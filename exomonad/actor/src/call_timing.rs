@@ -194,9 +194,8 @@ impl CallScope {
     }
 
     /// The open scope's compile-round-trip count so far — one `timed_compile`
-    /// call each, regardless of how many `tidepool-extract` processes any
-    /// one of them spawned internally (a folded whole-cell check that also
-    /// compiled its sole item is still one round trip). Exposed for tests
+    /// call each, regardless of how many compiler phases run inside one
+    /// request. Exposed for tests
     /// that assert on it directly rather than parsing `finish`'s log line.
     #[cfg(test)]
     pub(crate) fn compile_count(&self) -> u64 {

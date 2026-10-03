@@ -6,6 +6,9 @@
 
 #[cfg(all(test, feature = "codex-compat"))]
 mod agent_spec_tests;
+
+#[cfg(test)]
+pub(crate) use crate::transport_test_support::ResidentToolEndpointTestExt;
 #[cfg(all(test, feature = "codex-compat"))]
 mod background_command_example_tests;
 #[cfg(all(test, feature = "codex-compat"))]
@@ -28,6 +31,7 @@ mod context_transaction_acceptance_tests;
 #[cfg(all(test, feature = "codex-compat"))]
 mod custody_tests;
 mod delivery;
+mod display_output;
 #[cfg(all(test, feature = "codex-compat"))]
 mod documentation_tests;
 #[cfg(test)]
@@ -95,6 +99,8 @@ mod observation_budget_tests;
 mod overlay_resource;
 #[cfg(test)]
 mod packaged_catalog_tests;
+#[cfg(test)]
+mod prepared_display_tests;
 pub(crate) use overlay_resource::valid_artifact_path;
 #[cfg(all(test, feature = "codex-compat"))]
 mod source_reload_tests;
@@ -2647,6 +2653,7 @@ struct InteractiveFleet {
     root: LocalActorRef,
     config: ActorHostConfig,
     run_root: PathBuf,
+    output_store: Arc<harness::store::Store>,
     #[cfg(feature = "codex-compat")]
     tmux: TmuxSession,
     #[cfg(feature = "codex-compat")]
@@ -2899,6 +2906,10 @@ async fn run_owned(
         )
     } else {
         None
+    };
+    let output_store = match embedded_service.as_ref() {
+        Some(service) => service.runtime.store(),
+        None => display_output::open_run_store(&run_root).map_err(runtime_error)?,
     };
     #[cfg(test)]
     let mut embedded_service = embedded_service;
@@ -3502,6 +3513,7 @@ async fn run_owned(
             root: root_actor.clone(),
             config: config.clone(),
             run_root: run_root.clone(),
+            output_store,
             #[cfg(feature = "codex-compat")]
             tmux: tmux.clone(),
             #[cfg(feature = "codex-compat")]

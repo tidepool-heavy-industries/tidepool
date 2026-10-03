@@ -29,6 +29,8 @@ PREFIX = "resident-performance "
 LIMITS_MS = {"warm_cell": 1000, "cold_start": 10000, "cancel_ack": 250}
 MIN_COUNTS = {"warm_cell": 50, "cold_start": 5, "cancel_ack": 50}
 MAX_BUILD_JSON = 16 * 1024 * 1024
+CURRENT_RECOVERY_SCHEMA = "paired-public-v6"
+RECOVERY_SCHEMA_VERSIONS = {"paired-public-v4": 4, "paired-public-v5": 5, CURRENT_RECOVERY_SCHEMA: 6}
 DURABLE_MATRIX = {(baseline, prefix) for baseline in (0, 100) for prefix in (1, 10, 100)}
 
 
@@ -571,10 +573,12 @@ def analyze_durable(rows):
             "matrix": {"status": "unmeasured", "expected_count": len(DURABLE_MATRIX),
                        "observed_count": 0, "observed": [], "missing": [], "duplicates": [],
                        "replicate_policy": "one publication per coordinate; schema has no replicate identity"},
-            "evidence_problems": [],
+            "evidence_problems": [], "current_public_schema": CURRENT_RECOVERY_SCHEMA,
+            "observed_public_schemas": [],
         }
     problems = []
     phases = {}
+    observed_schemas = set()
     matrix_rows = {}
     matrix_seen = False
     matrix_duplicates = set()
@@ -595,25 +599,35 @@ def analyze_durable(rows):
             path = Path(row["manifest_path"])
             content = path.read_bytes()
             document = json.loads(content)
+            if not isinstance(document, dict):
+                raise ValueError("retained manifest is not an object")
             if not path.is_absolute() or len(content) != row.get("manifest_bytes"):
                 problems.append("durable manifest size/path differs from retained snapshot")
             if document.get("checksum") != row.get("manifest_checksum") or not row.get("manifest_checksum"):
                 problems.append("durable manifest checksum differs from retained snapshot")
             public_schema = document.get("public_schema")
-            if public_schema == "paired-public-v5":
+            version = document.get("version")
+            expected_version = RECOVERY_SCHEMA_VERSIONS.get(public_schema) if isinstance(public_schema, str) else None
+            matching_format = (expected_version is not None and type(version) is int and
+                               version == expected_version and row.get("public_schema") == public_schema)
+            if matching_format:
+                observed_schemas.add(public_schema)
+            if public_schema in ("paired-public-v5", CURRENT_RECOVERY_SCHEMA):
                 for counter in byte_counters:
                     if type(row.get(counter)) is not int or row[counter] < 0:
                         problems.append(f"durable {row.get('cell')} has unavailable {counter}")
                 inventory = row.get("artifact_inventory")
                 if row.get("inventory_counter_scope") != "shared-artifact-inventory-owner" or not isinstance(inventory, dict) or any(type(inventory.get(counter)) is not int or inventory[counter] < 0 for counter in ("structural_whole_graph_copies", "reclamation_runs", "reclamation_candidate_nodes", "reclaimed_nodes", "reclamation_elapsed_ns")):
                     problems.append(f"durable {row.get('cell')} has unavailable owning inventory counters")
-            if public_schema not in ("paired-public-v4", "paired-public-v5") or row.get("public_schema") != public_schema:
+            if not matching_format:
                 problems.append("durable sample is not a matching retained artifact graph format")
             # The measured one-cell workload is the second cell, named
             # `prefix`: B is the preexisting baseline installed by setup and N
             # is the number of bindings introduced in this single prefix cell.
             # Foundation and baseline setup rows are intentionally excluded.
-            if row.get("cell") == "prefix" and public_schema == "paired-public-v5":
+            # Historical reports retain their timings, but only the current
+            # schema supplies the matrix used for durable acceptance.
+            if matching_format and row.get("cell") == "prefix" and public_schema == CURRENT_RECOVERY_SCHEMA:
                 matrix_seen = True
                 baseline, prefix = row.get("baseline"), row.get("prefix")
                 coordinate = (baseline, prefix)
@@ -639,7 +653,7 @@ def analyze_durable(rows):
         missing = sorted(DURABLE_MATRIX)
         matrix_status = "unmeasured"
     if matrix_status == "invalid":
-        problems.append("durable v5 prefix matrix is incomplete or duplicated")
+        problems.append("durable v6 prefix matrix is incomplete or duplicated")
     return {
         "status": "invalid" if problems else "measured", "count": len(rows),
         "matrix": {"status": matrix_status, "expected_count": len(DURABLE_MATRIX),
@@ -650,8 +664,10 @@ def analyze_durable(rows):
                    "replicate_policy": "one publication per coordinate; schema has no replicate identity"},
         "phases_ms": {name: {"count": len(values), "p50_ms": percentile(values, 0.5), "p95_ms": percentile(values, 0.95)} for name, values in phases.items()},
         "samples": rows, "evidence_problems": sorted(set(problems)),
-        "format_note": "v4 rows describe historical timing only; current recovery requires v5",
-        "byte_counter_note": "Current v5 encode/validation-hash/materialization-hash/write counters are per publication ticket; manifest_bytes is retained file size. Historical v4 counters remain unknown. Inventory counters are shared-owner gauges; structural_whole_graph_copies is an estimate, not a measured copy count.",
+        "current_public_schema": CURRENT_RECOVERY_SCHEMA,
+        "observed_public_schemas": sorted(observed_schemas),
+        "format_note": "v4/v5 rows describe historical timing only; current recovery and durable acceptance require v6",
+        "byte_counter_note": "v5/v6 encode/validation-hash/materialization-hash/write counters are per publication ticket; manifest_bytes is retained file size. Historical v4 counters remain unknown. Inventory counters are shared-owner gauges; structural_whole_graph_copies is an estimate, not a measured copy count.",
     }
 
 

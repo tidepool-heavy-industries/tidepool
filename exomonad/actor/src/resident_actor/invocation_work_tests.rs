@@ -692,6 +692,7 @@ fn unconfirmed_invocation_cleanup_preserves_committed_reply_and_receipts() {
         source_items: Vec::new(),
         status: WorkbenchItemStatus::Committed,
         output: "committed reply".into(),
+        value: None,
         diagnostics: Vec::new(),
         failure_layer: None,
         warnings: Vec::new(),

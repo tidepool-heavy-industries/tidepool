@@ -282,6 +282,7 @@ impl RunningBrowserHost {
             root: campaign.actor.clone(),
             config: campaign.config.clone(),
             run_root: campaign.config.run_root.clone(),
+            output_store: service.runtime.store(),
             #[cfg(feature = "codex-compat")]
             tmux,
             #[cfg(feature = "codex-compat")]

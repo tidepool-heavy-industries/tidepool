@@ -1,6 +1,7 @@
 module CellProgramStateTest (cellProgramStateChecks) where
 
 import Control.Monad (unless)
+import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Tidepool.Binders
@@ -12,7 +13,8 @@ import Tidepool.ExactScope (ExactScope(..))
 cellProgramStateChecks :: IO ()
 cellProgramStateChecks = do
   let prologue = SourcePrologue [] []
-      exact = ExactScope "" "" "" "" [] [] [] [] [] Nothing Nothing Nothing Nothing Nothing Set.empty
+      exact = ExactScope "" "" "" "" [] Map.empty [] [] [] []
+        Nothing Nothing Nothing Nothing Nothing Nothing Set.empty
       initial = initialProgramCellState prologue exact Map.empty
       item index kind = CellAnalysisItem (CellSourceSpan index 1 index 2) (show index)
         (StmtBinders kind [] []) [] False
@@ -20,9 +22,9 @@ cellProgramStateChecks = do
       firstPlan = plan [item 1 KBind,item 2 KExpr]
       declaration = plan [item 3 KDecl,item 4 KDecl]
       lastPlan = plan [item 5 KExpr]
-      pin key = CheckedBinderPin key "Int" [] []
-      expression key = CellExpressionPlan key ExpressionPure ExpressionRendered "Int" [] []
-      signature key ty = CheckedSignature key ty []
+      pin key = CheckedBinderPin key "Int" []
+      expression key = CellExpressionPlan key ExpressionPure ExpressionRendered "Int" []
+      signature key ty = CheckedSignature key ty (BS.singleton 0) []
       signatures1 = [signature "pin-0" "Int",signature "expr-1" "Bool"]
       signatures2 = [signature "expr-4" "Char",signature "pin-0" "Duplicate"]
       expressions1 = [expression "expr-1"]
@@ -42,7 +44,7 @@ cellProgramStateChecks = do
     (programCheckedSignatures first == signatures1
       && programExpressions middle == expressions1
       && programCheckedSignatures final == signatures1 ++ signatures2
-      && [signatureType value | value <- programCheckedSignatures final, signatureKey value == "pin-0"]
+      && [signaturePresentation value | value <- programCheckedSignatures final, signatureKey value == "pin-0"]
         == ["Int","Duplicate"])
   assert "observations preserve legacy list append bytes"
     (encodeCellOut (plan (cellPlanItems firstPlan ++ cellPlanItems declaration ++ cellPlanItems lastPlan))

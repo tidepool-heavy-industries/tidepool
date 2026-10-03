@@ -60,20 +60,36 @@ default handshake.
 
 ## Exact-scope transport
 
-Execution-bearing requests use `TPEXACTSCOPE` version 6. The execution parcel
-contains `[sha256, absolute graph-file path]` descriptors followed by the same
-six-field exact original references. The request owner captures distinct graph
-files beside the manifest; their unchanged `TPEXECUTIONSOURCE` bytes and digests
-remain independent of the metadata envelope. The worker reads each graph once,
-verifies its digest and validates its exact native owner and compiler producer.
-Metadata retains its four MiB limit; aggregate graph bytes use the certified
-graph inventory's 64 MiB limit, with at most 4096 graphs. Either envelope's
-overflow rejects the request and never removes admitted execution authority.
+Exact-scope manifests use strict `TPEXACTSCOPE` version 8 with nine fields. The final
+fields contain an execution parcel or null and a compiler-purpose authorization
+or null. Interface rows have eight fields; their final field declares one
+closed artifact role: `["module", certificate path, certificate SHA, optional
+Core path, optional Core SHA]`, `["join"]`, or `["value"]`. Native product
+owners require module evidence. Roles never come from module-name spelling.
 
-This is a strict internal migration: version 5 execution-bearing scopes are
-rejected, and old workers reject version 6. Deploy the Rust frontend and Haskell
-worker together. Graph-free version 2/4 requests retain their format; candidate
-execution parcels keep their existing inline graph-byte format.
+Canonical module certificates bind the compiler producer, finalized interface
+and package bytes, original source digest, exact dependency seals, optional
+Core digest, and complete compiler home-unit inventory. The worker checks this
+proof against the selected interface closure before hydration. A Core companion
+is a separate compiler input; reading a type context does not load it or grant
+native execution or lexical imports. Its demanding recovery owner verifies and
+decodes the compiler-native payload without replaying source or Template Haskell.
+
+Execution parcels retain `[SHA, absolute graph-file path]` descriptors and exact
+original references. The request owner captures graph files beside the manifest;
+unchanged `TPEXECUTIONSOURCE` bytes remain independent of the metadata envelope.
+Metadata is limited to four MiB. Execution graphs retain their 64 MiB aggregate
+and 4096-graph bounds; advertised invalid or oversized parcels are rejected.
+
+This is a strict matched worker/frontend migration. Earlier exact-scope versions
+2, 4, 6 and 7 are rejected. Deploy both producers and consumers together and
+regenerate fixtures through their owning producers.
+
+Candidate offers use strict `TPMCAN` version 10 with seven fields and sixteen-field
+module rows. Each native row retains its exact canonical requirements and sealed
+module certificate/Core descriptor. Offers remain cache suggestions: admission
+checks them against the request's independently admitted compiler producer and
+complete selected interface closure before promoting their durable proof.
 
 ## Checked inspection inputs
 
@@ -103,6 +119,78 @@ recipe, current source and GHC interface compatibility before installing its
 source-import graph. Retained artifact requirements alone grant no lexical
 selection. Session implementation anchors use their existing independent
 checked-value and lexical authorities, never ordinary source-selection rows.
+
+## Matched cell observation migration
+
+Cell observations use `TPCELLOBSERVATIONS` version 2: the five-section payload
+retains diagnostic types, nominal heads, expression lift/presentation and the
+authored prologue. Binder rows have three fields; expression rows have five.
+Neither carries imports reconstructed from type presentation. Native checked
+signatures supply the exact type authority.
+
+`TPEXACTCHECK` and `TPEXACTPROGRAM` use version 2; parser receipts use
+`TPCELLPLAN2`. The matched Rust/Haskell release rejects older observations and
+receipts. Worker fields 34 (`--turn-pin`) and 45 (`--cell-fold-turn`) are retired
+and rejected explicitly. Whole-cell checking remains the initial admission step
+for host inputs; execution uses admitted item recipes.
+
+## Checked type signatures
+
+`TPCHECKEDSIGNATURE2` carries a compiler-produced GHC interface declaration,
+its exact external Name inventory, and separate presentation text. Generated
+annotations use a placeholder which is replaced with `XHsType` before renaming;
+the presentation text is never parsed to reconstruct the type. GHC supplies the
+interface codec and type hydration, including binder kinds and coercions.
+
+The enclosing checked receipt pins producer identity and the complete payload.
+Only those admitted bytes reach the native GHC decoder. Before hydration, the
+worker verifies the signature declaration identity and its complete Name census
+against the receipt; home Names must already exist in the admitted environment.
+The canonical activation witness remains a separate semantic equality contract:
+GHC binary bytes are not a canonical type fingerprint.
+
+Host input checking carries that same original witness through the protected
+`host-input-check1` admission. The generated `TidepoolActivationInput` type slot
+is replaced with the native type before renaming; it is not an imported type
+or a new alias. The initial check and preview compilation retain separate
+purposes and independently validate the resulting input type.
+
+This is a strict internal migration. Old three-field printed signatures are
+rejected. Deploy the Rust consumer and Haskell worker together and regenerate
+compiler-produced artifacts through their owning producers.
+
+## Original interface requirements
+
+`TPCERT` version 5 records each original module's interface-only dependencies as
+sorted exact unit/module/SHA-256 rows. Both GHC home usage forms contribute;
+self usages are excluded. Every seal must match a fresh same-transaction
+interface or the admitted exact interface closure. Authored import adjacency
+and executable group/global requirements remain separate evidence.
+
+The durable `TPHOMEOWNERS` version 4 preserves those interface seals and an
+explicit optional execution-source digest. Inventory admission checks the
+required interface bytes and compiler producer before adding retention edges.
+Native witness reuse retains this same proof; cold recovery must preserve every
+certified interface edge. Earlier product and Home certificate versions are
+rejected. Deploy the matched worker and frontend and regenerate artifacts
+through their owning producers.
+
+## Native request types
+
+Request-site result types use `TPREQUESTTYPESIGNATURES1` version 1, containing
+one native `request-reply` signature and an optional `request-progress`
+signature. The complete bundle is limited to four MiB and belongs to the
+original site's metadata seal. Progress signatures issue only for the known
+progress request/child verbs with their declared input and answer positions;
+canonical input witnesses remain separate.
+
+This is a strict sidecar migration: inline typed-site rows now have ten fields,
+and JSON rows must include `request_type_signatures` (null for nonrequest or
+synthetic sites). Seven-, eight- and nine-field inline rows and JSON rows missing
+the new field are rejected. Deploy matched worker/frontend binaries and
+regenerate retained compiler artifacts through their producers. Request
+authority consumers must additionally require original-site native signatures;
+decoding an observation alone does not grant that authority.
 
 ## Regenerate fixtures
 
@@ -147,10 +235,11 @@ process lifecycle. It either starts this worker for one typed request or keeps
 one worker alive with `--worker-loop-v2`. `Tidepool.WorkerServer` owns only the
 framed stdin/stdout loop; `Tidepool.GhcPipeline` owns the resident compiler
 state. `Main` decodes a typed request and dispatches compiler operations; it is
-not a second CLI or workflow engine. Transaction-local target and
-`Tidepool.Session.*` modules are removed from the shared memo when the
-transaction closes; reusable library interfaces remain warm. Transactions and
-their requests are serialized and carry their own CWD and compiler options.
+not a second CLI or workflow engine. Compiler-valued caches and recovery graphs belong to one admitted transaction
+and are released when it closes. A synchronous failed compilation clears those
+graphs before a permitted retry; cancellation terminates the transaction.
+Transactions and their requests are serialized and carry their own CWD and
+compiler options.
 
 The worker process environment is fixed at startup. Restart the daemon after
 changing extractor diagnostic variables, GHC configuration, or its watched

@@ -8,7 +8,8 @@ response <- do
   response <- request @Report worker (assignment [label|review-change|] task)
   Right () <- detachRequest response
   pure response
-pollResponse response
+state <- pollResponse response
+display state
 ```
 
 Here `worker` is an existing `AgentRef`, `task` is your typed input, and `Report`
@@ -36,7 +37,8 @@ To clarify the current assignment, target its existing `Response`:
 
 ```haskell
 Right clarification <- updateRequest response "Tabs must also respond to mouse clicks."
-pollRequestUpdate clarification
+update <- pollRequestUpdate clarification
+display update
 ```
 
 This wakes the same conversation if idle or presents input after the current
@@ -75,11 +77,10 @@ Request activations present `Text` inputs as assignment prose, up to 16 KiB of
 UTF-8 text, without Haskell string quoting. Read it there; `sessionInput` retains
 the exact input for later use. Structured inputs use the ordinary compact display
 (a 512-character payload prefix by default). Both have a 16 KiB byte cap, followed
-by an omission cue where needed. Expand omitted prose directly with
-`inspectFull sessionInput`; a bare `sessionInput` observation still uses the
-ordinary quiet display. Explicit text inspection returns the original text
-without a `Show` conversion, quoting, or escaping. Opaque inputs remain valid:
-use their types to select fields or apply them. Other values use `Show` by default.
+by an omission cue where needed. In a notebook cell, values do not render
+automatically: use `display sessionInput` for bounded structured output, or
+`display (show sessionInput)` when you need its textual `Show` form. Unsupported
+fields remain opaque unless you explicitly convert them to text.
 
 The reply type's GHC declaration is captured at its typed request site when
 available and capped at 4 KiB, with a direct lookup cue if truncated. Reply-type

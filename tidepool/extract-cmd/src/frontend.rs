@@ -77,7 +77,7 @@ pub fn run(args: Vec<OsString>) -> Result<u8, FrontendError> {
         .write_all(&diagnostics)
         .map_err(FrontendError::Io)?;
     let worker = prepare_worker()?;
-    let mut command = worker.command();
+    let mut command = worker.command()?;
     command.args(worker_args);
     crate::process::child_dies_with_parent(&mut command);
     let status = command.status().map_err(FrontendError::Io)?;
@@ -199,7 +199,7 @@ impl PreparedWorker {
     /// that predates the probe flag (unknown flag, or any nonzero exit)
     /// is reported the same way, as speaking an older protocol.
     fn check_request_protocol(&self) -> Result<(), FrontendError> {
-        let mut command = self.command();
+        let mut command = self.command()?;
         command
             .arg(PRINT_WORKER_REQUEST_FLAG)
             .stdin(Stdio::null())
@@ -249,14 +249,20 @@ impl PreparedWorker {
         ))
     }
 
-    pub(crate) fn command(&self) -> Command {
+    pub(crate) fn command(&self) -> Result<Command, FrontendError> {
         // The opened descriptor pins the selected inode. `execve` resolves
         // this path before applying close-on-exec, so an atomic replacement of
         // the worker path cannot change which bytes execute.
         let executable = format!("/proc/self/fd/{}", self.file.as_raw_fd());
         let mut command = crate::process::command(executable);
         command.env("TIDEPOOL_GHC_LIBDIR", &self.ghc_libdir);
-        command
+        // Candidate manifests cannot choose their own compiler authority. The
+        // pinned process owner supplies it independently at worker launch.
+        command.env(
+            "TIDEPOOL_COMPILER_PRODUCER",
+            crate::endpoint::hex(&self.producer_identity()?),
+        );
+        Ok(command)
     }
 
     pub(crate) fn selection(&self) -> &std::path::Path {
@@ -862,6 +868,13 @@ fn main() {{
         let prepared = PreparedWorker::prepare().unwrap();
         let old_identity = prepared.producer_identity().unwrap();
         let old_worker_identity = prepared.consumed_worker_identity();
+        let command = prepared.command().unwrap();
+        let configured_producer = command
+            .get_envs()
+            .find(|(name, _)| *name == OsStr::new("TIDEPOOL_COMPILER_PRODUCER"))
+            .and_then(|(_, value)| value);
+        let expected_producer = crate::endpoint::hex(&old_identity);
+        assert_eq!(configured_producer, Some(OsStr::new(&expected_producer)));
         let manifest_path = dir.join("compiler-deployment.json");
         write_compiler_deployment_manifest(&manifest_path).unwrap();
         let manifest: serde_json::Value =
@@ -918,6 +931,7 @@ fn main() {{
         );
         let output = retained
             .command()
+            .unwrap()
             .env("TIDEPOOL_PREPARED_WORKER_CHILD", "1")
             .output()
             .unwrap();
@@ -940,6 +954,7 @@ fn main() {{
 
         let output = prepared
             .command()
+            .unwrap()
             .env("TIDEPOOL_PREPARED_WORKER_CHILD", "1")
             .output()
             .unwrap();

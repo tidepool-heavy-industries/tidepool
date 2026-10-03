@@ -16,13 +16,6 @@ pub struct ResponseExpectation {
 }
 
 impl ResponseExpectation {
-    pub(crate) fn respond_signature(&self, effects: &str) -> String {
-        format!(
-            "respond :: ({}) -> Eff {effects} TidepoolVoid.Void",
-            self.expected_type
-        )
-    }
-
     #[must_use]
     pub(crate) fn new(expected_type: impl Into<String>) -> Self {
         Self {
@@ -42,9 +35,7 @@ impl ResponseExpectation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TypedRequestSignature {
     pub(crate) input_type: String,
-    pub(crate) input_modules: Vec<String>,
     pub(crate) response: ResponseExpectation,
-    pub(crate) output_modules: Vec<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -79,15 +70,11 @@ pub(crate) fn decode_typed_request_site(
     let mut response = ResponseExpectation::new(metadata.ty.clone());
     response.declaration = metadata.reply_declaration.clone();
     response.declaration_modules = metadata.modules.clone();
-    let mut output_modules = metadata.modules.clone();
     if let Some(progress) = metadata.inputs.get(1) {
         response.progress_type = Some(progress.ty.clone());
-        output_modules.extend(progress.modules.iter().cloned());
     }
     Ok(TypedRequestSignature {
         input_type: input.ty.clone(),
-        input_modules: input.modules.clone(),
         response,
-        output_modules,
     })
 }

@@ -57,6 +57,10 @@ pub enum WorkbenchBoundaryReconciliation {
     Settled,
 }
 
+pub(crate) trait WorkbenchReceiptOwner: Send + Sync {
+    fn freeze(&self, reply: &mut crate::KernelWorkbenchReply);
+}
+
 pub struct WorkbenchExecutionControl {
     pub(crate) invocation: Option<WorkbenchCallKey>,
     publication: Arc<PublicationDecision>,
@@ -64,6 +68,7 @@ pub struct WorkbenchExecutionControl {
     reservation_attempt: crate::request::WorkbenchReservationAttempt,
     execution: std::sync::OnceLock<WorkbenchExecutionId>,
     context_binding: std::sync::OnceLock<Arc<dyn crate::HostedContextBinding>>,
+    receipt_owner: std::sync::OnceLock<Arc<dyn WorkbenchReceiptOwner>>,
     context_cancel_requested: std::sync::atomic::AtomicBool,
     cell_terminal: parking_lot::Mutex<Option<crate::CellExit>>,
     publication_waited: std::sync::atomic::AtomicBool,
@@ -108,6 +113,7 @@ impl WorkbenchExecutionControl {
             reservation_attempt: crate::request::WorkbenchReservationAttempt::fresh(),
             execution: std::sync::OnceLock::new(),
             context_binding: std::sync::OnceLock::new(),
+            receipt_owner: std::sync::OnceLock::new(),
             context_cancel_requested: std::sync::atomic::AtomicBool::new(false),
             cell_terminal: parking_lot::Mutex::new(None),
             publication_waited: std::sync::atomic::AtomicBool::new(false),
@@ -273,19 +279,75 @@ impl WorkbenchExecutionControl {
             .ok();
     }
 
+    pub(crate) fn bind_receipt_owner(&self, owner: Arc<dyn WorkbenchReceiptOwner>) {
+        // Admission and first terminal publication share this cutoff. An
+        // already terminated control closes late custody without changing its
+        // immutable reply, even before the first display boundary is captured.
+        let _terminal = self.cell_terminal.lock();
+        if let Err(owner) = self.receipt_owner.set(owner) {
+            assert!(
+                Arc::ptr_eq(
+                    self.receipt_owner.get().expect("original receipt owner"),
+                    &owner
+                ),
+                "an execution control cannot replace its admitted receipt owner"
+            );
+        }
+        if let Some(mut reply) = self.terminal_reply() {
+            self.receipt_owner
+                .get()
+                .expect("bound receipt owner")
+                .freeze(&mut reply);
+        }
+    }
+
     /// The actor publishes the first terminal reply; transport failure may
     /// fill the slot only when no actor-owned reply arrived.
     pub(crate) fn settle(&self, reply: crate::KernelWorkbenchReply) {
+        let _ = self.settle_reply(reply);
+    }
+
+    pub(crate) fn settle_reply(
+        &self,
+        mut reply: crate::KernelWorkbenchReply,
+    ) -> crate::KernelWorkbenchReply {
         let _terminal = self.cell_terminal.lock();
         if self.settlement.send_if_modified(|current| {
-            if current.is_some() {
+            if let Some(current) = current {
+                reply = current.clone();
                 return false;
             }
-            *current = Some(reply);
+            if let Some(owner) = self.receipt_owner.get() {
+                // An exited actor carries actual display settlements through
+                // the receipt-bearing failure. A displayless owner still seals
+                // its admission while preserving the original failure class.
+                let exited = match &reply {
+                    Err(crate::KernelInvocationFailure::ActorExited(actor)) => Some(*actor),
+                    _ => None,
+                };
+                if let Some(actor) = exited {
+                    let mut projected = Err(crate::KernelInvocationFailure::Failed {
+                        actor,
+                        detail: "actor exited before its admitted workbench owner settled".into(),
+                        receipts: Vec::new(),
+                    });
+                    owner.freeze(&mut projected);
+                    if projected
+                        .as_ref()
+                        .is_err_and(|failure| !failure.receipts().is_empty())
+                    {
+                        reply = projected;
+                    }
+                } else {
+                    owner.freeze(&mut reply);
+                }
+            }
+            *current = Some(reply.clone());
             true
         }) {
             self.changed.notify_waiters();
         }
+        reply
     }
 
     fn admit_cancellation(&self) -> (bool, Option<PublicationCancellation>) {
@@ -506,6 +568,7 @@ fn hosted_admission_failure(
 ) -> crate::KernelInvocationFailure {
     match failure {
         crate::KernelCallFailure::MailboxClosed(_) => crate::KernelInvocationFailure::Rejected {
+            receipts: Vec::new(),
             actor,
             detail: "actor mailbox admission is closed".into(),
         },
@@ -514,6 +577,7 @@ fn hosted_admission_failure(
             crate::KernelInvocationFailure::ActorExited(actor)
         }
         failure => crate::KernelInvocationFailure::Failed {
+            receipts: Vec::new(),
             actor,
             detail: failure.to_string(),
         },
@@ -533,6 +597,26 @@ pub struct ResidentToolPolicy {
 
 pub type ResidentToolFuture =
     Pin<Box<dyn Future<Output = Result<serde_json::Value, ResidentToolError>> + Send + 'static>>;
+
+/// A completed endpoint dispatch keeps workbench execution receipts typed
+/// until the host chooses how to present them to its model provider.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(untagged)]
+pub enum ResidentToolResponse {
+    Workbench(WorkbenchResponse),
+    Value(serde_json::Value),
+}
+
+impl ResidentToolResponse {
+    /// Project a typed dispatch result for existing structured observers.
+    /// Model hosts should match the enum and present `Workbench` directly.
+    pub fn into_json(self) -> Result<serde_json::Value, serde_json::Error> {
+        serde_json::to_value(self)
+    }
+}
+
+pub type ResidentToolDispatchFuture =
+    Pin<Box<dyn Future<Output = Result<ResidentToolResponse, ResidentToolError>> + Send + 'static>>;
 
 /// Opaque host-owned half of a resident context checkpoint. The actor keeps
 /// this share with its checkpoint lease; only the host that created the value
@@ -601,13 +685,6 @@ pub trait HostedCheckpointCapture: Send + Sync {
     ) -> Result<HostedCheckpointAttachment, HostedCheckpointCaptureError>;
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-pub enum ResidentToolOutput {
-    #[default]
-    Value,
-    Workbench,
-}
-
 /// Transport-neutral interface projected by an actor-local tool host.
 /// Implementations retain actor admission and execution ownership behind
 /// their dispatcher; a concrete host sees only declarations and typed
@@ -634,19 +711,24 @@ pub trait ResidentToolEndpoint: Send + Sync {
     }
 
     fn tools(&self) -> &[HostedTool];
-    /// The owning endpoint chooses interpretation; tool input syntax does not.
-    fn output_format(&self) -> ResidentToolOutput {
-        ResidentToolOutput::Value
-    }
     fn instructions(&self) -> Option<&str>;
-    fn dispatch_boxed(&self, invocation: ToolInvocation) -> ResidentToolFuture;
+    fn dispatch_boxed(&self, invocation: ToolInvocation) -> ResidentToolDispatchFuture;
+    /// Expand an actor-issued display without compiling Haskell source.
+    fn expand_display_boxed(&self, _identity: (i64, i64, i64), _key: i64) -> ResidentToolFuture {
+        Box::pin(async {
+            Err(ResidentToolError::Unavailable(
+                "display expansion is unsupported".into(),
+            ))
+        })
+    }
+
     /// Dispatch with an exact hosted checkpoint capability. Endpoints that do
     /// not carry this authority fail closed; absence keeps the ordinary path.
     fn dispatch_with_checkpoint_boxed(
         &self,
         invocation: ToolInvocation,
         capture: Option<Arc<dyn HostedCheckpointCapture>>,
-    ) -> ResidentToolFuture {
+    ) -> ResidentToolDispatchFuture {
         if capture.is_some() {
             Box::pin(async {
                 Err(ResidentToolError::Unavailable(
@@ -664,7 +746,7 @@ pub trait ResidentToolEndpoint: Send + Sync {
         invocation: ToolInvocation,
         capture: Option<Arc<dyn HostedCheckpointCapture>>,
         context: Option<Arc<dyn crate::HostedContextBinding>>,
-    ) -> ResidentToolFuture {
+    ) -> ResidentToolDispatchFuture {
         if context.is_some() {
             Box::pin(async {
                 Err(ResidentToolError::Unavailable(
@@ -813,7 +895,39 @@ pub(crate) fn execution_id(
     WorkbenchExecutionId::from_digest(digest)
 }
 
+pub(crate) async fn expand_display_response(
+    actor: &crate::LocalActorRef,
+    identity: (i64, i64, i64),
+    key: i64,
+) -> Result<WorkbenchResponse, ResidentToolError> {
+    let (reply, receive) = oneshot::channel();
+    actor
+        .admit_mailbox(crate::KernelMessage::Workbench {
+            invocation: crate::ActorWorkbenchInvocation::for_display_expansion(identity, key),
+            control: Some(crate::WorkbenchExecutionControl::untracked()),
+            reply: reply.into(),
+        })
+        .map_err(|failure| hosted_admission_failure(actor.identity(), failure))
+        .map_err(ResidentToolError::Invocation)?;
+    let reply = receive
+        .await
+        .map_err(|_| {
+            ResidentToolError::Unavailable("display actor stopped before expansion settled".into())
+        })?
+        .map_err(ResidentToolError::Invocation)?;
+    Ok(reply)
+}
+
 impl ResidentToolClient {
+    pub(crate) async fn expand_display(
+        &self,
+        identity: (i64, i64, i64),
+        key: i64,
+    ) -> Result<serde_json::Value, ResidentToolError> {
+        let reply = expand_display_response(&self.actor, identity, key).await?;
+        serde_json::to_value(reply).map_err(ResidentToolError::Encoding)
+    }
+
     pub(crate) async fn seal(&self) -> Result<crate::HostedWorkSeal, ResidentToolError> {
         self.actor
             .seal_hosted_work()
@@ -1024,6 +1138,9 @@ impl ResidentToolClient {
     ) -> Result<serde_json::Value, ResidentToolError> {
         self.dispatch_workbench_issued_with_context(request, invocation, None, None, None, None)
             .await
+            .and_then(|response| {
+                serde_json::to_value(response).map_err(ResidentToolError::Encoding)
+            })
     }
 
     pub(crate) async fn dispatch_workbench_issued_with_context(
@@ -1034,7 +1151,7 @@ impl ResidentToolClient {
         hosted_checkpoint_capture: Option<Arc<dyn HostedCheckpointCapture>>,
         context_binding: Option<Arc<dyn crate::HostedContextBinding>>,
         selected_tool: Option<HostedTool>,
-    ) -> Result<serde_json::Value, ResidentToolError> {
+    ) -> Result<WorkbenchResponse, ResidentToolError> {
         let Some(invocation) = invocation else {
             if hosted_checkpoint_capture.is_some() || context_binding.is_some() {
                 return Err(ResidentToolError::Unavailable(
@@ -1102,7 +1219,7 @@ impl ResidentToolClient {
         hosted_checkpoint_capture: Option<Arc<dyn HostedCheckpointCapture>>,
         context_binding: Option<Arc<dyn crate::HostedContextBinding>>,
         selected_tool: Option<HostedTool>,
-    ) -> Result<serde_json::Value, ResidentToolError> {
+    ) -> Result<WorkbenchResponse, ResidentToolError> {
         let (response, receive) = oneshot::channel();
         if let Err(error) = self
             .actor
@@ -1128,16 +1245,19 @@ impl ResidentToolClient {
             Ok(reply) => reply,
             Err(_) => {
                 control.mark_unconfirmed();
-                control.settle(Err(crate::KernelInvocationFailure::ActorExited(
+                let reply = control.settle_reply(Err(crate::KernelInvocationFailure::ActorExited(
                     self.actor.identity(),
                 )));
-                return Err(ResidentToolError::Unavailable(
-                    "the actor stopped before settling the workbench invocation".into(),
-                ));
+                if matches!(&reply, Err(crate::KernelInvocationFailure::ActorExited(_))) {
+                    return Err(ResidentToolError::Unavailable(
+                        "the actor stopped before settling the workbench invocation".into(),
+                    ));
+                }
+                reply
             }
         };
         let response = reply.map_err(ResidentToolError::Invocation)?;
-        serde_json::to_value(response).map_err(ResidentToolError::Encoding)
+        Ok(response)
     }
 }
 
@@ -1192,7 +1312,12 @@ impl ResidentToolEndpoint for ResidentToolPolicy {
         self.instructions()
     }
 
-    fn dispatch_boxed(&self, invocation: ToolInvocation) -> ResidentToolFuture {
+    fn expand_display_boxed(&self, identity: (i64, i64, i64), key: i64) -> ResidentToolFuture {
+        let client = self.client.clone();
+        Box::pin(async move { client.expand_display(identity, key).await })
+    }
+
+    fn dispatch_boxed(&self, invocation: ToolInvocation) -> ResidentToolDispatchFuture {
         let client = self.client.clone();
         let tools = self.tools.clone();
         Box::pin(async move {
@@ -1204,7 +1329,10 @@ impl ResidentToolEndpoint for ResidentToolPolicy {
                     "unknown tool or invalid argument kind".into(),
                 ));
             }
-            client.dispatch(invocation).await
+            client
+                .dispatch(invocation)
+                .await
+                .map(ResidentToolResponse::Value)
         })
     }
 
@@ -1212,7 +1340,7 @@ impl ResidentToolEndpoint for ResidentToolPolicy {
         &self,
         invocation: ToolInvocation,
         capture: Option<Arc<dyn HostedCheckpointCapture>>,
-    ) -> ResidentToolFuture {
+    ) -> ResidentToolDispatchFuture {
         let client = self.client.clone();
         let tools = self.tools.clone();
         Box::pin(async move {
@@ -1224,14 +1352,15 @@ impl ResidentToolEndpoint for ResidentToolPolicy {
                     "unknown tool or invalid argument kind".into(),
                 ));
             }
-            match capture {
+            let value = match capture {
                 Some(capture) => {
                     client
                         .dispatch_with_checkpoint_capture(invocation, capture)
                         .await
                 }
                 None => client.dispatch(invocation).await,
-            }
+            }?;
+            Ok(ResidentToolResponse::Value(value))
         })
     }
 }
@@ -1331,10 +1460,10 @@ mod tests {
             None
         }
 
-        fn dispatch_boxed(&self, _invocation: ToolInvocation) -> ResidentToolFuture {
+        fn dispatch_boxed(&self, _invocation: ToolInvocation) -> ResidentToolDispatchFuture {
             self.dispatches
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Box::pin(async { Ok(serde_json::Value::Null) })
+            Box::pin(async { Ok(ResidentToolResponse::Value(serde_json::Value::Null)) })
         }
     }
 
@@ -1375,7 +1504,7 @@ mod tests {
             endpoint
                 .dispatch_with_checkpoint_boxed(invocation(), None)
                 .await,
-            Ok(serde_json::Value::Null)
+            Ok(ResidentToolResponse::Value(serde_json::Value::Null))
         ));
         assert_eq!(dispatches.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
@@ -1710,6 +1839,7 @@ mod tests {
             assert!(control.request_cancellation());
             control.acknowledge_cancellation();
             let failure = Err(crate::KernelInvocationFailure::CleanupUnconfirmed {
+                receipts: Vec::new(),
                 actor: crate::ActorRef::first(crate::ActorId(1)),
                 detail: "model invocation terminal receipt unavailable".into(),
             });
@@ -1776,6 +1906,7 @@ mod tests {
         assert!(claim.before_rename_failure());
         let execution = WorkbenchExecutionId::from_digest([8; 16]);
         control.settle(Err(crate::KernelInvocationFailure::Failed {
+            receipts: Vec::new(),
             actor: crate::ActorRef::first(crate::ActorId(1)),
             detail: "publication failed before visibility".into(),
         }));

@@ -354,6 +354,7 @@ pub type ActorSourceLayerResolver = std::sync::Arc<dyn ActorSourceLayers>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActorCompileView {
     session: SessionCompileView,
+    request_helper_recipe: tidepool_toolchain::declaration_join::RequestHelperRecipe,
     external: SourceImports,
     source_layer: std::sync::Arc<[PathBuf]>,
 }
@@ -366,15 +367,23 @@ impl ActorCompileView {
         self
     }
 
-    /// Extend this exact actor view with modules GHC named while describing a
-    /// typed suspension. These are compiler-derived type dependencies, not an
-    /// authored escape hatch around [`ActorSourceImports`]. Returning another
-    /// immutable view keeps turn compilation and persisted declaration source
-    /// on the same import set.
-    pub(crate) fn with_type_modules(mut self, modules: &[String]) -> Self {
-        for module in modules {
-            self.external.extend_text(module);
-        }
+    pub fn exact_compile_context(
+        &self,
+    ) -> Option<std::sync::Arc<tidepool_toolchain::declaration_join::ExactCompileContext>> {
+        self.session.exact_compile_context().map(|context| {
+            std::sync::Arc::new(
+                (*context)
+                    .clone()
+                    .with_request_helper_recipe(self.request_helper_recipe),
+            )
+        })
+    }
+
+    pub(crate) fn with_request_helper_recipe(
+        mut self,
+        recipe: tidepool_toolchain::declaration_join::RequestHelperRecipe,
+    ) -> Self {
+        self.request_helper_recipe = recipe;
         self
     }
 
@@ -487,6 +496,16 @@ impl ActorCompileView {
                 field(&mut hasher, &context.semantic_sha256());
             }
             None => field(&mut hasher, &[0]),
+        }
+        if let Some(context) = self.exact_compile_context() {
+            if let Some(signatures) = context.request_types() {
+                field(&mut hasher, &signatures.metadata_digest());
+                field(
+                    &mut hasher,
+                    context.request_helper_recipe().as_str().as_bytes(),
+                );
+                field(&mut hasher, &context.declarations().semantic_sha256());
+            }
         }
         field(&mut hasher, &self.session.session().0.to_le_bytes());
         field(&mut hasher, &self.session.lexical_scope().0.to_le_bytes());
@@ -624,6 +643,7 @@ impl ActorSessionContext {
             });
         }
         Ok(ActorCompileView {
+            request_helper_recipe: Default::default(),
             session,
             external: self.source_imports.imports.clone(),
             source_layer: self.source_layer.clone(),

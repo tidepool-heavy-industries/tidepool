@@ -11,7 +11,8 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Void (absurd)
 import GHC.Generics (Generic)
-import Tidepool.Agent.Contract (AsServerT, Call, JsonSchema, (:-), tool)
+import Tidepool.Agent.Contract
+  ( AsServerT, Call, JsonSchema, (:-), presentJson, presentWith, tool )
 import Tidepool.Aeson.FromJSON (FromJSON)
 import Tidepool.Aeson.Value (ToJSON)
 import Tidepool.Agent.Reply
@@ -58,7 +59,7 @@ data ReviewTools mode = ReviewTools
 tools :: (Member Replies effects, Member BoundWorktree effects)
   => ReviewTools (AsServerT (Eff effects))
 tools = ReviewTools
-  { submit_review = tool
+  { submit_review = presentWith presentJson $ tool
       "Accept the current typed review request after checking its request id, candidate commit, and bound checkout. Supply checks performed now and a rationale."
       submitReview
   }

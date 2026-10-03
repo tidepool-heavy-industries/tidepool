@@ -208,10 +208,8 @@ data SessionScope = SessionScope
     -- ^ Explicit producer-owned source-free declaration scope.
   , ssIncarnation :: !(Maybe String)
     -- ^ This session's incarnation identity (the Rust @SessionId@, decimal
-    -- text), when the caller has one. Session memo entries produced under
-    -- it survive the transaction ('Tidepool.GhcPipeline.sanitizeMemo') and
-    -- are reused only by a request carrying the same identity; 'Nothing'
-    -- produces entries that are discarded when the transaction ends.
+    -- text), when the caller has one. Session memo reuse within a compiler
+    -- transaction requires the same identity; an absent identity never matches.
   } deriving (Show)
 
 emptySessionScope :: SessionScope

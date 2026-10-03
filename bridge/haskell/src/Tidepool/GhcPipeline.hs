@@ -1,18 +1,23 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedPipelineResult(..), CheckedEnvironmentResult(..)
   , runPipelineSelected, runPipelineSessionSelected
   , runPipelineSelectedRetaining
+  , CompilerProducerIdentity, captureCompilerProducerIdentity
+  , runPipelineSessionSelectedWithProducer
   , CompilePurpose(..), PipelineResult(..)
   , generatedScaffoldRecipe
+  , FinalizedModule, finalizedHomeModInfo, finalizedTidyGuts
     -- * Bound-value type analysis
   , stripMonadHead, isClosureType, renderType
   , splitTupleType
-  , cellDisplayDeclarations
   , cellExpressionPlans, cellExpressionEvidence, cellCheckedBinderSignatures, satisfiesCapturedConstraint
   , checkCellInstances, activationPreviewInputType
+  , GeneratedInstanceRecipe, generatedInstanceRecipe, cellGeneratedInstanceRecipe
+  , withGeneratedInstanceRecovery
     -- * Resident session
   , withResidentPipelineSelected
   , withResidentPipelineSelectedRequests
@@ -20,29 +25,37 @@ module Tidepool.GhcPipeline
   ) where
 
 import GHC hiding (typeKind)
-import GHC.Driver.Main (hscDesugar, batchMsg, hscTidy, hscCompileCoreExpr')
+import GHC.Driver.Main (hscDesugar, hscDesugar', hscSimplify, hscMaybeWriteIface, batchMsg, hscTidy, hscCompileCoreExpr')
 import GHC.Driver.Pipeline (compileOne')
 import GHC.Driver.Pipeline.Execute (runPhase)
 import GHC.Driver.Pipeline.Phases (TPhase(..), PhaseHook(..))
-import GHC.Driver.Hooks (hscCompileCoreExprHook, runPhaseHook)
+import GHC.Driver.Hooks (hscCompileCoreExprHook, hscFrontendHook, runPhaseHook)
 import GHC.Data.StringBuffer (stringToStringBuffer)
-import GHC.Driver.Backend (backendGeneratesCode, backendWritesFiles)
-import GHC.Driver.Env (hscUpdateFlags, hscUpdateHPT, hsc_HPT, hsc_home_unit)
-import GHC.Driver.Env.Types (HscEnv(hsc_mod_graph, hsc_unit_env, hsc_logger, hsc_dflags, hsc_FC, hsc_targets, hsc_hooks))
-import GHC.Driver.Monad (reflectGhc, reifyGhc)
+import qualified GHC.Data.Maybe as MaybeErr
+import GHC.Driver.Backend (backendGeneratesCode, backendWritesFiles, backendCanReuseLoadedCode)
+import GHC.Driver.Env (hscUpdateFlags, hscUpdateHPT, hsc_HPT, hsc_home_unit, hscSetFlags, runHsc')
+import GHC.Driver.Env.Types (HscEnv(hsc_mod_graph, hsc_unit_env, hsc_logger, hsc_dflags, hsc_FC, hsc_targets, hsc_hooks, hsc_interp))
+import GHC.Driver.Monad (reflectGhc, reifyGhc, Session(..))
 import GHC.Unit.Home.ModInfo (HomeModInfo(..), HomeModLinkable(..), emptyHomeModInfoLinkable, addToHpt, lookupHpt)
-import GHC.Unit.Module.ModDetails (md_types)
+import GHC.Unit.Module.ModDetails (ModDetails, md_types, md_insts)
+import GHC.Unit.Module.Status (HscBackendAction(..))
+import GHC.Types.ForeignStubs (ForeignStubs(NoStubs))
+import GHC.Driver.Config.Diagnostic (initDiagOpts, initPrintConfig)
+import GHC.Driver.Errors (printOrThrowDiagnostics)
 import GHC.Types.Avail (availNames)
+import GHC.Iface.Load (loadInterface, WhereFrom(..))
+import GHC.Rename.Names (renameRawPkgQual)
 import GHC.Driver.Make (load', ModIfaceCache, newIfaceCache)
-import GHC.Iface.Make (mkIfaceTc)
+import qualified GHC.Linker.Loader as Linker
+import GHC.Iface.Make (mkIfaceTc, mkPartialIface, mkFullIface)
 import GHC.Iface.Recomp (MaybeValidated(..), checkOldIface)
 import GHC.Unit.Finder (initFinderCache)
-import GHC.Unit.Module.ModIface (set_mi_extra_decls, mi_iface_hash)
+import GHC.Unit.Module.ModIface (set_mi_extra_decls)
 import GHC.Unit.Module.Deps (imp_mods, Usage(..))
 import GHC.Unit.Finder (FindResult(Found), findImportedModule)
 import GHC.Iface.Tidy (mkBootModDetailsTc)
 import GHC.Types.SourceFile (HscSource(..))
-import GHC.Types.Error (MessageClass(..), mkLocMessage, getMessages, errMsgDiagnostic)
+import GHC.Types.Error (MessageClass(..), mkLocMessage, getMessages, errMsgDiagnostic, unionMessages)
 import GHC.Types.SourceError (SourceError, srcErrorMessages)
 import GHC.Driver.Errors.Types (GhcMessage(..))
 import GHC.Tc.Errors.Types (TcRnMessage(..), TcRnMessageDetailed(..), DeriveInstanceErrReason(..))
@@ -54,7 +67,6 @@ import GHC.Unit.Module.Graph (mgModSummaries', ModuleGraphNode(..), mkNodeKey, n
 import GHC.Unit.Home (homeUnitId, isHomeUnit)
 import GHC.Unit.Types (unitString)
 import GHC.Data.Graph.Directed (flattenSCCs)
-import GHC.Core.Opt.Pipeline (core2core)
 import GHC.Driver.Session
   ( updOptLevel, gopt_set, gopt_unset, xopt
   , WarningFlag
@@ -73,76 +85,81 @@ import qualified Data.Text.Encoding as TextEncoding
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import qualified Crypto.Hash.SHA256 as SHA256
+import Data.Char (digitToInt)
 import qualified Data.Graph as Graph
 import GHC.Platform (genericPlatform)
 import GHC.Utils.Outputable
   ( renderWithContext, defaultSDocContext, ppr, SDocContext(..)
   , mkUserStyle, NamePprCtx(..), QualifyName(..), Depth(..), PromotionTickContext(..) )
-import GHC.Types.Id (idName, setIdExported, setIdType)
+import GHC.Types.Id (idName, setIdExported)
 import GHC.Core.Type
   ( mkInvisForAllTys
   , mkInvisFunTys
   , splitAppTy_maybe
   , splitTyConApp_maybe
   , splitFunTy_maybe, splitFunTys
-  , isLiftedTypeKind, mkTyVarTy, typeKind, isTauTy, tyCoVarsOfType, getTyVar_maybe
+  , mkTyVarTy, typeKind, tyCoVarsOfType
   )
 import GHC.Core.TyCo.Compare (eqType)
 import GHC.Core.TyCo.FVs (scopedSort, tyConsOfType)
-import GHC.Core.TyCon (isTupleTyCon, tyConDataCons_maybe, unwrapNewTyCon_maybe, tyConUnique, tyConName, tyConVisibleTyVars)
+import GHC.Core.TyCon (isTupleTyCon, tyConDataCons_maybe, unwrapNewTyCon_maybe, tyConUnique, tyConName)
 import GHC.Types.SrcLoc (mkRealSrcSpan, mkRealSrcLoc)
 import GHC.Core.Class (className)
-import GHC.Core.InstEnv (is_cls, is_tys, is_flag, is_dfun_name, instanceSig, updateClsInstDFun, mapInstEnv)
-import GHC.Types.Basic (OverlapFlag(..), OverlapMode(..))
+import GHC.Core.InstEnv (is_cls, is_tys, instEnvElts)
 import GHC.Core.FamInstEnv (fi_fam, fi_tys)
 import GHC.Core.Predicate (mkClassPred, getClassPredTys_maybe)
 import GHC.Builtin.Names (gHC_PRIM, fUNTyConKey, unrestrictedFunTyConKey, genClassKey, repTyConKey)
 import GHC.Builtin.Types (zonkAnyTyCon)
-import GHC.Core.DataCon (dataConOrigArgTys, dataConName)
-import GHC.Types.FieldLabel (flLabel)
-import Language.Haskell.Syntax.Basic (field_label)
+import GHC.Core.DataCon (dataConOrigArgTys)
 import GHC.Data.Bag (listToBag)
 import GHC.Tc.Solver (tcCheckGivens, tcCheckWanteds)
 import GHC.Tc.Solver.InertSet (emptyInert)
-import GHC.Tc.Utils.Monad (initTcWithGbl)
+import GHC.Tc.Utils.Monad (initTcWithGbl, initIfaceCheck)
 import GHC.Tc.Utils.TcMType (newEvVars)
 import GHC.Core.TyCo.Rep (Scaled(..), Type(..))
-import GHC.Types.Unique.Set (UniqSet, emptyUniqSet, addOneToUniqSet, elementOfUniqSet, nonDetEltsUniqSet)
-import GHC.Tc.Utils.TcType (tcSplitSigmaTy, tcMkDFunSigmaTy)
+import GHC.Types.Unique.Set (UniqSet, emptyUniqSet, addOneToUniqSet, elementOfUniqSet)
+import GHC.Tc.Utils.TcType (tcSplitSigmaTy)
 import GHC.Types.TypeEnv (typeEnvIds, typeEnvTyCons)
 import GHC.LanguageExtensions.Type qualified as LangExt
-import GHC.Tc.Types (TcGblEnv, tcg_dependent_files, tcg_binds, tcg_rdr_env, tcg_type_env, tcg_insts, tcg_inst_env, tcg_imports, tcg_keep, tcg_used_gres, tcg_safe_infer, tcg_safe_infer_reasons)
+import GHC.Tc.Types (FrontendResult(..), TcGblEnv, tcg_th_coreplugins, tcg_import_decls, tcg_dependent_files, tcg_binds, tcg_rdr_env, tcg_type_env, tcg_imports, tcg_keep)
 import GHC.Types.Name.Set (extendNameSetList)
 import GHC.Types.Name.Reader (GlobalRdrEnv, rdrNameOcc)
 import GHC.Types.Name.Ppr (mkNamePprCtx)
 import GHC.Types.Name (nameOccName, nameUnique, mkExternalName, mkInternalName, nameModule_maybe)
-import GHC.Types.Name.Occurrence (OccName, mkOccName, mkTyVarOcc, occNameSpace, occNameString)
+import GHC.Types.Name.Occurrence (OccName, mkOccName, mkTyVarOcc, occNameSpace, occNameString, isTcOcc)
 import GHC.Types.Unique.Supply (UniqSupply, mkSplitUniqSupply, takeUniqFromSupply)
-import GHC.Types.Var (mkTyVar, mkTyVarBinder, setVarName, tyVarKind, varName)
+import GHC.Types.Var (mkTyVar, mkTyVarBinder, setVarName)
 import GHC.Types.Var.Set (isEmptyVarSet)
 import Language.Haskell.Syntax.Specificity (Specificity (SpecifiedSpec))
 import GHC.Types.Var.Env (mkVarEnv, lookupVarEnv)
 import Control.Applicative ((<|>))
+import Control.DeepSeq (force)
+import Control.Concurrent (myThreadId)
 import Control.Exception
-  ( finally, bracket, try, catch, throwIO, IOException )
+  ( Exception, SomeException, SomeAsyncException, fromException, finally, bracket, mask, try, catch, throwIO, IOException )
 import Data.Maybe (fromMaybe, isJust, isNothing, catMaybes)
-import Data.List (find, isPrefixOf, isInfixOf, nub, nubBy, sort, sortOn, intercalate)
+import Data.List (find, isPrefixOf, nub, nubBy, sort, sortOn, intercalate)
 import Data.Containers.ListUtils (nubOrd)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, modifyIORef', readIORef, writeIORef)
 import Numeric (showHex)
 import System.Environment (lookupEnv)
 import System.FilePath (takeBaseName, takeFileName, normalise, pathSeparator, (</>))
-import System.Directory (canonicalizePath, makeAbsolute, doesFileExist, getModificationTime)
-import System.IO (hPutStrLn, stderr, readFile')
+import System.Directory (canonicalizePath, makeAbsolute, doesFileExist, getModificationTime, getTemporaryDirectory, removeDirectoryRecursive)
+import System.Posix.Temp (mkdtemp)
+import System.IO (hPutStrLn, stderr, readFile', IOMode(ReadMode), withBinaryFile)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad (forM, forM_, when, unless, filterM)
 import Data.Data (Data, cast, gmapQ)
 import Data.Generics (everything, mkQ)
 import Data.Foldable (toList)
 import Data.Word (Word64)
-import Tidepool.Binders (CheckedBinderPin(..), CellSourcePlan(..), CellDisplayTarget(..), CellGenericDeclaration(..), CellExpressionPlan(..), ExpressionLiftPlan(..), ExpressionPresentation(..), omitCellGenericDeclarations, omitCellDisplayDeclarations)
-import Tidepool.CheckedCell (CheckedSignature, captureCheckedSignature, rewriteCheckedAnnotations)
-import Tidepool.HomeProducts (hydrateCandidateHomeProductsWithOriginals)
+import Tidepool.Binders (CheckedBinderPin(..), CellSourcePlan(..), CellGenericDeclaration(..), CellStructuralDisplayTarget(..), CellExpressionPlan(..), ExpressionLiftPlan(..), ExpressionPresentation(..), omitCellGenericDeclarations, omitCellStructuralDisplayDeclarations)
+import Tidepool.CheckedCell (CheckedSignature, captureCheckedSignature, rewriteCheckedAnnotations, rewriteHostInputType, rewriteRequestTypes
+  , NativeParsedModule, unannotatedModule, mapNativeModule, thenNativeModule, typecheckNativeModuleWithDiagnostics)
+import Tidepool.FinalizedModule (FinalizedModule(..))
+import Tidepool.HomeProducts
+  ( hydrateCandidateHomeProductsWithOriginals, materializeCandidateCompilerView
+  , validateCandidateInterfaceRequirements )
 import Tidepool.CompileInputPolicy (pluginInputIssues)
 import Tidepool.PlannedDeclaration
   ( PlannedDeclarationInventory, transformPlannedDeclarationImports, transformPlannedDeclarationImportsWithCompleted, transformProgramDeclarationImports, hydratePlannedDeclarationInventory )
@@ -180,14 +197,18 @@ import Tidepool.DependencyEvidence
   , DependencyModule(..), DependencyImport(..), DependencyQualifier(..), ProductAvailability(..)
   , sourceEvidenceWithFingerprint )
 import Tidepool.ExactHydration
-  ( ExactIfaceArtifact(..), freshExactState, hydrateExactScope
+  ( ExactIfaceArtifact(..), freshExactState, hydrateExactScope, serializeOriginalInterface
   , readVerifiedExactIfaceClosureWithCheckedValues, selectVerifiedExactInterfaces, selectVerifiedValueInterfaces
   , checkedValueImportAuthorityFromVerified
   , GeneratedScaffoldRecipe, generatedScaffoldRecipe, captureGeneratedScaffoldTarget
   , noGeneratedScaffoldImports, readGeneratedScaffoldImportAuthority, permitsGeneratedScaffoldImport, installExactLexicalGraphWithScaffold )
 import Tidepool.ExactScope
-  ( ExactScope(..), ExactCompilation(..), SourceSelectedOriginals(..), extendSourceSelectedOriginals, CheckedCellAdmission(..), CheckedItemAdmission(..), CheckedItemPurpose(..), readExactScope, revalidateExactScope, scopeValueInterfaces
+  ( ExactScope(..), ExactCompilation(..), SourceSelectedOriginals(..), extendSourceSelectedOriginals, CheckedCellAdmission(..), CheckedCellPurpose(..), CheckedItemAdmission(..), CheckedItemPurpose(..), readExactScope, revalidateExactScope, scopeValueInterfaces
   , writeExactCompilation, scopeExecutionNativeOwners )
+import Tidepool.ExactScope
+  ( CanonicalInterfaceProof, validateCandidateCanonicalInterfaceProof
+  , canonicalCertificatePath, canonicalCertificateSha256, canonicalCoreArtifact
+  , canonicalCorePath, canonicalCoreSha256 )
 import Tidepool.ExecutionSource
   ( ExecutionSourceGraph(..), ExecutionSourceNode(..), ExecutionSourceIdentity(..)
   , ExecutionSourceFailure(..), ExecutionSourceRef(..), executionSourceClosure, executionIdentityKey )
@@ -238,15 +259,6 @@ homeInterfaceConsumers summaries = drop 1 (scanr addConsumer Map.empty summaries
         addImport (_, imported) = Map.insertWith keepNearest (unLoc imported) (ms_mod_name summary)
         keepNearest new _ = new
 
--- | A registered interface carries the tidy result that produced it. Both
--- interface construction and prepared-STG lowering need that exact result;
--- retaining it only through the immediate compile back half avoids running
--- 'hscTidy' twice without extending the memo's retained state.
-data RegisteredInterface = RegisteredInterface
-  { riHomeModInfo :: HomeModInfo
-  , riTidyGuts :: CgGuts
-  }
-
 -- | Prepared mode keeps the ordinary typed pipeline observations alongside
 -- the unflattened per-module STG handoff.
 data PreparedPipelineResult = PreparedPipelineResult
@@ -254,6 +266,7 @@ data PreparedPipelineResult = PreparedPipelineResult
   , pprModules :: [PreparedModule]
   , pprDependencies :: DependencyEvidence
   , pprProductInterfaces :: Map.Map ModuleName ModIface
+  , pprFinalizedModules :: Map.Map ModuleName FinalizedModule
   , pprPackageImports :: Map.Map ModuleName PackageImportEvidence
   , pprAcceptedCandidates :: [ModuleCandidate]
   , pprExactCompilation :: Maybe ExactCompilation
@@ -325,17 +338,19 @@ checkCellInstances compile plan = do
   attempted <- try (compile plan)
   case attempted of
     Right result -> pure (plan, result)
-    Left failure -> case rejectedCellInstances plan failure of
-      [] -> throwIO failure
-      rejected -> checkCellInstances compile
-        (omitCellDisplayDeclarations [name | (AutomaticDisplay, name) <- rejected]
-          (omitCellGenericDeclarations [name | (AutomaticGeneric, name) <- rejected] plan))
+    Left (GeneratedInstanceRejection failure rejected) -> do
+      let generic = [name | GenericDuplicate name <- rejected]
+            ++ [name | UnsupportedGeneric name <- rejected]
+          structural = [name | StructuralDisplayCompanionDuplicate name <- rejected]
+            ++ [name | UnsupportedGeneric name <- rejected]
+          remaining = omitCellStructuralDisplayDeclarations structural
+            (omitCellGenericDeclarations generic plan)
+      if remaining == plan
+        then throwIO failure
+        else checkCellInstances compile remaining
 
--- | Recover the exact, post-defaulting type of every generated expression
--- lambda and ask GHC whether its result satisfies the generated display
--- constraint under the same quantified givens and exact effect row. This is
--- execution evidence: Rust selects one wrapper from it and never learns
--- policy from a failed wrapper compile.
+-- | Capture native expression types and effect lifting without probing display
+-- instances. Output is an explicit authored effect.
 cellExpressionPlans :: CheckedEnvironmentResult -> IO [CellExpressionPlan]
 cellExpressionPlans result = map fst <$> cellExpressionEvidence result
 
@@ -350,26 +365,19 @@ cellExpressionEvidence result = forM expressionIds $ \identifier -> do
   when (zonkAnyTyCon `elementOfUniqSet` tyConsOfType stableType) $
     fail "expression evidence still contains an unresolved internal type"
   let occurrence = occNameString (nameOccName (idName identifier))
-      (outerBinders, outerPredicates, outerBody) = tcSplitSigmaTy stableType
-      (liftPlan, valueBody) = case effectResultType effectConstructor outerBody of
-        Just resultType -> (ExpressionEffectful, resultType)
-        Nothing -> (ExpressionPure, outerBody)
-      (innerBinders, innerPredicates, body) = tcSplitSigmaTy valueBody
-      binders = outerBinders ++ innerBinders
-      predicates = outerPredicates ++ innerPredicates
-      quantified = mkInvisForAllTys (map (mkTyVarBinder SpecifiedSpec) binders)
-        (mkInvisFunTys predicates body)
-  rendered <- satisfiesCapturedConstraint (crHscEnv result) environment
-    "__tidepoolCellDisplayConstraint" quantified
+      (_, _, outerBody) = tcSplitSigmaTy stableType
+      liftPlan = case effectResultType effectConstructor outerBody of
+        Just _ -> ExpressionEffectful
+        Nothing -> ExpressionPure
   let plan = CellExpressionPlan
         { expressionPlanKey = occurrence
         , expressionPlanLift = liftPlan
-        , expressionPlanPresentation = if rendered then ExpressionRendered else ExpressionOpaque
+        , expressionPlanPresentation = ExpressionOpaque
         , expressionPlanType = renderCellPinType names stableType
         , expressionPlanHeads = nominalHeadsOfType stableType
-        , expressionPlanImports = cellPinTypeImports names stableType
         }
-  pure (plan, captureCheckedSignature (crHscEnv result) occurrence stableType)
+  signature <- captureCheckedSignature (crHscEnv result) occurrence stableType
+  pure (plan, signature)
   where
     environment = crTargetTcGblEnv result
     names = mkNamePprCtx (PromTickCtx True True)
@@ -404,8 +412,8 @@ cellCheckedBinderSignatures result = forM identifiers $ \identifier -> do
     (stabilizeCellEvidenceType supply (stabilizeEffectRows (idType identifier)))
   when (zonkAnyTyCon `elementOfUniqSet` tyConsOfType stable) $
     fail "checked binder still contains an unresolved internal type"
-  pure (captureCheckedSignature (crHscEnv result)
-    (occNameString (nameOccName (idName identifier))) stable)
+  captureCheckedSignature (crHscEnv result)
+    (occNameString (nameOccName (idName identifier))) stable
   where
     identifiers = Map.elems $ Map.fromList
       [(occNameString (nameOccName (idName identifier)), identifier)
@@ -503,183 +511,107 @@ stabilizeCellEvidenceType supply ty
     collect (CastTy inner _) = collect inner
     collect _ = []
 
-data AutomaticInstance = AutomaticGeneric | AutomaticDisplay
-  deriving (Eq)
+-- The retry recipe names generated candidates; GHC supplies their exact
+-- target and class identities before the target's typecheck can fail.
+data GeneratedInstanceRecipe = GeneratedInstanceRecipe
+  { generatedDisplayAlias :: String
+  , generatedGenericTargets :: [String]
+  , generatedStructuralTargets :: [String]
+  } deriving (Eq, Show)
 
--- GHC owns class identity, including qualified imports and reexports. A retry
--- removes only generated candidates; remaining authored errors still fail.
-rejectedCellInstances :: CellSourcePlan -> SourceError -> [(AutomaticInstance, String)]
-rejectedCellInstances plan failure = nub
-  [ (kind, occurrence)
+cellGeneratedInstanceRecipe :: CellSourcePlan -> GeneratedInstanceRecipe
+cellGeneratedInstanceRecipe plan = GeneratedInstanceRecipe
+  { generatedDisplayAlias = cellPlanStructuralDisplayAlias plan
+  , generatedGenericTargets = map genericDeclarationTarget (cellPlanGenericDeclarations plan)
+  , generatedStructuralTargets = map structuralDisplayTargetName (cellPlanStructuralDisplayTargets plan)
+  }
+
+data GeneratedInstanceFailure
+  = GenericDuplicate String
+  | UnsupportedGeneric String
+  | StructuralDisplayCompanionDuplicate String
+  deriving (Eq, Show)
+
+data GeneratedInstanceRejection = GeneratedInstanceRejection SourceError [GeneratedInstanceFailure]
+
+instance Show GeneratedInstanceRejection where
+  show (GeneratedInstanceRejection _ failures) = "generated instance rejection: " ++ show failures
+
+instance Exception GeneratedInstanceRejection
+
+data GeneratedInstanceAuthority = GeneratedInstanceAuthority
+  { generatedTargetModule :: Module
+  , generatedDisplayName :: Maybe Name
+  }
+
+-- Capture only from the actual generated import under this admitted compiler
+-- environment. Export Names preserve the defining unit through reexports.
+withGeneratedInstanceRecovery
+  :: GeneratedInstanceRecipe -> HscEnv -> ModSummary -> ParsedModule -> IO a -> IO a
+withGeneratedInstanceRecovery recipe environment summary parsed action = do
+  displayName <- if null (generatedStructuralTargets recipe)
+    then pure Nothing
+    else Just <$> captureDisplayName
+  let authority = GeneratedInstanceAuthority (ms_mod summary) displayName
+  action `catch` \failure -> case rejectedCellInstances recipe authority failure of
+    [] -> throwIO failure
+    rejected -> throwIO (GeneratedInstanceRejection failure rejected)
+  where
+    captureDisplayName = do
+      declaration <- case
+          [decl | L _ decl <- hsmodImports (unLoc (pm_parsed_source parsed))
+          , fmap unLoc (ideclAs decl) == Just (mkModuleName (generatedDisplayAlias recipe))] of
+        [found] -> pure found
+        _ -> fail "generated Display companion has no unique compiler import"
+      let importedName = unLoc (ideclName declaration)
+          qualifier = renameRawPkgQual (hsc_unit_env environment) importedName (ideclPkgQual declaration)
+      resolved <- findImportedModule environment importedName qualifier
+      owner <- case resolved of
+        Found _ found -> pure found
+        _ -> fail "generated Display companion import cannot be resolved"
+      loaded <- initIfaceCheck (ppr importedName) environment $
+        loadInterface (ppr importedName) owner (ImportByUser (ideclSource declaration))
+      iface <- case loaded of
+        MaybeErr.Succeeded found | mi_module found == owner -> pure found
+        _ -> fail "generated Display companion import has no admitted interface"
+      exports <- either fail pure (selectedImportNames (mi_exports iface) (ideclImportList declaration))
+      case nub [name | name <- exports, isTcOcc (nameOccName name)
+                    , occNameString (nameOccName name) == "Display"] of
+        [name] -> pure name
+        _ -> fail "generated Display companion import has no unique Display export"
+
+rejectedCellInstances
+  :: GeneratedInstanceRecipe -> GeneratedInstanceAuthority -> SourceError -> [GeneratedInstanceFailure]
+rejectedCellInstances recipe authority failure = nub
+  [ rejection occurrence
   | envelope <- toList (getMessages (srcErrorMessages failure))
   , GhcTcRnMessage diagnostic <- [errMsgDiagnostic envelope]
-  , (kind, ty) <- rejectedTypes diagnostic
+  , (rejection, candidates, ty) <- rejectedTypes diagnostic
   , Just (constructor, _) <- [splitTyConApp_maybe ty]
+  , nameModule_maybe (tyConName constructor) == Just (generatedTargetModule authority)
   , let occurrence = occNameString (nameOccName (tyConName constructor))
-  , occurrence `elem` candidates kind
+  , occurrence `elem` candidates
   ]
   where
-    candidates AutomaticGeneric = map genericDeclarationTarget (cellPlanGenericDeclarations plan)
-    candidates AutomaticDisplay = map displayTargetName (cellPlanDisplayTargets plan)
+    generic = generatedGenericTargets recipe
+    structural = generatedStructuralTargets recipe
     rejectedTypes (TcRnMessageWithInfo _ (TcRnMessageDetailed _ message)) = rejectedTypes message
     rejectedTypes (TcRnWithHsDocContext _ message) = rejectedTypes message
     rejectedTypes (TcRnCannotDeriveInstance cls types _ _ (DerivErrGenerics _))
-      | nameUnique (className cls) == genClassKey = [(AutomaticGeneric, ty) | ty <- types]
+      | nameUnique (className cls) == genClassKey = [(UnsupportedGeneric, generic, ty) | ty <- types]
     rejectedTypes (TcRnDupInstanceDecls _ instances) =
-      [ (kind, ty) | instance' <- toList instances
-      , kind <- if nameUnique (className (is_cls instance')) == genClassKey
-          then [AutomaticGeneric] else [AutomaticDisplay | isDisplayClass (is_cls instance')]
+      [ (rejection, candidates, ty)
+      | instance' <- toList instances
+      , (rejection, candidates) <-
+          if nameUnique (className (is_cls instance')) == genClassKey
+            then [(GenericDuplicate, generic)]
+            else [(StructuralDisplayCompanionDuplicate, structural)
+                 | Just (className (is_cls instance')) == generatedDisplayName authority]
       , ty <- is_tys instance' ]
     rejectedTypes (TcRnConflictingFamInstDecls instances) =
-      [ (AutomaticGeneric, ty) | instance' <- toList instances
-      , nameUnique (fi_fam instance') == repTyConKey, ty <- fi_tys instance' ]
+      [(GenericDuplicate, generic, ty) | instance' <- toList instances
+      , nameUnique (fi_fam instance') == repTyConKey, ty <- fi_tys instance']
     rejectedTypes _ = []
-
--- | 'Display' is authored in "Tidepool.Inspection.Display" (split out of
--- "Tidepool.Inspection" so "Tidepool.Agent.Reply.Internal" can depend on it
--- without a module cycle) and re-exported from "Tidepool.Inspection", the
--- surface authored code and this pass otherwise reference.
-isDisplayClass :: Class -> Bool
-isDisplayClass cls =
-  let name = className cls
-   in occNameString (nameOccName name) == "Display"
-      && fmap (moduleNameString . moduleName) (nameModule_maybe name) == Just "Tidepool.Inspection.Display"
-
--- | Select fields under the final generated instance contexts. The solver view
--- is disposable; the cell owner must compile the returned canonical source.
-cellDisplayDeclarations :: CheckedEnvironmentResult -> CellSourcePlan -> IO String
-cellDisplayDeclarations result plan = do
-  displayClass <- case
-      [ is_cls instance'
-      | instance' <- tcg_insts environment
-      , isDisplayClass (is_cls instance')
-      ] of
-    found : _ -> pure found
-    [] -> fail "cell display preparation has no compiler-qualified Display instance"
-  targets <- forM (cellPlanDisplayTargets plan) $ \target -> do
-    constructor <- case
-        [ tycon | tycon <- typeEnvTyCons (tcg_type_env environment)
-        , occNameString (nameOccName (tyConName tycon)) == displayTargetName target ] of
-      [found] -> pure found
-      _ -> fail "cell display target missing or ambiguous in its checked type environment"
-    pure (target, constructor)
-  solverEnvironment <- do
-    -- GHC's solver may mark newtype constructors as used and update Safe
-    -- Haskell inference. Its evidence, worklist, and errors are fresh under
-    -- initTcWithGbl; these module-level references also need private copies.
-    used <- readIORef (tcg_used_gres environment) >>= newIORef
-    keep <- readIORef (tcg_keep environment) >>= newIORef
-    safe <- readIORef (tcg_safe_infer environment) >>= newIORef
-    reasons <- readIORef (tcg_safe_infer_reasons environment) >>= newIORef
-    replacements <- forM targets $ \(_, constructor) -> do
-      -- A surviving generated candidate has a compiler-checked, fully
-      -- generic head. Specialized authored instances remain untouched.
-      (instance', binders, existing, cls, arguments, variables) <- case
-          [ (candidate, binders, existing, cls, arguments, variables)
-          | candidate <- tcg_insts environment
-          , is_cls candidate == displayClass
-          -- Cached matching variables may be alpha-renamed independently of
-          -- the DFun. Its new predicates must use the DFun's own binders.
-          , let (binders, existing, cls, arguments) = instanceSig candidate
-          , cls == displayClass
-          , [headType] <- [arguments]
-          , Just (headConstructor, headArguments) <- [splitTyConApp_maybe headType]
-          , headConstructor == constructor
-          , Just variables <- [mapM getTyVar_maybe headArguments]
-          , length variables == length (tyConTyVars constructor)
-          , length (nub variables) == length variables
-          ] of
-        [found] -> pure found
-        _ -> fail "cell display target has no unique compiler-generated generic instance"
-      unless (case overlapMode (is_flag instance') of Overlappable{} -> True; _ -> False) $
-        fail "cell display candidate does not have its generated overlap mode"
-      let visible = [ variable
-                    | (parameter, variable) <- zip (tyConTyVars constructor) variables
-                    , parameter `elem` tyConVisibleTyVars constructor
-                    , isLiftedTypeKind (tyVarKind variable) ]
-          predicates = map (mkClassPred displayClass . pure . mkTyVarTy) visible
-      unless (null existing || length existing == length predicates
-          && and (zipWith eqType existing predicates)) $
-        fail "cell display candidate has unexpected dictionary constraints"
-      let original = instanceDFunId instance'
-          replacement = if null existing
-            then setIdType original (tcMkDFunSigmaTy binders predicates (mkClassPred cls arguments))
-            else original
-      pure (idName original, replacement)
-    let replace candidate = case lookup (is_dfun_name candidate) replacements of
-          Nothing -> candidate
-          Just replacement -> updateClsInstDFun (const replacement) candidate
-    -- Only instance contexts differ. No evidence from this view is returned
-    -- or installed into the checked environment, interfaces, or native code.
-    pure environment
-      { tcg_inst_env = mapInstEnv replace (tcg_inst_env environment)
-      , tcg_insts = map replace (tcg_insts environment)
-      , tcg_used_gres = used
-      , tcg_keep = keep
-      , tcg_safe_infer = safe
-      , tcg_safe_infer_reasons = reasons
-      }
-  fmap concat $ forM targets $ \(target, constructor) -> do
-    let variables = filter (isLiftedTypeKind . tyVarKind) (tyConVisibleTyVars constructor)
-        predicates = map (mkClassPred displayClass . pure . mkTyVarTy) variables
-        context = case variables of
-          [] -> ""
-          _ -> "(" ++ intercalate ", "
-            [ qualifier ++ ".Display " ++ occNameString (nameOccName (varName variable))
-            | variable <- variables ] ++ ") => "
-        header = "\ninstance {-# OVERLAPPABLE #-} " ++ context ++ qualifier ++ ".Display "
-          ++ displayTargetApplication target ++ " where\n"
-    constructors <- maybe (fail "cell display target is not an algebraic datatype") pure
-      (tyConDataCons_maybe constructor)
-    methods <- forM constructors $ \dataConstructor -> do
-      let fields = [ ty | Scaled _ ty <- dataConOrigArgTys dataConstructor ]
-          labels = map (unpackFS . field_label . flLabel) (dataConFieldLabels dataConstructor)
-          constructorName = occNameString (nameOccName (dataConName dataConstructor))
-          names = [ "__tidepoolDisplayField" ++ show index | index <- [0 :: Int .. length fields - 1] ]
-      (_, checked) <- initTcWithGbl (crHscEnv result) solverEnvironment
-        (mkRealSrcSpan (mkRealSrcLoc (mkFastString "<cell display>") 1 1)
-          (mkRealSrcLoc (mkFastString "<cell display>") 1 1)) $ do
-          givens <- newEvVars predicates
-          inert <- tcCheckGivens emptyInert (listToBag givens)
-          case inert of
-            Nothing -> fail "generated Display instance has contradictory givens"
-            Just solved -> mapM (\ty -> if isTauTy ty && isLiftedTypeKind (typeKind ty)
-                then tcCheckWanteds solved [mkClassPred displayClass [ty]]
-                else pure False) fields
-      selections <- maybe (fail "cell display field solver failed") pure checked
-      let renderField index name supported =
-            let method = if null labels then ".displayTreePrec 11 " else ".displayTree "
-                value = if supported then qualifier ++ method ++ name
-                  else qualifier ++ ".TextLeaf " ++ textLiteral "<opaque>"
-             in case drop index labels of
-               label : _ -> qualifier ++ ".Concat [" ++ qualifier ++ ".TextLeaf "
-                 ++ textLiteral (label ++ " = ") ++ ", " ++ value ++ "]"
-               [] -> value
-          rendered = [ renderField index name supported
-                     | (index, (name, supported)) <- zip [0..] (zip names selections) ]
-          opening = constructorName ++ if null names then "" else if null labels then " " else " {"
-          closing = if null labels then ("" :: String) else "}"
-          patternName = case constructorName of
-            ':' : _ -> "(" ++ constructorName ++ ")"
-            _ -> constructorName
-          patternFields = zipWith (\name supported -> if supported then name else "_") names selections
-      pure ( "  displayTree (" ++ unwords (patternName : patternFields) ++ ") = "
-               ++ qualifier ++ ".treeParts " ++ textLiteral opening ++ " " ++ textLiteral closing
-               ++ " [" ++ intercalate ", " rendered ++ "]\n"
-           , "    " ++ patternName ++ " {} -> "
-               ++ (if null names then "" else qualifier ++ ".precedenceParens __tidepoolPrecedence ")
-               ++ "(" ++ qualifier ++ ".displayTree __tidepoolValue)\n" )
-    -- An applied constructor is parenthesized as an argument, as derived
-    -- Show does. The method names nothing from the cell's own scope.
-    let precedence = "  displayTreePrec __tidepoolPrecedence __tidepoolValue = case __tidepoolValue of\n"
-          ++ concatMap snd methods
-    pure (header ++ if null methods
-      then "  displayTree _ = " ++ qualifier ++ ".TextLeaf " ++ textLiteral "<empty>" ++ "\n"
-      else concatMap fst methods ++ precedence)
-  where
-    environment = crTargetTcGblEnv result
-    qualifier = cellPlanDisplayAlias plan
-    textLiteral value = "(" ++ qualifier ++ "Text.pack " ++ show value ++ ")"
 
 -- | Resolve the target module's 'ModuleName' for one input file. Prefers the
 -- declared name from a conventional @module ... where@ header (via
@@ -711,41 +643,46 @@ runPipelineSelected selection path includes =
 runPipelineSelectedRetaining
   :: PipelineSelection result -> Set.Set SymbolIdentity -> FilePath -> [FilePath] -> IO result
 runPipelineSelectedRetaining selection retained path includes = do
+  producer <- captureCompilerProducerIdentity
   variant <- normalVariant GeneralCompile path
-  runCompile selection retained variant path includes Nothing
+  runCompile selection retained variant {pvCompilerProducer = producer} path includes Nothing
+
+-- The process owner supplies this configuration before any authored compiler
+-- effect runs. A resident compiler retains it across requests and recovery;
+-- candidates and mutable source code cannot replace their own authority.
+newtype CompilerProducerIdentity = CompilerProducerIdentity String
+  deriving (Eq, Show)
+
+captureCompilerProducerIdentity :: IO (Maybe CompilerProducerIdentity)
+captureCompilerProducerIdentity = lookupEnv "TIDEPOOL_COMPILER_PRODUCER" >>= traverse decode
+  where
+    decode raw
+      | length raw /= 64 || any (`notElem` ("0123456789abcdef" :: String)) raw
+          || all (== '0') raw = fail "invalid compiler launch producer identity"
+      | otherwise = pure (CompilerProducerIdentity (concatMap byteHex
+          (BS.unpack (SHA256.hash (BS.pack (pairs raw))))))
+    pairs [] = []
+    pairs (first:second:remaining) =
+      fromIntegral (16 * digitToInt first + digitToInt second) : pairs remaining
+    pairs _ = error "validated compiler producer has odd length"
+    byteHex byte = let rendered = showHex byte "" in replicate (2-length rendered) '0' ++ rendered
 
 -- ---------------------------------------------------------------------------
 -- The shared compile loop and its two seams
 --
--- There is exactly ONE compile skeleton ('runCompileCycle'): session setup,
--- @depanal@, @load'@, the hs-boot summary filter, the per-module
--- parse/typecheck/capture/desugar/@core2core@, the summed timing phases, and
--- the guts→'PipelineResult' merge. The normal and session pipelines are that
--- skeleton plus a 'PipelineVariant'. Direct extraction bootstraps a session
--- for one cycle; the resident worker reuses its cache and module memo across
--- requests.
+-- 'runCompileCycle' owns load-time finalization, dependency-ordered deferred
+-- finalization, demand-driven STG preparation and the result merge. Normal and
+-- session compilation supply their admission and injection seams through one
+-- 'PipelineVariant'.
 -- ---------------------------------------------------------------------------
 
--- | Which modules pay 'core2core' — and, inseparably, in what SCHEDULE the
--- per-module loop runs. The two are one seam, not two: a tier rule that needs
--- a global view of every module's Core forces staging, and only a variant that
--- optimizes everything is free to interleave.
+-- | Which finalized modules proceed to prepared STG.
 data TierPolicy
   = OptimizeEveryModule
-    -- ^ 'core2core' every module, INTERLEAVED: each module runs
-    -- typecheck→desugar→'core2core'→interface registration before the next
-    -- module starts. Deferred session modules require this ordering: each
-    -- importer resolves dependencies from their freshly registered interfaces.
+    -- ^ Prepare each module in dependency order.
   | OptimizeCoreReachable
-    -- ^ E6 (tiered -O2): STAGE the loop — parse/typecheck/desugar every
-    -- module first to select the closure, then recheck and optimize only the
-    -- target and its Core-reachable dependencies in dependency order. Rechecking
-    -- makes each importer consume the interface paired with prepared code.
-    -- Staging is forced by the rule itself: 'reachableModuleClosure' is
-    -- computed over EVERY module's desugared Core, so no module's tier is
-    -- known until all desugars have run. A module outside the closure still
-    -- gets parsed/typechecked (its diagnostics still surface) and desugared
-    -- (needed to compute reachability at all), but never pays 'core2core'.
+    -- ^ Finalize every source owner in dependency order, then prepare only
+    -- the target's desugared Core reference closure.
 
 -- | A pipeline variant: everything the shared skeleton cannot decide for
 -- itself. 'pvPlan' runs after @depanal@ (it needs the downsweep graph) and
@@ -755,6 +692,7 @@ data PipelineVariant = PipelineVariant
     -- ^ Prefix on this variant's own error messages.
   , pvExactScope :: Maybe ExactScope
     -- ^ Admitted immutable declaration owners, independent of live values.
+  , pvCompilerProducer :: Maybe CompilerProducerIdentity
   , pvGeneratedScaffold :: Maybe GeneratedScaffoldRecipe
     -- ^ The protected target and its compiler-owned support import.
   , pvDownsweepExcludes :: [ModuleName]
@@ -762,7 +700,8 @@ data PipelineVariant = PipelineVariant
     -- source-less @Val.G\<g\>@ ifaces). Empty on the normal path.
   , pvPlan :: Bool -> ModuleGraph -> Maybe ExactScope -> Ghc CompilePlan
     -- ^ @pvPlan timingEnabled downsweepGraph selectedExactScope@.
-  , pvTransformParsed :: HscEnv -> ModSummary -> ParsedModule -> IO ParsedModule
+  , pvGeneratedInstanceCheck :: Maybe GeneratedInstanceRecipe
+  , pvTransformParsed :: HscEnv -> ModSummary -> ParsedModule -> IO NativeParsedModule
   }
 
 candidateManifestFor :: PipelineSelection result -> Maybe FilePath
@@ -770,9 +709,32 @@ candidateManifestFor (PreparedProducts path) = path
 candidateManifestFor (CheckedEnvironmentProducts path) = Just path
 candidateManifestFor _ = Nothing
 
+compilerProducerFor :: PipelineVariant -> Maybe String
+compilerProducerFor variant = case pvCompilerProducer variant of
+  Just (CompilerProducerIdentity producer) -> Just producer
+  Nothing -> Nothing
+
 exactCompileCycle :: PipelineSelection result -> PipelineVariant -> Bool
 exactCompileCycle selection variant =
   isJust (candidateManifestFor selection) || isJust (pvExactScope variant)
+
+-- The worker owns one interpreter. An interrupted retirement leaves it
+-- unusable; a later request must not borrow its partially unloaded symbols.
+data ResidentAvailability = ResidentAvailable | ResidentBusy | ResidentPoisoned | ResidentClosed
+  deriving (Eq)
+
+data CompilerTransactionFailure
+  = CompilerTransactionBusy
+  | CompilerTransactionPoisoned
+  | CompilerTransactionReleased
+  | CompilerTransactionWrongThread
+  | CompilerTransactionFailed
+  deriving (Show)
+
+instance Exception CompilerTransactionFailure
+
+data CompilerPhase = CompilerReady | CompilerRunning | CompilerFailed | CompilerClosed
+  deriving (Eq)
 
 data ResidentStateOrigin = OrdinarySourceState | LegacySourceFreeState | ExactState
   deriving (Eq)
@@ -785,30 +747,44 @@ residentStateOrigin selection variant
 
 data CompilePurpose = GeneralCompile | LookupTypeCompile | CertifyHomeProductsCompile | OriginalDeclarationCompile
   | CheckedItemCompile [(String,CheckedSignature)] (Maybe ((String,String),String)) [CompletedValueImport]
+  | HostActivationCheck CheckedSignature
   | HostActivationInputCompile [(String,CheckedSignature)] (Maybe ((String,String),String)) [CompletedValueImport]
   | ProgramItemCompile Bool [(String,CheckedSignature)] [((String,String),String)] [CompletedValueImport]
   | PlannedDeclarationCheck PlannedDeclarationInventory ExactScope
   | CellProgramCompile CompilePurpose ExactScope
   | GeneratedScaffoldCompile GeneratedScaffoldRecipe CompilePurpose
+  | GeneratedInstanceCheck GeneratedInstanceRecipe CompilePurpose
   deriving (Eq, Show)
+
+generatedInstanceRecipe :: CompilePurpose -> Maybe GeneratedInstanceRecipe
+generatedInstanceRecipe (GeneratedInstanceCheck recipe _) = Just recipe
+generatedInstanceRecipe (GeneratedScaffoldCompile _ inner) = generatedInstanceRecipe inner
+generatedInstanceRecipe (CellProgramCompile inner _) = generatedInstanceRecipe inner
+generatedInstanceRecipe _ = Nothing
+
+withoutGeneratedInstanceCheck :: CompilePurpose -> CompilePurpose
+withoutGeneratedInstanceCheck (GeneratedInstanceCheck _ inner) = withoutGeneratedInstanceCheck inner
+withoutGeneratedInstanceCheck purpose = purpose
 
 generatedRecipe :: CompilePurpose -> Maybe GeneratedScaffoldRecipe
 generatedRecipe (GeneratedScaffoldCompile recipe _) = Just recipe
 generatedRecipe (CellProgramCompile inner _) = generatedRecipe inner
+generatedRecipe (GeneratedInstanceCheck _ inner) = generatedRecipe inner
 generatedRecipe _ = Nothing
 
 originalPurpose :: CompilePurpose -> CompilePurpose
 originalPurpose (GeneratedScaffoldCompile _ inner) = originalPurpose inner
 originalPurpose (CellProgramCompile inner _) = originalPurpose inner
+originalPurpose (GeneratedInstanceCheck _ inner) = originalPurpose inner
 originalPurpose purpose = purpose
 
-transformFor :: CompilePurpose -> ModuleName -> HscEnv -> ModSummary -> ParsedModule -> IO ParsedModule
-transformFor GeneralCompile _ _ _ = pure
-transformFor OriginalDeclarationCompile _ _ _ = pure
-transformFor CertifyHomeProductsCompile _ _ _ = pure
+transformFor :: CompilePurpose -> ModuleName -> HscEnv -> ModSummary -> ParsedModule -> IO NativeParsedModule
+transformFor GeneralCompile _ _ _ = pure . unannotatedModule
+transformFor OriginalDeclarationCompile _ _ _ = pure . unannotatedModule
+transformFor CertifyHomeProductsCompile _ _ _ = pure . unannotatedModule
 transformFor LookupTypeCompile target _ summary
-  | ms_mod_name summary == target = pure . normalizeLookupWildcards
-  | otherwise = pure
+  | ms_mod_name summary == target = pure . unannotatedModule . normalizeLookupWildcards
+  | otherwise = pure . unannotatedModule
 transformFor (CheckedItemCompile annotations original _) target env summary
   | ms_mod_name summary == target = \parsed -> do
       annotated <- rewriteCheckedAnnotations env annotations parsed
@@ -816,46 +792,69 @@ transformFor (CheckedItemCompile annotations original _) target env summary
         Nothing -> pure annotated
         Just (owner, fingerprint) -> do
           inventory <- hydratePlannedDeclarationInventory owner fingerprint env >>= either fail pure
-          transformPlannedDeclarationImports inventory env annotated
-  | otherwise = pure
-transformFor (HostActivationInputCompile annotations original values) target env summary =
-  transformFor (CheckedItemCompile annotations original values) target env summary
+          mapNativeModule (transformPlannedDeclarationImports inventory env) annotated
+  | otherwise = pure . unannotatedModule
+transformFor (HostActivationCheck signature) target env summary
+  | ms_mod_name summary == target = rewriteHostInputType env 1 signature
+  | otherwise = pure . unannotatedModule
+transformFor (HostActivationInputCompile annotations original values) target env summary
+  | ms_mod_name summary == target = \parsed -> do
+      signature <- hostInputSignature annotations
+      typed <- rewriteHostInputType env 2 signature parsed
+      thenNativeModule typed (transformFor (CheckedItemCompile annotations original values) target env summary)
+  | otherwise = pure . unannotatedModule
 transformFor (ProgramItemCompile _ annotations originals _) target env summary
   | ms_mod_name summary == target = \parsed -> do
       annotated <- rewriteCheckedAnnotations env annotations parsed
       inventories <- mapM (\(owner,fingerprint) -> hydratePlannedDeclarationInventory owner fingerprint env >>= either fail pure) originals
-      transformProgramDeclarationImports inventories Nothing env annotated
-  | otherwise = pure
+      mapNativeModule (transformProgramDeclarationImports inventories Nothing env) annotated
+  | otherwise = pure . unannotatedModule
 transformFor (PlannedDeclarationCheck inventory _) target env summary
-  | ms_mod_name summary == target = transformPlannedDeclarationImports inventory env
-  | otherwise = pure
+  | ms_mod_name summary == target = fmap unannotatedModule . transformPlannedDeclarationImports inventory env
+  | otherwise = pure . unannotatedModule
 transformFor (CellProgramCompile purpose _) target env summary = transformFor purpose target env summary
 transformFor (GeneratedScaffoldCompile _ purpose) target env summary = transformFor purpose target env summary
+transformFor (GeneratedInstanceCheck _ purpose) target env summary = transformFor purpose target env summary
 
 transformWithCompletedValues :: Maybe CompletedValueImports -> CompilePurpose -> ModuleName
-  -> HscEnv -> ModSummary -> ParsedModule -> IO ParsedModule
+  -> HscEnv -> ModSummary -> ParsedModule -> IO NativeParsedModule
 transformWithCompletedValues captured purpose target env summary = case purpose of
   CellProgramCompile inner _ -> transformWithCompletedValues captured inner target env summary
   GeneratedScaffoldCompile _ inner -> transformWithCompletedValues captured inner target env summary
-  HostActivationInputCompile annotations original requested ->
-    transformWithCompletedValues captured (CheckedItemCompile annotations original requested) target env summary
+  GeneratedInstanceCheck _ inner -> transformWithCompletedValues captured inner target env summary
+  HostActivationInputCompile annotations original requested
+    | ms_mod_name summary == target -> \parsed -> do
+        signature <- hostInputSignature annotations
+        typed <- rewriteHostInputType env 2 signature parsed
+        thenNativeModule typed (transformWithCompletedValues captured (CheckedItemCompile annotations original requested) target env summary)
   CheckedItemCompile annotations original requested
     | ms_mod_name summary == target && not (null requested) -> \parsed -> do
         values <- maybe (fail "completed value interfaces were not installed in this request") pure captured
         annotated <- rewriteCheckedAnnotations env annotations parsed
         case original of
-          Nothing -> transformCompletedValueImports values env annotated
+          Nothing -> mapNativeModule (transformCompletedValueImports values env) annotated
           Just (owner, fingerprint) -> do
             inventory <- hydratePlannedDeclarationInventory owner fingerprint env >>= either fail pure
-            transformPlannedDeclarationImportsWithCompleted inventory values env annotated
+            mapNativeModule (transformPlannedDeclarationImportsWithCompleted inventory values env) annotated
   ProgramItemCompile _ annotations originals requested
     | ms_mod_name summary == target -> \parsed -> do
         values <- if null requested then pure Nothing else
           Just <$> maybe (fail "program completed interfaces were not installed") pure captured
         annotated <- rewriteCheckedAnnotations env annotations parsed
         inventories <- mapM (\(owner,fingerprint) -> hydratePlannedDeclarationInventory owner fingerprint env >>= either fail pure) originals
-        transformProgramDeclarationImports inventories values env annotated
+        mapNativeModule (transformProgramDeclarationImports inventories values env) annotated
   _ -> transformFor purpose target env summary
+
+hostInputSignature :: [(String, CheckedSignature)] -> IO CheckedSignature
+hostInputSignature [(_, signature)] = pure signature
+hostInputSignature _ = fail "host input recipe has no unique native signature"
+
+withNativeTypecheckRecovery :: PipelineVariant -> ModuleName -> HscEnv -> ModSummary -> ParsedModule -> IO a -> IO a
+withNativeTypecheckRecovery variant target environment summary parsed action
+  | ms_mod_name summary /= target || ms_hsc_src summary /= HsSrcFile = action
+  | otherwise = case pvGeneratedInstanceCheck variant of
+      Nothing -> action
+      Just recipe -> withGeneratedInstanceRecovery recipe environment summary parsed action
 
 -- | The seam values for one run, derived from the downsweep graph.
 data CompilePlan = CompilePlan
@@ -888,9 +887,8 @@ data CompilePlan = CompilePlan
     -- ^ Applied to the post-loop session before it becomes 'prHscEnv'.
   }
 
--- | One module's front half: everything produced by parse/typecheck/desugar,
--- carried to the back half ('core2core') whether that runs immediately
--- ('OptimizeEveryModule') or in a second stage ('OptimizeCoreReachable').
+-- | A deferred source's transient parse/typecheck/desugar handoff. It is
+-- consumed immediately by finalization, never stored in a reusable product.
 data ModuleFront = ModuleFront
   { mfSummary    :: ModSummary
   , mfHscEnv     :: HscEnv
@@ -906,6 +904,43 @@ data ModuleFront = ModuleFront
     -- 'classifyQuasiQuoteOrigins'.
   , mfHasDependentFiles :: Bool
     -- ^ Request-time inputs recorded by this module's typecheck.
+  }
+
+-- A request-local finalized frontend has no mutable compiler environment.
+-- Site preparation reads instances from its canonical ModDetails.
+data LoadedModule = LoadedModule
+  { loadedSummary :: ModSummary
+  , loadedFacts :: ModuleFacts
+  , loadedOutput :: ModuleOutput
+  , loadedFinalized :: FinalizedModule
+  }
+
+data CanonicalFrontendFailure
+  = CustomLoadPhaseHook
+  | CustomLoadFrontendHook
+  | UnsupportedLoadBackend
+  | CompilerProducerUnavailable
+  | CompilerProducerScopeMismatch
+  | LoadedFinalizationOwnerMismatch
+  | MissingLoadedFrontend
+  | MissingLoadedFinalization
+  | UnfinishedLoadedFrontend
+  | CandidateInterfaceBytesMismatch ModuleName
+  | CandidateFrontendReplayRefused ModuleName
+  | MissingFinalizedFacts ModuleName
+  deriving (Show)
+
+instance Exception CanonicalFrontendFailure
+
+-- The interpreter backend completes the same partial interface and tidy Core.
+-- This handoff exists only between PostTc and Backend in one load operation.
+data PendingFinalization = PendingFinalization
+  { pendingSummary :: ModSummary
+  , pendingFacts :: ModuleFacts
+  , pendingOutput :: ModuleOutput
+  , pendingTidyGuts :: CgGuts
+  , pendingDetails :: ModDetails
+  , pendingEnvironment :: HscEnv
   }
 
 -- Exact artifact operations have no authored source target. They use the
@@ -951,9 +986,8 @@ runCompile selection retained variant path includes buildProductsDir = do
         dflags' = configureBuildProducts extracted buildProductsDir extracted
     setSessionDynFlags dflags'
     -- Withhold unfoldings for retained-generation symbols BEFORE 'load''
-    -- runs: 'load' -- not this pipeline's own per-module redo loop below --
-    -- is what actually simplifies every home module the first time, so the
-    -- plugin must already be registered on the session's 'HscEnv' by now.
+    -- runs: load and deferred finalization share the canonical simplifier,
+    -- so the plugin must already be registered on the session's 'HscEnv'.
     -- See 'Tidepool.RetainedUnfoldings' for why a Core plugin is the seam
     -- that reaches both 'load'' and 'core2core' uniformly. The plugin reads
     -- this request's retained context from an 'IORef' at run time, so an
@@ -979,10 +1013,17 @@ runPipelineSessionSelected
   :: PipelineSelection result -> Set.Set SymbolIdentity -> CompilePurpose -> Maybe SessionScope
   -> FilePath -> [FilePath] -> Maybe FilePath -> IO result
 runPipelineSessionSelected selection retained purpose mscope path includes buildProductsDir = do
+  producer <- captureCompilerProducerIdentity
+  runPipelineSessionSelectedWithProducer producer selection retained purpose mscope path includes buildProductsDir
+
+runPipelineSessionSelectedWithProducer
+  :: Maybe CompilerProducerIdentity -> PipelineSelection result -> Set.Set SymbolIdentity -> CompilePurpose -> Maybe SessionScope
+  -> FilePath -> [FilePath] -> Maybe FilePath -> IO result
+runPipelineSessionSelectedWithProducer producer selection retained purpose mscope path includes buildProductsDir = do
   variant <- case mscope of
     Just scope | isSessionScopeActive scope -> sessionVariant purpose scope path
     _ -> normalVariant purpose path
-  runCompile selection retained variant path includes buildProductsDir
+  runCompile selection retained variant {pvCompilerProducer = producer} path includes buildProductsDir
 
 -- ---------------------------------------------------------------------------
 -- Resident compilation state
@@ -1010,7 +1051,7 @@ data MemoValidity = MemoValidity
     -- '.hi' it was compiled from. 'lookupValidMemo' requires this field to
     -- match the CURRENT request's incarnation, in addition to the source
     -- hash and home-dependency checks above, before reusing a session
-    -- module's entry -- see 'sanitizeMemo'.
+    -- module's entry within its owning transaction.
   , memoIncarnation :: Maybe String
   }
 
@@ -1351,22 +1392,16 @@ data ModuleOutput = ModuleOutput
   , moduleOutputResultType :: Maybe Type
   }
 
--- | A completed executable compile keeps its prepared body and, when needed,
--- the interface built from the same tidy result together. Ordinary leaf
--- interfaces can be elided; product mode retains them for later importers.
-data ProductInterface
-  = InterfaceElided
-  | InterfaceRetained HomeModInfo
-
+-- | Prepared STG and its canonical interface/Core owner remain paired.
 data ModuleProduct = ModuleProduct
   { productFacts :: ModuleFacts
   , productOutput :: ModuleOutput
   , productPrepared :: PreparedModule
-  , productInterface :: ProductInterface
+  , productFinalized :: FinalizedModule
   }
 
 data MemoPayload
-  = ValidationOnly ModuleFacts
+  = ValidationOnly ModuleFacts ModuleOutput FinalizedModule
   | ExecutableProduct ModuleProduct
 
 data GutsMemoEntry = GutsMemoEntry
@@ -1390,17 +1425,17 @@ data GutsMemoEntry = GutsMemoEntry
 
 data ModuleObservation
   = CachedObservation ModSummary GutsMemoEntry
-  | FreshObservation ModuleFront
+  | LoadedObservation LoadedModule
   | HydratedObservation ModSummary HomeModInfo PackageImportEvidence
 
 observationSummary :: ModuleObservation -> ModSummary
 observationSummary (CachedObservation summary _) = summary
-observationSummary (FreshObservation front) = mfSummary front
+observationSummary (LoadedObservation loaded) = loadedSummary loaded
 observationSummary (HydratedObservation summary _ _) = summary
 
 observationFacts :: ModuleObservation -> IO ModuleFacts
 observationFacts (CachedObservation _ entry) = pure (payloadFacts (gmePayload entry))
-observationFacts (FreshObservation front) = frontFacts front
+observationFacts (LoadedObservation loaded) = pure (loadedFacts loaded)
 observationFacts (HydratedObservation _ hmi roots) = pure ModuleFacts
   { moduleFactTyCons = typeEnvTyCons (md_types (hm_details hmi))
   , moduleFactReferences = Set.empty
@@ -1430,33 +1465,29 @@ exactInterfaceTyCons env (Just scope) = concat <$> forM originals
       , (exactUnit artifact, exactModule artifact, exactSha256 artifact) `Set.member` paired ]
 
 payloadFacts :: MemoPayload -> ModuleFacts
-payloadFacts (ValidationOnly facts) = facts
+payloadFacts (ValidationOnly facts _ _) = facts
 payloadFacts (ExecutableProduct moduleProduct) = productFacts moduleProduct
 
 payloadProduct :: MemoPayload -> Maybe ModuleProduct
-payloadProduct (ValidationOnly _) = Nothing
+payloadProduct (ValidationOnly _ _ _) = Nothing
 payloadProduct (ExecutableProduct moduleProduct) = Just moduleProduct
 
-retainedInterface :: ModuleProduct -> Maybe HomeModInfo
-retainedInterface moduleProduct = case productInterface moduleProduct of
-  InterfaceElided -> Nothing
-  InterfaceRetained hmi -> Just hmi
+payloadLoaded :: ModSummary -> MemoPayload -> LoadedModule
+payloadLoaded summary (ValidationOnly facts output finalized) =
+  LoadedModule summary facts output finalized
+payloadLoaded summary (ExecutableProduct product') =
+  LoadedModule summary (productFacts product') (productOutput product') (productFinalized product')
 
 requireProduct :: ModuleFacts -> ModuleOutput -> Maybe PreparedModule
-  -> Maybe HomeModInfo -> Ghc ModuleProduct
-requireProduct facts output (Just prepared) interface = pure ModuleProduct
+  -> FinalizedModule -> Ghc ModuleProduct
+requireProduct facts output (Just prepared) finalized = pure ModuleProduct
   { productFacts = facts
   , productOutput = output
   , productPrepared = prepared
-  , productInterface = maybe InterfaceElided InterfaceRetained interface
+  , productFinalized = finalized
   }
 requireProduct _ _ Nothing _ = liftIO $ ioError $ userError
     "executable compilation produced no prepared module"
-
-observationFront :: ModuleObservation -> Maybe ModuleFront
-observationFront (CachedObservation _ _) = Nothing
-observationFront (FreshObservation front) = Just front
-observationFront (HydratedObservation _ _ _) = Nothing
 
 -- Resolved direct imports include unused, instance-only and compiler-inserted
 -- package imports; interface dependencies alone do not retain that boundary.
@@ -1483,12 +1514,10 @@ frontFacts front = pure ModuleFacts
 
 type GutsMemo = Map.Map ModuleName GutsMemoEntry
 
--- | The ONE compile-cycle body: session setup (target/@depanal@/@load'@), the
--- hs-boot summary filter, the per-module
--- parse/typecheck/capture/desugar/@core2core@ loop, the summed timing
--- phases, and the guts→'PipelineResult' merge. Runs inside an
--- ALREADY-OPEN 'Ghc' session with 'DynFlags' already set. The caller owns
--- session bootstrap and decides whether caches survive this cycle.
+-- | One compile cycle in an already-open 'Ghc' session. Loaded sources
+-- finalize in the typed phase hooks; deferred sources finalize in dependency
+-- order before their importers. The caller owns session bootstrap and decides
+-- whether the immutable module memo survives this cycle.
 --
 -- Three seams, independent of the 'PipelineVariant' seam above:
 --
@@ -1508,7 +1537,12 @@ type GutsMemo = Map.Map ModuleName GutsMemoEntry
 runCompileCycle
   :: PipelineSelection result -> Maybe ModIfaceCache -> Maybe (IORef GutsMemo)
   -> RetainedContext -> Maybe String -> Bool -> Word64 -> Double -> Maybe ResourceTimingStart -> PipelineVariant -> FilePath -> Ghc result
-runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing requestIdentity sessionT0 setupResources variant path = withCycleHooks $ do
+runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing requestIdentity sessionT0 setupResources variant path = withCycleHooks $ withCompilerViewDirectory $ \compilerViewDirectory -> do
+    forM_ (pvExactScope variant) $ \scope ->
+      case compilerProducerFor variant of
+        Nothing -> liftIO (throwIO CompilerProducerUnavailable)
+        Just producer -> unless (producer == scopeProducerSha256 scope)
+          (liftIO (throwIO CompilerProducerScopeMismatch))
     memoTrace <- liftIO readMemoTraceEnabled
     let preparation = selectionKind selection
         captureProducts = capturesProductInterfaces selection
@@ -1522,6 +1556,12 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
       current <- getSession
       fresh <- liftIO (freshExactState current)
       setSession fresh
+    unless exactCycle $ do
+      current <- getSession
+      -- Make unloads home executables only for LinkInMemory. Extraction uses
+      -- NoLink, so this request boundary owns the same loader transition.
+      -- Immutable cached interfaces and bytecode remain available for reuse.
+      liftIO $ forM_ (hsc_interp current) $ \interp -> Linker.unload interp current []
     forM_ (pvExactScope variant) $ \scope -> do
       env <- getSession
       verified <- liftIO (revalidateExactScope env scope)
@@ -1543,6 +1583,9 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
     errorRef <- liftIO (newIORef [])
     preparedSiblingsRef <- liftIO (newIORef Map.empty)
     productInterfacesRef <- liftIO (newIORef Map.empty)
+    finalizedModulesRef <- liftIO (newIORef Map.empty)
+    loadedModulesRef <- liftIO (newIORef Map.empty)
+    targetEnvironmentRef <- liftIO (newIORef Nothing)
     pushLogHookM (diagnosticCollectorHook path warnRef errorRef)
     -- EPS unpoisoning (QQ/TH support — see canonicalizeDFlags haddock).
     -- 'depanal' runs downsweep, whose @enableCodeGenForTH@ downgrades the
@@ -1597,7 +1640,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
              , iface <- scopeValueInterfaces scope])
     acceptedCandidates <- case candidateManifest of
       Nothing -> pure Map.empty
-      Just manifest -> certifyModuleCandidates selectedExact
+      Just manifest -> certifyModuleCandidates compilerViewDirectory (compilerProducerFor variant) selectedExact
         sourceFreeOwners manifest modGraphRaw path
     -- 'ghc_setup' phase (TIDEPOOL_TIMING): 'guessTarget'/'setTargets' + this
     -- 'depanal' call, nothing else, on EVERY caller — a lone compile also
@@ -1657,7 +1700,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                                      "source-selected native candidate lacks its current GHC executable"
                            installPreparedInterface name hmi
                  , cpTier = OptimizeEveryModule }
-    liftIO (emitCount timing "candidate_source_load_required"
+    liftIO (emitCount timing "candidate_executable_required"
       (toInteger (length [() | candidate <- Map.elems acceptedCandidates
         , admittedCandidateLoading candidate == CandidateLoadForExecution])))
     -- Restore the representation-affecting extraction flags before 'load''
@@ -1672,8 +1715,12 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
     -- 'load'' needs those to provision splice bytecode. The bytecode choice is
     -- still session-wide in 'canonicalizeDFlags'
     -- (Opt_UseBytecodeRatherThanObjects).
-    let canonicalizeLoadSummary ms =
-          ms { ms_hspp_opts = canonicalizeRepresentationFlags (ms_hspp_opts ms) }
+    let canonicalizeLoadSummary summary =
+          let original = ms_hspp_opts summary
+              selected = maybe summary admittedCandidateView
+                (Map.lookup (ms_mod_name summary) acceptedCandidates)
+          in selected { ms_hspp_opts = (canonicalizeDFlags original)
+               { backend = backend original, ghcLink = ghcLink original } }
     targetName <- liftIO (targetModuleNameFor path)
     let plannedLoadGraph = cpLoadGraph plan
         (loadGraph, loadHowMuch) = case preparation of
@@ -1699,33 +1746,174 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
               [] -> (plannedLoadGraph, LoadAllTargets)
           _ -> (plannedLoadGraph, LoadAllTargets)
     targetLoadFailure <- liftIO (newIORef Nothing)
+    targetInstanceFailure <- liftIO (newIORef Nothing)
+    canonicalFailureRef <- liftIO (newIORef Nothing)
+    frontendOriginsRef <- liftIO (newIORef Map.empty)
+    pendingFinalizationsRef <- liftIO (newIORef Map.empty)
     beforeLoad <- getSession
     let originalPhaseHook = runPhaseHook (hsc_hooks beforeLoad)
         runOriginalPhase :: TPhase a -> IO a
         runOriginalPhase phase = case originalPhaseHook of
           Nothing -> runPhase phase
           Just (PhaseHook hook) -> hook phase
-        captureTargetFailure :: TPhase a -> IO a
-        captureTargetFailure phase@(T_Hsc _ summary)
-          | ms_mod_name summary == targetName, ms_hsc_src summary == HsSrcFile =
-              runOriginalPhase phase `catch` \failure -> do
-                writeIORef targetLoadFailure (Just (failure :: SourceError))
-                throwIO failure
-        captureTargetFailure phase = runOriginalPhase phase
-    -- A target in a boot cycle cannot be removed from GHC's build plan.
-    -- Preserve its typed frontend failure before the make driver renders it;
-    -- generated-instance recovery must never classify rendered diagnostics.
-    when (case preparation of CheckOnly -> True; PrepareStg -> False) $
-      setSession beforeLoad { hsc_hooks = (hsc_hooks beforeLoad)
-        { runPhaseHook = Just (PhaseHook captureTargetFailure) } }
+        canonicalSummary summary = summary
+          { ms_hspp_opts = canonicalizeDFlags (ms_hspp_opts summary) }
+        canonicalEnvironment env summary = scopeRetainedHscEnv (ms_mod summary)
+          (hscSetFlags (ms_hspp_opts (canonicalSummary summary)) env)
+        validateCandidateInterface env name iface =
+          forM_ (Map.lookup name acceptedCandidates) $ \candidate -> do
+            directory <- getTemporaryDirectory
+            bytes <- serializeOriginalInterface env directory (set_mi_extra_decls Nothing iface)
+            unless (hexBytes (SHA256.hash bytes) ==
+                candidateInterfaceSha256 (admittedCandidateOriginal candidate)) $
+              throwIO (CandidateInterfaceBytesMismatch name)
+        validateCandidateHomeInterfaces env =
+          forM_ (Map.keys acceptedCandidates) $ \name ->
+            forM_ (lookupHpt (hsc_HPT env) name) $ \hmi ->
+              validateCandidateInterface env name (hm_iface hmi)
+        retainLoaded pending iface = do
+          unless (mi_module iface == ms_mod (pendingSummary pending)) $
+            throwIO LoadedFinalizationOwnerMismatch
+          let skinny = set_mi_extra_decls Nothing iface
+              finalized = FinalizedModule
+                (HomeModInfo skinny (pendingDetails pending) emptyHomeModInfoLinkable)
+                (pendingTidyGuts pending)
+              loaded = LoadedModule (pendingSummary pending) (pendingFacts pending)
+                (pendingOutput pending) finalized
+              name = ms_mod_name (pendingSummary pending)
+          -- A candidate's bytecode may be needed by a splice. Its recompilation
+          -- may not supply a different interface to an importer while the old
+          -- certified product remains selected downstream.
+          validateCandidateInterface (pendingEnvironment pending) name skinny
+          atomicModifyIORef' loadedModulesRef (\known ->
+            (Map.insert (ms_mod (pendingSummary pending)) loaded known, ()))
+          unless (name `Map.member` acceptedCandidates) $ do
+            atomicModifyIORef' finalizedModulesRef (\known -> (Map.insert name finalized known, ()))
+            when captureProducts $
+              atomicModifyIORef' productInterfacesRef (\known -> (Map.insert name skinny known, ()))
+        canonicalLoadPhase :: TPhase a -> IO a
+        canonicalLoadPhase (T_Hsc phaseEnv summary)
+          | ms_hsc_src summary == HsSrcFile = do
+              let summaryC = canonicalSummary summary
+                  env = canonicalEnvironment phaseEnv summary
+                  originalBackend = backend (hsc_dflags phaseEnv)
+              unless (not (backendGeneratesCode originalBackend) || backendCanReuseLoadedCode originalBackend) $
+                throwIO UnsupportedLoadBackend
+              when (isJust (hscFrontendHook (hsc_hooks phaseEnv))) (throwIO CustomLoadFrontendHook)
+              when (ms_mod_name summary `Map.member` acceptedCandidates) $
+                throwIO (CandidateFrontendReplayRefused (ms_mod_name summary))
+              validateCandidateHomeInterfaces env
+              -- GHC make supplies the dependency HPT for this exact phase.
+              -- Never mutate or reuse the outer Ghc Session from a load hook.
+              session <- Session <$> newIORef env
+              reflectGhc (do
+                cpBeforeModule plan summaryC
+                current <- getSession
+                parsed <- parseModule summaryC
+                origins <- liftIO (classifyQuasiQuoteOrigins current parsed)
+                transformed <- liftIO (pvTransformParsed variant current summaryC parsed)
+                ((tcg, _), warnings) <- liftIO $ withNativeTypecheckRecovery variant targetName current summaryC parsed
+                  (typecheckNativeModuleWithDiagnostics current transformed)
+                liftIO (validateCompilationFamilies current tcg)
+                liftIO $ do
+                  atomicModifyIORef' frontendOriginsRef (\known ->
+                    (Map.insert (ms_mod summaryC) (origins, current) known, ()))
+                  when (ms_mod_name summaryC == targetName) (writeIORef targetEnvironmentRef (Just tcg))
+                  when timing $ hPutStrLn stderr $
+                    "tidepool-canonical-frontend module=" ++ moduleNameString (ms_mod_name summaryC)
+                pure (FrontendTypecheck tcg, warnings)) session
+                `catch` \failure -> do
+                  when (ms_mod_name summary == targetName) $
+                    writeIORef targetInstanceFailure (Just (failure :: GeneratedInstanceRejection))
+                  throwIO failure
+        canonicalLoadPhase (T_HscPostTc phaseEnv summary (FrontendTypecheck tcg) tcWarnings oldHash)
+          | ms_hsc_src summary == HsSrcFile = do
+              (origins, env) <- atomicModifyIORef' frontendOriginsRef (\known ->
+                (Map.delete (ms_mod summary) known, Map.lookup (ms_mod summary) known))
+                >>= maybe (throwIO MissingLoadedFrontend) pure
+              let summaryC = canonicalSummary summary
+                  flags = hsc_dflags env
+                  resultRoots = [idName identifier | cpKeepPrivateResult plan
+                    , ms_mod_name summaryC == targetName
+                    , identifier <- typeEnvIds (tcg_type_env tcg)
+                    , occNameString (nameOccName (idName identifier)) `elem` cpResultBinders plan
+                    , nameModule_maybe (idName identifier) == Just (ms_mod summaryC)]
+              modifyIORef' (tcg_keep tcg) (`extendNameSetList` resultRoots)
+              (desugared, dsWarnings) <- runHsc' env (hscDesugar' (ms_location summaryC) tcg)
+              printOrThrowDiagnostics (hsc_logger env) (initPrintConfig flags) (initDiagOpts flags)
+                (unionMessages tcWarnings dsWarnings)
+              plugins <- readIORef (tcg_th_coreplugins tcg)
+              simplified <- hscSimplify env plugins desugared
+              (tidy, details) <- hscTidy env simplified
+              roots <- directPackageImports env tcg
+              files <- readIORef (tcg_dependent_files tcg)
+              let partial = force (mkPartialIface env (cg_binds tidy) details summaryC
+                    (tcg_import_decls tcg) simplified)
+                  externalized = externalizeInternalTops simplified
+                  output = ModuleOutput (mg_module externalized) (mg_binds externalized)
+                    (capturedBindingDisplay evalUserBinder tcg) (capturedCellBinderPins env tcg)
+                    (foldr (<|>) Nothing [capturedBindingType name tcg | name <- cpResultBinders plan])
+                  facts = ModuleFacts (mg_tcs desugared) (moduleRefs desugared) roots
+                    (not (null files)) origins
+                  pending = PendingFinalization summaryC facts output tidy details env
+                  action = HscRecomp tidy (ms_location summaryC) partial oldHash
+              when timing $ hPutStrLn stderr $
+                "tidepool-canonical-finalization module=" ++ moduleNameString (ms_mod_name summaryC)
+              if not (backendGeneratesCode (backend (hsc_dflags phaseEnv)))
+                then do
+                  iface <- mkFullIface env partial Nothing Nothing NoStubs []
+                  hscMaybeWriteIface (hsc_logger env) flags True iface oldHash (ms_location summaryC)
+                  retainLoaded pending iface
+                  pure (HscUpdate (set_mi_extra_decls Nothing iface))
+                else if backendCanReuseLoadedCode (backend (hsc_dflags phaseEnv))
+                  then do
+                    atomicModifyIORef' pendingFinalizationsRef (\known ->
+                      (Map.insert (ms_mod summaryC) pending known, ()))
+                    pure action
+                  else throwIO UnsupportedLoadBackend
+        canonicalLoadPhase (T_HscBackend pipe phaseEnv name HsSrcFile location action@HscRecomp{}) = do
+          unless (backendCanReuseLoadedCode (backend (hsc_dflags phaseEnv))) $
+            throwIO UnsupportedLoadBackend
+          let owner = cg_module (hscs_guts action)
+          pending <- atomicModifyIORef' pendingFinalizationsRef (\known ->
+            (Map.delete owner known, Map.lookup owner known))
+            >>= maybe (throwIO MissingLoadedFinalization) pure
+          let env = hscUpdateFlags (\flags -> flags
+                { backend = backend (hsc_dflags phaseEnv), ghcLink = ghcLink (hsc_dflags phaseEnv) })
+                (pendingEnvironment pending)
+          result@(_, iface, _, _) <- runOriginalPhase
+            (T_HscBackend pipe env name HsSrcFile location action)
+          retainLoaded pending iface
+          let (files, _, linkable, output) = result
+          pure (files, set_mi_extra_decls Nothing iface, linkable, output)
+        canonicalLoadPhase phase = runOriginalPhase phase
+        targetPhase :: TPhase a -> Bool
+        targetPhase (T_Hsc _ summary) = ms_mod_name summary == targetName
+        targetPhase (T_HscPostTc _ summary _ _ _) = ms_mod_name summary == targetName
+        targetPhase (T_HscBackend _ _ name _ _ _) = name == targetName
+        targetPhase _ = False
+        captureCanonicalFailure :: TPhase a -> IO a
+        captureCanonicalFailure phase = canonicalLoadPhase phase
+          `catch` (\failure -> do
+            when (targetPhase phase) (writeIORef targetLoadFailure (Just (failure :: SourceError)))
+            throwIO failure)
+          `catch` (\failure -> do
+            writeIORef canonicalFailureRef (Just (failure :: CanonicalFrontendFailure))
+            throwIO failure)
+    when (isJust originalPhaseHook) (liftIO (throwIO CustomLoadPhaseHook))
+    when (isJust (hscFrontendHook (hsc_hooks beforeLoad))) (liftIO (throwIO CustomLoadFrontendHook))
     loadT0 <- monotonicTime
     loadResources <- beginResourceTiming timing
-    loadFlag <- withLoadTargets (cpLoadTargets plan) $ load' mCache loadHowMuch dependencyDiagnostic (Just batchMsg)
-               (scopeRetainedModuleGraph (mapMG canonicalizeLoadSummary loadGraph))
+    loadFlag <- reifyGhc $ \session -> bracket
+      (reflectGhc (getSession >>= \env -> setSession env
+        { hsc_hooks = (hsc_hooks env)
+            { runPhaseHook = Just (PhaseHook captureCanonicalFailure) } }) session)
+      (const (reflectGhc (getSession >>= \env -> setSession env
+        { hsc_hooks = hsc_hooks beforeLoad }) session))
+      (const (reflectGhc (withLoadTargets (cpLoadTargets plan) $ load' mCache loadHowMuch
+        dependencyDiagnostic (Just batchMsg)
+        (scopeRetainedModuleGraph (mapMG canonicalizeLoadSummary loadGraph))) session))
     loadT1 <- monotonicTime
-    afterLoad <- getSession
-    setSession afterLoad { hsc_hooks = (hsc_hooks afterLoad)
-      { runPhaseHook = originalPhaseHook } }
     endResourceTiming loadResources "compile" "ghc_load"
     -- 'ghc_load' phase (TIDEPOOL_TIMING): the 'load'' call alone, nothing
     -- else. FLAT — see 'ghc_setup' above; the two rows partition the work,
@@ -1746,23 +1934,19 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                     ++ " bytecode=" ++ show (isJust (homeMod_bytecode linkable))
                     ++ " object=" ++ show (isJust (homeMod_object linkable))
           _ -> pure ()
-    loadedHomeSources <- case loadFlag of
+    case loadFlag of
       Succeeded -> do
+        getSession >>= liftIO . validateCandidateHomeInterfaces
         cpAfterLoad plan
-        loaded <- getSession
-        let sources = case (preparation, pvExactScope variant) of
-              (CheckOnly, Just _) -> Map.fromList
-                [ (ms_mod_name summary, (ms_mod summary, ms_hs_hash summary, hmi))
-                | ModuleNode _ summary <- mgModSummaries' modGraphRaw
-                , ms_hsc_src summary == HsSrcFile
-                , ms_mod_name summary /= targetName
-                , ms_mod_name summary `Map.notMember` acceptedCandidates
-                , Just hmi <- [lookupHpt (hsc_HPT loaded) (ms_mod_name summary)]
-                , mi_module (hm_iface hmi) == ms_mod summary
-                , mi_src_hash (hm_iface hmi) == ms_hs_hash summary ]
-              _ -> Map.empty
-        pure sources
+        pending <- liftIO (readIORef pendingFinalizationsRef)
+        origins <- liftIO (readIORef frontendOriginsRef)
+        unless (Map.null pending && Map.null origins) $
+          liftIO $ throwIO UnfinishedLoadedFrontend
       Failed -> do
+        canonicalFailure <- liftIO (readIORef canonicalFailureRef)
+        forM_ canonicalFailure (liftIO . throwIO)
+        instanceFailure <- liftIO (readIORef targetInstanceFailure)
+        forM_ instanceFailure (liftIO . throwIO)
         targetFailure <- liftIO (readIORef targetLoadFailure)
         forM_ targetFailure (liftIO . throwIO)
         diagnostics <- liftIO (nub . reverse <$> readIORef errorRef)
@@ -1780,29 +1964,18 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
     -- path. Boot files exist for 'load''s loop-breaking only; any error in
     -- one already surfaced there, and their guts carry no bindings
     -- extraction could use.
+    loadedModules <- liftIO (readIORef loadedModulesRef)
     summaries0 <- cpSummaries plan
     let summaries = [ ms | ms <- summaries0, ms_hsc_src ms == HsSrcFile ]
     when (null summaries) $
       liftIO $ ioError (userError (pvLabel variant ++ ": empty module graph"))
     let compileExecutable = do
-          -- 'typecheck'/'lowering' are summed ACROSS the loop (one line each, emitted
-          -- after) rather than timed per-module: the wire grammar is one line per
-          -- phase per process, and a turn module always compiles alongside its
-          -- preamble/stdlib dep modules in the same loop. 'lowering' is desugar time
-          -- for EVERY module plus 'core2core' time for the modules 'cpTier' let
-          -- through — one flat phase, unchanged by the tier.
-          tcMsRef   <- liftIO (newIORef (0 :: Integer))
+          -- These summed phases cover deferred finalization only. Canonical
+          -- frontend work performed by the load hooks belongs to 'ghc_load'.
+          tcMsRef <- liftIO (newIORef (0 :: Integer))
           loweringMsRef <- liftIO (newIORef (0 :: Integer))
-          -- Diagnostic-only accounting (NOT part of the 'tidepool-timing phase=…'
-          -- wire grammar 'emitPhase' owns — see the line emitted below, distinctly
-          -- prefixed 'e6-tier', deliberately outside that contract so
-          -- 'ExtractTiming::parse' never has to know about it): the desugar/
-          -- core2core split within lowering, plus how many modules the tier
-          -- actually spared. Lowering stays one flat phase per the timing contract;
-          -- this line exists purely so E6's own report can size its win against what
-          -- it actually removed (core2core) rather than the whole lowering bucket
-          -- (desugar + core2core), which is a larger, unmeasured-by-this-item
-          -- quantity.
+          -- The existing diagnostic row separates deferred desugaring,
+          -- simplification and selected STG counts; it is not a speedup metric.
           dsMsRef  <- liftIO (newIORef (0 :: Integer))
           c2cMsRef <- liftIO (newIORef (0 :: Integer))
           frontCountRef <- liftIO (newIORef (0 :: Int))
@@ -1824,13 +1997,8 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                   modifyIORef' interfaceMsRef (+ ms)
                   modifyIORef' moduleInterfaceMsRef (Map.insertWith (+) name ms)
                   modifyIORef' moduleMsRef (Map.insertWith (+) name ms)
-              -- The ONE per-module front half. Re-canonicalize the module's
-              -- DynFlags first (see canonicalizeDFlags): the load phase may have
-              -- downgraded them for TH/QQ bytecode provisioning. NOTE: 'hscDesugar'
-              -- does not consume the optLevel/unfolding-exposure flags
-              -- 'canonicalizeDFlags' sets (those govern 'core2core' alone), so
-              -- applying it unconditionally here costs nothing extra even for a
-              -- module the tier goes on to skip.
+              -- Deferred source modules use the same canonical policy. Load
+              -- captures are consumed directly and never enter this frontend.
               compileFront modSum0 = do
                 liftIO (modifyIORef' frontCountRef (+ 1))
                 let modSum = modSum0 { ms_hspp_opts = canonicalizeDFlags (ms_hspp_opts modSum0) }
@@ -1839,20 +2007,25 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                 -- origins -- see 'classifyQuasiQuoteOrigins'); dependency
                 -- modules are already resident by this point in the batch.
                 classifyEnv <- getSession
-                ((typechecked, quasiQuoteOrigins), tcMs) <- timeSection $
+                ((tcGblEnv, quasiQuoteOrigins), tcMs) <- timeSection $
                   timeDetailPhase timing "typecheck" (moduleNameString (ms_mod_name modSum)) $ do
                     parsed <- parseModule modSum
                     origins <- liftIO (classifyQuasiQuoteOrigins classifyEnv parsed)
                     transformed <- liftIO (pvTransformParsed variant classifyEnv modSum parsed)
-                    typed <- typecheckModule transformed
+                    ((tcg, _), warnings) <- liftIO $ withNativeTypecheckRecovery variant targetName classifyEnv modSum parsed
+                      (typecheckNativeModuleWithDiagnostics classifyEnv transformed)
+                    let flags = ms_hspp_opts modSum
+                    liftIO (printOrThrowDiagnostics (hsc_logger classifyEnv)
+                      (initPrintConfig flags) (initDiagOpts flags) warnings)
                     familyEnvironment <- getSession
-                    liftIO (validateCompilationFamilies familyEnvironment (fst (tm_internals_ typed)))
-                    pure (typed, origins)
+                    liftIO (validateCompilationFamilies familyEnvironment tcg)
+                    pure (tcg, origins)
+                when (ms_mod_name modSum == targetName) $
+                  liftIO (writeIORef targetEnvironmentRef (Just tcGblEnv))
                 liftIO (modifyIORef' tcMsRef (+ tcMs))
                 hscEnv0 <- getSession
                 let hscEnv   = scopeRetainedHscEnv (ms_mod modSum)
                                  (hscUpdateFlags canonicalizeDFlags hscEnv0)
-                    tcGblEnv = fst (tm_internals_ typechecked)
                     -- Capture the inferred type of the eval's top expression NOW,
                     -- before optimization can inline/rename @__user@ away. Types
                     -- live on the Id in the typechecked type env; the prepared wire program erases
@@ -1906,19 +2079,21 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
               -- result; the memo retains the interface alongside its prepared body.
               compileBack interfaceUse mf = do
                 liftIO (modifyIORef' backCountRef (+ 1))
-                (simplified, coreMs) <- timeSection $
-                  liftIO (core2core (mfHscEnv mf) (mfDesugared mf))
+                (simplified, coreMs) <- timeSection $ liftIO $ do
+                  plugins <- readIORef (tcg_th_coreplugins (mfTcGblEnv mf))
+                  hscSimplify (mfHscEnv mf) plugins (mfDesugared mf)
                 liftIO (modifyIORef' loweringMsRef (+ coreMs))
                 liftIO (modifyIORef' c2cMsRef (+ coreMs))
                 liftIO (modifyIORef' moduleMsRef
                           (Map.insertWith (+) (moduleNameString (ms_mod_name (mfSummary mf))) coreMs))
                 let interfaceReuse = if isJust mMemoRef then MemoMiss else MemoDisabled
-                (mInterfaceMs, mRegistration) <- registerPreparedInterface timing requestIdentity interfaceReuse
-                  captureProducts interfaceUse (mfSummary mf) (mfTcGblEnv mf) (mfHscEnv mf) simplified
-                when captureProducts $ forM_ mRegistration $ \registration -> liftIO $
-                  modifyIORef' productInterfacesRef (Map.insert
-                    (ms_mod_name (mfSummary mf)) (hm_iface (riHomeModInfo registration)))
-                liftIO $ recordInterface (mfSummary mf) mInterfaceMs
+                (interfaceMs, registration) <- registerPreparedInterface timing requestIdentity interfaceReuse
+                  interfaceUse (mfSummary mf) (mfTcGblEnv mf) (mfHscEnv mf) simplified
+                liftIO $ do
+                  modifyIORef' finalizedModulesRef (Map.insert (ms_mod_name (mfSummary mf)) registration)
+                  when captureProducts $ modifyIORef' productInterfacesRef (Map.insert
+                    (ms_mod_name (mfSummary mf)) (hm_iface (finalizedHomeModInfo registration)))
+                liftIO $ recordInterface (mfSummary mf) (Just interfaceMs)
                 let externalized = externalizeInternalTops simplified
                 pure
                   ( simplified
@@ -1929,25 +2104,27 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                       , moduleOutputCheckedBinderPins = mfCheckedBinderPins mf
                       , moduleOutputResultType = mfResultType mf
                       }
-                  , riHomeModInfo <$> mRegistration
-                  , riTidyGuts <$> mRegistration
+                  , registration
                   )
-              prepareSelected mf simplified mRegisteredTidy = case preparation of
+              prepareFinalized loaded = case preparation of
                 CheckOnly -> pure Nothing
                 PrepareStg -> do
                   liftIO (modifyIORef' preparedCountRef (+ 1))
-                  cgGuts <- case mRegisteredTidy of
-                    Just tidy -> pure tidy
-                    Nothing -> fst <$> timePhase timing "prepared_tidy" (liftIO (hscTidy (mfHscEnv mf) simplified))
-                  let ownedSiblings = resolvePreparedSiblings (cg_binds cgGuts)
-                      importedSiblings = resolvePreparedInterfaceSiblings (mfHscEnv mf)
+                  current <- getSession
+                  let summary = loadedSummary loaded
+                      env = scopeRetainedHscEnv (ms_mod summary)
+                        (hscUpdateFlags canonicalizeDFlags current)
+                      cgGuts = finalizedTidyGuts (loadedFinalized loaded)
+                      ownedSiblings = resolvePreparedSiblings (cg_binds cgGuts)
+                      importedSiblings = resolvePreparedInterfaceSiblings env
                   siblings <- liftIO $ atomicModifyIORef' preparedSiblingsRef $ \known ->
                     let known' = Map.union ownedSiblings (Map.union known importedSiblings)
                     in (known', known')
                   siteAuthority <- timePhase timing "prepared_site_authority" $ liftIO
-                    (resolveSiteAuthority (mfHscEnv mf) (tcg_insts (mfTcGblEnv mf)))
+                    (resolveSiteAuthority env (instEnvElts
+                      (md_insts (hm_details (finalizedHomeModInfo (loadedFinalized loaded))))))
                   (elaboratedBindings, yieldSites, preparedSites, typeGraph, rejections) <- timePhase timing "prepared_sites" $ liftIO $
-                    elaboratePreparedSites (mfHscEnv mf) siteAuthority siblings (cg_binds cgGuts)
+                    elaboratePreparedSites env siteAuthority siblings (cg_binds cgGuts)
                   let elaboration = PreparedElaboration
                         { peGuts = cgGuts
                         , peBindings = elaboratedBindings
@@ -1958,7 +2135,22 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                         , peEffectRequestTypeIds = siteAuthorityEffectRequestTypeIds siteAuthority
                         , peSiteRejections = rejections
                         }
-                  Just <$> timePhase timing "prepared_stg" (liftIO (prepareModule (mfHscEnv mf) (mfSummary mf) elaboration))
+                  Just <$> timePhase timing "prepared_stg" (liftIO (prepareModule env summary elaboration))
+              finalizeCurrent interfaceUse summary = do
+                captured <- liftIO (Map.lookup (ms_mod summary) <$> readIORef loadedModulesRef)
+                case captured of
+                  Just loaded -> pure loaded
+                  Nothing -> do
+                    front <- compileFront summary
+                    (_, output, finalized) <- compileBack interfaceUse front
+                    facts <- liftIO (frontFacts front)
+                    pure (LoadedModule (mfSummary front) facts output finalized)
+              rememberFinalized loaded = do
+                let name = ms_mod_name (loadedSummary loaded)
+                    finalized = loadedFinalized loaded
+                liftIO (modifyIORef' finalizedModulesRef (Map.insert name finalized))
+                when captureProducts $ liftIO (modifyIORef' productInterfacesRef
+                  (Map.insert name (hm_iface (finalizedHomeModInfo finalized))))
               rememberPreparedSiblings prepared = liftIO $
                 modifyIORef' preparedSiblingsRef (\known -> Map.union (pmSitedSiblings prepared) known)
           -- Module names do not identify generated content across independent
@@ -2056,11 +2248,9 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                 liftIO (modifyIORef' executableValidRef (Map.insert (ms_mod_name modSum) isValid))
               cachedInterface modSum entry
                 | dropMemoInterface == Just (moduleNameString (ms_mod_name modSum)) = Nothing
-                | otherwise = payloadProduct (gmePayload entry) >>= retainedInterface
-              interfaceReady interfaceUse modSum entry =
-                case cachedInterface modSum entry of
-                  Nothing -> not captureProducts && not (needsPreparedInterface interfaceUse)
-                  Just _ -> True
+                | otherwise = Just (finalizedHomeModInfo
+                    (loadedFinalized (payloadLoaded modSum (gmePayload entry))))
+              interfaceReady _ modSum entry = isJust (cachedInterface modSum entry)
           -- Under TIDEPOOL_TIMING, name why a memoized module was recompiled.
           let memoMiss modSum reason = when timing $ liftIO $ hPutStrLn stderr $
                 "tidepool-memo-miss module=" ++ moduleNameString (ms_mod_name modSum)
@@ -2095,9 +2285,13 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                       ++ ",fingerprint=" ++ show ofp ++ "->" ++ show nfp
                       ++ ",path_changed=" ++ show (op /= np)
                       ++ ",fingerprint_changed=" ++ show (ofp /= nfp)
-          let lookupValidMemo modSum = case mMemoRef of
-                Nothing  -> pure Nothing
-                Just ref -> do
+          let lookupValidMemo modSum
+                | ms_mod modSum `Map.member` loadedModules = pure Nothing
+                | ms_mod_name modSum == targetName = pure Nothing
+                | otherwise = case mMemoRef of
+                  Nothing -> pure Nothing
+                  Just ref -> lookupMemo ref modSum
+              lookupMemo ref modSum = do
                   depsOk <- depsValidSoFar modSum
                   -- Cpp/TemplateHaskell gate here, before any entry lookup:
                   -- unconditional, no allowlist can rescue them. A
@@ -2135,20 +2329,10 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                               sameRetained = memoRetained validity == retainedFor modSum
                               sameHomeDependencies =
                                 memoHomeDependencies validity == homeDependencyWitnesses modSum
-                              -- A 'Tidepool.Session.*' module's name is only
-                              -- unique within one session incarnation (its
-                              -- generation counter restarts at 0 on a fresh
-                              -- incarnation at the same root, and a warm
-                              -- daemon can serve several incarnations'
-                              -- requests). 'sanitizeMemo' lets a session
-                              -- entry outlive its producing transaction only
-                              -- when the request carries an incarnation
-                              -- identity, so this entry's own recorded
-                              -- incarnation must match the CURRENT request's
-                              -- one -- an absent identity on either side
-                              -- (an older caller, or a one-shot compile)
-                              -- never matches, so it always misses exactly
-                              -- as it did before this check existed. Every
+                              -- Session generations are incarnation-local,
+                              -- even within a multi-operation transaction.
+                              -- Reuse requires both sides to name that owner.
+                              -- Every
                               -- non-session module is exempt: its identity
                               -- is not incarnation-scoped.
                               sameIncarnation =
@@ -2244,8 +2428,10 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                         recordValidity modSum True
                         recordExecutableValidity modSum True
                         rememberPreparedSiblings (productPrepared moduleProduct)
-                        when captureProducts $ forM_ (retainedInterface moduleProduct) $ \hmi -> liftIO $
-                          modifyIORef' productInterfacesRef (Map.insert mn (hm_iface hmi))
+                        let finalized = productFinalized moduleProduct
+                        liftIO $ modifyIORef' finalizedModulesRef (Map.insert mn finalized)
+                        when captureProducts $ liftIO $
+                          modifyIORef' productInterfacesRef (Map.insert mn (hm_iface (finalizedHomeModInfo finalized)))
                         when (needsPreparedInterface interfaceUse) $
                           forM_ (cachedInterface modSum entry) (installPreparedInterface mn)
                         pure (CachedObservation modSum entry, Just (productOutput moduleProduct), Just (productPrepared moduleProduct))
@@ -2259,11 +2445,16 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                                 | otherwise = "required-interface-not-retained"
                           memoMiss modSum reason
                           memoMissTrace modSum reason (Just entry)
-                        mf <- compileFront modSum
-                        (simplified, r, mInterface, mRegisteredTidy) <- compileBack interfaceUse mf
-                        prepared <- prepareSelected mf simplified mRegisteredTidy
-                        facts <- liftIO (frontFacts mf)
-                        moduleProduct <- requireProduct facts r prepared mInterface
+                        loaded <- case cached of
+                          Just entry | interfaceReady interfaceUse modSum entry ->
+                            pure (payloadLoaded modSum (gmePayload entry))
+                          _ -> finalizeCurrent interfaceUse modSum
+                        rememberFinalized loaded
+                        let r = loadedOutput loaded
+                            finalized = loadedFinalized loaded
+                            facts = loadedFacts loaded
+                        prepared <- prepareFinalized loaded
+                        moduleProduct <- requireProduct facts r prepared finalized
                         case mMemoRef of
                           Just ref -> liftIO (modifyIORef' ref
                             (Map.insert mn (GutsMemoEntry
@@ -2276,72 +2467,47 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                               requestIdentity
                               (memoDiagnosticWitnesses modSum))))
                           Nothing  -> pure ()
-                        pure (FreshObservation mf, Just r, prepared)
+                        pure (LoadedObservation loaded, Just r, prepared)
               pure ([observation | (observation, _, _) <- pairs], [r | (_, Just r, _) <- pairs],
                     [p | (_, _, Just p) <- pairs], Nothing)
             OptimizeCoreReachable -> do
-              -- A resident-session memo hit reuses compact reference facts for
-              -- the reachability walk without retaining or rebuilding its front
-              -- half. The second pass may reuse a reachable module's cached
-              -- result after checking executable dependencies. That result is
-              -- safe even though the cached entry was core2core'd in whatever
-              -- EARLIER cycle populated it: a module OUTSIDE the reachable
-              -- closure contributes nothing to the wire regardless of whether its
-              -- Core was ever optimized, so a valid cached executable can stay
-              -- in the memo even when this request does not reach it. Other
-              -- unreachable modules retain validation facts without preparing
-              -- new bodies.
-              observations' <- forM summaries $ \modSum -> do
+              -- Install every valid finalized owner before checking any later
+              -- importer. Reference facts select STG only after this pass;
+              -- unprepared owners retain their same interface/Core pair.
+              observations' <- forM (zip summaries interfaceUses) $ \(modSum, interfaceUse) -> do
                 cpBeforeModule plan modSum
                 cached <- lookupValidMemo modSum
                 case cached of
-                  Just entry -> do
+                  Just entry
+                    | interfaceReady interfaceUse modSum entry -> do
+                    let loaded = payloadLoaded modSum (gmePayload entry)
                     recordValidity modSum True
+                    rememberFinalized loaded
+                    when (needsPreparedInterface interfaceUse) $
+                      installPreparedInterface (ms_mod_name modSum)
+                        (finalizedHomeModInfo (loadedFinalized loaded))
                     pure (CachedObservation modSum entry)
-                  Nothing    -> do
+                  _ -> do
                     recordValidity modSum False
-                    mf <- compileFront modSum
-                    pure (FreshObservation mf)
+                    loaded <- finalizeCurrent interfaceUse modSum
+                    rememberFinalized loaded
+                    pure (LoadedObservation loaded)
               facts <- liftIO (mapM observationFacts observations')
-              -- Reachable-module rule (written down before implementation, per
-              -- spec): a home module is REACHABLE from the target iff it IS the
-              -- target, or its DESUGARED Core is transitively referenced — via a
-              -- real 'Var' occurrence at any depth — from the target module's own
-              -- desugared Core. Computed on desugared (pre-'core2core') Core
-              -- specifically: by desugar time, typeclass/instance selection is
-              -- already resolved to explicit dictionary-Var applications, so this
-              -- walk does not miss a module imported only for an orphan instance
-              -- the way a renamer/typecheck-level "used name" scan would. Because this codebase
-              -- defines no @{-# RULES #-}@ anywhere (grep-confirmed empty),
-              -- 'core2core' cannot introduce a genuinely NEW cross-module reference
-              -- that wasn't already visible at this desugared stage — dictionary/
-              -- instance selection is the only mechanism that could hide a
-              -- reference pre-Core, and it's already resolved by here. So the
-              -- desugar-stage reference graph is a sound (superset-or-equal)
-              -- approximation of what the fully optimized Core actually needs.
-              --
-              -- A module OUTSIDE this closure would contribute zero bindings the
-              -- target's Core can reach either way — Main.hs's own post-hoc,
-              -- binding-level reachability walk over the final merged 'allBinds'
-              -- ('Translate.reachableBinds', run from the target) would discard it
-              -- regardless — so skipping 'core2core' for it changes no wire byte on
-              -- a passing extraction; it only skips work whose result was always
-              -- going to be thrown away.
+              -- Desugared Core captures resolved dictionaries and therefore
+              -- includes instance-only dependencies in the selected closure.
+              -- All owners are already finalized; this only selects STG work.
               forceValidationOnly <- liftIO (lookupEnv "TIDEPOOL_TEST_FORCE_VALIDATION_ONLY")
               let referencesByMod = Map.fromList
                     [ (ms_mod_name (observationSummary observation), moduleFactReferences fact)
                     | (observation, fact) <- zip observations' facts ]
                   reachableMods0 = reachableModuleClosure targetModName' referencesByMod
-                  -- E6 mis-tiering fault injection (detection-power demonstration,
-                  -- see 00-spec.md's VERIFY section): forcibly deny a NAMED module
-                  -- 'core2core' regardless of whether the real closure above found
-                  -- it reachable — simulating exactly the mistake this tier could
-                  -- make. Inert unless set; never set outside a deliberate test.
+                  -- A focused fault-injection test can omit one real reachable
+                  -- owner from STG preparation without changing its finalization.
                   reachableMods = case forceValidationOnly of
                     Just m  -> Set.delete (mkModuleName m) reachableMods0
                     Nothing -> reachableMods0
-              let rememberExecutable modSum output prepared mInterface moduleFacts = do
-                    moduleProduct <- requireProduct moduleFacts output prepared mInterface
+              let rememberExecutable modSum output prepared finalized moduleFacts = do
+                    moduleProduct <- requireProduct moduleFacts output prepared finalized
                     case mMemoRef of
                       Just ref -> liftIO (modifyIORef' ref
                         (Map.insert (ms_mod_name modSum)
@@ -2355,15 +2521,24 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                             requestIdentity
                             (memoDiagnosticWitnesses modSum))))
                       Nothing -> pure ()
-                  compileReachable interfaceUse modSum moduleFacts = do
-                    -- The reachability pass ran against load's interfaces. Recheck
-                    -- against the exact prepared dependencies registered so far.
-                    f <- compileFront modSum
-                    (simplified, r, mInterface, mRegisteredTidy) <- compileBack interfaceUse f
-                    prepared <- prepareSelected f simplified mRegisteredTidy
-                    rememberExecutable modSum r prepared mInterface moduleFacts
+                  compileReachable _interfaceUse observation moduleFacts = do
+                    let modSum = observationSummary observation
+                    loaded <- case observation of
+                      LoadedObservation captured -> pure captured
+                      CachedObservation _ entry -> pure (payloadLoaded modSum (gmePayload entry))
+                      HydratedObservation _ _ _ -> liftIO (throwIO MissingLoadedFinalization)
+                    rememberFinalized loaded
+                    let r = loadedOutput loaded
+                        finalized = loadedFinalized loaded
+                    prepared <- prepareFinalized loaded
+                    rememberExecutable modSum r prepared finalized moduleFacts
                     pure [(r, prepared)]
-                  validationOnly modSum moduleFacts =
+                  validationOnly observation moduleFacts = do
+                    let modSum = observationSummary observation
+                    loaded <- case observation of
+                      LoadedObservation value -> pure value
+                      CachedObservation _ entry -> pure (payloadLoaded modSum (gmePayload entry))
+                      HydratedObservation _ _ _ -> liftIO (throwIO MissingLoadedFinalization)
                     case mMemoRef of
                       Just ref -> liftIO (modifyIORef' ref
                         (Map.insert (ms_mod_name modSum)
@@ -2373,7 +2548,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                               (retainedFor modSum)
                               (homeDependencyWitnesses modSum)
                               incarnation)
-                            (ValidationOnly moduleFacts)
+                            (ValidationOnly moduleFacts (loadedOutput loaded) (loadedFinalized loaded))
                             requestIdentity
                             (memoDiagnosticWitnesses modSum))))
                       Nothing -> pure ()
@@ -2386,19 +2561,17 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                 recordExecutableValidity modSum False
                 if ms_mod_name modSum `Set.member` reachableMods
                   then case observation of
-                    -- Memo hit AND reachable: the cached RESULT (already
-                    -- core2core'd by whatever cycle inserted it) is exactly what
-                    -- a fresh 'compileBack' would recompute — reuse it, skipping
-                    -- the optimizer pass entirely.
+                    -- Reuse a prepared body only with its current dependency
+                    -- bodies and the canonical interface admitted above.
                     CachedObservation _ entry
                       | depsExecutable
                       , Just moduleProduct <- payloadProduct (gmePayload entry)
                       , interfaceReady interfaceUse modSum entry -> do
                         recordExecutableValidity modSum True
                         rememberPreparedSiblings (productPrepared moduleProduct)
-                        when captureProducts $ forM_ (retainedInterface moduleProduct) $ \hmi -> liftIO $
-                          modifyIORef' productInterfacesRef (Map.insert
-                            (ms_mod_name modSum) (hm_iface hmi))
+                        when captureProducts $ liftIO $
+                          modifyIORef' productInterfacesRef (Map.insert (ms_mod_name modSum)
+                            (hm_iface (finalizedHomeModInfo (productFinalized moduleProduct))))
                         when (needsPreparedInterface interfaceUse) $
                           forM_ (cachedInterface modSum entry) (installPreparedInterface (ms_mod_name modSum))
                         pure [(productOutput moduleProduct, Just (productPrepared moduleProduct))]
@@ -2410,9 +2583,9 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                             | otherwise = "required-interface-not-retained"
                       memoMiss modSum reason
                       memoMissTrace modSum reason (Just entry)
-                      compileReachable interfaceUse modSum moduleFacts
-                    FreshObservation _ -> compileReachable interfaceUse modSum moduleFacts
-                    HydratedObservation _ _ _ -> compileReachable interfaceUse modSum moduleFacts
+                      compileReachable interfaceUse observation moduleFacts
+                    LoadedObservation _ -> compileReachable interfaceUse observation moduleFacts
+                    HydratedObservation _ _ _ -> compileReachable interfaceUse observation moduleFacts
                   -- Keep an existing executable only while its dependencies
                   -- and required interface still match. An unreachable source
                   -- needs validation facts, so preparing a new body here would
@@ -2427,7 +2600,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                         when (needsPreparedInterface interfaceUse) $
                           forM_ (cachedInterface modSum entry) (installPreparedInterface (ms_mod_name modSum))
                         pure []
-                    _ -> validationOnly modSum moduleFacts >> pure []
+                    _ -> validationOnly observation moduleFacts >> pure []
               pure (observations', map fst rs, [p | (_, Just p) <- rs], Just reachableMods)
           totalTcMs   <- liftIO (readIORef tcMsRef)
           totalLoweringMs <- liftIO (readIORef loweringMsRef)
@@ -2506,14 +2679,8 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
           let allBinds  = concatMap moduleOutputBinds depOutputs
                 ++ moduleOutputBinds targetOutput
               allTyCons = concatMap moduleFactTyCons moduleFacts ++ exactTyCons
-          targetEnvironment <- case [ mfTcGblEnv front
-                               | observation <- observations
-                               , Just front <- [observationFront observation]
-                               , ms_mod_name (mfSummary front) == targetModName' ] of
-            env : _ -> pure env
-            [] -> liftIO $ ioError $ userError $
-              pvLabel variant ++ ": target module '" ++ targetModName
-              ++ "' was typechecked without a retained reader environment"
+          targetEnvironment <- liftIO (readIORef targetEnvironmentRef) >>= maybe
+            (liftIO (ioError (userError (pvLabel variant ++ ": target frontend environment is absent")))) pure
           warnings <- liftIO (nub . reverse <$> readIORef warnRef)
           let pipelineResult = PipelineResult
                 { prBinds  = allBinds
@@ -2530,10 +2697,15 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
           dependencies <- liftIO (dependencyEvidenceFor hscFinal capturedSources freshGraph
             (zip (map (ms_mod_name . observationSummary) observations) moduleFacts))
           productInterfaces <- liftIO (readIORef productInterfacesRef)
-          let packageRoots = Map.fromList
-                [(ms_mod_name (observationSummary observation), moduleFactPackageImports facts)
-                | (observation, facts) <- zip observations moduleFacts]
-          pure (pipelineResult, preparedModules, dependencies, productInterfaces, packageRoots)
+          finalizedModules <- liftIO (readIORef finalizedModulesRef)
+          let packageRoots = Map.union
+                (Map.fromList [(ms_mod_name (observationSummary observation), moduleFactPackageImports facts)
+                  | (observation, facts) <- zip observations moduleFacts])
+                (Map.fromList [(ms_mod_name (loadedSummary loaded), moduleFactPackageImports (loadedFacts loaded))
+                  | loaded <- Map.elems loadedModules])
+          forM_ (Set.toAscList (Map.keysSet finalizedModules `Set.difference` Map.keysSet packageRoots)) $
+            liftIO . throwIO . MissingFinalizedFacts
+          pure (pipelineResult, preparedModules, dependencies, productInterfaces, finalizedModules, packageRoots)
     let compileChecked :: Ghc CheckedEnvironmentResult
         compileChecked = do
           -- Restore the full graph after any target deferral so checking sees
@@ -2545,7 +2717,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
           -- module can consume an interface we build here. Completed modules no
           -- longer consult the HPT, while the returned target environment owns
           -- its types and reader scope directly.
-          unless (Map.null loadedHomeSources) $ do
+          unless (Map.null loadedModules) $ do
             hydrated <- getSession
             liftIO (validateEnvironmentFamilies hydrated)
           checkedFactsRef <- liftIO (newIORef [])
@@ -2554,41 +2726,18 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
             current <- getSession
             let isTarget = ms_mod_name summary == targetName
                 loaded = lookupHpt (hsc_HPT current) (ms_mod_name summary)
-            sourceFacts <- case (Map.lookup (ms_mod_name summary) loadedHomeSources, loaded) of
-              (Just (owner, fingerprint, selected), Just hmi)
-                | owner == ms_mod summary
-                , fingerprint == ms_hs_hash summary
-                , mi_module (hm_iface hmi) == owner
-                , mi_iface_hash (mi_final_exts (hm_iface hmi))
-                    == mi_iface_hash (mi_final_exts (hm_iface selected)) -> do
-                    -- Unsupported compile-time inputs stay on the fresh
-                    -- frontend path. The actual loaded interface records
-                    -- dependent-file use; source parsing preserves quote
-                    -- provenance without repeating its typecheck.
-                    let flags = ms_hspp_opts summary
-                        hasFiles = any (\case UsageFile{} -> True; _ -> False)
-                          (mi_usages (hm_iface hmi))
-                    if hasUnconditionallyUntrackedCompileTimeExecution flags || hasFiles
-                      then pure Nothing
-                      else do
-                        origins <- if xopt LangExt.QuasiQuotes flags
-                          then parseModule summary >>= liftIO . classifyQuasiQuoteOrigins current
-                          else pure NoQuasiQuotes
-                        pure $ case origins of
-                          HasUntrackedQuasiQuote _ -> Nothing
-                          _ -> Just ModuleFacts
-                            { moduleFactTyCons = typeEnvTyCons (md_types (hm_details hmi))
-                            , moduleFactReferences = Set.empty
-                            , moduleFactPackageImports = emptyPackageImports
-                            , moduleFactHasDependentFiles = hasFiles
-                            , moduleFactQuasiQuoteOrigins = origins }
-              _ -> pure Nothing
+            let sourceFacts = loadedFacts <$> Map.lookup (ms_mod summary) loadedModules
             case sourceFacts of
               Just facts -> do
                 liftIO (modifyIORef' checkedFactsRef ((ms_mod_name summary, facts) :))
                 when timing $ liftIO $ hPutStrLn stderr $
                   "tidepool-checked-loaded-source module=" ++ moduleNameString (ms_mod_name summary)
-                pure Nothing
+                if isTarget
+                  then do
+                    tcg <- liftIO (readIORef targetEnvironmentRef) >>= maybe
+                      (liftIO (ioError (userError "loaded checked target environment is absent"))) pure
+                    pure (Just (tcg, capturedInspectionProbes tcg))
+                  else pure Nothing
               Nothing -> if not isTarget && not (isNothing loaded)
                   && (isNothing (pvExactScope variant) || ms_mod_name summary `Map.member` acceptedCandidates)
                 then do
@@ -2600,17 +2749,20 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                   liftIO $ hPutStrLn stderr $
                     "tidepool-checked module=" ++ moduleNameString (ms_mod_name summary)
                       ++ " target=" ++ show isTarget
-                  (typed, origins) <- timeDetailPhase timing "checked_typecheck"
+                  (tcg, origins) <- timeDetailPhase timing "checked_typecheck"
                     (moduleNameString (ms_mod_name summary)) $ do
                       parsed <- parseModule summary
                       origins <- liftIO (classifyQuasiQuoteOrigins current parsed)
                       transformed <- liftIO (pvTransformParsed variant current summary parsed)
-                      typed <- typecheckModule transformed
+                      ((checkedEnvironment, _), warnings) <- liftIO $ withNativeTypecheckRecovery variant targetName current summary parsed
+                        (typecheckNativeModuleWithDiagnostics current transformed)
+                      let flags = ms_hspp_opts summary
+                      liftIO (printOrThrowDiagnostics (hsc_logger current)
+                        (initPrintConfig flags) (initDiagOpts flags) warnings)
                       familyEnvironment <- getSession
-                      liftIO (validateCompilationFamilies familyEnvironment (fst (tm_internals_ typed)))
-                      pure (typed, origins)
-                  let tcg = fst (tm_internals_ typed)
-                      inspectionProbes = capturedInspectionProbes typed tcg
+                      liftIO (validateCompilationFamilies familyEnvironment checkedEnvironment)
+                      pure (checkedEnvironment, origins)
+                  let inspectionProbes = capturedInspectionProbes tcg
                       retainInterface reason = do
                         -- A later source module's normal home import resolves via
                         -- this HPT entry. A source-less Val interface injected before
@@ -2623,7 +2775,9 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                         (iface, _ifaceMs) <- liftIO $ measureModuleInterface timing requestIdentity
                           (moduleNameString (ms_mod_name summary)) CheckedEnvironmentInterface HptMiss $
                             mkIfaceTc env Sf_None details summary Nothing tcg
-                        let hmi = HomeModInfo iface details emptyHomeModInfoLinkable
+                        let linkable = maybe emptyHomeModInfoLinkable hm_linkable
+                              (lookupHpt (hsc_HPT env) (ms_mod_name summary))
+                            hmi = HomeModInfo (set_mi_extra_decls Nothing iface) details linkable
                         setSession (hscUpdateHPT (\hpt -> addToHpt hpt (ms_mod_name summary) hmi) env)
                         when timing $ liftIO $ hPutStrLn stderr $
                           "tidepool-checked-interface-retained module="
@@ -2650,7 +2804,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
           case [(tcg, probes) | Just (tcg, probes) <- checked] of
             [(tcg, probes)] -> do
               env <- getSession
-              valid <- liftIO (revalidateAcceptedCandidates (map admittedCandidateOriginal (Map.elems acceptedCandidates)))
+              valid <- liftIO (revalidateAcceptedCandidates (Map.elems acceptedCandidates))
               unless valid $ liftIO $ ioError $ userError
                 "accepted metadata candidate changed before checked receipt"
               forM_ exactCompilation $ \compilation -> do
@@ -2672,19 +2826,20 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
             _ -> liftIO $ ioError $ userError "metadata target missing from checked module graph"
     case selection of
       PreparedStg -> do
-        (result, modules, dependencies, productInterfaces, packageRoots) <- compileExecutable
+        (result, modules, dependencies, productInterfaces, finalizedModules, packageRoots) <- compileExecutable
         pure PreparedPipelineResult
           { pprPipelineResult = result
           , pprModules = modules
           , pprDependencies = dependencies
           , pprProductInterfaces = productInterfaces
+          , pprFinalizedModules = finalizedModules
           , pprPackageImports = packageRoots
           , pprAcceptedCandidates = []
           , pprExactCompilation = exactCompilation
           }
       PreparedProducts _ -> do
-        (result, modules, dependencies, productInterfaces, packageRoots) <- compileExecutable
-        valid <- liftIO $ revalidateAcceptedCandidates (map admittedCandidateOriginal (Map.elems acceptedCandidates))
+        (result, modules, dependencies, productInterfaces, finalizedModules, packageRoots) <- compileExecutable
+        valid <- liftIO $ revalidateAcceptedCandidates (Map.elems acceptedCandidates)
         when (not valid) $ liftIO $ ioError $ userError
           "accepted module candidate changed before artifact publication"
         pure PreparedPipelineResult
@@ -2692,6 +2847,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
           , pprModules = modules
           , pprDependencies = dependencies
           , pprProductInterfaces = productInterfaces
+          , pprFinalizedModules = finalizedModules
           , pprPackageImports = packageRoots
           , pprAcceptedCandidates = map admittedCandidateOriginal (Map.elems acceptedCandidates)
           , pprExactCompilation = exactCompilation
@@ -2732,6 +2888,8 @@ data AdmittedSourceCandidate = AdmittedSourceCandidate
   { admittedCandidateOriginal :: ModuleCandidate
   , admittedCandidateRoots :: PackageImportEvidence
   , admittedCandidateLoading :: CandidateLoading
+  , admittedCandidateProof :: CanonicalInterfaceProof
+  , admittedCandidateView :: ModSummary
   }
 
 data CandidateAdmissionReason
@@ -2741,13 +2899,14 @@ data CandidateAdmissionReason
   | CandidatePreprocessor | CandidateSourcePath | CandidateSourceRead
   | CandidateSourceSha | CandidateSummaryHash | CandidateNativeRead | CandidateNativeSha
   | CandidatePackageRead | CandidatePackageSelection | CandidateClosedHome
-  | CandidateInterfaceRead | CandidateInterfaceTH | CandidateHydration | CandidateExecutionProof | CandidateAccepted
+  | CandidateInterfaceRead | CandidateInterfaceTH | CandidateHydration | CandidateExecutionProof
+  | CandidateCanonicalProof | CandidateProducerUnavailable | CandidateAccepted
   deriving (Eq, Ord, Show)
 
 certifyModuleCandidates
-  :: Maybe ExactScope -> Set.Set ModuleName -> FilePath -> ModuleGraph -> FilePath
+  :: FilePath -> Maybe String -> Maybe ExactScope -> Set.Set ModuleName -> FilePath -> ModuleGraph -> FilePath
   -> Ghc (Map.Map ModuleName AdmittedSourceCandidate)
-certifyModuleCandidates exactScope sourceFreeOwners manifest graph targetPath = do
+certifyModuleCandidates compilerViewDirectory expectedProducer exactScope sourceFreeOwners manifest graph targetPath = do
   timing <- liftIO readTimingEnabled
   observations <- liftIO (newIORef Map.empty)
   let record owner reason detail = when timing $ liftIO $
@@ -2973,12 +3132,10 @@ certifyModuleCandidates exactScope sourceFreeOwners manifest graph targetPath = 
           closed selected = let smaller = shrink selected in
             if Map.keysSet smaller == Map.keysSet selected then smaller else closed smaller
           admitted = closed initial
-          artifact (candidate, _, node, _) = ExactIfaceArtifact
+          artifact (candidate, _, _, _) = ExactIfaceArtifact
             (candidateUnit candidate) (candidateModule candidate)
             (candidateInterface candidate) (candidateInterfaceSha256 candidate)
-            (Set.toAscList (Set.fromList
-              ([(candidateUnit candidate, moduleNameString requirement) | requirement <- requiredHome node]
-                ++ Map.keys (provenOriginals candidate))))
+            (candidateInterfaceRequirements candidate)
       forM_ (Map.elems (Map.difference initial admitted)) $ \(candidate, _, _, _) ->
         recordCandidate candidate CandidateClosedHome Nothing
       let recordAdmitted reason detail = forM_ (Map.elems admitted) $ \(candidate, _, _, _) ->
@@ -2989,52 +3146,84 @@ certifyModuleCandidates exactScope sourceFreeOwners manifest graph targetPath = 
           let candidates' = map artifact (Map.elems admitted)
               originals = maybe [] (map (\(iface,_,_) -> iface) . scopeInterfaces) exactScope
               values = maybe [] scopeValueInterfaces exactScope
-          captured <- liftIO $ readVerifiedExactIfaceClosureWithCheckedValues env
-            (candidates' ++ originals) values
-          let loaded = captured >>= \verified -> selectVerifiedExactInterfaces verified candidates'
-              originalInterfaces = captured >>= \verified -> selectVerifiedExactInterfaces verified originals
-              installLexical candidateGraph hydrated = case (exactScope,captured,originalInterfaces) of
-                (Nothing,_,_) -> pure (Right hydrated)
-                (Just scope,Right verified,Right originalIfaces) -> case
-                    checkedValueImportAuthorityFromVerified verified values of
-                  Left reason -> pure (Left reason)
-                  Right checked -> do
-                    let byOwner = Map.fromList [((exactUnit iface,exactModule iface),iface)
-                          | (iface,_) <- originalIfaces]
-                        lexical = [(iface,imports) | (key,imports) <- scopeLexical scope
-                          , Just iface <- [Map.lookup key byOwner]]
-                    installExactLexicalGraphWithScaffold candidateGraph lexical checked
-                      noGeneratedScaffoldImports hydrated
-                _ -> pure (Left "candidate original interface closure unavailable")
-          case loaded of
-            Left reason -> recordAdmitted CandidateInterfaceRead (Just reason) >> pure Map.empty
-            Right interfaces
-              | any (mi_used_th . snd) interfaces ->
-                  recordAdmitted CandidateInterfaceTH Nothing >> pure Map.empty
-              | otherwise -> do
-                  let selectedBoots = [summary | (name,summary) <- Map.toList bootSummaries,
-                        Map.member name admitted]
-                  let canonicalLoadGraph = mapMG (\summary -> summary
-                        { ms_hspp_opts = canonicalizeRepresentationFlags (ms_hspp_opts summary) }) graph
-                      nativeGraph = mapMG (\summary -> summary
-                        { ms_hspp_opts = canonicalizeDFlags (ms_hspp_opts summary) }) (hsc_mod_graph env)
-                      nativeSummary summary = summary
-                        { ms_hspp_opts = canonicalizeDFlags (ms_hspp_opts summary) }
-                  -- Original native products use the extraction profile. GHC's
-                  -- separate source load keeps its interpreter profile and
-                  -- provisions every executable needed by a splice.
-                  hydratedResult <- hydrateCandidateHomeProductsWithOriginals env { hsc_mod_graph = nativeGraph }
-                    canonicalLoadGraph interfaces (either (const []) id originalInterfaces)
-                    installLexical
-                    [nativeSummary summary | (_,summary,_,_) <- Map.elems admitted] selectedBoots
-                  case hydratedResult of
-                    Left reason -> recordAdmitted CandidateHydration (Just reason) >> pure Map.empty
-                    Right hydrated -> do
-                      setSession hydrated { hsc_mod_graph = hsc_mod_graph env }
-                      recordAdmitted CandidateAccepted Nothing
-                      pure (Map.map (\(candidate, summary, _, roots) -> AdmittedSourceCandidate
-                        candidate roots (if backendGeneratesCode (backend (ms_hspp_opts summary))
-                          then CandidateLoadForExecution else CandidateInterfaceOnly)) admitted)
+          let canonicalRows = [(artifact tuple, candidatePackageImports candidate,
+                candidatePackageImportsSha256 candidate)
+                | tuple@(candidate,_,_,_) <- Map.elems admitted]
+                ++ maybe [] scopeInterfaces exactScope
+          proofsResult <- case expectedProducer of
+            Nothing -> do
+              recordAdmitted CandidateProducerUnavailable Nothing
+              pure (Left "candidate admission requires the owning compiler producer")
+            Just producer -> liftIO $ fmap (fmap Map.fromList . sequence) $
+              forM (Map.toAscList admitted) $ \(name,(candidate,_,_,_)) ->
+                fmap (fmap (\proof -> (name,proof)))
+                  (validateCandidateCanonicalInterfaceProof producer canonicalRows candidate)
+          case proofsResult of
+            Left reason -> recordAdmitted CandidateCanonicalProof (Just reason) >> pure Map.empty
+            Right proofs -> do
+              captured <- liftIO $ readVerifiedExactIfaceClosureWithCheckedValues env
+                (candidates' ++ originals) values
+              let loaded = captured >>= \verified -> selectVerifiedExactInterfaces verified candidates'
+                  originalInterfaces = captured >>= \verified -> selectVerifiedExactInterfaces verified originals
+                  installLexical candidateGraph hydrated = case (exactScope,captured,originalInterfaces) of
+                    (Nothing,_,_) -> pure (Right hydrated)
+                    (Just scope,Right verified,Right originalIfaces) -> case
+                        checkedValueImportAuthorityFromVerified verified values of
+                      Left reason -> pure (Left reason)
+                      Right checked -> do
+                        let byOwner = Map.fromList [((exactUnit iface,exactModule iface),iface)
+                              | (iface,_) <- originalIfaces]
+                            lexical = [(iface,imports) | (key,imports) <- scopeLexical scope
+                              , Just iface <- [Map.lookup key byOwner]]
+                        installExactLexicalGraphWithScaffold candidateGraph lexical checked
+                          noGeneratedScaffoldImports hydrated
+                    _ -> pure (Left "candidate original interface closure unavailable")
+              case loaded of
+                Left reason -> recordAdmitted CandidateInterfaceRead (Just reason) >> pure Map.empty
+                Right interfaces
+                  | any (mi_used_th . snd) interfaces ->
+                      recordAdmitted CandidateInterfaceTH Nothing >> pure Map.empty
+                  | otherwise -> do
+                      liftIO $ forM_ interfaces $ \(artifact',iface) ->
+                        either throwIO pure (validateCandidateInterfaceRequirements
+                          (proofs Map.! mkModuleName (exactModule artifact')) iface)
+                      let selectedBoots = [summary | (name,summary) <- Map.toList bootSummaries,
+                            Map.member name admitted]
+                      let canonicalLoadGraph = mapMG (\summary -> summary
+                            { ms_hspp_opts = canonicalizeRepresentationFlags (ms_hspp_opts summary) }) graph
+                          nativeGraph = mapMG (\summary -> summary
+                            { ms_hspp_opts = canonicalizeDFlags (ms_hspp_opts summary) }) (hsc_mod_graph env)
+                          nativeSummary summary = summary
+                            { ms_hspp_opts = canonicalizeDFlags (ms_hspp_opts summary) }
+                      -- Current source selection checks the original native
+                      -- interface profile. GHC executable demand subsequently
+                      -- consumes the same finalized Core without a frontend.
+                      hydratedResult <- hydrateCandidateHomeProductsWithOriginals env { hsc_mod_graph = nativeGraph }
+                        canonicalLoadGraph interfaces (either (const []) id originalInterfaces)
+                        installLexical
+                        [nativeSummary summary | (_,summary,_,_) <- Map.elems admitted] selectedBoots
+                      case hydratedResult of
+                        Left reason -> recordAdmitted CandidateHydration (Just reason) >> pure Map.empty
+                        Right hydrated -> do
+                          setSession hydrated { hsc_mod_graph = hsc_mod_graph env }
+                          views <- fmap Map.fromList $ forM
+                            (zip [0..] (Map.toAscList admitted)) $ \(index,(name,(_,summary,_,_))) -> do
+                              currentEnvironment <- getSession
+                              let originalFlags = ms_hspp_opts summary
+                                  executable = backendGeneratesCode (backend originalFlags)
+                                  canonicalSummary' = summary {ms_hspp_opts =
+                                    (canonicalizeDFlags originalFlags)
+                                      {backend = backend originalFlags, ghcLink = ghcLink originalFlags}}
+                              view <- liftIO $ materializeCandidateCompilerView compilerViewDirectory
+                                index currentEnvironment (proofs Map.! name) canonicalSummary'
+                              when executable $ liftIO $
+                                emitCount timing "candidate_finalized_core_make_view" 1
+                              pure (name,view)
+                          recordAdmitted CandidateAccepted Nothing
+                          pure (Map.mapWithKey (\name (candidate, summary, _, roots) -> AdmittedSourceCandidate
+                            candidate roots (if backendGeneratesCode (backend (ms_hspp_opts summary))
+                              then CandidateLoadForExecution else CandidateInterfaceOnly)
+                            (proofs Map.! name) (views Map.! name)) admitted)
   when timing $ liftIO $ do
     observed <- readIORef observations
     let counts = Map.fromListWith (+)
@@ -3047,12 +3236,21 @@ certifyModuleCandidates exactScope sourceFreeOwners manifest graph targetPath = 
     emitCount timing "candidate_admission_rows_omitted" (toInteger (max 0 (Map.size observed - 128)))
   pure result
 
-revalidateAcceptedCandidates :: [ModuleCandidate] -> IO Bool
-revalidateAcceptedCandidates candidates = and <$> forM candidates (\candidate -> do
+revalidateAcceptedCandidates :: [AdmittedSourceCandidate] -> IO Bool
+revalidateAcceptedCandidates candidates = and <$> forM candidates (\admission -> do
+  let candidate = admittedCandidateOriginal admission
+      proof = admittedCandidateProof admission
   readBack <- try $ do
     (source, _) <- sourceEvidenceWithFingerprint (candidateSource candidate)
     interface <- BS.readFile (candidateInterface candidate)
     productBytes <- BS.readFile (candidateProductPath candidate)
+    certificate <- bounded (canonicalCertificatePath proof) (4 * 1024 * 1024)
+    coreValid <- case admittedCandidateLoading admission of
+      CandidateInterfaceOnly -> pure True
+      CandidateLoadForExecution -> case canonicalCoreArtifact proof of
+        Nothing -> pure False
+        Just core -> (== canonicalCoreSha256 core) . hexBytes . SHA256.hash
+          <$> bounded (canonicalCorePath core) (32 * 1024 * 1024)
     packageImports <- readPackageImports (candidatePackageImports candidate)
       (candidatePackageImportsSha256 candidate)
       (ExactIfaceArtifact (candidateUnit candidate) (candidateModule candidate)
@@ -3060,9 +3258,16 @@ revalidateAcceptedCandidates candidates = and <$> forM candidates (\candidate ->
     pure (dependencySourceSha256 source == candidateSourceSha256 candidate
       && hexBytes (SHA256.hash interface) == candidateInterfaceSha256 candidate
       && hexBytes (SHA256.hash productBytes) == candidateProductSha256 candidate
+      && hexBytes (SHA256.hash certificate) == canonicalCertificateSha256 proof
+      && coreValid
       && either (const False) (const True) packageImports)
     :: IO (Either IOException Bool)
   pure (either (const False) id readBack))
+  where
+    bounded path' limit = withBinaryFile path' ReadMode $ \handle -> do
+      bytes <- BS.hGet handle (limit + 1)
+      unless (BS.length bytes <= limit) (ioError (userError "candidate artifact exceeds byte bound"))
+      pure bytes
 
 dependencyQualifier :: PkgQual -> DependencyQualifier
 dependencyQualifier NoPkgQual = DependencyUnqualified
@@ -3250,10 +3455,8 @@ withResidentPipelineSelected
   -> (ResidentCompiler -> IO a)
   -> IO a
 withResidentPipelineSelected baseIncludes useCompiler =
-  withResidentPipelineSelectedRequests baseIncludes (const (pure ())) $ \runRequest ->
-    useCompiler $ \selection retained purpose mscope path extraIncludes buildProductsDir ->
-      runRequest $ \compile ->
-        compile selection retained purpose mscope path extraIncludes buildProductsDir
+  withResidentPipelineSelectedRequests baseIncludes $ \runRequest ->
+    runRequest (pure ()) useCompiler
 
 -- | Keep transaction-scoped compiler state across every compile needed to
 -- prepare one cell, then remove it before admitting the next transaction.
@@ -3263,10 +3466,10 @@ withResidentPipelineSelected baseIncludes useCompiler =
 -- cannot admit another request without first sanitizing this one's state.
 withResidentPipelineSelectedRequests
   :: [FilePath]
-  -> (ModuleName -> IO ())
   -> (RequestRunner -> IO a)
   -> IO a
-withResidentPipelineSelectedRequests baseIncludes evictRecovery useRequests = do
+withResidentPipelineSelectedRequests baseIncludes useRequests = do
+  producer <- captureCompilerProducerIdentity
   timing <- readTimingEnabled
   (libdir, startupMs) <- timeSection getLibdir
   emitPhase timing "startup" startupMs
@@ -3277,38 +3480,81 @@ withResidentPipelineSelectedRequests baseIncludes evictRecovery useRequests = do
     retainedRef <- liftIO (newIORef emptyRetainedContext)
     hscForRetained <- getSession
     setSession (installRetainedUnfoldingsPlugin retainedRef hscForRetained)
-    cache   <- liftIO newIfaceCache
-    memoRef <- liftIO (newIORef Map.empty)
-    requestTargetsRef <- liftIO (newIORef Set.empty)
-    stateOriginRef <- liftIO (newIORef OrdinarySourceState)
+    availability <- liftIO (newIORef ResidentAvailable)
+    ownerThread <- liftIO myThreadId
     let baseImportPaths = importPaths dflags'
     reifyGhc $ \session ->
-      let finishRequest = do
-            targets <- atomicModifyIORef' requestTargetsRef (\pending -> (Set.empty, pending))
-            forM_ (Set.toList targets) $ \targetModName' -> do
-              sanitizeMemo targetModName' memoRef
-              evictRecovery targetModName'
-          compile :: Word64 -> ResidentCompiler
-          compile requestIdentity selection retained purpose mscope path extraIncludes buildProductsDir = do
-            targetModName' <- targetModuleNameFor path
-            modifyIORef' requestTargetsRef (Set.insert targetModName')
-            -- The target's parsed tree depends on the compile purpose (for
-            -- example, lookup compilation normalizes wildcards). Source and
-            -- dependency hashes cannot distinguish those variants, so never
-            -- reuse a target entry across internal compiles. Session
-            -- dependencies remain warm until the compiler transaction ends.
-            evictTargetMemo targetModName' memoRef
-            (writeIORef retainedRef (retainedContext retained) >>
-              reflectGhc
-                (residentCompileOne selection cache memoRef retainedRef stateOriginRef dflags' baseImportPaths
-                  timing requestIdentity purpose mscope path extraIncludes buildProductsDir)
-                session)
-              `finally` writeIORef retainedRef emptyRetainedContext
+      let resetSession = reflectGhc
+            (getSession >>= liftIO . freshExactState >>= setSession) session
           runRequest :: RequestRunner
-          runRequest action = do
+          runRequest clearRecovery action = bracket acquire release $ \() -> do
+            -- These caches contain GHC values tied to this environment, not
+            -- portable products. No cache entry survives its owning bracket.
+            cacheRef <- newIfaceCache >>= newIORef
+            memoRef <- newIORef Map.empty
+            stateOriginRef <- newIORef OrdinarySourceState
+            phase <- newIORef CompilerReady
             requestIdentity <- newTimingRequestIdentity
-            action (compile requestIdentity) `finally` finishRequest
-      in useRequests runRequest
+            let compile :: ResidentCompiler
+                compile selection retained purpose mscope path extraIncludes buildProductsDir = mask $ \restore -> do
+                  caller <- myThreadId
+                  unless (caller == ownerThread) (throwIO CompilerTransactionWrongThread)
+                  previous <- atomicModifyIORef' phase $ \state ->
+                    (if state == CompilerReady then CompilerRunning else state, state)
+                  case previous of
+                    CompilerReady -> pure ()
+                    CompilerRunning -> throwIO CompilerTransactionBusy
+                    CompilerFailed -> throwIO CompilerTransactionFailed
+                    CompilerClosed -> throwIO CompilerTransactionReleased
+                  result <- restore (do
+                    targetModName' <- targetModuleNameFor path
+                    cache <- readIORef cacheRef
+                    -- Target source can be transformed differently by each
+                    -- purpose, even when its bytes have not changed.
+                    evictTargetMemo targetModName' memoRef
+                    (writeIORef retainedRef (retainedContext retained) >>
+                      reflectGhc
+                        (residentCompileOne producer selection cache memoRef retainedRef stateOriginRef dflags' baseImportPaths
+                          timing requestIdentity purpose mscope path extraIncludes buildProductsDir)
+                        session)
+                      `finally` writeIORef retainedRef emptyRetainedContext)
+                    `catch` \(failure :: SomeException) -> do
+                      writeIORef phase CompilerFailed
+                      case fromException failure :: Maybe SomeAsyncException of
+                        Just _ -> throwIO failure
+                        Nothing -> do
+                          -- A caller may retry a rejected generated instance.
+                          -- No partial compiler or recovery graph is reusable.
+                          clearRecovery
+                          writeIORef memoRef Map.empty
+                          newIfaceCache >>= writeIORef cacheRef
+                          resetSession
+                          writeIORef stateOriginRef OrdinarySourceState
+                          writeIORef phase CompilerReady
+                          throwIO failure
+                  writeIORef phase CompilerReady
+                  pure result
+                finish = do
+                  writeIORef phase CompilerClosed
+                  writeIORef memoRef Map.empty
+                  clearRecovery
+            action compile `finally` finish
+          acquire = do
+            caller <- myThreadId
+            unless (caller == ownerThread) (throwIO CompilerTransactionWrongThread)
+            previous <- atomicModifyIORef' availability $ \state ->
+              (if state == ResidentAvailable then ResidentBusy else state, state)
+            case previous of
+              ResidentAvailable -> pure ()
+              ResidentBusy -> throwIO CompilerTransactionBusy
+              ResidentPoisoned -> throwIO CompilerTransactionPoisoned
+              ResidentClosed -> throwIO CompilerTransactionReleased
+          release () = do
+            writeIORef availability ResidentPoisoned
+            writeIORef retainedRef emptyRetainedContext
+            resetSession
+            writeIORef availability ResidentAvailable
+      in useRequests runRequest `finally` writeIORef availability ResidentClosed
 
 type ResidentCompiler = forall result.
   PipelineSelection result
@@ -3320,15 +3566,17 @@ type ResidentCompiler = forall result.
   -> Maybe FilePath
   -> IO result
 
+-- The caller's recovery graphs share the compiler transaction's lifetime.
+-- Invalidation also runs before any synchronous failed-attempt retry.
 type RequestRunner = forall requestResult.
-  (ResidentCompiler -> IO requestResult) -> IO requestResult
+  IO () -> (ResidentCompiler -> IO requestResult) -> IO requestResult
 
 -- | One resident-session compile cycle, against the ALREADY-OPEN session
 -- 'withResidentPipelineSelected' booted. Patches @importPaths@ for THIS cycle only
 -- (see 'withResidentPipelineSelected'), compiles with the shared 'ModIfaceCache' +
 -- 'GutsMemo'. The transaction boundary established by
--- 'withResidentPipelineSelectedRequests' sanitizes the memo after both
--- successful and exceptional transactions (see 'sanitizeMemo').
+-- 'withResidentPipelineSelectedRequests' releases its GHC-valued memo after
+-- both successful and exceptional transactions.
 -- Captures a fresh start time so every request gets its own compile summary.
 --
 -- The resident and direct paths select the same pipeline variant. This is an
@@ -3338,16 +3586,17 @@ type RequestRunner = forall requestResult.
 -- Reads the context that the request runner wrote into the plugin's cell
 -- once at cycle start, then shares that value with memo validation.
 residentCompileOne
-  :: PipelineSelection result -> ModIfaceCache -> IORef GutsMemo -> IORef RetainedContext -> IORef ResidentStateOrigin -> DynFlags -> [FilePath]
+  :: Maybe CompilerProducerIdentity -> PipelineSelection result -> ModIfaceCache -> IORef GutsMemo -> IORef RetainedContext -> IORef ResidentStateOrigin -> DynFlags -> [FilePath]
   -> Bool -> Word64 -> CompilePurpose -> Maybe SessionScope -> FilePath -> [FilePath] -> Maybe FilePath
   -> Ghc result
-residentCompileOne selection cache memoRef retainedRef stateOriginRef baseDFlags baseImportPaths timing requestIdentity purpose mscope path extraIncludes buildProductsDir = do
+residentCompileOne producer selection cache memoRef retainedRef stateOriginRef baseDFlags baseImportPaths timing requestIdentity purpose mscope path extraIncludes buildProductsDir = do
   sessionT0 <- monotonicTime
   setupResources <- beginResourceTiming timing
   retained <- liftIO (readIORef retainedRef)
-  variant <- liftIO $ case mscope of
+  selectedVariant <- liftIO $ case mscope of
     Just scope | isSessionScopeActive scope -> sessionVariant purpose scope path
     _                                        -> normalVariant purpose path
+  let variant = selectedVariant {pvCompilerProducer = producer}
   previousOrigin <- liftIO (readIORef stateOriginRef)
   let currentOrigin = residentStateOrigin selection variant
       reset = case (previousOrigin,currentOrigin) of
@@ -3386,55 +3635,6 @@ compileSearchPaths variant requested ordinaryBase = case pvExactScope variant >>
   Just admitted -> do
     unless (requested == admitted) (throwIO SearchInputsChanged)
     pure admitted
-
--- | Retained-entry cap for @Tidepool.Session.*@ 'GutsMemo' entries once
--- 'sanitizeMemo' lets them outlive their producing transaction (below).
--- Sized for SEVERAL live incarnations sharing one warm daemon at once --
--- the per-child-sessions lane mints a fresh 'ssIncarnation' for each
--- selected-context child, so a busy daemon is not serving one session's
--- worth of growth -- not tuned from a measured per-entry byte size; revisit
--- once that measurement exists.
-sessionMemoCap :: Int
-sessionMemoCap = 8000
-
--- | Strip transaction-scoped entries from the shared 'GutsMemo' after a
--- compiler transaction: always the target module compiled by it, and every
--- @Tidepool.Session.*@ entry ('parseSessionModule' recognizes both @Val@ and
--- @Lib@ kinds) that was produced without a session incarnation identity.
--- Such an entry can never be reused: 'lookupValidMemo' requires a session
--- entry's recorded 'memoIncarnation' to equal the CURRENT request's
--- incarnation, and an absent identity never matches. An entry recorded under
--- an incarnation stays, whatever the finishing transaction carried: the same
--- lookup check already keeps a same-named module from another incarnation (a
--- restart, whose generation counter restarts at 0, or another session on the
--- same warm daemon) from reusing it, so a transaction with no incarnation
--- (a lookup, a plain eval, a one-shot compile) must not discard what a later
--- request in a live incarnation will reuse.
--- Reusable library entries stay warm either way; capped by recency
--- ('gmeCycle', the request identity that produced or last reused an entry)
--- once retained session entries exceed 'sessionMemoCap', so an unbounded
--- accumulation across a long-lived session or several concurrent
--- incarnations cannot grow the memo forever.
-sanitizeMemo :: ModuleName -> IORef GutsMemo -> IO ()
-sanitizeMemo targetModName' memoRef =
-  modifyIORef' memoRef $ capSessionEntries . Map.filterWithKey keep
-  where
-    keep mn entry = mn /= targetModName'
-      && (isNothing (parseSessionModule (moduleNameString mn))
-          || isJust (memoIncarnation (gmeValidity entry)))
-    capSessionEntries memo =
-      let (sessionEntries, otherEntries) = Map.partitionWithKey
-            (\mn _ -> isJust (parseSessionModule (moduleNameString mn))) memo
-          overflow = Map.size sessionEntries - sessionMemoCap
-      in if overflow <= 0
-        then memo
-        else
-          -- Oldest-'gmeCycle'-first, so the entries a later cycle just
-          -- reused (a fresh 'gmeCycle' stamped on every insert, including a
-          -- promoted validation-only entry) are never the ones dropped.
-          let oldestFirst = sortOn (gmeCycle . snd) (Map.toList sessionEntries)
-              retained = drop overflow oldestFirst
-          in Map.union otherEntries (Map.fromList retained)
 
 evictTargetMemo :: ModuleName -> IORef GutsMemo -> IO ()
 evictTargetMemo targetModName' memoRef =
@@ -3523,35 +3723,28 @@ configureBuildProducts baseline mDir dflags = case mDir of
       | gopt Opt_WriteInterface baseline = gopt_set dflags Opt_WriteInterface
       | otherwise = gopt_unset dflags Opt_WriteInterface
 
--- | Importers and prepared code must share the same tidy result. In particular,
--- load's bytecode interfaces can describe private bindings eliminated by the
--- extraction optimizer. Keep their linkables for later Template Haskell splices
--- while replacing their compiler-facing details and unfoldings.
+-- | Whether a finalized interface must enter the current HPT for a later
+-- importer. Every durable owner retains its interface even without an importer.
 needsPreparedInterface :: HomeInterfaceUse -> Bool
 needsPreparedInterface HomeInterfaceLeaf = False
 needsPreparedInterface _ = True
 
-registerPreparedInterface :: Bool -> Word64 -> InterfaceReuse -> Bool -> HomeInterfaceUse
+registerPreparedInterface :: Bool -> Word64 -> InterfaceReuse -> HomeInterfaceUse
   -> ModSummary -> TcGblEnv -> HscEnv -> ModGuts
-  -> Ghc (Maybe Integer, Maybe RegisteredInterface)
-registerPreparedInterface timing requestId interfaceReuse captureProducts interfaceUse modSum tcGblEnv hscEnv simplified
-  | not captureProducts && not (needsPreparedInterface interfaceUse) = do
-      when timing $ liftIO $ hPutStrLn stderr $
-        "tidepool-prepared-interface-elided module="
-          ++ moduleNameString (ms_mod_name modSum)
-          ++ " reason=no-later-home-importer"
-      pure (Nothing, Nothing)
-  | otherwise = do
-      ((cgGuts, modDetails), tidyMs) <- timeSection $ liftIO $ hscTidy hscEnv simplified
-      liftIO $ emitModuleInterfaceTiming timing (moduleNameString (ms_mod_name modSum))
-        "module_interface" "tidy" tidyMs
-      (iface, ifaceMs) <- liftIO $ measureModuleInterface timing requestId
-        (moduleNameString (ms_mod_name modSum)) SessionRegistrationInterface interfaceReuse $
-          mkIfaceTc hscEnv Sf_None modDetails modSum (Just (cg_binds cgGuts)) tcGblEnv
-      let hmi = HomeModInfo iface modDetails emptyHomeModInfoLinkable
-      when (needsPreparedInterface interfaceUse) $
-        installPreparedInterface (ms_mod_name modSum) hmi
-      pure (Just (tidyMs + ifaceMs), Just (RegisteredInterface hmi cgGuts))
+  -> Ghc (Integer, FinalizedModule)
+registerPreparedInterface timing requestId interfaceReuse interfaceUse modSum tcGblEnv hscEnv simplified = do
+  ((cgGuts, modDetails), tidyMs) <- timeSection $ liftIO $ hscTidy hscEnv simplified
+  liftIO $ emitModuleInterfaceTiming timing (moduleNameString (ms_mod_name modSum))
+    "module_interface" "tidy" tidyMs
+  (iface0, ifaceMs) <- liftIO $ measureModuleInterface timing requestId
+    (moduleNameString (ms_mod_name modSum)) SessionRegistrationInterface interfaceReuse $
+      mkFullIface hscEnv (force (mkPartialIface hscEnv (cg_binds cgGuts) modDetails
+        modSum (tcg_import_decls tcGblEnv) simplified)) Nothing Nothing NoStubs []
+  let iface = set_mi_extra_decls Nothing iface0
+      hmi = HomeModInfo iface modDetails emptyHomeModInfoLinkable
+  when (needsPreparedInterface interfaceUse) $
+    installPreparedInterface (ms_mod_name modSum) hmi
+  pure (tidyMs + ifaceMs, FinalizedModule hmi cgGuts)
 
 -- Keep request-local executable state out of the reusable prepared memo.
 installPreparedInterface :: ModuleName -> HomeModInfo -> Ghc ()
@@ -3563,26 +3756,29 @@ installPreparedInterface name hmi = do
                    , hm_linkable = linkable }
   setSession (hscUpdateHPT (\hpt -> addToHpt hpt name skinny) current)
 
--- | The normal (non-session) variant: no injection, and E6's Core-reachability
--- tier. Everything else is 'runCompile'.
+-- | Ordinary compilation has no value injection and selects prepared STG
+-- from the pre-optimization Core reference closure.
 normalVariant :: CompilePurpose -> FilePath -> IO PipelineVariant
 normalVariant purpose path = do
   case originalPurpose purpose of
     HostActivationInputCompile {} -> fail "host activation input requires its sealed session admission"
+    HostActivationCheck {} -> fail "host activation check requires its sealed session admission"
     _ -> pure ()
   targetModName' <- targetModuleNameFor path
   pure PipelineVariant
    { pvLabel = "runPipeline"
    , pvExactScope = Nothing
+   , pvCompilerProducer = Nothing
    , pvGeneratedScaffold = generatedRecipe purpose
+   , pvGeneratedInstanceCheck = generatedInstanceRecipe purpose
    , pvDownsweepExcludes = []
    , pvTransformParsed = transformFor purpose targetModName'
    , pvPlan = \_timing modGraphRaw _selectedExact -> pure CompilePlan
       { cpLoadGraph = modGraphRaw
       , cpLoadTargets = Nothing
       , cpAfterLoad = pure ()
-        -- Parse/typecheck each source in dependency order after the shared
-        -- load barrier has established a complete environment.
+        -- Consume load captures and finalize any deferred source in dependency
+        -- order before selecting prepared STG.
       , cpSummaries = pure
           [ ms | ModuleNode _ ms <- flattenSCCs (topSortModuleGraph True modGraphRaw Nothing) ]
         -- 'runPipeline' (single-shot eval) always compiles a target named
@@ -3601,8 +3797,8 @@ normalVariant purpose path = do
 
 -- | The SESSION extraction variant (active 'SessionScope' only). The same
 -- 'runCompile' skeleton as 'normalVariant' — @depanal@/@load'@ then the
--- per-module parse/typecheck/desugar/@core2core@ loop over every home module,
--- returning all their guts — with the session-scope injection seam filled in:
+-- dependency-ordered finalization and preparation of each home module, with
+-- the session-scope injection seam filled in:
 --
 --   1. The source-less @Val.G<g>@ modules are EXCLUDED from @depanal@ (no
 --      source to summarise) and their thin ifaces are INJECTED into the HPT +
@@ -3641,6 +3837,15 @@ withCycleHooks action = reifyGhc $ \session -> bracket
   (\(hooks, logger) -> reflectGhc
     (getSession >>= \env -> setSession env {hsc_hooks=hooks, hsc_logger=logger}) session)
   (const (reflectGhc action session))
+
+-- Make owns temporary interface cleanup. Every candidate view is staged in
+-- this private request directory, retained through deferred target checking,
+-- then removed on success, refusal or cancellation.
+withCompilerViewDirectory :: (FilePath -> Ghc a) -> Ghc a
+withCompilerViewDirectory action = reifyGhc $ \session -> bracket
+  (getTemporaryDirectory >>= \directory -> mkdtemp (directory </> "tidepool-compiler-view.XXXXXX"))
+  removeDirectoryRecursive
+  (\directory -> reflectGhc (action directory) session)
 
 -- GHC's whole-module pipeline consults targets to choose bytecode generation.
 -- Restore only this field in the current environment, retaining the load's HPT.
@@ -4033,7 +4238,7 @@ sessionVariant purpose scope path = do
         _ -> []
   capturedExact <- traverse (\manifest -> readExactScope manifest >>= either (ioError . userError) pure)
     (ssExactScope scope)
-  let exact = case purpose of
+  let exact = case withoutGeneratedInstanceCheck purpose of
         PlannedDeclarationCheck _ admitted -> Just admitted
         CellProgramCompile _ admitted -> Just admitted
         _ -> capturedExact
@@ -4043,6 +4248,14 @@ sessionVariant purpose scope path = do
       hostAdmission = maybe False ((== Just HostActivationInput) . fmap itemPurpose . scopeCheckedItem) exact
   unless (hostPurpose == hostAdmission)
     (fail "host activation input has another compiler purpose")
+  let checkPurpose = case effectivePurpose of
+        HostActivationCheck signature -> Just signature
+        _ -> Nothing
+      checkAdmission = exact >>= scopeCheckedCell >>= \cell -> case checkedCellPurpose cell of
+        HostInputCellCheck signature -> Just signature
+        AuthoredCellCheck -> Nothing
+  unless (checkPurpose == checkAdmission)
+    (fail "host activation check has another compiler purpose")
   forM_ exact $ \admitted -> case capturedExact of
     Just original | scopeRequestSha256 original == scopeRequestSha256 admitted -> pure ()
     _ -> ioError (userError "planned declaration leaves its original compiler offer")
@@ -4057,11 +4270,17 @@ sessionVariant purpose scope path = do
   pure PipelineVariant
    { pvLabel = "runSessionPipeline"
    , pvExactScope = exact
+   , pvCompilerProducer = Nothing
    , pvGeneratedScaffold = generatedRecipe purpose
+   , pvGeneratedInstanceCheck = generatedInstanceRecipe purpose
    , pvDownsweepExcludes = excludedOwners
    , pvTransformParsed = \env summary parsed -> do
        captured <- readIORef completedValuesRef
-       transformWithCompletedValues captured purpose targetModName' env summary parsed
+       transformed <- transformWithCompletedValues captured purpose targetModName' env summary parsed
+       case scopeRequestTypes =<< exact of
+         Just (recipe, signatures) | ms_mod_name summary == targetModName' ->
+           thenNativeModule transformed (rewriteRequestTypes env recipe signatures)
+         _ -> pure transformed
    , pvPlan = \timing modGraphRaw selectedExact -> do
       let directSummaries = [ ms | ModuleNode _ ms <- mgModSummaries' modGraphRaw ]
           importsOf ms = [ unLoc lmn | (_, lmn) <- ms_textual_imps ms ]
@@ -4352,12 +4571,11 @@ capturedBindingDisplay occurrence tcg =
 -- the effect-row sentinel, @:type@ probes, and the lookup type-search binder:
 -- all are target-local and must not be resolved back through an intentionally
 -- elided target interface.
-capturedInspectionProbes :: TypecheckedModule -> TcGblEnv -> Map.Map String Id
-capturedInspectionProbes typed tcg = Map.fromList
+capturedInspectionProbes :: TcGblEnv -> Map.Map String Id
+capturedInspectionProbes tcg = Map.fromList
   [ (occurrence, identifier)
   | identifier <- typeEnvIds (tcg_type_env tcg)
       ++ collectDataIds (tcg_binds tcg)
-      ++ collectDataIds (tm_typechecked_source typed)
   , let occurrence = occNameString (nameOccName (idName identifier))
   , occurrence == "__tidepool_lookup_row"
       || occurrence == "__tidepool_lookup_query"
@@ -4377,7 +4595,6 @@ capturedCellBinderPins hsc tcg =
       { checkedPinKey = occurrence
       , checkedPinType = renderCellPinType names stableType
       , checkedPinHeads = nominalHeadsOfType stableType
-      , checkedPinImports = cellPinTypeImports names stableType
       }
   | (occurrence, identifier) <- Map.toAscList unique
   , let stableType = stabilizeEffectRows (idType identifier)
@@ -4391,9 +4608,8 @@ capturedCellBinderPins hsc tcg =
       , "__tidepool_cell_pin_" `isPrefixOf` occurrence
       ]
 
--- A cell's pins are compiled again after the declaration module is staged.
--- Session types must retain their defining generation even when a newer
--- declaration shadows the same occurrence name.
+-- Diagnostic types retain their defining generation when another declaration
+-- shadows the same occurrence. These strings never become signature authority.
 renderCellPinType :: NamePprCtx -> Type -> String
 renderCellPinType originalNames = renderWithContext context . ppr
   where
@@ -4407,50 +4623,6 @@ cellPinNameContext originalNames = originalNames
         Just _ -> NameQual (moduleName modu)
         Nothing -> queryQualifyName originalNames modu occurrence
   }
-
--- Ask the same GHC printer which qualified constructors survive rendering.
--- Candidate traversal is deliberately broad (including invisible arguments
--- and synonym expansions); only a marker that appears in the printed type
--- becomes an import. A pre-existing qualified import, including an alias,
--- stays with the workbench source. Session generation imports are rebuilt.
-cellPinTypeImports :: NamePprCtx -> Type -> [String]
-cellPinTypeImports originalNames ty = sort . nub $
-  [ moduleNameString (moduleName modu)
-  | ((modu, _), marker) <- markers
-  , (moduleNameString marker ++ ".") `isInfixOf` probed
-  ]
-  where
-    names = cellPinNameContext originalNames
-    constructorNames =
-      [ (modu, nameOccName name)
-      | tc <- surfaceTyCons ty ++ nonDetEltsUniqSet (tyConsOfType ty)
-      , let name = tyConName tc
-      , Just modu <- [nameModule_maybe name]
-      ]
-    surfaceTyCons (TyConApp tc args) = tc : concatMap surfaceTyCons args
-    surfaceTyCons (AppTy function argument) =
-      surfaceTyCons function ++ surfaceTyCons argument
-    surfaceTyCons (ForAllTy _ body) = surfaceTyCons body
-    surfaceTyCons (FunTy _ multiplicity argument result) =
-      surfaceTyCons multiplicity ++ surfaceTyCons argument ++ surfaceTyCons result
-    surfaceTyCons (CastTy inner _) = surfaceTyCons inner
-    surfaceTyCons _ = []
-    needsImport (modu, occurrence) =
-      case queryQualifyName names modu occurrence of
-        NameUnqual -> False
-        NameQual _ -> isJust (parseSessionModule (moduleNameString (moduleName modu)))
-        _ -> True
-    markers = zip
-      (filter needsImport (nub constructorNames))
-      [ mkModuleName ("TidepoolPinImport" ++ show index) | index <- [(0 :: Int)..] ]
-    probeNames = names
-      { queryQualifyName = \modu occurrence ->
-          case lookup (modu, occurrence) markers of
-            Just marker -> NameQual marker
-            Nothing -> queryQualifyName names modu occurrence
-      }
-    probed = renderWithContext
-      (defaultSDocContext { sdocStyle = mkUserStyle probeNames AllTheWay }) (ppr ty)
 
 -- Stop at an 'Id': descending through its type/name graph is both unnecessary
 -- and dramatically larger than the typechecked syntax tree that owns it.
@@ -4558,15 +4730,10 @@ splitTupleType ty =
 renderType :: Type -> String
 renderType ty = renderWithContext defaultSDocContext (ppr ty)
 
--- | E6's reachable-module rule: a home module is REACHABLE from @target@ iff
--- it IS @target@, or its (desugared) Core is transitively referenced — via a
--- real 'Var' occurrence at any depth — from @target@'s own desugared Core.
--- See the call site in 'runCompile' ('OptimizeCoreReachable') for the full
--- soundness argument
--- (why pre-'core2core' desugared Core is the right stage, and why computing
--- this any earlier — e.g. from renamer/typecheck-level "used name" tracking
--- — would be UNSOUND: it would miss a module imported only for an orphan
--- instance).
+-- | A home module needs prepared STG if it is @target@ or transitively occurs
+-- as a resolved 'Var' in the target's desugared Core. Desugaring includes
+-- resolved dictionaries, retaining instance-only dependencies that source
+-- used-name tracking would miss. Optimization may erase these edges.
 reachableModuleClosure :: ModuleName -> Map.Map ModuleName (Set.Set ModuleName) -> Set.Set ModuleName
 reachableModuleClosure target referencesByMod = go (Set.singleton target) [target]
   where

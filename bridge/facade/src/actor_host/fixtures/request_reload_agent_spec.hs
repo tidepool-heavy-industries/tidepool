@@ -21,7 +21,7 @@ newtype ReloadTools mode = ReloadTools { probe :: mode :- Call Probe Int }
 agentSpec :: Member Sleep effects => AgentSpec ReloadTools effects
 agentSpec = defaultSpec
   { specTools = ReloadTools
-      { probe = tool "Add the installed offset after the requested delay." answer }
+      { probe = presentWith presentJson $ tool "Add the installed offset after the requested delay." answer }
   }
 
 offset :: Int

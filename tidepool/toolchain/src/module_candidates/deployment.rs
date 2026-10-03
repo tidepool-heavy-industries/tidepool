@@ -54,6 +54,18 @@ pub enum ModulePackageError {
     },
 }
 
+fn canonical_error(error: crate::recovery_artifacts::RecoveryArtifactError) -> ModulePackageError {
+    use crate::recovery_artifacts::RecoveryArtifactError as Error;
+    match error {
+        Error::DigestMismatch(path)
+        | Error::CertifiedOwnersDigestMismatch(path)
+        | Error::InvalidCapturedPayload(path)
+        | Error::InvalidModuleCertificate(path) => ModulePackageError::ArtifactChanged(path),
+        Error::Unreadable { path, error } => io(&path, error),
+        _ => ModulePackageError::Format("canonical module interface"),
+    }
+}
+
 fn io(path: &Path, source: std::io::Error) -> ModulePackageError {
     ModulePackageError::Io {
         path: path.to_owned(),
@@ -168,8 +180,8 @@ struct ModuleFiles {
     interface: FileRef,
     packages: FileRef,
     evidence: FileRef,
-    #[serde(default)]
-    certification: Option<FileRef>,
+    certification: FileRef,
+    module_interface: crate::recovery_artifacts::RecoveryModuleInterfaceRef,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -242,7 +254,7 @@ impl DeploymentModulePackage {
         let bytes = read(path, CATALOG_LIMIT)?;
         let catalog: Catalog = serde_json::from_slice(&bytes)
             .map_err(|_| ModulePackageError::Format("catalog JSON"))?;
-        if !matches!(catalog.schema, 1 | 2) {
+        if catalog.schema != 3 {
             return Err(ModulePackageError::Format("catalog schema"));
         }
         require_immutable_roots(policy, &catalog.source_root, &catalog.output_root)?;
@@ -400,25 +412,74 @@ impl DeploymentModulePackage {
                     skinny_iface_sha256: [0; 32],
                     product_sha256: [0; 32],
                 }),
-                original_certification: files
-                    .certification
-                    .as_ref()
-                    .map(|reference| self.read_ref(reference, &mut remaining))
-                    .transpose()?
-                    .unwrap_or_default(),
+                original_certification: self.read_ref(&files.certification, &mut remaining)?,
+                module_interface: Some(files.module_interface.clone()),
+                module_interface_proof: None,
                 execution_source_sha256: owner.execution_source_sha256,
                 execution_source: None,
             };
-            if self.catalog.schema == 1 {
-                if record.execution_source_sha256.is_some() {
-                    return Err(ModulePackageError::Format("legacy execution proof"));
-                }
-                record.original_owner =
-                    super::OriginalOwner::from_owner(&super::computed_owner(&record));
-            }
             if record.original_owner.owner() != super::computed_owner(&record) {
                 return Err(ModulePackageError::Format("original full owner"));
             }
+            let reference = &files.module_interface;
+            let mut captured_bytes = 0usize;
+            for relative in [
+                &reference.interface.interface_path,
+                &reference.interface.package_imports_path,
+                &reference.certificate_path,
+            ]
+            .into_iter()
+            .chain(reference.core.iter().map(|core| &core.path))
+            {
+                if relative.as_os_str().is_empty()
+                    || !relative
+                        .components()
+                        .all(|part| matches!(part, Component::Normal(_)))
+                {
+                    return Err(ModulePackageError::Format(
+                        "canonical artifact relative path",
+                    ));
+                }
+                let path = self.catalog.output_root.join(relative);
+                if absolute(&path).as_ref() != Some(&path) {
+                    return Err(ModulePackageError::RootMoved);
+                }
+                let length = fs::metadata(&path).map_err(|error| io(&path, error))?.len();
+                captured_bytes = captured_bytes
+                    .checked_add(usize::try_from(length).map_err(|_| ModulePackageError::Bounds)?)
+                    .ok_or(ModulePackageError::Bounds)?;
+            }
+            remaining = remaining
+                .checked_sub(captured_bytes)
+                .ok_or(ModulePackageError::Bounds)?;
+            let canonical = crate::recovery_artifacts::recover_module_interface(
+                &self.catalog.output_root,
+                reference,
+                &mut validation,
+            )
+            .map_err(canonical_error)?;
+            if canonical.producer_sha256()
+                != crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
+                    producer,
+                )
+                .sha256()
+                || super::hex(&canonical.source_sha256()) != record.source_sha256
+            {
+                return Err(ModulePackageError::Format("canonical producer/source"));
+            }
+            crate::certified_products::validate_canonical_native_bytes(
+                &record.original_owner.owner(),
+                &record.original_certification,
+                &record.interface,
+                &record.package_imports,
+                Some(
+                    super::parse_sha(&record.source_sha256)
+                        .ok_or(ModulePackageError::Format("canonical source digest"))?,
+                ),
+                &canonical,
+            )
+            .map_err(|_| ModulePackageError::Format("canonical native binding"))?;
+            record.module_interface_proof = Some(canonical);
             if let Some(digest) = record.execution_source_sha256 {
                 let graph = graphs
                     .get(&digest)
@@ -625,9 +686,16 @@ mod tests {
                 packages: vec![],
                 resolutions: vec![],
             };
-            let bytes = combine_rows(names.iter().map(|name| product_bytes("u", name, &[0x42])));
-            let packages =
-                combine_rows(names.iter().map(|name| package_bundle("u", name, &[0x42])));
+            let bytes = combine_rows(
+                names
+                    .iter()
+                    .map(|name| product_bytes("u", name, name.as_bytes())),
+            );
+            let packages = combine_rows(
+                names
+                    .iter()
+                    .map(|name| package_bundle("u", name, name.as_bytes())),
+            );
             let parsed =
                 crate::certified_products::ParsedModuleProducts::decode(&bytes, &packages).unwrap();
             let include = [source.clone()];
@@ -640,6 +708,32 @@ mod tests {
                 super::super::CandidateVersionOrigin::Ordinary,
                 &[],
             );
+            for record in &mut prepared.records {
+                let owner = record.original_owner.owner();
+                let product =
+                    crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+                        owner.clone(),
+                        record.interface.clone(),
+                        record.products.clone(),
+                        record.package_imports.clone(),
+                        crate::certified_products::encode_home_certification(
+                            &owner,
+                            &[],
+                            &std::collections::BTreeMap::new(),
+                        )
+                        .unwrap(),
+                    )
+                    .with_source_sha256(super::super::parse_sha(&record.source_sha256).unwrap());
+                let product = crate::certified_products::fixture_finalized_product(
+                    product,
+                    crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
+                        &producer_identity,
+                    )
+                    .sha256(),
+                );
+                record.original_certification = product.certification_bytes().to_vec();
+                record.module_interface_proof = product.module_interface().cloned();
+            }
             if with_execution {
                 use crate::execution_source::{
                     CertifiedExecutionSourceGraph, ExecutionSourceAdmission,
@@ -667,15 +761,10 @@ mod tests {
                 }).unwrap() else { panic!("graph"); };
                 for record in &mut prepared.records {
                     let owner = record.original_owner.owner();
-                    let seal = crate::certified_products::encode_home_certification(
-                        &owner,
-                        &[],
-                        &std::collections::BTreeMap::new(),
-                    )
-                    .unwrap();
+                    let seal = &record.original_certification;
                     record.original_certification =
                         crate::certified_products::bind_home_execution_source(
-                            &seal,
+                            seal,
                             &owner,
                             graph.digest(),
                             &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
@@ -795,12 +884,12 @@ mod tests {
     fn deployment_execution_proof_is_shared_and_advertised_corruption_refuses() {
         let fixture = Fixture::with_modules_and_execution(&["A", "B"], true);
         let catalog = fixture.catalog();
-        assert_eq!(catalog.schema, 2);
+        assert_eq!(catalog.schema, 3);
         assert_eq!(catalog.execution_graphs.len(), 1);
         assert!(catalog
             .modules
             .iter()
-            .all(|files| files.certification.is_some()));
+            .all(|files| files.certification.length > 0));
         let package = fixture.load().unwrap();
         let records = package.records(&[3; 32]).unwrap();
         let a = records[0].execution_source.as_ref().unwrap();
@@ -816,19 +905,41 @@ mod tests {
         fs::remove_file(&path).unwrap();
         assert!(matches!(fixture.load(), Err(ModulePackageError::RootMoved)));
         fs::write(&path, bytes).unwrap();
-        let seal = fixture.output.join(
-            catalog.modules[0]
-                .certification
-                .as_ref()
-                .unwrap()
-                .path
-                .clone(),
-        );
+        let seal = fixture
+            .output
+            .join(catalog.modules[0].certification.path.clone());
         fs::write(seal, b"corrupt seal").unwrap();
         assert!(matches!(
             fixture.load(),
             Err(ModulePackageError::ArtifactChanged(_))
         ));
+    }
+
+    #[test]
+    fn strict_catalog_preserves_core_and_refuses_legacy_and_changed_companions() {
+        let fixture = Fixture::new();
+        let mut catalog = fixture.catalog();
+        assert_eq!(catalog.schema, 3);
+        let core = catalog.modules[0].module_interface.core.as_ref().unwrap();
+        let core_path = fixture.output.join(&core.path);
+        let original = fs::read(&core_path).unwrap();
+        fs::write(&core_path, b"changed core").unwrap();
+        assert!(
+            matches!(fixture.load(), Err(ModulePackageError::ArtifactChanged(path)) if path == core_path)
+        );
+        fs::write(&core_path, original).unwrap();
+        for schema in [1, 2] {
+            catalog.schema = schema;
+            fs::write(
+                fixture.output.join("catalog.json"),
+                serde_json::to_vec(&catalog).unwrap(),
+            )
+            .unwrap();
+            assert!(matches!(
+                fixture.load(),
+                Err(ModulePackageError::Format("catalog schema"))
+            ));
+        }
     }
 
     #[test]
@@ -1154,7 +1265,32 @@ fn export_under(
     }
     validate_closed(&records, &source_root)?;
     let mut modules = Vec::new();
+    let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
     for record in records {
+        let canonical =
+            record
+                .module_interface_proof
+                .as_ref()
+                .ok_or(ModulePackageError::Format(
+                    "missing canonical module interface",
+                ))?;
+        if canonical.producer_sha256()
+            != crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(producer)
+                .sha256()
+            || super::hex(&canonical.source_sha256()) != record.source_sha256
+        {
+            return Err(ModulePackageError::Format("canonical producer/source"));
+        }
+        if record.original_certification.is_empty() {
+            return Err(ModulePackageError::Format("missing native certification"));
+        }
+        let module_interface = crate::recovery_artifacts::materialize_module_interface(
+            output_root,
+            canonical,
+            &mut validation,
+            crate::recovery_artifacts::MaterializationMode::Durable,
+        )
+        .map_err(|_| ModulePackageError::Format("canonical module materialization"))?;
         let directory =
             PathBuf::from("modules")
                 .join(sha(format!("{}:{}", record.unit, record.module).as_bytes()));
@@ -1171,6 +1307,7 @@ fn export_under(
             execution_source_sha256: record.execution_source_sha256,
         };
         modules.push(ModuleFiles {
+            module_interface,
             owner: write_ref(
                 output_root,
                 directory.join("owner.json"),
@@ -1194,15 +1331,11 @@ fn export_under(
                 &serde_json::to_vec(&record.evidence)
                     .map_err(|_| ModulePackageError::Format("evidence encoding"))?,
             )?,
-            certification: (!record.original_certification.is_empty())
-                .then(|| {
-                    write_ref(
-                        output_root,
-                        directory.join("home-certification.cbor"),
-                        &record.original_certification,
-                    )
-                })
-                .transpose()?,
+            certification: write_ref(
+                output_root,
+                directory.join("home-certification.cbor"),
+                &record.original_certification,
+            )?,
         });
     }
     let execution_graphs = prepared
@@ -1217,7 +1350,7 @@ fn export_under(
         })
         .collect::<Result<Vec<_>, _>>()?;
     let catalog = Catalog {
-        schema: 2,
+        schema: 3,
         output_root: output_root.to_owned(),
         source_root: source_root.clone(),
         source_files: crate::cache::source_root_manifest(&source_root)

@@ -867,6 +867,7 @@ mod tests {
                 }],
                 inputs: vec![],
                 reply_declaration: None,
+                request_type_signatures: None,
             },
         ])
         .unwrap();

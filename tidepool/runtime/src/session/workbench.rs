@@ -13,8 +13,8 @@ use serde::Serialize;
 
 use super::turn::CellSourceSpan;
 use super::{
-    assemble_bind_module, assemble_display_expression_module, assemble_opaque_expression_module,
-    insert_preamble_imports, ExpressionLift, TemplateSelector, TurnTemplate, DECL_TEMPLATE_SOURCE,
+    assemble_bind_module, assemble_opaque_expression_module, insert_preamble_imports,
+    ExpressionLift, TemplateSelector, TurnTemplate, DECL_TEMPLATE_SOURCE,
 };
 
 /// Normalize the one extra JSON-string layer some MCP clients apply to a
@@ -286,10 +286,84 @@ pub enum WorkbenchFailureLayer {
     Observation,
 }
 
+/// Actor-issued display identity and currently available expansion keys.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkbenchDisplayPage {
+    pub identity: (i64, i64, i64),
+    pub text: String,
+    pub expansions: Vec<(i64, String)>,
+    /// A legacy custom renderer omitted detail that cannot be expanded.
+    #[serde(default)]
+    pub unavailable: bool,
+}
+
+/// A reference to the one durable actor-output row committed by the host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ActorOutputReference {
+    pub run: String,
+    pub sequence: i64,
+}
+
+/// A published page always refers to the same durable row as actor history.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkbenchDisplayOutput {
+    #[serde(flatten)]
+    pub page: WorkbenchDisplayPage,
+    pub output: ActorOutputReference,
+}
+
+impl std::ops::Deref for WorkbenchDisplayOutput {
+    type Target = WorkbenchDisplayPage;
+
+    fn deref(&self) -> &Self::Target {
+        &self.page
+    }
+}
+
+/// The exact issued page, including retries whose Store outcome is unknown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkbenchDisplayPublicationIdentity {
+    pub display: (i64, i64, i64),
+    pub page_ordinal: u64,
+}
+
+/// Publication state at the operation's terminal snapshot. A later Store
+/// reconciliation updates retained publication state and history, never this
+/// already-delivered execution receipt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum WorkbenchDisplayPublication {
+    Pending {
+        publication: WorkbenchDisplayPublicationIdentity,
+    },
+    Unconfirmed {
+        publication: WorkbenchDisplayPublicationIdentity,
+        detail: String,
+    },
+    Published {
+        publication: WorkbenchDisplayPublicationIdentity,
+        output: ActorOutputReference,
+    },
+    Refused {
+        publication: WorkbenchDisplayPublicationIdentity,
+        detail: String,
+    },
+}
+
 /// One effect boundary observed while evaluating an input unit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkbenchOperationReceipt {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<WorkbenchDisplayOutput>,
+    /// Every submitted display retains its page identity even if cancellation
+    /// freezes this receipt before publication completes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_publication: Option<WorkbenchDisplayPublication>,
     pub id: WorkbenchOperationId,
     /// Open effect rows make the operation vocabulary extensible. This name
     /// is diagnostic metadata only and never drives behavior.
@@ -346,6 +420,10 @@ pub struct WorkbenchItemReceipt {
     pub source_items: Vec<WorkbenchCellSourceItem>,
     pub status: WorkbenchItemStatus,
     pub output: String,
+    /// Structured semantic value returned by an installed tool. Notebook and
+    /// system workbench items have no semantic tool value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<serde_json::Value>,
     /// The compiler diagnostics behind this unit's `output` and `warnings`,
     /// kept as data: severity, the coordinate the rendered header shows, and
     /// the message body. Populated on the compile-rejection paths (cell check
@@ -1190,10 +1268,9 @@ fn is_haskell_keyword(token: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Build the canonical templates for a resident actor workbench. GHC selects
-/// declaration, bind, or expression. Expressions first try the two
-/// single-evaluation Haskell-display lifts, then opaque-display counterparts
-/// for values without a rendering instance. Frontends may choose how to label
-/// those typed outcomes, but should not grow another source assembly path.
+/// declaration, bind, or expression. Pure and effectful expressions run once
+/// without requiring a rendering instance. Authored display effects own output;
+/// frontends should not grow another source assembly path.
 #[must_use]
 pub fn resident_workbench_templates(
     preamble: &str,
@@ -1228,26 +1305,6 @@ pub fn resident_workbench_templates(
                 "{{TURN_STMT}}",
                 "()",
                 false,
-            ),
-        },
-        TurnTemplate {
-            kind: TemplateSelector::Expr,
-            source: assemble_display_expression_module(
-                &preamble,
-                "__result",
-                effect_stack,
-                "{{TURN}}",
-                ExpressionLift::Effectful,
-            ),
-        },
-        TurnTemplate {
-            kind: TemplateSelector::Expr,
-            source: assemble_display_expression_module(
-                &preamble,
-                "__result",
-                effect_stack,
-                "{{TURN}}",
-                ExpressionLift::Pure,
             ),
         },
         TurnTemplate {
@@ -1294,10 +1351,6 @@ pub fn resident_cell_check_template(preamble: &str, effect_stack: &str, imports:
         &insert_preamble_imports(preamble, imports),
         "qualified GHC.TypeError as TidepoolWorkbenchTypeError",
     );
-    let preamble = insert_preamble_imports(
-        &preamble,
-        "qualified Tidepool.Inspection as TidepoolInspection",
-    );
     let preamble = insert_preamble_imports(&preamble, "{{CELL_IMPORTS}}")
         .replace("import {{CELL_IMPORTS}}", "{{CELL_IMPORTS}}")
         .replacen(
@@ -1322,8 +1375,6 @@ pub fn resident_cell_check_template(preamble: &str, effect_stack: &str, imports:
            __tidepoolCellExpression action = action >> pure () }}\n\
          instance {{-# OVERLAPPABLE #-}} TidepoolCellPure value => TidepoolCellExpression value where {{ \
            __tidepoolCellExpression _ = pure () }}\n\
-         __tidepoolCellDisplayConstraint :: TidepoolInspection.PageDisplay {effect_stack} value => value -> ()\n\
-         __tidepoolCellDisplayConstraint _ = ()\n\
          {{{{CELL_DECLS}}}}\n\
          __tidepool_cell_check :: Eff {effect_stack} ()\n\
          __tidepool_cell_check = do {{\n\
@@ -1724,6 +1775,48 @@ mod tests {
     }
 
     #[test]
+    fn display_publication_receipts_preserve_pending_page_identity() {
+        let publication = WorkbenchDisplayPublicationIdentity {
+            display: (3, 5, 7),
+            page_ordinal: 11,
+        };
+        let mut receipt = WorkbenchOperationReceipt {
+            display: None,
+            display_publication: Some(WorkbenchDisplayPublication::Pending { publication }),
+            id: WorkbenchOperationId {
+                execution: WorkbenchExecutionId::from_digest([3; 16]),
+                input_unit_index: 0,
+                effect_ordinal: 0,
+            },
+            effect: "Console.DisplayWith".into(),
+            disposition: WorkbenchOperationDisposition::Prepared,
+        };
+        let pending = serde_json::to_value(&receipt).unwrap();
+        assert!(pending.get("display").is_none());
+        assert_eq!(pending["displayPublication"]["status"], "pending");
+        assert_eq!(
+            pending["displayPublication"]["publication"]["display"],
+            serde_json::json!([3, 5, 7])
+        );
+        assert_eq!(
+            pending["displayPublication"]["publication"]["pageOrdinal"],
+            11
+        );
+
+        receipt.display_publication = Some(WorkbenchDisplayPublication::Published {
+            publication,
+            output: ActorOutputReference {
+                run: "run".into(),
+                sequence: 17,
+            },
+        });
+        let published = serde_json::to_value(receipt).unwrap();
+        assert_eq!(published["displayPublication"]["status"], "published");
+        assert_eq!(published["displayPublication"]["output"]["sequence"], 17);
+        assert_eq!(pending["displayPublication"]["status"], "pending");
+    }
+
+    #[test]
     fn response_statuses_are_closed_schema_backed_values() {
         let execution = WorkbenchExecutionId::from_digest([3; 16]);
         let response = WorkbenchResponse {
@@ -1736,11 +1829,14 @@ mod tests {
                 source_items: Vec::new(),
                 status: WorkbenchItemStatus::Committed,
                 output: "bound `answer`".into(),
+                value: None,
                 diagnostics: Vec::new(),
                 failure_layer: None,
                 warnings: Vec::new(),
                 installed_bindings: vec!["answer".into()],
                 operations: vec![WorkbenchOperationReceipt {
+                    display: None,
+                    display_publication: None,
                     id: WorkbenchOperationId {
                         execution,
                         input_unit_index: 0,

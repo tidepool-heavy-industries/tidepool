@@ -81,7 +81,7 @@ async fn hosted_tool(
     let policy = fixture.policy.clone();
     let context = reload_context(key);
     let name = name.to_owned();
-    let mut invocation = policy.dispatch_boxed(ToolInvocation {
+    let mut invocation = policy.dispatch_json_boxed(ToolInvocation {
         context: Some(context),
         name,
         arguments: ToolArguments::Structured(arguments),

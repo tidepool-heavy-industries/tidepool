@@ -83,7 +83,9 @@ workspace modules, then `reload_agent_spec` to rebuild its own typed tool
 record (a changed tool surface requires a new actor incarnation). Workers use
 the run's tooling; editing a child checkout does not reload it. `Project.Shell`,
 `Project.Lookup` and `Exomonad.Contrib.Routing` are the worked examples of presenters,
-selectors and event routing.
+selectors and event routing. Each installed function tool explicitly selects
+its model-facing text with `presentWith`; see the API guide for `Text`, JSON and
+`Display` choices.
 
 # Notebook contract
 
@@ -101,12 +103,9 @@ execution does not authorize replay. A recovery receipt saying "not submitted"
 requires waiting for its recovery notice before resubmission. Keep
 `respond value` as one single-line unit with nothing after it.
 
-Displays are bounded; retain full evidence and project useful fields.
-`cellDisplay.more` pages retained display without replay. In a cell,
-`cellDisplay` denotes the preceding cell's final display. Ordinary data types
-need no deriving clause for display; function fields are opaque. A `Display`
-instance (`Tidepool.Inspection`) sets how a type reads in cells and settlement
-notices; `Show` stays the constructor form.
+Data types need no deriving clause; unsupported fields stay opaque. Use
+`display value` for structured output and `expand` for detail, or
+`display (show value)` for textual output.
 
 # Evidence and semantic judgment
 

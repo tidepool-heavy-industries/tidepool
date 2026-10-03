@@ -127,11 +127,23 @@ pub enum KernelInvocationFailure {
     #[error("actor {0} has exited")]
     ActorExited(ActorRef),
     #[error("actor {actor} rejected the invocation: {detail}")]
-    Rejected { actor: ActorRef, detail: String },
+    Rejected {
+        actor: ActorRef,
+        detail: String,
+        receipts: Vec<tidepool_runtime::session::WorkbenchItemReceipt>,
+    },
     #[error("actor {actor} invocation failed: {detail}")]
-    Failed { actor: ActorRef, detail: String },
+    Failed {
+        actor: ActorRef,
+        detail: String,
+        receipts: Vec<tidepool_runtime::session::WorkbenchItemReceipt>,
+    },
     #[error("actor {actor} invocation cleanup remains unconfirmed: {detail}")]
-    CleanupUnconfirmed { actor: ActorRef, detail: String },
+    CleanupUnconfirmed {
+        actor: ActorRef,
+        detail: String,
+        receipts: Vec<tidepool_runtime::session::WorkbenchItemReceipt>,
+    },
     #[error(
         "actor {actor} accepted request {request:?}, but its terminal transfer failed: {source}"
     )]
@@ -142,6 +154,34 @@ pub enum KernelInvocationFailure {
     },
     #[error(transparent)]
     Workbench(#[from] KernelWorkbenchFailure),
+}
+
+impl KernelInvocationFailure {
+    /// Receipts retained by the admitted execution, including terminal cleanup
+    /// and transfer failures. The failure class remains independently typed.
+    pub fn receipts(&self) -> &[tidepool_runtime::session::WorkbenchItemReceipt] {
+        match self {
+            Self::Workbench(failure) => &failure.receipts,
+            Self::Rejected { receipts, .. }
+            | Self::Failed { receipts, .. }
+            | Self::CleanupUnconfirmed { receipts, .. } => receipts,
+            Self::TerminalTransferFailed { source, .. } => source.receipts(),
+            Self::ActorExited(_) => &[],
+        }
+    }
+
+    pub(crate) fn receipts_mut(
+        &mut self,
+    ) -> Option<&mut Vec<tidepool_runtime::session::WorkbenchItemReceipt>> {
+        match self {
+            Self::Workbench(failure) => Some(&mut failure.receipts),
+            Self::Rejected { receipts, .. }
+            | Self::Failed { receipts, .. }
+            | Self::CleanupUnconfirmed { receipts, .. } => Some(receipts),
+            Self::TerminalTransferFailed { source, .. } => source.receipts_mut(),
+            Self::ActorExited(_) => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -223,6 +263,7 @@ pub type KernelWorkbenchReply = Result<WorkbenchResponse, KernelInvocationFailur
 /// Actor-owned authority beside the transport-neutral workbench request.
 /// The runtime request and its exact execution journal never contain a handler.
 pub struct ActorWorkbenchInvocation {
+    pub(crate) display_expansion: Option<((i64, i64, i64), i64)>,
     pub request: WorkbenchRequest,
     pub(crate) installed_tools: Option<crate::resident_workbench::InstalledToolLease>,
     pub(crate) hosted_checkpoint_capture:
@@ -234,6 +275,7 @@ pub struct ActorWorkbenchInvocation {
 impl ActorWorkbenchInvocation {
     pub fn unbound(request: WorkbenchRequest) -> Self {
         Self {
+            display_expansion: None,
             request,
             installed_tools: None,
             hosted_checkpoint_capture: None,
@@ -242,12 +284,21 @@ impl ActorWorkbenchInvocation {
         }
     }
 
+    /// Execute an existing display callback through the actor's serialized mailbox.
+    /// Identity and key are validated against the actor's retained display slots.
+    pub fn for_display_expansion(identity: (i64, i64, i64), key: i64) -> Self {
+        let mut invocation = Self::unbound(WorkbenchRequest::from_cell_input(""));
+        invocation.display_expansion = Some((identity, key));
+        invocation
+    }
+
     pub(crate) fn issued(
         request: WorkbenchRequest,
         installed_tools: Option<crate::resident_workbench::InstalledToolLease>,
         hosted_checkpoint_capture: Option<std::sync::Arc<dyn crate::HostedCheckpointCapture>>,
     ) -> Self {
         Self {
+            display_expansion: None,
             request,
             installed_tools,
             hosted_checkpoint_capture,
@@ -775,7 +826,7 @@ impl LocalActorRef {
                 reply: reply.into(),
             })
             .map_err(|_| KernelInvocationFailure::ActorExited(self.identity))?;
-        receive.await.map_err(|_| KernelInvocationFailure::Failed {
+        receive.await.map_err(|_| KernelInvocationFailure::Failed { receipts: Vec::new(),
             actor: self.identity,
             detail: "replacement outcome unavailable; inspect retained actor state before further action".into(),
         })?
@@ -792,6 +843,7 @@ impl LocalActorRef {
             .await
             .map_err(|_| KernelInvocationFailure::ActorExited(self.identity))?
             .map_err(|error| KernelInvocationFailure::Rejected {
+                receipts: Vec::new(),
                 actor: self.identity,
                 detail: error.detail,
             })
@@ -1069,6 +1121,7 @@ mod tests {
                 source_items: Vec::new(),
                 status: tidepool_runtime::session::WorkbenchItemStatus::Committed,
                 output: "defined spotTaskText at generation 2".into(),
+                value: None,
                 warnings: Vec::new(),
                 installed_bindings: vec!["spotTaskText".into()],
                 operations: Vec::new(),
@@ -1103,11 +1156,14 @@ mod tests {
                 source_items: Vec::new(),
                 status: WorkbenchItemStatus::Committed,
                 output: format!("private result {index}"),
+                value: None,
                 diagnostics: Vec::new(),
                 failure_layer: None,
                 warnings: Vec::new(),
                 installed_bindings: vec![format!("private{index}")],
                 operations: vec![WorkbenchOperationReceipt {
+                    display_publication: None,
+                    display: None,
                     id: WorkbenchOperationId {
                         execution: tidepool_runtime::session::WorkbenchExecutionId::from_digest(
                             [index as u8; 16],

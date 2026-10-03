@@ -122,7 +122,7 @@ async fn visible_reload_uncertainty_and_failed_freeze_preserve_failure() {
     );
     let reply = tokio::time::timeout(
         std::time::Duration::from_secs(600),
-        fixture.policy.dispatch_boxed(ToolInvocation {
+        fixture.policy.dispatch_json_boxed(ToolInvocation {
             context: Some(context.clone()),
             name: "reload_helpers".into(),
             arguments: ToolArguments::Structured(serde_json::json!({})),
@@ -170,7 +170,7 @@ async fn visible_reload_uncertainty_and_failed_freeze_preserve_failure() {
         .contains("cannot admit exact source layer"));
     let status = tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        fixture.policy.dispatch_boxed(ToolInvocation {
+        fixture.policy.dispatch_json_boxed(ToolInvocation {
             context: Some(ToolInvocationContext::external(
                 "reload-uncertainty".into(),
                 "uncertain-status".into(),
@@ -190,7 +190,7 @@ async fn visible_reload_uncertainty_and_failed_freeze_preserve_failure() {
         layers.refresh_failed.load(Ordering::Acquire),
         "status does not repair or re-freeze source"
     );
-    let recovery = tokio::spawn(fixture.policy.dispatch_boxed(ToolInvocation {
+    let recovery = tokio::spawn(fixture.policy.dispatch_json_boxed(ToolInvocation {
         context: Some(ToolInvocationContext::external(
             "reload-uncertainty".into(),
             "reload-recovery".into(),
@@ -221,7 +221,7 @@ async fn visible_reload_uncertainty_and_failed_freeze_preserve_failure() {
         .contains("source installation is unavailable"));
     let status_during_recovery = tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        fixture.policy.dispatch_boxed(ToolInvocation {
+        fixture.policy.dispatch_json_boxed(ToolInvocation {
             context: Some(ToolInvocationContext::external(
                 "reload-uncertainty".into(),
                 "recovery-status".into(),

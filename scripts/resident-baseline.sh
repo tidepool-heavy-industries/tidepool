@@ -20,7 +20,7 @@ export TIDEPOOL_TEST_COMPILER_TRACE_OUTPUT="$evidence/compiler.jsonl"
 export TIDEPOOL_PERFORMANCE_WORKSPACE_ROOT="$evidence/workspaces"
 mkdir "$TIDEPOOL_PERFORMANCE_WORKSPACE_ROOT"
 unset TIDEPOOL_EXTRACT_NO_DAEMON TIDEPOOL_EXTRACT_DAEMON_SOCKET
-filter='test(=session::turn::scaling_tests::complete_cell_consumes_item_and_display_without_compiler_requests) | test(=session::turn::scaling_tests::resident_durable_display_cells_2_baseline)'
+filter='test(=session::turn::scaling_tests::complete_cell_consumes_native_items_without_compiler_requests) | test(=session::turn::scaling_tests::resident_durable_capture_cells_2_baseline)'
 command=(bash scripts/battery.sh -p tidepool-runtime --lib --run-ignored all --test-threads 1 --success-output immediate --failure-output immediate -E "$filter")
 python3 - "$evidence/manifest.json" "${command[@]}" <<'PY'
 import hashlib, json, os, pathlib, subprocess, sys

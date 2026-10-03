@@ -55,15 +55,15 @@ fn decode_string_array(v: &CborValue, what: &str) -> Result<Vec<String>, Compile
 
 fn decode_yield_site(v: &CborValue) -> Result<YieldSite, CompileError> {
     let arr = cbor_expect_array(v, "typed suspension site")?;
-    if !matches!(arr.len(), 7..=9) {
+    if arr.len() != 10 {
         return Err(CompileError::ExtractFailed(format!(
-            "TurnOut CBOR: expected typed suspension site with 7, 8 or 9 fields, got {}",
+            "TurnOut CBOR: expected typed suspension site with 10 fields, got {}",
             arr.len()
         )));
     }
-    let reply_declaration = match arr.get(7) {
-        None | Some(CborValue::Null) => None,
-        Some(value) => Some(cbor_expect_text(value, "reply declaration")?.to_owned()),
+    let reply_declaration = match &arr[7] {
+        CborValue::Null => None,
+        value => Some(cbor_expect_text(value, "reply declaration")?.to_owned()),
     };
     let site = cbor_as_u64(&arr[0], "Ask site")?;
     let origin = cbor_expect_text(&arr[1], "Ask origin")?.to_string();
@@ -82,29 +82,37 @@ fn decode_yield_site(v: &CborValue) -> Result<YieldSite, CompileError> {
             })
         })
         .collect::<Result<Vec<_>, CompileError>>()?;
-    let input_type_witnesses = match arr.get(8) {
-        None => Vec::new(),
-        Some(value) => {
-            let values = cbor_expect_array(value, "canonical input type witnesses")?;
-            if values.len() != inputs.len() {
-                return Err(CompileError::ExtractFailed(
-                    "typed site input witness arity".into(),
-                ));
+    let values = cbor_expect_array(&arr[8], "canonical input type witnesses")?;
+    if values.len() != inputs.len() {
+        return Err(CompileError::ExtractFailed(
+            "typed site input witness arity".into(),
+        ));
+    }
+    let input_type_witnesses = values
+        .iter()
+        .map(|value| match value {
+            CborValue::Null => Ok(None),
+            CborValue::Bytes(bytes) => {
+                crate::checked_cell::CanonicalInputTypeWitness::from_bytes(bytes).map(Some)
             }
-            values
-                .iter()
-                .map(|value| match value {
-                    CborValue::Null => Ok(None),
-                    CborValue::Bytes(bytes) => {
-                        crate::checked_cell::CanonicalInputTypeWitness::from_bytes(bytes).map(Some)
-                    }
-                    _ => Err(cbor_shape_error(
-                        "canonical input type witness",
-                        "bytes or null",
-                        value,
-                    )),
-                })
-                .collect::<Result<Vec<_>, CompileError>>()?
+            _ => Err(cbor_shape_error(
+                "canonical input type witness",
+                "bytes or null",
+                value,
+            )),
+        })
+        .collect::<Result<Vec<_>, CompileError>>()?;
+    let request_type_signatures = match &arr[9] {
+        CborValue::Null => None,
+        CborValue::Bytes(bytes) => Some(crate::checked_cell::RequestTypeSignatures::from_bytes(
+            bytes,
+        )?),
+        value => {
+            return Err(cbor_shape_error(
+                "request type signatures",
+                "bytes or null",
+                value,
+            ))
         }
     };
     Ok(YieldSite {
@@ -117,6 +125,7 @@ fn decode_yield_site(v: &CborValue) -> Result<YieldSite, CompileError> {
         heads,
         inputs,
         input_type_witnesses,
+        request_type_signatures,
     })
 }
 
@@ -149,6 +158,79 @@ mod tests {
     use super::*;
 
     #[test]
+    fn request_site_native_metadata_round_trips_json_and_cbor_and_seals_full_payload() {
+        let text = |value: &str| CborValue::Text(value.into());
+        let payload = |native: u8| {
+            let mut bytes = Vec::new();
+            // Structural codec fixture only; no GHC payload executes here.
+            ciborium::into_writer(
+                &CborValue::Array(vec![
+                    text("TPREQUESTTYPESIGNATURES1"),
+                    text("1"),
+                    CborValue::Array(vec![
+                        text("TPCHECKEDSIGNATURE2"),
+                        text("request-reply"),
+                        text("Report"),
+                        CborValue::Bytes(vec![native]),
+                        CborValue::Array(vec![]),
+                    ]),
+                    CborValue::Null,
+                ]),
+                &mut bytes,
+            )
+            .unwrap();
+            bytes
+        };
+        let site = |bytes: Vec<u8>| {
+            CborValue::Array(vec![
+                CborValue::Integer(7.into()),
+                text("Owner.request"),
+                CborValue::Integer(0.into()),
+                text("Report"),
+                CborValue::Array(vec![]),
+                CborValue::Array(vec![]),
+                CborValue::Array(vec![]),
+                CborValue::Null,
+                CborValue::Array(vec![]),
+                CborValue::Bytes(bytes),
+            ])
+        };
+        let bytes = payload(1);
+        let original = decode_yield_site(&site(bytes.clone())).unwrap();
+        let hex = bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let json = serde_json::json!({
+            "site": 7, "origin": "Owner.request", "ordinal": 0, "type": "Report", "modules": [], "heads": [], "inputs": [],
+            "input_type_witnesses": [], "reply_declaration": null, "request_type_signatures": hex,
+        });
+        assert_eq!(
+            serde_json::from_value::<YieldSite>(json.clone()).unwrap(),
+            original
+        );
+        let substituted = decode_yield_site(&site(payload(2))).unwrap();
+        assert_eq!(original.ty, substituted.ty);
+        assert!(!original.same_metadata(&substituted));
+        assert!(crate::artifacts::yield_sites_metadata_digest(&[original, substituted]).is_err());
+        let mut absent = json.clone();
+        absent
+            .as_object_mut()
+            .unwrap()
+            .remove("request_type_signatures");
+        assert!(serde_json::from_value::<YieldSite>(absent).is_err());
+        let mut nonrequest = json;
+        nonrequest["request_type_signatures"] = serde_json::Value::Null;
+        assert!(serde_json::from_value::<YieldSite>(nonrequest)
+            .unwrap()
+            .request_type_signatures
+            .is_none());
+        let mut malformed = site(payload(1));
+        malformed.as_array_mut().unwrap()[9] = text("untrusted printed type");
+        assert!(decode_yield_site(&malformed).is_err());
+    }
+
+    #[test]
     fn inline_turn_sites_preserve_nominal_owners_and_live_inputs() {
         let head = || {
             CborValue::Array(vec![
@@ -170,13 +252,23 @@ mod tests {
                 CborValue::Array(vec![head()]),
             ])]),
             CborValue::Text("data Report = Report Int".into()),
+            CborValue::Array(vec![CborValue::Null]),
+            CborValue::Null,
         ]);
         let sites = decode_turn_yield_sites(&CborValue::Array(vec![site.clone()])).unwrap();
-        assert!(sites[0].input_type_witnesses.is_empty());
+        assert_eq!(sites[0].input_type_witnesses, vec![None]);
+        assert!(sites[0].request_type_signatures.is_none());
         let CborValue::Array(mut fields) = site else {
             unreachable!()
         };
-        fields.push(CborValue::Array(vec![CborValue::Null]));
+        for legacy_fields in [7, 8, 9] {
+            assert!(
+                decode_turn_yield_sites(&CborValue::Array(vec![CborValue::Array(
+                    fields[..legacy_fields].to_vec()
+                ),]))
+                .is_err()
+            );
+        }
         let current =
             decode_turn_yield_sites(&CborValue::Array(vec![CborValue::Array(fields.clone())]))
                 .unwrap();
@@ -211,6 +303,8 @@ mod tests {
             CborValue::Text("Int".into()),
             CborValue::Array(vec![]),
             CborValue::Array(vec![]),
+            CborValue::Array(vec![]),
+            CborValue::Null,
             CborValue::Array(vec![]),
             CborValue::Null,
         ]);

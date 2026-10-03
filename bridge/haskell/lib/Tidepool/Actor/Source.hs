@@ -8,6 +8,7 @@
 module Tidepool.Actor.Source
   ( Source
   , progressSource
+  , progressSourceSited
   , settlementSource
   , ActorLifecycle (..)
   , commandSource
@@ -37,7 +38,7 @@ import Tidepool.Internal.ActorRef (ActorRef (..))
 data Source (protocol :: Type -> Type) where
   CommandSource :: Job -> (CommandResult -> protocol ()) -> Source protocol
   ProgressSource
-    :: Progress progress
+    :: Int -> Progress progress
     -> (ProgressState progress -> protocol ())
     -> Source protocol
   SettlementSource
@@ -50,11 +51,19 @@ data Source (protocol :: Type -> Type) where
     -> Source protocol
 
 -- | Capture current progress and every subsequent publication, including closure.
+{-# OPAQUE progressSource #-}
 progressSource
-  :: Progress progress
+  :: forall progress protocol. Progress progress
   -> (ProgressState progress -> protocol ())
   -> Source protocol
-progressSource = ProgressSource
+progressSource = progressSourceSited (-1)
+
+{-# OPAQUE progressSourceSited #-}
+progressSourceSited
+  :: forall progress protocol. Int -> Progress progress
+  -> (ProgressState progress -> protocol ())
+  -> Source protocol
+progressSourceSited = ProgressSource
 
 settlementSource
   :: Response result
@@ -78,12 +87,13 @@ commandSource = CommandSource
 -- entries read their request cells through the ordinary 'Replies'
 -- observation verbs; the runtime answers those with the delivered event
 -- rather than with a live poll.
+{-# OPAQUE installSource #-}
 installSource :: Member ActorKernel effs => Source protocol -> Eff effs ()
 installSource (CommandSource (Job job) project) =
   send (ActorInstallCommandSourceWith job (sourceEntry ActorCommandInputWith project))
-installSource (ProgressSource (Progress (RequestId request)) project) =
+installSource (ProgressSource site (Progress (RequestId request)) project) =
   send (ActorInstallProgressSourceWith request
-    (sourceEntry (ObserveProgressWith request) project))
+    (sourceEntry (ObserveProgressWith site request) project))
 installSource (SettlementSource response@(Response (RequestId request) _ _ _) project) =
   send (ActorInstallSettlementSourceWith request
     (sourceEntry (ObserveResponseWith request) (project . settledResponse response)))
@@ -91,14 +101,15 @@ installSource (LifecycleSource (ActorRef actor incarnation _) project) =
   send (ActorInstallLifecycleSourceWith (actor, incarnation)
     (sourceEntry ActorLifecycleInputWith project))
 
+{-# OPAQUE attachSource #-}
 attachSource
   :: forall protocol effs. Member (ActorLocal protocol) effs
   => (Int, Int) -> Source protocol -> Eff effs (Either Text ())
 attachSource owner (CommandSource (Job job) project) =
   send @(ActorLocal protocol) (ActorLocalAttachCommandSourceWith (owner, job) (sourceEntry ActorCommandInputWith project))
-attachSource owner (ProgressSource (Progress (RequestId request)) project) =
+attachSource owner (ProgressSource site (Progress (RequestId request)) project) =
   send @(ActorLocal protocol) (ActorLocalAttachProgressSourceWith (owner, request)
-    (sourceEntry (ObserveProgressWith request) project))
+    (sourceEntry (ObserveProgressWith site request) project))
 attachSource owner (SettlementSource response@(Response (RequestId request) _ _ _) project) =
   send @(ActorLocal protocol) (ActorLocalAttachSettlementSourceWith (owner, request)
     (sourceEntry (ObserveResponseWith request) (project . settledResponse response)))

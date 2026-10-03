@@ -1,5 +1,7 @@
 use super::*;
-use exomonad_actor::{ResidentToolEndpoint, ResidentToolError, ResidentToolFuture};
+use exomonad_actor::{
+    ResidentToolDispatchFuture, ResidentToolEndpoint, ResidentToolError, ResidentToolFuture,
+};
 use exomonad_agent::{
     AgentBackendError, InteractiveAgentCommand, InteractiveAgentSpec, InteractiveFuture,
     InteractiveInputError, InteractiveNativeToolPolicy, InteractivePolicyMount,
@@ -328,7 +330,7 @@ impl ResidentToolEndpoint for HeldEndpoint {
     fn instructions(&self) -> Option<&str> {
         self.inner.instructions()
     }
-    fn dispatch_boxed(&self, invocation: ToolInvocation) -> ResidentToolFuture {
+    fn dispatch_boxed(&self, invocation: ToolInvocation) -> ResidentToolDispatchFuture {
         self.inner.dispatch_boxed(invocation)
     }
     fn complete_boxed(
@@ -855,7 +857,7 @@ impl ResidentToolEndpoint for UnsupportedSeal {
     fn instructions(&self) -> Option<&str> {
         self.0.instructions()
     }
-    fn dispatch_boxed(&self, invocation: ToolInvocation) -> ResidentToolFuture {
+    fn dispatch_boxed(&self, invocation: ToolInvocation) -> ResidentToolDispatchFuture {
         self.0.dispatch_boxed(invocation)
     }
     fn complete_boxed(
@@ -1286,7 +1288,7 @@ impl ResidentToolEndpoint for ActorSealEndpoint {
     fn instructions(&self) -> Option<&str> {
         None
     }
-    fn dispatch_boxed(&self, _: ToolInvocation) -> ResidentToolFuture {
+    fn dispatch_boxed(&self, _: ToolInvocation) -> ResidentToolDispatchFuture {
         Box::pin(async { Err(ResidentToolError::Unavailable("no fixture tools".into())) })
     }
     fn seal_hosted_work_boxed(

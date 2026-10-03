@@ -78,7 +78,6 @@ fn execution(model: Arc<ModelOwner>) -> OwnedExecution<frunk::HNil, tidepool_mcp
         crate::ActorWorkbenchSource::new("", Vec::new()),
         None,
         None,
-        Vec::new(),
     );
     let cleanup = workbench.continuation_cleanup_owner(
         context.clone(),
@@ -93,6 +92,7 @@ fn execution(model: Arc<ModelOwner>) -> OwnedExecution<frunk::HNil, tidepool_mcp
     OwnedExecution {
         state: WorkbenchExecutionState {
             effects: WorkbenchEffectState {
+                display_receipt_owner: None,
                 park_effects: true,
                 context,
                 public_visibility: None,

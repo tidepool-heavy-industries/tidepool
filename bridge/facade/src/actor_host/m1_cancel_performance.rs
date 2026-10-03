@@ -76,7 +76,7 @@ impl CancelTransport {
             && self.warmup_issued.fetch_add(1, Ordering::SeqCst) == 0
         {
             harness::item::Item(
-                json!({"type":"custom_tool_call", "call_id":WARMUP_CALL, "name":"haskell", "input":"40 + 2 :: Int"}),
+                json!({"type":"custom_tool_call", "call_id":WARMUP_CALL, "name":"haskell", "input":"_ <- display (40 + 2 :: Int)"}),
             )
         } else {
             harness::item::Item(json!({

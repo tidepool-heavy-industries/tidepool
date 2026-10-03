@@ -137,6 +137,8 @@ pub struct SessionCompileView {
     pub(super) injected_values: Vec<SessionModule>,
     pub(super) next_value_generation: Generation,
     pub(super) projection: Arc<CompileViewProjection>,
+    pub(super) request_context:
+        Option<Arc<tidepool_toolchain::declaration_join::ExactCompileContext>>,
 }
 
 /// Immutable lexical metadata shared by readers of the same exact view.
@@ -229,6 +231,7 @@ impl SessionCompileView {
             injected_values,
             next_value_generation,
             projection: self.projection.clone(),
+            request_context: self.request_context.clone(),
         }
     }
 
@@ -286,6 +289,32 @@ impl SessionCompileView {
     #[must_use]
     pub fn exact_declaration_context(&self) -> Option<&Arc<ExactDeclarationContext>> {
         self.projection.exact_context.as_ref()
+    }
+
+    /// Request annotations and retained type interfaces are local to this
+    /// compile view; the cached lexical projection remains unchanged.
+    pub fn with_request_type_evidence(
+        mut self,
+        evidence: &super::SiteTypeEvidence,
+    ) -> Result<Self, crate::CompileError> {
+        self.request_context =
+            Some(evidence.compile_context(self.projection.exact_context.as_ref())?);
+        Ok(self)
+    }
+
+    #[must_use]
+    pub fn exact_compile_context(
+        &self,
+    ) -> Option<Arc<tidepool_toolchain::declaration_join::ExactCompileContext>> {
+        self.request_context.clone().or_else(|| {
+            self.projection.exact_context.as_ref().map(|declarations| {
+                Arc::new(
+                    tidepool_toolchain::declaration_join::ExactCompileContext::new(
+                        declarations.clone(),
+                    ),
+                )
+            })
+        })
     }
 
     #[must_use]
@@ -556,6 +585,7 @@ mod tests {
                 SessionModule::val(Generation(5)),
             ],
             next_value_generation: Generation(6),
+            request_context: None,
             projection: std::sync::Arc::new(crate::session::view::CompileViewProjection {
                 root: PathBuf::from("/session"),
                 persistent_imports: SourceImports::from_specs(["Data.Set qualified as Set"]),
@@ -600,6 +630,7 @@ mod tests {
                 SessionModule::val(Generation(5)),
             ],
             next_value_generation: Generation(6),
+            request_context: None,
             projection: std::sync::Arc::new(crate::session::view::CompileViewProjection {
                 root: PathBuf::from("/session"),
                 persistent_imports: SourceImports::from_specs(["Data.Set qualified as Set"]),
@@ -672,6 +703,7 @@ mod tests {
             lexical_scope: ScopeId::ROOT,
             injected_values: vec![SessionModule::val(Generation(5))],
             next_value_generation: Generation(6),
+            request_context: None,
             projection: std::sync::Arc::new(crate::session::view::CompileViewProjection {
                 root: PathBuf::from("/session"),
                 persistent_imports: SourceImports::default(),
@@ -708,6 +740,7 @@ mod tests {
             lexical_scope: ScopeId::ROOT,
             injected_values: vec![old],
             next_value_generation: Generation(6),
+            request_context: None,
             projection: std::sync::Arc::new(crate::session::view::CompileViewProjection {
                 root: PathBuf::from("/session"),
                 persistent_imports: SourceImports::default(),
@@ -715,7 +748,7 @@ mod tests {
                 visible_values: vec![old],
                 visible_value_names: vec![(
                     old,
-                    vec!["__tidepoolPage5".into(), "cellDisplay".into(), ".+".into()],
+                    vec!["retained".into(), "alias".into(), ".+".into()],
                 )],
                 reachable_values: Vec::new(),
                 shadowing: Vec::new(),
@@ -723,16 +756,16 @@ mod tests {
                 exact_context: None,
             }),
         }
-        .with_staged_values(SessionModule::val(Generation(6)), ["cellDisplay".into()]);
+        .with_staged_values(SessionModule::val(Generation(6)), ["alias".into()]);
 
         let imports = view.turn_imports(&SourceImports::default());
         assert_eq!(
             imports,
-            "Tidepool.Session.Val.G5 ((.+), __tidepoolPage5)\n\
-             qualified Tidepool.Session.Val.G5 (cellDisplay)\n\
-             Tidepool.Session.Val.G6 (cellDisplay)"
+            "Tidepool.Session.Val.G5 ((.+), retained)\n\
+             qualified Tidepool.Session.Val.G5 (alias)\n\
+             Tidepool.Session.Val.G6 (alias)"
         );
-        assert!(!imports.contains("__tidepoolDisplayMetadata5"));
+        assert!(!imports.contains("unpublishedHelper"));
     }
 
     #[test]

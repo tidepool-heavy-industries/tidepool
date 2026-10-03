@@ -1,4 +1,4 @@
-do
+_ <- do
   Right seed <- checkpoint "eight measured captured actors"
   (a, b, c, d, e, f, g, h) <- unfold (batch ("resident-measurement" :: CampaignLabel) ("eight-actors" :: ForkGroupLabel))
     ((,,,,,,,) <$>
@@ -13,4 +13,4 @@ do
   Right () <- releaseCheckpoint seed
   replies <- watch "eight measured replies" ((,,,,,,,) <$> awaitValue a <*> awaitValue b <*> awaitValue c <*> awaitValue d <*> awaitValue e <*> awaitValue f <*> awaitValue g <*> awaitValue h)
   Right (42, 42, 42, 42, 42, 42, 42, 42) <- awaitWatch replies
-  pure True
+  display True >> pure ()

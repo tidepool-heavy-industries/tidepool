@@ -3,6 +3,8 @@
 module Tidepool.ModuleCandidates
   ( ModuleCandidate(..), CandidateImport(..), CandidateQualifier(..)
   , CandidateGroup(..), CandidateGlobal(..)
+  , CandidateModuleInterface, candidateCertificatePath, candidateCertificateSha256
+  , candidateCoreDescriptor
   , CandidateExecutionSource, candidateExecutionSources, candidateOriginalIdentity
   , readModuleCandidates, readModuleCandidatesWithGraphs ) where
 
@@ -46,6 +48,17 @@ data ModuleCandidate = ModuleCandidate
   , candidatePackageImportsSha256 :: String
   , candidateProductPath :: FilePath
   , candidateExecutionSource :: Maybe CandidateExecutionSource
+  , candidateProducerSha256 :: String
+  , candidateInterfaceRequirements :: [(String,String)]
+  , candidateModuleInterface :: CandidateModuleInterface
+  } deriving (Eq, Show)
+
+-- This decoded descriptor supplies provenance only. ExactScope owns its
+-- promotion to a validated durable proof against the selected interface closure.
+data CandidateModuleInterface = CandidateModuleInterface
+  { candidateCertificatePath :: FilePath
+  , candidateCertificateSha256 :: String
+  , candidateCoreDescriptor :: (FilePath,String)
   } deriving (Eq, Show)
 
 -- The offer supplies provenance only. Current GHC admission must succeed
@@ -125,7 +138,7 @@ decodeManifest exactGraphs = do
   magic <- decodeString
   unless (magic == "TPMCAN") (fail "candidate manifest has wrong magic")
   version <- decodeString
-  unless (version == "8" && count == 6)
+  unless (version == "10" && count == 7)
     (fail "unsupported candidate manifest version or framing")
   symbols <- decodeTable $ do
     identity <- decodeIdentity
@@ -156,8 +169,13 @@ decodeManifest exactGraphs = do
         _ -> fail "candidate execution reference lacks its original graph owner"
       either (fail . show) (const (pure ()))
         (executionSourceOriginalClosure (Map.elems available) [reference])
+    producer <- T.unpack <$> decodeString
+    unless (canonicalDigest producer
+        && all ((== producer) . executionGraphProducer) (Map.elems available))
+      (fail "invalid or conflicting candidate compiler producer")
     pure [candidate {candidateExecutionSource = CandidateExecutionSource graphs <$>
-        Map.lookup (candidateUnit candidate,candidateModule candidate) byOwner}
+        Map.lookup (candidateUnit candidate,candidateModule candidate) byOwner
+        , candidateProducerSha256 = producer}
       | candidate <- candidates]
 
 type InventoryTable a = IntMap.IntMap (a, Integer)
@@ -186,7 +204,7 @@ decodeCandidate :: InventoryTable SymbolIdentity -> InventoryTable CandidateGlob
   -> Integer -> Decoder s (ModuleCandidate, Integer)
 decodeCandidate symbols globals budget = do
   count <- decodeListLen
-  unless (count == 14) (fail "module candidate must have fourteen fields")
+  unless (count == 16) (fail "module candidate must have sixteen fields")
   let text = T.unpack <$> decodeString
   unit <- text
   name <- text
@@ -199,8 +217,32 @@ decodeCandidate symbols globals budget = do
   evidenceSha <- text
   imports <- decodeImports
   (groups,next) <- decodeGroups symbols globals budget
-  candidate <- ModuleCandidate unit name source sourceSha interface interfaceSha
-    version productSha evidenceSha imports groups <$> text <*> text <*> text <*> pure Nothing
+  packages <- text
+  packageSha <- text
+  productPath <- text
+  requirements <- boundedList maxCandidates $ do
+    fields <- decodeListLen
+    unless (fields == 2) (fail "candidate interface requirement must have two fields")
+    (,) <$> text <*> text
+  unless (and (zipWith (<) requirements (drop 1 requirements))
+      && all (\(requiredUnit,requiredModule) -> not (null requiredUnit) && not (null requiredModule)) requirements
+      && (unit,name) `notElem` requirements)
+    (fail "invalid candidate canonical requirements")
+  descriptorFields <- decodeListLen
+  role <- text
+  unless (descriptorFields == 5 && role == "module")
+    (fail "candidate requires canonical module evidence")
+  certificatePath <- text
+  certificateSha <- text
+  corePath <- text
+  coreSha <- text
+  unless (isAbsolute certificatePath && canonicalDigest certificateSha
+      && isAbsolute corePath && canonicalDigest coreSha)
+    (fail "invalid candidate canonical descriptor")
+  let descriptor = CandidateModuleInterface certificatePath certificateSha (corePath,coreSha)
+      candidate = ModuleCandidate unit name source sourceSha interface interfaceSha
+        version productSha evidenceSha imports groups packages packageSha productPath Nothing
+        "" requirements descriptor
   unless (not (null (candidateUnit candidate))
       && not (null (candidateModule candidate))
       && isAbsolute (candidateSource candidate)
@@ -393,3 +435,7 @@ decodeImports = do
 
 isDigest :: String -> Bool
 isDigest bytes = length bytes == 64 && all isHexDigit bytes
+
+canonicalDigest :: String -> Bool
+canonicalDigest value = length value == 64 && value /= replicate 64 '0'
+  && all (`elem` ("0123456789abcdef" :: String)) value

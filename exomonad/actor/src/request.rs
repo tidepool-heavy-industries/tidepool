@@ -196,6 +196,7 @@ pub enum ReplyError {
     AlreadySettled,
     Unauthorized,
     WrongIncarnation,
+    ProgressTypeMismatch,
     CancellationRequested,
 }
 
@@ -316,6 +317,27 @@ enum OwnerState {
     Abandoned,
 }
 
+enum ProgressTypeAdmission {
+    Unadmitted,
+    Absent,
+    Typed(std::sync::Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>),
+}
+
+impl From<Option<std::sync::Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>>>
+    for ProgressTypeAdmission
+{
+    fn from(
+        witness: Option<
+            std::sync::Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>,
+        >,
+    ) -> Self {
+        match witness {
+            Some(witness) => Self::Typed(witness),
+            None => Self::Absent,
+        }
+    }
+}
+
 struct RequestRecord {
     sources: Vec<sources::RequestSourceConnection>,
     updates: Vec<updates::UpdateRecord>,
@@ -329,6 +351,7 @@ struct RequestRecord {
     owner_state: OwnerState,
     deadline: Option<ActiveRequestDeadline>,
     progress: Option<ProgressSnapshot>,
+    progress_type: ProgressTypeAdmission,
     /// Authored reporting intent; subscriptions temporarily own its wake.
     notify_owner: bool,
     /// The owner notice was emitted, a named subscription owns it, or a direct
@@ -364,6 +387,7 @@ struct RequestRecord {
 #[derive(Clone, Debug)]
 pub(crate) struct ProgressSnapshot {
     pub revision: u64,
+    pub type_witness: std::sync::Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>,
     pub value: std::sync::Arc<tidepool_runtime::session::RootCustody>,
     /// The resident session whose machine `value`'s handle actually lives
     /// on -- the publishing actor's own session at the moment it called
@@ -583,6 +607,7 @@ impl RequestStateTable {
                 owner_state: OwnerState::Observing,
                 deadline: None,
                 progress: None,
+                progress_type: ProgressTypeAdmission::Unadmitted,
                 notify_owner,
                 settlement_notified: false,
                 registered_at_unix_ms: unix_time_ms(),
@@ -957,12 +982,17 @@ impl RequestRegistry {
         &self,
         target: ActorRef,
         request: RequestId,
-        value: tidepool_runtime::session::RootCustody,
+        value: tidepool_runtime::session::RuntimeProgressPublication,
         session: tidepool_repr::SessionId,
     ) -> Result<(u64, Vec<WatchNotification>), ReplyError> {
         let mut state = self.state.lock();
         let record = state.requests.get_mut(&request).ok_or(ReplyError::Stale)?;
         authorize_progress_publication(record, target)?;
+        let (value, type_witness) = value.into_parts();
+        match &record.progress_type {
+            ProgressTypeAdmission::Typed(expected) if expected == &type_witness => {}
+            _ => return Err(ReplyError::ProgressTypeMismatch),
+        }
         let revision = record
             .progress
             .as_ref()
@@ -971,6 +1001,7 @@ impl RequestRegistry {
             .ok_or(ReplyError::Stale)?;
         record.progress = Some(ProgressSnapshot {
             revision,
+            type_witness,
             value: std::sync::Arc::new(value),
             session,
         });
@@ -1563,16 +1594,29 @@ impl RequestRegistry {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn present(
         &self,
         target: ActorRef,
         request: RequestId,
+    ) -> Result<Option<CancellationReason>, ReplyError> {
+        self.present_with_progress_type(target, request, None)
+    }
+
+    pub(crate) fn present_with_progress_type(
+        &self,
+        target: ActorRef,
+        request: RequestId,
+        progress_type: Option<
+            std::sync::Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>,
+        >,
     ) -> Result<Option<CancellationReason>, ReplyError> {
         let mut state = self.state.lock();
         let record = state.requests.get_mut(&request).ok_or(ReplyError::Stale)?;
         authorize_target(record, target)?;
         match record.target_state {
             TargetState::Queued => {
+                record.progress_type = progress_type.into();
                 record.target_state = TargetState::Presented;
                 Ok(None)
             }
@@ -1580,6 +1624,7 @@ impl RequestRegistry {
                 presented: false,
                 reason,
             } => {
+                record.progress_type = progress_type.into();
                 record.target_state = TargetState::CancellationRequested {
                     presented: true,
                     reason,

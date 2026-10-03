@@ -99,6 +99,10 @@ pub fn agent_control() -> Effect {
                         ],
                     ),
                     variant("CleanupGroupRetired", vec![HsType::Int]),
+                    variant(
+                        "CleanupActorOutputPending",
+                        vec![HsType::Int, HsType::Int, HsType::Int],
+                    ),
                     variant("CleanupBlocked", vec![HsType::Text]),
                     variant("CleanupStalePlan", vec![]),
                 ],

@@ -93,7 +93,7 @@ verifyModuleEvidenceProjection = do
   site binder_ sid origin ordinal root inputs = PreparedSite
     { psOwner = binder_
     , psSite = Effect.YieldSite sid origin ordinal
-        (Effect.SiteType "unused" [] []) [] [] Nothing
+        (Effect.SiteType "unused" [] []) [] [] Nothing Nothing
     , psDelivery = Effect.DeliverHostAnswer
     , psWireNode = TypePolicy.TypeNodeId root
     , psInputNodes = map TypePolicy.TypeNodeId inputs

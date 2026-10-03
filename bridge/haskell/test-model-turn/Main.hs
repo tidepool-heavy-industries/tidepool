@@ -26,16 +26,16 @@ data Reply = Reply { count :: Int, optional :: Maybe Text }
 
 program :: Eff '[ModelCall, State [Text]] (ModelResult Reply)
 program = invokeModel (typedTurn @Reply (defaultSpec
-  { specTools = Tools (tool "Echo with a caller effect" (\text -> modify (<> [text]) >> pure text))
-  , afterTool = Just (\_ result -> modify (<> [toolResultHandle result]) >> pure (Annotated "checked"))
+  { specTools = Tools (presentWith (const "model-visible") (tool "Echo with a caller effect" (\text -> modify (<> [text]) >> pure text)))
+  , afterTool = Just (\_ result -> modify (<> [toolResultHandle result, if toolResultValue result == String "called" then "semantic" else "missing"]) >> pure (Annotated "checked"))
   }) "Return a typed result after echoing") "hello"
 
 handleModel :: ModelCall a -> Eff '[State [Text]] a
 handleModel (ModelStartWith _) = pure (Right (object
   ["kind" .= ("callback" :: Text), "invocation" .= ("i" :: Text), "call_id" .= ("c" :: Text), "name" .= ("echo" :: Text), "arguments" .= ("called" :: Text)]))
 handleModel (ModelResumeWith token call answer)
-  | token == "i" && call == "c" && answer == toolDispatchReply (Right (String "called")) = pure (Right (object
-      ["kind" .= ("hook" :: Text), "invocation" .= token, "operation" .= ("op" :: Text), "name" .= ("echo" :: Text), "arguments" .= ("called" :: Text), "handle" .= ("retained:1" :: Text), "ordinal" .= (1 :: Int), "output" .= ("called" :: Text)]))
+  | token == "i" && call == "c" && answer == toolDispatchReply (Right (ToolDispatchSuccess (String "called") "model-visible")) = pure (Right (object
+      ["kind" .= ("hook" :: Text), "invocation" .= token, "operation" .= ("op" :: Text), "name" .= ("echo" :: Text), "arguments" .= ("called" :: Text), "handle" .= ("retained:1" :: Text), "ordinal" .= (1 :: Int), "value" .= ("called" :: Text), "output" .= ("called" :: Text)]))
   | otherwise = error "callback identity/output changed"
 handleModel (ModelAnnotateWith token op annotation)
   | token == "i" && op == "op" && annotation == annotationToJson (Annotated "checked") = pure (Right (object
@@ -58,7 +58,7 @@ main = do
     ,"error" .= ("invalid input for tool echo: semantic rejection" :: Text)])
     (error "input refusal lost its typed detail")
   let (result, events) = run (runState [] (interpret handleModel program))
-  unless (events == ["called", "retained:1"]) (error "callbacks did not use caller state")
+  unless (events == ["called", "retained:1", "semantic"]) (error "callbacks did not use caller state or semantic result")
   case modelOutcome result of
     Right (Reply 3 Nothing) -> pure ()
     _ -> error "typed result did not decode"

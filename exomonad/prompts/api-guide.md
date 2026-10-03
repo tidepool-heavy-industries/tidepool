@@ -6,6 +6,13 @@ text, maps, and sets. `bash`, `withMemory`, `MiB`, `GiB`, `:=`, and `:&` are in 
 Cells enable the usual extensions, including `TypeApplications`, `DataKinds`,
 `OverloadedLabels`, and `OverloadedRecordDot`; standalone modules declare theirs.
 
+Cell values retain their types without automatic rendering.
+Use `display value` for bounded structured output; it returns a
+`DisplayHandle value`. `expansions handle` gives opaque keys and field labels,
+and `expand handle key` displays one field independently. Use
+`display (show value)` when you want the textual `Show` form. Unsupported
+fields stay opaque.
+
 ## Choose the workflow
 
 Use pure functions for deterministic transforms, Haskell `do` for effects and
@@ -20,6 +27,13 @@ are not inherited. Calls in one cell share its model budget. Match `modelOutcome
 retain `modelReceipt`, and handle typed failure before cleanup. An absent admitted
 service returns a typed boundary failure.
 
+Every function tool in an installed `AgentSpec` selects its model-facing text
+explicitly: use `presentWith id` for `Text`, `presentWith presentJson` for JSON,
+or `presentWith presentDisplay` for a `Display` value. For example,
+`lookup = presentWith id $ tool description handler`. The hook receives
+`toolResultValue` as semantic JSON and `toolResultOutput` as the selected text;
+it does not render or replace the tool's text.
+
 ## Delegate and inspect
 
 Scaffold, admit ready parallel work and integrate checked results. Recursive
@@ -32,7 +46,7 @@ let task = "Remove the stale path and report the focused check." :: Text
   child @Text $ withLifetime ActorOwned $ withContext (selected id) $
     coding projectHead $
       assignment [label|remove-stale-path|] task
-ready
+display ready
 ```
 
 `spawnWatched` combines immediate `unfold` and a named settlement watch.
@@ -94,8 +108,8 @@ their creating cell. See `doc workbench` and the compiled
 `bridge/haskell/examples/model-turns/ContextWorkflow.hs`.
 
 The activation supplies typed `sessionInput`, its reply declaration, and the
-roster of siblings admitted with you; use `inspectFull sessionInput` only for
-omitted detail. `respond`, `sessionReply` and `sessionInput` exist only while
+roster of siblings admitted with you; use `display sessionInput` to inspect it.
+`respond`, `sessionReply` and `sessionInput` exist only while
 a request is pending; `lookup` shows them then. A root has none of them: use
 the project's task and review constructors instead of recipes written for a
 child. `request @Report (responseActor worker) (assignment [label|revision|] input)`

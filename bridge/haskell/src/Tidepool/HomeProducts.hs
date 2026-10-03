@@ -2,36 +2,48 @@
 -- Boot declarations are source inputs, not executable products. A boot SCC
 -- receives fresh GHC load validation before its original prepared bodies reuse.
 module Tidepool.HomeProducts
-  ( hydrateCandidateHomeProducts, hydrateCandidateHomeProductsWithOriginals ) where
+  ( hydrateCandidateHomeProducts, hydrateCandidateHomeProductsWithOriginals
+  , CandidateCoreFailure(..), validateCandidateInterfaceRequirements
+  , materializeCandidateCompilerView ) where
 
 import Control.Exception
-  ( SomeException, SomeAsyncException, displayException, fromException, throwIO, try )
+  ( Exception, SomeException, SomeAsyncException, displayException, fromException, throwIO, try )
 import Control.Monad (forM_, unless)
 import Control.Monad.IO.Class (liftIO)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.IORef (readIORef)
+import Data.ByteString qualified as BS
+import Crypto.Hash.SHA256 qualified as SHA256
+import Numeric (showHex)
+import System.IO (IOMode(ReadMode), withBinaryFile)
 import GHC
   ( Ghc, ModSummary(..), getSession, parseModule, setSession, typecheckModule
   , tm_internals_, ms_mod_name, LoadHowMuch(LoadAllTargets), SuccessFlag(..)
   , topSortModuleGraph )
 import GHC.Driver.Env
   ( HscEnv(..), hsc_HPT, hscUpdateHPT )
+import GHC.Driver.Backend (backendGeneratesCode)
 import GHC.Driver.Monad (reflectGhc, reifyGhc)
 import GHC.Iface.Recomp (MaybeValidated(..), checkOldIface)
-import GHC.Driver.Session (GeneralFlag(Opt_Pp), gopt, xopt)
+import GHC.Driver.Session (GeneralFlag(Opt_Pp, Opt_BuildDynamicToo), backend, gopt, xopt, dynamicNow, targetProfile)
 import GHC.LanguageExtensions.Type qualified as LangExt
 import GHC.Tc.Types (tcg_dependent_files)
 import GHC.Types.SourceFile (HscSource(..))
-import GHC.Unit.Home.ModInfo (addToHpt, eltsHpt, lookupHpt)
+import GHC.Unit.Home.ModInfo
+  ( HomeModInfo(..), addToHpt, eltsHpt, lookupHpt )
 import GHC.Unit.Module.Graph
   ( ModuleGraph, ModuleGraphNode(..), NodeKey(..), mgModSummaries', mkModuleGraph
   , mgTransDeps, mkNodeKey, nodeDependencies )
 import GHC.Driver.Make (load')
 import GHC.Types.Error (mkUnknownDiagnostic)
 import GHC.Data.Graph.Directed (flattenSCCs)
-import GHC.Unit.Module.ModIface (ModIface, mi_module)
-import GHC.Unit.Module (moduleName, moduleNameString)
+import GHC.Unit.Module.ModIface (ModIface, mi_module, mi_usages, set_mi_extra_decls)
+import GHC.Unit.Module.Location (ModLocation(..))
+import GHC.Iface.Binary (writeBinIface, CompressionIFace(..), TraceBinIFace(..))
+import GHC.Unit.Module.Deps (Usage(..))
+import GHC.Unit.Module (moduleName, moduleNameString, moduleUnit)
+import GHC.Unit.Types (unitString, unitIdString)
 import GHC.Utils.Outputable (ppr, renderWithContext, defaultSDocContext)
 import Tidepool.ExactHydration
   ( ExactIfaceArtifact, freshExactState, hydrateExactScope )
@@ -39,6 +51,84 @@ import Tidepool.CompileInputPolicy (pluginInputIssues)
 import Tidepool.FamilyConsistency (validateEnvironmentFamilies)
 import Tidepool.RetainedUnfoldings (scopeRetainedHscEnv, scopeRetainedModuleGraph)
 import Tidepool.Timing (emitCount, readTimingEnabled, timeDetailPhase)
+import Tidepool.ExactScope
+  ( CanonicalInterfaceProof, canonicalCoreArtifact, canonicalCorePath
+  , canonicalCoreSha256, canonicalHomeUnits, canonicalRequirements )
+import Tidepool.FinalizedCore (FinalizedCoreFailure, attachFinalizedCore)
+import System.Directory (getModificationTime)
+import System.FilePath ((</>))
+
+data CandidateCoreFailure
+  = CandidateInterfaceRequirementsMismatch
+  | CandidateCoreMissing
+  | CandidateCoreTooLarge
+  | CandidateCoreBytesMismatch
+  | CandidateCoreDecodeFailure FinalizedCoreFailure
+  | CandidateCoreHomeMissing
+  | CandidateCompilerViewUnsupportedProfile
+  deriving (Eq, Show)
+instance Exception CandidateCoreFailure
+
+-- The producer's complete home census classifies package-form usages too.
+-- Authored source import adjacency cannot substitute for this native census.
+validateCandidateInterfaceRequirements
+  :: CanonicalInterfaceProof -> ModIface -> Either CandidateCoreFailure ()
+validateCandidateInterfaceRequirements proof iface =
+  unless (all (`Set.member` homes) (map fst actual)
+      && Set.fromList actual == Map.keysSet (canonicalRequirements proof))
+    (Left CandidateInterfaceRequirementsMismatch)
+  where
+    homes = canonicalHomeUnits proof
+    self = (unitString (moduleUnit (mi_module iface)), moduleNameString (moduleName (mi_module iface)))
+    actual = Set.toAscList (Set.delete self (Set.fromList (concatMap owner (mi_usages iface))))
+    owner UsageHomeModule{usg_mod_name = name, usg_unit_id = unit} =
+      [(unitIdString unit, moduleNameString name)]
+    owner UsageHomeModuleInterface{usg_mod_name = name, usg_unit_id = unit} =
+      [(unitIdString unit, moduleNameString name)]
+    owner UsagePackageModule{usg_mod = required}
+      | unitString (moduleUnit required) `Set.member` homes =
+          [(unitString (moduleUnit required), moduleNameString (moduleName required))]
+    owner _ = []
+
+-- A request-local make view preserves source selection while giving GHC its
+-- own supported interface-to-bytecode handoff. Durable artifact paths are
+-- never handed to make, which may delete its input interface during cleanup.
+materializeCandidateCompilerView
+  :: FilePath -> Int -> HscEnv -> CanonicalInterfaceProof -> ModSummary
+  -> IO ModSummary
+materializeCandidateCompilerView directory index env proof summary = do
+  let flags = ms_hspp_opts summary
+  unless (not (gopt Opt_BuildDynamicToo flags) && not (dynamicNow flags))
+    (throwIO CandidateCompilerViewUnsupportedProfile)
+  home <- maybe (throwIO CandidateCoreHomeMissing) pure
+    (lookupHpt (hsc_HPT env) (ms_mod_name summary))
+  unless (mi_module (hm_iface home) == ms_mod summary) (throwIO CandidateCoreHomeMissing)
+  either throwIO pure (validateCandidateInterfaceRequirements proof (hm_iface home))
+  interface <- if backendGeneratesCode (backend flags)
+    then do
+      bytes <- readCandidateCore proof
+      attachFinalizedCore env home bytes >>= either (throwIO . CandidateCoreDecodeFailure) pure
+    else pure (set_mi_extra_decls Nothing (hm_iface home))
+  let path = directory </> "candidate-" ++ show index ++ ".hi"
+  writeBinIface (targetProfile flags) QuietBinIFace NormalCompression path interface
+  modified <- getModificationTime path
+  pure summary
+    { ms_location = (ms_location summary)
+        { ml_hi_file = path, ml_dyn_hi_file = path ++ ".dyn_hi" }
+    , ms_iface_date = Just modified
+    }
+
+readCandidateCore :: CanonicalInterfaceProof -> IO BS.ByteString
+readCandidateCore proof = do
+  core <- maybe (throwIO CandidateCoreMissing) pure (canonicalCoreArtifact proof)
+  bytes <- withBinaryFile (canonicalCorePath core) ReadMode $ \handle ->
+    BS.hGet handle (32 * 1024 * 1024 + 1)
+  unless (BS.length bytes <= 32 * 1024 * 1024) (throwIO CandidateCoreTooLarge)
+  unless (digest bytes == canonicalCoreSha256 core) (throwIO CandidateCoreBytesMismatch)
+  pure bytes
+  where
+    digest = concatMap (\byte -> let rendered = showHex byte ""
+      in replicate (2 - length rendered) '0' ++ rendered) . BS.unpack . SHA256.hash
 
 -- Every ordinary summary and every boot summary is from the current
 -- downsweep. The caller has already checked source/package witnesses and

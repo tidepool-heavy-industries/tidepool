@@ -117,6 +117,14 @@ pub struct YieldSite {
     pub input_type_witnesses: Vec<Option<crate::checked_cell::CanonicalInputTypeWitness>>,
     #[serde(default)]
     pub reply_declaration: Option<String>,
+    #[serde(deserialize_with = "deserialize_request_type_signatures")]
+    pub request_type_signatures: Option<crate::checked_cell::RequestTypeSignatures>,
+}
+
+fn deserialize_request_type_signatures<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<crate::checked_cell::RequestTypeSignatures>, D::Error> {
+    Option::deserialize(deserializer)
 }
 
 impl YieldSite {
@@ -162,6 +170,10 @@ impl YieldSite {
             if let Some(witness) = witness {
                 hasher.update(witness.metadata_digest());
             }
+        }
+        hasher.update([u8::from(self.request_type_signatures.is_some())]);
+        if let Some(signatures) = &self.request_type_signatures {
+            hasher.update(signatures.metadata_digest());
         }
         hasher.finalize().into()
     }
@@ -236,6 +248,7 @@ impl YieldSites {
                         site,
                         YieldSite {
                             reply_declaration: None,
+                            request_type_signatures: None,
                             site,
                             origin: "<test>".into(),
                             ordinal: site,
@@ -262,6 +275,7 @@ impl YieldSites {
                         site,
                         YieldSite {
                             reply_declaration: None,
+                            request_type_signatures: None,
                             site,
                             origin: "<test>".into(),
                             ordinal: site,
@@ -368,6 +382,7 @@ pub struct TargetArtifact {
 /// The full output of one `tidepool-extract` invocation: a shared constructor
 /// table + warnings, and one [`TargetArtifact`] per requested target.
 pub struct CompiledArtifacts {
+    pub artifact_view: crate::artifact_inventory::ArtifactView,
     /// DataCon metadata the JIT needs to dispatch on constructors — shared by
     /// every target (they compiled in the same GHC session).
     pub table: DataConTable,
@@ -393,7 +408,7 @@ pub struct CompiledArtifacts {
 }
 
 /// Candidate suggestions for a worker compile whose source is rendered by the
-/// worker after the request starts (the resident turn and folded-turn lanes).
+/// worker after the request starts (the resident turn lane).
 /// The same offer must be passed to final sealing; a manifest path alone is
 /// never authority for a cached product.
 pub struct ModuleCandidateOffer {
@@ -415,9 +430,17 @@ pub struct ModuleCandidateOffer {
 enum CheckedPurpose {
     Inspection,
     Cell,
+    HostInputCell,
     Item,
     HostActivationInput,
     Display,
+}
+
+/// The original host witness travels only with its dedicated compiler purpose.
+/// Authored and planned cells cannot attach host input signature authority.
+pub enum CheckedCellPurpose<'a> {
+    Authored,
+    HostActivationInput(&'a crate::checked_cell::CanonicalInputTypeWitness),
 }
 
 fn checked_search_authorization(
@@ -451,6 +474,7 @@ fn checked_search_authorization(
         match purpose {
             CheckedPurpose::Inspection => "inspection1",
             CheckedPurpose::Cell => "cell-check2",
+            CheckedPurpose::HostInputCell => "host-input-check1",
             CheckedPurpose::Item => "checked-item2",
             CheckedPurpose::HostActivationInput => "host-activation-input1",
             CheckedPurpose::Display => "checked-display2",
@@ -459,6 +483,45 @@ fn checked_search_authorization(
     );
     fields.push(Value::Array(paths));
     Ok(authorization)
+}
+
+fn checked_cell_authorization(
+    purpose: CheckedCellPurpose<'_>,
+    specification: &crate::checked_cell::CheckedCellSpecification,
+    values: &crate::checked_cell::CheckedValueInputs,
+    include: &[PathBuf],
+) -> Result<Value, CompileError> {
+    let mut authorization = specification.manifest_value()?;
+    let Value::Array(fields) = &mut authorization else {
+        unreachable!("closed cell authorization")
+    };
+    fields.push(values.baseline_authorization());
+    let purpose = match purpose {
+        CheckedCellPurpose::Authored => CheckedPurpose::Cell,
+        CheckedCellPurpose::HostActivationInput(witness) => {
+            if !specification.reserved_declaration_modules.is_empty()
+                || specification.cell_source
+                    != "sessionInput <- pure (undefined :: TidepoolActivationInput)"
+            {
+                return Err(CompileError::ExtractFailed(
+                    "host input witness requires its reserved binder-only compiler slot".into(),
+                ));
+            }
+            fields.push(crate::checked_cell::encode_signature(witness.signature()));
+            CheckedPurpose::HostInputCell
+        }
+    };
+    checked_search_authorization(purpose, authorization, include)
+}
+
+fn compile_context_with_declarations(
+    context: Option<Arc<crate::declaration_context::ExactCompileContext>>,
+    declarations: Arc<crate::declaration_join::ExactDeclarationContext>,
+) -> crate::declaration_context::ExactCompileContext {
+    match context {
+        Some(context) => (*context).clone().with_declarations(declarations),
+        None => crate::declaration_context::ExactCompileContext::new(declarations),
+    }
 }
 
 fn checked_offer_context(
@@ -548,7 +611,20 @@ fn immutable_candidates_in_context(
         );
     }
     let exclusions = module_candidates::ExactCandidateContext::new(protected, reserved)
-        .with_originals(context.recovery_products());
+        .with_originals(context.recovery_products())
+        .with_interface_seals(
+            context
+                .artifact_view()
+                .descriptors()
+                .into_iter()
+                .map(|descriptor| {
+                    (
+                        (descriptor.owner.unit, descriptor.owner.module),
+                        descriptor.interface_sha256,
+                    )
+                })
+                .collect(),
+        );
     Ok(
         module_candidates::select_configured_in_context(producer, include, scratch, &exclusions)?
             .map(Arc::new),
@@ -735,7 +811,7 @@ impl ModuleCandidateOffer {
         producer: &[u8],
         include: &[PathBuf],
         scratch: &Path,
-        context: Arc<crate::declaration_join::ExactDeclarationContext>,
+        context: Arc<crate::declaration_context::ExactCompileContext>,
     ) -> Result<Self, CompileError> {
         Ok(Self {
             selected: None,
@@ -813,8 +889,9 @@ impl ModuleCandidateOffer {
         producer: &[u8],
         include: &[PathBuf],
         scratch: &Path,
-        context: Option<Arc<crate::declaration_join::ExactDeclarationContext>>,
+        context: Option<Arc<crate::declaration_context::ExactCompileContext>>,
         specification: crate::checked_cell::CheckedCellSpecification,
+        purpose: CheckedCellPurpose<'_>,
         checked_values: Vec<(tidepool_repr::SessionModule, Arc<[u8]>)>,
         retained_interfaces: &[Arc<crate::checked_cell::CheckedValueArtifact>],
     ) -> Result<Self, CompileError> {
@@ -832,20 +909,20 @@ impl ModuleCandidateOffer {
                 "checked initial interface inventory differs from injected owners".into(),
             ));
         }
-        let mut authorization = specification.manifest_value()?;
-        let Value::Array(fields) = &mut authorization else {
-            unreachable!("closed cell authorization")
-        };
-        let publication_context = checked_offer_context(context)?;
+        let compile_context = context;
+        let publication_context = checked_offer_context(
+            compile_context
+                .as_ref()
+                .map(|context| context.declarations().clone()),
+        )?;
         let context = checked_value_context(
             Some(publication_context.clone()),
             &checked_values,
             retained_interfaces,
         )?;
         let checked_values = crate::checked_cell::CheckedValueInputs::capture(checked_values)?;
-        fields.push(checked_values.baseline_authorization());
         let authorization =
-            checked_search_authorization(CheckedPurpose::Cell, authorization, include)?;
+            checked_cell_authorization(purpose, &specification, &checked_values, include)?;
         Ok(Self {
             selected: immutable_candidates_in_context(
                 &context,
@@ -857,7 +934,7 @@ impl ModuleCandidateOffer {
             producer: producer.to_vec(),
             include: include.to_vec(),
             exact: Some(
-                context
+                compile_context_with_declarations(compile_context, context.clone())
                     .prepare_compilation_with_authorization(
                         &scratch.join("exact-scope"),
                         producer,
@@ -888,7 +965,7 @@ impl ModuleCandidateOffer {
         endpoint: &crate::toolchain::AdmittedCompilerEndpoint,
         include: &[PathBuf],
         scratch: &Path,
-        context: Option<Arc<crate::declaration_join::ExactDeclarationContext>>,
+        context: Option<Arc<crate::declaration_context::ExactCompileContext>>,
         specification: crate::checked_cell::CheckedCellSpecification,
         values: Vec<(tidepool_repr::SessionModule, Arc<[u8]>)>,
         planned: crate::checked_cell::CheckedPlannedCellSpecification,
@@ -911,7 +988,12 @@ impl ModuleCandidateOffer {
         }
         let extension = planned.authorization(&specification, producer, include, scratch)?;
         let mut authorization = specification.manifest_value()?;
-        let publication_context = checked_offer_context(context)?;
+        let compile_context = context;
+        let publication_context = checked_offer_context(
+            compile_context
+                .as_ref()
+                .map(|context| context.declarations().clone()),
+        )?;
         let context = checked_value_context(
             Some(publication_context.clone()),
             &values,
@@ -941,7 +1023,7 @@ impl ModuleCandidateOffer {
             producer: producer.to_vec(),
             include: include.to_vec(),
             exact: Some(
-                context
+                compile_context_with_declarations(compile_context, context.clone())
                     .prepare_compilation_with_authorization(
                         &scratch.join("exact-scope"),
                         producer,
@@ -971,7 +1053,7 @@ impl ModuleCandidateOffer {
         producer: &[u8],
         include: &[PathBuf],
         scratch: &Path,
-        context: Option<Arc<crate::declaration_join::ExactDeclarationContext>>,
+        context: Option<Arc<crate::declaration_context::ExactCompileContext>>,
         item: crate::checked_cell::ExactCheckedItem,
         prefix: crate::checked_cell::ExactCompiledPrefix,
         runtime_prefix_digest: [u8; 32],
@@ -1007,7 +1089,7 @@ impl ModuleCandidateOffer {
         producer: &[u8],
         include: &[PathBuf],
         scratch: &Path,
-        context: Option<Arc<crate::declaration_join::ExactDeclarationContext>>,
+        context: Option<Arc<crate::declaration_context::ExactCompileContext>>,
         item: crate::checked_cell::ExactCheckedItem,
         prefix: crate::checked_cell::ExactCompiledPrefix,
         runtime_prefix_digest: [u8; 32],
@@ -1040,7 +1122,7 @@ impl ModuleCandidateOffer {
         producer: &[u8],
         include: &[PathBuf],
         scratch: &Path,
-        context: Option<Arc<crate::declaration_join::ExactDeclarationContext>>,
+        context: Option<Arc<crate::declaration_context::ExactCompileContext>>,
         item: crate::checked_cell::ExactCheckedItem,
         prefix: crate::checked_cell::ExactCompiledPrefix,
         runtime_prefix_digest: [u8; 32],
@@ -1055,7 +1137,12 @@ impl ModuleCandidateOffer {
         )>,
         purpose: crate::checked_cell::CheckedItemPurpose,
     ) -> Result<Self, CompileError> {
-        let context = prefix.with_initial_value_context(checked_offer_context(context)?)?;
+        let compile_context = context;
+        let context = prefix.with_initial_value_context(checked_offer_context(
+            compile_context
+                .as_ref()
+                .map(|context| context.declarations().clone()),
+        )?)?;
         let settled_values = prefix.select_settled_values(settled_bindings)?;
         let checked_item = crate::checked_cell::CheckedItemOffer {
             purpose,
@@ -1064,7 +1151,6 @@ impl ModuleCandidateOffer {
             runtime_prefix_digest,
             generation,
             observation_name: observation_name.map(str::to_owned),
-            is_fold: false,
             is_program: false,
             settled_values,
         };
@@ -1074,44 +1160,47 @@ impl ModuleCandidateOffer {
             checked_item.validate_activation_input()?;
         }
         let mut selected = None;
-        let exact = context.prepare_compilation_authorizing(
-            &scratch.join("exact-scope"),
-            producer,
-            |semantic_sha256| {
-                let authorization = checked_search_authorization(
-                    match purpose {
-                        crate::checked_cell::CheckedItemPurpose::Authored => CheckedPurpose::Item,
-                        crate::checked_cell::CheckedItemPurpose::HostActivationInput => {
-                            CheckedPurpose::HostActivationInput
-                        }
-                    },
-                    checked_item.authorization(producer, semantic_sha256)?,
-                    include,
-                )?;
-                let mut reserved = checked_item
-                    .prefix
-                    .injected_modules()
-                    .into_iter()
-                    .collect::<BTreeSet<_>>();
-                reserved.extend(
-                    checked_item
-                        .item
-                        .reserved_declaration_modules()
-                        .iter()
-                        .cloned(),
-                );
-                reserved.insert(
-                    tidepool_repr::SessionModule::val(tidepool_repr::Generation(
-                        checked_item.generation,
-                    ))
-                    .module_name(),
-                );
-                selected = immutable_candidates_in_context(
-                    &context, producer, include, scratch, reserved,
-                )?;
-                Ok(authorization)
-            },
-        )?;
+        let exact = compile_context_with_declarations(compile_context, context.clone())
+            .prepare_compilation_authorizing(
+                &scratch.join("exact-scope"),
+                producer,
+                |semantic_sha256| {
+                    let authorization = checked_search_authorization(
+                        match purpose {
+                            crate::checked_cell::CheckedItemPurpose::Authored => {
+                                CheckedPurpose::Item
+                            }
+                            crate::checked_cell::CheckedItemPurpose::HostActivationInput => {
+                                CheckedPurpose::HostActivationInput
+                            }
+                        },
+                        checked_item.authorization(producer, semantic_sha256)?,
+                        include,
+                    )?;
+                    let mut reserved = checked_item
+                        .prefix
+                        .injected_modules()
+                        .into_iter()
+                        .collect::<BTreeSet<_>>();
+                    reserved.extend(
+                        checked_item
+                            .item
+                            .reserved_declaration_modules()
+                            .iter()
+                            .cloned(),
+                    );
+                    reserved.insert(
+                        tidepool_repr::SessionModule::val(tidepool_repr::Generation(
+                            checked_item.generation,
+                        ))
+                        .module_name(),
+                    );
+                    selected = immutable_candidates_in_context(
+                        &context, producer, include, scratch, reserved,
+                    )?;
+                    Ok(authorization)
+                },
+            )?;
         Ok(Self {
             selected,
             producer: producer.to_vec(),
@@ -1141,7 +1230,7 @@ impl ModuleCandidateOffer {
         producer: &[u8],
         include: &[PathBuf],
         scratch: &Path,
-        context: Option<Arc<crate::declaration_join::ExactDeclarationContext>>,
+        context: Option<Arc<crate::declaration_context::ExactCompileContext>>,
         capture: Arc<crate::checked_cell::ExactCompiledItem>,
         prefix: crate::checked_cell::ExactCompiledPrefix,
         generation: u64,
@@ -1155,7 +1244,12 @@ impl ModuleCandidateOffer {
             u64,
         )>,
     ) -> Result<Self, CompileError> {
-        let context = prefix.with_initial_value_context(checked_offer_context(context)?)?;
+        let compile_context = context;
+        let context = prefix.with_initial_value_context(checked_offer_context(
+            compile_context
+                .as_ref()
+                .map(|context| context.declarations().clone()),
+        )?)?;
         if !crate::checked_cell::same_include_paths(include, capture.item().cell_include()) {
             return Err(CompileError::ExtractFailed(
                 "checked display include search order changed".into(),
@@ -1173,40 +1267,41 @@ impl ModuleCandidateOffer {
             is_program: false,
         };
         let mut selected = None;
-        let exact = context.prepare_compilation_authorizing(
-            &scratch.join("exact-scope"),
-            producer,
-            |semantic_sha256| {
-                let authorization = checked_search_authorization(
-                    CheckedPurpose::Display,
-                    display.authorization(producer, semantic_sha256)?,
-                    include,
-                )?;
-                let mut reserved = display
-                    .prefix
-                    .injected_modules()
-                    .into_iter()
-                    .collect::<BTreeSet<_>>();
-                reserved.extend(
-                    display
-                        .capture
-                        .item()
-                        .reserved_declaration_modules()
-                        .iter()
-                        .cloned(),
-                );
-                reserved.insert(
-                    tidepool_repr::SessionModule::val(tidepool_repr::Generation(
-                        display.generation,
-                    ))
-                    .module_name(),
-                );
-                selected = immutable_candidates_in_context(
-                    &context, producer, include, scratch, reserved,
-                )?;
-                Ok(authorization)
-            },
-        )?;
+        let exact = compile_context_with_declarations(compile_context, context.clone())
+            .prepare_compilation_authorizing(
+                &scratch.join("exact-scope"),
+                producer,
+                |semantic_sha256| {
+                    let authorization = checked_search_authorization(
+                        CheckedPurpose::Display,
+                        display.authorization(producer, semantic_sha256)?,
+                        include,
+                    )?;
+                    let mut reserved = display
+                        .prefix
+                        .injected_modules()
+                        .into_iter()
+                        .collect::<BTreeSet<_>>();
+                    reserved.extend(
+                        display
+                            .capture
+                            .item()
+                            .reserved_declaration_modules()
+                            .iter()
+                            .cloned(),
+                    );
+                    reserved.insert(
+                        tidepool_repr::SessionModule::val(tidepool_repr::Generation(
+                            display.generation,
+                        ))
+                        .module_name(),
+                    );
+                    selected = immutable_candidates_in_context(
+                        &context, producer, include, scratch, reserved,
+                    )?;
+                    Ok(authorization)
+                },
+            )?;
         Ok(Self {
             selected,
             producer: producer.to_vec(),
@@ -1606,7 +1701,6 @@ impl ModuleCandidateOffer {
                 runtime_prefix_digest: cell.admission_digest(),
                 generation,
                 observation_name: observation,
-                is_fold: false,
                 is_program: true,
                 settled_values: completed.prepared_value_selection()?,
             }
@@ -1896,64 +1990,6 @@ impl ModuleCandidateOffer {
         }))
     }
 
-    pub fn admit_checked_fold(
-        &self,
-        root: &Path,
-        cell: &Arc<crate::checked_cell::ExactCheckedCell>,
-        generation: u64,
-        source: &str,
-        target: &Arc<PreparedProgram>,
-    ) -> Result<Arc<crate::checked_cell::ExactCompiledItem>, CompileError> {
-        if self.checked_cell.is_none() {
-            return Err(CompileError::ExtractFailed(
-                "ordinary offer cannot certify a checked fold".into(),
-            ));
-        }
-        let exact = self
-            .exact
-            .as_ref()
-            .ok_or_else(|| CompileError::ExtractFailed("checked fold lacks exact scope".into()))?;
-        let sealed = seal_turn_outputs(
-            self,
-            root,
-            &root.join(format!(
-                "{}.hs",
-                extract_module_name(source).ok_or_else(|| CompileError::ExtractFailed(
-                    "checked fold source has no module".into()
-                ))?
-            )),
-            source,
-            target,
-            "__prepared",
-        )?
-        .ok_or_else(|| {
-            CompileError::ExtractFailed("checked fold lacks certified products".into())
-        })?;
-        let source_path = root.join(format!(
-            "{}.hs",
-            extract_module_name(source).expect("validated module")
-        ));
-        let admitted_source = exact.admit_source(
-            &source_path,
-            source,
-            &crate::checked_cell::read(root.join("dependencies.json"), 32 << 20)?,
-        )?;
-        let context =
-            checked_output_context(self, &sealed.recovery_products, &admitted_source, source)?;
-        crate::checked_cell::seal_checked_fold(
-            root,
-            &self.producer,
-            exact.semantic_sha256,
-            &exact.request_sha256,
-            cell,
-            generation,
-            source,
-            target,
-            &context.0,
-            &context.1,
-        )
-    }
-
     pub fn exact_scope_path(&self) -> Option<&Path> {
         self.exact
             .as_ref()
@@ -2094,6 +2130,7 @@ impl NativeTurnOutput {
 
 #[derive(Debug)]
 pub struct SealedTurnProducts {
+    pub artifact_view: crate::artifact_inventory::ArtifactView,
     pub compile_input_identity: Option<Arc<SealedCompileInputIdentity>>,
     pub certified_groups: Arc<[certified_products::PendingCertifiedGroup]>,
     pub pending_imports: Vec<certified_products::PendingImportOwner>,
@@ -2392,6 +2429,15 @@ fn seal_turn_outputs_inner(
         } else {
             None
         };
+    let artifact_view = crate::declaration_context::certified_product_artifact_view(
+        crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(&offer.producer)
+            .sha256(),
+        &certified.recovery_products,
+        &certified.module_interfaces,
+        exact
+            .as_ref()
+            .map(|admission| admission.request.context.as_ref()),
+    )?;
     let checked_context = if offer.checked_item.is_some() || offer.checked_display.is_some() {
         Some(checked_output_context(
             offer,
@@ -2405,6 +2451,7 @@ fn seal_turn_outputs_inner(
         None
     };
     Ok(Some(SealedTurnProducts {
+        artifact_view,
         compile_input_identity,
         checked_display: offer
             .checked_display
@@ -2988,6 +3035,7 @@ fn compile_invocation_inner(
             certified_products::CertifiedProducts {
                 groups: Vec::new(),
                 recovery_products: Vec::new(),
+                module_interfaces: Vec::new(),
             }
         };
         let extra_products: Vec<_> = cached_receipts
@@ -3077,6 +3125,15 @@ fn compile_invocation_inner(
             0,
             receipt.targets.len(),
         );
+        artifacts.artifact_view = crate::declaration_context::certified_product_artifact_view(
+            crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(&producer)
+                .sha256(),
+            &certified.recovery_products,
+            &certified.module_interfaces,
+            exact_request
+                .as_ref()
+                .map(|request| request.context.as_ref()),
+        )?;
         artifacts.certified_groups = certified.groups;
         artifacts.recovery_products = certified.recovery_products;
         artifacts.exact_source_admission = exact_source;
@@ -3785,6 +3842,7 @@ pub(crate) fn assemble(
     on_stage(timing::STAGE_ASKS_PARSE, asks_start.elapsed(), 0);
 
     Ok(CompiledArtifacts {
+        artifact_view: crate::artifact_inventory::ArtifactInventory::default().empty_view(),
         table,
         warnings,
         targets,
@@ -4010,6 +4068,113 @@ fn store_memo(
 mod typed_site_tests {
     use super::*;
 
+    fn host_input_witness(payload: &[u8]) -> crate::checked_cell::CanonicalInputTypeWitness {
+        let text = |value: &str| Value::Text(value.into());
+        let mut structure = Vec::new();
+        ciborium::into_writer(
+            &Value::Array(vec![text("literal"), text("nat"), text("1")]),
+            &mut structure,
+        )
+        .unwrap();
+        let mut bytes = Vec::new();
+        // This codec fixture carries no executable GHC IfaceType.
+        ciborium::into_writer(
+            &Value::Array(vec![
+                text("TPCANONICALINPUTTYPE1"),
+                text("1"),
+                Value::Array(vec![
+                    text("TPCHECKEDSIGNATURE2"),
+                    text("activation-input"),
+                    text("presentation"),
+                    Value::Bytes(payload.to_vec()),
+                    Value::Array(vec![]),
+                ]),
+                Value::Bytes(structure),
+                Value::Array(vec![]),
+            ]),
+            &mut bytes,
+        )
+        .unwrap();
+        crate::checked_cell::CanonicalInputTypeWitness::from_bytes(&bytes).unwrap()
+    }
+
+    #[test]
+    fn host_input_authorization_preserves_native_payload_and_refuses_authored_or_planned_recipe() {
+        let witness = host_input_witness(&[1, 2, 3]);
+        let substituted = host_input_witness(&[3, 2, 1]);
+        assert_eq!(witness, substituted);
+        assert_eq!(witness.commitment(), substituted.commitment());
+        assert_ne!(witness.metadata_digest(), substituted.metadata_digest());
+        let specification = crate::checked_cell::CheckedCellSpecification {
+            admission_digest: [7; 32],
+            cell_source: "sessionInput <- pure (undefined :: TidepoolActivationInput)".into(),
+            template_source: "protected template".into(),
+            turn_templates: Vec::new(),
+            injected_modules: Vec::new(),
+            reserved_declaration_modules: Vec::new(),
+        };
+        let values = crate::checked_cell::CheckedValueInputs::capture(Vec::new()).unwrap();
+        let include = [PathBuf::from("/source/original")];
+        let authorization = checked_cell_authorization(
+            CheckedCellPurpose::HostActivationInput(&witness),
+            &specification,
+            &values,
+            &include,
+        )
+        .unwrap();
+        let fields = authorization.as_array().unwrap();
+        assert_eq!(fields.len(), 10);
+        assert_eq!(fields[0], Value::Text("host-input-check1".into()));
+        assert_eq!(
+            fields[8],
+            crate::checked_cell::encode_signature(witness.signature())
+        );
+        assert_eq!(
+            fields[9],
+            Value::Array(vec![Value::Text("/source/original".into())])
+        );
+        let substituted = checked_cell_authorization(
+            CheckedCellPurpose::HostActivationInput(&substituted),
+            &specification,
+            &values,
+            &include,
+        )
+        .unwrap();
+        assert_ne!(authorization, substituted);
+        let authored = checked_cell_authorization(
+            CheckedCellPurpose::Authored,
+            &specification,
+            &values,
+            &include,
+        )
+        .unwrap();
+        assert_eq!(authored.as_array().unwrap().len(), 9);
+        assert_eq!(
+            authored.as_array().unwrap()[0],
+            Value::Text("cell-check2".into())
+        );
+        let mut authored_recipe = specification.clone();
+        authored_recipe.cell_source = "let authored = 1".into();
+        assert!(checked_cell_authorization(
+            CheckedCellPurpose::HostActivationInput(&witness),
+            &authored_recipe,
+            &values,
+            &include
+        )
+        .is_err());
+        let mut planned_recipe = specification;
+        planned_recipe
+            .reserved_declaration_modules
+            .push("Tidepool.Session.Lib.G1".into());
+        assert!(checked_cell_authorization(
+            CheckedCellPurpose::HostActivationInput(&witness),
+            &planned_recipe,
+            &values,
+            &include
+        )
+        .is_err());
+    }
+
     #[cfg(unix)]
     #[test]
     fn protected_search_authorization_refuses_lossy_path_encoding() {
@@ -4046,6 +4211,7 @@ mod typed_site_tests {
     fn site(id: u64, ty: &str) -> YieldSite {
         YieldSite {
             reply_declaration: None,
+            request_type_signatures: None,
             site: id,
             origin: "M.program".into(),
             ordinal: 0,
@@ -4374,6 +4540,7 @@ mod module_product_tests {
             product_sha256: [2; 32],
             source_sha256: [3; 32],
             dependency_witness_sha256: [4; 32],
+            interface_requirements: BTreeMap::new(),
             groups: vec![],
         };
         ensure_ready_module_inventory(&[owner], &evidence).unwrap();

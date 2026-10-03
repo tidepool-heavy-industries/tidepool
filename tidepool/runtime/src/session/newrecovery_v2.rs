@@ -11,7 +11,7 @@ use tidepool_toolchain::artifact_inventory::{ArtifactDependency, ArtifactDescrip
 use tidepool_toolchain::declaration_join::{ExactLexicalNode, ExactModuleIdentity};
 use tidepool_toolchain::recovery_artifacts::{
     with_recovery_artifact_verification, RecoveryArtifactError, RecoveryArtifactRef,
-    RecoveryArtifactWork, RecoveryJoinRef, RecoveryValueInterfaceRef,
+    RecoveryArtifactWork, RecoveryJoinRef, RecoveryModuleInterfaceRef, RecoveryValueInterfaceRef,
 };
 
 #[path = "newrecovery_v2/snapshots.rs"]
@@ -19,8 +19,8 @@ mod snapshots;
 use snapshots::{GraphEncoding, GraphRead};
 pub(crate) use snapshots::{RecoveryGraph, RecoveryGraphCandidate};
 
-const VERSION: u32 = 5;
-const PAIRED_PUBLIC_SCHEMA: &str = "paired-public-v5";
+const VERSION: u32 = 6;
+const PAIRED_PUBLIC_SCHEMA: &str = "paired-public-v6";
 const MAX_MANIFEST_BYTES: usize = 64 << 20;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -166,6 +166,7 @@ pub(crate) enum RecoveryNodeState {
 pub(crate) enum RecoveryArtifactClosure {
     Home(RecoveryArtifactRef),
     Join(RecoveryJoinRef),
+    ModuleInterface(RecoveryModuleInterfaceRef),
     ValueInterface(RecoveryValueInterfaceRef),
 }
 
@@ -174,6 +175,9 @@ impl RecoveryArtifactClosure {
         match self {
             Self::Home(reference) => ArtifactDescriptor::from_recovery_product(reference),
             Self::Join(reference) => ArtifactDescriptor::from_recovery_join(reference),
+            Self::ModuleInterface(reference) => {
+                ArtifactDescriptor::from_recovery_module_interface(reference)
+            }
             Self::ValueInterface(reference) => {
                 ArtifactDescriptor::from_recovery_value_interface(reference)
             }
@@ -196,8 +200,60 @@ impl RecoveryArtifactClosure {
         match self {
             Self::Home(reference) => (&reference.interface_path, Some(&reference.product_path)),
             Self::Join(reference) => (&reference.interface_path, None),
+            Self::ModuleInterface(reference) => (&reference.interface.interface_path, None),
             Self::ValueInterface(reference) => (&reference.interface.interface_path, None),
         }
+    }
+
+    /// Every durable payload is checked before the toolchain reads it, including
+    /// the canonical interface companion nested in an original native product.
+    fn component_paths(&self) -> Vec<(RecoveryArtifactComponent, &Path)> {
+        use RecoveryArtifactComponent as C;
+        fn interface_paths<'a>(reference: &'a RecoveryJoinRef, paths: &mut Vec<(C, &'a Path)>) {
+            paths.push((C::Interface, &reference.interface_path));
+            paths.push((C::PackageImports, &reference.package_imports_path));
+        }
+        fn module_paths<'a>(
+            reference: &'a RecoveryModuleInterfaceRef,
+            paths: &mut Vec<(C, &'a Path)>,
+        ) {
+            interface_paths(&reference.interface, paths);
+            paths.push((C::Certificate, &reference.certificate_path));
+            if let Some(core) = &reference.core {
+                paths.push((C::Core, &core.path));
+            }
+        }
+        let mut paths = Vec::new();
+        match self {
+            Self::Home(reference) => {
+                paths.push((C::Interface, reference.interface_path.as_path()));
+                paths.push((C::Product, reference.product_path.as_path()));
+                paths.push((C::PackageImports, reference.package_imports_path.as_path()));
+                paths.push((C::Certificate, reference.certification_path.as_path()));
+                if let Some(source) = &reference.execution_source {
+                    paths.push((C::ExecutionSource, source.path.as_path()));
+                }
+                if let Some(interface) = &reference.module_interface {
+                    module_paths(interface, &mut paths);
+                }
+            }
+            Self::Join(reference) => interface_paths(reference, &mut paths),
+            Self::ModuleInterface(reference) => module_paths(reference, &mut paths),
+            Self::ValueInterface(reference) => interface_paths(&reference.interface, &mut paths),
+        }
+        paths
+    }
+
+    fn is_native_companion(&self, other: &Self) -> bool {
+        let (home, interface) = match (self, other) {
+            (Self::Home(home), Self::ModuleInterface(interface))
+            | (Self::ModuleInterface(interface), Self::Home(home)) => (home, interface),
+            _ => return false,
+        };
+        home.module_interface.as_ref().is_some_and(|companion| {
+            ArtifactDescriptor::from_recovery_module_interface(companion)
+                == ArtifactDescriptor::from_recovery_module_interface(interface)
+        })
     }
 
     fn owner(&self) -> ExactModuleIdentity {
@@ -296,6 +352,11 @@ pub(crate) enum RecoveryLossReason {
 pub(crate) enum RecoveryArtifactComponent {
     Interface,
     Product,
+    PackageImports,
+    Certificate,
+    Core,
+    ExecutionSource,
+    ExternalPackageInterface,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -692,11 +753,11 @@ pub(crate) fn read_v2_bytes(
     {
         return Err(at(
             path,
-            "v5 recovery graph lacks the supported paired-public-v5 schema",
+            "v6 recovery graph lacks the supported paired-public-v6 schema",
         ));
     }
     let graph: RecoveryGraph = serde_json::from_value(value)
-        .map_err(|e| at(path, format!("invalid v5 recovery graph: {e}")))?;
+        .map_err(|e| at(path, format!("invalid v6 recovery graph: {e}")))?;
     graph.validate().map_err(|e| at(path, e.detail))?;
     let (inventory, artifact_losses) = match purpose {
         RecoveryReadPurpose::Metadata => (
@@ -751,12 +812,16 @@ impl RecoveryGraph {
         tidepool_toolchain::declaration_join::RecoveryInventoryError,
     > {
         let mut products = Vec::new();
+        let mut module_interfaces = Vec::new();
         let mut joins = Vec::new();
         let mut values = Vec::new();
         for artifact in self.artifacts() {
             match artifact {
                 RecoveryArtifactClosure::Home(reference) => products.push(reference.clone()),
                 RecoveryArtifactClosure::Join(reference) => joins.push(reference.clone()),
+                RecoveryArtifactClosure::ModuleInterface(reference) => {
+                    module_interfaces.push(reference.clone())
+                }
                 RecoveryArtifactClosure::ValueInterface(reference) => {
                     values.push(reference.clone())
                 }
@@ -773,6 +838,7 @@ impl RecoveryGraph {
         tidepool_toolchain::declaration_join::RecoveredArtifactInventory::capture(
             root,
             &products,
+            &module_interfaces,
             &joins,
             &values,
             &descriptors,
@@ -943,10 +1009,8 @@ impl RecoveryGraph {
         with_recovery_artifact_verification(&root, work, |verification| {
             let mut losses = BTreeMap::new();
             for artifact in self.artifacts() {
-                let (interface, product) = artifact.paths();
-                validate_relative(interface)?;
-                if let Some(product) = product {
-                    validate_relative(product)?;
+                for (_, path) in artifact.component_paths() {
+                    validate_relative(path)?;
                 }
                 let key = artifact.artifact_id();
                 let mut item_losses = Vec::new();
@@ -956,6 +1020,9 @@ impl RecoveryGraph {
                     }
                     RecoveryArtifactClosure::Join(reference) => {
                         verification.verify_join(reference).map(|_| ())
+                    }
+                    RecoveryArtifactClosure::ModuleInterface(reference) => {
+                        verification.verify_module_interface(reference)
                     }
                     RecoveryArtifactClosure::ValueInterface(reference) => {
                         verification.verify_join(&reference.interface).map(|_| ())
@@ -1329,12 +1396,13 @@ fn validate_shape(graph: &impl GraphRead) -> Result<(), RecoveryError> {
 
     let mut artifacts = BTreeMap::new();
     for artifact in graph.artifacts() {
-        let (interface, product) = artifact.paths();
         let owner = artifact.owner();
         if owner.unit.is_empty()
             || owner.module.is_empty()
-            || validate_relative(interface).is_err()
-            || product.is_some_and(|path| validate_relative(path).is_err())
+            || artifact
+                .component_paths()
+                .iter()
+                .any(|(_, path)| validate_relative(path).is_err())
         {
             return Err(error("invalid recovery artifact reference"));
         }
@@ -1348,6 +1416,29 @@ fn validate_shape(graph: &impl GraphRead) -> Result<(), RecoveryError> {
             let requirements = reference.requirements.iter().collect::<BTreeSet<_>>();
             if requirements.len() != reference.requirements.len() {
                 return Err(error("duplicate recovery value interface requirement"));
+            }
+        }
+    }
+    for artifact in graph.artifacts() {
+        if let RecoveryArtifactClosure::Home(reference) = artifact {
+            let interface = reference.module_interface.as_ref().ok_or_else(|| {
+                error("native recovery artifact lacks canonical module interface")
+            })?;
+            let canonical = ArtifactDescriptor::from_recovery_module_interface(interface);
+            if canonical.owner != artifact.owner()
+                || !matches!(
+                    artifacts.get(&canonical.id),
+                    Some(RecoveryArtifactClosure::ModuleInterface(_))
+                )
+                || !graph.artifact_dependencies().any(|edge| {
+                    edge.source == artifact.artifact_id()
+                        && edge.target == canonical.id
+                        && edge.dependency == ArtifactDependency::Interface
+                })
+            {
+                return Err(error(
+                    "native recovery artifact lacks its canonical interface closure",
+                ));
             }
         }
     }
@@ -1380,12 +1471,31 @@ fn validate_shape(graph: &impl GraphRead) -> Result<(), RecoveryError> {
                 node.id.0
             )));
         }
+        for id in &node_artifacts {
+            if let RecoveryArtifactClosure::Home(reference) = artifacts[id] {
+                let canonical = ArtifactDescriptor::from_recovery_module_interface(
+                    reference
+                        .module_interface
+                        .as_ref()
+                        .expect("validated native companion"),
+                )
+                .id;
+                if !node_artifacts.contains(&canonical) {
+                    return Err(error(format!(
+                        "recovery node {} omits its canonical interface companion",
+                        node.id.0
+                    )));
+                }
+            }
+        }
         let mut artifact_owners = BTreeMap::new();
         for id in &node_artifacts {
             let artifact = artifacts[id];
             if artifact_owners
                 .insert(artifact.owner(), *id)
-                .is_some_and(|previous| previous != *id)
+                .is_some_and(|previous| {
+                    previous != *id && !artifact.is_native_companion(artifacts[&previous])
+                })
             {
                 return Err(error(format!(
                     "recovery node {} has multiple artifacts for one module owner",
@@ -1492,7 +1602,7 @@ fn checksum_with_encoded_bytes(graph: &impl GraphRead) -> Result<(String, u64), 
         checksum: "",
     })
     .map_err(|e| error(format!("could not encode recovery graph: {e}")))?;
-    let mut domain = b"tidepool-recovery-graph-v5\0".to_vec();
+    let mut domain = b"tidepool-recovery-graph-v6\0".to_vec();
     domain.extend_from_slice(&bytes);
     Ok((
         blake3::hash(&domain).to_hex().to_string(),
@@ -1547,11 +1657,14 @@ fn artifact_error_loss(
                 },
             )
         }
-        RecoveryArtifactError::UnsupportedPackageImportsVersion { path, found } => (
-            RecoveryArtifactComponent::Interface,
-            path,
-            RecoveryArtifactLossKind::UnsupportedPackageImportsVersion { found },
-        ),
+        RecoveryArtifactError::UnsupportedPackageImportsVersion { path, found } => {
+            let (component, relative) = artifact_component(artifact, &path);
+            (
+                component,
+                relative,
+                RecoveryArtifactLossKind::UnsupportedPackageImportsVersion { found },
+            )
+        }
         RecoveryArtifactError::Unavailable(path) => {
             let (component, relative) = artifact_component(artifact, &path);
             (component, relative, RecoveryArtifactLossKind::Missing)
@@ -1565,7 +1678,9 @@ fn artifact_error_loss(
             )
         }
         RecoveryArtifactError::InvalidPackageImports(path)
-        | RecoveryArtifactError::InvalidCertifiedOwners(path) => {
+        | RecoveryArtifactError::InvalidCertifiedOwners(path)
+        | RecoveryArtifactError::InvalidCapturedPayload(path)
+        | RecoveryArtifactError::InvalidModuleCertificate(path) => {
             let (component, relative) = artifact_component(artifact, &path);
             (
                 component,
@@ -1583,6 +1698,14 @@ fn artifact_error_loss(
                 component,
                 relative,
                 RecoveryArtifactLossKind::DigestMismatch,
+            )
+        }
+        RecoveryArtifactError::Unreadable { path, error } => {
+            let (component, relative) = artifact_component(artifact, &path);
+            (
+                component,
+                relative,
+                RecoveryArtifactLossKind::Unreadable(error.to_string()),
             )
         }
         RecoveryArtifactError::Io(error) => {
@@ -1613,16 +1736,22 @@ fn artifact_component(
     artifact: &RecoveryArtifactClosure,
     path: &Path,
 ) -> (RecoveryArtifactComponent, PathBuf) {
-    let (interface, product) = artifact.paths();
-    if product.is_some_and(|product| path.ends_with(product)) {
-        (
-            RecoveryArtifactComponent::Product,
-            product.expect("matched product path").to_path_buf(),
-        )
+    let paths = artifact.component_paths();
+    // A verifier may report an absolute root-qualified path. Match the longest
+    // complete relative payload path to avoid confusing overlapping suffixes.
+    if let Some((component, relative)) = paths
+        .into_iter()
+        .filter(|(_, relative)| path.ends_with(relative))
+        .max_by_key(|(_, relative)| relative.components().count())
+    {
+        (component, relative.to_path_buf())
     } else {
+        // Owned payload errors name their relative descriptor under the root.
+        // Remaining path-bearing errors come from package interfaces selected
+        // by the authenticated package witness, which may live outside it.
         (
-            RecoveryArtifactComponent::Interface,
-            interface.to_path_buf(),
+            RecoveryArtifactComponent::ExternalPackageInterface,
+            path.to_path_buf(),
         )
     }
 }
@@ -1785,8 +1914,9 @@ mod tests {
     fn owner(path: &str) -> RecoveryPublicOwner {
         RecoveryPublicOwner::new(&tidepool_repr::ActorPath::parse(path).unwrap(), 1).unwrap()
     }
+    use sha2::{Digest, Sha256};
     use tidepool_repr::execution_schema::{CachedHomeOwner, ModuleVersion};
-    use tidepool_toolchain::certified_products::encode_home_certification;
+    use tidepool_toolchain::certified_products::encode_home_certification_with_module;
     use tidepool_toolchain::recovery_artifacts::{
         materialize_recovery_closure, RecoveryArtifactInput,
     };
@@ -1825,6 +1955,118 @@ mod tests {
 
     fn snapshot(wire: &RecoveryGraphWire) -> RecoveryGraph {
         RecoveryGraph::from_wire(wire.clone()).unwrap()
+    }
+
+    fn home_artifact(wire: &RecoveryGraphWire) -> &RecoveryArtifactClosure {
+        wire.artifacts
+            .iter()
+            .find(|artifact| matches!(artifact, RecoveryArtifactClosure::Home(_)))
+            .unwrap()
+    }
+
+    fn home_artifact_mut(wire: &mut RecoveryGraphWire) -> &mut RecoveryArtifactClosure {
+        wire.artifacts
+            .iter_mut()
+            .find(|artifact| matches!(artifact, RecoveryArtifactClosure::Home(_)))
+            .unwrap()
+    }
+
+    fn install_fixture_canonical_interfaces(wire: &mut RecoveryGraphWire) {
+        let companions = wire
+            .artifacts
+            .iter()
+            .filter_map(|artifact| {
+                let RecoveryArtifactClosure::Home(home) = artifact else {
+                    return None;
+                };
+                let interface = RecoveryArtifactClosure::ModuleInterface(
+                    home.module_interface.clone().unwrap(),
+                );
+                Some((artifact.artifact_id(), interface))
+            })
+            .collect::<Vec<_>>();
+        for (native, interface) in companions {
+            let canonical = interface.artifact_id();
+            if !wire
+                .artifacts
+                .iter()
+                .any(|artifact| artifact.artifact_id() == canonical)
+            {
+                wire.artifacts.push(interface);
+            }
+            wire.artifact_dependencies.push(RecoveryArtifactDependency {
+                source: native,
+                target: canonical,
+                dependency: ArtifactDependency::Interface,
+            });
+            for node in &mut wire.nodes {
+                if node.artifact_refs.contains(&native) {
+                    node.artifact_refs.push(canonical);
+                }
+            }
+        }
+    }
+
+    fn payload_sha(bytes: &[u8]) -> [u8; 32] {
+        Sha256::digest(bytes).into()
+    }
+
+    fn module_certificate(reference: &RecoveryModuleInterfaceRef) -> Vec<u8> {
+        use ciborium::value::Value;
+        let hex = |sha: &[u8; 32]| {
+            sha.iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
+        let interface = &reference.interface;
+        let value = Value::Array(vec![
+            Value::Text("TPFINALMODULE".into()),
+            Value::Integer(1.into()),
+            Value::Text("tidepool-ghc-finalized-module-v1".into()),
+            Value::Text(hex(&interface.toolchain_identity_sha256)),
+            Value::Array(vec![Value::Text(interface.unit.clone())]),
+            Value::Text(interface.unit.clone()),
+            Value::Text(interface.module.clone()),
+            Value::Text(hex(&[0x33; 32])),
+            Value::Text(hex(&interface.skinny_iface_sha256)),
+            Value::Text(hex(&interface.package_imports_sha256)),
+            reference
+                .core
+                .as_ref()
+                .map_or(Value::Null, |core| Value::Text(hex(&core.sha256))),
+            Value::Array(vec![]),
+        ]);
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&value, &mut bytes).unwrap();
+        bytes
+    }
+
+    fn reseal_fixture_home(root: &Path, home: &mut RecoveryArtifactRef) {
+        let canonical = home
+            .module_interface
+            .as_mut()
+            .expect("fixture has canonical interface");
+        canonical.interface.package_imports_sha256 = home.package_imports_sha256;
+        let certificate = module_certificate(canonical);
+        canonical.certificate_sha256 = payload_sha(&certificate);
+        fs::write(root.join(&canonical.certificate_path), certificate).unwrap();
+        let owner = CachedHomeOwner {
+            unit: home.unit.clone(),
+            module: home.module.clone(),
+            module_version: ModuleVersion(home.module_version),
+            skinny_iface_sha256: home.skinny_iface_sha256,
+            product_sha256: home.product_sha256,
+        };
+        let native = encode_home_certification_with_module(
+            &owner,
+            &[],
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            canonical.certificate_sha256,
+        )
+        .unwrap();
+        home.certification_sha256 = payload_sha(&native);
+        fs::write(root.join(&home.certification_path), native).unwrap();
     }
 
     fn fixture(root: &Path) -> RecoveryGraphWire {
@@ -1875,8 +2117,42 @@ mod tests {
         ]);
         let mut package_bytes = Vec::new();
         ciborium::ser::into_writer(&package_witness, &mut package_bytes).unwrap();
+        let package_sha = payload_sha(&package_bytes);
         fs::write(source.path().join("Lib.hi.packages"), package_bytes).unwrap();
-        let certification = encode_home_certification(&home_owner, &[], &BTreeMap::new()).unwrap();
+        fs::write(source.path().join("Lib.core"), b"core").unwrap();
+        let mut canonical = RecoveryModuleInterfaceRef {
+            interface: RecoveryJoinRef {
+                toolchain_identity_sha256: [0x11; 32],
+                unit: "main".into(),
+                module: "Lib".into(),
+                skinny_iface_sha256: IFACE_SHA,
+                interface_path: "Lib.hi".into(),
+                package_imports_path: "Lib.hi.packages".into(),
+                package_imports_sha256: package_sha,
+            },
+            certificate_path: "Lib.module".into(),
+            certificate_sha256: [0; 32],
+            core: Some(tidepool_toolchain::recovery_artifacts::RecoveryCoreRef {
+                path: "Lib.core".into(),
+                sha256: payload_sha(b"core"),
+                bytes: 4,
+            }),
+        };
+        let module_bytes = module_certificate(&canonical);
+        canonical.certificate_sha256 = payload_sha(&module_bytes);
+        fs::write(
+            source.path().join(&canonical.certificate_path),
+            module_bytes,
+        )
+        .unwrap();
+        let certification = encode_home_certification_with_module(
+            &home_owner,
+            &[],
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            canonical.certificate_sha256,
+        )
+        .unwrap();
         fs::write(source.path().join("Lib.hi.owners"), certification).unwrap();
         let materialized = materialize_recovery_closure(
             root,
@@ -1885,6 +2161,7 @@ mod tests {
                 owner: &home_owner,
                 interface_source: &iface,
                 product_source: &product,
+                module_interface: (source.path(), &canonical),
             }],
         )
         .unwrap();
@@ -1946,6 +2223,7 @@ mod tests {
             artifact_dependencies: vec![],
             checksum: String::new(),
         };
+        install_fixture_canonical_interfaces(&mut graph);
         graph.seal().unwrap();
         graph
     }
@@ -1972,7 +2250,7 @@ mod tests {
     fn persistent_snapshots_share_history_payloads_across_publication_candidates() {
         let root = tempfile::tempdir().unwrap();
         let mut wire = fixture(root.path());
-        let RecoveryArtifactClosure::Home(home) = &wire.artifacts[0] else {
+        let RecoveryArtifactClosure::Home(home) = home_artifact(&wire) else {
             unreachable!()
         };
         let mut value = value_interface_from(home, "Val1");
@@ -1980,7 +2258,7 @@ mod tests {
         value.artifact_id = ArtifactDescriptor::from_recovery_value_interface(&value).id;
         let edge = RecoveryArtifactDependency {
             source: value.artifact_id,
-            target: wire.artifacts[0].artifact_id(),
+            target: home_artifact(&wire).artifact_id(),
             dependency: ArtifactDependency::Interface,
         };
         wire.nodes[0].artifact_refs.push(value.artifact_id);
@@ -2160,7 +2438,7 @@ mod tests {
         let other = make_value("Other", vec![]);
         let value = make_value("Val1", vec![module("main", "Other"), module("main", "Lib")]);
         let mut wire = fixture(root.path());
-        let home_id = wire.artifacts[0].artifact_id();
+        let home_id = home_artifact(&wire).artifact_id();
         for node in &mut wire.nodes {
             node.artifact_refs
                 .extend([home_id, other.artifact_id, value.artifact_id]);
@@ -2270,7 +2548,7 @@ mod tests {
         wire.public_surfaces[0].declaration_root = Some(Generation(1));
         wire.seal().unwrap();
         let graph = snapshot(&wire);
-        let artifact = &wire.artifacts[0];
+        let artifact = home_artifact(&wire);
         assert!(matches!(
             graph.projection(&owner("root"), &BTreeMap::new()).unwrap()[&identity("answer")],
             RecoveryHead::Available { .. }
@@ -2304,17 +2582,21 @@ mod tests {
     fn interface_recovery_retains_native_requirements_and_selected_evidence() {
         let dir = tempfile::tempdir().unwrap();
         let mut graph = fixture(dir.path());
-        let RecoveryArtifactClosure::Home(home) = &graph.artifacts[0] else {
+        let RecoveryArtifactClosure::Home(home) = home_artifact(&graph) else {
             unreachable!()
         };
         let value = value_interface_from(home, "Val1");
         let value_id = value.artifact_id;
-        let original_id = graph.artifacts[0].artifact_id();
+        let original_id = home_artifact(&graph).artifact_id();
+        let canonical_id = ArtifactDescriptor::from_recovery_module_interface(
+            home.module_interface.as_ref().unwrap(),
+        )
+        .id;
         graph
             .artifacts
             .push(RecoveryArtifactClosure::ValueInterface(value));
         for node in &mut graph.nodes {
-            node.artifact_refs = vec![original_id, value_id];
+            node.artifact_refs = vec![original_id, canonical_id, value_id];
             node.state = RecoveryNodeState::LiveValueDependency {
                 reason: "lost x".into(),
             };
@@ -2568,6 +2850,7 @@ mod tests {
                 reason: "exact lost Val1.x".into(),
             },
         }];
+        install_fixture_canonical_interfaces(&mut graph);
         graph.seal().unwrap();
         let manifest = root.path().join("accepted.json");
         assert!(matches!(
@@ -2657,10 +2940,10 @@ mod tests {
     }
 
     #[test]
-    fn v5_manifest_refuses_persisted_native_relation_rows() {
+    fn v6_manifest_refuses_persisted_native_relation_rows() {
         let root = tempfile::tempdir().unwrap();
         let mut graph = fixture(root.path());
-        let original = graph.artifacts[0].artifact_id();
+        let original = home_artifact(&graph).artifact_id();
         for dependency in [
             ArtifactDependency::NativeGroup {
                 dependent_ordinal: 1,
@@ -2727,7 +3010,7 @@ mod tests {
                 .publish(),
             RecoveryPublishOutcome::Durable { .. }
         ));
-        let RecoveryArtifactClosure::Home(reference) = &graph.artifacts[0] else {
+        let RecoveryArtifactClosure::Home(reference) = home_artifact(&graph) else {
             panic!("fixture has a home artifact")
         };
         fs::write(root.path().join(&reference.interface_path), b"changed").unwrap();
@@ -2997,10 +3280,257 @@ mod tests {
     }
 
     #[test]
+    fn native_recovery_requires_the_exact_canonical_companion_and_selection() {
+        let dir = tempfile::tempdir().unwrap();
+        let baseline = fixture(dir.path());
+        for mutation in 0..4 {
+            let mut wire = baseline.clone();
+            let RecoveryArtifactClosure::Home(home) = home_artifact(&wire) else {
+                unreachable!()
+            };
+            let canonical = ArtifactDescriptor::from_recovery_module_interface(
+                home.module_interface.as_ref().unwrap(),
+            )
+            .id;
+            match mutation {
+                0 => {
+                    let RecoveryArtifactClosure::Home(home) = home_artifact_mut(&mut wire) else {
+                        unreachable!()
+                    };
+                    home.module_interface = None;
+                }
+                1 => wire
+                    .artifacts
+                    .retain(|artifact| artifact.artifact_id() != canonical),
+                2 => wire.artifact_dependencies.clear(),
+                3 => wire.nodes[0].artifact_refs.retain(|id| *id != canonical),
+                _ => unreachable!(),
+            }
+            assert!(
+                wire.seal().is_err(),
+                "accepted incomplete native companion mutation {mutation}"
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_interface_closure_recovers_without_a_native_product() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut wire = fixture(dir.path());
+        let RecoveryArtifactClosure::Home(home) = home_artifact(&wire) else {
+            unreachable!()
+        };
+        let interface = home.module_interface.clone().unwrap();
+        let product_path = home.product_path.clone();
+        let canonical = RecoveryArtifactClosure::ModuleInterface(interface.clone());
+        wire.nodes[0].artifact_refs = vec![canonical.artifact_id()];
+        wire.artifacts = vec![canonical];
+        wire.artifact_dependencies.clear();
+        wire.seal().unwrap();
+        fs::remove_file(dir.path().join(product_path)).unwrap();
+
+        let bytes = serde_json::to_vec(&wire).unwrap();
+        let recovered = read_v2_bytes(
+            &dir.path().join("graph.json"),
+            dir.path(),
+            &bytes,
+            RecoveryReadPurpose::Hydration,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(recovered.artifact_losses.is_empty());
+        assert!(recovered.graph.capture_inventory(dir.path()).is_ok());
+        assert!(matches!(
+            recovered.graph.artifacts().next(),
+            Some(RecoveryArtifactClosure::ModuleInterface(_))
+        ));
+
+        let core = interface.core.unwrap();
+        fs::remove_file(dir.path().join(&core.path)).unwrap();
+        let losses = recovered.graph.validate_artifact_files(dir.path()).unwrap();
+        assert_eq!(losses.len(), 1);
+        let loss = &losses.values().next().unwrap()[0];
+        assert_eq!(loss.component, RecoveryArtifactComponent::Core);
+        assert_eq!(loss.path, core.path);
+        assert_eq!(loss.kind, RecoveryArtifactLossKind::Missing);
+    }
+
+    #[test]
+    fn all_recovery_witness_paths_are_confined_before_hydration() {
+        let dir = tempfile::tempdir().unwrap();
+        let wire = fixture(dir.path());
+        let home = home_artifact(&wire).clone();
+        let RecoveryArtifactClosure::Home(reference) = &home else {
+            unreachable!()
+        };
+        let canonical =
+            RecoveryArtifactClosure::ModuleInterface(reference.module_interface.clone().unwrap());
+        let join = RecoveryArtifactClosure::Join(
+            reference
+                .module_interface
+                .as_ref()
+                .unwrap()
+                .interface
+                .clone(),
+        );
+        let value = RecoveryArtifactClosure::ValueInterface(value_interface_from(reference, "Val"));
+        for original in [home, canonical, join, value] {
+            let mut safe = wire.clone();
+            safe.nodes[0].artifact_refs = vec![original.artifact_id()];
+            safe.artifacts = vec![original.clone()];
+            safe.artifact_dependencies.clear();
+            if matches!(original, RecoveryArtifactClosure::Home(_)) {
+                install_fixture_canonical_interfaces(&mut safe);
+            }
+            safe.seal().unwrap();
+            for (component, path) in original.component_paths() {
+                for unsafe_path in [
+                    PathBuf::new(),
+                    PathBuf::from("../escaped"),
+                    PathBuf::from("/escaped"),
+                    PathBuf::from("dir/../escaped"),
+                ] {
+                    let mut graph = wire.clone();
+                    // Replace the exact encoded payload path, including a nested
+                    // Home canonical companion, without skipping descriptor checks.
+                    let encoded = serde_json::to_value(&original).unwrap();
+                    fn replace(value: &mut serde_json::Value, old: &str, new: &str) {
+                        match value {
+                            serde_json::Value::String(text) if text == old => *text = new.into(),
+                            serde_json::Value::Array(items) => {
+                                for item in items {
+                                    replace(item, old, new);
+                                }
+                            }
+                            serde_json::Value::Object(items) => {
+                                for item in items.values_mut() {
+                                    replace(item, old, new);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    let mut encoded = encoded;
+                    replace(
+                        &mut encoded,
+                        path.to_str().unwrap(),
+                        unsafe_path.to_str().unwrap(),
+                    );
+                    let changed: RecoveryArtifactClosure = serde_json::from_value(encoded).unwrap();
+                    graph.nodes[0].artifact_refs = vec![changed.artifact_id()];
+                    graph.artifacts = vec![changed];
+                    graph.artifact_dependencies.clear();
+                    // The safe baseline below proves failure is caused by the
+                    // path; unsafe native rows keep their original companion.
+                    if matches!(original, RecoveryArtifactClosure::Home(_)) {
+                        install_fixture_canonical_interfaces(&mut graph);
+                    }
+                    assert!(
+                        graph.seal().is_err(),
+                        "accepted unsafe {component:?} path {unsafe_path:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn canonical_witness_losses_keep_the_exact_component_and_relative_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let wire = fixture(dir.path());
+        let RecoveryArtifactClosure::Home(home) = home_artifact(&wire) else {
+            unreachable!()
+        };
+        let canonical =
+            RecoveryArtifactClosure::ModuleInterface(home.module_interface.clone().unwrap());
+        for artifact in [home_artifact(&wire), &canonical] {
+            for (component, relative) in artifact.component_paths() {
+                let absolute = dir.path().join(relative);
+                for (error, expected) in [
+                    (
+                        RecoveryArtifactError::Unavailable(absolute.clone()),
+                        RecoveryArtifactLossKind::Missing,
+                    ),
+                    (
+                        RecoveryArtifactError::DigestMismatch(absolute.clone()),
+                        RecoveryArtifactLossKind::DigestMismatch,
+                    ),
+                    (
+                        RecoveryArtifactError::Unreadable {
+                            path: absolute.clone(),
+                            error: std::io::Error::new(
+                                std::io::ErrorKind::PermissionDenied,
+                                "denied",
+                            ),
+                        },
+                        RecoveryArtifactLossKind::Unreadable("denied".into()),
+                    ),
+                ] {
+                    let loss = artifact_error_loss(artifact, error);
+                    assert_eq!(loss.component, component);
+                    assert_eq!(loss.path, relative);
+                    assert_eq!(loss.kind, expected);
+                }
+            }
+        }
+        let certificate = home
+            .module_interface
+            .as_ref()
+            .unwrap()
+            .certificate_path
+            .clone();
+        let invalid = artifact_error_loss(
+            &canonical,
+            RecoveryArtifactError::InvalidModuleCertificate(dir.path().join(&certificate)),
+        );
+        assert_eq!(invalid.component, RecoveryArtifactComponent::Certificate);
+        assert_eq!(invalid.path, certificate);
+        let core = home
+            .module_interface
+            .as_ref()
+            .unwrap()
+            .core
+            .as_ref()
+            .unwrap()
+            .path
+            .clone();
+        let invalid = artifact_error_loss(
+            &canonical,
+            RecoveryArtifactError::InvalidCapturedPayload(dir.path().join(&core)),
+        );
+        assert_eq!(invalid.component, RecoveryArtifactComponent::Core);
+        assert_eq!(invalid.path, core);
+    }
+
+    #[test]
+    fn canonical_interface_identity_ignores_all_materialization_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let wire = fixture(dir.path());
+        let RecoveryArtifactClosure::Home(home) = home_artifact(&wire) else {
+            unreachable!()
+        };
+        let mut interface = home.module_interface.clone().unwrap();
+        let id = ArtifactDescriptor::from_recovery_module_interface(&interface).id;
+        interface.interface.interface_path = "relocated/module.hi".into();
+        interface.interface.package_imports_path = "relocated/module.packages".into();
+        interface.certificate_path = "relocated/module.certificate".into();
+        interface.core.as_mut().unwrap().path = "relocated/module.core".into();
+        assert_eq!(
+            ArtifactDescriptor::from_recovery_module_interface(&interface).id,
+            id
+        );
+        interface.certificate_sha256[0] ^= 1;
+        assert_ne!(
+            ArtifactDescriptor::from_recovery_module_interface(&interface).id,
+            id
+        );
+    }
+
+    #[test]
     fn artifact_ids_ignore_materialization_paths() {
         let dir = tempfile::tempdir().unwrap();
         let graph = fixture(dir.path());
-        let RecoveryArtifactClosure::Home(mut reference) = graph.artifacts[0].clone() else {
+        let RecoveryArtifactClosure::Home(mut reference) = home_artifact(&graph).clone() else {
             panic!("fixture has an original module artifact")
         };
         let id = ArtifactDescriptor::from_recovery_product(&reference).id;
@@ -3015,7 +3545,7 @@ mod tests {
     fn value_interface_artifact_id_and_exact_requirements_are_validated() {
         let dir = tempfile::tempdir().unwrap();
         let mut graph = fixture(dir.path());
-        let RecoveryArtifactClosure::Home(home) = graph.artifacts[0].clone() else {
+        let RecoveryArtifactClosure::Home(home) = home_artifact(&graph).clone() else {
             unreachable!()
         };
         let mut value = value_interface_from(&home, "Val");
@@ -3187,19 +3717,27 @@ mod tests {
     }
 
     #[test]
-    fn v5_checksum_covers_lexical_roots_and_edges() {
+    fn v6_checksum_covers_lexical_roots_and_edges() {
         let dir = tempfile::tempdir().unwrap();
         let root = module("main", "Lib");
         let other = module("main", "Other");
         let mut graph = fixture(dir.path());
-        let RecoveryArtifactClosure::Home(mut other_artifact) = graph.artifacts[0].clone() else {
+        let RecoveryArtifactClosure::Home(mut other_artifact) = home_artifact(&graph).clone()
+        else {
             unreachable!()
         };
         other_artifact.module = "Other".into();
+        other_artifact
+            .module_interface
+            .as_mut()
+            .unwrap()
+            .interface
+            .module = "Other".into();
         let other_closure = RecoveryArtifactClosure::Home(other_artifact);
         let other_key = other_closure.artifact_id();
         graph.artifacts.push(other_closure);
         graph.nodes[0].artifact_refs.push(other_key);
+        install_fixture_canonical_interfaces(&mut graph);
         graph.nodes[0].lexical_roots = vec![root.clone(), other.clone()];
         graph.nodes[0].lexical = vec![
             ExactLexicalNode {
@@ -3266,7 +3804,7 @@ mod tests {
         let package = dir.path().join("package.hi");
         fs::write(&package, b"interface").unwrap();
         let mut wire = fixture(dir.path());
-        let RecoveryArtifactClosure::Home(home) = &mut wire.artifacts[0] else {
+        let RecoveryArtifactClosure::Home(home) = home_artifact_mut(&mut wire) else {
             unreachable!()
         };
         let sidecar = dir.path().join(&home.package_imports_path);
@@ -3294,14 +3832,20 @@ mod tests {
         )
         .unwrap();
         home.package_imports_sha256 = join.package_imports_sha256;
+        reseal_fixture_home(dir.path(), home);
         let certification_path = dir.path().join(&home.certification_path);
         let mut separate = RecoveryArtifactWork::default();
         verify_materialized_ref_with_work(dir.path(), home, &mut separate).unwrap();
         verify_materialized_join_with_work(dir.path(), &join, &mut separate).unwrap();
-        let home_id = wire.artifacts[0].artifact_id();
+        wire.artifacts
+            .retain(|artifact| !matches!(artifact, RecoveryArtifactClosure::ModuleInterface(_)));
+        wire.artifact_dependencies.clear();
+        install_fixture_canonical_interfaces(&mut wire);
+        let home_id = home_artifact(&wire).artifact_id();
         let join = RecoveryArtifactClosure::Join(join);
         let join_id = join.artifact_id();
         wire.nodes[0].artifact_refs = vec![home_id];
+        install_fixture_canonical_interfaces(&mut wire);
         wire.nodes[1].artifact_refs = vec![join_id];
         wire.nodes[1].state = RecoveryNodeState::ExactArtifactClosure;
         wire.artifacts.push(join);
@@ -3323,7 +3867,15 @@ mod tests {
         let recovered = read_v2_bytes(&path, dir.path(), &bytes, RecoveryReadPurpose::Metadata)
             .unwrap()
             .unwrap();
-        assert_eq!(recovered.artifact_losses.len(), 2);
+        assert_eq!(recovered.artifact_losses.len(), 3);
+        for loss in recovered.artifact_losses.values().flatten() {
+            assert_eq!(
+                loss.component,
+                RecoveryArtifactComponent::ExternalPackageInterface
+            );
+            assert_eq!(loss.path, package);
+            assert_eq!(loss.kind, RecoveryArtifactLossKind::DigestMismatch);
+        }
         fs::write(&package, b"interface").unwrap();
         fs::write(&certification_path, b"corrupt").unwrap();
         let losses = graph.validate_artifact_files(dir.path()).unwrap();
@@ -3356,20 +3908,10 @@ mod tests {
         let expected_hash_bytes = staged
             .graph
             .artifacts()
-            .map(|artifact| {
-                let RecoveryArtifactClosure::Home(reference) = artifact else {
-                    unreachable!()
-                };
-                [
-                    &reference.interface_path,
-                    &reference.product_path,
-                    &reference.package_imports_path,
-                    &reference.certification_path,
-                ]
-                .into_iter()
-                .map(|relative| fs::metadata(dir.path().join(relative)).unwrap().len())
-                .sum::<u64>()
-            })
+            .flat_map(|artifact| artifact.component_paths().into_iter().map(|(_, path)| path))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .map(|relative| fs::metadata(dir.path().join(relative)).unwrap().len())
             .sum::<u64>();
         assert_eq!(staged.work.checksum_encode_bytes, unsigned.len() as u64);
         assert_eq!(
@@ -3414,7 +3956,7 @@ mod tests {
         let mut unsigned = graph.clone();
         unsigned.checksum.clear();
         let bytes = serde_json::to_vec(&unsigned).unwrap();
-        let mut domain = b"tidepool-recovery-graph-v5\0".to_vec();
+        let mut domain = b"tidepool-recovery-graph-v6\0".to_vec();
         domain.extend_from_slice(&bytes);
         assert_eq!(
             checksum(&graph).unwrap(),
@@ -3426,11 +3968,13 @@ mod tests {
     fn artifact_paths_must_stay_relative_to_the_recovery_root() {
         let dir = tempfile::tempdir().unwrap();
         let mut graph = fixture(dir.path());
-        match &mut graph.artifacts[0] {
+        match home_artifact_mut(&mut graph) {
             RecoveryArtifactClosure::Home(reference) => {
                 reference.interface_path = PathBuf::from("../escape.hi");
             }
-            RecoveryArtifactClosure::Join(_) | RecoveryArtifactClosure::ValueInterface(_) => {
+            RecoveryArtifactClosure::Join(_)
+            | RecoveryArtifactClosure::ModuleInterface(_)
+            | RecoveryArtifactClosure::ValueInterface(_) => {
                 unreachable!()
             }
         }
@@ -3441,9 +3985,11 @@ mod tests {
     fn reservations_advance_exactly_one_generation_without_publishing_a_node() {
         let dir = tempfile::tempdir().unwrap();
         let graph = fixture(dir.path());
-        let product = match &graph.artifacts[0] {
+        let product = match home_artifact(&graph) {
             RecoveryArtifactClosure::Home(reference) => reference.product_path.clone(),
-            RecoveryArtifactClosure::Join(_) | RecoveryArtifactClosure::ValueInterface(_) => {
+            RecoveryArtifactClosure::Join(_)
+            | RecoveryArtifactClosure::ModuleInterface(_)
+            | RecoveryArtifactClosure::ValueInterface(_) => {
                 unreachable!()
             }
         };
@@ -3563,10 +4109,12 @@ mod tests {
             RecoveryPublishOutcome::Durable { .. }
         ));
         let published = fs::read(&manifest).unwrap();
-        let artifact_id = graph.artifacts[0].artifact_id();
-        let product = match &graph.artifacts[0] {
+        let artifact_id = home_artifact(&graph).artifact_id();
+        let product = match home_artifact(&graph) {
             RecoveryArtifactClosure::Home(reference) => reference.product_path.clone(),
-            RecoveryArtifactClosure::Join(_) | RecoveryArtifactClosure::ValueInterface(_) => {
+            RecoveryArtifactClosure::Join(_)
+            | RecoveryArtifactClosure::ModuleInterface(_)
+            | RecoveryArtifactClosure::ValueInterface(_) => {
                 unreachable!()
             }
         };
@@ -3590,9 +4138,11 @@ mod tests {
         graph.nodes[1].state = RecoveryNodeState::ExactArtifactClosure;
         graph.nodes[1].artifact_refs = graph.nodes[0].artifact_refs.clone();
         graph.seal().unwrap();
-        let product = match &graph.artifacts[0] {
+        let product = match home_artifact(&graph) {
             RecoveryArtifactClosure::Home(reference) => reference.product_path.clone(),
-            RecoveryArtifactClosure::Join(_) | RecoveryArtifactClosure::ValueInterface(_) => {
+            RecoveryArtifactClosure::Join(_)
+            | RecoveryArtifactClosure::ModuleInterface(_)
+            | RecoveryArtifactClosure::ValueInterface(_) => {
                 unreachable!()
             }
         };
@@ -3631,9 +4181,11 @@ mod tests {
                 panic!("unexpected durability uncertainty: {detail}")
             }
         }
-        let product = match &graph.artifacts[0] {
+        let product = match home_artifact(&graph) {
             RecoveryArtifactClosure::Home(reference) => reference.product_path.clone(),
-            RecoveryArtifactClosure::Join(_) | RecoveryArtifactClosure::ValueInterface(_) => {
+            RecoveryArtifactClosure::Join(_)
+            | RecoveryArtifactClosure::ModuleInterface(_)
+            | RecoveryArtifactClosure::ValueInterface(_) => {
                 unreachable!()
             }
         };

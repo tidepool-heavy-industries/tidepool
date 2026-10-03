@@ -15,7 +15,7 @@ import Tidepool.Binders (StmtBinders(..), TurnKind(..))
 import Tidepool.CheckedCell (CheckedSignature(..))
 import Tidepool.ExecutionSchema (SymbolIdentity(..))
 import Tidepool.ExactScope
-  ( CheckedCellAdmission(..), CheckedItemAdmission(..), CheckedDisplayAdmission(..) )
+  ( CheckedCellAdmission(..), CheckedCellPurpose(..), CheckedItemAdmission(..), CheckedDisplayAdmission(..) )
 import Tidepool.ExtractRequest (WorkerRequest(..))
 import Tidepool.ExtractUtil (shaHex)
 
@@ -26,9 +26,9 @@ matchesInspectionAdmission args values =
     && not (requestTurn args) && not (requestCell args) && not (requestClassify args)
     && not (requestCheckSource args) && not (requestCellPlan args)
     && not (requestCertifyHomeProducts args) && not (requestActivationPreview args)
-    && not (requestHarnessProfile args) && not (requestCellFoldTurn args)
+    && not (requestHarnessProfile args)
     && not (isJust (requestDeclarationJoin args))
-    && not (isJust (requestBindGen args)) && not (isJust (requestTurnPin args))
+    && not (isJust (requestBindGen args))
     && not (isJust (requestTarget args)) && null (requestTargets args)
     && Map.null (requestRetainedGenerations args)
     && requestInjectVals args == values
@@ -46,6 +46,12 @@ requireGeneration args = maybe (error "required argument missing: --bind-gen") p
 validateCheckedCellAdmission :: WorkerRequest -> CheckedCellAdmission -> String -> String -> IO ()
 validateCheckedCellAdmission args admission cellSource template = do
   templateDigests <- readTurnTemplateDigests args
+  case checkedCellPurpose admission of
+    HostInputCellCheck _ -> unless
+      (cellSource == "sessionInput <- pure (undefined :: TidepoolActivationInput)"
+        && null (checkedReservedModules admission) && checkedPlannedCell admission == Nothing)
+      (fail "host input check requires its original protected placeholder")
+    AuthoredCellCheck -> pure ()
   unless (shaHex (TE.encodeUtf8 (T.pack cellSource)) == checkedCellSha256 admission
       && shaHex (TE.encodeUtf8 (T.pack template)) == checkedTemplateSha256 admission
       && templateDigests == checkedTurnTemplates admission

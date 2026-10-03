@@ -1022,6 +1022,7 @@ fn service_transaction(
         .begin_transaction_while_connected(&connection, request_deadline)
         .err();
     let mut orderly_end = false;
+    let mut one_shot_response = None;
     let mut request_ordinal = RequestOrdinal(0);
     while transaction_failed.is_none() {
         match next_request(&mut connection) {
@@ -1075,8 +1076,15 @@ fn service_transaction(
                             transaction,
                             "compiler request finished"
                         );
-                        if write_response(&mut connection, code, &stdout, &stderr).is_err() {
-                            break;
+                        if transaction {
+                            if write_response(&mut connection, code, &stdout, &stderr).is_err() {
+                                break;
+                            }
+                        } else {
+                            // The client may close and release its request inputs as
+                            // soon as it receives this response. Keep it waiting
+                            // until the worker finishes transaction cleanup.
+                            one_shot_response = Some((code, stdout, stderr));
                         }
                     }
                     Err(error) => {
@@ -1139,6 +1147,11 @@ fn service_transaction(
             connection.write_all(&[ACCEPTED]),
         );
         log_send_failure(run_id, "transaction accepted flush", connection.flush());
+    }
+    if let Some((code, stdout, stderr)) = one_shot_response {
+        if let Err(error) = write_response(&mut connection, code, &stdout, &stderr) {
+            tracing::debug!(run_id, %error, "compiler response delivery failed after cleanup");
+        }
     }
     drop(connection);
     let worker_rss = worker_rss_mb_logged(run_id, worker.child.id());
@@ -2324,7 +2337,7 @@ impl Worker {
         prepared: &PreparedWorker,
         build_products_namespace: BuildProductsNamespace,
     ) -> Result<Self, FrontendError> {
-        let mut command = prepared.command();
+        let mut command = prepared.command()?;
         command
             .arg("--worker-loop-v2")
             .stdin(Stdio::piped())
@@ -4116,11 +4129,10 @@ tidepool-target phase=desugar module=Execute\n",
         Stop,
     }
 
-    fn control_ack_recovery_cases(recovery: ControlRecovery) {
-        let scratch = tempfile::tempdir().unwrap();
-        let source = scratch.path().join("worker.rs");
+    fn compile_control_ack_worker(directory: &Path) -> std::path::PathBuf {
+        let source = directory.join("worker.rs");
         std::fs::write(&source, include_str!("test_fixtures/control_ack_worker.rs")).unwrap();
-        let fixture = scratch.path().join("worker");
+        let fixture = directory.join("worker");
         #[allow(
             clippy::disallowed_methods,
             reason = "test fixture: compile one immutable fake worker"
@@ -4132,6 +4144,113 @@ tidepool-target phase=desugar module=Execute\n",
             .status()
             .unwrap();
         assert!(built.success());
+        fixture
+    }
+
+    #[test]
+    fn one_shot_response_commits_after_cleanup_and_only_early_disconnect_replaces_worker() {
+        let scratch = tempfile::tempdir().unwrap();
+        let fixture = compile_control_ack_worker(scratch.path());
+        for cancel in [false, true] {
+            let dir = scratch
+                .path()
+                .join(if cancel { "cancel" } else { "complete" });
+            std::fs::create_dir(&dir).unwrap();
+            let worker_bin = dir.join("worker");
+            std::fs::copy(&fixture, &worker_bin).unwrap();
+            std::fs::write(dir.join("phase"), [2]).unwrap();
+            let socket = dir.join("daemon.sock");
+            let prepared = PreparedWorker::for_test(worker_bin).unwrap();
+            let config = DaemonConfig {
+                socket: socket.clone(),
+                rotate_after: Some(100),
+                rss_ceiling_mb: Some(u64::MAX),
+                request_deadline_secs: Some(10),
+                watch_stamp: None,
+                persistent: true,
+                run_id: None,
+                log_path: None,
+                workers: Some(1),
+            };
+            let (settled_tx, settled_rx) = std::sync::mpsc::channel();
+            let server = std::thread::spawn(move || {
+                let result = serve(&config, prepared);
+                settled_tx.send(()).unwrap();
+                result
+            });
+            let ready_deadline = Instant::now() + Duration::from_secs(10);
+            let binding = loop {
+                if let Ok(binding) = preflight(&socket) {
+                    break binding;
+                }
+                assert!(Instant::now() < ready_deadline);
+                #[allow(
+                    clippy::disallowed_methods,
+                    reason = "test fixture: await owned daemon startup"
+                )]
+                std::thread::sleep(Duration::from_millis(10));
+            };
+            let argv = vec![OsString::from("Expr.hs")];
+            let mut client = UnixStream::connect(&socket).unwrap();
+            client.write_all(REQUEST).unwrap();
+            client.write_all(&binding.epoch).unwrap();
+            client.write_all(&encode_request(&dir, &argv)).unwrap();
+            assert_eq!(read_exact_or_crash(&mut client, 1).unwrap(), [ACCEPTED]);
+            read_exact_or_crash(&mut client, 8).unwrap();
+            while !dir.join("stalled").exists() {
+                assert!(
+                    Instant::now() < ready_deadline,
+                    "worker never reached END_ACK"
+                );
+                #[allow(
+                    clippy::disallowed_methods,
+                    reason = "test fixture: await owned worker cleanup"
+                )]
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            client
+                .set_read_timeout(Some(Duration::from_millis(200)))
+                .unwrap();
+            let observed = client.read(&mut [0; 1]);
+            let response_pending = matches!(
+                observed,
+                Err(ref error) if matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut)
+            );
+            if !cancel {
+                std::fs::write(dir.join("release"), b"acknowledge cleanup").unwrap();
+                if response_pending {
+                    client
+                        .set_read_timeout(Some(Duration::from_secs(4)))
+                        .unwrap();
+                    let output = decode_output(&mut client).unwrap();
+                    assert_eq!(output.status.code(), Some(0));
+                    assert_eq!(output.stdout, b"1");
+                }
+            }
+            let started = Instant::now();
+            drop(client);
+            let output = execute(&socket, &binding.epoch, &dir, &argv).unwrap();
+            let retained_count = output.stdout;
+            request_stop(&socket).unwrap();
+            settled_rx
+                .recv_timeout(Duration::from_secs(4))
+                .expect("daemon did not stop");
+            assert_eq!(server.join().unwrap().unwrap(), 0);
+            assert!(
+                response_pending,
+                "one-shot response was visible before END_ACK: {observed:?}"
+            );
+            assert_eq!(retained_count, if cancel { b"1" } else { b"2" });
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "early disconnect waited for the 10s deadline"
+            );
+        }
+    }
+
+    fn control_ack_recovery_cases(recovery: ControlRecovery) {
+        let scratch = tempfile::tempdir().unwrap();
+        let fixture = compile_control_ack_worker(scratch.path());
 
         for operation in [
             WorkerOperation::BeginTransaction,

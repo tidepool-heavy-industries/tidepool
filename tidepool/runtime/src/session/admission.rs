@@ -152,7 +152,27 @@ pub struct RuntimeCellAdmission {
 /// It never authorizes authored private writes or declarations.
 enum NativeCellPurpose {
     Setup,
-    HostActivation([u8; 32]),
+    HostActivation {
+        input_commitment: [u8; 32],
+        input_type_witness: Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>,
+    },
+}
+
+impl NativeCellPurpose {
+    fn frame_authorization(&self, frame: &mut impl FnMut(&[u8])) {
+        match self {
+            Self::Setup => frame(b"TidepoolNativeSetupAdmission1"),
+            Self::HostActivation {
+                input_commitment,
+                input_type_witness,
+            } => {
+                frame(b"TidepoolHostActivationAdmission1");
+                frame(input_commitment);
+                frame(&input_type_witness.metadata_digest());
+                frame(&input_type_witness.commitment());
+            }
+        }
+    }
 }
 
 /// An admission lifetime exists before the lazy machine bootstrap and is
@@ -515,7 +535,6 @@ pub struct RuntimeCheckedPrefix {
 struct RuntimeCheckedState {
     snapshot: Arc<RuntimeCheckedPrefixSnapshot>,
     in_flight: Option<Arc<tidepool_toolchain::checked_cell::ExactCompiledItem>>,
-    display_in_flight: Option<Arc<tidepool_toolchain::checked_cell::ExactCompiledDisplay>>,
     reservation: Option<CheckedItemReservation>,
     interface_index: std::collections::BTreeMap<u64, [u8; 32]>,
     native_index: CheckedNativeIndex,
@@ -539,65 +558,6 @@ pub struct RuntimeCheckedItemAdmission {
     digest: [u8; 32],
 }
 
-/// A pure display of an exact observation that this runtime already captured.
-/// It retains that binding and its native dependency closure independently of
-/// later private items and owns the display's fresh value identity.
-#[derive(Debug)]
-pub struct RuntimeCheckedDisplayAdmission {
-    prefix: Arc<RuntimeCheckedPrefix>,
-    snapshot: Arc<RuntimeCheckedPrefixSnapshot>,
-    execution: Arc<tidepool_toolchain::checked_cell::ExactCompiledItem>,
-    captured_binding: super::BoundBinder,
-    generation: Generation,
-    budget: usize,
-    presented: Vec<String>,
-    digest: [u8; 32],
-    _retained_scope: Arc<RuntimeLexicalScopeLease>,
-    started: std::sync::atomic::AtomicBool,
-}
-
-impl RuntimeCheckedDisplayAdmission {
-    pub(crate) fn matches_compiled_display(
-        &self,
-        proof: &Arc<tidepool_toolchain::checked_cell::ExactCompiledDisplay>,
-    ) -> bool {
-        match self.prefix.cell_program() {
-            Some(program) => {
-                proof.admission_digest() == program.admission_digest()
-                    && program
-                        .items()
-                        .get(self.execution.item().index())
-                        .and_then(|item| item.display())
-                        .is_some_and(|prepared| Arc::ptr_eq(prepared, proof))
-            }
-            None => proof.admission_digest() == self.digest,
-        }
-    }
-    pub fn prefix(&self) -> &Arc<RuntimeCheckedPrefix> {
-        &self.prefix
-    }
-    pub fn snapshot(&self) -> &Arc<RuntimeCheckedPrefixSnapshot> {
-        &self.snapshot
-    }
-    pub fn execution(&self) -> &Arc<tidepool_toolchain::checked_cell::ExactCompiledItem> {
-        &self.execution
-    }
-    pub fn captured_binding(&self) -> &super::BoundBinder {
-        &self.captured_binding
-    }
-    pub fn generation(&self) -> Generation {
-        self.generation
-    }
-    pub fn budget(&self) -> usize {
-        self.budget
-    }
-    pub fn presented(&self) -> &[String] {
-        &self.presented
-    }
-    pub fn digest(&self) -> [u8; 32] {
-        self.digest
-    }
-}
 impl RuntimeCheckedItemAdmission {
     pub fn prefix(&self) -> &Arc<RuntimeCheckedPrefix> {
         &self.prefix
@@ -629,7 +589,6 @@ pub struct RuntimeCheckedPrefixSnapshot {
     native_shares: Vec<SourceLeaseKey>,
     native_imports: CheckedNativeImports,
     compiler_prefix: tidepool_toolchain::checked_cell::ExactCompiledPrefix,
-    last_display_settlement: Option<CheckedDisplaySettlement>,
     digest: [u8; 32],
 }
 
@@ -648,12 +607,12 @@ impl RuntimeCheckedPrefixSnapshot {
         &self.native_imports.base.entries
     }
     /// Only the admitted baseline and exports actually installed by this
-    /// prefix's sealed native targets. Failed displays omit absent bindings.
+    /// prefix's sealed native targets.
     pub fn actual_retained_imports(&self) -> impl Iterator<Item = (&SymbolIdentity, u64)> {
         self.native_imports.imports()
     }
     /// Actual same-prefix bindings in completion order, for selecting native
-    /// lexical winners without promoting a compiled display's absent rows.
+    /// lexical winners from the exact installed targets.
     pub fn settled_native_bindings(
         &self,
     ) -> impl Iterator<Item = (&str, &SymbolIdentity, u64, u64)> {
@@ -674,9 +633,6 @@ impl RuntimeCheckedPrefixSnapshot {
     }
     pub fn digest(&self) -> [u8; 32] {
         self.digest
-    }
-    pub fn display_settlement(&self) -> Option<CheckedDisplaySettlement> {
-        self.last_display_settlement
     }
 }
 
@@ -702,7 +658,6 @@ impl RuntimeCheckedPrefix {
             || !self.admission.belongs_to(session)
             || self.admission.visibility.scope != scope
             || state.in_flight.is_some()
-            || state.display_in_flight.is_some()
             || state.reservation.as_ref().is_none_or(|reservation| {
                 reservation.item != *execution.item()
                     || reservation.generation.0 != execution.generation()
@@ -744,34 +699,6 @@ impl RuntimeCheckedPrefix {
     }
 }
 
-fn refuse_ephemeral_declaration_replacement<'a>(
-    prefix: &RuntimeCheckedPrefix,
-    session: &PersistentSession,
-    snapshot: &RuntimeCheckedPrefixSnapshot,
-    names: impl Iterator<Item = &'a str>,
-) -> Result<(), SessionError> {
-    if prefix
-        .admission
-        .private_execution
-        .as_ref()
-        .is_none_or(|private| private.durable_owner.is_some())
-    {
-        return Ok(());
-    }
-    let names = names.collect::<std::collections::BTreeSet<_>>();
-    if session
-        .lib()
-        .log
-        .current_items_at(snapshot.visibility.declaration_tip)
-        .iter()
-        .flat_map(|(item, _)| item.value_names())
-        .any(|name| names.contains(name))
-    {
-        return Err(SessionError::UnsupportedPrivateValueReplacement);
-    }
-    Ok(())
-}
-
 fn validate_private_value_overlay<'a>(
     prefix: &RuntimeCheckedPrefix,
     session: &PersistentSession,
@@ -795,126 +722,6 @@ fn validate_private_value_overlay<'a>(
         return Err(SessionError::UnsupportedPrivateValueReplacement);
     }
     Ok(())
-}
-
-/// Auxiliary display settlement never completes another authored item. Its
-/// snapshot records the actual native rows, including a preserved page after
-/// a pure renderer failure, rather than the compiler's expected bundle rows.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CheckedDisplaySettlement {
-    Completed,
-    Failed,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct CheckedDisplayPlan {
-    pub(crate) admission: Arc<RuntimeCheckedDisplayAdmission>,
-    pub(crate) proof: Arc<tidepool_toolchain::checked_cell::ExactCompiledDisplay>,
-    pub(crate) metadata: super::BoundBinder,
-    pub(crate) binding_names: [String; 3],
-    pub(crate) binding_ids: [tidepool_repr::SessionVarId; 3],
-}
-impl CheckedDisplayPlan {
-    pub(crate) fn validate_ready(
-        &self,
-        session: &PersistentSession,
-        scope: ScopeId,
-    ) -> Result<(), SessionError> {
-        let prefix = &self.admission.prefix;
-        let state = prefix.state.lock();
-        if !prefix.admission.belongs_to(session)
-            || prefix.admission.visibility.scope != scope
-            || !Arc::ptr_eq(&state.snapshot, &self.admission.snapshot)
-            || state.in_flight.is_some()
-            || state.display_in_flight.is_some()
-            || state.reservation.is_some()
-            || !self.admission.matches_compiled_display(&self.proof)
-            || self.proof.generation() != self.admission.generation().0
-            || !Arc::ptr_eq(self.proof.capture(), self.admission.execution())
-            || session.public_visibility_snapshot_in(scope).as_ref()
-                != Some(&state.snapshot.visibility)
-            || session.compile_view_digest_in(scope) != Some(state.snapshot.view_digest)
-        {
-            return Err(SessionError::StaleStagedDeclaration);
-        }
-        self.proof
-            .validate_settled_native_bindings(state.snapshot.settled_native_bindings())?;
-        session.validate_new_binding_ids(self.binding_ids)?;
-        refuse_ephemeral_declaration_replacement(
-            prefix,
-            session,
-            &state.snapshot,
-            self.binding_names.iter().map(String::as_str),
-        )?;
-        state
-            .snapshot
-            .compiler_prefix
-            .append_display(self.proof.clone())?;
-        Ok(())
-    }
-    pub(crate) fn start(
-        &self,
-        session: &PersistentSession,
-        scope: ScopeId,
-    ) -> Result<(), SessionError> {
-        self.validate_ready(session, scope)?;
-        self.admission
-            .started
-            .compare_exchange(
-                false,
-                true,
-                std::sync::atomic::Ordering::AcqRel,
-                std::sync::atomic::Ordering::Acquire,
-            )
-            .map_err(|_| SessionError::StaleStagedDeclaration)?;
-        self.admission.prefix.state.lock().display_in_flight = Some(self.proof.clone());
-        Ok(())
-    }
-    pub(crate) fn settle(
-        &self,
-        session: &mut PersistentSession,
-        scope: ScopeId,
-        outcome: CheckedDisplaySettlement,
-        program: Option<tidepool_codegen::prepared_program::ProgramId>,
-    ) -> Result<(), SessionError> {
-        let prefix = &self.admission.prefix;
-        let mut state = prefix.state.lock();
-        if !prefix.admission.belongs_to(session)
-            || state
-                .display_in_flight
-                .as_ref()
-                .is_none_or(|proof| !Arc::ptr_eq(proof, &self.proof))
-        {
-            return Err(SessionError::StaleStagedDeclaration);
-        }
-        let compiler_prefix = state
-            .snapshot
-            .compiler_prefix
-            .append_display(self.proof.clone())?;
-        let native = session.capture_checked_native_delta(
-            scope,
-            self.proof.generation(),
-            program,
-            &state.native_index,
-            self.proof.target_definition_identities(),
-            self.proof
-                .bound_binder_identities()
-                .filter(|(name, _)| *name != self.metadata.name),
-            outcome == CheckedDisplaySettlement::Failed,
-        )?;
-        settle_checked_snapshot(
-            session,
-            &mut state,
-            scope,
-            compiler_prefix,
-            prefix.admission.digest(),
-            Some(self.proof.value_interface_certificate()),
-            Some(outcome),
-            Some(native),
-        )?;
-        state.display_in_flight = None;
-        Ok(())
-    }
 }
 
 /// Travels with the existing resident continuation token. It records no
@@ -983,7 +790,6 @@ impl CheckedTurnCompletion {
             &state.native_index,
             self.execution.target_definition_identities(),
             self.execution.bound_binder_identities(),
-            false,
         )?;
         let completed_values = if let Some(private) = &self.prefix.admission.private_execution {
             let mut values = Vec::new();
@@ -1017,7 +823,6 @@ impl CheckedTurnCompletion {
             compiler_prefix,
             self.prefix.admission.digest(),
             self.execution.value_interface_certificate(),
-            None,
             Some(native),
         )?;
         if let Some((private, values)) = completed_values {
@@ -1036,7 +841,6 @@ fn settle_checked_snapshot(
     compiler_prefix: tidepool_toolchain::checked_cell::ExactCompiledPrefix,
     admission: [u8; 32],
     interface: Option<Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>>,
-    display_settlement: Option<CheckedDisplaySettlement>,
     native_delta: Option<CapturedNativeDelta>,
 ) -> Result<(), SessionError> {
     let view = session
@@ -1074,7 +878,7 @@ fn settle_checked_snapshot(
         }
     }
     // The next snapshot owns the complete exact dependency closure before
-    // the previous snapshot can drop. Outstanding compiler/display owners
+    // the previous snapshot can drop. Outstanding compiler owners
     // keep their own old snapshot and lexical lease until they finish.
     let retained = session.retain_lexical_scope(scope)?;
     let (native_imports, added_native) = match native_delta {
@@ -1095,7 +899,6 @@ fn settle_checked_snapshot(
         compiler_prefix,
         admission,
         retained,
-        display_settlement,
         native_imports,
     ));
     if let Some((generation, digest)) = added_interface {
@@ -1114,7 +917,6 @@ fn checked_snapshot(
     compiler_prefix: tidepool_toolchain::checked_cell::ExactCompiledPrefix,
     admission: [u8; 32],
     retained_scope: Arc<RuntimeLexicalScopeLease>,
-    last_display_settlement: Option<CheckedDisplaySettlement>,
     native_imports: CheckedNativeImports,
 ) -> RuntimeCheckedPrefixSnapshot {
     let native_shares = visibility.source_instances.clone();
@@ -1141,11 +943,6 @@ fn checked_snapshot(
         frame(name.as_bytes());
         frame(&id.raw().to_le_bytes());
     }
-    frame(match last_display_settlement {
-        None => b"no-display-settlement".as_slice(),
-        Some(CheckedDisplaySettlement::Completed) => b"display-completed".as_slice(),
-        Some(CheckedDisplaySettlement::Failed) => b"display-failed".as_slice(),
-    });
     frame(b"interfaces");
     frame(&interfaces.commitment);
     frame(b"actual-native-imports");
@@ -1175,7 +972,6 @@ fn checked_snapshot(
         native_shares,
         native_imports,
         compiler_prefix,
-        last_display_settlement,
         digest: *digest.finalize().as_bytes(),
     }
 }
@@ -1240,8 +1036,18 @@ impl RuntimeCellAdmission {
     pub(super) fn is_host_activation(&self) -> bool {
         matches!(
             self.native_purpose,
-            Some(NativeCellPurpose::HostActivation(_))
+            Some(NativeCellPurpose::HostActivation { .. })
         )
+    }
+    pub(super) fn host_activation_input_witness(
+        &self,
+    ) -> Option<&Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>> {
+        match &self.native_purpose {
+            Some(NativeCellPurpose::HostActivation {
+                input_type_witness, ..
+            }) => Some(input_type_witness),
+            _ => None,
+        }
     }
     pub fn view(&self) -> &SessionCompileView {
         &self.view
@@ -1335,7 +1141,6 @@ impl PersistentSession {
             || !prefix.admission.belongs_to(self)
             || !Arc::ptr_eq(&state.snapshot, admission.snapshot())
             || state.in_flight.is_some()
-            || state.display_in_flight.is_some()
             || state.reservation.as_ref().is_none_or(|reservation| {
                 reservation.item != *execution.item()
                     || reservation.generation.0 != execution.generation()
@@ -1375,101 +1180,6 @@ impl PersistentSession {
             .store(next, std::sync::atomic::Ordering::Release);
     }
 
-    pub fn admit_checked_display(
-        &mut self,
-        prefix: Arc<RuntimeCheckedPrefix>,
-        execution: Arc<tidepool_toolchain::checked_cell::ExactCompiledItem>,
-        captured_binding: &super::BoundBinder,
-        budget: usize,
-        presented: Vec<String>,
-    ) -> Result<Arc<RuntimeCheckedDisplayAdmission>, SessionError> {
-        self.reap_admission_leases();
-        let state = prefix.state.lock();
-        let scope = prefix.admission.visibility.scope;
-        let id = tidepool_repr::SessionVarId::from_extract(captured_binding.var_id);
-        if !prefix.admission.belongs_to(self)
-            || prefix.admission.private_execution().is_none()
-            || state.in_flight.is_some()
-            || state.display_in_flight.is_some()
-            || state.reservation.is_some()
-            || state
-                .snapshot
-                .compiler_prefix
-                .completed_item(execution.item().index())
-                .is_none_or(|completed| !Arc::ptr_eq(completed, &execution))
-            || execution.observation_name() != Some(captured_binding.name.as_str())
-            || self.bindings().get(id).is_none_or(|entry| {
-                entry.scope != scope
-                    || entry.name.0 != captured_binding.name
-                    || entry.module.module_name() != captured_binding.module
-                    || entry.module
-                        != tidepool_repr::SessionModule::val(Generation(execution.generation()))
-            })
-            || self.public_visibility_snapshot_in(scope).as_ref()
-                != Some(&state.snapshot.visibility)
-            || self.compile_view_digest_in(scope) != Some(state.snapshot.view_digest)
-        {
-            return Err(SessionError::StaleStagedDeclaration);
-        }
-        execution.validate_bound_binders(&[super::turn::encode_bound_binder_authority(
-            captured_binding,
-        )])?;
-        let snapshot = state.snapshot.clone();
-        drop(state);
-        let generation = match &prefix.admission.planned {
-            Some(planned) => {
-                let row = planned
-                    .items()
-                    .get(execution.item().index())
-                    .ok_or(SessionError::StaleStagedDeclaration)?;
-                if row.kind() != super::RuntimePlannedCellItemKind::Expression
-                    || row.value_generation() != Some(Generation(execution.generation()))
-                    || row.observation_name() != execution.observation_name()
-                {
-                    return Err(SessionError::StaleStagedDeclaration);
-                }
-                row.display_generation()
-                    .ok_or(SessionError::StaleStagedDeclaration)?
-            }
-            None => {
-                let generation = self.val_gen().next();
-                self.set_val_gen(generation);
-                generation
-            }
-        };
-        let retained_scope = self.retain_lexical_scope(scope)?;
-        let mut digest = blake3::Hasher::new();
-        let mut frame = |bytes: &[u8]| {
-            digest.update(&(bytes.len() as u64).to_le_bytes());
-            digest.update(bytes);
-        };
-        frame(b"TidepoolRuntimeCheckedDisplay1");
-        frame(&snapshot.digest());
-        frame(&(execution.item().index() as u64).to_le_bytes());
-        frame(&execution.generation().to_le_bytes());
-        frame(&generation.0.to_le_bytes());
-        frame(&captured_binding.var_id.to_le_bytes());
-        frame(captured_binding.name.as_bytes());
-        frame(captured_binding.module.as_bytes());
-        frame(&(budget as u64).to_le_bytes());
-        frame(&(presented.len() as u64).to_le_bytes());
-        for key in &presented {
-            frame(key.as_bytes());
-        }
-        Ok(Arc::new(RuntimeCheckedDisplayAdmission {
-            prefix,
-            snapshot,
-            execution,
-            captured_binding: captured_binding.clone(),
-            generation,
-            budget,
-            presented,
-            digest: *digest.finalize().as_bytes(),
-            _retained_scope: retained_scope,
-            started: std::sync::atomic::AtomicBool::new(false),
-        }))
-    }
-
     pub fn admit_checked_item(
         &mut self,
         prefix: Arc<RuntimeCheckedPrefix>,
@@ -1487,7 +1197,6 @@ impl PersistentSession {
             })
             || item.index() != state.snapshot.compiler_prefix.next_item()
             || state.in_flight.is_some()
-            || state.display_in_flight.is_some()
             || state.reservation.is_some()
             || self.public_visibility_snapshot_in(scope).as_ref()
                 != Some(&state.snapshot.visibility)
@@ -1599,7 +1308,6 @@ impl PersistentSession {
         if !prefix.admission.belongs_to(self)
             || !Arc::ptr_eq(&state.snapshot, &admission.snapshot)
             || state.in_flight.is_some()
-            || state.display_in_flight.is_some()
             || state.reservation.as_ref().is_none_or(|reserved| {
                 reserved.item != *item || reserved.generation != admission.generation
             })
@@ -1714,7 +1422,6 @@ impl PersistentSession {
                 scope,
                 compiler_prefix,
                 prefix.admission.digest(),
-                None,
                 None,
                 None,
             )?;
@@ -1878,7 +1585,6 @@ impl PersistentSession {
             first_item.initial_prefix()?,
             admission.digest(),
             admission._retained_scope.clone(),
-            None,
             CheckedNativeImports::base(admission.native_imports.clone()),
         ));
         admission
@@ -1898,7 +1604,6 @@ impl PersistentSession {
             state: parking_lot::Mutex::new(RuntimeCheckedState {
                 snapshot,
                 in_flight: None,
-                display_in_flight: None,
                 reservation: None,
                 interface_index,
                 native_index,
@@ -2083,6 +1788,7 @@ impl PersistentSession {
             None,
             None,
             None,
+            None,
         )
     }
 
@@ -2096,6 +1802,7 @@ impl PersistentSession {
         specification_digest: [u8; 32],
         authority_digest: [u8; 32],
         include_paths: Vec<PathBuf>,
+        request_evidence: Option<Arc<super::SiteTypeEvidence>>,
     ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
         use tidepool_toolchain::cell_plan::ParsedCellPlanKind as Kind;
         if plan.items().len() != 1
@@ -2121,6 +1828,7 @@ impl PersistentSession {
             Some(plan),
             None,
             Some(NativeCellPurpose::Setup),
+            request_evidence,
         )
     }
 
@@ -2128,6 +1836,8 @@ impl PersistentSession {
         &mut self,
         scope: ScopeId,
         input_commitment: [u8; 32],
+        input_type_witness: Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>,
+        request_evidence: Arc<super::SiteTypeEvidence>,
         specification: Arc<dyn Any + Send + Sync>,
         specification_digest: [u8; 32],
         authority_digest: [u8; 32],
@@ -2142,7 +1852,11 @@ impl PersistentSession {
             include_paths,
             None,
             None,
-            Some(NativeCellPurpose::HostActivation(input_commitment)),
+            Some(NativeCellPurpose::HostActivation {
+                input_commitment,
+                input_type_witness,
+            }),
+            Some(request_evidence),
         )
     }
 
@@ -2170,12 +1884,19 @@ impl PersistentSession {
         plan: Option<Arc<tidepool_toolchain::cell_plan::ParsedCellPlan>>,
         private_execution: Option<Arc<PrivateExecutionAdmission>>,
         native_purpose: Option<NativeCellPurpose>,
+        request_evidence: Option<Arc<super::SiteTypeEvidence>>,
     ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
         self.reap_admission_leases();
         let view = self
             .compile_view_in(scope)
             .ok_or(SessionError::DeadScope(scope))?
             .with_scoped_injection();
+        let view = match &request_evidence {
+            Some(evidence) => view
+                .with_request_type_evidence(evidence)
+                .map_err(SessionError::Compile)?,
+            None => view,
+        };
         if let Some(plan) = &plan {
             let injected = view
                 .injected_values()
@@ -2466,13 +2187,11 @@ impl PersistentSession {
                 frame(parent.as_bytes());
             }
         }
-        match &native_purpose {
-            Some(NativeCellPurpose::Setup) => frame(b"TidepoolNativeSetupAdmission1"),
-            Some(NativeCellPurpose::HostActivation(input_commitment)) => {
-                frame(b"TidepoolHostActivationAdmission1");
-                frame(input_commitment);
-            }
-            None => {}
+        if let Some(purpose) = &native_purpose {
+            purpose.frame_authorization(&mut frame);
+        }
+        if let Some(evidence) = &request_evidence {
+            frame(&evidence.commitment());
         }
         let digest = *digest.finalize().as_bytes();
         let planned = planned.map(|mut planned| {
@@ -2578,7 +2297,6 @@ impl PersistentSession {
         known_owners: &CheckedNativeIndex,
         definitions: impl Iterator<Item = &'a SymbolIdentity>,
         bound_rows: impl Iterator<Item = (&'a str, u64)>,
-        allow_absent_bindings: bool,
     ) -> Result<CapturedNativeDelta, SessionError> {
         if !self.scope_tree().is_live(scope) {
             return Err(SessionError::DeadScope(scope));
@@ -2607,9 +2325,6 @@ impl PersistentSession {
         for (name, id) in bound_rows {
             let id = tidepool_repr::SessionVarId::from_extract(id);
             let Some(entry) = self.bindings().get(id) else {
-                if allow_absent_bindings {
-                    continue;
-                }
                 return Err(SessionError::StaleStagedDeclaration);
             };
             let identity = &entry.value.identity;
@@ -2689,6 +2404,7 @@ impl PersistentSession {
         specification_digest: [u8; 32],
         authority_digest: [u8; 32],
         include_paths: Vec<PathBuf>,
+        request_evidence: Option<Arc<super::SiteTypeEvidence>>,
     ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
         self.compile_view_for_execution(&execution)?;
         use tidepool_toolchain::cell_plan::ParsedCellPlanKind as Kind;
@@ -2707,6 +2423,7 @@ impl PersistentSession {
             Some(plan),
             Some(execution),
             None,
+            request_evidence,
         )
     }
 
@@ -2733,6 +2450,68 @@ impl PersistentSession {
 mod tests {
     use super::*;
     use crate::session::{ModuleEnv, SessionId, SessionLib};
+
+    #[test]
+    fn host_purpose_binds_whole_native_payload_and_semantic_input_identity() {
+        use ciborium::value::Value;
+        let text = |value: &str| Value::Text(value.into());
+        let witness = |payload: u8, shape: &str| {
+            let mut structure = Vec::new();
+            ciborium::into_writer(
+                &Value::Array(vec![text("literal"), text("nat"), text(shape)]),
+                &mut structure,
+            )
+            .unwrap();
+            let mut bytes = Vec::new();
+            // Structural codec evidence; this native payload is not executed.
+            ciborium::into_writer(
+                &Value::Array(vec![
+                    text("TPCANONICALINPUTTYPE1"),
+                    text("1"),
+                    Value::Array(vec![
+                        text("TPCHECKEDSIGNATURE2"),
+                        text("activation-input"),
+                        text("presentation"),
+                        Value::Bytes(vec![payload]),
+                        Value::Array(vec![]),
+                    ]),
+                    Value::Bytes(structure),
+                    Value::Array(vec![]),
+                ]),
+                &mut bytes,
+            )
+            .unwrap();
+            let encoded = bytes
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            Arc::new(serde_json::from_value::<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>(serde_json::Value::String(encoded)).unwrap())
+        };
+        let original = witness(1, "1");
+        let payload_changed = witness(2, "1");
+        let semantic_changed = witness(1, "2");
+        assert_eq!(original, payload_changed);
+        assert_eq!(original.commitment(), payload_changed.commitment());
+        assert_ne!(
+            original.metadata_digest(),
+            payload_changed.metadata_digest()
+        );
+        assert_ne!(original.commitment(), semantic_changed.commitment());
+        let digest = |witness: Arc<_>| {
+            let purpose = NativeCellPurpose::HostActivation {
+                input_commitment: [7; 32],
+                input_type_witness: witness,
+            };
+            let mut digest = blake3::Hasher::new();
+            purpose.frame_authorization(&mut |bytes| {
+                digest.update(&(bytes.len() as u64).to_le_bytes());
+                digest.update(bytes);
+            });
+            *digest.finalize().as_bytes()
+        };
+        assert_ne!(digest(original.clone()), digest(payload_changed));
+        assert_ne!(digest(original), digest(semantic_changed));
+    }
 
     #[test]
     fn initial_interface_inventory_refuses_missing_extra_duplicate_and_changed_bytes() {
@@ -3180,7 +2959,6 @@ mod tests {
                 &index,
                 [&ambient_identity, &own_identity].into_iter(),
                 [].into_iter(),
-                false,
             )
             .unwrap();
         assert_eq!(delta.imports.len(), 1);
@@ -3209,7 +2987,6 @@ mod tests {
                 &index,
                 [&ambient_identity].into_iter(),
                 [].into_iter(),
-                false,
             )
             .unwrap();
         assert!(absent.imports.is_empty());
@@ -3221,7 +2998,6 @@ mod tests {
                 &index,
                 [&own_identity].into_iter(),
                 [].into_iter(),
-                false,
             )
             .unwrap();
         let (unchanged, added) = ledger.append(next, &index).unwrap();
@@ -3279,7 +3055,6 @@ mod tests {
                 &index,
                 [&package_identity, &foreign_package].into_iter(),
                 [("answer", 924)].into_iter(),
-                false,
             )
             .unwrap();
         assert_eq!(reused.imports.len(), 2);
@@ -3295,7 +3070,6 @@ mod tests {
                 &index,
                 [].into_iter(),
                 [("answer", 924)].into_iter(),
-                false,
             )
             .is_err());
         for ((identity, generation), root) in &baseline.owners {
@@ -3332,7 +3106,6 @@ mod tests {
                 &index,
                 [&own_identity].into_iter(),
                 [].into_iter(),
-                false,
             )
             .unwrap();
         assert_eq!(delta.imports.len(), 1);
@@ -3362,102 +3135,6 @@ mod tests {
         assert!(retained.upgrade().is_some());
         drop(index);
         assert!(retained.upgrade().is_none());
-    }
-
-    #[test]
-    fn failed_display_delta_records_only_actual_native_rows_and_root_identity() {
-        let mut session = PersistentSession::new(None, 1024 * 1024);
-        let baseline = Arc::new(
-            session
-                .capture_admitted_native_imports(ScopeId::ROOT)
-                .unwrap(),
-        );
-        let index = CheckedNativeIndex::new(baseline.clone());
-        let scope = session.mint_scope(ScopeId::ROOT).unwrap();
-        let mut page = crate::session::prepared::tests::rooted_publication_fixture(
-            &mut session,
-            "__page",
-            920,
-        );
-        page.value.identity.module = page.module.module_name();
-        page.value.identity.namespace = "value".into();
-        page.value.identity.occurrence = page.name.0.clone();
-        let page_identity = page.value.identity.clone();
-        let page_id = page.id.raw();
-        session.bind_in(scope, page).unwrap();
-        let delta = session
-            .capture_checked_native_delta(
-                scope,
-                920,
-                None,
-                &index,
-                [].into_iter(),
-                [("__page", page_id), ("cellDisplay", 921)].into_iter(),
-                true,
-            )
-            .unwrap();
-        assert_eq!(delta.bindings.len(), 1);
-        assert_eq!(delta.bindings[0].name, "__page");
-        assert_eq!(delta.imports.len(), 1);
-        assert_eq!(delta.imports[0].identity, page_identity);
-        let (ledger, added) = CheckedNativeImports::base(baseline.clone())
-            .append(delta, &index)
-            .unwrap();
-        assert_eq!(added.len(), 1);
-        assert!(ledger
-            .imports()
-            .any(|(identity, generation)| identity == &page_identity && generation == 920));
-        assert!(!ledger
-            .deltas()
-            .flat_map(|delta| &delta.bindings)
-            .any(|binding| binding.name == "cellDisplay"));
-        assert!(session
-            .capture_checked_native_delta(
-                scope,
-                920,
-                None,
-                &index,
-                [].into_iter(),
-                [("__page", page_id), ("cellDisplay", 921)].into_iter(),
-                false,
-            )
-            .is_err());
-        // Missing rows are allowed; a foreign or mismatched live row is not.
-        let mut foreign = crate::session::prepared::tests::rooted_publication_fixture(
-            &mut session,
-            "cellDisplay",
-            921,
-        );
-        foreign.value.identity.module =
-            tidepool_repr::SessionModule::val(Generation(920)).module_name();
-        session.bind_in(ScopeId::ROOT, foreign).unwrap();
-        assert!(session
-            .capture_checked_native_delta(
-                scope,
-                920,
-                None,
-                &index,
-                [].into_iter(),
-                [("cellDisplay", 921)].into_iter(),
-                true,
-            )
-            .is_err());
-        let delta = session
-            .capture_checked_native_delta(
-                scope,
-                920,
-                None,
-                &index,
-                [].into_iter(),
-                [("__page", page_id)].into_iter(),
-                false,
-            )
-            .unwrap();
-        let mut replaced_owner = CheckedNativeIndex::new(baseline.clone());
-        replaced_owner
-            .added
-            .insert((page_identity, 920), delta.imports[0].root_id + 1);
-        assert!(ledger.append(delta, &replaced_owner).is_err());
     }
 
     #[test]

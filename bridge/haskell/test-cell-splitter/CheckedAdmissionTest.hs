@@ -4,8 +4,6 @@ module CheckedAdmissionTest (checkedAdmissionChecks) where
 
 import qualified Codec.CBOR.Encoding as Cbor
 import qualified Codec.CBOR.Write as Cbor
-import Data.Maybe (isJust, isNothing)
-import Tidepool.ExactHydration (ExactIfaceArtifact(..))
 import Control.Exception (IOException, bracket, try)
 import Control.Monad (unless, forM_)
 import qualified Data.ByteString as BS
@@ -37,10 +35,10 @@ checkedAdmissionChecks = withScratch $ \root -> do
       fields = [BindGen 7, InjectVal "Val7", TurnTemplate "bind" first,
         TurnTemplate "expr" second, TurnTemplate "bind" first]
       cell = CheckedCellAdmission "cell-admission" (digest source) (digest wrapper)
-        inventory ["Val7"] [] [] Nothing
+        inventory ["Val7"] [] [] Nothing AuthoredCellCheck
       item = CheckedItemAdmission AuthoredCheckedItem "item-admission" "cell-receipt" 2
         (digest source) "bind" ["café"] inventory ["Val7"]
-        [CheckedSignature "__tidepool_cell_pin_2_café" "Int" []]
+        [CheckedSignature "__tidepool_cell_pin_2_café" "Int" (BS.singleton 0) []]
         Nothing Nothing 7 "prefix" [] Nothing Nothing [] []
       display = CheckedDisplayAdmission "display-admission" "cell-receipt" 2
         "observation" 6 7 "prefix" 32 [] inventory ["Val7"] [] "rendered" Nothing [] []
@@ -77,7 +75,7 @@ checkedAdmissionChecks = withScratch $ \root -> do
   expectFailure "injected order" itemError (validateCheckedItemAdmission (args { requestInjectVals = ["Val7", "Val7"] }) item source verdict)
   expectFailure "generation" itemError (validateCheckedItemAdmission (args { requestBindGen = Just 8 }) item source verdict)
   expectFailure "verdict" itemError (validateCheckedItemAdmission args item source (StmtBinders KExpr [] []))
-  expectFailure "signature key" itemError (validateCheckedItemAdmission args (item { itemSignatures = [CheckedSignature "wrong" "Int" []] }) source verdict)
+  expectFailure "signature key" itemError (validateCheckedItemAdmission args (item { itemSignatures = [CheckedSignature "wrong" "Int" (BS.singleton 0) []] }) source verdict)
   let reserved = "let __tidepool_checked_annotation_0 = 1"
   expectFailure "reserved annotation" "authored checked item uses a compiler-reserved annotation name"
     (validateCheckedItemAdmission args (item { itemSourceDigest = digest reserved }) reserved verdict)
@@ -140,8 +138,8 @@ withScratch = bracket acquire removeDirectoryRecursive
 
 receiptChecks :: FilePath -> CheckedItemAdmission -> CheckedDisplayAdmission -> IO ()
 receiptChecks root item display = do
-  let scope = ExactScope "manifest" "request" "producer" "semantic" [] [] [] [] []
-        Nothing Nothing Nothing Nothing Nothing Set.empty
+  let scope = ExactScope "manifest" "request" "producer" "semantic" [] Map.empty [] [] [] []
+        Nothing Nothing Nothing Nothing Nothing Nothing Set.empty
       source = "recipe λ"
   writeCheckedItemReceipt root scope item source
   check "checked-item.cbor" itemGolden
@@ -185,26 +183,19 @@ inspectionScopeChecks root = do
       readScope injected modules paths = do
         BS.writeFile path (envelope injected modules paths)
         readExactScope path
-  admitted <- readScope [owner] [owner] [root]
-  case admitted of
-    Right scope -> unless (isJust (scopeCheckedInspection scope)
-        && isNothing (scopeCheckedCell scope) && isNothing (scopeCheckedItem scope)
-        && isNothing (scopeCheckedDisplay scope) && scopeIncludePaths scope == Just [root]
-        && map exactModule (scopeValueInterfaces scope) == [owner])
-      (fail "inspection purpose gained publication authority or lost captured inputs")
-    Left failure -> fail failure
-  -- Authorization names may sort lexically while captured interfaces retain
-  -- numeric generation order. Both inventories still name exactly the cap.
+  -- These legacy inspection envelopes have no typed interface evidence or
+  -- producer certificate. Even matching inventories cannot authorize v8.
   let owner9 = "Tidepool.Session.Val.G9"
       owner10 = "Tidepool.Session.Val.G10"
-  numeric <- readScope [owner10,owner9] [owner9,owner10] [root]
-  case numeric of
-    Right scope -> unless (map exactModule (scopeValueInterfaces scope) == [owner9,owner10])
-      (fail "inspection generation inventory reordered captured interface inputs")
-    Left failure -> fail failure
-  forM_ [([owner],[],[root]), ([owner,owner],[owner,owner],[root])
+  forM_ [([owner],[owner],[root])
+        , ([owner10,owner9],[owner9,owner10],[root])
+        , ([owner],[],[root]), ([owner,owner],[owner,owner],[root])
         , (["Tidepool.Session.Lib.G2"],["Tidepool.Session.Lib.G2"],[root])
         , ([owner],[owner],["relative-root"])] $ \(injected,modules,paths) -> do
+    let expected = envelope injected modules paths
     rejected <- readScope injected modules paths
-    unless (either (const True) (const False) rejected)
-      (fail "inspection scope accepted mismatched, duplicate, non-value or relative inputs")
+    case rejected of
+      Left _ -> pure ()
+      Right _ -> fail "legacy inspection envelope gained current scope authority"
+    unchanged <- BS.readFile path
+    unless (unchanged == expected) (fail "legacy inspection refusal changed its producer bytes")

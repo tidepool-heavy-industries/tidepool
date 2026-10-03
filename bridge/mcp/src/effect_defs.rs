@@ -597,6 +597,19 @@ macro_rules! console_effect_def {
                 { ctor Print, method print,
                   args { msg: "Text" as String },
                   ret "()" },
+                { ctor DisplayWith, method display_with,
+                  args { view: "((Int, Int, Int), Text, [(Int, Text)], Bool)" as ((i64, i64, i64), String, Vec<(i64, String)>, bool),
+                         continuation: "payload" as tidepool_bridge::HaskellValue },
+                  ret "(Int, Int, Int)" },
+                { ctor DisplayExpandWith, method display_expand_with,
+                  args { selection: "((Int, Int, Int), Int)" as ((i64, i64, i64), i64) },
+                  ret "[(Int, Text)]" },
+                { ctor DisplayAllowanceWith, method display_allowance_with,
+                  args { },
+                  ret "Int" },
+                { ctor DisplayExpansionInputWith, method display_expansion_input_with,
+                  args { },
+                  ret "((Int, Int, Int), Int, Int)" },
             ],
             helpers [
                 { name say, sig "forall effs. Member Console effs => Text -> Eff effs ()",
@@ -1801,11 +1814,20 @@ mod tests {
     }
 
     #[test]
-    fn generated_console_decl_matches_handwritten_baseline() {
+    fn generated_console_decl_contains_actor_display_protocol() {
         let d = crate::console_decl();
         assert_eq!(d.type_name, "Console");
         assert_eq!(d.description, "Print text output.");
-        assert_eq!(d.constructors, &["Print :: Text -> Console ()"]);
+        assert_eq!(
+            d.constructors,
+            &[
+                "Print :: Text -> Console ()",
+                "DisplayWith :: ((Int, Int, Int), Text, [(Int, Text)], Bool) -> payload -> Console (Int, Int, Int)",
+                "DisplayExpandWith :: ((Int, Int, Int), Int) -> Console [(Int, Text)]",
+                "DisplayAllowanceWith :: Console Int",
+                "DisplayExpansionInputWith :: Console ((Int, Int, Int), Int, Int)",
+            ]
+        );
         assert!(d.type_defs.is_empty());
         assert_eq!(
             d.helpers,

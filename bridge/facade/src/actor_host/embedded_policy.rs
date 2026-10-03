@@ -4,7 +4,7 @@ use harness::finalize::FunctionToolSchema;
 
 use exomonad_actor::{
     ActorRef, HostedCheckpointCapture, HostedContextBinding, LocalResidentInstallation,
-    ResidentToolEndpoint, ResidentToolError, ResidentToolFuture,
+    ResidentToolDispatchFuture, ResidentToolEndpoint, ResidentToolError, ResidentToolFuture,
 };
 use exomonad_tool::{HostedTool, ToolArguments, ToolInvocation, ToolInvocationContext};
 use serde_json::{json, Value};
@@ -127,7 +127,7 @@ impl EmbeddedPolicySnapshot {
             }
             raw => raw,
         };
-        self.policy.dispatch_with_context_boxed(
+        let future = self.policy.dispatch_with_context_boxed(
             ToolInvocation {
                 context: Some(context),
                 name,
@@ -135,7 +135,13 @@ impl EmbeddedPolicySnapshot {
             },
             checkpoint_capture,
             context_binding,
-        )
+        );
+        Box::pin(async move {
+            future
+                .await?
+                .into_json()
+                .map_err(ResidentToolError::Encoding)
+        })
     }
 
     pub(super) fn implementation(&self, name: &str) -> Option<exomonad_tool::ToolImplementation> {
@@ -227,17 +233,19 @@ mod tests {
             None
         }
 
-        fn dispatch_boxed(&self, invocation: ToolInvocation) -> ResidentToolFuture {
+        fn dispatch_boxed(&self, invocation: ToolInvocation) -> ResidentToolDispatchFuture {
             let marker = self.marker;
-            Box::pin(ready(Ok(json!({
-                "marker": marker,
-                "name": invocation.name,
-                "context": invocation.context.as_ref().map(|context| context.call_id.as_str()),
-                "arguments": match invocation.arguments {
-                    ToolArguments::Raw(raw) => json!({"raw": raw}),
-                    ToolArguments::Structured(value) => json!({"structured": value}),
-                },
-            }))))
+            Box::pin(ready(Ok(exomonad_actor::ResidentToolResponse::Value(
+                json!({
+                    "marker": marker,
+                    "name": invocation.name,
+                    "context": invocation.context.as_ref().map(|context| context.call_id.as_str()),
+                    "arguments": match invocation.arguments {
+                        ToolArguments::Raw(raw) => json!({"raw": raw}),
+                        ToolArguments::Structured(value) => json!({"structured": value}),
+                    },
+                }),
+            ))))
         }
     }
 

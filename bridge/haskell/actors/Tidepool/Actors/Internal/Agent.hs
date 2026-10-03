@@ -100,7 +100,7 @@ import Tidepool.Agent.Assignment
   )
 import Tidepool.Agent.Watch.Internal (WatchId (..))
 import Tidepool.Inspection
-  ( Display (..), DisplayTree (..), PageDisplay (..), opaqueHandle, pageWithContinuation )
+  ( Display (..), DisplayRoot (..), DisplayTree (..), PageDisplay (..), opaqueHandle, pageWithContinuation )
 import Tidepool.Agent.Session
   ( ActivationMetadata (..)
   , emptyActivationMetadata
@@ -263,6 +263,7 @@ data AgentForgetOutcome
   | AgentForgetRunning
   | AgentForgetRetained [RequestId] [WatchId]
   | AgentForgetUnavailable
+  | AgentForgetOutputPending Int
   deriving (Show, Eq)
 
 forgetAgent :: Member AgentInspection effs => AgentRef -> Eff effs AgentForgetOutcome
@@ -274,6 +275,7 @@ forgetAgent (AgentRef target _) = do
     Core.AgentForgetRetained requests watches ->
       AgentForgetRetained (map RequestId requests) (map WatchId watches)
     Core.AgentForgetUnavailable -> AgentForgetUnavailable
+    Core.AgentForgetOutputPending displays -> AgentForgetOutputPending displays
 
 -- | Configure a coding agent around one managed worktree.
 codingAgent :: WorktreeHandle -> AgentLaunchSpec
@@ -757,7 +759,16 @@ instance Display NotificationReceipt where
   displayTree receipt =
     opaqueHandle ("notification " <> notificationSummary receipt)
 
--- | A cell's own result reads as what happened: admitted, not yet presented.
+-- | Explicit top-level output describes admission, never model presentation.
+instance DisplayRoot NotificationReceipt where
+  displayRoot = TextLeaf . notificationAccepted
+
+instance DisplayRoot (Either NotificationError NotificationReceipt) where
+  displayRoot (Right receipt) = displayRoot receipt
+  displayRoot (Left failure) =
+    Concat [TextLeaf "notification not accepted: ", StringLeaf (show failure)]
+
+-- | A retained pure page uses the same admission description.
 instance PageDisplay effects NotificationReceipt where
   displayPage budget receipt =
     pageWithContinuation budget (TextLeaf (notificationAccepted receipt)) Nothing

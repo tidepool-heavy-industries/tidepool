@@ -50,6 +50,9 @@ library tidepool-extract-internal
     Tidepool.ExtractUtil
     Tidepool.ExtractRequest
     Tidepool.FatIface
+    Tidepool.FinalizedModule
+    Tidepool.FinalizedModuleArtifacts
+    Tidepool.FinalizedCore
     Tidepool.GhcPipeline
     Tidepool.ExactHydration
     Tidepool.ExactScope
@@ -95,10 +98,12 @@ library tidepool-extract-internal
     ghc-boot     >= 9.12 && < 9.13,
     bytestring,
     containers,
+    deepseq,
     filepath,
     directory,
     process,
     template-haskell,
+    time,
     text,
     cborg,
     cryptohash-sha256,
@@ -193,6 +198,7 @@ test-suite display-tree-test
   main-is:          DisplayTreeTest.hs
   hs-source-dirs:   lib test-display-tree
   other-modules:    Tidepool.Inspection.Tree
+                   Tidepool.Inspection.Display
   build-depends:
     base >= 4.20 && < 5,
     text
@@ -331,9 +337,13 @@ test-suite source-boot-product-reuse-test
   main-is:          Main.hs
   hs-source-dirs:   test-source-boot
   other-modules:    ExecutionSourceDecodeTest
+                    ProgressBoundaryTest
+                    FinalizedCoreTest
+                    ExactScopeV8Test
   build-depends:
     base >= 4.20 && < 5,
     ghc >= 9.12 && < 9.13,
+    ghc-boot >= 9.12 && < 9.13,
     containers,
     bytestring,
     cborg,

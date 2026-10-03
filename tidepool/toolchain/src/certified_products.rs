@@ -13,6 +13,12 @@ use tidepool_repr::execution_schema::{
     ProjectedGroup, RawModuleProduct, ResultContract, RuntimeRep, Signature, SymbolIdentity,
 };
 
+mod finalized_module;
+pub(crate) use finalized_module::CertifiedModuleInterface;
+pub use finalized_module::{
+    CapturedArtifactDescriptor, FinalizationEnvelope, FinalizedModuleReceipt,
+};
+
 use crate::cache::{DependencyEvidence, ProductAvailability};
 use crate::module_candidates::CandidateSet;
 use crate::recovery_artifacts::PackageInterfaceValidation;
@@ -116,6 +122,7 @@ pub struct CertifiedModuleReceipt {
     pub source_sha256: [u8; 32],
     pub dependency_witness_sha256: [u8; 32],
     pub groups: Vec<AcceptedGroup>,
+    pub interface_requirements: BTreeMap<(String, String), [u8; 32]>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -123,6 +130,7 @@ pub struct CertifiedReceipt {
     pub modules: Vec<CertifiedModuleReceipt>,
     pub targets: BTreeMap<String, Vec<AcceptedGlobal>>,
     pub packages: BTreeMap<(String, String), PackageInterfaceWitness>,
+    pub finalization: FinalizationEnvelope,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -240,6 +248,7 @@ pub struct PendingCertifiedGroup {
 pub(crate) struct CertifiedProducts {
     pub groups: Vec<PendingCertifiedGroup>,
     pub recovery_products: Vec<crate::recovery_artifacts::CertifiedRecoveryProduct>,
+    pub module_interfaces: Vec<CertifiedModuleInterface>,
 }
 
 impl PendingCertifiedGroup {
@@ -273,9 +282,11 @@ impl PendingCertifiedGroup {
 #[derive(Debug)]
 pub(crate) struct OriginalNativeWitness {
     owner: CachedHomeOwner,
+    execution_source_sha256: Option<[u8; 32]>,
     anchors: [Arc<[u8]>; 4],
     groups: Arc<[PendingCertifiedGroup]>,
     sources: Vec<CachedHomeOwner>,
+    interface_requirements: BTreeMap<(String, String), [u8; 32]>,
     packages: BTreeMap<(String, String), PackageInterfaceWitness>,
     native_requirements: CertifiedNativeRequirements,
 }
@@ -312,9 +323,11 @@ fn retain_original_native(
     let native_requirements = native_requirements_from_witness(&witness);
     let facts = Arc::new(OriginalNativeWitness {
         owner: witness.owner,
+        execution_source_sha256: witness.execution_source_sha256,
         anchors: product.original_byte_anchors().map(Arc::clone),
         groups: groups.into(),
         sources: witness.sources.into_values().collect(),
+        interface_requirements: witness.interface_requirements,
         packages: witness.packages,
         native_requirements,
     });
@@ -598,7 +611,7 @@ fn validate_global_witness(
     Ok(selected.owner.clone())
 }
 
-/// Decode the worker's bounded `TPCERT4` tuple with exact owner rows shared
+/// Decode the worker's bounded `TPCERT6` tuple with exact owner rows shared
 /// through an immutable dictionary. Older ownership formats are refused.
 /// Original groups and executable targets preserve their ordered witnesses.
 pub fn decode_receipt(bytes: &[u8]) -> CertResult<CertifiedReceipt> {
@@ -620,14 +633,14 @@ fn decode_receipt_value(value: &Value) -> CertResult<CertifiedReceipt> {
         return Err(CertificationError::Receipt("receipt header"));
     }
     let version = number(&header[1])?;
-    if version != 4 {
+    if version != 6 {
         return Err(CertificationError::UnsupportedVersion {
             format: CertificationFormat::ProductReceipt,
             found: version,
-            expected: 4,
+            expected: 6,
         });
     }
-    if header.len() != 6 {
+    if header.len() != 7 {
         return Err(CertificationError::Receipt("receipt header"));
     }
     let mut dictionary = GlobalDictionary::decode(&header[5])?;
@@ -645,7 +658,7 @@ fn decode_receipt_value(value: &Value) -> CertResult<CertifiedReceipt> {
     let modules = modules
         .iter()
         .map(|module| {
-            let row = sized(module, 9)?;
+            let row = sized(module, 10)?;
             let origin = match string(&row[0])? {
                 "fresh" => ProductOrigin::Fresh,
                 "cached" => ProductOrigin::Cached,
@@ -676,6 +689,7 @@ fn decode_receipt_value(value: &Value) -> CertResult<CertifiedReceipt> {
                 source_sha256: digest(&row[4])?,
                 dependency_witness_sha256: digest(&row[7])?,
                 groups,
+                interface_requirements: decode_interface_requirements(&row[9])?,
             })
         })
         .collect::<CertResult<Vec<_>>>()?;
@@ -729,10 +743,13 @@ fn decode_receipt_value(value: &Value) -> CertResult<CertifiedReceipt> {
             return Err(CertificationError::Receipt("duplicate package witness"));
         }
     }
+    let finalization = finalized_module::decode_envelope(&header[6])?;
+    finalization.validate_owners(&modules, &packages)?;
     Ok(CertifiedReceipt {
         modules,
         targets,
         packages,
+        finalization,
     })
 }
 
@@ -1151,9 +1168,68 @@ pub struct InheritedProductInput<'a> {
 struct HomeCertification {
     owner: CachedHomeOwner,
     execution_source_sha256: Option<[u8; 32]>,
+    finalized_module_sha256: Option<[u8; 32]>,
     groups: Vec<(u32, Vec<SymbolIdentity>, Vec<AcceptedGlobal>)>,
     sources: BTreeMap<(String, String), CachedHomeOwner>,
+    interface_requirements: BTreeMap<(String, String), [u8; 32]>,
     packages: BTreeMap<(String, String), PackageInterfaceWitness>,
+}
+
+fn decode_interface_requirements(
+    value: &Value,
+) -> CertResult<BTreeMap<(String, String), [u8; 32]>> {
+    let rows = array(value)?;
+    if rows.len() > MODULE_LIMIT {
+        return Err(CertificationError::Receipt("interface owner count"));
+    }
+    let mut requirements = BTreeMap::new();
+    let mut previous = None;
+    for row in rows {
+        let row = sized(row, 3)?;
+        let key = (string(&row[0])?.to_owned(), string(&row[1])?.to_owned());
+        let seal = digest(&row[2])?;
+        if key.0.is_empty()
+            || key.1.is_empty()
+            || seal == [0; 32]
+            || string(&row[2])? != hex(&seal)
+            || previous.as_ref().is_some_and(|owner| owner >= &key)
+        {
+            return Err(CertificationError::Receipt(
+                "noncanonical interface owner seal",
+            ));
+        }
+        previous = Some(key.clone());
+        requirements.insert(key, seal);
+    }
+    Ok(requirements)
+}
+
+fn encode_interface_requirements(requirements: &BTreeMap<(String, String), [u8; 32]>) -> Value {
+    value_array(requirements.iter().map(|((unit, module), seal)| {
+        value_array([value_text(unit), value_text(module), value_text(hex(seal))])
+    }))
+}
+
+/// Interface-only closure is separate from executable global/group requirements.
+/// The inventory verifies these exact seals against the admitted owner graph.
+pub(crate) fn original_interface_requirements(
+    product: &crate::recovery_artifacts::CertifiedRecoveryProduct,
+) -> CertResult<BTreeMap<(String, String), [u8; 32]>> {
+    match product.original_native() {
+        Some(witness) if witness.matches_original(product) => {
+            Ok(witness.interface_requirements.clone())
+        }
+        Some(_) => Err(CertificationError::Mismatch(
+            "original native witness bytes",
+        )),
+        None => {
+            let witness = decode_home_witness(product.certification_bytes())?;
+            if &witness.owner != product.owner() {
+                return Err(CertificationError::Mismatch("interface requirements owner"));
+            }
+            Ok(witness.interface_requirements)
+        }
+    }
 }
 
 fn home_owner(value: &Value) -> CertResult<CachedHomeOwner> {
@@ -1291,14 +1367,7 @@ fn value_global(global: &AcceptedGlobal) -> Value {
 fn encode_home_witness(witness: &HomeCertification) -> CertResult<Vec<u8>> {
     let mut fields = vec![
         value_text("TPHOMEOWNERS"),
-        Value::Integer(
-            if witness.execution_source_sha256.is_some() {
-                3
-            } else {
-                2
-            }
-            .into(),
-        ),
+        Value::Integer(5.into()),
         value_home(&witness.owner),
         value_array(witness.groups.iter().map(|(ordinal, binders, globals)| {
             value_array([
@@ -1329,9 +1398,19 @@ fn encode_home_witness(witness: &HomeCertification) -> CertResult<Vec<u8>> {
                 .collect::<CertResult<Vec<_>>>()?,
         ),
     ];
-    if let Some(digest) = witness.execution_source_sha256 {
-        fields.push(value_text(hex(&digest)));
-    }
+    fields.push(
+        witness
+            .execution_source_sha256
+            .map_or(Value::Null, |digest| value_text(hex(&digest))),
+    );
+    fields.push(encode_interface_requirements(
+        &witness.interface_requirements,
+    ));
+    fields.push(
+        witness
+            .finalized_module_sha256
+            .map_or(Value::Null, |digest| value_text(hex(&digest))),
+    );
     let value = value_array(fields);
     let mut bytes = Vec::new();
     ciborium::ser::into_writer(&value, &mut bytes)
@@ -1362,15 +1441,25 @@ fn decode_home_witness(bytes: &[u8]) -> CertResult<HomeCertification> {
         return Err(CertificationError::Receipt("home witness header"));
     }
     let version = number(&row[1])?;
-    if version != 2 && version != 3 {
+    if version != 5 {
         return Err(CertificationError::UnsupportedVersion {
             format: CertificationFormat::HomeOwners,
             found: version,
-            expected: 3,
+            expected: 5,
         });
     }
-    let row = sized(&value, if version == 3 { 7 } else { 6 })?;
-    let execution_source_sha256 = if version == 3 {
+    let row = sized(&value, 9)?;
+    let finalized_module_sha256 = match &row[8] {
+        Value::Null => None,
+        value => {
+            let seal = digest(value)?;
+            if seal == [0; 32] || string(value)? != hex(&seal) {
+                return Err(CertificationError::Receipt("finalized module digest"));
+            }
+            Some(seal)
+        }
+    };
+    let execution_source_sha256 = if !matches!(&row[6], Value::Null) {
         let digest = digest(&row[6])?;
         if digest == [0; 32] {
             return Err(CertificationError::Receipt("empty execution source digest"));
@@ -1380,6 +1469,10 @@ fn decode_home_witness(bytes: &[u8]) -> CertResult<HomeCertification> {
         None
     };
     let owner = home_owner(&row[2])?;
+    let interface_requirements = decode_interface_requirements(&row[7])?;
+    if interface_requirements.contains_key(&(owner.unit.clone(), owner.module.clone())) {
+        return Err(CertificationError::Receipt("self interface requirement"));
+    }
     let groups = array(&row[3])?;
     if groups.len() > GROUP_LIMIT {
         return Err(CertificationError::Receipt("group count"));
@@ -1525,14 +1618,145 @@ fn decode_home_witness(bytes: &[u8]) -> CertResult<HomeCertification> {
     let witness = HomeCertification {
         owner,
         execution_source_sha256,
+        finalized_module_sha256,
         groups,
         sources,
+        interface_requirements,
         packages,
     };
+    validate_home_witness_structure(&witness)?;
     if encode_home_witness(&witness)? != bytes {
         return Err(CertificationError::Receipt("noncanonical home witness"));
     }
     Ok(witness)
+}
+
+fn validate_home_witness_structure(witness: &HomeCertification) -> CertResult<()> {
+    if witness.owner.unit.is_empty() || witness.owner.module.is_empty() {
+        return Err(CertificationError::Receipt("empty home owner"));
+    }
+    if witness.execution_source_sha256 == Some([0; 32]) {
+        return Err(CertificationError::Receipt("empty execution source digest"));
+    }
+    if witness.groups.len() > GROUP_LIMIT {
+        return Err(CertificationError::Receipt("group count"));
+    }
+    let mut ordinals = BTreeSet::new();
+    let mut binders_seen = BTreeSet::new();
+    let mut globals_count = 0;
+    for (ordinal, binders, globals) in &witness.groups {
+        if !ordinals.insert(*ordinal) {
+            return Err(CertificationError::Receipt("duplicate group ordinal"));
+        }
+        if binders.is_empty()
+            || binders.iter().any(|binder| {
+                binder.unit != witness.owner.unit
+                    || binder.module != witness.owner.module
+                    || !binders_seen.insert(binder.clone())
+            })
+        {
+            return Err(CertificationError::Receipt("home witness binders"));
+        }
+        globals_count += globals.len();
+        if globals_count > GLOBAL_LIMIT {
+            return Err(CertificationError::Receipt("global count"));
+        }
+    }
+    if witness.sources.len() > MODULE_LIMIT {
+        return Err(CertificationError::Receipt("source owner count"));
+    }
+    for ((unit, module), source) in &witness.sources {
+        if unit.is_empty() || module.is_empty() || unit != &source.unit || module != &source.module
+        {
+            return Err(CertificationError::Receipt("empty home owner"));
+        }
+    }
+    if witness.packages.len() > PACKAGE_LIMIT {
+        return Err(CertificationError::Receipt("package count"));
+    }
+    for ((unit, module), package) in &witness.packages {
+        if unit.is_empty() || module.is_empty() || !package.selected_path.is_absolute() {
+            return Err(CertificationError::Receipt("package witness"));
+        }
+    }
+    if witness.finalized_module_sha256 == Some([0; 32])
+        || witness.interface_requirements.len() > MODULE_LIMIT
+        || witness
+            .interface_requirements
+            .iter()
+            .any(|((unit, module), seal)| {
+                unit.is_empty()
+                    || module.is_empty()
+                    || *seal == [0; 32]
+                    || (unit == &witness.owner.unit && module == &witness.owner.module)
+            })
+    {
+        return Err(CertificationError::Receipt(
+            "invalid canonical interface requirements",
+        ));
+    }
+    let mut used_sources = BTreeSet::new();
+    let mut used_packages = BTreeSet::new();
+    for (_, _, globals) in &witness.groups {
+        for global in globals {
+            match &global.owner {
+                ReceiptImportOwner::Source {
+                    unit,
+                    module,
+                    module_version,
+                    binder,
+                    ..
+                } => {
+                    let key = (unit.clone(), module.clone());
+                    let source = witness
+                        .sources
+                        .get(&key)
+                        .ok_or(CertificationError::Mismatch("home source witness"))?;
+                    if module_version.as_ref() != Some(&source.module_version)
+                        || binder != &global.identity
+                        || binder.unit != *unit
+                        || binder.module != *module
+                    {
+                        return Err(CertificationError::Mismatch("home source witness"));
+                    }
+                    used_sources.insert(key);
+                }
+                ReceiptImportOwner::Package {
+                    unit,
+                    module,
+                    interface_digest,
+                    binder,
+                }
+                | ReceiptImportOwner::RetainedPackage {
+                    unit,
+                    module,
+                    interface_digest,
+                    binder,
+                    ..
+                } => {
+                    let key = (unit.clone(), module.clone());
+                    if witness.packages.get(&key).map(|witness| witness.sha256)
+                        != Some(*interface_digest)
+                        || binder != &global.identity
+                        || binder.unit != *unit
+                        || binder.module != *module
+                    {
+                        return Err(CertificationError::Mismatch("home package witness"));
+                    }
+                    used_packages.insert(key);
+                }
+                ReceiptImportOwner::Retained { identity, .. } if identity != &global.identity => {
+                    return Err(CertificationError::Mismatch("home retained witness"));
+                }
+                _ => {}
+            }
+        }
+    }
+    if used_sources.len() != witness.sources.len() || used_packages.len() != witness.packages.len()
+    {
+        return Err(CertificationError::Receipt("unused owner witness"));
+    }
+    Ok(())
 }
 
 /// Called by the recovery owner before retaining or materializing a seal.
@@ -1586,6 +1810,235 @@ pub(crate) fn original_home_requirements_with_validation(
         .into_values()
         .collect()),
     }
+}
+
+/// Private construction proves a native issuer selected this same canonical
+/// carrier; recovery uses the full wire decoder instead.
+#[cfg(test)]
+pub(crate) fn fixture_module_interface(
+    producer: [u8; 32],
+    unit: &str,
+    module: &str,
+    requirements: BTreeMap<(String, String), [u8; 32]>,
+) -> CertifiedModuleInterface {
+    let bytes = module.as_bytes().to_vec();
+    let value = value_array([
+        value_text("TPPKGROOTS"),
+        value_text("2"),
+        value_array([
+            value_text(unit),
+            value_text(module),
+            value_text(hex(&sha(&bytes))),
+        ]),
+        value_array([]),
+        value_array([]),
+    ]);
+    let mut packages = Vec::new();
+    ciborium::ser::into_writer(&value, &mut packages).unwrap();
+    finalized_module::fixture_interface(
+        producer,
+        unit,
+        module,
+        [1; 32],
+        bytes,
+        packages,
+        requirements,
+        Some(b"fixture-core".to_vec()),
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn fixture_interface_bytes(
+    producer: [u8; 32],
+    unit: &str,
+    module: &str,
+    interface: Vec<u8>,
+    packages: Vec<u8>,
+) -> CertifiedModuleInterface {
+    finalized_module::fixture_interface(
+        producer,
+        unit,
+        module,
+        [1; 32],
+        interface,
+        packages,
+        BTreeMap::new(),
+        Some(b"fixture-core".to_vec()),
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn fixture_finalized_product(
+    product: crate::recovery_artifacts::CertifiedRecoveryProduct,
+    producer: [u8; 32],
+) -> crate::recovery_artifacts::CertifiedRecoveryProduct {
+    let mut witness = decode_home_witness(product.certification_bytes()).unwrap();
+    let package_bytes = if product.package_imports_bytes().is_empty() {
+        let value = value_array([
+            value_text("TPPKGROOTS"),
+            value_text("2"),
+            value_array([
+                value_text(&product.owner().unit),
+                value_text(&product.owner().module),
+                value_text(hex(&product.owner().skinny_iface_sha256)),
+            ]),
+            value_array([]),
+            value_array([]),
+        ]);
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&value, &mut bytes).unwrap();
+        bytes
+    } else {
+        product.package_imports_bytes().to_vec()
+    };
+    let interface = finalized_module::fixture_interface(
+        producer,
+        &product.owner().unit,
+        &product.owner().module,
+        product.source_sha256().unwrap_or([1; 32]),
+        product.interface_bytes().to_vec(),
+        package_bytes.clone(),
+        witness.interface_requirements.clone(),
+        Some(b"fixture-core".to_vec()),
+    );
+    witness.finalized_module_sha256 = Some(sha(interface.certificate_bytes()));
+    let binding = validate_module_binding(
+        &witness,
+        &interface,
+        product.interface_bytes(),
+        &package_bytes,
+        product.source_sha256(),
+    )
+    .unwrap();
+    let mut finalized =
+        crate::recovery_artifacts::CertifiedRecoveryProduct::from_finalized_certification(
+            product.owner().clone(),
+            product.product_bytes().to_vec(),
+            encode_home_witness(&witness).unwrap(),
+            binding,
+        );
+    if let Some(source) = product.source_sha256() {
+        finalized = finalized.with_source_sha256(source);
+    }
+    finalized
+}
+
+pub(crate) struct ValidatedModuleBinding(CertifiedModuleInterface);
+impl ValidatedModuleBinding {
+    pub(crate) fn into_interface(self) -> CertifiedModuleInterface {
+        self.0
+    }
+}
+
+fn validate_module_binding(
+    witness: &HomeCertification,
+    interface: &CertifiedModuleInterface,
+    actual_interface: &[u8],
+    actual_packages: &[u8],
+    expected_source_sha256: Option<[u8; 32]>,
+) -> CertResult<ValidatedModuleBinding> {
+    if expected_source_sha256.is_some_and(|source| source != interface.source_sha256())
+        || !interface.home_units().contains(&witness.owner.unit)
+        || witness
+            .sources
+            .values()
+            .any(|owner| !interface.home_units().contains(&owner.unit))
+        || witness
+            .packages
+            .keys()
+            .any(|(unit, _)| interface.home_units().contains(unit))
+        || witness.finalized_module_sha256 != Some(sha(interface.certificate_bytes()))
+        || interface.unit() != witness.owner.unit
+        || interface.module() != witness.owner.module
+        || interface.interface_sha256() != witness.owner.skinny_iface_sha256
+        || interface.interface_bytes() != actual_interface
+        || interface.package_imports_bytes() != actual_packages
+        || interface.requirements() != &witness.interface_requirements
+        || interface.core_bytes().is_none()
+    {
+        return Err(CertificationError::Mismatch(
+            "native canonical module binding",
+        ));
+    }
+    Ok(ValidatedModuleBinding(interface.clone()))
+}
+
+pub(crate) fn original_execution_source_digest_with_validation(
+    product: &crate::recovery_artifacts::CertifiedRecoveryProduct,
+    validation: &mut PackageInterfaceValidation,
+) -> CertResult<Option<[u8; 32]>> {
+    match product.original_native() {
+        Some(witness) if witness.matches_original(product) => {
+            for package in witness.packages.values() {
+                verify_package_interface(validation, package)?;
+            }
+            Ok(witness.execution_source_sha256)
+        }
+        Some(_) => Err(CertificationError::Mismatch(
+            "original native witness bytes",
+        )),
+        None => home_execution_source_digest_with_validation(
+            product.certification_bytes(),
+            product.owner(),
+            validation,
+        ),
+    }
+}
+
+pub(crate) fn recover_module_interface(
+    producer: [u8; 32],
+    certificate: Vec<u8>,
+    interface: Vec<u8>,
+    packages: Vec<u8>,
+    core: Option<Vec<u8>>,
+    validation: &mut PackageInterfaceValidation,
+) -> CertResult<CertifiedModuleInterface> {
+    finalized_module::recover_interface(
+        producer,
+        certificate,
+        interface,
+        packages,
+        core,
+        validation,
+    )
+}
+
+pub(crate) fn validate_original_module_interface(
+    product: &crate::recovery_artifacts::CertifiedRecoveryProduct,
+    interface: &CertifiedModuleInterface,
+) -> CertResult<()> {
+    validate_canonical_native_bytes(
+        product.owner(),
+        product.certification_bytes(),
+        product.interface_bytes(),
+        product.package_imports_bytes(),
+        product.source_sha256(),
+        interface,
+    )
+}
+
+pub(crate) fn validate_canonical_native_bytes(
+    owner: &CachedHomeOwner,
+    certification: &[u8],
+    actual_interface: &[u8],
+    actual_packages: &[u8],
+    source_sha256: Option<[u8; 32]>,
+    interface: &CertifiedModuleInterface,
+) -> CertResult<()> {
+    let witness = decode_home_witness(certification)?;
+    if witness.owner != *owner {
+        return Err(CertificationError::Mismatch(
+            "native canonical source owner",
+        ));
+    }
+    validate_module_binding(
+        &witness,
+        interface,
+        actual_interface,
+        actual_packages,
+        source_sha256,
+    )
+    .map(|_| ())
 }
 
 pub(crate) fn original_native_requirements(
@@ -1716,6 +2169,7 @@ fn verify_home_witness_with_validation(
     Ok(witness)
 }
 
+#[cfg(test)]
 pub(crate) fn bind_home_execution_source(
     bytes: &[u8],
     owner: &CachedHomeOwner,
@@ -1732,6 +2186,18 @@ pub(crate) fn bind_home_execution_source(
     }
     witness.execution_source_sha256 = Some(source_digest);
     encode_home_witness(&witness)
+}
+
+pub(crate) fn home_certification_digests_with_validation(
+    bytes: &[u8],
+    owner: &CachedHomeOwner,
+    validation: &mut PackageInterfaceValidation,
+) -> CertResult<(Option<[u8; 32]>, Option<[u8; 32]>)> {
+    let witness = verify_home_witness_with_validation(bytes, owner, validation)?;
+    Ok((
+        witness.execution_source_sha256,
+        witness.finalized_module_sha256,
+    ))
 }
 
 pub(crate) fn home_execution_source_digest_with_validation(
@@ -1769,21 +2235,67 @@ pub fn encode_home_certification(
         owner,
         groups,
         packages,
+        &BTreeMap::new(),
         &mut PackageInterfaceValidation::default(),
     )
+}
+
+/// Encode native evidence bound to one independently validated canonical module.
+/// Complete product admission still decodes that certificate and its payloads.
+pub fn encode_home_certification_with_module(
+    owner: &CachedHomeOwner,
+    groups: &[PendingCertifiedGroup],
+    packages: &BTreeMap<(String, String), PackageInterfaceWitness>,
+    interface_requirements: &BTreeMap<(String, String), [u8; 32]>,
+    module_certificate_sha256: [u8; 32],
+) -> CertResult<Vec<u8>> {
+    let witness = issue_home_certification_with_validation(
+        owner,
+        groups,
+        packages,
+        interface_requirements,
+        None,
+        Some(module_certificate_sha256),
+        &mut PackageInterfaceValidation::default(),
+    )?;
+    encode_home_witness(&witness)
 }
 
 fn encode_home_certification_with_validation(
     owner: &CachedHomeOwner,
     groups: &[PendingCertifiedGroup],
     packages: &BTreeMap<(String, String), PackageInterfaceWitness>,
+    interface_requirements: &BTreeMap<(String, String), [u8; 32]>,
     validation: &mut PackageInterfaceValidation,
 ) -> CertResult<Vec<u8>> {
+    let witness = issue_home_certification_with_validation(
+        owner,
+        groups,
+        packages,
+        interface_requirements,
+        None,
+        None,
+        validation,
+    )?;
+    encode_home_witness(&witness)
+}
+
+fn issue_home_certification_with_validation(
+    owner: &CachedHomeOwner,
+    groups: &[PendingCertifiedGroup],
+    packages: &BTreeMap<(String, String), PackageInterfaceWitness>,
+    interface_requirements: &BTreeMap<(String, String), [u8; 32]>,
+    execution_source_sha256: Option<[u8; 32]>,
+    finalized_module_sha256: Option<[u8; 32]>,
+    validation: &mut PackageInterfaceValidation,
+) -> CertResult<HomeCertification> {
     let mut witness = HomeCertification {
         owner: owner.clone(),
-        execution_source_sha256: None,
+        execution_source_sha256,
+        finalized_module_sha256,
         groups: Vec::new(),
         sources: BTreeMap::new(),
+        interface_requirements: interface_requirements.clone(),
         packages: BTreeMap::new(),
     };
     for group in groups {
@@ -1886,9 +2398,11 @@ fn encode_home_certification_with_validation(
             globals,
         ));
     }
-    let bytes = encode_home_witness(&witness)?;
-    validate_home_certification_with_validation(&bytes, owner, validation)?;
-    Ok(bytes)
+    validate_home_witness_structure(&witness)?;
+    for package in witness.packages.values() {
+        verify_package_interface(validation, package)?;
+    }
+    Ok(witness)
 }
 
 /// Re-admit complete original products using durable ownership receipts. Source
@@ -2392,6 +2906,9 @@ pub(crate) fn certify_recovery_products_with_validation(
                     artifact.package_imports_bytes,
                     artifact.certification_bytes,
                 );
+            product = product
+                .with_module_interface(artifact.module_interface)
+                .map_err(|_| CertificationError::Mismatch("recovered canonical module"))?;
             if let Some(graph) = artifact.execution_source {
                 product = product
                     .with_execution_source_with_validation(graph, validation)
@@ -2940,6 +3457,9 @@ pub(crate) fn certify_products(
     include: &[PathBuf],
     exact: Option<&crate::declaration_context::ExactProductAdmission<'_>>,
 ) -> CertResult<CertifiedProducts> {
+    receipt
+        .finalization
+        .validate_owners(&receipt.modules, &receipt.packages)?;
     let evidence_start = std::time::Instant::now();
     let mut validation = PackageInterfaceValidation::default();
     let normalized = match exact {
@@ -2974,6 +3494,44 @@ pub(crate) fn certify_products(
         evidence_start.elapsed(),
         fresh_evidence_bytes.len() as u64,
     );
+    let producer_sha256 =
+        crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
+            endpoint_identity,
+        )
+        .sha256();
+    let inherited_interfaces = exact
+        .map(|admission| admission.request.context.artifact_view().descriptors())
+        .unwrap_or_default();
+    if inherited_interfaces
+        .iter()
+        .any(|entry| entry.producer_sha256 != producer_sha256)
+    {
+        return Err(CertificationError::Mismatch(
+            "inherited finalization producer",
+        ));
+    }
+    let inherited_seals = inherited_interfaces
+        .into_iter()
+        .map(|entry| {
+            (
+                (entry.owner.unit, entry.owner.module),
+                entry.interface_sha256,
+            )
+        })
+        .collect();
+    let module_interfaces = finalized_module::issue_interfaces(
+        &receipt.finalization,
+        fresh_input_path
+            .parent()
+            .ok_or(CertificationError::StaleEvidence)?,
+        producer_sha256,
+        final_evidence,
+        &inherited_seals,
+        &mut validation,
+    )?;
+    let inherited_module_interfaces = exact
+        .map(|admission| admission.request.context.module_interfaces())
+        .unwrap_or_default();
     let parsed_fresh = fresh_products.products();
     let fresh_product_bytes = fresh_products.bytes;
     let requirements = crate::prepared_artifact::production_requirements()
@@ -3008,6 +3566,44 @@ pub(crate) fn certify_products(
             &mut validation,
         )
         .map_err(|_| CertificationError::Mismatch("fresh package import witness"))?;
+    }
+    let mut admitted_interfaces = BTreeMap::new();
+    for module in &receipt.modules {
+        let key = (module.unit.clone(), module.module.clone());
+        if admitted_interfaces
+            .insert(key, module.skinny_iface_sha256)
+            .is_some()
+        {
+            return Err(CertificationError::Mismatch("duplicate interface owner"));
+        }
+    }
+    if let Some(admission) = exact {
+        for artifact in &admission.request.artifacts {
+            let key = (
+                artifact.interface.unit.clone(),
+                artifact.interface.module.clone(),
+            );
+            let seal = digest(&value_text(&artifact.interface.sha256))?;
+            if admitted_interfaces
+                .insert(key, seal)
+                .is_some_and(|previous| previous != seal)
+            {
+                return Err(CertificationError::Mismatch(
+                    "conflicting admitted interface owner",
+                ));
+            }
+        }
+    }
+    for module in &receipt.modules {
+        for (key, seal) in &module.interface_requirements {
+            if key == &(module.unit.clone(), module.module.clone())
+                || admitted_interfaces.get(key) != Some(seal)
+            {
+                return Err(CertificationError::Mismatch(
+                    "original interface owner closure",
+                ));
+            }
+        }
     }
     let mut seen_modules = BTreeSet::new();
     let mut origin_counts = [[0_u64; 3]; 2];
@@ -3426,12 +4022,31 @@ pub(crate) fn certify_products(
                     .filter(|group| group.owner() == &owner)
                     .cloned()
                     .collect();
-                let mut certification = encode_home_certification_with_validation(
-                    &owner,
-                    &original,
-                    &receipt.packages,
-                    &mut validation,
-                )?;
+                let accepted = receipt
+                    .modules
+                    .iter()
+                    .find(|module| module.unit == owner.unit && module.module == owner.module)
+                    .ok_or(CertificationError::Mismatch(
+                        "original interface owner receipt",
+                    ))?;
+                let canonical_interface = match origin {
+                    ProductOrigin::Fresh => module_interfaces.iter().find(|interface| {
+                        interface.unit() == owner.unit && interface.module() == owner.module
+                    }),
+                    ProductOrigin::Cached => candidates.and_then(|set| set.by_owner.get(&(owner.unit.clone(), owner.module.clone()))).filter(|bundle| bundle.owner == owner).and_then(|bundle| bundle.original_module_interface.as_ref()).or_else(|| module_interfaces
+                        .iter()
+                        .chain(inherited_module_interfaces.iter())
+                        .find(|interface| {
+                            interface.unit() == owner.unit && interface.module() == owner.module
+                        })),
+                }
+                .ok_or(CertificationError::Mismatch(
+                    "native canonical module carrier",
+                ))?;
+                if canonical_interface.producer_sha256() != producer_sha256
+                    || canonical_interface.source_sha256() != source_sha {
+                    return Err(CertificationError::Mismatch("native canonical producer/source"));
+                }
                 let execution_source = match origin {
                     ProductOrigin::Fresh => execution_graph
                         .as_ref()
@@ -3445,28 +4060,20 @@ pub(crate) fn certify_products(
                         .and_then(|bundle| bundle.original_execution.as_ref())
                         .map(|proof| &proof.graph),
                 };
-                if let Some(graph) = execution_source {
-                    certification = bind_home_execution_source(
-                        &certification,
-                        &owner,
-                        graph.digest(),
-                        &mut validation,
-                    )?;
-                }
-                let product =
-                    crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
-                        owner,
-                        interface,
-                        product_bytes,
-                        package_bytes,
-                        certification,
-                    )
-                    .with_source_sha256(source_sha);
-                let witness = verify_home_witness_with_validation(
-                    product.certification_bytes(),
-                    product.owner(),
+                let witness = issue_home_certification_with_validation(
+                    &owner,
+                    &original,
+                    &receipt.packages,
+                    &accepted.interface_requirements,
+                    execution_source.map(|graph| graph.digest()),
+                    Some(sha(canonical_interface.certificate_bytes())),
                     &mut validation,
                 )?;
+                let certification = encode_home_witness(&witness)?;
+                let binding = validate_module_binding(&witness, canonical_interface, &interface, &package_bytes, Some(source_sha))?;
+                let product = crate::recovery_artifacts::CertifiedRecoveryProduct::from_finalized_certification(
+                    owner, product_bytes, certification, binding,
+                ).with_source_sha256(source_sha);
                 let product = retain_original_native(product, original, witness)?;
                 match execution_source {
                     Some(graph) => product
@@ -3511,6 +4118,7 @@ pub(crate) fn certify_products(
     Ok(CertifiedProducts {
         groups,
         recovery_products,
+        module_interfaces,
     })
 }
 
@@ -3738,6 +4346,7 @@ pub(crate) mod tests {
             package_bytes,
             seal,
         );
+        let product = fixture_finalized_product(product, [2; 32]);
         let original =
             crate::recovery_artifacts::materialize_certified_products(root, [2; 32], &[product])
                 .unwrap()
@@ -3769,8 +4378,9 @@ pub(crate) mod tests {
             crate::recovery_artifacts::RecoveryValueInterfaceRef,
         )>(&serde_json::to_vec(&(original, value)).unwrap())
         .unwrap();
+        let canonical = original.module_interface.clone().unwrap();
         if let Some(output) = std::env::var_os("TIDEPOOL_RECOVERY_NATIVE_PACKET_OUTPUT") {
-            let paths = [
+            let mut paths = vec![
                 &original.interface_path,
                 &original.package_imports_path,
                 &original.certification_path,
@@ -3778,6 +4388,14 @@ pub(crate) mod tests {
                 &value.interface.interface_path,
                 &value.interface.package_imports_path,
             ];
+            paths.extend([
+                &canonical.interface.interface_path,
+                &canonical.interface.package_imports_path,
+                &canonical.certificate_path,
+            ]);
+            if let Some(core) = &canonical.core {
+                paths.push(&core.path);
+            }
             let files = paths
                 .into_iter()
                 .map(|path| (path.clone(), std::fs::read(root.path().join(path)).unwrap()))
@@ -3791,14 +4409,21 @@ pub(crate) mod tests {
         let descriptors = [
             ArtifactDescriptor::from_recovery_product(&original),
             ArtifactDescriptor::from_recovery_value_interface(&value),
+            ArtifactDescriptor::from_recovery_module_interface(&canonical),
         ];
+        let interfaces = [(
+            descriptors[0].id,
+            descriptors[2].id,
+            ArtifactDependency::Interface,
+        )];
         let inventory = RecoveredArtifactInventory::capture(
             root.path(),
             &[original.clone()],
+            &[canonical.clone()],
             &[],
             &[value.clone()],
             &descriptors,
-            &[],
+            &interfaces,
         )
         .unwrap();
         let ids = descriptors
@@ -3824,7 +4449,7 @@ pub(crate) mod tests {
             }
         )));
         assert!(edges.iter().any(|(_, target, edge)| *target == value.artifact_id && matches!(edge, ArtifactDependency::NativeBinding { dependent_ordinal: 7, generation: 1, occurrence, .. } if occurrence == "x")));
-        assert!(first.artifact_view().interface_dependencies().is_empty());
+        assert_eq!(first.artifact_view().interface_dependencies(), interfaces);
         let required = first
             .artifact_view()
             .native_binding_requirements_from_roots(&[descriptors[0].id])
@@ -3836,33 +4461,42 @@ pub(crate) mod tests {
         assert!(RecoveredArtifactInventory::capture(
             root.path(),
             &[original],
+            &[canonical],
             &[],
             &[value],
             &descriptors,
-            &[]
+            &interfaces
         )
         .is_err());
     }
 
     #[test]
     fn recovery_refuses_tampered_and_ambiguous_native_dependency_owners() {
-        use crate::artifact_inventory::ArtifactDescriptor;
+        use crate::artifact_inventory::{ArtifactDependency, ArtifactDescriptor};
         use crate::declaration_join::RecoveredArtifactInventory;
         let root = tempfile::tempdir().unwrap();
         let (original, value) = recovery_native_fixture(root.path());
+        let canonical = original.module_interface.clone().unwrap();
         let descriptors = [
             ArtifactDescriptor::from_recovery_product(&original),
             ArtifactDescriptor::from_recovery_value_interface(&value),
+            ArtifactDescriptor::from_recovery_module_interface(&canonical),
         ];
+        let interfaces = [(
+            descriptors[0].id,
+            descriptors[2].id,
+            ArtifactDependency::Interface,
+        )];
         let mut forged = descriptors.clone();
         forged[1].interface_sha256 = [99; 32];
         assert!(RecoveredArtifactInventory::capture(
             root.path(),
             &[original.clone()],
+            &[canonical.clone()],
             &[],
             &[value.clone()],
             &forged,
-            &[]
+            &interfaces
         )
         .is_err());
         let bytes = b"another value interface".to_vec();
@@ -3897,22 +4531,30 @@ pub(crate) mod tests {
         let descriptors = [
             descriptors[0].clone(),
             descriptors[1].clone(),
+            descriptors[2].clone(),
             ArtifactDescriptor::from_recovery_value_interface(&alternative),
         ];
         let inventory = RecoveredArtifactInventory::capture(
             root.path(),
             &[original.clone()],
+            &[canonical.clone()],
             &[],
             &[value.clone(), alternative],
             &descriptors,
-            &[],
+            &interfaces,
         )
         .unwrap();
         assert!(inventory
-            .context(&[descriptors[0].id, descriptors[1].id], vec![])
+            .context(
+                &[descriptors[0].id, descriptors[1].id, descriptors[2].id],
+                vec![]
+            )
             .is_ok());
         assert!(inventory
-            .context(&[descriptors[0].id, descriptors[2].id], vec![])
+            .context(
+                &[descriptors[0].id, descriptors[3].id, descriptors[2].id],
+                vec![]
+            )
             .is_ok());
         assert!(inventory
             .context(
@@ -3924,10 +4566,11 @@ pub(crate) mod tests {
         assert!(RecoveredArtifactInventory::capture(
             root.path(),
             &[original],
+            &[canonical],
             &[],
             &[value],
-            &descriptors[..2],
-            &[]
+            &descriptors[..3],
+            &interfaces
         )
         .is_err());
     }
@@ -5067,12 +5710,36 @@ pub(crate) mod tests {
         let mut packages = Vec::new();
         ciborium::ser::into_writer(&package_seal, &mut packages).unwrap();
         std::fs::write(interface.with_extension("hi.packages"), packages).unwrap();
+        let finalized = fixture_finalized_product(
+            crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+                owner.clone(),
+                vec![0x42],
+                std::fs::read(&product).unwrap(),
+                std::fs::read(interface.with_extension("hi.packages")).unwrap(),
+                seal,
+            ),
+            [1; 32],
+        );
+        let seal = finalized.certification_bytes().to_vec();
+        std::fs::write(
+            interface.with_extension("hi.owners"),
+            finalized.certification_bytes(),
+        )
+        .unwrap();
+        let canonical = crate::recovery_artifacts::materialize_module_interface(
+            source.path(),
+            finalized.module_interface().unwrap(),
+            &mut PackageInterfaceValidation::default(),
+            crate::recovery_artifacts::MaterializationMode::Durable,
+        )
+        .unwrap();
         let refs = crate::recovery_artifacts::materialize_recovery_closure(
             run.path(),
             [1; 32],
             &[crate::recovery_artifacts::RecoveryArtifactInput {
                 owner: &owner,
                 interface_source: &interface,
+                module_interface: (source.path(), &canonical),
                 product_source: &product,
             }],
         )
@@ -5085,7 +5752,9 @@ pub(crate) mod tests {
             artifact.product_bytes.clone(),
             artifact.package_imports_bytes.clone(),
             artifact.certification_bytes.clone(),
-        );
+        )
+        .with_module_interface(artifact.module_interface.clone())
+        .unwrap();
         assert_eq!(
             certify_owned_products_with_validation(
                 &[&owned],
@@ -5306,7 +5975,80 @@ pub(crate) mod tests {
             product_sha256: sha(bytes),
             source_sha256: sha(source.as_bytes()),
             dependency_witness_sha256: sha(&serde_json::to_vec(evidence).unwrap()),
+            interface_requirements: BTreeMap::new(),
             groups: vec![],
+        }
+    }
+
+    fn fixture_finalization(
+        root: Option<&Path>,
+        modules: &[CertifiedModuleReceipt],
+    ) -> FinalizationEnvelope {
+        let mut finalized = BTreeMap::new();
+        let mut home_units = BTreeSet::from(["main".to_owned()]);
+        for module in modules {
+            home_units.insert(module.unit.clone());
+            home_units.extend(
+                module
+                    .interface_requirements
+                    .keys()
+                    .map(|(unit, _)| unit.clone()),
+            );
+            if module.origin != ProductOrigin::Fresh {
+                continue;
+            }
+            let package_value = value_array([
+                value_text("TPPKGROOTS"),
+                value_text("2"),
+                value_array([
+                    value_text(&module.unit),
+                    value_text(&module.module),
+                    value_text(hex(&module.skinny_iface_sha256)),
+                ]),
+                value_array([]),
+                value_array([]),
+            ]);
+            let mut packages = Vec::new();
+            ciborium::ser::into_writer(&package_value, &mut packages).unwrap();
+            let descriptor = |suffix: &str, bytes: &[u8], digest| CapturedArtifactDescriptor {
+                relative_path: PathBuf::from(format!(
+                    "finalized-fixture/{}.{}.{}",
+                    module.unit, module.module, suffix
+                )),
+                sha256: digest,
+                bytes: bytes.len() as u64,
+            };
+            let interface = descriptor("hi", &[0x42], module.skinny_iface_sha256);
+            let package_imports = descriptor("packages", &packages, sha(&packages));
+            let core_bytes = b"fixture-finalized-core";
+            let core = descriptor("core", core_bytes, sha(core_bytes));
+            if let Some(root) = root {
+                std::fs::create_dir_all(root.join("finalized-fixture")).unwrap();
+                for (artifact, bytes) in [
+                    (&interface, &[0x42][..]),
+                    (&package_imports, packages.as_slice()),
+                    (&core, core_bytes.as_slice()),
+                ] {
+                    std::fs::write(root.join(&artifact.relative_path), bytes).unwrap();
+                }
+            }
+            finalized.insert(
+                (module.unit.clone(), module.module.clone()),
+                FinalizedModuleReceipt {
+                    unit: module.unit.clone(),
+                    module: module.module.clone(),
+                    source_sha256: module.source_sha256,
+                    interface,
+                    package_imports,
+                    core: Some(core),
+                    interface_requirements: module.interface_requirements.clone(),
+                },
+            );
+        }
+        FinalizationEnvelope {
+            profile: finalized_module::FINALIZATION_PROFILE.into(),
+            home_units,
+            modules: finalized,
         }
     }
 
@@ -5380,6 +6122,10 @@ pub(crate) mod tests {
             package_bytes.clone(),
             encode_home_certification(&owner, &[], &BTreeMap::new()).unwrap(),
         );
+        let recovery = fixture_finalized_product(
+            recovery.with_source_sha256(sha(source_text.as_bytes())),
+            [3; 32],
+        );
         let accepted = CertifiedModuleReceipt {
             origin: ProductOrigin::Cached,
             unit: owner.unit.clone(),
@@ -5389,6 +6135,7 @@ pub(crate) mod tests {
             product_sha256: owner.product_sha256,
             source_sha256: sha(source_text.as_bytes()),
             dependency_witness_sha256: sha(&serde_json::to_vec(&evidence).unwrap()),
+            interface_requirements: BTreeMap::new(),
             groups: vec![],
         };
         (
@@ -5406,6 +6153,7 @@ pub(crate) mod tests {
                 evidence: evidence.into(),
                 target_source: "target".into(),
                 origin: crate::module_candidates::CandidateOrigin::Ordinary,
+                original_module_interface: recovery.module_interface().cloned(),
                 original_execution: None,
                 execution_admitted: false,
             },
@@ -5460,6 +6208,10 @@ pub(crate) mod tests {
                 ]),
             },
             CertifiedReceipt {
+                finalization: fixture_finalization(
+                    None,
+                    &vec![accepted_a.clone(), accepted_b.clone()],
+                ),
                 modules: vec![accepted_a, accepted_b],
                 targets: BTreeMap::new(),
                 packages: BTreeMap::new(),
@@ -5658,6 +6410,8 @@ pub(crate) mod tests {
             b.package_imports_bytes().to_vec(),
             seal,
         )
+        .with_module_interface(b.module_interface().unwrap().clone())
+        .unwrap()
         .with_execution_source(b_graph.clone())
         .unwrap();
         let context = crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![])
@@ -5794,16 +6548,14 @@ pub(crate) mod tests {
             .unwrap()
             .original_execution =
             Some(crate::module_candidates::OriginalCandidateExecution { graph });
-        assert!(
-            validate_exact_cached_closure(
-                Some(&candidates),
-                &receipt,
-                &context,
-                &current,
-                &imports
-            )
-            .is_err()
-        );
+        assert!(validate_exact_cached_closure(
+            Some(&candidates),
+            &receipt,
+            &context,
+            &current,
+            &imports
+        )
+        .is_err());
     }
 
     #[test]
@@ -5868,6 +6620,7 @@ pub(crate) mod tests {
         let mut accepted = receipt(&bytes, &admitted, support_source);
         accepted.dependency_witness_sha256 = sha(&evidence_bytes);
         let mut fresh_receipt = CertifiedReceipt {
+            finalization: fixture_finalization(Some(root.path()), &vec![accepted.clone()]),
             modules: vec![accepted.clone()],
             targets: BTreeMap::new(),
             packages: BTreeMap::new(),
@@ -5982,7 +6735,7 @@ pub(crate) mod tests {
         else {
             panic!("manifest");
         };
-        assert_eq!(fields[1].as_text(), Some("8"));
+        assert_eq!(fields[1].as_text(), Some("10"));
         let execution = fields[5].as_array().unwrap();
         assert_eq!(execution[0].as_array().unwrap().len(), 1);
         assert_eq!(execution[1].as_array().unwrap().len(), 1);
@@ -6065,6 +6818,7 @@ pub(crate) mod tests {
         accepted.product_sha256 = bundle.owner.product_sha256;
         accepted.dependency_witness_sha256 = sha(&serde_json::to_vec(&bundle.evidence).unwrap());
         let cached_receipt = CertifiedReceipt {
+            finalization: fixture_finalization(Some(root.path()), &vec![accepted.clone()]),
             modules: vec![accepted],
             targets: BTreeMap::new(),
             packages: BTreeMap::new(),
@@ -6204,6 +6958,10 @@ pub(crate) mod tests {
             quoter_receipt.module = "Quoter".into();
             quoter_receipt.dependency_witness_sha256 = sha(&current_bytes);
             let mixed = CertifiedReceipt {
+                finalization: fixture_finalization(
+                    Some(root.path()),
+                    &vec![cached_receipt.modules[0].clone(), quoter_receipt.clone()],
+                ),
                 modules: vec![cached_receipt.modules[0].clone(), quoter_receipt],
                 targets: BTreeMap::new(),
                 packages: BTreeMap::new(),
@@ -6344,6 +7102,7 @@ pub(crate) mod tests {
         let certified = certify_products(
             None,
             &CertifiedReceipt {
+                finalization: fixture_finalization(Some(directory.path()), &vec![accepted.clone()]),
                 modules: vec![accepted],
                 targets: BTreeMap::new(),
                 packages: BTreeMap::new(),
@@ -6415,8 +7174,17 @@ pub(crate) mod tests {
         )
         .is_ok());
         let recovered = Arc::new(
-            ExactDeclarationContext::capture_recovery(directory.path(), &references, &[], vec![])
-                .unwrap(),
+            ExactDeclarationContext::capture_recovery(
+                directory.path(),
+                &references,
+                &references
+                    .iter()
+                    .map(|reference| reference.module_interface.clone().unwrap())
+                    .collect::<Vec<_>>(),
+                &[],
+                vec![],
+            )
+            .unwrap(),
         );
         assert_eq!(recovered.toolchain_identity_sha256(), canonical_producer);
         let recovered_request = recovered
@@ -6452,6 +7220,7 @@ pub(crate) mod tests {
         let certified = certify_products(
             None,
             &CertifiedReceipt {
+                finalization: fixture_finalization(Some(directory.path()), &vec![accepted.clone()]),
                 modules: vec![accepted.clone()],
                 targets: BTreeMap::new(),
                 packages: BTreeMap::new(),
@@ -6470,7 +7239,8 @@ pub(crate) mod tests {
         assert_eq!(certified.recovery_products.len(), 1);
         let refs = crate::recovery_artifacts::materialize_certified_products(
             directory.path(),
-            [3; 32],
+            crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(b"producer")
+                .sha256(),
             &certified.recovery_products,
         )
         .unwrap();
@@ -6488,6 +7258,10 @@ pub(crate) mod tests {
             certify_products(
                 None,
                 &CertifiedReceipt {
+                    finalization: fixture_finalization(
+                        Some(directory.path()),
+                        &vec![accepted.clone()]
+                    ),
                     modules: vec![accepted.clone()],
                     targets: BTreeMap::new(),
                     packages: BTreeMap::new(),
@@ -6509,6 +7283,10 @@ pub(crate) mod tests {
             certify_products(
                 None,
                 &CertifiedReceipt {
+                    finalization: fixture_finalization(
+                        Some(directory.path()),
+                        &vec![changed.clone()]
+                    ),
                     modules: vec![changed],
                     targets: BTreeMap::new(),
                     packages: BTreeMap::new()
@@ -6531,6 +7309,7 @@ pub(crate) mod tests {
         assert!(certify_products(
             None,
             &CertifiedReceipt {
+                finalization: fixture_finalization(Some(directory.path()), &vec![changed.clone()]),
                 modules: vec![changed],
                 targets: BTreeMap::new(),
                 packages: BTreeMap::new()
@@ -6569,7 +7348,7 @@ pub(crate) mod tests {
             Err(CertificationError::UnsupportedVersion {
                 format: CertificationFormat::ProductReceipt,
                 found: 2,
-                expected: 4
+                expected: 5
             })
         ));
         let mut trailing = encoded;
@@ -6744,6 +7523,34 @@ pub(crate) mod tests {
         bytes
     }
 
+    fn fixture_envelope_value(envelope: &FinalizationEnvelope) -> Value {
+        value_array([
+            value_text(&envelope.profile),
+            value_array(envelope.home_units.iter().map(value_text)),
+            value_array(envelope.modules.values().map(|module| {
+                value_array([
+                    value_text(&module.unit),
+                    value_text(&module.module),
+                    value_text(hex(&module.source_sha256)),
+                    value_text(module.interface.relative_path.to_string_lossy()),
+                    value_text(hex(&module.interface.sha256)),
+                    Value::Integer(module.interface.bytes.into()),
+                    value_text(module.package_imports.relative_path.to_string_lossy()),
+                    value_text(hex(&module.package_imports.sha256)),
+                    Value::Integer(module.package_imports.bytes.into()),
+                    module.core.as_ref().map_or(Value::Null, |core| {
+                        value_array([
+                            value_text(core.relative_path.to_string_lossy()),
+                            value_text(hex(&core.sha256)),
+                            Value::Integer(core.bytes.into()),
+                        ])
+                    }),
+                    encode_interface_requirements(&module.interface_requirements),
+                ])
+            })),
+        ])
+    }
+
     fn dictionary_receipt(legacy: &Value) -> Value {
         let mut compact = legacy.clone();
         let Value::Array(header) = &mut compact else {
@@ -6793,6 +7600,7 @@ pub(crate) mod tests {
                 };
                 rewrite(&mut group[1]);
             }
+            module.push(value_array([]));
         }
         let Value::Array(targets) = &mut header[3] else {
             panic!("targets")
@@ -6803,8 +7611,34 @@ pub(crate) mod tests {
             };
             rewrite(&mut target[1]);
         }
-        header[1] = Value::Integer(4.into());
+        let modules = array(&header[2])
+            .unwrap()
+            .iter()
+            .map(|module| {
+                let row = array(module).unwrap();
+                CertifiedModuleReceipt {
+                    origin: if string(&row[0]).unwrap() == "fresh" {
+                        ProductOrigin::Fresh
+                    } else {
+                        ProductOrigin::Cached
+                    },
+                    unit: string(&row[1]).unwrap().into(),
+                    module: string(&row[2]).unwrap().into(),
+                    module_version: None,
+                    source_sha256: digest(&row[4]).unwrap(),
+                    skinny_iface_sha256: digest(&row[5]).unwrap(),
+                    product_sha256: digest(&row[6]).unwrap(),
+                    dependency_witness_sha256: digest(&row[7]).unwrap(),
+                    groups: vec![],
+                    interface_requirements: BTreeMap::new(),
+                }
+            })
+            .collect::<Vec<_>>();
+        header[1] = Value::Integer(6.into());
         header.push(value_array(indexed.into_values().map(|(_, row)| row)));
+        header.push(fixture_envelope_value(&fixture_finalization(
+            None, &modules,
+        )));
         compact
     }
 
@@ -6845,6 +7679,7 @@ pub(crate) mod tests {
         assert_eq!(
             decode_receipt(&encoded).unwrap(),
             CertifiedReceipt {
+                finalization: fixture_finalization(None, &vec![accepted.clone()]),
                 modules: vec![accepted],
                 targets: BTreeMap::from([("target".into(), vec![])]),
                 packages: BTreeMap::from([(
@@ -7107,8 +7942,81 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn original_interface_seals_survive_cold_codec_and_native_witness_without_executable_sources() {
+        let owner = inherited_owner("Original");
+        let encoded = encode_home_certification(&owner, &[], &BTreeMap::new()).unwrap();
+        let mut witness = decode_home_witness(&encoded).unwrap();
+        let requirements =
+            BTreeMap::from([(("old-cohort".into(), "PrivateNominalOwner".into()), [7; 32])]);
+        witness.interface_requirements = requirements.clone();
+        let encoded = encode_home_witness(&witness).unwrap();
+        let cold = decode_home_witness(&encoded).unwrap();
+        assert_eq!(cold.interface_requirements, requirements);
+        assert!(cold.sources.is_empty());
+        assert!(native_requirements_from_witness(&cold)
+            .artifact_edges
+            .is_empty());
+        let product = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+            owner.clone(),
+            vec![1],
+            vec![2],
+            vec![],
+            encoded,
+        );
+        assert_eq!(
+            original_interface_requirements(&product).unwrap(),
+            requirements
+        );
+        let retained = retain_original_native(product, vec![], cold).unwrap();
+        assert_eq!(
+            original_interface_requirements(&retained).unwrap(),
+            requirements
+        );
+        assert!(original_native_requirements(&retained)
+            .unwrap()
+            .artifact_edges
+            .is_empty());
+        let mut wrong_owner = witness;
+        wrong_owner.owner.module = "AnotherOriginal".into();
+        let wrong = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+            owner,
+            vec![1],
+            vec![2],
+            vec![],
+            encode_home_witness(&wrong_owner).unwrap(),
+        );
+        assert!(original_interface_requirements(&wrong).is_err());
+    }
+
+    #[test]
+    fn original_interface_seal_codec_refuses_missing_duplicate_unsorted_and_self_owners() {
+        let owner = inherited_owner("Original");
+        let current = encode_home_certification(&owner, &[], &BTreeMap::new()).unwrap();
+        let value: Value = ciborium::de::from_reader(current.as_slice()).unwrap();
+        let seal = |unit, module| {
+            value_array([
+                value_text(unit),
+                value_text(module),
+                value_text(hex(&[7; 32])),
+            ])
+        };
+        for entries in [
+            vec![seal("unit", "A"), seal("unit", "A")],
+            vec![seal("unit", "Z"), seal("unit", "A")],
+            vec![seal(&owner.unit, &owner.module)],
+        ] {
+            let mut changed = value.clone();
+            changed.as_array_mut().unwrap()[7] = value_array(entries);
+            assert!(decode_home_witness(&receipt_bytes(&changed)).is_err());
+        }
+        let mut missing = value;
+        missing.as_array_mut().unwrap().pop();
+        assert!(decode_home_witness(&receipt_bytes(&missing)).is_err());
+    }
+
+    #[test]
     fn certificate_versions_refuse_legacy_ownership_without_reinterpretation() {
-        for version in [1, 2, 3] {
+        for version in [1, 2, 3, 4] {
             let mut receipt = dictionary_receipt(&empty_legacy_receipt());
             let Value::Array(rows) = &mut receipt else {
                 unreachable!()
@@ -7118,7 +8026,7 @@ pub(crate) mod tests {
                 decode_receipt(&receipt_bytes(&receipt)),
                 Err(CertificationError::UnsupportedVersion {
                     format: CertificationFormat::ProductReceipt,
-                    expected: 4,
+                    expected: 5,
                     ..
                 })
             ));
@@ -7129,14 +8037,16 @@ pub(crate) mod tests {
         let Value::Array(rows) = &mut value else {
             unreachable!()
         };
-        rows[1] = Value::Integer(1.into());
-        assert!(matches!(
-            decode_home_witness(&receipt_bytes(&value)),
-            Err(CertificationError::UnsupportedVersion {
-                format: CertificationFormat::HomeOwners,
-                found: 1,
-                expected: 3
-            })
-        ));
+        for version in [1, 2, 3] {
+            rows[1] = Value::Integer(version.into());
+            assert!(matches!(
+                decode_home_witness(&receipt_bytes(&Value::Array(rows.clone()))),
+                Err(CertificationError::UnsupportedVersion {
+                    format: CertificationFormat::HomeOwners,
+                    expected: 4,
+                    ..
+                })
+            ));
+        }
     }
 }

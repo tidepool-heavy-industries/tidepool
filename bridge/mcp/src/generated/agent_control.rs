@@ -16,7 +16,7 @@ pub fn agent_control_decl() -> crate::EffectDecl {
             "data CleanupActorState = CleanupActorRunning | CleanupActorTerminal deriving (Show, Eq)",
             "data CleanupActorPlan = CleanupActorPlan { cleanupActorId :: Int, cleanupActorIncarnation :: Int, cleanupActorLabel :: Text, cleanupActorState :: CleanupActorState, cleanupActorRevision :: Int } deriving (Show, Eq)",
             "data CleanupPlan = CleanupPlan { cleanupPlanGroup :: Int, cleanupPlanActors :: [CleanupActorPlan], cleanupPlanPendingResponses :: [Int], cleanupPlanPendingWatches :: [Int], cleanupPlanRefusal :: Maybe Text } deriving (Show, Eq)",
-            "data CleanupStepReceipt = CleanupForgotResponses [Int] | CleanupForgotWatches [Int] | CleanupStoppedActor Int Int AgentStopControlOutcome | CleanupForgotActor Int Int | CleanupActorRetained Int Int [Int] [Int] | CleanupGroupRetired Int | CleanupBlocked Text | CleanupStalePlan deriving (Show, Eq)",
+            "data CleanupStepReceipt = CleanupForgotResponses [Int] | CleanupForgotWatches [Int] | CleanupStoppedActor Int Int AgentStopControlOutcome | CleanupForgotActor Int Int | CleanupActorRetained Int Int [Int] [Int] | CleanupGroupRetired Int | CleanupActorOutputPending Int Int Int | CleanupBlocked Text | CleanupStalePlan deriving (Show, Eq)",
             "data CleanupReceipt = CleanupReceipt { cleanupReceiptPlan :: CleanupPlan, cleanupReceiptSteps :: [CleanupStepReceipt], cleanupReceiptComplete :: Bool } deriving (Show, Eq)",
         ],
         extra_imports: &[],

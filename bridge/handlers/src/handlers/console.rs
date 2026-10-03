@@ -17,6 +17,45 @@ tidepool_mcp::console_effect_def!(crate::effect_glue::effect_rust_projection);
 pub struct ConsoleHandler;
 
 impl ConsoleHandler {
+    fn display_with(
+        &mut self,
+        _cx: &EffectContext<'_, CapturedOutput>,
+        _view: ((i64, i64, i64), String, Vec<(i64, String)>, bool),
+        _continuation: tidepool_bridge::HaskellValue,
+    ) -> Result<tidepool_effect::Response, EffectError> {
+        Err(EffectError::Handler(
+            "display requires an actor resource owner".into(),
+        ))
+    }
+
+    fn display_expand_with(
+        &mut self,
+        _cx: &EffectContext<'_, CapturedOutput>,
+        _selection: ((i64, i64, i64), i64),
+    ) -> Result<tidepool_effect::Response, EffectError> {
+        Err(EffectError::Handler(
+            "display expansion requires an actor resource owner".into(),
+        ))
+    }
+
+    fn display_allowance_with(
+        &mut self,
+        _cx: &EffectContext<'_, CapturedOutput>,
+    ) -> Result<tidepool_effect::Response, EffectError> {
+        Err(EffectError::Handler(
+            "display allowance requires an actor resource owner".into(),
+        ))
+    }
+
+    fn display_expansion_input_with(
+        &mut self,
+        _cx: &EffectContext<'_, CapturedOutput>,
+    ) -> Result<tidepool_effect::Response, EffectError> {
+        Err(EffectError::Handler(
+            "display input requires an active expansion".into(),
+        ))
+    }
+
     fn print(
         &mut self,
         cx: &EffectContext<'_, CapturedOutput>,

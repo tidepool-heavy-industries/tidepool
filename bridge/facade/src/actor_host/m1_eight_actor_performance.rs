@@ -1,7 +1,7 @@
 //! Eight real captured child actors, sequential cells within each actor.
 
 use super::warm_cell_performance::{
-    require_owned_daemon, ClientRequests, CompilerInvocation, DaemonTrace, Workload,
+    ClientRequests, CompilerInvocation, DaemonTrace, Workload, require_owned_daemon,
 };
 use super::*;
 use harness::model::{CallId, ConversationIdentity, OperationId, RequestId};
@@ -64,7 +64,7 @@ impl EightActorTransport {
                 0 => {
                     self.clients.issue(&operation("eight-actor-setup"));
                     harness::item::Item(
-                        json!({"type":"custom_tool_call","call_id":"eight-actor-setup","name":"haskell","input":include_str!("embedded_later_failure_scope_setup.hs")}),
+                        json!({"type":"custom_tool_call","call_id":"eight-actor-setup","name":"haskell","input":format!("{}\n_ <- display True", include_str!("embedded_later_failure_scope_setup.hs"))}),
                     )
                 }
                 1 => {
@@ -333,10 +333,12 @@ async fn production_engine_store_eight_actors_sequential_cells() {
             let claims = store.claims_for_operation(operation).unwrap();
             assert_eq!(claims.len(), 1);
             assert_eq!(claims[0].state, harness::store::ClaimState::Settled);
-            assert!(store
-                .replay_tool_output_operation(operation)
-                .unwrap()
-                .is_some());
+            assert!(
+                store
+                    .replay_tool_output_operation(operation)
+                    .unwrap()
+                    .is_some()
+            );
             let matching = nodes.iter().filter(|node| {
                 if node.actor == fixture.campaign.actor.identity() { return false; }
                 let parent = embedded_context::selected_provider_parent(&target.run, node.creator, &nodes, &conversations).unwrap();

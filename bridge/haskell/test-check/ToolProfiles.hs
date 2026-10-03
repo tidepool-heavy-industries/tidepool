@@ -3,7 +3,7 @@ module Main where
 
 import Control.Monad (unless)
 import Control.Monad.Freer (Eff, interpret, reinterpret, run, send)
-import Control.Monad.Freer.State (State, modify, runState)
+import Control.Monad.Freer.State (State, get, modify, runState)
 import Data.Text (Text)
 import GHC.Generics (Generic)
 import Tidepool.Agent.Contract
@@ -21,6 +21,27 @@ data Tools mode = Tools
 
 data Narrow mode = Narrow { narrow :: mode :- HaskellCell '[] } deriving (Generic)
 
+data Unpresented mode = Unpresented { unpresented :: mode :- Call Text Text } deriving (Generic)
+data UnpresentedRaw mode = UnpresentedRaw { unpresentedRaw :: mode :- RawCall Text } deriving (Generic)
+data UnpresentedSync mode = UnpresentedSync { unpresentedSync :: mode :- Sync (Call Text Text) } deriving (Generic)
+data UnpresentedSyncRaw mode = UnpresentedSyncRaw { unpresentedSyncRaw :: mode :- Sync (RawCall Text) } deriving (Generic)
+
+data ActorTools mode = ActorTools
+  { actorCall :: mode :- Call Text Value
+  , actorFinish :: mode :- Finish Text Text
+  } deriving (Generic)
+
+data ActorHarness = ActorHarness
+  { actorInputs :: [(Text, Value)]
+  , actorReplies :: [Value]
+  }
+
+actorTools :: ActorTools (AsActorT (Eff '[AgentTools, State ActorHarness]) () Text)
+actorTools = ActorTools
+  { actorCall = tool "Structured semantic output" (\_ -> pure (object ["meaning" .= ("payload" :: Text)]))
+  , actorFinish = finishTool "Finish" (\value -> pure (value, value))
+  }
+
 data ContextNotebook mode = ContextNotebook
   { contextNotebook :: mode :- Sync (HaskellCell (SyncEffects '[]))
   } deriving (Generic)
@@ -33,10 +54,10 @@ narrowTools = Narrow (haskellTool "A pure notebook in a command-capable actor")
 
 tools :: Tools (AsServerT (Eff '[]))
 tools = Tools
-  { ordinary = tool "Echo" pure
-  , curate = syncTool "Select next model" $ \model -> send (SetNextModelWith model) >> pure model
-  , rawCurate = syncRawTool "Echo literal" pure
-  , notifyCurate = syncNotify "Select next model" (send . SetNextModelWith)
+  { ordinary = presentWith id (tool "Echo" pure)
+  , curate = presentWith id $ syncTool "Select next model" $ \model -> send (SetNextModelWith model) >> pure model
+  , rawCurate = presentWith id (syncRawTool "Echo literal" pure)
+  , notifyCurate = presentWith (const "") $ syncNotify "Select next model" (send . SetNextModelWith)
   , notebook = haskellTools
   }
 
@@ -51,8 +72,35 @@ installation :: AgentTools a -> Eff '[State Value, ContextReadWrite] a
 installation (AgentToolsInstallWith value _) = modify (const value)
 installation _ = error "installation executed the retained handler"
 
+actorRuntime :: AgentTools a -> Eff '[State ActorHarness] a
+actorRuntime (AgentToolsAwaitWith _ _ _) = do
+  harness <- get
+  case actorInputs harness of
+    input : remaining -> modify (\current -> current {actorInputs = remaining}) >> pure input
+    [] -> error "actor requested an unexpected tool input"
+actorRuntime AgentToolsInputWith = error "actor requested an ordinary hosted tool input"
+actorRuntime (AgentToolsReplyWith value) = modify (\harness -> harness {actorReplies = actorReplies harness <> [value]})
+actorRuntime _ = error "unexpected actor tool operation"
+
 main :: IO ()
 main = do
+  let missing = compileInstalledTools
+        (Unpresented (tool "Echo" pure) :: Unpresented (AsServerT (Eff '[])))
+      missingRaw = compileInstalledTools
+        (UnpresentedRaw (rawTool "Echo" pure) :: UnpresentedRaw (AsServerT (Eff '[])))
+      missingSync = compileInstalledTools
+        (UnpresentedSync (syncTool "Echo" pure) :: UnpresentedSync (AsServerT (Eff '[])))
+      missingSyncRaw = compileInstalledTools
+        (UnpresentedSyncRaw (syncRawTool "Echo" pure) :: UnpresentedSyncRaw (AsServerT (Eff '[])))
+      rejected result = case result of Left MissingToolPresentation {} -> True; _ -> False
+  require "installed named handlers require explicit presentation"
+    (rejected missing)
+  require "installed raw handlers require explicit presentation before dispatch"
+    (rejected missingRaw)
+  require "installed sync handlers require explicit presentation before dispatch"
+    (rejected missingSync)
+  require "installed sync raw handlers require explicit presentation before dispatch"
+    (rejected missingSyncRaw)
   compiled <- either (error . show) pure (compileInstalledTools tools)
   let declared = declarations compiled
       runTool name = run $ runState [] $ reinterpret context $ dispatch compiled name (toJSON ("executor" :: Text))
@@ -69,11 +117,23 @@ main = do
   require "native endpoints cannot enter the handler dispatcher"
     (fst (runTool "haskell") == Left (NativeToolInvocation "haskell"))
   require "async compiled handler is lifted into shared dispatcher"
-    (runTool "ordinary" == (Right (toJSON ("executor" :: Text)), []))
+    (runTool "ordinary" == (Right (ToolDispatchSuccess (toJSON ("executor" :: Text)) "executor"), []))
+  require "dispatch reply keeps semantic output separate from selected presentation"
+    (toolDispatchReply (Right (ToolDispatchSuccess (toJSON ("payload" :: Text)) "model text"))
+      == object ["status" .= ("success" :: Text), "output" .= ("payload" :: Text), "presentation" .= ("model text" :: Text)])
+  let actorInitial = ActorHarness
+        [("actor_call", toJSON ("call" :: Text)), ("actor_finish", toJSON ("done" :: Text))]
+        []
+      (actorExit, actorFinal) = run $ runState actorInitial $ interpret actorRuntime (serveTools actorTools)
+  require "programmatic actor tools need no presenter and return structured semantic output"
+    (actorExit == "done" && actorReplies actorFinal ==
+      [ object ["status" .= ("success" :: Text), "output" .= object ["meaning" .= ("payload" :: Text)]]
+      , object ["status" .= ("success" :: Text), "output" .= ("done" :: Text)]
+      ])
   require "sync compiled handler emits context effect in shared dispatcher"
-    (runTool "curate" == (Right (toJSON ("executor" :: Text)), ["executor"]))
+    (runTool "curate" == (Right (ToolDispatchSuccess (toJSON ("executor" :: Text)) "executor"), ["executor"]))
   require "sync raw handler reuses compiled function"
-    (runTool "raw_curate" == (Right (toJSON ("executor" :: Text)), []))
+    (runTool "raw_curate" == (Right (ToolDispatchSuccess (toJSON ("executor" :: Text)) "executor"), []))
   require "sync notification runs context effect"
     (snd (runTool "notify_curate") == ["executor"])
   asyncDefault <- either (error . show) pure (compileInstalledTools (specTools (defaultAsyncWorkbenchSpec :: AgentSpec (AsyncHaskellTools '[]) '[])))

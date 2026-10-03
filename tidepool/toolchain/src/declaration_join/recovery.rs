@@ -51,6 +51,7 @@ impl RecoveredDeclarationTip {
 pub fn certify_recovered_declaration_tip(
     recovery_root: &Path,
     products: &[crate::recovery_artifacts::RecoveryArtifactRef],
+    module_interfaces: &[crate::recovery_artifacts::RecoveryModuleInterfaceRef],
     joins: &[crate::recovery_artifacts::RecoveryJoinRef],
     selection: RecoveryDeclarationSelection,
     includes: &[PathBuf],
@@ -58,6 +59,7 @@ pub fn certify_recovered_declaration_tip(
     certify_recovered_declaration_tip_with_value_interfaces(
         recovery_root,
         products,
+        module_interfaces,
         joins,
         &[],
         selection,
@@ -68,6 +70,7 @@ pub fn certify_recovered_declaration_tip(
 pub fn certify_recovered_declaration_tip_with_value_interfaces(
     recovery_root: &Path,
     products: &[crate::recovery_artifacts::RecoveryArtifactRef],
+    module_interfaces: &[crate::recovery_artifacts::RecoveryModuleInterfaceRef],
     joins: &[crate::recovery_artifacts::RecoveryJoinRef],
     values: &[crate::recovery_artifacts::RecoveryValueInterfaceRef],
     mut selection: RecoveryDeclarationSelection,
@@ -77,6 +80,7 @@ pub fn certify_recovered_declaration_tip_with_value_interfaces(
         ExactDeclarationContext::capture_recovery_with_value_interfaces(
             recovery_root,
             products,
+            module_interfaces,
             joins,
             values,
             std::mem::take(&mut selection.lexical),
@@ -88,6 +92,7 @@ pub fn certify_recovered_declaration_tip_with_value_interfaces(
 pub fn certify_recovered_declaration_tip_with_inventory(
     recovery_root: &Path,
     products: &[crate::recovery_artifacts::RecoveryArtifactRef],
+    module_interfaces: &[crate::recovery_artifacts::RecoveryModuleInterfaceRef],
     joins: &[crate::recovery_artifacts::RecoveryJoinRef],
     values: &[crate::recovery_artifacts::RecoveryValueInterfaceRef],
     descriptors: &[crate::artifact_inventory::ArtifactDescriptor],
@@ -102,6 +107,7 @@ pub fn certify_recovered_declaration_tip_with_inventory(
     let context = Arc::new(ExactDeclarationContext::capture_recovery_with_inventory(
         recovery_root,
         products,
+        module_interfaces,
         joins,
         values,
         descriptors,

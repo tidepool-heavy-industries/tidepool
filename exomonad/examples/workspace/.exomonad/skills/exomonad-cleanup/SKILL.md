@@ -36,7 +36,7 @@ For routine retirement, plan and execute in one cell:
 
 ```haskell
 cleanupReceipt <- executeCleanup =<< planCleanupFor worker
-cleanupReceiptPlan cleanupReceipt
+display (cleanupReceiptPlan cleanupReceipt)
 ```
 
 Given a retained `worker :: Response result`, `planCleanupFor` extracts its fork
@@ -49,14 +49,14 @@ before execution, separate planning and execution:
 
 ```haskell
 cleanupPlan <- planCleanupFor worker
-cleanupPlan
+display cleanupPlan
 ```
 
 Inspect the plan, then execute it in a separate cell:
 
 ```haskell
 cleanupReceipt <- executeCleanup cleanupPlan
-cleanupReceiptPlan cleanupReceipt
+display (cleanupReceiptPlan cleanupReceipt)
 ```
 
 Execution honors the actor incarnations and activity revisions that were
@@ -90,7 +90,7 @@ which of them happened:
 
 ```haskell
 stopped <- stopAgent (responseActor worker)
-stopped
+display stopped
 ```
 
 - `StoppedNow` — both phases completed. This is final; no notice follows.

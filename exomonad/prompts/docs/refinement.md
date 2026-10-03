@@ -15,7 +15,7 @@ revision <- do
   Right () <- detachRequest response
   pure response
 let revisionActor = responseActor revision
-revisionActor
+display revisionActor
 ```
 
 The new response has its own identity and worktree evidence. Settling either

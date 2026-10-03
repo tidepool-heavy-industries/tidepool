@@ -154,6 +154,14 @@ fn admit_authored_artifact_closure_inner(
                 .requirements
                 .clone()
         };
+        requirements.extend(
+            crate::certified_products::original_interface_requirements(product)
+                .map_err(|error| {
+                    contract(format!("original interface requirements rejected: {error}"))
+                })?
+                .into_keys()
+                .map(|(unit, module)| ExactModuleIdentity { unit, module }),
+        );
         requirements.sort();
         requirements.dedup();
         let requirements = requirements
@@ -743,6 +751,7 @@ pub(crate) fn certify_same_offer_planned_declaration(
         &products,
         &interfaces,
         &joined_interfaces,
+        &sealed.artifact_view,
         baseline.map(Arc::as_ref),
     )?;
     Ok(CertifiedAuthoredDeclaration {

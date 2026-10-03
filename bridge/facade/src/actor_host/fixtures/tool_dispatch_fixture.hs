@@ -24,8 +24,8 @@ data DispatchTools mode = DispatchTools
 
 record :: DispatchTools (AsServerT (Eff effects))
 record = DispatchTools
-  { structuredProbe = tool "Return the decoded text." (\(DispatchInput value) -> pure value)
-  , rawProbe = rawTool "Return literal text." pure
+  { structuredProbe = presentWith id $ tool "Return the decoded text." (\(DispatchInput value) -> pure value)
+  , rawProbe = presentWith id $ rawTool "Return literal text." pure
   }
 
 dispatchChecks :: Eff effects Bool
@@ -41,8 +41,8 @@ dispatchChecks = case compileTools record of
       ( unknown == Left (UnknownTool "absent")
       && invalid "structured_probe" invalidStructured
       && invalid "raw_probe" invalidRaw
-      && structured == Right (toJSON ("decoded" :: Text))
-      && raw == Right (toJSON ("literal" :: Text))
+      && structured == Right (ToolDispatchSuccess (toJSON ("decoded" :: Text)) "decoded")
+      && raw == Right (ToolDispatchSuccess (toJSON ("literal" :: Text)) "literal")
       )
   where
     invalid expected result = case result of

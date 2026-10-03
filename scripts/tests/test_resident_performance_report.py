@@ -559,7 +559,7 @@ class ResidentPerformanceReport(unittest.TestCase):
         self.assertEqual(REPORT.analyze_durable([])["status"], "unmeasured")
         with tempfile.TemporaryDirectory() as root:
             path = Path(root) / "declarations.json"
-            content = json.dumps({"checksum": "retained-checksum", "public_schema": "paired-public-v4"}).encode()
+            content = json.dumps({"version": 4, "checksum": "retained-checksum", "public_schema": "paired-public-v4"}).encode()
             path.write_bytes(content)
             row = {
                 "schema": 1, "composition": "durable-publication", "completed": True,
@@ -572,9 +572,9 @@ class ResidentPerformanceReport(unittest.TestCase):
             result = REPORT.analyze_durable([row])
             self.assertEqual(result["status"], "measured")
             self.assertIsNone(result["samples"][0]["manifest_write_bytes"])
-            # Current v5 timing is also accepted, but the record and actual
-            # retained document must agree on the migration format.
-            document = {"checksum": "retained-checksum", "public_schema": "paired-public-v5"}
+            # Historical v5 retains its available counters and must still
+            # agree with the exact retained document format.
+            document = {"version": 5, "checksum": "retained-checksum", "public_schema": "paired-public-v5"}
             content = json.dumps(document).encode()
             path.write_bytes(content)
             row["manifest_bytes"] = len(content)
@@ -583,15 +583,23 @@ class ResidentPerformanceReport(unittest.TestCase):
             self.assertEqual(REPORT.analyze_durable([row])["status"], "invalid")
             row.update(checksum_encode_bytes=20, recovery_validation_hash_bytes=30, recovery_materialization_hash_bytes=40, manifest_write_bytes=len(content), inventory_counter_scope="shared-artifact-inventory-owner", artifact_inventory={field:0 for field in ("structural_whole_graph_copies", "reclamation_runs", "reclamation_candidate_nodes", "reclaimed_nodes", "reclamation_elapsed_ns")})
             self.assertEqual(REPORT.analyze_durable([row])["status"], "measured")
-            document["public_schema"] = "paired-public-v6"
+            document.update(version=6, public_schema="paired-public-v6")
             content = json.dumps(document).encode()
             path.write_bytes(content)
             row.update(manifest_bytes=len(content), public_schema="paired-public-v6")
+            current = REPORT.analyze_durable([row])
+            self.assertEqual(current["status"], "measured")
+            self.assertEqual(current["current_public_schema"], "paired-public-v6")
+            self.assertEqual(current["observed_public_schemas"], ["paired-public-v6"])
+            document.update(version=7, public_schema="paired-public-v7")
+            content = json.dumps(document).encode()
+            path.write_bytes(content)
+            row.update(manifest_bytes=len(content), public_schema="paired-public-v7")
             self.assertEqual(REPORT.analyze_durable([row])["status"], "invalid")
             path.unlink()
             self.assertEqual(REPORT.analyze_durable([row])["status"], "invalid")
 
-    def durable_matrix_fixture(self):
+    def durable_matrix_fixture(self, version=6):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         root = Path(directory.name)
@@ -599,7 +607,8 @@ class ResidentPerformanceReport(unittest.TestCase):
         for baseline in (0, 100):
             for prefix in (1, 10, 100):
                 checksum = f"{baseline:03d}-{prefix:03d}"
-                document = {"checksum": checksum, "public_schema": "paired-public-v5"}
+                schema = f"paired-public-v{version}"
+                document = {"version": version, "checksum": checksum, "public_schema": schema}
                 content = json.dumps(document).encode()
                 path = root / f"declarations-B{baseline}-N{prefix}.json"
                 path.write_bytes(content)
@@ -609,7 +618,7 @@ class ResidentPerformanceReport(unittest.TestCase):
                     "elapsed_ns": 100, "certification_ns": 10,
                     "metadata_stage_file_sync_ns": 20, "publication_rename_directory_sync_ns": 30,
                     "manifest_path": str(path), "manifest_bytes": len(content),
-                    "manifest_checksum": checksum, "public_schema": "paired-public-v5",
+                    "manifest_checksum": checksum, "public_schema": schema,
                     "checksum_encode_bytes": 20, "recovery_validation_hash_bytes": 30,
                     "recovery_materialization_hash_bytes": 40, "manifest_write_bytes": len(content),
                     "inventory_counter_scope": "shared-artifact-inventory-owner",
@@ -619,7 +628,7 @@ class ResidentPerformanceReport(unittest.TestCase):
                 })
         return rows
 
-    def test_durable_v5_requires_exact_baseline_by_prefix_matrix(self):
+    def test_durable_v6_requires_exact_baseline_by_prefix_matrix(self):
         rows = self.durable_matrix_fixture()
         report = REPORT.analyze_durable(rows)
         self.assertEqual(report["status"], "measured")
@@ -637,6 +646,49 @@ class ResidentPerformanceReport(unittest.TestCase):
         # A second test execution is not silently collapsed into a replicate:
         # there is no replicate ID or aggregation rule in the existing schema.
         self.assertEqual(duplicated["matrix"]["observed_count"], 6)
+
+    def test_historical_durable_matrix_is_reported_without_current_acceptance(self):
+        for version in (4, 5):
+            with self.subTest(version=version):
+                rows = self.durable_matrix_fixture(version)
+                report = REPORT.analyze_durable(rows)
+                self.assertEqual(report["status"], "measured")
+                self.assertEqual(report["matrix"]["status"], "unmeasured")
+                self.assertEqual(report["matrix"]["observed_count"], 0)
+                self.assertEqual(report["observed_public_schemas"], [f"paired-public-v{version}"])
+
+    def test_durable_v6_requires_exact_version_checksum_and_counters(self):
+        for mutation in ("version", "missing_version", "bool_version", "checksum", "row_schema", "byte_counter", "inventory_counter"):
+            with self.subTest(mutation=mutation):
+                rows = self.durable_matrix_fixture()
+                row = rows[0]
+                path = Path(row["manifest_path"])
+                document = json.loads(path.read_bytes())
+                if mutation == "version":
+                    document["version"] = 5
+                elif mutation == "missing_version":
+                    document.pop("version")
+                elif mutation == "bool_version":
+                    document["version"] = True
+                elif mutation == "checksum":
+                    row["manifest_checksum"] = "other-checksum"
+                elif mutation == "row_schema":
+                    row["public_schema"] = "paired-public-v5"
+                elif mutation == "byte_counter":
+                    row["recovery_validation_hash_bytes"] = None
+                elif mutation == "inventory_counter":
+                    row["artifact_inventory"].pop("reclamation_runs")
+                path.write_text(json.dumps(document))
+                row["manifest_bytes"] = path.stat().st_size
+                self.assertEqual(REPORT.analyze_durable(rows)["status"], "invalid")
+
+    def test_durable_v6_preserves_typed_loss_metadata(self):
+        rows = self.durable_matrix_fixture()
+        loss = {"component": "core", "path": "modules/Lib.core", "kind": {"digest_mismatch": {}}}
+        rows[0]["artifact_losses"] = [{"artifact_id": "canonical-Lib", "losses": [loss]}]
+        report = REPORT.analyze_durable(rows)
+        self.assertEqual(report["status"], "measured")
+        self.assertEqual(report["samples"][0]["artifact_losses"], rows[0]["artifact_losses"])
 
     def test_durable_matrix_uses_prefix_cell_counts_not_setup_cells(self):
         rows = self.durable_matrix_fixture()

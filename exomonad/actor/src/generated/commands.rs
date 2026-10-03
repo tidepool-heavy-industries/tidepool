@@ -28,6 +28,7 @@ pub enum CommandsReq {
     CommandAwaitAndNotifyWith(String, i64),
     CommandWaitWith(String),
     CommandPresentWith(String, tidepool_bridge_effects::CommandPresentation),
+    CommandRetainJobWith(String),
     CommandOutputWith(String, i64),
     CommandReadWith(
         String,

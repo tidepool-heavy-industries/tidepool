@@ -106,8 +106,8 @@ pub(crate) enum RepliesReq {
     ObserveReplyWith(i64),
     AttemptAcknowledgeCancellationWith(i64),
     AcknowledgeCancellationWith(i64),
-    PublishProgressWith(i64, HaskellValue),
-    ObserveProgressWith(i64),
+    PublishProgressWith(i64, HaskellValue, i64),
+    ObserveProgressWith(i64, i64),
     UpdateRequestWith(i64, String),
     ObserveRequestUpdateWith(i64, i64),
 }
@@ -167,7 +167,7 @@ pub(crate) enum WatchesReq {
     #[haskell(module = "Tidepool.Agent.Watch.Internal")]
     AwaitWatchWith(i64),
     ForgetWatchWith(i64),
-    ObserveWatchProgressWith(i64, i64, i64),
+    ObserveWatchProgressWith(i64, i64, i64, i64),
     ObserveCommandWith(String),
 }
 
@@ -310,6 +310,7 @@ fn reply_error_name(error: ReplyError) -> &'static str {
         ReplyError::AlreadySettled => "ReplyAlreadySettled",
         ReplyError::Unauthorized => "ReplyUnauthorized",
         ReplyError::WrongIncarnation => "ReplyWrongIncarnation",
+        ReplyError::ProgressTypeMismatch => "ReplyProgressTypeMismatch",
         ReplyError::CancellationRequested => "ReplySettlementCancelled",
     }
 }

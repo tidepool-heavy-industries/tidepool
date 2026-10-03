@@ -1466,6 +1466,7 @@ impl PersistentSession {
             lexical_scope: scope,
             injected_values: Vec::new(),
             next_value_generation: self.val_gen.next(),
+            request_context: None,
             projection: Arc::new(super::view::CompileViewProjection {
                 root: PathBuf::from(lib.include_dir()),
                 persistent_imports: self.workbench_imports_in(scope),

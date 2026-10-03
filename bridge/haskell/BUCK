@@ -27,6 +27,9 @@ _EXTRACTOR_SRCS = {
     "Tidepool/ExtractUtil.hs": "src/Tidepool/ExtractUtil.hs",
     "Tidepool/ExtractRequest.hs": "src/Tidepool/ExtractRequest.hs",
     "Tidepool/FatIface.hs": "src/Tidepool/FatIface.hs",
+    "Tidepool/FinalizedModule.hs": "src/Tidepool/FinalizedModule.hs",
+    "Tidepool/FinalizedModuleArtifacts.hs": "src/Tidepool/FinalizedModuleArtifacts.hs",
+    "Tidepool/FinalizedCore.hs": "src/Tidepool/FinalizedCore.hs",
     "Tidepool/GhcPipeline.hs": "src/Tidepool/GhcPipeline.hs",
     "Tidepool/QuasiQuoteOccurrences.hs": "src/Tidepool/QuasiQuoteOccurrences.hs",
     "Tidepool/ExactHydration.hs": "src/Tidepool/ExactHydration.hs",
@@ -224,10 +227,16 @@ sh_test(
 
 haskell_binary(
     name = "source_boot_product_reuse_test",
-    srcs = {"Main.hs": "test-source-boot/Main.hs"},
+    srcs = {
+        "Main.hs": "test-source-boot/Main.hs",
+        "ExecutionSourceDecodeTest.hs": "test-source-boot/ExecutionSourceDecodeTest.hs",
+        "ProgressBoundaryTest.hs": "test-source-boot/ProgressBoundaryTest.hs",
+        "ExactScopeV8Test.hs": "test-source-boot/ExactScopeV8Test.hs",
+        "FinalizedCoreTest.hs": "test-source-boot/FinalizedCoreTest.hs",
+    },
     deps = [":tidepool_extract_internal"],
-    compiler_flags = extractor_binary_flags("-XOverloadedStrings", "-package", "process"),
-    linker_flags = extractor_binary_link_flags() + ["-package", "process"],
+    compiler_flags = extractor_binary_flags("-XOverloadedStrings", "-package", "process", "-package", "ghc-boot"),
+    linker_flags = extractor_binary_link_flags() + ["-package", "process", "-package", "ghc-boot"],
     visibility = ["PUBLIC"],
 )
 

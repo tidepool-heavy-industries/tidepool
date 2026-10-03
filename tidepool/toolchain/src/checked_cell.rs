@@ -72,17 +72,19 @@ impl CheckedCellSpecification {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExactSignatureName {
-    qualifier: String,
     unit: String,
     module: String,
     namespace: String,
     occurrence: String,
 }
 
+/// A compiler-issued native IfaceType and its original external Names.
+/// `presentation` is human-readable text; compilation consumes the opaque payload.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExactCheckedSignature {
     key: String,
-    source: String,
+    presentation: String,
+    iface: Arc<[u8]>,
     names: Vec<ExactSignatureName>,
 }
 
@@ -104,7 +106,9 @@ impl PartialEq for CanonicalInputTypeWitness {
 impl Eq for CanonicalInputTypeWitness {}
 
 impl CanonicalInputTypeWitness {
-    pub(crate) fn metadata_digest(&self) -> [u8; 32] {
+    /// Seal of the complete compiler-issued payload, including its native
+    /// signature. Semantic equality alone does not authenticate that payload.
+    pub fn metadata_digest(&self) -> [u8; 32] {
         self.metadata_digest
     }
     pub fn commitment(&self) -> [u8; 32] {
@@ -119,6 +123,11 @@ impl CanonicalInputTypeWitness {
             }
         }
         hasher.finalize().into()
+    }
+    pub fn interface_seals(&self) -> impl Iterator<Item = (&str, &str, &str)> {
+        self.interfaces
+            .iter()
+            .map(|(unit, module, seal)| (unit.as_str(), module.as_str(), seal.as_str()))
     }
     pub fn signature(&self) -> &ExactCheckedSignature {
         &self.signature
@@ -183,29 +192,33 @@ impl CanonicalInputTypeWitness {
 
 impl<'de> serde::Deserialize<'de> for CanonicalInputTypeWitness {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let encoded = <String as serde::Deserialize>::deserialize(deserializer)?;
-        if encoded.len() > 8 * 1024 * 1024 || encoded.len() % 2 != 0 {
-            return Err(serde::de::Error::custom(
-                "canonical input witness hex bound",
-            ));
-        }
-        let bytes = encoded
-            .as_bytes()
-            .chunks_exact(2)
-            .map(|pair| {
-                let digit = |byte: u8| match byte {
-                    b'0'..=b'9' => Some(byte - b'0'),
-                    b'a'..=b'f' => Some(byte - b'a' + 10),
-                    _ => None,
-                };
-                digit(pair[0])
-                    .zip(digit(pair[1]))
-                    .map(|(high, low)| high * 16 + low)
-                    .ok_or_else(|| serde::de::Error::custom("canonical input witness hex"))
-            })
-            .collect::<Result<Vec<_>, D::Error>>()?;
-        Self::from_bytes(&bytes).map_err(serde::de::Error::custom)
+        Self::from_bytes(&deserialize_type_evidence_bytes(deserializer)?)
+            .map_err(serde::de::Error::custom)
     }
+}
+
+fn deserialize_type_evidence_bytes<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<u8>, D::Error> {
+    let encoded = <String as serde::Deserialize>::deserialize(deserializer)?;
+    if encoded.len() > 8 * 1024 * 1024 || encoded.len() % 2 != 0 {
+        return Err(serde::de::Error::custom("native type evidence hex bound"));
+    }
+    encoded
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let digit = |byte: u8| match byte {
+                b'0'..=b'9' => Some(byte - b'0'),
+                b'a'..=b'f' => Some(byte - b'a' + 10),
+                _ => None,
+            };
+            digit(pair[0])
+                .zip(digit(pair[1]))
+                .map(|(high, low)| high * 16 + low)
+                .ok_or_else(|| serde::de::Error::custom("native type evidence hex"))
+        })
+        .collect::<Result<Vec<_>, D::Error>>()
 }
 
 fn validate_input_type_shape(
@@ -302,18 +315,78 @@ impl ExactCheckedSignature {
     pub fn key(&self) -> &str {
         &self.key
     }
-    pub fn source(&self) -> &str {
-        &self.source
+    pub fn presentation(&self) -> &str {
+        &self.presentation
     }
     pub fn names(&self) -> &[ExactSignatureName] {
         &self.names
     }
 }
 
-impl ExactSignatureName {
-    pub fn qualifier(&self) -> &str {
-        &self.qualifier
+/// Native result types captured at one original request site. The complete
+/// payload belongs to the site's metadata seal; presentation never issues it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RequestTypeSignatures {
+    reply: ExactCheckedSignature,
+    progress: Option<ExactCheckedSignature>,
+    metadata_digest: [u8; 32],
+}
+
+impl RequestTypeSignatures {
+    pub fn reply(&self) -> &ExactCheckedSignature {
+        &self.reply
     }
+    pub fn progress(&self) -> Option<&ExactCheckedSignature> {
+        self.progress.as_ref()
+    }
+    pub fn metadata_digest(&self) -> [u8; 32] {
+        self.metadata_digest
+    }
+    pub fn authorization_value(&self) -> Value {
+        array([
+            text("TPREQUESTTYPESIGNATURES1"),
+            text("1"),
+            encode_signature(&self.reply),
+            self.progress.as_ref().map_or(Value::Null, encode_signature),
+        ])
+    }
+    pub(crate) fn from_bytes(bytes: &[u8]) -> Result<Self, CompileError> {
+        if bytes.len() > 4 * 1024 * 1024 {
+            return Err(failure("request type signatures byte bound"));
+        }
+        let value = decode(bytes)?;
+        let fields = row(&value, 4)?;
+        if string(&fields[0])? != "TPREQUESTTYPESIGNATURES1" || string(&fields[1])? != "1" {
+            return Err(failure("request type signatures version"));
+        }
+        let reply = decode_signature(&fields[2])?;
+        let progress = match &fields[3] {
+            Value::Null => None,
+            value => Some(decode_signature(value)?),
+        };
+        if reply.key() != "request-reply"
+            || progress
+                .as_ref()
+                .is_some_and(|signature| signature.key() != "request-progress")
+        {
+            return Err(failure("request type signatures purpose"));
+        }
+        Ok(Self {
+            reply,
+            progress,
+            metadata_digest: Sha256::digest(bytes).into(),
+        })
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for RequestTypeSignatures {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::from_bytes(&deserialize_type_evidence_bytes(deserializer)?)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+impl ExactSignatureName {
     pub fn unit(&self) -> &str {
         &self.unit
     }
@@ -1192,7 +1265,6 @@ impl CheckedSettledValues {
 
 #[derive(Clone, Debug)]
 enum CheckedExecutionAdmission {
-    InitialFold([u8; 32]),
     RuntimeItem([u8; 32]),
     CellProgram([u8; 32]),
     HostActivationInput([u8; 32]),
@@ -1557,12 +1629,6 @@ impl ExactCompiledItem {
             CheckedExecutionAdmission::HostActivationInput(_) => false,
             CheckedExecutionAdmission::RuntimeItem(digest) => digest == item_digest,
             CheckedExecutionAdmission::CellProgram(digest) => digest == cell_digest,
-            CheckedExecutionAdmission::InitialFold(digest) => {
-                digest == cell_digest
-                    && self.item.index() == 0
-                    && self.item.kind() == CheckedItemKind::Bind
-                    && self.settled_values.rows.is_empty()
-            }
         };
         if !valid {
             return Err(failure(
@@ -2157,7 +2223,7 @@ impl ExactCheckedItem {
         let Some(expression) = &self.cell.items[self.index].expression else {
             return Ok(None);
         };
-        Ok(Some(match string(&row(expression, 6)?[1])? {
+        Ok(Some(match string(&row(expression, 5)?[1])? {
             "pure" => CheckedExpressionLift::Pure,
             "effectful" => CheckedExpressionLift::Effectful,
             _ => return Err(failure("sealed expression has an unknown lift")),
@@ -2169,7 +2235,7 @@ impl ExactCheckedItem {
         let Some(expression) = &self.cell.items[self.index].expression else {
             return Ok(None);
         };
-        Ok(Some(match string(&row(expression, 6)?[2])? {
+        Ok(Some(match string(&row(expression, 5)?[2])? {
             "rendered" => CheckedExpressionPresentation::Rendered,
             "opaque" => CheckedExpressionPresentation::Opaque,
             _ => return Err(failure("sealed expression has an unknown presentation")),
@@ -2211,50 +2277,6 @@ impl ExactCheckedItem {
     }
 }
 
-pub(crate) fn seal_checked_fold(
-    root: &Path,
-    producer: &[u8],
-    context: [u8; 32],
-    request: &str,
-    cell: &Arc<ExactCheckedCell>,
-    generation: u64,
-    source: &str,
-    target: &Arc<tidepool_repr::execution_schema::PreparedProgram>,
-    artifact_context: &Arc<crate::declaration_context::ExactDeclarationContext>,
-    source_lexical: &[crate::declaration_join::ExactLexicalNode],
-) -> Result<Arc<ExactCompiledItem>, CompileError> {
-    cell.revalidate(producer, &context)?;
-    if cell.items.len() != 1
-        || cell.items[0].kind != CheckedItemKind::Bind
-        || hash(&read(root.join("checked-cell.cbor"), 8 * 1024 * 1024)?)
-            != hex(&cell.receipt_digest)
-    {
-        return Err(failure(
-            "fold is not the sole bind of its same checked offer",
-        ));
-    }
-    let item = cell.item(0)?;
-    CheckedItemOffer {
-        purpose: CheckedItemPurpose::Authored,
-        prefix: item.initial_prefix()?,
-        item,
-        runtime_prefix_digest: cell.admission_digest(),
-        generation,
-        observation_name: None,
-        is_fold: true,
-        is_program: false,
-        settled_values: CheckedSettledValues::default(),
-    }
-    .seal(
-        root,
-        request,
-        source,
-        target,
-        artifact_context,
-        source_lexical,
-    )
-}
-
 #[derive(Clone, Debug)]
 pub(crate) struct CheckedItemOffer {
     pub(crate) purpose: CheckedItemPurpose,
@@ -2263,7 +2285,6 @@ pub(crate) struct CheckedItemOffer {
     pub(crate) runtime_prefix_digest: [u8; 32],
     pub(crate) generation: u64,
     pub(crate) observation_name: Option<String>,
-    pub(crate) is_fold: bool,
     pub(crate) is_program: bool,
     pub(crate) settled_values: CheckedSettledValues,
 }
@@ -2288,7 +2309,6 @@ impl CheckedItemOffer {
             || self.item.cell.receipt_digest == [0; 32]
             || self.runtime_prefix_digest == [0; 32]
             || self.observation_name.is_some()
-            || self.is_fold
             || self.is_program
             || self.generation == 0
         {
@@ -2561,8 +2581,6 @@ impl CheckedItemOffer {
                     CheckedExecutionAdmission::HostActivationInput(self.runtime_prefix_digest)
                 } else if self.is_program {
                     CheckedExecutionAdmission::CellProgram(self.item.admission_digest())
-                } else if self.is_fold {
-                    CheckedExecutionAdmission::InitialFold(self.runtime_prefix_digest)
                 } else {
                     CheckedExecutionAdmission::RuntimeItem(self.runtime_prefix_digest)
                 },
@@ -2603,17 +2621,18 @@ fn read_table(root: &Path) -> Result<tidepool_repr::DataConTable, CompileError> 
     Ok(table)
 }
 
-fn encode_signature(signature: &ExactCheckedSignature) -> Value {
+pub(crate) fn encode_signature(signature: &ExactCheckedSignature) -> Value {
     array([
+        text("TPCHECKEDSIGNATURE2"),
         text(&signature.key),
-        text(&signature.source),
+        text(&signature.presentation),
+        Value::Bytes(signature.iface.to_vec()),
         Value::Array(
             signature
                 .names
                 .iter()
                 .map(|name| {
                     array([
-                        text(&name.qualifier),
                         text(&name.unit),
                         text(&name.module),
                         text(&name.namespace),
@@ -2656,7 +2675,7 @@ pub(crate) fn admit_checked_cell(
     let header = row(&value, if program.is_some() { 11 } else { 10 })?;
     let observations = read(root.join("cell.cbor"), 32 * 1024 * 1024)?;
     let output = decode(&observations)?;
-    let output = row(&output, 5)?;
+    let output = cell_observations(&output)?;
     let checked_source = string(&output[2])?.to_owned();
     if string(&header[0])?
         != if program.is_some() {
@@ -2664,7 +2683,7 @@ pub(crate) fn admit_checked_cell(
         } else {
             "TPEXACTCHECK"
         }
-        || string(&header[1])? != "1"
+        || string(&header[1])? != "2"
         || string(&header[2])? != request_digest
         || string(&header[3])? != hex(&specification.admission_digest)
         || string(&header[4])? != hash(specification.cell_source.as_bytes())
@@ -2761,7 +2780,7 @@ pub(crate) fn admit_checked_cell(
                 binders
                     .iter()
                     .map(|binder| {
-                        unique_key(pins, &format!("__tidepool_cell_pin_{index}_{binder}"), 4)
+                        unique_key(pins, &format!("__tidepool_cell_pin_{index}_{binder}"), 3)
                     })
                     .collect::<Result<Vec<_>, _>>()?
             } else {
@@ -2771,17 +2790,17 @@ pub(crate) fn admit_checked_cell(
                 Some(unique_key(
                     expressions,
                     &format!("__tidepool_cell_expr_{index}"),
-                    6,
+                    5,
                 )?)
             } else {
                 None
             };
             let mut keys = item_pins
                 .iter()
-                .map(|value| row(value, 4).and_then(|row| string(&row[0])))
+                .map(|value| row(value, 3).and_then(|row| string(&row[0])))
                 .collect::<Result<Vec<_>, _>>()?;
             if let Some(expression) = &expression {
-                keys.push(string(&row(expression, 6)?[0])?);
+                keys.push(string(&row(expression, 5)?[0])?);
             }
             let item_signatures = keys
                 .iter()
@@ -2879,32 +2898,63 @@ pub(crate) fn admit_checked_cell(
 }
 
 fn decode_signature(value: &Value) -> Result<ExactCheckedSignature, CompileError> {
-    let fields = row(value, 3)?;
-    let mut qualifiers = BTreeSet::new();
-    let names = list(&fields[2], 65536)?
+    let fields = row(value, 5)?;
+    if string(&fields[0])? != "TPCHECKEDSIGNATURE2" {
+        return Err(failure("checked signature version"));
+    }
+    let key = string(&fields[1])?.to_owned();
+    let Value::Bytes(iface) = &fields[3] else {
+        return Err(failure("checked signature IfaceType payload"));
+    };
+    if iface.is_empty() || iface.len() > 4 * 1024 * 1024 {
+        return Err(failure("checked signature IfaceType byte bound"));
+    }
+    let names = list(&fields[4], 65536)?
         .iter()
         .map(|value| {
-            let fields = row(value, 5)?;
-            let qualifier = string(&fields[0])?.to_owned();
-            let namespace = string(&fields[3])?.to_owned();
-            if !qualifier.starts_with("TidepoolCheckedName")
-                || !qualifiers.insert(qualifier.clone())
-                || !matches!(namespace.as_str(), "type" | "data")
+            let fields = row(value, 4)?;
+            let unit = string(&fields[0])?.to_owned();
+            let module = string(&fields[1])?.to_owned();
+            let namespace = string(&fields[2])?.to_owned();
+            let occurrence = string(&fields[3])?.to_owned();
+            if unit.is_empty()
+                || module.is_empty()
+                || occurrence.is_empty()
+                || !matches!(namespace.as_str(), "type" | "data" | "var")
             {
-                return Err(failure("invalid signature Name qualifier or namespace"));
+                return Err(failure(
+                    "invalid signature Name owner, occurrence or namespace",
+                ));
             }
             Ok(ExactSignatureName {
-                qualifier,
-                unit: string(&fields[1])?.to_owned(),
-                module: string(&fields[2])?.to_owned(),
+                unit,
+                module,
                 namespace,
-                occurrence: string(&fields[4])?.to_owned(),
+                occurrence,
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
+    if names.windows(2).any(|pair| {
+        (
+            &pair[0].unit,
+            &pair[0].module,
+            &pair[0].namespace,
+            &pair[0].occurrence,
+        ) >= (
+            &pair[1].unit,
+            &pair[1].module,
+            &pair[1].namespace,
+            &pair[1].occurrence,
+        )
+    }) {
+        return Err(failure(
+            "checked signature Names are unsorted or duplicated",
+        ));
+    }
     Ok(ExactCheckedSignature {
-        key: string(&fields[0])?.to_owned(),
-        source: string(&fields[1])?.to_owned(),
+        key,
+        presentation: string(&fields[2])?.to_owned(),
+        iface: iface.clone().into(),
         names,
     })
 }
@@ -2954,6 +3004,28 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Value, CompileError> {
     }
     Ok(value)
 }
+/// Decode the matched observation format; old bare rows cannot satisfy a
+/// checked receipt or parser capability under the current compiler protocol.
+pub(crate) fn cell_observations(value: &Value) -> Result<&[Value], CompileError> {
+    let envelope = row(value, 3)?;
+    if string(&envelope[0])? != "TPCELLOBSERVATIONS"
+        || envelope[1]
+            .as_integer()
+            .and_then(|value| u64::try_from(value).ok())
+            != Some(2)
+    {
+        return Err(failure("unsupported cell observations version"));
+    }
+    let payload = row(&envelope[2], 5)?;
+    for pin in list(&payload[1], 65536)? {
+        row(pin, 3)?;
+    }
+    for expression in list(&payload[4], 65536)? {
+        row(expression, 5)?;
+    }
+    Ok(payload)
+}
+
 pub(crate) fn row(value: &Value, count: usize) -> Result<&[Value], CompileError> {
     let values = list(value, count)?;
     if values.len() != count {
@@ -2991,11 +3063,229 @@ fn failure(error: impl std::fmt::Display) -> CompileError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn observation_migration_refuses_unversioned_and_import_bearing_rows() {
+        use super::*;
+        let payload = Value::Array(vec![
+            Value::Array(vec![]),
+            Value::Array(vec![]),
+            text(""),
+            Value::Array(vec![Value::Array(vec![]), Value::Array(vec![])]),
+            Value::Array(vec![]),
+        ]);
+        let envelope = Value::Array(vec![text("TPCELLOBSERVATIONS"), 2.into(), payload.clone()]);
+        assert!(cell_observations(&envelope).is_ok());
+        assert!(cell_observations(&payload).is_err());
+        let mut old_version = envelope.clone();
+        old_version.as_array_mut().unwrap()[1] = 1.into();
+        assert!(cell_observations(&old_version).is_err());
+        for (section, count) in [(1, 4), (4, 6)] {
+            let mut old_row = envelope.clone();
+            old_row.as_array_mut().unwrap()[2].as_array_mut().unwrap()[section] =
+                Value::Array(vec![Value::Array(vec![Value::Null; count])]);
+            assert!(cell_observations(&old_row).is_err());
+        }
+    }
+
     use super::{CheckedPrefixSequence, CheckedValueInputs};
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
     };
+
+    fn signature_codec_fixture() -> ciborium::Value {
+        use super::*;
+        // Structural codec fixture only; this payload is never executed by GHC.
+        array([
+            text("TPCHECKEDSIGNATURE2"),
+            text("pin"),
+            text("UI presentation"),
+            Value::Bytes(vec![1, 2, 3]),
+            array([array([
+                text("main"),
+                text("Owner"),
+                text("type"),
+                text("Original"),
+            ])]),
+        ])
+    }
+
+    fn request_signature_codec_fixture(progress: bool) -> ciborium::Value {
+        use super::*;
+        let signature = |key: &str| {
+            let mut value = signature_codec_fixture();
+            value.as_array_mut().unwrap()[1] = text(key);
+            value
+        };
+        array([
+            text("TPREQUESTTYPESIGNATURES1"),
+            text("1"),
+            signature("request-reply"),
+            if progress {
+                signature("request-progress")
+            } else {
+                Value::Null
+            },
+        ])
+    }
+
+    #[test]
+    fn request_type_signatures_native_codec_preserves_payload_and_progress() {
+        use super::*;
+        for progress in [false, true] {
+            let wire = request_signature_codec_fixture(progress);
+            let mut bytes = Vec::new();
+            ciborium::into_writer(&wire, &mut bytes).unwrap();
+            let signatures = RequestTypeSignatures::from_bytes(&bytes).unwrap();
+            assert_eq!(signatures.reply().key(), "request-reply");
+            assert_eq!(
+                signatures.progress().map(ExactCheckedSignature::key),
+                progress.then_some("request-progress")
+            );
+            assert_eq!(signatures.authorization_value(), wire);
+            assert_eq!(
+                signatures.metadata_digest(),
+                <[u8; 32]>::from(Sha256::digest(&bytes))
+            );
+            let hex = bytes
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            assert_eq!(
+                serde_json::from_value::<RequestTypeSignatures>(serde_json::Value::String(hex))
+                    .unwrap(),
+                signatures
+            );
+            let mut changed = wire;
+            changed.as_array_mut().unwrap()[2].as_array_mut().unwrap()[3] =
+                Value::Bytes(vec![3, 2, 1]);
+            let mut changed_bytes = Vec::new();
+            ciborium::into_writer(&changed, &mut changed_bytes).unwrap();
+            assert_ne!(
+                signatures.metadata_digest(),
+                RequestTypeSignatures::from_bytes(&changed_bytes)
+                    .unwrap()
+                    .metadata_digest()
+            );
+        }
+    }
+
+    #[test]
+    fn request_type_signatures_native_codec_refuses_legacy_purpose_and_envelope_substitution() {
+        use super::*;
+        let valid = request_signature_codec_fixture(true);
+        for field in [0, 1] {
+            let mut invalid = valid.clone();
+            invalid.as_array_mut().unwrap()[field] = text("legacy");
+            let mut bytes = Vec::new();
+            ciborium::into_writer(&invalid, &mut bytes).unwrap();
+            assert!(RequestTypeSignatures::from_bytes(&bytes).is_err());
+        }
+        for field in [2, 3] {
+            let mut invalid = valid.clone();
+            invalid.as_array_mut().unwrap()[field]
+                .as_array_mut()
+                .unwrap()[1] = text("activation-input");
+            let mut bytes = Vec::new();
+            ciborium::into_writer(&invalid, &mut bytes).unwrap();
+            assert!(RequestTypeSignatures::from_bytes(&bytes).is_err());
+        }
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&valid, &mut bytes).unwrap();
+        bytes.push(0);
+        assert!(RequestTypeSignatures::from_bytes(&bytes).is_err());
+        assert!(RequestTypeSignatures::from_bytes(&vec![0; 4 * 1024 * 1024 + 1]).is_err());
+        for invalid in ["0", "FF", "gg"] {
+            assert!(
+                serde_json::from_value::<RequestTypeSignatures>(serde_json::Value::String(
+                    invalid.into()
+                ))
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn checked_signature_native_codec_preserves_opaque_payload_and_original_names() {
+        use super::*;
+        let mut wire = signature_codec_fixture();
+        let Value::Array(fields) = &mut wire else {
+            unreachable!()
+        };
+        fields[4] = Value::Array(
+            ["data", "type", "var"]
+                .into_iter()
+                .map(|namespace| {
+                    array([
+                        text("main"),
+                        text("Owner"),
+                        text(namespace),
+                        text("Original"),
+                    ])
+                })
+                .collect(),
+        );
+        let signature = decode_signature(&wire).unwrap();
+        assert_eq!(signature.key(), "pin");
+        assert_eq!(signature.presentation(), "UI presentation");
+        assert_eq!(signature.iface.as_ref(), &[1, 2, 3]);
+        assert_eq!(signature.names()[1].unit(), "main");
+        assert_eq!(signature.names()[1].module(), "Owner");
+        assert_eq!(signature.names()[1].namespace(), "type");
+        assert_eq!(signature.names()[1].occurrence(), "Original");
+        assert_eq!(encode_signature(&signature), wire);
+    }
+
+    #[test]
+    fn checked_signature_native_codec_rejects_old_and_malformed_authority() {
+        use super::*;
+        assert!(decode_signature(&array([text("pin"), text("old"), array([])])).is_err());
+        for (index, invalid) in [
+            (0, text("TPCHECKEDSIGNATURE1")),
+            (1, Value::Integer(1.into())),
+            (2, Value::Bytes(vec![1])),
+            (3, text("IfaceType")),
+            (3, Value::Bytes(Vec::new())),
+            (3, Value::Bytes(vec![1; 4 * 1024 * 1024 + 1])),
+            (4, Value::Array(vec![array([]); 65537])),
+        ] {
+            let mut wire = signature_codec_fixture();
+            let Value::Array(fields) = &mut wire else {
+                unreachable!()
+            };
+            fields[index] = invalid;
+            assert!(decode_signature(&wire).is_err());
+        }
+        for (index, invalid) in [(0, ""), (1, ""), (2, "field"), (3, "")] {
+            let mut wire = signature_codec_fixture();
+            let Value::Array(fields) = &mut wire else {
+                unreachable!()
+            };
+            let Value::Array(names) = &mut fields[4] else {
+                unreachable!()
+            };
+            let Value::Array(name) = &mut names[0] else {
+                unreachable!()
+            };
+            name[index] = text(invalid);
+            assert!(decode_signature(&wire).is_err());
+        }
+        for occurrences in [["A", "A"], ["B", "A"]] {
+            let mut wire = signature_codec_fixture();
+            let Value::Array(fields) = &mut wire else {
+                unreachable!()
+            };
+            fields[4] = Value::Array(
+                occurrences
+                    .into_iter()
+                    .map(|occurrence| {
+                        array([text("main"), text("Owner"), text("type"), text(occurrence)])
+                    })
+                    .collect(),
+            );
+            assert!(decode_signature(&wire).is_err());
+        }
+    }
 
     fn witness_bytes(shape: ciborium::Value, seal: &str) -> Vec<u8> {
         use super::*;
@@ -3004,7 +3294,14 @@ mod tests {
         let wire = array([
             text("TPCANONICALINPUTTYPE1"),
             text("1"),
-            array([text("activation-input"), text("presentation"), array([])]),
+            // Structural codec fixture only; these bytes are not a GHC IfaceType.
+            array([
+                text("TPCHECKEDSIGNATURE2"),
+                text("activation-input"),
+                text("presentation"),
+                Value::Bytes(vec![1]),
+                array([]),
+            ]),
             Value::Bytes(structure),
             array([array([text("main"), text("Owner"), text(seal)])]),
         ]);
@@ -3245,7 +3542,8 @@ mod tests {
         let Value::Array(signature) = &mut fields[2] else {
             unreachable!()
         };
-        signature[1] = text("different parser presentation");
+        signature[2] = text("different parser presentation");
+        signature[3] = Value::Bytes(vec![2]);
         let mut presentation_bytes = Vec::new();
         ciborium::into_writer(&presentation_wire, &mut presentation_bytes).unwrap();
         let presentation = CanonicalInputTypeWitness::from_bytes(&presentation_bytes).unwrap();
@@ -3266,6 +3564,7 @@ mod tests {
             }],
             input_type_witnesses: vec![Some(forward.clone())],
             reply_declaration: None,
+            request_type_signatures: None,
         };
         let mut edited = site.clone();
         edited.input_type_witnesses[0] = Some(presentation);
@@ -3370,7 +3669,9 @@ mod tests {
                 expression: None,
                 signatures: vec![ExactCheckedSignature {
                     key: "__tidepool_cell_pin_0_sessionInput".into(),
-                    source: "Int".into(),
+                    presentation: "Int".into(),
+                    // Nonexecuting role-validation fixture, not a GHC payload.
+                    iface: vec![1].into(),
                     names: Vec::new(),
                 }],
             }],
@@ -3387,7 +3688,6 @@ mod tests {
             runtime_prefix_digest: [6; 32],
             generation: 1,
             observation_name: None,
-            is_fold: false,
             is_program: false,
             settled_values: Default::default(),
         }

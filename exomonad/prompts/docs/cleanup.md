@@ -6,7 +6,7 @@ that was never admitted through `unfold`:
 
 ```haskell
 cleanupPlan <- planCleanupFor oneWorker
-cleanupPlan
+display cleanupPlan
 ```
 
 If you already hold a `ForkGroupHandle` (from `forkGroupHandle` or
@@ -16,7 +16,7 @@ Inspect this result, then execute in a separate hosted call:
 
 ```haskell
 cleanupReceipt <- executeCleanup cleanupPlan
-cleanupReceiptPlan cleanupReceipt
+display (cleanupReceiptPlan cleanupReceipt)
 ```
 
 Execution honors the inspected actor incarnations and activity revisions.

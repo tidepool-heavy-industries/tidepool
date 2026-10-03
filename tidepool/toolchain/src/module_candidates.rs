@@ -29,7 +29,7 @@ const MANIFEST_LIMIT: usize = 4 << 20;
 const CANDIDATE_LIMIT: usize = 128;
 const RECORD_DIR: &str = "module-candidates-v12";
 const RECORD_MAGIC: &[u8; 8] = b"TPCRE10\n";
-const RECORD_VERSION: u32 = 9;
+const RECORD_VERSION: u32 = 10;
 const HEADER_LIMIT: usize = 64 << 10;
 const DISCOVERY_LIMIT: usize = 512;
 const PAYLOAD_LIMIT: usize = 128 << 20;
@@ -224,6 +224,7 @@ pub(crate) struct CandidateBundle {
     pub target_source: String,
     pub origin: CandidateOrigin,
     pub original_execution: Option<OriginalCandidateExecution>,
+    pub original_module_interface: Option<crate::certified_products::CertifiedModuleInterface>,
     pub(crate) execution_admitted: bool,
 }
 
@@ -334,6 +335,9 @@ struct Record<Evidence = shared_evidence::SharedEvidence> {
     original_owner: OriginalOwner,
     #[serde(with = "opaque_bytes::packages")]
     original_certification: Vec<u8>,
+    module_interface: Option<crate::recovery_artifacts::RecoveryModuleInterfaceRef>,
+    #[serde(skip)]
+    module_interface_proof: Option<crate::certified_products::CertifiedModuleInterface>,
     execution_source_sha256: Option<[u8; 32]>,
     #[serde(skip)]
     execution_source: Option<Arc<crate::execution_source::CertifiedExecutionSourceGraph>>,
@@ -952,6 +956,8 @@ fn eligible_records_with_report(
                 product_sha256: [0; 32],
             },
             original_certification: Vec::new(),
+            module_interface: None,
+            module_interface_proof: None,
             execution_source_sha256: None,
             execution_source: None,
         };
@@ -973,6 +979,7 @@ fn eligible_records_with_report(
                 );
                 continue;
             }
+            record.module_interface_proof = original.module_interface().cloned();
             record.original_certification = original.certification_bytes().to_vec();
             record.execution_source = original.execution_source().cloned();
             record.execution_source_sha256 =
@@ -1012,7 +1019,7 @@ pub(crate) fn publish_prepared(prepared: PreparedPublication<'_>) {
             }
         }
     }
-    for record in prepared.records {
+    for mut record in prepared.records {
         let group_rows = prepared.group_counts[&(record.unit.clone(), record.module.clone())];
         let mut report = |encoded_payload_bytes, disposition| {
             diagnostics.report_owner(
@@ -1032,6 +1039,21 @@ pub(crate) fn publish_prepared(prepared: PreparedPublication<'_>) {
         let dir = root_shard(&producer_dir, &root);
         if fs::create_dir_all(&dir).is_err() {
             report(None, PublicationDisposition::DirectoryUnavailable);
+            continue;
+        }
+        let Some(interface) = record.module_interface_proof.as_ref() else {
+            report(None, PublicationDisposition::ProductOwnerRejected);
+            continue;
+        };
+        record.module_interface = crate::recovery_artifacts::materialize_module_interface(
+            &producer_dir,
+            interface,
+            &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+            crate::recovery_artifacts::MaterializationMode::Scratch,
+        )
+        .ok();
+        if record.module_interface.is_none() {
+            report(None, PublicationDisposition::WriteRejected);
             continue;
         }
         let bytes = match encode_record_checked(&record) {
@@ -1348,6 +1370,7 @@ pub(crate) struct ExactCandidateContext {
     protected: BTreeSet<(String, String)>,
     reserved: BTreeSet<String>,
     originals: Vec<crate::recovery_artifacts::CertifiedRecoveryProduct>,
+    interface_seals: BTreeMap<(String, String), [u8; 32]>,
 }
 
 impl ExactCandidateContext {
@@ -1356,6 +1379,7 @@ impl ExactCandidateContext {
             protected,
             reserved,
             originals: Vec::new(),
+            interface_seals: BTreeMap::new(),
         }
     }
 
@@ -1364,6 +1388,14 @@ impl ExactCandidateContext {
         originals: Vec<crate::recovery_artifacts::CertifiedRecoveryProduct>,
     ) -> Self {
         self.originals = originals;
+        self
+    }
+
+    pub(crate) fn with_interface_seals(
+        mut self,
+        seals: BTreeMap<(String, String), [u8; 32]>,
+    ) -> Self {
+        self.interface_seals = seals;
         self
     }
 
@@ -1576,6 +1608,26 @@ fn select_records_inner(
         } else if record.execution_source.is_some() {
             return None;
         }
+        let canonical = match (&record.module_interface_proof, &record.module_interface) {
+            (Some(interface), _) => interface.clone(),
+            (None, Some(reference)) => crate::recovery_artifacts::recover_module_interface(
+                &record_dir(endpoint_identity),
+                reference,
+                &mut package_validation,
+            )
+            .ok()?,
+            (None, None) => continue,
+        };
+        crate::certified_products::validate_canonical_native_bytes(
+            &computed_owner(&record),
+            &record.original_certification,
+            &record.interface,
+            &record.package_imports,
+            Some(parse_sha(&record.source_sha256)?),
+            &canonical,
+        )
+        .ok()?;
+        record.module_interface_proof = Some(canonical);
         let product = matching.into_iter().next()?;
         if generation_dependent(&product) {
             continue;
@@ -1594,6 +1646,58 @@ fn select_records_inner(
         validated = validated.len());
     if let Some(context) = context {
         retain_compatible_dependencies(&mut validated, context, &include);
+    }
+    loop {
+        let mut available = context
+            .map(|context| context.interface_seals.clone())
+            .unwrap_or_default();
+        for (key, (record, _, _, _)) in &validated {
+            available.entry(key.clone()).or_insert_with(|| {
+                record
+                    .module_interface_proof
+                    .as_ref()
+                    .unwrap()
+                    .interface_sha256()
+            });
+        }
+        let rejected = validated
+            .iter()
+            .filter_map(|(key, (record, _, _, _))| {
+                let canonical = record.module_interface_proof.as_ref()?;
+                let expected_producer =
+                    crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
+                        endpoint_identity,
+                    )
+                    .sha256();
+                let reason = if canonical.producer_sha256() != expected_producer
+                    || hex(&canonical.source_sha256()) != record.source_sha256
+                {
+                    Some(CandidateInterfaceUnavailable::ProducerOrSourceMismatch)
+                } else {
+                    canonical
+                        .requirements()
+                        .iter()
+                        .find_map(|(owner, expected)| {
+                            (available.get(owner) != Some(expected)).then(|| {
+                                CandidateInterfaceUnavailable::RequiredInterface {
+                                    owner: owner.clone(),
+                                    expected: *expected,
+                                    available: available.get(owner).copied(),
+                                }
+                            })
+                        })
+                };
+                reason.map(|reason| (key.clone(), reason))
+            })
+            .collect::<Vec<_>>();
+        if rejected.is_empty() {
+            break;
+        }
+        for (owner, reason) in rejected {
+            tracing::debug!(target: "tidepool_toolchain::module_candidates", unit = owner.0.as_str(), module = owner.1.as_str(), ?reason,
+                "candidate declined because its canonical interface closure is unavailable");
+            validated.remove(&owner);
+        }
     }
     let mut inventory = inventory::InventoryTables::new(
         validated
@@ -1651,6 +1755,41 @@ fn select_records_inner(
                 (iface_path, package_path)
             }
         };
+        let canonical = record.module_interface_proof.as_ref()?;
+        let canonical_reference = crate::recovery_artifacts::materialize_module_interface(
+            &scratch,
+            canonical,
+            &mut package_validation,
+            crate::recovery_artifacts::MaterializationMode::Scratch,
+        )
+        .ok()?;
+        let core_reference = canonical_reference.core.as_ref()?;
+        let canonical_requirements = Value::Array(
+            canonical
+                .requirements()
+                .keys()
+                .map(|(unit, module)| {
+                    Value::Array(vec![Value::Text(unit.clone()), Value::Text(module.clone())])
+                })
+                .collect(),
+        );
+        let canonical_evidence = Value::Array(vec![
+            Value::Text("module".into()),
+            Value::Text(
+                scratch
+                    .join(&canonical_reference.certificate_path)
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            Value::Text(hex(&canonical_reference.certificate_sha256)),
+            Value::Text(
+                scratch
+                    .join(&core_reference.path)
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            Value::Text(hex(&core_reference.sha256)),
+        ]);
         let bundle = CandidateBundle {
             owner: owner.clone(),
             product,
@@ -1665,6 +1804,7 @@ fn select_records_inner(
             evidence: record.evidence.clone(),
             target_source: record.target_source.clone(),
             origin,
+            original_module_interface: record.module_interface_proof.clone(),
             original_execution: record.execution_source.as_ref().map(|graph| {
                 OriginalCandidateExecution {
                     graph: Arc::clone(graph),
@@ -1697,6 +1837,8 @@ fn select_records_inner(
             Value::Text(package_imports_path.to_string_lossy().into_owned()),
             Value::Text(sha(&selected.package_imports_bytes)),
             Value::Text(product_path.to_string_lossy().into_owned()),
+            canonical_requirements,
+            canonical_evidence,
         ]));
     }
     retain_closed_execution_capabilities(
@@ -1719,7 +1861,7 @@ fn select_records_inner(
     let (symbols, globals) = inventory.into_wire_tables();
     let value = Value::Array(vec![
         Value::Text("TPMCAN".into()),
-        Value::Text("8".into()),
+        Value::Text("10".into()),
         symbols,
         globals,
         Value::Array(manifest),
@@ -1761,6 +1903,12 @@ fn select_records_inner(
                     .collect(),
             ),
         ]),
+        Value::Text(
+            crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
+                endpoint_identity,
+            )
+            .hex(),
+        ),
     ]);
     let mut encoded = Vec::new();
     ciborium::ser::into_writer(&value, &mut encoded).ok()?;
@@ -1776,6 +1924,18 @@ fn select_records_inner(
         manifest_path,
         by_owner,
     })
+}
+
+#[derive(Clone, Debug, thiserror::Error)]
+enum CandidateInterfaceUnavailable {
+    #[error("canonical module producer or source differs")]
+    ProducerOrSourceMismatch,
+    #[error("required interface {owner:?} needs {expected:?}; available {available:?}")]
+    RequiredInterface {
+        owner: (String, String),
+        expected: [u8; 32],
+        available: Option<[u8; 32]>,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2297,6 +2457,7 @@ mod tests {
             evidence: record.evidence.clone(),
             target_source: record.target_source.clone(),
             origin: CandidateOrigin::Ordinary,
+            original_module_interface: None,
             original_execution: proof.then(|| OriginalCandidateExecution {
                 graph: Arc::clone(&graph),
             }),
@@ -2548,11 +2709,41 @@ mod tests {
                 product_sha256: [0; 32],
             },
             original_certification: Vec::new(),
+            module_interface: None,
+            module_interface_proof: None,
             execution_source_sha256: None,
             execution_source: None,
         };
         let mut record = record;
         record.original_owner = OriginalOwner::from_owner(&computed_owner(&record));
+        let owner = computed_owner(&record);
+        let original = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+            owner.clone(),
+            record.interface.clone(),
+            record.products.clone(),
+            record.package_imports.clone(),
+            crate::certified_products::encode_home_certification(&owner, &[], &BTreeMap::new())
+                .unwrap(),
+        )
+        .with_source_sha256(Sha256::digest(&source_bytes).into());
+        let original = crate::certified_products::fixture_finalized_product(
+            original,
+            crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
+                &record.endpoint,
+            )
+            .sha256(),
+        );
+        let producer_dir = fixture_record_dir(root).parent().unwrap().to_path_buf();
+        record.module_interface = Some(
+            crate::recovery_artifacts::materialize_module_interface(
+                &producer_dir,
+                original.module_interface().unwrap(),
+                &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+                crate::recovery_artifacts::MaterializationMode::Durable,
+            )
+            .unwrap(),
+        );
+        record.original_certification = original.certification_bytes().to_vec();
         let bytes = encode_record(&record).unwrap();
         let dir = fixture_record_dir(root);
         shared_evidence::publish(dir.parent().unwrap(), &record.evidence).unwrap();
@@ -2574,11 +2765,20 @@ mod tests {
             module,
             product_bytes("u", module, &[0x42]),
         );
-        fs::read_dir(fixture_record_dir(root))
+        let mut record = fs::read_dir(fixture_record_dir(root))
             .unwrap()
             .map(|entry| read_record_path(&entry.unwrap().path()).unwrap())
             .find(|r| r.module == module)
-            .unwrap()
+            .unwrap();
+        record.module_interface_proof = Some(
+            crate::recovery_artifacts::recover_module_interface(
+                fixture_record_dir(root).parent().unwrap(),
+                record.module_interface.as_ref().unwrap(),
+                &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+            )
+            .unwrap(),
+        );
+        record
     }
 
     fn publication_fixture_report(record: &Record) -> (Vec<Record>, Vec<PublicationDisposition>) {
@@ -2930,9 +3130,9 @@ mod tests {
         let manifest: Value =
             ciborium::de::from_reader(fs::File::open(&selected.manifest_path).unwrap()).unwrap();
         let fields = manifest.as_array().unwrap();
-        assert_eq!(fields[1].as_text(), Some("8"));
+        assert_eq!(fields[1].as_text(), Some("10"));
         let row = fields[4].as_array().unwrap()[0].as_array().unwrap();
-        assert_eq!(row.len(), 14);
+        assert_eq!(row.len(), 16);
         let original = fs::read(row[13].as_text().unwrap()).unwrap();
         let bundle = &selected.by_owner[&("u".into(), "D".into())];
         assert_eq!(original, expected_products);
@@ -3555,8 +3755,8 @@ mod tests {
             panic!("candidate manifest envelope")
         };
         assert_eq!(fields[0].as_text(), Some("TPMCAN"));
-        assert_eq!(fields[1].as_text(), Some("8"));
-        assert_eq!(fields.len(), 6);
+        assert_eq!(fields[1].as_text(), Some("10"));
+        assert_eq!(fields.len(), 7);
         assert_eq!(fields[2], Value::Array(vec![]));
         assert_eq!(fields[3], Value::Array(vec![]));
         assert_eq!(fields[4], Value::Array(vec![]));

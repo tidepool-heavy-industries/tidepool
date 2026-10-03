@@ -46,6 +46,8 @@ impl LegacyRecord {
                 product_sha256: [0; 32],
             },
             original_certification: Vec::new(),
+            module_interface: None,
+            module_interface_proof: None,
             execution_source_sha256: None,
             execution_source: None,
         };
@@ -472,8 +474,8 @@ fn retained_shared_evidence_inventory_measurement() {
     assert!(manifest_bytes.len() <= MANIFEST_LIMIT);
     let manifest: Value = ciborium::de::from_reader(manifest_bytes.as_slice()).unwrap();
     let fields = manifest.as_array().unwrap();
-    assert_eq!(fields.len(), 6);
-    assert_eq!(fields[1].as_text(), Some("8"));
+    assert_eq!(fields.len(), 7);
+    assert_eq!(fields[1].as_text(), Some("10"));
     let symbol_rows = fields[2].as_array().unwrap().len();
     let global_rows = fields[3].as_array().unwrap().len();
     assert_eq!(symbol_rows, symbols.len());

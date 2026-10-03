@@ -7,6 +7,7 @@ struct WorkbenchExecutionRecord {
     invocation_work: Option<Arc<InvocationWork>>,
     cell_terminal: Option<crate::CellExit>,
     boundary_abort: Option<BoundaryAbortCleanup>,
+    display_settlements: Arc<DisplayExecutionSettlement>,
 }
 
 #[derive(Clone, Default)]
@@ -59,6 +60,47 @@ pub(super) enum WorkbenchBoundaryRecord {
 }
 
 impl WorkbenchExecutions {
+    pub(super) fn display_receipt_owner(
+        &self,
+        execution: &WorkbenchExecutionId,
+        invocation: Option<&crate::resident_tools::WorkbenchCallKey>,
+    ) -> Option<Arc<DisplayExecutionSettlement>> {
+        self.0
+            .get(&WorkbenchReplayKey::new(execution, invocation))
+            .map(|record| record.display_settlements.clone())
+    }
+
+    pub(super) fn freeze_display_receipts(
+        &self,
+        execution: &WorkbenchExecutionId,
+        invocation: Option<&crate::resident_tools::WorkbenchCallKey>,
+        result: &mut Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>,
+    ) {
+        if let Some(owner) = self.display_receipt_owner(execution, invocation) {
+            owner.freeze_step(result);
+        }
+    }
+
+    pub(super) fn display_observations(
+        &self,
+    ) -> Vec<(
+        WorkbenchOperationId,
+        tidepool_runtime::session::WorkbenchDisplayPublication,
+    )> {
+        let mut observed = self
+            .0
+            .values()
+            .flat_map(|record| record.display_settlements.observations())
+            .collect::<Vec<_>>();
+        observed.sort_by_key(|(id, _)| {
+            (
+                id.execution.to_string(),
+                id.input_unit_index,
+                id.effect_ordinal,
+            )
+        });
+        observed
+    }
     pub(super) fn retain_invocation_work(
         &mut self,
         work: Arc<InvocationWork>,
@@ -151,6 +193,7 @@ impl WorkbenchExecutions {
                 invocation_work: None,
                 cell_terminal: None,
                 boundary_abort: None,
+                display_settlements: Arc::new(DisplayExecutionSettlement::new(execution.clone())),
             },
         );
     }
@@ -176,6 +219,11 @@ impl WorkbenchExecutions {
             .0
             .get(&key)
             .and_then(|record| record.cell_terminal.clone());
+        let display_settlements = self
+            .0
+            .get(&key)
+            .map(|record| record.display_settlements.clone())
+            .unwrap_or_else(|| Arc::new(DisplayExecutionSettlement::new(execution.clone())));
         self.0.insert(
             key,
             WorkbenchExecutionRecord {
@@ -187,6 +235,7 @@ impl WorkbenchExecutions {
                 invocation_work,
                 cell_terminal,
                 boundary_abort,
+                display_settlements,
             },
         );
     }
@@ -495,6 +544,7 @@ mod tests {
         let execution = WorkbenchExecutionId::from_digest([10; 16]);
         let actor = crate::ActorRef::first(crate::ActorId(1));
         let failed = Err(crate::KernelInvocationFailure::Failed {
+            receipts: Vec::new(),
             actor,
             detail: "intentional runtime failure".into(),
         });

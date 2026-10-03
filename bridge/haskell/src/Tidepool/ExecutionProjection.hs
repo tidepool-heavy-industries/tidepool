@@ -1099,6 +1099,15 @@ lowerVerbEvidence effectRequestTypeIds base = do
                 ((== "Tidepool.Effects.Core") . moduleNameString . moduleName)
                 (nameModule_maybe family)
         , generated || getKey (nameUnique family) `Set.member` effectRequestTypeIds
+        -- Progress constructors select a typed helper site from field zero.
+        -- A constructor-wide site cannot authenticate their existential payload.
+        , (maybe "" (moduleNameString . moduleName)
+              (nameModule_maybe (dataConName constructor)),
+            occNameString (nameOccName (dataConName constructor))) `notElem`
+            [ ("Tidepool.Agent.Reply.Internal", "PublishProgressWith")
+            , ("Tidepool.Agent.Reply.Internal", "ObserveProgressWith")
+            , ("Tidepool.Agent.Watch.Internal", "ObserveWatchProgressWith")
+            ]
         , Just index <- [requestReplyIndex constructor]
         , let symbol = nameSymbol "constructor" (dataConName constructor)
               qualified = symbolModule symbol <> "." <> symbolOccurrence symbol

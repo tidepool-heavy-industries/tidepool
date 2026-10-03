@@ -241,6 +241,8 @@ pub(super) fn decode_record(
         version_origin: record.version_origin,
         original_owner: record.original_owner,
         original_certification: record.original_certification,
+        module_interface: record.module_interface,
+        module_interface_proof: record.module_interface_proof,
         execution_source_sha256: record.execution_source_sha256,
         execution_source: record.execution_source,
     })

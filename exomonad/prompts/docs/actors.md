@@ -27,7 +27,8 @@ let resultDefinition = coordinationActor "candidate-results" Results
       , resultCount = \() -> gets length
       }
 results <- R.start resultDefinition
-R.call (resultCount (R.client results)) ()
+count <- R.call (resultCount (R.client results)) ()
+display count
 ```
 
 `State s` appears exactly once; its definition field is the initial value, and

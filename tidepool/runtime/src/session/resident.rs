@@ -22,7 +22,7 @@ use tidepool_repr::execution_schema::{
     CachedHomeOwner, ImportOwner, JsonLayout, PreparedProgram, SymbolIdentity,
 };
 
-use super::admission::{CheckedDisplayPlan, CheckedDisplaySettlement, CheckedTurnCompletion};
+use super::admission::CheckedTurnCompletion;
 use super::prepared::{ParkPolicy, PreparedRuntimeError, PreparedSettlement};
 use super::turn::TurnCode;
 use tidepool_codegen::suspension::{ContinuationId, RealmId, ValueHandle};
@@ -64,7 +64,7 @@ pub struct ProgramProvenance {
     sites: BTreeMap<u64, YieldSite>,
     // Authentication follows the original compiler bundle through owned roots.
     // Public metadata construction alone cannot authorize a host input mount.
-    authenticated_inputs: std::collections::BTreeSet<u64>,
+    authenticated_inputs: BTreeMap<u64, tidepool_toolchain::artifact_inventory::ArtifactView>,
 }
 
 pub type ProgramProvenanceError = YieldSiteCollision;
@@ -94,11 +94,27 @@ impl ProgramProvenance {
     }
 
     fn merge(&mut self, other: &Self) -> Result<(), ProgramProvenanceError> {
+        for (site, interfaces) in &other.authenticated_inputs {
+            if self
+                .authenticated_inputs
+                .get(site)
+                .is_some_and(|previous| previous != interfaces)
+            {
+                return Err(YieldSiteCollision {
+                    site: *site,
+                    first: Box::new(self.sites[site].clone()),
+                    second: Box::new(other.sites[site].clone()),
+                });
+            }
+        }
         for site in other.sites.values() {
             self.extend(std::slice::from_ref(site))?;
         }
-        self.authenticated_inputs
-            .extend(other.authenticated_inputs.iter().copied());
+        for (site, interfaces) in &other.authenticated_inputs {
+            self.authenticated_inputs
+                .entry(*site)
+                .or_insert_with(|| interfaces.clone());
+        }
         Ok(())
     }
 
@@ -382,6 +398,7 @@ pub struct RuntimeActivationInput {
     input_type: String,
     type_evidence: Arc<super::prepared::SiteTypeEvidence>,
     input_type_witness: Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>,
+    progress_type_witness: Option<Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>>,
 }
 
 static_assertions::assert_not_impl_any!(RuntimeActivationInput: Clone, Copy);
@@ -395,8 +412,35 @@ impl RuntimeActivationInput {
         &self.type_evidence
     }
 
+    pub fn progress_type_witness(
+        &self,
+    ) -> Option<Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>> {
+        self.progress_type_witness.clone()
+    }
+
     pub fn placeholder_source(&self) -> String {
-        format!("sessionInput <- pure (undefined :: ({}))", self.input_type)
+        "sessionInput <- pure (undefined :: TidepoolActivationInput)".into()
+    }
+}
+
+/// A progress root and its canonical type captured from the same authenticated
+/// parked helper call. Callers cannot pair an arbitrary root with a witness.
+#[derive(Debug)]
+pub struct RuntimeProgressPublication {
+    custody: RootCustody,
+    type_witness: Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>,
+}
+
+static_assertions::assert_not_impl_any!(RuntimeProgressPublication: Clone, Copy);
+
+impl RuntimeProgressPublication {
+    pub fn into_parts(
+        self,
+    ) -> (
+        RootCustody,
+        Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>,
+    ) {
+        (self.custody, self.type_witness)
     }
 }
 
@@ -931,25 +975,6 @@ pub enum ResidentContinuationEvent {
     Retired(String),
 }
 
-/// The rendered metadata from one compiler-produced display bundle.
-///
-/// The page itself is installed in the persistent binding store before this metadata is
-/// forced.  Consequently a renderer failure leaves the captured observation
-/// available to the caller, while the compiler-provided `cellDisplay` alias is
-/// only published after metadata observation succeeds.
-#[derive(Debug)]
-pub struct ResidentDisplayBundle {
-    result: EvalResult,
-}
-
-impl ResidentDisplayBundle {
-    /// The strict `(Text, Bool, Bool)` display summary produced by the bundle.
-    #[must_use]
-    pub fn result(&self) -> &EvalResult {
-        &self.result
-    }
-}
-
 /// Why a resident-session operation was refused or failed.
 #[derive(thiserror::Error, Debug)]
 pub enum ResidentError {
@@ -1347,73 +1372,7 @@ fn is_checked_turn(code: &TurnCode<'_>) -> bool {
                 || certification.checked_execution().is_some()
                 || certification.checked_prefix().is_some()
                 || certification.checked_display().is_some()
-                || certification.checked_display_admission().is_some()
         })
-}
-
-fn checked_display_plan(
-    code: &TurnCode<'_>,
-    page: &BoundBinder,
-    metadata: &BoundBinder,
-    alias: &BoundBinder,
-    generation: Generation,
-    admission: Arc<super::RuntimeCheckedDisplayAdmission>,
-) -> Result<CheckedDisplayPlan, ResidentError> {
-    let invalid = || {
-        SessionError::Compile(crate::CompileError::ExtractFailed(
-            "display lacks its sealed compiler and runtime admission".into(),
-        ))
-    };
-    let certification = code.certification.as_ref().as_ref().ok_or_else(invalid)?;
-    let proof = certification.checked_display().ok_or_else(invalid)?;
-    if certification
-        .checked_display_admission()
-        .is_none_or(|owned| !Arc::ptr_eq(owned, &admission))
-        || certification.checked_execution().is_some()
-        || !admission.matches_compiled_display(proof)
-        || proof.generation() != generation.0
-        || generation != admission.generation()
-        || !Arc::ptr_eq(proof.capture(), admission.execution())
-        || !proof.matches_target(&code.prepared)
-    {
-        return Err(invalid().into());
-    }
-    certification
-        .validate_checked_table(&code.table)
-        .map_err(SessionError::Compile)?;
-    certification
-        .validate_checked_display(
-            &code.prepared,
-            generation.0,
-            &[page.clone(), metadata.clone(), alias.clone()],
-        )
-        .map_err(SessionError::Compile)?;
-    proof
-        .validate_bound_binders(
-            &[page, metadata, alias].map(super::turn::encode_bound_binder_authority),
-        )
-        .map_err(SessionError::Compile)?;
-    Ok(CheckedDisplayPlan {
-        admission,
-        proof: proof.clone(),
-        metadata: metadata.clone(),
-        binding_names: [page.name.clone(), metadata.name.clone(), alias.name.clone()],
-        binding_ids: [page, metadata, alias]
-            .map(|binder| SessionVarId::from_extract(binder.var_id)),
-    })
-}
-
-fn validate_checked_display_rows(
-    plan: &CheckedDisplayPlan,
-    page: &BoundBinder,
-    alias: &BoundBinder,
-) -> Result<(), ResidentError> {
-    plan.proof
-        .validate_bound_binders(
-            &[page, &plan.metadata, alias].map(super::turn::encode_bound_binder_authority),
-        )
-        .map_err(SessionError::Compile)?;
-    Ok(())
 }
 
 fn refuse_checked_turn(code: &TurnCode<'_>) -> Result<(), ResidentError> {
@@ -1509,67 +1468,6 @@ impl PendingPreparedInstall {
     }
 }
 
-/// Everything [`ResidentSession::snapshot_display_bundle`] produces under a
-/// machine checkout for a display bundle's off-checkout Cranelift compile;
-/// the display counterpart of [`PendingPreparedInstall`].
-pub struct PendingDisplayInstall {
-    snapshot: PendingPreparedSource,
-    metadata: DisplayInstallMetadata,
-}
-
-struct DisplayInstallMetadata {
-    provenance: Arc<ProgramProvenance>,
-    generation: Generation,
-    lexical_scope: ScopeId,
-    checked: Option<CheckedDisplayPlan>,
-    binders: [BoundBinder; 3],
-}
-
-/// One compiled display bundle with its original source, binder rows, and
-/// completion metadata. Final installation accepts only this capsule.
-pub struct ReadyDisplayInstall {
-    source: ReadyPreparedSource,
-    metadata: DisplayInstallMetadata,
-}
-
-impl PendingDisplayInstall {
-    /// Compile off checkout and retain the original bundle as one capsule.
-    pub fn compile_off_checkout(self) -> Result<ReadyDisplayInstall, PreparedRuntimeError> {
-        let source = self.snapshot.compile_off_checkout()?;
-        Ok(ReadyDisplayInstall {
-            source,
-            metadata: self.metadata,
-        })
-    }
-}
-
-/// A display bundle's three binders come from one compiler value module.
-fn checked_display_input(
-    checked: Option<&CheckedDisplayPlan>,
-) -> Result<Option<(i64, Vec<String>)>, ResidentError> {
-    let Some(plan) = checked.filter(|plan| plan.admission.prefix().cell_program().is_some()) else {
-        return Ok(None);
-    };
-    let budget =
-        i64::try_from(plan.admission.budget()).map_err(|_| PreparedRuntimeError::HostMount {
-            detail: "display budget exceeds the worker Int range".into(),
-        })?;
-    Ok(Some((budget, plan.admission.presented().to_vec())))
-}
-
-fn check_display_bundle_binders(
-    page: &BoundBinder,
-    metadata: &BoundBinder,
-    alias: &BoundBinder,
-) -> Result<(), ResidentError> {
-    if page.module != metadata.module || page.module != alias.module {
-        return Err(ResidentError::Run(RuntimeError::Jit(EffectError::Handler(
-            "display bundle binders do not share one compiler value module".into(),
-        ))));
-    }
-    Ok(())
-}
-
 /// The `Send` projection of one prepared run that crosses the eval thread:
 /// handles are ids, the observed value is an owned tree.
 pub(crate) enum PreparedRun {
@@ -1579,15 +1477,6 @@ pub(crate) enum PreparedRun {
     },
     /// A projected tuple split into one retained handle per binder.
     Projected { fields: Vec<PreparedHandle> },
-    /// A display bundle has three compiler-owned tuple fields: the retained
-    /// page, its lazy metadata tuple, and a fresh alias identity for the page.
-    /// The session binds and observes them in that order so metadata failure
-    /// cannot lose the already-captured observation.
-    Display {
-        page: PreparedHandle,
-        metadata: PreparedHandle,
-        alias: PreparedHandle,
-    },
     /// The turn requested a typed effect: its continuation is parked under
     /// `id` in the machine's ledger and `request` is the observed request,
     /// ready for the host to route.
@@ -1650,10 +1539,6 @@ pub(crate) enum SettlePlan {
     Bind(ValueTier),
     /// A projected tuple: one binder per field, each at its tier.
     Project(Vec<ValueTier>),
-    /// Project a compiler-generated `(page, metadata, alias)` tuple.  Only
-    /// the page receives the normal bind-tier forcing here; metadata remains
-    /// lazy until the page has entered the persistent binding store.
-    Display(ValueTier),
 }
 
 /// How deep [`render_retained_layer`] recurses into nested constructors
@@ -2159,21 +2044,9 @@ pub(crate) fn finish_prepared<H: DispatchEffect<O>, O>(
         settlement = resumed.settlement;
     };
     match plan {
-        // A bare expression's value is DISPLAYED, so unlike a bind this arm
-        // really does need a `HaskellValue`. But the budget that bounds
-        // materialization is a display limit, and a display limit must not
-        // discard a run whose effects are already committed. So this always
-        // observes under `BudgetPolicy::Bounded`, which stops where the
-        // budget runs out and leaves `OVERSIZE_SENTINEL` at each cut instead
-        // of failing, rather than a rejection. The handle is kept on that
-        // path exactly as on the successful one, so the part the cut omitted
-        // stays reachable through the binding the caller installs (a workbench
-        // expression is named `observationN` and bound before it is shown).
-        //
-        // `Bounded` and `Complete` walk identically until a budget-exceeded
-        // node is reached — every OTHER observation failure still propagates
-        // either way — so there is no second, redone walk here: `Bounded`
-        // subsumes `Complete`'s success case in one pass.
+        // Transient entries materialize their result under a bounded observation
+        // budget. Cuts use the oversize sentinel without invalidating completed
+        // effects; persistent bindings use Bind or Project below.
         SettlePlan::Observe => match engine.observe_bounded(program, handle) {
             Ok(value) => Ok(PreparedRun::Done { handle, value }),
             Err(error) => {
@@ -2181,20 +2054,8 @@ pub(crate) fn finish_prepared<H: DispatchEffect<O>, O>(
                 Err(error)
             }
         },
-        // A bind's value is the RETAINED HANDLE, which
-        // `run_entry_retained` produced without consulting any budget, and
-        // whose receipt renders binder names rather than the value
-        // (`WorkbenchDisplay::Binding`). Observation here is a forcing step
-        // whose materialized product this arm hands on but the binding does
-        // not need. So an exhausted observation budget is not a failure of
-        // anything: the program ran, its effects are committed, and the
-        // binding is sound. Rejecting the unit would discard both and demand
-        // that every committed effect be replayed to get the value back —
-        // a live session lost 45 committed operations (10 Jev calls, 35
-        // command jobs) that way, and `reflect 3` cannot bind at all, since
-        // three turns of conversation exceed 100_000 bytes on their own.
-        // Keep the handle and report the size, exactly as the closure tier
-        // below keeps a value that has no `HaskellValue` representation.
+        // Exhausting the observation budget does not invalidate a retained
+        // binding or its completed effects. Keep the handle and report the cut.
         SettlePlan::Bind(ValueTier::ForceData) => match engine.observe(program, handle) {
             Ok(value) => Ok(PreparedRun::Done { handle, value }),
             Err(error) if is_observation_budget_exhausted(&error) => Ok(PreparedRun::Done {
@@ -2243,52 +2104,6 @@ pub(crate) fn finish_prepared<H: DispatchEffect<O>, O>(
                 }
             }
             Ok(PreparedRun::Projected { fields })
-        }
-        SettlePlan::Display(page_tier) => {
-            let fields = engine.fields(handle, realm, 3);
-            engine.release(handle);
-            let mut fields = fields?;
-            let Some(alias) = fields.pop() else {
-                return Err(PreparedRuntimeError::ProjectionShape {
-                    binders: 3,
-                    fields: 0,
-                });
-            };
-            let Some(metadata) = fields.pop() else {
-                engine.release(alias);
-                return Err(PreparedRuntimeError::ProjectionShape {
-                    binders: 3,
-                    fields: 1,
-                });
-            };
-            let Some(page) = fields.pop() else {
-                engine.release_all([metadata, alias]);
-                return Err(PreparedRuntimeError::ProjectionShape {
-                    binders: 3,
-                    fields: 2,
-                });
-            };
-            if !fields.is_empty() {
-                engine.release_all(fields.into_iter().chain([page, metadata, alias]));
-                return Err(PreparedRuntimeError::ProjectionShape {
-                    binders: 3,
-                    fields: 4,
-                });
-            }
-            if page_tier == ValueTier::ForceData {
-                // Forcing only checks for a genuine error here; the forced
-                // value itself is discarded. `Bounded` subsumes `Complete`'s
-                // success case, so one pass suffices -- see `SettlePlan::Observe`.
-                if let Err(error) = engine.observe_bounded(program, page) {
-                    engine.release_all([page, metadata, alias]);
-                    return Err(error);
-                }
-            }
-            Ok(PreparedRun::Display {
-                page,
-                metadata,
-                alias,
-            })
         }
     }
 }
@@ -2600,12 +2415,8 @@ where
         {
             return Err(ResidentError::InvalidActivationInput { site: input.site });
         }
-        let turn_template = super::turn::assemble_checked_activation_module(
-            preamble,
-            effect_stack,
-            input.input_type(),
-            preview_budget,
-        );
+        let turn_template =
+            super::turn::assemble_checked_activation_module(preamble, effect_stack, preview_budget);
         let injected_modules = self
             .state
             .compile_view_in(scope)
@@ -2631,10 +2442,13 @@ where
         frame(input.input_type.as_bytes());
         frame(&input.type_evidence.commitment());
         frame(&input.input_type_witness.commitment());
+        frame(&input.input_type_witness.metadata_digest());
         let input_commitment = *digest.finalize().as_bytes();
         let admission = self.state.admit_host_activation_cell_in(
             scope,
             input_commitment,
+            input.input_type_witness.clone(),
+            input.type_evidence.clone(),
             retained_source,
             specification.specification_digest(),
             authority_digest,
@@ -2715,6 +2529,7 @@ where
         specification_digest: [u8; 32],
         authority_digest: [u8; 32],
         include_paths: Vec<PathBuf>,
+        request_evidence: Option<Arc<super::SiteTypeEvidence>>,
     ) -> Result<Arc<super::RuntimeCellAdmission>, SessionError> {
         self.settle_dropped_custody();
         self.state.admit_native_setup_cell_in(
@@ -2724,6 +2539,7 @@ where
             specification_digest,
             authority_digest,
             include_paths,
+            request_evidence,
         )
     }
 
@@ -2735,6 +2551,7 @@ where
         specification_digest: [u8; 32],
         authority_digest: [u8; 32],
         include_paths: Vec<PathBuf>,
+        request_evidence: Option<Arc<super::SiteTypeEvidence>>,
     ) -> Result<Arc<super::RuntimeCellAdmission>, SessionError> {
         self.settle_dropped_custody();
         self.state.admit_planned_cell_for_execution(
@@ -2744,6 +2561,7 @@ where
             specification_digest,
             authority_digest,
             include_paths,
+            request_evidence,
         )
     }
 
@@ -2785,19 +2603,6 @@ where
         }
         self.settle_dropped_custody();
         self.state.adopt_checked_declaration(admission)
-    }
-
-    pub fn admit_checked_display(
-        &mut self,
-        prefix: Arc<super::RuntimeCheckedPrefix>,
-        execution: Arc<tidepool_toolchain::checked_cell::ExactCompiledItem>,
-        captured_binding: &BoundBinder,
-        budget: usize,
-        presented: Vec<String>,
-    ) -> Result<Arc<super::RuntimeCheckedDisplayAdmission>, SessionError> {
-        self.settle_dropped_custody();
-        self.state
-            .admit_checked_display(prefix, execution, captured_binding, budget, presented)
     }
 
     pub fn freeze_execution_intent(
@@ -3578,7 +3383,7 @@ where
             return Err(invalid());
         }
         let provenance = self.parked_program_provenance(hole).ok_or_else(invalid)?;
-        if !provenance.authenticated_inputs.contains(&site) {
+        if !provenance.authenticated_inputs.contains_key(&site) {
             return Err(ResidentError::UnauthenticatedActivationInputWitness { site });
         }
         let metadata = provenance.sites.get(&site).ok_or_else(invalid)?;
@@ -3599,7 +3404,25 @@ where
             .and_then(Option::as_ref)
             .ok_or_else(missing_witness)?
             .clone();
-        let type_evidence = self.request_site_type_evidence(site).ok_or_else(invalid)?;
+        let progress_type_witness = match metadata.input_type_witnesses.get(1) {
+            Some(witness) => Some(Arc::new(
+                witness.as_ref().ok_or_else(missing_witness)?.clone(),
+            )),
+            None => None,
+        };
+        let signatures = metadata
+            .request_type_signatures
+            .clone()
+            .ok_or_else(invalid)?;
+        let interfaces = provenance
+            .authenticated_inputs
+            .get(&site)
+            .ok_or_else(invalid)?;
+        let type_evidence = self
+            .request_site_type_evidence(site)
+            .ok_or_else(invalid)?
+            .authenticate_request_types(signatures, interfaces)
+            .map_err(SessionError::Compile)?;
         let custody = self
             .live_payload_handle_owned_by(hole.cont_id(), realm)?
             .ok_or_else(invalid)?;
@@ -3609,6 +3432,59 @@ where
             input_type,
             type_evidence: Arc::new(type_evidence),
             input_type_witness: Arc::new(input_type_witness),
+            progress_type_witness,
+        })
+    }
+
+    /// Read progress authority from the actual parked frame, never from a
+    /// caller-supplied site number or an erased runtime representation.
+    pub fn progress_type_witness(
+        &mut self,
+        continuation: &str,
+    ) -> Result<Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>, ResidentError>
+    {
+        let entry = self
+            .parked
+            .iter()
+            .find(|entry| entry.name == continuation)
+            .ok_or(ResidentError::InvalidActivationInput { site: 0 })?;
+        let (_, evidence) = self
+            .state
+            .prepared_mut()
+            .and_then(|engine| engine.parked(entry.id))
+            .ok_or(ResidentError::InvalidActivationInput { site: 0 })?;
+        let site = evidence.site;
+        let invalid = || ResidentError::InvalidActivationInput { site };
+        let provenance = self
+            .parked_provenance
+            .get(&entry.id)
+            .cloned()
+            .ok_or_else(invalid)?;
+        if !provenance.authenticated_inputs.contains_key(&site) {
+            return Err(ResidentError::UnauthenticatedActivationInputWitness { site });
+        }
+        let metadata = provenance.sites.get(&site).ok_or_else(invalid)?;
+        if metadata.inputs.len() != 1 || metadata.input_type_witnesses.len() != 1 {
+            return Err(invalid());
+        }
+        let witness = metadata.input_type_witnesses[0]
+            .as_ref()
+            .ok_or(ResidentError::MissingActivationInputWitness { site })?;
+        Ok(Arc::new(witness.clone()))
+    }
+
+    pub fn capture_progress_publication(
+        &mut self,
+        hole: &ResidentHole,
+        realm: RealmId,
+    ) -> Result<RuntimeProgressPublication, ResidentError> {
+        let type_witness = self.progress_type_witness(hole.cont_id())?;
+        let custody = self
+            .live_payload_handle_owned_by(hole.cont_id(), realm)?
+            .ok_or(ResidentError::InvalidActivationInput { site: 0 })?;
+        Ok(RuntimeProgressPublication {
+            custody,
+            type_witness,
         })
     }
 
@@ -4999,7 +4875,8 @@ where
 
     fn provenance_for(&self, code: &TurnCode<'_>) -> Result<Arc<ProgramProvenance>, ResidentError> {
         let mut provenance = ProgramProvenance::from_sites(&code.sites)?;
-        let authenticated = if let Some(certification) = code.certification.as_ref() {
+        let certification = code.certification.as_ref().as_ref();
+        let authenticated = if let Some(certification) = certification {
             if let Some(execution) = &certification.checked_execution {
                 if !execution.matches_target(&code.prepared) {
                     return Err(ResidentError::UnsupportedCheckedTurn);
@@ -5051,17 +4928,79 @@ where
         } else {
             false
         };
-        if authenticated {
-            provenance.authenticated_inputs.extend(
+        if let Some(certification) = certification.filter(|_| authenticated) {
+            let descriptors = certification.artifact_view.descriptors();
+            let home_units = descriptors
+                .iter()
+                .map(|descriptor| descriptor.owner.unit.as_str())
+                .collect::<std::collections::BTreeSet<_>>();
+            let owners = descriptors
+                .iter()
+                .map(|descriptor| (&descriptor.owner, descriptor.id))
+                .collect::<BTreeMap<_, _>>();
+            for site in provenance.sites.values().filter(|site| {
+                site.input_type_witnesses.len() == site.inputs.len()
+                    && site.input_type_witnesses.iter().any(Option::is_some)
+            }) {
+                let Some(signatures) = &site.request_type_signatures else {
+                    continue;
+                };
+                let mut roots = std::collections::BTreeSet::new();
+                for name in std::iter::once(signatures.reply())
+                    .chain(signatures.progress())
+                    .flat_map(|signature| signature.names())
+                {
+                    if home_units.contains(name.unit()) {
+                        let owner = tidepool_toolchain::declaration_join::ExactModuleIdentity {
+                            unit: name.unit().to_owned(),
+                            module: name.module().to_owned(),
+                        };
+                        let id = owners.get(&owner).ok_or_else(|| SessionError::Compile(crate::CompileError::ExtractFailed(
+                            format!("request native type owner {}:{} is outside its sealed interface closure", name.unit(), name.module()),
+                        )))?;
+                        roots.insert(*id);
+                    }
+                }
+                if let Some(witness) = site.input_type_witnesses.first().and_then(Option::as_ref) {
+                    for (unit, module, seal) in witness.interface_seals() {
+                        let owner = tidepool_toolchain::declaration_join::ExactModuleIdentity {
+                            unit: unit.to_owned(),
+                            module: module.to_owned(),
+                        };
+                        if let Some(id) = owners.get(&owner) {
+                            let descriptor = descriptors
+                                .iter()
+                                .find(|descriptor| descriptor.id == *id)
+                                .expect("selected owner descriptor");
+                            let actual = descriptor
+                                .interface_sha256
+                                .iter()
+                                .map(|byte| format!("{byte:02x}"))
+                                .collect::<String>();
+                            if actual != seal {
+                                return Err(SessionError::Compile(
+                                    crate::CompileError::ExtractFailed(format!(
+                                        "request input interface seal differs for {unit}:{module}"
+                                    )),
+                                )
+                                .into());
+                            }
+                            roots.insert(*id);
+                        } else if home_units.contains(unit) {
+                            return Err(SessionError::Compile(crate::CompileError::ExtractFailed(
+                                format!("request input owner {unit}:{module} is outside its sealed interface closure"),
+                            )).into());
+                        }
+                    }
+                }
+                let interfaces = certification
+                    .artifact_view
+                    .select_roots(roots.into_iter().collect())
+                    .map_err(SessionError::Compile)?;
                 provenance
-                    .sites
-                    .values()
-                    .filter(|site| {
-                        site.input_type_witnesses.len() == site.inputs.len()
-                            && site.input_type_witnesses.iter().any(Option::is_some)
-                    })
-                    .map(|site| site.site),
-            );
+                    .authenticated_inputs
+                    .insert(site.site, interfaces);
+            }
         }
         Ok(Arc::new(provenance))
     }
@@ -5760,20 +5699,6 @@ where
                 }
                 self.classify_parked(ParkedRun::CompletedProject, resumed, seed, provenance)
             }
-            PreparedRun::Display {
-                page,
-                metadata,
-                alias,
-            } => {
-                if let Some(engine) = self.state.prepared_mut() {
-                    engine.release_all([page, metadata, alias]);
-                }
-                return Err(PreparedRuntimeError::UnsettledEntry {
-                    program,
-                    detail: "a display bundle reached the ordinary turn completion path",
-                }
-                .into());
-            }
             PreparedRun::Suspended { id, request } => {
                 // The frame is parked in the machine's ledger; the hole
                 // carries the turn's completion obligation forward.
@@ -5946,7 +5871,7 @@ where
         self.run_binding_with_sites(name_hint, code, binder, gen, None)
     }
 
-    /// Capture an automatic workbench observation using the same suspendable
+    /// Capture a bare workbench result using the same suspendable
     /// binding path. Effectful expressions can export slot-dependent closures,
     /// so their dependencies acquire the ordinary persistent lifetime first.
     pub fn run_observation_with_sites(
@@ -5958,519 +5883,6 @@ where
     ) -> Result<ResidentOutcome, ResidentError> {
         let _ = effectful;
         self.run_binding_with_sites("actor_observation", code, binder, gen, Some(Vec::new()))
-    }
-
-    /// Run one generated display bundle.  The compiler supplies all three
-    /// binder identities in one `Val.G<generation>` interface: a captured
-    /// page, its `(Text, hasMore, unavailable)` metadata, and `cellDisplay`.
-    ///
-    /// The page is bound before metadata is forced.  This preserves the
-    /// workbench promise that a display failure never loses an expression that
-    /// has already run.  The final alias is deliberately published through
-    /// [`Self::publish_captured_alias_in`] rather than materializing the tuple's
-    /// third field: it must share the page's existing root and dependency edge.
-    pub fn run_display_bundle_with_sites(
-        &mut self,
-        code: TurnCode<'_>,
-        page: &BoundBinder,
-        metadata: &BoundBinder,
-        alias: &BoundBinder,
-        generation: Generation,
-    ) -> Result<ResidentDisplayBundle, ResidentError> {
-        refuse_checked_turn(&code)?;
-        self.run_display_bundle_inner(code, page, metadata, alias, generation, None)
-    }
-
-    pub fn run_checked_display_bundle_with_sites(
-        &mut self,
-        code: TurnCode<'_>,
-        page: &BoundBinder,
-        metadata: &BoundBinder,
-        alias: &BoundBinder,
-        generation: Generation,
-        admission: Arc<super::RuntimeCheckedDisplayAdmission>,
-    ) -> Result<ResidentDisplayBundle, ResidentError> {
-        let checked = checked_display_plan(&code, page, metadata, alias, generation, admission)?;
-        self.run_display_bundle_inner(code, page, metadata, alias, generation, Some(checked))
-    }
-
-    fn run_display_bundle_inner(
-        &mut self,
-        code: TurnCode<'_>,
-        page: &BoundBinder,
-        metadata: &BoundBinder,
-        alias: &BoundBinder,
-        generation: Generation,
-        checked: Option<CheckedDisplayPlan>,
-    ) -> Result<ResidentDisplayBundle, ResidentError> {
-        check_display_bundle_binders(page, metadata, alias)?;
-        self.state.validate_new_binding_ids(
-            [page, metadata, alias].map(|binder| SessionVarId::from_extract(binder.var_id)),
-        )?;
-        let provenance = self.provenance_for(&code)?;
-        let lexical_scope = self.run_context.lexical_scope;
-        if let Some(plan) = &checked {
-            plan.start(&self.state, lexical_scope)?;
-        }
-        let mut installed_program = None;
-        let result = (|| {
-            let prepared = code.prepared.into_owned();
-            self.state
-                .merge_table(&code.table)
-                .map_err(ResidentError::TableCollision)?;
-            self.state.set_val_gen(generation);
-            let install_prepared_started = std::time::Instant::now();
-            let lexical_scope = self.run_context.lexical_scope;
-            let (program, source_keys) = if let Some(certification) = code.certification.as_ref() {
-                let resolved =
-                    self.state
-                        .resolve_certification_in(lexical_scope, &prepared, certification)?;
-                let registry = self.state.certified_image_registry();
-                let target = super::prepared::CertifiedTargetImage::compile_certified(
-                    prepared,
-                    &registry,
-                    resolved.package_interfaces.clone(),
-                )
-                .map_err(PreparedRuntimeError::Compile)?;
-                let target = target.with_source_plan(resolved.source_plan.clone());
-                let demanded = target
-                    .compile_scoped_demanded(resolved.groups, &registry)
-                    .map_err(PreparedRuntimeError::from)?;
-                self.install_certified_turn_in(
-                    lexical_scope,
-                    target,
-                    &resolved.target_owners,
-                    &resolved.source_evidence,
-                    demanded,
-                    &resolved.inherited_needed,
-                )?
-            } else {
-                (self.state.install_prepared(prepared)?, Default::default())
-            };
-            installed_program = Some(program);
-            timing::record_stage(
-                timing::NO_NODE,
-                timing::NO_ROUND,
-                timing::STAGE_INSTALL_PREPARED,
-                install_prepared_started.elapsed(),
-                0,
-            );
-            self.run_installed_display_bundle(
-                program,
-                source_keys,
-                provenance,
-                page,
-                alias,
-                generation,
-                checked_display_input(checked.as_ref())?,
-                ValueInterfaceSource::for_checked(checked.is_some()),
-            )
-        })();
-        if let Some(plan) = checked {
-            let outcome = if result.is_ok() {
-                CheckedDisplaySettlement::Completed
-            } else {
-                CheckedDisplaySettlement::Failed
-            };
-            plan.settle(&mut self.state, lexical_scope, outcome, installed_program)?;
-        }
-        result
-    }
-
-    /// Step (a) of the off-checkout split for a display bundle, the
-    /// counterpart of [`Self::snapshot_run_prepared`]: merge `code`'s table,
-    /// claim `generation`, and resolve and link the install without the
-    /// Cranelift compile. Compile the result with
-    /// [`PendingDisplayInstall::compile_off_checkout`] with no checkout
-    /// held, then finish through [`Self::revalidate_and_run_display_bundle`].
-    /// The caller checks [`Self::prepared_machine_ready`] first; a session
-    /// with no machine is refused with `MachineNotInstalled`.
-    pub fn snapshot_display_bundle(
-        &mut self,
-        code: TurnCode<'static>,
-        page: &BoundBinder,
-        metadata: &BoundBinder,
-        alias: &BoundBinder,
-        generation: Generation,
-    ) -> Result<PendingDisplayInstall, ResidentError> {
-        refuse_checked_turn(&code)?;
-        self.snapshot_display_bundle_inner(code, page, metadata, alias, generation, None)
-    }
-
-    pub fn snapshot_checked_display_bundle(
-        &mut self,
-        code: TurnCode<'static>,
-        page: &BoundBinder,
-        metadata: &BoundBinder,
-        alias: &BoundBinder,
-        generation: Generation,
-        admission: Arc<super::RuntimeCheckedDisplayAdmission>,
-    ) -> Result<PendingDisplayInstall, ResidentError> {
-        let checked = checked_display_plan(&code, page, metadata, alias, generation, admission)?;
-        checked.validate_ready(&self.state, self.run_context.lexical_scope)?;
-        self.snapshot_display_bundle_inner(code, page, metadata, alias, generation, Some(checked))
-    }
-
-    fn snapshot_display_bundle_inner(
-        &mut self,
-        code: TurnCode<'static>,
-        page: &BoundBinder,
-        metadata: &BoundBinder,
-        alias: &BoundBinder,
-        generation: Generation,
-        checked: Option<CheckedDisplayPlan>,
-    ) -> Result<PendingDisplayInstall, ResidentError> {
-        check_display_bundle_binders(page, metadata, alias)?;
-        self.state.validate_new_binding_ids(
-            [page, metadata, alias].map(|binder| SessionVarId::from_extract(binder.var_id)),
-        )?;
-        let provenance = self.provenance_for(&code)?;
-        let prepared = code.prepared.into_owned();
-        self.state
-            .merge_table(&code.table)
-            .map_err(ResidentError::TableCollision)?;
-        self.state.set_val_gen(generation);
-        let lexical_scope = self.run_context.lexical_scope;
-        let snapshot = if let Some(certification) = code.certification.as_ref() {
-            let admitted_public = self
-                .state
-                .public_visibility_snapshot_in(lexical_scope)
-                .ok_or(PreparedRuntimeError::SourceScopeAdmission)?;
-            let resolved =
-                self.state
-                    .resolve_certification_in(lexical_scope, &prepared, certification)?;
-            PendingPreparedSource::Certified {
-                prepared,
-                resolved,
-                registry: self.state.certified_image_registry(),
-                admitted_public,
-            }
-        } else {
-            PendingPreparedSource::Legacy(
-                self.state
-                    .snapshot_install_prepared(prepared)?
-                    .ok_or(PreparedRuntimeError::MachineNotInstalled)?,
-            )
-        };
-        Ok(PendingDisplayInstall {
-            snapshot,
-            metadata: DisplayInstallMetadata {
-                provenance,
-                generation,
-                lexical_scope,
-                checked,
-                binders: [page.clone(), metadata.clone(), alias.clone()],
-            },
-        })
-    }
-
-    /// Revalidate the display capsule's original imports under this checkout
-    /// and, when still current, install its image and
-    /// run the bundle exactly as [`Self::run_display_bundle_with_sites`]
-    /// does. `Ok(None)` means an import changed (or the machine went away)
-    /// since the snapshot; the caller recompiles from a fresh snapshot.
-    pub fn revalidate_and_run_display_bundle(
-        &mut self,
-        ready: ReadyDisplayInstall,
-    ) -> Result<Option<ResidentDisplayBundle>, ResidentError> {
-        let ReadyDisplayInstall { source, metadata } = ready;
-        let DisplayInstallMetadata {
-            provenance,
-            generation,
-            lexical_scope,
-            checked,
-            binders: [page, _metadata, alias],
-        } = metadata;
-        if lexical_scope != self.run_context.lexical_scope {
-            return Err(SessionError::StaleStagedDeclaration.into());
-        }
-        self.state.validate_new_binding_ids(
-            [&page, &alias].map(|binder| SessionVarId::from_extract(binder.var_id)),
-        )?;
-        if let Some(plan) = &checked {
-            validate_checked_display_rows(plan, &page, &alias)?;
-            plan.validate_ready(&self.state, lexical_scope)?;
-        }
-        if let Some(plan) = &checked {
-            match &source {
-                ReadyPreparedSource::Certified { target, .. }
-                    if plan.proof.matches_target(target.prepared()) => {}
-                _ => return Err(PreparedRuntimeError::CertifiedTargetOwners.into()),
-            }
-        }
-        // Refusals before native installation leave this display admission unused.
-        if let ReadyPreparedSource::Certified {
-            admitted_public, ..
-        } = &source
-        {
-            if self
-                .state
-                .public_visibility_snapshot_in(lexical_scope)
-                .as_ref()
-                != Some(admitted_public)
-            {
-                return Ok(None);
-            }
-        }
-        if let Some(plan) = &checked {
-            plan.start(&self.state, lexical_scope)?;
-        }
-        let mut installed_program = None;
-        let result = (|| {
-            let install_started = std::time::Instant::now();
-            let (program, source_keys) = match source {
-                ReadyPreparedSource::Legacy { snapshot, image } => {
-                    let Some(program) = self
-                        .state
-                        .revalidate_and_install_prepared(snapshot, image)?
-                    else {
-                        return Ok(None);
-                    };
-                    (program, Default::default())
-                }
-                ReadyPreparedSource::Certified {
-                    resolved,
-                    admitted_public,
-                    target,
-                    demanded,
-                } => {
-                    if self
-                        .state
-                        .public_visibility_snapshot_in(lexical_scope)
-                        .as_ref()
-                        != Some(&admitted_public)
-                    {
-                        return Ok(None);
-                    }
-                    self.install_certified_turn_in(
-                        lexical_scope,
-                        target,
-                        &resolved.target_owners,
-                        &resolved.source_evidence,
-                        demanded,
-                        &resolved.inherited_needed,
-                    )?
-                }
-            };
-            installed_program = Some(program);
-            timing::record_stage(
-                timing::NO_NODE,
-                timing::NO_ROUND,
-                timing::STAGE_INSTALL_PREPARED,
-                install_started.elapsed(),
-                0,
-            );
-            self.run_installed_display_bundle(
-                program,
-                source_keys,
-                provenance,
-                &page,
-                &alias,
-                generation,
-                checked_display_input(checked.as_ref())?,
-                ValueInterfaceSource::for_checked(checked.is_some()),
-            )
-            .map(Some)
-        })();
-        if let Some(plan) = checked {
-            let outcome = if matches!(result, Ok(Some(_))) {
-                CheckedDisplaySettlement::Completed
-            } else {
-                CheckedDisplaySettlement::Failed
-            };
-            plan.settle(&mut self.state, lexical_scope, outcome, installed_program)?;
-        }
-        result
-    }
-
-    /// Run an installed (and pinned) display-bundle program and settle its
-    /// three fields: the page is bound before metadata is forced, then the
-    /// `cellDisplay` alias is published over the page's root.
-    fn run_installed_display_bundle(
-        &mut self,
-        program: ProgramId,
-        source_keys: tidepool_codegen::binding_table::SourceScopeAdmission,
-        provenance: Arc<ProgramProvenance>,
-        page: &BoundBinder,
-        alias: &BoundBinder,
-        generation: Generation,
-        presentation: Option<(i64, Vec<String>)>,
-        interface_source: ValueInterfaceSource,
-    ) -> Result<ResidentDisplayBundle, ResidentError> {
-        let realm = self.run_context.resource_scope;
-        let lexical_scope = self.run_context.lexical_scope;
-        let park = ParkPolicy {
-            principal: self.run_context.principal,
-            effect_policy: self.state.effect_policy(),
-            live_payload: self.state.live_payload_policy(),
-        };
-        let run_exec_started = std::time::Instant::now();
-        let ran = self.on_eval_thread(move |engine, table, handlers, captured| {
-            let argument = match presentation
-                .as_ref()
-                .map(|input| engine.build_host_value(realm, input, table))
-                .transpose()
-            {
-                Ok(argument) => argument,
-                Err(error) => return Ok(Err(error)),
-            };
-            let outcome = settle_prepared(
-                engine,
-                program,
-                realm,
-                argument,
-                SettlePlan::Display(page.tier),
-                park,
-                table,
-                handlers,
-                captured,
-            );
-            if let Some(argument) = argument {
-                engine.release(argument);
-            }
-            Ok(outcome)
-        });
-        timing::record_stage(
-            timing::NO_NODE,
-            timing::NO_ROUND,
-            timing::STAGE_RUN_EXEC,
-            run_exec_started.elapsed(),
-            0,
-        );
-        if let Some(engine) = self.state.prepared_mut() {
-            engine.unpin(program);
-        }
-        let prebind = (|| -> Result<(PreparedHandle, PreparedHandle), ResidentError> {
-            let (page_handle, metadata_handle, alias_handle) = match ran?? {
-                PreparedRun::Display {
-                    page,
-                    metadata,
-                    alias,
-                } => (page, metadata, alias),
-                PreparedRun::Done { handle, .. } => {
-                    self.on_eval_thread(move |engine, _, _, _| {
-                        engine.release(handle);
-                        Ok(())
-                    })?;
-                    return Err(PreparedRuntimeError::UnsettledEntry {
-                        program,
-                        detail: "display bundle settled as a whole value",
-                    }
-                    .into());
-                }
-                PreparedRun::Projected { fields } => {
-                    self.on_eval_thread(move |engine, _, _, _| {
-                        engine.release_all(fields);
-                        Ok(())
-                    })?;
-                    return Err(PreparedRuntimeError::UnsettledEntry {
-                        program,
-                        detail: "display bundle settled as an ordinary projected bind",
-                    }
-                    .into());
-                }
-                PreparedRun::Suspended { id, .. } => {
-                    self.on_eval_thread(move |engine, _, _, _| {
-                        engine
-                            .abort_parked(id)
-                            .map_err(|error| EffectError::Handler(error.to_string()))?;
-                        Ok(())
-                    })?;
-                    return Err(PreparedRuntimeError::UnsettledEntry {
-                        program,
-                        detail: "display bundle suspended while constructing a pure page",
-                    }
-                    .into());
-                }
-                PreparedRun::Deferred { id, .. } => {
-                    self.on_eval_thread(move |engine, _, _, _| {
-                        engine
-                            .abort_parked(id)
-                            .map_err(|error| EffectError::Handler(error.to_string()))?;
-                        Ok(())
-                    })?;
-                    return Err(PreparedRuntimeError::UnsettledEntry {
-                        program,
-                        detail: "display bundle deferred while constructing a pure page",
-                    }
-                    .into());
-                }
-            };
-            if let Err(error) = self.bind_prepared(
-                program,
-                lexical_scope,
-                generation,
-                &[(page, page_handle)],
-                None,
-                interface_source,
-            ) {
-                self.release_display_fields(metadata_handle, alias_handle)?;
-                return Err(error);
-            }
-            Ok((metadata_handle, alias_handle))
-        })();
-        let (metadata_handle, alias_handle) = match prebind {
-            Ok(fields) => fields,
-            Err(error) => {
-                self.retire_failed_turn_source_instances(lexical_scope, &source_keys);
-                return Err(error);
-            }
-        };
-        self.binding_provenance
-            .insert(page.var_id, Arc::clone(&provenance));
-        self.finish_observation(page, &[]);
-
-        let metadata_value =
-            self.observe_display_metadata(program, metadata_handle, alias_handle)?;
-        let lease = self.lease_bindings(&[tidepool_repr::VarId(page.var_id)]);
-        self.publish_captured_alias_in(
-            lexical_scope,
-            SessionVarId::from_extract(page.var_id),
-            alias,
-            generation,
-            &lease,
-        )?;
-        self.binding_provenance.insert(alias.var_id, provenance);
-        self.settle_dropped_custody();
-        if let Some(engine) = self.state.prepared_mut() {
-            if engine.disposition() == tidepool_codegen::machine::MachineDisposition::Reusable {
-                engine.quiesce_and_collect()?;
-            }
-        }
-        Ok(ResidentDisplayBundle {
-            result: EvalResult::new(
-                metadata_value,
-                self.state.session_table().clone(),
-                Vec::new(),
-            ),
-        })
-    }
-
-    fn release_display_fields(
-        &mut self,
-        metadata: PreparedHandle,
-        alias: PreparedHandle,
-    ) -> Result<(), ResidentError> {
-        self.on_eval_thread(move |engine, _, _, _| {
-            engine.release_all([metadata, alias]);
-            Ok(())
-        })
-    }
-
-    fn observe_display_metadata(
-        &mut self,
-        program: ProgramId,
-        metadata: PreparedHandle,
-        alias: PreparedHandle,
-    ) -> Result<HaskellValue, ResidentError> {
-        self.on_eval_thread(move |engine, _, _, _| {
-            // `Bounded` subsumes `Complete`'s success case in one pass -- see
-            // `SettlePlan::Observe`.
-            let observed = engine.observe_bounded(program, metadata);
-            engine.release_all([metadata, alias]);
-            Ok(observed)
-        })?
-        .map_err(Into::into)
     }
 
     fn run_binding_with_sites(
@@ -7767,9 +7179,9 @@ mod authored_publication_tests {
         let include = view.include_paths(effects.include_paths());
         let include = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
         let injected = view.injected_module_names();
-        let (checked, _) = check_cell_admitted(
+        let checked = check_cell_admitted(
             CellCheckRequest {
-                exact_context: view.exact_declaration_context().cloned(),
+                exact_context: view.exact_compile_context(),
                 session_id: Some(view.session()),
                 cell_text: source,
                 template: &template,
@@ -7781,7 +7193,6 @@ mod authored_publication_tests {
             },
             admission.clone(),
             &templates,
-            None,
         )
         .unwrap();
         let first = checked.checked_item(0).unwrap();
@@ -7805,7 +7216,7 @@ mod authored_publication_tests {
             bound, compiled, ..
         } = run_checked_item(
             TurnRequest {
-                exact_context: view.exact_declaration_context().cloned(),
+                exact_context: view.exact_compile_context(),
                 session_id: Some(view.session()),
                 turn_text: first.source(),
                 templates: &templates,
@@ -9144,9 +8555,9 @@ mod authored_publication_tests {
             )
             .unwrap();
         let includes = includes.iter().map(PathBuf::as_path).collect::<Vec<_>>();
-        let (checked, _) = check_cell_admitted(
+        let checked = check_cell_admitted(
             CellCheckRequest {
-                exact_context: view.exact_declaration_context().cloned(),
+                exact_context: view.exact_compile_context(),
                 session_id: Some(view.session()),
                 cell_text: source,
                 template: &template,
@@ -9158,7 +8569,6 @@ mod authored_publication_tests {
             },
             admission.clone(),
             &templates,
-            None,
         )
         .unwrap();
         let item = checked.checked_item(0).unwrap();
@@ -9171,7 +8581,7 @@ mod authored_publication_tests {
             bound, compiled, ..
         } = run_checked_item(
             TurnRequest {
-                exact_context: view.exact_declaration_context().cloned(),
+                exact_context: view.exact_compile_context(),
                 session_id: Some(view.session()),
                 turn_text: &checked.items[0].source,
                 templates: &templates,
@@ -9190,10 +8600,6 @@ mod authored_publication_tests {
             panic!("expected compiler-owned binders");
         };
         let page = bound.iter().find(|binder| binder.name == "page").unwrap();
-        let mut metadata = page.clone();
-        metadata.name = "metadata".into();
-        let mut alias = page.clone();
-        alias.name = "cellDisplay".into();
         let code = compiled.into_code();
         assert!(code
             .certification
@@ -9211,20 +8617,6 @@ mod authored_publication_tests {
         let before_table = session.state.session_table().clone();
         let before_prefix = prefix.snapshot();
 
-        assert!(matches!(
-            session.run_display_bundle_with_sites(
-                code.clone(),
-                page,
-                &metadata,
-                &alias,
-                generation
-            ),
-            Err(ResidentError::UnsupportedCheckedTurn)
-        ));
-        assert!(matches!(
-            session.snapshot_display_bundle(code.clone(), page, &metadata, &alias, generation),
-            Err(ResidentError::UnsupportedCheckedTurn)
-        ));
         assert!(matches!(
             session.mount_json_binding_in(
                 scope,
@@ -9322,7 +8714,7 @@ mod authored_publication_tests {
     }
 
     #[test]
-    fn certified_install_fences_hidden_binding_replacement_in_both_paths() {
+    fn certified_install_fences_hidden_binding_replacement() {
         use crate::session::{resident_workbench_templates, run_turn, TurnRequest, TurnResult};
         use tidepool_testing::effect_surface::TestEffectSurface;
 
@@ -9345,10 +8737,10 @@ mod authored_publication_tests {
         let mut includes = effects.include_paths().to_vec();
         includes.push(root.path().to_path_buf());
         let includes = includes.iter().map(PathBuf::as_path).collect::<Vec<_>>();
-        let TurnResult::Bind { bound, compiled, .. } = run_turn(TurnRequest {
+        let TurnResult::Bind { compiled, .. } = run_turn(TurnRequest {
             exact_context: None,
             session_id: None,
-            turn_text: "let (page, metadata, cellDisplay) = ((42 :: Int), (\"page\", False, False), (42 :: Int))",
+            turn_text: "let retained = (42 :: Int)",
             templates: &templates,
             include: &includes,
             session_root: root.path(),
@@ -9357,28 +8749,16 @@ mod authored_publication_tests {
             verdict: None,
             target: None,
             retained_imports: &[],
-        }).unwrap() else {
-            panic!("expected compiler-owned display binders");
+        })
+        .unwrap() else {
+            panic!("expected compiler-owned binding");
         };
         assert!(compiled.certification.is_some());
-        let page = bound.iter().find(|binder| binder.name == "page").unwrap();
-        let metadata = bound
-            .iter()
-            .find(|binder| binder.name == "metadata")
-            .unwrap();
-        let alias = bound
-            .iter()
-            .find(|binder| binder.name == "cellDisplay")
-            .unwrap();
         let code = compiled.into_code();
         let pending = session
             .snapshot_run_prepared(code.clone(), PendingPreparedMode::Value, None)
             .unwrap();
-        let display = session
-            .snapshot_display_bundle(code, page, metadata, alias, Generation(1))
-            .unwrap();
         let compiled = pending.compile_off_checkout().unwrap();
-        let compiled_display = display.compile_off_checkout().unwrap();
         let admitted = session
             .public_visibility_snapshot_in(ScopeId::ROOT)
             .unwrap();
@@ -9418,10 +8798,6 @@ mod authored_publication_tests {
         let residency = session.residency();
         assert!(session
             .revalidate_and_run_prepared(compiled)
-            .unwrap()
-            .is_none());
-        assert!(session
-            .revalidate_and_run_display_bundle(compiled_display)
             .unwrap()
             .is_none());
         assert_eq!(session.residency(), residency);

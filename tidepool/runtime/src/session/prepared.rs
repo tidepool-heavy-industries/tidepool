@@ -740,9 +740,65 @@ pub struct SiteTypeEvidence {
     constructors: Vec<SymbolIdentity>,
     input: TypeNodeId,
     answer: TypeNodeId,
+    request_context: Option<Arc<tidepool_toolchain::declaration_join::ExactCompileContext>>,
 }
 
 impl SiteTypeEvidence {
+    pub fn request_type_signatures(
+        &self,
+    ) -> Option<&Arc<tidepool_toolchain::checked_cell::RequestTypeSignatures>> {
+        self.request_context.as_ref()?.request_types()
+    }
+
+    pub(crate) fn authenticate_request_types(
+        mut self,
+        signatures: tidepool_toolchain::checked_cell::RequestTypeSignatures,
+        artifacts: &tidepool_toolchain::artifact_inventory::ArtifactView,
+    ) -> Result<Self, crate::CompileError> {
+        let declarations = tidepool_toolchain::declaration_join::ExactDeclarationContext::new(
+            &[],
+            &[],
+            Vec::new(),
+        )?
+        .extend_interface_artifacts(artifacts)?;
+        self.request_context = Some(Arc::new(
+            tidepool_toolchain::declaration_join::ExactCompileContext::new(Arc::new(declarations))
+                .with_request_types(Arc::new(signatures)),
+        ));
+        Ok(self)
+    }
+
+    pub(crate) fn compile_context(
+        &self,
+        declarations: Option<&Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>>,
+    ) -> Result<Arc<tidepool_toolchain::declaration_join::ExactCompileContext>, crate::CompileError>
+    {
+        let request = self.request_context.as_ref().ok_or_else(|| {
+            crate::CompileError::ExtractFailed(
+                "request type evidence lacks its original compiler authentication".into(),
+            )
+        })?;
+        let base = match declarations {
+            Some(declarations) => (**declarations).clone(),
+            None => tidepool_toolchain::declaration_join::ExactDeclarationContext::new(
+                &[],
+                &[],
+                Vec::new(),
+            )?,
+        };
+        let declarations =
+            Arc::new(base.extend_interface_artifacts(request.declarations().artifact_view())?);
+        Ok(Arc::new(
+            tidepool_toolchain::declaration_join::ExactCompileContext::new(declarations)
+                .with_request_types(
+                    request
+                        .request_types()
+                        .expect("authenticated request signatures")
+                        .clone(),
+                ),
+        ))
+    }
+
     /// Commit to the complete canonical site type graph with explicit framing
     /// and a versioned domain. This is evidence identity, not a type renderer.
     pub(crate) fn commitment(&self) -> [u8; 32] {
@@ -803,7 +859,7 @@ impl SiteTypeEvidence {
 
         let mut hash = blake3::Hasher::new();
         frame(&mut hash, b"Tidepool.SiteTypeEvidence");
-        frame(&mut hash, b"v1");
+        frame(&mut hash, b"v2");
         count(&mut hash, self.types.len());
         for node in &self.types {
             match node {
@@ -847,6 +903,20 @@ impl SiteTypeEvidence {
         }
         type_node_id(&mut hash, self.input);
         type_node_id(&mut hash, self.answer);
+        match &self.request_context {
+            Some(request) => {
+                frame(&mut hash, &[1]);
+                frame(
+                    &mut hash,
+                    &request
+                        .request_types()
+                        .expect("authenticated signatures")
+                        .metadata_digest(),
+                );
+                frame(&mut hash, &request.declarations().semantic_sha256());
+            }
+            None => frame(&mut hash, &[0]),
+        }
         *hash.finalize().as_bytes()
     }
 }
@@ -2456,6 +2526,7 @@ impl PreparedEngine {
                 .collect(),
             input: *row.inputs.first()?,
             answer: row.wire,
+            request_context: None,
         })
     }
 
@@ -9353,9 +9424,15 @@ pub(super) mod tests {
             constructors: vec![testing::identity("Fixture.Types", "ReplyValue")],
             input: TypeNodeId(0),
             answer: TypeNodeId(1),
+            request_context: None,
         };
         let commitment = evidence.commitment();
         assert_eq!(commitment, evidence.clone().commitment());
+        assert!(evidence.request_type_signatures().is_none());
+        assert!(
+            evidence.compile_context(None).is_err(),
+            "public type graphs cannot authenticate native request signatures"
+        );
 
         let mut changed_endpoint = evidence.clone();
         changed_endpoint.answer = TypeNodeId(0);

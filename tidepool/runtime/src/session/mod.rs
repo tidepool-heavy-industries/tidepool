@@ -60,10 +60,9 @@ pub use persistent::{
 };
 
 pub use admission::{
-    CheckedDisplaySettlement, NativeSetupAdmissionFailure, NativeSetupInputInventory,
-    PrivateExecutionAdmission, RuntimeCellAdmission, RuntimeCheckedDisplayAdmission,
-    RuntimeCheckedItemAdmission, RuntimeCheckedPrefix, RuntimeCheckedPrefixSnapshot,
-    RuntimeLexicalScopeLease,
+    NativeSetupAdmissionFailure, NativeSetupInputInventory, PrivateExecutionAdmission,
+    RuntimeCellAdmission, RuntimeCheckedItemAdmission, RuntimeCheckedPrefix,
+    RuntimeCheckedPrefixSnapshot, RuntimeLexicalScopeLease,
 };
 pub use paired_publication::{
     AcceptedDeclarationPublication, CertifiedDeclarationPublication, DeclarationPublicationBase,
@@ -113,11 +112,11 @@ pub use supervisor::{GraceOutcome, TurnSupervisor};
 
 pub use resident::{
     truncate_preview_at_line, CompiledActivationInput, HostBindingType, HostCarrier, HostPayload,
-    MountedActivationInput, PendingDisplayInstall, PendingPreparedInstall, PendingPreparedMode,
-    PreparedStartupEntry, ProgramProvenance, ProgramProvenanceError, ReadyDisplayInstall,
-    ReadyPreparedInstall, ResidentContinuationEvent, ResidentDisplayBundle, ResidentError,
-    ResidentHole, ResidentOutcome, ResidentResumeError, ResidentSession, RootCustody,
-    RuntimeActivationInput, RuntimeActivationInputAdmission, SessionRunContext,
+    MountedActivationInput, PendingPreparedInstall, PendingPreparedMode, PreparedStartupEntry,
+    ProgramProvenance, ProgramProvenanceError, ReadyPreparedInstall, ResidentContinuationEvent,
+    ResidentError, ResidentHole, ResidentOutcome, ResidentResumeError, ResidentSession,
+    RootCustody, RuntimeActivationInput, RuntimeActivationInputAdmission,
+    RuntimeProgressPublication, SessionRunContext,
 };
 
 pub use view::{hide_preamble_exports, SessionCompileView, SourceImports};
@@ -125,27 +124,28 @@ pub use view::{hide_preamble_exports, SessionCompileView, SourceImports};
 pub use workbench::{
     classify_workbench_item, detect_hoisted_declaration_collision, escape_workbench_haskell_string,
     normalize_workbench_input, resident_cell_check_template, resident_workbench_templates,
-    run_block_sequence, BlockExecution, BlockSequenceOutcome, CommittedBlock, MetaCommandLine,
-    ParsedBlock, SourceOrderCollision, WorkSequence, WorkbenchBinding, WorkbenchBindingKind,
-    WorkbenchCellItemKind, WorkbenchCellSourceItem, WorkbenchDiscovery, WorkbenchExecutionId,
-    WorkbenchFailureLayer, WorkbenchFailurePoint, WorkbenchForkBoundary, WorkbenchItem,
-    WorkbenchItemReceipt, WorkbenchItemStatus, WorkbenchOperationDisposition, WorkbenchOperationId,
+    run_block_sequence, ActorOutputReference, BlockExecution, BlockSequenceOutcome, CommittedBlock,
+    MetaCommandLine, ParsedBlock, SourceOrderCollision, WorkSequence, WorkbenchBinding,
+    WorkbenchBindingKind, WorkbenchCellItemKind, WorkbenchCellSourceItem, WorkbenchDiscovery,
+    WorkbenchDisplayOutput, WorkbenchDisplayPage, WorkbenchDisplayPublication,
+    WorkbenchDisplayPublicationIdentity, WorkbenchExecutionId, WorkbenchFailureLayer,
+    WorkbenchFailurePoint, WorkbenchForkBoundary, WorkbenchItem, WorkbenchItemReceipt,
+    WorkbenchItemStatus, WorkbenchOperationDisposition, WorkbenchOperationId,
     WorkbenchOperationReceipt, WorkbenchPublicationOutcome, WorkbenchRequest, WorkbenchResponse,
     WorkbenchRunStatus, WorkbenchTerminalTransfer,
 };
 
 pub use turn::{
-    ambiguous_type_advice, assemble_bind_module, assemble_display_expression_module,
-    assemble_expression_module, assemble_inspection_module, assemble_opaque_expression_module,
-    check_cell, check_cell_with_fold, classify_block, constructor_advice,
-    enable_no_monomorphism_restriction, insert_preamble_imports, place_turn_stmt,
-    prepared_scaffold_binding, render_cell_compile_error, render_cell_compile_rejection,
-    render_template, render_turn_compile_error, render_turn_compile_rejection,
-    resume_import_targets, run_turn, run_turn_pinned, runtime_failure_advice,
+    ambiguous_type_advice, assemble_bind_module, assemble_expression_module,
+    assemble_inspection_module, assemble_opaque_expression_module, check_cell, classify_block,
+    constructor_advice, enable_no_monomorphism_restriction, insert_preamble_imports,
+    place_turn_stmt, prepared_scaffold_binding, render_cell_compile_error,
+    render_cell_compile_rejection, render_template, render_turn_compile_error,
+    render_turn_compile_rejection, resume_import_targets, run_turn, runtime_failure_advice,
     turn_user_code_line_range, turn_user_code_offset, with_resume_import, BoundBinder,
     CellAnalysisItem, CellAnalysisSourceItem, CellCheck, CellCheckFailure, CellCheckRequest,
-    CellFoldTurn, CellSourceSpan, CheckedBinderPin, CheckedExpressionPlan, CompileRejection,
-    CompiledTurn, DeclarationReceipt, DeclarationSource, ExpressionLift, ExpressionPresentation,
+    CellSourceSpan, CheckedBinderPin, CheckedExpressionPlan, CompileRejection, CompiledTurn,
+    DeclarationReceipt, DeclarationSource, ExpressionLift, ExpressionPresentation,
     HostBindingAuthority, LocatedImport, LocatedPragma, PragmaKind, SourcePrologue,
     TemplateSelector, TurnClassification, TurnCode, TurnFailure, TurnKind, TurnRequest, TurnResult,
     TurnTemplate, ValueTier, AMBIGUOUS_TYPE_ADVICE, CELL_PURE_DISPATCH_ADVICE,
@@ -2156,6 +2156,13 @@ impl SessionLib {
             .into_iter()
             .map(recovery::RecoveryArtifactClosure::Home)
             .collect::<Vec<_>>();
+        artifacts.extend(
+            context
+                .materialize_module_interfaces(root)
+                .map_err(|error| invalid(&error.to_string()))?
+                .into_iter()
+                .map(recovery::RecoveryArtifactClosure::ModuleInterface),
+        );
         for interface in context.joined_interfaces() {
             artifacts.push(recovery::RecoveryArtifactClosure::Join(
                 interface
@@ -2546,7 +2553,13 @@ fn validate_rendered_module(
     let preamble = format!("{pragmas}\nmodule TidepoolDeclarationTypes where\n");
     let include_refs = includes.iter().map(PathBuf::as_path).collect::<Vec<_>>();
     let results = match inspection::run_inspections_strict(InspectionRequest {
-        exact_context: exact_context.cloned(),
+        exact_context: exact_context.map(|declarations| {
+            std::sync::Arc::new(
+                tidepool_toolchain::declaration_join::ExactCompileContext::new(
+                    std::sync::Arc::clone(declarations),
+                ),
+            )
+        }),
         preamble: &preamble,
         imports: &imports,
         include: &include_refs,

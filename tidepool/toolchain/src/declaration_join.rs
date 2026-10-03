@@ -17,8 +17,9 @@ mod planned;
 pub(crate) use planned::certify_same_offer_planned_declaration;
 
 pub use crate::declaration_context::{
-    ExactDeclarationContext, ExactSourceWitness, MaterializedExactDeclarationContext,
-    RecoveredArtifactInventory, RecoveryInventoryError,
+    ExactCompileContext, ExactDeclarationContext, ExactSourceWitness,
+    MaterializedExactDeclarationContext, RecoveredArtifactInventory, RecoveryInventoryError,
+    RequestHelperRecipe,
 };
 
 mod recovery;
@@ -259,7 +260,8 @@ fn source_lexical_surface_inner(
                         .map(|generation| {
                             SessionModule::lib(tidepool_repr::Generation(generation))
                         }),
-                    None => None,
+                    Some(crate::artifact_inventory::ArtifactKind::CanonicalModuleInterface)
+                    | None => None,
                 };
                 if owner.unit == "main"
                     && module.is_some_and(|module| module.module_name() == owner.module)
@@ -731,6 +733,7 @@ fn certify_authored_declaration_inner(
         &products,
         &interfaces,
         &joined_interfaces,
+        &compiled.artifact_view,
         context.as_deref(),
     )?;
     Ok(CertifiedAuthoredDeclaration {
@@ -848,6 +851,7 @@ pub struct MaterializedDeclarationJoin {
     pub materialization_hash_bytes: u64,
     pub join: crate::recovery_artifacts::RecoveryJoinRef,
     pub products: Vec<crate::recovery_artifacts::RecoveryArtifactRef>,
+    pub module_interfaces: Vec<crate::recovery_artifacts::RecoveryModuleInterfaceRef>,
     pub anchors: Vec<crate::recovery_artifacts::RecoveryJoinRef>,
     pub value_interfaces: Vec<crate::recovery_artifacts::RecoveryValueInterfaceRef>,
     /// Durable Interface edges; native edges remain in the certified original graph.
@@ -912,6 +916,21 @@ impl AcceptedJoin {
             &self.recovery_products(),
             &mut work,
         )?;
+        let module_interfaces =
+            crate::recovery_artifacts::with_artifact_work(&mut work, |validation| {
+                self.context
+                    .module_interfaces()
+                    .iter()
+                    .map(|interface| {
+                        crate::recovery_artifacts::materialize_module_interface(
+                            root,
+                            interface,
+                            validation,
+                            crate::recovery_artifacts::MaterializationMode::Durable,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })?;
         let anchors = self
             .context
             .joined_interfaces()
@@ -927,21 +946,30 @@ impl AcceptedJoin {
         let join = self.interface.materialize_with_work(root, &mut work)?;
         let descriptor = crate::artifact_inventory::ArtifactDescriptor::from_recovery_join(&join);
         let mut artifact_dependencies = self.context.artifact_view().interface_dependencies();
-        artifact_dependencies.extend(self.context.artifact_view().artifact_ids().into_iter().map(
-            |id| {
-                (
-                    descriptor.id,
-                    id,
-                    crate::artifact_inventory::ArtifactDependency::Interface,
-                )
-            },
-        ));
+        artifact_dependencies.extend(
+            self.context
+                .artifact_view()
+                .descriptors()
+                .into_iter()
+                .filter(|descriptor| {
+                    descriptor.kind != crate::artifact_inventory::ArtifactKind::OriginalModule
+                })
+                .map(|descriptor| descriptor.id)
+                .map(|id| {
+                    (
+                        descriptor.id,
+                        id,
+                        crate::artifact_inventory::ArtifactDependency::Interface,
+                    )
+                }),
+        );
         artifact_dependencies.sort();
         artifact_dependencies.dedup();
         Ok(MaterializedDeclarationJoin {
             materialization_hash_bytes: work.hash_bytes,
             join,
             products,
+            module_interfaces,
             anchors,
             value_interfaces,
             artifact_dependencies,
@@ -2128,6 +2156,7 @@ mod authored_tests {
         let recovered = ExactDeclarationContext::capture_recovery(
             durable.path(),
             &stored.products,
+            &stored.module_interfaces,
             &[stored.join],
             lexical.clone(),
         )

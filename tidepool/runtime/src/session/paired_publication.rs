@@ -1071,6 +1071,12 @@ impl AcceptedDeclarationPublication {
                 .map(recovery::RecoveryArtifactClosure::Home)
                 .chain(
                     materialized
+                        .module_interfaces
+                        .into_iter()
+                        .map(recovery::RecoveryArtifactClosure::ModuleInterface),
+                )
+                .chain(
+                    materialized
                         .anchors
                         .into_iter()
                         .map(recovery::RecoveryArtifactClosure::Join),

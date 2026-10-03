@@ -32,6 +32,125 @@ pub struct ExactDeclarationContext {
     lexical: Vec<ExactLexicalNode>,
 }
 
+/// Trusted source recipe associated with request-local native type custody.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RequestHelperRecipe {
+    #[default]
+    None,
+    ActorReply,
+}
+
+impl RequestHelperRecipe {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::ActorReply => "actor-reply",
+        }
+    }
+}
+
+/// Request-local compiler inputs. Persistent publication retains declarations
+/// separately, so native request annotations cannot enter a lexical snapshot.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExactCompileContext {
+    declarations: Arc<ExactDeclarationContext>,
+    request_types: Option<Arc<crate::checked_cell::RequestTypeSignatures>>,
+    request_helper_recipe: RequestHelperRecipe,
+}
+
+impl ExactCompileContext {
+    pub fn new(declarations: Arc<ExactDeclarationContext>) -> Self {
+        Self {
+            declarations,
+            request_types: None,
+            request_helper_recipe: RequestHelperRecipe::None,
+        }
+    }
+
+    pub fn declarations(&self) -> &Arc<ExactDeclarationContext> {
+        &self.declarations
+    }
+
+    pub fn request_types(&self) -> Option<&Arc<crate::checked_cell::RequestTypeSignatures>> {
+        self.request_types.as_ref()
+    }
+
+    pub fn with_request_types(
+        mut self,
+        signatures: Arc<crate::checked_cell::RequestTypeSignatures>,
+    ) -> Self {
+        self.request_types = Some(signatures);
+        self
+    }
+
+    pub fn with_request_helper_recipe(mut self, recipe: RequestHelperRecipe) -> Self {
+        self.request_helper_recipe = recipe;
+        self
+    }
+
+    pub fn request_helper_recipe(&self) -> RequestHelperRecipe {
+        self.request_helper_recipe
+    }
+
+    pub(crate) fn with_declarations(mut self, declarations: Arc<ExactDeclarationContext>) -> Self {
+        self.declarations = declarations;
+        self
+    }
+
+    fn authorization(&self, purpose: Option<Value>) -> Option<Value> {
+        match &self.request_types {
+            Some(signatures) => Some(Value::Array(vec![
+                text("request-types2"),
+                signatures.authorization_value(),
+                text(self.request_helper_recipe.as_str()),
+                purpose.unwrap_or(Value::Null),
+            ])),
+            None => purpose,
+        }
+    }
+
+    pub(crate) fn prepare_compilation(
+        &self,
+        root: &Path,
+        producer: &[u8],
+    ) -> Result<ExactCompilationRequest, CompileError> {
+        self.prepare_compilation_with_authorization(root, producer, None)
+    }
+
+    pub(crate) fn prepare_compilation_with_authorization(
+        &self,
+        root: &Path,
+        producer: &[u8],
+        authorization: Option<Value>,
+    ) -> Result<ExactCompilationRequest, CompileError> {
+        self.declarations.prepare_compilation_with_authorization(
+            root,
+            producer,
+            self.authorization(authorization),
+        )
+    }
+
+    pub(crate) fn prepare_compilation_authorizing(
+        &self,
+        root: &Path,
+        producer: &[u8],
+        authorize: impl FnOnce([u8; 32]) -> Result<Value, CompileError>,
+    ) -> Result<ExactCompilationRequest, CompileError> {
+        self.declarations
+            .prepare_compilation_authorizing(root, producer, |semantic| {
+                Ok(self
+                    .authorization(Some(authorize(semantic)?))
+                    .expect("purpose authorization"))
+            })
+    }
+}
+
+impl From<Arc<ExactDeclarationContext>> for ExactCompileContext {
+    fn from(declarations: Arc<ExactDeclarationContext>) -> Self {
+        Self::new(declarations)
+    }
+}
+
 const EXACT_SCOPE_BYTES_LIMIT: usize = 4 << 20;
 const EXACT_SCOPE_GRAPHS_LIMIT: usize = 4096;
 
@@ -76,6 +195,12 @@ fn materialization_bytes(entries: &[Arc<ArtifactEntry>]) -> u64 {
                     + product.product_bytes().len() as u64
                     + product.package_imports_bytes().len() as u64
                     + product.certification_bytes().len() as u64
+            }
+            ArtifactPayload::Canonical(interface) => {
+                interface.interface_bytes().len() as u64
+                    + interface.package_imports_bytes().len() as u64
+                    + interface.certificate_bytes().len() as u64
+                    + interface.core_bytes().map_or(0, |bytes| bytes.len() as u64)
             }
             ArtifactPayload::Interface(interface, _) => {
                 interface.interface_bytes().len() as u64
@@ -196,21 +321,9 @@ fn encode_scope_manifest(
     execution_scope: Option<Value>,
     authorization: Option<Value>,
 ) -> Result<Vec<u8>, CompileError> {
-    let has_execution_scope = execution_scope.is_some();
-    let has_authorization = authorization.is_some();
-    fields[1] = text(if has_execution_scope {
-        "6"
-    } else if has_authorization {
-        "4"
-    } else {
-        "2"
-    });
-    if let Some(execution_scope) = execution_scope {
-        fields.push(execution_scope);
-        fields.push(authorization.unwrap_or(Value::Null));
-    } else if let Some(authorization) = authorization {
-        fields.push(authorization);
-    }
+    fields[1] = text("8");
+    fields.push(execution_scope.unwrap_or(Value::Null));
+    fields.push(authorization.unwrap_or(Value::Null));
     let value = Value::Array(fields);
     let mut bytes = Vec::new();
     ciborium::ser::into_writer(&value, &mut bytes).map_err(failure)?;
@@ -253,6 +366,7 @@ impl RecoveredArtifactInventory {
     pub fn capture(
         root: &Path,
         products: &[RecoveryArtifactRef],
+        module_interfaces: &[recovery_artifacts::RecoveryModuleInterfaceRef],
         joins: &[RecoveryJoinRef],
         values: &[RecoveryValueInterfaceRef],
         descriptors: &[crate::artifact_inventory::ArtifactDescriptor],
@@ -265,6 +379,7 @@ impl RecoveredArtifactInventory {
         Self::capture_inputs(
             root,
             products,
+            module_interfaces,
             joins,
             values,
             Some((descriptors, interfaces)),
@@ -274,6 +389,7 @@ impl RecoveredArtifactInventory {
     fn capture_inputs(
         root: &Path,
         products: &[RecoveryArtifactRef],
+        module_interfaces: &[recovery_artifacts::RecoveryModuleInterfaceRef],
         joins: &[RecoveryJoinRef],
         values: &[RecoveryValueInterfaceRef],
         inventory: Option<(
@@ -293,13 +409,38 @@ impl RecoveredArtifactInventory {
         let mut validation = PackageInterfaceValidation::default();
         let mut entries = Vec::new();
         let mut losses = Vec::new();
+        let mut verified_modules = Vec::new();
+        for reference in module_interfaces {
+            match recovery_artifacts::recover_module_interface(root, reference, &mut validation) {
+                Ok(interface) => verified_modules.push((reference, interface)),
+                Err(error) => losses.push((
+                    crate::artifact_inventory::ArtifactDescriptor::from_recovery_module_interface(
+                        reference,
+                    )
+                    .id,
+                    error,
+                )),
+            }
+        }
         let mut verified = Vec::new();
         for reference in products {
-            match recovery_artifacts::verify_materialized_ref_with_validation(
-                root,
-                reference,
-                &mut validation,
-            ) {
+            let captured = reference.module_interface.as_ref().and_then(|required| {
+                verified_modules
+                    .iter()
+                    .find(|(supplied, _)| *supplied == required)
+            });
+            let result = match captured {
+                Some((_, interface)) => {
+                    recovery_artifacts::verify_materialized_ref_with_module_interface(
+                        root,
+                        reference,
+                        interface,
+                        &mut validation,
+                    )
+                }
+                None => Err(recovery_artifacts::RecoveryArtifactError::InvalidReference),
+            };
+            match result {
                 Ok(artifact) => verified.push(artifact),
                 Err(error) => losses.push((
                     crate::artifact_inventory::ArtifactDescriptor::from_recovery_product(reference)
@@ -394,6 +535,30 @@ impl RecoveredArtifactInventory {
             }
             entries.push(entry);
         }
+        for (_, interface) in verified_modules {
+            context.admit_producer(interface.producer_sha256())?;
+            entries.push(ArtifactEntry::canonical(interface));
+        }
+        // Native references carry their same canonical interface; standalone type
+        // owners arrive through the explicit manifest rows above.
+        let canonical = entries
+            .iter()
+            .filter_map(|entry| match &entry.payload {
+                ArtifactPayload::Original(product) => product.module_interface().cloned(),
+                _ => None,
+            })
+            .map(ArtifactEntry::canonical)
+            .collect::<Vec<_>>();
+        entries.extend(canonical);
+        let mut unique = BTreeMap::new();
+        for entry in entries {
+            if let Some(previous) = unique.insert(entry.descriptor.id, entry.clone()) {
+                if previous != entry {
+                    return Err(failure("conflicting recovered canonical carrier").into());
+                }
+            }
+        }
+        let mut entries = unique.into_values().collect::<Vec<_>>();
         let mut interfaces = Vec::new();
         if let Some((descriptors, dependencies)) = inventory {
             crate::artifact_inventory::restore_recovery_interface_dependencies(
@@ -437,12 +602,13 @@ impl RecoveredArtifactInventory {
                     .ok_or_else(|| failure("missing recovered artifact selection"))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let owners = entries
-            .iter()
-            .map(|entry| (entry.descriptor.owner.clone(), entry))
-            .collect::<BTreeMap<_, _>>();
-        if owners.len() != entries.len() {
-            return Err(failure("ambiguous recovered dependency owner"));
+        let mut owners = BTreeMap::new();
+        for entry in &entries {
+            let owner = entry.descriptor.owner.clone();
+            if matches!(entry.payload, ArtifactPayload::Original(_)) || !owners.contains_key(&owner)
+            {
+                owners.insert(owner, entry);
+            }
         }
         for (from, to, _) in &self.interfaces {
             if selected.contains(from) && !selected.contains(to) {
@@ -1598,6 +1764,50 @@ fn boolean(value: &Value) -> Result<bool, CompileError> {
     }
 }
 
+fn scope_interface_evidence(
+    entry: &ArtifactEntry,
+    root: &Path,
+    validation: &mut PackageInterfaceValidation,
+) -> Result<Value, CompileError> {
+    let interface = match (&entry.descriptor.kind, &entry.payload) {
+        (ArtifactKind::CanonicalModuleInterface, ArtifactPayload::Canonical(interface)) => {
+            interface
+        }
+        (ArtifactKind::OriginalModule, ArtifactPayload::Original(product)) => product
+            .module_interface()
+            .ok_or_else(|| failure("native interface evidence is missing"))?,
+        (ArtifactKind::LexicalJoin, ArtifactPayload::Interface(_, _)) => {
+            return Ok(Value::Array(vec![text("join")]))
+        }
+        (ArtifactKind::ValueInterface, ArtifactPayload::Interface(_, _)) => {
+            return Ok(Value::Array(vec![text("value")]))
+        }
+        _ => return Err(failure("interface evidence kind differs from payload")),
+    };
+    let reference = recovery_artifacts::materialize_module_interface(
+        root,
+        interface,
+        validation,
+        MaterializationMode::Scratch,
+    )
+    .map_err(failure)?;
+    Ok(Value::Array(vec![
+        text("module"),
+        path_value(&root.join(reference.certificate_path))?,
+        text(hex(&reference.certificate_sha256)),
+        reference
+            .core
+            .as_ref()
+            .map(|core| path_value(&root.join(&core.path)))
+            .transpose()?
+            .unwrap_or(Value::Null),
+        reference
+            .core
+            .as_ref()
+            .map_or(Value::Null, |core| text(hex(&core.sha256))),
+    ]))
+}
+
 fn failure(message: impl std::fmt::Display) -> CompileError {
     CompileError::ExtractFailed(format!("exact declaration context: {message}"))
 }
@@ -1626,24 +1836,42 @@ impl ExactDeclarationContext {
     pub fn capture_recovery(
         root: &Path,
         products: &[RecoveryArtifactRef],
+        module_interfaces: &[recovery_artifacts::RecoveryModuleInterfaceRef],
         joins: &[RecoveryJoinRef],
         lexical: Vec<ExactLexicalNode>,
     ) -> Result<Self, CompileError> {
-        Self::capture_recovery_with_value_interfaces(root, products, joins, &[], lexical)
+        Self::capture_recovery_with_value_interfaces(
+            root,
+            products,
+            module_interfaces,
+            joins,
+            &[],
+            lexical,
+        )
     }
 
     pub fn capture_recovery_with_value_interfaces(
         root: &Path,
         products: &[RecoveryArtifactRef],
+        module_interfaces: &[recovery_artifacts::RecoveryModuleInterfaceRef],
         joins: &[RecoveryJoinRef],
         values: &[RecoveryValueInterfaceRef],
         lexical: Vec<ExactLexicalNode>,
     ) -> Result<Self, CompileError> {
-        Self::capture_recovery_inputs(root, products, joins, values, None, lexical)
+        Self::capture_recovery_inputs(
+            root,
+            products,
+            module_interfaces,
+            joins,
+            values,
+            None,
+            lexical,
+        )
     }
     pub fn capture_recovery_with_inventory(
         root: &Path,
         products: &[RecoveryArtifactRef],
+        module_interfaces: &[recovery_artifacts::RecoveryModuleInterfaceRef],
         joins: &[RecoveryJoinRef],
         values: &[RecoveryValueInterfaceRef],
         descriptors: &[crate::artifact_inventory::ArtifactDescriptor],
@@ -1657,6 +1885,7 @@ impl ExactDeclarationContext {
         Self::capture_recovery_inputs(
             root,
             products,
+            module_interfaces,
             joins,
             values,
             Some((descriptors, dependencies)),
@@ -1666,6 +1895,7 @@ impl ExactDeclarationContext {
     fn capture_recovery_inputs(
         root: &Path,
         products: &[RecoveryArtifactRef],
+        module_interfaces: &[recovery_artifacts::RecoveryModuleInterfaceRef],
         joins: &[RecoveryJoinRef],
         values: &[RecoveryValueInterfaceRef],
         inventory: Option<(
@@ -1678,9 +1908,15 @@ impl ExactDeclarationContext {
         )>,
         lexical: Vec<ExactLexicalNode>,
     ) -> Result<Self, CompileError> {
-        let inventory =
-            RecoveredArtifactInventory::capture_inputs(root, products, joins, values, inventory)
-                .map_err(failure)?;
+        let inventory = RecoveredArtifactInventory::capture_inputs(
+            root,
+            products,
+            module_interfaces,
+            joins,
+            values,
+            inventory,
+        )
+        .map_err(failure)?;
         inventory.context(
             &inventory.entries.keys().copied().collect::<Vec<_>>(),
             lexical,
@@ -1741,9 +1977,24 @@ impl ExactDeclarationContext {
         for product in products {
             let owner = identity(&product.owner().unit, &product.owner().module);
             if let Some(entry) = existing.get(&owner) {
+                if let ArtifactPayload::Canonical(interface) = &entry.payload {
+                    if product.module_interface() != Some(interface) {
+                        return Err(failure("supporting original differs from canonical module"));
+                    }
+                    entries.push(ArtifactEntry::original(
+                        producer_sha256,
+                        product.clone(),
+                        interface
+                            .requirements()
+                            .keys()
+                            .map(|(unit, module)| identity(unit, module))
+                            .collect(),
+                    )?);
+                    continue;
+                }
                 let ArtifactPayload::Original(previous) = &entry.payload else {
                     return Err(failure(
-                        "supporting original collides with type-only interface",
+                        "supporting original collides with synthetic interface",
                     ));
                 };
                 if previous.owner() != product.owner()
@@ -1782,9 +2033,60 @@ impl ExactDeclarationContext {
     pub fn artifact_view(&self) -> &ArtifactView {
         &self.inventory
     }
+    /// Merge retained interface custody without granting authored imports.
+    pub fn extend_interface_artifacts(
+        mut self,
+        artifacts: &ArtifactView,
+    ) -> Result<Self, CompileError> {
+        for descriptor in artifacts.descriptors() {
+            self.admit_producer(descriptor.producer_sha256)?;
+        }
+        let owners = artifacts
+            .interface_owners()
+            .into_iter()
+            .map(|interface| interface.owner)
+            .collect::<Vec<_>>();
+        let interfaces = artifacts.interface_projection(&owners)?;
+        self.inventory = self.inventory.merge(&interfaces)?;
+        self.normalize()?;
+        Ok(self)
+    }
+
     pub(crate) fn interface_owners(&self) -> Vec<ExactInterfaceOwner> {
         self.inventory.interface_owners()
     }
+    pub(crate) fn module_interfaces(
+        &self,
+    ) -> Vec<crate::certified_products::CertifiedModuleInterface> {
+        self.inventory
+            .entries()
+            .iter()
+            .filter_map(|entry| match &entry.payload {
+                ArtifactPayload::Canonical(interface) => Some(interface.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub fn materialize_module_interfaces(
+        &self,
+        root: &Path,
+    ) -> Result<Vec<recovery_artifacts::RecoveryModuleInterfaceRef>, CompileError> {
+        let mut validation = PackageInterfaceValidation::default();
+        self.module_interfaces()
+            .iter()
+            .map(|interface| {
+                recovery_artifacts::materialize_module_interface(
+                    root,
+                    interface,
+                    &mut validation,
+                    MaterializationMode::Durable,
+                )
+                .map_err(failure)
+            })
+            .collect()
+    }
+
     pub fn recovery_products(&self) -> Vec<CertifiedRecoveryProduct> {
         self.inventory
             .entries()
@@ -2014,7 +2316,7 @@ impl ExactDeclarationContext {
             text(hex(&sha2::Sha256::digest(
                 serde_json::to_vec(&(
                     metadata
-                        .entries
+                        .artifacts
                         .values()
                         .map(|entry| &entry.descriptor)
                         .collect::<Vec<_>>(),
@@ -2132,6 +2434,14 @@ impl ExactDeclarationContext {
                     return Err(failure("original product differs from owned bytes"));
                 }
                 (product.interface_bytes(), product.package_imports_bytes())
+            } else if let ArtifactPayload::Canonical(interface) = &entry.payload {
+                if artifact.product.is_some() {
+                    return Err(failure("type interface has an executable product"));
+                }
+                (
+                    interface.interface_bytes(),
+                    interface.package_imports_bytes(),
+                )
             } else {
                 let ArtifactPayload::Interface(
                     join,
@@ -2268,6 +2578,25 @@ impl ExactDeclarationContext {
             )
             .map_err(failure)?
         };
+        let native_owners = products
+            .iter()
+            .map(|product| identity(&product.owner().unit, &product.owner().module))
+            .collect::<BTreeSet<_>>();
+        let canonical = entries
+            .iter()
+            .filter_map(|entry| match &entry.payload {
+                ArtifactPayload::Canonical(interface)
+                    if !native_owners.contains(&entry.descriptor.owner) =>
+                {
+                    Some(interface)
+                }
+                _ => None,
+            })
+            .map(|interface| {
+                recovery_artifacts::materialize_module_interface(root, interface, validation, mode)
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(failure)?;
         let joined = entries
             .iter()
             .filter_map(|entry| match &entry.payload {
@@ -2302,7 +2631,11 @@ impl ExactDeclarationContext {
                 }),
             });
         }
-        for reference in joined {
+        for reference in canonical
+            .into_iter()
+            .map(|reference| reference.interface)
+            .chain(joined)
+        {
             let owner = identity(&reference.unit, &reference.module);
             artifacts.push(DeclarationArtifact {
                 interface: ExactIfaceArtifact {
@@ -2483,6 +2816,16 @@ impl ExactDeclarationContext {
                             ),
                             path_value(&packages)?,
                             text(sha256(&std::fs::read(packages)?)),
+                            scope_interface_evidence(
+                                metadata
+                                    .entries
+                                    .get(&identity(&iface.unit, &iface.module))
+                                    .ok_or_else(|| {
+                                        failure("interface evidence owner is missing")
+                                    })?,
+                                root,
+                                &mut validation,
+                            )?,
                         ]))
                     })
                     .collect::<Result<Vec<_>, CompileError>>()?,
@@ -2589,17 +2932,51 @@ impl ExactDeclarationContext {
     }
 }
 
-pub(crate) fn certified_artifact_view(
+pub(crate) fn certified_product_artifact_view(
     producer: [u8; 32],
     products: &[CertifiedRecoveryProduct],
-    interfaces: &[ExactInterfaceOwner],
-    joined: &[CertifiedJoinedInterface],
+    interfaces: &[crate::certified_products::CertifiedModuleInterface],
     baseline: Option<&ExactDeclarationContext>,
 ) -> Result<ArtifactView, CompileError> {
     let view = baseline.map_or_else(
         || ArtifactInventory::default().empty_view(),
         |context| context.artifact_view().clone(),
     );
+    let mut entries = interfaces
+        .iter()
+        .cloned()
+        .map(ArtifactEntry::canonical)
+        .collect::<Vec<_>>();
+    for product in products {
+        entries.push(ArtifactEntry::original(
+            producer,
+            product.clone(),
+            Vec::new(),
+        )?);
+    }
+    view.inventory().admit(&view, entries)
+}
+
+pub(crate) fn certified_artifact_view(
+    producer: [u8; 32],
+    products: &[CertifiedRecoveryProduct],
+    interfaces: &[ExactInterfaceOwner],
+    joined: &[CertifiedJoinedInterface],
+    compiled: &ArtifactView,
+    baseline: Option<&ExactDeclarationContext>,
+) -> Result<ArtifactView, CompileError> {
+    let view = baseline.map_or_else(
+        || ArtifactInventory::default().empty_view(),
+        |context| context.artifact_view().clone(),
+    );
+    let selected = compiled.entries_for_owners(
+        products
+            .iter()
+            .map(|product| identity(&product.owner().unit, &product.owner().module)),
+    );
+    let view = view.merge(
+        &compiled.select_roots(selected.values().map(|entry| entry.descriptor.id).collect())?,
+    )?;
     let mut entries = Vec::new();
     for product in products {
         let owner = identity(&product.owner().unit, &product.owner().module);
@@ -2770,12 +3147,15 @@ mod tests {
             &mut packages,
         )
         .unwrap();
-        CertifiedRecoveryProduct::from_certification(
-            owner,
-            interface,
-            product,
-            packages,
-            certification,
+        crate::certified_products::fixture_finalized_product(
+            CertifiedRecoveryProduct::from_certification(
+                owner,
+                interface,
+                product,
+                packages,
+                certification,
+            ),
+            [2; 32],
         )
     }
 
@@ -2862,7 +3242,10 @@ mod tests {
             .clone()
             .extend_checked_original_products(
                 context.producer,
-                &[support_product("Later")],
+                &[crate::certified_products::fixture_finalized_product(
+                    support_product("Later"),
+                    context.producer,
+                )],
                 &BTreeMap::new(),
             )
             .unwrap();
@@ -2956,11 +3339,21 @@ mod tests {
             .admit(
                 &inventory.empty_view(),
                 vec![
-                    ArtifactEntry::original(producer_sha256, support_product("Alpha"), Vec::new())
-                        .unwrap(),
                     ArtifactEntry::original(
                         producer_sha256,
-                        support_product("Beta"),
+                        crate::certified_products::fixture_finalized_product(
+                            support_product("Alpha"),
+                            producer_sha256,
+                        ),
+                        Vec::new(),
+                    )
+                    .unwrap(),
+                    ArtifactEntry::original(
+                        producer_sha256,
+                        crate::certified_products::fixture_finalized_product(
+                            support_product("Beta"),
+                            producer_sha256,
+                        ),
                         vec![identity("fixture", "Alpha")],
                     )
                     .unwrap(),
@@ -2996,6 +3389,42 @@ mod tests {
     }
 
     #[test]
+    fn exact_scope_evidence_uses_admitted_artifact_roles() {
+        let (context, _) = metadata_fixture();
+        let root = tempfile::tempdir().unwrap();
+        let metadata = context.inventory.metadata_snapshot();
+        for entry in metadata.entries.values() {
+            let value = scope_interface_evidence(
+                entry,
+                root.path(),
+                &mut PackageInterfaceValidation::default(),
+            )
+            .unwrap();
+            let row = value.as_array().unwrap();
+            match entry.descriptor.kind {
+                ArtifactKind::OriginalModule | ArtifactKind::CanonicalModuleInterface => {
+                    assert_eq!(row.len(), 5);
+                    assert_eq!(row[0], text("module"));
+                    assert!(row[3].as_text().is_some());
+                    assert!(row[4].as_text().is_some());
+                }
+                ArtifactKind::LexicalJoin => assert_eq!(row, &[text("join")]),
+                ArtifactKind::ValueInterface => assert_eq!(row, &[text("value")]),
+            }
+        }
+        let mut forged = metadata.entries[&identity("fixture", "Joined")]
+            .as_ref()
+            .clone();
+        forged.descriptor.kind = ArtifactKind::CanonicalModuleInterface;
+        assert!(scope_interface_evidence(
+            &forged,
+            root.path(),
+            &mut PackageInterfaceValidation::default()
+        )
+        .is_err());
+    }
+
+    #[test]
     fn metadata_validation_indexes_owners_and_rechecks_late_corruption() {
         let (context, _) = metadata_fixture();
         let directory = tempfile::tempdir().unwrap();
@@ -3003,9 +3432,9 @@ mod tests {
         let before = context.inventory.inventory().metrics();
         context.validate_artifacts(&artifacts).unwrap();
         let after = context.inventory.inventory().metrics();
-        assert_eq!(after.graph_visits - before.graph_visits, 4);
+        assert_eq!(after.graph_visits - before.graph_visits, 6);
         assert_eq!(after.view_queries - before.view_queries, 1);
-        assert_eq!(after.entry_handle_copies - before.entry_handle_copies, 4);
+        assert_eq!(after.entry_handle_copies - before.entry_handle_copies, 10);
         assert!(context.validate_artifacts(&artifacts[..3]).is_err());
         let mut duplicate = artifacts.clone();
         duplicate.push(artifacts[0].clone());
@@ -3118,7 +3547,10 @@ mod tests {
             .clone()
             .extend_checked_original_products(
                 context.producer,
-                &[support_product("Later")],
+                &[crate::certified_products::fixture_finalized_product(
+                    support_product("Later"),
+                    context.producer,
+                )],
                 &BTreeMap::new(),
             )
             .unwrap();
@@ -4265,7 +4697,7 @@ mod tests {
             .unwrap();
         assert!(request.program_source_lexical().is_empty());
         let native = request.program_support.as_ref().unwrap();
-        assert_eq!(native.descriptors().len(), 1);
+        assert_eq!(native.descriptors().len(), 2);
         assert!(context
             .retain_value_source_surface(native, request.program_source_lexical())
             .unwrap()
@@ -4490,12 +4922,15 @@ mod tests {
         ]);
         let mut package_bytes = Vec::new();
         ciborium::ser::into_writer(&package_value, &mut package_bytes).unwrap();
-        let product = CertifiedRecoveryProduct::from_certification(
-            owner,
-            interface,
-            product_bytes,
-            package_bytes,
-            certification,
+        let product = crate::certified_products::fixture_finalized_product(
+            CertifiedRecoveryProduct::from_certification(
+                owner,
+                interface,
+                product_bytes,
+                package_bytes,
+                certification,
+            ),
+            [2; 32],
         );
         let baseline = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
         let context = Arc::new(
@@ -4548,12 +4983,15 @@ mod tests {
         let certification =
             crate::certified_products::encode_home_certification(&owner, &[], &BTreeMap::new())
                 .unwrap();
-        let product = CertifiedRecoveryProduct::from_certification(
-            owner,
-            b"interface".to_vec(),
-            b"product".to_vec(),
-            Vec::new(),
-            certification,
+        let product = crate::certified_products::fixture_finalized_product(
+            CertifiedRecoveryProduct::from_certification(
+                owner,
+                b"interface".to_vec(),
+                b"product".to_vec(),
+                Vec::new(),
+                certification,
+            ),
+            [2; 32],
         );
         let context = Arc::new(
             ExactDeclarationContext::new(&[], &[], Vec::new())
@@ -4619,12 +5057,15 @@ mod tests {
         let certification =
             crate::certified_products::encode_home_certification(&owner, &[], &BTreeMap::new())
                 .unwrap();
-        let product = CertifiedRecoveryProduct::from_certification(
-            owner.clone(),
-            b"interface".to_vec(),
-            b"product".to_vec(),
-            Vec::new(),
-            certification.clone(),
+        let product = crate::certified_products::fixture_finalized_product(
+            CertifiedRecoveryProduct::from_certification(
+                owner.clone(),
+                b"interface".to_vec(),
+                b"product".to_vec(),
+                Vec::new(),
+                certification.clone(),
+            ),
+            [2; 32],
         );
         let context = ExactDeclarationContext::new(&[], &[], Vec::new())
             .unwrap()
@@ -4635,7 +5076,7 @@ mod tests {
             )
             .unwrap();
         assert!(context.lexical_graph().is_empty());
-        assert_eq!(context.artifact_view().descriptors().len(), 1);
+        assert_eq!(context.artifact_view().descriptors().len(), 2);
         let repeated = context
             .clone()
             .extend_checked_original_products(
@@ -4645,7 +5086,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(context.semantic_sha256(), repeated.semantic_sha256());
-        assert_eq!(repeated.artifact_view().inventory().node_count(), 1);
+        assert_eq!(repeated.artifact_view().inventory().node_count(), 2);
         let changed = CertifiedRecoveryProduct::from_certification(
             owner,
             b"interface".to_vec(),
@@ -4693,12 +5134,15 @@ mod tests {
             &mut packages,
         )
         .unwrap();
-        let product = CertifiedRecoveryProduct::from_certification(
-            owner,
-            b"iface".to_vec(),
-            b"product".to_vec(),
-            packages,
-            seal,
+        let product = crate::certified_products::fixture_finalized_product(
+            CertifiedRecoveryProduct::from_certification(
+                owner,
+                b"iface".to_vec(),
+                b"product".to_vec(),
+                packages,
+                seal,
+            ),
+            [7; 32],
         )
         .with_execution_source_with_validation(graph, &mut validation)
         .unwrap();
@@ -5027,7 +5471,7 @@ mod tests {
         ];
         let manifest = encode_scope_manifest(fields, Some(execution), None).unwrap();
         let decoded: Value = ciborium::de::from_reader(manifest.as_slice()).unwrap();
-        assert_eq!(decoded.as_array().unwrap()[1], text("6"));
+        assert_eq!(decoded.as_array().unwrap()[1], text("8"));
         std::fs::write(root.join("exact-declaration-scope.cbor"), manifest).unwrap();
         let missing = execution_scope_fixture(&entries[..1], &root)
             .unwrap()
@@ -5061,12 +5505,15 @@ mod tests {
                 &mut packages,
             )
             .unwrap();
-            let product = CertifiedRecoveryProduct::from_certification(
-                owner,
-                b"iface".to_vec(),
-                b"product".to_vec(),
-                packages,
-                seal,
+            let product = crate::certified_products::fixture_finalized_product(
+                CertifiedRecoveryProduct::from_certification(
+                    owner,
+                    b"iface".to_vec(),
+                    b"product".to_vec(),
+                    packages,
+                    seal,
+                ),
+                [2; 32],
             );
             Arc::new(ArtifactEntry::original([7; 32], product, vec![]).unwrap())
         };
@@ -5122,6 +5569,8 @@ mod tests {
         let owner = product.owner().clone();
         let producer = b"execution manifest producer";
         let producer_sha256 = Sha256::digest(producer).into();
+        let product =
+            crate::certified_products::fixture_finalized_product(product, producer_sha256);
         let evidence = DependencyEvidence {
             version: 4,
             cache_safe: true,
@@ -5181,6 +5630,8 @@ mod tests {
             product.package_imports_bytes().to_vec(),
             seal,
         )
+        .with_module_interface(product.module_interface().unwrap().clone())
+        .unwrap()
         .with_execution_source_with_validation(graph.clone(), &mut validation)
         .unwrap();
         let context = Arc::new(
@@ -5206,7 +5657,7 @@ mod tests {
         let value: Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
         let fields = value.as_array().unwrap();
         assert_eq!(fields.len(), 9);
-        assert_eq!(fields[1], text("6"));
+        assert_eq!(fields[1], text("8"));
         assert_eq!(fields[8], Value::Null);
         assert_eq!(
             fields[7].as_array().unwrap()[1].as_array().unwrap().len(),
@@ -5263,16 +5714,15 @@ mod tests {
         ]);
         for authorization in [None, Some(authorization)] {
             let mut expected = base.clone();
-            expected[1] = text(if authorization.is_some() { "4" } else { "2" });
-            if let Some(value) = &authorization {
-                expected.push(value.clone());
-            }
+            expected[1] = text("8");
+            expected.push(Value::Null);
+            expected.push(authorization.clone().unwrap_or(Value::Null));
             let mut legacy = Vec::new();
             ciborium::ser::into_writer(&Value::Array(expected), &mut legacy).unwrap();
             assert_eq!(
                 encode_scope_manifest(base.clone(), None, authorization.clone()).unwrap(),
                 legacy,
-                "optional recipe absence preserves legacy v2/v4 canonical bytes"
+                "v8 always retains explicit execution and purpose fields"
             );
             let overflow = Value::Array(vec![
                 Value::Bytes(vec![0; EXACT_SCOPE_BYTES_LIMIT - 32]),
@@ -5287,7 +5737,7 @@ mod tests {
                     .unwrap();
             let decoded: Value = ciborium::de::from_reader(with_recipe.as_slice()).unwrap();
             let decoded = decoded.as_array().unwrap();
-            assert_eq!(decoded[1], text("6"));
+            assert_eq!(decoded[1], text("8"));
             assert_eq!(decoded[8], authorization.unwrap_or(Value::Null));
         }
     }

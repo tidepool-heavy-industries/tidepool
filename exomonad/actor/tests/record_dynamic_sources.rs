@@ -172,7 +172,9 @@ async fn run_record_case(source: &str, discriminator: u32) {
     )
     .await
     .expect("dynamic lifecycle case timed out")
-    .expect("dynamic lifecycle case");
+    .expect("dynamic lifecycle case")
+    .into_json()
+    .expect("resident response serializes for structured test assertions");
     assert_eq!(
         result.get("passed"),
         Some(&serde_json::json!(true)),

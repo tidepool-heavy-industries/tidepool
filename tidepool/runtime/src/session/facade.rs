@@ -232,6 +232,7 @@ mod tests {
             lexical_scope: ScopeId::ROOT,
             injected_values: Vec::new(),
             next_value_generation: Generation(1),
+            request_context: None,
             projection: std::sync::Arc::new(crate::session::view::CompileViewProjection {
                 root: dir.path().to_path_buf(),
                 persistent_imports: SourceImports::new(),

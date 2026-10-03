@@ -1,6 +1,7 @@
 module Main (main) where
 
 import ExecutionSourceDecodeTest (executionSourceDecodeChecks, executionSourceDecodeBenchmark, executionSourceDecodeSnapshots)
+import ExactScopeV8Test (exactScopeV8Checks, candidateCanonicalChecks)
 
 import Codec.CBOR.Encoding (encodeBool, encodeListLen, encodeString)
 import Codec.CBOR.Write (toStrictByteString)
@@ -9,28 +10,29 @@ import Codec.CBOR.Term (Term(..), decodeTerm, encodeTerm)
 import Data.ByteString.Lazy qualified as BSL
 import Control.Exception (SomeException, AsyncException(ThreadKilled), bracket, evaluate, finally, try, fromException)
 import Control.Concurrent (MVar, forkIO, killThread, newEmptyMVar, putMVar, takeMVar)
-import Control.Monad (foldM, forM, unless, void, when)
+import Control.Monad (foldM, forM, forM_, unless, void, when)
 import GHC.Clock (getMonotonicTimeNSec)
 import Data.Word (Word64)
 import Data.IORef (newIORef, readIORef, writeIORef, modifyIORef')
 import Crypto.Hash.SHA256 qualified as SHA
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as BSC
-import Data.List (isInfixOf, isPrefixOf, sortOn, stripPrefix)
+import Data.List (isInfixOf, isPrefixOf, sort, sortOn, stripPrefix)
 import Data.Maybe (catMaybes, isJust, isNothing, maybeToList)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text qualified as T
-import GHC (runGhc, setSession, ms_mod_name, ms_hsc_src, parseModule, typecheckModule, Target(..))
+import GHC (runGhc, getSession, setSession, SafeHaskellMode(Sf_None), ms_mod_name, ms_hsc_src, ms_hspp_buf, ms_hspp_file, ms_hspp_opts, parseModule, typecheckModule, TypecheckedModule(..), ParsedModule(..), Target(..))
 import GHC.Core qualified as Core
 import GHC.Builtin.Types (boolTy, intTy, charTy, stringTy, intDataCon)
 import GHC.Core.Type (mkVisFunTyMany, mkTyVarTy, mkForAllTy)
+import GHC.Core.TyCo.Compare (eqType)
 import GHC.Builtin.Types (liftedTypeKind)
 import GHC.Types.Var (mkTyVar, VarBndr(..))
 import GHC.Types.Name.Occurrence (mkTyVarOcc, mkVarOcc)
 import GHC.Types.SrcLoc (noSrcSpan)
 import Language.Haskell.Syntax.Specificity (ForAllTyFlag(..), Specificity(..))
-import GHC.Types.Id (idName, setIdName)
+import GHC.Types.Id (idName, idType, setIdName)
 import GHC.Types.Literal (Literal(..), LitNumType(..))
 import GHC.Types.Name (getOccString, nameOccName, nameSrcSpan, mkExternalName, mkInternalName)
 import GHC.Types.Avail (availNames)
@@ -45,19 +47,24 @@ import GHC.Unit.Finder.Types (FinderCache(..))
 import GHC.Unit.Module.Location (ml_hi_file)
 import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
 import GHC.Builtin.Names (gHC_PRIM)
-import GHC.Tc.Types (tcg_imports)
-import GHC.Unit.Module.Deps (imp_mods)
+import GHC.Tc.Types (tcg_imports, tcg_type_env)
+import GHC.Unit.Module.Deps (imp_mods, Usage(..))
 import GHC.Unit.Module.Graph (ModuleGraphNode(..), mgModSummaries', mkModuleGraph)
 import GHC.Types.SourceFile (HscSource(..))
 import Control.Monad.IO.Class (liftIO)
-import GHC.Driver.Session (targetProfile)
+import GHC.Driver.Session (targetProfile, wopt_set, WarningFlag(Opt_WarnMissingSignatures))
+import GHC.Types.Error (isEmptyMessages)
+import GHC.Types.Name.Set (nameSetElemsStable)
 import GHC.Driver.Hooks (hscCompileCoreExprHook)
+import GHC.Iface.Make (mkIfaceTc)
+import GHC.Iface.Tidy (mkBootModDetailsTc)
 import GHC.Iface.Binary (CompressionIFace(..), TraceBinIFace(..), writeBinIface)
-import GHC.Unit.Module.ModIface (set_mi_module, mi_module, mi_exports, mi_decls)
+import GHC.Unit.Module.ModIface (set_mi_module, mi_module, mi_exports, mi_usages, mi_decls)
 import GHC.Iface.Syntax (ifaceDeclImplicitBndrs)
 import GHC.Unit.Module.ModDetails (md_types)
+import GHC.Unit.Module.ModGuts (cg_binds)
 import GHC.Unit.Module (Module, mkModule, mkModuleName, moduleName, moduleNameString, moduleUnit)
-import GHC.Unit.Types (unitString, stringToUnit, GenWithIsBoot(..))
+import GHC.Unit.Types (unitString, unitIdString, stringToUnit, GenWithIsBoot(..))
 import Numeric (showHex)
 import System.Directory
   ( copyFile, createDirectory, createDirectoryIfMissing, getTemporaryDirectory, removeDirectoryRecursive
@@ -71,6 +78,7 @@ import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 import System.Process (readProcessWithExitCode)
 import System.Timeout (timeout)
 import Tidepool.CertifiedProducts (encodeCertifiedProducts, resolvePackageGlobal)
+import Tidepool.FinalizedModuleArtifacts (captureFinalizedModuleArtifacts, emptyFinalizedModuleArtifacts)
 import Tidepool.ExecutionEncode (encodeModuleProducts)
 
 import Tidepool.ExecutionProjection
@@ -108,8 +116,10 @@ import Tidepool.ExtractUtil (getLibdir)
 import Tidepool.HomeProducts (hydrateCandidateHomeProducts)
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedPipelineResult(..), PipelineResult(..), CheckedEnvironmentResult(..)
+  , finalizedTidyGuts
   , renderType, generatedScaffoldRecipe, activationPreviewInputType
-  , CompilePurpose(..), runPipelineSelected, runPipelineSessionSelected, withResidentPipelineSelected )
+  , CompilePurpose(..), runPipelineSelected, runPipelineSessionSelected, withResidentPipelineSelected
+  , withResidentPipelineSelectedRequests )
 import Tidepool.ModuleCandidates (ModuleCandidate(..), CandidateGroup(..), CandidateGlobal(..)
   , readModuleCandidates, readModuleCandidatesWithGraphs, candidateExecutionSources, candidateOriginalIdentity)
 import Tidepool.PackageWitness (PackageImportEvidence(..), PackageImportRoot(..), encodePackageImports, emptyPackageImports, readPackageImports, revalidatePackageImports)
@@ -118,10 +128,12 @@ import Tidepool.FatIface (readExactInterface)
 import Tidepool.Session (SessionScope(..), emptySessionScope)
 import Tidepool.SessionArtifacts (mkBoundBinders, parseValModule)
 import Tidepool.Session (sessionHiPath)
-import Tidepool.ExactScope (ExactScope(..), ExactProduct(..), ExactOriginalGroup(..), CheckedCellAdmission(..), CheckedItemAdmission(..), CheckedItemPurpose(..), readExactScope, extendExactExecutionSources, extendExactExecutionSourcesWithinBudget, scopeExecutionNativeOwners)
+import Tidepool.ExactScope (ExactScope(..), ExactProduct(..), ExactOriginalGroup(..), CheckedCellAdmission(..), CheckedCellPurpose(..), CheckedItemAdmission(..), CheckedItemPurpose(..), readExactScope, extendExactExecutionSources, extendExactExecutionSourcesWithinBudget, scopeExecutionNativeOwners)
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
-import Tidepool.CheckedCell (CheckedSignature(..), captureCheckedSignature, encodeCheckedSignature
-  , captureCheckedTypeWitness, sealCheckedTypeWitness, encodeCheckedTypeWitness)
+import ProgressBoundaryTest (progressBoundaryChecks)
+import FinalizedCoreTest (finalizedCoreChecks)
+import Tidepool.CheckedCell (CheckedSignature(..), RequestTypeSignatures(..), RequestHelperRecipe(..), captureCheckedSignature, encodeCheckedSignature, encodeRequestTypeSignatures
+  , captureCheckedTypeWitness, sealCheckedTypeWitness, encodeCheckedTypeWitness, rewriteCheckedAnnotations, rewriteHostInputType, rewriteRequestTypes, NativeParsedModule(..), thenNativeModule, typecheckNativeModule, typecheckNativeModuleWithDiagnostics)
 import Tidepool.TurnSource (replaceTemplateMarker, spliceTemplate)
 import Tidepool.Binders (BoundBinder(..))
 import Tidepool.ExecutionSource
@@ -174,6 +186,10 @@ exactCompilationCacheSafety expectedSource bytes = do
 
 main :: IO ()
 main = getArgs >>= \case
+  ["--finalized-core"] -> finalizedCoreChecks
+  ["--exact-scope-v8", manifest] -> exactScopeV8Checks manifest
+  ["--canonical-candidates", scope, candidates] -> candidateCanonicalChecks scope candidates
+  ["--finalized-frontend-once"] -> finalizedFrontendOnce
   ["--execution-source-decode"] -> executionSourceDecodeChecks
   "--execution-source-decode-benchmark" : iterations : files -> executionSourceDecodeBenchmark iterations files
   "--execution-source-decode-snapshots" : output : files -> executionSourceDecodeSnapshots output files
@@ -190,11 +206,13 @@ main = getArgs >>= \case
   ["--generated-scaffold-retained",scope,seal] -> generatedScaffoldRetained scope seal
   ["--hydrated-site-siblings"] -> hydratedSiteSiblings
   ["--fresh-execution-recipe"] -> freshExecutionRecipeTest
+  ["--native-checked-signatures"] -> nativeCheckedSignaturesTest
   ["--host-activation-purpose"] -> hostActivationPurposeTest Nothing
   ["--host-activation-purpose", destination] -> hostActivationPurposeTest (Just destination)
   ["--candidate-execution-sources"] -> candidateExecutionSourcesTest
   ["--candidate-execution-wire", path] -> candidateExecutionWire path
   ["--checked-value-type-closure", effects] -> checkedValueTypeClosure effects
+  ["--progress-boundary", effects] -> progressBoundaryChecks effects
   ["--execution-source-wire", path] -> executionSourceWire path
   ["--execution-source-closure-wire", path] -> executionSourceClosureWire path
   ["--exact-retained-quoter"] -> exactRetainedQuoter
@@ -463,7 +481,8 @@ executionSourceClosureWire path = do
     fail "large closure accepted a missing native owner"
   let candidates = takeDirectory path </> "empty-candidates.cbor"
   BS.writeFile candidates (toStrictByteString (encodeTerm (TList
-    [TString "TPMCAN", TString "8", TList [], TList [], TList [], TList [TList [],TList []]])))
+    [TString "TPMCAN", TString "10", TList [], TList [], TList [], TList [TList [],TList []]
+      ,TString (T.pack (scopeProducerSha256 scope))])))
   decoded <- readModuleCandidatesWithGraphs graphs candidates >>= either fail pure
   unless (null decoded) $ fail "empty candidate manifest invented source candidates"
   bytes <- BS.readFile path
@@ -524,7 +543,7 @@ checkedValueTypeClosure effects = withScratch $ \work -> do
         { scopeInterfaces = scopeInterfaces base ++ [(value,valuePath ++ ".packages",digest valuePackages)]
         , scopeLexical = scopeLexical base ++ [(("main","Tidepool.Session.Val.G7"),requirements)]
         , scopeCheckedCell = Just (CheckedCellAdmission (replicate 64 '0') (replicate 64 '0')
-            (replicate 64 '0') [] ["Tidepool.Session.Val.G7"] [] [value] Nothing) }
+            (replicate 64 '0') [] ["Tidepool.Session.Val.G7"] [] [value] Nothing AuthoredCellCheck) }
       scope = emptySessionScope { ssRoot = work, ssExactScope = Just scopePath, ssValIfaces = [valueOwner] }
   isolated <- readCheckedValueImportAuthority environment [value]
   unless (case isolated of Left "incomplete exact interface dependency closure" -> True; _ -> False) $
@@ -802,72 +821,79 @@ exactRetainedQuoter = withTiming $ withScratch $ \work -> do
   supportB <- runPipelineSelected (PreparedProducts Nothing) (work </> "MetadataQuoteSupport.hs") [work]
   writeExecutionScope changedPath work supportB ["MetadataQuoteSupport"]
   copyFile "test-source-boot/fixtures/MetadataQuoteSupport.hs" (work </> "MetadataQuoteSupport.hs")
-  withResidentPipelineSelected [work] $ \compile -> do
-    checked <- compile CheckedEnvironment Set.empty GeneralCompile (Just scope)
-      (work </> "MetadataQuotedTarget.hs") [work] Nothing
-    unless (fmap renderType (crResultType checked) == Just "Int") $
-      fail "retained quoter execution changed its result type"
-    native <- compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope)
-      (work </> "MetadataQuotedTarget.hs") [work] Nothing
-    unless (fmap renderType (prResultType (pprPipelineResult native)) == Just "Int"
-        && hasIntResultLiteral 42 (prBinds (pprPipelineResult native))
-        && not (isJust (hscCompileCoreExprHook (hsc_hooks (prHscEnv (pprPipelineResult native)))))) $
-      fail "retained quoter native execution changed its result type"
+  withResidentPipelineSelectedRequests [work] $ \runRequest -> do
     let helperPath = work </> "MetadataQuoteSupport.hs"
-    copyFile "test-source-boot/fixtures/MetadataQuoteSupportChanged.hs" helperPath
-    refused <- try (compile CheckedEnvironment Set.empty GeneralCompile (Just scope)
-      (work </> "MetadataQuotedTarget.hs") [work] Nothing) :: IO (Either SomeException CheckedEnvironmentResult)
-    unless (case refused of Left reason -> "ExecutionSourceChanged" `isInfixOf` show reason; _ -> False) $
-      fail "retained quoter executed a changed original source"
-    let preprocessor = work </> "changed-preprocessor"
-        preprocessMarker = work </> "preprocess-marker"
-    writeFile preprocessor ("#!/bin/sh\n: > " ++ show preprocessMarker ++ "\nexit 1\n")
-    permissions <- getPermissions preprocessor
-    setPermissions preprocessor permissions {executable=True}
-    preprocessingSource <- readFile "test-source-boot/fixtures/ExecutionChangedPreprocessor.hs"
-    writeFile helperPath (T.unpack (T.replace "EXECUTION_PREPROCESSOR" (T.pack preprocessor) (T.pack preprocessingSource)))
-    preprocessed <- try (compile CheckedEnvironment Set.empty GeneralCompile (Just scope)
-      (work </> "MetadataQuotedTarget.hs") [work] Nothing) :: IO (Either SomeException CheckedEnvironmentResult)
-    ranPreprocessor <- doesFileExist preprocessMarker
-    unless (case preprocessed of Left reason -> "ExecutionSourceChanged" `isInfixOf` show reason && not ranPreprocessor; _ -> False) $
-      fail "changed original source executed preprocessing before recipe admission"
-    copyFile "test-source-boot/fixtures/MetadataQuoteSupportChanged.hs" helperPath
-    nativeB <- compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just changedScope)
-      (work </> "MetadataQuotedTarget.hs") [work] Nothing
-    unless (hasIntResultLiteral 43 (prBinds (pprPipelineResult nativeB))) $
-      fail "execution recipe B linked the previous source owner's bytecode"
-    copyFile "test-source-boot/fixtures/MetadataQuoteSupport.hs" helperPath
-    nativeA <- compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope)
-      (work </> "MetadataQuotedTarget.hs") [work] Nothing
-    unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult nativeA))) $
-      fail "execution recipe A/B/A retained a changed helper body"
-    let cancelMarker = work </> "cancel-marker"
+        cancelMarker = work </> "cancel-marker"
         quoterPath = work </> "MetadataQuoter.hs"
-    cancellingSource <- readFile "test-source-boot/fixtures/ExecutionCancellingQuoter.hs"
-    writeFile quoterPath (T.unpack (T.replace "\"EXECUTION_CANCEL_MARKER\"" (T.pack (show cancelMarker)) (T.pack cancellingSource)))
-    cancelled <- try (timeout 1500000 (compile CheckedEnvironment Set.empty GeneralCompile (Just scope)
-      (work </> "MetadataQuotedTarget.hs") [work] Nothing)) :: IO (Either SomeException (Maybe CheckedEnvironmentResult))
-    beganExecution <- doesFileExist cancelMarker
-    unless (beganExecution && case cancelled of Right (Just _) -> False; _ -> True) $
-      fail "execution cancellation did not reach the scoped splice linker"
-    copyFile "test-source-boot/fixtures/MetadataQuoter.hs" quoterPath
-    copyFile "test-source-boot/fixtures/MetadataQuoteSupportChanged.hs" helperPath
-    afterCancel <- compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just changedScope)
-      (work </> "MetadataQuotedTarget.hs") [work] Nothing
-    unless (hasIntResultLiteral 43 (prBinds (pprPipelineResult afterCancel))
-        && not (isJust (hscCompileCoreExprHook (hsc_hooks (prHscEnv (pprPipelineResult afterCancel)))))) $
-      fail "cancelled execution A leaked its linker view into B"
-    copyFile "test-source-boot/fixtures/MetadataQuoteSupport.hs" helperPath
-    (hidden,diagnostics) <- captureDiagnostics (try (compile CheckedEnvironment Set.empty GeneralCompile (Just hiddenScope)
-      (work </> "MetadataQuotedTarget.hs") [work] Nothing) :: IO (Either SomeException CheckedEnvironmentResult))
-    unless (case hidden of
-      Left reason
-        | Just (OriginalSourceSelectionRejected
-            (ExecutionSourceUnavailable ("main", "MetadataQuoteSupport"))) <- fromException reason ->
-          not ("tidepool-timing phase=ghc_load" `isInfixOf` diagnostics)
-      _ -> False) $
-      fail ("hidden lexical import did not refuse its missing source-selection authority: "
-        ++ either show (const "unexpected success") hidden)
+    runRequest (pure ()) $ \compile -> do
+      checked <- compile CheckedEnvironment Set.empty GeneralCompile (Just scope)
+        (work </> "MetadataQuotedTarget.hs") [work] Nothing
+      unless (fmap renderType (crResultType checked) == Just "Int") $
+        fail "retained quoter execution changed its result type"
+      native <- compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope)
+        (work </> "MetadataQuotedTarget.hs") [work] Nothing
+      unless (fmap renderType (prResultType (pprPipelineResult native)) == Just "Int"
+          && hasIntResultLiteral 42 (prBinds (pprPipelineResult native))
+          && not (isJust (hscCompileCoreExprHook (hsc_hooks (prHscEnv (pprPipelineResult native)))))) $
+        fail "retained quoter native execution changed its result type"
+      copyFile "test-source-boot/fixtures/MetadataQuoteSupportChanged.hs" helperPath
+      refused <- try (compile CheckedEnvironment Set.empty GeneralCompile (Just scope)
+        (work </> "MetadataQuotedTarget.hs") [work] Nothing) :: IO (Either SomeException CheckedEnvironmentResult)
+      unless (case refused of Left reason -> "ExecutionSourceChanged" `isInfixOf` show reason; _ -> False) $
+        fail "retained quoter executed a changed original source"
+      let preprocessor = work </> "changed-preprocessor"
+          preprocessMarker = work </> "preprocess-marker"
+      writeFile preprocessor ("#!/bin/sh\n: > " ++ show preprocessMarker ++ "\nexit 1\n")
+      permissions <- getPermissions preprocessor
+      setPermissions preprocessor permissions {executable=True}
+      preprocessingSource <- readFile "test-source-boot/fixtures/ExecutionChangedPreprocessor.hs"
+      writeFile helperPath (T.unpack (T.replace "EXECUTION_PREPROCESSOR" (T.pack preprocessor) (T.pack preprocessingSource)))
+      preprocessed <- try (compile CheckedEnvironment Set.empty GeneralCompile (Just scope)
+        (work </> "MetadataQuotedTarget.hs") [work] Nothing) :: IO (Either SomeException CheckedEnvironmentResult)
+      ranPreprocessor <- doesFileExist preprocessMarker
+      unless (case preprocessed of Left reason -> "ExecutionSourceChanged" `isInfixOf` show reason && not ranPreprocessor; _ -> False) $
+        fail "changed original source executed preprocessing before recipe admission"
+      copyFile "test-source-boot/fixtures/MetadataQuoteSupportChanged.hs" helperPath
+      nativeB <- compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just changedScope)
+        (work </> "MetadataQuotedTarget.hs") [work] Nothing
+      unless (hasIntResultLiteral 43 (prBinds (pprPipelineResult nativeB))) $
+        fail "execution recipe B linked the previous source owner's bytecode"
+      copyFile "test-source-boot/fixtures/MetadataQuoteSupport.hs" helperPath
+      nativeA <- compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope)
+        (work </> "MetadataQuotedTarget.hs") [work] Nothing
+      unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult nativeA))) $
+        fail "execution recipe A/B/A retained a changed helper body"
+    runRequest (pure ()) $ \compile -> do
+      cancellingSource <- readFile "test-source-boot/fixtures/ExecutionCancellingQuoter.hs"
+      writeFile quoterPath (T.unpack (T.replace "\"EXECUTION_CANCEL_MARKER\"" (T.pack (show cancelMarker)) (T.pack cancellingSource)))
+      cancelled <- try (timeout 1500000 (compile CheckedEnvironment Set.empty GeneralCompile (Just scope)
+        (work </> "MetadataQuotedTarget.hs") [work] Nothing)) :: IO (Either SomeException (Maybe CheckedEnvironmentResult))
+      beganExecution <- doesFileExist cancelMarker
+      unless (beganExecution && case cancelled of Right (Just _) -> False; _ -> True) $
+        fail "execution cancellation did not reach the scoped splice linker"
+      terminal <- try (timeout 1000000 (compile CheckedEnvironment Set.empty GeneralCompile (Just scope)
+        (work </> "MetadataQuotedTarget.hs") [work] Nothing)) :: IO (Either SomeException (Maybe CheckedEnvironmentResult))
+      unless (case terminal of Left _ -> True; Right _ -> False) $
+        fail "cancelled compiler callback remained usable"
+    runRequest (pure ()) $ \compile -> do
+      copyFile "test-source-boot/fixtures/MetadataQuoter.hs" quoterPath
+      copyFile "test-source-boot/fixtures/MetadataQuoteSupportChanged.hs" helperPath
+      afterCancel <- compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just changedScope)
+        (work </> "MetadataQuotedTarget.hs") [work] Nothing
+      unless (hasIntResultLiteral 43 (prBinds (pprPipelineResult afterCancel))
+          && not (isJust (hscCompileCoreExprHook (hsc_hooks (prHscEnv (pprPipelineResult afterCancel)))))) $
+        fail "cancelled execution A leaked its linker view into B"
+      copyFile "test-source-boot/fixtures/MetadataQuoteSupport.hs" helperPath
+      (hidden,diagnostics) <- captureDiagnostics (try (compile CheckedEnvironment Set.empty GeneralCompile (Just hiddenScope)
+        (work </> "MetadataQuotedTarget.hs") [work] Nothing) :: IO (Either SomeException CheckedEnvironmentResult))
+      unless (case hidden of
+        Left reason
+          | Just (OriginalSourceSelectionRejected
+              (ExecutionSourceUnavailable ("main", "MetadataQuoteSupport"))) <- fromException reason ->
+            not ("tidepool-timing phase=ghc_load" `isInfixOf` diagnostics)
+        _ -> False) $
+        fail ("hidden lexical import did not refuse its missing source-selection authority: "
+          ++ either show (const "unexpected success") hidden)
   unless (null (scopeExecutionOwners originalScope)) (fail "legacy scope gained execution authority")
   putStrLn "exact retained quoter: metadata/native, missing/change/preprocess refusals, A/B/A, cancellation, hidden-import preflight passed"
 
@@ -1072,14 +1098,8 @@ exactToOrdinary = withTiming $ withScratch $ \work -> do
   writeExecutionScope scopePath work sealed ["ExecutionSealedQuoter"]
   writeExecutionScope hiddenPath work sealed []
   writeExecutionScope helperPath work helper ["MetadataQuoteSupport"]
-  withResidentPipelineSelected [work] $ \compile -> do
-    _ <- compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope)
-      (work </> "ExecutionSealedTarget.hs") [work] Nothing
-    ordinary <- compile (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile Nothing
-      (work </> "ExecutionClassQuoter.hs") [work] Nothing
-    unless ("ExecutionClassQuoter" `elem` preparedNames ordinary) $
-      fail "ordinary certification after an exact request omitted its source owner"
-    let ordinaryQuote = do
+  withResidentPipelineSelectedRequests [work] $ \runRequest -> do
+    let ordinaryQuote compile = do
           result <- compile (PreparedProducts Nothing) Set.empty GeneralCompile Nothing
             (work </> "ExecutionClassQuoteTarget.hs") [work] Nothing
           assertSingleDiagnosticCollector (prHscEnv (pprPipelineResult result))
@@ -1088,50 +1108,64 @@ exactToOrdinary = withTiming $ withScratch $ \work -> do
               && not (isJust (lookupHpt (hsc_HPT (prHscEnv (pprPipelineResult result))) (mkModuleName "ExecutionHiddenOrphan")))
               && not (isJust (lookupHpt (hsc_HPT (prHscEnv (pprPipelineResult result))) (mkModuleName "Tidepool.Session.Val.G2")))) $
             fail "ordinary request inherited an exact execution environment"
-    ordinaryQuote
-    ordinaryQuote
-    _ <- compile CheckedEnvironment Set.empty GeneralCompile (Just scope)
-      (work </> "ExecutionSealedTarget.hs") [work] Nothing
-    afterExactLegacy <- compile CheckedEnvironment Set.empty GeneralCompile
-      (Just emptySessionScope {ssRoot=work,ssValIfaces=[valueModule]}) (work </> "CheckedValueConsumer.hs") [work] Nothing
-    unless (fmap renderType (crResultType afterExactLegacy) == Just "Int") $
-      fail "legacy value request inherited the preceding exact graph"
-    ordinaryQuote
-    (refused, refusalDiagnostics) <- captureDiagnostics $ try (compile CheckedEnvironment Set.empty GeneralCompile
-      (Just scope {ssExactScope=Just hiddenPath}) (work </> "ExecutionSealedTarget.hs") [work] Nothing)
-      :: IO (Either SomeException CheckedEnvironmentResult, String)
-    unless (case refused of
-      Left reason
-        | Just (OriginalSourceSelectionRejected
-            (ExecutionSourceUnavailable ("main", "ExecutionSealedQuoter"))) <- fromException reason ->
-          not ("tidepool-timing phase=ghc_load" `isInfixOf` refusalDiagnostics)
-      _ -> False) $
-      fail ("hidden original did not refuse its missing source-selection authority: "
-        ++ either show (const "unexpected success") refused)
-    ordinaryQuote
-    cancelling <- readFile "test-source-boot/fixtures/ExecutionCancellingQuoter.hs"
-    let marker = work </> "cancel-marker"
-    writeFile (work </> "MetadataQuoter.hs") (T.unpack (T.replace "EXECUTION_CANCEL_MARKER" (T.pack marker) (T.pack cancelling)))
-    cancelled <- timeout 1500000 (compile CheckedEnvironment Set.empty GeneralCompile
-      (Just scope {ssExactScope=Just helperPath}) (work </> "MetadataQuotedTarget.hs") [work] Nothing)
-    started <- doesFileExist marker
-    unless (isNothing cancelled && started) (fail "exact cancellation did not reach the real quoter")
-    copyFile "test-source-boot/fixtures/MetadataQuoter.hs" (work </> "MetadataQuoter.hs")
-    copyFile "test-source-boot/fixtures/MetadataQuoteSupportChanged.hs" (work </> "MetadataQuoteSupport.hs")
-    afterCancel <- compile (PreparedProducts Nothing) Set.empty GeneralCompile Nothing
-      (work </> "MetadataQuotedTarget.hs") [work] Nothing
-    assertSingleDiagnosticCollector (prHscEnv (pprPipelineResult afterCancel))
-    unless (hasIntResultLiteral 43 (prBinds (pprPipelineResult afterCancel))
-        && not (isJust (hscCompileCoreExprHook (hsc_hooks (prHscEnv (pprPipelineResult afterCancel)))))) $
-      fail "ordinary request after cancellation reused the old helper executable"
-    legacy <- compile CheckedEnvironment Set.empty GeneralCompile
-      (Just emptySessionScope {ssRoot=work,ssValIfaces=[valueModule]}) (work </> "CheckedValueConsumer.hs") [work] Nothing
-    unless (fmap renderType (crResultType legacy) == Just "Int") (fail "legacy value injection did not typecheck")
-    ordinaryQuote
-    provisional <- compile (PreparedProducts (Just (work </> "missing-candidates.cbor"))) Set.empty GeneralCompile Nothing
-      (work </> "ExecutionClassQuoteTarget.hs") [work] Nothing
-    unless (null (pprAcceptedCandidates provisional)) (fail "missing manifest unexpectedly admitted a candidate")
-    ordinaryQuote
+    runRequest (pure ()) $ \compile -> do
+      _ <- compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope)
+        (work </> "ExecutionSealedTarget.hs") [work] Nothing
+      ordinary <- compile (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile Nothing
+        (work </> "ExecutionClassQuoter.hs") [work] Nothing
+      unless ("ExecutionClassQuoter" `elem` preparedNames ordinary) $
+        fail "ordinary certification after an exact request omitted its source owner"
+      ordinaryQuote compile
+      ordinaryQuote compile
+      _ <- compile CheckedEnvironment Set.empty GeneralCompile (Just scope)
+        (work </> "ExecutionSealedTarget.hs") [work] Nothing
+      afterExactLegacy <- compile CheckedEnvironment Set.empty GeneralCompile
+        (Just emptySessionScope {ssRoot=work,ssValIfaces=[valueModule]}) (work </> "CheckedValueConsumer.hs") [work] Nothing
+      unless (fmap renderType (crResultType afterExactLegacy) == Just "Int") $
+        fail "legacy value request inherited the preceding exact graph"
+      ordinaryQuote compile
+      (refused, refusalDiagnostics) <- captureDiagnostics $ try (compile CheckedEnvironment Set.empty GeneralCompile
+        (Just scope {ssExactScope=Just hiddenPath}) (work </> "ExecutionSealedTarget.hs") [work] Nothing)
+        :: IO (Either SomeException CheckedEnvironmentResult, String)
+      unless (case refused of
+        Left reason
+          | Just (OriginalSourceSelectionRejected
+              (ExecutionSourceUnavailable ("main", "ExecutionSealedQuoter"))) <- fromException reason ->
+            not ("tidepool-timing phase=ghc_load" `isInfixOf` refusalDiagnostics)
+        _ -> False) $
+        fail ("hidden original did not refuse its missing source-selection authority: "
+          ++ either show (const "unexpected success") refused)
+      ordinaryQuote compile
+    runRequest (pure ()) $ \compile -> do
+      cancelling <- readFile "test-source-boot/fixtures/ExecutionCancellingQuoter.hs"
+      let marker = work </> "cancel-marker"
+      writeFile (work </> "MetadataQuoter.hs") (T.unpack (T.replace "EXECUTION_CANCEL_MARKER" (T.pack marker) (T.pack cancelling)))
+      cancelled <- timeout 1500000 (compile CheckedEnvironment Set.empty GeneralCompile
+        (Just scope {ssExactScope=Just helperPath}) (work </> "MetadataQuotedTarget.hs") [work] Nothing)
+      started <- doesFileExist marker
+      unless (isNothing cancelled && started) (fail "exact cancellation did not reach the real quoter")
+      terminal <- try (timeout 1000000 (compile CheckedEnvironment Set.empty GeneralCompile
+        (Just scope {ssExactScope=Just helperPath}) (work </> "MetadataQuotedTarget.hs") [work] Nothing))
+        :: IO (Either SomeException (Maybe CheckedEnvironmentResult))
+      unless (case terminal of Left _ -> True; Right _ -> False) $
+        fail "cancelled compiler callback remained usable"
+    runRequest (pure ()) $ \compile -> do
+      copyFile "test-source-boot/fixtures/MetadataQuoter.hs" (work </> "MetadataQuoter.hs")
+      copyFile "test-source-boot/fixtures/MetadataQuoteSupportChanged.hs" (work </> "MetadataQuoteSupport.hs")
+      afterCancel <- compile (PreparedProducts Nothing) Set.empty GeneralCompile Nothing
+        (work </> "MetadataQuotedTarget.hs") [work] Nothing
+      assertSingleDiagnosticCollector (prHscEnv (pprPipelineResult afterCancel))
+      unless (hasIntResultLiteral 43 (prBinds (pprPipelineResult afterCancel))
+          && not (isJust (hscCompileCoreExprHook (hsc_hooks (prHscEnv (pprPipelineResult afterCancel)))))) $
+        fail "ordinary request after cancellation reused the old helper executable"
+      legacy <- compile CheckedEnvironment Set.empty GeneralCompile
+        (Just emptySessionScope {ssRoot=work,ssValIfaces=[valueModule]}) (work </> "CheckedValueConsumer.hs") [work] Nothing
+      unless (fmap renderType (crResultType legacy) == Just "Int") (fail "legacy value injection did not typecheck")
+      ordinaryQuote compile
+      provisional <- compile (PreparedProducts (Just (work </> "missing-candidates.cbor"))) Set.empty GeneralCompile Nothing
+        (work </> "ExecutionClassQuoteTarget.hs") [work] Nothing
+      unless (null (pprAcceptedCandidates provisional)) (fail "missing manifest unexpectedly admitted a candidate")
+      ordinaryQuote compile
   putStrLn "exact to ordinary: successful, refused and cancelled scopes reset; ordinary reuse and provisional candidates remain valid"
 
 exactExecutionValues :: IO ()
@@ -1149,7 +1183,7 @@ exactExecutionValues = withTiming $ withScratch $ \work -> do
   writeExactMetadataScope scopePath []
   base <- readExactScope scopePath >>= either fail pure
   let admitted = base {scopeCheckedCell=Just (CheckedCellAdmission (replicate 64 '0') (replicate 64 '0')
-        (replicate 64 '0') [] ["Tidepool.Session.Val.G8"] [] [value] Nothing)}
+        (replicate 64 '0') [] ["Tidepool.Session.Val.G8"] [] [value] Nothing AuthoredCellCheck)}
       scope = emptySessionScope {ssRoot=work,ssExactScope=Just scopePath,ssValIfaces=[valueOwner]}
   withResidentPipelineSelected [work] $ \compile -> do
     (refused,diagnostics) <- captureDiagnostics (try (compile CheckedEnvironment Set.empty
@@ -1199,7 +1233,7 @@ originalPackageProjection = withScratch $ \work -> do
             then global {globalRequiredGeneration=Nothing} else global
           | global <- projectedGlobals (projectedBody group)]}}
       normalized = map (\(owner,groups) -> (owner,fmap (map normalize) groups)) executable
-  verifyCertifiedGroupingOrder env
+  verifyCertifiedGroupingOrder work original
   unless (not (null packages) && any (isJust . globalRequiredGeneration) (globals executable)
       && all (isNothing . globalRequiredGeneration) (globals sourceProducts)
       && [owner | (owner,_) <- executable] == [owner | (owner,_) <- sourceProducts]) $
@@ -1354,14 +1388,17 @@ certifyProjectedProducts work label original outcomes targets env = do
             then node {dependencyModuleProduct=ProductReady} else node
         | node <- dependencyModules (pprDependencies original)]}
       bytes = encodeModuleProducts fresh
-  encodeCertifiedProducts env [] Nothing fresh targets evidence bytes
+  originals <- newOriginalInterfaceArtifacts env (pprFinalizedModules original) [] work
+  finalized <- captureFinalizedModuleArtifacts originals env (pprFinalizedModules original)
+    (pprPackageImports original) evidence work
+  encodeCertifiedProducts env (pprProductInterfaces original) finalized [] Nothing fresh targets evidence bytes
     (BSC.pack (renderDependencyEvidence evidence))
 
 certificateOwners :: BS.ByteString -> IO [Term]
 certificateOwners bytes = do
   term <- either (fail . show) (pure . snd) (deserialiseFromBytes decodeTerm (BSL.fromStrict bytes))
   case term of
-    TList [TString "TPCERT", TInt 4, _, _, _, TList rows] -> forM rows $ \case
+    TList [TString "TPCERT", TInt 6, _, _, _, TList rows, _] -> forM rows $ \case
       TList [_,_,_,_,owner] -> pure owner
       _ -> fail "original certificate global lacks its exact owner"
     _ -> fail "original product lacks its canonical ownership certificate"
@@ -1371,7 +1408,7 @@ verifyOriginalOnlyPackageRefusal :: FilePath -> PreparedPipelineResult
 verifyOriginalOnlyPackageRefusal work original outcomes certified = do
   term <- either (fail . show) (pure . snd) (deserialiseFromBytes decodeTerm (BSL.fromStrict certified))
   (unit,name,path) <- case term of
-    TList [_,_,_,TList [],TList (TList [TString unit,TString name,TString path,_]:_),_] ->
+    TList [_,_,_,TList [],TList (TList [TString unit,TString name,TString path,_]:_),_,_] ->
       pure (T.unpack unit,T.unpack name,T.unpack path)
     _ -> fail "original-only package requirement did not issue its own positive witness"
   let env = prHscEnv (pprPipelineResult original)
@@ -1393,39 +1430,71 @@ verifyOriginalOnlyPackageRefusal work original outcomes certified = do
   restored <- certifyProjectedProducts work "restored" original outcomes [] env {hsc_FC=finder}
   either fail (const (pure ())) restored
 
-verifyCertifiedGroupingOrder :: HscEnv -> IO ()
-verifyCertifiedGroupingOrder env = do
-  let emptyEvidence = DependencyEvidence False False [] [] [] []
-      candidate = ModuleCandidate
-        { candidateUnit = "main"
-        , candidateModule = "CertifiedOrderFixture"
-        , candidateSource = "/fixture/CertifiedOrderFixture.hs"
-        , candidateSourceSha256 = replicate 64 '0'
-        , candidateInterface = "/fixture/CertifiedOrderFixture.hi"
-        , candidateInterfaceSha256 = replicate 64 '0'
-        , candidateModuleVersion = "fixture-v1"
-        , candidateProductSha256 = replicate 64 '0'
-        , candidateEvidenceSha256 = replicate 64 '0'
+verifyCertifiedGroupingOrder :: FilePath -> PreparedPipelineResult -> IO ()
+verifyCertifiedGroupingOrder work original = do
+  let env = prHscEnv (pprPipelineResult original)
+      emptyEvidence = DependencyEvidence False False [] [] [] []
+      name = "PackageOriginalHome"
+      path = work </> "certified-group-order.hi"
+      source = work </> name ++ ".hs"
+  iface <- maybe (fail "group ordering fixture lost its actual original interface") pure
+    (Map.lookup (mkModuleName name) (pprProductInterfaces original))
+  writeBinIface (targetProfile (hsc_dflags env)) QuietBinIFace NormalCompression path iface
+  interfaceBytes <- BS.readFile path
+  sourceBytes <- BS.readFile source
+  base <- structuralCandidate work
+  let candidate = base
+        { candidateUnit = unitString (moduleUnit (mi_module iface))
+        , candidateModule = name
+        , candidateSource = source
+        , candidateSourceSha256 = digest sourceBytes
+        , candidateInterface = path
+        , candidateInterfaceSha256 = digest interfaceBytes
+        , candidateModuleVersion = replicate 64 '1'
+        , candidateProductSha256 = replicate 64 '2'
+        , candidateEvidenceSha256 = replicate 64 '3'
         , candidateImports = []
         , candidateGroups = [CandidateGroup 91 [] [], CandidateGroup 3 [] []]
-        , candidatePackageImports = "/fixture/CertifiedOrderFixture.packages"
-        , candidatePackageImportsSha256 = replicate 64 '0'
-        , candidateProductPath = "/fixture/CertifiedOrderFixture.products.cbor"
+        , candidatePackageImports = path ++ ".packages"
+        , candidatePackageImportsSha256 = replicate 64 '4'
+        , candidateProductPath = path ++ ".product.cbor"
         , candidateExecutionSource = Nothing
         }
-  bytes <- encodeCertifiedProducts env [candidate] Nothing [] [] emptyEvidence BS.empty BS.empty
-    >>= either fail pure
-  term <- either (fail . show) (pure . snd) (deserialiseFromBytes decodeTerm (BSL.fromStrict bytes))
+  bytes <- encodeCertifiedProducts env (pprProductInterfaces original) (emptyFinalizedModuleArtifacts env) [candidate] Nothing
+    [] [] emptyEvidence BS.empty BS.empty >>= either fail pure
+  term <- either (fail . show) (pure . snd)
+    (deserialiseFromBytes decodeTerm (BSL.fromStrict bytes))
   case term of
-    TList [TString "TPCERT", TInt 4, TList [TList fields], TList [], TList [], TList []]
-      | length fields == 9 -> case drop 8 fields of
-          [TList groups] -> unless (map ordinal groups == [91, 3]) $
+    TList [TString "TPCERT", TInt 6, TList [TList fields], TList [], TList [], TList [], _]
+      | length fields == 10 -> case drop 8 fields of
+          [TList groups,TList []] -> unless (map ordinal groups == [91,3]) $
             fail "certified module grouping changed nonmonotone encounter order"
-          _ -> fail "certified module grouping omitted its group inventory"
+          _ -> fail "certified module grouping omitted its exact group or interface inventory"
     _ -> fail "certified module grouping produced an unexpected certificate envelope"
+  let absent = candidate {candidateModule="MissingOriginalInterface"}
+  encodeCertifiedProducts env Map.empty (emptyFinalizedModuleArtifacts env) [absent] Nothing [] [] emptyEvidence BS.empty BS.empty >>= \case
+    Left _ -> pure ()
+    Right _ -> fail "cached original without its exact interface acquired a certificate"
   where
-    ordinal (TList [TInt value, TList []]) = value
+    ordinal (TList [TInt value,TList []]) = value
     ordinal _ = -1
+
+-- Synthetic descriptors exercise producer group framing only. This decoder
+-- does not grant them a durable certificate or compiler admission.
+structuralCandidate :: FilePath -> IO ModuleCandidate
+structuralCandidate work = do
+  let path = work </> "structural-candidate.cbor"
+      seal = TString (T.replicate 64 "a")
+      row = TList [TString "main",TString "Fixture",TString "/fixture/Source.hs",seal
+        ,TString "/fixture/Source.hi",seal,seal,seal,seal,TList [],TList []
+        ,TString "/fixture/packages",seal,TString "/fixture/products.tpmod",TList []
+        ,TList [TString "module",TString "/fixture/module.cbor",seal,TString "/fixture/Core",seal]]
+      packet = TList [TString "TPMCAN",TString "10",TList [],TList [],TList [row]
+        ,TList [TList [],TList []],seal]
+  BS.writeFile path (toStrictByteString (encodeTerm packet))
+  readModuleCandidates path >>= \case
+    Right [candidate] -> pure candidate
+    _ -> fail "structural producer-group candidate did not decode"
 
 originalProjectionProducts :: IO ()
 originalProjectionProducts = withScratch $ \work -> do
@@ -1570,12 +1639,12 @@ compactInventoryRows rows = do
   pure (TList (reverse (fixtureSymbolRows inventory)),TList (reverse (fixtureGlobalRows inventory)),compact)
   where
     empty = FixtureInventory Map.empty [] Map.empty []
-    compactRow inventory (TList fields) | length fields == 14 = case drop 10 fields of
+    compactRow inventory (TList fields) | length fields == 16 = case drop 10 fields of
       TList groups:_ -> do
         (next,compact) <- mapFixtureInventory compactGroup inventory groups
         pure (next,TList (take 10 fields ++ [TList compact] ++ drop 11 fields))
       _ -> Left "fixture candidate lacks groups"
-    compactRow _ _ = Left "fixture candidate must have fourteen fields"
+    compactRow _ _ = Left "fixture candidate must have sixteen fields"
     compactGroup inventory (TList [ordinal,TList binders,TList globals]) = do
       (withBinders,binderRefs) <- mapFixtureInventory internFixtureSymbol inventory binders
       (withGlobals,globalRefs) <- mapFixtureInventory internFixtureGlobal withBinders globals
@@ -1635,7 +1704,8 @@ candidateCompactInventory = withScratch $ \work -> do
         ,fixtureCandidate "Other" (map groupTerm (reverse groups))]
       emptyParcel = TList [TList [],TList []]
       envelope symbols globalTable rows = TList
-        [TString "TPMCAN",TString "8",symbols,globalTable,TList rows,emptyParcel]
+        [TString "TPMCAN",TString "10",symbols,globalTable,TList rows,emptyParcel
+        ,TString (T.replicate 64 "a")]
       readFixture name value = do
         let path = work </> (name ++ ".cbor")
             bytes = toStrictByteString (encodeTerm value)
@@ -1682,8 +1752,12 @@ candidateCompactInventory = withScratch $ \work -> do
   where
     fixtureCandidate name groups = TList
       ([TString "main",TString name,TString "/fixture/source.hs",sha,TString "/fixture/interface.hi",sha,sha,sha,sha]
-        ++ [TList [],TList groups,TString "/fixture/packages",sha,TString "/fixture/products.tpmod"])
-      where sha = TString (T.replicate 64 "0")
+        ++ [TList [],TList groups,TString "/fixture/packages",sha,TString "/fixture/products.tpmod"
+          ,TList [],TList [TString "module",TString "/fixture/module.cbor",proofSeal
+            ,TString "/fixture/Core",proofSeal]])
+      where
+        sha = TString (T.replicate 64 "0")
+        proofSeal = TString (T.replicate 64 "a")
     groupTerm group = TList [TInt (fromIntegral (candidateGroupOrdinal group))
       ,TList (map symbolTerm (candidateGroupBinders group)),TList (map globalTerm (candidateGroupGlobals group))]
     globalTerm global = TList [symbolTerm (candidateGlobalIdentity global),repTerm (candidateGlobalRep global)
@@ -1741,6 +1815,144 @@ candidateGhcLoad = withTiming $ withScratch $ \work -> do
 
 -- Pure issuer and scope-budget controls; the runtime suite separately drives
 -- cold parser -> whole checked program -> per-item original certification.
+nativeCheckedSignaturesTest :: IO ()
+nativeCheckedSignaturesTest = withScratch $ \work -> do
+  let target = work </> "CheckedNativeSignatures.hs"
+  forM_ ["CheckedNativeTypeOwner.hs", "CheckedNativeSignatures.hs"] $ \file ->
+    copyFile ("test-source-boot/fixtures" </> file) (work </> file)
+  libdir <- getLibdir
+  withResidentPipelineSelected [work] $ \compile -> do
+    checked <- compile CheckedEnvironment Set.empty GeneralCompile Nothing target [work] Nothing
+    let original = Map.fromList
+          [(getOccString identifier, idType identifier)
+          | identifier <- typeEnvIds (tcg_type_env (crTargetTcGblEnv checked))
+          , "__tidepool_cell_pin_" `isPrefixOf` getOccString identifier]
+    unless (Map.size original == 7) (fail "native signature fixture lost a case")
+    signatures <- forM (Map.toList original) $ \(key, ty) -> do
+      signature <- captureCheckedSignature (crHscEnv checked) key ty
+      pure (key, signature { signaturePresentation = "not Haskell syntax !!!" })
+    summary <- case [summary | ModuleNode _ summary <- mgModSummaries' (hsc_mod_graph (crHscEnv checked))
+      , ms_mod_name summary == mkModuleName "CheckedNativeSignatures"] of
+      [value] -> pure value
+      _ -> fail "native signature target summary missing"
+    runGhc (Just libdir) $ do
+      setSession (crHscEnv checked)
+      parsed <- parseModule summary
+      rewritten <- liftIO (rewriteCheckedAnnotations (crHscEnv checked) signatures parsed)
+      rechecked <- typecheckNativeModule rewritten
+      let (environment, _) = tm_internals_ rechecked
+          actual = Map.fromList [(getOccString identifier, idType identifier)
+            | identifier <- typeEnvIds (tcg_type_env environment)]
+      liftIO $ forM_ (Map.toList original) $ \(key, expected) ->
+        unless (maybe False (eqType expected) (Map.lookup key actual))
+          (fail ("native signature changed exact type: " ++ key))
+      let damaged = [(key, signature { signatureNames = [] }) | (key, signature) <- signatures]
+      refused <- liftIO (try (rewriteCheckedAnnotations (crHscEnv checked) damaged parsed)
+        :: IO (Either SomeException NativeParsedModule))
+      liftIO $ unless (case refused of Left _ -> True; Right _ -> False)
+        (fail "native signature admitted a substituted Name inventory")
+      let inputSignature = lookup "__tidepool_cell_pin_0_nominal" signatures
+          inputType = Map.lookup "__tidepool_cell_pin_0_nominal" original
+      signature <- maybe (fail "native nominal signature missing") pure inputSignature
+      expected <- maybe (fail "native nominal type missing") pure inputType
+      let parseSlot body = do
+            liftIO (writeFile target ("module CheckedNativeSignatures where\n" ++ body))
+            parseModule (summary { ms_hspp_buf = Nothing, ms_hspp_file = target })
+      slot <- parseSlot "__result :: TidepoolActivationInput\n__result = undefined\nwarningProbe = ()\n"
+      native <- liftIO (rewriteHostInputType (crHscEnv checked) 1 signature slot)
+      let warningSource = nativeParsedModule native
+          warningSummary = pm_mod_summary warningSource
+          warningNative = native { nativeParsedModule = warningSource
+            { pm_mod_summary = warningSummary { ms_hspp_opts = wopt_set
+                (ms_hspp_opts warningSummary) Opt_WarnMissingSignatures } } }
+      ((nativeEnvironment, _), nativeDiagnostics) <- liftIO
+        (typecheckNativeModuleWithDiagnostics (crHscEnv checked) warningNative)
+      liftIO $ unless (not (isEmptyMessages nativeDiagnostics))
+        (fail "native typecheck hook dropped missing-signature diagnostics")
+      let actualInput = [idType identifier | identifier <- typeEnvIds (tcg_type_env nativeEnvironment)
+            , getOccString identifier == "__result"]
+      liftIO $ unless (case actualInput of [ty] -> eqType expected ty; _ -> False)
+        (fail "native host slot lost its nominal owner without a source import")
+      nativeEnvironmentOwner <- getSession
+      details <- liftIO (mkBootModDetailsTc (hsc_logger nativeEnvironmentOwner) nativeEnvironment)
+      interface <- liftIO (mkIfaceTc nativeEnvironmentOwner Sf_None details summary Nothing nativeEnvironment)
+      let ownerUsage UsageHomeModule { usg_mod_name = owner, usg_unit_id = unit } =
+            moduleNameString owner == "CheckedNativeTypeOwner" && unitIdString unit == "main"
+          ownerUsage _ = False
+          sourceImports = Map.keys (imp_mods (tcg_imports nativeEnvironment))
+      liftIO $ unless (any ownerUsage (mi_usages interface)
+          && all ((/= "CheckedNativeTypeOwner") . moduleNameString . moduleName) sourceImports)
+        (fail "native type owner lacks GHC usage evidence or acquired a source import")
+      forM_ ["Int", "Missing.TidepoolActivationInput", "(TidepoolActivationInput, TidepoolActivationInput)"] $ \bad -> do
+        malformed <- parseSlot ("__result :: " ++ bad ++ "\n__result = undefined\n")
+        refusedSlot <- liftIO (try (rewriteHostInputType (crHscEnv checked) 1 signature malformed)
+          :: IO (Either SomeException NativeParsedModule))
+        liftIO $ unless (case refusedSlot of Left _ -> True; Right _ -> False)
+          (fail "host input admitted a missing, qualified or duplicated native slot")
+      -- A request carries native reply/progress leaves independently of their
+      -- presentation. Neither nominal owner is introduced as a source import.
+      reply <- liftIO (captureCheckedSignature (crHscEnv checked) "request-reply" expected)
+      progressType <- maybe (fail "native progress fixture missing") pure
+        (Map.lookup "__tidepool_cell_pin_6_tuple" original)
+      progress <- liftIO (captureCheckedSignature (crHscEnv checked) "request-progress" progressType)
+      let requestBody replySlot progressSlot = unlines
+            ([ "sessionReply :: " ++ replySlot
+             , "sessionReply = undefined"
+             , "respond :: " ++ replySlot ++ " -> ()"
+             , "respond _ = ()"
+             ] ++ case progressSlot of
+               Nothing -> []
+               Just slotName -> ["reportProgress :: " ++ slotName ++ " -> ()", "reportProgress _ = ()"])
+          presentationOnly nativeSignature = nativeSignature
+            { signaturePresentation = "this is deliberately not a Haskell type" }
+      forM_ [Nothing, Just progress] $ \maybeProgress -> do
+        let contract = RequestTypeSignatures (presentationOnly reply) (presentationOnly <$> maybeProgress)
+            progressSlot = "TidepoolRequestProgress" <$ maybeProgress
+        requestParsed <- parseSlot (requestBody "TidepoolRequestReply" progressSlot)
+        requestNative <- liftIO (rewriteRequestTypes (crHscEnv checked) ActorReplyHelpers contract requestParsed)
+        requestChecked <- typecheckNativeModule requestNative
+        let (requestEnvironment, _) = tm_internals_ requestChecked
+            replyTypes = [idType identifier | identifier <- typeEnvIds (tcg_type_env requestEnvironment)
+              , getOccString identifier == "sessionReply"]
+        liftIO $ unless (case replyTypes of [ty] -> eqType expected ty; _ -> False)
+          (fail "request annotation reconstructed a type from presentation")
+      let plainContract = RequestTypeSignatures reply Nothing
+      forM_ [plainContract, RequestTypeSignatures reply (Just progress)] $ \contract -> do
+        noHelpers <- parseSlot "__result :: Int\n__result = 0\n"
+        rewritten <- liftIO (rewriteRequestTypes (crHscEnv checked) NoRequestHelpers contract noHelpers)
+        _ <- typecheckNativeModule rewritten
+        composed <- liftIO (thenNativeModule native
+          (rewriteRequestTypes (crHscEnv checked) NoRequestHelpers contract))
+        liftIO $ unless (nameSetElemsStable (nativeTypeUses composed)
+            == nameSetElemsStable (nativeTypeUses native))
+          (fail "helper-free request transform dropped native input dependency uses")
+        composedChecked <- typecheckNativeModule composed
+        let (composedEnvironment, _) = tm_internals_ composedChecked
+            composedTypes = [idType identifier | identifier <- typeEnvIds (tcg_type_env composedEnvironment)
+              , getOccString identifier == "__result"]
+        liftIO $ unless (case composedTypes of [ty] -> eqType expected ty; _ -> False)
+          (fail "helper-free request transform lost the prior native input type")
+        forM_ [requestBody "TidepoolRequestReply" Nothing
+              ,"__result :: TidepoolRequestProgress\n__result = undefined\n"] $ \body -> do
+          malformed <- parseSlot body
+          refused <- liftIO (try (rewriteRequestTypes (crHscEnv checked) NoRequestHelpers contract malformed)
+            :: IO (Either SomeException NativeParsedModule))
+          liftIO $ unless (case refused of Left _ -> True; Right _ -> False)
+            (fail "helper-free source recipe admitted a reserved request slot")
+      let rejectedBodies =
+            [ requestBody "Int" Nothing
+            , requestBody "Missing.TidepoolRequestReply" Nothing
+            , requestBody "(TidepoolRequestReply, TidepoolRequestReply)" Nothing
+            , requestBody "TidepoolRequestReply" (Just "TidepoolRequestProgress")
+            ]
+      forM_ rejectedBodies $ \body -> do
+        malformed <- parseSlot body
+        refusedRequest <- liftIO (try (rewriteRequestTypes (crHscEnv checked) ActorReplyHelpers plainContract malformed)
+          :: IO (Either SomeException NativeParsedModule))
+        liftIO $ unless (case refusedRequest of Left _ -> True; Right _ -> False)
+          (fail "request recipe admitted missing, qualified, duplicated or unauthorized native slots")
+  putStrLn "native checked signatures: 7 shapes, source-free nominal slot and authority/slot refusals passed"
+
 hostActivationPurposeTest :: Maybe FilePath -> IO ()
 hostActivationPurposeTest destination = withScratch $ \work -> do
   let previewMarker = "{{ACTIVATION_PREVIEW}}"
@@ -1754,14 +1966,15 @@ hostActivationPurposeTest destination = withScratch $ \work -> do
   let sha = TString (T.replicate 64 "a")
       empty = TList []
       text = TString . T.pack
-      signature = TList [text "__tidepool_cell_pin_0_sessionInput",text "Int",empty]
+      signature = TList [text "TPCHECKEDSIGNATURE2",text "__tidepool_cell_pin_0_sessionInput",text "Int",TBytes (BS.singleton 0),empty]
       authorization = [text "host-activation-input1",sha,sha,TInt 0,sha,text "bind"
         ,TList [text "sessionInput"],TList [TList [text "bind",sha]],empty,TList [signature]
         ,TNull,TInt 1,sha,empty,TNull,TNull,empty,empty,TList [text work]]
-      hostManifest auth = TList [text "TPEXACTSCOPE",text "5",sha,sha,empty,empty,empty
+      hostManifest auth = TList [text "TPEXACTSCOPE",text "6",sha,sha,empty,empty,empty
         ,TList [empty,empty],TList auth]
       path = work </> "host-scope.cbor"
-      decode auth = BS.writeFile path (toStrictByteString (encodeTerm (hostManifest auth))) >> readExactScope path
+      decodeManifest manifest = BS.writeFile path (toStrictByteString (encodeTerm manifest)) >> readExactScope path
+      decode = decodeManifest . hostManifest
       replace index value fields = [if ordinal == index then value else field | (ordinal,field) <- zip [0::Int ..] fields]
   admitted <- decode authorization >>= either fail pure
   unless (fmap itemPurpose (scopeCheckedItem admitted) == Just HostActivationInput) $
@@ -1782,11 +1995,64 @@ hostActivationPurposeTest destination = withScratch $ \work -> do
   writeFile sourcePath originalSource
   original <- runPipelineSessionSelected CheckedEnvironment Set.empty GeneralCompile Nothing sourcePath [work] Nothing
   inputType <- maybe (fail "host input fixture has no inferred type") pure (crResultType original)
-  let checkedSignature = captureCheckedSignature (crHscEnv original) "__tidepool_cell_pin_0_sessionInput" inputType
+  capturedSignature <- captureCheckedSignature (crHscEnv original) "__tidepool_cell_pin_0_sessionInput" inputType
+  replySignature <- captureCheckedSignature (crHscEnv original) "request-reply" inputType
+  requestTerm <- either (fail . show) (pure . snd)
+    (deserialiseFromBytes decodeTerm (BSL.fromStrict (toStrictByteString
+      (encodeRequestTypeSignatures (RequestTypeSignatures replySignature Nothing)))))
+  let nativeAuthorization recipe inner = [text "request-types2", requestTerm, text recipe, inner]
+  forM_ [("none",NoRequestHelpers),("actor-reply",ActorReplyHelpers)] $ \(tag,recipe) -> do
+    requestScope <- decode (nativeAuthorization tag TNull) >>= either fail pure
+    unless (scopeRequestTypes requestScope == Just (recipe,RequestTypeSignatures replySignature Nothing)
+        && isNothing (scopeCheckedCell requestScope) && isNothing (scopeCheckedItem requestScope)
+        && isNothing (scopeCheckedDisplay requestScope) && isNothing (scopeCheckedInspection requestScope)
+        && isNothing (scopeIncludePaths requestScope))
+      (fail "native request wrapper lost recipe or granted an inner purpose")
+    graphFree <- decodeManifest (TList [text "TPEXACTSCOPE",text "4",sha,sha,empty,empty,empty
+      ,TList (nativeAuthorization tag TNull)]) >>= either fail pure
+    unless (scopeRequestTypes graphFree == scopeRequestTypes requestScope
+        && isNothing (scopeCheckedItem graphFree))
+      (fail "graph-free request wrapper changed native recipe authority")
+    wrappedHost <- decode (nativeAuthorization tag (TList authorization)) >>= either fail pure
+    unless (fmap itemPurpose (scopeCheckedItem wrappedHost) == Just HostActivationInput
+        && fmap fst (scopeRequestTypes wrappedHost) == Just recipe)
+      (fail "native request wrapper lost its protected inner purpose")
+  forM_ [[text "request-types1",requestTerm,TNull]
+        ,nativeAuthorization "unknown" TNull
+        ,nativeAuthorization "none" (TList [text "request-types2",requestTerm,text "none",TNull])
+        ,nativeAuthorization "actor-reply" (TList (replace 3 (TInt 1) authorization))
+        ,nativeAuthorization "none" TNull ++ [TNull]] $ \invalid -> do
+    refused <- decode invalid
+    unless (case refused of Left _ -> True; Right _ -> False)
+      (fail "native request wrapper admitted legacy, malformed or invalid inner authority")
+  let checkedSignature = capturedSignature { signaturePresentation = "presentation is not Haskell syntax !" }
   encodedSignature <- either (fail . show) (pure . snd)
     (deserialiseFromBytes decodeTerm (BSL.fromStrict (toStrictByteString (encodeCheckedSignature checkedSignature))))
   _ <- decode (replace 9 (TList [encodedSignature]) authorization) >>= either fail pure
-  checkedSource <- either fail pure (replaceTemplateMarker "{{CHECKED_TYPE}}" (signatureType checkedSignature) inputTemplate)
+  initialSignature <- captureCheckedSignature (crHscEnv original) "activation-input" inputType
+  initialTerm <- either (fail . show) (pure . snd)
+    (deserialiseFromBytes decodeTerm (BSL.fromStrict (toStrictByteString (encodeCheckedSignature initialSignature))))
+  let initialAuthorization = [text "host-input-check1",sha,sha,sha,TList [TList [text "bind",sha]]
+        ,empty,empty,empty,initialTerm,TList [text work]]
+      initialSource = "module HostActivationInput where\n__result :: TidepoolActivationInput\n__result = undefined\n"
+      initialSession = emptySessionScope {ssRoot=work,ssExactScope=Just path}
+  initialAdmitted <- decode initialAuthorization >>= either fail pure
+  unless (fmap checkedCellPurpose (scopeCheckedCell initialAdmitted) == Just (HostInputCellCheck initialSignature))
+    (fail "host input check lost its original native signature")
+  writeFile sourcePath initialSource
+  initialChecked <- runPipelineSessionSelected CheckedEnvironment Set.empty (HostActivationCheck initialSignature)
+    (Just initialSession) sourcePath [work] Nothing
+  unless (maybe False (eqType inputType) (crResultType initialChecked))
+    (fail "host input first check lost the original type")
+  forM_ [replace 0 (text "cell-check2") initialAuthorization
+        ,replace 6 (TList [text "unexpected-declaration"]) initialAuthorization] $ \invalid -> do
+    refused <- decode invalid
+    unless (case refused of Left _ -> True; Right _ -> False)
+      (fail "host input check admitted authored/declaration purpose substitution")
+  _ <- decode (replace 9 (TList [encodedSignature]) authorization) >>= either fail pure
+  untypedSource <- either fail pure (replaceTemplateMarker "{{CHECKED_TYPE}}" "()" inputTemplate)
+  resultSlot <- either fail pure (replaceTemplateMarker "__result :: Int" "__result :: TidepoolActivationInput" untypedSource)
+  checkedSource <- either fail pure (replaceTemplateMarker "__activationPreview :: Int" "__activationPreview :: TidepoolActivationInput" resultSlot)
   writeFile sourcePath checkedSource
   let session = emptySessionScope {ssRoot=work,ssExactScope=Just path}
       purpose = HostActivationInputCompile [("__tidepool_checked_annotation_0",
@@ -1801,9 +2067,9 @@ hostActivationPurposeTest destination = withScratch $ \work -> do
   unless (fmap renderType (crResultType checked) == Just "Int") $
     fail "host checked annotation changed the inferred input"
   actualInput <- either fail pure (activationPreviewInputType (crTargetTcGblEnv checked))
-  originalInterfaces <- newOriginalInterfaceArtifacts (crHscEnv checked) Map.empty work
-  let witness ty = maybe (fail "complete fixture type has no canonical witness") pure
-        (captureCheckedTypeWitness (crHscEnv checked) ty)
+  originalInterfaces <- newOriginalInterfaceArtifacts (crHscEnv checked) Map.empty [] work
+  let witness ty = captureCheckedTypeWitness (crHscEnv checked) ty
+        >>= maybe (fail "complete fixture type has no canonical witness") pure
       sealedBytes ty = do
         raw <- witness ty
         sealed <- sealCheckedTypeWitness originalInterfaces raw
@@ -1829,7 +2095,8 @@ hostActivationPurposeTest destination = withScratch $ \work -> do
         (mkVisFunTyMany (mkTyVarTy variable) (mkTyVarTy variable))
   alphaFirst <- sealedBytes (alphaType firstVariable)
   alphaSecond <- sealedBytes (alphaType secondVariable)
-  unless (isNothing (captureCheckedTypeWitness (crHscEnv checked) (mkTyVarTy firstVariable))) $
+  freeWitness <- captureCheckedTypeWitness (crHscEnv checked) (mkTyVarTy firstVariable)
+  unless (isNothing freeWitness) $
     fail "canonical type witness admitted a free type variable"
   let ownerPath = work </> "HostActivationOwner.hs"
       ownerWitness fixture = do
@@ -1837,8 +2104,9 @@ hostActivationPurposeTest destination = withScratch $ \work -> do
         produced <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty GeneralCompile Nothing ownerPath [work] Nothing
         let pipeline = pprPipelineResult produced
         ty <- maybe (fail "owner fixture has no input type") pure (prResultType pipeline)
-        raw <- maybe (fail "owner fixture has no canonical witness") pure (captureCheckedTypeWitness (prHscEnv pipeline) ty)
-        artifacts <- newOriginalInterfaceArtifacts (prHscEnv pipeline) (pprProductInterfaces produced) work
+        raw <- captureCheckedTypeWitness (prHscEnv pipeline) ty
+          >>= maybe (fail "owner fixture has no canonical witness") pure
+        artifacts <- newOriginalInterfaceArtifacts (prHscEnv pipeline) (pprFinalizedModules produced) [] work
         sealed <- sealCheckedTypeWitness artifacts raw
           >>= maybe (fail "owner fixture lacks its original interface") pure
         maybe (fail "owner witness is unsealed") (pure . toStrictByteString) (encodeCheckedTypeWitness sealed)
@@ -1906,8 +2174,8 @@ freshExecutionRecipeTest = withScratch $ \work -> do
     fail "unsupported prospective recipe hid corrupt inherited advertised proof"
   let original = ExactProduct "main" "Support" sha sha sha "" []
       scope = ExactScope "" sha sha sha
-        [(ExactIfaceArtifact "main" "Support" "" sha [],"",sha)] [] [original]
-        [] [] Nothing Nothing Nothing Nothing Nothing Set.empty
+        [(ExactIfaceArtifact "main" "Support" "" sha [],"",sha)] Map.empty [] [original]
+        [] [] Nothing Nothing Nothing Nothing Nothing Nothing Set.empty
       oversized = graph {executionGraphBytes=BS.replicate (executionSourceGraphBytesLimit+1) 0}
   bounded <- either (fail . show) pure
     (extendExactExecutionSourcesWithinBudget [oversized] [reference] scope)
@@ -2322,6 +2590,107 @@ hasIntResultLiteral expected = any (\case
       Core.Tick _ body -> contains body
       _ -> False
 
+-- A real splice executes in both dependency and target. The recorded side
+-- effect rejects replay even if two frontend executions produce identical Core.
+finalizedFrontendOnce :: IO ()
+finalizedFrontendOnce = withTiming $ withScratch $ \work -> do
+  let fixture name = "test-source-boot/fixtures" </> name
+      counter = work </> "frontend-counts"
+      target = work </> "FinalizedSpliceTarget.hs"
+      owner = mkModuleName "FinalizedSpliceOwner"
+      unused = mkModuleName "FinalizedSpliceUnused"
+      targetOwner = mkModule (stringToUnit "main") (mkModuleName "FinalizedSpliceTarget")
+      hasNativeResult expected = any (\(binder,rhs) ->
+        nameModule_maybe (idName binder) == Just targetOwner
+          && getOccString binder == "result" && containsLiteral expected rhs) . Core.flattenBinds
+      containsLiteral expected = \case
+        Core.Lit (LitNumber LitNumInt value) -> value == expected
+        Core.App function argument -> containsLiteral expected function || containsLiteral expected argument
+        Core.Lam _ body -> containsLiteral expected body
+        Core.Let binding body -> any (containsLiteral expected . snd) (Core.flattenBinds [binding])
+          || containsLiteral expected body
+        Core.Case scrutinee _ _ alternatives -> containsLiteral expected scrutinee
+          || any (\(Core.Alt _ _ rhs) -> containsLiteral expected rhs) alternatives
+        Core.Cast body _ -> containsLiteral expected body
+        Core.Tick _ body -> containsLiteral expected body
+        _ -> False
+      executions expected diagnostics = do
+        actual <- lines <$> readFile counter
+        require "native splice executions" [("exact-inventory",sort actual == sort expected)]
+          diagnostics ("expected=" ++ show expected ++ "\nactual=" ++ show actual)
+      capturedCount phase name diagnostics = length
+        [line | line <- lines diagnostics, line == "tidepool-canonical-" ++ phase
+          ++ " module=" ++ name]
+      require :: String -> [(String,Bool)] -> String -> String -> IO ()
+      require label checks diagnostics details = unless (all snd checks) $ do
+        hPutStrLn stderr (label ++ " assertions=" ++ show checks ++ "\n" ++ details)
+        hPutStrLn stderr diagnostics
+        fail (label ++ " failed: " ++ show [name | (name,False) <- checks])
+      preparedDetails :: PreparedPipelineResult -> String
+      preparedDetails prepared =
+        "warnings=" ++ show (prWarnings (pprPipelineResult prepared))
+        ++ "\nfinalized=" ++ show (map moduleNameString (Map.keys (pprFinalizedModules prepared)))
+        ++ "\nprepared=" ++ show (preparedNames prepared)
+        ++ "\nCore=" ++ showSDocUnsafe (ppr (prBinds (pprPipelineResult prepared)))
+        ++ "\nfinalized-Core=" ++ showSDocUnsafe (ppr
+          [(name,cg_binds (finalizedTidyGuts finalized))
+          | (name,finalized) <- Map.toAscList (pprFinalizedModules prepared)])
+  forM_ ["FinalizedSpliceOwner.hs", "FinalizedSpliceUnused.hs", "FinalizedSpliceTarget.hs"] $ \name ->
+    copyFile (fixture name) (work </> name)
+  -- CheckOnly stops before desugaring, where the fixture's incomplete-pattern
+  -- warning is issued. Also exercise a warning from native typechecking.
+  targetSource <- readFile target
+  evaluate (length targetSource) >> writeFile target
+    ("{-# OPTIONS_GHC -Wmissing-signatures #-}\n" ++ targetSource
+      ++ "\nnativeTypecheckWarning = ()\n")
+  bracket (lookupEnv "TIDEPOOL_TEST_FINALIZATION_COUNTER")
+    (maybe (unsetEnv "TIDEPOOL_TEST_FINALIZATION_COUNTER")
+      (setEnv "TIDEPOOL_TEST_FINALIZATION_COUNTER")) $ \_ -> do
+    setEnv "TIDEPOOL_TEST_FINALIZATION_COUNTER" counter
+    withResidentPipelineSelected [work] $ \compile -> do
+      let run = captureDiagnostics $
+            compile (PreparedProducts Nothing) Set.empty GeneralCompile Nothing target [work] Nothing
+      (result, diagnostics) <- run
+      executions ["owner", "target"] diagnostics
+      require "cold finalized frontend"
+        [ ("native-result",hasNativeResult 42 (prBinds (pprPipelineResult result)))
+        , ("warnings",not (null (prWarnings (pprPipelineResult result))))
+        , ("provider-owner",Map.member owner (pprFinalizedModules result))
+        , ("unused-owner",Map.member unused (pprFinalizedModules result))
+        , ("lazy-STG","FinalizedSpliceUnused" `notElem` preparedNames result)
+        ] diagnostics (preparedDetails result)
+      forM_ ["FinalizedSpliceOwner", "FinalizedSpliceUnused", "FinalizedSpliceTarget"] $ \name ->
+        require ("canonical phase for " ++ name)
+          [("frontend-once",capturedCount "frontend" name diagnostics == 1)
+          ,("finalization-once",capturedCount "finalization" name diagnostics == 1)]
+          diagnostics (preparedDetails result)
+      writeFile counter ""
+      (checked, checkedDiagnostics) <- captureDiagnostics $
+        compile CheckedEnvironment Set.empty GeneralCompile Nothing target [work] Nothing
+      actual <- lines <$> readFile counter
+      require "checked finalized frontend"
+        [("target-splice-once",length (filter (== "target") actual) == 1)
+        ,("provider-splice-capture",length (filter (== "owner") actual)
+          == capturedCount "frontend" "FinalizedSpliceOwner" checkedDiagnostics)
+        ,("provider-splice-at-most-once",length (filter (== "owner") actual) <= 1)
+        ,("splice-inventory",all (`elem` ["owner", "target"]) actual)
+        ,("result-type",isJust (crResultType checked))
+        ,("warnings",not (null (crWarnings checked)))]
+        checkedDiagnostics ("splices=" ++ show actual ++ "\nresult-type="
+          ++ show (fmap renderType (crResultType checked)) ++ "\nwarnings=" ++ show (crWarnings checked))
+      -- A changed provider forces a fresh authoritative native frontend; its
+      -- splice and the target splice must still each execute once.
+      source <- T.pack <$> readFile (fixture "FinalizedSpliceOwner.hs")
+      writeFile (work </> "FinalizedSpliceOwner.hs")
+        (T.unpack (T.replace "[| 42 :: Int |]" "[| 43 :: Int |]" source))
+      writeFile counter ""
+      (changed, changedDiagnostics) <- run
+      executions ["owner", "target"] changedDiagnostics
+      require "changed finalized frontend"
+        [("native-result",hasNativeResult 43 (prBinds (pprPipelineResult changed)))]
+        changedDiagnostics (preparedDetails changed)
+  putStrLn "finalized frontend: splice once, native bytecode, warnings and lazy STG passed"
+
 quasiQuoteCodegenTransition :: IO ()
 quasiQuoteCodegenTransition = withTiming $ withScratch $ \work -> do
   let fixture name = "test-source-boot/fixtures" </> name
@@ -2376,6 +2745,9 @@ exactLoadedMetadata = withTiming $ withScratch $ \work -> do
       resultType = fmap renderType . crResultType
       loadedOwner = "tidepool-checked-loaded-source module=MetadataOwner"
       checkedOwner = "tidepool-checked module=MetadataOwner target=False"
+      frontendCount name diagnostics = length (filter (==
+          "tidepool-canonical-frontend module=" ++ name) (lines diagnostics))
+        + length (filter (== "tidepool-checked module=" ++ name ++ " target=False") (lines diagnostics))
   forM_ ["MetadataOwner.hs", "MetadataTarget.hs", "MetadataExtensionOnlyTarget.hs", "MetadataLoadedFamily.hs"
     , "MetadataFamilyTarget.hs", "MetadataHiddenFamily.hs", "MetadataUntracked.hs"
     , "MetadataUntrackedTarget.hs", "MetadataQuoter.hs", "MetadataQuotedTarget.hs", "MetadataQuoteSupport.hs"] install
@@ -2387,8 +2759,8 @@ exactLoadedMetadata = withTiming $ withScratch $ \work -> do
       (work </> "MetadataTarget.hs") [work] Nothing
     (exact, diagnostics) <- captureDiagnostics (checked "MetadataTarget.hs")
     unless (resultType exact == Just "Int" && resultType ordinary == resultType exact
-        && length (filter (== loadedOwner) (lines diagnostics)) == 1
-        && checkedOwner `notElem` lines diagnostics
+        && frontendCount "MetadataOwner" diagnostics == 1
+        && not (loadedOwner `elem` lines diagnostics && checkedOwner `elem` lines diagnostics)
         && "tidepool-checked module=MetadataTarget target=True" `elem` lines diagnostics) $
       fail "exact metadata repeated the loaded source frontend or changed its instance result"
     (extensionOnly, extensionDiagnostics) <- captureDiagnostics
@@ -2420,7 +2792,7 @@ exactLoadedMetadata = withTiming $ withScratch $ \work -> do
     unless (resultType quoted == Just "Int"
         && null (counterValues "quasiquote_codegen_elided_modules" quoteDiagnostics)
         && "tidepool-checked-dependency-executable module=MetadataQuoter bytecode=True object=False" `elem` lines quoteDiagnostics
-        && "tidepool-checked-loaded-source module=MetadataQuoter" `elem` lines quoteDiagnostics) $
+        && frontendCount "MetadataQuoter" quoteDiagnostics == 1) $
       fail "exact metadata discarded the loaded quoter's executable linkable"
     quoterProducer <- compile (PreparedProducts Nothing) Set.empty GeneralCompile Nothing
       (work </> "MetadataQuoter.hs") [work] Nothing
@@ -2431,7 +2803,7 @@ exactLoadedMetadata = withTiming $ withScratch $ \work -> do
       compile (CheckedEnvironmentProducts (manifest work)) Set.empty GeneralCompile (Just scope)
         (work </> "MetadataQuotedTarget.hs") [work] Nothing
     unless (resultType quotedCandidate == Just "Int"
-        && "tidepool-checked-loaded-source module=MetadataQuoter" `elem` lines candidateQuoteDiagnostics
+        && frontendCount "MetadataQuoter" candidateQuoteDiagnostics == 1
         && "tidepool-checked-dependency-executable module=MetadataQuoteSupport bytecode=True object=False" `elem` lines candidateQuoteDiagnostics
         && counterValues "candidate_source_load_required" candidateQuoteDiagnostics == [1]) $
       fail "source candidate discarded a GHC-required quoter executable"
@@ -2466,9 +2838,9 @@ exactLoadedMetadata = withTiming $ withScratch $ \work -> do
       _ -> fail "loaded metadata lost the hidden original family conflict"
     writeExactMetadataScope scopePath []
     (_, untrackedDiagnostics) <- captureDiagnostics (checked "MetadataUntrackedTarget.hs")
-    unless ("tidepool-checked module=MetadataUntracked target=False" `elem` lines untrackedDiagnostics
-        && "tidepool-checked-loaded-source module=MetadataUntracked" `notElem` lines untrackedDiagnostics) $
-      fail "untracked compile-time input was promoted to loaded metadata evidence"
+    unless (frontendCount "MetadataUntracked" untrackedDiagnostics == 1
+        && "tidepool-checked-loaded-source module=MetadataUntracked" `elem` lines untrackedDiagnostics) $
+      fail "untracked compile-time input repeated its native frontend"
     receipts <- listDirectory (work </> ".exact-compilations")
     receiptSafety <- fmap catMaybes $ forM receipts $ \entry -> do
       bytes' <- BS.readFile (work </> ".exact-compilations" </> entry </> "receipt.cbor")
@@ -3009,7 +3381,7 @@ verifyRetainedPackageWitness producer evidence = do
         , programSignatures = [], programGlobals = globals, programConstructors = []
         , programOperations = [], programBindings = [], programEntry = ValueId 0
         , programTypes = [], programSites = [], programVerbSites = [], programJsonLayout = Nothing }
-      encode globals = encodeCertifiedProducts producer [] Nothing []
+      encode globals = encodeCertifiedProducts producer Map.empty (emptyFinalizedModuleArtifacts producer) [] Nothing []
         [("target", program globals)] evidence "" ""
   withTiming $ do
     let repeated = replicate 1000 (global package 0)
@@ -3033,9 +3405,9 @@ verifyRetainedPackageWitness producer evidence = do
     repeatedTerm <- either (fail . show) (pure . snd)
       (deserialiseFromBytes decodeTerm (BSL.fromStrict first))
     case repeatedTerm of
-      TList [TString "TPCERT", TInt 4, TList [],
+      TList [TString "TPCERT", TInt 6, TList [],
           TList [TList [TString "target", TList references]],
-          TList _, TList globals]
+          TList _, TList globals, _]
         | length references == 1001
             && length globals == 2 -> unless (sameRepeatedReferences references globals) $
               fail ("repeated package witnesses lost canonical deduplication or reference indices: "
@@ -3062,7 +3434,7 @@ verifyRetainedPackageWitness producer evidence = do
   retainByteOracle "mixed-retained" bytes
   term <- either (fail . show) (pure . snd) (deserialiseFromBytes decodeTerm (BSL.fromStrict bytes))
   owners <- case term of
-    TList [TString "TPCERT", TInt 4, _, _, _, TList rows] ->
+    TList [TString "TPCERT", TInt 6, _, _, _, TList rows, _] ->
       forM rows $ \case
         TList [_, _, _, _, owner] -> pure owner
         _ -> fail "certified global row lacks exact owner"
@@ -3085,7 +3457,7 @@ verifyRetainedPackageWitness producer evidence = do
         , programBindings = [NonRecursive (TopBinding identity
             (HeapBinding (ValueId (fromIntegral index)) (Constructor (ConstructorId 0) [])))
             | (index, identity) <- zip [0 :: Int ..] identities] }
-      encodeProgram target = encodeCertifiedProducts producer [] Nothing []
+      encodeProgram target = encodeCertifiedProducts producer Map.empty (emptyFinalizedModuleArtifacts producer) [] Nothing []
         [("target", target)] evidence "" ""
       decode bytes' = either (fail . show) (pure . snd)
         (deserialiseFromBytes decodeTerm (BSL.fromStrict bytes'))
@@ -3164,13 +3536,13 @@ verifyRetainedPackageWitness producer evidence = do
   retainByteOracle "local-package" localBytes
   local <- decode localBytes
   case local of
-    TList [TString "TPCERT", TInt 4, _, _, TList [TList
-      [TString "ghc-internal", TString "GHC.Internal.Stack.Types", TString _, TString sha]], TList []]
+    TList [TString "TPCERT", TInt 6, _, _, TList [TList
+      [TString "ghc-internal", TString "GHC.Internal.Stack.Types", TString _, TString sha]], TList [], _]
       | T.length sha == 64 -> pure ()
     _ -> fail "local package constructor without incoming globals lacks exact interface evidence"
   internal <- encodeProgram (localProgram [synthetic]) >>= either fail decode
   case internal of
-    TList [TString "TPCERT", TInt 4, _, _, TList [], TList []] -> pure ()
+    TList [TString "TPCERT", TInt 6, _, _, TList [], TList [], _] -> pure ()
     _ -> fail "noncanonical internal package helper supplied external interface authority"
   encodeProgram ((localProgram [constructor, synthetic])
     { programGlobals = [global synthetic 0] }) >>= \case
@@ -3221,7 +3593,7 @@ verifyChangedPackageInterface producer identity evidence program global = withSc
   finder <- initFinderCache
   addModuleToFinder finder (GWIB owner NotBoot) (location { ml_hi_file = path })
   let environment = producer { hsc_FC = finder }
-      encode = encodeCertifiedProducts environment [] Nothing []
+      encode = encodeCertifiedProducts environment Map.empty (emptyFinalizedModuleArtifacts environment) [] Nothing []
         [("target", program [global identity 0, global identity 0])] evidence "" ""
   first <- encode >>= either fail pure
   (firstId, _) <- resolvePackageGlobal environment identity >>= either fail pure
@@ -3464,8 +3836,6 @@ exerciseRefusalsWith requireAccepted work reuse = do
     `finally` BS.writeFile boot original
   reuse >>= requireAccepted "resident reuse after refusal"
 
-forM_ :: [a] -> (a -> IO b) -> IO ()
-forM_ values action = mapM_ action values
 
 manifest :: FilePath -> FilePath
 manifest work = work </> "module-candidates.cbor"

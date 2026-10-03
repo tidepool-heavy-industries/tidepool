@@ -9,6 +9,7 @@ fn receipt(status: WorkbenchItemStatus) -> WorkbenchItemReceipt {
         source_items: Vec::new(),
         status,
         output: String::new(),
+        value: None,
         diagnostics: Vec::new(),
         failure_layer: None,
         warnings: Vec::new(),
@@ -117,6 +118,7 @@ fn prefix_publication_preserves_failed_cell_eligibility_and_cancellation_veto() 
         ),
         (
             Err(KernelInvocationFailure::Failed {
+                receipts: Vec::new(),
                 actor,
                 detail: "native failure".into(),
             }),

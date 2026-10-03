@@ -13,7 +13,7 @@ module Tidepool.EffectSchema
 
 import Data.Text (Text)
 import Data.Word (Word64)
-import Tidepool.CheckedCell (CheckedTypeWitness)
+import Tidepool.CheckedCell (CheckedTypeWitness, RequestTypeSignatures)
 import Tidepool.TypePolicy (NominalHead(..))
 
 -- | One GHC-rendered, monomorphic type crossing a suspension boundary.
@@ -36,6 +36,7 @@ data YieldSite = YieldSite
   , ysInputTypeWitnesses :: [Maybe CheckedTypeWitness]
   -- Presentation captured from the concrete answer TyCon; no downstream lookup.
   , ysReplyDeclaration :: Maybe Text
+  , ysRequestTypeSignatures :: Maybe RequestTypeSignatures
   }
   deriving (Eq, Show)
 
@@ -92,6 +93,7 @@ data SiteWireSource
   | InvocationAnswer
   | InvocationAnswers
   | ResponseResultEvidence
+  | ProgressStateEvidence
   deriving (Eq, Ord, Show)
 
 -- | The complete typed-suspension vocabulary understood by the extractor.
@@ -156,6 +158,21 @@ sitedVerbs =
       { vsAnswerSource = EffectResult
       , vsDerivedInput = Just (2, ResponseResultEvidence)
       }
+  , (verb "reportRequestProgress" "Tidepool.Agent.Reply.Internal"
+      "reportRequestProgressSited" "Tidepool.Agent.Reply.Internal" False [0]
+      DeliverHostAnswer SelectedAnswer) { vsAnswerSource = EffectResult }
+  , (verb "pollProgress" "Tidepool.Agent.Reply.Internal"
+      "pollProgressSited" "Tidepool.Agent.Reply.Internal" False [0]
+      DeliverHostAnswer SelectedAnswer) { vsAnswerSource = EffectResult }
+  , verb "awaitProgressAfter" "Tidepool.Agent.Watch.Internal"
+      "awaitProgressAfterSited" "Tidepool.Agent.Watch.Internal" False [0]
+      DeliverHostAnswer ProgressStateEvidence
+  , verb "awaitAnyProgress" "Tidepool.Agent.Watch.Internal"
+      "awaitAnyProgressSited" "Tidepool.Agent.Watch.Internal" False [0]
+      DeliverHostAnswer ProgressStateEvidence
+  , verb "progressSource" "Tidepool.Actor.Source"
+      "progressSourceSited" "Tidepool.Actor.Source" False [0]
+      DeliverHostAnswer ProgressStateEvidence
   , verb "receive" "Tidepool.Actor"
       "receiveSited" "Tidepool.Actor" False [] DeliverLiveReentry SelectedAnswer
   , verb "serve" "Tidepool.Actor"

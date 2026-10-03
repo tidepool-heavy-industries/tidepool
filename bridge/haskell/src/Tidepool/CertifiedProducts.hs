@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 module Tidepool.CertifiedProducts
-  ( encodeCertifiedProducts, resolvePackageGlobal ) where
+  ( encodeCertifiedProducts, resolvePackageGlobal, homeInterfaceUsageOwners ) where
 
 import Prelude hiding (product)
 import Codec.CBOR.Encoding
@@ -20,12 +20,11 @@ import qualified Data.Set as Set
 import Data.IORef (IORef, newIORef, modifyIORef', readIORef)
 import qualified Data.Text as T
 import Data.Word (Word64)
-import GHC.Driver.Env (HscEnv, hsc_home_unit)
-import GHC.Unit.Module (Module, mkModule, mkModuleName, moduleUnit)
-import GHC.Unit.Home (isHomeUnit)
-import GHC.Unit.Module.ModIface (ModIface, mi_decls, mi_exports)
+import GHC.Driver.Env (HscEnv, hsc_all_home_unit_ids)
+import GHC.Unit.Module (Module, ModuleName, mkModule, mkModuleName, moduleUnit, moduleName)
+import GHC.Unit.Module.ModIface (ModIface, mi_decls, mi_exports, mi_module)
 import GHC.Unit.Module.Location (ml_hi_file)
-import GHC.Unit.Types (stringToUnit)
+import GHC.Unit.Types (stringToUnit, toUnitId)
 import GHC.Iface.Syntax (IfaceDecl(..), ifaceDeclImplicitBndrs)
 import GHC.Iface.Load (importDecl)
 import GHC.Tc.Utils.Monad (initIfaceLoad)
@@ -53,6 +52,9 @@ import Tidepool.PackageWitness
   ( PackageImportRoot(..), packageImportRoot, validatePackageImportRoot )
 import Tidepool.FatIface (readExactInterface)
 import Tidepool.ExactHydration (ExactIfaceArtifact(..))
+import Tidepool.FinalizedModule (homeInterfaceUsageOwners)
+import Tidepool.FinalizedModuleArtifacts
+  ( FinalizedModuleArtifacts, encodeFinalizedModuleArtifacts, finalizedInterfaceSeals )
 import Tidepool.Timing (readTimingEnabled, emitCount)
 
 data Product = Product
@@ -64,6 +66,7 @@ data Product = Product
   , productIfaceSha :: T.Text
   , productBytesSha :: T.Text
   , productEvidenceSha :: T.Text
+  , productInterfaces :: [(T.Text, T.Text, T.Text)]
   , productGroups :: [CandidateGroup]
   }
 
@@ -73,12 +76,12 @@ type PackageWitness = (T.Text, T.Text, FilePath, T.Text)
 -- The producer's group inventory is only a suggestion. Rust compares every
 -- emitted row with the original sidecar bytes before admitting any product.
 encodeCertifiedProducts
-  :: HscEnv -> [ModuleCandidate] -> Maybe ExactScope
+  :: HscEnv -> Map.Map ModuleName ModIface -> FinalizedModuleArtifacts -> [ModuleCandidate] -> Maybe ExactScope
   -> [(T.Text, T.Text, BS.ByteString, [ProjectedGroup])]
   -> [(String, WireProgram)]
   -> DependencyEvidence -> BS.ByteString -> BS.ByteString
   -> IO (Either String BS.ByteString)
-encodeCertifiedProducts env cached exact fresh targets evidence productBytes evidenceBytes = do
+encodeCertifiedProducts env interfaces finalized cached exact fresh targets evidence productBytes evidenceBytes = do
   packageRef <- newIORef []
   timing <- readTimingEnabled
   (resolvePackage, resolutionCounts) <- newPackageGlobalResolver timing env
@@ -94,6 +97,7 @@ encodeCertifiedProducts env cached exact fresh targets evidence productBytes evi
               , productIfaceSha = digest iface
               , productBytesSha = freshProductSha
               , productEvidenceSha = freshEvidenceSha
+              , productInterfaces = []
               , productGroups = groups
               }
         | (unit, name, iface, projected) <- fresh ]
@@ -107,9 +111,30 @@ encodeCertifiedProducts env cached exact fresh targets evidence productBytes evi
           , productIfaceSha = T.pack (candidateInterfaceSha256 candidate)
           , productBytesSha = T.pack (candidateProductSha256 candidate)
           , productEvidenceSha = T.pack (candidateEvidenceSha256 candidate)
+          , productInterfaces = []
           , productGroups = candidateGroups candidate
           } | candidate <- cached ]
-      products = freshProducts ++ cachedProducts
+      unsealedProducts = freshProducts ++ cachedProducts
+      interfaceSeals = Map.fromListWith Set.union
+        ([(owner,Set.singleton sha) | (owner,sha) <- finalizedInterfaceSeals finalized]
+        ++ [( (productUnit product, productModule product), Set.singleton (productIfaceSha product))
+          | product <- unsealedProducts]
+        ++ [((T.pack (exactUnit iface), T.pack (exactModule iface)), Set.singleton (T.pack (exactSha256 iface)))
+           | scope <- maybe [] pure exact, (iface, _, _) <- scopeInterfaces scope])
+  sealedProducts <- forM unsealedProducts $ \product -> do
+    let owner = mkModule (stringToUnit (T.unpack (productUnit product))) (mkModuleName (T.unpack (productModule product)))
+    selected <- case Map.lookup (moduleName owner) interfaces of
+      Just iface | mi_module iface == owner -> pure (Right iface)
+      _ -> fmap (either (const (Left "original interface usage inventory unavailable")) (Right . fst))
+        (readExactInterface env owner)
+    pure $ do
+      iface <- selected
+      requirements <- forM (homeInterfaceUsageOwners env iface) $ \(unit, name) ->
+        case Map.lookup (T.pack unit, T.pack name) interfaceSeals of
+          Just seals | [sha] <- Set.toAscList seals -> Right (T.pack unit, T.pack name, sha)
+          _ -> Left "original interface usage leaves the exact sealed owner closure"
+      Right product { productInterfaces = requirements }
+  let products = [product | Right product <- sealedProducts]
       expectedFresh = length fresh
       admittedBinders =
         [ (binder, (T.pack (originalUnit product), T.pack (originalModule product),
@@ -129,9 +154,14 @@ encodeCertifiedProducts env cached exact fresh targets evidence productBytes evi
            | scope <- maybe [] pure exact, (iface, _, _) <- scopeInterfaces scope])
       allGlobals =
         [ (product, group) | product <- products, group <- productGroups product ]
-  if length freshProducts /= expectedFresh
+  if any ((/= 1) . Set.size) (Map.elems interfaceSeals)
+      || length products /= length unsealedProducts
+      || length freshProducts /= expectedFresh
       || length binders /= Map.size ownerMap
-    then pure (Left "incomplete fresh source or duplicate original binder inventory")
+    then pure (Left (case [reason | Left reason <- sealedProducts] of
+      reason : _ -> reason
+      [] | any ((/= 1) . Set.size) (Map.elems interfaceSeals) -> "conflicting original interface owner seals"
+         | otherwise -> "incomplete fresh source or duplicate original binder inventory"))
     else do
       modules <- forM allGlobals $ \(product, group) -> do
         globals <- forM (candidateGroupGlobals group) $ \global ->
@@ -213,9 +243,10 @@ encodeCertifiedProducts env cached exact fresh targets evidence productBytes evi
                 | ((unit, name), options) <- Map.toList packages
                 , (path, sha) <- Set.toList options ]
           pure (Right (toStrictByteString (array
-            [encodeString "TPCERT", encodeWord 4
+            [encodeString "TPCERT", encodeWord 6
             , list id encodedModules, list id encodedTargets
-            , list id encodedPackages, list encodePreEncoded globalBytes])))
+            , list id encodedPackages, list encodePreEncoded globalBytes
+            , encodeFinalizedModuleArtifacts finalized])))
   where
     internWitness :: Map.Map BS.ByteString Word -> Encoding
       -> (Map.Map BS.ByteString Word, Word)
@@ -244,7 +275,7 @@ certifyLocalPackageExports env resolvePackage packageRef programs = do
         , TopBinding identity binding <- case group of
             NonRecursive top -> [top]
             Recursive tops -> tops
-        , not (isHomeUnit (hsc_home_unit env) (moduleUnit (symbolOwner identity)))
+        , not (toUnitId (moduleUnit (symbolOwner identity)) `Set.member` hsc_all_home_unit_ids env)
         , symbolNamespace identity == "value"
         , eligible program (heapBindingRhs binding) ]
   mapM_ (select . Set.toAscList . Set.fromList . snd)
@@ -306,7 +337,7 @@ encodeGlobalWitness
 encodeGlobalWitness env resolvePackage packageRef binders homeModules identity rep signature evaluated generation = do
   selected <- case generation of
     Just wanted
-      | isHomeUnit (hsc_home_unit env) (moduleUnit (symbolOwner identity)) ->
+      | toUnitId (moduleUnit (symbolOwner identity)) `Set.member` hsc_all_home_unit_ids env ->
           pure (Right (array
             [encodeString "retained", encodeIdentity identity, encodeWord64 wanted]))
       | otherwise -> packageOwner resolvePackage packageRef identity (Just wanted)
@@ -316,7 +347,8 @@ encodeGlobalWitness env resolvePackage packageRef binders homeModules identity r
         , maybe encodeNull encodeString version, encodeWord ordinal
         , encodeIdentity identity]))
       Nothing
-        | (symbolUnit identity, symbolModule identity) `Set.member` homeModules ->
+        | (symbolUnit identity, symbolModule identity) `Set.member` homeModules
+            || toUnitId (moduleUnit (symbolOwner identity)) `Set.member` hsc_all_home_unit_ids env ->
             pure (Left "external home global has no certified source group")
         | otherwise -> packageOwner resolvePackage packageRef identity Nothing
   pure $ do
@@ -528,6 +560,8 @@ encodeModule product groups = array
   , encodeString (productBytesSha product)
   , encodeString (productEvidenceSha product)
   , list (\(ordinal, globals) -> array [encodeWord ordinal, list id globals]) groups
+  , list (\(unit, name, sha) -> array [encodeString unit, encodeString name, encodeString sha])
+      (productInterfaces product)
   ]
 
 encodeIdentity :: SymbolIdentity -> Encoding

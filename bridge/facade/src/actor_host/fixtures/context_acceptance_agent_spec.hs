@@ -18,7 +18,8 @@ import GHC.Generics (Generic)
 import Tidepool.Aeson.FromJSON (FromJSON)
 import Tidepool.Agent.Contract
   ( AgentSpec (..), AsyncEffects, Call, HaskellCell, KnownToolEffects
-  , JsonSchema, Subset, Sync, SyncEffects, (:-), defaultSpec, haskellTool, syncTool )
+  , JsonSchema, Subset, Sync, SyncEffects, (:-), defaultSpec, haskellTool
+  , presentWith, syncTool )
 import qualified Tidepool.Agent.Contract as A
 import qualified Tidepool.Agent.Context as C
 
@@ -43,7 +44,7 @@ agentSpec = defaultSpec
   { specTools = ContextTools
       { haskell = A.haskell (A.haskellTools @effects)
       , haskellSync = haskellTool "Edit this actor's context before the next inference."
-      , curate = syncTool "Curate this actor's context and select its next model." curateContext
+      , curate = presentWith id $ syncTool "Curate this actor's context and select its next model." curateContext
       }
   }
 

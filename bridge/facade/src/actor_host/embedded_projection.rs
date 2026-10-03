@@ -177,6 +177,11 @@ impl EmbeddedProjection {
             };
             actors.push(HostActorProjection {
                 identity,
+                output_origin: Some(harness::store::actor_output::ActorOutputOrigin {
+                    run: run.to_owned(),
+                    native_actor: node.actor.id.0,
+                    incarnation: node.actor.incarnation.0,
+                }),
                 parent: node
                     .supervisor_parent
                     .or(node.creator)

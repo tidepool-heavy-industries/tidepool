@@ -128,6 +128,44 @@ pub(super) struct TestCampaign {
 }
 
 impl TestCampaign {
+    /// Drive the production durable output sink without creating a provider turn.
+    /// Other deployments remain available to the campaign's existing consumers.
+    pub async fn drive_actor_output<F: std::future::Future>(
+        &mut self,
+        store: &harness::store::Store,
+        future: F,
+    ) -> F::Output {
+        let run = super::runtime_namespace(self.session_root.path());
+        let mut index = 0;
+        while index < self.pending.len() {
+            if matches!(
+                self.pending[index],
+                LocalResidentDeployment::DisplayPublished(_)
+            ) {
+                let LocalResidentDeployment::DisplayPublished(request) =
+                    self.pending.remove(index).unwrap()
+                else {
+                    unreachable!()
+                };
+                super::display_output::publish(&self.forest, store, &run, None, None, &request);
+            } else {
+                index += 1;
+            }
+        }
+        tokio::pin!(future);
+        loop {
+            tokio::select! {
+                result = &mut future => return result,
+                event = self.deployments.recv() => match event.expect("campaign deployment channel closed while awaiting output") {
+                    LocalResidentDeployment::DisplayPublished(request) => {
+                        super::display_output::publish(&self.forest, store, &run, None, None, &request);
+                    }
+                    event => self.pending.push_back(event),
+                }
+            }
+        }
+    }
+
     /// Attach the browser service to the resident campaign's existing run owner.
     pub async fn prepare_embedded_service(
         &self,
@@ -469,6 +507,16 @@ pub(super) async fn dispatch_haskell_script_result(
     endpoint: &dyn exomonad_actor::ResidentToolEndpoint,
     script: &str,
 ) -> Result<serde_json::Value, exomonad_actor::ResidentToolError> {
+    dispatch_haskell_script_response(endpoint, script)
+        .await?
+        .into_json()
+        .map_err(exomonad_actor::ResidentToolError::Encoding)
+}
+
+pub(super) async fn dispatch_haskell_script_response(
+    endpoint: &dyn exomonad_actor::ResidentToolEndpoint,
+    script: &str,
+) -> Result<exomonad_actor::ResidentToolResponse, exomonad_actor::ResidentToolError> {
     let call_id = uuid::Uuid::new_v4().simple().to_string();
     let result = endpoint
         .dispatch_boxed(ToolInvocation {
@@ -501,7 +549,7 @@ pub(super) async fn dispatch_structured_tool(
 ) -> serde_json::Value {
     let call_id = uuid::Uuid::new_v4().simple().to_string();
     let result = endpoint
-        .dispatch_boxed(ToolInvocation {
+        .dispatch_json_boxed(ToolInvocation {
             context: Some(ToolInvocationContext::external(
                 "actor-host-vertical".into(),
                 call_id.clone(),

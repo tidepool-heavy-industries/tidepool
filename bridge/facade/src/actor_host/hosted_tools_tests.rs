@@ -1,5 +1,6 @@
 use super::test_campaign::TestCampaign;
 use super::tests::dispatch_haskell_script;
+use super::ResidentToolEndpointTestExt;
 use exomonad_tool::{HostedTool, ToolArguments, ToolInvocation};
 
 #[tokio::test]
@@ -41,7 +42,7 @@ async fn frozen_tools_dispatch_raw_and_structured_inputs_without_workbench_bindi
     assert!(matches!(&policy.tools()[4], HostedTool::Custom(tool) if tool.name == "raw_echo"));
     assert!(matches!(&policy.tools()[5], HostedTool::Function(tool) if tool.name == "repeat_text"));
     let call = |name: &str, arguments| {
-        policy.dispatch_boxed(ToolInvocation {
+        policy.dispatch_json_boxed(ToolInvocation {
             context: None,
             name: name.into(),
             arguments,
