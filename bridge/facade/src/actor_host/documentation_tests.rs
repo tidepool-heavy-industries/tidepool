@@ -3321,3 +3321,113 @@ async fn work_router_queries_receipts_as_the_issuing_actor() {
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
+
+fn explicit_display_output(reply: &serde_json::Value) -> &serde_json::Value {
+    reply["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|item| item["operations"].as_array().unwrap())
+        .find_map(|operation| operation.get("display"))
+        .unwrap_or_else(|| panic!("structured display metadata missing: {reply}"))
+}
+
+fn explicit_display_identity(display: &serde_json::Value) -> (i64, i64, i64) {
+    let identity = display["identity"].as_array().unwrap();
+    (
+        identity[0].as_i64().unwrap(),
+        identity[1].as_i64().unwrap(),
+        identity[2].as_i64().unwrap(),
+    )
+}
+
+#[tokio::test]
+async fn explicit_display_expands_siblings_without_compilation_or_repeated_effects() {
+    use super::command_jobs_tests::backend_request;
+    use super::command_test_support::TestCommands;
+
+    let mut campaign = TestCampaign::start().await;
+    let policy = campaign.root_installation.policy.clone();
+    let invoking_policy = policy.clone();
+    let mut running = tokio::spawn(async move {
+        dispatch_haskell_script(
+            invoking_policy.as_ref(),
+            include_str!("notebook_explicit_display_siblings.hs"),
+        )
+        .await
+    });
+    let backend = TestCommands::completed(&"x".repeat(4000));
+    tokio::select! {
+        request = backend_request(&mut campaign) => request.supply(Ok(backend.clone())),
+        result = &mut running => panic!("display ended before its authored command: {result:?}"),
+    }
+    let first = running.await.unwrap();
+    assert_eq!(first["status"], "committed", "{first}");
+    let display = explicit_display_output(&first);
+    let identity = explicit_display_identity(display);
+    let keys = display["expansions"].as_array().unwrap();
+    assert_eq!(
+        keys.len(),
+        2,
+        "both fields are independently addressable: {first}"
+    );
+    let left = keys[0][0].as_i64().unwrap();
+    let right = keys[1][0].as_i64().unwrap();
+    assert!(display["text"].as_str().unwrap().contains("DisplayPair"));
+
+    tidepool_extract_cmd::reset_extract_spawn_count();
+    let expanded = policy.expand_display_boxed(identity, left).await.unwrap();
+    assert_eq!(expanded["status"], "committed", "{expanded}");
+    let next = explicit_display_output(&expanded);
+    assert_eq!(explicit_display_identity(next), identity);
+    assert_eq!(next["expansions"][0][0], right, "sibling key stays stable");
+    assert_eq!(next["expansions"].as_array().unwrap().len(), 1);
+    assert!(policy.expand_display_boxed(identity, left).await.is_err());
+    assert!(policy
+        .expand_display_boxed((identity.0, identity.1 + 1, identity.2), right)
+        .await
+        .is_err());
+    let final_page = policy.expand_display_boxed(identity, right).await.unwrap();
+    assert!(explicit_display_output(&final_page)["expansions"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        tidepool_extract_cmd::extract_spawn_count(),
+        0,
+        "native expansion must not invoke the source compiler"
+    );
+    assert_eq!(backend.executions(), 1, "authored effects execute once");
+
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+    assert!(policy.expand_display_boxed(identity, right).await.is_err());
+    assert!(
+        explicit_display_output(&first)["text"]
+            .as_str()
+            .unwrap()
+            .contains("DisplayPair"),
+        "historical output stays readable after retirement"
+    );
+}
+
+#[tokio::test]
+async fn explicit_display_rejects_callback_effect_before_authority_input() {
+    let campaign = TestCampaign::start().await;
+    let policy = campaign.root_installation.policy.as_ref();
+    let published = committed(
+        policy,
+        include_str!("notebook_explicit_display_untrusted_callback.hs"),
+    )
+    .await;
+    let identity = explicit_display_identity(explicit_display_output(&published));
+    tidepool_extract_cmd::reset_extract_spawn_count();
+    assert!(policy.expand_display_boxed(identity, 1).await.is_err());
+    assert_eq!(tidepool_extract_cmd::extract_spawn_count(), 0);
+    assert_eq!(
+        explicit_display_output(&published)["text"],
+        "forged preview"
+    );
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
