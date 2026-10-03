@@ -293,6 +293,9 @@ pub struct WorkbenchDisplayOutput {
     pub identity: (i64, i64, i64),
     pub text: String,
     pub expansions: Vec<(i64, String)>,
+    /// A legacy custom renderer omitted detail that cannot be expanded.
+    #[serde(default)]
+    pub unavailable: bool,
 }
 
 /// One effect boundary observed while evaluating an input unit.

@@ -598,7 +598,7 @@ macro_rules! console_effect_def {
                   args { msg: "Text" as String },
                   ret "()" },
                 { ctor DisplayWith, method display_with,
-                  args { view: "((Int, Int, Int), Text, [(Int, Text)])" as ((i64, i64, i64), String, Vec<(i64, String)>),
+                  args { view: "((Int, Int, Int), Text, [(Int, Text)], Bool)" as ((i64, i64, i64), String, Vec<(i64, String)>, bool),
                          continuation: "payload" as tidepool_bridge::HaskellValue },
                   ret "(Int, Int, Int)" },
                 { ctor DisplayExpandWith, method display_expand_with,
@@ -1822,7 +1822,7 @@ mod tests {
             d.constructors,
             &[
                 "Print :: Text -> Console ()",
-                "DisplayWith :: ((Int, Int, Int), Text, [(Int, Text)]) -> payload -> Console (Int, Int, Int)",
+                "DisplayWith :: ((Int, Int, Int), Text, [(Int, Text)], Bool) -> payload -> Console (Int, Int, Int)",
                 "DisplayExpandWith :: ((Int, Int, Int), Int) -> Console [(Int, Text)]",
                 "DisplayAllowanceWith :: Console Int",
                 "DisplayExpansionInputWith :: Console ((Int, Int, Int), Int, Int)",

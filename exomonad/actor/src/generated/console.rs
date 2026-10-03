@@ -23,7 +23,7 @@ use tidepool_bridge_derive::FromHaskell;
 pub enum ConsoleReq {
     Print(String),
     DisplayWith(
-        ((i64, i64, i64), String, Vec<(i64, String)>),
+        ((i64, i64, i64), String, Vec<(i64, String)>, bool),
         tidepool_bridge::HaskellValue,
     ),
     DisplayExpandWith(((i64, i64, i64), i64)),

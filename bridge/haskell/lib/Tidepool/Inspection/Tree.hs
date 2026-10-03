@@ -201,13 +201,13 @@ newDisplayState budget tree =
 -- | Expand exactly one retained subtree, preserving the keys of its siblings.
 -- Invalid or already-consumed keys do not force any retained value.
 expandDisplayState :: Int -> ExpansionKey -> DisplayState -> Maybe DisplayState
-expandDisplayState budget selected (DisplayState _ branches next _) = choose [] branches
+expandDisplayState budget selected (DisplayState _ branches next previouslyUnavailable) = choose [] branches
   where
     choose _ [] = Nothing
     choose prefix ((key, label, tree) : rest)
       | key == selected =
           let (value, children, nextKey, unavailable) = preview (max 0 budget) 0 next label tree
-          in Just (DisplayState value (reverse prefix ++ children ++ rest) nextKey unavailable)
+          in Just (DisplayState value (reverse prefix ++ children ++ rest) nextKey (previouslyUnavailable || unavailable))
       | otherwise = choose ((key, label, tree) : prefix) rest
 
 -- The per-field allowance prevents a large first field from hiding a sibling.
@@ -217,15 +217,19 @@ preview :: Int -> Int -> Int -> Text -> DisplayTree -> (Text, [(ExpansionKey, Te
 preview budget depth next label tree
   | budget <= 0 || depth >= 2 = ("", [(ExpansionKey next, label, tree)], next + 1, False)
   | otherwise = case tree of
-      Constructor name [] -> (T.take budget name, [], next, False)
-      Constructor name fields -> children (name <> " {") "}" fields
+      Constructor name [] -> ordinary (TextLeaf name)
+      Constructor name fields
+        | budget <= T.length name + 5 ->
+            (T.take budget name, [(ExpansionKey next, label, tree)], next + 1, False)
+        | otherwise -> children (name <> " {") "}" fields
       Sequence opening closing items -> sequenceChildren opening closing (0 :: Int) items
-      _ ->
-        let (value, remaining, unavailable) = renderTree budget tree
+      _ -> ordinary tree
+  where
+    ordinary valueTree =
+        let (value, remaining, unavailable) = renderTree budget valueTree
         in case remaining of
           Nothing -> (value, [], next, unavailable)
           Just suffix -> (value, [(ExpansionKey next, label, suffix)], next + 1, unavailable)
-  where
     children opening closing fields = walk opening [] next False fields
       where
         walk value keys key unavailable pending

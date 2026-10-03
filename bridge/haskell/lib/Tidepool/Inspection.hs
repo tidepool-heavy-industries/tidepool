@@ -73,7 +73,7 @@ display value = do
   allowance <- send DisplayAllowanceWith
   let budget = displayBudget allowance
       state = newDisplayState budget (displayRoot value)
-  identity <- publishDisplay budget (0, 0, 0) state
+  identity <- publishDisplay (0, 0, 0) state
   pure (DisplayHandle identity (displayStateKeys state))
 
 -- | The key must come from this handle's current expansion description.
@@ -100,27 +100,18 @@ instance DisplayRoot [Char] where
 displayBudget :: Int -> Int
 displayBudget = max 0 . min 8192
 
-publishDisplay :: forall effects. Member Console effects => Int -> (Int, Int, Int) -> DisplayState -> Eff effects (Int, Int, Int)
-publishDisplay budget identity state =
-  send (DisplayWith (identity, displayPresentation budget state,
-    [(expansionKeyNumber key, label) | (key, label) <- displayStateKeys state])
+publishDisplay :: forall effects. Member Console effects => (Int, Int, Int) -> DisplayState -> Eff effects (Int, Int, Int)
+publishDisplay identity state =
+  send (DisplayWith (identity, displayStateText state,
+    [(expansionKeyNumber key, label) | (key, label) <- displayStateKeys state], displayStateUnavailable state)
     ((\(_ :: Int) -> do
       (issued, selected, allowance) <- send DisplayExpansionInputWith
       let granted = displayBudget allowance
       case expandDisplayState granted (expansionKeyFromNumber selected) state of
         Nothing -> error "display expansion key is unavailable"
         Just detail -> do
-          _ <- publishDisplay granted issued detail
+          _ <- publishDisplay issued detail
           pure ()) :: Int -> Eff effects ()))
-
--- Legacy custom renderers can report omitted detail without a resumable tree.
--- Preserve that fact inside the same bounded output as the visible prefix.
-displayPresentation :: Int -> DisplayState -> Text
-displayPresentation budget state
-  | displayStateUnavailable state =
-      let marker = "\n[display detail unavailable]"
-      in Text.take budget (Text.take (max 0 (budget - Text.length marker)) (displayStateText state) <> marker)
-  | otherwise = displayStateText state
 
 instance Display ReplyError where
   displayTree ReplyUnauthorized =

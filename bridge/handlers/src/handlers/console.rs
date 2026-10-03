@@ -20,7 +20,7 @@ impl ConsoleHandler {
     fn display_with(
         &mut self,
         _cx: &EffectContext<'_, CapturedOutput>,
-        _view: ((i64, i64, i64), String, Vec<(i64, String)>),
+        _view: ((i64, i64, i64), String, Vec<(i64, String)>, bool),
         _continuation: tidepool_bridge::HaskellValue,
     ) -> Result<tidepool_effect::Response, EffectError> {
         Err(EffectError::Handler(

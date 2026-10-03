@@ -51,8 +51,15 @@ pub fn console() -> Effect {
                 args: vec![
                     Arg {
                         name: "view",
-                        ty: HsType::Tuple(vec![display_id(), HsType::Text, expansion_keys()]),
-                        rust: RustBinding::Path("((i64, i64, i64), String, Vec<(i64, String)>)"),
+                        ty: HsType::Tuple(vec![
+                            display_id(),
+                            HsType::Text,
+                            expansion_keys(),
+                            HsType::Bool,
+                        ]),
+                        rust: RustBinding::Path(
+                            "((i64, i64, i64), String, Vec<(i64, String)>, bool)",
+                        ),
                     },
                     Arg {
                         name: "continuation",

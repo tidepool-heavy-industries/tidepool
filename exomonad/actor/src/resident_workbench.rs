@@ -4114,9 +4114,9 @@ where
                                     input_received = true;
                                     Ok(session.resume(hole.clone(), (identity, key, allowance)))
                                 }
-                                ResidentRequest::Console(crate::generated::console::ConsoleReq::DisplayWith((issued, text, expansions), _)) if input_received && published.is_none() && issued == identity => {
+                                ResidentRequest::Console(crate::generated::console::ConsoleReq::DisplayWith((issued, text, expansions, unavailable), _)) if input_received && published.is_none() && issued == identity => {
                                     let callback = session.live_payload_handle_owned_by(hole.cont_id(), scope)?.ok_or_else(|| ResidentActorWorkbenchError::ActorProtocol("display update has no retained callback".into()))?;
-                                    published = Some((tidepool_runtime::session::WorkbenchDisplayOutput { identity, text, expansions }, callback));
+                                    published = Some((tidepool_runtime::session::WorkbenchDisplayOutput { identity, text, expansions, unavailable }, callback));
                                     Ok(session.resume(hole.clone(), identity))
                                 }
                                 _ => Err(ResidentActorWorkbenchError::ActorProtocol("display callback crossed an unauthorized boundary".into())),
@@ -8777,12 +8777,12 @@ where
                         },
                     )),
                     ResidentRequest::Console(crate::generated::console::ConsoleReq::Print(text)) => Ok(ResidentActorBoundary::Console { continuation: hole, text }),
-                    ResidentRequest::Console(crate::generated::console::ConsoleReq::DisplayWith((identity, text, expansions), _)) => {
+                    ResidentRequest::Console(crate::generated::console::ConsoleReq::DisplayWith((identity, text, expansions, unavailable), _)) => {
                         let callback = session.live_payload_handle_owned_by(hole.cont_id(), actor_realm)?
                             .ok_or_else(|| ResidentActorWorkbenchError::ActorProtocol("display has no retained expansion callback".into()))?;
                         Ok(ResidentActorBoundary::DisplayPublish {
                             continuation: hole,
-                            output: tidepool_runtime::session::WorkbenchDisplayOutput { identity, text, expansions },
+                            output: tidepool_runtime::session::WorkbenchDisplayOutput { identity, text, expansions, unavailable },
                             callback,
                         })
                     }

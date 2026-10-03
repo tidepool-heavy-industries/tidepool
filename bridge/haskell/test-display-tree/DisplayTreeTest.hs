@@ -38,6 +38,8 @@ main = do
   collapsedSequenceTailRemainsLazy
   shortGroupBudgetDoesNotForceFields
   exactBudgetRetainsUnknownSuffixes
+  tinyGrantsRetainConstructorNames
+  unavailableDetailDoesNotReplaceSupportedText
 
 applicationsParenthesizeOnlyAboveApplicationPrecedence :: IO ()
 applicationsParenthesizeOnlyAboveApplicationPrecedence = do
@@ -248,3 +250,29 @@ exactBudgetRetainsUnknownSuffixes = do
   assertEqual "exact Concat page keeps the unseen children" 1 (length (displayStateKeys concatState))
   assertEqual "constructor cap does not inspect the collapsed field spine" "T {x = …}" (displayStateText fieldsState)
   assertEqual "constructor cap retains the collapsed field spine" 2 (length (displayStateKeys fieldsState))
+
+tinyGrantsRetainConstructorNames :: IO ()
+tinyGrantsRetainConstructorNames = do
+  let atom = newDisplayState 1 (Constructor "Nothing" [])
+      record = newDisplayState 1 (Constructor "Outer" [("value", TextLeaf "7")])
+  assertEqual "nullary constructor preview respects the tiny allowance" "N" (displayStateText atom)
+  case displayStateKeys atom of
+    [(key, _)] -> assertEqual "nullary constructor suffix remains available" (Just "othing")
+      (fmap displayStateText (expandDisplayState 64 key atom))
+    _ -> fail "nullary constructor suffix was lost"
+  assertEqual "compound constructor preview respects the tiny allowance" "O" (displayStateText record)
+  case displayStateKeys record of
+    [(key, _)] -> assertEqual "compound constructor keeps its complete envelope" (Just "Outer {value = 7}")
+      (fmap displayStateText (expandDisplayState 64 key record))
+    _ -> fail "compound constructor envelope was lost"
+
+unavailableDetailDoesNotReplaceSupportedText :: IO ()
+unavailableDetailDoesNotReplaceSupportedText = do
+  let state = newDisplayState 10 (Concat [LegacyLeaf (\_ -> ("old", True)), TextLeaf "visible"])
+  assertEqual "supported payload stays visible beside legacy unavailable detail" "oldvisible" (displayStateText state)
+  assertEqual "legacy unavailability is separate from the visible payload" True (displayStateUnavailable state)
+  case displayStateKeys state of
+    [(key, _)] -> case expandDisplayState 64 key state of
+      Just detail -> assertEqual "unavailable detail survives later sibling expansion" True (displayStateUnavailable detail)
+      Nothing -> fail "supported tree suffix was lost"
+    _ -> fail "lazy exact-boundary suffix was not retained"
