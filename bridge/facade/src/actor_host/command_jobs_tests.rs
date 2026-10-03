@@ -636,12 +636,11 @@ async fn structured_bash_timeout_preserves_the_command_for_haskell_continuation(
     campaign.hosted.await.unwrap();
 }
 
-/// Every direct command tool — not only the ones that happen to overflow the
-/// display budget — leaves the same retained job bound in Haskell scope, and
-/// names it in its own result text. `write_stdin` and `cancel_command` are
-/// the two tools not covered by the other command-jobs tests in this file.
+/// A launch introduces the retained job once. Later observations and
+/// cancellation use the supplied session without repeating the introduction.
+
 #[tokio::test]
-async fn write_stdin_and_cancel_command_each_name_the_same_retained_binding() {
+async fn later_command_tools_keep_recovery_without_repeating_binding_introductions() {
     let mut campaign = TestCampaign::start_with_shell().await;
     let backend = TestCommands::new();
     let policy = campaign.root_installation.policy.clone();
@@ -682,15 +681,9 @@ async fn write_stdin_and_cancel_command_each_name_the_same_retained_binding() {
     .await
     .unwrap();
     assert_eq!(write["status"], "committed", "{write}");
-    let write_binding = write["items"][0]["installedBindings"][0].as_str().unwrap();
-    assert_eq!(write_binding, started_binding, "{write}");
-    assert!(
-        write["items"][0]["output"]
-            .as_str()
-            .unwrap()
-            .contains(&format!("retained as {write_binding} :: Cmd.Job")),
-        "{write}"
-    );
+    let write_output = write["items"][0]["output"].as_str().unwrap();
+    assert!(!write_output.contains("retained as"), "{write}");
+    assert!(!write_output.contains("session_id:"), "{write}");
 
     let cancel = call(
         "cancel_command",
@@ -699,21 +692,14 @@ async fn write_stdin_and_cancel_command_each_name_the_same_retained_binding() {
     .await
     .unwrap();
     assert_eq!(cancel["status"], "committed", "{cancel}");
-    let cancel_binding = cancel["items"][0]["installedBindings"][0].as_str().unwrap();
-    assert_eq!(cancel_binding, started_binding, "{cancel}");
-    assert!(
-        cancel["items"][0]["output"]
-            .as_str()
-            .unwrap()
-            .contains(&format!("retained as {cancel_binding} :: Cmd.Job")),
-        "{cancel}"
-    );
+    let cancel_output = cancel["items"][0]["output"].as_str().unwrap();
+    assert!(!cancel_output.contains("retained as"), "{cancel}");
+    assert!(!cancel_output.contains("session_id:"), "{cancel}");
+    // The original launch binding remains usable after later tool calls.
 
-    // The binding named by both write_stdin and cancel_command resolves in a
-    // later cell exactly as a cell-created binding would.
     let resolved = committed(
         &campaign,
-        &format!("saved <- Cmd.await {started_binding}\nCmd.status {started_binding}"),
+        &format!("saved <- Cmd.await {started_binding}\ndisplay =<< Cmd.status {started_binding}"),
     )
     .await;
     assert!(resolved.to_string().contains("Cancelled"), "{resolved}");
