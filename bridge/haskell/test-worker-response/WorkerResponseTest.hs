@@ -1,6 +1,8 @@
+{-# LANGUAGE ScopedTypeVariables #-}
+
 module Main (main) where
 
-import Control.Exception (bracket)
+import Control.Exception (AsyncException(..), SomeException, bracket, catch, throwIO)
 import Control.Monad (unless, void)
 import Data.Bits ((.|.), shiftL, shiftR)
 import qualified Data.ByteString as BS
@@ -21,7 +23,7 @@ main :: IO ()
 main = getArgs >>= \case
   ["--worker", scratch] -> do
     setEnv "TMPDIR" scratch
-    runWorkerLoop (\transaction -> transaction handler)
+    runWorkerLoop (\transaction -> transaction handler `catch` \(_ :: SomeException) -> pure ())
   [] -> bracket temporary removeDirectoryRecursive check
   _ -> fail "unexpected worker response test arguments"
   where
@@ -34,6 +36,10 @@ main = getArgs >>= \case
         ["aggregate-overflow"] -> do
           BS.hPut stdout (BS.replicate (limit `div` 2) 111)
           BS.hPut stderr (BS.replicate (limit `div` 2 + 1) 101)
+        ["throw"] -> do
+          BSC.hPutStr stdout "before-async-exception"
+          BSC.hPutStr stderr "before-async-exception"
+          throwIO ThreadKilled
         ["next-request"] -> BSC.hPutStr stdout "complete-next-request"
         _ -> fail "unexpected capture fixture request"
       pure ExitSuccess
@@ -78,12 +84,34 @@ check scratch = do
       hFlush input
       ackDone <- exact output 1
       unless (ackDone == BS.singleton 1) (fail "missing completed transaction acknowledgement")
+
+      BS.hPut input (BS.singleton 1)
+      hFlush input
+      ackNext <- exact output 1
+      unless (ackNext == BS.singleton 1) (fail "missing next transaction acknowledgement")
+      BS.hPut input (BS.singleton 1 <> frame "." <> put32 1 <> frame "throw")
+      hFlush input
+      ackAborted <- timeout 10000000 (exact output 1)
+      unless (ackAborted == Just (BS.singleton 1))
+        (fail "worker did not leave the failed transaction")
+
+      BS.hPut input (BS.singleton 1)
+      hFlush input
+      ackRecovered <- exact output 1
+      unless (ackRecovered == BS.singleton 1) (fail "worker did not accept a later transaction")
+      forRequest input output "next-request" $ \code out err ->
+        unless (code == 0 && out == "complete-next-request" && BS.null err)
+          (fail "capture was not restored after an async handler exception")
+      BS.hPut input (BS.singleton 0)
+      hFlush input
+      ackFinal <- exact output 1
+      unless (ackFinal == BS.singleton 1) (fail "missing recovered transaction acknowledgement")
       hClose input
       status <- waitForProcess child
       unless (status == ExitSuccess) (fail "worker failed to close cleanly")
       leftovers <- listDirectory scratch
       unless (null leftovers) (fail ("capture tempfiles retained: " ++ show leftovers))
-      putStrLn "worker response bounds: 1 passed"
+      putStrLn "worker response bounds and cleanup: 1 passed"
 
 forRequest :: Handle -> Handle -> String -> (Word32 -> BS.ByteString -> BS.ByteString -> IO ()) -> IO ()
 forRequest input output label assertion = do
