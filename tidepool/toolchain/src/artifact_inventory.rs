@@ -688,17 +688,38 @@ impl SelectedOwners {
         entry: &ArtifactEntry,
         entries: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
     ) -> Result<BTreeSet<(ArtifactId, ArtifactDependency)>, CompileError> {
-        if matches!(
-            entry.payload,
-            ArtifactPayload::Canonical(_) | ArtifactPayload::Original(_)
-        ) && entry.requirements.iter().collect::<BTreeSet<_>>()
-            != entry.interface_seals.keys().collect()
-        {
-            return Err(admission_failure(
-                ArtifactInventoryFailure::MetadataConflict {
-                    artifact: entry.descriptor.id,
-                },
-            ));
+        let canonical = match &entry.payload {
+            ArtifactPayload::Canonical(interface) => Some(interface),
+            ArtifactPayload::Original(product) => Some(
+                product
+                    .module_interface()
+                    .ok_or_else(|| failure("native canonical carrier missing"))?,
+            ),
+            ArtifactPayload::Interface(_, _) => None,
+        };
+        if let Some(canonical) = canonical {
+            let sealed = canonical
+                .requirements()
+                .iter()
+                .map(|((unit, module), seal)| {
+                    (
+                        ExactModuleIdentity {
+                            unit: unit.clone(),
+                            module: module.clone(),
+                        },
+                        *seal,
+                    )
+                })
+                .collect::<BTreeMap<_, _>>();
+            if entry.interface_seals != sealed
+                || entry.requirements.iter().collect::<BTreeSet<_>>() != sealed.keys().collect()
+            {
+                return Err(admission_failure(
+                    ArtifactInventoryFailure::MetadataConflict {
+                        artifact: entry.descriptor.id,
+                    },
+                ));
+            }
         }
         let resolve = |owner: &ExactModuleIdentity, dependency: &ArtifactDependency| {
             state
@@ -1980,10 +2001,15 @@ mod tests {
         assert!(matches!(inventory.admit(&empty, vec![dependent.clone()]),
             Err(CompileError::ArtifactInventory(error)) if matches!(error.failure, ArtifactInventoryFailure::MissingDependency { .. })));
         assert_eq!(inventory.node_count(), 1);
-        let mut unsealed = dependent.clone();
-        unsealed.interface_seals.clear();
-        assert!(inventory.admit(&ambient, vec![unsealed]).is_err());
-        assert_eq!(inventory.node_count(), 1);
+        for drop_requirements in [false, true] {
+            let mut unsealed = dependent.clone();
+            unsealed.interface_seals.clear();
+            if drop_requirements {
+                unsealed.requirements.clear();
+            }
+            assert!(inventory.admit(&ambient, vec![unsealed]).is_err());
+            assert_eq!(inventory.node_count(), 1);
+        }
         let selected = inventory.admit(&ambient, vec![dependent]).unwrap();
         assert_eq!(selected.descriptors().len(), 2);
     }
