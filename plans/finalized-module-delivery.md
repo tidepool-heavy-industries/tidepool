@@ -27,6 +27,15 @@ worker-tree trial. Source-ready candidates are not acceptance evidence.
   type-interface reader continues to reject defining Core.
 - Request helper selection is request-local and explicit: none, or actor reply
   helpers. Native signatures carry authority; printed types carry presentation.
+- GHC make consumes request-owned interface views. Executable demand attaches
+  the separately authenticated Core; type-only demand stages the skinny bytes.
+  Source identity and dependency admission remain unchanged. Preserve GHC's
+  loaded linkable when restoring the canonical skinny interface, and retain
+  views through deferred checking. Durable artifact paths never become make
+  scratch paths.
+- The NoLink compiler request boundary retires prior home execution symbols
+  through GHC's loader. Immutable interface/Core/bytecode caches remain separate
+  from loaded symbols, so reuse cannot execute a previous source version.
 
 ## Implementation owners
 
@@ -46,7 +55,8 @@ Do not multiply large resident compiler heaps to fill worker slots.
    replay, including cold source-less recovery and a TH execution counter.
    Cover private/sited names, constructor layouts, source/package/producer drift,
    and reclamation after the last capture is released.
-3. Rerun the four failing planned-cell/activation certificate regressions.
+3. Rerun the planned-cell/activation certificate regressions, including the
+   native-owner shadow survival case that replaces textual type reconstruction.
    Cover complete home-unit classification and no implicit lexical imports.
 4. Prove progress publication/observation refuses nominal mismatches before
    revision changes, wakes, or cross-session value import. Cover raw/Sited
