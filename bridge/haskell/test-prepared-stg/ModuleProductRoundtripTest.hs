@@ -37,7 +37,7 @@ import GHC.Unit.Module.ModIface (mi_extra_decls, mi_final_exts, mi_flag_hash, mi
 import GHC.Unit.Types (moduleName, unitString)
 import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
 import System.Directory (copyFile, createDirectoryIfMissing, getFileSize, renameFile)
-import System.FilePath ((</>))
+import System.FilePath ((</>), takeDirectory)
 import Numeric (showHex)
 import Tidepool.ExtractUtil (getLibdir)
 import Tidepool.ExecutionProjection
@@ -307,6 +307,7 @@ verifyOriginalProductCatalogue work = do
   let directory = work </> "original-product-catalogue"
       a = directory </> "ModuleProductCatalogA.hs"
       b = directory </> "ModuleProductCatalogB.hs"
+      replyInternal = directory </> "Tidepool" </> "Agent" </> "Reply" </> "Internal.hs"
       manifest = directory </> "candidate-template.cbor"
       seal = T.replicate 64 "a"
       candidateRow = encodeListLen 16
@@ -335,7 +336,9 @@ verifyOriginalProductCatalogue work = do
     _ -> ioError (userError "candidate template did not decode to one module")
   copyFile "test-prepared-stg/ModuleProductCatalogA.hs" a
   copyFile "test-prepared-stg/ModuleProductCatalogB.hs" b
-  result <- runPipelineSelected (PreparedProducts Nothing) b [directory, "lib"]
+  createDirectoryIfMissing True (takeDirectory replyInternal)
+  copyFile "test-prepared-stg/ReplyInternalFixture.hs" replyInternal
+  result <- runPipelineSelected (PreparedProducts Nothing) b [directory]
   moduleA <- case [prepared | prepared <- pprModules result
       , moduleNameString (moduleName (pmModule prepared)) == "ModuleProductCatalogA"] of
     [prepared] -> pure prepared
