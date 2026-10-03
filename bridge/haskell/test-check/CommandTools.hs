@@ -92,6 +92,8 @@ main = do
         cancelled <- Tools.cancelRetained (Tools.CancelCommand "cancel-job" Nothing (Just 1024))
         pure (immediate, yielded, background, accepted, repeated, output, fullOutput, cancelled)
       (immediate, yielded, background, accepted, repeated, output, fullOutput, cancelled) = results
+      (uncroppedPrefix, _) = runCommands $
+        Tools.execute (Tools.Execute "printf λ" Nothing Nothing Nothing Nothing Nothing Nothing (Just 32768) Nothing Nothing Nothing)
       noPresented = not (any isPresentation events)
       initialReferences =
         "session_id: job-immediate" `T.isInfixOf` Tools.presentation immediate
@@ -129,6 +131,11 @@ main = do
             && "stdout · bytes 0..9000 of 90000 · more available" `T.isInfixOf` Tools.presentation immediate
             && "read_output(session_id=\"job-immediate\", stream=\"Stdout\", offset=0)" `T.isInfixOf` Tools.presentation immediate
         _ -> False
+      uncroppedPrefixIncomplete = case Tools.facts uncroppedPrefix of
+        Tools.ObservedCommand {Tools.complete = False, Tools.payload_lines = 3000} ->
+          not ("[payload clipped" `T.isInfixOf` Tools.presentation uncroppedPrefix)
+            && "stream=\"Stdout\", offset=9000" `T.isInfixOf` Tools.presentation uncroppedPrefix
+        _ -> False
   check "named command routes never request host presentation" noPresented
   check "new command receipts introduce their session and binding" initialReferences
   check "later observation omits repeated session introduction" repeatedOmitsIntro
@@ -138,8 +145,9 @@ main = do
   check "finished partial read is distinct from complete stream EOF" (pageFacts && pageTextHasState && completePageFacts)
   check "accepted cancellation survives a failed follow-up await" acceptedCancelDespiteAwaitError
   check ("capped output from a larger finished stream remains incomplete with recovery: " <> T.unpack (Tools.presentation immediate)) largeResultIncomplete
+  check "a fetched prefix that fits the display budget is still incomplete" uncroppedPrefixIncomplete
   check "yield route detaches a still-running job" (Detached "job-immediate" `elem` events)
-  putStrLn "passed: command tool receipt behavior (10 checks)"
+  putStrLn "passed: command tool receipt behavior (11 checks)"
   where
     isPresentation Presented = True
     isPresentation _ = False
