@@ -116,6 +116,22 @@ This is a strict internal migration. Old three-field printed signatures are
 rejected. Deploy the Rust consumer and Haskell worker together and regenerate
 compiler-produced artifacts through their owning producers.
 
+## Original interface requirements
+
+`TPCERT` version 5 records each original module's interface-only dependencies as
+sorted exact unit/module/SHA-256 rows. Both GHC home usage forms contribute;
+self usages are excluded. Every seal must match a fresh same-transaction
+interface or the admitted exact interface closure. Authored import adjacency
+and executable group/global requirements remain separate evidence.
+
+The durable `TPHOMEOWNERS` version 4 preserves those interface seals and an
+explicit optional execution-source digest. Inventory admission checks the
+required interface bytes and compiler producer before adding retention edges.
+Native witness reuse retains this same proof; cold recovery must preserve every
+certified interface edge. Earlier product and Home certificate versions are
+rejected. Deploy the matched worker and frontend and regenerate artifacts
+through their owning producers.
+
 ## Regenerate fixtures
 
 After changing translation or serialization, regenerate through the canonical

@@ -113,6 +113,14 @@ pub(super) fn admit_authored_artifact_closure(
                 .requirements
                 .clone()
         };
+        requirements.extend(
+            crate::certified_products::original_interface_requirements(product)
+                .map_err(|error| {
+                    contract(format!("original interface requirements rejected: {error}"))
+                })?
+                .into_keys()
+                .map(|(unit, module)| ExactModuleIdentity { unit, module }),
+        );
         requirements.sort();
         requirements.dedup();
         let requirements = requirements

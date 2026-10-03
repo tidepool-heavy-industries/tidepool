@@ -77,6 +77,11 @@ pub enum ArtifactInventoryFailure {
     MetadataConflict { artifact: ArtifactId },
     #[error("original owner {owner:?} has differing artifacts")]
     OwnerConflict { owner: ExactModuleIdentity },
+    #[error("{dependent:?} requires another exact interface seal for {required:?}")]
+    InterfaceSealMismatch {
+        dependent: ExactModuleIdentity,
+        required: ExactModuleIdentity,
+    },
     #[error("{dependent:?} requires unavailable {required:?} through {dependency:?}")]
     MissingDependency {
         artifact: ArtifactId,
@@ -217,6 +222,7 @@ pub(crate) struct ArtifactEntry {
     pub descriptor: ArtifactDescriptor,
     pub payload: ArtifactPayload,
     pub requirements: Vec<ExactModuleIdentity>,
+    interface_seals: BTreeMap<ExactModuleIdentity, [u8; 32]>,
     pub native_requirements: Vec<(ExactModuleIdentity, ArtifactDependency)>,
     pub retained_packages: Vec<RetainedPackageDependency>,
 }
@@ -228,6 +234,13 @@ impl ArtifactEntry {
         requirements: Vec<ExactModuleIdentity>,
     ) -> Result<Self, CompileError> {
         let owner = product.owner();
+        let interface_seals = crate::certified_products::original_interface_requirements(&product)
+            .map_err(|error| failure(&format!("original interface requirements: {error}")))?
+            .into_iter()
+            .map(|((unit, module), seal)| (ExactModuleIdentity { unit, module }, seal))
+            .collect::<BTreeMap<_, _>>();
+        let mut requirements = requirements;
+        requirements.extend(interface_seals.keys().cloned());
         let native_requirements = crate::certified_products::original_native_requirements(&product)
             .map_err(|error| {
                 CompileError::ExtractFailed(format!(
@@ -250,6 +263,7 @@ impl ArtifactEntry {
             descriptor,
             payload: ArtifactPayload::Original(product),
             requirements,
+            interface_seals,
             native_requirements: native_requirements.artifact_edges,
             retained_packages: native_requirements.retained_packages,
         })
@@ -275,6 +289,7 @@ impl ArtifactEntry {
             descriptor,
             payload: ArtifactPayload::Interface(interface, kind),
             requirements,
+            interface_seals: BTreeMap::new(),
             native_requirements: Vec::new(),
             retained_packages: Vec::new(),
         }
@@ -331,6 +346,15 @@ pub(crate) fn restore_recovery_interface_dependencies(
         {
             return Err(failure(
                 "value interface dependencies differ from retained evidence",
+            ));
+        }
+        if !entry
+            .interface_seals
+            .keys()
+            .all(|owner| requirements.contains(owner))
+        {
+            return Err(failure(
+                "recovered original omits certified interface requirements",
             ));
         }
         entry.requirements = requirements.into_iter().collect();
@@ -502,6 +526,32 @@ impl ArtifactInventory {
                 return Err(admission_failure(ArtifactInventoryFailure::OwnerConflict {
                     owner: entry.descriptor.owner.clone(),
                 }));
+            }
+            for (owner, seal) in &entry.interface_seals {
+                state
+                    .admission_owner_lookups
+                    .fetch_add(1, Ordering::Relaxed);
+                let required = owners
+                    .get(owner)
+                    .map(|id| &additions[id].descriptor)
+                    .or_else(|| {
+                        state
+                            .owners
+                            .get(owner)
+                            .map(|id| &state.payloads[id].descriptor)
+                    });
+                if let Some(required) = required {
+                    if required.interface_sha256 != *seal
+                        || required.producer_sha256 != entry.descriptor.producer_sha256
+                    {
+                        return Err(admission_failure(
+                            ArtifactInventoryFailure::InterfaceSealMismatch {
+                                dependent: entry.descriptor.owner.clone(),
+                                required: owner.clone(),
+                            },
+                        ));
+                    }
+                }
             }
             for (owner, dependency) in entry
                 .requirements
@@ -1034,6 +1084,144 @@ mod tests {
         assert_eq!(selected.descriptors().len(), 2);
         assert_eq!(inventory.node_count(), 2);
         drop(selected);
+        assert_eq!(inventory.node_count(), 0);
+    }
+
+    fn interface_only_original(
+        name: &str,
+        required: &ArtifactDescriptor,
+        seal: [u8; 32],
+    ) -> ArtifactEntry {
+        let original = entry(name, &[]);
+        let ArtifactPayload::Original(product) = original.payload else {
+            unreachable!()
+        };
+        let mut wire: ciborium::value::Value =
+            ciborium::de::from_reader(product.certification_bytes()).unwrap();
+        wire.as_array_mut().unwrap()[7] =
+            ciborium::value::Value::Array(vec![ciborium::value::Value::Array(vec![
+                ciborium::value::Value::Text(required.owner.unit.clone()),
+                ciborium::value::Value::Text(required.owner.module.clone()),
+                ciborium::value::Value::Text(
+                    seal.iter().map(|byte| format!("{byte:02x}")).collect(),
+                ),
+            ])]);
+        let mut certification = Vec::new();
+        ciborium::ser::into_writer(&wire, &mut certification).unwrap();
+        let product = CertifiedRecoveryProduct::from_certification(
+            product.owner().clone(),
+            product.interface_bytes().to_vec(),
+            product.product_bytes().to_vec(),
+            product.package_imports_bytes().to_vec(),
+            certification,
+        );
+        ArtifactEntry::original(original.descriptor.producer_sha256, product, Vec::new()).unwrap()
+    }
+
+    #[test]
+    fn certified_interface_only_owner_survives_its_originating_reader_and_reclaims_with_original() {
+        let inventory = ArtifactInventory::default();
+        let empty = inventory.empty_view();
+        let private = entry("PrivateNominalOwner", &[]);
+        let dependent = interface_only_original(
+            "PublishedOriginal",
+            &private.descriptor,
+            private.descriptor.interface_sha256,
+        );
+        assert_eq!(
+            dependent.requirements,
+            vec![private.descriptor.owner.clone()]
+        );
+        assert!(dependent.native_requirements.is_empty());
+        let published = dependent.descriptor.id;
+        let originating_reader = inventory.admit(&empty, vec![private]).unwrap();
+        let issued = inventory
+            .admit(&originating_reader, vec![dependent])
+            .unwrap();
+        let retained = issued.select_roots(vec![published]).unwrap();
+        drop(issued);
+        drop(originating_reader);
+        assert_eq!(inventory.node_count(), 2);
+        assert_eq!(retained.descriptors().len(), 2);
+        assert_eq!(retained.interface_dependencies().len(), 1);
+        assert!(retained
+            .native_requirements_from_roots(&[published])
+            .unwrap()
+            .bindings
+            .is_empty());
+        drop(retained);
+        assert_eq!(inventory.node_count(), 0);
+    }
+
+    #[test]
+    fn recovery_cannot_drop_original_certified_interface_only_edges() {
+        let private = entry("PrivateNominalOwner", &[]);
+        let dependent = interface_only_original(
+            "PublishedOriginal",
+            &private.descriptor,
+            private.descriptor.interface_sha256,
+        );
+        let descriptors = vec![private.descriptor.clone(), dependent.descriptor.clone()];
+        let mut entries = vec![private, dependent];
+        assert!(restore_recovery_interface_dependencies(&mut entries, &descriptors, &[]).is_err());
+        let edges = vec![(
+            descriptors[1].id,
+            descriptors[0].id,
+            ArtifactDependency::Interface,
+        )];
+        restore_recovery_interface_dependencies(&mut entries, &descriptors, &edges).unwrap();
+        let inventory = ArtifactInventory::default();
+        let recovered = inventory.admit(&inventory.empty_view(), entries).unwrap();
+        assert_eq!(recovered.interface_dependencies(), edges);
+    }
+
+    #[test]
+    fn certified_interface_only_owner_rejects_wrong_unit_changed_interface_and_producer_atomically()
+    {
+        for wrong_unit in [false, true] {
+            let inventory = ArtifactInventory::default();
+            let empty = inventory.empty_view();
+            let private = entry("PrivateNominalOwner", &[]);
+            let mut evidence = private.descriptor.clone();
+            if wrong_unit {
+                evidence.owner.unit = "another-cohort".into();
+            }
+            let seal = if wrong_unit {
+                evidence.interface_sha256
+            } else {
+                [9; 32]
+            };
+            let dependent = interface_only_original("PublishedOriginal", &evidence, seal);
+            let failure = inventory
+                .admit(&empty, vec![private, dependent])
+                .unwrap_err();
+            let CompileError::ArtifactInventory(failure) = failure else {
+                panic!("expected inventory refusal")
+            };
+            let failure = &failure.failure;
+            assert!(if wrong_unit {
+                matches!(failure, ArtifactInventoryFailure::MissingDependency { .. })
+            } else {
+                matches!(
+                    failure,
+                    ArtifactInventoryFailure::InterfaceSealMismatch { .. }
+                )
+            });
+            assert_eq!(inventory.node_count(), 0);
+        }
+        let inventory = ArtifactInventory::default();
+        let empty = inventory.empty_view();
+        let mut private = entry("PrivateNominalOwner", &[]);
+        let dependent = interface_only_original(
+            "PublishedOriginal",
+            &private.descriptor,
+            private.descriptor.interface_sha256,
+        );
+        let ArtifactPayload::Original(product) = private.payload else {
+            unreachable!()
+        };
+        private = ArtifactEntry::original([8; 32], product, Vec::new()).unwrap();
+        assert!(inventory.admit(&empty, vec![private, dependent]).is_err());
         assert_eq!(inventory.node_count(), 0);
     }
 

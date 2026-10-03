@@ -26,10 +26,10 @@ import System.Exit (ExitCode(..), exitWith)
 import System.IO (hPutStrLn, stderr, stdin, stdout, hSetBinaryMode, hSetEncoding, utf8)
 import qualified System.Info as SystemInfo
 
-import GHC (ModuleName, moduleName, moduleNameString, moduleUnit, mkModuleName)
+import GHC (ModuleName, moduleName, moduleNameString, moduleUnit, mkModuleName, mkModule)
 import GHC.Driver.Env (HscEnv)
 import GHC.Unit.Module.ModIface (ModIface, mi_module)
-import GHC.Unit.Types (unitString)
+import GHC.Unit.Types (unitString, stringToUnit)
 import GHC.Core (Bind(..), CoreBind)
 import GHC.Core.DataCon (DataCon)
 import GHC.Core.TyCon (TyCon)
@@ -79,7 +79,7 @@ import Tidepool.PreparedRecovery
   , preparedRecoveryClosure, growPreparedRecovery )
 import Tidepool.ModuleCandidates (ModuleCandidate(..), candidateExecutionSources)
 import Tidepool.CompileInput (writeCompileInputProof)
-import Tidepool.CertifiedProducts (encodeCertifiedProducts, resolvePackageGlobal)
+import Tidepool.CertifiedProducts (encodeCertifiedProducts, resolvePackageGlobal, homeInterfaceUsageOwners)
 import Tidepool.OriginalProductRoots (requiredOriginalPackageGlobalsWithRetained)
 import Tidepool.ExactHydration (ExactIfaceArtifact(..), OriginalInterfaceArtifacts
   , newOriginalInterfaceArtifacts, originalInterfaceBytes)
@@ -128,7 +128,7 @@ import Tidepool.Session
   , preparedApplyEntryTargetName, preparedApplyValueTargetName
   , sessionHiPath )
 import Tidepool.FatIface
-  ( FatIfaceCache, newFatIfaceCache, evictFatIfaceMatching
+  ( FatIfaceCache, newFatIfaceCache, evictFatIfaceMatching, readExactInterface
   , OwnerInterfaceCache, newOwnerInterfaceCache, evictOwnerInterfaceMatching )
 import Tidepool.SessionArtifacts
   ( mkBoundBinders, parseValModule )
@@ -447,7 +447,7 @@ writeCertifiedProductsKeeping originalInterfaces outDir hscEnv prepared productC
       evidenceBytes <- BS.readFile (outDir </> "dependencies.json")
       pure (productBytes, evidenceBytes)
     timeDetailPhase timing "module_products" "certify" $ do
-      certified <- encodeCertifiedProducts hscEnv (pprAcceptedCandidates prepared)
+      certified <- encodeCertifiedProducts hscEnv (pprProductInterfaces prepared) (pprAcceptedCandidates prepared)
         (compilationScope <$> pprExactCompilation prepared)
         (map moduleProductInput freshProducts) [(paTarget artifact, paProgram artifact) | artifact <- preparedArtifacts]
         finalDependencies productBytes evidenceBytes
@@ -1536,7 +1536,7 @@ prepareOriginalCellDeclaration compiler caches args template outDir scope exact 
       productPath = directory </> "original.product.cbor"
   BS.writeFile productPath originalBytes
   requirements <- programInterfaceRequirements prepared unit reserved
-  lexicalRequirements <- programLexicalRequirements supportScope [] requirements
+  lexicalRequirements <- programSourceRequirements prepared unit reserved >>= programLexicalRequirements supportScope []
   let interfacePath = directory </> "original.hi"
       packagesPath = directory </> "original.hi.packages"
       interface = ExactIfaceArtifact unit reserved interfacePath (shaHex interfaceBytes) requirements
@@ -1602,7 +1602,7 @@ retainProgramProducts includes directory prepared certified target initial = do
           && shaHex productBytes == candidateProductSha256 candidate) $
         fail "accepted cached supporting original changed before retention"
       requirements <- programInterfaceRequirements prepared unit owner
-      lexicalRequirements <- programLexicalRequirements scope supportOwners requirements
+      lexicalRequirements <- programSourceRequirements prepared unit owner >>= programLexicalRequirements scope supportOwners
       let groups = map originalGroupFromCandidate (candidateGroups candidate)
           existingInterfaces = [(artifact,packages,sha)
             | (artifact,packages,sha) <- scopeInterfaces scope
@@ -1660,7 +1660,7 @@ retainProgramProducts includes directory prepared certified target initial = do
       roots <- maybe (fail "supporting original lacks package interface witness") pure
         (Map.lookup (mkModuleName owner) (pprPackageImports prepared))
       requirements <- programInterfaceRequirements prepared unit owner
-      lexicalRequirements <- programLexicalRequirements scope supportOwners requirements
+      lexicalRequirements <- programSourceRequirements prepared unit owner >>= programLexicalRequirements scope supportOwners
       let stem = directory </> "retained-original-" ++ show index
           interfacePath = stem ++ ".hi"
           packagesPath = stem ++ ".hi.packages"
@@ -1804,6 +1804,15 @@ programLexicalRequirements scope freshOwners requirements = do
 
 programInterfaceRequirements :: PreparedPipelineResult -> String -> String -> IO [(String, String)]
 programInterfaceRequirements prepared unit owner = do
+  source <- programSourceRequirements prepared unit owner
+  iface <- case Map.lookup (mkModuleName owner) (pprProductInterfaces prepared) of
+    Just value | unitString (moduleUnit (mi_module value)) == unit -> pure value
+    _ -> fmap fst <$> readExactInterface (prHscEnv (pprPipelineResult prepared))
+      (mkModule (stringToUnit unit) (mkModuleName owner)) >>= either (fail . show) pure
+  pure (nub (source ++ homeInterfaceUsageOwners iface))
+
+programSourceRequirements :: PreparedPipelineResult -> String -> String -> IO [(String, String)]
+programSourceRequirements prepared unit owner = do
   fresh <- either fail pure (selectedHomeRequirements (pprDependencies prepared) unit owner)
   let exact = [(importedUnit,name)
         | compilation <- maybe [] pure (pprExactCompilation prepared)

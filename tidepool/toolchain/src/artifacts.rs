@@ -4459,6 +4459,7 @@ mod module_product_tests {
             product_sha256: [2; 32],
             source_sha256: [3; 32],
             dependency_witness_sha256: [4; 32],
+            interface_requirements: BTreeMap::new(),
             groups: vec![],
         };
         ensure_ready_module_inventory(&[owner], &evidence).unwrap();

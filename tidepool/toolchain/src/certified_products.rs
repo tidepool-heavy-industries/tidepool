@@ -116,6 +116,7 @@ pub struct CertifiedModuleReceipt {
     pub source_sha256: [u8; 32],
     pub dependency_witness_sha256: [u8; 32],
     pub groups: Vec<AcceptedGroup>,
+    pub interface_requirements: BTreeMap<(String, String), [u8; 32]>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -276,6 +277,7 @@ pub(crate) struct OriginalNativeWitness {
     anchors: [Arc<[u8]>; 4],
     groups: Arc<[PendingCertifiedGroup]>,
     sources: Vec<CachedHomeOwner>,
+    interface_requirements: BTreeMap<(String, String), [u8; 32]>,
     packages: BTreeMap<(String, String), PackageInterfaceWitness>,
     native_requirements: CertifiedNativeRequirements,
 }
@@ -315,6 +317,7 @@ fn retain_original_native(
         anchors: product.original_byte_anchors().map(Arc::clone),
         groups: groups.into(),
         sources: witness.sources.into_values().collect(),
+        interface_requirements: witness.interface_requirements,
         packages: witness.packages,
         native_requirements,
     });
@@ -598,7 +601,7 @@ fn validate_global_witness(
     Ok(selected.owner.clone())
 }
 
-/// Decode the worker's bounded `TPCERT4` tuple with exact owner rows shared
+/// Decode the worker's bounded `TPCERT5` tuple with exact owner rows shared
 /// through an immutable dictionary. Older ownership formats are refused.
 /// Original groups and executable targets preserve their ordered witnesses.
 pub fn decode_receipt(bytes: &[u8]) -> CertResult<CertifiedReceipt> {
@@ -620,11 +623,11 @@ fn decode_receipt_value(value: &Value) -> CertResult<CertifiedReceipt> {
         return Err(CertificationError::Receipt("receipt header"));
     }
     let version = number(&header[1])?;
-    if version != 4 {
+    if version != 5 {
         return Err(CertificationError::UnsupportedVersion {
             format: CertificationFormat::ProductReceipt,
             found: version,
-            expected: 4,
+            expected: 5,
         });
     }
     if header.len() != 6 {
@@ -645,7 +648,7 @@ fn decode_receipt_value(value: &Value) -> CertResult<CertifiedReceipt> {
     let modules = modules
         .iter()
         .map(|module| {
-            let row = sized(module, 9)?;
+            let row = sized(module, 10)?;
             let origin = match string(&row[0])? {
                 "fresh" => ProductOrigin::Fresh,
                 "cached" => ProductOrigin::Cached,
@@ -676,6 +679,7 @@ fn decode_receipt_value(value: &Value) -> CertResult<CertifiedReceipt> {
                 source_sha256: digest(&row[4])?,
                 dependency_witness_sha256: digest(&row[7])?,
                 groups,
+                interface_requirements: decode_interface_requirements(&row[9])?,
             })
         })
         .collect::<CertResult<Vec<_>>>()?;
@@ -1153,7 +1157,65 @@ struct HomeCertification {
     execution_source_sha256: Option<[u8; 32]>,
     groups: Vec<(u32, Vec<SymbolIdentity>, Vec<AcceptedGlobal>)>,
     sources: BTreeMap<(String, String), CachedHomeOwner>,
+    interface_requirements: BTreeMap<(String, String), [u8; 32]>,
     packages: BTreeMap<(String, String), PackageInterfaceWitness>,
+}
+
+fn decode_interface_requirements(
+    value: &Value,
+) -> CertResult<BTreeMap<(String, String), [u8; 32]>> {
+    let rows = array(value)?;
+    if rows.len() > MODULE_LIMIT {
+        return Err(CertificationError::Receipt("interface owner count"));
+    }
+    let mut requirements = BTreeMap::new();
+    let mut previous = None;
+    for row in rows {
+        let row = sized(row, 3)?;
+        let key = (string(&row[0])?.to_owned(), string(&row[1])?.to_owned());
+        let seal = digest(&row[2])?;
+        if key.0.is_empty()
+            || key.1.is_empty()
+            || seal == [0; 32]
+            || string(&row[2])? != hex(&seal)
+            || previous.as_ref().is_some_and(|owner| owner >= &key)
+        {
+            return Err(CertificationError::Receipt(
+                "noncanonical interface owner seal",
+            ));
+        }
+        previous = Some(key.clone());
+        requirements.insert(key, seal);
+    }
+    Ok(requirements)
+}
+
+fn encode_interface_requirements(requirements: &BTreeMap<(String, String), [u8; 32]>) -> Value {
+    value_array(requirements.iter().map(|((unit, module), seal)| {
+        value_array([value_text(unit), value_text(module), value_text(hex(seal))])
+    }))
+}
+
+/// Interface-only closure is separate from executable global/group requirements.
+/// The inventory verifies these exact seals against the admitted owner graph.
+pub(crate) fn original_interface_requirements(
+    product: &crate::recovery_artifacts::CertifiedRecoveryProduct,
+) -> CertResult<BTreeMap<(String, String), [u8; 32]>> {
+    match product.original_native() {
+        Some(witness) if witness.matches_original(product) => {
+            Ok(witness.interface_requirements.clone())
+        }
+        Some(_) => Err(CertificationError::Mismatch(
+            "original native witness bytes",
+        )),
+        None => {
+            let witness = decode_home_witness(product.certification_bytes())?;
+            if &witness.owner != product.owner() {
+                return Err(CertificationError::Mismatch("interface requirements owner"));
+            }
+            Ok(witness.interface_requirements)
+        }
+    }
 }
 
 fn home_owner(value: &Value) -> CertResult<CachedHomeOwner> {
@@ -1291,14 +1353,7 @@ fn value_global(global: &AcceptedGlobal) -> Value {
 fn encode_home_witness(witness: &HomeCertification) -> CertResult<Vec<u8>> {
     let mut fields = vec![
         value_text("TPHOMEOWNERS"),
-        Value::Integer(
-            if witness.execution_source_sha256.is_some() {
-                3
-            } else {
-                2
-            }
-            .into(),
-        ),
+        Value::Integer(4.into()),
         value_home(&witness.owner),
         value_array(witness.groups.iter().map(|(ordinal, binders, globals)| {
             value_array([
@@ -1329,9 +1384,14 @@ fn encode_home_witness(witness: &HomeCertification) -> CertResult<Vec<u8>> {
                 .collect::<CertResult<Vec<_>>>()?,
         ),
     ];
-    if let Some(digest) = witness.execution_source_sha256 {
-        fields.push(value_text(hex(&digest)));
-    }
+    fields.push(
+        witness
+            .execution_source_sha256
+            .map_or(Value::Null, |digest| value_text(hex(&digest))),
+    );
+    fields.push(encode_interface_requirements(
+        &witness.interface_requirements,
+    ));
     let value = value_array(fields);
     let mut bytes = Vec::new();
     ciborium::ser::into_writer(&value, &mut bytes)
@@ -1362,15 +1422,15 @@ fn decode_home_witness(bytes: &[u8]) -> CertResult<HomeCertification> {
         return Err(CertificationError::Receipt("home witness header"));
     }
     let version = number(&row[1])?;
-    if version != 2 && version != 3 {
+    if version != 4 {
         return Err(CertificationError::UnsupportedVersion {
             format: CertificationFormat::HomeOwners,
             found: version,
-            expected: 3,
+            expected: 4,
         });
     }
-    let row = sized(&value, if version == 3 { 7 } else { 6 })?;
-    let execution_source_sha256 = if version == 3 {
+    let row = sized(&value, 8)?;
+    let execution_source_sha256 = if !matches!(&row[6], Value::Null) {
         let digest = digest(&row[6])?;
         if digest == [0; 32] {
             return Err(CertificationError::Receipt("empty execution source digest"));
@@ -1380,6 +1440,10 @@ fn decode_home_witness(bytes: &[u8]) -> CertResult<HomeCertification> {
         None
     };
     let owner = home_owner(&row[2])?;
+    let interface_requirements = decode_interface_requirements(&row[7])?;
+    if interface_requirements.contains_key(&(owner.unit.clone(), owner.module.clone())) {
+        return Err(CertificationError::Receipt("self interface requirement"));
+    }
     let groups = array(&row[3])?;
     if groups.len() > GROUP_LIMIT {
         return Err(CertificationError::Receipt("group count"));
@@ -1527,6 +1591,7 @@ fn decode_home_witness(bytes: &[u8]) -> CertResult<HomeCertification> {
         execution_source_sha256,
         groups,
         sources,
+        interface_requirements,
         packages,
     };
     if encode_home_witness(&witness)? != bytes {
@@ -1769,6 +1834,7 @@ pub fn encode_home_certification(
         owner,
         groups,
         packages,
+        &BTreeMap::new(),
         &mut PackageInterfaceValidation::default(),
     )
 }
@@ -1777,6 +1843,7 @@ fn encode_home_certification_with_validation(
     owner: &CachedHomeOwner,
     groups: &[PendingCertifiedGroup],
     packages: &BTreeMap<(String, String), PackageInterfaceWitness>,
+    interface_requirements: &BTreeMap<(String, String), [u8; 32]>,
     validation: &mut PackageInterfaceValidation,
 ) -> CertResult<Vec<u8>> {
     let mut witness = HomeCertification {
@@ -1784,6 +1851,7 @@ fn encode_home_certification_with_validation(
         execution_source_sha256: None,
         groups: Vec::new(),
         sources: BTreeMap::new(),
+        interface_requirements: interface_requirements.clone(),
         packages: BTreeMap::new(),
     };
     for group in groups {
@@ -3009,6 +3077,44 @@ pub(crate) fn certify_products(
         )
         .map_err(|_| CertificationError::Mismatch("fresh package import witness"))?;
     }
+    let mut admitted_interfaces = BTreeMap::new();
+    for module in &receipt.modules {
+        let key = (module.unit.clone(), module.module.clone());
+        if admitted_interfaces
+            .insert(key, module.skinny_iface_sha256)
+            .is_some()
+        {
+            return Err(CertificationError::Mismatch("duplicate interface owner"));
+        }
+    }
+    if let Some(admission) = exact {
+        for artifact in &admission.request.artifacts {
+            let key = (
+                artifact.interface.unit.clone(),
+                artifact.interface.module.clone(),
+            );
+            let seal = digest(&value_text(&artifact.interface.sha256))?;
+            if admitted_interfaces
+                .insert(key, seal)
+                .is_some_and(|previous| previous != seal)
+            {
+                return Err(CertificationError::Mismatch(
+                    "conflicting admitted interface owner",
+                ));
+            }
+        }
+    }
+    for module in &receipt.modules {
+        for (key, seal) in &module.interface_requirements {
+            if key == &(module.unit.clone(), module.module.clone())
+                || admitted_interfaces.get(key) != Some(seal)
+            {
+                return Err(CertificationError::Mismatch(
+                    "original interface owner closure",
+                ));
+            }
+        }
+    }
     let mut seen_modules = BTreeSet::new();
     let mut origin_counts = [[0_u64; 3]; 2];
     let mut fresh_modules = BTreeSet::new();
@@ -3426,10 +3532,18 @@ pub(crate) fn certify_products(
                     .filter(|group| group.owner() == &owner)
                     .cloned()
                     .collect();
+                let accepted = receipt
+                    .modules
+                    .iter()
+                    .find(|module| module.unit == owner.unit && module.module == owner.module)
+                    .ok_or(CertificationError::Mismatch(
+                        "original interface owner receipt",
+                    ))?;
                 let mut certification = encode_home_certification_with_validation(
                     &owner,
                     &original,
                     &receipt.packages,
+                    &accepted.interface_requirements,
                     &mut validation,
                 )?;
                 let execution_source = match origin {
@@ -5306,6 +5420,7 @@ mod tests {
             product_sha256: sha(bytes),
             source_sha256: sha(source.as_bytes()),
             dependency_witness_sha256: sha(&serde_json::to_vec(evidence).unwrap()),
+            interface_requirements: BTreeMap::new(),
             groups: vec![],
         }
     }
@@ -5389,6 +5504,7 @@ mod tests {
             product_sha256: owner.product_sha256,
             source_sha256: sha(source_text.as_bytes()),
             dependency_witness_sha256: sha(&serde_json::to_vec(&evidence).unwrap()),
+            interface_requirements: BTreeMap::new(),
             groups: vec![],
         };
         (
@@ -5794,16 +5910,14 @@ mod tests {
             .unwrap()
             .original_execution =
             Some(crate::module_candidates::OriginalCandidateExecution { graph });
-        assert!(
-            validate_exact_cached_closure(
-                Some(&candidates),
-                &receipt,
-                &context,
-                &current,
-                &imports
-            )
-            .is_err()
-        );
+        assert!(validate_exact_cached_closure(
+            Some(&candidates),
+            &receipt,
+            &context,
+            &current,
+            &imports
+        )
+        .is_err());
     }
 
     #[test]
@@ -6569,7 +6683,7 @@ mod tests {
             Err(CertificationError::UnsupportedVersion {
                 format: CertificationFormat::ProductReceipt,
                 found: 2,
-                expected: 4
+                expected: 5
             })
         ));
         let mut trailing = encoded;
@@ -6793,6 +6907,7 @@ mod tests {
                 };
                 rewrite(&mut group[1]);
             }
+            module.push(value_array([]));
         }
         let Value::Array(targets) = &mut header[3] else {
             panic!("targets")
@@ -6803,7 +6918,7 @@ mod tests {
             };
             rewrite(&mut target[1]);
         }
-        header[1] = Value::Integer(4.into());
+        header[1] = Value::Integer(5.into());
         header.push(value_array(indexed.into_values().map(|(_, row)| row)));
         compact
     }
@@ -7107,8 +7222,81 @@ mod tests {
     }
 
     #[test]
+    fn original_interface_seals_survive_cold_codec_and_native_witness_without_executable_sources() {
+        let owner = inherited_owner("Original");
+        let encoded = encode_home_certification(&owner, &[], &BTreeMap::new()).unwrap();
+        let mut witness = decode_home_witness(&encoded).unwrap();
+        let requirements =
+            BTreeMap::from([(("old-cohort".into(), "PrivateNominalOwner".into()), [7; 32])]);
+        witness.interface_requirements = requirements.clone();
+        let encoded = encode_home_witness(&witness).unwrap();
+        let cold = decode_home_witness(&encoded).unwrap();
+        assert_eq!(cold.interface_requirements, requirements);
+        assert!(cold.sources.is_empty());
+        assert!(native_requirements_from_witness(&cold)
+            .artifact_edges
+            .is_empty());
+        let product = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+            owner.clone(),
+            vec![1],
+            vec![2],
+            vec![],
+            encoded,
+        );
+        assert_eq!(
+            original_interface_requirements(&product).unwrap(),
+            requirements
+        );
+        let retained = retain_original_native(product, vec![], cold).unwrap();
+        assert_eq!(
+            original_interface_requirements(&retained).unwrap(),
+            requirements
+        );
+        assert!(original_native_requirements(&retained)
+            .unwrap()
+            .artifact_edges
+            .is_empty());
+        let mut wrong_owner = witness;
+        wrong_owner.owner.module = "AnotherOriginal".into();
+        let wrong = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+            owner,
+            vec![1],
+            vec![2],
+            vec![],
+            encode_home_witness(&wrong_owner).unwrap(),
+        );
+        assert!(original_interface_requirements(&wrong).is_err());
+    }
+
+    #[test]
+    fn original_interface_seal_codec_refuses_missing_duplicate_unsorted_and_self_owners() {
+        let owner = inherited_owner("Original");
+        let current = encode_home_certification(&owner, &[], &BTreeMap::new()).unwrap();
+        let value: Value = ciborium::de::from_reader(current.as_slice()).unwrap();
+        let seal = |unit, module| {
+            value_array([
+                value_text(unit),
+                value_text(module),
+                value_text(hex(&[7; 32])),
+            ])
+        };
+        for entries in [
+            vec![seal("unit", "A"), seal("unit", "A")],
+            vec![seal("unit", "Z"), seal("unit", "A")],
+            vec![seal(&owner.unit, &owner.module)],
+        ] {
+            let mut changed = value.clone();
+            changed.as_array_mut().unwrap()[7] = value_array(entries);
+            assert!(decode_home_witness(&receipt_bytes(&changed)).is_err());
+        }
+        let mut missing = value;
+        missing.as_array_mut().unwrap().pop();
+        assert!(decode_home_witness(&receipt_bytes(&missing)).is_err());
+    }
+
+    #[test]
     fn certificate_versions_refuse_legacy_ownership_without_reinterpretation() {
-        for version in [1, 2, 3] {
+        for version in [1, 2, 3, 4] {
             let mut receipt = dictionary_receipt(&empty_legacy_receipt());
             let Value::Array(rows) = &mut receipt else {
                 unreachable!()
@@ -7118,7 +7306,7 @@ mod tests {
                 decode_receipt(&receipt_bytes(&receipt)),
                 Err(CertificationError::UnsupportedVersion {
                     format: CertificationFormat::ProductReceipt,
-                    expected: 4,
+                    expected: 5,
                     ..
                 })
             ));
@@ -7129,14 +7317,16 @@ mod tests {
         let Value::Array(rows) = &mut value else {
             unreachable!()
         };
-        rows[1] = Value::Integer(1.into());
-        assert!(matches!(
-            decode_home_witness(&receipt_bytes(&value)),
-            Err(CertificationError::UnsupportedVersion {
-                format: CertificationFormat::HomeOwners,
-                found: 1,
-                expected: 3
-            })
-        ));
+        for version in [1, 2, 3] {
+            rows[1] = Value::Integer(version.into());
+            assert!(matches!(
+                decode_home_witness(&receipt_bytes(&Value::Array(rows.clone()))),
+                Err(CertificationError::UnsupportedVersion {
+                    format: CertificationFormat::HomeOwners,
+                    expected: 4,
+                    ..
+                })
+            ));
+        }
     }
 }
