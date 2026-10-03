@@ -1984,6 +1984,11 @@ fn start_workbench<B: KernelBehavior>(
         state.pending_tasks.is_empty() || can_admit_deferred_workbench(state, &invocation.request),
         "workbench admission requires an independent owned-task lane"
     );
+    let control = if invocation.display_expansion.is_some() {
+        Some(control.unwrap_or_else(crate::WorkbenchExecutionControl::untracked))
+    } else {
+        control
+    };
     let Some(generation) = state.next_task_generation.checked_add(1) else {
         let failure = Err(KernelInvocationFailure::Failed {
             actor: state.context.identity,

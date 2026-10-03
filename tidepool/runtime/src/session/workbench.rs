@@ -286,10 +286,21 @@ pub enum WorkbenchFailureLayer {
     Observation,
 }
 
+/// Actor-issued display identity and currently available expansion keys.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkbenchDisplayOutput {
+    pub identity: (i64, i64, i64),
+    pub text: String,
+    pub expansions: Vec<(i64, String)>,
+}
+
 /// One effect boundary observed while evaluating an input unit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkbenchOperationReceipt {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<WorkbenchDisplayOutput>,
     pub id: WorkbenchOperationId,
     /// Open effect rows make the operation vocabulary extensible. This name
     /// is diagnostic metadata only and never drives behavior.
@@ -1741,6 +1752,7 @@ mod tests {
                 warnings: Vec::new(),
                 installed_bindings: vec!["answer".into()],
                 operations: vec![WorkbenchOperationReceipt {
+                    display: None,
                     id: WorkbenchOperationId {
                         execution,
                         input_unit_index: 0,

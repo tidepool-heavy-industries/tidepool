@@ -382,7 +382,7 @@ impl ActorWorkbenchSource {
             workbench_imports: SourceImports::from_specs([
                 "qualified Data.Set as Set",
                 "qualified Tidepool.Inspection as TidepoolInspection",
-                "Tidepool.Inspection (print, cellDisplay)",
+                "Tidepool.Inspection (display, expand, expansions)",
                 "qualified Tidepool.Effects.Core",
             ]),
             spec: None,
@@ -1840,6 +1840,24 @@ pub(crate) enum ResidentActorBoundary {
         continuation: ResidentHole,
         text: String,
     },
+    DisplayPublish {
+        continuation: ResidentHole,
+        output: tidepool_runtime::session::WorkbenchDisplayOutput,
+        callback: RootCustody,
+    },
+    DisplayExpand {
+        continuation: ResidentHole,
+        identity: (i64, i64, i64),
+        key: i64,
+    },
+    DisplayPublished {
+        continuation: ResidentHole,
+        identity: (i64, i64, i64),
+    },
+    DisplayExpanded {
+        continuation: ResidentHole,
+        keys: Vec<(i64, String)>,
+    },
     Sleep {
         continuation: ResidentHole,
         duration: Duration,
@@ -2081,6 +2099,8 @@ impl ResidentActorBoundary {
             Self::Context { .. } => "context transformation",
             Self::Command { .. } => "command job",
             Self::Console { .. } => "print",
+            Self::DisplayPublish { .. } | Self::DisplayPublished { .. } => "display",
+            Self::DisplayExpand { .. } | Self::DisplayExpanded { .. } => "expand",
             Self::NotificationSend { .. } => "notify",
             Self::NotificationPoll { .. } => "pollNotification",
             Self::ActorContext(_) => "actorContext",
@@ -4046,6 +4066,59 @@ where
             drop(dependencies);
             publication
         })
+    }
+
+    /// Drive a display callback using its actor-issued input. No source is compiled.
+    pub(crate) async fn expand_display(
+        &self,
+        context: crate::ActorSessionContext,
+        callback: Arc<RootCustody>,
+        identity: (i64, i64, i64),
+        key: i64,
+    ) -> Result<
+        (
+            tidepool_runtime::session::WorkbenchDisplayOutput,
+            RootCustody,
+        ),
+        ResidentActorWorkbenchError,
+    > {
+        let mut context = context;
+        context.effect_policy = tidepool_effect::EffectRunPolicy::SuspendAll;
+        self.access.with_machine(context, move |session, context, _| {
+            let scope = context.placement.resource_scope;
+            let mut outcome = session.run_rooted_entry_borrowed("display_expansion", &callback, 0, scope, None)?;
+            let mut input_received = false;
+            let mut published = None;
+            loop {
+                match outcome {
+                    ResidentOutcome::Completed { .. } if input_received => return published.ok_or_else(|| ResidentActorWorkbenchError::ActorProtocol("display callback completed without publishing detail".into())),
+                    ResidentOutcome::Suspended { hole, request, .. } => {
+                        let next = (|| {
+                            match ResidentRequest::decode(&request, session.data_con_table())? {
+                                ResidentRequest::Console(crate::generated::console::ConsoleReq::DisplayExpansionInputWith) if !input_received => {
+                                    input_received = true;
+                                    Ok(session.resume(hole.clone(), (identity, key)))
+                                }
+                                ResidentRequest::Console(crate::generated::console::ConsoleReq::DisplayWith((issued, text, expansions), _)) if input_received && published.is_none() && issued == identity => {
+                                    let callback = session.live_payload_handle_owned_by(hole.cont_id(), scope)?.ok_or_else(|| ResidentActorWorkbenchError::ActorProtocol("display update has no retained callback".into()))?;
+                                    published = Some((tidepool_runtime::session::WorkbenchDisplayOutput { identity, text, expansions }, callback));
+                                    Ok(session.resume(hole.clone(), identity))
+                                }
+                                _ => Err(ResidentActorWorkbenchError::ActorProtocol("display callback crossed an unauthorized boundary".into())),
+                            }
+                        })();
+                        match next {
+                            Ok(next) => outcome = next?,
+                            Err(error) => {
+                                let _ = session.abort(hole.cont_id(), "display expansion rejected".into());
+                                return Err(error);
+                            }
+                        }
+                    }
+                    _ => return Err(ResidentActorWorkbenchError::ActorProtocol("display callback did not follow its input/publication protocol".into())),
+                }
+            }
+        }).await
     }
 
     /// Apply the retained handler with invocation data. No source compiler is involved.
@@ -8689,6 +8762,17 @@ where
                         },
                     )),
                     ResidentRequest::Console(crate::generated::console::ConsoleReq::Print(text)) => Ok(ResidentActorBoundary::Console { continuation: hole, text }),
+                    ResidentRequest::Console(crate::generated::console::ConsoleReq::DisplayWith((identity, text, expansions), _)) => {
+                        let callback = session.live_payload_handle_owned_by(hole.cont_id(), actor_realm)?
+                            .ok_or_else(|| ResidentActorWorkbenchError::ActorProtocol("display has no retained expansion callback".into()))?;
+                        Ok(ResidentActorBoundary::DisplayPublish {
+                            continuation: hole,
+                            output: tidepool_runtime::session::WorkbenchDisplayOutput { identity, text, expansions },
+                            callback,
+                        })
+                    }
+                    ResidentRequest::Console(crate::generated::console::ConsoleReq::DisplayExpandWith((identity, key))) => Ok(ResidentActorBoundary::DisplayExpand { continuation: hole, identity, key }),
+                    ResidentRequest::Console(crate::generated::console::ConsoleReq::DisplayExpansionInputWith) => Err(ResidentActorWorkbenchError::ActorProtocol("display expansion input requires a retained callback invocation".into())),
                     ResidentRequest::Commands(request) => Ok(ResidentActorBoundary::Command { continuation: hole, request }),
                     ResidentRequest::AgentControl(
                         crate::generated::agent_control::AgentControlReq::AgentControlStopWith(

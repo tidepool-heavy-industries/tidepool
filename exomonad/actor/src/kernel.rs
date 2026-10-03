@@ -223,6 +223,7 @@ pub type KernelWorkbenchReply = Result<WorkbenchResponse, KernelInvocationFailur
 /// Actor-owned authority beside the transport-neutral workbench request.
 /// The runtime request and its exact execution journal never contain a handler.
 pub struct ActorWorkbenchInvocation {
+    pub(crate) display_expansion: Option<((i64, i64, i64), i64)>,
     pub request: WorkbenchRequest,
     pub(crate) installed_tools: Option<crate::resident_workbench::InstalledToolLease>,
     pub(crate) hosted_checkpoint_capture:
@@ -234,6 +235,7 @@ pub struct ActorWorkbenchInvocation {
 impl ActorWorkbenchInvocation {
     pub fn unbound(request: WorkbenchRequest) -> Self {
         Self {
+            display_expansion: None,
             request,
             installed_tools: None,
             hosted_checkpoint_capture: None,
@@ -242,12 +244,21 @@ impl ActorWorkbenchInvocation {
         }
     }
 
+    /// Execute an existing display callback through the actor's serialized mailbox.
+    /// Identity and key are validated against the actor's retained display slots.
+    pub fn for_display_expansion(identity: (i64, i64, i64), key: i64) -> Self {
+        let mut invocation = Self::unbound(WorkbenchRequest::from_cell_input(""));
+        invocation.display_expansion = Some((identity, key));
+        invocation
+    }
+
     pub(crate) fn issued(
         request: WorkbenchRequest,
         installed_tools: Option<crate::resident_workbench::InstalledToolLease>,
         hosted_checkpoint_capture: Option<std::sync::Arc<dyn crate::HostedCheckpointCapture>>,
     ) -> Self {
         Self {
+            display_expansion: None,
             request,
             installed_tools,
             hosted_checkpoint_capture,
@@ -1108,6 +1119,7 @@ mod tests {
                 warnings: Vec::new(),
                 installed_bindings: vec![format!("private{index}")],
                 operations: vec![WorkbenchOperationReceipt {
+                    display: None,
                     id: WorkbenchOperationId {
                         execution: tidepool_runtime::session::WorkbenchExecutionId::from_digest(
                             [index as u8; 16],

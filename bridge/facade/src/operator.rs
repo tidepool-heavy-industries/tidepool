@@ -135,6 +135,10 @@ impl OperatorService {
             .route("/host/artifacts", post(artifact))
             .route("/v1/sessions/{session}", get(inspect))
             .route("/v1/sessions/{session}/submit", post(submit))
+            .route(
+                "/v1/sessions/{session}/display/expand",
+                post(expand_display),
+            )
             .route("/v1/sessions/{session}/actors", get(graph))
             .fallback(|| async {
                 error(StatusCode::NOT_FOUND, "session_not_found", "Unknown route")
@@ -418,6 +422,39 @@ async fn graph(
         .into_response()
 }
 
+async fn expand_display(
+    State(state): State<AttachmentState>,
+    RoutePath(session): RoutePath<String>,
+    body: Body,
+) -> Response {
+    let bytes = match to_bytes(body, MAX_REQUEST_BYTES).await {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "request_too_large",
+                "Display expansion request exceeds the request budget",
+            )
+        }
+    };
+    let input: DisplayExpansionRequest = match serde_json::from_slice(&bytes) {
+        Ok(input) => input,
+        Err(error_value) => {
+            return error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                error_value.to_string(),
+            )
+        }
+    };
+    submit_invocation(
+        state,
+        session,
+        exomonad_actor::ActorWorkbenchInvocation::for_display_expansion(input.identity, input.key),
+    )
+    .await
+}
+
 async fn submit(
     State(state): State<AttachmentState>,
     RoutePath(session): RoutePath<String>,
@@ -438,6 +475,19 @@ async fn submit(
         Err(e) => return error(StatusCode::BAD_REQUEST, "invalid_request", e.to_string()),
     };
     let request = WorkbenchRequest::from_cell_input(&input.source);
+    submit_invocation(
+        state,
+        session,
+        exomonad_actor::ActorWorkbenchInvocation::unbound(request),
+    )
+    .await
+}
+
+async fn submit_invocation(
+    state: AttachmentState,
+    session: String,
+    invocation: exomonad_actor::ActorWorkbenchInvocation,
+) -> Response {
     let sessions = state.sessions.lock().await;
     let Some(LocalOperator::Available(actor)) = sessions
         .get(&session)
@@ -453,7 +503,7 @@ async fn submit(
     if actor
         .address()
         .send_message(KernelMessage::Workbench {
-            invocation: exomonad_actor::ActorWorkbenchInvocation::unbound(request),
+            invocation,
             control: None,
             reply: reply.into(),
         })
@@ -681,6 +731,7 @@ mod artifact_tests {
                     warnings: Vec::new(),
                     installed_bindings: vec![format!("private{index}")],
                     operations: vec![WorkbenchOperationReceipt {
+                        display: None,
                         id: WorkbenchOperationId {
                             execution: WorkbenchExecutionId::from_digest([index as u8; 16]),
                             input_unit_index: index,

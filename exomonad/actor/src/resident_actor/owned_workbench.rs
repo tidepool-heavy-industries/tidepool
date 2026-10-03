@@ -405,6 +405,7 @@ impl<H, O> OwnedExecution<H, O> {
                 self.state.cursor.index,
                 stamp.ordinal,
                 &stamp.effect,
+                stamp.display,
                 stamp.started.elapsed(),
                 WorkbenchOperationDisposition::Unknown,
             );
@@ -1475,6 +1476,7 @@ where
                                             resume,
                                         ));
                                         let pending = ParkedWorkbenchEffect {
+                                            display: pending.display,
                                             wait: OwnedWorkbenchWait::Prepared(operation),
                                             ordinal: pending.ordinal,
                                             effect: pending.effect,
@@ -1528,6 +1530,7 @@ where
                                     resume,
                                 ));
                                 let pending = ParkedWorkbenchEffect {
+                                    display: pending.display,
                                     wait: OwnedWorkbenchWait::Prepared(operation),
                                     ordinal: pending.ordinal,
                                     effect: pending.effect,
@@ -1564,6 +1567,7 @@ where
                             resume,
                         ));
                         let pending = ParkedWorkbenchEffect {
+                            display: pending.display,
                             wait: OwnedWorkbenchWait::Prepared(operation),
                             ordinal: pending.ordinal,
                             effect: pending.effect,
@@ -1702,6 +1706,7 @@ where
                                     owned.state.cursor.index,
                                     pending.ordinal,
                                     &pending.effect,
+                                    pending.display.clone(),
                                     pending.started.elapsed(),
                                     WorkbenchOperationDisposition::Unknown,
                                 );
@@ -1781,6 +1786,7 @@ where
                     owned.state.cursor.index,
                     pending.ordinal,
                     &pending.effect,
+                    pending.display.clone(),
                     pending.started.elapsed(),
                     scoped_operation_disposition(pending.success_disposition, result.disposition),
                 );

@@ -8,6 +8,13 @@ pub struct ArtifactRequest {
     pub relative_path: PathBuf,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DisplayExpansionRequest {
+    pub identity: (i64, i64, i64),
+    pub key: i64,
+}
+
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 pub const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;

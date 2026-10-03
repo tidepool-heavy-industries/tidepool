@@ -2341,6 +2341,7 @@ pub(crate) mod tests {
                 failure_layer: None,
                 operations: (0..1000)
                     .map(|effect_ordinal| WorkbenchOperationReceipt {
+                        display: None,
                         id: WorkbenchOperationId {
                             execution: WorkbenchExecutionId::from_digest([1; 16]),
                             input_unit_index: 1,

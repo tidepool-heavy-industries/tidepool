@@ -640,6 +640,15 @@ pub trait ResidentToolEndpoint: Send + Sync {
     }
     fn instructions(&self) -> Option<&str>;
     fn dispatch_boxed(&self, invocation: ToolInvocation) -> ResidentToolFuture;
+    /// Expand an actor-issued display without compiling Haskell source.
+    fn expand_display_boxed(&self, _identity: (i64, i64, i64), _key: i64) -> ResidentToolFuture {
+        Box::pin(async {
+            Err(ResidentToolError::Unavailable(
+                "display expansion is unsupported".into(),
+            ))
+        })
+    }
+
     /// Dispatch with an exact hosted checkpoint capability. Endpoints that do
     /// not carry this authority fail closed; absence keeps the ordinary path.
     fn dispatch_with_checkpoint_boxed(
@@ -814,6 +823,31 @@ pub(crate) fn execution_id(
 }
 
 impl ResidentToolClient {
+    pub(crate) async fn expand_display(
+        &self,
+        identity: (i64, i64, i64),
+        key: i64,
+    ) -> Result<serde_json::Value, ResidentToolError> {
+        let (reply, receive) = oneshot::channel();
+        self.actor
+            .admit_mailbox(crate::KernelMessage::Workbench {
+                invocation: crate::ActorWorkbenchInvocation::for_display_expansion(identity, key),
+                control: Some(crate::WorkbenchExecutionControl::untracked()),
+                reply: reply.into(),
+            })
+            .map_err(|failure| hosted_admission_failure(self.actor.identity(), failure))
+            .map_err(ResidentToolError::Invocation)?;
+        let reply = receive
+            .await
+            .map_err(|_| {
+                ResidentToolError::Unavailable(
+                    "display actor stopped before expansion settled".into(),
+                )
+            })?
+            .map_err(ResidentToolError::Invocation)?;
+        serde_json::to_value(reply).map_err(ResidentToolError::Encoding)
+    }
+
     pub(crate) async fn seal(&self) -> Result<crate::HostedWorkSeal, ResidentToolError> {
         self.actor
             .seal_hosted_work()
@@ -1190,6 +1224,11 @@ impl ResidentToolEndpoint for ResidentToolPolicy {
 
     fn instructions(&self) -> Option<&str> {
         self.instructions()
+    }
+
+    fn expand_display_boxed(&self, identity: (i64, i64, i64), key: i64) -> ResidentToolFuture {
+        let client = self.client.clone();
+        Box::pin(async move { client.expand_display(identity, key).await })
     }
 
     fn dispatch_boxed(&self, invocation: ToolInvocation) -> ResidentToolFuture {

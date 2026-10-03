@@ -57,10 +57,11 @@ use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_runtime::session::{
     truncate_preview_at_line, CellSourceSpan, OutputSink, ParsedBlock, ResidentHole,
     ResidentOutcome, ResidentSession, RootCustody, TurnKind, WorkbenchCellItemKind,
-    WorkbenchCellSourceItem, WorkbenchExecutionId, WorkbenchFailureLayer, WorkbenchFailurePoint,
-    WorkbenchItemReceipt, WorkbenchItemStatus, WorkbenchOperationDisposition, WorkbenchOperationId,
-    WorkbenchOperationReceipt, WorkbenchPublicationOutcome, WorkbenchRequest, WorkbenchResponse,
-    WorkbenchRunStatus, WorkbenchTerminalTransfer,
+    WorkbenchCellSourceItem, WorkbenchDisplayOutput, WorkbenchExecutionId, WorkbenchFailureLayer,
+    WorkbenchFailurePoint, WorkbenchItemReceipt, WorkbenchItemStatus,
+    WorkbenchOperationDisposition, WorkbenchOperationId, WorkbenchOperationReceipt,
+    WorkbenchPublicationOutcome, WorkbenchRequest, WorkbenchResponse, WorkbenchRunStatus,
+    WorkbenchTerminalTransfer,
 };
 use tokio::sync::mpsc;
 use tracing::Instrument;
@@ -318,6 +319,7 @@ fn retain_retired_metadata<H, O>(
     environment.fork_groups.retire_actor(actor);
     if let Some(record) = environment.actors.lock().get_mut(&actor) {
         record.terminal = Some(terminal.clone());
+        record.displays.lock().slots.clear();
     }
 }
 
@@ -377,6 +379,148 @@ struct ResidentActorRecord {
     runtime_observation: crate::ActorRuntimeObservationHandle,
     /// Scheduler ownership can differ from retained logical parentage after recovery.
     scheduler_root: bool,
+    displays: Arc<Mutex<ActorDisplays>>,
+}
+
+#[derive(Default)]
+struct ActorDisplays {
+    next_slot: i64,
+    slots: std::collections::HashMap<i64, DisplaySlot>,
+}
+
+struct DisplaySlot {
+    callback: Arc<RootCustody>,
+    keys: Vec<(i64, String)>,
+    expanding: bool,
+}
+
+impl ActorDisplays {
+    fn validate_identity(
+        actor: ActorRef,
+        identity: (i64, i64, i64),
+    ) -> Result<i64, ResidentActorWorkbenchError> {
+        let owner = actor_address(actor);
+        if (identity.0, identity.1) != owner || identity.2 <= 0 {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "display belongs to a different actor incarnation or has an invalid slot".into(),
+            ));
+        }
+        Ok(identity.2)
+    }
+
+    fn publish(
+        &mut self,
+        actor: ActorRef,
+        mut output: WorkbenchDisplayOutput,
+        callback: RootCustody,
+        update: bool,
+    ) -> Result<WorkbenchDisplayOutput, ResidentActorWorkbenchError> {
+        let mut seen = std::collections::HashSet::new();
+        if output
+            .expansions
+            .iter()
+            .any(|(key, _)| *key <= 0 || !seen.insert(*key))
+        {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "display contains invalid or duplicate expansion keys".into(),
+            ));
+        }
+        if update == (output.identity == (0, 0, 0)) {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "display publication does not match its invocation authority".into(),
+            ));
+        }
+        let slot = if output.identity == (0, 0, 0) {
+            self.next_slot = self.next_slot.checked_add(1).ok_or_else(|| {
+                ResidentActorWorkbenchError::ActorProtocol("display slot space exhausted".into())
+            })?;
+            let owner = actor_address(actor);
+            output.identity = (owner.0, owner.1, self.next_slot);
+            self.next_slot
+        } else {
+            let slot = Self::validate_identity(actor, output.identity)?;
+            if !self.slots.get(&slot).is_some_and(|slot| slot.expanding) {
+                return Err(ResidentActorWorkbenchError::ActorProtocol(
+                    "display slot is unavailable".into(),
+                ));
+            }
+            slot
+        };
+        self.slots.insert(
+            slot,
+            DisplaySlot {
+                callback: Arc::new(callback),
+                keys: output.expansions.clone(),
+                expanding: false,
+            },
+        );
+        Ok(output)
+    }
+
+    fn select(
+        &mut self,
+        actor: ActorRef,
+        identity: (i64, i64, i64),
+        key: i64,
+    ) -> Result<Arc<RootCustody>, ResidentActorWorkbenchError> {
+        let slot = Self::validate_identity(actor, identity)?;
+        let selected = self
+            .slots
+            .get_mut(&slot)
+            .filter(|slot| {
+                !slot.expanding && slot.keys.iter().any(|(available, _)| *available == key)
+            })
+            .ok_or_else(|| {
+                ResidentActorWorkbenchError::ActorProtocol(
+                    "display expansion key is unavailable".into(),
+                )
+            })?;
+        selected.expanding = true;
+        Ok(selected.callback.clone())
+    }
+}
+
+/// Dropping a cancelled or failed expansion releases its reservation. Retirement
+/// removes the slot first; the guard never recreates an actor-owned resource.
+struct DisplayExpansionLease {
+    displays: Arc<Mutex<ActorDisplays>>,
+    slot: i64,
+}
+
+impl Drop for DisplayExpansionLease {
+    fn drop(&mut self) {
+        if let Some(slot) = self.displays.lock().slots.get_mut(&self.slot) {
+            slot.expanding = false;
+        }
+    }
+}
+
+#[cfg(test)]
+mod display_tests {
+    use super::*;
+
+    #[test]
+    fn display_expansion_validates_exact_incarnation_and_issued_slot() {
+        let actor = ActorRef::first(crate::ActorId(37));
+        let owner = actor_address(actor);
+        let mut displays = ActorDisplays::default();
+        assert_eq!(
+            ActorDisplays::validate_identity(actor, (owner.0, owner.1, 1)).unwrap(),
+            1
+        );
+        for identity in [
+            (owner.0 + 1, owner.1, 1),
+            (owner.0, owner.1 + 1, 1),
+            (owner.0, owner.1, 0),
+            (owner.0, owner.1, -1),
+        ] {
+            assert!(ActorDisplays::validate_identity(actor, identity).is_err());
+        }
+        assert!(
+            displays.select(actor, (owner.0, owner.1, 1), 1).is_err(),
+            "a guessed slot must not authorize expansion"
+        );
+    }
 }
 
 fn settle_root_public_owner_record(
@@ -1140,6 +1284,7 @@ fn record_workbench_operation(
     input_unit_index: usize,
     effect_ordinal: usize,
     effect: &str,
+    display: Option<WorkbenchDisplayOutput>,
     elapsed: std::time::Duration,
     disposition: WorkbenchOperationDisposition,
 ) {
@@ -1167,6 +1312,7 @@ fn record_workbench_operation(
         return;
     };
     operations.push(WorkbenchOperationReceipt {
+        display,
         id: WorkbenchOperationId {
             execution: execution.clone(),
             input_unit_index,
@@ -1687,6 +1833,7 @@ impl Default for WorkbenchCursor {
 }
 
 struct WorkbenchEffectStamp {
+    display: Option<WorkbenchDisplayOutput>,
     success_disposition: WorkbenchOperationDisposition,
     ordinal: usize,
     effect: String,
@@ -1694,6 +1841,7 @@ struct WorkbenchEffectStamp {
 }
 
 struct ParkedWorkbenchEffect {
+    display: Option<WorkbenchDisplayOutput>,
     success_disposition: WorkbenchOperationDisposition,
     wait: OwnedWorkbenchWait,
     ordinal: usize,
@@ -4271,6 +4419,21 @@ where
                         .await
                 })
             }
+            ResidentActorBoundary::DisplayPublished {
+                continuation,
+                identity,
+            } => Box::pin(async move {
+                environment
+                    .runner
+                    .resume_value(context.clone(), continuation, identity)
+                    .await
+            }),
+            ResidentActorBoundary::DisplayExpanded { continuation, keys } => Box::pin(async move {
+                environment
+                    .runner
+                    .resume_value(context.clone(), continuation, keys)
+                    .await
+            }),
             ResidentActorBoundary::Console { continuation, text } => Box::pin(async move {
                 tracing::debug!(actor = ?context.actor, output = %crate::workbench_display::bounded_output(&text, 8192), "actor console");
                 environment
@@ -4606,6 +4769,121 @@ where
         Ok(operation)
     }
 
+    fn publish_display(
+        &self,
+        context: &ActorSessionContext,
+        output: WorkbenchDisplayOutput,
+        callback: RootCustody,
+    ) -> Result<WorkbenchDisplayOutput, ResidentActorWorkbenchError> {
+        let records = self.environment.actors.lock();
+        let record = records
+            .get(&context.actor)
+            .filter(|record| {
+                record.terminal.is_none() && record.descriptor.placement() == context.placement
+            })
+            .ok_or_else(|| {
+                ResidentActorWorkbenchError::ActorProtocol("display actor is unavailable".into())
+            })?;
+        let published = record
+            .displays
+            .lock()
+            .publish(context.actor, output, callback, false);
+        published
+    }
+
+    async fn expand_display(
+        &self,
+        context: &ActorSessionContext,
+        identity: (i64, i64, i64),
+        key: i64,
+    ) -> Result<WorkbenchDisplayOutput, ResidentActorWorkbenchError> {
+        let (callback, lease) = {
+            let records = self.environment.actors.lock();
+            let record = records
+                .get(&context.actor)
+                .filter(|record| {
+                    record.terminal.is_none() && record.descriptor.placement() == context.placement
+                })
+                .ok_or_else(|| {
+                    ResidentActorWorkbenchError::ActorProtocol(
+                        "display actor is unavailable".into(),
+                    )
+                })?;
+            let callback = record
+                .displays
+                .lock()
+                .select(context.actor, identity, key)?;
+            (
+                callback,
+                DisplayExpansionLease {
+                    displays: record.displays.clone(),
+                    slot: identity.2,
+                },
+            )
+        };
+        let (output, callback) = self
+            .environment
+            .runner
+            .expand_display(context.clone(), callback, identity, key)
+            .await?;
+        let records = self.environment.actors.lock();
+        let record = records
+            .get(&context.actor)
+            .filter(|record| {
+                record.terminal.is_none() && record.descriptor.placement() == context.placement
+            })
+            .ok_or_else(|| {
+                ResidentActorWorkbenchError::ActorProtocol(
+                    "display actor retired during expansion".into(),
+                )
+            })?;
+        let output = record
+            .displays
+            .lock()
+            .publish(context.actor, output, callback, true);
+        drop(lease);
+        output
+    }
+
+    async fn prepare_display_boundary(
+        &self,
+        context: &ActorSessionContext,
+        boundary: ResidentActorBoundary,
+    ) -> Result<(ResidentActorBoundary, Option<WorkbenchDisplayOutput>), ResidentActorWorkbenchError>
+    {
+        match boundary {
+            ResidentActorBoundary::DisplayPublish {
+                continuation,
+                output,
+                callback,
+            } => {
+                let output = self.publish_display(context, output, callback)?;
+                Ok((
+                    ResidentActorBoundary::DisplayPublished {
+                        continuation,
+                        identity: output.identity,
+                    },
+                    Some(output),
+                ))
+            }
+            ResidentActorBoundary::DisplayExpand {
+                continuation,
+                identity,
+                key,
+            } => {
+                let output = self.expand_display(context, identity, key).await?;
+                Ok((
+                    ResidentActorBoundary::DisplayExpanded {
+                        continuation,
+                        keys: output.expansions.clone(),
+                    },
+                    Some(output),
+                ))
+            }
+            boundary => Ok((boundary, None)),
+        }
+    }
+
     async fn resolve_effect(
         &mut self,
         kernel: &KernelContext,
@@ -4615,6 +4893,10 @@ where
         boundary: ResidentActorBoundary,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         let boundary = prepare_execution_effect(context, &effect_owner, boundary);
+        let (boundary, display) = self.prepare_display_boundary(context, boundary).await?;
+        if let Some(display) = display {
+            tracing::debug!(actor = ?context.actor, identity = ?display.identity, output = %display.text, "actor display");
+        }
         let boundary =
             match self.prepare_independent_effect(kernel, context, &effect_owner, boundary) {
                 Ok(operation) => return operation.await,
@@ -7771,6 +8053,7 @@ where
                     // `elapsed_ms` once the match below settles it.
                     let effect_started = std::time::Instant::now();
                     current.inflight_effect = Some(WorkbenchEffectStamp {
+                        display: None,
                         success_disposition,
                         ordinal,
                         effect: effect.clone(),
@@ -7791,6 +8074,24 @@ where
                         &CurrentEffectOwner::Workbench(execution_state),
                         boundary,
                     );
+                    let (boundary, display) =
+                        self.prepare_display_boundary(context, boundary).await?;
+                    current
+                        .inflight_effect
+                        .as_mut()
+                        .expect("captured display retains its effect stamp")
+                        .display = display.clone();
+                    if let Some(display) = &display {
+                        let rendered = crate::workbench_display::bounded_output(
+                            &display.text,
+                            (*unit.display_remaining).min(32768),
+                        );
+                        let rendered =
+                            next_fragment.present_output(&rendered, unit.display_remaining);
+                        if !rendered.is_empty() {
+                            unit.command_output.push(rendered);
+                        }
+                    }
                     if let ResidentActorBoundary::Console { text, .. } = &boundary {
                         let rendered = crate::workbench_display::bounded_output(
                             text,
@@ -7915,6 +8216,7 @@ where
                                         .arm_sleep();
                                 }
                                 current.parked_effect = Some(ParkedWorkbenchEffect {
+                                    display: display.clone(),
                                     success_disposition: current
                                         .inflight_effect
                                         .as_ref()
@@ -7946,6 +8248,7 @@ where
                                     unit.input_unit_index,
                                     ordinal,
                                     &effect,
+                                    display.clone(),
                                     effect_started.elapsed(),
                                     WorkbenchOperationDisposition::Committed,
                                 );
@@ -7966,6 +8269,7 @@ where
                                     unit.input_unit_index,
                                     ordinal,
                                     &effect,
+                                    display.clone(),
                                     effect_started.elapsed(),
                                     WorkbenchOperationDisposition::Rejected,
                                 );
@@ -8002,6 +8306,7 @@ where
                                     unit.input_unit_index,
                                     ordinal,
                                     &effect,
+                                    display.clone(),
                                     effect_started.elapsed(),
                                     WorkbenchOperationDisposition::Rejected,
                                 );
@@ -8029,6 +8334,7 @@ where
                                         unit.input_unit_index,
                                         ordinal,
                                         &effect,
+                                        display.clone(),
                                         effect_started.elapsed(),
                                         WorkbenchOperationDisposition::Committed,
                                     );
@@ -8046,6 +8352,7 @@ where
                                         unit.input_unit_index,
                                         ordinal,
                                         &effect,
+                                        display.clone(),
                                         effect_started.elapsed(),
                                         WorkbenchOperationDisposition::Rejected,
                                     );
@@ -8080,6 +8387,7 @@ where
                                         unit.input_unit_index,
                                         ordinal,
                                         &effect,
+                                        display.clone(),
                                         effect_started.elapsed(),
                                         WorkbenchOperationDisposition::Rejected,
                                     );
@@ -8186,6 +8494,7 @@ where
                                         unit.input_unit_index,
                                         ordinal,
                                         &effect,
+                                        display.clone(),
                                         effect_started.elapsed(),
                                         scoped_operation_disposition(
                                             success_disposition,
@@ -8204,6 +8513,7 @@ where
                                         unit.input_unit_index,
                                         ordinal,
                                         &effect,
+                                        display.clone(),
                                         effect_started.elapsed(),
                                         scoped_operation_disposition(
                                             success_disposition,
@@ -10292,6 +10602,7 @@ where
                     terminal: None,
                     runtime_observation: self.runtime_observation.clone(),
                     scheduler_root: kernel.supervisor_identity().is_none(),
+                    displays: Default::default(),
                 },
             );
             if self.root_startup.is_some() {
@@ -11036,6 +11347,12 @@ where
         invocation: crate::ActorWorkbenchInvocation,
         control: Option<Arc<crate::WorkbenchExecutionControl>>,
     ) -> crate::WorkbenchDispatch<Self> {
+        if invocation.display_expansion.is_some() {
+            return crate::WorkbenchDispatch::Sequential {
+                invocation,
+                control,
+            };
+        }
         self.dispatch_owned_workbench(kernel, invocation, control)
     }
 
@@ -11049,6 +11366,61 @@ where
         Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>,
     > {
         Box::pin(async move {
+            if let Some((identity, key)) = invocation.display_expansion {
+                let context = self.context(kernel.identity());
+                if control
+                    .as_ref()
+                    .is_some_and(|control| control.cancellation_requested())
+                {
+                    return Err(KernelInvocationFailure::Rejected {
+                        actor: context.actor,
+                        detail: "display actor is unavailable or invocation was cancelled".into(),
+                    });
+                }
+                let expansion = self.expand_display(&context, identity, key);
+                let output = match control {
+                    Some(control) => {
+                        crate::resident_workbench::with_execution_control(control, expansion).await
+                    }
+                    None => expansion.await,
+                }
+                .map_err(|error| KernelInvocationFailure::Rejected {
+                    actor: context.actor,
+                    detail: error.to_string(),
+                })?;
+                let operation = WorkbenchOperationReceipt {
+                    id: WorkbenchOperationId {
+                        execution: WorkbenchExecutionId::from_digest(
+                            *uuid::Uuid::new_v4().as_bytes(),
+                        ),
+                        input_unit_index: 0,
+                        effect_ordinal: 0,
+                    },
+                    effect: "expand".into(),
+                    disposition: WorkbenchOperationDisposition::Committed,
+                    display: Some(output.clone()),
+                };
+                return Ok(KernelStep::Continue(workbench_response(
+                    WorkbenchRunStatus::Committed,
+                    vec![WorkbenchItemReceipt {
+                        index: 0,
+                        kind: None,
+                        span: None,
+                        source_items: Vec::new(),
+                        status: WorkbenchItemStatus::Committed,
+                        output: output.text,
+                        diagnostics: Vec::new(),
+                        failure_layer: None,
+                        warnings: Vec::new(),
+                        installed_bindings: Vec::new(),
+                        operations: vec![operation],
+                        terminal_transfer: None,
+                    }],
+                    1,
+                    1,
+                    None,
+                )));
+            }
             let admitted = self.preflight_workbench(kernel.identity(), invocation, control)?;
             let WorkbenchAdmission {
                 context,
@@ -14226,6 +14598,7 @@ mod tests {
                     warnings: Vec::new(),
                     installed_bindings: Vec::new(),
                     operations: vec![WorkbenchOperationReceipt {
+                        display: None,
                         id: WorkbenchOperationId {
                             execution: WorkbenchExecutionId::from_digest([3; 16]),
                             input_unit_index: 0,
@@ -15029,6 +15402,7 @@ mod tests {
             1,
             crate::ResidentActorWorkbenchError::ActorProtocol("publish failed".into()),
             vec![WorkbenchOperationReceipt {
+                display: None,
                 id: WorkbenchOperationId {
                     execution,
                     input_unit_index: 0,
@@ -15067,6 +15441,7 @@ mod tests {
                 0,
                 ordinal,
                 boundary.operation(),
+                None,
                 std::time::Duration::ZERO,
                 super::scoped_operation_disposition(
                     boundary.success_disposition(),

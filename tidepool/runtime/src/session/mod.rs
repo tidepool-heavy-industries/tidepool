@@ -126,11 +126,11 @@ pub use workbench::{
     normalize_workbench_input, resident_cell_check_template, resident_workbench_templates,
     run_block_sequence, BlockExecution, BlockSequenceOutcome, CommittedBlock, MetaCommandLine,
     ParsedBlock, SourceOrderCollision, WorkSequence, WorkbenchBinding, WorkbenchBindingKind,
-    WorkbenchCellItemKind, WorkbenchCellSourceItem, WorkbenchDiscovery, WorkbenchExecutionId,
-    WorkbenchFailureLayer, WorkbenchFailurePoint, WorkbenchForkBoundary, WorkbenchItem,
-    WorkbenchItemReceipt, WorkbenchItemStatus, WorkbenchOperationDisposition, WorkbenchOperationId,
-    WorkbenchOperationReceipt, WorkbenchPublicationOutcome, WorkbenchRequest, WorkbenchResponse,
-    WorkbenchRunStatus, WorkbenchTerminalTransfer,
+    WorkbenchCellItemKind, WorkbenchCellSourceItem, WorkbenchDiscovery, WorkbenchDisplayOutput,
+    WorkbenchExecutionId, WorkbenchFailureLayer, WorkbenchFailurePoint, WorkbenchForkBoundary,
+    WorkbenchItem, WorkbenchItemReceipt, WorkbenchItemStatus, WorkbenchOperationDisposition,
+    WorkbenchOperationId, WorkbenchOperationReceipt, WorkbenchPublicationOutcome, WorkbenchRequest,
+    WorkbenchResponse, WorkbenchRunStatus, WorkbenchTerminalTransfer,
 };
 
 pub use turn::{
