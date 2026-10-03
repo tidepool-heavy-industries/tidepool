@@ -224,7 +224,9 @@ preview budget depth next label tree
         | budget <= 5 || T.length (T.take (budget - 5) name) >= budget - 5 ->
             constructorPrefix name fields
         | otherwise -> children (name <> " {") "}" fields
-      Sequence opening closing items -> sequenceChildren opening closing (0 :: Int) items
+      Sequence opening closing items
+        | budget <= T.length (T.take budget opening) + T.length (T.take budget closing) + 2 -> ordinary tree
+        | otherwise -> sequenceChildren opening closing (0 :: Int) items
       _ -> ordinary tree
   where
     constructorPrefix name fields =

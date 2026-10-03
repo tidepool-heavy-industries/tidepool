@@ -32,6 +32,7 @@ main = do
   collapsedFieldsRemainLazy
   infiniteSequencesHaveBoundedFrontiers
   continuedFrontierLabelsStayBounded
+  smallSequenceGrantsAdvanceTheirActualSuffix
   unsupportedFieldsRemainOpaque
   structuralGenericUsesFieldNames
   recursiveGenericDisplayIsProductive
@@ -188,6 +189,27 @@ infiniteSequencesHaveBoundedFrontiers = do
   let state = newDisplayState 1024 (Sequence "[" "]" (repeat (TextLeaf "1")))
   assertEqual "bounded sequence preview" "[1, 1, 1, 1, 1, 1, 1, 1…]" (displayStateText state)
   assertEqual "one retained sequence remainder" 1 (length (displayStateKeys state))
+
+smallSequenceGrantsAdvanceTheirActualSuffix :: IO ()
+smallSequenceGrantsAdvanceTheirActualSuffix = do
+  tiny <- collect 1 8 (newDisplayState 1 (Sequence "[" "]" [TextLeaf "1"]))
+  assertEqual "a tiny sequence grant advances rather than repeating its opening" "[1]" tiny
+  let opening = Text.replicate 100 "o"
+      closing = Text.replicate 100 "c"
+  wide <- collect 8 40 (newDisplayState 8 (Sequence opening closing [TextLeaf "1"]))
+  assertEqual "oversized sequence framing retains its actual suffix" (opening <> "1" <> closing) wide
+  let lazyState = newDisplayState 1 (Sequence "[" "]" undefined)
+  assertEqual "an opening-only page does not inspect the child spine" "[" (displayStateText lazyState)
+  where
+    collect budget remaining state
+      | remaining <= (0 :: Int) = fail "sequence framing did not make progress"
+      | otherwise = case displayStateKeys state of
+          [] -> pure (displayStateText state)
+          [(key, _)] -> do
+            detail <- maybe (fail "sequence cursor was lost") pure (expandDisplayState budget key state)
+            suffix <- collect budget (remaining - 1) detail
+            pure (displayStateText state <> suffix)
+          _ -> fail "exceptional sequence framing acquired unrelated keys"
 
 continuedFrontierLabelsStayBounded :: IO ()
 continuedFrontierLabelsStayBounded = do
