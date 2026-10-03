@@ -1630,7 +1630,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
              , iface <- scopeValueInterfaces scope])
     acceptedCandidates <- case candidateManifest of
       Nothing -> pure Map.empty
-      Just manifest -> certifyModuleCandidates selectedExact
+      Just manifest -> certifyModuleCandidates (compilerProducerFor variant) selectedExact
         sourceFreeOwners manifest modGraphRaw path
     -- 'ghc_setup' phase (TIDEPOOL_TIMING): 'guessTarget'/'setTargets' + this
     -- 'depanal' call, nothing else, on EVERY caller — a lone compile also
@@ -2892,9 +2892,9 @@ data CandidateAdmissionReason
   deriving (Eq, Ord, Show)
 
 certifyModuleCandidates
-  :: Maybe ExactScope -> Set.Set ModuleName -> FilePath -> ModuleGraph -> FilePath
+  :: Maybe String -> Maybe ExactScope -> Set.Set ModuleName -> FilePath -> ModuleGraph -> FilePath
   -> Ghc (Map.Map ModuleName AdmittedSourceCandidate)
-certifyModuleCandidates exactScope sourceFreeOwners manifest graph targetPath = do
+certifyModuleCandidates expectedProducer exactScope sourceFreeOwners manifest graph targetPath = do
   timing <- liftIO readTimingEnabled
   observations <- liftIO (newIORef Map.empty)
   let record owner reason detail = when timing $ liftIO $
@@ -3138,14 +3138,14 @@ certifyModuleCandidates exactScope sourceFreeOwners manifest graph targetPath = 
                 candidatePackageImportsSha256 candidate)
                 | tuple@(candidate,_,_,_) <- Map.elems admitted]
                 ++ maybe [] scopeInterfaces exactScope
-          proofsResult <- case exactScope of
+          proofsResult <- case expectedProducer of
             Nothing -> do
               recordAdmitted CandidateProducerUnavailable Nothing
               pure (Left "candidate admission requires the owning compiler producer")
-            Just scope -> liftIO $ fmap (fmap Map.fromList . sequence) $
+            Just producer -> liftIO $ fmap (fmap Map.fromList . sequence) $
               forM (Map.toAscList admitted) $ \(name,(candidate,_,_,_)) ->
                 fmap (fmap (\proof -> (name,proof)))
-                  (validateCandidateCanonicalInterfaceProof (scopeProducerSha256 scope) canonicalRows candidate)
+                  (validateCandidateCanonicalInterfaceProof producer canonicalRows candidate)
           case proofsResult of
             Left reason -> recordAdmitted CandidateCanonicalProof (Just reason) >> pure Map.empty
             Right proofs -> do
