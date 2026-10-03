@@ -53,9 +53,9 @@ quasiQuoteOccurrenceChecksWith initial = do
     case unP Parser.parseModule state of
       PFailed _ -> fail (label ++ ": parser rejected fixture")
       POk _ parsed -> do
-        let actual = quasiQuoteOccurrences parsed
+        let actual = quasiQuoteOccurrences flags parsed
         unless (actual == referenceOccurrences (unLoc parsed)) $
-          fail (label ++ ": pruned traversal changed occurrence order or multiplicity")
+          fail (label ++ ": shared traversal changed occurrence order or multiplicity")
         unless (map (showSDocUnsafe . ppr) actual == expected) $
           fail (label ++ ": unexpected quasiquote inventory")) cases
   putStrLn "quasiquote occurrences: 4 parsed AST equivalence cases passed"

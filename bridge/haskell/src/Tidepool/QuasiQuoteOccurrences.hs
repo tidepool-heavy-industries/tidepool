@@ -1,28 +1,20 @@
 -- | Parsed quasiquote syntax, before the renamer expands it.
 module Tidepool.QuasiQuoteOccurrences (quasiQuoteOccurrences) where
 
-import Data.Data (Data, cast, gmapQ)
-import Data.Maybe (isJust)
+import Data.Generics (everything, mkQ)
 import GHC (GhcPs, HsUntypedSplice(..), ParsedSource, unLoc)
-import GHC.Data.FastString (FastString)
+import GHC.Driver.Session (DynFlags, xopt)
+import GHC.LanguageExtensions.Type qualified as LangExt
 import GHC.Types.Name.Reader (RdrName)
-import GHC.Types.SrcLoc (RealSrcSpan, SrcSpan)
 
--- | Preserve parser traversal order and duplicates. Literal text and source
--- locations cannot contain parsed splice nodes; a quasiquote's body is also
--- text, not a nested parsed Haskell expression. Ordinary TH splice bodies
--- remain traversable, so their nested quasiquotes are still discovered.
-quasiQuoteOccurrences :: ParsedSource -> [RdrName]
-quasiQuoteOccurrences = collect . unLoc
+-- | Preserve parser traversal order and duplicates. A successful parse with
+-- quasiquote syntax disabled cannot contain a quasiquote node. Enabled syntax
+-- retains the full generic walk, including ordinary TH splice children.
+quasiQuoteOccurrences :: DynFlags -> ParsedSource -> [RdrName]
+quasiQuoteOccurrences flags
+  | not (xopt LangExt.QuasiQuotes flags) = const []
+  | otherwise = everything (++) (mkQ [] selected) . unLoc
   where
-    collect :: Data value => value -> [RdrName]
-    collect value = case cast value :: Maybe (HsUntypedSplice GhcPs) of
-      Just (HsQuasiQuote _ name _) -> [name]
-      _ | opaque value -> []
-        | otherwise -> concat (gmapQ collect value)
-
-    opaque :: Data value => value -> Bool
-    opaque value = isJust (cast value :: Maybe String)
-      || isJust (cast value :: Maybe FastString)
-      || isJust (cast value :: Maybe SrcSpan)
-      || isJust (cast value :: Maybe RealSrcSpan)
+    selected :: HsUntypedSplice GhcPs -> [RdrName]
+    selected (HsQuasiQuote _ name _) = [name]
+    selected _ = []

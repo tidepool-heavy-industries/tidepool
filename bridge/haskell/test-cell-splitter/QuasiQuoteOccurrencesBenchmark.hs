@@ -10,7 +10,7 @@ import GHC.Clock (getMonotonicTimeNSec)
 import GHC.Data.FastString (mkFastString)
 import GHC.Data.StringBuffer (stringToStringBuffer)
 import GHC.Driver.Config.Parser (initParserOpts)
-import GHC.Driver.Session (parseDynamicFilePragma, xopt_set)
+import GHC.Driver.Session (DynFlags, parseDynamicFilePragma, xopt_set)
 import GHC.LanguageExtensions (Extension(..))
 import GHC.Parser qualified as Parser
 import GHC.Parser.Header (getOptions)
@@ -35,7 +35,7 @@ oldCollector = everything (++) (mkQ [] selected) . unLoc
     selected _ = []
 
 {-# NOINLINE newCollector #-}
-newCollector :: ParsedSource -> [RdrName]
+newCollector :: DynFlags -> ParsedSource -> [RdrName]
 newCollector = quasiQuoteOccurrences
 
 -- Parsing, source IO, AST warming and exact inventory comparison are excluded
@@ -50,7 +50,8 @@ quasiQuoteOccurrenceBenchmark size files = do
   unless enabled (fail "quasiquote benchmark requires +RTS -T")
   real <- mapM (\path -> (path,) <$> readFile path) selectedFiles
   let inputs =
-        [ ("small-no-quotes", "module Small where\nvalue = 1\n")
+        [ ("syntax-disabled", "{-# LANGUAGE NoQuasiQuotes #-}\nmodule Disabled where\nvalue = \"[textQ|literal|]\"\n-- [commentQ|comment|]\n")
+        , ("small-no-quotes", "module Small where\nvalue = 1\n")
         , ("large-literal", "module Large where\nvalue = \"" ++ replicate 100000 'x' ++ "\"\n")
         ] ++ real
   libdir <- getLibdir
@@ -68,7 +69,7 @@ quasiQuoteOccurrenceBenchmark size files = do
         POk _ ast -> pure ast
       liftIO $ do
         let reference = oldCollector parsed
-            candidate = newCollector parsed
+            candidate = newCollector flags parsed
         unless (reference == candidate) (fail (label ++ ": occurrence inventories differ"))
         count <- evaluate (length reference)
         inputChars <- evaluate (length source)
@@ -76,7 +77,7 @@ quasiQuoteOccurrenceBenchmark size files = do
         -- Alternate order to expose run-order sensitivity rather than quietly
         -- giving one collector every first measurement.
         forM_ [1 :: Int .. 4] $ \repetition -> do
-          let modes = [("old", oldCollector), ("pruned", newCollector)]
+          let modes = [("old", oldCollector), ("shared", newCollector flags)]
           forM_ (if odd repetition then modes else reverse modes) $ \(mode, collect) -> do
             performGC
             before <- getRTSStats
