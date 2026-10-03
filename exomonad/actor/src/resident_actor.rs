@@ -277,6 +277,14 @@ impl DisplayPublication {
     /// waiter cannot lose a committed page's callback authority.
     pub fn answer(&self, answer: DisplayPublicationOutcome) -> bool {
         let mut outcome = self.outcome.lock();
+        // A refusal from a later attempt cannot establish that an earlier
+        // uncertain attempt did not commit. Serialize this fence with timeout.
+        let answer = match answer {
+            DisplayPublicationOutcome::Refused(detail) if self.was_unconfirmed() => {
+                DisplayPublicationOutcome::Unconfirmed(detail)
+            }
+            answer => answer,
+        };
         if matches!(
             &*outcome,
             Some(DisplayPublicationOutcome::Published(_) | DisplayPublicationOutcome::Refused(_))
@@ -826,11 +834,26 @@ impl ActorDisplays {
 struct DisplayPublicationLease {
     displays: Arc<Mutex<ActorDisplays>>,
     slot: i64,
+    request: Arc<DisplayPublication>,
 }
 
 impl Drop for DisplayPublicationLease {
     fn drop(&mut self) {
-        let _ = self.displays.lock().reconcile(self.slot);
+        let mut displays = self.displays.lock();
+        if !displays
+            .slots
+            .get(&self.slot)
+            .and_then(|slot| slot.pending.as_ref())
+            .is_some_and(|pending| Arc::ptr_eq(&pending.request, &self.request))
+        {
+            return;
+        }
+        // Cancellation can drop the send or acknowledgment wait before its
+        // timeout runs. Retain retryable uncertainty on this exact emission.
+        self.request.answer(DisplayPublicationOutcome::Unconfirmed(
+            "display execution stopped before host settlement".into(),
+        ));
+        let _ = displays.reconcile(self.slot);
     }
 }
 
@@ -843,6 +866,7 @@ async fn complete_display_publication<H, O>(
     let _lease = DisplayPublicationLease {
         displays: displays.clone(),
         slot: request.page.identity.2,
+        request: request.clone(),
     };
     let admitted = async {
         if environment
@@ -927,6 +951,152 @@ mod display_tests {
         }
     }
 
+    #[tokio::test]
+    async fn display_timeout_fences_stale_host_refusal_until_confirmed_commit() {
+        for retry_before_refusal in [false, true] {
+            let actor = ActorRef::first(crate::ActorId(37));
+            let displays = Arc::new(Mutex::new(ActorDisplays::default()));
+            let (request, answer) = displays
+                .lock()
+                .stage(actor, terminal_page(), None, false, 8192, None)
+                .unwrap();
+            let slot = request.page.identity.2;
+            let entered = Arc::new(std::sync::Barrier::new(2));
+            let release = Arc::new(std::sync::Barrier::new(2));
+            let host = std::thread::spawn({
+                let request = request.clone();
+                let entered = entered.clone();
+                let release = release.clone();
+                move || {
+                    // Freeze the adapter's stale observation before the wait expires.
+                    assert!(!request.was_unconfirmed());
+                    entered.wait();
+                    release.wait();
+                    request.answer(DisplayPublicationOutcome::Refused(
+                        "late host authority refusal".into(),
+                    ))
+                }
+            });
+            entered.wait();
+            assert!(tokio::time::timeout(Duration::ZERO, answer).await.is_err());
+            assert!(request.answer(DisplayPublicationOutcome::Unconfirmed(
+                "host output acknowledgement timed out".into(),
+            )));
+            let retry = retry_before_refusal.then(|| request.retry_channel().unwrap());
+            release.wait();
+            assert_eq!(host.join().unwrap(), retry_before_refusal);
+            if let Some(retry) = retry {
+                assert!(matches!(
+                    retry.await.unwrap(),
+                    DisplayPublicationOutcome::Unconfirmed(_)
+                ));
+            }
+            assert!(request.was_unconfirmed());
+            assert!(matches!(
+                request.outcome(),
+                Some(DisplayPublicationOutcome::Unconfirmed(_))
+            ));
+            {
+                let mut owner = displays.lock();
+                assert_eq!(owner.pending_count(), 1);
+                assert_eq!(owner.slots[&slot].page_ordinal, 0);
+                assert!(Arc::ptr_eq(
+                    &owner.slots[&slot].pending.as_ref().unwrap().request,
+                    &request,
+                ));
+            }
+            assert!(request.answer(DisplayPublicationOutcome::Published(durable_reference())));
+            drop(DisplayPublicationLease {
+                displays: displays.clone(),
+                slot,
+                request: request.clone(),
+            });
+            assert_eq!(displays.lock().pending_count(), 0);
+            assert_eq!(displays.lock().slots[&slot].page_ordinal, 1);
+            assert!(!request.answer(DisplayPublicationOutcome::Published(durable_reference())));
+            displays.lock().reconcile(slot).unwrap();
+            assert_eq!(displays.lock().slots[&slot].page_ordinal, 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_display_send_and_ack_wait_retain_same_retry_packet() {
+        for sent_before_cancel in [false, true] {
+            let actor = ActorRef::first(crate::ActorId(37));
+            let displays = Arc::new(Mutex::new(ActorDisplays::default()));
+            let (request, answer) = displays
+                .lock()
+                .stage(actor, terminal_page(), None, false, 8192, None)
+                .unwrap();
+            let slot = request.page.identity.2;
+            let lease = DisplayPublicationLease {
+                displays: displays.clone(),
+                slot,
+                request: request.clone(),
+            };
+            let (sender, mut receiver) = mpsc::channel(1);
+            if sent_before_cancel {
+                sender
+                    .send(LocalResidentDeployment::DisplayPublished(request.clone()))
+                    .await
+                    .unwrap();
+            }
+            drop(lease);
+            assert!(matches!(
+                answer.await.unwrap(),
+                DisplayPublicationOutcome::Unconfirmed(_)
+            ));
+            assert!(request.was_unconfirmed());
+            assert_eq!(displays.lock().pending_count(), 1);
+            if sent_before_cancel {
+                let LocalResidentDeployment::DisplayPublished(first) =
+                    receiver.recv().await.unwrap()
+                else {
+                    panic!("only the original publication was queued");
+                };
+                assert!(Arc::ptr_eq(&first, &request));
+            } else {
+                assert!(receiver.try_recv().is_err());
+            }
+            let retry = request.retry_channel().unwrap();
+            let pending = displays.lock().slots[&slot]
+                .pending
+                .as_ref()
+                .unwrap()
+                .request
+                .clone();
+            assert!(Arc::ptr_eq(&pending, &request));
+            sender
+                .send(LocalResidentDeployment::DisplayPublished(pending))
+                .await
+                .unwrap();
+            let LocalResidentDeployment::DisplayPublished(retried) = receiver.recv().await.unwrap()
+            else {
+                panic!("retry must submit the retained publication");
+            };
+            assert!(Arc::ptr_eq(&retried, &request));
+            assert_eq!(retried.page_ordinal, 1);
+            assert_eq!(
+                displays.lock().next_slot,
+                1,
+                "retry never restages the callback result"
+            );
+            assert!(retried.answer(DisplayPublicationOutcome::Published(durable_reference())));
+            assert!(matches!(
+                retry.await.unwrap(),
+                DisplayPublicationOutcome::Published(_)
+            ));
+            drop(DisplayPublicationLease {
+                displays: displays.clone(),
+                slot,
+                request: retried,
+            });
+            assert_eq!(displays.lock().pending_count(), 0);
+            assert_eq!(displays.lock().slots[&slot].page_ordinal, 1);
+            assert!(!request.answer(DisplayPublicationOutcome::Published(durable_reference())));
+        }
+    }
+
     #[test]
     fn display_commit_survives_lost_ack_wakeup_and_installs_once() {
         let actor = ActorRef::first(crate::ActorId(37));
@@ -942,6 +1112,7 @@ mod display_tests {
         let lease = DisplayPublicationLease {
             displays: displays.clone(),
             slot,
+            request: request.clone(),
         };
         assert!(request.answer(DisplayPublicationOutcome::Published(durable_reference())));
         drop(lease);
@@ -988,6 +1159,7 @@ mod display_tests {
         drop(DisplayPublicationLease {
             displays: displays.clone(),
             slot,
+            request: request.clone(),
         });
         {
             let mut owner = displays.lock();
@@ -1006,6 +1178,7 @@ mod display_tests {
         drop(DisplayPublicationLease {
             displays: displays.clone(),
             slot,
+            request: request.clone(),
         });
         assert_eq!(displays.lock().slots[&slot].page_ordinal, 1);
         assert_eq!(displays.lock().pending_count(), 0);
@@ -1030,6 +1203,7 @@ mod display_tests {
         drop(DisplayPublicationLease {
             displays: displays.clone(),
             slot,
+            request: request.clone(),
         });
         let mut owner = displays.lock();
         assert!(owner.slots[&slot].pending.is_none());
@@ -1063,6 +1237,7 @@ mod display_tests {
         drop(DisplayPublicationLease {
             displays: displays.clone(),
             slot,
+            request: request.clone(),
         });
         let mut owner = displays.lock();
         assert_eq!(owner.slots[&slot].page_ordinal, 1);
