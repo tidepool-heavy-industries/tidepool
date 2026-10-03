@@ -139,11 +139,11 @@ pub use request::{
 };
 pub use resident_actor::{
     spawn_resident_root, spawn_resident_root_in_incarnation,
-    spawn_resident_root_with_fork_admission, ActorGraphNode, ActorProviderAdmission,
-    DisplayConversationIdentity, DisplayPublication, DisplayPublicationHostContext,
-    DisplayPublicationOutcome, ForkChildRelease, LocalResidentDeployment,
-    LocalResidentInstallation, ReleaseAwait, ResidentActorRoot, ResidentForest,
-    ResidentKernelBehavior, ResidentRootEntry, ResourceRelease, RootStartupRelease,
+    spawn_resident_root_with_fork_admission, ActorDisplayAdmission, ActorGraphNode,
+    ActorProviderAdmission, DisplayConversationIdentity, DisplayPublication,
+    DisplayPublicationHostContext, DisplayPublicationOutcome, ForkChildRelease,
+    LocalResidentDeployment, LocalResidentInstallation, ReleaseAwait, ResidentActorRoot,
+    ResidentForest, ResidentKernelBehavior, ResidentRootEntry, ResourceRelease, RootStartupRelease,
 };
 pub use resident_interactive::{ResidentInteractivePolicy, HASKELL_TOOL};
 pub use resident_tools::{

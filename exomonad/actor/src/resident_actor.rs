@@ -57,8 +57,8 @@ use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_runtime::session::{
     truncate_preview_at_line, CellSourceSpan, OutputSink, ParsedBlock, ResidentHole,
     ResidentOutcome, ResidentSession, RootCustody, TurnKind, WorkbenchCellItemKind,
-    WorkbenchCellSourceItem, WorkbenchDisplayOutput, WorkbenchExecutionId, WorkbenchFailureLayer,
-    WorkbenchFailurePoint, WorkbenchItemReceipt, WorkbenchItemStatus,
+    WorkbenchCellSourceItem, WorkbenchDisplayOutput, WorkbenchDisplayPage, WorkbenchExecutionId,
+    WorkbenchFailureLayer, WorkbenchFailurePoint, WorkbenchItemReceipt, WorkbenchItemStatus,
     WorkbenchOperationDisposition, WorkbenchOperationId, WorkbenchOperationReceipt,
     WorkbenchPublicationOutcome, WorkbenchRequest, WorkbenchResponse, WorkbenchRunStatus,
     WorkbenchTerminalTransfer,
@@ -275,9 +275,16 @@ impl DisplayPublication {
     /// waiter cannot lose a committed page's callback authority.
     pub fn answer(&self, answer: DisplayPublicationOutcome) -> bool {
         let mut outcome = self.outcome.lock();
-        if matches!(&*outcome, Some(DisplayPublicationOutcome::Published(_)
-            | DisplayPublicationOutcome::Refused(_)))
-            || matches!((&*outcome, &answer), (Some(DisplayPublicationOutcome::Unconfirmed(_)), DisplayPublicationOutcome::Unconfirmed(_))) {
+        if matches!(
+            &*outcome,
+            Some(DisplayPublicationOutcome::Published(_) | DisplayPublicationOutcome::Refused(_))
+        ) || matches!(
+            (&*outcome, &answer),
+            (
+                Some(DisplayPublicationOutcome::Unconfirmed(_)),
+                DisplayPublicationOutcome::Unconfirmed(_)
+            )
+        ) {
             return false;
         }
         *outcome = Some(answer.clone());
@@ -424,7 +431,7 @@ fn retain_retired_metadata<H, O>(
     environment.fork_groups.retire_actor(actor);
     if let Some(record) = environment.actors.lock().get_mut(&actor) {
         record.terminal = Some(terminal.clone());
-        record.displays.lock().slots.clear();
+        record.displays.lock().retire();
     }
 }
 
@@ -519,7 +526,7 @@ pub(crate) fn validate_display_page(
 }
 
 pub(crate) fn validate_display_metadata(
-    output: &WorkbenchDisplayOutput,
+    output: &WorkbenchDisplayPage,
 ) -> Result<(), ResidentActorWorkbenchError> {
     #[derive(serde::Serialize)]
     struct Metadata<'a> {
@@ -558,15 +565,49 @@ pub(crate) fn validate_display_metadata(
 struct ActorDisplays {
     next_slot: i64,
     slots: std::collections::HashMap<i64, DisplaySlot>,
+    retired: bool,
 }
 
 struct DisplaySlot {
     callback: Option<Arc<RootCustody>>,
     keys: Vec<(i64, String)>,
-    expanding: bool,
+    expanding: Option<u64>,
+    next_expansion: u64,
+    page_ordinal: u64,
+    pending: Option<StagedDisplayPublication>,
+}
+
+struct StagedDisplayPublication {
+    request: Arc<DisplayPublication>,
+    callback: Option<Arc<RootCustody>>,
+}
+
+fn valid_display_reference(
+    request: &DisplayPublication,
+    reference: &tidepool_runtime::session::ActorOutputReference,
+) -> bool {
+    !reference.run.is_empty()
+        && reference.sequence > 0
+        && request
+            .host_context()
+            .is_none_or(|context| context.run == reference.run)
 }
 
 impl ActorDisplays {
+    fn retire(&mut self) {
+        self.retired = true;
+        for slot in self.slots.values_mut() {
+            slot.callback = None;
+            slot.keys.clear();
+            slot.expanding = None;
+            if let Some(pending) = &mut slot.pending {
+                pending.callback = None;
+            }
+        }
+        // Only accepted, unsettled emission metadata survives resource release.
+        self.slots.retain(|_, slot| slot.pending.is_some());
+    }
+
     fn validate_identity(
         actor: ActorRef,
         identity: (i64, i64, i64),
@@ -580,14 +621,26 @@ impl ActorDisplays {
         Ok(identity.2)
     }
 
-    fn publish(
+    fn stage(
         &mut self,
         actor: ActorRef,
-        mut output: WorkbenchDisplayOutput,
-        callback: RootCustody,
+        mut output: WorkbenchDisplayPage,
+        callback: Option<RootCustody>,
         update: bool,
         allowance: i64,
-    ) -> Result<WorkbenchDisplayOutput, ResidentActorWorkbenchError> {
+        operation: Option<WorkbenchOperationId>,
+    ) -> Result<
+        (
+            Arc<DisplayPublication>,
+            tokio::sync::oneshot::Receiver<DisplayPublicationOutcome>,
+        ),
+        ResidentActorWorkbenchError,
+    > {
+        if self.retired {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "display actor is retired".into(),
+            ));
+        }
         validate_display_page(&output.text, allowance)?;
         if update == (output.identity == (0, 0, 0)) {
             return Err(ResidentActorWorkbenchError::ActorProtocol(
@@ -603,7 +656,11 @@ impl ActorDisplays {
             next_slot
         } else {
             let slot = Self::validate_identity(actor, output.identity)?;
-            if !self.slots.get(&slot).is_some_and(|slot| slot.expanding) {
+            if !self
+                .slots
+                .get(&slot)
+                .is_some_and(|slot| slot.expanding.is_some() && slot.pending.is_none())
+            {
                 return Err(ResidentActorWorkbenchError::ActorProtocol(
                     "display slot is unavailable".into(),
                 ));
@@ -621,18 +678,86 @@ impl ActorDisplays {
                 "display contains invalid or duplicate expansion keys".into(),
             ));
         }
+        let ordinal = self
+            .slots
+            .get(&slot)
+            .map_or(0, |slot| slot.page_ordinal)
+            .checked_add(1)
+            .filter(|ordinal| *ordinal <= i64::MAX as u64)
+            .ok_or_else(|| {
+                ResidentActorWorkbenchError::ActorProtocol("display page ordinal exhausted".into())
+            })?;
+        let callback = if output.expansions.is_empty() {
+            None
+        } else {
+            Some(Arc::new(callback.ok_or_else(|| {
+                ResidentActorWorkbenchError::ActorProtocol(
+                    "expandable display has no retained callback".into(),
+                )
+            })?))
+        };
         if !update {
             self.next_slot = slot;
+            self.slots.insert(
+                slot,
+                DisplaySlot {
+                    callback: None,
+                    keys: Vec::new(),
+                    expanding: None,
+                    next_expansion: 0,
+                    page_ordinal: 0,
+                    pending: None,
+                },
+            );
         }
-        self.slots.insert(
-            slot,
-            DisplaySlot {
-                callback: (!output.expansions.is_empty()).then(|| Arc::new(callback)),
-                keys: output.expansions.clone(),
-                expanding: false,
-            },
-        );
-        Ok(output)
+        let owned = self.slots.get_mut(&slot).expect("issued display slot");
+        let (request, answer) = DisplayPublication::channel(actor, ordinal, operation, output);
+        owned.pending = Some(StagedDisplayPublication {
+            request: request.clone(),
+            callback,
+        });
+        Ok((request, answer))
+    }
+
+    fn reconcile(&mut self, slot: i64) -> Result<(), ResidentActorWorkbenchError> {
+        let Some(owned) = self.slots.get_mut(&slot) else {
+            return Ok(());
+        };
+        let Some(pending) = &owned.pending else {
+            return Ok(());
+        };
+        match pending.request.outcome() {
+            Some(DisplayPublicationOutcome::Published(reference))
+                if valid_display_reference(&pending.request, &reference) =>
+            {
+                let pending = owned.pending.take().expect("acknowledged publication");
+                if !self.retired {
+                    owned.callback = pending.callback;
+                    owned.keys = pending.request.page.expansions.clone();
+                }
+                owned.page_ordinal = pending.request.page_ordinal;
+                owned.expanding = None;
+                Ok(())
+            }
+            Some(DisplayPublicationOutcome::Refused(detail)) => {
+                owned.pending = None;
+                owned.expanding = None;
+                Err(ResidentActorWorkbenchError::ActorProtocol(format!(
+                    "display publication refused: {detail}"
+                )))
+            }
+            Some(DisplayPublicationOutcome::Unconfirmed(detail)) => {
+                Err(ResidentActorWorkbenchError::ActorProtocol(format!(
+                    "display publication remains unconfirmed: {detail}"
+                )))
+            }
+            Some(DisplayPublicationOutcome::Published(_)) => {
+                Err(ResidentActorWorkbenchError::ActorProtocol(
+                    "display publication returned an invalid durable reference".into(),
+                ))
+            }
+            None => Ok(()),
+        }
     }
 
     fn select(
@@ -640,13 +765,21 @@ impl ActorDisplays {
         actor: ActorRef,
         identity: (i64, i64, i64),
         key: i64,
-    ) -> Result<Arc<RootCustody>, ResidentActorWorkbenchError> {
+    ) -> Result<(Arc<RootCustody>, u64), ResidentActorWorkbenchError> {
+        if self.retired {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "display actor is retired".into(),
+            ));
+        }
         let slot = Self::validate_identity(actor, identity)?;
+        let _ = self.reconcile(slot);
         let selected = self
             .slots
             .get_mut(&slot)
             .filter(|slot| {
-                !slot.expanding && slot.keys.iter().any(|(available, _)| *available == key)
+                slot.pending.is_none()
+                    && slot.expanding.is_none()
+                    && slot.keys.iter().any(|(available, _)| *available == key)
             })
             .ok_or_else(|| {
                 ResidentActorWorkbenchError::ActorProtocol(
@@ -658,8 +791,80 @@ impl ActorDisplays {
                 "display expansion callback is unavailable".into(),
             )
         })?;
-        selected.expanding = true;
-        Ok(callback)
+        let generation = selected.next_expansion.checked_add(1).ok_or_else(|| {
+            ResidentActorWorkbenchError::ActorProtocol(
+                "display expansion generation exhausted".into(),
+            )
+        })?;
+        selected.next_expansion = generation;
+        selected.expanding = Some(generation);
+        Ok((callback, generation))
+    }
+}
+
+struct DisplayPublicationLease {
+    displays: Arc<Mutex<ActorDisplays>>,
+    slot: i64,
+}
+
+impl Drop for DisplayPublicationLease {
+    fn drop(&mut self) {
+        let _ = self.displays.lock().reconcile(self.slot);
+    }
+}
+
+async fn complete_display_publication<H, O>(
+    environment: &ResidentEnvironment<H, O>,
+    displays: Arc<Mutex<ActorDisplays>>,
+    request: Arc<DisplayPublication>,
+    answer: tokio::sync::oneshot::Receiver<DisplayPublicationOutcome>,
+) -> Result<WorkbenchDisplayOutput, ResidentActorWorkbenchError> {
+    let _lease = DisplayPublicationLease {
+        displays: displays.clone(),
+        slot: request.page.identity.2,
+    };
+    let admitted = async {
+        if environment
+            .deployments
+            .send(LocalResidentDeployment::DisplayPublished(request.clone()))
+            .await
+            .is_err()
+        {
+            request.answer(DisplayPublicationOutcome::Unconfirmed(
+                "host output service is unavailable".into(),
+            ));
+        }
+        let _ = answer.await;
+    };
+    if tokio::time::timeout(RELEASE_WAIT, admitted).await.is_err() {
+        request.answer(DisplayPublicationOutcome::Unconfirmed(
+            "host output acknowledgement timed out".into(),
+        ));
+    }
+    // The retained answer is authoritative even when its wakeup was lost.
+    displays.lock().reconcile(request.page.identity.2)?;
+    match request.outcome() {
+        Some(DisplayPublicationOutcome::Published(output))
+            if valid_display_reference(&request, &output) =>
+        {
+            Ok(WorkbenchDisplayOutput {
+                page: request.page.clone(),
+                output,
+            })
+        }
+        Some(DisplayPublicationOutcome::Refused(detail)) => {
+            Err(ResidentActorWorkbenchError::ActorProtocol(format!(
+                "display publication refused: {detail}"
+            )))
+        }
+        Some(DisplayPublicationOutcome::Unconfirmed(detail)) => {
+            Err(ResidentActorWorkbenchError::ActorProtocol(format!(
+                "display publication remains unconfirmed: {detail}"
+            )))
+        }
+        _ => Err(ResidentActorWorkbenchError::ActorProtocol(
+            "display publication acknowledgement is unavailable".into(),
+        )),
     }
 }
 
@@ -668,12 +873,15 @@ impl ActorDisplays {
 struct DisplayExpansionLease {
     displays: Arc<Mutex<ActorDisplays>>,
     slot: i64,
+    generation: u64,
 }
 
 impl Drop for DisplayExpansionLease {
     fn drop(&mut self) {
         if let Some(slot) = self.displays.lock().slots.get_mut(&self.slot) {
-            slot.expanding = false;
+            if slot.expanding == Some(self.generation) {
+                slot.expanding = None;
+            }
         }
     }
 }
@@ -681,6 +889,165 @@ impl Drop for DisplayExpansionLease {
 #[cfg(test)]
 mod display_tests {
     use super::*;
+
+    fn terminal_page() -> WorkbenchDisplayPage {
+        WorkbenchDisplayPage {
+            identity: (0, 0, 0),
+            text: "visible".into(),
+            expansions: Vec::new(),
+            unavailable: false,
+        }
+    }
+
+    fn durable_reference() -> tidepool_runtime::session::ActorOutputReference {
+        tidepool_runtime::session::ActorOutputReference {
+            run: "run-1".into(),
+            sequence: 7,
+        }
+    }
+
+    #[test]
+    fn display_commit_survives_lost_ack_wakeup_and_installs_once() {
+        let actor = ActorRef::first(crate::ActorId(37));
+        let displays = Arc::new(Mutex::new(ActorDisplays::default()));
+        let (request, answer) = displays
+            .lock()
+            .stage(actor, terminal_page(), None, false, 8192, None)
+            .unwrap();
+        let slot = request.page.identity.2;
+        assert_eq!(request.page_ordinal, 1);
+        assert_eq!(displays.lock().slots[&slot].page_ordinal, 0);
+        drop(answer);
+        let lease = DisplayPublicationLease {
+            displays: displays.clone(),
+            slot,
+        };
+        assert!(request.answer(DisplayPublicationOutcome::Published(durable_reference())));
+        drop(lease);
+        let mut displays = displays.lock();
+        let committed = &displays.slots[&slot];
+        assert_eq!(committed.page_ordinal, 1);
+        assert!(committed.pending.is_none());
+        assert!(committed.callback.is_none());
+        assert!(!request.answer(DisplayPublicationOutcome::Published(durable_reference())));
+        displays.reconcile(slot).unwrap();
+        assert_eq!(displays.slots[&slot].page_ordinal, 1);
+        assert!(displays.select(actor, request.page.identity, 1).is_err());
+    }
+
+    #[test]
+    fn uncertain_display_retry_keeps_exact_emission_and_frozen_host_context() {
+        let actor = ActorRef::first(crate::ActorId(37));
+        let displays = Arc::new(Mutex::new(ActorDisplays::default()));
+        let (request, answer) = displays
+            .lock()
+            .stage(actor, terminal_page(), None, false, 8192, None)
+            .unwrap();
+        let slot = request.page.identity.2;
+        let frozen = DisplayPublicationHostContext {
+            run: "run-1".into(),
+            conversation: None,
+        };
+        assert_eq!(request.admit_host_context(frozen.clone()), &frozen);
+        assert_eq!(
+            request.admit_host_context(DisplayPublicationHostContext {
+                run: "changed".into(),
+                conversation: Some(DisplayConversationIdentity {
+                    run: "changed".into(),
+                    actor: "new conversation".into(),
+                    incarnation: "1".into(),
+                }),
+            }),
+            &frozen
+        );
+        assert!(request.answer(DisplayPublicationOutcome::Unconfirmed(
+            "lost commit acknowledgement".into()
+        )));
+        drop(answer);
+        drop(DisplayPublicationLease {
+            displays: displays.clone(),
+            slot,
+        });
+        {
+            let mut owner = displays.lock();
+            assert_eq!(owner.slots[&slot].page_ordinal, 0);
+            assert!(Arc::ptr_eq(
+                &owner.slots[&slot].pending.as_ref().unwrap().request,
+                &request
+            ));
+            assert!(owner.select(actor, request.page.identity, 1).is_err());
+        }
+        let retry = request.retry_channel().unwrap();
+        drop(retry);
+        assert!(request.answer(DisplayPublicationOutcome::Published(durable_reference())));
+        drop(DisplayPublicationLease {
+            displays: displays.clone(),
+            slot,
+        });
+        assert_eq!(displays.lock().slots[&slot].page_ordinal, 1);
+        assert_eq!(request.page_ordinal, 1);
+        assert_eq!(request.host_context(), Some(&frozen));
+    }
+
+    #[test]
+    fn display_refusal_preserves_issued_tombstone_without_committing_page() {
+        let actor = ActorRef::first(crate::ActorId(37));
+        let displays = Arc::new(Mutex::new(ActorDisplays::default()));
+        let (request, answer) = displays
+            .lock()
+            .stage(actor, terminal_page(), None, false, 8192, None)
+            .unwrap();
+        drop(answer);
+        let slot = request.page.identity.2;
+        request.answer(DisplayPublicationOutcome::Refused(
+            "authority refused".into(),
+        ));
+        drop(DisplayPublicationLease {
+            displays: displays.clone(),
+            slot,
+        });
+        let mut owner = displays.lock();
+        assert!(owner.slots[&slot].pending.is_none());
+        assert_eq!(owner.slots[&slot].page_ordinal, 0);
+        let (next, _) = owner
+            .stage(actor, terminal_page(), None, false, 8192, None)
+            .unwrap();
+        assert_ne!(next.page.identity, request.page.identity);
+    }
+
+    #[test]
+    fn accepted_display_can_settle_after_retirement_without_new_authority() {
+        let actor = ActorRef::first(crate::ActorId(37));
+        let displays = Arc::new(Mutex::new(ActorDisplays::default()));
+        let (request, answer) = displays
+            .lock()
+            .stage(actor, terminal_page(), None, false, 8192, None)
+            .unwrap();
+        let slot = request.page.identity.2;
+        drop(answer);
+        displays.lock().retire();
+        assert!(Arc::ptr_eq(
+            &displays.lock().slots[&slot]
+                .pending
+                .as_ref()
+                .unwrap()
+                .request,
+            &request
+        ));
+        request.answer(DisplayPublicationOutcome::Published(durable_reference()));
+        drop(DisplayPublicationLease {
+            displays: displays.clone(),
+            slot,
+        });
+        let mut owner = displays.lock();
+        assert_eq!(owner.slots[&slot].page_ordinal, 1);
+        assert!(owner.slots[&slot].pending.is_none());
+        assert!(owner.slots[&slot].callback.is_none());
+        assert!(owner
+            .stage(actor, terminal_page(), None, false, 8192, None)
+            .is_err());
+        assert!(owner.select(actor, request.page.identity, 1).is_err());
+    }
 
     #[test]
     fn display_allowance_preserves_rendered_utf8_page_in_transport_budget() {
@@ -715,7 +1082,7 @@ mod display_tests {
 
     #[test]
     fn display_metadata_budget_counts_encoded_labels_and_envelope() {
-        let mut output = WorkbenchDisplayOutput {
+        let mut output = WorkbenchDisplayPage {
             identity: (i64::MAX, i64::MAX, i64::MAX),
             text: String::new(),
             expansions: vec![(i64::MAX, String::new())],
@@ -766,6 +1133,216 @@ mod display_tests {
             displays.select(actor, (owner.0, owner.1, 1), 1).is_err(),
             "a guessed slot must not authorize expansion"
         );
+    }
+}
+
+fn stage_actor_display<H, O>(
+    environment: &ResidentEnvironment<H, O>,
+    context: &ActorSessionContext,
+    page: WorkbenchDisplayPage,
+    callback: RootCustody,
+    update: bool,
+    allowance: i64,
+    operation: Option<WorkbenchOperationId>,
+) -> Result<
+    (
+        Arc<Mutex<ActorDisplays>>,
+        Arc<DisplayPublication>,
+        tokio::sync::oneshot::Receiver<DisplayPublicationOutcome>,
+    ),
+    ResidentActorWorkbenchError,
+> {
+    let records = environment.actors.lock();
+    let record = records
+        .get(&context.actor)
+        .filter(|record| record.owns_display_resources(context))
+        .ok_or_else(|| {
+            ResidentActorWorkbenchError::ActorProtocol("display actor is unavailable".into())
+        })?;
+    let displays = record.displays.clone();
+    let (request, answer) = displays.lock().stage(
+        context.actor,
+        page,
+        Some(callback),
+        update,
+        allowance,
+        operation,
+    )?;
+    Ok((displays, request, answer))
+}
+
+async fn publish_actor_display<H, O>(
+    environment: &ResidentEnvironment<H, O>,
+    context: &ActorSessionContext,
+    page: WorkbenchDisplayPage,
+    callback: RootCustody,
+    update: bool,
+    allowance: i64,
+    operation: Option<WorkbenchOperationId>,
+) -> Result<WorkbenchDisplayOutput, ResidentActorWorkbenchError>
+where
+    H: DispatchEffect<O> + Send + 'static,
+    O: OutputSink + Sync + 'static,
+{
+    let (displays, request, answer) = stage_actor_display(
+        environment,
+        context,
+        page,
+        callback,
+        update,
+        allowance,
+        operation,
+    )?;
+    complete_display_publication(&environment, displays, request, answer).await
+}
+
+async fn expand_actor_display<H, O>(
+    environment: &ResidentEnvironment<H, O>,
+    context: &ActorSessionContext,
+    identity: (i64, i64, i64),
+    key: i64,
+    allowance: i64,
+    operation: Option<WorkbenchOperationId>,
+) -> Result<WorkbenchDisplayOutput, ResidentActorWorkbenchError>
+where
+    H: DispatchEffect<O> + Send + 'static,
+    O: OutputSink + Sync + 'static,
+{
+    let displays = {
+        let records = environment.actors.lock();
+        records
+            .get(&context.actor)
+            .filter(|record| record.owns_display_resources(context))
+            .ok_or_else(|| {
+                ResidentActorWorkbenchError::ActorProtocol("display actor is unavailable".into())
+            })?
+            .displays
+            .clone()
+    };
+    let pending = {
+        let mut displays = displays.lock();
+        let slot = ActorDisplays::validate_identity(context.actor, identity)?;
+        let pending = displays
+            .slots
+            .get(&slot)
+            .and_then(|slot| slot.pending.as_ref())
+            .map(|pending| pending.request.clone());
+        if pending.as_ref().is_some_and(|pending| {
+            matches!(
+                pending.outcome(),
+                Some(DisplayPublicationOutcome::Refused(_))
+            )
+        }) {
+            let _ = displays.reconcile(slot);
+            None
+        } else {
+            pending
+        }
+    };
+    if let Some(request) = pending {
+        // Resolve the same pending emission before interpreting another key.
+        // Repeating a legal key must never remint its earlier publication.
+        if let Some(answer) = request.retry_channel() {
+            let output =
+                complete_display_publication(&environment, displays, request, answer).await?;
+            validate_display_page(&output.text, allowance)?;
+            return Ok(output);
+        }
+        if let Some(DisplayPublicationOutcome::Published(output)) = request.outcome() {
+            displays.lock().reconcile(identity.2)?;
+            validate_display_page(&request.page.text, allowance)?;
+            return Ok(WorkbenchDisplayOutput {
+                page: request.page.clone(),
+                output,
+            });
+        }
+        return Err(ResidentActorWorkbenchError::ActorProtocol(
+            "display publication is still pending".into(),
+        ));
+    }
+    let (callback, generation) = displays.lock().select(context.actor, identity, key)?;
+    let lease = DisplayExpansionLease {
+        displays,
+        slot: identity.2,
+        generation,
+    };
+    let (page, callback) = environment
+        .runner
+        .expand_display(context.clone(), callback, identity, key, allowance)
+        .await?;
+    let output = publish_actor_display(
+        environment,
+        context,
+        page,
+        callback,
+        true,
+        allowance,
+        operation,
+    )
+    .await;
+    drop(lease);
+    output
+}
+
+async fn prepare_actor_display_boundary<H, O>(
+    environment: &ResidentEnvironment<H, O>,
+    context: &ActorSessionContext,
+    boundary: ResidentActorBoundary,
+    allowance: i64,
+    operation: Option<WorkbenchOperationId>,
+) -> Result<(ResidentActorBoundary, Option<WorkbenchDisplayOutput>), ResidentActorWorkbenchError>
+where
+    H: DispatchEffect<O> + Send + 'static,
+    O: OutputSink + Sync + 'static,
+{
+    match boundary {
+        ResidentActorBoundary::DisplayAllowance { continuation } => Ok((
+            ResidentActorBoundary::DisplayAllowanceGranted {
+                continuation,
+                allowance,
+            },
+            None,
+        )),
+        ResidentActorBoundary::DisplayPublish {
+            continuation,
+            output,
+            callback,
+        } => {
+            let output = publish_actor_display(
+                environment,
+                context,
+                output,
+                callback,
+                false,
+                allowance,
+                operation,
+            )
+            .await?;
+            Ok((
+                ResidentActorBoundary::DisplayPublished {
+                    continuation,
+                    identity: output.identity,
+                },
+                Some(output),
+            ))
+        }
+        ResidentActorBoundary::DisplayExpand {
+            continuation,
+            identity,
+            key,
+        } => {
+            let output =
+                expand_actor_display(environment, context, identity, key, allowance, operation)
+                    .await?;
+            Ok((
+                ResidentActorBoundary::DisplayExpanded {
+                    continuation,
+                    keys: output.expansions.clone(),
+                },
+                Some(output),
+            ))
+        }
+        boundary => Ok((boundary, None)),
     }
 }
 
@@ -841,6 +1418,24 @@ impl ActorPublicOwnerPlane {
 /// frontend retains this capsule across waits and revalidates it before bind.
 pub struct ActorProviderAdmission {
     owner: Arc<WorkbenchPublicOwner>,
+}
+
+/// Forest-issued custody for one already-admitted output. Completion may cross
+/// actor retirement; the capsule grants no new display or expansion authority.
+pub struct ActorDisplayAdmission {
+    actor: ActorRef,
+    placement: crate::ActorPlacement,
+    displays: Arc<Mutex<ActorDisplays>>,
+    request: Arc<DisplayPublication>,
+}
+
+impl ActorDisplayAdmission {
+    pub fn actor(&self) -> ActorRef {
+        self.actor
+    }
+    pub fn placement(&self) -> crate::ActorPlacement {
+        self.placement
+    }
 }
 
 impl ActorProviderAdmission {
@@ -2096,6 +2691,11 @@ struct ParkedWorkbenchEffect {
 }
 
 enum OwnedWorkbenchWait {
+    Display {
+        boundary: ResidentActorBoundary,
+        allowance: i64,
+        operation: Option<WorkbenchOperationId>,
+    },
     Launch(child_launch::PreparedChildLaunch),
     CapturedCommit(captured_commit::PreparedCapturedCommit),
     DeferredCommit(captured_commit::PreparedDeferredCommit),
@@ -5024,78 +5624,23 @@ where
         Ok(operation)
     }
 
-    fn publish_display(
-        &self,
-        context: &ActorSessionContext,
-        output: WorkbenchDisplayOutput,
-        callback: RootCustody,
-        allowance: i64,
-    ) -> Result<WorkbenchDisplayOutput, ResidentActorWorkbenchError> {
-        let records = self.environment.actors.lock();
-        let record = records
-            .get(&context.actor)
-            .filter(|record| record.owns_display_resources(context))
-            .ok_or_else(|| {
-                ResidentActorWorkbenchError::ActorProtocol("display actor is unavailable".into())
-            })?;
-        let published =
-            record
-                .displays
-                .lock()
-                .publish(context.actor, output, callback, false, allowance);
-        published
-    }
-
     async fn expand_display(
         &self,
         context: &ActorSessionContext,
         identity: (i64, i64, i64),
         key: i64,
         allowance: i64,
+        operation: Option<WorkbenchOperationId>,
     ) -> Result<WorkbenchDisplayOutput, ResidentActorWorkbenchError> {
-        let (callback, lease) = {
-            let records = self.environment.actors.lock();
-            let record = records
-                .get(&context.actor)
-                .filter(|record| record.owns_display_resources(context))
-                .ok_or_else(|| {
-                    ResidentActorWorkbenchError::ActorProtocol(
-                        "display actor is unavailable".into(),
-                    )
-                })?;
-            let callback = record
-                .displays
-                .lock()
-                .select(context.actor, identity, key)?;
-            (
-                callback,
-                DisplayExpansionLease {
-                    displays: record.displays.clone(),
-                    slot: identity.2,
-                },
-            )
-        };
-        let (output, callback) = self
-            .environment
-            .runner
-            .expand_display(context.clone(), callback, identity, key, allowance)
-            .await?;
-        let records = self.environment.actors.lock();
-        let record = records
-            .get(&context.actor)
-            .filter(|record| record.owns_display_resources(context))
-            .ok_or_else(|| {
-                ResidentActorWorkbenchError::ActorProtocol(
-                    "display actor retired during expansion".into(),
-                )
-            })?;
-        let output =
-            record
-                .displays
-                .lock()
-                .publish(context.actor, output, callback, true, allowance);
-        drop(lease);
-        output
+        expand_actor_display(
+            &self.environment,
+            context,
+            identity,
+            key,
+            allowance,
+            operation,
+        )
+        .await
     }
 
     async fn prepare_display_boundary(
@@ -5103,48 +5648,11 @@ where
         context: &ActorSessionContext,
         boundary: ResidentActorBoundary,
         allowance: i64,
+        operation: Option<WorkbenchOperationId>,
     ) -> Result<(ResidentActorBoundary, Option<WorkbenchDisplayOutput>), ResidentActorWorkbenchError>
     {
-        match boundary {
-            ResidentActorBoundary::DisplayAllowance { continuation } => Ok((
-                ResidentActorBoundary::DisplayAllowanceGranted {
-                    continuation,
-                    allowance,
-                },
-                None,
-            )),
-            ResidentActorBoundary::DisplayPublish {
-                continuation,
-                output,
-                callback,
-            } => {
-                let output = self.publish_display(context, output, callback, allowance)?;
-                Ok((
-                    ResidentActorBoundary::DisplayPublished {
-                        continuation,
-                        identity: output.identity,
-                    },
-                    Some(output),
-                ))
-            }
-            ResidentActorBoundary::DisplayExpand {
-                continuation,
-                identity,
-                key,
-            } => {
-                let output = self
-                    .expand_display(context, identity, key, allowance)
-                    .await?;
-                Ok((
-                    ResidentActorBoundary::DisplayExpanded {
-                        continuation,
-                        keys: output.expansions.clone(),
-                    },
-                    Some(output),
-                ))
-            }
-            boundary => Ok((boundary, None)),
-        }
+        prepare_actor_display_boundary(&self.environment, context, boundary, allowance, operation)
+            .await
     }
 
     async fn resolve_effect(
@@ -5157,11 +5665,9 @@ where
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         let boundary = prepare_execution_effect(context, &effect_owner, boundary);
         let (boundary, display) = self
-            .prepare_display_boundary(context, boundary, DEFAULT_DISPLAY_CHARACTER_ALLOWANCE)
+            .prepare_display_boundary(context, boundary, DEFAULT_DISPLAY_CHARACTER_ALLOWANCE, None)
             .await?;
-        if let Some(display) = display {
-            tracing::debug!(actor = ?context.actor, identity = ?display.identity, output = %display.text, "actor display");
-        }
+        let _ = display;
         let boundary =
             match self.prepare_independent_effect(kernel, context, &effect_owner, boundary) {
                 Ok(operation) => return operation.await,
@@ -8339,11 +8845,41 @@ where
                         &CurrentEffectOwner::Workbench(execution_state),
                         boundary,
                     );
+                    if execution_state.park_effects
+                        && matches!(
+                            &boundary,
+                            ResidentActorBoundary::DisplayPublish { .. }
+                                | ResidentActorBoundary::DisplayExpand { .. }
+                        )
+                    {
+                        current.parked_effect = Some(ParkedWorkbenchEffect {
+                            display: None,
+                            success_disposition,
+                            wait: OwnedWorkbenchWait::Display {
+                                boundary,
+                                allowance: display_character_allowance(*unit.display_remaining),
+                                operation: unit.execution.map(|execution| WorkbenchOperationId {
+                                    execution: execution.clone(),
+                                    input_unit_index: unit.input_unit_index,
+                                    effect_ordinal: ordinal,
+                                }),
+                            },
+                            ordinal,
+                            effect,
+                            started: effect_started,
+                        });
+                        return Ok(FragmentAdvance::ParkEffect);
+                    }
                     let (boundary, mut display) = self
                         .prepare_display_boundary(
                             context,
                             boundary,
                             display_character_allowance(*unit.display_remaining),
+                            unit.execution.map(|execution| WorkbenchOperationId {
+                                execution: execution.clone(),
+                                input_unit_index: unit.input_unit_index,
+                                effect_ordinal: ordinal,
+                            }),
                         )
                         .await?;
                     current
@@ -8354,7 +8890,6 @@ where
                     if let Some(display) = &mut display {
                         let rendered =
                             next_fragment.present_output(&display.text, unit.display_remaining);
-                        display.text.clone_from(&rendered);
                         current
                             .inflight_effect
                             .as_mut()
@@ -11654,6 +12189,7 @@ where
                     identity,
                     key,
                     DEFAULT_DISPLAY_CHARACTER_ALLOWANCE,
+                    None,
                 );
                 let output = match control {
                     Some(control) => {
@@ -11685,7 +12221,7 @@ where
                         span: None,
                         source_items: Vec::new(),
                         status: WorkbenchItemStatus::Committed,
-                        output: output.text,
+                        output: output.page.text,
                         diagnostics: Vec::new(),
                         failure_layer: None,
                         warnings: Vec::new(),
@@ -12962,6 +13498,79 @@ where
             .await?;
         self.settle_root_public_owner(&placement, &outcome)?;
         Ok(outcome)
+    }
+
+    /// Request compiled display detail through its owning mailbox. Provider
+    /// attachment and a resident tool surface are not prerequisites.
+    pub async fn request_expansion(
+        &self,
+        actor: ActorRef,
+        identity: (i64, i64, i64),
+        key: i64,
+    ) -> Result<WorkbenchResponse, crate::ResidentToolError> {
+        ActorDisplays::validate_identity(actor, identity)
+            .map_err(|error| crate::ResidentToolError::Unavailable(error.to_string()))?;
+        let target = self.directory.resolve(actor).ok_or_else(|| {
+            crate::ResidentToolError::Unavailable("display actor is unavailable".into())
+        })?;
+        crate::resident_tools::expand_display_response(&target, identity, key).await
+    }
+
+    /// Authorize an exact accepted emission independently of provider startup.
+    pub fn authorize_display_publication(
+        &self,
+        request: &Arc<DisplayPublication>,
+    ) -> Result<Arc<ActorDisplayAdmission>, ResidentActorWorkbenchError> {
+        let records = self.environment.actors.lock();
+        let record = records.get(&request.actor).ok_or_else(|| {
+            ResidentActorWorkbenchError::ActorProtocol("display actor owner is unavailable".into())
+        })?;
+        let admission = Arc::new(ActorDisplayAdmission {
+            actor: request.actor,
+            placement: record.descriptor.placement(),
+            displays: record.displays.clone(),
+            request: request.clone(),
+        });
+        drop(records);
+        self.validate_display_publication(&admission, request)?;
+        Ok(admission)
+    }
+
+    /// Recheck the same owner's pending Arc under the Store transaction. An
+    /// actor's retirement releases roots but preserves accepted pending output.
+    pub fn validate_display_publication(
+        &self,
+        admission: &ActorDisplayAdmission,
+        request: &Arc<DisplayPublication>,
+    ) -> Result<(), ResidentActorWorkbenchError> {
+        let refuse = || {
+            ResidentActorWorkbenchError::ActorProtocol(
+                "display admission no longer matches its issued pending publication".into(),
+            )
+        };
+        if request.actor != admission.actor || !Arc::ptr_eq(request, &admission.request) {
+            return Err(refuse());
+        }
+        let slot = ActorDisplays::validate_identity(request.actor, request.page.identity)?;
+        let records = self.environment.actors.lock();
+        let record = records.get(&admission.actor).ok_or_else(refuse)?;
+        if record.descriptor.placement() != admission.placement
+            || !Arc::ptr_eq(&record.displays, &admission.displays)
+        {
+            return Err(refuse());
+        }
+        let displays = record.displays.lock();
+        let owned = displays.slots.get(&slot).ok_or_else(refuse)?;
+        if !owned.pending.as_ref().is_some_and(|pending| {
+            Arc::ptr_eq(&pending.request, request)
+                && owned.page_ordinal.checked_add(1) == Some(request.page_ordinal)
+        }) || matches!(
+            request.outcome(),
+            Some(DisplayPublicationOutcome::Refused(_))
+        ) {
+            return Err(refuse());
+        }
+        Ok(())
     }
 
     /// Admit attachment only after the actual actor's requested plane is ready.

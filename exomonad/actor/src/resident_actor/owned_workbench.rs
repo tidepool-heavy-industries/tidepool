@@ -1436,6 +1436,99 @@ where
             .take()
             .expect("one captured effect wait");
         let pending = match pending.wait {
+            OwnedWorkbenchWait::Display {
+                boundary,
+                allowance,
+                operation,
+            } => {
+                let environment = self.environment.clone();
+                let context = owned.state.effects.context.clone();
+                return Self::owned_step_task(
+                    owned,
+                    move |owned| {
+                        Box::pin(async move {
+                            let prepared = prepare_actor_display_boundary(
+                                &environment,
+                                &context,
+                                boundary,
+                                allowance,
+                                operation,
+                            )
+                            .await;
+                            if let Ok((_, Some(display))) = &prepared {
+                                let cursor = &mut owned.state.cursor;
+                                let current =
+                                    cursor.running.as_mut().expect("same display fragment");
+                                current
+                                    .inflight_effect
+                                    .as_mut()
+                                    .expect("captured display effect")
+                                    .display = Some(display.clone());
+                                let rendered = current
+                                    .fragment
+                                    .as_mut()
+                                    .expect("display owns its fragment")
+                                    .present_output(
+                                        &display.text,
+                                        &mut cursor.unit.display_remaining,
+                                    );
+                                if !rendered.is_empty() {
+                                    cursor.unit.command_output.push(rendered);
+                                }
+                            }
+                            prepared
+                        })
+                    },
+                    move |behavior, kernel, mut owned, prepared| match prepared {
+                        Ok((boundary, display)) => {
+                            let context = &owned.state.effects.context;
+                            let operation = behavior
+                                .prepare_independent_effect(
+                                    kernel,
+                                    context,
+                                    &CurrentEffectOwner::Workbench(&owned.state.effects),
+                                    boundary,
+                                )
+                                .unwrap_or_else(|_| {
+                                    unreachable!(
+                                        "display acknowledgement is independently resumable"
+                                    )
+                                });
+                            let pending = ParkedWorkbenchEffect {
+                                wait: OwnedWorkbenchWait::Prepared(operation),
+                                display,
+                                ..pending
+                            };
+                            Ok(WorkbenchAdvance::Park(behavior.resume_owned_effect_task(
+                                owned,
+                                kernel.clone(),
+                                pending,
+                            )))
+                        }
+                        Err(error) => {
+                            let current = owned
+                                .state
+                                .cursor
+                                .running
+                                .as_mut()
+                                .expect("same display fragment");
+                            current.inflight_effect = None;
+                            current.resume_failure = Some(error);
+                            record_workbench_operation(
+                                &mut owned.state.cursor.unit.operations,
+                                owned.state.request.execution_id(),
+                                owned.state.cursor.index,
+                                pending.ordinal,
+                                &pending.effect,
+                                None,
+                                pending.started.elapsed(),
+                                WorkbenchOperationDisposition::Unknown,
+                            );
+                            Ok(WorkbenchAdvance::Park(Self::continue_owned_task(owned)))
+                        }
+                    },
+                );
+            }
             OwnedWorkbenchWait::DeferredCommit(prepared) => {
                 let environment = self.environment.clone();
                 let readiness_kernel = kernel.clone();
@@ -2225,6 +2318,7 @@ where
 {
     let result = match wait {
         OwnedWorkbenchWait::Launch(_)
+        | OwnedWorkbenchWait::Display { .. }
         | OwnedWorkbenchWait::CapturedCommit(_)
         | OwnedWorkbenchWait::DeferredCommit(_) => {
             unreachable!("child launch requires fenced actor application")

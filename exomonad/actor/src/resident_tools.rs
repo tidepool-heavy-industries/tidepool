@@ -822,29 +822,36 @@ pub(crate) fn execution_id(
     WorkbenchExecutionId::from_digest(digest)
 }
 
+pub(crate) async fn expand_display_response(
+    actor: &crate::LocalActorRef,
+    identity: (i64, i64, i64),
+    key: i64,
+) -> Result<WorkbenchResponse, ResidentToolError> {
+    let (reply, receive) = oneshot::channel();
+    actor
+        .admit_mailbox(crate::KernelMessage::Workbench {
+            invocation: crate::ActorWorkbenchInvocation::for_display_expansion(identity, key),
+            control: Some(crate::WorkbenchExecutionControl::untracked()),
+            reply: reply.into(),
+        })
+        .map_err(|failure| hosted_admission_failure(actor.identity(), failure))
+        .map_err(ResidentToolError::Invocation)?;
+    let reply = receive
+        .await
+        .map_err(|_| {
+            ResidentToolError::Unavailable("display actor stopped before expansion settled".into())
+        })?
+        .map_err(ResidentToolError::Invocation)?;
+    Ok(reply)
+}
+
 impl ResidentToolClient {
     pub(crate) async fn expand_display(
         &self,
         identity: (i64, i64, i64),
         key: i64,
     ) -> Result<serde_json::Value, ResidentToolError> {
-        let (reply, receive) = oneshot::channel();
-        self.actor
-            .admit_mailbox(crate::KernelMessage::Workbench {
-                invocation: crate::ActorWorkbenchInvocation::for_display_expansion(identity, key),
-                control: Some(crate::WorkbenchExecutionControl::untracked()),
-                reply: reply.into(),
-            })
-            .map_err(|failure| hosted_admission_failure(self.actor.identity(), failure))
-            .map_err(ResidentToolError::Invocation)?;
-        let reply = receive
-            .await
-            .map_err(|_| {
-                ResidentToolError::Unavailable(
-                    "display actor stopped before expansion settled".into(),
-                )
-            })?
-            .map_err(ResidentToolError::Invocation)?;
+        let reply = expand_display_response(&self.actor, identity, key).await?;
         serde_json::to_value(reply).map_err(ResidentToolError::Encoding)
     }
 

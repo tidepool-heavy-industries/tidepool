@@ -1849,7 +1849,7 @@ pub(crate) enum ResidentActorBoundary {
     },
     DisplayPublish {
         continuation: ResidentHole,
-        output: tidepool_runtime::session::WorkbenchDisplayOutput,
+        output: tidepool_runtime::session::WorkbenchDisplayPage,
         callback: RootCustody,
     },
     DisplayExpand {
@@ -4090,10 +4090,7 @@ where
         key: i64,
         allowance: i64,
     ) -> Result<
-        (
-            tidepool_runtime::session::WorkbenchDisplayOutput,
-            RootCustody,
-        ),
+        (tidepool_runtime::session::WorkbenchDisplayPage, RootCustody),
         ResidentActorWorkbenchError,
     > {
         let allowance = allowance.clamp(0, 8192);
@@ -4115,7 +4112,7 @@ where
                                     Ok(session.resume(hole.clone(), (identity, key, allowance)))
                                 }
                                 ResidentRequest::Console(crate::generated::console::ConsoleReq::DisplayWith((issued, text, expansions, unavailable), _)) if input_received && published.is_none() && issued == identity => {
-                                    let output = tidepool_runtime::session::WorkbenchDisplayOutput { identity, text, expansions, unavailable };
+                                    let output = tidepool_runtime::session::WorkbenchDisplayPage { identity, text, expansions, unavailable };
                                     crate::resident_actor::validate_display_page(&output.text, allowance)?;
                                     crate::resident_actor::validate_display_metadata(&output)?;
                                     let callback = session.live_payload_handle_owned_by(hole.cont_id(), scope)?.ok_or_else(|| ResidentActorWorkbenchError::ActorProtocol("display update has no retained callback".into()))?;
@@ -8785,7 +8782,7 @@ where
                             .ok_or_else(|| ResidentActorWorkbenchError::ActorProtocol("display has no retained expansion callback".into()))?;
                         Ok(ResidentActorBoundary::DisplayPublish {
                             continuation: hole,
-                            output: tidepool_runtime::session::WorkbenchDisplayOutput { identity, text, expansions, unavailable },
+                            output: tidepool_runtime::session::WorkbenchDisplayPage { identity, text, expansions, unavailable },
                             callback,
                         })
                     }
