@@ -88,7 +88,7 @@ fn emit_dev_source_identity(identity: Option<&str>) {
     );
     let dest =
         Path::new(&std::env::var("OUT_DIR").expect("OUT_DIR")).join("dev_source_identity.rs");
-    std::fs::write(dest, output).expect("write dev Haskell source identity");
+    write_if_changed(&dest, output).expect("write dev Haskell source identity");
 }
 
 /// Dev-build stand-in for [`emit_bundle`]: same generated symbol and type, no
@@ -105,22 +105,35 @@ fn emit_empty_bundle(symbol: &str, output: &str) {
     )]
     let dest = Path::new(&std::env::var("OUT_DIR").unwrap()).join(output);
     #[allow(clippy::expect_used, reason = "write generated empty source bundle")]
-    std::fs::write(dest, out).expect("write generated empty source bundle");
+    write_if_changed(&dest, &out).expect("write generated empty source bundle");
 }
 
 /// The project-owned files `exomonad new` writes, alongside the URL for the
 /// generic workspace repository it clones.
 fn emit_scaffold_package(repository: PathBuf) {
     let template = repository.join("exomonad/examples/workspace/.exomonad");
-    println!("cargo:rerun-if-changed={}", template.display());
     let mut entries = Vec::new();
-    collect_all(&template, &template, &mut entries);
-    entries.retain(|(relative, _)| {
-        relative == "AgentSpec.hs"
-            || relative == "WORKBENCH.md"
-            || relative.starts_with("prompts/")
-            || relative.starts_with("plans/")
-    });
+    for name in ["AgentSpec.hs", "WORKBENCH.md"] {
+        let path = template.join(name);
+        if !path.is_file() {
+            panic!("required scaffold input is missing: {}", path.display());
+        }
+        println!("cargo:rerun-if-changed={}", path.display());
+        entries.push((name.to_owned(), path));
+    }
+    // This package currently ships the prompt tree. Cargo watches it
+    // recursively, covering edits, additions, and removals without watching
+    // unrelated workspace files. Optional plans are not part of this package.
+    let prompts = template.join("prompts");
+    if !prompts.is_dir() {
+        panic!("required scaffold input is missing: {}", prompts.display());
+    }
+    println!("cargo:rerun-if-changed={}", prompts.display());
+    let mut prompt_entries = Vec::new();
+    collect_all(&prompts, &prompts, &mut prompt_entries);
+    entries.extend(prompt_entries.into_iter().map(|(relative, path)| {
+        (format!("prompts/{relative}"), path)
+    }));
     entries.sort();
     let entries: Vec<(String, PathBuf)> = entries
         .into_iter()
@@ -157,7 +170,14 @@ fn emit_scaffold_package(repository: PathBuf) {
     )]
     let dest = Path::new(&std::env::var("OUT_DIR").unwrap()).join("scaffold_package.rs");
     #[allow(clippy::expect_used, reason = "write generated scaffold package")]
-    std::fs::write(dest, out).expect("write generated scaffold package");
+    write_if_changed(&dest, &out).expect("write generated scaffold package");
+}
+
+fn write_if_changed(path: &Path, contents: &str) -> std::io::Result<()> {
+    if std::fs::read(path).is_ok_and(|existing| existing == contents.as_bytes()) {
+        return Ok(());
+    }
+    std::fs::write(path, contents)
 }
 
 /// The pinned jev-dsl flake URL, read out of the example workspace's own
@@ -221,5 +241,5 @@ fn emit_bundle(root: &Path, watch_root: &str, prefix: &str, symbol: &str, output
     )]
     let dest = Path::new(&std::env::var("OUT_DIR").unwrap()).join(output);
     #[allow(clippy::expect_used, reason = "write generated source bundle")]
-    std::fs::write(dest, out).expect("write generated source bundle");
+    write_if_changed(&dest, &out).expect("write generated source bundle");
 }

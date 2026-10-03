@@ -10,8 +10,8 @@ fi
 
 crate="$1"
 mode="${2:-run}"
-scripts/test-suite-check.sh
 metadata="$(cargo metadata --no-deps --format-version 1)"
+printf '%s\n' "$metadata" | scripts/test-suite-check.sh --stdin
 target_list="$(jq -er --arg crate "$crate" '
   . as $metadata | [.packages[] | select(.name == $crate) |
     select(.id as $id | $metadata.workspace_members | index($id))] |

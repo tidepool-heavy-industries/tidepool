@@ -2,14 +2,23 @@
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
-python3 - <<'PY'
+if [[ $# -gt 1 || ( $# -eq 1 && "$1" != "--stdin" ) ]]; then
+  echo "usage: $0 [--stdin]" >&2
+  exit 2
+fi
+python3 - "$@" <<'PY'
 import json
 import subprocess
+import sys
 from pathlib import Path
 from scripts.test_source_ownership import registration_errors
 
-metadata = json.loads(subprocess.check_output(
-    ["cargo", "metadata", "--no-deps", "--format-version", "1"], text=True))
+if sys.argv[1:] == ["--stdin"]:
+    metadata_text = sys.stdin.read()
+else:
+    metadata_text = subprocess.check_output(
+        ["cargo", "metadata", "--no-deps", "--format-version", "1"], text=True)
+metadata = json.loads(metadata_text)
 errors = registration_errors(metadata, Path.cwd())
 if errors:
     for error in errors:

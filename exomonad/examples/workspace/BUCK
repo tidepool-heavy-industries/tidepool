@@ -17,8 +17,8 @@ filegroup(
     srcs = {source: source for source in glob([
         "flake.nix",
         ".exomonad/AgentSpec.hs",
-        ".exomonad/prompts/**/*.md",
-        ".exomonad/plans/**/*",
+        ".exomonad/WORKBENCH.md",
+        ".exomonad/prompts/**/*",
     ])},
     visibility = ["PUBLIC"],
 )
