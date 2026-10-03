@@ -17,7 +17,7 @@ import Control.Exception
   ( evaluate, try, throwIO, SomeAsyncException, SomeException, Exception
   , fromException, toException, IOException )
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
-import Data.List (intercalate, nub, isInfixOf, isPrefixOf)
+import Data.List (intercalate, nub, isPrefixOf)
 import Data.Maybe (fromMaybe, mapMaybe, isJust)
 import Data.Word (Word64)
 import Data.Bits (shiftR)

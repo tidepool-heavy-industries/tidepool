@@ -107,7 +107,7 @@ expectFailure :: String -> String -> IO () -> IO ()
 expectFailure label message action = do
   result <- try action :: IO (Either IOException ())
   case result of
-    Left exception | message `T.isInfixOf` T.pack (show exception) -> pure ()
+    Left exception | T.pack message `T.isInfixOf` T.pack (show exception) -> pure ()
     other -> fail (label ++ ": unexpected result " ++ show other)
 
 withScratch :: (FilePath -> IO a) -> IO a

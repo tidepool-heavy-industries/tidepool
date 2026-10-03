@@ -51,6 +51,7 @@ import Tidepool.Session
   ( Generation(..), SessionModule(..), SessionModuleKind(..), SessionScope(..)
   , mkThinSessionIface, writeSessionIface, injectSessionIface, renderSessionModule )
 import Tidepool.PreparedStg (PreparedModule(..))
+import CheckedAdmissionTest (checkedAdmissionChecks)
 import CellProgramStateTest (cellProgramStateChecks)
 import UnreachableCompileTimeTest (unreachableCompileTimeCompilation)
 import Tidepool.Timing
@@ -66,6 +67,7 @@ import System.Environment (getArgs, lookupEnv, setEnv, unsetEnv)
 
 main :: IO ()
 main = getArgs >>= \case
+  ["--checked-admission"] -> checkedAdmissionChecks
   ["--cell-accumulation"] -> cellProgramStateChecks
   ["--request-validation"] -> requestValidationChecks
   ["--check-source-request"] -> checkingSourceRequestRoundTrip >> putStrLn "checking source request: 1 passed"
