@@ -2529,6 +2529,7 @@ where
         specification_digest: [u8; 32],
         authority_digest: [u8; 32],
         include_paths: Vec<PathBuf>,
+        request_evidence: Option<Arc<super::SiteTypeEvidence>>,
     ) -> Result<Arc<super::RuntimeCellAdmission>, SessionError> {
         self.settle_dropped_custody();
         self.state.admit_native_setup_cell_in(
@@ -2538,7 +2539,7 @@ where
             specification_digest,
             authority_digest,
             include_paths,
-            None,
+            request_evidence,
         )
     }
 
@@ -2550,6 +2551,7 @@ where
         specification_digest: [u8; 32],
         authority_digest: [u8; 32],
         include_paths: Vec<PathBuf>,
+        request_evidence: Option<Arc<super::SiteTypeEvidence>>,
     ) -> Result<Arc<super::RuntimeCellAdmission>, SessionError> {
         self.settle_dropped_custody();
         self.state.admit_planned_cell_for_execution(
@@ -2559,7 +2561,7 @@ where
             specification_digest,
             authority_digest,
             include_paths,
-            None,
+            request_evidence,
         )
     }
 

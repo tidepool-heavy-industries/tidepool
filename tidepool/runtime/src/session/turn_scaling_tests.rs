@@ -296,6 +296,7 @@ fn try_execute_cell_with_template_imports(
             specification.specification_digest(),
             [1; 32],
             admitted_include,
+            None,
         )
         .unwrap();
     let view = admission.view();
