@@ -21,6 +21,13 @@ data Tools mode = Tools
 
 data Narrow mode = Narrow { narrow :: mode :- HaskellCell '[] } deriving (Generic)
 
+data ContextNotebook mode = ContextNotebook
+  { contextNotebook :: mode :- Sync (HaskellCell (SyncEffects '[]))
+  } deriving (Generic)
+
+contextNotebookTools :: ContextNotebook (AsServerT (Eff '[]))
+contextNotebookTools = ContextNotebook (haskellTool "A context-editing notebook")
+
 narrowTools :: Narrow (AsServerT (Eff '[Commands]))
 narrowTools = Narrow (haskellTool "A pure notebook in a command-capable actor")
 
@@ -53,8 +60,12 @@ main = do
     (map dtdName declared == ["ordinary", "curate", "raw_curate", "notify_curate", "haskell", "haskell_sync"])
   require "async default and explicit sync scheduling"
     (map dtdSchedule declared == [Asynchronous, BeforeNextInference, BeforeNextInference, BeforeNextInference, Asynchronous, BeforeNextInference])
-  require "native notebook endpoints carry their exact selected row"
-    (map dtdEffectKeys (drop 4 declared) == [Just [], Just ["ContextReadWrite"]])
+  require "native notebook scheduling preserves the same selected row"
+    (map dtdEffectKeys (drop 4 declared) == [Just [], Just []])
+  contextCompiled <- either (error . show) pure (compileInstalledTools contextNotebookTools)
+  require "context-editing notebooks declare their additional effect explicitly"
+    (map (\entry -> (dtdSchedule entry, dtdEffectKeys entry)) (declarations contextCompiled)
+      == [(BeforeNextInference, Just ["ContextReadWrite"])])
   require "native endpoints cannot enter the handler dispatcher"
     (fst (runTool "haskell") == Left (NativeToolInvocation "haskell"))
   require "async compiled handler is lifted into shared dispatcher"
@@ -79,7 +90,7 @@ main = do
   require "installation resolves sync profile and async hook profile"
     (field "slotEffectKeys" manifest == Just (object ["afterTool" .= ([] :: [Text])]) &&
       map (field "effectKeys") installed == map (Just . toJSON)
-        ([[], ["ContextReadWrite"], ["ContextReadWrite"], ["ContextReadWrite"], [], ["ContextReadWrite"]] :: [[Text]]))
+        ([[], ["ContextReadWrite"], ["ContextReadWrite"], ["ContextReadWrite"], [], []] :: [[Text]]))
   require "installed manifest includes implementation identity"
     (map (field "implementation") (drop 4 installed) == replicate 2 (Just (toJSON ("haskell_cell" :: Text))))
   where

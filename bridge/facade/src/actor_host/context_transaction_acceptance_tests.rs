@@ -366,11 +366,31 @@ async fn start() -> (
     RunningBrowserHost,
     mpsc::UnboundedReceiver<RequestedRound>,
 ) {
-    start_with_spec(None).await
+    start_with_spec_and_model(
+        Some(include_str!("fixtures/context_acceptance_agent_spec.hs")),
+        "test-model",
+    )
+    .await
 }
 
 async fn start_with_spec(
     spec: Option<&str>,
+) -> (
+    tempfile::TempDir,
+    RunningBrowserHost,
+    mpsc::UnboundedReceiver<RequestedRound>,
+) {
+    let initial_model = if spec.is_some() {
+        "gpt-6.1-sol"
+    } else {
+        "test-model"
+    };
+    start_with_spec_and_model(spec, initial_model).await
+}
+
+async fn start_with_spec_and_model(
+    spec: Option<&str>,
+    initial_model: &str,
 ) -> (
     tempfile::TempDir,
     RunningBrowserHost,
@@ -382,11 +402,6 @@ async fn start_with_spec(
     let fixture = RunningBrowserHost::start_configured(&settings, &transport, |config| {
         let authored = config.workspace.join(".exomonad");
         std::fs::create_dir_all(&authored).unwrap();
-        let initial_model = if spec.is_some() {
-            "gpt-6.1-sol"
-        } else {
-            "test-model"
-        };
         config.model = initial_model.into();
         let mut configuration =
             format!("[defaults]\nmodel='{initial_model}'\n[models]\nexecutor='gpt-6.1-sol'\n");
@@ -462,6 +477,60 @@ async fn start_with_spec(
         .unwrap();
     assert_eq!(input.status(), reqwest::StatusCode::ACCEPTED);
     (files, fixture, rounds)
+}
+
+#[tokio::test]
+async fn native_notebook_scheduling_preserves_effects_and_published_bindings() {
+    let (_files, fixture, mut rounds) = start_with_spec(None).await;
+    let actor = fixture.campaign.actor.identity();
+    let first = next_round(&mut rounds).await;
+    let session = first.request.session_id.clone();
+    first.cell(
+        "first-sync-publication",
+        "let notebookAction = (pure (41 :: Int) :: M Int)\n\
+         let notebookSamples = [1, 2, 3] :: [Int]\n\
+         notebookAction",
+    );
+    let following = next_round(&mut rounds).await;
+    let output = successful_output(&following.request, "first-sync-publication");
+    assert_eq!(
+        output["items"].as_array().unwrap().last().unwrap()["output"],
+        "41"
+    );
+    following.async_cell(
+        "async-publication",
+        "let asyncValue = sum notebookSamples + 36 :: Int\n\
+         let asyncAction = (pure asyncValue :: M Int)\n\
+         asyncAction",
+    );
+    let following = next_round(&mut rounds).await;
+    let output = successful_output(&following.request, "async-publication");
+    assert_eq!(
+        output["items"].as_array().unwrap().last().unwrap()["output"],
+        "42"
+    );
+    following.cell(
+        "sync-publication",
+        "let syncAction = (do { value <- asyncAction; pure (value + 1) } :: M Int)\n\
+         syncAction",
+    );
+    let following = next_round(&mut rounds).await;
+    let output = successful_output(&following.request, "sync-publication");
+    assert_eq!(
+        output["items"].as_array().unwrap().last().unwrap()["output"],
+        "43"
+    );
+    following.async_cell("async-reuse", "syncAction >>= \\value -> pure (value + 1)");
+    let following = next_round(&mut rounds).await;
+    let output = successful_output(&following.request, "async-reuse");
+    assert_eq!(
+        output["items"].as_array().unwrap().last().unwrap()["output"],
+        "44"
+    );
+    assert_eq!(following.request.session_id, session);
+    assert_eq!(fixture.campaign.actor.identity(), actor);
+    following.finish();
+    fixture.stop().await.unwrap();
 }
 
 fn has_user_text(request: &ResponsesRequest, expected: &str) -> bool {
@@ -870,7 +939,7 @@ async fn resident_async_failed_deferred_unfold_keeps_bindings_and_never_launches
     let (_files, fixture, mut rounds) = start().await;
     let actor = fixture.campaign.actor.identity();
     let setup = next_round(&mut rounds).await;
-    setup.cell(
+    setup.async_cell(
         "async-failure-setup",
         include_str!("fixtures/context_acceptance_setup.hs"),
     );
@@ -935,7 +1004,7 @@ async fn resident_async_failed_deferred_unfold_keeps_bindings_and_never_launches
         }),
         "failed async cell left a deferred child able to launch: {graph:?}"
     );
-    failed.cell(
+    failed.async_cell(
         "async-failure-reuse",
         include_str!("fixtures/context_acceptance_after_failure.hs"),
     );
