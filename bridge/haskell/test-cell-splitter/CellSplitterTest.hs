@@ -397,9 +397,9 @@ orderedInferenceSegments = do
       assertEqual "authored type owns its generated Generic" ["Imported"]
         (map genericDeclarationTarget (cellPlanGenericDeclarations declaration))
       assertEqual "import prologue has no generated display" []
-        (map displayTargetName (cellPlanDisplayTargets prologue))
+        (map structuralDisplayTargetName (cellPlanStructuralDisplayTargets prologue))
       assertEqual "authored type owns its generated display" ["Imported"]
-        (map displayTargetName (cellPlanDisplayTargets declaration))
+        (map structuralDisplayTargetName (cellPlanStructuralDisplayTargets declaration))
     _ -> fail "import and type declaration share a segment"
   where
     source = unlines
@@ -1510,25 +1510,25 @@ structuralDisplayCompilation selectedScope effectsRoot = bracket temporary remov
           compiler CheckedEnvironment mempty GeneralCompile scope path includes Nothing
     (accepted, _) <- checkCellInstances compile plan
     assertEqual "resolved authored Display instances retained" False
-      (any (`elem` map displayTargetName (cellPlanDisplayTargets accepted)) ["Custom", "Reexported"])
+      (any (`elem` map structuralDisplayTargetName (cellPlanStructuralDisplayTargets accepted)) ["Custom", "Reexported"])
     assertEqual "resolved authored Generic instances retained" False
       (any (`elem` map genericDeclarationTarget (cellPlanGenericDeclarations accepted)) ["Authored", "Standalone", "Reexported"])
     assertEqual "unrelated qualified classes do not suppress generated instances" True
-      ("ForeignClass" `elem` map displayTargetName (cellPlanDisplayTargets accepted)
+      ("ForeignClass" `elem` map structuralDisplayTargetName (cellPlanStructuralDisplayTargets accepted)
         && "ForeignClass" `elem` map genericDeclarationTarget (cellPlanGenericDeclarations accepted))
     assertEqual "specialized custom instance preserves general structure" True
-      ("Special" `elem` map displayTargetName (cellPlanDisplayTargets accepted))
+      ("Special" `elem` map structuralDisplayTargetName (cellPlanStructuralDisplayTargets accepted))
     assertEqual "authored Show remains an explicit text rendering choice" True
-      ("Presented" `elem` map displayTargetName (cellPlanDisplayTargets accepted))
+      ("Presented" `elem` map structuralDisplayTargetName (cellPlanStructuralDisplayTargets accepted))
     assertEqual "authored Show keeps the automatic Generic" True
       ("Presented" `elem` map genericDeclarationTarget (cellPlanGenericDeclarations accepted))
     assertEqual "unsupported automatic Generic derivations omitted" False
       (any ((`elem` ["Poly", "HiddenPoly", "Unboxed"]) . genericDeclarationTarget) (cellPlanGenericDeclarations accepted))
     assertEqual "unsupported Generic has no structural companion" False
-      (any ((`elem` ["Poly", "HiddenPoly", "Unboxed"]) . displayTargetName) (cellPlanDisplayTargets accepted))
+      (any ((`elem` ["Poly", "HiddenPoly", "Unboxed"]) . structuralDisplayTargetName) (cellPlanStructuralDisplayTargets accepted))
     assertEqual "authored Generic retains its structural companion" True
-      (all (`elem` map displayTargetName (cellPlanDisplayTargets accepted)) ["Authored", "Standalone"])
-    let generated = cellPlanDisplayDeclarations accepted
+      (all (`elem` map structuralDisplayTargetName (cellPlanStructuralDisplayTargets accepted)) ["Authored", "Standalone"])
+    let generated = cellPlanStructuralDisplayDeclarations accepted
     assertContains "structural companion delegates once to Generic" ".genericDisplayTree" generated
     assertContains "parameterized representation context" ".Rep (Parameter a)" generated
     assertContains "symbolic datatype instance head" ".Display ((:+:) a b)" generated
