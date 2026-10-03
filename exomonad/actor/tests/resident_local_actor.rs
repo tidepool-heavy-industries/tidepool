@@ -1353,14 +1353,27 @@ async fn resident_await_watch_case(case: WatchCase) {
                 return;
             }
             if retain_command_binding {
-                let binding = settled["items"][0]["installedBindings"][0]
-                    .as_str()
-                    .expect("the host returns the retained binding reference");
+                let installed_bindings = settled["items"][0]["installedBindings"]
+                    .as_array()
+                    .expect("host binding references");
+                let observation_binding = installed_bindings
+                    .first()
+                    .and_then(serde_json::Value::as_str)
+                    .expect("ordinary result observation is listed first");
+                assert!(
+                    observation_binding.starts_with("observation"),
+                    "the automatic result binder is distinct from the retained job: {settled:?}"
+                );
+                let binding = installed_bindings
+                    .last()
+                    .and_then(serde_json::Value::as_str)
+                    .expect("the command retain effect returns the retained binding reference");
                 assert!(!binding.contains("session_id:"), "{settled:?}");
-                assert_eq!(
-                    settled["items"][0]["installedBindings"],
-                    serde_json::json!([binding]),
-                    "the host tracks the binding on the item that requested it: {settled:?}"
+                assert!(
+                    installed_bindings
+                        .iter()
+                        .any(|candidate| candidate.as_str() == Some(binding)),
+                    "the host tracks the retained binding on the item that requested it: {settled:?}"
                 );
                 assert_eq!(
                     settled["items"][0]["output"], "",
