@@ -4317,7 +4317,7 @@ where
         let (preview, input_binding) = preview;
         let input = match preview {
             Ok((text, omitted)) => bounded_activation_text(
-                text, ACTIVATION_INPUT_LIMIT, omitted, "inspectFull sessionInput",
+                text, ACTIVATION_INPUT_LIMIT, omitted, "display sessionInput",
             ),
             Err(_) => "<input rendering unavailable; use lookup for sessionInput, then select or apply the value>".into(),
         };
@@ -6799,16 +6799,16 @@ mod activation_preview_tests {
     #[test]
     fn preview_bounds_preserve_unicode_and_mark_omission() {
         assert_eq!(
-            bounded_activation_text("".into(), 4, false, "inspectFull sessionInput"),
+            bounded_activation_text("".into(), 4, false, "display sessionInput"),
             ""
         );
         assert_eq!(
-            bounded_activation_text("a\nλ".into(), 4, false, "inspectFull sessionInput"),
+            bounded_activation_text("a\nλ".into(), 4, false, "display sessionInput"),
             "a\nλ"
         );
         assert_eq!(
-            bounded_activation_text("aλz".into(), 2, true, "inspectFull sessionInput"),
-            "a\n<additional detail omitted past the 2 bytes cap; expand with `inspectFull sessionInput`>"
+            bounded_activation_text("aλz".into(), 2, true, "display sessionInput"),
+            "a\n<additional detail omitted past the 2 bytes cap; expand with `display sessionInput`>"
         );
         assert_eq!(
             bounded_activation_text("data R".into(), 4, false, "lookup R"),
@@ -6829,7 +6829,7 @@ mod activation_preview_tests {
                 task.clone(),
                 ACTIVATION_INPUT_LIMIT,
                 false,
-                "inspectFull sessionInput"
+                "display sessionInput"
             ),
             task
         );
@@ -6838,11 +6838,11 @@ mod activation_preview_tests {
             oversized,
             ACTIVATION_INPUT_LIMIT,
             false,
-            "inspectFull sessionInput",
+            "display sessionInput",
         );
         assert!(rendered.starts_with(&"x".repeat(ACTIVATION_INPUT_LIMIT)));
         assert!(rendered.ends_with(
-            "\n<additional detail omitted past the 32 KiB cap; expand with `inspectFull sessionInput`>"
+            "\n<additional detail omitted past the 32 KiB cap; expand with `display sessionInput`>"
         ));
     }
 }

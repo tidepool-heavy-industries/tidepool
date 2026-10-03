@@ -1056,7 +1056,7 @@ async fn activation_presents_prose_and_preserves_exact_inputs() {
         (
             "preview-oversized-text",
             "oversizedTextPreview",
-            "past the 32 KiB cap; expand with `inspectFull sessionInput`",
+            "past the 32 KiB cap; expand with `display sessionInput`",
             "respond (Report 1)",
         ),
         (
