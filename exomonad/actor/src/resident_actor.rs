@@ -16850,8 +16850,8 @@ mod tests {
     fn completed_observation_failure_keeps_recovered_bindings_and_classification() {
         let recovered = vec!["commandJob".to_owned()];
         let source = ResidentActorWorkbenchError::CompletedResultObservation {
-            detail: "presenter result exceeded observation budget".into(),
-            recovered_bindings: Vec::new(),
+            detail: "command observation receipt: displayed-page bookkeeping failed".into(),
+            recovered_bindings: recovered.clone(),
         };
         let execution = WorkbenchExecutionId::from_digest([10; 16]);
         let operation = WorkbenchOperationReceipt {
@@ -16862,7 +16862,7 @@ mod tests {
                 input_unit_index: 0,
                 effect_ordinal: 0,
             },
-            effect: "retain command job binding".into(),
+            effect: "retain command job binding before display receipt".into(),
             disposition: WorkbenchOperationDisposition::Committed,
         };
         let failure = workbench_failure_after_unit(&[], 0, 1, source, vec![operation], &recovered);
