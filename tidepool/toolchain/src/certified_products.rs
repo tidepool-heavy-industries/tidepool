@@ -3538,28 +3538,6 @@ pub(crate) fn certify_products(
             "inherited finalization producer",
         ));
     }
-    let inherited_seals = inherited_interfaces
-        .into_iter()
-        .map(|entry| {
-            (
-                (entry.owner.unit, entry.owner.module),
-                entry.interface_sha256,
-            )
-        })
-        .collect();
-    let module_interfaces = finalized_module::issue_interfaces(
-        &receipt.finalization,
-        fresh_input_path
-            .parent()
-            .ok_or(CertificationError::StaleEvidence)?,
-        producer_sha256,
-        final_evidence,
-        &inherited_seals,
-        &mut validation,
-    )?;
-    let inherited_module_interfaces = exact
-        .map(|admission| admission.request.context.module_interfaces())
-        .unwrap_or_default();
     let parsed_fresh = fresh_products.products();
     let fresh_product_bytes = fresh_products.bytes;
     let requirements = crate::prepared_artifact::production_requirements()
@@ -3595,40 +3573,6 @@ pub(crate) fn certify_products(
         )
         .map_err(|_| CertificationError::Mismatch("fresh package import witness"))?;
     }
-    let mut admitted_interfaces = BTreeMap::new();
-    for module in &receipt.modules {
-        let key = (module.unit.clone(), module.module.clone());
-        if admitted_interfaces
-            .insert(key, module.skinny_iface_sha256)
-            .is_some()
-        {
-            return Err(CertificationError::Mismatch("duplicate interface owner"));
-        }
-    }
-    if let Some(admission) = exact {
-        for artifact in &admission.request.artifacts {
-            let key = (
-                artifact.interface.unit.clone(),
-                artifact.interface.module.clone(),
-            );
-            let seal = digest(&value_text(&artifact.interface.sha256))?;
-            if admitted_interfaces
-                .insert(key, seal)
-                .is_some_and(|previous| previous != seal)
-            {
-                return Err(CertificationError::Mismatch(
-                    "conflicting admitted interface owner",
-                ));
-            }
-        }
-    }
-    admit_canonical_interface_owners(
-        &mut admitted_interfaces,
-        module_interfaces
-            .iter()
-            .chain(inherited_module_interfaces.iter()),
-    )?;
-    validate_original_interface_owner_closure(&receipt.modules, &admitted_interfaces)?;
     let mut seen_modules = BTreeSet::new();
     let mut origin_counts = [[0_u64; 3]; 2];
     let mut fresh_modules = BTreeSet::new();
@@ -3883,6 +3827,102 @@ pub(crate) fn certify_products(
             return Err(CertificationError::Mismatch("unwitnessed fresh module"));
         }
     }
+    // Each cached row has passed the same source, native product, package,
+    // digest and global checks as fresh rows. Its selected immutable canonical
+    // carrier supplies type authority to this transaction's fresh interfaces.
+    let selected_cached_interfaces = module_bytes
+        .iter()
+        .filter(|row| row.5 == ProductOrigin::Cached)
+        .map(|(owner, source_sha, _, _, _, _)| {
+            let interface = &candidates
+                .and_then(|set| {
+                    set.by_owner
+                        .get(&(owner.unit.clone(), owner.module.clone()))
+                })
+                .filter(|bundle| bundle.owner == *owner)
+                .ok_or(CertificationError::Mismatch("selected candidate"))?
+                .original_module_interface;
+            if interface.producer_sha256() != producer_sha256
+                || interface.unit() != owner.unit
+                || interface.module() != owner.module
+                || interface.source_sha256() != *source_sha
+                || interface.interface_sha256() != owner.skinny_iface_sha256
+            {
+                return Err(CertificationError::Mismatch(
+                    "native canonical producer/source",
+                ));
+            }
+            Ok(interface)
+        })
+        .collect::<CertResult<Vec<_>>>()?;
+    let mut inherited_seals = inherited_interfaces
+        .into_iter()
+        .map(|entry| {
+            (
+                (entry.owner.unit, entry.owner.module),
+                entry.interface_sha256,
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    for interface in &selected_cached_interfaces {
+        let key = (interface.unit().to_owned(), interface.module().to_owned());
+        if inherited_seals
+            .insert(key, interface.interface_sha256())
+            .is_some_and(|previous| previous != interface.interface_sha256())
+        {
+            return Err(CertificationError::Mismatch(
+                "conflicting admitted interface owner",
+            ));
+        }
+    }
+    let module_interfaces = finalized_module::issue_interfaces(
+        &receipt.finalization,
+        fresh_input_path
+            .parent()
+            .ok_or(CertificationError::StaleEvidence)?,
+        producer_sha256,
+        final_evidence,
+        &inherited_seals,
+        &mut validation,
+    )?;
+    let inherited_module_interfaces = exact
+        .map(|admission| admission.request.context.module_interfaces())
+        .unwrap_or_default();
+    let mut admitted_interfaces = BTreeMap::new();
+    for module in &receipt.modules {
+        let key = (module.unit.clone(), module.module.clone());
+        if admitted_interfaces
+            .insert(key, module.skinny_iface_sha256)
+            .is_some()
+        {
+            return Err(CertificationError::Mismatch("duplicate interface owner"));
+        }
+    }
+    if let Some(admission) = exact {
+        for artifact in &admission.request.artifacts {
+            let key = (
+                artifact.interface.unit.clone(),
+                artifact.interface.module.clone(),
+            );
+            let seal = digest(&value_text(&artifact.interface.sha256))?;
+            if admitted_interfaces
+                .insert(key, seal)
+                .is_some_and(|previous| previous != seal)
+            {
+                return Err(CertificationError::Mismatch(
+                    "conflicting admitted interface owner",
+                ));
+            }
+        }
+    }
+    admit_canonical_interface_owners(
+        &mut admitted_interfaces,
+        module_interfaces
+            .iter()
+            .chain(inherited_module_interfaces.iter())
+            .chain(selected_cached_interfaces.iter().copied()),
+    )?;
+    validate_original_interface_owner_closure(&receipt.modules, &admitted_interfaces)?;
     let mut source_groups = match exact {
         Some(admission) => certified_source_map(&admission.request.groups)?,
         None => SourceGroupMap::new(),
@@ -7026,6 +7066,10 @@ pub(crate) mod tests {
             let mut quoter_receipt = receipt(&quoter_bytes, &current, quoter_source);
             quoter_receipt.module = "Quoter".into();
             quoter_receipt.dependency_witness_sha256 = sha(&current_bytes);
+            quoter_receipt.interface_requirements.insert(
+                (bundle.owner.unit.clone(), bundle.owner.module.clone()),
+                bundle.original_module_interface.interface_sha256(),
+            );
             let mixed = CertifiedReceipt {
                 finalization: fixture_finalization(
                     Some(root.path()),
@@ -7048,6 +7092,28 @@ pub(crate) mod tests {
                 None,
             )
             .unwrap();
+            let mut offered_only = mixed.clone();
+            offered_only
+                .modules
+                .retain(|module| module.origin != ProductOrigin::Cached);
+            assert!(matches!(
+                certify_products(
+                    Some(&selected),
+                    &offered_only,
+                    &parsed,
+                    &current_bytes,
+                    &input,
+                    &current,
+                    source,
+                    &producer,
+                    &include,
+                    None,
+                ),
+                Err(CertificationError::FinalizedInterfaceRequirement {
+                    selected_sha256: None,
+                    ..
+                })
+            ));
             let quoter = issued
                 .recovery_products
                 .iter()
