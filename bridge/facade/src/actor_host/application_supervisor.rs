@@ -6,15 +6,13 @@ pub(super) async fn run_interactive_applications(
     fleet: InteractiveFleet,
     shutdown: watch::Receiver<Option<NativeRetirement>>,
     mut root_config: watch::Receiver<ActorHostConfig>,
-    mut embedded_service: Option<embedded_service::EmbeddedService>,
+    mut embedded_service: embedded_service::EmbeddedService,
 ) -> Result<(), String> {
     let InteractiveFleet {
         provider_forest,
         root,
         config,
         run_root,
-        output_store,
-
         worktrees,
 
         readiness,
@@ -24,6 +22,7 @@ pub(super) async fn run_interactive_applications(
         #[cfg(test)]
         test_observer,
     } = fleet;
+    let output_store = embedded_service.runtime.store();
     let base_prompt = FrozenBasePrompt::materialize_selected(
         &run_root,
         config
@@ -59,7 +58,8 @@ pub(super) async fn run_interactive_applications(
         embedded_projection::LifecycleSender::channel();
     let mut embedded_projection = embedded_projection::EmbeddedProjection::default();
     let embedded_run = runtime_namespace(&launch_context.run_root);
-    if let Some(service) = embedded_service.as_ref() {
+    {
+        let service = &embedded_service;
         let forest = Arc::downgrade(&provider_forest);
         let run = embedded_run.clone();
         service
@@ -96,14 +96,15 @@ pub(super) async fn run_interactive_applications(
             .map_err(str::to_owned)?;
     }
 
-    // Supervisors waiting for a stopped actor's release receipt. Served from
-    // the receipt slot when it already exists, else when native cleanup joins.
+    // Answer a stopped actor's release wait from its settled Engine state,
+    // or when its native driver joins and confirms cleanup.
     let mut release_waiters: HashMap<ActorRef, Vec<Arc<exomonad_actor::ReleaseAwait>>> =
         HashMap::new();
     let mut notifications: JoinSet<(ActorRef, Result<(), String>)> = JoinSet::new();
 
     let mut health = tokio::time::interval(Duration::from_secs(1));
-    if let Some(service) = embedded_service.as_ref() {
+    {
+        let service = &embedded_service;
         let live_actors = embedded_live_actors(&application_owners);
         embedded_projection
             .publish(
@@ -139,7 +140,8 @@ pub(super) async fn run_interactive_applications(
             changed = embedded_lifecycle_rx.changed() => {
                 if changed.is_ok() {
                     let states = (*embedded_lifecycle_rx.borrow_and_update()).clone();
-                    if let Some(service) = embedded_service.as_ref() {
+                    {
+                        let service = &embedded_service;
                         let conversations = embedded_bindings(&application_owners);
                         let live_actors = embedded_live_actors(&application_owners);
                         if let Err(error) = service.control.refresh_completed_model_requests(&service.runtime.store()) {
@@ -172,7 +174,8 @@ pub(super) async fn run_interactive_applications(
                         &mut notifications,
                     );
                 }
-                if let Some(service) = embedded_service.as_mut() {
+                {
+                    let service = &mut embedded_service;
                     if let Err(error) = service.control.refresh_completed_model_requests(&service.runtime.store()) {
                         break Some(format!("embedded request projection failed: {error}"));
                     }
@@ -210,16 +213,11 @@ pub(super) async fn run_interactive_applications(
 
             }
 
-            command = async {
-                match embedded_service.as_mut() {
-                    Some(service) => service.commands.recv().await,
-                    None => std::future::pending().await,
-                }
-            } => {
+            command = embedded_service.commands.recv() => {
                 let Some(command) = command else {
                     break Some("embedded browser command channel closed".into());
                 };
-                let service = embedded_service.as_ref().expect("branch requires service");
+                let service = &embedded_service;
                 let store = service.runtime.store();
                 match command.command {
                     harness::server::ClientCommand::Host { operation_id, command } => {
@@ -418,7 +416,7 @@ pub(super) async fn run_interactive_applications(
                             &output_store,
                             &embedded_run,
                             conversation,
-                            embedded_service.as_ref().map(|service| &service.control),
+                            Some(&embedded_service.control),
                             &request,
                         );
                     }
@@ -444,12 +442,8 @@ pub(super) async fn run_interactive_applications(
                             worktree_grant(installation.effective_role.role()),
                         );
                         {
-                            let Some(service) = embedded_service.as_ref() else {
-                                break Some("embedded backend has no prepared service".into());
-                            };
-                            let Some(settings) = launch_context.config.embedded.clone() else {
-                                break Some("embedded backend has no launch settings".into());
-                            };
+                            let service = &embedded_service;
+                            let settings = service.settings.clone();
                             let actor = installation.actor.identity();
                             application_owners
                                 .lock()
@@ -1025,11 +1019,7 @@ pub(super) async fn run_interactive_applications(
     for owner in application_owners.lock().values_mut() {
         owner.native_retirement = native_retirement;
         owner.cancel();
-        if let Some(cancellation) = owner
-            .embedded
-            .as_ref()
-            .and_then(|embedded| embedded.cancellation.as_ref())
-        {
+        if let Some(cancellation) = owner.embedded.cancellation.as_ref() {
             cancellation.send_replace(true);
         }
     }
@@ -1042,14 +1032,11 @@ pub(super) async fn run_interactive_applications(
         },
     )
     .await;
-    let embedded_service_cleanup = match embedded_service.as_mut() {
-        Some(service) => service
-            .shutdown()
-            .await
-            .err()
-            .map(|error| format!("embedded browser shutdown: {error}")),
-        None => None,
-    };
+    let embedded_service_cleanup = embedded_service
+        .shutdown()
+        .await
+        .err()
+        .map(|error| format!("embedded browser shutdown: {error}"));
 
     let notification_cleanup = tokio::time::timeout(APPLICATION_SHUTDOWN_TIMEOUT, async {
         let mut failure = None;
@@ -1074,8 +1061,8 @@ pub(super) async fn run_interactive_applications(
             .filter_map(|(actor, owner)| {
                 owner
                     .embedded
+                    .cleanup_failure
                     .as_ref()
-                    .and_then(|embedded| embedded.cleanup_failure.as_ref())
                     .map(|error| format!("embedded Engine {actor:?}: {error}"))
             })
             .collect::<Vec<_>>();

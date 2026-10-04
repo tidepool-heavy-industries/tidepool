@@ -144,17 +144,8 @@ impl Fixture {
         owners.lock().insert(
             self.custody.actor,
             InteractiveApplicationOwner {
-                creator_workspace: None,
-                cancel: None,
-                native_retirement: Default::default(),
-                pane: Arc::new(Mutex::new(None)),
-                fork_gate: None,
                 custody: Some(self.custody.clone()),
-                scoped_retention: None,
-                embedded_policy: None,
-                embedded: None,
-                terminal: None,
-                retirement: Arc::new(Mutex::new(None)),
+                ..InteractiveApplicationOwner::embedded()
             },
         );
     }

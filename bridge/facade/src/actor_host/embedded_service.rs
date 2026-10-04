@@ -91,6 +91,7 @@ pub(super) fn responses_client(settings: &EmbeddedLaunchConfig) -> ResponsesClie
 
 pub(super) struct EmbeddedService {
     _owner: Arc<super::HostIncarnationLease>,
+    pub(super) settings: EmbeddedLaunchConfig,
     pub(super) runtime: Arc<EmbeddedHarnessRuntime>,
     pub(super) commands: mpsc::Receiver<QueuedCommand>,
     pub(super) control: ServerControl,
@@ -217,6 +218,7 @@ impl EmbeddedService {
         });
         Ok(Self {
             _owner: owner,
+            settings: settings.clone(),
             runtime,
             commands,
             control,

@@ -1224,67 +1224,6 @@ enum DurableActorEvent {
     Text(String),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-enum CleanupComponent {
-    Process,
-    Pane,
-    ToolService,
-    Delivery,
-    Socket,
-    WorktreeBinding,
-    BuildResource,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "status", rename_all = "camelCase")]
-enum CleanupComponentOutcome {
-    Completed,
-    Forced,
-    Failed { detail: String },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct CleanupComponentReceipt {
-    component: CleanupComponent,
-    outcome: CleanupComponentOutcome,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct InteractiveCleanupReceipt {
-    actor: ActorRef,
-    components: Vec<CleanupComponentReceipt>,
-}
-
-impl InteractiveCleanupReceipt {
-    /// Components that did not settle, each named with its reason.
-    fn retained(&self) -> Vec<String> {
-        self.components
-            .iter()
-            .filter_map(|component| match &component.outcome {
-                CleanupComponentOutcome::Failed { detail } => {
-                    Some(format!("{:?}: {detail}", component.component))
-                }
-                CleanupComponentOutcome::Forced => Some(format!(
-                    "{:?}: forcibly stopped before graceful settlement",
-                    component.component
-                )),
-                CleanupComponentOutcome::Completed => None,
-            })
-            .collect()
-    }
-
-    /// The answer a waiting supervisor receives for `stopAgent`/cleanup.
-    fn release(&self) -> exomonad_actor::ResourceRelease {
-        let retained = self.retained();
-        if retained.is_empty() {
-            exomonad_actor::ResourceRelease::Released
-        } else {
-            exomonad_actor::ResourceRelease::Retained(retained.join("; "))
-        }
-    }
-}
-
 struct InteractiveApplicationOwner {
     creator_workspace: Option<BoundWorkspace>,
     cancel: Option<oneshot::Sender<NativeRetirement>>,
@@ -1296,9 +1235,8 @@ struct InteractiveApplicationOwner {
 
     embedded_policy: Option<Arc<embedded_policy::EmbeddedPolicyInstallation>>,
 
-    embedded: Option<EmbeddedApplicationState>,
+    embedded: EmbeddedApplicationState,
     terminal: Option<ActorTerminal>,
-    retirement: Arc<Mutex<Option<InteractiveCleanupReceipt>>>,
 }
 
 /// Per-actor Engine custody, liveness, and retained conversation state.
@@ -1344,8 +1282,7 @@ fn with_embedded_state<R>(
     owners
         .lock()
         .get_mut(&actor)
-        .and_then(|owner| owner.embedded.as_mut())
-        .map(update)
+        .map(|owner| update(&mut owner.embedded))
 }
 
 fn update_embedded_state(
@@ -1353,12 +1290,8 @@ fn update_embedded_state(
     actor: ActorRef,
     update: impl FnOnce(&mut EmbeddedApplicationState),
 ) {
-    if let Some(state) = owners
-        .lock()
-        .get_mut(&actor)
-        .and_then(|owner| owner.embedded.as_mut())
-    {
-        update(state);
+    if let Some(owner) = owners.lock().get_mut(&actor) {
+        update(&mut owner.embedded);
     }
 }
 
@@ -1366,8 +1299,7 @@ fn embedded_is_live(owners: &InteractiveOwners, actor: ActorRef) -> bool {
     owners
         .lock()
         .get(&actor)
-        .and_then(|owner| owner.embedded.as_ref())
-        .is_some_and(|embedded| embedded.live)
+        .is_some_and(|owner| owner.embedded.live)
 }
 
 fn embedded_binding(
@@ -1377,8 +1309,7 @@ fn embedded_binding(
     owners
         .lock()
         .get(&actor)
-        .and_then(|owner| owner.embedded.as_ref())
-        .and_then(|embedded| embedded.conversation.clone())
+        .and_then(|owner| owner.embedded.conversation.clone())
 }
 
 fn embedded_bindings(
@@ -1390,8 +1321,8 @@ fn embedded_bindings(
         .filter_map(|(actor, owner)| {
             owner
                 .embedded
-                .as_ref()
-                .and_then(|embedded| embedded.conversation.clone())
+                .conversation
+                .clone()
                 .map(|binding| (*actor, binding))
         })
         .collect()
@@ -1401,24 +1332,15 @@ fn embedded_live_actors(owners: &InteractiveOwners) -> BTreeSet<ActorRef> {
     owners
         .lock()
         .iter()
-        .filter_map(|(actor, owner)| {
-            owner
-                .embedded
-                .as_ref()
-                .is_some_and(|embedded| embedded.live)
-                .then_some(*actor)
-        })
+        .filter_map(|(actor, owner)| owner.embedded.live.then_some(*actor))
         .collect()
 }
 
 fn embedded_actor_for_task(owners: &InteractiveOwners, task: tokio::task::Id) -> Option<ActorRef> {
-    owners.lock().iter().find_map(|(actor, owner)| {
-        owner
-            .embedded
-            .as_ref()
-            .filter(|embedded| embedded.task_id == Some(task))
-            .map(|_| *actor)
-    })
+    owners
+        .lock()
+        .iter()
+        .find_map(|(actor, owner)| (owner.embedded.task_id == Some(task)).then_some(*actor))
 }
 
 impl InteractiveApplicationOwner {
@@ -1453,9 +1375,8 @@ impl InteractiveApplicationOwner {
 
             embedded_policy: None,
 
-            embedded: Some(EmbeddedApplicationState::new()),
+            embedded: EmbeddedApplicationState::new(),
             terminal: None,
-            retirement: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -1672,13 +1593,10 @@ fn handoff_application_owners(
     cleanup: Result<(), Box<dyn std::error::Error>>,
     run_result: Result<(), Box<dyn std::error::Error>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let retained = owners.lock().values().any(|owner| {
-        owner.scoped_retention.is_some() || owner.custody.is_some() || {
-            {
-                false
-            }
-        }
-    });
+    let retained = owners
+        .lock()
+        .values()
+        .any(|owner| owner.scoped_retention.is_some() || owner.custody.is_some());
     let unfinished = !task.is_finished();
     if retained || unfinished {
         return Err(Box::new(RetainedInteractiveFleet {
@@ -1717,8 +1635,6 @@ struct InteractiveFleet {
     root: LocalActorRef,
     config: ActorHostConfig,
     run_root: PathBuf,
-    output_store: Arc<harness::store::Store>,
-
     worktrees: WorktreeManager,
 
     /// Readiness events are best-effort notifications: a dropped receiver
@@ -1842,6 +1758,10 @@ async fn run_owned(
     #[cfg(test)] test_transport: Option<Arc<dyn harness::engine::ResponsesTransport>>,
     #[cfg(test)] mut test_hooks: Option<hosted_test_context::HostTestHooks>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let settings = config
+        .embedded
+        .as_ref()
+        .ok_or_else(|| runtime_error("embedded host requires [launch.embedded]"))?;
     let host_incarnation = Arc::new(host_incarnation);
     let run_root = config.run_root.clone();
     std::fs::create_dir_all(&run_root)?;
@@ -1887,47 +1807,32 @@ async fn run_owned(
         &run_journal_path,
         prior_actor_records.is_empty(),
     )?;
-    let embedded_service = {
-        let settings = config
-            .embedded
-            .as_ref()
-            .ok_or_else(|| runtime_error("embedded backend requires [launch.embedded]"))?;
-        Some(
-            embedded_service::EmbeddedService::prepare_owned(
-                &run_root,
-                settings,
-                Arc::clone(&host_incarnation),
-            )
-            .await
-            .map_err(runtime_error)?,
-        )
-    };
-    let output_store = match embedded_service.as_ref() {
-        Some(service) => service.runtime.store(),
-        None => display_output::open_run_store(&run_root).map_err(runtime_error)?,
-    };
+    let embedded_service = embedded_service::EmbeddedService::prepare_owned(
+        &run_root,
+        settings,
+        Arc::clone(&host_incarnation),
+    )
+    .await
+    .map_err(runtime_error)?;
     #[cfg(test)]
     let mut embedded_service = embedded_service;
     #[cfg(test)]
-    if let (Some(service), Some(transport)) = (&mut embedded_service, test_transport) {
-        service.set_test_transport(transport);
+    if let Some(transport) = test_transport {
+        embedded_service.set_test_transport(transport);
     }
     #[cfg(test)]
-    if let (Some(service), Some(hooks)) = (&mut embedded_service, &mut test_hooks) {
+    if let Some(hooks) = &mut test_hooks {
         if let Some(factory) = hooks.transport.take() {
-            service.set_test_transport(factory(&service.runtime, &config));
+            embedded_service.set_test_transport(factory(&embedded_service.runtime, &config));
         }
     }
-    let mut embedded_startup =
-        embedded_service
-            .as_ref()
-            .map(|service| embedded_recovery::EmbeddedStartupRecovery {
-                lease: Arc::clone(&host_incarnation),
-                journal: Arc::clone(&actor_recovery),
-                store: service.runtime.store(),
-                root_binding_path: config.root_binding_path.clone(),
-                manifest: None,
-            });
+    let mut embedded_startup = embedded_recovery::EmbeddedStartupRecovery {
+        lease: Arc::clone(&host_incarnation),
+        journal: Arc::clone(&actor_recovery),
+        store: embedded_service.runtime.store(),
+        root_binding_path: config.root_binding_path.clone(),
+        manifest: None,
+    };
     let (source, root, program, child_session_factory, image_registry) = compile_root(
         &config,
         &run_root,
@@ -1936,23 +1841,17 @@ async fn run_owned(
         source_layers.as_ref(),
         Arc::clone(&host_incarnation),
         run_journal_mode,
-        embedded_startup.as_mut(),
+        Some(&mut embedded_startup),
     )?;
     let prior_actor_records = actor_recovery.records();
     let accepted_source = active_source_identity(&run_root, config.workspace_inputs.is_some())?;
-    let (descriptor, mut machine, entry) = root.into_parts();
+    let (descriptor, machine, entry) = root.into_parts();
     let exomonad_actor::ResidentRootEntry::Startup(entry) = entry else {
         return Err(runtime_error(
             "root startup requires its installed executable entry",
         ));
     };
     let bootstrap_identity = entry.compile_input_identity().to_owned();
-    let outcome = if embedded_service.is_some() {
-        exomonad_actor::ResidentRootEntry::Startup(entry)
-    } else {
-        exomonad_actor::ResidentRootEntry::Prepared(machine.run_startup_entry(entry)?)
-    };
-
     let worktree_admission = fork_workspace_admission(
         worktrees.clone(),
         worktree_authority.clone(),
@@ -1974,14 +1873,11 @@ async fn run_owned(
         .with_recovery_journal(actor_recovery.clone())
         .with_child_session_factory(child_session_factory)
         .with_handler_effect_support(tidepool_mcp::InstalledEffectSupport::installed_effect_support)
-        .with_image_registry(image_registry);
-
-    if let Some(service) = &embedded_service {
-        forest = forest.with_conversation_reader(embedded_reflect::run_conversation_reader(
-            service.runtime.store(),
+        .with_image_registry(image_registry)
+        .with_conversation_reader(embedded_reflect::run_conversation_reader(
+            embedded_service.runtime.store(),
             actor_recovery.clone(),
         ));
-    }
     // No child bootstrap program: every launch stays on its launching
     // session, as before per-actor machines.
     let _ = &program;
@@ -1989,14 +1885,15 @@ async fn run_owned(
     if let Some(layers) = &source_layers {
         forest.set_source_layers(layers.clone());
     }
-    if let (Some(service), Some(settings)) = (&embedded_service, &config.embedded) {
-        service
-            .runtime
-            .configure_context_models(&config)
-            .map_err(runtime_error)?;
-        forest = forest
-            .with_cell_model_factory(cell_model::admitted_factory(service, settings, &config));
-    }
+    embedded_service
+        .runtime
+        .configure_context_models(&config)
+        .map_err(runtime_error)?;
+    forest = forest.with_cell_model_factory(cell_model::admitted_factory(
+        &embedded_service,
+        settings,
+        &config,
+    ));
     forest.track_resource_release();
     let forest = Arc::new(forest);
     let recovered_root = durable_root_identity(&prior_actor_records, accepted_source.as_deref())?;
@@ -2015,82 +1912,50 @@ async fn run_owned(
                 .chain(recovered_root.map(|(_, actor)| actor.id)),
         )
         .map_err(runtime_error)?;
-    let mut startup_intent = embedded_startup
-        .as_ref()
-        .map(|startup| {
-            startup.intent(
-                &run_root,
-                recovered_root
-                    .map(|(_, identity)| identity)
-                    .unwrap_or(ActorRef::first(exomonad_actor::ActorId(0))),
-                accepted_source.clone(),
-                bootstrap_identity.clone(),
-            )
-        })
-        .transpose()?;
-    let (root_actor, mut root_task, startup_release) = if let Some(intent) = &startup_intent {
-        let exomonad_actor::ResidentRootEntry::Startup(entry) = outcome else {
-            return Err(runtime_error(
-                "embedded root startup lost its executable entry",
-            ));
-        };
-        let (actor, task, release) = match recovered_root {
-            Some((_, identity)) => {
-                forest
-                    .admit_pending_root_with_identity(descriptor, entry, identity, intent.clone())
-                    .await?
-            }
-            None => {
-                let mut intent = intent.clone();
-                let run_root = run_root.clone();
-                forest
-                    .admit_pending_root(descriptor, entry, move |identity| {
-                        intent.conversation = embedded_recovery::conversation(
-                            &embedded_recovery::host_identity(&run_root, "/root", identity),
-                        );
-                        intent
-                    })
-                    .await?
-            }
-        };
-        startup_intent
-            .as_mut()
-            .expect("pending intent")
-            .conversation = embedded_recovery::conversation(&embedded_recovery::host_identity(
-            &run_root,
-            "/root",
-            actor.identity(),
-        ));
-        (actor, task, Some(release))
-    } else {
-        let exomonad_actor::ResidentRootEntry::Prepared(outcome) = outcome else {
-            return Err(runtime_error(
-                "standalone root startup has no prepared outcome",
-            ));
-        };
-        let (actor, task) = match recovered_root {
-            Some((_, identity)) => {
-                forest
-                    .admit_root_with_identity(descriptor, outcome, identity)
-                    .await?
-            }
-            None => forest.admit_root(descriptor, outcome).await?,
-        };
-        (actor, task, None)
+    let mut startup_intent = embedded_startup.intent(
+        &run_root,
+        recovered_root
+            .map(|(_, identity)| identity)
+            .unwrap_or(ActorRef::first(exomonad_actor::ActorId(0))),
+        accepted_source.clone(),
+        bootstrap_identity.clone(),
+    )?;
+    let (root_actor, mut root_task, startup_release) = match recovered_root {
+        Some((_, identity)) => {
+            forest
+                .admit_pending_root_with_identity(
+                    descriptor,
+                    entry,
+                    identity,
+                    startup_intent.clone(),
+                )
+                .await?
+        }
+        None => {
+            let mut intent = startup_intent.clone();
+            let run_root = run_root.clone();
+            forest
+                .admit_pending_root(descriptor, entry, move |identity| {
+                    intent.conversation = embedded_recovery::conversation(
+                        &embedded_recovery::host_identity(&run_root, "/root", identity),
+                    );
+                    intent
+                })
+                .await?
+        }
     };
+    startup_intent.conversation = embedded_recovery::conversation(
+        &embedded_recovery::host_identity(&run_root, "/root", root_actor.identity()),
+    );
     #[cfg(test)]
     embedded_recovery_tests::startup_checkpoint("admitted");
     if let Err(error) = actor_recovery.prepare_application_with_intent(
         root_actor.identity(),
         config.root_binding_path.clone(),
         accepted_source.clone(),
-        embedded_service.as_ref().map(|_| {
-            embedded_recovery::conversation(&embedded_recovery::host_identity(
-                &run_root,
-                "/root",
-                root_actor.identity(),
-            ))
-        }),
+        Some(embedded_recovery::conversation(
+            &embedded_recovery::host_identity(&run_root, "/root", root_actor.identity()),
+        )),
     ) {
         forest.shutdown().await;
         return Err(runtime_error(format!(
@@ -2098,130 +1963,120 @@ async fn run_owned(
         )));
     }
     let declaration_recovery = async {
-        if let (Some(intent), Some(release), Some(service)) =
-            (&startup_intent, &startup_release, &embedded_service)
-        {
-            let placement = forest
-                .root_recovery_placement(root_actor.identity())
-                .map_err(|error| runtime_error(error.to_string()))?;
-            let admission = intent
-                .manifest_predecessor
-                .map(|predecessor| {
-                    actor_recovery.certify_root_successor(
-                        predecessor,
-                        placement,
-                        accepted_source.as_deref(),
-                        &config.root_binding_path,
+        let intent = &startup_intent;
+        let release = &startup_release;
+        let service = &embedded_service;
+        let placement = forest
+            .root_recovery_placement(root_actor.identity())
+            .map_err(|error| runtime_error(error.to_string()))?;
+        let admission = intent
+            .manifest_predecessor
+            .map(|predecessor| {
+                actor_recovery.certify_root_successor(
+                    predecessor,
+                    placement,
+                    accepted_source.as_deref(),
+                    &config.root_binding_path,
+                )
+            })
+            .transpose()?;
+        let manifest = match (intent.manifest_predecessor, admission.as_ref()) {
+            (Some(predecessor), Some(admission)) => {
+                let owner = tidepool_runtime::session::RecoveryPublicOwner::new(
+                    &root_declaration_recovery::root_path(),
+                    predecessor.incarnation.0,
+                )
+                .ok_or_else(|| runtime_error("root manifest predecessor has no incarnation"))?;
+                forest
+                    .transfer_recovered_root_public_owner(
+                        root_actor.identity(),
+                        &owner,
+                        root_declaration_recovery::successor_authority(
+                            Arc::clone(&host_incarnation),
+                            Arc::clone(admission),
+                        ),
                     )
-                })
-                .transpose()?;
-            let manifest = match (intent.manifest_predecessor, admission.as_ref()) {
-                (Some(predecessor), Some(admission)) => {
-                    let owner = tidepool_runtime::session::RecoveryPublicOwner::new(
-                        &root_declaration_recovery::root_path(),
-                        predecessor.incarnation.0,
-                    )
-                    .ok_or_else(|| runtime_error("root manifest predecessor has no incarnation"))?;
-                    forest
-                        .transfer_recovered_root_public_owner(
-                            root_actor.identity(),
-                            &owner,
-                            root_declaration_recovery::successor_authority(
-                                Arc::clone(&host_incarnation),
-                                Arc::clone(admission),
-                            ),
-                        )
-                        .await
-                        .map_err(|error| runtime_error(error.to_string()))?
-                }
-                _ => forest
-                    .bind_durable_root_public_owner(root_actor.identity())
                     .await
-                    .map_err(|error| runtime_error(error.to_string()))?,
-            };
-            match manifest {
-                tidepool_runtime::session::PublicManifestCommit::Durable => {}
-                tidepool_runtime::session::PublicManifestCommit::PublishedDurabilityUnconfirmed { .. } => {
-                    forest
-                        .confirm_durable_root_public_owner(root_actor.identity())
-                        .await
-                        .map_err(|error| runtime_error(error.to_string()))?;
-                }
-                outcome => return Err(runtime_error(format!(
-                    "root startup manifest did not become durable: {outcome:?}"
-                ))),
+                    .map_err(|error| runtime_error(error.to_string()))?
             }
-            #[cfg(test)]
-            embedded_recovery_tests::startup_checkpoint("manifest");
-            let identity = embedded_recovery::host_identity(&run_root, "/root", root_actor.identity());
-            let store = service.runtime.store();
-            #[cfg(test)]
-            let _uncertain_reader = embedded_recovery_tests::uncertain_store_reader();
-            if let Some(predecessor) = &intent.store_predecessor {
-                let predecessor = embedded_recovery::identity_from_conversation(predecessor)
-                    .map_err(runtime_error)?;
-                let admission = admission
-                    .ok_or_else(|| runtime_error("Store successor lacks exact manifest admission"))?;
-                let authority = embedded_recovery::EmbeddedBindingSuccessorAuthority {
-                    lease: Arc::clone(&host_incarnation),
-                    run_root: run_root.clone(),
-                    admission,
-                };
-                store.transfer_embedded_binding(&predecessor, &identity, &authority)?;
-            } else {
-                let authority = embedded_recovery::EmbeddedBindingInitialAuthority {
+            _ => forest
+                .bind_durable_root_public_owner(root_actor.identity())
+                .await
+                .map_err(|error| runtime_error(error.to_string()))?,
+        };
+        match manifest {
+            tidepool_runtime::session::PublicManifestCommit::Durable => {}
+            tidepool_runtime::session::PublicManifestCommit::PublishedDurabilityUnconfirmed {
+                ..
+            } => {
+                forest
+                    .confirm_durable_root_public_owner(root_actor.identity())
+                    .await
+                    .map_err(|error| runtime_error(error.to_string()))?;
+            }
+            outcome => {
+                return Err(runtime_error(format!(
+                    "root startup manifest did not become durable: {outcome:?}"
+                )))
+            }
+        }
+        #[cfg(test)]
+        embedded_recovery_tests::startup_checkpoint("manifest");
+        let identity = embedded_recovery::host_identity(&run_root, "/root", root_actor.identity());
+        let store = service.runtime.store();
+        #[cfg(test)]
+        let _uncertain_reader = embedded_recovery_tests::uncertain_store_reader();
+        if let Some(predecessor) = &intent.store_predecessor {
+            let predecessor = embedded_recovery::identity_from_conversation(predecessor)
+                .map_err(runtime_error)?;
+            let admission = admission
+                .ok_or_else(|| runtime_error("Store successor lacks exact manifest admission"))?;
+            let authority = embedded_recovery::EmbeddedBindingSuccessorAuthority {
+                lease: Arc::clone(&host_incarnation),
+                run_root: run_root.clone(),
+                admission,
+            };
+            store.transfer_embedded_binding(&predecessor, &identity, &authority)?;
+        } else {
+            let authority = embedded_recovery::EmbeddedBindingInitialAuthority {
+                lease: Arc::clone(&host_incarnation),
+                journal: Arc::clone(&actor_recovery),
+                run_root: run_root.clone(),
+                actor: root_actor.identity(),
+                intent: intent.clone(),
+            };
+            store.bind_initial_embedded_binding(&identity, None, &authority)?;
+        }
+        if !store.embedded_binding_matches(&identity)? {
+            return Err(runtime_error(
+                "root startup Store binding readback differs after durable commit",
+            ));
+        }
+        #[cfg(test)]
+        embedded_recovery_tests::startup_checkpoint("store");
+        actor_recovery
+            .bind_application_conversation(root_actor.identity(), intent.conversation.clone())?;
+        #[cfg(test)]
+        embedded_recovery_tests::startup_checkpoint("bound");
+        forest
+            .release_root_startup(release)
+            .map_err(|error| runtime_error(error.to_string()))?;
+        #[cfg(test)]
+        embedded_recovery_tests::startup_checkpoint("released");
+        service
+            .runtime
+            .configure_application_recovery(Arc::new(
+                embedded_recovery::EmbeddedApplicationRecovery {
                     lease: Arc::clone(&host_incarnation),
                     journal: Arc::clone(&actor_recovery),
                     run_root: run_root.clone(),
-                    actor: root_actor.identity(),
-                    intent: intent.clone(),
-                };
-                store.bind_initial_embedded_binding(&identity, None, &authority)?;
-            }
-            if !store.embedded_binding_matches(&identity)? {
-                return Err(runtime_error("root startup Store binding readback differs after durable commit"));
-            }
-            #[cfg(test)]
-            embedded_recovery_tests::startup_checkpoint("store");
-            actor_recovery.bind_application_conversation(
-                root_actor.identity(),
-                intent.conversation.clone(),
-            )?;
-            #[cfg(test)]
-            embedded_recovery_tests::startup_checkpoint("bound");
-            forest
-                .release_root_startup(release)
-                .map_err(|error| runtime_error(error.to_string()))?;
-            #[cfg(test)]
-            embedded_recovery_tests::startup_checkpoint("released");
-        } else {
-            match forest
-                .bind_durable_root_public_owner(root_actor.identity())
-                .await
-                .map_err(|error| runtime_error(error.to_string()))?
-            {
-                tidepool_runtime::session::PublicManifestCommit::Durable => {}
-                outcome => return Err(runtime_error(format!(
-                    "initial root declaration ownership did not become durable: {outcome:?}"
-                ))),
-            }
-        }
-        if let Some(service) = &embedded_service {
-            service
-                .runtime
-                .configure_application_recovery(Arc::new(
-                    embedded_recovery::EmbeddedApplicationRecovery {
-                        lease: Arc::clone(&host_incarnation),
-                        journal: Arc::clone(&actor_recovery),
-                        run_root: run_root.clone(),
-                        root: root_actor.identity(),
-                        root_binding_path: config.root_binding_path.clone(),
-                        accepted_source: accepted_source.clone(),
-                        recovered_root: recovered_root.is_some(),
-                    },
-                ))
-                .map_err(runtime_error)?;
-        }
+                    root: root_actor.identity(),
+                    root_binding_path: config.root_binding_path.clone(),
+                    accepted_source: accepted_source.clone(),
+                    recovered_root: recovered_root.is_some(),
+                },
+            ))
+            .map_err(runtime_error)?;
         Ok::<(), Box<dyn std::error::Error>>(())
     }
     .await;
@@ -2404,13 +2259,13 @@ async fn run_owned(
     #[cfg(test)]
     let test_observer = test_hooks.as_ref().map(|hooks| hooks.observer.clone());
     #[cfg(test)]
-    if let (Some(hooks), Some(service)) = (&mut test_hooks, &embedded_service) {
+    if let Some(hooks) = &mut test_hooks {
         if let Some(assembled) = hooks.assembled.take() {
             let _ = assembled.send(hosted_test_context::HostedActorContext {
                 config: config.clone(),
                 actor: root_actor.clone(),
                 forest: Arc::clone(&forest),
-                runtime: Arc::clone(&service.runtime),
+                runtime: Arc::clone(&embedded_service.runtime),
                 observer: hooks.observer.clone(),
                 owners: Arc::clone(&application_owners),
             });
@@ -2424,8 +2279,6 @@ async fn run_owned(
             root: root_actor.clone(),
             config: config.clone(),
             run_root: run_root.clone(),
-            output_store,
-
             worktrees,
 
             readiness: readiness.clone(),
@@ -3409,25 +3262,16 @@ fn observed_resource_release(
     actor: ActorRef,
     owners: &InteractiveOwners,
 ) -> Option<exomonad_actor::ResourceRelease> {
-    let retirement = {
-        let owners = owners.lock();
-        let Some(owner) = owners.get(&actor) else {
-            return Some(exomonad_actor::ResourceRelease::Released);
-        };
-        if let Some(embedded) = owner.embedded.as_ref() {
-            if embedded.live {
-                return None;
-            }
-            if let Some(error) = embedded.cleanup_failure.as_ref() {
-                return Some(embedded_resource_release(Some(error)));
-            }
-            return Some(exomonad_actor::ResourceRelease::Released);
-        }
-        Arc::clone(&owner.retirement)
+    let owners = owners.lock();
+    let Some(owner) = owners.get(&actor) else {
+        return Some(exomonad_actor::ResourceRelease::Released);
     };
-    let receipt = retirement.lock();
-    let release = receipt.as_ref().map(InteractiveCleanupReceipt::release);
-    release
+    if owner.embedded.live {
+        return None;
+    }
+    Some(embedded_resource_release(
+        owner.embedded.cleanup_failure.as_ref(),
+    ))
 }
 
 /// Fence admission and preserve release waits already queued when shutdown wins.
