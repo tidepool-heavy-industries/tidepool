@@ -566,9 +566,9 @@ mod tests {
     /// `Tidepool.Actors.Role` spells what a child DECLARES; the roles here are
     /// the ceilings those declarations must sit under. The two are different
     /// things — a ceiling is a maximum, not a request — so this checks the
-    /// subset direction. Equality would be wrong and was: widening a ceiling
-    /// and mirroring it into the Haskell alias made children demand effects
-    /// whose handlers the recipe-check environment does not install.
+    /// subset direction. Standard rows also declare Console for explicit
+    /// display; its interpreter is intrinsic to the resident actor, including
+    /// recipe-check environments. Custom narrowed rows retain their own policy.
     #[test]
     fn haskell_declared_rows_sit_under_the_rust_ceilings() {
         let source = include_str!("../../../bridge/haskell/actors/Tidepool/Actors/Role.hs");
@@ -586,6 +586,8 @@ mod tests {
                 .collect()
         }
         for (name, role) in [
+            ("CoreEffects", EffectiveRole::research()),
+            ("ResearchLeafEffects", EffectiveRole::research()),
             ("ResearchEffects", EffectiveRole::research()),
             ("CodingEffects", EffectiveRole::coding()),
             ("IntegrationEffects", EffectiveRole::integration()),
@@ -596,7 +598,12 @@ mod tests {
                 .iter()
                 .map(|effect| effect.haskell_name())
                 .collect();
-            for effect in declared(source, name) {
+            let declared = declared(source, name);
+            assert!(
+                declared.iter().any(|effect| effect == "Console"),
+                "{name} must support explicit value display"
+            );
+            for effect in declared {
                 assert!(
                     ceiling.contains(&effect.as_str()),
                     "{name} declares {effect}, which is outside the {:?} ceiling",
