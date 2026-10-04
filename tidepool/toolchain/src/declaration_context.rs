@@ -5509,6 +5509,142 @@ mod tests {
 
     #[test]
     #[ignore = "requires the matched Haskell worker and frontend"]
+    fn source_selected_receipt_pairs_prior_program_support_with_actual_original_proof() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let module = tidepool_repr::SessionModule::lib(tidepool_repr::Generation(1));
+        let original = include_str!("../tests/fixtures/checked-prefix-publication/G1.hs");
+        let support =
+            include_str!("../tests/fixtures/checked-prefix-publication/PrefixSelectedSupport.hs");
+        let original_path = root.join(module.relative_hs_path());
+        std::fs::create_dir_all(original_path.parent().unwrap()).unwrap();
+        std::fs::write(&original_path, original).unwrap();
+        let support_path = root.join("PrefixSelectedSupport.hs");
+        std::fs::write(&support_path, support).unwrap();
+        let includes = vec![root.to_path_buf()];
+        let certificate = crate::declaration_join::certify_authored_declaration(
+            module,
+            &original_path,
+            original,
+            &includes,
+            root,
+        )
+        .expect("actual compiler issues the original support proof");
+        let owner = identity("main", "PrefixSelectedSupport");
+        let persisted = ExactDeclarationContext::new(&[], &[], vec![])
+            .unwrap()
+            .extend_interface_artifacts(
+                &certificate
+                    .artifact_view()
+                    .interface_projection(std::slice::from_ref(&owner))
+                    .unwrap(),
+            )
+            .unwrap();
+        assert!(persisted.authored_native_root(1).is_err());
+        let empty = ExactDeclarationContext::new(&[], &[], vec![]).unwrap();
+        let (endpoint, _) = crate::toolchain::bind_extract_endpoint().unwrap();
+        let request = Arc::new(persisted.clone())
+            .prepare_compilation(&root.join("scope"), endpoint.identity().producer_bytes())
+            .unwrap()
+            .with_source_search_context(&includes);
+        let source_path = root.join("Consumer.hs");
+        std::fs::write(&source_path,
+            "module Consumer where\nimport PrefixSelectedSupport\nresult :: Int\nresult = selected\n").unwrap();
+        let output = root.join("consumer-output");
+        let mut command = tidepool_extract_cmd::ExtractCmd::new().unwrap();
+        command
+            .input(&source_path)
+            .includes(&includes)
+            .target("result")
+            .output_dir(&output);
+        request.apply_to(&mut command).unwrap();
+        let run = endpoint.execute(&command).unwrap();
+        crate::diag::decode_extract_result(run.success(), &run.output.stdout, &run.output.stderr)
+            .expect("actual current-source consumer compiles");
+        let persisted_admissions = request.validate_outputs(&output).unwrap();
+        assert_eq!(persisted_admissions.len(), 1);
+        assert!(persisted_admissions[0]
+            .selected_originals
+            .contains_key(&owner));
+        let receipts = std::fs::read_dir(output.join(".exact-compilations"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path().join("receipt.cbor"))
+            .collect::<Vec<_>>();
+        assert_eq!(receipts.len(), 1);
+        let receipt = &receipts[0];
+        assert!(
+            request.validate_receipt(receipt, None, &empty).is_err(),
+            "current worker claims cannot supply absent prior custody"
+        );
+        let mut local = request.clone();
+        local.program_support = Some(persisted.artifact_view().clone());
+        let local_admission = local.validate_receipt(receipt, None, &empty).unwrap();
+        assert_eq!(
+            local_admission.home_imports().unwrap(),
+            persisted_admissions[0].home_imports().unwrap()
+        );
+        assert_eq!(
+            local_admission.selected_originals.len(),
+            persisted_admissions[0].selected_originals.len()
+        );
+        assert!(empty.artifact_view().is_empty());
+        assert!(empty.lexical_graph().is_empty());
+        let actual = read_receipt(receipt);
+        let mut changed = actual.clone();
+        changed.as_array_mut().unwrap()[9].as_array_mut().unwrap()[0]
+            .as_array_mut()
+            .unwrap()[0]
+            .as_array_mut()
+            .unwrap()[1] = text("UnadmittedOwner");
+        write_receipt(receipt, &changed);
+        assert!(local.validate_receipt(receipt, None, &empty).is_err());
+        let mut changed = actual.clone();
+        let selection = changed.as_array_mut().unwrap()[9].as_array_mut().unwrap();
+        let mut evidence: crate::cache::DependencyEvidence =
+            serde_json::from_str(selection[1].as_text().unwrap()).unwrap();
+        evidence.modules[0]
+            .imports
+            .push(crate::cache::ModuleImportEvidence {
+                qualifier: crate::cache::ImportQualifier::Unqualified,
+                module: "UnadmittedOwner".into(),
+                boot: false,
+                selected: None,
+            });
+        selection[1] = text(serde_json::to_string(&evidence).unwrap());
+        write_receipt(receipt, &changed);
+        assert!(local.validate_receipt(receipt, None, &empty).is_err());
+        write_receipt(receipt, &actual);
+        std::fs::write(
+            &support_path,
+            support.replace("selected = 42", "selected = 43"),
+        )
+        .unwrap();
+        assert!(local.validate_receipt(receipt, None, &empty).is_err());
+        let conflicting_root = root.join("conflicting-issuer");
+        std::fs::create_dir(&conflicting_root).unwrap();
+        let changed = crate::declaration_join::certify_authored_declaration(
+            module,
+            &original_path,
+            original,
+            &includes,
+            &conflicting_root,
+        )
+        .expect("actual compiler issues the changed original proof");
+        std::fs::write(&support_path, support).unwrap();
+        local.program_support = Some(
+            changed
+                .artifact_view()
+                .interface_projection(&[owner])
+                .unwrap(),
+        );
+        assert!(
+            local.validate_receipt(receipt, None, &persisted).is_err(),
+            "local custody cannot override a conflicting persisted canonical owner"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the matched Haskell worker and frontend"]
     fn generated_planned_import_is_bound_to_original_certificate_and_target() {
         let directory = tempfile::tempdir().unwrap();
         let owner = tidepool_repr::SessionModule::lib(tidepool_repr::Generation(1));
