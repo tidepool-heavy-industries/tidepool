@@ -4,6 +4,7 @@
 module GenuineCandidateFixture
   ( writeGenuineCandidateManifestFor, writeGenuineMetadataScope
   , writeGenuineEmptyMetadataScope, writeGenuineCandidateNativeScope
+  , writeGenuineCandidateLexicalScope
   , writeGenuineAuthoredDeclarationScope ) where
 
 import Codec.CBOR.Encoding
@@ -41,16 +42,16 @@ import Tidepool.Session (Generation(..), SessionModule(..), SessionModuleKind(..
 writeGenuineCandidateManifestFor
   :: [String] -> FilePath -> FilePath -> [FilePath] -> PreparedPipelineResult -> IO ()
 writeGenuineCandidateManifestFor names work source includes prepared =
-  writePacket work (Just (source, includes, prepared)) names [] [] Nothing
+  writePacket work (Just (source, includes, prepared)) names [] [] [] Nothing
 
 writeGenuineMetadataScope
   :: FilePath -> FilePath -> FilePath -> [FilePath] -> [String] -> PreparedPipelineResult -> IO ()
 writeGenuineMetadataScope destination work source includes names prepared =
-  writePacket work (Just (source, includes, prepared)) [] names [] (Just destination)
+  writePacket work (Just (source, includes, prepared)) [] names [] [] (Just destination)
 
 writeGenuineEmptyMetadataScope :: FilePath -> IO ()
 writeGenuineEmptyMetadataScope destination =
-  writePacket (takeDirectory destination) Nothing [] [] [] (Just destination)
+  writePacket (takeDirectory destination) Nothing [] [] [] [] (Just destination)
 
 -- Native products and candidate descriptors share one immutable finalization
 -- packet. The Rust owner retains the complete canonical interface closure and
@@ -59,7 +60,15 @@ writeGenuineEmptyMetadataScope destination =
 writeGenuineCandidateNativeScope
   :: [String] -> [String] -> FilePath -> FilePath -> [FilePath] -> FilePath -> PreparedPipelineResult -> IO ()
 writeGenuineCandidateNativeScope candidates nativeOwners work source includes destination prepared =
-  writePacket work (Just (source, includes, prepared)) candidates candidates nativeOwners (Just destination)
+  writePacket work (Just (source, includes, prepared)) candidates candidates nativeOwners [] (Just destination)
+
+-- Source-free metadata imports retain the actual original source closure.
+-- Candidate delivery and lexical selection share this one immutable capture;
+-- neither requests native execution products in the delivered scope.
+writeGenuineCandidateLexicalScope
+  :: [String] -> FilePath -> FilePath -> [FilePath] -> FilePath -> PreparedPipelineResult -> IO ()
+writeGenuineCandidateLexicalScope owners work source includes destination prepared =
+  writePacket work (Just (source, includes, prepared)) owners owners [] owners (Just destination)
 
 -- This packet invokes the existing protected authored producer once. It does
 -- not relabel an ordinary finalized module as a native declaration.
@@ -93,8 +102,8 @@ writeGenuineAuthoredDeclarationScope owner includes source destination = do
 
 writePacket
   :: FilePath -> Maybe (FilePath, [FilePath], PreparedPipelineResult)
-  -> [String] -> [String] -> [String] -> Maybe FilePath -> IO ()
-writePacket work input candidates exactOwners nativeOwners destination = do
+  -> [String] -> [String] -> [String] -> [String] -> Maybe FilePath -> IO ()
+writePacket work input candidates exactOwners nativeOwners lexicalOwners destination = do
   issuer <- lookupEnv "TIDEPOOL_CANDIDATE_FIXTURE_ISSUER" >>= maybe
     (fail "genuine fixture requires the matched tidepool-toolchain libtest executable in TIDEPOOL_CANDIDATE_FIXTURE_ISSUER") pure
   -- The adapter verifies this configured producer against its admitted endpoint.
@@ -113,9 +122,9 @@ writePacket work input candidates exactOwners nativeOwners destination = do
       includes = maybe [] (\(_, roots, _) -> roots) input
       source = (\(path, _, _) -> path) <$> input
   BS.writeFile (packet </> "request.cbor") (toStrictByteString
-    (encodeListLen 8 <> text "TPSOURCEBOOTFIXTURE2" <> optional source
+    (encodeListLen 9 <> text "TPSOURCEBOOTFIXTURE3" <> optional source
       <> names includes <> names candidates <> names exactOwners <> names nativeOwners
-      <> optional destination <> text producer))
+      <> optional destination <> text producer <> names lexicalOwners))
   bracket (lookupEnv "TIDEPOOL_CANDIDATE_FIXTURE_PACKET")
     (maybe (unsetEnv "TIDEPOOL_CANDIDATE_FIXTURE_PACKET") (setEnv "TIDEPOOL_CANDIDATE_FIXTURE_PACKET")) $ \_ -> do
       setEnv "TIDEPOOL_CANDIDATE_FIXTURE_PACKET" packet

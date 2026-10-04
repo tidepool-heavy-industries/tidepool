@@ -30,8 +30,8 @@ fn source_boot_candidate_packet_producer() {
     assert!(request.len() <= MANIFEST_LIMIT);
     let request: Value = ciborium::de::from_reader(request.as_slice()).unwrap();
     let fields = request.as_array().expect("fixture request tuple");
-    assert_eq!(fields.len(), 8);
-    assert_eq!(text_field(&fields[0]), "TPSOURCEBOOTFIXTURE2");
+    assert_eq!(fields.len(), 9);
+    assert_eq!(text_field(&fields[0]), "TPSOURCEBOOTFIXTURE3");
     let (endpoint, _) = crate::toolchain::bind_extract_endpoint().unwrap();
     let producer = endpoint.identity().producer_bytes();
     assert_eq!(text_field(&fields[7]), endpoint.identity().producer_hex());
@@ -57,8 +57,16 @@ fn source_boot_candidate_packet_producer() {
             module,
         })
         .collect::<Vec<_>>();
+    let lexical_roots = names(&fields[8])
+        .into_iter()
+        .map(|module| ExactModuleIdentity {
+            unit: "main".into(),
+            module,
+        })
+        .collect::<Vec<_>>();
     assert!(
-        (exact_owners.is_empty() && native_owners.is_empty()) || !matches!(fields[6], Value::Null),
+        (exact_owners.is_empty() && native_owners.is_empty() && lexical_roots.is_empty())
+            || !matches!(fields[6], Value::Null),
         "retained interface/native custody requires an actual delivered scope"
     );
     let mut context = ExactDeclarationContext::new(&[], &[], vec![])
@@ -105,6 +113,48 @@ fn source_boot_candidate_packet_producer() {
             context = context
                 .extend_interface_artifacts(&view.interface_projection(&exact_owners).unwrap())
                 .unwrap();
+        }
+        if !lexical_roots.is_empty() {
+            // Read adjacency from the genuinely certified original recipes.
+            // The owning traversal checks full closure and implementation roles;
+            // fixture-selected roots cannot invent edges or promote native bodies.
+            let imports = certified
+                .recovery_products
+                .iter()
+                .filter_map(|product| {
+                    let graph = product.execution_source()?;
+                    let edges = graph.direct_source_owners(product.owner()).unwrap();
+                    Some((
+                        ExactModuleIdentity {
+                            unit: product.owner().unit.clone(),
+                            module: product.owner().module.clone(),
+                        },
+                        edges
+                            .into_iter()
+                            .map(|owner| ExactModuleIdentity {
+                                unit: owner.unit.clone(),
+                                module: owner.module.clone(),
+                            })
+                            .collect(),
+                    ))
+                })
+                .collect();
+            let surface = crate::declaration_join::source_lexical_closure(
+                &lexical_roots,
+                &imports,
+                &[],
+                &view.source_implementation_roles(),
+            )
+            .unwrap();
+            let lexical_owners = surface
+                .lexical
+                .iter()
+                .map(|node| node.owner.clone())
+                .collect::<Vec<_>>();
+            context = context
+                .extend_interface_artifacts(&view.interface_projection(&lexical_owners).unwrap())
+                .unwrap();
+            context = context.extend(&[], &[], surface.lexical).unwrap();
         }
         if !native_owners.is_empty() {
             context = context
@@ -177,6 +227,7 @@ fn source_boot_candidate_packet_producer() {
             requested.is_empty()
                 && exact_owners.is_empty()
                 && native_owners.is_empty()
+                && lexical_roots.is_empty()
                 && include.is_empty()
         );
     }

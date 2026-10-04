@@ -5,7 +5,7 @@ import ExactScopeV9Test (exactScopeV9Checks, nativeOriginChecks, candidateCanoni
 import CandidateGraphDescriptorTest (candidateGraphDescriptorChecks)
 import GenuineCandidateFixture
   ( writeGenuineCandidateManifestFor, writeGenuineMetadataScope, writeGenuineEmptyMetadataScope
-  , writeGenuineCandidateNativeScope, writeGenuineAuthoredDeclarationScope )
+  , writeGenuineCandidateNativeScope, writeGenuineCandidateLexicalScope, writeGenuineAuthoredDeclarationScope )
 
 import Codec.CBOR.Encoding (encodeBool, encodeListLen, encodeString)
 import Codec.CBOR.Write (toStrictByteString)
@@ -113,7 +113,7 @@ import Tidepool.DependencyEvidence
   , DependencyQualifier(..), renderDependencyQualifier
   , selectedHomeRequirements, renderDependencyEvidence )
 import Tidepool.ExactHydration
-  ( newOriginalInterfaceArtifacts, ExactIfaceArtifact(..), freshExactState, noCheckedValueImports, installExactLexicalGraph
+  ( newOriginalInterfaceArtifacts, originalInterfaceBytes, ExactIfaceArtifact(..), freshExactState, noCheckedValueImports, installExactLexicalGraph
   , readCheckedValueImportAuthority, readExactIfaceArtifacts, hydrateExactScope
   , readVerifiedExactIfaceClosure, readVerifiedExactIfaceClosureWithCheckedValues
   , selectVerifiedExactInterfaces, selectVerifiedValueInterfaces, checkedValueImportAuthorityFromVerified )
@@ -1691,6 +1691,7 @@ candidateSitedSiblingsAt work = do
       owner = unfoldDir </> "Unfold.hs"
       target = work </> "HydratedChildTarget.hs"
       scopePath = work </> "exact-scope.cbor"
+      capturedPath = work </> "captured-scope.cbor"
       scope = emptySessionScope { ssRoot = work, ssExactScope = Just scopePath }
       owners = ["Tidepool.Agent.Reply.Internal", "Tidepool.Actors.Unfold"]
   createDirectoryIfMissing True unfoldDir
@@ -1700,8 +1701,10 @@ candidateSitedSiblingsAt work = do
   copyFile "test-source-boot/fixtures/HydratedChildTarget.hs" target
   original <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
     Nothing owner [work] Nothing
-  writeManifestFor owners work original
-  writeExactMetadataScope scopePath []
+  originals <- newOriginalInterfaceArtifacts (prHscEnv (pprPipelineResult original))
+    (pprFinalizedModules original) [] work
+  writeGenuineCandidateLexicalScope owners work owner [work] capturedPath original
+  writeGenuineEmptyMetadataScope scopePath
   -- A fresh compiler admits the source/interface candidates without preparing
   -- their bodies. This must not accidentally rely on a previous worker memo.
   reused <- runPipelineSessionSelected (PreparedProducts (Just (manifest work)))
@@ -1711,33 +1714,23 @@ candidateSitedSiblingsAt work = do
     fail "typed sibling regression did not exercise the hydrated candidate path"
   forM_ (pprAcceptedCandidates reused) $ \candidate -> do
     bytes <- BS.readFile (candidateInterface candidate)
+    captured <- originalInterfaceBytes originals
+      (mkModule (stringToUnit (candidateUnit candidate)) (mkModuleName (candidateModule candidate)))
+      >>= maybe (fail "typed sibling candidate lacks its captured original interface") pure
     unless (candidateUnit candidate == "main"
-        && candidateInterface candidate == work </> (candidateModule candidate ++ ".candidate.hi")
-        && candidateInterfaceSha256 candidate == digest bytes) $
+        && bytes == captured && candidateInterfaceSha256 candidate == digest captured) $
       fail "typed sibling candidate changed its exact original interface custody"
   case pprModules reused of
     [prepared] | null (pmSiteRejections prepared), length (pmYieldSites prepared) == 1 -> pure ()
     _ -> fail "hydrated child surface lost its exact typed sibling or site identity"
-  originals <- forM owners $ \name -> do
-    iface <- maybe (fail "typed sibling owner lacks its original interface") pure
-      (Map.lookup (mkModuleName name) (pprProductInterfaces original))
-    let interfacePath = work </> (name ++ ".original.hi")
-    writeBinIface (targetProfile (hsc_dflags (prHscEnv (pprPipelineResult original))))
-      QuietBinIFace NormalCompression interfacePath iface
-    bytes <- BS.readFile interfacePath
-    requirements <- either fail pure (selectedHomeRequirements (pprDependencies original) "main" name)
-    let artifact = ExactIfaceArtifact "main" name interfacePath (digest bytes) requirements
-        packagePath = interfacePath ++ ".packages"
-        packages = encodePackageImports artifact
-          (Map.findWithDefault emptyPackageImports (mkModuleName name) (pprPackageImports original))
-    BS.writeFile packagePath packages
-    pure (artifact, packagePath, digest packages)
-  writeExactMetadataScopeWithLexical scopePath originals
-    [(artifact, exactRequirements artifact) | (artifact, _, _) <- originals]
+  retainedScope <- readExactScope capturedPath >>= either fail pure
+  unless (Set.fromList (map (snd . fst) (scopeLexical retainedScope)) == Set.fromList owners
+      && null (scopeProducts retainedScope) && null (scopeExecutionOwners retainedScope)) $
+    fail "typed sibling metadata closure lost source authority or acquired native execution"
   removeFile owner
   removeFile (replyDir </> "Internal.hs")
   captured <- runPipelineSessionSelected (PreparedProducts Nothing)
-    Set.empty GeneralCompile (Just scope) target [work] Nothing
+    Set.empty GeneralCompile (Just (scope {ssExactScope=Just capturedPath})) target [work] Nothing
   unless (null (pprAcceptedCandidates captured)
       && preparedNames captured == ["HydratedChildTarget"]
       && all ((`notElem` owners) . dependencyModuleName) (dependencyModules (pprDependencies captured))) $
@@ -1745,6 +1738,8 @@ candidateSitedSiblingsAt work = do
   case pprModules captured of
     [prepared] | null (pmSiteRejections prepared), length (pmYieldSites prepared) == 1 -> pure ()
     _ -> fail "source-free exact child surface lost its typed sibling or site identity"
+  unless (map pmYieldSites (pprModules captured) == map pmYieldSites (pprModules reused)) $
+    fail "source-free sibling hydration changed the original typed suspension site"
   putStrLn "candidate typed siblings: certified candidates and source-free exact owners retain childSited and typed sites without dependency recompilation"
 
 -- The fixture encoder keys complete legacy values by their canonical CBOR.
