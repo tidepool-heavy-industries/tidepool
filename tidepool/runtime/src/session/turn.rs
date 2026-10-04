@@ -6258,8 +6258,8 @@ mod tests {
         );
         let expression = checked.checked_item(3).unwrap();
         assert!(expression.expression_presentation().unwrap().is_some());
-        let projection = admission.prepared_declaration(&declaration).unwrap();
-        let receipt = projection.projection.receipt().clone();
+        let prepared_declaration = admission.prepared_declaration(&declaration).unwrap();
+        let receipt = prepared_declaration.projection.receipt().clone();
         let prefix = declaration.initial_prefix().unwrap();
         assert!(prefix
             .append_declaration_with_projection(binding.clone(), receipt.clone())
@@ -6333,7 +6333,7 @@ mod tests {
         assert!(
             imports
                 .lines()
-                .any(|line| line == projection.projection.module_name()),
+                .any(|line| line == prepared_declaration.projection.module_name()),
             "new source imports the compiler-issued cumulative projection"
         );
         assert!(
@@ -6351,10 +6351,13 @@ mod tests {
             .unwrap()
             .lexical_graph()
             .iter()
-            .any(|node| node.owner.module == projection.projection.module_name()));
+            .any(|node| node.owner.module == prepared_declaration.projection.module_name()));
         let source_inputs = crate::session::RuntimeCompileInputs::new(
             None,
-            vec![projection.projection.clone(), projection.projection.clone()],
+            vec![
+                prepared_declaration.projection.clone(),
+                prepared_declaration.projection.clone(),
+            ],
         )
         .unwrap();
         assert_eq!(
@@ -6373,7 +6376,7 @@ mod tests {
             .unwrap()
             .lexical_graph()
             .iter()
-            .any(|node| node.owner.module == projection.projection.module_name()));
+            .any(|node| node.owner.module == prepared_declaration.projection.module_name()));
         assert!(resident.adopt_checked_declaration(reservation).is_err());
         let original_context = protected
             .snapshot()

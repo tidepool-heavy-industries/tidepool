@@ -3198,12 +3198,28 @@ where
         self.state.val_gen()
     }
 
-    /// Raise this session's value-binding generation counter to at least
-    /// `generation` — [`super::persistent::PersistentSession::set_val_gen`]'s
-    /// own monotonic-max, never lowers it. A fresh child session seeded with
-    /// a copy of another session's `Tidepool.Session.Val`/`Lib.G<n>` source
-    /// files uses this so its own later declarations never mint a
-    /// generation a just-copied file already occupies.
+    /// The existing declaration allocator's high-water mark, captured while
+    /// the parent owner is checked out. It grants no lexical scope.
+    pub fn declaration_generation_high_water(&self) -> Option<Generation> {
+        self.state.has_lib().then(|| self.state.lib().generation())
+    }
+
+    /// Initialize a fresh declaration allocator before retained compilation.
+    /// The library owner persists the fence without changing any scope tip.
+    pub fn initialize_captured_declaration_high_water(
+        &mut self,
+        generation: Generation,
+    ) -> Result<(), SessionError> {
+        if !self.state.has_lib() {
+            return Err(SessionError::MissingDeclarationLibrary);
+        }
+        self.state
+            .lib_mut()
+            .initialize_captured_declaration_high_water(generation)
+    }
+
+    /// Raise the value allocator past retained native value identities.
+    /// Declaration identities have their own allocator and captured fence.
     pub fn set_val_gen(&mut self, generation: Generation) {
         self.state.set_val_gen(generation);
     }
