@@ -1664,12 +1664,92 @@ pub struct TurnCertification {
         tidepool_toolchain::certified_products::CertifiedTargetPackageInterfaces,
     /// Exact owned compiler products for recovery publication after admission.
     pub recovery_products: Vec<CertifiedRecoveryProduct>,
-    pub(crate) checked_item: Option<ExactCheckedItem>,
-    pub(crate) checked_execution: Option<Arc<ExactCompiledItem>>,
-    pub(crate) checked_activation_input:
-        Option<Arc<tidepool_toolchain::checked_cell::ExactCompiledActivationInput>>,
-    pub(crate) checked_prefix: Option<Arc<super::RuntimeCheckedPrefix>>,
-    pub(crate) checked_display: Option<Arc<tidepool_toolchain::checked_cell::ExactCompiledDisplay>>,
+    purpose: TurnPurpose,
+}
+
+/// Checked runtime output is ready only with its original prefix owner.
+/// Compiler bundle identity remains independent of this execution purpose.
+#[derive(Clone, Debug)]
+pub(super) enum TurnPurpose {
+    Ordinary,
+    Execution {
+        execution: Arc<ExactCompiledItem>,
+        prefix: Arc<super::RuntimeCheckedPrefix>,
+    },
+    ActivationInput {
+        proof: Arc<tidepool_toolchain::checked_cell::ExactCompiledActivationInput>,
+        prefix: Arc<super::RuntimeCheckedPrefix>,
+    },
+    Display(Arc<tidepool_toolchain::checked_cell::ExactCompiledDisplay>),
+}
+
+impl TurnPurpose {
+    fn from_sealed(
+        proof: Option<&tidepool_toolchain::artifacts::CheckedNativeProof>,
+        admission: Option<&Arc<super::RuntimeCheckedItemAdmission>>,
+    ) -> Result<Self, CompileError> {
+        use tidepool_toolchain::artifacts::CheckedNativeProof;
+        let Some(admission) = admission else {
+            return match proof {
+                None => Ok(Self::Ordinary),
+                Some(CheckedNativeProof::Display(display)) => Ok(Self::Display(display.clone())),
+                Some(CheckedNativeProof::Execution(_)) => Err(CompileError::ExtractFailed(
+                    "checked execution lacks its runtime prefix owner".into(),
+                )),
+                Some(CheckedNativeProof::ActivationInput(_)) => Err(CompileError::ExtractFailed(
+                    "host activation input requires its affine mount consumer".into(),
+                )),
+            };
+        };
+        if admission.prefix().admission().is_host_activation() {
+            let Some(CheckedNativeProof::ActivationInput(proof)) = proof else {
+                return Err(CompileError::ExtractFailed(
+                    "host activation input lacks its distinct sealed mount recipe".into(),
+                ));
+            };
+            if proof.item() != admission.item() || proof.generation() != admission.generation().0 {
+                return Err(CompileError::ExtractFailed(
+                    "activation output differs from its exact input admission".into(),
+                ));
+            }
+            proof.validate_runtime_admission(
+                admission.digest(),
+                admission.prefix().admission().digest(),
+            )?;
+            Ok(Self::ActivationInput {
+                proof: proof.clone(),
+                prefix: admission.prefix().clone(),
+            })
+        } else {
+            let Some(CheckedNativeProof::Execution(execution)) = proof else {
+                return Err(CompileError::ExtractFailed(
+                    "checked item lacks a sealed execution recipe".into(),
+                ));
+            };
+            Self::execution(execution.clone(), admission)
+        }
+    }
+
+    fn execution(
+        execution: Arc<ExactCompiledItem>,
+        admission: &Arc<super::RuntimeCheckedItemAdmission>,
+    ) -> Result<Self, CompileError> {
+        if execution.item() != admission.item()
+            || execution.generation() != admission.generation().0
+        {
+            return Err(CompileError::ExtractFailed(
+                "prepared item differs from its original reservation".into(),
+            ));
+        }
+        execution.validate_runtime_admission(
+            admission.digest(),
+            admission.prefix().admission().digest(),
+        )?;
+        Ok(Self::Execution {
+            execution,
+            prefix: admission.prefix().clone(),
+        })
+    }
 }
 
 impl Default for TurnCertification {
@@ -1682,42 +1762,60 @@ impl Default for TurnCertification {
             target_owners: Vec::new(),
             package_interfaces: Default::default(),
             recovery_products: Vec::new(),
-            checked_item: None,
-            checked_execution: None,
-            checked_activation_input: None,
-            checked_prefix: None,
-            checked_display: None,
+            purpose: TurnPurpose::Ordinary,
         }
     }
 }
 
 impl TurnCertification {
+    pub(super) fn purpose(&self) -> &TurnPurpose {
+        &self.purpose
+    }
     pub fn checked_display(
         &self,
     ) -> Option<&Arc<tidepool_toolchain::checked_cell::ExactCompiledDisplay>> {
-        self.checked_display.as_ref()
+        match &self.purpose {
+            TurnPurpose::Display(display) => Some(display),
+            _ => None,
+        }
     }
     pub fn checked_item(&self) -> Option<&ExactCheckedItem> {
-        self.checked_item.as_ref()
+        match &self.purpose {
+            TurnPurpose::Execution { execution, .. } => Some(execution.item()),
+            TurnPurpose::ActivationInput { proof, .. } => Some(proof.item()),
+            _ => None,
+        }
     }
     pub fn checked_execution(&self) -> Option<&Arc<ExactCompiledItem>> {
-        self.checked_execution.as_ref()
+        match &self.purpose {
+            TurnPurpose::Execution { execution, .. } => Some(execution),
+            _ => None,
+        }
+    }
+    pub(crate) fn checked_activation_input(
+        &self,
+    ) -> Option<&Arc<tidepool_toolchain::checked_cell::ExactCompiledActivationInput>> {
+        match &self.purpose {
+            TurnPurpose::ActivationInput { proof, .. } => Some(proof),
+            _ => None,
+        }
     }
     pub fn checked_prefix(&self) -> Option<&Arc<super::RuntimeCheckedPrefix>> {
-        self.checked_prefix.as_ref()
+        match &self.purpose {
+            TurnPurpose::Execution { prefix, .. } | TurnPurpose::ActivationInput { prefix, .. } => {
+                Some(prefix)
+            }
+            _ => None,
+        }
     }
 
     pub(crate) fn validate_checked_table(&self, table: &DataConTable) -> Result<(), CompileError> {
-        if let Some(execution) = &self.checked_execution {
-            execution.validate_table(table)?;
+        match &self.purpose {
+            TurnPurpose::Ordinary => Ok(()),
+            TurnPurpose::Execution { execution, .. } => execution.validate_table(table),
+            TurnPurpose::ActivationInput { proof, .. } => proof.validate_table(table),
+            TurnPurpose::Display(display) => display.validate_table(table),
         }
-        if let Some(display) = &self.checked_display {
-            display.validate_table(table)?;
-        }
-        if let Some(activation) = &self.checked_activation_input {
-            activation.validate_table(table)?;
-        }
-        Ok(())
     }
 
     pub(crate) fn validate_checked_bind(
@@ -1726,23 +1824,19 @@ impl TurnCertification {
         generation: u64,
         bound: &[BoundBinder],
     ) -> Result<(), CompileError> {
-        if self.checked_activation_input.is_some() {
-            return Err(CompileError::ExtractFailed(
-                "host activation input requires its affine mount consumer".into(),
-            ));
-        }
-        if self.checked_display.is_some() {
-            return Err(CompileError::ExtractFailed(
-                "legacy checked display has no execution route".into(),
-            ));
-        }
-        let Some(execution) = self.checked_execution.as_ref() else {
-            if self.checked_item.is_some() {
+        let execution = match &self.purpose {
+            TurnPurpose::Ordinary => return Ok(()),
+            TurnPurpose::ActivationInput { .. } => {
                 return Err(CompileError::ExtractFailed(
-                    "checked item lacks a sealed execution recipe".into(),
-                ));
+                    "host activation input requires its affine mount consumer".into(),
+                ))
             }
-            return Ok(());
+            TurnPurpose::Display(_) => {
+                return Err(CompileError::ExtractFailed(
+                    "legacy checked display has no execution route".into(),
+                ))
+            }
+            TurnPurpose::Execution { execution, .. } => execution,
         };
         if !execution.matches_target(target) || execution.generation() != generation {
             return Err(CompileError::ExtractFailed(
@@ -2463,19 +2557,15 @@ pub fn compile_activation_input(
     let certification = compiled.certification.as_ref().ok_or_else(|| {
         CompileError::ExtractFailed("activation has no sealed native products".into())
     })?;
-    let proof = certification
-        .checked_activation_input
-        .as_ref()
-        .ok_or_else(|| {
-            CompileError::ExtractFailed("activation has no distinct host input receipt".into())
-        })?;
+    let proof = certification.checked_activation_input().ok_or_else(|| {
+        CompileError::ExtractFailed("activation has no distinct host input receipt".into())
+    })?;
     if binder.name != "sessionInput"
         || proof.item() != admission.item()
         || proof.generation() != admission.generation().0
         || !proof.matches_target(&compiled.prepared)
         || certification
-            .checked_prefix
-            .as_ref()
+            .checked_prefix()
             .is_none_or(|prefix| !Arc::ptr_eq(prefix, admission.prefix()))
     {
         return Err(CompileError::ExtractFailed(
@@ -2877,23 +2967,13 @@ pub fn consume_cell_program_item(
         )
         .into());
     }
-    let mut result = decode_cell_program_turn(item)?;
-    let certification = match &mut result {
-        TurnResult::Bind { compiled, .. } | TurnResult::Expr { compiled, .. } => {
-            compiled.certification.as_mut()
-        }
-        TurnResult::Decl(_) => None,
-    }
-    .ok_or_else(|| {
-        CompileError::ExtractFailed("prepared native item lacks certified products".into())
-    })?;
-    certification.checked_prefix = Some(admission.prefix().clone());
-    execution.validate_runtime_admission(admission.digest(), program.admission_digest())?;
+    let result = decode_cell_program_turn(item, &admission)?;
     Ok(result)
 }
 
 fn decode_cell_program_turn(
     item: &tidepool_toolchain::checked_cell::CellProgramItem,
+    admission: &Arc<super::RuntimeCheckedItemAdmission>,
 ) -> Result<TurnResult, CompileError> {
     let (turn_bytes, metadata_bytes, products, prepared) = (
         item.native_turn_bytes(),
@@ -2914,11 +2994,10 @@ fn decode_cell_program_turn(
         target_owners: products.pending_imports.clone(),
         package_interfaces: products.package_interfaces.clone(),
         recovery_products: products.recovery_products.clone(),
-        checked_item: Some(item.checked_item().clone()),
-        checked_execution: Some(item.native().expect("native products preflighted").clone()),
-        checked_activation_input: None,
-        checked_prefix: None,
-        checked_display: None,
+        purpose: TurnPurpose::execution(
+            item.native().expect("native products preflighted").clone(),
+            admission,
+        )?,
     };
     certification.validate_checked_table(&table)?;
     match turn {
@@ -3249,8 +3328,10 @@ fn run_turn_with_admission(
     }
 
     let decoded = match &run {
-        TurnCompilerOutput::Admitted(run) => decode_admitted_turn_output(run),
-        TurnCompilerOutput::Direct(_) => decode_turn_output_dir(output_dir, &offer),
+        TurnCompilerOutput::Admitted(run) => decode_admitted_turn_output(run, checked.as_ref()),
+        TurnCompilerOutput::Direct(_) => {
+            decode_turn_output_dir(output_dir, &offer, checked.as_ref())
+        }
     };
     let mut result = decoded.map_err(|error| TurnFailure {
         error: offer.retain_failure(
@@ -3306,8 +3387,8 @@ fn run_turn_with_admission(
         }
         certification.compile_input_identity = Some(Arc::clone(identity));
     }
-    if let Some(admission) = checked {
-        let compiled = match &mut result {
+    if checked.is_some() {
+        let compiled = match &result {
             TurnResult::Bind { compiled, .. } | TurnResult::Expr { compiled, .. } => compiled,
             TurnResult::Decl(_) => {
                 return Err(
@@ -3315,29 +3396,11 @@ fn run_turn_with_admission(
                 )
             }
         };
-        let certification = compiled.certification.as_mut().ok_or_else(|| {
+        let certification = compiled.certification.as_ref().ok_or_else(|| {
             CompileError::ExtractFailed("checked item lacks sealed native products".into())
         })?;
-        if admission.prefix().admission().is_host_activation() {
-            if certification.checked_activation_input.is_none()
-                || certification.checked_execution.is_some()
-            {
-                return Err(CompileError::ExtractFailed(
-                    "host activation input lacks its distinct sealed mount recipe".into(),
-                )
-                .into());
-            }
-        } else if certification.checked_execution.is_none() {
-            return Err(CompileError::ExtractFailed(
-                "checked item lacks a sealed execution recipe".into(),
-            )
-            .into());
-        }
-        certification.checked_item = Some(admission.item().clone());
-        certification.checked_prefix = Some(admission.prefix().clone());
         if let Some((module, bytes)) = certification
-            .checked_execution
-            .as_ref()
+            .checked_execution()
             .and_then(|execution| execution.value_interface())
         {
             let generation = module
@@ -3377,6 +3440,7 @@ pub(super) fn select_module_candidate_offer(
 /// bundle. The exposed directory is retained only for compile diagnostics.
 fn decode_admitted_turn_output(
     output: &tidepool_toolchain::artifacts::AdmittedTurnOutput,
+    admission: Option<&Arc<super::RuntimeCheckedItemAdmission>>,
 ) -> Result<TurnResult, CompileError> {
     let missing =
         || CompileError::ExtractFailed("admitted turn lacks retained observations".into());
@@ -3405,7 +3469,7 @@ fn decode_admitted_turn_output(
             asks,
             wrapped_source,
         } => {
-            let compiled = retained_compiled_turn(output, asks, &wrapped_source)?;
+            let compiled = retained_compiled_turn(output, asks, &wrapped_source, admission)?;
             Ok(TurnResult::Bind {
                 binders,
                 variant,
@@ -3419,7 +3483,7 @@ fn decode_admitted_turn_output(
             asks,
             wrapped_source,
         } => {
-            let compiled = retained_compiled_turn(output, asks, &wrapped_source)?;
+            let compiled = retained_compiled_turn(output, asks, &wrapped_source, admission)?;
             Ok(TurnResult::Expr {
                 variant,
                 compiled,
@@ -3433,6 +3497,7 @@ fn retained_compiled_turn(
     output: &tidepool_toolchain::artifacts::AdmittedTurnOutput,
     asks: Vec<YieldSite>,
     wrapped_source: &str,
+    admission: Option<&Arc<super::RuntimeCheckedItemAdmission>>,
 ) -> Result<CompiledTurn, CompileError> {
     let native = output.native_output().ok_or_else(|| {
         CompileError::ExtractFailed("admitted native turn has no retained bundle".into())
@@ -3447,19 +3512,20 @@ fn retained_compiled_turn(
         warnings: native.warnings().clone(),
         asks,
         prepared: native.target_owned(),
-        certification: native.products().map(|products| TurnCertification {
-            artifact_view: products.artifact_view.clone(),
-            compile_input_identity: products.compile_input_identity.clone(),
-            groups: products.certified_groups.clone(),
-            target_owners: products.pending_imports.clone(),
-            package_interfaces: products.package_interfaces.clone(),
-            recovery_products: products.recovery_products.clone(),
-            checked_item: None,
-            checked_execution: products.checked_execution.clone(),
-            checked_activation_input: products.checked_activation_input.clone(),
-            checked_prefix: None,
-            checked_display: products.checked_display.clone(),
-        }),
+        certification: native
+            .products()
+            .map(|products| -> Result<_, CompileError> {
+                Ok(TurnCertification {
+                    artifact_view: products.artifact_view.clone(),
+                    compile_input_identity: products.compile_input_identity.clone(),
+                    groups: products.certified_groups.clone(),
+                    target_owners: products.pending_imports.clone(),
+                    package_interfaces: products.package_interfaces.clone(),
+                    recovery_products: products.recovery_products.clone(),
+                    purpose: TurnPurpose::from_sealed(products.checked.as_ref(), admission)?,
+                })
+            })
+            .transpose()?,
     };
     if let Some(certification) = &compiled.certification {
         certification.validate_checked_table(&compiled.table)?;
@@ -3473,6 +3539,7 @@ fn retained_compiled_turn(
 fn decode_turn_output_dir(
     dir: &Path,
     offer: &ModuleCandidateOffer,
+    admission: Option<&Arc<super::RuntimeCheckedItemAdmission>>,
 ) -> Result<TurnResult, CompileError> {
     let turn_out_path = dir.join("turn.cbor");
     if !turn_out_path.exists() {
@@ -3498,7 +3565,7 @@ fn decode_turn_output_dir(
             asks,
             wrapped_source,
         } => {
-            let compiled = read_compiled_turn(dir, asks, &wrapped_source, offer)?;
+            let compiled = read_compiled_turn(dir, asks, &wrapped_source, offer, admission)?;
             Ok(TurnResult::Bind {
                 binders,
                 bound,
@@ -3512,7 +3579,7 @@ fn decode_turn_output_dir(
             asks,
             wrapped_source,
         } => {
-            let compiled = read_compiled_turn(dir, asks, &wrapped_source, offer)?;
+            let compiled = read_compiled_turn(dir, asks, &wrapped_source, offer, admission)?;
             Ok(TurnResult::Expr {
                 variant,
                 compiled,
@@ -3529,6 +3596,7 @@ fn read_compiled_turn(
     asks: Vec<YieldSite>,
     wrapped_source: &str,
     offer: &ModuleCandidateOffer,
+    admission: Option<&Arc<super::RuntimeCheckedItemAdmission>>,
 ) -> Result<CompiledTurn, CompileError> {
     let meta_path = output_dir.join("meta.cbor");
     if !meta_path.exists() {
@@ -3573,19 +3641,19 @@ fn read_compiled_turn(
         warnings,
         asks,
         prepared,
-        certification: sealed.map(|sealed| TurnCertification {
-            artifact_view: sealed.artifact_view,
-            compile_input_identity: sealed.compile_input_identity,
-            groups: sealed.certified_groups,
-            target_owners: sealed.pending_imports,
-            package_interfaces: sealed.package_interfaces,
-            recovery_products: sealed.recovery_products,
-            checked_item: None,
-            checked_execution: sealed.checked_execution,
-            checked_activation_input: sealed.checked_activation_input,
-            checked_prefix: None,
-            checked_display: sealed.checked_display,
-        }),
+        certification: sealed
+            .map(|sealed| -> Result<_, CompileError> {
+                Ok(TurnCertification {
+                    artifact_view: sealed.artifact_view,
+                    compile_input_identity: sealed.compile_input_identity,
+                    groups: sealed.certified_groups,
+                    target_owners: sealed.pending_imports,
+                    package_interfaces: sealed.package_interfaces,
+                    recovery_products: sealed.recovery_products,
+                    purpose: TurnPurpose::from_sealed(sealed.checked.as_ref(), admission)?,
+                })
+            })
+            .transpose()?,
     };
     if let Some(certification) = &compiled.certification {
         certification.validate_checked_table(&compiled.table)?;

@@ -24,7 +24,7 @@ use tidepool_repr::execution_schema::{
 
 use super::admission::CheckedTurnCompletion;
 use super::prepared::{ParkPolicy, PreparedRuntimeError, PreparedSettlement, HOME_UNIT};
-use super::turn::TurnCode;
+use super::turn::{TurnCode, TurnPurpose};
 use tidepool_codegen::suspension::{ContinuationId, RealmId, ValueHandle};
 use tidepool_effect::dispatch::{
     request_constructor, DeferredEffect, DispatchEffect, EffectContext, EffectDispatch, Response,
@@ -1569,7 +1569,7 @@ fn checked_turn_plan(
     let Some(certification) = certification else {
         return Ok(None);
     };
-    if certification.checked_activation_input.is_some() {
+    if certification.checked_activation_input().is_some() {
         return Err(ResidentError::UnsupportedCheckedTurn);
     }
     certification
@@ -1593,14 +1593,9 @@ fn checked_turn_plan(
     certification
         .validate_checked_bind(prepared, generation, binders)
         .map_err(SessionError::Compile)?;
-    let Some(execution) = certification.checked_execution() else {
+    let TurnPurpose::Execution { execution, prefix } = certification.purpose() else {
         return Ok(None);
     };
-    let prefix = certification.checked_prefix().ok_or_else(|| {
-        SessionError::Compile(crate::CompileError::ExtractFailed(
-            "checked execution lacks its runtime prefix owner".into(),
-        ))
-    })?;
     Ok(Some(PreparedCheckedTurn {
         prefix: prefix.clone(),
         execution: execution.clone(),
@@ -1641,13 +1636,7 @@ fn is_checked_turn(code: &TurnCode<'_>) -> bool {
     code.certification
         .as_ref()
         .as_ref()
-        .is_some_and(|certification| {
-            certification.checked_item().is_some()
-                || certification.checked_activation_input.is_some()
-                || certification.checked_execution().is_some()
-                || certification.checked_prefix().is_some()
-                || certification.checked_display().is_some()
-        })
+        .is_some_and(|certification| !matches!(certification.purpose(), TurnPurpose::Ordinary))
 }
 
 fn refuse_checked_turn(code: &TurnCode<'_>) -> Result<(), ResidentError> {
@@ -4174,12 +4163,10 @@ where
             .as_ref()
             .ok_or_else(invalid)?;
         if certification
-            .checked_activation_input
-            .as_ref()
+            .checked_activation_input()
             .is_none_or(|proof| !Arc::ptr_eq(proof, &compiled.proof))
             || certification
-                .checked_prefix
-                .as_ref()
+                .checked_prefix()
                 .is_none_or(|prefix| !Arc::ptr_eq(prefix, compiled.admission.prefix()))
         {
             return Err(invalid());
@@ -5171,58 +5158,62 @@ where
     fn provenance_for(&self, code: &TurnCode<'_>) -> Result<Arc<ProgramProvenance>, ResidentError> {
         let mut provenance = ProgramProvenance::from_sites(&code.sites)?;
         let certification = code.certification.as_ref().as_ref();
-        let authenticated = if let Some(certification) = certification {
-            if let Some(execution) = &certification.checked_execution {
-                if !execution.matches_target(&code.prepared) {
-                    return Err(ResidentError::UnsupportedCheckedTurn);
+        let authenticated =
+            if let Some(certification) = certification {
+                match certification.purpose() {
+                    TurnPurpose::Execution { execution, .. } => {
+                        if !execution.matches_target(&code.prepared) {
+                            return Err(ResidentError::UnsupportedCheckedTurn);
+                        }
+                        execution
+                            .validate_table(&code.table)
+                            .map_err(SessionError::Compile)?;
+                        execution
+                            .validate_yield_sites(&code.sites)
+                            .map_err(SessionError::Compile)?;
+                        true
+                    }
+                    TurnPurpose::Display(display) => {
+                        if !display.matches_target(&code.prepared) {
+                            return Err(ResidentError::UnsupportedCheckedTurn);
+                        }
+                        display
+                            .validate_table(&code.table)
+                            .map_err(SessionError::Compile)?;
+                        display
+                            .validate_yield_sites(&code.sites)
+                            .map_err(SessionError::Compile)?;
+                        true
+                    }
+                    TurnPurpose::ActivationInput { proof, .. } => {
+                        if !proof.matches_target(&code.prepared) {
+                            return Err(ResidentError::UnsupportedCheckedTurn);
+                        }
+                        proof
+                            .validate_table(&code.table)
+                            .map_err(SessionError::Compile)?;
+                        proof
+                            .validate_yield_sites(&code.sites)
+                            .map_err(SessionError::Compile)?;
+                        true
+                    }
+                    TurnPurpose::Ordinary => certification
+                        .compile_input_identity
+                        .as_ref()
+                        .is_some_and(|proof| {
+                            proof.matches_bundle(
+                                &code.prepared,
+                                &certification.groups,
+                                &certification.target_owners,
+                                &certification.package_interfaces,
+                                &code.table,
+                                &code.sites,
+                            )
+                        }),
                 }
-                execution
-                    .validate_table(&code.table)
-                    .map_err(SessionError::Compile)?;
-                execution
-                    .validate_yield_sites(&code.sites)
-                    .map_err(SessionError::Compile)?;
-                true
-            } else if let Some(display) = &certification.checked_display {
-                if !display.matches_target(&code.prepared) {
-                    return Err(ResidentError::UnsupportedCheckedTurn);
-                }
-                display
-                    .validate_table(&code.table)
-                    .map_err(SessionError::Compile)?;
-                display
-                    .validate_yield_sites(&code.sites)
-                    .map_err(SessionError::Compile)?;
-                true
-            } else if let Some(activation) = &certification.checked_activation_input {
-                if !activation.matches_target(&code.prepared) {
-                    return Err(ResidentError::UnsupportedCheckedTurn);
-                }
-                activation
-                    .validate_table(&code.table)
-                    .map_err(SessionError::Compile)?;
-                activation
-                    .validate_yield_sites(&code.sites)
-                    .map_err(SessionError::Compile)?;
-                true
             } else {
-                certification
-                    .compile_input_identity
-                    .as_ref()
-                    .is_some_and(|proof| {
-                        proof.matches_bundle(
-                            &code.prepared,
-                            &certification.groups,
-                            &certification.target_owners,
-                            &certification.package_interfaces,
-                            &code.table,
-                            &code.sites,
-                        )
-                    })
-            }
-        } else {
-            false
-        };
+                false
+            };
         if let Some(certification) = certification.filter(|_| authenticated) {
             let descriptors = certification.artifact_view.descriptors();
             let home_units = descriptors
@@ -5371,8 +5362,7 @@ where
                 .as_ref()
                 .is_none_or(|certification| {
                     certification
-                        .checked_activation_input
-                        .as_ref()
+                        .checked_activation_input()
                         .is_none_or(|proof| !Arc::ptr_eq(proof, &mounted.proof))
                 })
         {

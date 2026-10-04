@@ -420,8 +420,12 @@ pub struct ModuleCandidateOffer {
     planned_cell: Option<crate::checked_cell::CheckedPlannedCellSpecification>,
     checked_values: Option<Arc<crate::checked_cell::CheckedValueInputs>>,
     checked_projections: Vec<Arc<crate::declaration_join::AcceptedJoin>>,
-    checked_item: Option<crate::checked_cell::CheckedItemOffer>,
-    checked_display: Option<crate::checked_cell::CheckedDisplayOffer>,
+    checked: Option<NativeCheckedOffer>,
+}
+
+enum NativeCheckedOffer {
+    Item(crate::checked_cell::CheckedItemOffer),
+    Display(crate::checked_cell::CheckedDisplayOffer),
 }
 
 // Protected compilation manifests bind the actual worker search order as well
@@ -772,8 +776,7 @@ impl ModuleCandidateOffer {
             planned_cell: None,
             checked_values: None,
             checked_projections: Vec::new(),
-            checked_item: None,
-            checked_display: None,
+            checked: None,
         })
     }
 
@@ -796,8 +799,7 @@ impl ModuleCandidateOffer {
             planned_cell: None,
             checked_values: None,
             checked_projections: Vec::new(),
-            checked_item: None,
-            checked_display: None,
+            checked: None,
         })
     }
 
@@ -850,8 +852,7 @@ impl ModuleCandidateOffer {
             planned_cell: None,
             checked_values: Some(inputs),
             checked_projections: Vec::new(),
-            checked_item: None,
-            checked_display: None,
+            checked: None,
         })
     }
 
@@ -927,8 +928,7 @@ impl ModuleCandidateOffer {
             planned_cell: None,
             checked_values: Some(checked_values),
             checked_projections,
-            checked_item: None,
-            checked_display: None,
+            checked: None,
         })
     }
 
@@ -1016,8 +1016,7 @@ impl ModuleCandidateOffer {
             planned_cell: Some(planned),
             checked_values: Some(inputs),
             checked_projections,
-            checked_item: None,
-            checked_display: None,
+            checked: None,
         })
     }
 
@@ -1208,8 +1207,7 @@ impl ModuleCandidateOffer {
             planned_cell: None,
             checked_values: None,
             checked_projections: Vec::new(),
-            checked_item: Some(checked_item),
-            checked_display: None,
+            checked: Some(NativeCheckedOffer::Item(checked_item)),
         })
     }
 
@@ -1326,8 +1324,7 @@ impl ModuleCandidateOffer {
             planned_cell: None,
             checked_values: None,
             checked_projections: Vec::new(),
-            checked_item: None,
-            checked_display: Some(display),
+            checked: Some(NativeCheckedOffer::Display(display)),
         })
     }
 
@@ -1337,15 +1334,9 @@ impl ModuleCandidateOffer {
         self.checked_values
             .as_ref()
             .map(|inputs| inputs.root())
-            .or_else(|| {
-                self.checked_item
-                    .as_ref()
-                    .map(|offer| offer.item.value_input_root())
-            })
-            .or_else(|| {
-                self.checked_display
-                    .as_ref()
-                    .map(|offer| offer.capture.item().value_input_root())
+            .or_else(|| match self.checked.as_ref()? {
+                NativeCheckedOffer::Item(offer) => Some(offer.item.value_input_root()),
+                NativeCheckedOffer::Display(offer) => Some(offer.capture.item().value_input_root()),
             })
     }
 
@@ -1374,17 +1365,17 @@ impl ModuleCandidateOffer {
     fn retain_checked_inputs(&self, destination: &Path) -> std::io::Result<()> {
         if let Some(inputs) = &self.checked_values {
             inputs.retain_diagnostics(None, destination)
-        } else if let Some(offer) = &self.checked_item {
-            offer
-                .item
-                .retain_input_diagnostics(&offer.prefix, destination)
-        } else if let Some(offer) = &self.checked_display {
-            offer
-                .capture
-                .item()
-                .retain_input_diagnostics(&offer.prefix, destination)
         } else {
-            Ok(())
+            match &self.checked {
+                Some(NativeCheckedOffer::Item(offer)) => offer
+                    .item
+                    .retain_input_diagnostics(&offer.prefix, destination),
+                Some(NativeCheckedOffer::Display(offer)) => offer
+                    .capture
+                    .item()
+                    .retain_input_diagnostics(&offer.prefix, destination),
+                None => Ok(()),
+            }
         }
     }
 
@@ -1783,8 +1774,7 @@ impl ModuleCandidateOffer {
             planned_cell: None,
             checked_values: None,
             checked_projections: Vec::new(),
-            checked_item: None,
-            checked_display: None,
+            checked: None,
         }
     }
 
@@ -2146,9 +2136,16 @@ pub struct SealedTurnProducts {
     pub pending_imports: Vec<certified_products::PendingImportOwner>,
     pub recovery_products: Vec<crate::recovery_artifacts::CertifiedRecoveryProduct>,
     pub package_interfaces: certified_products::CertifiedTargetPackageInterfaces,
-    pub checked_execution: Option<Arc<crate::checked_cell::ExactCompiledItem>>,
-    pub checked_activation_input: Option<Arc<crate::checked_cell::ExactCompiledActivationInput>>,
-    pub checked_display: Option<Arc<crate::checked_cell::ExactCompiledDisplay>>,
+    pub checked: Option<CheckedNativeProof>,
+}
+
+/// One compiler-issued checked native purpose. Its original proof remains the
+/// authority for the output; bundle identity is independent evidence.
+#[derive(Clone, Debug)]
+pub enum CheckedNativeProof {
+    Execution(Arc<crate::checked_cell::ExactCompiledItem>),
+    ActivationInput(Arc<crate::checked_cell::ExactCompiledActivationInput>),
+    Display(Arc<crate::checked_cell::ExactCompiledDisplay>),
 }
 
 fn has_ready_home_module(evidence: &cache::DependencyEvidence) -> bool {
@@ -2451,25 +2448,17 @@ fn seal_turn_outputs_inner(
             .as_ref()
             .map(|admission| admission.request.context.as_ref()),
     )?;
-    let checked_context = if offer.checked_item.is_some() || offer.checked_display.is_some() {
-        Some(checked_output_context(
+    let checked = if let Some(checked) = &offer.checked {
+        let (context, lexical) = checked_output_context(
             offer,
             &certified.recovery_products,
             exact_source
                 .as_ref()
                 .expect("checked output has exact source"),
             source,
-        )?)
-    } else {
-        None
-    };
-    Ok(Some(SealedTurnProducts {
-        artifact_view,
-        compile_input_identity,
-        checked_display: offer
-            .checked_display
-            .as_ref()
-            .map(|display| {
+        )?;
+        Some(match checked {
+            NativeCheckedOffer::Display(display) => CheckedNativeProof::Display(
                 display.seal(
                     output_dir,
                     &offer
@@ -2479,51 +2468,47 @@ fn seal_turn_outputs_inner(
                         .request_sha256,
                     source,
                     prepared,
-                    &checked_context.as_ref().expect("checked output context").0,
-                    &checked_context.as_ref().expect("checked output context").1,
-                )
-            })
-            .transpose()?,
-        checked_execution: offer
-            .checked_item
-            .as_ref()
-            .filter(|item| item.purpose == crate::checked_cell::CheckedItemPurpose::Authored)
-            .map(|item| {
-                item.seal(
-                    output_dir,
-                    &offer
-                        .exact
-                        .as_ref()
-                        .expect("checked offer has exact scope")
-                        .request_sha256,
-                    source,
-                    prepared,
-                    &checked_context.as_ref().expect("checked output context").0,
-                    &checked_context.as_ref().expect("checked output context").1,
-                )
-            })
-            .transpose()?,
-        checked_activation_input: offer
-            .checked_item
-            .as_ref()
-            .filter(|item| {
-                item.purpose == crate::checked_cell::CheckedItemPurpose::HostActivationInput
-            })
-            .map(|item| {
-                item.seal_activation_input(
-                    output_dir,
-                    &offer
-                        .exact
-                        .as_ref()
-                        .expect("host activation has exact scope")
-                        .request_sha256,
-                    source,
-                    prepared,
-                    &checked_context.as_ref().expect("checked output context").0,
-                    &checked_context.as_ref().expect("checked output context").1,
-                )
-            })
-            .transpose()?,
+                    &context,
+                    &lexical,
+                )?,
+            ),
+            NativeCheckedOffer::Item(item) => {
+                let request_sha256 = &offer
+                    .exact
+                    .as_ref()
+                    .expect("checked offer has exact scope")
+                    .request_sha256;
+                match item.purpose {
+                    crate::checked_cell::CheckedItemPurpose::Authored => {
+                        CheckedNativeProof::Execution(item.seal(
+                            output_dir,
+                            request_sha256,
+                            source,
+                            prepared,
+                            &context,
+                            &lexical,
+                        )?)
+                    }
+                    crate::checked_cell::CheckedItemPurpose::HostActivationInput => {
+                        CheckedNativeProof::ActivationInput(item.seal_activation_input(
+                            output_dir,
+                            request_sha256,
+                            source,
+                            prepared,
+                            &context,
+                            &lexical,
+                        )?)
+                    }
+                }
+            }
+        })
+    } else {
+        None
+    };
+    Ok(Some(SealedTurnProducts {
+        artifact_view,
+        compile_input_identity,
+        checked,
         certified_groups,
         pending_imports,
         recovery_products: certified.recovery_products,

@@ -175,7 +175,7 @@ impl InputFixture {
         let checked_execution = receiver
             .certification
             .as_ref()
-            .and_then(|certificate| certificate.checked_execution.as_ref())
+            .and_then(|certificate| certificate.checked_execution())
             .expect("receiver setup has its checked native output proof");
         assert!(checked_execution.matches_target(&receiver.prepared));
         let interface = checked_execution

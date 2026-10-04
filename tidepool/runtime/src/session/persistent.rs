@@ -4787,18 +4787,15 @@ mod checkpoint_scope_tests {
             required_generation: Some(0),
         });
         let prepared = testing::prepare(wire).unwrap();
-        let certification = TurnCertification {
-            target_owners: vec![PendingImportOwner::Retained {
-                identity: binder.clone(),
-                generation: 0,
-            }],
-            ..TurnCertification::default()
-        };
+        let mut certification = TurnCertification::default();
+        certification.target_owners = vec![PendingImportOwner::Retained {
+            identity: binder.clone(),
+            generation: 0,
+        }];
         assert!(
             matches!(session.resolve_certification_in(ScopeId::ROOT, &prepared, &certification),
             Err(PreparedRuntimeError::MissingRetainedCertifiedOwner { identity, generation: 0 }) if identity == binder)
         );
-        let mut certification = certification;
         for digest in [[0; 32], [8; 32]] {
             certification.target_owners[0] = PendingImportOwner::RetainedPackage {
                 unit: binder.unit.clone(),
