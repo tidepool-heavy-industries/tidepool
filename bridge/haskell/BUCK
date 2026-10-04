@@ -232,7 +232,7 @@ haskell_binary(
         "GenuineCandidateFixture.hs": "test-source-boot/GenuineCandidateFixture.hs",
         "ExecutionSourceDecodeTest.hs": "test-source-boot/ExecutionSourceDecodeTest.hs",
         "ProgressBoundaryTest.hs": "test-source-boot/ProgressBoundaryTest.hs",
-        "ExactScopeV8Test.hs": "test-source-boot/ExactScopeV8Test.hs",
+        "ExactScopeV9Test.hs": "test-source-boot/ExactScopeV9Test.hs",
         "CandidateGraphDescriptorTest.hs": "test-source-boot/CandidateGraphDescriptorTest.hs",
         "FinalizedCoreTest.hs": "test-source-boot/FinalizedCoreTest.hs",
     },

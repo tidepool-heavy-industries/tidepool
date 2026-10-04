@@ -5,7 +5,7 @@ module Tidepool.PlannedDeclaration
   ( PlannedDeclaration, plannedModule, plannedSource, plannedCheckPlan
   , PlannedDeclarationRejection(..), preparePlannedDeclaration, replaceTemplateModuleHeader
   , PlannedDeclarationInventory, plannedExports, plannedInstances
-  , plannedOriginalOwner, plannedInterfaceFingerprint, plannedFamilyClosure
+  , plannedOriginalOwner, plannedInterfaceFingerprint, plannedSourceMatches, plannedFamilyClosure
   , renderPlannedDeclarationInventory
   , certifyPlannedDeclaration, hydratePlannedDeclarationInventory
   , transformPlannedDeclarationImports, transformPlannedDeclarationImportsWithCompleted
@@ -69,6 +69,7 @@ data PlannedDeclarationInventory = PlannedDeclarationInventory
   , plannedInstances :: InstanceInventory
   , inventoryOwner :: Module
   , inventoryInterface :: Fingerprint
+  , inventorySource :: Fingerprint
   , plannedFamilyClosure :: [ExportIdentity]
   } deriving (Eq)
 
@@ -85,6 +86,10 @@ plannedOriginalOwner inventory =
 
 plannedInterfaceFingerprint :: PlannedDeclarationInventory -> String
 plannedInterfaceFingerprint = show . inventoryInterface
+
+plannedSourceMatches :: PlannedDeclaration -> PlannedDeclarationInventory -> Bool
+plannedSourceMatches planned inventory = plannedModule planned == snd (plannedOriginalOwner inventory)
+  && inventorySource inventory == fingerprintByteString (TE.encodeUtf8 (T.pack (plannedSource planned)))
 
 renderPlannedDeclarationInventory :: PlannedDeclarationInventory -> String
 renderPlannedDeclarationInventory inventory = "{" ++ intercalate ","
@@ -244,7 +249,7 @@ readPlannedDeclarationInventory env original = do
       (Left "planned original instance inventory has a foreign owner")
     case familyCheck of
       JoinAccepted -> Right (PlannedDeclarationInventory exports inventory owner
-        (mi_iface_hash (mi_final_exts iface))
+        (mi_iface_hash (mi_final_exts iface)) (mi_src_hash iface)
         (sort (nub (map (exportIdentity . coAxiomName . fi_axiom) families))))
       JoinRejected _ diagnostic -> Left diagnostic
 

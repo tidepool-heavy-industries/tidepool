@@ -103,7 +103,7 @@ import GHC.Core.Type
 import GHC.Core.TyCo.Compare (eqType)
 import GHC.Core.TyCo.FVs (scopedSort, tyConsOfType)
 import GHC.Core.TyCon (isTupleTyCon, tyConDataCons_maybe, unwrapNewTyCon_maybe, tyConUnique, tyConName)
-import GHC.Types.SrcLoc (mkRealSrcSpan, mkRealSrcLoc)
+import GHC.Types.SrcLoc (mkRealSrcSpan, mkRealSrcLoc, noLoc)
 import GHC.Core.Class (className)
 import GHC.Core.InstEnv (is_cls, is_tys, instEnvElts)
 import GHC.Core.FamInstEnv (fi_fam, fi_tys)
@@ -205,7 +205,7 @@ import Tidepool.ExactHydration
 import Tidepool.ExactScope
   ( ExactScope(..), ExactScopePurpose(..), ExactCompilation(..), SourceSelectedOriginals(..), extendSourceSelectedOriginals, CheckedCellAdmission(..), CheckedCellPurpose(..), CheckedItemAdmission(..), CheckedItemPurpose(..), readExactScope, revalidateExactScope, scopeValueInterfaces
   , scopeCheckedCell, scopeCheckedItem, scopeIncludePaths
-  , writeExactCompilation, scopeExecutionNativeOwners, ExactInterfaceEvidence(..) )
+  , writeExactCompilation, scopeExecutionNativeOwners, ExactInterfaceEvidence(..), CanonicalOrigin(..), canonicalOrigin )
 import Tidepool.ExactScope
   ( CanonicalInterfaceProof, CanonicalInterfaceAdmission, scopeCanonicalInterfaces
   , validateCandidateCanonicalInterfaceProof
@@ -3788,7 +3788,8 @@ installPreparedInterface name hmi = do
 -- from the pre-optimization Core reference closure.
 normalVariant :: CompilePurpose -> FilePath -> IO PipelineVariant
 normalVariant purpose path = do
-  case originalPurpose purpose of
+  let effectivePurpose = originalPurpose purpose
+  case effectivePurpose of
     HostActivationInputCompile {} -> fail "host activation input requires its sealed session admission"
     HostActivationCheck {} -> fail "host activation check requires its sealed session admission"
     _ -> pure ()
@@ -3814,10 +3815,10 @@ normalVariant purpose path = do
         -- @result@; a resident turn without prior bindings can also land on
         -- this variant while its template names @__result@. Try both, in that
         -- order.
-      , cpKeepPrivateResult = purpose == OriginalDeclarationCompile
+      , cpKeepPrivateResult = effectivePurpose == OriginalDeclarationCompile
       , cpResultBinders = [scaffoldOutputBase, scaffoldTargetName]
       , cpBeforeModule = \_ -> pure ()
-      , cpTier = if purpose == CertifyHomeProductsCompile
+      , cpTier = if effectivePurpose == CertifyHomeProductsCompile
           then OptimizeEveryModule else OptimizeCoreReachable
       , cpBeforeMerge = pure ()
       , cpFinalEnv = id
@@ -3928,15 +3929,16 @@ selectCurrentSourceOriginals admitted intents recipe sourceGraph = do
       -- edges and generated target imports never seed this closure.
       sourceDemands selected =
         let grown = Set.unions (selected :
-              [imports | key <- Set.toList selected, Just imports <- [Map.lookup key freshImports]])
+              [imports | key <- Set.toList selected, sourceProvider key
+                , Just imports <- [Map.lookup key freshImports]])
          in if grown == selected then selected else sourceDemands grown
       authoredOwners = Set.filter currentProvider (sourceDemands requestedOwners)
-      currentProvider key = case Map.lookup key (scopeInterfaceEvidence admitted) of
-        Just (ModuleInterfaceEvidence _) -> True
+      sourceProvider key = case Map.lookup key (scopeInterfaceEvidence admitted) of
+        Nothing -> True -- A fresh provider can introduce an already retained dependency.
+        Just (ModuleInterfaceEvidence proof) -> canonicalOrigin proof == SourceOriginal
         Just (LocalModuleInterfaceEvidence _) -> True
-        -- Native joins and checked values retain their existing exact
-        -- import authorities; they are not ordinary source providers.
         _ -> False
+      currentProvider key = Map.member key exactOwners && sourceProvider key
       hiddenImports = [(summary,imported,key) | summary <- sourceSummaries
         , imported <- ms_textual_imps summary ++ ms_srcimps summary
         , Just key <- [localOwner imported], Map.member key exactOwners

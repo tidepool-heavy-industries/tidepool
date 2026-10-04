@@ -118,7 +118,7 @@ import Tidepool.ExactScope
   , scopeCheckedCell, scopeCheckedItem, scopeCheckedDisplay, scopeIncludePaths
   , originalGroupFromProjected, originalGroupFromCandidate
   , CheckedCellAdmission(..), CheckedCellPurpose(..), CheckedItemAdmission(..), CheckedItemPurpose(..), CheckedDisplayAdmission(..), PlannedCellAdmission(..), PlannedCellSlot(..)
-  , ExactInterfaceEvidence(..), validateCandidateCanonicalInterfaceProof, canonicalCertificateSha256
+  , ExactInterfaceEvidence(..), admitLocalNativeDeclaration, validateCandidateCanonicalInterfaceProof, canonicalCertificateSha256
   , readExactScope, revalidateExactScope, writeExactCompilation, scopeValueInterfaces, extendSourceSelectedOriginals, extendExactExecutionSources, extendExactExecutionSourcesWithinBudget )
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import Tidepool.CellProgramState
@@ -1606,6 +1606,7 @@ prepareOriginalCellDeclaration compiler caches args template outDir scope exact 
   packageBytes <- BS.readFile packagesPath
   unless (shaHex packageBytes == packagesSha)
     (fail "planned original declaration package capture changed")
+  nativeEvidence <- either fail pure (admitLocalNativeDeclaration original inventory localProof)
   let originalProduct = ExactProduct unit reserved
         (exactProgramProductVersion exact unit reserved (plannedSource original) interfaceBytes originalBytes packageBytes)
         (shaHex interfaceBytes) (shaHex originalBytes) productPath
@@ -1613,7 +1614,7 @@ prepareOriginalCellDeclaration compiler caches args template outDir scope exact 
       extended = supportScope
         { scopeProducts = scopeProducts supportScope ++ [originalProduct]
         , scopeInterfaces = scopeInterfaces supportScope ++ [(interface, packagesPath, packagesSha)]
-        , scopeInterfaceEvidence = Map.insert (unit,reserved) (LocalModuleInterfaceEvidence localProof)
+        , scopeInterfaceEvidence = Map.insert (unit,reserved) nativeEvidence
             (scopeInterfaceEvidence supportScope)
         , scopeLexical = scopeLexical supportScope ++ [((unit,reserved), lexicalRequirements)] }
       text = encodeString . T.pack

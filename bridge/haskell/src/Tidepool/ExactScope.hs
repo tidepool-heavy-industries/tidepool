@@ -4,14 +4,15 @@ module Tidepool.ExactScope
   ( ExactScope(..), ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..), ExactCompilation(..), SourceSelectedOriginals(..)
   , CheckedCellAdmission(..), CheckedCellPurpose(..), CheckedItemAdmission(..), CheckedItemPurpose(..), CheckedDisplayAdmission(..)
   , PlannedCellAdmission(..), PlannedCellSlot(..)
-  , ExactInterfaceEvidence(..), CanonicalInterfaceProof, CanonicalCoreArtifact
+  , ExactInterfaceEvidence(..), CanonicalOrigin(..), CanonicalInterfaceProof, CanonicalCoreArtifact
+  , admitLocalNativeDeclaration
   , CanonicalInterfaceAdmission(..), scopeCanonicalInterfaces, scopeDurableInterfaces
   , admittedInterfaceHomeUnits, admittedInterfaceSourceSha256, resolveShippedHomeModule
   , admittedInterfaceRequirements, admittedInterfaceCore
   , validateCanonicalInterfaceProof, validateCandidateCanonicalInterfaceProof
   , canonicalCertificatePath, canonicalCertificateSha256, canonicalCoreArtifact
   , canonicalCorePath, canonicalCoreSha256, canonicalHomeUnits, canonicalSourceSha256
-  , canonicalRequirements
+  , canonicalRequirements, canonicalOrigin
   , scopeCheckedCell, scopeCheckedItem, scopeCheckedDisplay, scopeIncludePaths
   , readExactScope, revalidateExactScope, scopeValueInterfaces
   , writeExactCompilation, extendSourceSelectedOriginals
@@ -33,6 +34,7 @@ import Data.Char (isHexDigit)
 import Data.List (isPrefixOf)
 import Data.Maybe (isJust)
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import GHC.Driver.Env (HscEnv, hsc_home_unit)
@@ -49,7 +51,7 @@ import System.FilePath (isAbsolute, takeDirectory, (</>))
 import System.IO (IOMode(ReadMode), withBinaryFile)
 import System.IO.Error (isAlreadyExistsError)
 import Tidepool.ExactHydration (ExactIfaceArtifact(..))
-import Tidepool.Session (SessionModule(..), SessionModuleKind(..), parseSessionModule, sessionModuleString)
+import Tidepool.Session (Generation(..), SessionModule(..), SessionModuleKind(..), parseSessionModule, sessionModuleString)
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import Tidepool.CheckedCell
   ( CheckedSignature(..), RequestTypeSignatures, RequestHelperRecipe(..), decodeCheckedSignature, decodeRequestTypeSignatures )
@@ -64,6 +66,8 @@ import Tidepool.ExecutionSource
   , readExecutionSourceGraphs, executionSourceGraphsFit
   , ExecutionSourceFailure(..), executionIdentityKey, executionSourceClosure, executionSourceOriginalNode
   , executionSourceOriginalClosure )
+import Tidepool.PlannedDeclaration
+  ( PlannedDeclaration, PlannedDeclarationInventory, plannedModule, plannedSource, plannedOriginalOwner, plannedSourceMatches )
 import Tidepool.PackageWitness
   ( revalidatePackageImports )
 import Tidepool.FinalizedModuleArtifacts
@@ -133,10 +137,25 @@ data CanonicalCoreArtifact = CanonicalCoreArtifact
   , canonicalCoreSha256 :: String
   } deriving (Eq, Show)
 
+data CanonicalOrigin = SourceOriginal | NativeAuthoredDeclaration Generation
+  deriving (Eq, Show)
+
+data CanonicalInterfaceRole = SourceOriginalRole | NativeDeclarationRole
+  deriving (Eq, Show)
+
+-- Candidate promotion validates a carrier without granting a scope role.
+data CanonicalInterfacePurpose = ScopeInterface CanonicalInterfaceRole | CandidateCarrier
+  deriving (Eq, Show)
+
+originRole :: CanonicalOrigin -> CanonicalInterfaceRole
+originRole SourceOriginal = SourceOriginalRole
+originRole (NativeAuthoredDeclaration _) = NativeDeclarationRole
+
 data CanonicalInterfaceDescriptor = CanonicalInterfaceDescriptor
   { descriptorCertificatePath :: FilePath
   , descriptorCertificateSha256 :: String
   , descriptorCore :: Maybe CanonicalCoreArtifact
+  , descriptorPurpose :: CanonicalInterfacePurpose
   } deriving (Eq, Show)
 
 data CanonicalInterfaceProof = CanonicalInterfaceProof
@@ -146,11 +165,13 @@ data CanonicalInterfaceProof = CanonicalInterfaceProof
   , canonicalHomeUnits :: Set.Set String
   , canonicalSourceSha256 :: String
   , canonicalRequirements :: Map.Map (String,String) String
+  , canonicalOrigin :: CanonicalOrigin
   } deriving (Eq, Show)
 
 data ExactInterfaceEvidence
   = ModuleInterfaceEvidence CanonicalInterfaceProof
   | LocalModuleInterfaceEvidence LocalFinalizedAdmission
+  | LocalNativeDeclarationEvidence LocalNativeDeclarationAdmission
   | LexicalJoinEvidence
   | CheckedValueEvidence
   deriving (Eq, Show)
@@ -158,8 +179,33 @@ data ExactInterfaceEvidence
 data ParsedInterfaceEvidence
   = ParsedModuleEvidence CanonicalInterfaceDescriptor
   | ParsedLocalModuleEvidence LocalFinalizedAdmission
+  | ParsedLocalNativeEvidence LocalNativeDeclarationAdmission
   | ParsedJoinEvidence
   | ParsedValueEvidence
+
+-- Only the protected planned declaration can associate local finalized facts
+-- with native authored provenance. Neither a wire role nor a namespace can.
+data LocalNativeDeclarationAdmission = LocalNativeDeclarationAdmission
+  PlannedDeclarationInventory LocalFinalizedAdmission
+  deriving (Eq, Show)
+
+admitLocalNativeDeclaration
+  :: PlannedDeclaration -> PlannedDeclarationInventory -> LocalFinalizedAdmission
+  -> Either String ExactInterfaceEvidence
+admitLocalNativeDeclaration planned inventory proof = do
+  let (iface,_,_) = localFinalizedInterface proof
+      key = (exactUnit iface,exactModule iface)
+  unless (plannedOriginalOwner inventory == key && plannedSourceMatches planned inventory
+      && localFinalizedSourceSha256 proof == digest (TE.encodeUtf8 (T.pack (plannedSource planned))))
+    (Left "local native declaration differs from its protected owner or source")
+  case parseSessionModule (plannedModule planned) of
+    Just owner | smKind owner == LibMod, Generation generation <- smGen owner
+      , generation > 0, sessionModuleString owner == plannedModule planned ->
+        pure (LocalNativeDeclarationEvidence (LocalNativeDeclarationAdmission inventory proof))
+    _ -> Left "local native declaration has an invalid reserved identity"
+
+localNativeProof :: LocalNativeDeclarationAdmission -> LocalFinalizedAdmission
+localNativeProof (LocalNativeDeclarationAdmission _ proof) = proof
 
 -- The consumer sees the same finalized facts whether their owner is this
 -- request's capture or a Rust-issued durable certificate. Only durable
@@ -174,6 +220,7 @@ scopeCanonicalInterfaces = Map.mapMaybe select . scopeInterfaceEvidence
   where
     select (ModuleInterfaceEvidence proof) = Just (DurableInterfaceAdmission proof)
     select (LocalModuleInterfaceEvidence proof) = Just (LocalInterfaceAdmission proof)
+    select (LocalNativeDeclarationEvidence native) = Just (LocalInterfaceAdmission (localNativeProof native))
     select _ = Nothing
 
 scopeDurableInterfaces :: ExactScope -> Map.Map (String,String) CanonicalInterfaceProof
@@ -230,6 +277,7 @@ data CanonicalModuleCertificate = CanonicalModuleCertificate
   , certificatePackages :: String
   , certificateCore :: Maybe String
   , certificateRequirements :: [((String,String),String)]
+  , certificateOrigin :: CanonicalOrigin
   }
 
 data CheckedDisplayAdmission = CheckedDisplayAdmission
@@ -549,7 +597,13 @@ validateInterfaceEvidence scope offered = do
   let interfaces = Map.fromList
         [((exactUnit iface,exactModule iface),(iface,packages,packageSha))
         | (iface,packages,packageSha) <- scopeInterfaces scope]
-      locals = Map.fromList [(key,proof) | (key,ParsedLocalModuleEvidence proof) <- offered]
+      locals = Map.fromList ([(key,proof) | (key,ParsedLocalModuleEvidence proof) <- offered]
+        ++ [(key,localNativeProof native) | (key,ParsedLocalNativeEvidence native) <- offered])
+  forM_ [(key,native) | (key,ParsedLocalNativeEvidence native) <- offered] $ \(key,LocalNativeDeclarationAdmission inventory proof) ->
+    unless (plannedOriginalOwner inventory == key
+        && let (iface,_,_) = localFinalizedInterface proof
+           in (exactUnit iface,exactModule iface) == key)
+      (fail "local native declaration leaves its protected original owner")
   forM_ (Map.toAscList locals) $ \(key,proof) -> do
     either fail pure =<< revalidateLocalFinalizedAdmission proof
     unless (Map.lookup key interfaces == Just (localFinalizedInterface proof))
@@ -561,6 +615,7 @@ validateInterfaceEvidence scope offered = do
   let evidence = Map.fromList [(key,case value of
         ParsedModuleEvidence _ -> ModuleInterfaceEvidence (proofs Map.! key)
         ParsedLocalModuleEvidence proof -> LocalModuleInterfaceEvidence proof
+        ParsedLocalNativeEvidence native -> LocalNativeDeclarationEvidence native
         ParsedJoinEvidence -> LexicalJoinEvidence
         ParsedValueEvidence -> CheckedValueEvidence) | (key,value) <- offered]
   unless (Map.keysSet evidence == Set.fromList
@@ -591,7 +646,7 @@ validateCanonicalProof producer interfaces key certificatePath certificateSha co
         && maybe True (\(path,seal) -> isAbsolute path && isCanonicalDigest seal) core)
       (fail "invalid canonical interface descriptor")
     proofs <- validateCanonicalInterfaces producer interfaces [(key, CanonicalInterfaceDescriptor
-      certificatePath certificateSha (uncurry CanonicalCoreArtifact <$> core))]
+      certificatePath certificateSha (uncurry CanonicalCoreArtifact <$> core) CandidateCarrier)]
     maybe (fail "canonical proof has no selected owner") pure (Map.lookup key proofs))
     :: IO (Either IOException CanonicalInterfaceProof)
   pure (either (Left . show) Right result)
@@ -649,6 +704,10 @@ validateCanonicalInterfaces producer selectedInterfaces descriptors = do
         && certificatePackages certificate == packageSha
         && certificateCore certificate == (canonicalCoreSha256 <$> descriptorCore descriptor))
       (fail "canonical module certificate differs from exact owner or payload")
+    unless (case descriptorPurpose descriptor of
+        CandidateCarrier -> True
+        ScopeInterface role -> role == originRole (certificateOrigin certificate))
+      (fail "canonical module origin differs from its exact interface role")
     let requirements = Map.fromList (certificateRequirements certificate)
     let matchesRequirement (required,seal) = case Map.lookup required interfaces of
           Just (value,_,_) -> exactSha256 value == seal
@@ -668,16 +727,17 @@ validateCanonicalInterfaces producer selectedInterfaces descriptors = do
       , canonicalHomeUnits = Set.fromList (certificateHomeUnits certificate)
       , canonicalSourceSha256 = certificateSource certificate
       , canonicalRequirements = requirements
+      , canonicalOrigin = certificateOrigin certificate
       })
   pure (Map.fromList proofs)
 
 decodeCanonicalModuleCertificate :: Decoder s CanonicalModuleCertificate
 decodeCanonicalModuleCertificate = do
-  array 12
+  array 13
   magic <- string
   version <- decodeWord
   profile <- string
-  unless (magic == "TPFINALMODULE" && version == 1
+  unless (magic == "TPFINALMODULE" && version == 2
       && profile == "tidepool-ghc-finalized-module-v1")
     (fail "unsupported canonical module certificate")
   producer <- canonicalDigest
@@ -695,11 +755,22 @@ decodeCanonicalModuleCertificate = do
       && unit `elem` homes && all ((`elem` homes) . fst . fst) requirements
       && key `notElem` map fst requirements)
     (fail "invalid canonical module requirement inventory")
-  pure (CanonicalModuleCertificate producer homes key source interface packages core requirements)
+  originCount <- decodeListLen
+  originTag <- string
+  origin <- case (originTag,originCount) of
+    ("source-original",1) -> pure SourceOriginal
+    ("native-authored-declaration",2) -> do
+      generation <- decodeWord64
+      let owner = SessionModule LibMod (Generation generation)
+      unless (generation > 0 && key == ("main",sessionModuleString owner))
+        (fail "native canonical origin differs from its reserved identity")
+      pure (NativeAuthoredDeclaration (Generation generation))
+    _ -> fail "unsupported canonical module origin"
+  pure (CanonicalModuleCertificate producer homes key source interface packages core requirements origin)
 
 encodeCanonicalModuleCertificate :: CanonicalModuleCertificate -> E.Encoding
-encodeCanonicalModuleCertificate certificate = E.encodeListLen 12
-  <> text "TPFINALMODULE" <> E.encodeWord 1 <> text "tidepool-ghc-finalized-module-v1"
+encodeCanonicalModuleCertificate certificate = E.encodeListLen 13
+  <> text "TPFINALMODULE" <> E.encodeWord 2 <> text "tidepool-ghc-finalized-module-v1"
   <> text (certificateProducer certificate)
   <> list text (certificateHomeUnits certificate)
   <> text (fst (certificateOwner certificate)) <> text (snd (certificateOwner certificate))
@@ -708,6 +779,10 @@ encodeCanonicalModuleCertificate certificate = E.encodeListLen 12
   <> maybe E.encodeNull text (certificateCore certificate)
   <> list (\((unit,name),seal) -> E.encodeListLen 3 <> text unit <> text name <> text seal)
       (certificateRequirements certificate)
+  <> case certificateOrigin certificate of
+    SourceOriginal -> E.encodeListLen 1 <> text "source-original"
+    NativeAuthoredDeclaration (Generation generation) ->
+      E.encodeListLen 2 <> text "native-authored-declaration" <> E.encodeWord64 generation
   where
     text = E.encodeString . T.pack
     list encode values = E.encodeListLen (fromIntegral (length values)) <> foldMap encode values
@@ -736,8 +811,9 @@ revalidateExactScope env scope = do
         [(key,case value of
           ModuleInterfaceEvidence proof -> ParsedModuleEvidence
             (CanonicalInterfaceDescriptor (canonicalCertificatePath proof)
-              (canonicalCertificateSha256 proof) (canonicalCoreArtifact proof))
+              (canonicalCertificateSha256 proof) (canonicalCoreArtifact proof) (ScopeInterface (originRole (canonicalOrigin proof))))
           LocalModuleInterfaceEvidence proof -> ParsedLocalModuleEvidence proof
+          LocalNativeDeclarationEvidence native -> ParsedLocalNativeEvidence native
           LexicalJoinEvidence -> ParsedJoinEvidence
           CheckedValueEvidence -> ParsedValueEvidence)
         | (key,value) <- Map.toAscList (scopeInterfaceEvidence scope)]
@@ -834,7 +910,7 @@ decodeScope = do
   count <- decodeListLen
   magic <- string
   version <- string
-  unless (magic == "TPEXACTSCOPE" && version == "8" && count == 9)
+  unless (magic == "TPEXACTSCOPE" && version == "9" && count == 9)
     (fail "unsupported exact scope")
   semantic <- digestField
   producer <- digestField
@@ -851,7 +927,7 @@ decodeScope = do
     evidenceCount <- decodeListLen
     evidenceRole <- string
     evidence <- case (evidenceRole,evidenceCount) of
-      ("module",5) -> do
+      (role,5) | role == "module" || role == "native-declaration" -> do
         certificatePath <- absolute
         certificateSha <- canonicalDigest
         coreToken <- peekTokenType
@@ -860,7 +936,8 @@ decodeScope = do
           decodeNull
           pure Nothing
           else Just <$> (CanonicalCoreArtifact <$> absolute <*> canonicalDigest)
-        pure (ParsedModuleEvidence (CanonicalInterfaceDescriptor certificatePath certificateSha core))
+        pure (ParsedModuleEvidence (CanonicalInterfaceDescriptor certificatePath certificateSha core
+          (ScopeInterface (if role == "module" then SourceOriginalRole else NativeDeclarationRole))))
       ("join",1) -> pure ParsedJoinEvidence
       ("value",1) -> pure ParsedValueEvidence
       _ -> fail "unsupported exact interface evidence role"

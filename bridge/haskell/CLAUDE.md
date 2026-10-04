@@ -60,12 +60,13 @@ default handshake.
 
 ## Exact-scope transport
 
-Exact-scope manifests use strict `TPEXACTSCOPE` version 8 with nine fields. The final
+Exact-scope manifests use strict `TPEXACTSCOPE` version 9 with nine fields. The final
 fields contain an execution parcel or null and a compiler-purpose authorization
 or null. Interface rows have eight fields; their final field declares one
 closed artifact role: `["module", certificate path, certificate SHA, optional
-Core path, optional Core SHA]`, `["join"]`, or `["value"]`. Native product
-owners require module evidence. Roles never come from module-name spelling.
+Core path, optional Core SHA]`, the same five-field `["native-declaration", ...]`
+for native authored originals, `["join"]`, or `["value"]`. Native product
+owners require canonical module evidence. Roles never come from module-name spelling.
 
 Canonical module certificates bind the compiler producer, finalized interface
 and package bytes, original source digest, exact dependency seals, optional
@@ -86,7 +87,7 @@ oversized parcels are rejected. Resolution evidence retains at most 65,536 rows,
 and exact-import edges retain their independent budgets.
 
 This is a strict matched worker/frontend migration. Earlier exact-scope versions
-2, 4, 6 and 7 are rejected. Deploy both producers and consumers together and
+2, 4, 6, 7 and 8 are rejected. Deploy both producers and consumers together and
 regenerate fixtures through their owning producers.
 
 Candidate offers use strict `TPMCAN` version 10 with seven fields and sixteen-field
@@ -148,6 +149,16 @@ signatures supply the exact type authority.
 receipts. Worker fields 34 (`--turn-pin`) and 45 (`--cell-fold-turn`) are retired
 and rejected explicitly. Whole-cell checking remains the initial admission step
 for host inputs; execution uses admitted item recipes.
+
+Canonical `TPFINALMODULE` version 2 certificates have thirteen fields. The final
+field is `["source-original"]` or `["native-authored-declaration", generation]`;
+the latter binds the issuer's protected native declaration reservation. Scope
+roles must match that authenticated origin. The finalization profile remains
+`tidepool-ghc-finalized-module-v1`. Prior certificate and scope versions are
+rejected; deploy the matched issuer and worker and regenerate evidence through
+its producers. Canonical origin alone grants neither lexical import authority
+nor native execution. Request-local native originals retain their protected
+planned declaration and exact finalized owner/source association.
 
 ## Checked type signatures
 

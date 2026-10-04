@@ -1,11 +1,11 @@
 module Main (main) where
 
 import ExecutionSourceDecodeTest (executionSourceDecodeChecks, executionSourceDecodeBenchmark, executionSourceDecodeSnapshots, executionSourceResolutionBudgetChecks)
-import ExactScopeV8Test (exactScopeV8Checks, candidateCanonicalChecks)
+import ExactScopeV9Test (exactScopeV9Checks, nativeOriginChecks, candidateCanonicalChecks)
 import CandidateGraphDescriptorTest (candidateGraphDescriptorChecks)
 import GenuineCandidateFixture
   ( writeGenuineCandidateManifestFor, writeGenuineMetadataScope, writeGenuineEmptyMetadataScope
-  , writeGenuineCandidateNativeScope )
+  , writeGenuineCandidateNativeScope, writeGenuineAuthoredDeclarationScope )
 
 import Codec.CBOR.Encoding (encodeBool, encodeListLen, encodeString)
 import Codec.CBOR.Write (toStrictByteString)
@@ -77,7 +77,7 @@ import System.Directory
   , getModificationTime, setModificationTime, withCurrentDirectory, getCurrentDirectory )
 import System.Environment (getArgs, getExecutablePath, setEnv, lookupEnv, unsetEnv)
 import System.Exit (ExitCode(..))
-import System.FilePath ((</>), takeDirectory, normalise)
+import System.FilePath ((</>), takeDirectory, normalise, replaceExtension)
 import System.IO (hClose, hFlush, hPutStrLn, hSeek, hSetFileSize, withBinaryFile, IOMode(WriteMode), SeekMode(AbsoluteSeek), openTempFile, stderr)
 import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 import System.Process (readProcessWithExitCode)
@@ -133,7 +133,7 @@ import Tidepool.PreparedStg (PreparedModule(..), PreparedCoverage(..))
 import Tidepool.FatIface (readExactInterface)
 import Tidepool.Session (SessionScope(..), emptySessionScope)
 import Tidepool.SessionArtifacts (mkBoundBinders, parseValModule)
-import Tidepool.Session (sessionHiPath)
+import Tidepool.Session (sessionHiPath, Generation(..), SessionModule(..), SessionModuleKind(..))
 import Tidepool.ExactScope
   ( ExactScope(..), ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..)
   , CheckedCellAdmission(..), CheckedCellPurpose(..), CheckedItemAdmission(..), CheckedItemPurpose(..)
@@ -199,7 +199,8 @@ exactCompilationCacheSafety expectedSource bytes = do
 main :: IO ()
 main = getArgs >>= \case
   ["--finalized-core"] -> finalizedCoreChecks
-  ["--exact-scope-v8", manifest] -> exactScopeV8Checks manifest
+  ["--exact-scope-v9", manifest] -> exactScopeV9Checks manifest
+  ["--native-origin-scope", manifest] -> nativeOriginChecks manifest
   ["--canonical-candidates", scope, candidates] -> candidateCanonicalChecks scope candidates
   ["--finalized-frontend-once"] -> finalizedFrontendOnce
   ["--execution-source-decode"] -> executionSourceDecodeChecks
@@ -297,7 +298,14 @@ sourceBootReuseAt work = do
         Just _ -> False) candidates) $
     fail "SOURCE SCC candidate issued unsupported execution source custody"
   putStrLn "SOURCE execution custody: CacheEven/CacheOdd recipes absent; ordinary NativeScopeBase/NativeScopeOwner recipes admitted"
-  exactScopeV8Checks nativeScope
+  exactScopeV9Checks nativeScope
+  let nativeOwner = SessionModule LibMod (Generation 1)
+      authoredSource = replaceExtension (sessionHiPath work nativeOwner) "hs"
+      authoredScope = work </> "authored-native-origin-scope.cbor"
+  createDirectoryIfMissing True (takeDirectory authoredSource)
+  copyFile "test-source-boot/fixtures/AuthoredScopeG1.hs" authoredSource
+  writeGenuineAuthoredDeclarationScope nativeOwner [work] authoredSource authoredScope
+  nativeOriginChecks authoredScope
   candidateCanonicalChecks nativeScope (manifest work)
   verifyHydration work cold
   partial <- runPipelineSelected (PreparedProducts (Just (manifest work)))

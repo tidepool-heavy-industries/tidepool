@@ -321,10 +321,10 @@ captureProof env artifact source core work = do
       homes = map unitIdString (Set.toAscList (hsc_all_home_unit_ids env))
       packages = encodePackageImports artifact emptyPackageImports
       certificate = toStrictByteString $ list
-        [text "TPFINALMODULE",encodeWord 1,text "tidepool-ghc-finalized-module-v1",text producer
+        [text "TPFINALMODULE",encodeWord 2,text "tidepool-ghc-finalized-module-v1",text producer
         ,list (map text homes),text (exactUnit artifact),text (exactModule artifact)
         ,text (sha sourceBytes),text (exactSha256 artifact),text (sha packages)
-        ,text (sha core),list []]
+        ,text (sha core),list [],list [text "source-original"]]
       candidate = list
         (map text [exactUnit artifact,exactModule artifact,source,sha sourceBytes
           ,exactPath artifact,exactSha256 artifact,replicate 64 '0',sha BS.empty,replicate 64 '0']

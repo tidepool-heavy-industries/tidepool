@@ -3,7 +3,8 @@
 -- module never writes durable certificates or candidate/scope descriptors.
 module GenuineCandidateFixture
   ( writeGenuineCandidateManifestFor, writeGenuineMetadataScope
-  , writeGenuineEmptyMetadataScope, writeGenuineCandidateNativeScope ) where
+  , writeGenuineEmptyMetadataScope, writeGenuineCandidateNativeScope
+  , writeGenuineAuthoredDeclarationScope ) where
 
 import Codec.CBOR.Encoding
 import Codec.CBOR.Write (toStrictByteString)
@@ -35,6 +36,7 @@ import Tidepool.PackageWitness (encodePackageImports)
 import Tidepool.PreparedFormatting (resolveFormattingAuthority)
 import Tidepool.PreparedJson (resolveJsonAuthority)
 import Tidepool.PreparedTime (resolveTimeAuthority)
+import Tidepool.Session (Generation(..), SessionModule(..), SessionModuleKind(..))
 
 writeGenuineCandidateManifestFor
   :: [String] -> FilePath -> FilePath -> [FilePath] -> PreparedPipelineResult -> IO ()
@@ -58,6 +60,36 @@ writeGenuineCandidateNativeScope
   :: [String] -> [String] -> FilePath -> FilePath -> [FilePath] -> FilePath -> PreparedPipelineResult -> IO ()
 writeGenuineCandidateNativeScope candidates nativeOwners work source includes destination prepared =
   writePacket work (Just (source, includes, prepared)) candidates candidates nativeOwners (Just destination)
+
+-- This packet invokes the existing protected authored producer once. It does
+-- not relabel an ordinary finalized module as a native declaration.
+writeGenuineAuthoredDeclarationScope
+  :: SessionModule -> [FilePath] -> FilePath -> FilePath -> IO ()
+writeGenuineAuthoredDeclarationScope owner includes source destination = do
+  let Generation generation = smGen owner
+      work = takeDirectory destination
+  unless (smKind owner == LibMod && generation > 0 && not (null includes))
+    (fail "genuine authored fixture requires a positive reserved Lib generation and source roots")
+  issuer <- lookupEnv "TIDEPOOL_CANDIDATE_FIXTURE_ISSUER" >>= maybe
+    (fail "genuine authored fixture requires the matched Rust libtest issuer") pure
+  (packet, handle) <- openTempFile work "authored-origin-fixture"
+  hClose handle
+  removeFile packet
+  createDirectory packet
+  let text = encodeString . T.pack
+      names values = encodeListLen (fromIntegral (length values)) <> foldMap text values
+  BS.writeFile (packet </> "request.cbor") (toStrictByteString
+    (encodeListLen 5 <> text "TPSOURCEBOOTAUTHORED1" <> encodeWord64 generation
+      <> names includes <> text source <> text destination))
+  bracket (lookupEnv "TIDEPOOL_CANDIDATE_FIXTURE_PACKET")
+    (maybe (unsetEnv "TIDEPOOL_CANDIDATE_FIXTURE_PACKET") (setEnv "TIDEPOOL_CANDIDATE_FIXTURE_PACKET")) $ \_ -> do
+      setEnv "TIDEPOOL_CANDIDATE_FIXTURE_PACKET" packet
+      (status, output, errors) <- readProcessWithExitCode issuer
+        ["--exact", "module_candidates::fixture_packets::source_boot_authored_declaration_packet_producer"
+        , "--ignored", "--nocapture"] ""
+      unless (status == ExitSuccess) $
+        fail ("genuine authored Rust fixture issuance failed\n" ++ output ++ errors)
+      putStr output
 
 writePacket
   :: FilePath -> Maybe (FilePath, [FilePath], PreparedPipelineResult)

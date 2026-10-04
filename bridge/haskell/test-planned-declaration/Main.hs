@@ -67,7 +67,8 @@ main = withScratch $ \work -> do
   hydrated <- hydratePlannedDeclarationInventory (plannedOriginalOwner certified)
     (plannedInterfaceFingerprint certified) (prHscEnv (pprPipelineResult original))
     >>= either fail pure
-  unless (hydrated == certified) $
+  unless (hydrated == certified && plannedSourceMatches planned certified
+      && plannedSourceMatches planned hydrated) $
     fail "exact hydrated original changed its declaration inventory"
   forM_ [(plannedOriginalOwner certified, "stale-interface")
     ,((fst (plannedOriginalOwner certified), "Tidepool.Session.Lib.G8")
@@ -115,6 +116,8 @@ main = withScratch $ \work -> do
       [if line == "let value = Box 42" then "other = 99\n" ++ line else line
       | line <- lines authored]) >>= either (fail . show) pure
   stale <- either (fail . show) pure (preparePlannedDeclaration originalName wrapper changed)
+  unless (not (plannedSourceMatches stale certified)) $
+    fail "same-owner inventory admitted a different planned source"
   refused <- certifyPlannedDeclaration stale (prHscEnv (pprPipelineResult original))
   unless (case refused of Left _ -> True; Right _ -> False) $
     fail "old original interface certified a changed declaration source"
