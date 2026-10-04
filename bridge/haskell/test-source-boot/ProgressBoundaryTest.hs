@@ -1,7 +1,8 @@
-module ProgressBoundaryTest (progressBoundaryChecks) where
+module ProgressBoundaryTest (progressBoundaryChecks, watchReplyEvidenceChecks) where
 
 import Control.Exception (bracket)
-import Control.Monad (forM_, unless)
+import Control.Monad (forM, forM_, unless)
+import Data.ByteString qualified as BS
 import Data.List (isInfixOf)
 import Data.Maybe (isJust)
 import Data.Map.Strict qualified as Map
@@ -10,13 +11,14 @@ import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import GHC.Types.Name (getOccString)
 import GHC.Unit.Module (moduleName, moduleNameString)
-import System.Directory (copyFile, createDirectory, getTemporaryDirectory, removeDirectoryRecursive, removeFile)
+import System.Directory (createDirectoryIfMissing, copyFile, createDirectory, getTemporaryDirectory, removeDirectoryRecursive, removeFile)
 import System.FilePath ((</>))
 import System.IO (hClose, openTempFile)
 import Tidepool.EffectSchema (YieldSite(..), SiteType(..))
-import Tidepool.GhcPipeline (PipelineResult(..), PipelineSelection(..), PreparedPipelineResult(..), runPipelineSelected)
+import Tidepool.GhcPipeline (PipelineResult(..), PipelineSelection(..), PreparedPipelineResult(..), CompilePurpose(..), runPipelineSelected, withResidentPipelineSelected)
 import Tidepool.ExecutionProjection
-import Tidepool.ExecutionSchema (SymbolIdentity(..), TargetDescriptor(..), Architecture(..), Endianness(..), globalIdentity)
+import Tidepool.ExecutionSchema
+import Tidepool.ExecutionEncode (encodeWireProgram, encodeProjectedGroup)
 import Tidepool.PreparedSites (SiteRejection(..))
 import Tidepool.PreparedStg (PreparedModule(..))
 
@@ -106,3 +108,66 @@ progressBoundaryChecks effects = bracket scratch removeDirectoryRecursive $ \wor
     removeFile path
     createDirectory path
     pure path
+
+-- The explicit destination retains successful GHC projections for inspection.
+-- It contains compiler output, never a hand-built authority packet.
+watchReplyEvidenceChecks :: FilePath -> FilePath -> IO ()
+watchReplyEvidenceChecks effects work = do
+  createDirectoryIfMissing True work
+  let target = work </> "WatchReplyEvidence.hs"
+      includes = [work, "lib", effects]
+  copyFile "test-source-boot/fixtures/WatchReplyEvidence.hs" target
+  withResidentPipelineSelected includes $ \compile -> do
+    result <- compile (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile Nothing target includes Nothing
+    let environment = prHscEnv (pprPipelineResult result)
+        context entry = ProjectionContext "ghc-9.12-prepared-stg" "ghc-9.12.2"
+          (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) Map.empty
+          (SymbolIdentity "main" "WatchReplyEvidence" "value" entry Nothing)
+          [] Nothing Nothing Nothing Nothing
+        relevant owner = moduleNameString (moduleName owner) `elem`
+          ["Tidepool.Agent.Watch.Internal", "WatchReplyEvidence"]
+        products = projectOriginalHomeModuleProducts environment (pprProductInterfaces result)
+          (context "registerSingle") (pprModules result)
+        outcomes = [(owner, outcome) | (owner, outcome) <- preparedModuleProductOutcomes products, relevant owner]
+        census = [(moduleNameString (moduleName (pmModule prepared)), pmCoverage prepared,
+          Set.toAscList (pmEffectRequestTypeIds prepared))
+          | prepared <- pprModules result, relevant (pmModule prepared)]
+    writeFile (work </> "reply-evidence.txt") (unlines
+      ["prepared census: " ++ show census
+      , "original outcomes: " ++ show [(moduleNameString (moduleName owner),
+          either (Left . show) (Right . map (\group -> (projectedOriginalOrdinal group,
+            projectedBinders group, projectedVerbSites (projectedBody group)))) outcome)
+          | (owner, outcome) <- outcomes]
+      , "original omissions: " ++ show (preparedModuleProductOmissions products)])
+    forM_ outcomes $ \(owner, outcome) -> case outcome of
+      Left failure -> fail ("watch original projection failed: " ++ show failure)
+      Right groups -> forM_ groups $ \group -> BS.writeFile
+        (work </> (moduleNameString (moduleName owner) ++ "-" ++ show (projectedOriginalOrdinal group) ++ ".cbor"))
+        (encodeProjectedGroup group)
+    targets <- forM ["registerSingle", "registerGrouped"] $ \entry -> do
+      wire <- either (fail . show) pure (projectPreparedTarget (context entry) (pprModules result))
+      BS.writeFile (work </> (T.unpack entry ++ ".cbor")) (encodeWireProgram wire)
+      pure wire
+    let originalBodies = [projectedBody group | (owner, Right groups) <- outcomes
+          , moduleNameString (moduleName owner) == "Tidepool.Agent.Watch.Internal", group <- groups]
+    forM_ ["RegisterWatchWith", "RegisterWatchGroupsWith"] $ \occurrence -> do
+      let targetRows = [replyRows occurrence (programConstructors wire) (programTypes wire)
+            (programSites wire) (programVerbSites wire) | wire <- targets]
+          originalRows = [replyRows occurrence (projectedConstructors body) (projectedTypes body)
+            (projectedSites body) (projectedVerbSites body) | body <- originalBodies]
+      putStrLn ("watch reply evidence " ++ T.unpack occurrence ++ ": targets=" ++ show targetRows
+        ++ " originals=" ++ show originalRows ++ " census=" ++ show census)
+      unless (any (== [True]) targetRows) $
+        fail ("watch target lacks its closed Int reply row: " ++ T.unpack occurrence)
+      unless (any (== [True]) originalRows) $
+        fail ("watch native original lacks its closed Int reply row: " ++ T.unpack occurrence)
+  putStrLn ("watch reply evidence retained at " ++ work)
+ where
+  replyRows occurrence constructors types sites verbs =
+    [case types !! fromIntegral index of
+       TypeData family _ _ -> symbolOccurrence family == "Int"
+       _ -> False
+    | (ConstructorId constructor, site) <- verbs
+    , symbolOccurrence (constructorIdentity (constructors !! fromIntegral constructor)) == occurrence
+    , row <- sites, siteId row == site
+    , let TypeNodeId index = siteWire row]

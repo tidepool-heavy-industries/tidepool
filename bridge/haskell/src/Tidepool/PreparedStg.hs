@@ -23,6 +23,7 @@ import Control.Concurrent.MVar (MVar, modifyMVar_, newMVar, readMVar)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set (Set)
+import Data.Set qualified as Set
 import Data.Word (Word64)
 import GHC.Core.Lint (displayLintResults)
 import GHC.Core (CoreBind, Bind(..), bindersOfBinds)
@@ -50,6 +51,7 @@ import GHC.Types.Unique (getKey)
 import GHC.Types.Var (Id, isId, varName, varUnique)
 import GHC.Types.Name (isExternalName, nameModule_maybe)
 import GHC.Unit.Types (Module)
+import GHC.Unit.Module (moduleName, moduleNameString)
 import GHC.Unit.Module.Location (ModLocation)
 import GHC.Unit.Module.ModIface (ModIface)
 import GHC.Unit.Module.ModDetails (md_types)
@@ -57,6 +59,7 @@ import GHC.Unit.Module.ModGuts (CgGuts(..))
 import GHC.Unit.Module.ModSummary (ModSummary(..))
 import GHC.Types.TypeEnv (typeEnvTyCons)
 import GHC.Utils.Outputable (ppr, showSDocUnsafe, text)
+import Tidepool.Timing (readTimingEnabled, emitCount)
 import Tidepool.EffectSchema (YieldSite)
 import Tidepool.PreparedSites (PreparedSite, SiteRejection)
 import Tidepool.TypePolicy (TypeGraph(..))
@@ -131,6 +134,9 @@ prepareModule hscEnv summary elaboration = do
   prepared <- prepareBindings hscEnv (cg_module guts) (ms_location summary)
     (cg_tycons guts) (peBindings elaboration)
     (peSitedSiblings elaboration) (peYieldSites elaboration)
+  timing <- readTimingEnabled
+  emitCount timing ("prepared_reply_families_source_" ++ moduleNameString (moduleName (cg_module guts)))
+    (toInteger (Set.size (peEffectRequestTypeIds elaboration)))
   pure prepared
     { pmPreparedSites = pePreparedSites elaboration
     , pmTypeGraph = peTypeGraph elaboration
@@ -174,6 +180,9 @@ prepareRecoveredModule hscEnv input = do
     (recoveredSubsetScope (recoveredModule input) (recoveredBindings input))
     hscEnv (recoveredModule input) (recoveredLocation input)
     (recoveredTyCons input) (recoveredBindings input) mempty []
+  timing <- readTimingEnabled
+  emitCount timing ("prepared_reply_families_recovered_" ++ moduleNameString (moduleName (recoveredModule input)))
+    (toInteger (Set.size (pmEffectRequestTypeIds prepared)))
   pure prepared { pmCoverage = ExactBodySubset }
 
 -- | An exact subset can reference other external tops in its defining module.
