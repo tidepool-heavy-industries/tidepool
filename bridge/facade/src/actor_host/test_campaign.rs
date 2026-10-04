@@ -494,6 +494,28 @@ fn install_trace_file() {
         .ok();
 }
 
+pub(super) fn committed_display_text(response: &serde_json::Value) -> &str {
+    assert_eq!(response["status"], "committed", "{response}");
+    let items = response["items"].as_array().unwrap();
+    for item in items {
+        assert_eq!(item["status"], "committed", "{response}");
+    }
+    let displays = items
+        .iter()
+        .flat_map(|item| item["operations"].as_array().into_iter().flatten())
+        .filter_map(|operation| operation.get("display"))
+        .collect::<Vec<_>>();
+    let [display] = displays.as_slice() else {
+        panic!("expected one explicit display receipt: {response}");
+    };
+    assert!(
+        display["output"]["sequence"].as_i64().is_some(),
+        "{response}"
+    );
+    assert!(display["output"]["run"].as_str().is_some(), "{response}");
+    display["text"].as_str().unwrap()
+}
+
 pub(super) async fn dispatch_haskell_script(
     endpoint: &dyn exomonad_actor::ResidentToolEndpoint,
     script: &str,

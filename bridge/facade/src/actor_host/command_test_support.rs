@@ -144,7 +144,6 @@ impl TestCommands {
             .store(true, std::sync::atomic::Ordering::Release);
     }
 
-    #[cfg(feature = "codex-compat")]
     pub(super) fn shorten_slice_read(&self, read: usize) {
         self.slice_reads
             .store(0, std::sync::atomic::Ordering::Release);
