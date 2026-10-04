@@ -73,6 +73,7 @@ executionSourceDecodeChecks = do
     _ -> fail "issued decoder fixture has malformed CBOR"
   graph <- either fail pure (decode bytes)
   unless (executionGraphBytes graph == bytes) (fail "decoder changed graph bytes")
+  inheritedIdentityChecks graph
   let refuse label reason value = case decode (encode value) of
         Left actual | reason `isInfixOf` actual -> pure ()
         result -> fail (label ++ ": unexpected decoder result " ++ show result)
@@ -117,6 +118,45 @@ executionSourceDecodeChecks = do
   expectParcelRejection "duplicate original execution graphs" decodeExecutionSourceDescriptors parcel
   expectParcelRejection "duplicate original execution references" decodeExecutionSourceReferences (encode (TList [reference, reference]))
   putStrLn "execution source decoder: 21 admission cases passed"
+
+-- The graph and original identity come from the owning recipe issuer above.
+-- Mutations are refusals: unchanged interface bytes cannot authorize another
+-- native product/version or select a different graph by last-write order.
+inheritedIdentityChecks :: ExecutionSourceGraph -> IO ()
+inheritedIdentityChecks graph = do
+  original <- case [executionOwnerIdentity owner | owner <- executionGraphOwners graph
+      , executionModule (executionOwnerIdentity owner) == "Support"] of
+    [identity] -> pure identity
+    _ -> fail "issued inherited fixture lacks one support owner"
+  let key = executionIdentityKey original
+      reference = ExecutionSourceRef original (executionGraphSha256 graph)
+      owner = ExecutionSourceOwner original False (Just (executionGraphSha256 graph))
+      changedNative = original {executionNativeSha256 = shaHex "different native product"}
+      changedVersion = original {executionVersion = shaHex "different module version"}
+      changedInterface = original {executionIfaceSha256 = shaHex "different interface"}
+      otherGraph = reference {executionRefGraph = shaHex "different original recipe"}
+      positive =
+        [ ("matching original", [reference], [original], [owner])
+        , ("missing optional recipe", [], [original], [owner {executionOwnerOriginalGraph = Nothing}])
+        , ("identical repeated input", [reference,reference], [original,original], [owner]) ]
+      negative =
+        [("changed retained " ++ label, [reference], [changed])
+          | (label,changed) <- [("native",changedNative),("version",changedVersion),("interface",changedInterface)]]
+        ++ [("conflicting original reference", refs, [original])
+          | changed <- [changedNative,changedVersion]
+          , refs <- [[reference,reference {executionRefIdentity=changed}],
+                     [reference {executionRefIdentity=changed},reference]]]
+        ++ [("conflicting graph reference", refs, [original])
+          | refs <- [[reference,otherGraph],[otherGraph,reference]]]
+        ++ [("conflicting retained identities", [], originals)
+          | originals <- [[original,changedNative],[changedNative,original]]]
+  forM_ positive $ \(label,references,originals,expected) ->
+    unless (executionSourceInheritedOwners references originals == Right expected)
+      (fail ("inherited reference lost " ++ label))
+  forM_ negative $ \(label,references,originals) ->
+    unless (executionSourceInheritedOwners references originals == Left (ExecutionSourceConflicting key))
+      (fail ("inherited reference admitted " ++ label))
+  putStrLn ("execution source inherited identity: " ++ show (length positive + length negative) ++ " cases passed")
 
 -- Candidate-path fanout is independent of the number of resolution rows.
 -- These compact packets stay below the graph byte bound throughout.

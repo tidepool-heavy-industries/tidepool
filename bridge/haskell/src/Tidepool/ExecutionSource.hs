@@ -5,6 +5,7 @@
 module Tidepool.ExecutionSource
   ( ExecutionSourceGraph(..), ExecutionSourceIdentity(..), ExecutionSourceOwner(..)
   , ExecutionSourceRef(..), decodeExecutionSourceGraph, decodeExecutionSourceReferences, executionIdentityKey
+  , executionSourceInheritedOwners
   , ExecutionSourceNode(..), ExecutionSourceFailure(..), ExecutionSourceValidationStage(..)
   , ExecutionSourceInterfaceReason(..), executionSourceClosure, executionSourceOriginalNode, executionSourceOriginalClosure
   , ExecutionSourceRecipe(..), issueExecutionSourceRecipe
@@ -67,6 +68,34 @@ data ExecutionSourceRef = ExecutionSourceRef
   { executionRefIdentity :: ExecutionSourceIdentity
   , executionRefGraph :: String
   } deriving (Eq, Show)
+
+-- Optional original recipes belong to the complete retained native identity.
+-- Combining separately admitted inputs must not choose a reference by spelling
+-- or silently replace another original recipe for that owner.
+executionSourceInheritedOwners :: [ExecutionSourceRef] -> [ExecutionSourceIdentity]
+  -> Either ExecutionSourceFailure [ExecutionSourceOwner]
+executionSourceInheritedOwners references originals = do
+  prior <- foldM insertReference Map.empty references
+  Map.elems <$> foldM (retain prior) Map.empty originals
+  where
+    insertReference selected reference =
+      let key = executionIdentityKey (executionRefIdentity reference)
+      in case Map.lookup key selected of
+        Nothing -> Right (Map.insert key reference selected)
+        Just previous | previous == reference -> Right selected
+        _ -> Left (ExecutionSourceConflicting key)
+    retain prior selected original = do
+      let key = executionIdentityKey original
+      graph <- case Map.lookup key prior of
+        Nothing -> Right Nothing
+        Just reference | executionRefIdentity reference == original ->
+          Right (Just (executionRefGraph reference))
+        _ -> Left (ExecutionSourceConflicting key)
+      let owner = ExecutionSourceOwner original False graph
+      case Map.lookup key selected of
+        Nothing -> Right (Map.insert key owner selected)
+        Just previous | previous == owner -> Right selected
+        _ -> Left (ExecutionSourceConflicting key)
 
 data ExecutionSourceGraph = ExecutionSourceGraph
   { executionGraphSha256 :: String

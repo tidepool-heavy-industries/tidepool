@@ -95,7 +95,8 @@ import Tidepool.ExecutionSource
   ( ExecutionSourceRecipe(..), ExecutionSourceGraph(..), ExecutionSourceIdentity(..)
   , ExecutionSourceOwner(..), ExecutionSourceRef(..), ExecutionSourceFailure(..)
   , WorkerExecutionSource(..), SourceRecipeUnavailable(..)
-  , issueExecutionSourceRecipe, executionIdentityKey, executionSourceProspectiveReferences )
+  , issueExecutionSourceRecipe, executionIdentityKey, executionSourceProspectiveReferences
+  , executionSourceInheritedOwners )
 import Numeric (readHex)
 import Tidepool.DeclarationJoin
   ( DeclarationOperation(..), readDeclarationOperation, validateDeclarationJoin
@@ -1863,10 +1864,6 @@ issueFreshExecutionSource includes prepared evidence fullProducts scope
               (Map.lookup (mkModuleName (T.unpack owner)) (pprPackageImports prepared))
           packages <- foldM retainPackage Map.empty (concatMap packageInterfaces sourcePackages)
           let freshKeys = Set.fromList (map executionIdentityKey fresh)
-              prior = Map.fromList
-                [(executionIdentityKey (executionRefIdentity ref),ref)
-                | ref <- scopeExecutionOwners scope ++ map snd (mapMaybe candidateExecutionSources
-                    (pprAcceptedCandidates prepared))]
               originalIdentity product' = ExecutionSourceIdentity
                 (originalUnit product') (originalModule product') (originalVersion product')
                 (originalIfaceSha256 product') (originalProductSha256 product')
@@ -1874,10 +1871,11 @@ issueFreshExecutionSource includes prepared evidence fullProducts scope
                 ++ [ExecutionSourceIdentity (candidateUnit candidate) (candidateModule candidate)
                     (candidateModuleVersion candidate) (candidateInterfaceSha256 candidate)
                     (candidateProductSha256 candidate) | candidate <- pprAcceptedCandidates prepared]
-              inherited = [ExecutionSourceOwner original False
-                  (executionRefGraph <$> Map.lookup (executionIdentityKey original) prior)
-                | original <- retained, executionIdentityKey original `Set.notMember` freshKeys]
-              normalized = evidence
+          inherited <- either throwIO pure (executionSourceInheritedOwners
+            (scopeExecutionOwners scope ++ map snd (mapMaybe candidateExecutionSources
+              (pprAcceptedCandidates prepared)))
+            [original | original <- retained, executionIdentityKey original `Set.notMember` freshKeys])
+          let normalized = evidence
                 { dependencySources = [row {dependencySourcePath = marker (dependencySourcePath row)}
                     | row <- dependencySources evidence]
                 , dependencyModules = [node
