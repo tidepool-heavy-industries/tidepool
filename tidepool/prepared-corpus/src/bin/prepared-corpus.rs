@@ -31,9 +31,6 @@ enum Command {
         expectations: PathBuf,
         output: PathBuf,
     },
-    EffectsCore {
-        include: PathBuf,
-    },
     AuditOperations {
         manifest: PathBuf,
         output: PathBuf,
@@ -130,18 +127,6 @@ fn main() -> Result<(), Box<dyn Error>> {
             expectations,
             output,
         } => verify_cohort(directory, expectations, output),
-        Command::EffectsCore { include } => {
-            let module = include.join("Tidepool/Effects/Core.hs");
-            if !module.is_file() {
-                return Err(io::Error::new(
-                    io::ErrorKind::NotFound,
-                    format!("generated effect surface is missing {}", module.display()),
-                )
-                .into());
-            }
-            println!("{}", include.display());
-            Ok(())
-        }
         Command::AuditOperations { manifest, output } => audit_operations(manifest, output),
         Command::Run {
             manifest,
@@ -180,13 +165,6 @@ fn parse_values(values: Vec<OsString>) -> Result<Command, Box<dyn Error>> {
                 directory: directory.into(),
                 expectations: expectations.into(),
                 output: output.into(),
-            });
-        }
-    }
-    if let [mode, include] = values.as_slice() {
-        if mode == "effects-core" {
-            return Ok(Command::EffectsCore {
-                include: PathBuf::from(include),
             });
         }
     }
@@ -241,7 +219,7 @@ fn parse_values(values: Vec<OsString>) -> Result<Command, Box<dyn Error>> {
 fn usage() -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidInput,
-        "usage: prepared-corpus validate-fixture DIRECTORY SOURCE TARGETS [INCLUDE...] | prepared-corpus verify-cohort DIRECTORY EXPECTATIONS REPORT | prepared-corpus effects-core GENERATED_INCLUDE | prepared-corpus audit-operations MANIFEST OUTPUT | prepared-corpus run MANIFEST EXPECTATIONS METADATA OUTPUT | prepared-corpus child MANIFEST EXPECTATIONS METADATA OUTPUT INDEX",
+        "usage: prepared-corpus validate-fixture DIRECTORY SOURCE TARGETS [INCLUDE...] | prepared-corpus verify-cohort DIRECTORY EXPECTATIONS REPORT | prepared-corpus audit-operations MANIFEST OUTPUT | prepared-corpus run MANIFEST EXPECTATIONS METADATA OUTPUT | prepared-corpus child MANIFEST EXPECTATIONS METADATA OUTPUT INDEX",
     )
 }
 
@@ -1392,14 +1370,21 @@ mod tests {
 
     #[test]
     fn cli_accepts_only_typed_command_shapes() {
-        assert!(parse_values(vec![OsString::from("effects-core")]).is_err());
+        assert!(parse_values(vec![OsString::from("validate-fixture")]).is_err());
         assert!(matches!(
-            parse_values(vec![
-                OsString::from("effects-core"),
-                OsString::from("generated")
-            ])
+            parse_values(["validate-fixture", "directory", "source", "targets", "first-root", "second-root"].into_iter().map(OsString::from).collect())
             .unwrap(),
-            Command::EffectsCore { .. }
+            Command::ValidateFixture { include, .. } if include == [PathBuf::from("first-root"), PathBuf::from("second-root")]
+        ));
+        assert!(matches!(
+            parse_values(
+                ["verify-cohort", "directory", "expectations", "output"]
+                    .into_iter()
+                    .map(OsString::from)
+                    .collect()
+            )
+            .unwrap(),
+            Command::VerifyCohort { .. }
         ));
         let run = parse_values(
             [
