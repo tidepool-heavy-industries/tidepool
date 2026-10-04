@@ -8691,13 +8691,13 @@ pub(crate) mod tests {
         let Value::Array(rows) = &mut value else {
             unreachable!()
         };
-        for version in [1, 2, 3] {
+        for version in [1, 2, 3, 4] {
             rows[1] = Value::Integer(version.into());
             assert!(matches!(
                 decode_home_witness(&receipt_bytes(&Value::Array(rows.clone()))),
                 Err(CertificationError::UnsupportedVersion {
                     format: CertificationFormat::HomeOwners,
-                    expected: 4,
+                    expected: 5,
                     ..
                 })
             ));
