@@ -2,7 +2,9 @@
 //! This adapter is compiled only into the owning crate's test executable.
 
 use super::*;
-use crate::certified_products::{certify_products, decode_receipt, ParsedModuleProducts};
+use crate::certified_products::{
+    certify_products, decode_receipt_in, CertifiedProducts, ParsedModuleProducts,
+};
 use crate::declaration_context::{certified_product_artifact_view, ExactDeclarationContext};
 use crate::declaration_join::ExactModuleIdentity;
 
@@ -17,6 +19,205 @@ fn names(value: &Value) -> Vec<String> {
         .iter()
         .map(|value| text_field(value).to_owned())
         .collect()
+}
+
+// The complete certified view owns interface closure and original import
+// evidence. Selecting lexical visibility never selects a native implementation.
+fn admit_fixture_scope(
+    producer_sha: [u8; 32],
+    certified: &CertifiedProducts,
+    exact_owners: &[ExactModuleIdentity],
+    native_owners: &[ExactModuleIdentity],
+    lexical_roots: &[ExactModuleIdentity],
+) -> ExactDeclarationContext {
+    let mut context = empty_fixture_scope(producer_sha);
+    // Admit the complete interface closure before selecting any native
+    // owner. Type-only dependencies cannot be inferred as packages.
+    let view = certified_product_artifact_view(
+        producer_sha,
+        &certified.recovery_products,
+        &certified.module_interfaces,
+        None,
+    )
+    .unwrap();
+    if !exact_owners.is_empty() {
+        context = context
+            .extend_interface_artifacts(&view.interface_projection(exact_owners).unwrap())
+            .unwrap();
+    }
+    if !lexical_roots.is_empty() {
+        // Canonical interfaces retain authenticated source imports even
+        // when a source-only owner has no executable recovery graph.
+        // Native ownership and implementation roles remain separate.
+        let imports = certified
+            .module_interfaces
+            .iter()
+            .filter_map(|interface| {
+                let edges = interface.source_imports()?;
+                Some((
+                    ExactModuleIdentity {
+                        unit: interface.unit().to_owned(),
+                        module: interface.module().to_owned(),
+                    },
+                    edges
+                        .iter()
+                        .filter_map(|edge| {
+                            Some(ExactModuleIdentity {
+                                unit: edge.home_unit.as_ref()?.clone(),
+                                module: edge.module.clone(),
+                            })
+                        })
+                        .collect::<BTreeSet<_>>()
+                        .into_iter()
+                        .collect(),
+                ))
+            })
+            .collect();
+        let surface = crate::declaration_join::source_lexical_closure(
+            lexical_roots,
+            &imports,
+            &[],
+            &view.source_implementation_roles(),
+        )
+        .unwrap();
+        let lexical_owners = surface
+            .lexical
+            .iter()
+            .map(|node| node.owner.clone())
+            .collect::<Vec<_>>();
+        context = context
+            .extend_interface_artifacts(&view.interface_projection(&lexical_owners).unwrap())
+            .unwrap();
+        context = context.extend(&[], &[], surface.lexical).unwrap();
+    }
+    if !native_owners.is_empty() {
+        context = context
+            .extend_interface_artifacts(&view.interface_projection(native_owners).unwrap())
+            .unwrap();
+        let native = certified
+            .recovery_products
+            .iter()
+            .filter(|product| {
+                native_owners.iter().any(|owner| {
+                    owner.unit == product.owner().unit && owner.module == product.owner().module
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            native
+                .iter()
+                .map(|product| ExactModuleIdentity {
+                    unit: product.owner().unit.clone(),
+                    module: product.owner().module.clone(),
+                })
+                .collect::<BTreeSet<_>>(),
+            native_owners.iter().cloned().collect::<BTreeSet<_>>(),
+            "native scope owners require genuine original products"
+        );
+        for product in &native {
+            let canonical = product
+                .module_interface()
+                .expect("native product must retain its paired finalized module");
+            assert!(
+                canonical.core_bytes().is_some(),
+                "native scope requires its captured canonical interface and Core"
+            );
+            crate::certified_products::validate_original_module_interface(product, canonical)
+                .expect("native custody must match its certified canonical module");
+        }
+        context = context
+            .extend_checked_original_products(producer_sha, &native)
+            .unwrap();
+    }
+    context
+}
+
+fn empty_fixture_scope(producer_sha: [u8; 32]) -> ExactDeclarationContext {
+    ExactDeclarationContext::new(&[], &[], vec![])
+        .unwrap()
+        .extend_checked_original_products(producer_sha, &[])
+        .unwrap()
+}
+
+// Publication consumes actual native product rows. Canonical source-only
+// interfaces belong to exact scope delivery and cannot become native records.
+fn publish_fixture_candidates(
+    producer: &[u8],
+    include: &[PathBuf],
+    evidence: &DependencyEvidence,
+    parsed: ParsedModuleProducts<'_>,
+    source: &str,
+    certified: &CertifiedProducts,
+    requested: &BTreeSet<String>,
+    delivery: &Path,
+) {
+    let native_owners = certified
+        .recovery_products
+        .iter()
+        .map(|product| product.owner().module.clone())
+        .collect::<BTreeSet<_>>();
+    assert!(
+        requested.is_subset(&native_owners),
+        "requested candidates must have genuine native products; source-only owners require canonical scope delivery"
+    );
+    let (_, publication) = prepare_publication(
+        producer,
+        include,
+        evidence,
+        parsed,
+        source,
+        CandidateVersionOrigin::Ordinary,
+        &certified.recovery_products,
+    );
+    let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+    let records = publication
+        .records
+        .into_iter()
+        .filter(|record| requested.contains(&record.module))
+        .map(|mut record| {
+            let canonical = record
+                .module_interface_proof
+                .as_ref()
+                .expect("publication requires the genuinely issued canonical interface");
+            // Publication normally creates this descriptor before a
+            // durable record becomes selectable. Keep the fixture's
+            // real proof and descriptor together in its own delivery.
+            record.data.module_interface = Some(
+                crate::recovery_artifacts::materialize_module_interface(
+                    delivery,
+                    canonical,
+                    &mut validation,
+                    crate::recovery_artifacts::MaterializationMode::Scratch,
+                )
+                .expect("genuine publication canonical descriptor materialization"),
+            );
+            (record, CandidateOrigin::Ordinary)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        records
+            .iter()
+            .map(|(record, _)| record.module.clone())
+            .collect::<BTreeSet<_>>(),
+        *requested,
+        "genuine publication omitted a requested owner before candidate selection"
+    );
+    let selected =
+        select_records_inner(producer, include, delivery, records, None).unwrap_or_else(|| {
+            panic!("production candidate delivery refused requested owners {requested:?}")
+        });
+    assert_eq!(
+        selected
+            .by_owner
+            .keys()
+            .map(|(_, module)| module.clone())
+            .collect::<BTreeSet<_>>(),
+        *requested,
+        "fixture must not silently decline a requested native owner or its interface closure"
+    );
+    let destination = delivery.join("module-candidates.cbor");
+    assert_eq!(selected.manifest_path, destination);
 }
 
 #[test]
@@ -69,12 +270,7 @@ fn source_boot_candidate_packet_producer() {
             || !matches!(fields[6], Value::Null),
         "retained interface/native custody requires an actual delivered scope"
     );
-    let mut context = ExactDeclarationContext::new(&[], &[], vec![])
-        .unwrap()
-        .extend_checked_original_products(producer_sha, &[])
-        .unwrap();
-
-    if !matches!(fields[1], Value::Null) {
+    let context = if !matches!(fields[1], Value::Null) {
         let source_path = PathBuf::from(text_field(&fields[1]));
         assert!(source_path.is_absolute());
         let source = fs::read_to_string(&source_path).unwrap();
@@ -82,7 +278,16 @@ fn source_boot_candidate_packet_producer() {
         let evidence = DependencyEvidence::from_worker(&evidence_bytes, &source_path, &source)
             .expect("actual consumed source and resolution evidence");
         let receipt_bytes = fs::read(packet.join("certified-products.cbor")).unwrap();
-        let receipt = decode_receipt(&receipt_bytes).unwrap();
+        let receipt = decode_receipt_in(&receipt_bytes, Some(&packet)).unwrap();
+        assert!(
+            receipt.modules.iter().all(|module| {
+                module.origin == crate::certified_products::ProductOrigin::Fresh
+            }) && matches!(
+                &receipt.source_recipe,
+                crate::certified_products::WorkerExecutionSource::Ordinary
+            ),
+            "fixture delivery selections cannot replace an inherited compiler request context; capture a cold original"
+        );
         let product_bytes = fs::read(packet.join("module-products.cbor")).unwrap();
         let package_bytes = fs::read(packet.join("module-package-imports.cbor")).unwrap();
         let parsed = ParsedModuleProducts::decode(&product_bytes, &package_bytes).unwrap();
@@ -92,7 +297,7 @@ fn source_boot_candidate_packet_producer() {
             &parsed,
             &evidence_bytes,
             &source_path,
-            source_path.parent().expect("original Haskell capture root"),
+            &packet,
             &evidence,
             &source,
             producer,
@@ -101,160 +306,26 @@ fn source_boot_candidate_packet_producer() {
             None,
         )
         .unwrap();
-        // Admit the complete interface closure before selecting any native
-        // owner. Type-only dependencies cannot be inferred as packages.
-        let view = certified_product_artifact_view(
+        let context = admit_fixture_scope(
             producer_sha,
-            &certified.recovery_products,
-            &certified.module_interfaces,
-            None,
-        )
-        .unwrap();
-        if !exact_owners.is_empty() {
-            context = context
-                .extend_interface_artifacts(&view.interface_projection(&exact_owners).unwrap())
-                .unwrap();
-        }
-        if !lexical_roots.is_empty() {
-            // Canonical interfaces retain authenticated source imports even
-            // when a source-only owner has no executable recovery graph.
-            // Native ownership and implementation roles remain separate.
-            let imports = certified
-                .module_interfaces
-                .iter()
-                .filter_map(|interface| {
-                    let edges = interface.source_imports()?;
-                    Some((
-                        ExactModuleIdentity {
-                            unit: interface.unit().to_owned(),
-                            module: interface.module().to_owned(),
-                        },
-                        edges
-                            .iter()
-                            .filter_map(|edge| {
-                                Some(ExactModuleIdentity {
-                                    unit: edge.home_unit.as_ref()?.clone(),
-                                    module: edge.module.clone(),
-                                })
-                            })
-                            .collect::<BTreeSet<_>>()
-                            .into_iter()
-                            .collect(),
-                    ))
-                })
-                .collect();
-            let surface = crate::declaration_join::source_lexical_closure(
-                &lexical_roots,
-                &imports,
-                &[],
-                &view.source_implementation_roles(),
-            )
-            .unwrap();
-            let lexical_owners = surface
-                .lexical
-                .iter()
-                .map(|node| node.owner.clone())
-                .collect::<Vec<_>>();
-            context = context
-                .extend_interface_artifacts(&view.interface_projection(&lexical_owners).unwrap())
-                .unwrap();
-            context = context.extend(&[], &[], surface.lexical).unwrap();
-        }
-        if !native_owners.is_empty() {
-            context = context
-                .extend_interface_artifacts(&view.interface_projection(&native_owners).unwrap())
-                .unwrap();
-            let native = certified
-                .recovery_products
-                .iter()
-                .filter(|product| {
-                    native_owners.iter().any(|owner| {
-                        owner.unit == product.owner().unit && owner.module == product.owner().module
-                    })
-                })
-                .cloned()
-                .collect::<Vec<_>>();
-            assert_eq!(
-                native
-                    .iter()
-                    .map(|product| ExactModuleIdentity {
-                        unit: product.owner().unit.clone(),
-                        module: product.owner().module.clone(),
-                    })
-                    .collect::<BTreeSet<_>>(),
-                native_owners.iter().cloned().collect::<BTreeSet<_>>(),
-                "native scope owners require genuine original products"
-            );
-            assert!(
-                native
-                    .iter()
-                    .all(|product| product.execution_source().is_some()),
-                "native execution scope requires original authenticated source recipes"
-            );
-            context = context
-                .extend_checked_original_products(producer_sha, &native)
-                .unwrap();
-        }
+            &certified,
+            &exact_owners,
+            &native_owners,
+            &lexical_roots,
+        );
         if !requested.is_empty() {
-            let (_, publication) = prepare_publication(
+            publish_fixture_candidates(
                 producer,
                 &include,
                 &evidence,
                 parsed,
                 &source,
-                CandidateVersionOrigin::Ordinary,
-                &certified.recovery_products,
+                &certified,
+                &requested,
+                packet.parent().unwrap(),
             );
-            let delivery = packet.parent().unwrap();
-            let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
-            let records = publication
-                .records
-                .into_iter()
-                .filter(|record| requested.contains(&record.module))
-                .map(|mut record| {
-                    let canonical = record
-                        .module_interface_proof
-                        .as_ref()
-                        .expect("publication requires the genuinely issued canonical interface");
-                    // Publication normally creates this descriptor before a
-                    // durable record becomes selectable. Keep the fixture's
-                    // real proof and descriptor together in its own delivery.
-                    record.data.module_interface = Some(
-                        crate::recovery_artifacts::materialize_module_interface(
-                            delivery,
-                            canonical,
-                            &mut validation,
-                            crate::recovery_artifacts::MaterializationMode::Scratch,
-                        )
-                        .expect("genuine publication canonical descriptor materialization"),
-                    );
-                    (record, CandidateOrigin::Ordinary)
-                })
-                .collect::<Vec<_>>();
-            assert_eq!(
-                records
-                    .iter()
-                    .map(|(record, _)| record.module.clone())
-                    .collect::<BTreeSet<_>>(),
-                requested,
-                "genuine publication omitted a requested owner before candidate selection"
-            );
-            let selected = select_records_inner(producer, &include, delivery, records, None)
-                .unwrap_or_else(|| {
-                    panic!("production candidate delivery refused requested owners {requested:?}")
-                });
-            assert_eq!(
-                selected
-                    .by_owner
-                    .keys()
-                    .map(|(_, module)| module.clone())
-                    .collect::<BTreeSet<_>>(),
-                requested,
-                "fixture must not silently decline a requested native owner or its interface closure"
-            );
-            let destination = packet.parent().unwrap().join("module-candidates.cbor");
-            assert_eq!(selected.manifest_path, destination);
         }
+        context
     } else {
         assert!(
             requested.is_empty()
@@ -263,7 +334,8 @@ fn source_boot_candidate_packet_producer() {
                 && lexical_roots.is_empty()
                 && include.is_empty()
         );
-    }
+        empty_fixture_scope(producer_sha)
+    };
     if !matches!(fields[6], Value::Null) {
         let destination = PathBuf::from(text_field(&fields[6]));
         assert!(destination.is_absolute());
