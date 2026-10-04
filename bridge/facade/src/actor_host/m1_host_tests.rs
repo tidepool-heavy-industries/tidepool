@@ -194,7 +194,7 @@ async fn next_browser_event(
     .unwrap_or_else(|_| panic!("timed out waiting for browser event {kind}"))
 }
 
-async fn browser_snapshot(
+pub(super) async fn browser_snapshot(
     address: std::net::SocketAddr,
     cookie: &str,
 ) -> (

@@ -13,6 +13,7 @@ use tokio::sync::Notify;
 
 const PENDING_CALL: &str = "captured-unfold-and-await";
 const REUSE_CALL: &str = "reuse-failed-cell-capture";
+const RESUME_INPUT: &str = "resume interrupted captured fixture";
 
 const TYPED_CHILD_REPLY_SETTLEMENT_BUDGET: Duration = Duration::from_secs(90);
 
@@ -112,10 +113,20 @@ impl CapturedHostTransport {
                     .await
                     .expect("scripted root steps remain available")
                 {
-                    RootStep::Tool { call_id, source } => vec![harness::item::Item(json!({
-                        "type":"custom_tool_call", "call_id":call_id, "name":"haskell",
-                        "input":source
-                    }))],
+                    RootStep::Tool { call_id, source } => {
+                        if call_id == "captured-after-interrupt" {
+                            assert!(
+                                request
+                                    .input
+                                    .iter()
+                                    .any(|item| item.0["content"] == RESUME_INPUT),
+                                "resumed root request must include its durable browser input"
+                            );
+                        }
+                        vec![harness::item::Item(json!({
+                            "type":"custom_tool_call", "call_id":call_id, "name":"haskell", "input":source
+                        }))]
+                    }
                     RootStep::Finish => vec![harness::item::Item(json!({
                         "type":"message", "role":"assistant", "phase":"final_answer",
                         "content":[{"type":"output_text","text":"same-cell child replies received"}]
@@ -430,6 +441,34 @@ async fn embedded_parked_captured_pipeline_cancellation_settles_invocation_owned
     captured_host_scenario(CapturedScenario::CancelWhileParked).await;
 }
 
+async fn root_browser_projection(
+    address: std::net::SocketAddr,
+    cookie: &str,
+    target: &harness::embedding::HostIdentity,
+    lifecycle: harness::server::HostActorLifecycle,
+) -> harness::server::HostActorProjection {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let (mut socket, snapshot) =
+                super::m1_host_tests::browser_snapshot(address, cookie).await;
+            socket.close(None).await.unwrap();
+            for value in snapshot["snapshot"]["actors"]
+                .as_array()
+                .expect("browser actor projection")
+            {
+                let actor: harness::server::HostActorProjection =
+                    serde_json::from_value(value.clone()).unwrap();
+                if actor.identity == *target && actor.lifecycle == lifecycle {
+                    return actor;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("exact root browser lifecycle is projected")
+}
+
 // Offer another real provider tool call only after subscribing to its settlement.
 async fn root_tool_call(
     transport: &CapturedHostTransport,
@@ -532,6 +571,7 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
         .expect("scripted Responses transport");
     let actor = campaign.actor.identity();
     let runtime = Arc::clone(&service.runtime);
+    let address = service.address;
     let root_origin = transport.root_origin.clone();
     assert_eq!(
         root_origin,
@@ -732,20 +772,62 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
         })
         .await
         .expect("original compiled pipeline parks before cancellation");
-        tokio::time::timeout(
-            Duration::from_secs(30),
-            campaign.actor.shutdown(ActorTerminal {
-                kind: ActorExitKind::Cancelled,
-                summary: "cancel parked captured pipeline".into(),
-            }),
+        let target = harness::embedding::HostIdentity {
+            run: runtime_namespace(&campaign.config.run_root),
+            actor: AgentPath("/root".into()),
+            incarnation: actor.incarnation.0.to_string(),
+        };
+        let api = format!("http://{address}/api");
+        let origin = format!("https://{address}");
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .unwrap();
+        let login = client
+            .post(format!("{api}/session"))
+            .header("Origin", &origin)
+            .json(&json!({"secret": "embedded-children-secret-is-long-enough"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(login.status(), reqwest::StatusCode::OK);
+        let cookie = login.headers()[reqwest::header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let running = root_browser_projection(
+            address,
+            &cookie,
+            &target,
+            harness::server::HostActorLifecycle::Running,
         )
-        .await
-        .expect("parked pipeline retirement settles")
-        .unwrap();
+        .await;
+        let round = running
+            .active_round
+            .expect("running root owns the interrupted Engine round");
+        let interrupt = harness::server::ClientCommand::Host {
+            operation_id: harness::embedding::ClientOperationId(uuid::Uuid::new_v4()),
+            command: harness::server::HostCommand::Interrupt {
+                target: target.clone(),
+                expected_round: round,
+            },
+        };
+        let requested = client
+            .post(format!("{api}/commands"))
+            .header("Origin", &origin)
+            .header(reqwest::header::COOKIE, &cookie)
+            .json(&interrupt)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(requested.status(), reqwest::StatusCode::ACCEPTED);
         let parent = transport.operation(&root_origin, PENDING_CALL);
         let cancelled = tokio::time::timeout(Duration::from_secs(30), scheduler.wait(&parent))
             .await
-            .expect("exact original parent operation settles after retirement")
+            .expect("exact original parent operation settles after browser interrupt")
             .unwrap();
         match cancelled {
             JobOutput::CancelledWithReceipt(Ok(receipt)) => {
@@ -763,11 +845,11 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
         }
         let known_children = captured_actors.lock().clone();
         assert_eq!(known_children.len(), 2);
-        for child in std::iter::once(&campaign.actor).chain(known_children.iter()) {
+        for child in &known_children {
             let terminal = child.terminal();
             tokio::time::timeout(Duration::from_secs(30), terminal.wait())
                 .await
-                .expect("root and invocation-owned children retire");
+                .expect("invocation-owned children retire after the interrupted call");
             let cleanup = terminal
                 .cleanup()
                 .expect("retirement retains owner cleanup evidence");
@@ -781,6 +863,66 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
                 .and_then(|snapshot| snapshot.parked),
             Some(0)
         );
+        assert!(
+            campaign.actor.terminal().get().is_none(),
+            "interrupt must preserve the root actor"
+        );
+        let waiting = root_browser_projection(
+            address,
+            &cookie,
+            &target,
+            harness::server::HostActorLifecycle::Waiting,
+        )
+        .await;
+        assert!(
+            waiting.active_round.is_none(),
+            "interrupted Engine round must clear before new input"
+        );
+        let input = harness::server::ClientCommand::Host {
+            operation_id: harness::embedding::ClientOperationId(uuid::Uuid::new_v4()),
+            command: harness::server::HostCommand::Input {
+                target: target.clone(),
+                text: RESUME_INPUT.into(),
+            },
+        };
+        let wake = client
+            .post(format!("{api}/commands"))
+            .header("Origin", &origin)
+            .header(reqwest::header::COOKIE, &cookie)
+            .json(&input)
+            .send();
+        let resumed = root_tool_call(
+            &transport,
+            "captured-after-interrupt",
+            "let resumedAfterInterrupt = x + getX\ndisplay (resumedAfterInterrupt == 83)",
+        );
+        let (woken, resumed) = tokio::join!(wake, resumed);
+        assert_eq!(woken.unwrap().status(), reqwest::StatusCode::ACCEPTED);
+        assert_committed_haskell_value(
+            &resumed.expect("new root Haskell call succeeds after interrupt"),
+            "True",
+        );
+        let absent = root_tool_call(
+            &transport,
+            "captured-cancelled-prefix-absent",
+            "display (capturedValue :: Int)",
+        )
+        .await
+        .unwrap();
+        assert_preflight_rejection(&absent);
+        let cleaned = root_tool_call(
+            &transport,
+            "captured-interrupted-group-cleanup",
+            include_str!("embedded_captured_group_cleanup.hs"),
+        )
+        .await
+        .unwrap();
+        assert_committed_haskell_value(&cleaned, "True");
+        assert!(
+            campaign.actor.terminal().get().is_none(),
+            "resumed root remains live until ordinary shutdown"
+        );
+        transport.root_steps_tx.send(RootStep::Finish).unwrap();
         shutdown_tx.send_replace(Some(NativeRetirement::Terminate));
         let result = tokio::time::timeout(Duration::from_secs(30), host)
             .await
