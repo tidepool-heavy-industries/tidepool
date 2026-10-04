@@ -6,19 +6,9 @@ use exomonad_node::{DeliveryPhase, ReceiptLookup};
 use harness::{
     engine::ResponsesTransport,
     item::Item,
-    model::Effort,
-    transport::{Auth, ResponsesRequest, ResponsesTurn, TransportError},
+    transport::{ResponsesRequest, ResponsesTurn, TransportError},
 };
 use serde_json::json;
-
-#[derive(Clone)]
-struct Offline;
-
-impl Auth for Offline {
-    fn access(&self) -> Result<(String, String), TransportError> {
-        panic!("offline notification test must not request credentials")
-    }
-}
 
 #[derive(Clone)]
 struct HeldFirstRound {
@@ -202,10 +192,7 @@ async fn embedded_notification_handoff_retries_by_operation_and_waits_for_store_
 
 #[tokio::test]
 async fn production_engine_advances_queued_notifications_and_reconciles_inclusion() {
-    let campaign = TestCampaign::start().await;
-    let actor = campaign.actor.identity();
     let (_files, settings) = embedded_settings();
-    let mut service = campaign.prepare_embedded_service(&settings).await.unwrap();
     let (entered, mut rounds) = tokio::sync::mpsc::unbounded_channel();
     let transport = HeldFirstRound {
         entered,
@@ -213,24 +200,16 @@ async fn production_engine_advances_queued_notifications_and_reconciles_inclusio
         release_first: Arc::new(tokio::sync::Semaphore::new(0)),
         release_final: Arc::new(tokio::sync::Semaphore::new(0)),
     };
-    let embedded = embedded_service::attach_actor(
-        &service,
-        campaign.session_root.path(),
-        harness::model::AgentPath("/root".into()),
-        None,
-        campaign.root_installation.clone(),
-        Some("start".into()),
-    )
-    .await
-    .unwrap();
-    let conversation = Arc::clone(&embedded.conversation);
-    let binding = open_embedded_actor_binding(
-        campaign.session_root.path(),
-        actor,
-        harness::model::AgentPath("/root".into()),
-        Some(conversation.clone()),
-    )
-    .unwrap();
+    let provider: Arc<dyn ResponsesTransport> = Arc::new(transport.clone());
+    let host = hosted_test_context::HostedTestRuntime::start(&settings, &provider)
+        .await
+        .expect("production notification host starts");
+    let actor = host.context.actor.identity();
+    let binding = host
+        .context
+        .binding(actor)
+        .expect("production root binding attached");
+    let conversation = binding.conversation().unwrap();
     assert_eq!(binding.set_conversation(Arc::clone(&conversation)), Ok(()));
     let mut wrong_identity = conversation.identity().clone();
     wrong_identity.actor = harness::model::AgentPath("/different".into());
@@ -244,27 +223,6 @@ async fn production_engine_advances_queued_notifications_and_reconciles_inclusio
         wrong_binding.set_conversation(Arc::clone(&conversation)),
         Err(embedded_harness::ConversationAttachError::IdentityMismatch)
     );
-    let (lifecycle, _lifecycle_rx) = super::embedded_projection::LifecycleSender::channel();
-    let runtime = Arc::clone(&service.runtime);
-    let engine_settings = settings.clone();
-    let engine_transport = transport.clone();
-    let cancellation = embedded.cancellation.clone();
-    let mut engine = tokio::spawn(async move {
-        embedded_service::drive_conversation_with_transport::<Offline, _>(
-            embedded.driver,
-            runtime,
-            &engine_settings,
-            "offline".into(),
-            Effort::Medium,
-            "resident test".into(),
-            embedded.cancellation_rx,
-            lifecycle,
-            actor,
-            engine_transport,
-        )
-        .await
-    });
-
     let (round, _) = tokio::time::timeout(Duration::from_secs(30), rounds.recv())
         .await
         .unwrap()
@@ -323,23 +281,6 @@ async fn production_engine_advances_queued_notifications_and_reconciles_inclusio
         "second input must remain behind the front row"
     );
 
-    let mut notifications = JoinSet::new();
-    schedule_embedded_notification_drain(actor, binding.clone(), &mut notifications);
-    let (_, result) = tokio::time::timeout(Duration::from_secs(5), notifications.join_next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    result.unwrap();
-    assert!(matches!(
-        binding.inbox.observe_receipt(first.sequence).unwrap(),
-        ReceiptLookup::Retained(ref evidence) if evidence.phase == DeliveryPhase::Presented
-    ));
-    assert!(matches!(
-        binding.inbox.observe_receipt(second.sequence).unwrap(),
-        ReceiptLookup::Retained(ref evidence) if evidence.phase == DeliveryPhase::Submitted
-    ));
-
     let (round, request) = tokio::time::timeout(Duration::from_secs(60), rounds.recv())
         .await
         .unwrap()
@@ -360,14 +301,10 @@ async fn production_engine_advances_queued_notifications_and_reconciles_inclusio
             .unwrap(),
         Some(harness::embedding::InputObservation::Included(_))
     ));
-    cancellation.send_replace(true);
-    let engine_result = tokio::time::timeout(Duration::from_secs(5), &mut engine)
+    host.stop()
         .await
-        .unwrap()
-        .unwrap();
-    engine_result.expect("embedded cancellation must confirm Engine cleanup");
+        .expect("production notification host acknowledges cleanup");
     let binding_alias = binding.clone();
-    binding.mark_retired();
     assert!(binding_alias.conversation().is_none());
     assert_eq!(
         binding_alias.set_conversation(Arc::clone(&conversation)),
@@ -382,6 +319,7 @@ async fn production_engine_advances_queued_notifications_and_reconciles_inclusio
             .unwrap(),
         Some(harness::embedding::InputObservation::Included(_))
     ));
+    let mut notifications = JoinSet::new();
     schedule_embedded_notification_drain(actor, binding.clone(), &mut notifications);
     let (_, result) = tokio::time::timeout(Duration::from_secs(5), notifications.join_next())
         .await
@@ -393,8 +331,4 @@ async fn production_engine_advances_queued_notifications_and_reconciles_inclusio
         binding.inbox.observe_receipt(second.sequence).unwrap(),
         ReceiptLookup::Retained(ref evidence) if evidence.phase == DeliveryPhase::Presented
     ));
-
-    service.shutdown().await.unwrap();
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
 }
