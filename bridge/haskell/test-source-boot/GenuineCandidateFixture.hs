@@ -5,6 +5,7 @@ module GenuineCandidateFixture
   ( writeGenuineCandidateManifestFor, writeGenuineMetadataScope
   , writeGenuineEmptyMetadataScope, writeGenuineCandidateNativeScope
   , writeGenuineCandidateLexicalScope, writeGenuineOriginalExecutionScope
+  , writeGenuineExecutionScope
   , writeGenuineAuthoredDeclarationScope ) where
 
 import Codec.CBOR.Encoding
@@ -69,6 +70,13 @@ writeGenuineOriginalExecutionScope
   :: [String] -> FilePath -> FilePath -> [FilePath] -> FilePath -> PreparedPipelineResult -> IO ()
 writeGenuineOriginalExecutionScope owners work source includes destination prepared =
   writePacket work (Just (source, includes, prepared)) [] owners owners owners (Just destination)
+
+-- Compiler dependency closure and native implementation selection are separate.
+-- Lexical adjacency comes from the same admitted original compilation.
+writeGenuineExecutionScope
+  :: [String] -> [String] -> FilePath -> FilePath -> [FilePath] -> FilePath -> PreparedPipelineResult -> IO ()
+writeGenuineExecutionScope nativeOwners lexicalRoots work source includes destination prepared =
+  writePacket work (Just (source, includes, prepared)) [] nativeOwners nativeOwners lexicalRoots (Just destination)
 
 -- Source-free metadata imports retain the actual original source closure.
 -- Candidate delivery and lexical selection share this one immutable capture;

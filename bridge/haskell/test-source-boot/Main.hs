@@ -6,15 +6,15 @@ import CandidateGraphDescriptorTest (candidateGraphDescriptorChecks)
 import GenuineCandidateFixture
   ( writeGenuineCandidateManifestFor, writeGenuineMetadataScope, writeGenuineEmptyMetadataScope
   , writeGenuineCandidateNativeScope, writeGenuineCandidateLexicalScope, writeGenuineAuthoredDeclarationScope
-  , writeGenuineOriginalExecutionScope )
+  , writeGenuineOriginalExecutionScope, writeGenuineExecutionScope )
 
 import Codec.CBOR.Encoding (encodeBool, encodeListLen, encodeString)
 import Codec.CBOR.Write (toStrictByteString)
 import Codec.CBOR.Read (deserialiseFromBytes)
 import Codec.CBOR.Term (Term(..), decodeTerm, encodeTerm)
 import Data.ByteString.Lazy qualified as BSL
-import Control.Exception (SomeException, AsyncException(ThreadKilled), bracket, evaluate, finally, try, fromException)
-import Control.Concurrent (MVar, forkIO, killThread, newEmptyMVar, putMVar, takeMVar)
+import Control.Exception (SomeException, IOException, AsyncException(ThreadKilled), bracket, evaluate, finally, try, fromException)
+import Control.Concurrent (MVar, forkIO, killThread, myThreadId, throwTo, threadDelay, newEmptyMVar, putMVar, takeMVar)
 import Control.Monad (foldM, forM, forM_, unless, void, when)
 import GHC.Clock (getMonotonicTimeNSec)
 import Data.Word (Word32, Word64)
@@ -77,11 +77,12 @@ import Numeric (showHex)
 import System.Directory
   ( copyFile, createDirectory, createDirectoryIfMissing, getTemporaryDirectory, removeDirectoryRecursive
   , removeFile, renameFile, listDirectory, doesFileExist, getPermissions, setPermissions, executable
-  , getModificationTime, setModificationTime, withCurrentDirectory, getCurrentDirectory )
+  , getModificationTime, setModificationTime, withCurrentDirectory, getCurrentDirectory, canonicalizePath )
 import System.Environment (getArgs, getExecutablePath, setEnv, lookupEnv, unsetEnv)
 import System.Exit (ExitCode(..))
-import System.FilePath ((</>), takeDirectory, normalise, replaceExtension)
+import System.FilePath ((</>), takeDirectory, normalise, replaceExtension, addTrailingPathSeparator)
 import System.IO (hClose, hFlush, hPutStrLn, hSeek, hSetFileSize, withBinaryFile, IOMode(WriteMode), SeekMode(AbsoluteSeek), openTempFile, stderr)
+import System.IO.Error (isDoesNotExistError, ioeGetFileName)
 import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 import System.Process (readProcessWithExitCode)
 import System.Timeout (timeout)
@@ -121,11 +122,11 @@ import Tidepool.ExactHydration
   , readVerifiedExactIfaceClosure, readVerifiedExactIfaceClosureWithCheckedValues
   , selectVerifiedExactInterfaces, selectVerifiedValueInterfaces, checkedValueImportAuthorityFromVerified )
 import Tidepool.ExtractUtil (getLibdir)
-import Tidepool.HomeProducts (hydrateCandidateHomeProducts)
+import Tidepool.HomeProducts (hydrateCandidateHomeProducts, CandidateCoreFailure(..))
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedPipelineResult(..), PipelineResult(..), CheckedEnvironmentResult(..)
   , finalizedTidyGuts
-  , renderType, generatedScaffoldRecipe, activationPreviewInputType
+  , renderType, generatedScaffoldRecipe, activationPreviewInputType, withSourceImportIntents
   , CompilePurpose(..), runPipelineSelected, runPipelineSessionSelected, withResidentPipelineSelected
   , withResidentPipelineSelectedRequests )
 import Tidepool.ModuleCandidates (ModuleCandidate(..), CandidateGroup(..), CandidateGlobal(..)
@@ -142,6 +143,8 @@ import Tidepool.ExactScope
   ( ExactScope(..), ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..)
   , CheckedCellAdmission(..), CheckedCellPurpose(..), CheckedItemAdmission(..), CheckedItemPurpose(..)
   , scopeCheckedCell, scopeCheckedItem, scopeIncludePaths, readExactScope
+  , scopeDurableInterfaces, canonicalCoreArtifact, canonicalCorePath
+  , canonicalCertificatePath, canonicalCertificateSha256, canonicalRequirements
   , originalGroupFromCandidate
   , extendExactExecutionSources, extendExactExecutionSourcesWithinBudget, scopeExecutionNativeOwners )
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
@@ -150,7 +153,7 @@ import FinalizedCoreTest (finalizedCoreChecks)
 import Tidepool.CheckedCell (CheckedSignature(..), RequestTypeSignatures(..), RequestHelperRecipe(..), captureCheckedSignature, encodeCheckedSignature, encodeRequestTypeSignatures
   , captureCheckedTypeWitness, sealCheckedTypeWitness, encodeCheckedTypeWitness, rewriteCheckedAnnotations, rewriteHostInputType, rewriteRequestTypes, NativeParsedModule(..), thenNativeModule, typecheckNativeModule, typecheckNativeModuleWithDiagnostics)
 import Tidepool.TurnSource (replaceTemplateMarker, spliceTemplate)
-import Tidepool.Binders (BoundBinder(..))
+import Tidepool.Binders (BoundBinder(..), analyzeCellWithFlags, CellSourcePlan(..))
 import Tidepool.ExecutionSource
   ( WorkerExecutionSource(OrdinaryExecutionSource)
   , ExecutionSourceIdentity(..), ExecutionSourceOwner(..), ExecutionSourceRef(..), ExecutionSourceGraph(..), ExecutionSourceNode(..)
@@ -942,22 +945,63 @@ generatedScaffoldRetained manifestPath sealPath = withTiming $ withScratch $ \wo
   unless (after == seal) (fail "scaffold consumer changed the original Home seal")
   putStrLn "retained scaffold: real production full owner/native/interface/seal self-custody admitted, foreign and wrong-unit requirements refused; original proof unchanged"
 
-retainedExecutionPublication :: IO ()
-retainedExecutionPublication = withTiming $ withScratch $ \work -> do
-  forM_ ["MetadataQuoter.hs", "MetadataQuotedTarget.hs"] $ \name ->
+-- Native and lexical roots share one immutable compiler capture. The witness
+-- is retained only as canonical interface/Core custody in the emitted scope.
+captureRetainedCompilerFixture
+  :: FilePath -> IO (PreparedPipelineResult, SessionScope, ExactScope)
+captureRetainedCompilerFixture work = do
+  forM_ ["MetadataQuoter.hs", "MetadataQuotedTarget.hs", "MetadataRetainedWitness.hs"
+    , "MetadataCurrentSourceTarget.hs"] $ \name ->
     copyFile ("test-source-boot/fixtures" </> name) (work </> name)
-  copyFile "test-source-boot/fixtures/MetadataQuoteSupportModuleFlags.hs" (work </> "MetadataQuoteSupport.hs")
-  let helper = mkModuleName "MetadataQuoteSupport"
-      provider = mkModuleName "MetadataQuoter"
-      target = mkModuleName "MetadataQuotedTarget"
-      helperPath = work </> "MetadataQuoteSupport.hs"
-      providerPath = work </> "MetadataQuoter.hs"
-      targetPath = work </> "MetadataQuotedTarget.hs"
+  copyFile "test-source-boot/fixtures/MetadataQuoteSupportRetainedCore.hs"
+    (work </> "MetadataQuoteSupport.hs")
+  let source = work </> "MetadataQuoter.hs"
       scopePath = work </> "original-execution.cbor"
       session = emptySessionScope {ssRoot=work,ssExactScope=Just scopePath}
-  -- The request target is generated-source evidence, not an original recipe.
-  -- Capture the helper as real source support of the quoter producer.
-  original <- runPipelineSelected (PreparedProducts Nothing) providerPath [work]
+      helper = ("main", "MetadataQuoteSupport")
+      witness = ("main", "MetadataRetainedWitness")
+  original <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
+    Nothing source [work] Nothing
+  writeGenuineExecutionScope [snd helper] [snd helper] work source [work] scopePath original
+  exact <- readExactScope scopePath >>= either fail pure
+  let proofs = scopeDurableInterfaces exact
+  unless (map originalModule (scopeProducts exact) == [snd helper]
+      && Map.member witness proofs
+      && isJust (Map.lookup witness proofs >>= canonicalCoreArtifact)
+      && maybe False (Map.member witness . canonicalRequirements) (Map.lookup helper proofs)) $
+    fail "retained fixture lost its interface/Core-only compiler dependency or acquired its native product"
+  pure (original, session, exact)
+
+removeRetainedCompilerSources :: FilePath -> ExactScope -> IO ()
+removeRetainedCompilerSources work exact =
+  forM_ ["MetadataQuoteSupport", "MetadataRetainedWitness"] $ \owner ->
+    forM_ ["hs", "hi", "o", "dyn_hi", "dyn_o", "hie"] $ \extension -> do
+      let path = work </> owner ++ "." ++ extension
+      unless (path `notElem` [exactPath artifact | (artifact,_,_) <- scopeInterfaces exact]) $
+        fail "ordinary compiler output is also an admitted immutable interface"
+      exists <- doesFileExist path
+      when exists (removeFile path)
+
+requireRetainedCompilerResult :: PreparedPipelineResult -> String -> IO ()
+requireRetainedCompilerResult prepared diagnostics = do
+  let retained = map mkModuleName ["MetadataQuoteSupport", "MetadataRetainedWitness"]
+      fresh = Set.fromList (map mkModuleName ["MetadataQuoter", "MetadataQuotedTarget"])
+  unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult prepared))
+      && counterValues "exact_execution_original_load_owners" diagnostics == [2]
+      && counterValues "exact_execution_fresh_provider_compiles" diagnostics == [1]
+      && Map.keysSet (pprFinalizedModules prepared) == fresh
+      && all (`Map.notMember` pprProductInterfaces prepared) retained
+      && all (\owner -> ("tidepool-canonical-frontend module=" ++ moduleNameString owner)
+          `notElem` lines diagnostics) retained) $
+    fail "retained compiler load changed original42, ran a retained frontend or republished a native owner"
+
+retainedExecutionPublication :: IO ()
+retainedExecutionPublication = withTiming $ withScratch $ \work -> do
+  (original, session, exact) <- captureRetainedCompilerFixture work
+  let helper = mkModuleName "MetadataQuoteSupport"
+      helperPath = work </> "MetadataQuoteSupport.hs"
+      targetPath = work </> "MetadataQuotedTarget.hs"
+      scopePath = work </> "original-execution.cbor"
   let originalEnvironment = prHscEnv (pprPipelineResult original)
       helperFlags = [ms_hspp_opts summary | ModuleNode _ summary <-
         mgModSummaries' (hsc_mod_graph originalEnvironment), ms_mod_name summary == helper]
@@ -966,22 +1010,14 @@ retainedExecutionPublication = withTiming $ withScratch $ \work -> do
         && not (xopt LangExt.TypeFamilies (hsc_dflags originalEnvironment))
       _ -> False) $
     fail "retained support must require module flags absent from the session defaults"
-  writeGenuineOriginalExecutionScope ["MetadataQuoteSupport"] work providerPath [work] scopePath original
-  exact <- readExactScope scopePath >>= either fail pure
   originalBytes <- BS.readFile scopePath
   deferredOriginalModuleFlags work session
+  removeRetainedCompilerSources work exact
   withResidentPipelineSelected [work] $ \compile -> do
     (prepared, diagnostics) <- captureDiagnostics $ compile (PreparedProducts Nothing) Set.empty GeneralCompile
       (Just session) targetPath [work] Nothing
-    let result = pprPipelineResult prepared
-        environment = prHscEnv result
-        freshOwners = Map.keysSet (pprFinalizedModules prepared)
-    unless (hasIntResultLiteral 42 (prBinds result)
-        && counterValues "exact_execution_original_load_owners" diagnostics == [1]
-        && counterValues "exact_execution_fresh_provider_compiles" diagnostics == [1]
-        && freshOwners == Set.fromList [provider,target]
-        && Map.notMember helper (pprProductInterfaces prepared)) $
-      fail "retained executable acquired fresh finalization ownership or fresh provider lost it"
+    requireRetainedCompilerResult prepared diagnostics
+    let environment = prHscEnv (pprPipelineResult prepared)
     case lookupHpt (hsc_HPT environment) helper of
       Just hmi | isJust (homeMod_bytecode (hm_linkable hmi)) -> pure ()
       _ -> fail "retained original lost its authorized GHC bytecode"
@@ -998,11 +1034,16 @@ retainedExecutionPublication = withTiming $ withScratch $ \work -> do
     unless (Map.member helper (pprFinalizedModules fresh)
         && Map.member helper (pprProductInterfaces fresh)) $
       fail "ordinary source refresh inherited retained execution ownership"
-    changed <- try (compile (PreparedProducts Nothing) Set.empty GeneralCompile
-      (Just session) targetPath [work] Nothing) :: IO (Either SomeException PreparedPipelineResult)
-    unless (case changed of Left failure -> "ExecutionSourceChanged" `isInfixOf` show failure; _ -> False) $
-      fail "retained execution accepted the refreshed source under its old admission"
-  putStrLn "retained execution publication: bytecode retained, only fresh providers captured, source refresh separate"
+    ordinary <- compile (PreparedProducts Nothing) Set.empty GeneralCompile Nothing targetPath [work] Nothing
+    unless (hasIntResultLiteral 43 (prBinds (pprPipelineResult ordinary))) $
+      fail "ordinary source refresh did not execute the changed current helper"
+    (capturedAgain, againDiagnostics) <- captureDiagnostics $ compile
+      (PreparedProducts Nothing) Set.empty GeneralCompile (Just session) targetPath [work] Nothing
+    requireRetainedCompilerResult capturedAgain againDiagnostics
+    afterChangedSource <- BS.readFile scopePath
+    unless (afterChangedSource == originalBytes) $
+      fail "capture-only execution changed its immutable admission after disk source drift"
+  putStrLn "retained execution publication: cold source-less original42, compiler dependency without native product, no retained frontend/native publication, current source43 separate"
 
 -- The exact helper makes both its fresh importer and that importer's consumer
 -- deferred. Retain the actual finalized interface across request cleanup, then
@@ -1057,114 +1098,151 @@ deferredOriginalModuleFlags work session = do
 
 exactRetainedQuoter :: IO ()
 exactRetainedQuoter = withTiming $ withScratch $ \work -> do
-  forM_ ["MetadataQuoteSupport.hs", "MetadataQuoter.hs", "MetadataQuotedTarget.hs"] $ \name ->
-    copyFile ("test-source-boot/fixtures" </> name) (work </> name)
-  support <- runPipelineSelected (PreparedProducts Nothing) (work </> "MetadataQuoteSupport.hs") [work]
-  let producer = prHscEnv (pprPipelineResult support)
-      hi = work </> "retained-quote-support.hi"
-      packagesPath = hi ++ ".packages"
-      scopePath = work </> "exact-scope.cbor"
-      scope = emptySessionScope { ssRoot = work, ssExactScope = Just scopePath }
-  iface <- maybe (fail "retained quoter helper omitted its interface") pure
-    (Map.lookup (mkModuleName "MetadataQuoteSupport") (pprProductInterfaces support))
-  writeBinIface (targetProfile (hsc_dflags producer)) QuietBinIFace NormalCompression hi iface
-  bytes <- BS.readFile hi
-  let artifact = ExactIfaceArtifact "main" "MetadataQuoteSupport" hi (digest bytes) []
-      packages = encodePackageImports artifact
-        (Map.findWithDefault emptyPackageImports (mkModuleName "MetadataQuoteSupport") (pprPackageImports support))
-  BS.writeFile packagesPath packages
-  writeExactMetadataScopeWithLexical scopePath [(artifact, packagesPath, digest packages)] [(artifact, [])]
-  originalScope <- readExactScope scopePath >>= either fail pure
-  withResidentPipelineSelected [work] $ \compile -> do
-    absent <- try (compile CheckedEnvironment Set.empty GeneralCompile (Just scope)
-      (work </> "MetadataQuotedTarget.hs") [work] Nothing) :: IO (Either SomeException CheckedEnvironmentResult)
-    unless (case absent of Left reason -> "ExecutionSourceMissing" `isInfixOf` show reason; _ -> False) $
-      fail "source-free execution borrowed source without an original recipe"
-  writeExecutionScope scopePath work support ["MetadataQuoteSupport"]
-  let changedPath = work </> "changed-scope.cbor"
-      changedScope = scope {ssExactScope=Just changedPath}
+  (original, scope, exact) <- captureRetainedCompilerFixture work
+  let target = work </> "MetadataQuotedTarget.hs"
+      helperPath = work </> "MetadataQuoteSupport.hs"
+      quoterPath = work </> "MetadataQuoter.hs"
+      scopePath = work </> "original-execution.cbor"
       hiddenPath = work </> "hidden-scope.cbor"
       hiddenScope = scope {ssExactScope=Just hiddenPath}
-  writeExecutionScope hiddenPath work support []
-  copyFile "test-source-boot/fixtures/MetadataQuoteSupportChanged.hs" (work </> "MetadataQuoteSupport.hs")
-  supportB <- runPipelineSelected (PreparedProducts Nothing) (work </> "MetadataQuoteSupport.hs") [work]
-  writeExecutionScope changedPath work supportB ["MetadataQuoteSupport"]
-  copyFile "test-source-boot/fixtures/MetadataQuoteSupport.hs" (work </> "MetadataQuoteSupport.hs")
+      cancelMarker = work </> "cancel-marker"
+      helperKey = ("main", "MetadataQuoteSupport")
+      witnessKey = ("main", "MetadataRetainedWitness")
+      proofs = scopeDurableInterfaces exact
+  helperProof <- maybe (fail "captured helper lacks its canonical proof") pure (Map.lookup helperKey proofs)
+  witnessProof <- maybe (fail "captured compiler dependency lacks its canonical proof") pure (Map.lookup witnessKey proofs)
+  core <- maybe (fail "captured helper lacks its executable Core") pure (canonicalCoreArtifact helperProof)
+  scratchRoot <- addTrailingPathSeparator <$> canonicalizePath work
+  corePath <- canonicalizePath (canonicalCorePath core)
+  unless (scratchRoot `isPrefixOf` corePath) $
+    fail "retained Core mutation must remain inside this fixture's scratch directory"
+  coreBytes <- BS.readFile (canonicalCorePath core)
+  originalBytes <- BS.readFile scopePath
+  writeGenuineExecutionScope [snd helperKey] [] work quoterPath [work] hiddenPath original
+  removeRetainedCompilerSources work exact
   withResidentPipelineSelectedRequests [work] $ \runRequest -> do
-    let helperPath = work </> "MetadataQuoteSupport.hs"
-        cancelMarker = work </> "cancel-marker"
-        quoterPath = work </> "MetadataQuoter.hs"
     runRequest (pure ()) $ \compile -> do
-      checked <- compile CheckedEnvironment Set.empty GeneralCompile (Just scope)
-        (work </> "MetadataQuotedTarget.hs") [work] Nothing
+      checked <- compile CheckedEnvironment Set.empty GeneralCompile (Just scope) target [work] Nothing
       unless (fmap renderType (crResultType checked) == Just "Int") $
-        fail "retained quoter execution changed its result type"
-      native <- compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope)
-        (work </> "MetadataQuotedTarget.hs") [work] Nothing
-      unless (fmap renderType (prResultType (pprPipelineResult native)) == Just "Int"
-          && hasIntResultLiteral 42 (prBinds (pprPipelineResult native))
-          && not (isJust (hscCompileCoreExprHook (hsc_hooks (prHscEnv (pprPipelineResult native)))))) $
-        fail "retained quoter native execution changed its result type"
+        fail "cold retained compiler execution changed its result type"
+      (native,diagnostics) <- captureDiagnostics $
+        compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope) target [work] Nothing
+      requireRetainedCompilerResult native diagnostics
+    let missing = canonicalCorePath core ++ ".removed"
+    backupExists <- doesFileExist missing
+    when backupExists (fail "retained Core removal backup already exists")
+    bracket (renameFile (canonicalCorePath core) missing)
+      (const (renameFile missing (canonicalCorePath core))) $ \_ ->
+        runRequest (pure ()) $ \compile -> do
+          refused <- try (void (compile CheckedEnvironment Set.empty GeneralCompile
+            (Just scope) target [work] Nothing)) :: IO (Either IOException ())
+          unless (case refused of
+            Left reason -> isDoesNotExistError reason && ioeGetFileName reason == Just (canonicalCorePath core)
+            _ -> False) $
+            fail "retained compiler execution did not refuse its exact missing Core path"
+    bracket (BS.writeFile (canonicalCorePath core) (BSC.pack "corrupt retained Core"))
+      (const (BS.writeFile (canonicalCorePath core) coreBytes)) $ \_ ->
+        runRequest (pure ()) $ \compile -> do
+          refused <- try (void (compile CheckedEnvironment Set.empty GeneralCompile
+            (Just scope) target [work] Nothing)) :: IO (Either CandidateCoreFailure ())
+          unless (refused == Left CandidateCoreBytesMismatch) $
+            fail "retained compiler execution did not refuse corrupted authenticated Core bytes"
+    -- Both certificate descriptors are genuine; only this negative association
+    -- places the dependency's certificate under the helper's exact owner.
+    let wrongOwner (TList fields)
+          | take 2 fields == map (TString . T.pack) [fst helperKey,snd helperKey]
+          , length fields == 8
+          , TList role <- fields !! 7
+          , length role == 5 = TList (take 7 fields ++ [TList
+              [head role,TString (T.pack (canonicalCertificatePath witnessProof))
+              ,TString (T.pack (canonicalCertificateSha256 witnessProof)),role !! 3,role !! 4]])
+        wrongOwner row = row
+    originalTerm <- term scopePath
+    wrongOwnerTerm <- case originalTerm of
+      TList fields | length fields == 9 -> case fields !! 4 of
+        TList rows -> pure (TList [if index == 4 then TList (map wrongOwner rows) else field
+          | (index,field) <- zip [0::Int ..] fields])
+        _ -> fail "genuine retained interface inventory changed framing"
+      _ -> fail "genuine retained scope changed framing"
+    let wrongOwnerPath = work </> "wrong-core-owner.cbor"
+    BS.writeFile wrongOwnerPath (toStrictByteString (encodeTerm wrongOwnerTerm))
+    wrongOwner <- readExactScope wrongOwnerPath
+    unless (case wrongOwner of Left _ -> True; _ -> False) $
+      fail "retained compiler proof accepted another genuine certificate under the wrong owner"
+    runRequest (pure ()) $ \compile -> do
       copyFile "test-source-boot/fixtures/MetadataQuoteSupportChanged.hs" helperPath
-      refused <- try (compile CheckedEnvironment Set.empty GeneralCompile (Just scope)
-        (work </> "MetadataQuotedTarget.hs") [work] Nothing) :: IO (Either SomeException CheckedEnvironmentResult)
-      unless (case refused of Left reason -> "ExecutionSourceChanged" `isInfixOf` show reason; _ -> False) $
-        fail "retained quoter executed a changed original source"
-      let preprocessor = work </> "changed-preprocessor"
-          preprocessMarker = work </> "preprocess-marker"
-      writeFile preprocessor ("#!/bin/sh\n: > " ++ show preprocessMarker ++ "\nexit 1\n")
+      (captured,diagnostics) <- captureDiagnostics $
+        compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope) target [work] Nothing
+      requireRetainedCompilerResult captured diagnostics
+      -- This is a real authored current-source demand, separate from capture.
+      -- This fixture has no checked include authority and must refuse before
+      -- considering changed current source; it does not qualify drift checks.
+      parsed <- analyzeCellWithFlags (hsc_dflags (prHscEnv (pprPipelineResult original))) ""
+        "import MetadataQuoteSupport (answerValue)\nanswerValue" >>= either (fail . show) pure
+      let current = withSourceImportIntents (cellPlanPrologue parsed) GeneralCompile
+      refused <- try (void (compile CheckedEnvironment Set.empty current (Just scope)
+        (work </> "MetadataCurrentSourceTarget.hs") [work] Nothing)) :: IO (Either InputRejection ())
+      case refused of
+        Left (OriginalSourceSelectionRejected (ExecutionSourceUnavailable key)) | key == helperKey -> pure ()
+        Left reason -> fail ("current import had another authority refusal: " ++ show reason)
+        Right () -> fail "capture-only scope acquired checked current-source authority"
+    runRequest (pure ()) $ \compile -> do
+      let preprocessor = work </> "unadmitted-preprocessor"
+          marker = work </> "preprocess-marker"
+      writeFile preprocessor ("#!/bin/sh\n: > " ++ show marker ++ "\nexit 1\n")
       permissions <- getPermissions preprocessor
       setPermissions preprocessor permissions {executable=True}
-      preprocessingSource <- readFile "test-source-boot/fixtures/ExecutionChangedPreprocessor.hs"
-      writeFile helperPath (T.unpack (T.replace "EXECUTION_PREPROCESSOR" (T.pack preprocessor) (T.pack preprocessingSource)))
-      preprocessed <- try (compile CheckedEnvironment Set.empty GeneralCompile (Just scope)
-        (work </> "MetadataQuotedTarget.hs") [work] Nothing) :: IO (Either SomeException CheckedEnvironmentResult)
-      ranPreprocessor <- doesFileExist preprocessMarker
-      unless (case preprocessed of Left reason -> "ExecutionSourceChanged" `isInfixOf` show reason && not ranPreprocessor; _ -> False) $
-        fail "changed original source executed preprocessing before recipe admission"
-      copyFile "test-source-boot/fixtures/MetadataQuoteSupportChanged.hs" helperPath
-      nativeB <- compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just changedScope)
-        (work </> "MetadataQuotedTarget.hs") [work] Nothing
-      unless (hasIntResultLiteral 43 (prBinds (pprPipelineResult nativeB))) $
-        fail "execution recipe B linked the previous source owner's bytecode"
-      copyFile "test-source-boot/fixtures/MetadataQuoteSupport.hs" helperPath
-      nativeA <- compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope)
-        (work </> "MetadataQuotedTarget.hs") [work] Nothing
-      unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult nativeA))) $
-        fail "execution recipe A/B/A retained a changed helper body"
+      source <- readFile "test-source-boot/fixtures/ExecutionChangedPreprocessor.hs"
+      writeFile helperPath (T.unpack (T.replace "EXECUTION_PREPROCESSOR" (T.pack preprocessor) (T.pack source)))
+      (captured,diagnostics) <- captureDiagnostics $
+        compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope) target [work] Nothing
+      requireRetainedCompilerResult captured diagnostics
+      ran <- doesFileExist marker
+      when ran (fail "retained Core execution replayed changed original preprocessing")
     runRequest (pure ()) $ \compile -> do
-      cancellingSource <- readFile "test-source-boot/fixtures/ExecutionCancellingQuoter.hs"
-      writeFile quoterPath (T.unpack (T.replace "\"EXECUTION_CANCEL_MARKER\"" (T.pack (show cancelMarker)) (T.pack cancellingSource)))
-      cancelled <- try (timeout 1500000 (compile CheckedEnvironment Set.empty GeneralCompile (Just scope)
-        (work </> "MetadataQuotedTarget.hs") [work] Nothing)) :: IO (Either SomeException (Maybe CheckedEnvironmentResult))
-      beganExecution <- doesFileExist cancelMarker
-      unless (beganExecution && case cancelled of Right (Just _) -> False; _ -> True) $
+      source <- readFile "test-source-boot/fixtures/ExecutionCancellingQuoter.hs"
+      writeFile quoterPath (T.unpack (T.replace "\"EXECUTION_CANCEL_MARKER\"" (T.pack (show cancelMarker)) (T.pack source)))
+      caller <- myThreadId
+      let waitForSplice = do
+            started <- doesFileExist cancelMarker
+            unless started (threadDelay 10000 >> waitForSplice)
+          cancelAtSplice = do
+            started <- timeout 60000000 waitForSplice
+            case started of
+              Just () -> throwTo caller ThreadKilled
+              Nothing -> throwTo caller (userError "execution cancellation splice did not start")
+      -- The watchdog bounds failure to reach the splice. Cancellation itself
+      -- follows its real marker, independently of compiler startup duration.
+      cancelled <- bracket (forkIO cancelAtSplice) killThread $ \_ ->
+        try (void (compile CheckedEnvironment Set.empty GeneralCompile
+          (Just scope) target [work] Nothing)) :: IO (Either SomeException ())
+      began <- doesFileExist cancelMarker
+      unless (began && case cancelled of
+          Left reason -> fromException reason == Just ThreadKilled
+          Right () -> False) $
         fail "execution cancellation did not reach the scoped splice linker"
-      terminal <- try (timeout 1000000 (compile CheckedEnvironment Set.empty GeneralCompile (Just scope)
-        (work </> "MetadataQuotedTarget.hs") [work] Nothing)) :: IO (Either SomeException (Maybe CheckedEnvironmentResult))
-      unless (case terminal of Left _ -> True; Right _ -> False) $
+      terminal <- try (timeout 1000000 (compile CheckedEnvironment Set.empty GeneralCompile
+        (Just scope) target [work] Nothing)) :: IO (Either SomeException (Maybe CheckedEnvironmentResult))
+      unless (case terminal of Left _ -> True; _ -> False) $
         fail "cancelled compiler callback remained usable"
     runRequest (pure ()) $ \compile -> do
       copyFile "test-source-boot/fixtures/MetadataQuoter.hs" quoterPath
-      copyFile "test-source-boot/fixtures/MetadataQuoteSupportChanged.hs" helperPath
-      afterCancel <- compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just changedScope)
-        (work </> "MetadataQuotedTarget.hs") [work] Nothing
-      unless (hasIntResultLiteral 43 (prBinds (pprPipelineResult afterCancel))
-          && not (isJust (hscCompileCoreExprHook (hsc_hooks (prHscEnv (pprPipelineResult afterCancel)))))) $
-        fail "cancelled execution A leaked its linker view into B"
-      copyFile "test-source-boot/fixtures/MetadataQuoteSupport.hs" helperPath
-      (hidden,diagnostics) <- captureDiagnostics (try (compile CheckedEnvironment Set.empty GeneralCompile (Just hiddenScope)
-        (work </> "MetadataQuotedTarget.hs") [work] Nothing) :: IO (Either SomeException CheckedEnvironmentResult))
-      unless (case hidden of
-        Left reason
-          | Just (OriginalSourceSelectionRejected
-              (ExecutionSourceUnavailable ("main", "MetadataQuoteSupport"))) <- fromException reason ->
-            not ("tidepool-timing phase=ghc_load" `isInfixOf` diagnostics)
-        _ -> False) $
-        fail ("hidden lexical import did not refuse its missing source-selection authority: "
-          ++ either show (const "unexpected success") hidden)
-  unless (null (scopeExecutionOwners originalScope)) (fail "legacy scope gained execution authority")
-  putStrLn "exact retained quoter: metadata/native, missing/change/preprocess refusals, A/B/A, cancellation, hidden-import preflight passed"
+      (recovered,diagnostics) <- captureDiagnostics $
+        compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope) target [work] Nothing
+      requireRetainedCompilerResult recovered diagnostics
+      when (isJust (hscCompileCoreExprHook (hsc_hooks (prHscEnv (pprPipelineResult recovered))))) $
+        fail "cancelled retained execution leaked its linker hook into the next request"
+      hidden <- try (void (compile CheckedEnvironment Set.empty GeneralCompile
+        (Just hiddenScope) target [work] Nothing)) :: IO (Either InputRejection ())
+      case hidden of
+        Left (OriginalSourceSelectionRejected (ExecutionSourceUnavailable key)) | key == helperKey -> pure ()
+        Left reason -> fail ("hidden import had another authority refusal: " ++ show reason)
+        Right () -> fail "native/Core custody exposed its unadmitted lexical owner"
+  restored <- BS.readFile (canonicalCorePath core)
+  after <- BS.readFile scopePath
+  unless (restored == coreBytes && after == originalBytes) $
+    fail "retained compiler refusal/recovery changed immutable admission bytes"
+  putStrLn "exact retained quoter: cold source-less original42, Core-only compiler dependency, missing/corrupt/wrong-owner Core refusal, capture-only source drift, no preprocessing/frontend replay, explicit current/hidden authority refusal, cancellation/recovery"
 
 -- The GHC fixture issues the original recipe alongside actual native group
 -- bytes and the producer's positive source/resolution evidence. Rust's real
