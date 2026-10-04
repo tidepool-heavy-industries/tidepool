@@ -1689,7 +1689,7 @@ impl PersistentSession {
                 self.bindings.prepare_source_owner_origin_in(
                     &self.scopes,
                     scope,
-                    certificate.product().owner().clone(),
+                    certificate.evidence.product().owner().clone(),
                 )
             })
             .transpose()
