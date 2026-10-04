@@ -438,7 +438,7 @@ orderedInferenceSegments = do
         [ if line == "module CellCheck where"
             then unlines [line
               , "import qualified GHC.Generics as TidepoolCompilerGeneric"
-              , "import qualified Tidepool.Inspection as TidepoolCompilerDisplay"]
+              , "import qualified Tidepool.Inspection.Display as TidepoolCompilerDisplay"]
             else line
         | line <- lines template ]
   retainedPlan <- analyzeOrderedCell retainedTemplate "data Retained = Retained"
@@ -457,7 +457,7 @@ orderedInferenceSegments = do
   assertEqual "generated Display alias avoids retained template imports" True
     (displayAlias /= "TidepoolCompilerDisplay")
   assertEqual "generated Display imports its selected alias" True
-    (("import qualified Tidepool.Inspection as " ++ displayAlias) `elem` imports)
+    (("import qualified Tidepool.Inspection.Display as " ++ displayAlias) `elem` imports)
   assertEqual "generated Display uses its selected import alias" True
     ((displayAlias ++ ".Display") `isInfixOf` declarations)
   where

@@ -207,6 +207,12 @@ checkOriginalDeclarationShadow work checkWrapper = do
   wrapper <- readFile "test-planned-declaration/fixtures/shadow-decl-wrapper.hs"
   plan <- analyzeCell checkWrapper authored >>= either (fail . show) pure
   original <- either (fail . show) pure (preparePlannedDeclaration originalName wrapper plan)
+  unless (not (null (cellPlanGenericDeclarations plan))
+      && not (null (cellPlanStructuralDisplayTargets plan))
+      && "import qualified Tidepool.Inspection.Display as " `isInfixOf` plannedSource original
+      && ".Generic" `isInfixOf` plannedSource original
+      && ".Display" `isInfixOf` plannedSource original) $
+    fail "original shadow fixture lost genuine generated Generic or Display companions"
   writeFile originalFile (plannedSource original)
   checked <- runPipelineSessionSelected CheckedEnvironment Set.empty
     (GeneratedInstanceCheck (cellGeneratedInstanceRecipe plan) OriginalDeclarationCompile)

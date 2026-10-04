@@ -633,7 +633,7 @@ analyzeCellWithGrouping ordered dflags template source = do
         generatedImports =
           [ LocatedImport (CellSourceSpan 1 1 1 1) ("import qualified GHC.Generics as " ++ genericAlias) RetainedGeneratedImport
           | not (null generated) ] ++
-          [ LocatedImport (CellSourceSpan 1 1 1 1) ("import qualified Tidepool.Inspection as " ++ displayAlias) RetainedGeneratedImport
+          [ LocatedImport (CellSourceSpan 1 1 1 1) ("import qualified Tidepool.Inspection.Display as " ++ displayAlias) RetainedGeneratedImport
           | not (null targets) ]
         plan = CellSourcePlan
           { cellPlanPrologue = prologue { prologueImports = prologueImports prologue ++ generatedImports }
