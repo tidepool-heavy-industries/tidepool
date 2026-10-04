@@ -1,7 +1,9 @@
-load("@prelude//:rules.bzl", "filegroup")
+load("@prelude//:rules.bzl", "filegroup", "export_file")
 
 filegroup(
     name = "qualification_inputs",
     srcs = {"scripts/" + source: source for source in glob(["BUCK", "*.py", "*.sh", "*.toml"])},
     visibility = ["PUBLIC"],
 )
+
+export_file(name = "embedded_web_provenance_script", src = "embedded_web_provenance.py", visibility = ["PUBLIC"])
