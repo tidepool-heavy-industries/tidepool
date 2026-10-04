@@ -214,7 +214,8 @@ import Tidepool.ExactScope
   , canonicalCorePath, canonicalCoreSha256 )
 import Tidepool.ExecutionSource
   ( ExecutionSourceGraph(..), ExecutionSourceNode(..), ExecutionSourceIdentity(..)
-  , ExecutionSourceFailure(..), ExecutionSourceRef(..), executionSourceClosure, executionIdentityKey
+  , ExecutionSourceFailure(..), ExecutionSourceValidationStage(..), ExecutionSourceInterfaceReason(..)
+  , ExecutionSourceRef(..), executionSourceClosure, executionIdentityKey
   , executionSourceGraphsFit, executionNodeOriginalResolutions )
 import Tidepool.PackageWitness
   ( PackageImportRoot(..), PackageImportEvidence(..), CompilerProvidedImport(..), emptyPackageImports, packageImportRoot, readPackageImports
@@ -4048,7 +4049,7 @@ selectCurrentSourceOriginals admitted intents recipe sourceGraph = do
             [summary | ModuleNode _ summary <- mgModSummaries' selectedGraph]) $
           liftIO (throwIO (ExecutionSourceUnsupported root))
         (sources,complete) <- liftIO (captureDependencySources selectedGraph)
-        unless complete $ liftIO (throwIO (ExecutionSourceChanged root))
+        unless complete $ liftIO (throwIO (ExecutionSourceChangedDuring root CurrentSourceSelectionIncomplete))
         forM_ (filter relevant (dependencyResolutions current)) $ \resolution -> do
           let negative = case dependencyResolutionSelected resolution of
                 Nothing -> dependencyResolutionCandidates resolution
@@ -4095,8 +4096,10 @@ validateExactOriginalSources admitted interfaces sourceGraph nodes = do
     let source = dependencyModuleSource (executionNodeModule node)
         key = executionIdentityKey (executionNodeIdentity node)
     bytes <- liftIO (BS.readFile source)
-    unless (hexBytes (SHA256.hash bytes) == executionNodeSourceSha256 node) $
-      liftIO (throwIO (ExecutionSourceChanged key))
+    let actualSha = hexBytes (SHA256.hash bytes)
+    unless (actualSha == executionNodeSourceSha256 node) $
+      liftIO (throwIO (ExecutionSourceChangedDuring key
+        (OriginalSourceBytesChanged source (executionNodeSourceSha256 node) actualSha)))
     contents <- either (const (liftIO (throwIO (ExecutionSourceUnsupported key)))) pure
       (TextEncoding.decodeUtf8' bytes)
     now <- liftIO (getModificationTime source)
@@ -4129,7 +4132,9 @@ validateExactOriginalSources admitted interfaces sourceGraph nodes = do
         executionPath <- liftIO (traverse canonicalizePath (ml_hs_file (ms_location summary)))
         unless (ms_mod summary == ms_mod originalFresh && executionPath == originalPath
             && ms_hs_hash summary == ms_hs_hash originalFresh) $
-          liftIO (throwIO (ExecutionSourceChanged key))
+          liftIO (throwIO (ExecutionSourceChangedDuring key
+            (FreshSourceSummaryChanged (ownerKey (ms_mod originalFresh)) originalPath
+              (show (ms_hs_hash originalFresh)) executionPath (show (ms_hs_hash summary)))))
     _ -> pure ()
   observations <- forM nodes $ \node -> do
     let key = executionIdentityKey (executionNodeIdentity node)
@@ -4140,7 +4145,9 @@ validateExactOriginalSources admitted interfaces sourceGraph nodes = do
     canonical <- liftIO (traverse canonicalizePath (ml_hs_file (ms_location summary)))
     (sourceProof,fingerprint) <- liftIO (sourceEvidenceWithFingerprint source)
     unless (canonical == Just source && dependencySourceSha256 sourceProof == executionNodeSourceSha256 node
-        && fingerprint == ms_hs_hash summary) $ liftIO (throwIO (ExecutionSourceChanged key))
+        && fingerprint == ms_hs_hash summary) $ liftIO (throwIO (ExecutionSourceChangedDuring key
+          (OriginalSourceObservationChanged source canonical (executionNodeSourceSha256 node)
+            (dependencySourceSha256 sourceProof) (show fingerprint) (show (ms_hs_hash summary)))))
     originalQuotes <- if xopt LangExt.QuasiQuotes (ms_hspp_opts summary)
       then do parsedOriginal <- parseModule summary
               pure (quasiQuoteOccurrences (ms_hspp_opts summary) (pm_parsed_source parsedOriginal))
@@ -4237,7 +4244,8 @@ validateExactOriginalSources admitted interfaces sourceGraph nodes = do
       summary {ms_hspp_opts=canonicalizeDFlags (ms_hspp_opts summary)} (Just iface))
     case decision of
       UpToDateItem _ -> pure ()
-      OutOfDateItem _ _ -> liftIO (throwIO (ExecutionSourceChanged key))
+      OutOfDateItem reason _ -> liftIO (throwIO (ExecutionSourceChangedDuring key
+        (OriginalInterfaceRecompileRequired (ExecutionSourceInterfaceReason reason))))
   setSession env {hsc_targets=hsc_targets initial}
   pure (ValidatedOriginalSources executionGraph extraTargets current
     (nubOrd (concatMap fst observations)) (Set.toAscList (Set.fromList (concatMap snd observations))))
@@ -4650,7 +4658,9 @@ sessionVariant purpose scope path = do
                forM_ executionNodes $ \node -> do
                  actual <- liftIO (sourceEvidenceWithFingerprint (dependencyModuleSource (executionNodeModule node)))
                  unless (dependencySourceSha256 (fst actual) == executionNodeSourceSha256 node) $
-                   liftIO (throwIO (ExecutionSourceChanged (executionIdentityKey (executionNodeIdentity node))))
+                   liftIO (throwIO (ExecutionSourceChangedDuring (executionIdentityKey (executionNodeIdentity node))
+                     (BeforeMergeSourceBytesChanged (dependencyModuleSource (executionNodeModule node))
+                       (executionNodeSourceSha256 node) (dependencySourceSha256 (fst actual)))))
                forM_ (executionNegativePaths executionPlan) $ \path' -> do
                  exists <- liftIO (doesFileExist path')
                  when exists $ liftIO (throwIO (ExecutionSourceResolutionChanged ("",path')))

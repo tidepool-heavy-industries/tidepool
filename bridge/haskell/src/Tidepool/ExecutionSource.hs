@@ -5,7 +5,8 @@
 module Tidepool.ExecutionSource
   ( ExecutionSourceGraph(..), ExecutionSourceIdentity(..), ExecutionSourceOwner(..)
   , ExecutionSourceRef(..), decodeExecutionSourceGraph, decodeExecutionSourceReferences, executionIdentityKey
-  , ExecutionSourceNode(..), ExecutionSourceFailure(..), executionSourceClosure, executionSourceOriginalNode, executionSourceOriginalClosure
+  , ExecutionSourceNode(..), ExecutionSourceFailure(..), ExecutionSourceValidationStage(..)
+  , ExecutionSourceInterfaceReason(..), executionSourceClosure, executionSourceOriginalNode, executionSourceOriginalClosure
   , ExecutionSourceRecipe(..), issueExecutionSourceRecipe
   , executionSourceProspectiveReferences
   , executionNodeOriginalResolutions
@@ -29,6 +30,8 @@ import qualified Data.Text.Encoding as TE
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Numeric (showHex)
+import GHC.Iface.Recomp (CompileReason)
+import GHC.Utils.Outputable (defaultSDocContext, ppr, renderWithContext)
 import System.Directory (getFileSize)
 import System.FilePath (isAbsolute, takeDirectory)
 import System.IO (IOMode(ReadMode), withBinaryFile)
@@ -245,12 +248,30 @@ executionNodeOriginalResolutions graphs = \node -> do
       Just previous | executionGraphBytes previous == executionGraphBytes graph -> Right selected
       _ -> Left (ExecutionSourceConflicting ("",executionGraphSha256 graph))
 
+newtype ExecutionSourceInterfaceReason = ExecutionSourceInterfaceReason CompileReason
+  deriving (Eq)
+
+instance Show ExecutionSourceInterfaceReason where
+  showsPrec precedence (ExecutionSourceInterfaceReason reason) =
+    showsPrec precedence (renderWithContext defaultSDocContext (ppr reason))
+
+-- Diagnostic facts retain the validation owner and stage; they grant no authority.
+data ExecutionSourceValidationStage
+  = CurrentSourceSelectionIncomplete
+  | OriginalSourceBytesChanged FilePath String String
+  | FreshSourceSummaryChanged (String, String) (Maybe FilePath) String (Maybe FilePath) String
+  | OriginalSourceObservationChanged FilePath (Maybe FilePath) String String String String
+  | OriginalInterfaceRecompileRequired ExecutionSourceInterfaceReason
+  | BeforeMergeSourceBytesChanged FilePath String String
+  deriving (Eq, Show)
+
 data ExecutionSourceFailure
   = ExecutionSourceMissing (String, String)
   | ExecutionSourceConflicting (String, String)
   | ExecutionSourceUnsupported (String, String)
   | ExecutionSourceIncomplete (String, String)
   | ExecutionSourceChanged (String, String)
+  | ExecutionSourceChangedDuring (String, String) ExecutionSourceValidationStage
   | ExecutionSourceResolutionChanged (String, String)
   | ExecutionSourceImportResolutionChanged (String, String)
       [(DependencyQualifier,String,Bool,Maybe FilePath)] [(DependencyQualifier,String,Bool,Maybe FilePath)]
