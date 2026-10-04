@@ -95,8 +95,12 @@ Unknown or retired IDs return JSON 404 errors and are never replaced silently.
 The graph route is an additive interface and does not change the console schema.
 
 Source is classified by the existing workbench parser. Ractor serializes admitted
-submissions. Admitted work survives loss of the HTTP observer. Successful prefixes
-and diagnostics remain in receipt order; rejection does not imply rollback.
+submissions. Admitted work survives loss of the HTTP observer. Successful cells
+publish declarations and bindings together. A failed cell or cancellation winning
+before publication publishes no names from that cell; completed effects remain
+in receipt order. Publication and cleanup have separate outcomes: cleanup trouble
+cannot undo an already published cell, and an uncertain response does not
+authorize replay.
 `Committed`, `Completed`, `Replied`, and `RequestCancelled` map to wire `completed`;
 `Rejected` maps to `rejected`. The exact status remains in the receipt. Completion
 means the call ended, including a terminal transfer that skipped trailing units.

@@ -92,13 +92,16 @@ its model-facing text with `presentWith`; see the API guide for `Text`, JSON and
 Send raw Haskell, not GHCi commands. `let x = value` retains a pure binding;
 `x <- action` retains an effect result. Declarations are mutually recursive and
 visible to statements, but cannot depend on same-cell statement bindings.
-Declarations, imports, and bindings persist; leading pragmas are cell-local.
+Successful cells publish declarations, imports, and bindings together; leading
+pragmas are cell-local.
 Annotate ambiguous polymorphism, defaulting, and reusable `Member Effect effects`
 constraints.
 
 Admission typechecks the whole cell: rejection executes and installs nothing.
-Runtime failure retains the completed prefix; the suffix did not run. Inspect
-the receipt before issuing new intent: it names what each unit did. Uncertain
+Runtime failure or cancellation before publication publishes no names from that
+cell. Completed effects and independently owned captures remain real; inspect
+their receipts before issuing new intent. Cleanup trouble after publication does
+not undo it. Uncertain
 execution does not authorize replay. A recovery receipt saying "not submitted"
 requires waiting for its recovery notice before resubmission. Keep
 `respond value` as one single-line unit with nothing after it.

@@ -17,11 +17,13 @@ display (map score approved)
 The cell summary counts declarations, statements, and expressions. Typecheck rejection
 installs no bindings and runs no effects. A fully polymorphic expression (a bare
 `error "..."` or `undefined`) cannot be classified as pure or effectful; annotate
-it, e.g. `error "..." :: Text`. If a statement fails at runtime, its
-earlier bindings and completed effects remain committed and the suffix is marked
-not run. Declarations become public only when the whole cell succeeds; completed
-native bindings can retain private declaration dependencies after failure.
-Inspect that receipt before deciding whether a new cell is new intent.
+it, e.g. `error "..." :: Text`. Successful completion publishes the cell's
+executed declarations and bindings together. Runtime failure or cancellation
+before publication publishes none of its names; earlier successful cells remain
+available. Completed effects retain their receipts, and explicitly transferred
+captures retain their independent ownership. The unexecuted suffix is marked not
+run. Publication that already committed survives later cleanup trouble; inspect
+the publication and effect receipts before deciding whether to submit new intent.
 
 The `haskell` tool schedules cells asynchronously by default, and an
 asynchronous-only host may expose no synchronous alternative. When a typed

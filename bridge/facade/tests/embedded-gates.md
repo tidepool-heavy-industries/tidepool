@@ -28,9 +28,9 @@ unfinished parent call.
 The failure gate raises an authored Haskell error after those replies. It fails
 the parent **cell**, leaving its actor alive, and therefore retains the normal
 `ParentOwned` child lifetime. Changing the children to `SwarmOwned` would test a
-different contract. The completed native prefix remains public, while the actual
-`privateCapturedHelper` declaration and unrun suffix remain absent. The parent
-then rebinds its public prefix to `(99, 100)`. The children's subsequent real
+different contract. No declaration or binding from the failed cell becomes
+public; the earlier successful cell's bindings remain available. The parent
+then publishes new values in a successful cell. The children's subsequent real
 reads must still return `(41, 42)`, then the
 checkpoint retained in the seed-store actor admits a third reader after the
 failed original operation has durably settled. Releasing that checkpoint twice

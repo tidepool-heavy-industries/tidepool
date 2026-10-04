@@ -5,8 +5,10 @@ description: Write Haskell notebook cells that typecheck the first time — Text
 
 Send one cell of ordinary Haskell: declarations, bindings and expressions. GHC
 splits declarations from statements and checks the whole cell before any effect
-runs: typecheck rejection installs no bindings and executes nothing. Runtime
-failure retains the completed prefix; inspect the receipt before retry. Declarations are
+runs: typecheck rejection installs no bindings and executes nothing. Successful
+cells publish declarations and bindings together. Runtime failure or cancellation
+before publication publishes no cell names; completed effects and independently
+owned captures retain their receipts. Inspect the outcome before retry. Declarations are
 mutually recursive and visible to every statement, but a declaration cannot
 depend on a binding a statement in the same cell introduces. Expressions and
 bindings retain typed values without automatic rendering; declarations and
@@ -240,7 +242,9 @@ value; use `Cmd.output` and `Cmd.next` to navigate retained command output witho
 rerunning the command. Extracting one field per statement out of a long value
 costs a statement each time; bind the value once and project in one expression.
 
-If a statement fails at runtime, its earlier bindings and completed effects stay
-committed and the suffix is marked not run — read that receipt before deciding
-whether the next cell is new intent. `doc workbench` is the same material in
+If a statement fails at runtime, none of that cell's names become public and the
+suffix is marked not run. Completed effects remain real: recover command output
+through its retained session ID, without rerunning the command. A successfully
+published cell remains published even if later cleanup is uncertain. Read the
+receipt before submitting new intent. `doc workbench` is the same material in
 fallback form.

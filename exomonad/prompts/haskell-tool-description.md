@@ -10,8 +10,10 @@ display labels
 Execute raw Haskell in the persistent notebook: declarations, `let` bindings,
 effectful `<-` bindings, and expressions. Values remain typed without automatic
 rendering; use `display value` for bounded structured output. Whole-cell typechecking precedes
-execution; runtime failure retains the completed prefix, and the receipt names
-what each unit did. Inspect it before retrying. A cell splits into units at
+execution. Successful cells publish declarations and bindings together. Failure or
+cancellation before publication publishes no cell names; completed effects and
+independently owned captures retain their receipts. Inspect the outcome before
+retrying. A cell splits into units at
 column-1 boundaries: keep `respond value` on one line with nothing after it.
 For signatures or `doc workbench`, use hosted `lookup` when declared; otherwise
 use `LookupApi.lookupRaw` with `LookupApi.lookupRequest` when the admitted notebook
