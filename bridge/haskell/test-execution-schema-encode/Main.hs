@@ -9,7 +9,7 @@ import Control.Monad (forM_, unless)
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BL
 import Data.Text qualified as T
-import Data.Word (Word32, Word64)
+import Data.Word (Word32)
 import System.Environment (getArgs)
 import System.Directory (getTemporaryDirectory, removeFile)
 import System.IO (openBinaryTempFile, hClose)

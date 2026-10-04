@@ -263,7 +263,9 @@ sh_test(
 
 filegroup(
     name = "source_boot_fixtures",
-    srcs = glob(["test-source-boot/fixtures/*.hs", "test-source-boot/fixtures/*.hs-boot"]),
+    srcs = glob(["test-source-boot/fixtures/*.hs", "test-source-boot/fixtures/*.hs-boot"]) + [
+        "lib/Tidepool/Internal/RequestSite.hs",
+    ],
 )
 
 # Exact compile-time resources consumed by the native repr targets.

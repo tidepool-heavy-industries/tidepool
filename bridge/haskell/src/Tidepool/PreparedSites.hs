@@ -284,13 +284,16 @@ elaboratePreparedSites env authority siblings bindings = do
                     Right (Just (spAnswer plan, progress))
                   _ -> Right Nothing
                 carrier <- maybe (Left "missing RequestSite type authority") Right (requestSiteTyCon authority)
+                carrierConstructor <- case tyConDataCons carrier of
+                  [constructor] -> Right constructor
+                  _ -> Left "RequestSite type authority must have one constructor"
                 let reply = case vsDelivery spec of
                       DeliverExitCellFill -> spAnswer plan
                       _ -> wire
                     inputs = spInputs plan ++ derived
                     carrierType = mkTyConApp carrier [mkPromotedListTy liftedTypeKind inputs, reply]
                 if eqType carrierType (spCarrierType plan)
-                  then Right (wire, inputs, requestTypes, carrier, reply)
+                  then Right (wire, inputs, requestTypes, carrierConstructor, reply)
                   else Left "site-aware sibling has another RequestSite input or reply index" of
                 Left detail -> do
                   modify' (\current -> current
@@ -298,7 +301,7 @@ elaboratePreparedSites env authority siblings bindings = do
                         (vsName spec ++ " site in " ++ T.unpack originName ++ ": " ++ detail)
                         : esRejections current })
                   pure (mkApps headExpr rewrittenArguments)
-                Right (wireType, siteInputs, requestTypes, carrierTyCon, carrierReply) -> do
+                Right (wireType, siteInputs, requestTypes, carrierConstructor, carrierReply) -> do
                   missing <- traverse freshEvidence (spMissingEvidence plan)
                   ordinal <- nextOrdinal originName
                   witnesses <- liftIO (traverse (captureCheckedTypeWitness env) siteInputs)
@@ -308,7 +311,7 @@ elaboratePreparedSites env authority siblings bindings = do
                         { ysInputTypeWitnesses = witnesses, ysRequestTypeSignatures = signatures }
                       literal = mkCoreConApps intDataCon
                         [Lit (LitNumber LitNumInt (fromIntegral (ysSite site)))]
-                      carrier = mkCoreConApps (head (tyConDataCons carrierTyCon))
+                      carrier = mkCoreConApps carrierConstructor
                         [ Type (mkPromotedListTy liftedTypeKind siteInputs)
                         , Type carrierReply, literal ]
                   current <- get

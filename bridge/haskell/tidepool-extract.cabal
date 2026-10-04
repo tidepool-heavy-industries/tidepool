@@ -8,6 +8,9 @@ extra-source-files:
   lib/Tidepool/Command/Types.hs
   lib/Tidepool/Data/Time.hs
   lib/Tidepool/Double.hs
+  lib/Tidepool/Internal/RequestSite.hs
+  test/prepared-stg/Tidepool/Actor.hs
+  test/prepared-stg/Tidepool/Internal/RequestSite.hs
   test-prepared-stg/site-fixtures/*.hs
   test-prepared-stg/BuiltinIdentityContract.hs
   test-prepared-stg/builtin-identity/Data/Text/Internal.hs
