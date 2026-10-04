@@ -113,7 +113,7 @@ instance Display (Response result) where
       "response to request " <> tshow request <> " from agent " <> agentAddressText actor
         <> maybe "" (\receipt -> let ActorPath path = allocatedPath receipt in ", path " <> path) admission
 
-newtype Reply result = Reply RequestId
+newtype Reply (result :: Type) = Reply RequestId
   deriving (Show, Eq)
 
 data RequestScopeError
@@ -122,7 +122,7 @@ data RequestScopeError
   | RequestInputShadowed
   deriving (Show, Eq)
 
-data RequestScope input result
+data RequestScope input (result :: Type)
   = RequestUnavailable RequestScopeError
   | RequestActive RequestId input
 
