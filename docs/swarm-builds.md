@@ -17,11 +17,11 @@ unit; an administrator launches the approved job as the unprivileged `swarm`
 user. The first Buck command, including metadata queries, must run inside that
 unit so the Buck daemon shares its admission boundary.
 
-Materialize the checkout's declared closure and configure from inside the
-admitted build environment:
+Prepare the selected pinned outputs and configure inside the admitted build
+environment. Configure realizes every selected output and registers a durable
+Nix GC root before publishing `.buckconfig.local`:
 
 ```sh
-nix build .#buck-toolchain-closure --no-link
 bash scripts/buck2-configure.sh
 export PATH="$(awk -F ' = ' '$1 == "action_path" {print $2}' .buckconfig.local):/run/current-system/sw/bin"
 buck2 build --local-only -c remote.enabled=false //tidepool/repr:tidepool_repr
@@ -90,8 +90,8 @@ module ownership walk. Registered native wrappers own libtest discovery,
 nonzero counts, bounded isolated execution and reports. Haskell target/module
 rosters come from Cabal through `scripts/buck2-haskell-tests.py` and execute
 shared Tasty trees. Test GHC packages are separate from the production worker's
-package environment. Materialize `.#buck-test-ghc`,
-`.#buck-haskell-test-closure` and `.#buck-jev-sources`, then configure `--tests`
+package environment. Configure with `--tests` to prepare and retain
+`.#buck-test-ghc`, `.#buck-haskell-test-closure` and `.#buck-jev-sources`
 for host tests. The test runtime closure retains both host and production GHC;
 production worker compilation still uses its production toolchain alone.
 
@@ -139,12 +139,31 @@ framing test does not build Chromium or start GHC.
 ## Toolchain and output setup
 
 The flake pins Buck2, Reindeer, Rust, GHC, C/C++, and the action support tools.
-Materialize the declared action closure before configuring the checkout:
+Configure prepares the exact outputs selected by its existing flags:
 
 ```sh
-bash scripts/dev-shell.sh bash -c 'nix build --no-link "${TIDEPOOL_DEV_SHELL%#*}#buck-toolchain-closure"'
 bash scripts/buck2-configure.sh
 ```
+
+Each preparation writes an ignored checkout-owned directory under
+`.buck2-toolchains/generations/`. Its `owner` records the checkout, Unix UID,
+flake selection and flags; `outputs.tsv` records each selected output's name,
+flake reference, resolved store path and indirect GC-root link. `status` records
+preparation success or failure, and `config` retains the published configuration.
+The configuration comment and command output identify the exact generation.
+Output realization, root/path validation and GHC libdir validation precede the
+atomic configuration switch. A failed preparation preserves the prior config
+and retains its partial roots and evidence for inspection.
+
+Previous generations stay rooted by default. Before explicitly retiring one,
+inspect its recorded paths against active Buck configurations, frozen bundles
+and live processes. Do not delete the generation directory or its root links
+while any consumer still needs them. Configuring a new generation does not
+retire old roots, and checkout roots do not replace the independent retention
+owned by a frozen native bundle's qualification descriptor. `nix build --no-link`
+provides no durable retention and is not the checkout preparation workflow.
+Optional test and catalog outputs are realized only when selected; ordinary
+configuration does not build catalog products or the host test GHC environment.
 
 First-party Rust and Haskell actions use the Buck `tidepool.profile` setting.
 The checked-in default, `fast-dev`, preserves the existing per-crate Rust
@@ -182,7 +201,7 @@ in the delivery evidence ledger.
 
 The optional `matched_runtime_bundle` owns separate Nix catalog products.
 Native source-backed configuration selects `.#buck-exomonad-runtime-tools`
-independently of `--runtime-stdlib`; materialize that pinned closure before
+independently of `--runtime-stdlib`; configure prepares and roots it before
 bundle actions. Both modes preserve separately installed stock Codex and its
 credential owner; neither builds or packages credentials.
 

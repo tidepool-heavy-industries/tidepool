@@ -31,7 +31,8 @@ Review unexpected complexity as a finding, then repair it within scope.
    control flow. Report unqualified targets explicitly.
 
 Each Buck checkout needs its own provisioned `buck-out` bind mount on
-`/srv/build`. Materialize its pinned Nix outputs and configure that checkout;
+`/srv/build`. Prepare its selected pinned Nix outputs through configure, which
+retains an inspectable GC-root generation before publishing checkout config;
 see `docs/swarm-builds.md`. Keep remote execution disabled until its closure,
 isolation, reuse and cancellation gates are accepted. The first Buck query
 also starts a daemon, so it belongs inside the admitted build slice.

@@ -12,8 +12,9 @@ providers, scheduling, resources, persistence, and argument parsing.
 2. Before editing a subsystem, read the nearest nested `AGENTS.md` or
    `CLAUDE.md`. They state that crate's boundaries and invariants.
 3. Build and test through the `justfile`, a thin frontend to declared Buck targets.
-   Materialize this revision's pinned Nix tools, then configure Buck with
-   `scripts/buck2-configure.sh --tests`. See `docs/swarm-builds.md` for the
+   Prepare and retain this revision's selected pinned Nix tools with
+   `scripts/buck2-configure.sh --tests`, which publishes Buck configuration only
+   after realizing and rooting its selected outputs. See `docs/swarm-builds.md` for the
    source outputs, bind mount and resource admission requirements.
    `just test-lib PACKAGE --exact FULL_NAME --expected-count 1` runs one unit
    test through its native counted runner. Compile-only target builds do not

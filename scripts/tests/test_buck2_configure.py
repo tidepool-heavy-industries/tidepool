@@ -25,35 +25,51 @@ class ConfigureRuntimeStdlibTests(unittest.TestCase):
         self.capture.mkdir()
         self.log = self.root / "nix.log"
         self.executable("mountpoint", "#!/bin/sh\nexit 0\n")
-        self.executable("ghc", "#!/bin/sh\necho /nix/store/checked-ghc/lib\n")
+        self.outputs = self.root / "outputs"
+        self.executable("ghc", '#!/bin/sh\necho "$TEST_GHC_ROOT/lib"\n')
         self.executable("nix", f"""#!{sys.executable}
 import json, os, sys
 from pathlib import Path
+args = sys.argv[1:]
 with open(os.environ['TEST_NIX_LOG'], 'a') as log:
-    log.write(json.dumps(sys.argv[1:]) + '\\n')
-if sys.argv[1] == 'flake':
-    print(json.dumps({{'path': os.environ['TEST_SOURCE_CAPTURE']}}))
-elif '--impure' in sys.argv:
-    print('x86_64-linux')
-else:
-    name = sys.argv[-1].split('.')[-2]
+    log.write(json.dumps(args) + '\\n')
+def output(name):
     if name == 'buck-ghc':
-        print(os.environ['TEST_GHC_ROOT'])
-    elif name == 'buck-test-ghc':
-        print(os.environ['TEST_TEST_GHC_ROOT'])
-    elif name == 'buck-python':
-        print(str(Path(sys.executable).parent.parent))
-    else:
-        print('/nix/store/checked-' + name)
+        return Path(os.environ['TEST_GHC_ROOT'])
+    if name == 'buck-test-ghc':
+        return Path(os.environ['TEST_TEST_GHC_ROOT'])
+    if name == 'buck-python':
+        return Path(sys.executable).parent.parent
+    return Path(os.environ['TEST_OUTPUTS']) / name
+if args[0] == 'flake':
+    print(json.dumps({{'path': os.environ['TEST_SOURCE_CAPTURE']}}))
+elif '--impure' in args:
+    print('x86_64-linux')
+elif args[0] == 'build':
+    name = args[-1].split('.')[-1]
+    if os.environ.get('TEST_BUILD_FAILURE') == name:
+        sys.exit('selected output failed to build')
+    target = output(name)
+    target.mkdir(parents=True, exist_ok=True)
+    link = Path(args[args.index('--out-link') + 1])
+    link.symlink_to(target if os.environ.get('TEST_WRONG_ROOT') != name else target.parent)
+elif args[0] == 'path-info':
+    if not Path(args[-1]).is_dir():
+        sys.exit('output unavailable')
+    print(args[-1])
+else:
+    print(output(args[-1].split('.')[-2]))
 """)
         self.ghc = self.root / "ghc/bin"
         self.ghc.mkdir(parents=True)
+        (self.ghc.parent / "lib").mkdir()
         shutil.copyfile(self.tools / "ghc", self.ghc / "ghc")
         (self.ghc / "ghc").chmod(0o755)
 
         self.test_ghc = self.root / "test-ghc/bin"
         self.test_ghc.mkdir(parents=True)
-        (self.test_ghc / "ghc").write_text("#!/bin/sh\necho /nix/store/checked-test-ghc/lib\n")
+        (self.test_ghc.parent / "lib").mkdir()
+        (self.test_ghc / "ghc").write_text('#!/bin/sh\necho "$TEST_TEST_GHC_ROOT/lib"\n')
         (self.test_ghc / "ghc").chmod(0o755)
 
     def executable(self, name, source):
@@ -61,7 +77,7 @@ else:
         path.write_text(source)
         path.chmod(0o755)
 
-    def run_configure(self, *args, pin=PIN):
+    def run_configure(self, *args, pin=PIN, extra_env=None):
         environment = dict(os.environ)
         environment.update(
             PATH=str(self.tools) + os.pathsep + environment["PATH"],
@@ -69,10 +85,12 @@ else:
             TIDEPOOL_DEV_FLAKE=pin,
             TIDEPOOL_BUCK_REMOTE="false",
             TEST_NIX_LOG=str(self.log),
+            TEST_OUTPUTS=str(self.outputs),
             TEST_SOURCE_CAPTURE=str(self.capture),
             TEST_GHC_ROOT=str(self.ghc.parent),
             TEST_TEST_GHC_ROOT=str(self.test_ghc.parent),
         )
+        environment.update(extra_env or {})
         return subprocess.run(
             ["bash", str(self.root / "scripts/buck2-configure.sh"), *args],
             env=environment, text=True, capture_output=True,
@@ -95,17 +113,17 @@ else:
         result = self.run_configure("--tests")
         self.assertEqual(result.returncode, 0, result.stderr)
         configured = (self.root / ".buckconfig.local").read_text()
-        self.assertIn("ghc_libdir = /nix/store/checked-ghc/lib\n", configured)
-        self.assertIn("test_ghc_libdir = /nix/store/checked-test-ghc/lib\n", configured)
+        self.assertIn("ghc_libdir = " + str(self.ghc.parent / "lib") + "\n", configured)
+        self.assertIn("test_ghc_libdir = " + str(self.test_ghc.parent / "lib") + "\n", configured)
         self.assertIn("test_ghc = " + str(self.test_ghc / "ghc"), configured)
-        self.assertIn("haskell_test_closure = /nix/store/checked-buck-haskell-test-closure", configured)
-        self.assertIn("jev_sources = /nix/store/checked-buck-jev-sources", configured)
+        self.assertIn("haskell_test_closure = " + str(self.outputs / "buck-haskell-test-closure"), configured)
+        self.assertIn("jev_sources = " + str(self.outputs / "buck-jev-sources"), configured)
 
     def test_runtime_tools_are_pinned_without_project_catalog_capture(self):
         result = self.run_configure()
         self.assertEqual(result.returncode, 0, result.stderr)
         configured = (self.root / ".buckconfig.local").read_text()
-        self.assertIn("exomonad_runtime_tools = /nix/store/checked-buck-exomonad-runtime-tools", configured)
+        self.assertIn("exomonad_runtime_tools = " + str(self.outputs / "buck-exomonad-runtime-tools"), configured)
         self.assertIn("runtime_stdlib_products = \n", configured)
         calls = [json.loads(line) for line in self.log.read_text().splitlines()]
         self.assertTrue(any(call[-1].endswith("buck-exomonad-runtime-tools.outPath") for call in calls))
@@ -125,11 +143,11 @@ else:
         result = self.run_configure("--runtime-stdlib")
         self.assertEqual(result.returncode, 0, result.stderr)
         text = (self.root / ".buckconfig.local").read_text()
-        self.assertIn("runtime_stdlib_sources = /nix/store/checked-runtime-stdlib-sources", text)
-        self.assertIn("runtime_stdlib_products = /nix/store/checked-runtime-stdlib-products", text)
-        self.assertIn("runtime_stdlib_extract = /nix/store/checked-tidepool-extract", text)
+        self.assertIn("runtime_stdlib_sources = " + str(self.outputs / "runtime-stdlib-sources"), text)
+        self.assertIn("runtime_stdlib_products = " + str(self.outputs / "runtime-stdlib-products"), text)
+        self.assertIn("runtime_stdlib_extract = " + str(self.outputs / "tidepool-extract"), text)
         calls = [json.loads(line) for line in self.log.read_text().splitlines()]
-        selected = [call[-1] for call in calls if "runtime-stdlib" in call[-1]]
+        selected = [call[-1] for call in calls if call[0] == "eval" and "runtime-stdlib" in call[-1]]
         self.assertTrue(selected)
         self.assertTrue(all(reference.startswith(PIN + "#") for reference in selected))
 
@@ -138,6 +156,74 @@ else:
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertIn("revision-pinned", result.stderr)
         self.assertNotIn('"flake"', self.log.read_text())
+
+    def generations(self):
+        return sorted((self.root / ".buck2-toolchains/generations").iterdir())
+
+    def test_selected_outputs_have_registered_roots_before_config_is_published(self):
+        result = self.run_configure("--tests")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        generation, = self.generations()
+        records = [line.split("\t") for line in (generation / "outputs.tsv").read_text().splitlines()]
+        calls = [json.loads(line) for line in self.log.read_text().splitlines()]
+        evaluated = {call[-1].removesuffix(".outPath") for call in calls if call[0] == "eval" and "--impure" not in call}
+        self.assertEqual({reference for _, reference, _, _ in records}, evaluated)
+        self.assertEqual(len(records), len(evaluated))
+        for _, reference, output, root in records:
+            self.assertTrue(Path(root).is_symlink())
+            self.assertEqual(str(Path(root).resolve()), output)
+            self.assertTrue(any(call[0] == "build" and call[-1] == reference and
+                                call[call.index("--out-link") + 1] == root for call in calls))
+            self.assertIn(["path-info", "--", output], calls)
+        self.assertEqual((generation / "status").read_text(), "configured\n")
+        self.assertEqual((generation / "config").read_bytes(), (self.root / ".buckconfig.local").read_bytes())
+        self.assertIn(str(generation), result.stdout)
+        self.assertIn("uid=", (generation / "owner").read_text())
+
+    def test_new_selection_keeps_prior_generation_and_optional_outputs_separate(self):
+        result = self.run_configure()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        old, = self.generations()
+        old_config = (old / "config").read_bytes()
+        old_records = (old / "outputs.tsv").read_text()
+        self.assertNotIn("buck-test-ghc", old_records)
+        self.assertNotIn("runtime-stdlib-products", old_records)
+        result = self.run_configure("--tests")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(self.generations()), 2)
+        self.assertEqual((old / "config").read_bytes(), old_config)
+        for line in old_records.splitlines():
+            self.assertTrue(Path(line.split("\t")[3]).is_symlink())
+        self.assertNotEqual((self.root / ".buckconfig.local").read_bytes(), old_config)
+
+    def assert_failed_generation_preserves_config(self, result):
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((self.root / ".buckconfig.local").read_text(), "previous configuration\n")
+        generation, = self.generations()
+        self.assertTrue((generation / "status").read_text().startswith("failed"))
+        self.assertIn(str(generation), result.stderr)
+        self.assertFalse((generation / "config").exists())
+
+    def test_build_failure_retains_evidence_without_switching_config(self):
+        (self.root / ".buckconfig.local").write_text("previous configuration\n")
+        self.assert_failed_generation_preserves_config(
+            self.run_configure(extra_env={"TEST_BUILD_FAILURE": "buck-browser-npm-cache"}))
+        generation, = self.generations()
+        self.assertIn("buck-browser-npm-cache", (generation / "outputs.tsv").read_text())
+        self.assertTrue((generation / "roots/buck-ghc").is_symlink())
+
+    def test_wrong_root_refuses_configuration(self):
+        (self.root / ".buckconfig.local").write_text("previous configuration\n")
+        result = self.run_configure(extra_env={"TEST_WRONG_ROOT": "buck-rust"})
+        self.assert_failed_generation_preserves_config(result)
+        self.assertIn("output/root mismatch", result.stderr)
+
+    def test_unavailable_ghc_libdir_refuses_configuration(self):
+        (self.root / ".buckconfig.local").write_text("previous configuration\n")
+        (self.test_ghc.parent / "lib").rmdir()
+        result = self.run_configure("--tests")
+        self.assert_failed_generation_preserves_config(result)
+        self.assertIn("GHC libdir is unavailable", result.stderr)
 
 
 if __name__ == "__main__":
