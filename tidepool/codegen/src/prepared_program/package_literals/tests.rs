@@ -506,7 +506,11 @@ fn package_literal_parcel_keeps_image_bytes_after_sender_drop() {
     assert!(receiver
         .pending_parcel_import_identities(&parcel)
         .is_empty());
-    let (arrived, imports) = receiver.import_parcel(parcel, RealmId::ROOT).unwrap();
+    let crate::prepared_program::ImportedParcel {
+        value: arrived,
+        imports,
+        ..
+    } = receiver.import_parcel(parcel, RealmId::ROOT).unwrap();
     assert!(imports.is_empty());
     let result = receiver
         .run_entry_retained(

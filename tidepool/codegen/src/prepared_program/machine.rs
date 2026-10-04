@@ -1896,9 +1896,6 @@ impl<'code> PreparedMachine<'code> {
         &mut self,
         imported: &[ProgramId],
     ) -> Result<(), ExecutionError> {
-        if imported.is_empty() {
-            return Ok(());
-        }
         let temporary_pins: Vec<_> = self
             .programs
             .keys()
@@ -1918,6 +1915,16 @@ impl<'code> PreparedMachine<'code> {
         })();
         for id in temporary_pins {
             self.pins.remove(&id);
+        }
+        if let Err(error) = &result {
+            tracing::error!(
+                ?error,
+                "parcel rollback could not prove complete native retirement"
+            );
+            // Failed rollback cannot leave native images runnable without
+            // their caller's admission metadata. The existing integrity
+            // latch fences all subsequent entry, inspection and import.
+            return Err(runtime_error(&self.machine, crate::host_fns::bad_pointer()));
         }
         result
     }
@@ -4809,7 +4816,11 @@ mod tests {
             parcel.bytes() > 0,
             "a heap constructor is copied, not shared"
         );
-        let (arrived, _imports) = right
+        let crate::prepared_program::ImportedParcel {
+            value: arrived,
+            imports: _imports,
+            ..
+        } = right
             .import_parcel(parcel, RealmId::ROOT)
             .expect("right imports the parcel");
         let after = right
@@ -4890,7 +4901,11 @@ mod tests {
         ));
         let parcel = left.export_parcel(handle).expect("export");
         assert_eq!(parcel.bytes(), 0, "a static value is shared, never copied");
-        let (arrived, _imports) = right
+        let crate::prepared_program::ImportedParcel {
+            value: arrived,
+            imports: _imports,
+            ..
+        } = right
             .import_parcel(parcel, RealmId::ROOT)
             .expect("right imports a static reference");
         assert_eq!(right.handle_current_pointer(arrived), Some(source_address));
@@ -4956,7 +4971,11 @@ mod tests {
         assert_eq!(pending, vec![thunk_to_closure_identity()]);
         assert!(left.pending_parcel_import_identities(&parcel).is_empty());
         assert_eq!(right.residency().programs, before);
-        let (arrived, imports) = right
+        let crate::prepared_program::ImportedParcel {
+            value: arrived,
+            imports,
+            ..
+        } = right
             .import_parcel(parcel, RealmId::ROOT)
             .expect("right imports, installing both images");
         assert_eq!(
@@ -4971,7 +4990,11 @@ mod tests {
             .export_parcel(entry)
             .expect("export the same instances again");
         assert!(right.pending_parcel_import_identities(&repeated).is_empty());
-        let (repeated_value, repeated_imports) = right
+        let crate::prepared_program::ImportedParcel {
+            value: repeated_value,
+            imports: repeated_imports,
+            ..
+        } = right
             .import_parcel(repeated, RealmId::ROOT)
             .expect("already installed instances retain their bindings");
         assert!(repeated_imports.is_empty());
@@ -5014,7 +5037,7 @@ mod tests {
         assert!(right.release(arrived));
     }
 
-    fn rejected_static_parcel_restores_receiver(fail_after_first_install: bool) {
+    fn rejected_parcel_restores_receiver(fail_after_first_install: bool, copied_heap: bool) {
         let options = PreparedMachineOptions {
             nursery_bytes: RunOptions::default().nursery_bytes,
         };
@@ -5033,8 +5056,19 @@ mod tests {
         )
         .expect("source installs C importing A");
         let entry = source.retain_top(caller, ValueId(0)).expect("source entry");
-        let mut parcel = source.export_parcel(entry).expect("export static closure");
-        assert_eq!(parcel.bytes(), 0);
+        let root = if copied_heap {
+            let mut builder = source.managed_builder().expect("copied wrapper builder");
+            let wrapper = builder
+                .constructor(DataConId(7_960), &[ManagedField::Handle(entry)])
+                .expect("copied wrapper retains both native dependencies");
+            builder.finish(RealmId::ROOT, wrapper).expect("copied root")
+        } else {
+            entry
+        };
+        let mut parcel = source
+            .export_parcel(root)
+            .expect("export dependency closure");
+        assert_eq!(parcel.bytes() > 0, copied_heap);
         assert_eq!(parcel.images().len(), 2);
         let identity = parcel.images()[0].imports[0].0.clone();
         let failing_image = usize::from(fail_after_first_install);
@@ -5083,12 +5117,59 @@ mod tests {
 
     #[test]
     fn a_rejected_static_parcel_before_first_install_releases_its_dependencies() {
-        rejected_static_parcel_restores_receiver(false);
+        rejected_parcel_restores_receiver(false, false);
     }
 
     #[test]
     fn a_rejected_static_parcel_after_first_install_rolls_back_all_dependencies() {
-        rejected_static_parcel_restores_receiver(true);
+        rejected_parcel_restores_receiver(true, false);
+    }
+
+    #[test]
+    fn a_rejected_copied_parcel_before_first_install_releases_its_dependencies() {
+        rejected_parcel_restores_receiver(false, true);
+    }
+
+    #[test]
+    fn a_rejected_copied_parcel_after_first_install_rolls_back_all_dependencies() {
+        rejected_parcel_restores_receiver(true, true);
+    }
+
+    #[test]
+    fn failed_parcel_retirement_fences_the_receiver() {
+        let (mut receiver, program) = PreparedMachine::new(
+            CompiledProgram::compile(&base_program(7_959)).expect("native image"),
+            PreparedMachineOptions {
+                nursery_bytes: RunOptions::default().nursery_bytes,
+            },
+        )
+        .expect("receiver");
+        let _retained = receiver
+            .retain_top(program, ValueId(0))
+            .expect("actual native root");
+        assert!(matches!(receiver.retire_failed_parcel_installs(&[program]),
+            Err(ExecutionError::Runtime(failure))
+                if failure.disposition == MachineDisposition::Unavailable));
+        assert_eq!(
+            receiver.residency().programs,
+            1,
+            "uncertain cleanup retains the native image until machine teardown"
+        );
+        assert_eq!(
+            receiver.handle_count(),
+            1,
+            "the residual root retains its custody"
+        );
+        assert!(
+            matches!(receiver.run_entry(
+            program, ValueId(0), &[], PreparedCallOptions {
+                observation_budget: RunOptions::default().observation_budget,
+                collect_before_observation: false,
+            }, RealmId::ROOT,
+        ), Err(ExecutionError::Runtime(failure))
+            if failure.disposition == MachineDisposition::Unavailable),
+            "a failed retirement proof fences subsequent native entry"
+        );
     }
 
     fn p7_case_producer_identity() -> SymbolIdentity {
@@ -5383,7 +5464,11 @@ mod tests {
             options,
         )
         .expect("right installs an unrelated base image, lacking both A and B");
-        let (arrived, _imports) = right
+        let crate::prepared_program::ImportedParcel {
+            value: arrived,
+            imports: _imports,
+            ..
+        } = right
             .import_parcel(parcel, RealmId::ROOT)
             .expect("right imports, installing both A and B");
         let call_site =
@@ -5458,7 +5543,11 @@ mod tests {
             options,
         )
         .expect("right installs an unrelated base image, lacking A's");
-        let (arrived, _imports) = right
+        let crate::prepared_program::ImportedParcel {
+            value: arrived,
+            imports: _imports,
+            ..
+        } = right
             .import_parcel(parcel, RealmId::ROOT)
             .expect("right imports, installing A's image it lacked");
         // The parcel is consumed by `import_parcel`; the source machine is

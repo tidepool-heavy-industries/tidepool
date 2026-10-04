@@ -33,7 +33,7 @@ use tidepool_heap::gc::evacuate::{export_reachable, MachineSpaces, NurseryView};
 use tidepool_repr::execution_schema::{RuntimeRep, SymbolIdentity};
 use tidepool_repr::DataConId;
 
-/// Admit static roots carried by a zero-byte parcel until their owning
+/// Admit static roots carried by a parcel until their owning
 /// instances install. A failed import must not leave ownerless regions in the
 /// receiving machine's exact-address catalog.
 struct PendingStaticRegions {
@@ -107,6 +107,15 @@ pub struct Parcel {
     heap: tidepool_heap::gc::evacuate::Parcel,
     images: Vec<ParcelImage>,
     constructors: Vec<ParcelConstructor>,
+}
+
+/// Successful import of a value and its exact native instance owners. The
+/// program report follows the parcel image order, including already installed
+/// instances, so session metadata can admit those same image declarations.
+pub struct ImportedParcel {
+    pub value: PreparedHandle,
+    pub imports: Vec<(SymbolIdentity, PreparedHandle)>,
+    pub programs: Vec<(ProgramId, Arc<CompiledProgram>)>,
 }
 
 impl Parcel {
@@ -348,7 +357,7 @@ impl PreparedMachine<'_> {
     /// new old-space arena, its payloads become ledger allocations, every
     /// image it names that this machine lacks is installed (bound to the
     /// copies of its import slots), and the returned handle roots the value
-    /// in `realm`. The second element is every distinct identity (across
+    /// in `realm`. The import report carries every distinct identity (across
     /// every newly installed image's `ParcelImports`, deduplicated) paired
     /// with the handle rooting its copied value — the session layer records
     /// these in the persistent binding store so a LATER compiled program on
@@ -363,7 +372,7 @@ impl PreparedMachine<'_> {
         &mut self,
         parcel: Parcel,
         realm: RealmId,
-    ) -> Result<(PreparedHandle, Vec<(SymbolIdentity, PreparedHandle)>), ExecutionError> {
+    ) -> Result<ImportedParcel, ExecutionError> {
         self.ensure_handle_access()?;
         let _quiescent = self.quiesce()?;
         let Parcel {
@@ -413,185 +422,206 @@ impl PreparedMachine<'_> {
         self.handles.try_reserve_handles(roots).map_err(|_| {
             runtime_error(&self.machine, crate::host_fns::RuntimeError::HeapOverflow)
         })?;
-        // Carried constructors join this machine's registry exactly as an
-        // install's interned constructors do: shared, never owned, never
-        // retired. Infallible, so it happens before any heap work.
-        self.descriptors.reserve(new_constructors.len());
-        for entry in &new_constructors {
-            let header = entry.descriptor.initial_header_word();
-            self.descriptors.push(Arc::clone(&entry.descriptor));
-            self.descriptor_registry.insert(
-                header,
-                super::DescriptorMetadata {
-                    descriptor: Arc::clone(&entry.descriptor),
-                    meaning: super::DescriptorMeaning::Constructor(super::ConstructorObservation {
-                        identity: entry.identity,
-                        fields: entry.fields.clone(),
-                    }),
-                },
-            );
-            self.machine
-                .register_prepared_constructors([(header, entry.identity)]);
-        }
-        let carried: Vec<Arc<ObjectDescriptor>> = new_constructors
-            .iter()
-            .map(|entry| Arc::clone(&entry.descriptor))
-            .collect();
-        drop(new_constructors);
+        let mut handles = Vec::with_capacity(roots);
+        let mut installed_ids = Vec::new();
+        let mut provisional_headers = Vec::new();
+        let mut gc_provisional_headers = Vec::new();
+        let mut static_admission = None;
+        let result = (|| {
+            // Carried constructors join this machine's registry exactly as an
+            // install's interned constructors do. Their provisional registrations
+            // stay available through failure collection and commit with the import.
+            self.descriptors.reserve(new_constructors.len());
+            for entry in &new_constructors {
+                let header = entry.descriptor.initial_header_word();
+                provisional_headers.push(header);
+                self.descriptors.push(Arc::clone(&entry.descriptor));
+                self.descriptor_registry.insert(
+                    header,
+                    super::DescriptorMetadata {
+                        descriptor: Arc::clone(&entry.descriptor),
+                        meaning: super::DescriptorMeaning::Constructor(
+                            super::ConstructorObservation {
+                                identity: entry.identity,
+                                fields: entry.fields.clone(),
+                            },
+                        ),
+                    },
+                );
+                self.machine
+                    .register_prepared_constructors([(header, entry.identity)]);
+            }
+            let carried: Vec<Arc<ObjectDescriptor>> = new_constructors
+                .iter()
+                .map(|entry| Arc::clone(&entry.descriptor))
+                .collect();
+            drop(new_constructors);
 
-        // A static root needs no heap copy, but an imported instance can
-        // verify one of its imports before the instance owning that root is
-        // installed. Admit only the exact immutable regions named by this
-        // parcel for that interval; installation takes over their ownership.
-        let mut static_admission = if parcel.bytes() == 0 {
+            // A static root needs no heap copy, but an imported instance can
+            // verify one of its imports before the instance owning that root is
+            // installed. Admit only the exact immutable regions named by this
+            // parcel for that interval; installation takes over their ownership.
             let catalog = self
                 .machine
                 .prepared_static_catalog()
                 .map_err(|cause| runtime_error(&self.machine, cause))?;
-            Some(PendingStaticRegions::new(catalog, &missing)?)
-        } else {
-            None
-        };
+            static_admission = Some(PendingStaticRegions::new(catalog, &missing)?);
 
-        // Payloads first: the copier expands them through this machine's
-        // ledger, so the parcel must already point at ledger allocations.
-        let mut payload_map = HashMap::new();
-        for payload in parcel.payloads() {
-            let shape = payload.shape();
-            let published = match shape.kind {
-                ExternalStorageKind::Bytes => self
-                    .machine
-                    .allocate_external_bytes(shape.logical_len, shape.align),
-                ExternalStorageKind::BoxedArray => self
-                    .machine
-                    .allocate_external_storage(shape.kind, shape.logical_len),
+            // Copy and rollback collection both need every image layout
+            // before any instance installs. Dispatch is still unavailable
+            // until the instance's native installation succeeds.
+            for entry in &missing {
+                for (&header, metadata) in &entry.instance.descriptor_registry {
+                    if self.descriptor_registry.contains_key(&header) {
+                        continue;
+                    }
+                    provisional_headers.push(header);
+                    self.descriptors.push(Arc::clone(&metadata.descriptor));
+                    self.descriptor_registry.insert(header, metadata.clone());
+                    if let super::DescriptorMeaning::Constructor(observation) = &metadata.meaning {
+                        self.machine
+                            .register_prepared_constructors([(header, observation.identity)]);
+                    }
+                }
             }
-            .map_err(|error| {
-                ExecutionError::Evacuation(DescriptorTraceError::ExternalPayload(error))
-            })?;
-            let data = payload.data();
-            // SAFETY: the ledger allocated `logical_len` bytes (or slots)
-            // after the length prefix at `published`.
-            unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), published.add(8), data.len()) };
-            payload_map.insert(payload.published() as usize, published);
-        }
-        // SAFETY: the parcel is sealed and owned; no copy is in progress.
-        unsafe { parcel.rewrite_payloads(&payload_map) }.map_err(ExecutionError::Evacuation)?;
 
-        let relocated: Vec<usize> = if parcel.bytes() == 0 {
-            // Static or otherwise stable roots: nothing to copy, but the
-            // images that own them must still be installed below.
-            parcel.roots().to_vec()
-        } else {
-            let mut state = self
+            // Copy and installation admit descriptor-space keys independently
+            // of the native registry. Remember only previously absent keys;
+            // failed image retirement leaves shared constructor keys admitted.
+            let state = self
                 .machine
                 .take_gc_state()
                 .ok_or_else(|| runtime_error(&self.machine, crate::host_fns::bad_pointer()))?;
-            let outcome: Result<Vec<usize>, ExecutionError> = (|| {
-                let prepared = state
-                    .prepared
-                    .as_mut()
-                    .ok_or_else(|| runtime_error(&self.machine, crate::host_fns::bad_pointer()))?;
-                // The copier must recognise every header and static region
-                // the parcel names before the images that own them are
-                // installed (installing needs the copied import values, so
-                // the copy comes first). Descriptors and static regions are
-                // shared, immutable `Arc`s; knowing them early is harmless.
-                let mut arena_descriptors = self.descriptors.clone();
-                prepared
-                    .space
-                    .extend_descriptors(carried.iter().cloned())
-                    .map_err(ExecutionError::Evacuation)?;
-                for entry in &missing {
-                    prepared
-                        .space
-                        .extend_descriptors(entry.instance.descriptors.iter().cloned())
-                        .map_err(ExecutionError::Evacuation)?;
-                    prepared
-                        .space
-                        .extend_static_region(Arc::clone(&entry.instance.statics))
-                        .map_err(ExecutionError::Evacuation)?;
-                    arena_descriptors.extend(entry.instance.descriptors.iter().cloned());
-                }
-                let mut arena = DescriptorArena::reserve(parcel.bytes(), arena_descriptors)
-                    .map_err(ExecutionError::Evacuation)?;
-                self.old_space.prepared_arenas.try_reserve(1).map_err(|_| {
-                    runtime_error(&self.machine, crate::host_fns::RuntimeError::HeapOverflow)
-                })?;
-                let range = arena.allocation_range();
-                self.machine
-                    .register_old_space_arena(range.start as *const u8, range.end as *const u8);
-                self.machine.arm_write_barrier();
-                // SAFETY: quiescent, exclusively borrowed machine; the parcel
-                // already points at this ledger's payloads.
-                let copied = unsafe {
-                    parcel.import_into(&mut arena, &mut prepared.space, None, &*self.machine)
-                };
-                let (relocated, _) = match copied {
-                    Ok(copied) => copied,
-                    Err(error) => {
-                        self.machine.retire_old_space_arena(
-                            range.start as *const u8,
-                            range.end as *const u8,
-                        );
-                        return Err(ExecutionError::Evacuation(error));
-                    }
-                };
-                let visited: Vec<_> = prepared.space.visited_external_payloads().collect();
-                self.old_space.prepared_arenas.push(arena);
-                self.machine
-                    .retain_external_payloads(&visited)
-                    .map_err(|error| {
-                        ExecutionError::Evacuation(DescriptorTraceError::ExternalPayload(error))
-                    })?;
-                Ok(relocated)
-            })();
+            let keys = state.prepared.as_ref().map(|prepared| {
+                carried
+                    .iter()
+                    .chain(
+                        missing
+                            .iter()
+                            .flat_map(|entry| entry.instance.descriptors.iter()),
+                    )
+                    .map(|descriptor| descriptor.initial_header_word())
+                    .filter(|header| prepared.space.live_descriptor(*header).is_none())
+                    .collect::<Vec<_>>()
+            });
             self.machine.put_gc_state(state);
-            outcome?
-        };
+            gc_provisional_headers =
+                keys.ok_or_else(|| runtime_error(&self.machine, crate::host_fns::bad_pointer()))?;
 
-        // Every root gets a handle: the value's for the caller, the imports'
-        // for the installs below and the caller after
-        // (`Self::import_parcel`'s own doc comment — kept, not released,
-        // once the blocks hold them too).
-        let mut handles = Vec::with_capacity(relocated.len());
-        let mut installed_ids = Vec::new();
-        // The images install in manifest order, and an image's import values
-        // may belong to a sibling that installs later: an install verifies
-        // its imports through this machine's registry, so every missing
-        // image's descriptors join the registry first. Shared `Arc`s; an
-        // install's own extension of the registry skips what is present.
-        let mut provisional_headers = Vec::new();
-        for entry in &missing {
-            for (&header, metadata) in &entry.instance.descriptor_registry {
-                if self.descriptor_registry.contains_key(&header) {
-                    continue;
+            // Payloads first: the copier expands them through this machine's
+            // ledger, so the parcel must already point at ledger allocations.
+            let mut payload_map = HashMap::new();
+            for payload in parcel.payloads() {
+                let shape = payload.shape();
+                let published = match shape.kind {
+                    ExternalStorageKind::Bytes => self
+                        .machine
+                        .allocate_external_bytes(shape.logical_len, shape.align),
+                    ExternalStorageKind::BoxedArray => self
+                        .machine
+                        .allocate_external_storage(shape.kind, shape.logical_len),
                 }
-                provisional_headers.push(header);
-                self.descriptors.push(Arc::clone(&metadata.descriptor));
-                self.descriptor_registry.insert(header, metadata.clone());
-                if let super::DescriptorMeaning::Constructor(observation) = &metadata.meaning {
-                    self.machine
-                        .register_prepared_constructors([(header, observation.identity)]);
-                }
+                .map_err(|error| {
+                    ExecutionError::Evacuation(DescriptorTraceError::ExternalPayload(error))
+                })?;
+                let data = payload.data();
+                // SAFETY: the ledger allocated `logical_len` bytes (or slots)
+                // after the length prefix at `published`.
+                unsafe {
+                    std::ptr::copy_nonoverlapping(data.as_ptr(), published.add(8), data.len())
+                };
+                payload_map.insert(payload.published() as usize, published);
             }
-        }
-        let missing: Vec<(Arc<CompiledProgram>, Arc<InstanceImage>, ParcelImports)> = missing
-            .into_iter()
-            .map(|entry| {
-                (
-                    Arc::clone(&entry.image),
-                    Arc::clone(&entry.instance),
-                    entry.imports.clone(),
-                )
-            })
-            .collect();
-        // Kept, not released: the caller (session layer) roots these in the
-        // persistent binding store, so a later compiled program's import
-        // resolves against the SAME live value the images below install
-        // bound to. An index not named by any kept identity (a duplicate
-        // root two images both import) is released with the rest below.
-        let result = (|| {
+            // SAFETY: the parcel is sealed and owned; no copy is in progress.
+            unsafe { parcel.rewrite_payloads(&payload_map) }.map_err(ExecutionError::Evacuation)?;
+
+            let relocated: Vec<usize> = if parcel.bytes() == 0 {
+                // Static or otherwise stable roots: nothing to copy, but the
+                // images that own them must still be installed below.
+                parcel.roots().to_vec()
+            } else {
+                let mut state = self
+                    .machine
+                    .take_gc_state()
+                    .ok_or_else(|| runtime_error(&self.machine, crate::host_fns::bad_pointer()))?;
+                let outcome: Result<Vec<usize>, ExecutionError> = (|| {
+                    let prepared = state.prepared.as_mut().ok_or_else(|| {
+                        runtime_error(&self.machine, crate::host_fns::bad_pointer())
+                    })?;
+                    // The copier must recognise every header and static region
+                    // the parcel names before the images that own them are
+                    // installed (installing needs the copied import values, so
+                    // the copy comes first). Descriptors and static regions are
+                    // shared, immutable `Arc`s; knowing them early is harmless.
+                    let mut arena_descriptors = self.descriptors.clone();
+                    prepared
+                        .space
+                        .extend_descriptors(carried.iter().cloned())
+                        .map_err(ExecutionError::Evacuation)?;
+                    for entry in &missing {
+                        prepared
+                            .space
+                            .extend_descriptors(entry.instance.descriptors.iter().cloned())
+                            .map_err(ExecutionError::Evacuation)?;
+                        prepared
+                            .space
+                            .extend_static_region(Arc::clone(&entry.instance.statics))
+                            .map_err(ExecutionError::Evacuation)?;
+                        arena_descriptors.extend(entry.instance.descriptors.iter().cloned());
+                    }
+                    let mut arena = DescriptorArena::reserve(parcel.bytes(), arena_descriptors)
+                        .map_err(ExecutionError::Evacuation)?;
+                    self.old_space.prepared_arenas.try_reserve(1).map_err(|_| {
+                        runtime_error(&self.machine, crate::host_fns::RuntimeError::HeapOverflow)
+                    })?;
+                    let range = arena.allocation_range();
+                    self.machine
+                        .register_old_space_arena(range.start as *const u8, range.end as *const u8);
+                    self.machine.arm_write_barrier();
+                    // SAFETY: quiescent, exclusively borrowed machine; the parcel
+                    // already points at this ledger's payloads.
+                    let copied = unsafe {
+                        parcel.import_into(&mut arena, &mut prepared.space, None, &*self.machine)
+                    };
+                    let (relocated, _) = match copied {
+                        Ok(copied) => copied,
+                        Err(error) => {
+                            self.machine.retire_old_space_arena(
+                                range.start as *const u8,
+                                range.end as *const u8,
+                            );
+                            return Err(ExecutionError::Evacuation(error));
+                        }
+                    };
+                    let visited: Vec<_> = prepared.space.visited_external_payloads().collect();
+                    self.old_space.prepared_arenas.push(arena);
+                    self.machine
+                        .retain_external_payloads(&visited)
+                        .map_err(|error| {
+                            ExecutionError::Evacuation(DescriptorTraceError::ExternalPayload(error))
+                        })?;
+                    Ok(relocated)
+                })();
+                self.machine.put_gc_state(state);
+                outcome?
+            };
+
+            let missing: Vec<(Arc<CompiledProgram>, Arc<InstanceImage>, ParcelImports)> = missing
+                .into_iter()
+                .map(|entry| {
+                    (
+                        Arc::clone(&entry.image),
+                        Arc::clone(&entry.instance),
+                        entry.imports.clone(),
+                    )
+                })
+                .collect();
+            // Kept, not released: the caller (session layer) roots these in the
+            // persistent binding store, so a later compiled program's import
+            // resolves against the SAME live value the images below install
+            // bound to. An index not named by any kept identity (a duplicate
+            // root two images both import) is released with the rest below.
+            // Every root is retained before installation can allocate or collect.
             for &pointer in &relocated {
                 let slot = self
                     .old_space
@@ -636,28 +666,72 @@ impl PreparedMachine<'_> {
                 if let Some(admission) = &mut static_admission {
                     admission.committed();
                 }
-                Ok(imported)
+                let (value, imports) = imported;
+                let programs = images
+                    .into_iter()
+                    .map(|image| {
+                        let program = self
+                            .programs
+                            .iter()
+                            .find_map(|(id, installed)| {
+                                Arc::ptr_eq(&installed.instance, &image.instance).then_some(*id)
+                            })
+                            .expect("successful parcel import installs every exact instance");
+                        (program, image.image)
+                    })
+                    .collect();
+                Ok(ImportedParcel {
+                    value,
+                    imports,
+                    programs,
+                })
             }
             Err(error) => {
-                if let Some(admission) = &mut static_admission {
-                    for handle in handles {
-                        self.release(handle);
-                    }
-                    if let Err(cleanup) = self.retire_failed_parcel_installs(&installed_ids) {
-                        // A failed collection still owns every installed
-                        // instance. Keep provisional regions admitted rather
-                        // than strand any retained heap object or root.
+                for handle in handles {
+                    self.release(handle);
+                }
+                if let Err(cleanup) = self.retire_failed_parcel_installs(&installed_ids) {
+                    tracing::error!(
+                        ?error,
+                        ?cleanup,
+                        "parcel import failed with incomplete rollback"
+                    );
+                    // Uncertain cleanup fences the machine. Retain admitted
+                    // regions until teardown so residual code cannot dangle.
+                    if let Some(admission) = &mut static_admission {
                         admission.committed();
-                        return Err(cleanup);
                     }
-                    self.machine
-                        .retire_prepared_constructors(&provisional_headers);
-                    self.descriptors.retain(|descriptor| {
-                        !provisional_headers.contains(&descriptor.initial_header_word())
-                    });
-                    for header in provisional_headers {
-                        self.descriptor_registry.remove(&header);
+                    return Err(cleanup);
+                }
+                // Collection proved no copied object still names these
+                // provisional layouts. The copy's registrations need cleanup
+                // even when the first image never installed.
+                let Some(mut state) = self.machine.take_gc_state() else {
+                    if let Some(admission) = &mut static_admission {
+                        admission.committed();
                     }
+                    return Err(runtime_error(&self.machine, crate::host_fns::bad_pointer()));
+                };
+                let cleaned = if let Some(prepared) = state.prepared.as_mut() {
+                    prepared.space.retire_owner(&gc_provisional_headers, None);
+                    true
+                } else {
+                    false
+                };
+                self.machine.put_gc_state(state);
+                if !cleaned {
+                    if let Some(admission) = &mut static_admission {
+                        admission.committed();
+                    }
+                    return Err(runtime_error(&self.machine, crate::host_fns::bad_pointer()));
+                }
+                self.machine
+                    .retire_prepared_constructors(&provisional_headers);
+                self.descriptors.retain(|descriptor| {
+                    !provisional_headers.contains(&descriptor.initial_header_word())
+                });
+                for header in provisional_headers {
+                    self.descriptor_registry.remove(&header);
                 }
                 Err(error)
             }

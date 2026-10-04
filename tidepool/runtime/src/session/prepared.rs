@@ -5389,10 +5389,38 @@ impl PreparedEngine {
         parcel: Parcel,
         realm: RealmId,
     ) -> Result<(ValueHandle, Vec<(SymbolIdentity, PreparedHandle)>), PreparedRuntimeError> {
-        self.machine
+        // Native code and its typed delivery evidence cross as one owner.
+        // All site conflicts are refused before the machine imports any roots.
+        let facts = parcel
+            .images()
+            .iter()
+            .map(|image| ProgramFacts::from_image(&image.image, None))
+            .collect::<Vec<_>>();
+        let plans = self.plan_batch_evidence(&facts)?;
+        let imported = self
+            .machine
             .import_parcel(parcel, realm)
-            .map(|(handle, imports)| (handle.raw(), imports))
-            .map_err(PreparedRuntimeError::Run)
+            .map_err(PreparedRuntimeError::Run)?;
+        assert_eq!(
+            imported.programs.len(),
+            facts.len(),
+            "exact parcel image report"
+        );
+        for (((program, image), facts), plan) in imported.programs.into_iter().zip(facts).zip(plans)
+        {
+            assert!(
+                Arc::ptr_eq(image.definition_facts(), &facts.definitions),
+                "parcel metadata retains the same native image"
+            );
+            // A repeated instance keeps its admitted entry/resume metadata.
+            if let std::collections::btree_map::Entry::Vacant(entry) = self.programs.entry(program)
+            {
+                entry.insert(facts);
+                self.installs_since_major += 1;
+            }
+            self.publish_evidence(program, plan);
+        }
+        Ok((imported.value.raw(), imported.imports))
     }
 
     pub(crate) fn pending_parcel_import_identities(&self, parcel: &Parcel) -> Vec<SymbolIdentity> {
@@ -8857,6 +8885,10 @@ pub(super) mod tests {
     /// has three scalar fields so its table row passes name/arity lookup but
     /// descriptor validation rejects it after the byte array was built.
     fn json_mount_program() -> PreparedProgram {
+        json_mount_program_with_verb(false)
+    }
+
+    fn json_mount_program_with_verb(include_verb: bool) -> PreparedProgram {
         let mut wire = testing::wire_program();
         wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
         wire.constructors = vec![
@@ -9186,6 +9218,13 @@ pub(super) mod tests {
             text: ConstructorId(16),
             int: ConstructorId(15),
         });
+        if include_verb {
+            let mut verb = wire.sites[0].clone();
+            verb.site = tidepool_repr::execution_schema::SYNTHETIC_SITE_BIT | 7;
+            verb.ordinal = 2;
+            wire.verb_sites.push((ConstructorId(0), verb.site));
+            wire.sites.push(verb);
+        }
         testing::prepare(wire).expect("JSON mount fixture")
     }
 
@@ -9419,6 +9458,205 @@ pub(super) mod tests {
         ));
         assert!(engine.release(value));
         assert_eq!(engine.parked_count(), 0);
+    }
+
+    #[test]
+    fn parcel_import_retains_typed_replies_across_instance_retirement() {
+        fn park_json_reply(
+            engine: &mut PreparedEngine,
+            owner: ProgramId,
+            site: u64,
+        ) -> ContinuationId {
+            let continuation = {
+                let mut builder = engine.machine.managed_builder().expect("reply builder");
+                let root = builder.constructor(DataConId(105), &[]).expect("Null");
+                builder
+                    .finish(RealmId::ROOT, root)
+                    .expect("rooted continuation")
+            };
+            engine
+                .machine
+                .park(
+                    continuation,
+                    RealmId::ROOT,
+                    None,
+                    ParkRequest {
+                        principal: PrincipalId::SYSTEM,
+                        effect_policy: EffectRunPolicy::SuspendAll,
+                        live_payload: LivePayloadPolicy::None,
+                        evidence: PreparedFrameEvidence {
+                            owner,
+                            site,
+                            runner: owner,
+                            resume_entry: ValueId(1),
+                            continuation_rep: RuntimeRep::LiftedRef,
+                        },
+                    },
+                )
+                .expect("imported continuation parks")
+        }
+        fn answer_json(engine: &mut PreparedEngine, owner: ProgramId) {
+            let id = park_json_reply(engine, owner, 7);
+            let resumed = engine
+                .resume_with_structural_answer(
+                    id,
+                    &serde_json::json!({"worked": [true, 3]}),
+                    &json_mount_table(),
+                )
+                .expect("imported site's field-bearing answer remains typed");
+            let PreparedSettlement::Done { value } = resumed.settlement else {
+                panic!("imported resume returns Done")
+            };
+            assert!(matches!(
+                engine.observe(owner, value).expect("typed JSON"),
+                HaskellValue::Con(DataConId(100), _)
+            ));
+            assert!(engine.release(value));
+        }
+
+        let registry = Arc::new(ImageRegistry::new());
+        let (mut first, first_program) = PreparedEngine::bootstrap_shared(
+            json_mount_program_with_verb(true),
+            RunOptions::default().nursery_bytes,
+            Some(Arc::clone(&registry)),
+        )
+        .expect("first source instance");
+        let (mut second, second_program) = PreparedEngine::bootstrap_shared(
+            json_mount_program_with_verb(true),
+            RunOptions::default().nursery_bytes,
+            Some(registry),
+        )
+        .expect("second mutable instance of the same compiled image");
+        assert!(Arc::ptr_eq(
+            &first.programs[&first_program].definitions,
+            &second.programs[&second_program].definitions
+        ));
+        let first_function = first
+            .machine
+            .retain_top(first_program, ValueId(1))
+            .expect("first function");
+        let second_function = second
+            .machine
+            .retain_top(second_program, ValueId(1))
+            .expect("second function");
+        let (mut receiver, _) = PreparedEngine::bootstrap(
+            testing::prepare(testing::wire_program()).expect("receiver wire"),
+        )
+        .expect("unrelated receiver");
+        let before = receiver.residency().programs;
+        let before_installs = receiver.installs_since_major();
+        let (first_root, imports) = receiver
+            .import_parcel(
+                first
+                    .export_parcel(first_function.raw())
+                    .expect("first parcel"),
+                RealmId::ROOT,
+            )
+            .expect("first typed import");
+        assert!(imports.is_empty());
+        let first_owner = receiver
+            .machine
+            .owner_of_handle(
+                receiver
+                    .prepared_handle_of(first_root)
+                    .expect("first handle"),
+            )
+            .expect("first exact installed instance");
+        let (repeated_root, _) = receiver
+            .import_parcel(
+                first
+                    .export_parcel(first_function.raw())
+                    .expect("repeat parcel"),
+                RealmId::ROOT,
+            )
+            .expect("repeated instance import");
+        assert_eq!(receiver.residency().programs, before + 1);
+        assert_eq!(
+            receiver.installs_since_major(),
+            before_installs + 1,
+            "repeated exact instances do not count as installations"
+        );
+        let (second_root, _) = receiver
+            .import_parcel(
+                second
+                    .export_parcel(second_function.raw())
+                    .expect("second parcel"),
+                RealmId::ROOT,
+            )
+            .expect("distinct mutable instance import");
+        let second_owner = receiver
+            .machine
+            .owner_of_handle(
+                receiver
+                    .prepared_handle_of(second_root)
+                    .expect("second handle"),
+            )
+            .expect("second exact installed instance");
+        assert_ne!(first_owner, second_owner);
+        assert_eq!(receiver.residency().programs, before + 2);
+        assert_eq!(receiver.sites[&7].owner, first_owner);
+        assert_eq!(receiver.verb_sites[&DataConId(1)].owner, first_owner);
+        assert_eq!(receiver.installs_since_major(), before_installs + 2);
+        answer_json(&mut receiver, first_owner);
+        assert!(receiver.discard_handle(first_root));
+        assert!(receiver.discard_handle(repeated_root));
+        receiver
+            .quiesce_and_collect_now()
+            .expect("retire only the first imported instance");
+        assert!(!receiver.programs.contains_key(&first_owner));
+        assert!(receiver.programs.contains_key(&second_owner));
+        assert_eq!(receiver.sites[&7].owner, second_owner);
+        assert_eq!(receiver.verb_sites[&DataConId(1)].owner, second_owner);
+        answer_json(&mut receiver, second_owner);
+
+        let unsited = park_json_reply(&mut receiver, second_owner, UNSITED);
+        assert!(matches!(
+            receiver.resume_with_structural_answer(
+                unsited,
+                &serde_json::json!({"worked": [true]}),
+                &json_mount_table(),
+            ),
+            Err(PreparedRuntimeError::UnsitedAnswer)
+        ));
+        assert_eq!(
+            receiver.parked_count(),
+            1,
+            "untyped refusal retains the frame"
+        );
+        receiver.abort_parked(unsited).expect("abort unsited frame");
+        assert!(receiver.discard_handle(second_root));
+
+        let entry = first.programs[&first_program].entry;
+        let self_parcel = first
+            .export_parcel(first_function.raw())
+            .expect("already installed parcel");
+        let (self_root, _) = first
+            .import_parcel(self_parcel, RealmId::ROOT)
+            .expect("existing instance report");
+        assert_eq!(
+            first.programs[&first_program].entry, entry,
+            "repeated import preserves the owner's admitted entry metadata"
+        );
+        assert!(first.discard_handle(self_root));
+
+        let (mut conflicting, _) =
+            PreparedEngine::bootstrap(typed_site_program(7, vec![TypeNode::Integer], 0, &[]))
+                .expect("different site owner");
+        let before = conflicting.residency();
+        assert!(matches!(
+            conflicting.import_parcel(
+                first
+                    .export_parcel(first_function.raw())
+                    .expect("conflicting parcel"),
+                RealmId::ROOT,
+            ),
+            Err(PreparedRuntimeError::SiteConflict { site: 7, .. })
+        ));
+        assert_eq!(
+            conflicting.residency(),
+            before,
+            "typed preflight precedes native mutation"
+        );
     }
 
     #[test]

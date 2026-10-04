@@ -53,7 +53,7 @@ mod no_success_tests;
 mod observe;
 pub(crate) mod resolve;
 mod roots;
-pub use evacuation::{Parcel, ParcelImage, ParcelImports};
+pub use evacuation::{ImportedParcel, Parcel, ParcelImage, ParcelImports};
 pub use observe::{AddressOrigin, ObservationFailure};
 mod interner;
 pub use interner::DescriptorInterner;

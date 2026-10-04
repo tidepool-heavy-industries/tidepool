@@ -170,7 +170,11 @@ fn parcel_image_admits_reused_literal_after_source_machine_drop() {
     assert!(unrelated_owner.upgrade().is_none());
 
     let mut receiver = receiver();
-    let (arrived, imports) = receiver.import_parcel(parcel, RealmId::ROOT).unwrap();
+    let crate::prepared_program::ImportedParcel {
+        value: arrived,
+        imports,
+        ..
+    } = receiver.import_parcel(parcel, RealmId::ROOT).unwrap();
     assert!(imports.is_empty());
     let id = receiver
         .programs
