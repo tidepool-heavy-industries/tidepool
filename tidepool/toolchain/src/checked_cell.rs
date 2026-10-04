@@ -3220,7 +3220,7 @@ mod tests {
         }
     }
 
-    use super::{CheckedPrefixSequence, CheckedValueInputs};
+    use super::{CheckedPrefixSequence, CheckedValueInputs, RequestTypeSignatures};
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
