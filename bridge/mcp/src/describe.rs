@@ -133,9 +133,9 @@ pub fn helper_name(helper: &str) -> Option<String> {
 }
 
 /// Is `helper`'s rendered text tagged substrate — an implementation detail
-/// the extract layer needs (schema-building internals, the `*Sited`
-/// call-site-id plumbing behind `runLLMTurn`/`fork`/`forkAll`, Green's raw
-/// thread primitives, Subagent's raw wire helpers) rather than a verb a
+/// the extract layer needs (schema-building internals, private suspension
+/// helpers, Green's raw thread primitives, Subagent's raw wire helpers)
+/// rather than a verb a
 /// model should reach for directly?
 ///
 /// Structural, not a hand-maintained (effect, helper name) allowlist: a
@@ -250,9 +250,8 @@ mod tests {
     }
 
     /// Snapshot-guard: the derived index names every effect and lists at least
-    /// one of each effect's PUBLIC helper verbs (an effect whose only declared
-    /// helpers are substrate, e.g. `Fork`'s `forkSited`/`forkAllSited`, is
-    /// exempt — its model-facing verbs live in the Haskell stdlib instead, not
+    /// one of each effect's PUBLIC helper verbs. Effects declaring only private
+    /// helpers are exempt; their public verbs live in the Haskell stdlib, not
     /// in `EffectDecl::helpers`). Adding a new public helper to a `*_decl()`
     /// therefore auto-appears in both servers' tool descriptions with no
     /// hand-edit; a substrate helper never does.
@@ -284,12 +283,7 @@ mod tests {
         }
     }
 
-    /// The recommended-surface index must not leak the extract-layer
-    /// substrate: `ask`'s schema-building internals, `RunLLMTurn`'s
-    /// call-site-id plumbing, and `Fork`'s — the report finding this closes
-    /// (D's #3): the generated index advertised `isOpt`, `innerSchema`,
-    /// `schemaToValue`, every `*Sited` variant, and only `forkSited`/
-    /// `forkAllSited` for `Fork`, none of which a model should call directly.
+    /// Recommended-surface indexing excludes private substrate helpers.
     #[test]
     fn derived_index_excludes_substrate_helpers() {
         let decls = standard_decls();
@@ -298,11 +292,6 @@ mod tests {
             "isOpt",
             "innerSchema",
             "schemaToValue",
-            "forkSited",
-            "forkAllSited",
-            "runLLMTurnSited",
-            "runLLMTurnForkSited",
-            "runLLMTurnFanoutSited",
         ] {
             assert!(
                 !index.contains(name),
@@ -311,10 +300,6 @@ mod tests {
         }
         // The model-facing verbs stay listed.
         assert!(index.contains("ask"), "index must still list ask: {index}");
-        assert!(
-            index.contains("runLLMTurn"),
-            "index must still list runLLMTurn: {index}"
-        );
     }
 
     /// Green and Subagent are not in `standard_decls()` (neither is part of

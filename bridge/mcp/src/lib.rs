@@ -48,8 +48,8 @@ use std::sync::Arc;
 ///
 /// **`shim` is the per-window half**: content-addressed on the ROW (which
 /// effects are actually in `type M`) and any [`RowArgs`] type application —
-/// small, and it is the only dir that changes when e.g. a `Finalize` hole's
-/// answer type changes between windows.
+/// small, and it is the only dir that changes when a protocol's applied
+/// type changes between windows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EffectsModuleDirs {
     /// Include root holding universal `Tidepool/Effects/Core.hs` and its
@@ -82,7 +82,7 @@ pub fn ensure_effects_module(effects: &[EffectDecl]) -> std::io::Result<EffectsM
 }
 
 /// [`ensure_effects_module`] with the row's parameterized effects applied to
-/// explicit type arguments (the harness's per-hole `Finalize <answer type>`).
+/// explicit type arguments, such as `ActorLocal Protocol`.
 /// The shim dir stays content-addressed on ITS generated source (which
 /// includes the applied types + their imports) — so two answer types get two
 /// shim dirs, and neither can be served the other's module — while the core
@@ -136,8 +136,7 @@ pub fn write_core_module(core_src: &str) -> std::io::Result<PathBuf> {
 /// Write just the per-window shim (`Tidepool/Effects.hs` +
 /// `Tidepool/Orchestrate.hs`) into its own content-addressed dir and return
 /// it, WITHOUT touching Core. For a caller that already holds a stable Core
-/// dir (e.g. re-pinning a `Finalize <T>` row every round of the same
-/// answerer hole) and only needs to re-materialize the small per-row half —
+/// dir and only needs to re-materialize the small per-row half —
 /// [`ensure_effects_module_at`] would also recompute (a cheap,
 /// content-addressed cache hit, but still a hash + lock) Core's dir every
 /// call, which this skips entirely.
@@ -733,7 +732,7 @@ data Console a where
     #[test]
     fn test_standard_decls_includes_ask() {
         let decls = standard_decls();
-        assert_eq!(decls.len(), 12);
+        assert_eq!(decls.len(), 11);
         assert_eq!(decls[2].type_name, "FsRead");
         assert_eq!(decls[3].type_name, "FsWrite");
         assert_eq!(decls[4].type_name, "Http");
@@ -743,12 +742,6 @@ data Console a where
         assert_eq!(decls[8].type_name, "Time");
         assert_eq!(decls[9].type_name, "Entropy");
         assert_eq!(decls[10].type_name, "Ask");
-        // RunLLMTurn (self-iterating-harness WS-B) was split out of Ask into
-        // its own interposed effect, appended right after it. No Fork: the
-        // ordinary session engine this roster serves never accepts
-        // ForkWith/ForkAllWith (vestigial-subsystems review §4) — the
-        // harness Agent turn's roster adds Fork on top of this one.
-        assert_eq!(decls[11].type_name, "RunLLMTurn");
     }
 
     #[test]
@@ -758,7 +751,7 @@ data Console a where
         assert!(preamble.contains("data Ask a where"));
         assert!(preamble.contains("  AskWith :: Text -> Value -> Ask Value"));
         assert!(preamble.contains(
-            "type M = Eff '[Console, KV, FsRead, FsWrite, Http, Exec, Llm, Git, Time, Entropy, Ask, RunLLMTurn]"
+            "type M = Eff '[Console, KV, FsRead, FsWrite, Http, Exec, Llm, Git, Time, Entropy, Ask]"
         ));
     }
 
@@ -768,7 +761,7 @@ data Console a where
         let stack = build_effect_stack_type(&decls);
         assert_eq!(
             stack,
-            "'[Console, KV, FsRead, FsWrite, Http, Exec, Llm, Git, Time, Entropy, Ask, RunLLMTurn]"
+            "'[Console, KV, FsRead, FsWrite, Http, Exec, Llm, Git, Time, Entropy, Ask]"
         );
     }
 

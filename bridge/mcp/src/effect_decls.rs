@@ -50,23 +50,18 @@ pub struct EffectDecl {
     /// Thin curried helper definitions emitted after the `type M` alias.
     /// Each string is one or more lines of Haskell (signature + definition).
     pub helpers: &'static [&'static str],
-    /// Type parameters the GADT head carries BEFORE its result parameter —
-    /// `["v"]` for `data Finalize v a where`, empty for every unparameterized
-    /// effect. A parameterized effect's row entry is APPLIED (`Finalize
-    /// Decision`), so `Member (Finalize T)` is what admits `finalize @T`:
-    /// the row itself is the constraint, exactly as `State s` works.
+    /// Type parameters the GADT head carries before its result parameter,
+    /// e.g. `["api"]` for `ActorLocal api a`. A row entry applies these
+    /// parameters, so `Member (ActorLocal Maybe) effs` admits that protocol.
     pub type_params: &'static [&'static str],
     /// The row arguments a compile that supplies none falls back to — same
-    /// length as `type_params`, empty when there are none. `Finalize`'s is
-    /// canonical `Data.Void.Void` (imported into the generated Core module,
-    /// not declared in its own `type_defs`): a turn that is not answering a
-    /// typed hole cannot finalize at all, and GHC says so by name (`'Finalize
-    /// Text' is not a member of '[…, Finalize Void]'`).
+    /// length as `type_params`, empty when there are none. These arguments
+    /// must match each parameter's kind, as with `ActorLocal Maybe`.
     pub default_row_args: &'static [&'static str],
     /// Do this effect's `helpers` typecheck against ANY row that carries the
     /// `Member <Effect> effs` constraint, rather than only the closed `M`
     /// alias? A row-polymorphic helper (`foo :: Member E effs => A -> Eff
-    /// effs B`, e.g. `RunLLMTurn`'s `runLLMTurn`) compiles fine even when `E`
+    /// effs B`) compiles fine even when `E`
     /// is absent from the CURRENT row — the constraint just goes unsolved
     /// until a call site fixes `effs`, so it's safe to emit for an effect
     /// that is in the generated module's VOCABULARY but not its ROW (see
@@ -74,8 +69,7 @@ pub struct EffectDecl {
     /// (`foo :: A -> M B`, the default) only typechecks when its effect is
     /// actually in the row — emitting it otherwise breaks the compile at the
     /// DEFINITION site, the opposite of the vocabulary/row split's goal — so
-    /// such helpers stay row-gated. `false` for every effect except
-    /// `RunLLMTurn`.
+    /// such helpers stay row-gated.
     pub helpers_row_polymorphic: bool,
 }
 
@@ -83,16 +77,10 @@ pub struct EffectDecl {
 /// its row, plus the modules the generated `Tidepool.Effects` must import to
 /// resolve them.
 ///
-/// The answer type of a `Finalize` hole is an AUTHOR type (`Decision`,
-/// `Contribution`), known only per-compile, so it cannot live in the `'static`
-/// [`EffectDecl`]. It rides here instead: `RowArgs::at("Finalize",
-/// ["Decision"]).importing(["HarnessTypes"])` renders the row entry `Finalize
-/// Decision` and adds `import HarnessTypes` to the generated module (naming a
-/// type requires it in scope THERE, not only in the turn module).
-///
-/// An empty `RowArgs` renders every effect at its [`EffectDecl::default_row_args`]
-/// — the shape every non-harness stack (`standard_decls()`, which carries no
-/// parameterized effect at all) already had.
+/// Protocol types known per compile live here rather than in the static
+/// declaration. `RowArgs::at("ActorLocal", ["Protocol"]).importing(["ActorTypes"])`
+/// renders `ActorLocal Protocol` and imports the module defining the protocol.
+/// An empty `RowArgs` uses each declaration's default arguments.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RowArgs {
     args: std::collections::BTreeMap<String, Vec<String>>,
@@ -144,8 +132,8 @@ impl RowArgs {
     }
 }
 
-/// Render one entry of a promoted effect row: `Console`, `Finalize Decision`,
-/// `Finalize (Int -> Int)`.
+/// Render one entry of a promoted effect row: `Console`, `ActorLocal Maybe`,
+/// `ActorLocal (Either Bool)`.
 ///
 /// An argument that isn't a single atom is parenthesized, so a function or
 /// applied type (`Int -> Int`, `Maybe Text`) stays one row element.
@@ -318,9 +306,7 @@ crate::entropy_effect_def!(crate::effect_defs::effect_decl_projection);
 crate::meta_effect_def!(crate::effect_defs::effect_decl_projection);
 crate::ask_effect_def!(crate::effect_defs::effect_decl_projection);
 
-// AskUser / ReadState / RunLLMTurn / Finalize / Fork: MIGRATED —
-// `askuser_decl()`/`readstate_decl()`/`runllmturn_decl()`/`finalize_decl()`/
-// `fork_decl()` come from `src/generated/`, not a macro here.
+// AskUser and ReadState declarations come from src/generated/.
 
 crate::llm_effect_def!(crate::effect_defs::effect_decl_projection);
 
@@ -332,6 +318,5 @@ crate::llm_effect_def!(crate::effect_defs::effect_decl_projection);
 // `worktree_decl()`/`event_decl()`/`journal_decl()`/`green_decl()` come from
 // `src/generated/`, not a macro here. Subagent additionally requires
 // Worktree in the same row (its types reference
-// WorktreeSpec/WorktreeHandle/WorktreeError). Green must sit LAST in
-// `outer_decls()` so `RunLLMTurn` keeps index 0.
+// WorktreeSpec/WorktreeHandle/WorktreeError).
 crate::subagent_effect_def!(crate::effect_defs::effect_decl_projection);

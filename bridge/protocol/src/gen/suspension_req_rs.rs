@@ -35,7 +35,7 @@ pub fn path(e: &Effect, crate_dir: &str) -> String {
 
 /// The `mod`-index for the generated decode modules in `crate_dir` —
 /// deliberately NOT flattened: a consumer names each request type through
-/// its own module (`generated::fork::ForkReq`) rather than a single glob, so
+/// its own module (`generated::actor::ActorReq`) rather than a single glob, so
 /// two effects can never contribute an ambiguously-named `Req` type to one
 /// scope (unlike the decl-side index, which flattens because every name
 /// there is already unique by Haskell convention).

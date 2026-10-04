@@ -23,7 +23,7 @@
 //!     it's checked here by
 //!     reading the source file and parsing its extension set directly. It is
 //!     designed to carry EXACTLY EVAL_PRAGMAS's set (an author using
-//!     `Tidepool.Harness.Prelude` gets the identical dialect an eval author
+//!     the authored library gets the identical dialect an eval author
 //!     gets — "one dialect everywhere", repo CLAUDE.md).
 //!
 //! The parse-only template and standalone declaration environment now derive
@@ -155,7 +155,7 @@ fn standalone_default_tracks_decl_pragmas_modulo_no_implicit_prelude() {
 /// The Haskell-side harness compilation profile
 /// (`bridge/haskell/src/Tidepool/HarnessSource.hs`'s `harnessProfilePragmaLine`) must carry EXACTLY
 /// `EVAL_PRAGMAS`'s extension set — an author importing
-/// `Tidepool.Harness.Prelude` under `--harness-profile` gets the identical
+/// the authored library under `--harness-profile` gets the identical
 /// dialect an ordinary eval author gets. Reads the Haskell SOURCE FILE and
 /// parses the string literal directly (a Haskell string constant can't be
 /// imported into a Rust test across the language boundary) — brittle to the

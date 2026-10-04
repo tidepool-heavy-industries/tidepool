@@ -3,20 +3,9 @@
 //! interposed tail — the ONE list that, when it changes, has historically
 //! broken separately-maintained satellites nobody remembered to check.
 //!
-//! `Entropy` joining the base stack broke three of them in one lane, each
-//! found by a DIFFERENT later lane: an inline golden string in
-//! `preamble.rs`'s `import_gating_pin` module, two protocol-golden lines, and
-//! a hardcoded union-tag constant (`FORK_TAG`, 10 → 11). A fourth
-//! (`RUN_LLM_TURN_TAG` in `run_llm_turn_sidecar.rs`, stuck at 9 when the real
-//! tag had moved to 10) went undetected for a full lane because that suite
-//! only runs under the GHC-heavy sharded tier — this sentinel is cheap and
-//! runs in the fast default tier, so the NEXT such change fails loudly here
-//! before it can hide the same way.
-//!
-//! This test does not (and cannot) prevent drift by itself — it is a
-//! deliberately hand-maintained trip-wire: the assertion below is meant to
-//! start failing the moment the roster's shape changes, and the failure
-//! message IS the checklist of what to do next.
+//! A changed effect ordering must update generated goldens and consumers of
+//! union tags together. This deliberately explicit expected roster catches
+//! changes before the compiler-backed suites run.
 
 /// `base_effects!`'s own roster (`bridge/mcp/src/eval_prep.rs`), in order.
 const BASE_EFFECTS: &[&str] = &[
@@ -24,7 +13,7 @@ const BASE_EFFECTS: &[&str] = &[
 ];
 
 /// `standard_decls()`'s interposed tail, appended after `BASE_EFFECTS`.
-const INTERPOSED_TAIL: &[&str] = &["Ask", "RunLLMTurn"];
+const INTERPOSED_TAIL: &[&str] = &["Ask"];
 
 #[test]
 fn effect_roster_shape_sentinel() {

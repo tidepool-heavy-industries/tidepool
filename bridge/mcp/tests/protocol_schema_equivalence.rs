@@ -160,47 +160,6 @@ fn read_state_decl_matches_the_schema_exactly() {
 }
 
 /// Written to run BEFORE the flip, against the still-hand-written
-/// `runllmturn_effect_def!` macro — see the module doc. #20 steps 2-3
-/// (helperbody-flip lane): the first migrated effect using
-/// [`tidepool_protocol::schema::HelperBody::OpaqueForward`]/`OpaqueSited`,
-/// the reviewed shapes that finally express the OPAQUE+`*Sited`+
-/// `unsafeCoerce` delegation pattern, and the first whose `errors` ADT
-/// (`InvocationExit`) has no `errors`-tagged verb of its own — it backs a
-/// pure display helper (`renderInvocationExit`) and two OPAQUE forwards'
-/// declared result types instead.
-#[test]
-fn run_llm_turn_decl_matches_the_schema_exactly() {
-    assert_decl_matches_schema(
-        &tidepool_mcp::runllmturn_decl(),
-        &tidepool_protocol::effects::run_llm_turn::run_llm_turn(),
-    );
-}
-
-/// Written to run BEFORE the flip, against the still-hand-written
-/// `finalize_effect_def!` macro — see the module doc. The one effect whose
-/// `Polymorphism::ArgBound` (`v`) now has a real consumer:
-/// `finalize`/`finalizeSited`'s two-tyvar `forall v a effs.` signatures.
-#[test]
-fn finalize_decl_matches_the_schema_exactly() {
-    assert_decl_matches_schema(
-        &tidepool_mcp::finalize_decl(),
-        &tidepool_protocol::effects::finalize::finalize(),
-    );
-}
-
-/// Written to run BEFORE the flip, against the still-hand-written
-/// `fork_effect_def!` macro — see the module doc. Both helpers are the
-/// `OpaqueSited` shape's simplest real use: the site id rides as a bare
-/// leading constructor argument, no payload object to build.
-#[test]
-fn fork_decl_matches_the_schema_exactly() {
-    assert_decl_matches_schema(
-        &tidepool_mcp::fork_decl(),
-        &tidepool_protocol::effects::fork::fork(),
-    );
-}
-
-/// Written to run BEFORE the flip, against the still-hand-written
 /// `green_effect_def!` macro — see the module doc. The widest of the four:
 /// `HelperBody::IntDecode` (`asyncStatus`) and `HelperBody::AsyncSpawnBody`
 /// (`asyncSpawn`, the one helper in this whole schema fixed to concrete `M`
@@ -401,9 +360,6 @@ fn every_schema_effect_is_reachable() {
             "AskUser",
             "ReadState",
             "RecipeCheck",
-            "RunLLMTurn",
-            "Fork",
-            "Finalize",
             "Green",
             "Actor",
             "ActorContext",

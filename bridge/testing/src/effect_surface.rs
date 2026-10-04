@@ -117,9 +117,9 @@ mod tests {
 
     #[test]
     fn parameterized_effect_uses_the_same_row_arguments_for_source_and_row() {
-        let row_args = RowArgs::at("Finalize", ["Decision"]).importing(["HarnessTypes"]);
+        let row_args = RowArgs::at("ActorLocal", ["Protocol"]).importing(["ActorTypes"]);
         let surface = TestEffectSurface::with_options(
-            &[tidepool_mcp::finalize_decl()],
+            &[tidepool_mcp::actor_local_decl()],
             TestEffectSurfaceOptions {
                 row_args,
                 ..Default::default()
@@ -127,14 +127,14 @@ mod tests {
         )
         .expect("parameterized surface");
 
-        assert_eq!(surface.row(), "'[Finalize Decision]");
+        assert_eq!(surface.row(), "'[ActorLocal Protocol]");
         let shim = surface
             .include_paths()
             .last()
             .expect("effect surface includes its row-specific shim");
         let source = std::fs::read_to_string(shim.join("Tidepool/Effects.hs"))
             .expect("parameterized effect shim source");
-        assert!(source.contains("import HarnessTypes"));
-        assert!(source.contains("Finalize Decision"));
+        assert!(source.contains("import ActorTypes"));
+        assert!(source.contains("ActorLocal Protocol"));
     }
 }

@@ -56,40 +56,14 @@ macro_rules! base_effects {
     };
 }
 
-/// Append the ordinary session's interposed effects after its handler row.
-/// `Ask` and `RunLLMTurn` are suspended by the session router, so neither has
-/// a handler slot. Keep this suffix shared by [`standard_decls`] and stacks
-/// assembled from concrete handlers.
+/// Append the ordinary session's interposed Ask effect after its handler row.
 pub fn with_session_effects(mut handler_decls: Vec<EffectDecl>) -> Vec<EffectDecl> {
     handler_decls.push(crate::ask_decl());
-    handler_decls.push(crate::runllmturn_decl());
     handler_decls
 }
 
-/// The ordinary session's effect row: the base stack plus the interposed
-/// `Ask`/`RunLLMTurn` effects. The handler order comes from [`base_effects!`].
-///
-/// **This is a per-surface roster, not a universal one** (vestigial-subsystems
-/// review §4): it names exactly what the ordinary eval server's request
-/// parser accepts — `AskWith` and `RunLLMTurnWith`, nothing else. Arbitrary
-/// handler stacks use [`with_session_effects`] too.
-///
-/// A surface that genuinely services more than this — the harness Agent turn
-/// (`exomonad-harness::engine::agent_decls`) dispatches `ForkWith`/
-/// `ForkAllWith` through its own `classify_hole`, which this engine's parser
-/// does not — builds its own WIDER roster by appending to this one's output
-/// explicitly (`agent_decls`'s doc has the details), rather than this
-/// function growing a fourth interposed effect nothing here can service.
-///
-/// `RunLLMTurn` must stay in the roster (not opt-in): the generated
-/// `Tidepool.Effects` only exports `runLLMTurn`/`runLLMTurnFork`/
-/// `runLLMTurnFanout` when its decl is present. Both `Ask` and `RunLLMTurn`
-/// are UNHANDLED (interposed) tags: no `tidepool-handlers` entry, serviced by
-/// each server's own suspend machinery (see
-/// the runtime's nominal request router
-/// threshold — every tag from the first interposed effect onward suspends,
-/// so appending further interposed effects here needs no Rust-side dispatch
-/// change).
+/// The ordinary session's effect row: base handlers followed by Ask.
+/// Arbitrary handler stacks share the same interposed suffix.
 pub fn standard_decls() -> Vec<EffectDecl> {
     macro_rules! std_decls_rows {
         ($(($name:ident, $decl:ident)),* $(,)?) => {
@@ -134,15 +108,9 @@ pub fn all_decls() -> Vec<EffectDecl> {
 /// renderer still deduplicates its input so focused source tests cannot
 /// accidentally double-declare a GADT.
 ///
-/// A parameterized effect (`Finalize`, non-empty `type_params`) is emitted
-/// GENERICALLY (`data Finalize v a where …`, `v` a bare type variable) exactly
-/// like every other effect — there is no "vocab-only parameterized effects are
-/// unrepresentable" restriction any more: a generic GADT plus a
-/// `Member`-polymorphic `finalize` needs no row application to have a
-/// well-defined spelling, and it is exactly as nameable-but-possibly-
-/// unexecutable as any other vocabulary effect (a comprehensible unsolved-
-/// `Member` error at the use site, same as `RunLLMTurn`'s existing
-/// nameable-everywhere policy — this replaces and generalizes it).
+/// Parameterized effects are declared generically. Their row-polymorphic
+/// helpers remain available in the vocabulary; the selected executable row
+/// determines whether their `Member` constraints can be solved at a call site.
 pub fn effects_core_module_source() -> String {
     effects_core_module_source_for(&all_decls())
 }
@@ -185,13 +153,6 @@ pub(crate) fn effects_core_module_source_for(vocab_effects: &[EffectDecl]) -> St
     out.push_str("module Tidepool.Effects.Core where\n");
     out.push_str("import Tidepool.Prelude hiding (error)\n");
     out.push_str("import Control.Monad.Fail (MonadFail(..))\n");
-    // Canonical `Data.Void.Void` — the uninhabited default `Finalize` answer
-    // type (`finalize_effect_def!`'s `default_row_args ["Void"]`) for a turn
-    // that isn't answering a typed hole. Imported unconditionally (like the
-    // rest of this preamble) rather than gated on `Finalize`'s presence in
-    // `effects`: it's a zero-cost base import, and gating it would need a
-    // vocabulary check this function doesn't otherwise make per-effect.
-    out.push_str("import Data.Void (Void)\n");
     out.push_str("import Data.Kind (Type)\n");
     // Stable model-facing duration type used by the resident Sleep effect.
     // Its constructors stay hidden; authored units receive the smart
@@ -267,39 +228,25 @@ pub(crate) fn effects_core_module_source_for(vocab_effects: &[EffectDecl]) -> St
 /// the stable [`effects_core_module_source`] plus the one thing that
 /// genuinely varies per compile — `type M = Eff <row_effects>` — and the
 /// author-module imports a parameterized row entry's applied type needs
-/// (`row.imports()`, e.g. the harness's `HarnessTypes` for a `Finalize
-/// Decision` row).
+/// (`row.imports()`, e.g. `ActorTypes` for an `ActorLocal Protocol` row).
 ///
 /// Model-visible spelling is UNCHANGED: `import Tidepool.Effects` and `M`
 /// still resolve exactly as before — this module re-exports every name Core
 /// declares, so an eval/session import of `Tidepool.Effects` alone still sees
 /// the whole effect vocabulary plus `M`.
 ///
-/// Content is a pure function of `row_effects` + `row` alone — small, and it
-/// changes every time a window's `Finalize` (or another parameterized
-/// effect's) row application changes, which is exactly why it stays split
-/// out of Core: recompiling a few lines per window is cheap, recompiling
-/// every effect GADT + helper per window (today's behavior) is not, and only
-/// the small shim's tycons (none — see below) are ever per-window-nominal.
+/// Content depends only on the row and its applied types. Changing a protocol
+/// application recompiles the small shim while preserving the stable Core.
 ///
 /// Declares no `data`/GADT of its own. The module is deliberately only a
 /// concrete-row alias and its resolution probe.
 pub fn effects_shim_module_source(row_effects: &[EffectDecl], row: &crate::RowArgs) -> String {
-    let mut extra_exports = String::new();
-    // `Void` needs explicit export-list treatment: it isn't declared by this
-    // module or by Core (`Data.Void`'s own base import), so
-    // neither the `module Tidepool.Effects.Core` wildcard entry nor an
-    // implicit no-export-list rule ever re-exports it. Without this, a TURN
-    // module's own `import Tidepool.Effects` (unqualified, no import list)
-    // cannot see `Void` even though the shim's `type M` line resolves it fine
-    // internally (see the import above) — and the turn module needs it too:
-    // `result :: Eff <promoted-row> Value`, spliced directly by the turn
-    // TEMPLATE (not `type M`), names `Finalize Void` verbatim whenever this
-    // row's `Finalize` entry falls back to its default. Gated on the same
-    // `Finalize`-presence check as the import above.
-    if row_effects.iter().any(|e| e.type_name == "Finalize") {
-        extra_exports.push_str(", Void");
-    }
+    // Imported default argument types must also be visible when a caller
+    // writes the promoted row directly rather than using `M`.
+    let uses_void = row_effects
+        .iter()
+        .any(|effect| effect.default_row_args.contains(&"Void"));
+    let extra_exports = if uses_void { ", Void" } else { "" };
 
     let mut out = String::new();
     out.push_str(&tidepool_runtime::session::generated_support_pragmas());
@@ -331,18 +278,10 @@ pub fn effects_shim_module_source(row_effects: &[EffectDecl], row: &crate::RowAr
         out.push_str("import Control.Monad.Freer hiding (run)\n");
         out.push_str("import Tidepool.Prelude hiding (error)\n");
     }
-    // `Data.Void`'s `Void` rides the SAME re-export hazard as the pair above.
-    // Import it whenever an effect's default application actually names it;
-    // keying this to one historical consumer (`Finalize`) would make adding a
-    // second parameterized effect silently generate an ill-scoped row.
-    if row_effects
-        .iter()
-        .any(|effect| effect.default_row_args.contains(&"Void"))
-    {
+    if uses_void {
         out.push_str("import Data.Void (Void)\n");
     }
-    // Author modules defining the types this row is applied to (e.g. the
-    // harness's `HarnessTypes` for a `Finalize Decision` row).
+    // Modules defining this row's applied protocol types.
     for m in row.imports() {
         out.push_str(&format!("import {m}\n"));
     }
@@ -351,12 +290,7 @@ pub fn effects_shim_module_source(row_effects: &[EffectDecl], row: &crate::RowAr
     // Type alias so helpers can write `M a` instead of `Eff '[Console, KV, Fs] a`.
     if !row_effects.is_empty() {
         out.push_str(&format!("type M = Eff {}\n", row_type(row_effects, row)));
-        // A throwaway value binding that forces `M` (hence the whole applied
-        // row, including a pinned `Finalize <T>`'s answer type) to resolve —
-        // the probe target `exomonad-harness::engine::validate_finalize_row`
-        // extracts to catch an unresolved row application HERE rather than as
-        // a confusing cascade in whatever turn module happens to import this
-        // shim (see that function's doc). Never called; dead by construction.
+        // Force the complete applied row to resolve in the shim itself.
         out.push_str("__shimProbe :: M ()\n__shimProbe = pure ()\n");
     }
     out
@@ -576,7 +510,7 @@ pub fn build_effect_stack_type_at(effects: &[EffectDecl], row: &crate::RowArgs) 
     row_type(effects, row)
 }
 
-/// The promoted effect row (`'[Console, KV, Finalize Decision]`) — one entry
+/// The promoted effect row (`'[Console, KV, ActorLocal Maybe]`) — one entry
 /// per decl, each parameterized effect applied to its row arguments.
 fn row_type(effects: &[EffectDecl], row: &crate::RowArgs) -> String {
     if effects.is_empty() {
@@ -614,49 +548,14 @@ pub enum Render {
     ToWire,
 }
 
-/// Options for [`TurnTemplate::render`] — the wrap-`code`-in-a-module
-/// template shared by [`template_haskell`]/[`template_haskell_anchored`]/
-/// [`template_haskell_show_default`] (thin named wrappers kept below because
-/// callers read better with a name). Construct this directly for a
-/// combination none of them name, e.g. `render: Render::ToWire` +
-/// `anchor_result: true` (a REPL turn against a real `Finalize` row).
+/// Options for wrapping an authored expression in a Haskell module.
+/// Named wrappers below select common combinations; callers may combine
+/// `Render::ToWire` with `anchor_result` directly.
 ///
-/// `anchor_result`: when `true`, the result binding routes `_r` through a
-/// generated `__anchor :: P.Show a => a -> a; __anchor = P.id` before
-/// rendering it. This is ADDITIVE, not a type pin: `__anchor` is `id`, so it
-/// never forces `_r`'s type to anything — it only adds a `Show a0` constraint
-/// alongside the render call's `ToJSON`/`ToWire` one.
-///
-/// Why that's needed at all: GHC's defaulting (even under
-/// `ExtendedDefaultRules`, even with an explicit `default (...)` list naming
-/// a type with a matching instance) requires the ambiguous variable's
-/// constraint set to carry at least one class from GHC's own fixed "standard"
-/// set — the GHC User's Guide's `ExtendedDefaultRules` section states rule 3
-/// as relaxed to "at least one of the classes Ci is numeric, or is Show, Eq,
-/// or Ord" (a relaxation of the anchor requirement, never its removal). A
-/// solitary `ToJSON a0`/`ToWire a0` — both ordinary library classes with no
-/// superclass — never qualifies, so `finalize`'s intentionally free result
-/// tyvar (`finalize :: forall v a effs. Member (Finalize v) effs => v -> Eff
-/// effs a`, `a` unconstrained by design) is permanently unreachable by
-/// defaulting on its own. Confirmed empirically, not by reasoning about the
-/// docs: a minimal `IO`-do-block repro and a real `freer-simple` `Eff`-row
-/// repro fail IDENTICALLY under identical pragmas (ruling out any
-/// `Eff`-row/`MonoLocalBinds`/implication-specific explanation), and adding a
-/// bare `Num` constraint on the SAME otherwise-ambiguous tyvar, nothing else
-/// changed, makes defaulting fire — that is what `__anchor` supplies, in the
-/// one turn shape that needs it, without touching a type any concretely-typed
-/// result (an ordinary eval, or an answerer turn whose block doesn't reach
-/// `finalize`) already has.
-///
-/// `__anchor` only becomes load-bearing when `_r`'s type is otherwise
-/// ambiguous — which happens ONLY for a turn compiled against a real
-/// `Finalize T` row whose block's result is `finalize`'s free `a`. Any
-/// concretely-typed result (an ordinary eval's `Value`/`Int`/record, or an
-/// answerer turn that suspends on `askUser` without finalizing) already has a
-/// resolved type with its own `Show` instance available, so `__anchor`
-/// resolves trivially and changes nothing observable — this is why it's safe
-/// to add without threading the hole's concrete answer type through at all,
-/// only a per-turn boolean (see `exomonad-harness::engine::template_turn_for`).
+/// `anchor_result` routes the result through `__anchor :: Show a => a -> a`.
+/// This identity function adds a standard class constraint that permits GHC
+/// defaulting when a result has only `ToJSON` or `ToWire` constraints. It
+/// does not pin the result to a concrete type.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TurnTemplate<'a> {
     pub preamble: &'a str,
@@ -801,7 +700,7 @@ impl TurnTemplate<'_> {
         // The defaulting anchor (see this struct's doc): `id` under a `Show`
         // constraint, so it never forces `_r`'s type — only adds the standard-
         // class anchor `ToJSON`/`ToWire` alone can never supply. Emitted only
-        // when `anchor_result` is set (a real `Finalize T` row); every other
+        // when `anchor_result` is set; every other
         // caller's `_r` is rendered exactly as before. Declared ONCE, ahead of
         // every entry body (including any extra entries), since it is a single
         // top-level binding shared module-wide, not a per-entry one.
@@ -947,12 +846,8 @@ pub fn template_haskell(
     .render()
 }
 
-/// Like [`template_haskell`], but the result binding carries an extra `Show`
-/// anchor (see [`TurnTemplate`]'s `anchor_result` doc) so a turn compiled
-/// against a real `Finalize T` row can resolve `finalize`'s free result
-/// tyvar. Every OTHER caller keeps using [`template_haskell`] /
-/// [`template_haskell_show_default`] unpinned — this is additive to a single
-/// turn's own module, never a change to the shared template those callers see.
+/// Like [`template_haskell`], with an extra `Show` constraint that permits
+/// defaulting an otherwise ambiguous rendered result.
 pub fn template_haskell_anchored(
     preamble: &str,
     effect_stack: &str,
@@ -1113,15 +1008,8 @@ mod tests {
         assert_eq!(a, b);
         // Canonical order is load-bearing: handlers are tag-indexed by it.
         assert_eq!(a.first(), Some(&"Console"));
-        // Ask and RunLLMTurn are both interposed (WS-B split runLLMTurn out
-        // of Ask), appended in that order after the base stack. Fork is NOT
-        // here: the ordinary session engine's request parser never accepts
-        // ForkWith/ForkAllWith (vestigial-subsystems review §4) — the
-        // harness Agent turn's own roster (`agent_decls`) adds Fork on top
-        // of this one explicitly.
-        assert_eq!(a[10], "Ask");
-        assert_eq!(a.last(), Some(&"RunLLMTurn"));
-        assert_eq!(a.len(), 12);
+        assert_eq!(a.last(), Some(&"Ask"));
+        assert_eq!(a.len(), 11);
         // SG is not part of the supported effect stack.
         assert!(
             !a.contains(&"SG"),
@@ -1197,87 +1085,21 @@ mod tests {
         assert_eq!(build_effect_stack_type(&[]), "'[]");
     }
 
-    /// `Finalize` is type-indexed: its GADT head carries `v`, and its row entry
-    /// is APPLIED — to the hole's answer type when the compile supplies one, to
-    /// the uninhabited canonical `Void` when it doesn't. `Member (Finalize T)`
-    /// is then the whole pin: no shim, no hiding, no per-compile symbol
-    /// manipulation.
-    /// The GADT itself lives in the STABLE Core text — only `type M` (the
-    /// shim) instantiates it per row.
+    /// Protocol-indexed effect rows vary per shim while Core stays stable.
     #[test]
-    fn finalize_row_entry_is_applied_to_its_answer_type() {
-        let decls = vec![crate::askuser_decl(), crate::finalize_decl()];
-
+    fn actor_local_row_entry_is_applied_to_its_protocol() {
+        let decls = vec![crate::askuser_decl(), crate::actor_local_decl()];
         let core = effects_core_module_source_for(&decls);
-        assert!(
-            core.contains("module Tidepool.Effects.Core where"),
-            "{core}"
-        );
-        assert!(core.contains("data Finalize v a where"), "{core}");
-        assert!(
-            core.contains("FinalizeWith :: Int -> v -> Finalize v a"),
-            "{core}"
-        );
-        assert!(core.contains("import Data.Void (Void)"), "{core}");
-        assert!(
-            core.contains(
-                "finalize :: forall v a effs. Member (Finalize v) effs => v -> Eff effs a"
-            ),
-            "{core}"
-        );
-        // Core never DECLARES `type M` — that's the shim's whole reason to
-        // exist. Checked as `"type M ="` (the declaration form), not a bare
-        // `"type M"` substring: Core's own header comment explains this
-        // property in prose ("...no `type M`)...") and a bare substring
-        // check false-positives on that comment — pre-existing, unrelated to
-        // this test's own subject, caught incidentally while verifying the
-        // `Void` import fix below.
+        assert!(core.contains("data ActorLocal (api :: Type -> Type) a where"), "{core}");
+        assert!(core.contains("RequestSite '[] next"), "{core}");
         assert!(!core.contains("type M ="), "{core}");
-
-        // No contract: the shim's row names the uninhabited default, so a turn
-        // that isn't answering a typed hole simply cannot finalize.
         let shim = effects_shim_module_source(&decls, &crate::RowArgs::default());
-        assert!(
-            shim.contains("type M = Eff '[AskUser, Finalize Void]"),
-            "{shim}"
-        );
-        // The shim must import `Void` itself — Core imports it too, but (like
-        // `Eff`/`Member`/`send` from freer-simple) Core's own implicit export
-        // list re-exports only what it DEFINES, never what it merely imports,
-        // so `type M`'s own `Finalize Void` reference needs its own import
-        // here or it's "Not in scope: Void" — a real, previously-undetected
-        // regression this project's own GHC-heavy acceptance tier caught.
-        assert!(shim.contains("import Data.Void (Void)"), "{shim}");
-        // AND the shim must RE-EXPORT `Void` too (not just import it for its
-        // own internal `type M` use): a TURN module's own `import
-        // Tidepool.Effects` (unqualified, no import list) needs `Void` in
-        // scope for its OWN `result :: Eff <promoted-row> Value` signature —
-        // the turn template splices the promoted row directly, independent
-        // of `type M` — and an import brings in only what the imported
-        // module itself EXPORTS.
-        assert!(
-            shim.contains("module Tidepool.Effects (module Tidepool.Effects.Authored, M, Void)"),
-            "{shim}"
-        );
-
-        // With a contract: the row is instantiated at the answer type, and the
-        // shim imports the author module that defines it — Core is untouched.
-        let row = crate::RowArgs::at("Finalize", ["Decision"]).importing(["HarnessTypes"]);
+        assert!(shim.contains("type M = Eff '[AskUser, ActorLocal Maybe]"), "{shim}");
+        let row = crate::RowArgs::at("ActorLocal", ["Protocol"]).importing(["ActorTypes"]);
         let pinned = effects_shim_module_source(&decls, &row);
-        assert!(
-            pinned.contains("type M = Eff '[AskUser, Finalize Decision]"),
-            "{pinned}"
-        );
-        assert!(pinned.contains("\nimport HarnessTypes\n"), "{pinned}");
-        assert_eq!(
-            build_effect_stack_type_at(&decls, &row),
-            "'[AskUser, Finalize Decision]"
-        );
-
-        // Two answer types must not share a generated SHIM (hence not a
-        // staging dir either — it is content-addressed on this source) — but
-        // DO share the identical Core text, since neither touches vocabulary.
-        let other = crate::RowArgs::at("Finalize", ["Contribution"]).importing(["HarnessTypes"]);
+        assert!(pinned.contains("type M = Eff '[AskUser, ActorLocal Protocol]"), "{pinned}");
+        assert!(pinned.contains("\nimport ActorTypes\n"), "{pinned}");
+        let other = crate::RowArgs::at("ActorLocal", ["OtherProtocol"]).importing(["ActorTypes"]);
         assert_ne!(pinned, effects_shim_module_source(&decls, &other));
         assert_eq!(core, effects_core_module_source_for(&decls));
     }
@@ -1296,15 +1118,15 @@ mod tests {
         );
     }
 
-    /// A row entry stays ONE element: a function or applied answer type is
-    /// parenthesized (`Finalize (Int -> Int)`), never split across the list.
+    /// A row entry stays one element: an applied protocol type is
+    /// parenthesized (`ActorLocal (Either Bool)`), never split across the list.
     #[test]
-    fn compound_answer_type_is_parenthesized_in_the_row() {
-        let decls = vec![crate::finalize_decl()];
-        let row = crate::RowArgs::at("Finalize", ["Int -> Int"]);
+    fn compound_protocol_type_is_parenthesized_in_the_row() {
+        let decls = vec![crate::actor_local_decl()];
+        let row = crate::RowArgs::at("ActorLocal", ["Either Bool"]);
         assert_eq!(
             build_effect_stack_type_at(&decls, &row),
-            "'[Finalize (Int -> Int)]"
+            "'[ActorLocal (Either Bool)]"
         );
     }
 
@@ -1312,19 +1134,10 @@ mod tests {
     /// concrete row satisfies their `Member` constraint.
     #[test]
     fn parameterized_effect_is_generic_and_nameable() {
-        let vocab = vec![crate::askuser_decl(), crate::finalize_decl()];
+        let vocab = vec![crate::askuser_decl(), crate::actor_local_decl()];
         let core = effects_core_module_source_for(&vocab);
-        assert!(core.contains("data Finalize v a where"), "{core}");
-        assert!(
-            core.contains(
-                "finalize :: forall v a effs. Member (Finalize v) effs => v -> Eff effs a"
-            ),
-            "{core}"
-        );
-
-        // A shim whose OWN row omits Finalize entirely still resolves `finalize`
-        // as a name (it's in Core) — only `Member (Finalize v) effs` fails to
-        // solve, which is a GHC compile concern this pure test doesn't reach.
+        assert!(core.contains("data ActorLocal (api :: Type -> Type) a where"), "{core}");
+        // The shim can omit an effect without changing its stable vocabulary.
         let shim = effects_shim_module_source(&[crate::askuser_decl()], &crate::RowArgs::default());
         assert!(shim.contains("type M = Eff '[AskUser]"), "{shim}");
     }
@@ -1450,8 +1263,7 @@ mod template_haskell_pin {
         );
     }
 
-    /// The `show_default=true, anchor_result=true` combination (a REPL turn
-    /// compiled against a real `Finalize T` row) has no named wrapper —
+    /// The `show_default=true, anchor_result=true` combination has no named wrapper —
     /// construct [`TurnTemplate`] directly for it.
     #[test]
     fn show_default_anchored_combination_is_expressible_and_pinned() {

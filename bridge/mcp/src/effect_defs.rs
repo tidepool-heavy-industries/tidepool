@@ -201,7 +201,7 @@ pub(crate) use ty_param_names;
 
 /// Render an optional `helpers_row_polymorphic <bool>` grammar token to its
 /// `bool` value, defaulting to `false` when the definition omits the clause
-/// entirely (every effect except `RunLLMTurn`, today).
+/// entirely.
 macro_rules! opt_bool_or_false {
     () => {
         false
@@ -286,7 +286,7 @@ macro_rules! extra_imports_for {
     // `newStdGen`/`randomRIO` (built on `entropySeed`) — same
     // built-on-the-raw-substrate-verb shape as `AskUser`/`Tidepool.Form`.
     // `Entropy` is a BASE effect (always in `base_effects!`, unlike the
-    // gated AskUser/Fork), so this import is unconditionally live. It
+    // gated AskUser), so this import is unconditionally live. It
     // cannot instead be reached through `Tidepool.Prelude`: the generated
     // `Tidepool.Effects` module itself imports `Tidepool.Prelude`, so a
     // Prelude re-export of anything importing `Tidepool.Effects` (as
@@ -301,12 +301,6 @@ macro_rules! extra_imports_for {
     (KV) => {
         &["import Tidepool.Kv"]
     };
-    // Fork was migrated to the `tidepool-protocol` schema; its
-    // `extra_imports` (`import Tidepool.Answerer.Fork` — `fork`/`forkAll`/`forkMap`/
-    // `forkCata` build on `Fork`'s own `forkSited`/`forkAllSited`) is schema
-    // data now, emitted straight into its generated decl. See
-    // `bridge/protocol/src/effects/fork.rs`.
-    //
     // `renderSpawnError` is DEFINED in `bridge/haskell/lib/Tidepool/Agent/Spawn.hs`
     // rather than emitted into the generated module, because it calls
     // `renderWorktreeError` — authored library code in `Tidepool.Worktree`,
@@ -493,11 +487,11 @@ macro_rules! effect_decl_projection {
             }
         }
     };
-    // An unparameterized effect (all but `Finalize`): forward to the arm below
+    // An unparameterized effect: forward to the arm below
     // with an empty type-parameter list. Two arms rather than one optional
     // slot because the parameters are consumed INSIDE the per-constructor
     // repetition (each constructor's result type is the applied head,
-    // `Finalize v a`), and macro_rules cannot nest an optional group there.
+    // `State s a`), and macro_rules cannot nest an optional group there.
     (
         effect $eff:ident,
         handler $handler:ident,
@@ -986,22 +980,6 @@ macro_rules! ask_effect_def {
 // `bridge/mcp/src/generated/read_state.rs`; see
 // `bridge/protocol/src/effects/read_state.rs` for the single-source
 // definition.
-
-// RunLLMTurn effect: MIGRATED to the `tidepool-protocol` schema (#20 steps
-// 2-3, helperbody-flip). `runllmturn_decl()` now comes from
-// `bridge/mcp/src/generated/run_l_l_m_turn.rs`; see
-// `bridge/protocol/src/effects/run_llm_turn.rs` for the single-source
-// definition.
-
-// Finalize effect: MIGRATED to the `tidepool-protocol` schema (#20 steps 2-3,
-// helperbody-flip). `finalize_decl()` now comes from
-// `bridge/mcp/src/generated/finalize.rs`; see
-// `bridge/protocol/src/effects/finalize.rs` for the single-source definition.
-
-// Fork effect: MIGRATED to the `tidepool-protocol` schema (#20 steps 2-3,
-// helperbody-flip). `fork_decl()` now comes from
-// `bridge/mcp/src/generated/fork.rs`; see
-// `bridge/protocol/src/effects/fork.rs` for the single-source definition.
 
 /// Llm effect — single definition.
 // See `http_effect_def!` on why `crate::` (not `$crate`) is correct here.
@@ -1790,27 +1768,6 @@ mod tests {
         assert!(decl.type_defs.iter().any(|definition| {
             definition.contains("data KvError = KvCorrupt Text | KvIo Text | KvDurabilityUnknown Text | KvDecode Text")
         }));
-    }
-
-    /// The Fork effect's generated decl: two constructors (`ForkWith`/
-    /// `ForkAllWith`) carrying a site id, and the `forkSited`/`forkAllSited`
-    /// executing helpers `Tidepool.Answerer.Fork`'s stubs head-swap to.
-    #[test]
-    fn generated_fork_decl_shape() {
-        let d = crate::fork_decl();
-        assert_eq!(d.type_name, "Fork");
-        assert_eq!(
-            d.constructors,
-            &[
-                "ForkWith :: Int -> Text -> Fork Value",
-                "ForkAllWith :: Int -> [Text] -> Fork Value",
-            ]
-        );
-        assert!(d.type_defs.is_empty());
-        assert!(d.helpers[0].contains("forkSited :: forall a effs. Member Fork effs"));
-        assert!(d.helpers[0].contains("send (ForkWith sid brief)"));
-        assert!(d.helpers[1].contains("forkAllSited :: forall a effs. Member Fork effs"));
-        assert!(d.helpers[1].contains("send (ForkAllWith sid prompts)"));
     }
 
     #[test]

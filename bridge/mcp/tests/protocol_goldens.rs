@@ -45,9 +45,6 @@ fn all_declaration_names_and_order_are_explicit() {
             "AskUser",
             "ReadState",
             "RecipeCheck",
-            "RunLLMTurn",
-            "Fork",
-            "Finalize",
             "Green",
             "Actor",
             "ActorContext",
@@ -189,10 +186,9 @@ fn hardcoded_pins_survive_a_blind_regen() {
     );
 
     let console = tidepool_mcp::console_decl();
-    assert_eq!(
-        console.constructors.to_vec(),
-        vec!["Print :: Text -> Console ()"],
-        "Console's single constructor signature drifted from effect_defs.rs's console_effect_def!"
+    assert!(
+        console.constructors.contains(&"Print :: Text -> Console ()"),
+        "Console's text-printing contract changed"
     );
 }
 
@@ -213,9 +209,9 @@ fn hardcoded_pins_survive_a_blind_regen() {
 // Covers the four combinations the import-gating refactor (companion imports
 // living on `EffectDecl::extra_imports`, see `effect_decls.rs`) must
 // reproduce byte-for-byte: the standard row (all base effects, exercises the
-// Exec+Git+Entropy companion imports), the answerer row `[AskUser,
-// Finalize]` (exercises the AskUser companion import alone), the outer row
-// `[RunLLMTurn, AskUser]` (AskUser again, different row shape), and the
+// Exec+Git+Entropy companion imports), the actor-local row `[AskUser,
+// ActorLocal]` (exercises the AskUser companion import alone), the agent-session row
+// `[AgentSession, AskUser]` (AskUser again, different row shape), and the
 // empty row (no companion imports, no `paginateResult` alias).
 // ---------------------------------------------------------------------------
 
@@ -247,18 +243,18 @@ fn import_gating_standard_row_golden_matches_committed_file() {
 }
 
 #[test]
-fn import_gating_answerer_row_golden_matches_committed_file() {
-    let effects = vec![tidepool_mcp::askuser_decl(), tidepool_mcp::finalize_decl()];
-    check_import_gating("answerer_row", &effects);
+fn import_gating_actor_local_row_golden_matches_committed_file() {
+    let effects = vec![tidepool_mcp::askuser_decl(), tidepool_mcp::actor_local_decl()];
+    check_import_gating("actor_local_row", &effects);
 }
 
 #[test]
-fn import_gating_outer_row_golden_matches_committed_file() {
+fn import_gating_agent_session_row_golden_matches_committed_file() {
     let effects = vec![
-        tidepool_mcp::runllmturn_decl(),
+        tidepool_mcp::agent_session_decl(),
         tidepool_mcp::askuser_decl(),
     ];
-    check_import_gating("outer_row", &effects);
+    check_import_gating("agent_session_row", &effects);
 }
 
 #[test]

@@ -505,33 +505,9 @@ impl EvalHarness {
     }
 }
 
-/// The base MCP effect stack (Console, KV, FsRead, FsWrite, Http, Exec, Llm, Git, Time,
-/// Entropy, Ask, RunLLMTurn) as a hand-maintained GADT preamble, plus matching
-/// stub handlers and a ready-made [`mock::min_stack`] `frunk` HList.
-///
-/// The GADT preamble text and stub handlers below are a STATIC mirror of the
-/// real stack, not a derivation — it exists so callers can compile a
-/// self-contained module without wiring `with_effects_module()`/
-/// `Tidepool.Orchestrate`. Because *those* are hand-maintained, they CAN
-/// drift from `tidepool_mcp::standard_decls()` (that's exactly what happened
-/// when the SG effect was cut and Lsp/Time were added — see f1a480e6). This
-/// preamble text/`min_stack()`'s HList still declare `Fork` (tag 11) as a
-/// KNOWN, intentional divergence from `standard_decls()` (vestigial-
-/// subsystems review §4 narrowed `standard_decls()` to the ordinary
-/// one-shot/REPL roster, which never services `Fork`) — several tests
-/// dispatch `Fork` through this mock stack directly (not through the session
-/// engine's suspend/resume parser, so the gap the review names doesn't apply
-/// here) and still need it declared; shrinking this hand-maintained mirror is
-/// a separate migration, not required by that fix.
-/// [`EFFECT_NAMES`] itself is no longer part of that hand-maintained surface:
-/// it's computed straight from `tidepool_mcp::standard_decls()` (this crate
-/// already depends on `tidepool-mcp` as a normal dependency), so it cannot
-/// independently drift, and (as of the `Fork` narrowing above) is one effect
-/// SHORTER than this module's own hand-maintained preamble/`min_stack()`.
-/// `mock_stack_matches_production`
-/// (`tidepool/runtime/tests/effect_stack/mock_stack_lockstep.rs`) still pins
-/// it against `tidepool_mcp::standard_decls()` as a regression guard against
-/// a future hand-maintained list creeping back in.
+/// The base MCP effect stack, with a self-contained Haskell preamble and
+/// matching stub handlers. Production effect names come from standard_decls;
+/// mock_stack_matches_production guards the corresponding stack order.
 pub mod mock {
     use std::collections::HashMap;
     use std::sync::LazyLock;
@@ -614,17 +590,11 @@ data Entropy a where
   EntropySeed :: Entropy Int
 data Ask a where
   Ask :: Text -> Ask HaskellValue
-data RunLLMTurn a where
-  RunLLMTurnStub :: Text -> RunLLMTurn HaskellValue
-data Fork a where
-  ForkWith :: Int -> Text -> Fork HaskellValue
-  ForkAllWith :: Int -> [Text] -> Fork HaskellValue
-
-type M = Eff '[Console, KV, FsRead, FsWrite, Http, Exec, Llm, Git, Time, Entropy, Ask, RunLLMTurn, Fork]
+type M = Eff '[Console, KV, FsRead, FsWrite, Http, Exec, Llm, Git, Time, Entropy, Ask]
 "#;
 
     /// [`MCP_PREAMBLE`] followed by `body` (your helper defs + `result`). The
-    /// standard way to build a source string for the 13-effect stack.
+    /// standard way to build a source string for the 11-effect stack.
     pub fn mcp_module(body: &str) -> String {
         format!("{MCP_PREAMBLE}\n{body}\n")
     }
@@ -905,48 +875,9 @@ type M = Eff '[Console, KV, FsRead, FsWrite, Http, Exec, Llm, Git, Time, Entropy
         }
     }
 
-    // 11: RunLLMTurn (stub — self-iterating-harness WS-B split this out of
-    // Ask; this mock harness dispatches every tag through the handler HList
-    // (no suspend-tag threshold), so it needs its own stub same as MockAsk).
-    #[derive(FromHaskell)]
-    #[allow(dead_code)]
-    pub enum RunLLMTurnReq {
-        #[haskell(name = "RunLLMTurnStub")]
-        RunLLMTurnStub(String),
-    }
-    pub struct MockRunLLMTurn;
-    impl EffectHandler for MockRunLLMTurn {
-        type Request = RunLLMTurnReq;
-        fn handle(
-            &mut self,
-            _req: RunLLMTurnReq,
-            cx: &EffectContext,
-        ) -> Result<Response, EffectError> {
-            cx.respond(serde_json::json!("stub_response"))
-        }
-    }
-
-    // 12: Fork (stub — the answerer parallel-delegation effect; same
-    // dispatch-every-tag reasoning as MockRunLLMTurn).
-    #[derive(FromHaskell)]
-    #[allow(dead_code)]
-    pub enum ForkReq {
-        #[haskell(name = "ForkWith")]
-        ForkWith(i64, String),
-        #[haskell(name = "ForkAllWith")]
-        ForkAllWith(i64, Vec<String>),
-    }
-    pub struct MockFork;
-    impl EffectHandler for MockFork {
-        type Request = ForkReq;
-        fn handle(&mut self, _req: ForkReq, cx: &EffectContext) -> Result<Response, EffectError> {
-            cx.respond(serde_json::json!("stub_response"))
-        }
-    }
-
     /// The base-stack mock handler HList, in stack order (matches
     /// [`EFFECT_NAMES`]) `[Console, KV, FsRead, FsWrite, Http, Exec, Llm, Git, Time,
-    /// Entropy, Ask, RunLLMTurn, Fork]` — pass straight to
+    /// Entropy, Ask]` — pass straight to
     /// [`super::EvalHarness::run`].
     pub fn min_stack() -> frunk::HList!(
         MockConsole,
@@ -959,9 +890,7 @@ type M = Eff '[Console, KV, FsRead, FsWrite, Http, Exec, Llm, Git, Time, Entropy
         MockGit,
         MockTime,
         MockEntropy,
-        MockAsk,
-        MockRunLLMTurn,
-        MockFork
+        MockAsk
     ) {
         frunk::hlist![
             MockConsole,
@@ -974,9 +903,7 @@ type M = Eff '[Console, KV, FsRead, FsWrite, Http, Exec, Llm, Git, Time, Entropy
             MockGit,
             MockTime,
             MockEntropy,
-            MockAsk,
-            MockRunLLMTurn,
-            MockFork
+            MockAsk
         ]
     }
 }
