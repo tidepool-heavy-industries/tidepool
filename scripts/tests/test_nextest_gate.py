@@ -24,7 +24,9 @@ class NextestGate(unittest.TestCase):
             "#!/usr/bin/env bash\nset -euo pipefail\n"
             "source scripts/lib-nextest.sh\n"
             "trap 'kill -TERM \"$nextest_pid\" 2>/dev/null || true; wait \"$nextest_pid\" 2>/dev/null || true; exit 130' INT TERM\n"
-            "nextest_run_checked\n")
+            "status=0; nextest_run_checked || status=$?\n"
+            "printf 'process=%s gate=%s\\n' \"$NEXTTEST_PROCESS_STATUS\" \"$NEXTTEST_GATE_STATUS\"\n"
+            "exit \"$status\"\n")
         self.runner.chmod(0o755)
         cargo = self.root / "bin" / "cargo"
         cargo.write_text("""#!/usr/bin/env python3
@@ -49,10 +51,16 @@ sys.exit(int(os.environ.get('STATUS', '0')))
                               text=True, timeout=5)
 
     def test_valid_nonzero_and_invalid_summaries(self):
-        self.assertEqual(self.run_gate().returncode, 0)
-        self.assertNotEqual(self.run_gate(ZERO="1").returncode, 0)
-        self.assertNotEqual(self.run_gate(MISSING="1").returncode, 0)
-        self.assertEqual(self.run_gate(STATUS="8").returncode, 8)
+        for values, status, stages in [
+            ({}, 0, "process=0 gate=0"),
+            ({"ZERO": "1"}, 1, "process=0 gate=1"),
+            ({"MISSING": "1"}, 1, "process=0 gate=1"),
+            ({"STATUS": "8"}, 8, "process=8 gate=8"),
+        ]:
+            with self.subTest(values=values):
+                result = self.run_gate(**values)
+                self.assertEqual(result.returncode, status, result.stderr)
+                self.assertIn(stages, result.stdout)
 
     def test_signal_stops_actual_nextest_process(self):
         process = subprocess.Popen([str(self.runner)], cwd=self.root,

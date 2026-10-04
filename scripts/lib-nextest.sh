@@ -3,6 +3,8 @@
 nextest_pid=""
 nextest_run_checked() {
   local log status remove_log=0
+  NEXTTEST_PROCESS_STATUS=""
+  NEXTTEST_GATE_STATUS=""
   log="${NEXTTEST_STDERR_LOG:-$(mktemp -t tidepool-nextest.XXXXXX)}"
   [[ -n "${NEXTTEST_STDERR_LOG:-}" ]] || remove_log=1
   set +e
@@ -10,6 +12,7 @@ nextest_run_checked() {
   nextest_pid=$!
   wait "$nextest_pid"
   status=$?
+  NEXTTEST_PROCESS_STATUS="$status"
   nextest_pid=""
   set -e
   if (( status == 0 )); then
@@ -21,6 +24,7 @@ nextest_run_checked() {
       status=1
     fi
   fi
+  NEXTTEST_GATE_STATUS="$status"
   (( remove_log == 0 )) || rm -f "$log"
   return "$status"
 }

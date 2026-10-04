@@ -4,6 +4,7 @@
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -443,12 +444,53 @@ exit 9
         self.assertIn("did not publish matching producer/pid/epoch evidence", result.stderr)
         self.assertNotIn("direct compiler endpoint validated", result.stderr)
 
+    def test_artifacts_record_source_and_reproduce_exact_argv_through_dev_shell(self):
+        subprocess.run(["git", "init", "--quiet"], cwd=self.root, check=True)
+        tracked = self.root / "tracked.txt"
+        tracked.write_text("original\n")
+        subprocess.run(["git", "add", "tracked.txt"], cwd=self.root, check=True)
+        subprocess.run(["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                        "commit", "--quiet", "-m", "fixture"], cwd=self.root, check=True)
+        source = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=self.root, text=True).strip()
+        tracked.write_text("dirty content must not enter metadata\n")
+        scripts = self.root / "scripts"
+        scripts.mkdir()
+        (scripts / "dev-shell.sh").write_text('printf "%s\\n" "$@" > "$TEST_OUTPUT"\n')
+        argv = ["scripts/battery.sh", "-p", "fixture", "--lib", "-E",
+                "test(=path::with spaces)", "literal$(touch should-not-exist)"]
+        self.run_shell("prepare_battery_artifacts fixture " + shlex.join(argv)
+                       + "\nfinalize_battery_artifacts 1\n",
+                       TIDEPOOL_TEST_ARTIFACT_ROOT=str(self.root / "artifacts"))
+        artifact = next((self.root / "artifacts").iterdir())
+        self.assertEqual((artifact / "source.oid").read_text().strip(), source)
+        inventory = (artifact / "source-wip.txt").read_text()
+        self.assertIn(" M tracked.txt", inventory)
+        self.assertNotIn("dirty content", inventory)
+        output = self.root / "reproduced-argv.txt"
+        subprocess.run(["bash", str(artifact / "reproduce.sh")], cwd=self.root, check=True,
+                       env=self.env | {"TEST_OUTPUT": str(output)})
+        self.assertEqual(output.read_text().splitlines(), argv)
+        self.assertFalse((self.root / "should-not-exist").exists())
+
+    def test_artifacts_report_unknown_source_and_reset_unexecuted_nextest_status(self):
+        self.run_shell('prepare_battery_artifacts fixture true\nfinalize_battery_artifacts 1\n',
+                       TIDEPOOL_TEST_ARTIFACT_ROOT=str(self.root / "artifacts"),
+                       NEXTTEST_PROCESS_STATUS="0", NEXTTEST_GATE_STATUS="0")
+        artifact = next((self.root / "artifacts").iterdir())
+        self.assertEqual((artifact / "source.oid").read_text(), "unknown\n")
+        self.assertEqual((artifact / "source-wip.txt").read_text(), "unknown\n")
+        self.assertEqual((artifact / "run-status.txt").read_text(),
+                         "nextest_process_status=unknown\n"
+                         "nextest_selection_gate_status=unknown\n"
+                         "entrypoint_status_before_finalization=1\n"
+                         "artifact_finalization_status=0\n")
+
     def test_battery_exit_trap_propagates_finalization_failure_and_still_tears_down(self):
         self.executable(
-            "cargo-nextest", "#!/bin/sh\nprintf '%s\\n' 'Summary: 1 tests run: 1 passed'\nexit \"${NEXTTEST_STATUS:-0}\"\n")
+            "cargo-nextest", "#!/bin/sh\nprintf '%s\\n' 'Summary: 1 tests run: 1 passed' >&2\nexit \"${NEXTTEST_STATUS:-0}\"\n")
         self.executable(
             "cargo", "#!/bin/sh\n[ \"$1\" = nextest ] || exit 88\n"
-            "printf '%s\\n' 'Summary: 1 tests run: 1 passed'\nexit \"${NEXTTEST_STATUS:-0}\"\n")
+            "printf '%s\\n' 'Summary: 1 tests run: 1 passed' >&2\nexit \"${NEXTTEST_STATUS:-0}\"\n")
         manifest = self.root / "compiler-deployment.json"
         manifest.write_text("{}\n")
         destination = self.root / "measurement/already-retained.jsonl"
@@ -477,6 +519,12 @@ exit 9
             self.assertEqual(result.returncode, expected_status)
             self.assertIn("could not retain the explicitly selected raw compiler trace", result.stderr)
             self.assertEqual(destination.read_bytes(), prior_trace)
+            artifact = max((self.root / "artifacts").iterdir(), key=lambda path: path.stat().st_mtime)
+            self.assertEqual((artifact / "run-status.txt").read_text(),
+                             f"nextest_process_status={nextest_status}\n"
+                             f"nextest_selection_gate_status={nextest_status}\n"
+                             f"entrypoint_status_before_finalization={nextest_status}\n"
+                             "artifact_finalization_status=1\n")
             if nextest_status == 0:
                 self.assertFalse(list((self.root / "artifacts").glob("*/.successful-run")))
             self.assertEqual(list(self.root.glob("tidepool-extract-daemon.*")), [])

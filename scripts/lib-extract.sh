@@ -298,19 +298,26 @@ prepare_battery_artifacts() {
   stamp="$(date -u +%Y%m%dT%H%M%SZ)"
   BATTERY_ARTIFACT_DIR="$root/$stamp-$$-$label"
   BATTERY_NEXTEST_LOG="$BATTERY_ARTIFACT_DIR/nextest.log"
+  NEXTTEST_PROCESS_STATUS=""
+  NEXTTEST_GATE_STATUS=""
   mkdir -p "$BATTERY_ARTIFACT_DIR"
   {
     printf '#!/usr/bin/env bash\nset -euo pipefail\ncd %q\n' "$PWD"
-    printf 'nix develop --command'
+    printf 'bash scripts/dev-shell.sh'
     printf ' %q' "$@"
     printf '\n'
   } >"$BATTERY_ARTIFACT_DIR/reproduce.sh"
   chmod +x "$BATTERY_ARTIFACT_DIR/reproduce.sh"
+  git rev-parse HEAD >"$BATTERY_ARTIFACT_DIR/source.oid" 2>/dev/null \
+    || printf 'unknown\n' >"$BATTERY_ARTIFACT_DIR/source.oid"
+  git status --short >"$BATTERY_ARTIFACT_DIR/source-wip.txt" 2>/dev/null \
+    || printf 'unknown\n' >"$BATTERY_ARTIFACT_DIR/source-wip.txt"
   : >"$BATTERY_NEXTEST_LOG"
 }
 
 finalize_battery_artifacts() {
-  local status="$1"
+  local entrypoint_status="$1"
+  local status="$entrypoint_status"
   local finalize_status=0
   [[ -n "$BATTERY_ARTIFACT_DIR" ]] || return 0
   if [[ "${TIDEPOOL_EXTRACT_MEASUREMENT:-0}" = 1 && "$BATTERY_DAEMON_OWNED" = 1 ]]; then
@@ -458,7 +465,14 @@ PYLOG
   else
     echo "==> test/daemon failure artifacts: $BATTERY_ARTIFACT_DIR" >&2
   fi
+  {
+    printf 'nextest_process_status=%s\n' "${NEXTTEST_PROCESS_STATUS:-unknown}"
+    printf 'nextest_selection_gate_status=%s\n' "${NEXTTEST_GATE_STATUS:-unknown}"
+    printf 'entrypoint_status_before_finalization=%s\n' "$entrypoint_status"
+    printf 'artifact_finalization_status=%s\n' "$finalize_status"
+  } >"$BATTERY_ARTIFACT_DIR/run-status.txt"
   echo "==> reproduce: $BATTERY_ARTIFACT_DIR/reproduce.sh" >&2
+  echo "==> execution/finalization status: $BATTERY_ARTIFACT_DIR/run-status.txt" >&2
   return "$finalize_status"
 }
 
