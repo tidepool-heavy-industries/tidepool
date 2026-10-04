@@ -108,13 +108,19 @@ projectEntry :: PreparedPipelineResult -> String -> String
 projectEntry result modul entry retained =
   projectEntryWithAux result modul entry [] retained
 
-projectEntryWithJsonAuthority :: JsonAuthority -> PreparedPipelineResult
-  -> String -> String -> Either Projection.ProjectionError Schema.WireProgram
-projectEntryWithJsonAuthority authority result modul entry =
-  Projection.projectPreparedTarget (jsonProjectionContext authority modul entry) (pprModules result)
+projectEntryWithJsonAuthority :: Projection.ProjectionContext -> PreparedPipelineResult
+  -> String -> Either Projection.ProjectionError Schema.WireProgram
+projectEntryWithJsonAuthority context result entry =
+  Projection.projectPreparedTarget
+    (context { Projection.projectionEntry = (Projection.projectionEntry context)
+      { Schema.symbolOccurrence = fromString entry } }) (pprModules result)
 
-jsonProjectionContext :: JsonAuthority -> String -> String -> Projection.ProjectionContext
-jsonProjectionContext authority modul entry = Projection.ProjectionContext
+jsonProjectionContext :: JsonAuthority -> PreparedPipelineResult -> String -> String
+  -> IO Projection.ProjectionContext
+jsonProjectionContext authority result modul entry = do
+  textAuthority <- Projection.resolveTextPackageUnit (prHscEnv (pprPipelineResult result))
+    >>= maybe (ioError (userError "JSON projection lacks its selected compiler Text package")) pure
+  pure Projection.ProjectionContext
     { Projection.projectionProfile = "ghc-9.12-prepared-stg"
     , Projection.projectionToolchain = "ghc-9.12.2"
     , Projection.projectionTarget =
@@ -126,7 +132,7 @@ jsonProjectionContext authority modul entry = Projection.ProjectionContext
     , Projection.projectionFormattingAuthority = Nothing
     , Projection.projectionTimeAuthority = Nothing
     , Projection.projectionJsonAuthority = Just authority
-    , Projection.projectionTextUnit = Nothing
+    , Projection.projectionTextUnit = Just textAuthority
     }
 
 -- | 'projectEntry' plus a set of auxiliary root occurrences in the same
@@ -219,8 +225,9 @@ verifyJsonDependencyAuthority dir = do
     (prHscEnv (pprPipelineResult shadowedEither))
   authority <- maybe (ioError (userError "installed JSON owners did not resolve")) pure
     shadowedEitherAuthority
-  case projectEntryWithJsonAuthority authority shadowedEither
-      "JsonEitherAuthorityContract" "result" of
+  eitherContext <- jsonProjectionContext authority shadowedEither
+    "JsonEitherAuthorityContract" "result"
+  case projectEntryWithJsonAuthority eitherContext shadowedEither "result" of
     Left (Projection.UnsupportedPreparedShape detail)
       | "InvalidJsonType" `Text.isInfixOf` detail -> pure ()
     outcome -> ioError (userError
@@ -229,8 +236,8 @@ verifyJsonDependencyAuthority dir = do
 
 verifyJsonLayoutDemand :: JsonAuthority -> PreparedPipelineResult -> IO ()
 verifyJsonLayoutDemand authority result = do
-  let context = jsonProjectionContext authority "JsonAuthorityContract" "unrelated"
-      plain = context { Projection.projectionJsonAuthority = Nothing }
+  context <- jsonProjectionContext authority result "JsonAuthorityContract" "unrelated"
+  let plain = context { Projection.projectionJsonAuthority = Nothing }
       project = Projection.projectPreparedTarget
       require :: Show failure => String -> Either failure value -> IO value
       require label = either (ioError . userError . ((label ++ ": ") ++) . show) pure
@@ -282,6 +289,10 @@ verifyJsonLayoutDemand authority result = do
       && retains textRepresentation textConstructors
       && Schema.programJsonLayout textCarrier == Nothing)
     "bound host constructors were omitted or Text acquired JSON roles"
+  putStrLn $ "bound_host_representation_projections json_layout_roles="
+    ++ show (length . toList <$> Schema.programJsonLayout jsonCarrier)
+    ++ " json_constructor_rows=" ++ show (length jsonConstructors)
+    ++ " text_constructor_rows=" ++ show (length textConstructors)
   let selectionFor owner occurrences = Just (Set.fromList [ fromIntegral ordinal
         | (ordinal, (binding, _)) <- zip [0 :: Int ..] (pmBindings owner)
         , any ((`elem` occurrences) . occNameString . nameOccName . idName)
@@ -310,15 +321,15 @@ verifyJsonLayoutDemand authority result = do
       ((/= Nothing) . Schema.projectedJsonLayout . Schema.projectedBody) jsonGroups)
     "JSON intrinsic original groups omitted authenticated roles"
   mapM_ (\entry -> do
-      program <- require entry (projectEntryWithJsonAuthority authority result "JsonAuthorityContract" entry)
+      program <- require entry (projectEntryWithJsonAuthority context result entry)
       assert (Schema.programJsonLayout program /= Nothing)
         (entry ++ ": omitted required JSON layout"))
     ["result", "encodeOnly", "decodeOnly", "hostValue", "polymorphicValue"]
   mapM_ (\entry -> do
-      program <- require entry (projectEntryWithJsonAuthority authority result "JsonAuthorityContract" entry)
+      program <- require entry (projectEntryWithJsonAuthority context result entry)
       assert (any isJsonOperation (Schema.programOperations program))
         (entry ++ ": intrinsic regression fixture lacks JSON operations")) ["encodeOnly", "decodeOnly"]
-  host <- require "host carrier" (projectEntryWithJsonAuthority authority result "JsonAuthorityContract" "hostValue")
+  host <- require "host carrier" (projectEntryWithJsonAuthority context result "hostValue")
   assert (not (any isJsonOperation (Schema.programOperations host)))
     "host carrier regression fixture unexpectedly uses JSON operations"
   let nestedContext = context { Projection.projectionAuxiliaryRoots =
@@ -367,6 +378,7 @@ verifyNominalJsonConstructorDemand dir = do
   valueTyCon <- case valueTyCons of
     tc : _ -> pure tc
     [] -> ioError (userError "nominal JSON fixture lacks Value type evidence")
+  context <- jsonProjectionContext authority result "JsonNominalAnswer" "answer"
   let newUnique = mkUnique 'z' 54322
       otherTyCon = valueTyCon
         { TC.tyConUnique = newUnique
@@ -388,7 +400,6 @@ verifyNominalJsonConstructorDemand dir = do
               TypePolicy.DataG ty tc args [(clone con, children) | (con, children) <- rows]
             _ -> node
         | node <- TypePolicy.tgNodes (pmTypeGraph prepared) ] }
-      context = jsonProjectionContext authority "JsonNominalAnswer" "answer"
       project modules = either (ioError . userError . show) pure
         (Projection.projectPreparedTarget context modules)
   assert (otherTyCon /= valueTyCon) "nominal JSON fixture did not change GHC identity"
