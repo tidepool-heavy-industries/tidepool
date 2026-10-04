@@ -261,7 +261,6 @@ pub fn source() -> Effect {
                 ret: HsType::Named("ReloadOutcome"),
                 errors: Some("SourceError"),
                 handling: HandlingClass::OuterDispatch(OuterEffect::Source),
-                extract: None,
             },
             Verb {
                 ctor: "SourceStatusWith",
@@ -270,7 +269,6 @@ pub fn source() -> Effect {
                 ret: HsType::Named("SourceStatus"),
                 errors: Some("SourceError"),
                 handling: HandlingClass::OuterDispatch(OuterEffect::Source),
-                extract: None,
             },
         ],
         helpers: vec![

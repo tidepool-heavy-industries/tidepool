@@ -33,7 +33,6 @@ pub fn agent_launch() -> Effect {
             ret: launched_actor_type(),
             errors: None,
             handling: HandlingClass::Actor,
-            extract: None,
         }],
         helpers: Vec::new(),
         polymorphism: Polymorphism::None,

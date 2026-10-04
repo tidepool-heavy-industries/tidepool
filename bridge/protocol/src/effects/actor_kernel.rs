@@ -95,7 +95,6 @@ pub fn actor_kernel() -> Effect {
                 ret: HsType::Unit,
                 errors: None,
                 handling: HandlingClass::Actor,
-                extract: None,
             },
             Verb {
                 ctor: "ActorReadyWith",
@@ -104,7 +103,6 @@ pub fn actor_kernel() -> Effect {
                 ret: HsType::Unit,
                 errors: None,
                 handling: HandlingClass::Actor,
-                extract: None,
             },
             Verb {
                 ctor: "ActorReplyWith",
@@ -124,7 +122,6 @@ pub fn actor_kernel() -> Effect {
                 ret: HsType::Unit,
                 errors: None,
                 handling: HandlingClass::Actor,
-                extract: None,
             },
             Verb {
                 ctor: "ActorContinueWith",
@@ -144,7 +141,6 @@ pub fn actor_kernel() -> Effect {
                 ret: HsType::Unit,
                 errors: None,
                 handling: HandlingClass::Actor,
-                extract: None,
             },
             source_install(
                 "ActorInstallProgressSourceWith",
@@ -196,7 +192,6 @@ pub fn actor_kernel() -> Effect {
                 ret: HsType::Named("ActorLifecycle"),
                 errors: None,
                 handling: HandlingClass::Actor,
-                extract: None,
             },
             Verb {
                 ctor: "ActorCommandInputWith",
@@ -205,7 +200,6 @@ pub fn actor_kernel() -> Effect {
                 ret: HsType::Named("CommandResult"),
                 errors: None,
                 handling: HandlingClass::Actor,
-                extract: None,
             },
         ],
         helpers: Vec::new(),
@@ -237,6 +231,5 @@ fn source_install(ctor: &'static str, method: &'static str, target: Arg) -> Verb
         ret: HsType::Unit,
         errors: None,
         handling: HandlingClass::Actor,
-        extract: None,
     }
 }

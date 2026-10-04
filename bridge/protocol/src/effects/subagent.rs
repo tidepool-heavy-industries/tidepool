@@ -56,7 +56,6 @@ pub fn subagent() -> Effect {
                 ret: HsType::Unit,
                 errors: None,
                 handling: HandlingClass::Subagent,
-                extract: None,
             },
             Verb {
                 ctor: "SubagentBegin",
@@ -65,7 +64,6 @@ pub fn subagent() -> Effect {
                 ret: HsType::Unit,
                 errors: None,
                 handling: HandlingClass::Subagent,
-                extract: None,
             },
             Verb {
                 ctor: "SubagentResume",
@@ -87,7 +85,6 @@ pub fn subagent() -> Effect {
                 ret: HsType::Unit,
                 errors: None,
                 handling: HandlingClass::Subagent,
-                extract: None,
             },
             Verb {
                 ctor: "SubagentSpawnAsync",
@@ -96,7 +93,6 @@ pub fn subagent() -> Effect {
                 ret: HsType::Unit,
                 errors: None,
                 handling: HandlingClass::Subagent,
-                extract: None,
             },
             Verb {
                 ctor: "SubagentAwait",
@@ -105,7 +101,6 @@ pub fn subagent() -> Effect {
                 ret: HsType::Unit,
                 errors: None,
                 handling: HandlingClass::Subagent,
-                extract: None,
             },
             Verb {
                 ctor: "SubagentCancel",
@@ -114,7 +109,6 @@ pub fn subagent() -> Effect {
                 ret: HsType::Unit,
                 errors: None,
                 handling: HandlingClass::Subagent,
-                extract: None,
             },
         ],
         helpers: Vec::new(),

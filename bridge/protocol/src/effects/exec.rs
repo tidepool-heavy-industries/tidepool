@@ -114,7 +114,6 @@ pub fn exec() -> Effect {
                 ret: proc(),
                 errors: Some("ExecError"),
                 handling: HandlingClass::OuterDispatch(OuterEffect::Exec),
-                extract: None,
             },
             Verb {
                 ctor: "RunIn",
@@ -134,7 +133,6 @@ pub fn exec() -> Effect {
                 ret: proc(),
                 errors: Some("ExecError"),
                 handling: HandlingClass::OuterDispatch(OuterEffect::Exec),
-                extract: None,
             },
             // Shell-free exec: argv list, no sh -c. Safe with metachars ($1, globs).
             Verb {
@@ -148,7 +146,6 @@ pub fn exec() -> Effect {
                 ret: proc(),
                 errors: Some("ExecError"),
                 handling: HandlingClass::OuterDispatch(OuterEffect::Exec),
-                extract: None,
             },
         ],
         helpers: vec![

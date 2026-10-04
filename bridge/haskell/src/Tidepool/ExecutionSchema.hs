@@ -15,7 +15,7 @@ module Tidepool.ExecutionSchema
   , OperationIdentity(..), JsonLayout(..), WiredInErrorKind(..), ForeignConvention(..)
   , TopBinding(..), WireProgram(..), schemaVersion, executionAbiVersion
   , ProjectedGroup(..), ProjectedGroupBody(..)
-  , TypeNodeId(..), CtorRow(..), TypeNode(..), SiteDelivery(..), SiteRow(..)
+  , TypeNodeId(..), CtorRow(..), TypeNode(..), SiteDelivery(..), SiteRow(..), ConstructorReply(..)
   ) where
 
 import Data.ByteString (ByteString)
@@ -24,8 +24,8 @@ import Data.Word (Word32, Word64, Word8)
 import GHC.Generics (Generic)
 
 schemaVersion, executionAbiVersion :: Word64
-schemaVersion = 14
-executionAbiVersion = 8
+schemaVersion = 15
+executionAbiVersion = 9
 
 newtype ValueId = ValueId Word32 deriving stock (Eq, Ord, Show, Generic)
 newtype JoinId = JoinId Word32 deriving stock (Eq, Ord, Show, Generic)
@@ -184,7 +184,7 @@ data WireProgram = WireProgram
   -- | Request constructors whose reply is answered by a synthetic row in
   -- 'programSites': an ordinary effect request carries no dynamic site, so
   -- the host classifies it by its outer constructor.
-  , programVerbSites :: [(ConstructorId, Word64)]
+  , programConstructorReplies :: [(ConstructorId, ConstructorReply)]
   -- | Compiler-authenticated JSON constructor roles. Kept independently of
   -- intrinsic operations because typed host mounts and answers also need it.
   , programJsonLayout :: Maybe (JsonLayout ConstructorId)
@@ -202,7 +202,7 @@ data ProjectedGroupBody = ProjectedGroupBody
   , projectedBindings :: [Group TopBinding]
   , projectedTypes :: [TypeNode]
   , projectedSites :: [SiteRow]
-  , projectedVerbSites :: [(ConstructorId, Word64)]
+  , projectedConstructorReplies :: [(ConstructorId, ConstructorReply)]
   , projectedJsonLayout :: Maybe (JsonLayout ConstructorId)
   } deriving stock (Eq, Show, Generic)
 
@@ -211,3 +211,8 @@ data ProjectedGroup = ProjectedGroup
   , projectedBinders :: [SymbolIdentity]
   , projectedBody :: ProjectedGroupBody
   } deriving stock (Eq, Show, Generic)
+
+-- | Reply evidence owned by the exact request constructor. AtSite reads only
+-- its authenticated first runtime field; StaticReply never inspects payloads.
+data ConstructorReply = StaticReply TypeNodeId | ReplyAtSite
+  deriving stock (Eq, Ord, Show, Generic)

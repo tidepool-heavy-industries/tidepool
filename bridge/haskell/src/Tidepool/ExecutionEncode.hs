@@ -37,7 +37,7 @@ encodeWireProgram program = toStrictByteString $ array
   , encodeValueId (programEntry program)
   , list encodeTypeNode (programTypes program)
   , list encodeSiteRow (programSites program)
-  , list encodeVerbSite (programVerbSites program)
+  , list encodeConstructorReply (programConstructorReplies program)
   , case programJsonLayout program of
       Nothing -> tag 0
       Just layout -> tagged 1 [encodeJsonLayout layout]
@@ -69,7 +69,7 @@ encodeProjectedGroup group = toStrictByteString $ array
   , list id bindings
   , list encodeTypeNode (projectedTypes body)
   , list encodeSiteRow (projectedSites body)
-  , list encodeVerbSite (projectedVerbSites body)
+  , list encodeConstructorReply (projectedConstructorReplies body)
   , case projectedJsonLayout body of
       Nothing -> tag 0
       Just layout -> tagged 1 [encodeJsonLayout layout]
@@ -262,9 +262,13 @@ encodeSiteRow site = array
   , list encodeTypeNodeId (siteInputs site)
   ]
 
-encodeVerbSite :: (ConstructorId, Word64) -> Encoding
-encodeVerbSite (constructor, site) =
-  array [encodeConstructorId constructor, encodeWord64 site]
+encodeConstructorReply :: (ConstructorId, ConstructorReply) -> Encoding
+encodeConstructorReply (constructor, reply) = array
+  [ encodeConstructorId constructor
+  , case reply of
+      StaticReply node -> tagged 0 [encodeTypeNodeId node]
+      ReplyAtSite -> tag 1
+  ]
 
 encodeValueRef :: ValueRef -> Encoding
 encodeValueRef ref = case ref of

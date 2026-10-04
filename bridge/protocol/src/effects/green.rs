@@ -131,7 +131,6 @@ pub fn green() -> Effect {
                 ret: HsType::Int,
                 errors: None,
                 handling: HandlingClass::Green,
-                extract: None,
             },
             Verb {
                 ctor: "AsyncDoneWith",
@@ -140,7 +139,6 @@ pub fn green() -> Effect {
                 ret: HsType::Unit,
                 errors: None,
                 handling: HandlingClass::Green,
-                extract: None,
             },
             Verb {
                 ctor: "AsyncJoinAnyWith",
@@ -153,7 +151,6 @@ pub fn green() -> Effect {
                 ret: HsType::Int,
                 errors: None,
                 handling: HandlingClass::Green,
-                extract: None,
             },
             Verb {
                 ctor: "AsyncStatusWith",
@@ -162,7 +159,6 @@ pub fn green() -> Effect {
                 ret: HsType::Int,
                 errors: None,
                 handling: HandlingClass::Green,
-                extract: None,
             },
             Verb {
                 ctor: "AsyncCancelWith",
@@ -171,7 +167,6 @@ pub fn green() -> Effect {
                 ret: HsType::Unit,
                 errors: None,
                 handling: HandlingClass::Green,
-                extract: None,
             },
         ],
         helpers: vec![

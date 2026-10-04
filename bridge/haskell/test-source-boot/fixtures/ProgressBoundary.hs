@@ -8,6 +8,7 @@ import Data.Coerce (coerce)
 import Tidepool.Agent.Reply.Internal
 import Tidepool.Agent.Watch.Internal
 import Tidepool.Actor.Source
+import Tidepool.Internal.RequestSite (RequestSite)
 
 newtype ProgressNote = ProgressNote Int
 
@@ -40,18 +41,18 @@ source stream = progressSource stream ProgressEvent
 
 {-# OPAQUE rawPublish #-}
 rawPublish :: Replies (Either ReplyError ())
-rawPublish = PublishProgressWith 1 (ProgressNote 41) 1
+rawPublish = PublishProgressWith (error "unavailable carrier") (ProgressNote 41) 1
 
 {-# OPAQUE rawObserve #-}
 rawObserve :: Replies (ProgressState ProgressNote)
-rawObserve = ObserveProgressWith 1 1
+rawObserve = ObserveProgressWith (error "unavailable carrier") 1
 
 {-# OPAQUE rawWatch #-}
 rawWatch :: Watches (ProgressState ProgressNote)
-rawWatch = ObserveWatchProgressWith 1 1 1 0
+rawWatch = ObserveWatchProgressWith (error "unavailable carrier") 1 1 0
 
 {-# OPAQUE bareRaw #-}
-bareRaw :: Int -> Int -> Replies (ProgressState ProgressNote)
+bareRaw :: RequestSite '[ProgressNote] (ProgressState ProgressNote) -> Int -> Replies (ProgressState ProgressNote)
 bareRaw = ObserveProgressWith
 
 {-# OPAQUE partialRaw #-}
@@ -60,45 +61,45 @@ partialRaw = ObserveProgressWith 1
 
 {-# OPAQUE tickedRaw #-}
 tickedRaw :: Replies (ProgressState ProgressNote)
-tickedRaw = {-# SCC "raw-progress" #-} ObserveProgressWith 1 1
+tickedRaw = {-# SCC "raw-progress" #-} ObserveProgressWith (error "unavailable carrier") 1
 
--- A guessed/copied numeric site must never authorize an authored Sited call.
+-- A raw/Sited reference cannot escape compiler-issued helper admission.
 {-# OPAQUE copiedPublisher #-}
 copiedPublisher :: ProgressSink ProgressNote -> Eff '[Replies] (Either ReplyError ())
-copiedPublisher sink = reportRequestProgressSited 1 sink (ProgressNote 41)
+copiedPublisher sink = reportRequestProgressSited (error "unavailable carrier") sink (ProgressNote 41)
 
 {-# OPAQUE copiedObserver #-}
 copiedObserver :: Progress ProgressNote -> Eff '[Replies] (ProgressState ProgressNote)
-copiedObserver = pollProgressSited 1
+copiedObserver = pollProgressSited (error "unavailable carrier")
 
 {-# OPAQUE copiedWatch #-}
 copiedWatch :: Progress ProgressNote -> Await (ProgressState ProgressNote)
-copiedWatch stream = awaitProgressAfterSited 1 stream (ProgressCursor 0)
+copiedWatch stream = awaitProgressAfterSited (error "unavailable carrier") stream (ProgressCursor 0)
 
 {-# OPAQUE copiedMany #-}
 copiedMany :: Progress ProgressNote -> Await [ProgressState ProgressNote]
-copiedMany stream = awaitAnyProgressSited 1 [(stream, ProgressCursor 0)]
+copiedMany stream = awaitAnyProgressSited (error "unavailable carrier") [(stream, ProgressCursor 0)]
 
 {-# OPAQUE copiedSource #-}
 copiedSource :: Progress ProgressNote -> Source Protocol
-copiedSource stream = progressSourceSited 1 stream ProgressEvent
+copiedSource stream = progressSourceSited (error "unavailable carrier") stream ProgressEvent
 
 {-# OPAQUE openObserver #-}
 openObserver :: Progress progress -> Eff '[Replies] (ProgressState progress)
 openObserver = pollProgress
 
 {-# OPAQUE castedRaw #-}
-castedRaw :: Int -> Int -> Int -> Replies (Either ReplyError ())
+castedRaw :: RequestSite '[ProgressNote] (Either ReplyError ()) -> Int -> Int -> Replies (Either ReplyError ())
 castedRaw = coerce
-  (PublishProgressWith :: Int -> ProgressNote -> Int -> Replies (Either ReplyError ()))
+  (PublishProgressWith :: RequestSite '[ProgressNote] (Either ReplyError ()) -> ProgressNote -> Int -> Replies (Either ReplyError ()))
 
 {-# OPAQUE copiedIntPublisher #-}
 copiedIntPublisher :: ProgressSink Int -> Eff '[Replies] (Either ReplyError ())
-copiedIntPublisher sink = reportRequestProgressSited (1 {- copied-site -}) sink (41 :: Int)
+copiedIntPublisher sink = reportRequestProgressSited (error "unavailable carrier") sink (41 :: Int)
 
 {-# OPAQUE copiedRawPublisher #-}
 copiedRawPublisher :: Replies (Either ReplyError ())
-copiedRawPublisher = PublishProgressWith (1 {- copied-site -}) (41 :: Int) 1
+copiedRawPublisher = PublishProgressWith (error "unavailable carrier") (41 :: Int) 1
 
 {-# OPAQUE safeSibling #-}
 safeSibling :: Int

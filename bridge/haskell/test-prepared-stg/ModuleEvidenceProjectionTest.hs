@@ -114,7 +114,7 @@ verifyModuleEvidenceProjection = do
         , TypePolicy.ProjectionDefectG "unreachable defect"
         , TypePolicy.UnconstructibleG "third" "C" ]
     , pmSiteRejections = []
-    , pmEffectRequestTypeIds = Set.empty
+    , pmRequestSiteTyCon = Nothing
     }
   context = ProjectionContext
     { projectionProfile = "ghc-9.12-prepared-stg"

@@ -351,23 +351,26 @@ verifyJsonLayoutDemand authority result = do
 verifyNominalJsonConstructorDemand :: FilePath -> IO ()
 verifyNominalJsonConstructorDemand dir = do
   createDirectoryIfMissing True (dir </> "Tidepool" </> "Effects")
-  writeFile (dir </> "Tidepool" </> "Effects" </> "Core.hs") (unlines
-    [ "module Tidepool.Effects.Core where"
-    , "{-# OPAQUE runLLMTurn #-}"
-    , "runLLMTurn :: forall answer. String -> Maybe answer"
-    , "runLLMTurn _ = Nothing"
-    , "{-# OPAQUE runLLMTurnSited #-}"
-    , "runLLMTurnSited :: forall answer. Int -> String -> Maybe answer"
-    , "runLLMTurnSited _ _ = Nothing"
+  writeRequestSiteFixture dir
+  writeFile (dir </> "Tidepool" </> "Actor.hs") (unlines
+    [ "{-# LANGUAGE DataKinds, ExplicitForAll #-}"
+    , "module Tidepool.Actor where"
+    , "import Tidepool.Internal.RequestSite (RequestSite)"
+    , "{-# OPAQUE receive #-}"
+    , "receive :: forall answer. String -> Maybe answer"
+    , "receive _ = Nothing"
+    , "{-# OPAQUE receiveSited #-}"
+    , "receiveSited :: forall answer. RequestSite '[] answer -> String -> Maybe answer"
+    , "receiveSited _ _ = Nothing"
     ])
   let source = dir </> "JsonNominalAnswer.hs"
   writeFile source (unlines
     [ "{-# LANGUAGE TypeApplications #-}"
     , "module JsonNominalAnswer where"
     , "import Tidepool.Aeson.Value (Value)"
-    , "import Tidepool.Effects.Core"
+    , "import Tidepool.Actor"
     , "answer :: Maybe Value"
-    , "answer = runLLMTurn @Value \"json\""
+    , "answer = receive @Value \"json\""
     ])
   result <- runPipelineSelected PreparedStg source [dir, "lib"]
   authority <- resolveJsonAuthority (prHscEnv (pprPipelineResult result))
@@ -482,14 +485,14 @@ strictMetadataSource modul quoted = unlines $
   [ "{-# LANGUAGE TypeApplications #-}" ] ++ quasiquoteLanguage quoted ++
   [ "module " ++ modul ++ " where"
   , "import StrictOwned"
-  , "import Tidepool.Effects.Core"
+  , "import Tidepool.Actor"
   ] ++ quasiquoteBindings quoted ++
   [ "automatic :: Maybe Automatic"
-  , "automatic = runLLMTurn @Automatic \"automatic\""
+  , "automatic = receive @Automatic \"automatic\""
   , "noUnpack :: Maybe NoUnpack"
-  , "noUnpack = runLLMTurn @NoUnpack \"nounpack\""
+  , "noUnpack = receive @NoUnpack \"nounpack\""
   , "explicitUnpack :: Maybe ExplicitUnpack"
-  , "explicitUnpack = runLLMTurn @ExplicitUnpack \"unpack\""
+  , "explicitUnpack = receive @ExplicitUnpack \"unpack\""
   ]
 
 quasiquoteLanguage :: Bool -> [String]
@@ -566,10 +569,10 @@ verifyConstructorRepresentations dir = do
     [ "{-# LANGUAGE TypeApplications #-}" ] ++ quasiquoteLanguage quoted ++
     [ "module " ++ modul ++ " where"
     , "import Tidepool.Aeson.Value (Value)"
-    , "import Tidepool.Effects.Core"
+    , "import Tidepool.Actor"
     ] ++ quasiquoteBindings quoted ++
     [ "result :: Maybe Value"
-    , "result = runLLMTurn @Value \"scientific\""
+    , "result = receive @Value \"scientific\""
     ]
   assertMetadataReps occurrence plain quoted expected = do
     let plainReps = typeGraphReps occurrence plain
@@ -791,13 +794,9 @@ main = do
 fullMain :: IO ()
 fullMain = do
   let expectedSites =
-        [ ("runLLMTurnFork", DeliverHostAnswer, InvocationAnswer)
-        , ("runLLMTurnFanout", DeliverHostAnswer, InvocationAnswers)
-        , ("forkCata", DeliverHostAnswer, ListAnswer)
-        , ("serve", DeliverLiveReentry, SelectedAnswer)
+        [ ("serve", DeliverLiveReentry, SelectedAnswer)
         , ("request", DeliverExitCellFill, ResponseResultEvidence)
         , ("requestWithProgress", DeliverExitCellFill, ResponseResultEvidence)
-        , ("finalize", DeliverTerminalCapture, SelectedAnswer)
         ]
       actualSites =
         [ (vsName spec, vsDelivery spec, vsWireSource spec)
@@ -823,7 +822,7 @@ fullMain = do
       verifyPreparedScope dir
       let dep = dir </> "Dep.hs"
           effectsDir = dir </> "Tidepool" </> "Effects"
-          effects = effectsDir </> "Core.hs"
+          effects = dir </> "Tidepool" </> "Actor.hs"
           unfoldDir = dir </> "Tidepool" </> "Actors"
           unfold = unfoldDir </> "Unfold.hs"
           replyDir = dir </> "Tidepool" </> "Agent" </> "Reply"
@@ -847,6 +846,7 @@ fullMain = do
             , "result :: Int"
             , "result = case Packed 41 'x' of Packed n _ -> helper n + length embeddedNul"
             ]
+      writeRequestSiteFixture dir
       createDirectoryIfMissing True effectsDir
       createDirectoryIfMissing True unfoldDir
       createDirectoryIfMissing True replyDir
@@ -859,35 +859,21 @@ fullMain = do
       writeFile effects (unlines
         [ "{-# LANGUAGE ExplicitForAll #-}"
         , "{-# LANGUAGE TypeApplications #-}"
-        , "module Tidepool.Effects.Core where"
-        , "data InvocationExit = InvocationExit"
-        , "{-# OPAQUE runLLMTurn #-}"
-        , "runLLMTurn :: forall a. String -> Maybe a"
-        , "runLLMTurn _ = Nothing"
-        , "{-# OPAQUE runLLMTurnSited #-}"
-        , "runLLMTurnSited :: forall a. Int -> String -> Maybe a"
-        , "runLLMTurnSited _ _ = Nothing"
-        , "{-# OPAQUE runLLMTurnFork #-}"
-        , "runLLMTurnFork :: forall a. String -> Maybe (Either InvocationExit a)"
-        , "runLLMTurnFork _ = Nothing"
-        , "{-# OPAQUE runLLMTurnForkSited #-}"
-        , "runLLMTurnForkSited :: forall a. Int -> String -> Maybe (Either InvocationExit a)"
-        , "runLLMTurnForkSited _ _ = Nothing"
-        , "{-# OPAQUE runLLMTurnFanout #-}"
-        , "runLLMTurnFanout :: forall a. [String] -> Maybe [Either InvocationExit a]"
-        , "runLLMTurnFanout _ = Nothing"
-        , "{-# OPAQUE runLLMTurnFanoutSited #-}"
-        , "runLLMTurnFanoutSited :: forall a. Int -> [String] -> Maybe [Either InvocationExit a]"
-        , "runLLMTurnFanoutSited _ _ = Nothing"
-        , "{-# OPAQUE forkAllSited #-}"
-        , "forkAllSited :: forall a. Int -> String -> Maybe [a]"
-        , "forkAllSited _ _ = Nothing"
-        , "keepForkAllSited :: Maybe [Bool]"
-        , "keepForkAllSited = forkAllSited @Bool 0 \"\""
+        , "{-# LANGUAGE DataKinds #-}"
+        , "module Tidepool.Actor where"
+        , "import Tidepool.Internal.RequestSite (RequestSite)"
+        , "{-# OPAQUE receive #-}"
+        , "receive :: forall a. String -> Maybe a"
+        , "receive _ = Nothing"
+        , "{-# OPAQUE receiveSited #-}"
+        , "receiveSited :: forall a. RequestSite '[] a -> String -> Maybe a"
+        , "receiveSited _ _ = Nothing"
         ])
       writeFile unfold (unlines
         [ "{-# LANGUAGE ExplicitForAll #-}"
+        , "{-# LANGUAGE DataKinds #-}"
         , "module Tidepool.Actors.Unfold where"
+        , "import Tidepool.Internal.RequestSite (RequestSite)"
         , "import Data.Kind (Type)"
         , "import Tidepool.Agent.Reply.Internal (ResponseResult)"
         , "keepResponseResultAuthority :: Maybe (ResponseResult Bool)"
@@ -896,22 +882,24 @@ fullMain = do
         , "child :: forall result (child :: Type) input (parent :: Type). input -> Maybe result"
         , "child _ = Nothing"
         , "{-# OPAQUE childSited #-}"
-        , "childSited :: forall result (child :: Type) input (parent :: Type). Int -> input -> Maybe result"
+        , "childSited :: forall result (child :: Type) input (parent :: Type). RequestSite '[input] result -> input -> Maybe result"
         , "childSited _ _ = Nothing"
         ])
       writeFile replyInternal (unlines
         [ "{-# LANGUAGE ExplicitForAll #-}"
         , "{-# LANGUAGE KindSignatures #-}"
+        , "{-# LANGUAGE DataKinds #-}"
         , "module Tidepool.Agent.Reply.Internal where"
+        , "import Tidepool.Internal.RequestSite (RequestSite)"
         , "import Data.Kind (Type)"
         , "data ResponseResult a = ResponseResult a"
         , "data RequestScope (input :: Type) (result :: Type) = RequestScope"
         , "data Eff (effs :: Type) (value :: Type) = Eff value"
         , "{-# OPAQUE currentRequest #-}"
         , "currentRequest :: forall input result effs. Eff effs (RequestScope input result)"
-        , "currentRequest = currentRequestSited (-1)"
+        , "currentRequest = currentRequestSited (error \"unavailable carrier\")"
         , "{-# OPAQUE currentRequestSited #-}"
-        , "currentRequestSited :: forall input result effs. Int -> Eff effs (RequestScope input result)"
+        , "currentRequestSited :: forall input result effs. RequestSite '[input, result, ResponseResult result] (RequestScope input result) -> Eff effs (RequestScope input result)"
         , "currentRequestSited _ = Eff RequestScope"
         ])
       writeFile currentRequestTarget (unlines
@@ -966,27 +954,23 @@ fullMain = do
       writeFile siteTarget (unlines
         [ "{-# LANGUAGE TypeApplications #-}"
         , "module SiteExpr where"
-        , "import Tidepool.Effects.Core"
+        , "import Tidepool.Actor"
         , "typedSite :: Maybe Bool"
-        , "typedSite = runLLMTurn @Bool \"prepared\""
-        , "forkedSite :: Maybe (Either InvocationExit Bool)"
-        , "forkedSite = runLLMTurnFork @Bool \"prepared\""
-        , "fanoutSite :: Maybe [Either InvocationExit Bool]"
-        , "fanoutSite = runLLMTurnFanout @Bool [\"prepared\"]"
+        , "typedSite = receive @Bool \"prepared\""
         ])
       writeFile polySiteTarget (unlines
         [ "{-# LANGUAGE RankNTypes #-}"
         , "{-# LANGUAGE ScopedTypeVariables #-}"
         , "{-# LANGUAGE TypeApplications #-}"
         , "module PolySiteExpr where"
-        , "import Tidepool.Effects.Core"
+        , "import Tidepool.Actor"
         , "polyHelper :: forall a. String -> Maybe a"
         -- Fully applied to a computed argument, so the simplifier cannot
         -- eta-reduce it to a partial, unelaborated verb occurrence.
-        , "polyHelper label = runLLMTurn @a (label ++ \"!\")"
+        , "polyHelper label = receive @a (label ++ \"!\")"
         , "{-# OPAQUE polyHelper #-}"
         , "polyNested :: forall a. Bool -> String -> Maybe a"
-        , "polyNested flag label = if flag then runLLMTurn @a label else Nothing"
+        , "polyNested flag label = if flag then receive @a label else Nothing"
         , "{-# NOINLINE polyNested #-}"
         , "unrelated :: Int"
         , "unrelated = 42"
@@ -995,7 +979,7 @@ fullMain = do
         , "applyVerb verb = verb \"first-class\""
         , "{-# NOINLINE applyVerb #-}"
         , "firstClass :: Maybe Bool"
-        , "firstClass = applyVerb runLLMTurn"
+        , "firstClass = applyVerb receive"
         , "usesHelper :: Maybe Bool"
         , "usesHelper = polyHelper @Bool \"helper\""
         , "usesNested :: Maybe Bool"
@@ -1022,6 +1006,7 @@ fullMain = do
       assert (case currentRequestEvidence of
                 (inventory, [site]) -> "currentRequestSited" `isInfixOf` inventory
                   && ysOrigin site == "CurrentRequestSiteExpr.typedRequest"
+                  && map stType (ysInputs site) == ["Int", "Char", "ResponseResult Char"]
                 _ -> False)
         ("currentRequest must resolve its exact generated sibling: "
           ++ show currentRequestEvidence
@@ -1030,14 +1015,10 @@ fullMain = do
             , rejection <- pmSiteRejections prepared])
       let (siteInventory, directSites) = preparedEvidence "SiteExpr" siteDirect
       assert (case filter ((== "SiteExpr.typedSite") . ysOrigin) directSites of
-                [site] -> "runLLMTurnSited" `isInfixOf` siteInventory
+                [site] -> "receiveSited" `isInfixOf` siteInventory
                   && show (ysSite site) `isInfixOf` siteInventory
                 _ -> False)
         "typed site was not elaborated before preparation"
-      assertWireSite "forked answer wrapper" Schema.HostAnswer "Either"
-        (projectEntry siteDirect "SiteExpr" "forkedSite" mempty)
-      assertWireSite "fanout answer wrapper" Schema.HostAnswer "List"
-        (projectEntry siteDirect "SiteExpr" "fanoutSite" mempty)
       partialChildDirect <- runPipelineSelected PreparedStg partialChildTarget [dir]
       assertWireSite "direct value-partial child site" Schema.ExitCellFill "ResponseResult"
         (projectEntry partialChildDirect "PartialChildExpr" "partialChild" mempty)
@@ -1057,13 +1038,6 @@ fullMain = do
           (Map.singleton (Schema.SymbolIdentity "main" "PolySiteExpr" "value" "polyHelper" Nothing) 1))
       assertSiteRejection "verb used as a first-class value" "result type is unresolved"
         (projectEntry polyDirect "PolySiteExpr" "firstClass" mempty)
-      let forkAllSpec = case filter ((== "forkAll") . vsName) sitedVerbs of
-            [spec] -> spec
-            _ -> error "missing forkAll VerbSpec"
-          listSite = buildYieldSite forkAllSpec "ListSiteExpr.listSite" 0 boolTy []
-      assert (stType (ysAnswer listSite) == "[Bool]")
-        "list-answer site did not preserve shared legacy answer identity"
-
       withResidentPipelineSelected [dir] $ \compileSite -> do
         requestCold <- compileSite PreparedStg mempty GeneralCompile Nothing currentRequestTarget [] Nothing
         assert (preparedEvidence "CurrentRequestSiteExpr" requestCold == currentRequestEvidence)
@@ -1169,3 +1143,9 @@ fullMain = do
         recovered <- compile PreparedStg mempty GeneralCompile Nothing target [] Nothing
         assert (preparedShape recovered == directShape)
           "resident compiler did not recover after a request-local failure"
+
+writeRequestSiteFixture :: FilePath -> IO ()
+writeRequestSiteFixture dir = do
+  createDirectoryIfMissing True (dir </> "Tidepool" </> "Internal")
+  readFile "test-prepared-stg/site-fixtures/RequestSite.hs" >>=
+    writeFile (dir </> "Tidepool" </> "Internal" </> "RequestSite.hs")

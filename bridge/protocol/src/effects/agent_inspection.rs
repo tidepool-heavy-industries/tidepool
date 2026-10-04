@@ -240,7 +240,6 @@ pub fn agent_inspection() -> Effect {
                 ret: HsType::Named("CleanupPlan"),
                 errors: None,
                 handling: HandlingClass::Actor,
-                extract: None,
             },
             Verb {
                 ctor: "AgentInspectWith",
@@ -253,7 +252,6 @@ pub fn agent_inspection() -> Effect {
                 ret: HsType::maybe(HsType::Named("AgentRosterEntry")),
                 errors: None,
                 handling: HandlingClass::Actor,
-                extract: None,
             },
             Verb {
                 ctor: "AgentListWith",
@@ -262,7 +260,6 @@ pub fn agent_inspection() -> Effect {
                 ret: HsType::List(Box::new(HsType::Named("AgentRosterEntry"))),
                 errors: None,
                 handling: HandlingClass::Actor,
-                extract: None,
             },
             Verb {
                 ctor: "AgentShareObservationWith",
@@ -274,7 +271,6 @@ pub fn agent_inspection() -> Effect {
                 ret: HsType::Named("ObservationShareResult"),
                 errors: None,
                 handling: HandlingClass::Actor,
-                extract: None,
             },
             Verb {
                 ctor: "AgentGroupListWith",
@@ -287,7 +283,6 @@ pub fn agent_inspection() -> Effect {
                 ret: HsType::maybe(HsType::list(HsType::Named("AgentRosterEntry"))),
                 errors: None,
                 handling: HandlingClass::Actor,
-                extract: None,
             },
             Verb {
                 ctor: "AgentForgetWith",
@@ -300,7 +295,6 @@ pub fn agent_inspection() -> Effect {
                 ret: HsType::Named("AgentForgetOutcome"),
                 errors: None,
                 handling: HandlingClass::Actor,
-                extract: None,
             },
         ],
         helpers: Vec::new(),

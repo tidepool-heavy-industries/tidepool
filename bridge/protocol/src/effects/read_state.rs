@@ -57,7 +57,6 @@ pub fn read_state() -> Effect {
             ret: HsType::Value,
             errors: None,
             handling: HandlingClass::ReadState,
-            extract: None,
         }],
         helpers: vec![Helper {
             name: "getStateJson",

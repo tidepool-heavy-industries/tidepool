@@ -32,7 +32,7 @@ pub fn actor_local() -> Effect {
         type_params: TYPE_PARAMS,
         default_row_args: &["Maybe"],
         helpers_row_polymorphic: true,
-        extra_imports: &["import Tidepool.Actor"],
+        extra_imports: &["import Tidepool.Actor", "import Tidepool.Internal.RequestSite (RequestSite)"],
         type_defs: vec![TypeDef {
             name: "ActorInputOrigin",
             wire_rust: None,
@@ -50,7 +50,7 @@ pub fn actor_local() -> Effect {
             domain: None,
             doc: &["Runtime identity of the currently handled input; it conveys no resource authority."],
         }],
-        foreign_types: &[],
+        foreign_types: &[("RequestSite", "i64")],
         errors: None,
         verbs: vec![
             Verb {
@@ -60,7 +60,6 @@ pub fn actor_local() -> Effect {
                 ret: HsType::Tuple(vec![HsType::Tuple(vec![HsType::Int, HsType::Int]), HsType::Named("ActorInputOrigin")]),
                 errors: None,
                 handling: HandlingClass::Actor,
-                extract: None,
             },
             source_attach("ActorLocalAttachProgressSourceWith", "actor_local_attach_progress_source_with", "((i64, i64), i64)", Arg {
                 name: "request", ty: HsType::Int, rust: RustBinding::Derived,
@@ -80,8 +79,10 @@ pub fn actor_local() -> Effect {
                 args: vec![
                     Arg {
                         name: "site",
-                        ty: HsType::Int,
-                        rust: RustBinding::Derived,
+                        ty: HsType::app(
+                            HsType::app(HsType::Named("RequestSite"), HsType::TypeList(vec![])),
+                            HsType::Var("next")),
+                        rust: RustBinding::Path("i64"),
                     },
                     Arg {
                         name: "handler",
@@ -101,7 +102,34 @@ pub fn actor_local() -> Effect {
                 ret: HsType::Var("next"),
                 errors: None,
                 handling: HandlingClass::Actor,
-                extract: None,
+            },
+            Verb {
+                ctor: "ActorReceiveStatefulWith",
+                method: "actor_receive_stateful_with",
+                args: vec![
+                    Arg {
+                        name: "correlation",
+                        ty: HsType::Int,
+                        rust: RustBinding::Derived,
+                    },
+                    Arg {
+                        name: "handler",
+                        ty: HsType::forall(
+                            vec!["result"],
+                            HsType::func(
+                                HsType::app(HsType::Var("api"), HsType::Var("result")),
+                                HsType::app(
+                                    HsType::app(HsType::Named("Eff"), HsType::Var("handlerEffs")),
+                                    HsType::Unit,
+                                ),
+                            ),
+                        ),
+                        rust: RustBinding::HaskellValue,
+                    },
+                ],
+                ret: HsType::maybe(HsType::Var("state")),
+                errors: None,
+                handling: HandlingClass::Actor,
             },
             Verb {
                 ctor: "ActorCheckpointWith",
@@ -121,7 +149,6 @@ pub fn actor_local() -> Effect {
                 ret: HsType::Unit,
                 errors: None,
                 handling: HandlingClass::Actor,
-                extract: None,
             },
         ],
         helpers: Vec::new(),
@@ -167,6 +194,5 @@ fn source_attach(
         ret: HsType::Either(Box::new(HsType::Text), Box::new(HsType::Unit)),
         errors: None,
         handling: HandlingClass::Actor,
-        extract: None,
     }
 }

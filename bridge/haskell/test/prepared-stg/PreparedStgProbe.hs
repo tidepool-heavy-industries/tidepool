@@ -12,7 +12,7 @@ import qualified Data.Text as Text
 import GHC.Exts
 import ProbeDependency (libraryAndLocalDependency)
 import RetainedValueShape (RetainedValue(..), importedRetainedValue)
-import Tidepool.Effects.Core (runLLMTurn)
+import Tidepool.Actor (receive)
 
 -- Strict lifted and unpacked scalar fields must not acquire the same layout.
 data StrictAndUnpacked = StrictAndUnpacked
@@ -68,7 +68,7 @@ integerValue = 1234567890123456789012345678901234567890
 -- the generated sibling.  Keeping the call concrete also verifies that the
 -- prepared sidecar records the answer before types are erased.
 typedTidepoolEffectSite :: Maybe Bool
-typedTidepoolEffectSite = runLLMTurn @Bool "prepared"
+typedTidepoolEffectSite = receive @Bool "prepared"
 
 localAndLibraryDependency :: Int
 localAndLibraryDependency = libraryAndLocalDependency [1, 2, 3, 4]

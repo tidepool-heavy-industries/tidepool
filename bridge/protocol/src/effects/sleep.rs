@@ -40,7 +40,6 @@ pub fn sleep() -> Effect {
             ret: HsType::Unit,
             errors: None,
             handling: HandlingClass::Actor,
-            extract: None,
         }],
         helpers: vec![Helper {
             name: "sleep",

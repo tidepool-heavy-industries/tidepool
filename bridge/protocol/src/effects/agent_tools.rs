@@ -56,7 +56,6 @@ pub fn agent_tools() -> Effect {
                 ret: HsType::Unit,
                 errors: None,
                 handling: HandlingClass::Actor,
-                extract: None,
             },
             Verb {
                 ctor: "AgentToolsInputWith",
@@ -65,7 +64,6 @@ pub fn agent_tools() -> Effect {
                 ret: HsType::Tuple(vec![HsType::Text, HsType::Value]),
                 errors: None,
                 handling: HandlingClass::Actor,
-                extract: None,
             },
             Verb {
                 ctor: "AgentToolsAwaitWith",
@@ -90,7 +88,6 @@ pub fn agent_tools() -> Effect {
                 ret: HsType::Tuple(vec![HsType::Text, HsType::Value]),
                 errors: None,
                 handling: HandlingClass::Actor,
-                extract: None,
             },
             Verb {
                 ctor: "AgentToolsReplyWith",
@@ -103,7 +100,6 @@ pub fn agent_tools() -> Effect {
                 ret: HsType::Unit,
                 errors: None,
                 handling: HandlingClass::Actor,
-                extract: None,
             },
         ],
         helpers: Vec::new(),

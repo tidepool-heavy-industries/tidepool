@@ -81,7 +81,6 @@ fn verb(
         ret,
         errors: None,
         handling: HandlingClass::Actor,
-        extract: None,
     }
 }
 

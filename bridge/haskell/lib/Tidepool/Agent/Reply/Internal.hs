@@ -1,3 +1,4 @@
+{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE KindSignatures #-}
@@ -65,6 +66,7 @@ module Tidepool.Agent.Reply.Internal
   ) where
 
 import Control.Monad.Freer (Eff, Member, send)
+import Tidepool.Internal.RequestSite (RequestSite)
 import Data.Kind (Type)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -312,7 +314,7 @@ data RawReplyObservation
   | RawReplyRejected ReplyError
 
 data Replies a where
-  CurrentRequestWith :: Int -> Replies (RequestScope input result)
+  CurrentRequestWith :: RequestSite '[input, result, ResponseResult result] (RequestScope input result) -> Replies (RequestScope input result)
   ReserveRequestWith :: Text -> (Int, Int) -> Bool -> Replies Int
   SubmitRequestWith :: Int -> request -> (Int, Int) -> Maybe Duration -> Replies ()
   -- | The 'Text' is a bounded, already-rendered preview of @result@ (see
@@ -333,8 +335,8 @@ data Replies a where
   ObserveReplyWith :: Int -> Replies RawReplyObservation
   AttemptAcknowledgeCancellationWith :: Int -> Replies (Either ReplyError Void)
   AcknowledgeCancellationWith :: Int -> Replies Void
-  PublishProgressWith :: Int -> progress -> Int -> Replies (Either ReplyError ())
-  ObserveProgressWith :: Int -> Int -> Replies (ProgressState progress)
+  PublishProgressWith :: RequestSite '[progress] (Either ReplyError ()) -> progress -> Int -> Replies (Either ReplyError ())
+  ObserveProgressWith :: RequestSite '[progress] (ProgressState progress) -> Int -> Replies (ProgressState progress)
   UpdateRequestWith :: Int -> Text -> Replies (Either ReplyError Int)
   ObserveRequestUpdateWith :: Int -> Int -> Replies (Either ReplyError RequestUpdateState)
 
@@ -342,24 +344,24 @@ data Replies a where
 currentRequest
   :: forall input result effs. Member Replies effs
   => Eff effs (RequestScope input result)
-currentRequest = currentRequestSited (-1)
+currentRequest = currentRequestSited (error "currentRequest: extractor must assign a typed site")
 
 {-# OPAQUE currentRequestSited #-}
 currentRequestSited
   :: forall input result effs. Member Replies effs
-  => Int -> Eff effs (RequestScope input result)
+  => RequestSite '[input, result, ResponseResult result] (RequestScope input result) -> Eff effs (RequestScope input result)
 currentRequestSited site = send (CurrentRequestWith site)
 
 {-# OPAQUE reportRequestProgress #-}
 reportRequestProgress
   :: forall progress effs. Member Replies effs
   => ProgressSink progress -> progress -> Eff effs (Either ReplyError ())
-reportRequestProgress = reportRequestProgressSited (-1)
+reportRequestProgress = reportRequestProgressSited (error "reportRequestProgress: extractor must assign a typed site")
 
 {-# OPAQUE reportRequestProgressSited #-}
 reportRequestProgressSited
   :: forall progress effs. Member Replies effs
-  => Int -> ProgressSink progress -> progress -> Eff effs (Either ReplyError ())
+  => RequestSite '[progress] (Either ReplyError ()) -> ProgressSink progress -> progress -> Eff effs (Either ReplyError ())
 reportRequestProgressSited site (ProgressSink (RequestId request)) value =
   send (PublishProgressWith site value request)
 
@@ -367,12 +369,12 @@ reportRequestProgressSited site (ProgressSink (RequestId request)) value =
 pollProgress
   :: forall progress effs. Member Replies effs
   => Progress progress -> Eff effs (ProgressState progress)
-pollProgress = pollProgressSited (-1)
+pollProgress = pollProgressSited (error "pollProgress: extractor must assign a typed site")
 
 {-# OPAQUE pollProgressSited #-}
 pollProgressSited
   :: forall progress effs. Member Replies effs
-  => Int -> Progress progress -> Eff effs (ProgressState progress)
+  => RequestSite '[progress] (ProgressState progress) -> Progress progress -> Eff effs (ProgressState progress)
 pollProgressSited site (Progress (RequestId request)) = send (ObserveProgressWith site request)
 
 reserveRequest :: Member Replies effs => Label -> (Int, Int) -> SettlementReporting -> Eff effs RequestId

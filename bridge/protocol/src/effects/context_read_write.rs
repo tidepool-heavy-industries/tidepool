@@ -298,7 +298,6 @@ fn verb(ctor: &'static str, method: &'static str, args: Vec<Arg>, ret: HsType) -
         ret,
         errors: None,
         handling: HandlingClass::OuterDispatch(crate::schema::OuterEffect::ContextReadWrite),
-        extract: None,
     }
 }
 

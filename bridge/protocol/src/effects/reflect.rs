@@ -181,7 +181,6 @@ pub fn reflect() -> Effect {
             ),
             errors: None,
             handling: HandlingClass::Actor,
-            extract: None,
         }],
         helpers: vec![Helper {
             name: "reflect",

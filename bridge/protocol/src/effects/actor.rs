@@ -225,7 +225,6 @@ pub fn actor() -> Effect {
                 ]),
                 errors: None,
                 handling: HandlingClass::Actor,
-                extract: None,
             },
             Verb {
                 ctor: "ActorStartWith",
@@ -266,7 +265,6 @@ pub fn actor() -> Effect {
                 ret: launched_actor_type(),
                 errors: None,
                 handling: HandlingClass::Actor,
-                extract: None,
             },
             Verb {
                 ctor: "ActorForkWith",
@@ -312,7 +310,6 @@ pub fn actor() -> Effect {
                 ret: launched_actor_type(),
                 errors: None,
                 handling: HandlingClass::Actor,
-                extract: None,
             },
             Verb {
                 ctor: "ActorCommitForkGroupWith",
@@ -325,7 +322,6 @@ pub fn actor() -> Effect {
                 ret: HsType::Unit,
                 errors: None,
                 handling: HandlingClass::Actor,
-                extract: None,
             },
             Verb {
                 ctor: "ActorAbortForkGroupWith",
@@ -338,7 +334,6 @@ pub fn actor() -> Effect {
                 ret: HsType::Unit,
                 errors: None,
                 handling: HandlingClass::Actor,
-                extract: None,
             },
             Verb {
                 ctor: "ActorWaitWith",
@@ -351,7 +346,6 @@ pub fn actor() -> Effect {
                 ret: HsType::Named("ActorTerminalStatus"),
                 errors: None,
                 handling: HandlingClass::Actor,
-                extract: None,
             },
             Verb {
                 ctor: "ActorPollWith",
@@ -364,7 +358,6 @@ pub fn actor() -> Effect {
                 ret: HsType::maybe(HsType::Named("ActorTerminalStatus")),
                 errors: None,
                 handling: HandlingClass::Actor,
-                extract: None,
             },
             Verb {
                 ctor: "ActorCallWith",
@@ -384,7 +377,6 @@ pub fn actor() -> Effect {
                 ret: HsType::Var("result"),
                 errors: None,
                 handling: HandlingClass::Actor,
-                extract: None,
             },
             Verb {
                 ctor: "ActorTryCallWith",
@@ -404,7 +396,6 @@ pub fn actor() -> Effect {
                 ret: HsType::Named("ActorCallStatus"),
                 errors: None,
                 handling: HandlingClass::Actor,
-                extract: None,
             },
             Verb {
                 ctor: "ActorCastWith",
@@ -424,7 +415,6 @@ pub fn actor() -> Effect {
                 ret: HsType::Unit,
                 errors: None,
                 handling: HandlingClass::Actor,
-                extract: None,
             },
             Verb {
                 ctor: "ActorTryCastWith",
@@ -444,7 +434,6 @@ pub fn actor() -> Effect {
                 ret: HsType::either(HsType::Text, HsType::Unit),
                 errors: None,
                 handling: HandlingClass::Actor,
-                extract: None,
             },
             Verb {
                 ctor: "ActorDrainWith",
@@ -457,7 +446,6 @@ pub fn actor() -> Effect {
                 ret: HsType::Unit,
                 errors: None,
                 handling: HandlingClass::Actor,
-                extract: None,
             },
             Verb {
                 ctor: "ActorReplaceWith",
@@ -498,7 +486,6 @@ pub fn actor() -> Effect {
                 ret: address_type(),
                 errors: None,
                 handling: HandlingClass::Actor,
-                extract: None,
             },
         ],
         // The public wrapper needs the managed cell carried by `ActorRef`, so

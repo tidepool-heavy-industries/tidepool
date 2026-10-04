@@ -1,3 +1,4 @@
+{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
@@ -46,6 +47,7 @@ import Data.Char (isAsciiLower, isDigit)
 import Data.String (IsString (fromString))
 import Data.Text (Text)
 import qualified Data.Text as Text
+import Tidepool.Internal.RequestSite (RequestSite)
 import Prelude
 
 import Tidepool.Agent.Assignment.Internal (IsWatchLabel (..))
@@ -158,7 +160,7 @@ data Watches a where
   RegisterRouteGroupsWith :: Text -> (Int -> Eff effs ()) -> [[AwaitDependency]] -> Watches Int
   ObserveRouteWith :: Int -> Watches RouteState
   ListRoutesWith :: Watches [Int]
-  ObserveWatchProgressWith :: Int -> Int -> Int -> Int -> Watches (ProgressState progress)
+  ObserveWatchProgressWith :: RequestSite '[progress] (ProgressState progress) -> Int -> Int -> Int -> Watches (ProgressState progress)
   ObserveWatchWith :: Int -> Watches RawWatchObservation
   AwaitWatchWith :: Int -> Watches RawWatchObservation
   -- | The completion report of a finished command job, once its settlement
@@ -199,10 +201,10 @@ awaitSettled response =
 
 {-# OPAQUE awaitProgressAfter #-}
 awaitProgressAfter :: forall progress. Progress progress -> ProgressCursor -> Await (ProgressState progress)
-awaitProgressAfter = awaitProgressAfterSited (-1)
+awaitProgressAfter = awaitProgressAfterSited (error "awaitProgressAfter: extractor must assign a typed site")
 
 {-# OPAQUE awaitProgressAfterSited #-}
-awaitProgressAfterSited :: forall progress. Int -> Progress progress -> ProgressCursor -> Await (ProgressState progress)
+awaitProgressAfterSited :: forall progress. RequestSite '[progress] (ProgressState progress) -> Progress progress -> ProgressCursor -> Await (ProgressState progress)
 awaitProgressAfterSited site (Progress request@(RequestId requestId)) cursor@(ProgressCursor revision) =
   Await [[AwaitProgress request cursor]] $ \watchId _ ->
     observedProgress <$> send (ObserveWatchProgressWith site watchId requestId revision)
@@ -212,10 +214,10 @@ awaitProgressAfterSited site (Progress request@(RequestId requestId)) cursor@(Pr
 -- 'ProgressPending'.
 {-# OPAQUE awaitAnyProgress #-}
 awaitAnyProgress :: forall progress. [(Progress progress, ProgressCursor)] -> Await [ProgressState progress]
-awaitAnyProgress = awaitAnyProgressSited (-1)
+awaitAnyProgress = awaitAnyProgressSited (error "awaitAnyProgress: extractor must assign a typed site")
 
 {-# OPAQUE awaitAnyProgressSited #-}
-awaitAnyProgressSited :: forall progress. Int -> [(Progress progress, ProgressCursor)] -> Await [ProgressState progress]
+awaitAnyProgressSited :: forall progress. RequestSite '[progress] (ProgressState progress) -> [(Progress progress, ProgressCursor)] -> Await [ProgressState progress]
 awaitAnyProgressSited _ [] = pure []
 awaitAnyProgressSited site sources =
   Await [map dependency sources] $ \watchId _ ->

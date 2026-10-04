@@ -69,7 +69,6 @@ pub fn journal() -> Effect {
                 ret: HsType::Unit,
                 errors: None,
                 handling: HandlingClass::OuterDispatch(OuterEffect::Journal),
-                extract: None,
             },
             Verb {
                 ctor: "TraceStep",
@@ -94,7 +93,6 @@ pub fn journal() -> Effect {
                 ret: HsType::Unit,
                 errors: None,
                 handling: HandlingClass::OuterDispatch(OuterEffect::Journal),
-                extract: None,
             },
         ],
         helpers: vec![

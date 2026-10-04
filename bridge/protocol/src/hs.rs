@@ -45,6 +45,10 @@ pub enum HsType {
     /// this is for genuinely higher-kinded contract types such as
     /// `Eff bodyEffs ()`.
     App(Box<HsType>, Box<HsType>),
+    /// A promoted type list, such as `'[input, progress]`.
+    TypeList(Vec<HsType>),
+    /// A promoted type cons, such as `input ': extra`.
+    TypeCons(Box<HsType>, Box<HsType>),
     /// `[T]`.
     List(Box<HsType>),
     /// `Maybe T`.
@@ -119,6 +123,8 @@ impl HsType {
             HsType::Value => "Value".to_string(),
             HsType::Named(n) | HsType::Var(n) => (*n).to_string(),
             HsType::App(f, x) => format!("{} {}", f.render_app_head(), x.render_app_arg()),
+            HsType::TypeList(ts) => format!("'[{}]", ts.iter().map(HsType::render).collect::<Vec<_>>().join(", ")),
+            HsType::TypeCons(head, tail) => format!("{} ': {}", head.render_app_arg(), tail.render_app_arg()),
             HsType::List(t) => format!("[{}]", t.render()),
             HsType::Maybe(t) => format!("Maybe {}", t.render_app_arg()),
             HsType::Either(e, a) => {
@@ -145,6 +151,7 @@ impl HsType {
     pub fn render_app_arg(&self) -> String {
         match self {
             HsType::App(_, _)
+            | HsType::TypeCons(_, _)
             | HsType::Maybe(_)
             | HsType::Either(_, _)
             | HsType::Fn(_, _)
@@ -204,8 +211,8 @@ pub fn render_member_signature(args: &[HsType], effect: &str, result: &HsType) -
 }
 
 /// [`render_member_signature`], generalized for an OPAQUE substrate helper
-/// whose `Member` row entry is a PARAMETERIZED effect head (`Finalize v`,
-/// needing `Member (Finalize v) effs`, not `Member Finalize v effs`) and/or
+/// whose `Member` row entry is a PARAMETERIZED effect head (`ActorLocal api`,
+/// needing `Member (ActorLocal api) effs`) and/or
 /// which forall's its own extra type variables ahead of `effs` (`finalize ::
 /// forall v a effs. …` — `v` doubles as the head's own applied parameter,
 /// `a` is free).
@@ -240,7 +247,7 @@ pub fn render_member_signature_with(
 }
 
 /// Parenthesize a rendered effect head exactly when it is an application
-/// (`Finalize v`) rather than a single atom (`RunLLMTurn`) — correct in
+/// (`ActorLocal api`) rather than a single atom (`Exec`) — correct in
 /// `Member` position, the same rule [`HsType::render_app_arg`] applies to a
 /// real type, spelled out for a plain string because [`Effect::head`]
 /// renders one, not an [`HsType`].

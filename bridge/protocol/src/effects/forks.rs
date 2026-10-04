@@ -296,7 +296,6 @@ pub fn forks() -> Effect {
                 ])),
                 errors: None,
                 handling: HandlingClass::Actor,
-                extract: None,
             },
             {
                 let mut args = launch_args(true);
@@ -360,8 +359,7 @@ pub fn forks() -> Effect {
                     ])),
                     errors: None,
                     handling: HandlingClass::Actor,
-                    extract: None,
-                }
+                    }
             },
             Verb {
                 ctor: "ForksCheckpointWith",
@@ -374,7 +372,6 @@ pub fn forks() -> Effect {
                 ret: HsType::either(HsType::Named("CheckpointRefusal"), HsType::Text),
                 errors: None,
                 handling: HandlingClass::Actor,
-                extract: None,
             },
             Verb {
                 ctor: "ForksCheckCheckpointWith",
@@ -387,7 +384,6 @@ pub fn forks() -> Effect {
                 ret: HsType::either(HsType::Named("CheckpointRefusal"), HsType::Unit),
                 errors: None,
                 handling: HandlingClass::Actor,
-                extract: None,
             },
             Verb {
                 ctor: "ForksReleaseCheckpointWith",
@@ -400,7 +396,6 @@ pub fn forks() -> Effect {
                 ret: HsType::either(HsType::Named("CheckpointRefusal"), HsType::Unit),
                 errors: None,
                 handling: HandlingClass::Actor,
-                extract: None,
             },
             Verb {
                 ctor: "ForksPreviewWith",
@@ -453,7 +448,6 @@ pub fn forks() -> Effect {
                 ])),
                 errors: None,
                 handling: HandlingClass::Actor,
-                extract: None,
             },
             group_verb("ForksCommitWith", "forks_commit_with"),
             group_verb("ForksCommitCapturedWith", "forks_commit_captured_with"),
@@ -469,7 +463,6 @@ pub fn forks() -> Effect {
                 ret: HsType::Named("ForkGroupCleanupOutcome"),
                 errors: None,
                 handling: HandlingClass::Actor,
-                extract: None,
             },
         ],
         helpers: Vec::new(),
@@ -492,7 +485,6 @@ fn group_verb(ctor: &'static str, method: &'static str) -> Verb {
         ret: fallible(HsType::Unit),
         errors: None,
         handling: HandlingClass::Actor,
-        extract: None,
     }
 }
 

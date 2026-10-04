@@ -52,15 +52,15 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Word (Word32, Word64, Word8)
 import GHC.Builtin.PrimOps (PrimOp(..), PrimCall(..), primOpOcc)
-import GHC.Builtin.Types (doubleDataCon, intDataCon)
+import GHC.Builtin.Types (doubleDataCon, intDataCon, intTy)
 import GHC.Core (AltCon(..))
 import GHC.Core.DataCon
-  ( DataCon, dataConName, dataConInstOrigArgTys, dataConRepArgTys, dataConRepArity, dataConWorkId
+  ( DataCon, dataConName, dataConTheta, dataConOrigArgTys, dataConInstOrigArgTys, dataConRepArgTys, dataConRepArity, dataConWorkId
   , dataConTag, dataConTyCon, dataConOrigResTy, dataConImplBangs, HsImplBang(..)
   , isMarkedStrict, isUnboxedTupleDataCon )
 import GHC.Core.TyCo.Rep (Scaled(..), Type(..))
 import GHC.Core.TyCo.FVs (tyCoVarsOfType)
-import GHC.Core.Type (splitFunTys, splitTyConApp_maybe)
+import GHC.Core.Type (splitFunTys, splitTyConApp_maybe, eqType)
 import GHC.Core.TyCon qualified as GHC
 import GHC.Data.FastString (fsLit, unpackFS)
 import GHC.Driver.Env.Types (HscEnv, hsc_unit_env)
@@ -103,7 +103,7 @@ import Tidepool.PreparedFacts (PreparedFacts(..), extractPreparedFacts)
 import Tidepool.Identity (varId)
 import Tidepool.PreparedStg (PreparedModule(..), PreparedCoverage(..))
 import Tidepool.PreparedSites (SiteRejection(..))
-import Tidepool.PreparedSites (PreparedSite(..), requestReplyIndex, syntheticSiteId)
+import Tidepool.PreparedSites (PreparedSite(..), requestReplyIndex)
 import Tidepool.EffectSchema qualified as Effect
 import Tidepool.TypePolicy qualified as TypePolicy
 import Tidepool.PreparedFormatting
@@ -442,7 +442,7 @@ projectPreparedModuleGroupOutcomesFor purpose context prepared selection =
             , projectedBindings = map NonRecursive (reverse (implicitTops final)) ++ groups
             , projectedTypes = types
             , projectedSites = sites
-            , projectedVerbSites = verbSites
+            , projectedConstructorReplies = verbSites
             , projectedJsonLayout = jsonLayout
             }
         }
@@ -490,7 +490,7 @@ projectPreparedWithHostBindings hostBindings context modules topIdentityMap = do
       -- module set (so a same-name internal identity cannot borrow home-module
       -- standing from the retained one), but nothing here recovers its body.
       projectable = map (dropRetainedTops context) modules
-  ((bindingGroups, programTypes, programSites, programVerbSites, programJsonLayout), final) <- runStateT
+  ((bindingGroups, programTypes, programSites, programConstructorReplies, programJsonLayout), final) <- runStateT
     (do evidence <- lift (traverse preparedEvidence projectable)
         validatePreparedEvidence context projectable evidence
           (concatMap hostBindingRepresentationConstructors hostBindings)
@@ -524,7 +524,7 @@ projectPreparedWithHostBindings hostBindings context modules topIdentityMap = do
         , programEntry = entry
         , programTypes = programTypes
         , programSites = programSites
-        , programVerbSites = programVerbSites
+        , programConstructorReplies = programConstructorReplies
         , programJsonLayout = programJsonLayout
         }
   pure (program, map fst (toList (constructors final)))
@@ -1134,17 +1134,16 @@ preparedEvidence prepared = selectPreparedEvidence (indexPreparedEvidence prepar
 -- Graph ids are module-local during elaboration; this pass compacts reachable
 -- nodes in module/original order and rebases every edge into one program table.
 -- An admitted auxiliary root's own result type follows the module evidence
--- ('lowerAuxiliaryRootEvidence'); synthetic reply sites for the program's
--- request constructors follow that ('lowerVerbEvidence').
+-- ('lowerAuxiliaryRootEvidence'); intrinsic constructor reply graphs follow.
 lowerPreparedEvidence :: ProjectionContext -> [PreparedModule]
-  -> [SelectedPreparedEvidence] -> P ([TypeNode], [SiteRow], [(ConstructorId, Word64)])
+  -> [SelectedPreparedEvidence] -> P ([TypeNode], [SiteRow], [(ConstructorId, ConstructorReply)])
 lowerPreparedEvidence context modules evidence = do
   (moduleNodes, moduleSites) <- foldM lowerOne ([], []) evidence
   auxNodes <- lowerAuxiliaryRootEvidence context modules (length moduleNodes)
-  (verbNodes, verbRows, verbSites) <-
-    lowerVerbEvidence (Set.unions (map pmEffectRequestTypeIds modules))
+  (verbNodes, verbSites) <-
+    lowerConstructorReplies (mapMaybe pmRequestSiteTyCon modules)
       (length moduleNodes + length auxNodes)
-  let sites = moduleSites <> verbRows
+  let sites = moduleSites
       duplicates = Map.keys (Map.filter (> (1 :: Int))
         (Map.fromListWith (+) [(siteId site, 1) | site <- sites]))
   case duplicates of
@@ -1230,53 +1229,36 @@ auxiliaryRootTypeGraph context modules = do
         TypePolicy.emptyTypeGraphBuilder
   pure (TypePolicy.tgNodes (TypePolicy.finishTypeGraph builder), graphRoots)
 
--- | Generated effect constructors and explicit KnownEffect instances both
--- authorize synthetic host-answer rows. The latter include the handwritten
--- Replies and Watches protocols; a nominal reply type alone is not authority
--- (ordinary data constructors such as (:|) can have that shape too).
-lowerVerbEvidence :: Set Word64 -> Int -> P ([TypeNode], [SiteRow], [(ConstructorId, Word64)])
-lowerVerbEvidence effectRequestTypeIds base = do
+-- | A genuine saturated GHC constructor owns its result graph independently
+-- of effect rows. Only the exact compiler-issued carrier selects dynamic sites.
+lowerConstructorReplies :: [GHC.TyCon] -> Int -> P ([TypeNode], [(ConstructorId, ConstructorReply)])
+lowerConstructorReplies carriers base = do
   known <- gets (toList . constructors)
   let candidates =
-        [ (identity, qualified, index)
+        [ (identity, index, atSite constructor index)
         | (constructor, identity) <- known
-        , let family = GHC.tyConName (dataConTyCon constructor)
-        , let generated = maybe False
-                ((== "Tidepool.Effects.Core") . moduleNameString . moduleName)
-                (nameModule_maybe family)
-        , generated || getKey (nameUnique family) `Set.member` effectRequestTypeIds
-        -- Progress constructors select a typed helper site from field zero.
-        -- A constructor-wide site cannot authenticate their existential payload.
-        , (maybe "" (moduleNameString . moduleName)
-              (nameModule_maybe (dataConName constructor)),
-            occNameString (nameOccName (dataConName constructor))) `notElem`
-            [ ("Tidepool.Agent.Reply.Internal", "PublishProgressWith")
-            , ("Tidepool.Agent.Reply.Internal", "ObserveProgressWith")
-            , ("Tidepool.Agent.Watch.Internal", "ObserveWatchProgressWith")
-            ]
         , Just index <- [requestReplyIndex constructor]
-        , let symbol = nameSymbol "constructor" (dataConName constructor)
-              qualified = symbolModule symbol <> "." <> symbolOccurrence symbol
         ]
+      static = [(identity, index) | (identity, index, False) <- candidates]
       (roots, builder) = runState
-        (traverse (\(_, _, index) -> TypePolicy.internType index) candidates)
+        (traverse (TypePolicy.internType . snd) static)
         TypePolicy.emptyTypeGraphBuilder
   (lowered, rebase) <- lowerTypeGraph base
     (TypePolicy.tgNodes (TypePolicy.finishTypeGraph builder)) roots
-  entries <- traverse (\((identity, qualified, _), root) -> do
-      wire <- rebase root
-      let site = syntheticSiteId qualified
-      pure ( SiteRow
-               { siteId = site
-               , siteOrigin = qualified
-               , siteOrdinal = 0
-               , siteDelivery = HostAnswer
-               , siteWire = wire
-               , siteInputs = []
-               }
-           , (identity, site) ))
-    (zip candidates roots)
-  pure (lowered, map fst entries, map snd entries)
+  entries <- traverse (\((identity, _), root) ->
+      (identity,) . StaticReply <$> rebase root) (zip static roots)
+  let replies = Map.fromList (entries <> [(identity, ReplyAtSite) | (identity, _, True) <- candidates])
+  pure (lowered, [(identity, replies Map.! identity) | (identity, _, _) <- candidates])
+ where
+  atSite constructor reply = case (dataConOrigArgTys constructor, dataConRepArgTys constructor) of
+    (Scaled _ first : _, Scaled _ runtimeFirst : _) ->
+      case splitTyConApp_maybe first of
+        Just (carrier, [_, carrierReply]) ->
+          null (dataConTheta constructor)
+            && carrier `elem` carriers && eqType carrierReply reply
+            && eqType (unwrapType runtimeFirst) intTy
+        _ -> False
+    _ -> False
 
 -- | Lower the nodes of one elaboration-local graph reachable from @roots@,
 -- in original order, as program nodes starting at @base@.

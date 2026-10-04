@@ -1,3 +1,4 @@
+{-# LANGUAGE AllowAmbiguousTypes, FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleInstances #-}
@@ -6,14 +7,14 @@
 {-# OPTIONS_GHC -O1 #-}
 module TypeEvidence where
 
+import Control.Monad.Freer (Eff, Member, send)
+import Tidepool.Internal.RequestSite (RequestSite)
 import Data.Text (Text)
 import Data.Kind (Type)
 import Numeric.Natural (Natural)
 import Tidepool.Effects.Core
-  ( AgentSession (AgentAttachWith), AgentTools (AgentToolsInstallWith), runLLMTurn )
-import Tidepool.Effects.Row (KnownEffect)
-
-instance KnownEffect Console
+  ( AgentSession (AgentAttachWith), AgentTools (AgentToolsInstallWith) )
+import Tidepool.Actor (receive)
 
 newtype Identity a = Identity a
 newtype Wrap (f :: Type -> Type) a = Wrap (f a)
@@ -40,58 +41,91 @@ profileWitness :: EffectProfile Maybe '[Maybe, Maybe]
 profileWitness = ReadOnly
 
 boolAnswer :: Maybe Bool
-boolAnswer = runLLMTurn @Bool "bool"
+boolAnswer = receive @Bool "bool"
 
 nestedIdentity :: Maybe (Identity (Identity Int))
-nestedIdentity = runLLMTurn @(Identity (Identity Int)) "nested"
+nestedIdentity = receive @(Identity (Identity Int)) "nested"
 
 higherKinded :: Maybe (Wrap Maybe Int)
-higherKinded = runLLMTurn @(Wrap Maybe Int) "higher-kinded"
+higherKinded = receive @(Wrap Maybe Int) "higher-kinded"
 
 recursiveNewtype :: Maybe Loop
-recursiveNewtype = runLLMTurn @Loop "recursive newtype"
+recursiveNewtype = receive @Loop "recursive newtype"
 
 impossibleGadt :: Maybe (Choice Bool)
-impossibleGadt = runLLMTurn @(Choice Bool) "impossible"
+impossibleGadt = receive @(Choice Bool) "impossible"
 
 recursiveData :: Maybe Chain
-recursiveData = runLLMTurn @Chain "recursive"
+recursiveData = receive @Chain "recursive"
 
 expandingData :: Maybe (Nest Int)
-expandingData = runLLMTurn @(Nest Int) "expanding"
+expandingData = receive @(Nest Int) "expanding"
 
 phantomInt :: Maybe (Phantom Int)
-phantomInt = runLLMTurn @(Phantom Int) "phantom int"
+phantomInt = receive @(Phantom Int) "phantom int"
 
 phantomBool :: Maybe (Phantom Bool)
-phantomBool = runLLMTurn @(Phantom Bool) "phantom bool"
+phantomBool = receive @(Phantom Bool) "phantom bool"
 
 eitherIntBool :: Maybe (Either Int Bool)
-eitherIntBool = runLLMTurn @(Either Int Bool) "either int bool"
+eitherIntBool = receive @(Either Int Bool) "either int bool"
 
 eitherBoolInt :: Maybe (Either Bool Int)
-eitherBoolInt = runLLMTurn @(Either Bool Int) "either bool int"
+eitherBoolInt = receive @(Either Bool Int) "either bool int"
 
 textAnswer :: Maybe Text
-textAnswer = runLLMTurn @Text "text"
+textAnswer = receive @Text "text"
 
 integerAnswer :: Maybe Integer
-integerAnswer = runLLMTurn @Integer "integer"
+integerAnswer = receive @Integer "integer"
 
 naturalAnswer :: Maybe Natural
-naturalAnswer = runLLMTurn @Natural "natural"
+naturalAnswer = receive @Natural "natural"
 
 packedAnswer :: Maybe Packed
-packedAnswer = runLLMTurn @Packed "packed"
+packedAnswer = receive @Packed "packed"
 
 -- An ordinary effect GADT: requests carry no dynamic site, so the projector
--- emits a synthetic reply row for each constructor with a closed reply index.
+-- emits its intrinsic graph even when the final reply index is unresolved.
 data Console a where
   Print :: Text -> Console ()
   Fetch :: Text -> Console (Either Bool Text)
   Echo :: a -> Console a
   ObserveProgress :: Console (Progress progress)
   FunctionReply :: Console (Int -> Int)
+  PartialReply :: Console (Maybe a)
+  GenuineCarrier :: RequestSite '[Int] a -> Console a
+  MismatchedCarrier :: RequestSite '[Int] Bool -> Console Int
+  StrictCarrier :: {-# UNPACK #-} !(RequestSite '[Int] Int) -> Console Int
+  IntegerPayload :: Int -> Console Int
+
+class CarriesInt a where
+  carrierInt :: Int
+
+data DictConsole parameter reply where
+  DictionaryCarrier :: CarriesInt parameter => RequestSite '[] Int -> DictConsole parameter Int
+
+{-# OPAQUE customSend #-}
+customSend :: Member Console effects => Eff effects ()
+customSend = send (Print "custom")
+
+partialReply :: Console (Maybe Int)
+partialReply = PartialReply
+
+genuineCarrier :: RequestSite '[Int] Bool -> Console Bool
+genuineCarrier = GenuineCarrier
+
+mismatchedCarrier :: RequestSite '[Int] Bool -> Console Int
+mismatchedCarrier = MismatchedCarrier
+
+strictCarrier :: RequestSite '[Int] Int -> Console Int
+strictCarrier = StrictCarrier
+
+dictionaryCarrier :: CarriesInt parameter => RequestSite '[] Int -> DictConsole parameter Int
+dictionaryCarrier = DictionaryCarrier
+
+integerPayload :: Console Int
+integerPayload = IntegerPayload 1
 
 printRequest :: Console ()
 printRequest = Print "hi"

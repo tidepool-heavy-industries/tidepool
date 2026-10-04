@@ -1,3 +1,5 @@
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# OPTIONS_GHC -Wno-simplifiable-class-constraints #-}
@@ -16,6 +18,7 @@ module Tidepool.Agent.Session
 
 import Control.Monad.Freer (Eff, Member, send)
 import Data.Text (Text)
+import Tidepool.Internal.RequestSite (RequestSite)
 
 import Tidepool.Effects.Core (AgentSession (..), WorkerLifetime (..))
 
@@ -36,9 +39,9 @@ attachAgent initialUser = send (AgentAttachWith initialUser)
 -- authority; the site still carries GHC's input/result types.
 {-# OPAQUE requestSessionSited #-}
 requestSessionSited
-  :: forall output input effs
+  :: forall output input extra effs
    . Member AgentSession effs
-  => Int
+  => RequestSite (input ': extra) output
   -> Int
   -> Maybe Text
   -> ActivationMetadata

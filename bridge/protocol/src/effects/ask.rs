@@ -53,7 +53,6 @@ pub fn ask() -> Effect {
             ret: HsType::Unit,
             errors: None,
             handling: HandlingClass::Ask,
-            extract: None,
         }],
         helpers: Vec::new(),
         polymorphism: Polymorphism::None,

@@ -63,7 +63,6 @@ fn verb(ctor: &'static str, method: &'static str, arg: &'static str, ok: HsType)
         ret: ok,
         errors: None,
         handling: HandlingClass::Actor,
-        extract: None,
     }
 }
 

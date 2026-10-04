@@ -264,13 +264,8 @@ encodeBoundBinder (BoundBinder name varid modul tier tdisp rootHead hostAuthorit
     encodeAuthority TextAuthority = encodeString "Text"
     encodeAuthority CommandJobAuthority = encodeString "CommandJob"
 
--- | @modules@ (the third element, added alongside @site@/@type@ — see
--- @modules@ is the defining-module set a shim
--- must import to resolve @type@ by name. This is the SAME wire a resident
--- session turn's suspension classifies against (@exomonad-harness@'s
--- fork/finalize servicing reads it back to pin a fork child's @Finalize@
--- row) — the asks.json sidecar is a SEPARATE encoding of the identical data
--- for the multi-target/whole-module compile path.
+-- | Presentation and native signatures for compiler-issued typed sites.
+-- The metadata names each exact input witness independently of wire graphs.
 encodeAsks :: [YieldSite] -> Encoding
 encodeAsks xs = encodeListLen (fromIntegral (length xs)) <> foldMap encodeAsk xs
 

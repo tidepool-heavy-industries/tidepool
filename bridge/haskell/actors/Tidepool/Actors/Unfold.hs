@@ -1,3 +1,4 @@
+{-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
@@ -97,6 +98,7 @@ module Tidepool.Actors.Unfold
 
 import Control.Monad.Freer (Eff, Member, send)
 import Data.Kind (Type)
+import Tidepool.Internal.RequestSite (RequestSite)
 import Data.String (IsString (fromString))
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -541,7 +543,7 @@ executeCleanup plan = case cleanupPlanRefusal plan of
 
 data Unfold (parent :: [Type -> Type]) result where
   PureU :: result -> Unfold parent result
-  BranchU :: Int -> Branch child input result -> Unfold parent (Response result)
+  BranchU :: RequestSite (input ': extra) result -> Branch child input result -> Unfold parent (Response result)
   ApU :: Unfold parent (a -> result) -> Unfold parent a -> Unfold parent result
 
 -- The intermediate tree preserves the caller's heterogeneous applicative
@@ -550,7 +552,7 @@ data Unfold (parent :: [Type -> Type]) result where
 data Started (parent :: [Type -> Type]) result where
   StartedPure :: result -> Started parent result
   StartedBranch
-    :: Int
+    :: RequestSite (input ': extra) result
     -> Int
     -> ForkGroupPath
     -> Branch child input result
@@ -582,7 +584,7 @@ child = childSited (error "child: extractor must assign a typed site")
 childSited
   :: forall result child input parent
    . (KnownEffects child, Subset child parent)
-  => Int
+  => RequestSite '[input] result
   -> Branch child input result
   -> Unfold parent (Response result)
 childSited = BranchU
@@ -600,12 +602,12 @@ childWithProgress = childWithProgressSited
 childWithProgressSited
   :: forall progress result child input parent
    . (KnownEffects child, Subset child parent)
-  => Int
+  => RequestSite '[input, progress] result
   -> Branch child input result
   -> Unfold parent (Response result, Progress progress)
 childWithProgressSited site branch =
   (\response -> (response, Progress (responseRequestId response)))
-    <$> childSited @result @child @input @parent site branch
+    <$> BranchU site branch
 
 data UnfoldError
   = UnfoldBeginRejected Text
@@ -860,7 +862,7 @@ errand name task = do
   watch (WatchLabel (labelText name)) (awaitSettled reply)
 
 startBranch
-  :: forall effects child input result
+  :: forall effects child input result extra
    . Member Forks effects
   => Int
   -> Text
@@ -918,9 +920,9 @@ siblingPreviewText value =
         else rendered
 
 requestBranch
-  :: forall effects child input result
+  :: forall effects child input result extra
    . (Member Replies effects, Member AgentInspection effects)
-  => Int
+  => RequestSite (input ': extra) result
   -> Int
   -> ForkGroupPath
   -> Branch child input result

@@ -135,7 +135,6 @@ pub fn agent_control() -> Effect {
                 ret: HsType::Named("AgentStopControlOutcome"),
                 errors: None,
                 handling: HandlingClass::Actor,
-                extract: None,
             },
             Verb {
                 ctor: "AgentControlExecuteCleanupWith",
@@ -159,7 +158,6 @@ pub fn agent_control() -> Effect {
                 ret: HsType::Named("CleanupReceipt"),
                 errors: None,
                 handling: HandlingClass::Actor,
-                extract: None,
             },
         ],
         helpers: Vec::new(),

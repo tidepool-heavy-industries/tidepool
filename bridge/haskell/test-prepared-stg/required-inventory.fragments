@@ -2,7 +2,7 @@
 # One fixed-string fragment per line; process-corpus.sh checks every line.
 module main:PreparedStgProbe:<module>
 RecursiveDependency
-GlobalDependency(main:Tidepool.Effects.Core:runLLMTurnSited)
+GlobalDependency(main:Tidepool.Actor:receiveSited)
 LibraryDependency(text-
 LibraryDependency(ghc-bignum
 # Exact imported home values used as a retained-value-shaped baseline.

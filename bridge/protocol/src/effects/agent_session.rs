@@ -28,9 +28,9 @@ pub fn agent_session() -> Effect {
         type_params: &[],
         default_row_args: &[],
         helpers_row_polymorphic: true,
-        extra_imports: &["import Tidepool.Agent.Session"],
+        extra_imports: &["import Tidepool.Agent.Session", "import Tidepool.Internal.RequestSite (RequestSite)"],
         type_defs: Vec::new(),
-        foreign_types: &[],
+        foreign_types: &[("RequestSite", "i64")],
         errors: None,
         verbs: vec![
             Verb {
@@ -39,8 +39,11 @@ pub fn agent_session() -> Effect {
                 args: vec![
                     Arg {
                         name: "site",
-                        ty: HsType::Int,
-                        rust: RustBinding::Derived,
+                        ty: HsType::app(
+                            HsType::app(HsType::Named("RequestSite"),
+                                HsType::TypeCons(Box::new(HsType::Var("input")), Box::new(HsType::Var("extra")))),
+                            HsType::Var("output")),
+                        rust: RustBinding::Path("i64"),
                     },
                     Arg {
                         name: "input",
@@ -74,7 +77,6 @@ pub fn agent_session() -> Effect {
                 ret: HsType::Var("output"),
                 errors: None,
                 handling: HandlingClass::AgentSession,
-                extract: None,
             },
             Verb {
                 ctor: "AgentAttachWith",
@@ -87,7 +89,6 @@ pub fn agent_session() -> Effect {
                 ret: HsType::Unit,
                 errors: None,
                 handling: HandlingClass::AgentSession,
-                extract: None,
             },
         ],
         helpers: Vec::new(),

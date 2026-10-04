@@ -48,8 +48,8 @@ pub fn notifications() -> Effect {
             sum("NotificationState", vec![variant("NotificationAccepted", vec![]), variant("NotificationPresented", vec![]), variant("NotificationUnconfirmed", vec![])]),
         ], foreign_types: &[], errors: None,
         verbs: vec![
-            Verb { ctor: "NotifyWith", method: "notify_with", args: vec![Arg { name: "target", ty: address(), rust: RustBinding::Path("(i64, i64)") }, Arg { name: "message", ty: HsType::Text, rust: RustBinding::Derived }], ret: HsType::either(HsType::Named("NotificationError"), receipt()), errors: None, handling: HandlingClass::Actor, extract: None },
-            Verb { ctor: "PollNotificationWith", method: "poll_notification_with", args: vec![Arg { name: "receipt", ty: receipt(), rust: RustBinding::Path("((i64, i64), ((i64, i64), (String, i64)))") }], ret: HsType::either(HsType::Named("NotificationError"), HsType::Named("NotificationState")), errors: None, handling: HandlingClass::Actor, extract: None },
+            Verb { ctor: "NotifyWith", method: "notify_with", args: vec![Arg { name: "target", ty: address(), rust: RustBinding::Path("(i64, i64)") }, Arg { name: "message", ty: HsType::Text, rust: RustBinding::Derived }], ret: HsType::either(HsType::Named("NotificationError"), receipt()), errors: None, handling: HandlingClass::Actor },
+            Verb { ctor: "PollNotificationWith", method: "poll_notification_with", args: vec![Arg { name: "receipt", ty: receipt(), rust: RustBinding::Path("((i64, i64), ((i64, i64), (String, i64)))") }], ret: HsType::either(HsType::Named("NotificationError"), HsType::Named("NotificationState")), errors: None, handling: HandlingClass::Actor },
         ], helpers: vec![], polymorphism: Polymorphism::None, generated_handler: false, handler_execution: crate::schema::HandlerExecution::Immediate, caller_principal: false,
     }
 }

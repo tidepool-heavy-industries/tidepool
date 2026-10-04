@@ -2068,9 +2068,11 @@ candidateSitedSiblingsAt work = do
       scopePath = work </> "exact-scope.cbor"
       capturedPath = work </> "captured-scope.cbor"
       scope = emptySessionScope { ssRoot = work, ssExactScope = Just scopePath }
-      owners = ["Tidepool.Agent.Reply.Internal", "Tidepool.Actors.Unfold"]
+      owners = ["Tidepool.Internal.RequestSite", "Tidepool.Agent.Reply.Internal", "Tidepool.Actors.Unfold"]
   createDirectoryIfMissing True unfoldDir
   createDirectoryIfMissing True replyDir
+  createDirectoryIfMissing True (work </> "Tidepool/Internal")
+  copyFile "lib/Tidepool/Internal/RequestSite.hs" (work </> "Tidepool/Internal/RequestSite.hs")
   copyFile "test-source-boot/fixtures/HydratedChildOwner.hs" owner
   copyFile "test-source-boot/fixtures/HydratedReplyOwner.hs" (replyDir </> "Internal.hs")
   copyFile "test-source-boot/fixtures/HydratedChildTarget.hs" target
@@ -2103,6 +2105,7 @@ candidateSitedSiblingsAt work = do
       && null (scopeProducts retainedScope) && null (scopeExecutionOwners retainedScope)) $
     fail "typed sibling metadata closure lost source authority or acquired native execution"
   removeFile owner
+  removeFile (work </> "Tidepool/Internal/RequestSite.hs")
   removeFile (replyDir </> "Internal.hs")
   captured <- runPipelineSessionSelected (PreparedProducts Nothing)
     Set.empty GeneralCompile (Just (scope {ssExactScope=Just capturedPath})) target [work] Nothing
@@ -3495,7 +3498,7 @@ hydratedSiteSiblings :: IO ()
 hydratedSiteSiblings = withScratch $ \work -> do
   let unfoldName = "Tidepool.Actors.Unfold"
       replyName = "Tidepool.Agent.Reply.Internal"
-      names = [replyName,unfoldName]
+      names = ["Tidepool.Internal.RequestSite",replyName,unfoldName]
       target = work </> "HydratedSiteExpr.hs"
       unfoldPath = work </> "Tidepool/Actors/Unfold.hs"
       replyPath = work </> "Tidepool/Agent/Reply/Internal.hs"
@@ -3530,6 +3533,8 @@ hydratedSiteSiblings = withScratch $ \work -> do
           actual -> fail ("hydrated sibling changed the lexical site/root/input arity: " ++ show actual)
   createDirectoryIfMissing True (work </> "Tidepool/Actors")
   createDirectoryIfMissing True (work </> "Tidepool/Agent/Reply")
+  createDirectoryIfMissing True (work </> "Tidepool/Internal")
+  copyFile "lib/Tidepool/Internal/RequestSite.hs" (work </> "Tidepool/Internal/RequestSite.hs")
   copyFile "test-source-boot/fixtures/HydratedSiteUnfold.hs" unfoldPath
   copyFile "test-source-boot/fixtures/HydratedSiteReply.hs" replyPath
   copyFile "test-source-boot/fixtures/HydratedSiteExpr.hs" target
@@ -3619,9 +3624,9 @@ hydratedSiteSiblings = withScratch $ \work -> do
   missing <- compile (PreparedProducts Nothing) Nothing >>= targetModule
   unless (any (isInfixOf "missing generated site-aware sibling" . srMessage) (pmSiteRejections missing)) $
     fail "missing typed sibling did not remain a source rejection"
-  writeFile unfoldPath (T.unpack (T.replace ". Int -> input -> Maybe result" ". Bool -> input -> Maybe result" (T.pack source)))
+  writeFile unfoldPath (T.unpack (T.replace "RequestSite '[input] result" "Bool" (T.pack source)))
   incompatible <- compile (PreparedProducts Nothing) Nothing >>= targetModule
-  unless (any (isInfixOf "incompatible type" . srMessage) (pmSiteRejections incompatible)) $
+  unless (any (isInfixOf "RequestSite input or reply index" . srMessage) (pmSiteRejections incompatible)) $
     fail "incompatible typed sibling did not remain a source rejection"
   putStrLn "hydrated site siblings: 10 checks passed (native/exact, private native/exact, wrong interface owner, foreign surface unit, two missing owners, missing sibling, incompatible sibling)"
 
@@ -4028,7 +4033,7 @@ verifyRetainedPackageWitness producer evidence = do
             (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" [])
         , programSignatures = [], programGlobals = globals, programConstructors = []
         , programOperations = [], programBindings = [], programEntry = ValueId 0
-        , programTypes = [], programSites = [], programVerbSites = [], programJsonLayout = Nothing }
+        , programTypes = [], programSites = [], programConstructorReplies = [], programJsonLayout = Nothing }
       encode globals = encodeCertifiedProducts producer OrdinaryExecutionSource Map.empty (emptyFinalizedModuleArtifacts producer) [] Nothing []
         [("target", program globals)] evidence "" ""
   withTiming $ do

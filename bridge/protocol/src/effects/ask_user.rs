@@ -99,7 +99,6 @@ pub fn ask_user() -> Effect {
                 ret: HsType::Value,
                 errors: None,
                 handling: HandlingClass::AskUserForm,
-                extract: None,
             },
             Verb {
                 ctor: "NoteWith",
@@ -112,7 +111,6 @@ pub fn ask_user() -> Effect {
                 ret: HsType::Unit,
                 errors: None,
                 handling: HandlingClass::Note,
-                extract: None,
             },
         ],
         helpers: vec![

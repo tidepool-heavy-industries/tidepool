@@ -6,14 +6,13 @@ module Tidepool.SiteClassifier
 
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import GHC.Builtin.Types (intTy)
 import GHC.Core
 import GHC.Core.TyCo.Compare (eqType)
 import GHC.Core.TyCo.FVs (tyCoVarsOfType)
 import GHC.Core.TyCo.Rep (Scaled(..))
 import GHC.Core.Type
   ( Type, mkTyVarTy, splitForAllTyCoVars, piResultTys, splitFunTys
-  , mkPiTys, mkVisFunTyMany, splitInvisPiTys, splitTyConApp_maybe )
+  , mkPiTys, mkVisFunTy, splitInvisPiTys, splitTyConApp_maybe )
 import GHC.Types.Id (Id, idName, idType)
 import GHC.Types.Name (nameModule_maybe, nameOccName)
 import GHC.Types.Name.Occurrence (occNameString)
@@ -36,6 +35,7 @@ data SitePlan = SitePlan
   , spRest :: [CoreExpr]
   , spAnswer :: Type
   , spInputs :: [Type]
+  , spCarrierType :: Type
   }
 
 data SiteFailure
@@ -81,9 +81,15 @@ classifySiteOccurrence siblings spec surface args = do
         Just (_, [_effects, value]) -> closed SiteResult value
         _ -> Left MissingEffectResult
   inputs <- traverse (\i -> typeAt types i >>= closed SiteInput) (vsInputTypeArgs spec)
-  if eqType (idType sibling) (mkPiTys binders (mkVisFunTyMany intTy result))
-    then Right (SitePlan sibling types missingTypes evidence missingEvidence rest answer inputs)
-    else Left IncompatibleSibling
+  let (siblingBinders, siblingBody) = splitInvisPiTys (idType sibling)
+      (siblingArgs, siblingResult) = splitFunTys siblingBody
+      rebuild = foldr (\(Scaled mult arg) body -> mkVisFunTy mult arg body) siblingResult
+      instantiatedArgs = fst (splitFunTys (piResultTys (idType sibling) types))
+  case (siblingArgs, drop nEvidence instantiatedArgs) of
+    (_ : remaining, Scaled _ carrierType : _)
+      | eqType (mkPiTys siblingBinders (rebuild remaining)) (mkPiTys binders result) ->
+          Right (SitePlan sibling types missingTypes evidence missingEvidence rest answer inputs carrierType)
+    _ -> Left IncompatibleSibling
   where
     isNamed Named{} = True
     isNamed _ = False

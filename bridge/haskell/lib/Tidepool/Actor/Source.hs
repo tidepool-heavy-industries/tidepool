@@ -19,6 +19,7 @@ module Tidepool.Actor.Source
 
 import Control.Monad.Freer (Eff, Member, send)
 import Data.Kind (Type)
+import Tidepool.Internal.RequestSite (RequestSite)
 import Data.Text (Text)
 import Tidepool.Agent.Reply.Internal
   ( Progress (..)
@@ -38,7 +39,7 @@ import Tidepool.Internal.ActorRef (ActorRef (..))
 data Source (protocol :: Type -> Type) where
   CommandSource :: Job -> (CommandResult -> protocol ()) -> Source protocol
   ProgressSource
-    :: Int -> Progress progress
+    :: RequestSite '[progress] (ProgressState progress) -> Progress progress
     -> (ProgressState progress -> protocol ())
     -> Source protocol
   SettlementSource
@@ -56,11 +57,11 @@ progressSource
   :: forall progress protocol. Progress progress
   -> (ProgressState progress -> protocol ())
   -> Source protocol
-progressSource = progressSourceSited (-1)
+progressSource = progressSourceSited (error "progressSource: extractor must assign a typed site")
 
 {-# OPAQUE progressSourceSited #-}
 progressSourceSited
-  :: forall progress protocol. Int -> Progress progress
+  :: forall progress protocol. RequestSite '[progress] (ProgressState progress) -> Progress progress
   -> (ProgressState progress -> protocol ())
   -> Source protocol
 progressSourceSited = ProgressSource

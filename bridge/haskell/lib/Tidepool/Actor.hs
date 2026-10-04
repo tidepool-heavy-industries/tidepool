@@ -319,7 +319,7 @@ receive handler = receiveSited unreachableSiteId handler
 receiveSited
   :: forall next protocol effs
    . Member (ActorLocal protocol) effs
-  => Int
+  => RequestSite '[] next
   -> (forall result. protocol result -> Eff effs (result, next))
   -> Eff effs next
 receiveSited site handler = send (ActorReceiveWith site kernelHandler)
@@ -327,8 +327,8 @@ receiveSited site handler = send (ActorReceiveWith site kernelHandler)
     kernelHandler :: forall result. protocol result -> Eff (ActorKernel ': effs) ()
     kernelHandler request = do
       (reply, next) <- raiseKernel (handler request)
-      send (ActorReplyWith site reply)
-      send (ActorContinueWith site next)
+      send (ActorReplyWith (requestSiteIdentity site) reply)
+      send (ActorContinueWith (requestSiteIdentity site) next)
 
 -- | Serve requests forever with explicit Haskell state. Actors that may exit
 -- in response to a message use 'receive' directly and return normally.
@@ -351,7 +351,7 @@ serve state step = serveSited @state unreachableSiteId state step
 serveSited
   :: forall state protocol effs exit
    . Member (ActorLocal protocol) effs
-  => Int
+  => RequestSite '[] state
   -> state
   -> (forall result. state -> protocol result -> Eff effs (result, state))
   -> Eff effs exit
@@ -385,12 +385,16 @@ statefulLoop
   -> Eff effs state
 statefulLoop step state = do
   send @(ActorLocal protocol) (ActorCheckpointWith 0 state)
-  next <- receiveSited @(Maybe state) 0 (\message -> do
-    (reply, nextState) <- step state message
-    pure (reply, Just nextState))
+  next <- send @(ActorLocal protocol) (ActorReceiveStatefulWith 0 kernelHandler)
   case next of
     Nothing -> pure state
     Just nextState -> statefulLoop step nextState
+  where
+    kernelHandler :: forall result. protocol result -> Eff (ActorKernel ': effs) ()
+    kernelHandler message = do
+      (reply, nextState) <- raiseKernel (step state message)
+      send (ActorReplyWith 0 reply)
+      send (ActorContinueWith 0 (Just nextState))
 
 -- | Observe this exact actor incarnation's retained terminal result.
 --

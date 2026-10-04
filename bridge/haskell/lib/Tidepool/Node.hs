@@ -48,10 +48,8 @@
 -- 'Tidepool.Async' is pure thread lifecycle (spawn\/join\/cancel) with no
 -- opinion on what a thread talks about; this module is a messaging
 -- PROTOCOL layered on top of one green thread ('forkNode' is 'async' plus
--- two minted mailboxes). Keeping them apart mirrors "Tidepool.Answerer.Fork" living
--- apart from the answerer surface it has nothing to do with — a reader who
--- only wants thread lifecycle should not have to read a mailbox protocol to
--- find it.
+-- two minted mailboxes). A reader who only wants thread lifecycle need not
+-- load a mailbox protocol.
 --
 -- == Sends never block, and bursts coalesce
 --

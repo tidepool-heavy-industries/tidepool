@@ -64,6 +64,7 @@ module Tidepool.Actors.Internal.Agent
 
 import Control.Monad.Freer (Eff, Member, raise, send)
 import Data.Text (Text)
+import Tidepool.Internal.RequestSite (RequestSite)
 import qualified Data.Text as Text
 import Prelude
 
@@ -361,7 +362,7 @@ request = requestSited (error "request: extractor must assign a typed site")
 requestSited
   :: forall result input effs
    . Member Replies effs
-  => Int
+  => RequestSite '[input] result
   -> AgentRef
   -> Assignment input
   -> Eff effs (Response result)
@@ -382,12 +383,12 @@ requestWithProgress = requestWithProgressSited
 requestWithProgressSited
   :: forall progress result input effs
    . Member Replies effs
-  => Int
+  => RequestSite '[input, progress] result
   -> AgentRef
   -> Assignment input
   -> Eff effs (Response result, Progress progress)
-requestWithProgressSited site actor options = do
-  response <- requestSited @result @input site actor options
+requestWithProgressSited site (AgentRef target targetWorktree) options = do
+  response <- requestConfiguredSited site target targetWorktree options emptyActivationMetadata (const (pure ()))
   pure (response, Progress (responseRequestId response))
 
 -- | Retain the exact typed handles before admitting work. The callback should
@@ -407,7 +408,7 @@ requestWithProgressInto = requestWithProgressIntoSited
 {-# OPAQUE requestWithProgressIntoSited #-}
 requestWithProgressIntoSited
   :: forall progress result input effs. Member Replies effs
-  => Int
+  => RequestSite '[input, progress] result
   -> AgentRef
   -> Assignment input
   -> ((Response result, Progress progress) -> Eff effs ())
@@ -420,9 +421,9 @@ requestWithProgressIntoSited site (AgentRef target targetWorktree) options retai
 
 {-# OPAQUE requestActivatedSited #-}
 requestActivatedSited
-  :: forall result input effs
+  :: forall result input extra effs
    . Member Replies effs
-  => Int
+  => RequestSite (input ': extra) result
   -> AgentRef
   -> Assignment input
   -> ActivationMetadata
@@ -437,9 +438,9 @@ requestActivatedSited site (AgentRef target targetWorktree) options metadata =
     (const (pure ()))
 
 requestConfiguredSited
-  :: forall result input effs
+  :: forall result input extra effs
    . Member Replies effs
-  => Int
+  => RequestSite (input ': extra) result
   -> Actor.ActorRef AgentProtocol ()
   -> Maybe WorktreeHandle
   -> Assignment input

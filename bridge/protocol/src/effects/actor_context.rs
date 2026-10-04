@@ -44,7 +44,6 @@ pub fn actor_context() -> Effect {
             ret: HsType::Named("ActorContextInfo"),
             errors: None,
             handling: HandlingClass::Actor,
-            extract: None,
         }],
         helpers: vec![Helper {
             name: "actorContext",

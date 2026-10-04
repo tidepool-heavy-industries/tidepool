@@ -58,11 +58,7 @@
 -- package means it to mean.
 --
 -- Its effectful helpers require @Green@; the module is auto-imported
--- whenever @Green@ is in the row. It has nothing to do with
--- "Tidepool.Answerer.Fork", which is the answerer's unrelated fanout-to-sub-answerers
--- surface — though the two COMPOSE: @'async' (fork \@T brief)@ parks the
--- fork in a thread of its own, so several forks can be outstanding before
--- the first 'wait'.
+-- whenever @Green@ is in the row.
 --
 -- The Event-algebra completion watch (@waitEvent@) lives in "Tidepool.Event"
 -- rather than here: it rides @RepoEvent@'s substrate, and this module must

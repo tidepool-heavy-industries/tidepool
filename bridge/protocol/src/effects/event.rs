@@ -659,7 +659,6 @@ fn verbs() -> Vec<Verb> {
             ret: HsType::Named("SubscriptionId"),
             errors: Some("EventError"),
             handling: HandlingClass::OuterDispatch(OuterEffect::RepoEvent),
-            extract: None,
         },
         Verb {
             ctor: "RepoEventDrain",
@@ -668,7 +667,6 @@ fn verbs() -> Vec<Verb> {
             ret: HsType::list(HsType::Named("RepositoryEvent")),
             errors: Some("EventError"),
             handling: HandlingClass::OuterDispatch(OuterEffect::RepoEvent),
-            extract: None,
         },
         // BLOCKS at the handler until the subscription has >= 1 observation or
         // `timeoutMs` elapses (negative == no deadline). This exact verb is the
@@ -687,7 +685,6 @@ fn verbs() -> Vec<Verb> {
             ret: HsType::list(HsType::Named("RepositoryEvent")),
             errors: Some("EventError"),
             handling: HandlingClass::OuterDispatch(OuterEffect::RepoEvent),
-            extract: None,
         },
         Verb {
             ctor: "RepoEventUnsubscribe",
@@ -696,7 +693,6 @@ fn verbs() -> Vec<Verb> {
             ret: HsType::Unit,
             errors: Some("EventError"),
             handling: HandlingClass::OuterDispatch(OuterEffect::RepoEvent),
-            extract: None,
         },
         // Capability mailboxes. A mailbox IS an event source, so it lives on
         // RepoEvent rather than Green.
@@ -707,7 +703,6 @@ fn verbs() -> Vec<Verb> {
             ret: HsType::Named("MailboxId"),
             errors: Some("EventError"),
             handling: HandlingClass::OuterDispatch(OuterEffect::RepoEvent),
-            extract: None,
         },
         Verb {
             ctor: "MailboxSend",
@@ -732,7 +727,6 @@ fn verbs() -> Vec<Verb> {
             ret: HsType::Unit,
             errors: Some("EventError"),
             handling: HandlingClass::OuterDispatch(OuterEffect::RepoEvent),
-            extract: None,
         },
         Verb {
             ctor: "MailboxDrop",
@@ -745,7 +739,6 @@ fn verbs() -> Vec<Verb> {
             ret: HsType::Unit,
             errors: Some("EventError"),
             handling: HandlingClass::OuterDispatch(OuterEffect::RepoEvent),
-            extract: None,
         },
     ]
 }

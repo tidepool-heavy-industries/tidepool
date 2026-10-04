@@ -941,7 +941,6 @@ fn verbs() -> Vec<Verb> {
             ret: handle.clone(),
             errors: Some("WorktreeError"),
             handling: HandlingClass::OuterDispatch(OuterEffect::Worktree),
-            extract: None,
         },
         Verb {
             ctor: "WorktreeCreateForActorPath",
@@ -961,7 +960,6 @@ fn verbs() -> Vec<Verb> {
             ret: handle.clone(),
             errors: Some("WorktreeError"),
             handling: HandlingClass::OuterDispatch(OuterEffect::Worktree),
-            extract: None,
         },
         Verb {
             ctor: "WorktreeCreateFromBoundForActorPath",
@@ -981,7 +979,6 @@ fn verbs() -> Vec<Verb> {
             ret: handle.clone(),
             errors: Some("WorktreeError"),
             handling: HandlingClass::OuterDispatch(OuterEffect::Worktree),
-            extract: None,
         },
         Verb {
             ctor: "WorktreeLookup",
@@ -990,7 +987,6 @@ fn verbs() -> Vec<Verb> {
             ret: handle.clone(),
             errors: Some("WorktreeError"),
             handling: HandlingClass::OuterDispatch(OuterEffect::Worktree),
-            extract: None,
         },
         Verb {
             ctor: "WorktreeBound",
@@ -999,7 +995,6 @@ fn verbs() -> Vec<Verb> {
             ret: handle.clone(),
             errors: Some("WorktreeError"),
             handling: HandlingClass::OuterDispatch(OuterEffect::Worktree),
-            extract: None,
         },
         Verb {
             ctor: "WorktreeList",
@@ -1008,7 +1003,6 @@ fn verbs() -> Vec<Verb> {
             ret: HsType::list(HsType::Named("WorktreeSummary")),
             errors: Some("WorktreeError"),
             handling: HandlingClass::OuterDispatch(OuterEffect::Worktree),
-            extract: None,
         },
         Verb {
             ctor: "WorktreeListMatching",
@@ -1033,7 +1027,6 @@ fn verbs() -> Vec<Verb> {
             ret: HsType::list(HsType::Named("WorktreeSummary")),
             errors: Some("WorktreeError"),
             handling: HandlingClass::OuterDispatch(OuterEffect::Worktree),
-            extract: None,
         },
         Verb {
             ctor: "WorktreeBranchOf",
@@ -1042,7 +1035,6 @@ fn verbs() -> Vec<Verb> {
             ret: HsType::Named("BranchName"),
             errors: Some("WorktreeError"),
             handling: HandlingClass::OuterDispatch(OuterEffect::Worktree),
-            extract: None,
         },
         // A FRESH git read of the worktree's current HEAD. Deliberately NOT the
         // handle's recorded `sourceHead` (the seed the branch was rooted at) and
@@ -1055,7 +1047,6 @@ fn verbs() -> Vec<Verb> {
             ret: HsType::Named("GitOid"),
             errors: Some("WorktreeError"),
             handling: HandlingClass::OuterDispatch(OuterEffect::Worktree),
-            extract: None,
         },
         Verb {
             ctor: "WorktreeObserveSubmission",
@@ -1064,7 +1055,6 @@ fn verbs() -> Vec<Verb> {
             ret: HsType::Named("SubmissionObservation"),
             errors: Some("WorktreeError"),
             handling: HandlingClass::OuterDispatch(OuterEffect::Worktree),
-            extract: None,
         },
         // The one narrow, deliberate workflow primitive (the
         // worktree-coordination fold — see `exomonad/worktree/src/merge.rs`
@@ -1084,7 +1074,6 @@ fn verbs() -> Vec<Verb> {
             ret: HsType::Named("MergeOutcome"),
             errors: Some("WorktreeError"),
             handling: HandlingClass::OuterDispatch(OuterEffect::Worktree),
-            extract: None,
         },
     ]
 }

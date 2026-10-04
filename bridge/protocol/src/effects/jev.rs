@@ -67,7 +67,6 @@ pub fn jev() -> Effect {
             ret: HsType::either(HsType::Named("JevCallError"), HsType::Text),
             errors: None,
             handling: HandlingClass::Actor,
-            extract: None,
         }],
         helpers: vec![],
         polymorphism: Polymorphism::None,

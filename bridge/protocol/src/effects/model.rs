@@ -67,6 +67,5 @@ fn verb(ctor: &'static str, method: &'static str, args: Vec<Arg>, ret: HsType) -
         ret,
         errors: Some("ModelBoundaryError"),
         handling: HandlingClass::OuterDispatch(OuterEffect::Model),
-        extract: None,
     }
 }

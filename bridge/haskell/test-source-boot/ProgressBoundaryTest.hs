@@ -1,6 +1,6 @@
 module ProgressBoundaryTest (progressBoundaryChecks, watchReplyEvidenceChecks, watchReplyWarmAuthorityChecks) where
 
-import Control.Exception (bracket)
+import Control.Exception (bracket, try, SomeException)
 import Control.Monad (forM, forM_, unless)
 import Data.ByteString qualified as BS
 import Data.List (isInfixOf)
@@ -8,7 +8,6 @@ import Data.Maybe (isJust)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text qualified as T
-import Data.Text.IO qualified as TIO
 import GHC.Types.Name (getOccString)
 import GHC.Unit.Module (moduleName, moduleNameString)
 import System.Directory (createDirectoryIfMissing, copyFile, createDirectory, getTemporaryDirectory, removeDirectoryRecursive, removeFile)
@@ -26,16 +25,19 @@ progressBoundaryChecks :: FilePath -> IO ()
 progressBoundaryChecks effects = bracket scratch removeDirectoryRecursive $ \work -> do
   let target = work </> "ProgressBoundary.hs"
   copyFile "test-source-boot/fixtures/ProgressBoundary.hs" target
-  first <- runPipelineSelected (PreparedProducts Nothing) target [work, "lib", effects]
-  issued <- case [site | owner <- pprModules first, site <- pmYieldSites owner,
-        "ProgressBoundary.publish" `T.isInfixOf` ysOrigin site] of
-    site : _ -> pure (ysSite site)
-    [] -> fail "copied-site regression has no genuine nominal publisher site"
-  source <- TIO.readFile target
-  TIO.writeFile target (T.replace "1 {- copied-site -}" (T.pack (show issued)) source)
   result <- runPipelineSelected (PreparedProducts Nothing) target [work, "lib", effects]
-  unless (any ((== issued) . ysSite) (concatMap pmYieldSites (pprModules result))) $
-    fail "copied-site regression no longer names an actual concrete site"
+  forM_ [
+      "bad :: RequestSite '[Int] Bool -> RequestSite '[Int] Int\nbad = coerce",
+      "bad :: RequestSite '[Int] Bool -> RequestSite '[Bool] Bool\nbad = coerce",
+      "bad :: Int -> RequestSite '[Int] Bool\nbad = coerce"
+    ] $ \declaration -> do
+    let mismatch = work </> "CarrierMismatch.hs"
+    writeFile mismatch (unlines ["{-# LANGUAGE DataKinds #-}", "module CarrierMismatch where",
+      "import Data.Coerce (coerce)", "import Tidepool.Internal.RequestSite (RequestSite)", declaration])
+    rejected <- try (runPipelineSelected PreparedStg mismatch [work, "lib", effects])
+      :: IO (Either SomeException PreparedPipelineResult)
+    unless (case rejected of Left _ -> True; Right _ -> False) $
+      fail "opaque nominal RequestSite accepted a forged reply, input vector, or integer"
   prepared <- case filter ((== "ProgressBoundary") . moduleNameString . moduleName . pmModule) (pprModules result) of
     [value] -> pure value
     _ -> fail "progress fixture has no original prepared module"
@@ -158,14 +160,11 @@ retainWatchReplyEvidence work result = do
         products = projectOriginalHomeModuleProducts environment (pprProductInterfaces result)
           (context "registerSingle") (pprModules result)
         outcomes = [(owner, outcome) | (owner, outcome) <- preparedModuleProductOutcomes products, relevant owner]
-        census = [(moduleNameString (moduleName (pmModule prepared)), pmCoverage prepared,
-          Set.toAscList (pmEffectRequestTypeIds prepared))
-          | prepared <- pprModules result, relevant (pmModule prepared)]
+
     writeFile (work </> "reply-evidence.txt") (unlines
-      ["prepared census: " ++ show census
-      , "original outcomes: " ++ show [(moduleNameString (moduleName owner),
+      ["original outcomes: " ++ show [(moduleNameString (moduleName owner),
           either (Left . show) (Right . map (\group -> (projectedOriginalOrdinal group,
-            projectedBinders group, projectedVerbSites (projectedBody group)))) outcome)
+            projectedBinders group, projectedConstructorReplies (projectedBody group)))) outcome)
           | (owner, outcome) <- outcomes]
       , "original omissions: " ++ show [(moduleNameString (moduleName owner), omissions)
           | (owner, omissions) <- preparedModuleProductOmissions products]])
@@ -182,18 +181,17 @@ retainWatchReplyEvidence work result = do
           , moduleNameString (moduleName owner) == "Tidepool.Agent.Watch.Internal", group <- groups]
     forM ["RegisterWatchWith", "RegisterWatchGroupsWith"] $ \occurrence -> do
       let targetRows = [replyRows occurrence (programConstructors wire) (programTypes wire)
-            (programSites wire) (programVerbSites wire) | wire <- targets]
+            (programConstructorReplies wire) | wire <- targets]
           originalRows = [replyRows occurrence (projectedConstructors body) (projectedTypes body)
-            (projectedSites body) (projectedVerbSites body) | body <- originalBodies]
+            (projectedConstructorReplies body) | body <- originalBodies]
       putStrLn ("watch reply evidence " ++ T.unpack occurrence ++ ": targets=" ++ show targetRows
-        ++ " originals=" ++ show originalRows ++ " census=" ++ show census)
+        ++ " originals=" ++ show originalRows)
       pure (occurrence, targetRows, originalRows)
  where
-  replyRows occurrence constructors types sites verbs =
+  replyRows occurrence constructors types replies =
     [case types !! fromIntegral index of
        TypeData family _ _ -> symbolOccurrence family == "Int"
        _ -> False
-    | (ConstructorId constructor, site) <- verbs
+    | (ConstructorId constructor, StaticReply (TypeNodeId index)) <- replies
     , symbolOccurrence (constructorIdentity (constructors !! fromIntegral constructor)) == occurrence
-    , row <- sites, siteId row == site
-    , let TypeNodeId index = siteWire row]
+    ]

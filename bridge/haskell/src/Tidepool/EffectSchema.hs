@@ -90,8 +90,6 @@ data SiteDelivery
 data SiteWireSource
   = SelectedAnswer
   | ListAnswer
-  | InvocationAnswer
-  | InvocationAnswers
   | ResponseResultEvidence
   | ProgressStateEvidence
   deriving (Eq, Ord, Show)
@@ -101,31 +99,7 @@ data SiteWireSource
 -- consume this table.
 sitedVerbs :: [VerbSpec]
 sitedVerbs =
-  [ verb "runLLMTurn" "Tidepool.Effects.Core"
-      "runLLMTurnSited" "Tidepool.Effects.Core" False []
-      DeliverHostAnswer SelectedAnswer
-  , verb "runLLMTurnFork" "Tidepool.Effects.Core"
-      "runLLMTurnForkSited" "Tidepool.Effects.Core" False []
-      DeliverHostAnswer InvocationAnswer
-  , verb "runLLMTurnFanout" "Tidepool.Effects.Core"
-      "runLLMTurnFanoutSited" "Tidepool.Effects.Core" True []
-      DeliverHostAnswer InvocationAnswers
-  , verb "finalize" "Tidepool.Effects.Core"
-      "finalizeSited" "Tidepool.Effects.Core" False []
-      DeliverTerminalCapture SelectedAnswer
-  , verb "fork" "Tidepool.Answerer.Fork"
-      "forkSited" "Tidepool.Effects.Core" False []
-      DeliverHostAnswer SelectedAnswer
-  , verb "forkAll" "Tidepool.Answerer.Fork"
-      "forkAllSited" "Tidepool.Effects.Core" True []
-      DeliverHostAnswer ListAnswer
-  , verb "forkMap" "Tidepool.Answerer.Fork"
-      "forkMapSited" "Tidepool.Answerer.Fork" True []
-      DeliverHostAnswer ListAnswer
-  , verb "forkCata" "Tidepool.Answerer.Fork"
-      "forkCataSited" "Tidepool.Answerer.Fork" True []
-      DeliverHostAnswer ListAnswer
-  , verb "request" "Tidepool.Actors.Internal.Agent"
+  [ verb "request" "Tidepool.Actors.Internal.Agent"
       "requestSited" "Tidepool.Actors.Internal.Agent" False [1]
       DeliverExitCellFill ResponseResultEvidence
   , (verb "requestWithProgress" "Tidepool.Actors.Internal.Agent"
@@ -153,10 +127,10 @@ sitedVerbs =
       DeliverExitCellFill ResponseResultEvidence)
       { vsAnswerSource = TypeArgument 1 }
   , (verb "currentRequest" "Tidepool.Agent.Reply.Internal"
-      "currentRequestSited" "Tidepool.Agent.Reply.Internal" False [1, 2]
+      "currentRequestSited" "Tidepool.Agent.Reply.Internal" False [0, 1]
       DeliverHostAnswer SelectedAnswer)
       { vsAnswerSource = EffectResult
-      , vsDerivedInput = Just (2, ResponseResultEvidence)
+      , vsDerivedInput = Just (1, ResponseResultEvidence)
       }
   , (verb "reportRequestProgress" "Tidepool.Agent.Reply.Internal"
       "reportRequestProgressSited" "Tidepool.Agent.Reply.Internal" False [0]

@@ -80,7 +80,6 @@ fn verb(ctor: &'static str, method: &'static str, arg: &'static str, ok: HsType)
         ret: HsType::either(HsType::Named("QueryError"), ok),
         errors: None,
         handling: HandlingClass::Actor,
-        extract: None,
     }
 }
 

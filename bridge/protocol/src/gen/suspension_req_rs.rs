@@ -2,7 +2,7 @@
 //! that owns each effect's orchestration (see [`path`]'s `crate_dir`).
 //!
 //! These suspending effects are interpreted by their owning runtime — a
-//! suspending effect (`Fork`, `Finalize`, `AskUser`, `RunLLMTurn`, `ReadState`,
+//! suspending effect (`AskUser`, `ReadState`,
 //! `Subagent`, `Green`, `Console`'s `Print`, plus the four already-
 //! migrated outer effects reused from `tidepool-handlers`) is classified and
 //! handed to the driver's OWN orchestration, never routed through an

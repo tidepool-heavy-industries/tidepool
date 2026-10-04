@@ -43,7 +43,6 @@ pub fn console() -> Effect {
                 ret: HsType::Unit,
                 errors: None,
                 handling: HandlingClass::OuterDispatch(OuterEffect::Console),
-                extract: None,
             },
             Verb {
                 ctor: "DisplayWith",
@@ -70,7 +69,6 @@ pub fn console() -> Effect {
                 ret: display_id(),
                 errors: None,
                 handling: HandlingClass::OuterDispatch(OuterEffect::Console),
-                extract: None,
             },
             Verb {
                 ctor: "DisplayExpandWith",
@@ -83,7 +81,6 @@ pub fn console() -> Effect {
                 ret: expansion_keys(),
                 errors: None,
                 handling: HandlingClass::OuterDispatch(OuterEffect::Console),
-                extract: None,
             },
             Verb {
                 ctor: "DisplayAllowanceWith",
@@ -92,7 +89,6 @@ pub fn console() -> Effect {
                 ret: HsType::Int,
                 errors: None,
                 handling: HandlingClass::OuterDispatch(OuterEffect::Console),
-                extract: None,
             },
             Verb {
                 ctor: "DisplayExpansionInputWith",
@@ -101,7 +97,6 @@ pub fn console() -> Effect {
                 ret: HsType::Tuple(vec![display_id(), HsType::Int, HsType::Int]),
                 errors: None,
                 handling: HandlingClass::OuterDispatch(OuterEffect::Console),
-                extract: None,
             },
         ],
         helpers: Vec::new(),

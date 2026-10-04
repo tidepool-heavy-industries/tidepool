@@ -31,7 +31,6 @@ fn verb(
         ret,
         errors: None,
         handling: HandlingClass::RecipeCheck,
-        extract: None,
     }
 }
 

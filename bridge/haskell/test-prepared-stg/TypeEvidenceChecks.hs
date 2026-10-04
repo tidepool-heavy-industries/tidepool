@@ -1,8 +1,6 @@
 module TypeEvidenceChecks (runTypeEvidenceChecks) where
 
 import Control.Monad (unless)
-import Data.Bits ((.&.))
-import Data.List (isSuffixOf)
 import Data.Text qualified as Text
 import System.Directory (createDirectoryIfMissing)
 import System.FilePath ((</>))
@@ -24,40 +22,23 @@ runTypeEvidenceChecks directory project projectWithAux = do
     [ "{-# LANGUAGE ExplicitForAll #-}"
     , "{-# LANGUAGE GADTs #-}"
     , "module Tidepool.Effects.Core where"
-    , "data InvocationExit = InvocationExit"
-    , "{-# OPAQUE runLLMTurn #-}"
-    , "runLLMTurn :: forall answer. String -> Maybe answer"
-    , "runLLMTurn _ = Nothing"
-    , "{-# OPAQUE runLLMTurnSited #-}"
-    , "runLLMTurnSited :: forall answer. Int -> String -> Maybe answer"
-    , "runLLMTurnSited _ _ = Nothing"
-    , "{-# OPAQUE runLLMTurnFork #-}"
-    , "runLLMTurnFork :: forall answer. String -> Maybe (Either InvocationExit answer)"
-    , "runLLMTurnFork _ = Nothing"
-    , "{-# OPAQUE runLLMTurnForkSited #-}"
-    , "runLLMTurnForkSited :: forall answer. Int -> String -> Maybe (Either InvocationExit answer)"
-    , "runLLMTurnForkSited _ _ = Nothing"
-    , "{-# OPAQUE runLLMTurnFanout #-}"
-    , "runLLMTurnFanout :: forall answer. [String] -> Maybe [Either InvocationExit answer]"
-    , "runLLMTurnFanout _ = Nothing"
-    , "{-# OPAQUE runLLMTurnFanoutSited #-}"
-    , "runLLMTurnFanoutSited :: forall answer. Int -> [String] -> Maybe [Either InvocationExit answer]"
-    , "runLLMTurnFanoutSited _ _ = Nothing"
-    , "{-# OPAQUE forkAllSited #-}"
-    , "forkAllSited :: forall answer. Int -> String -> Maybe [answer]"
-    , "forkAllSited _ _ = Nothing"
-    , "keepForkAllSited :: Maybe [Bool]"
-    , "keepForkAllSited = forkAllSited 0 \"\""
     , "data AgentSession a where"
     , "  AgentAttachWith :: Maybe String -> AgentSession ()"
     , "data AgentTools a where"
     , "  AgentToolsInstallWith :: AgentTools ()"
     ])
-  writeFile (directory </> "Tidepool" </> "Effects" </> "Row.hs") (unlines
-    [ "{-# LANGUAGE KindSignatures #-}"
-    , "module Tidepool.Effects.Row (KnownEffect(..)) where"
-    , "import Data.Kind (Type)"
-    , "class KnownEffect (effect :: Type -> Type)"
+  createDirectoryIfMissing True (directory </> "Tidepool" </> "Internal")
+  readFile "test-prepared-stg/site-fixtures/RequestSite.hs" >>= writeFile (directory </> "Tidepool" </> "Internal" </> "RequestSite.hs")
+  writeFile (directory </> "Tidepool" </> "Actor.hs") (unlines
+    [ "{-# LANGUAGE DataKinds, ExplicitForAll #-}"
+    , "module Tidepool.Actor where"
+    , "import Tidepool.Internal.RequestSite (RequestSite)"
+    , "{-# OPAQUE receive #-}"
+    , "receive :: forall answer. String -> Maybe answer"
+    , "receive _ = Nothing"
+    , "{-# OPAQUE receiveSited #-}"
+    , "receiveSited :: forall answer. RequestSite '[] answer -> String -> Maybe answer"
+    , "receiveSited _ _ = Nothing"
     ])
   readFile "test-prepared-stg/site-fixtures/TypeEvidence.hs" >>= writeFile target
   result <- runPipelineSelected PreparedStg target [directory]
@@ -66,7 +47,7 @@ runTypeEvidenceChecks directory project projectWithAux = do
         (ioError . userError . ((entry ++ ": ") ++) . show) pure (project result entry)
       answer entry = do
         wire <- program entry
-        case filter (not . synthetic) (programSites wire) of
+        case programSites wire of
           [site] -> pure (wire, nodeAt wire (siteWire site))
           sites -> ioError (userError (entry ++ ": expected one selected site, got "
             ++ show (length sites)))
@@ -96,7 +77,7 @@ runTypeEvidenceChecks directory project projectWithAux = do
   assert (isRefusal loop) "recursive newtype did not produce a bounded refusal"
 
   (chain, _, chainRows) <- dataAnswer "recursiveData" "Chain"
-  chainRoot <- case filter (not . synthetic) (programSites chain) of
+  chainRoot <- case programSites chain of
     [site] -> pure (siteWire site)
     _ -> ioError (userError "recursiveData: expected one selected site")
   assert (map rowFields chainRows == [[], [chainRoot]])
@@ -126,7 +107,7 @@ runTypeEvidenceChecks directory project projectWithAux = do
   printWire <- program "printRequest"
   printNode <- verbAnswer printWire "Print"
   assert (familyOf printNode `elem` [Just "Unit", Just "()"])
-    ("Print's synthetic reply is not unit: " ++ show printNode)
+    ("Print's intrinsic reply is not unit: " ++ show printNode)
   fetchWire <- program "fetchRequest"
   fetchNode <- verbAnswer fetchWire "Fetch"
   case fetchNode of
@@ -134,31 +115,47 @@ runTypeEvidenceChecks directory project projectWithAux = do
       (symbolOccurrence family == "Either" && length rows == 2
         && map (familyAt fetchWire) arguments == [Just "Bool", Nothing]
         && map (nodeAt fetchWire) (drop 1 arguments) == [TypeText])
-      ("Fetch's synthetic reply lost its Either Bool Text evidence: " ++ show fetchNode)
+      ("Fetch's intrinsic reply lost its Either Bool Text evidence: " ++ show fetchNode)
     other -> ioError (userError ("Fetch reply is not data evidence: " ++ show other))
   echoWire <- program "echoRequest"
-  assert (null (programVerbSites echoWire))
-    "an open reply index acquired a synthetic site"
+  echoNode <- verbAnswer echoWire "Echo"
+  assert (isRefusal echoNode) "an open reply index acquired structural construction authority"
   functionWire <- program "functionRequest"
-  assert (null (programVerbSites functionWire))
-    "a function reply index acquired a synthetic site"
+  functionNode <- verbAnswer functionWire "FunctionReply"
+  assert (isRefusal functionNode) "a function reply index acquired structural construction authority"
   profileWire <- program "profileWitness"
-  assert (null (programVerbSites profileWire))
-    "an effect-list witness acquired a synthetic reply site"
-  firstPoly <- program "polyChoice"
-  firstNestedPoly <- program "polyChoiceNested"
-  secondPoly <- either (ioError . userError . show) pure (project secondResult "polyChoice")
-  secondNestedPoly <- either (ioError . userError . show) pure (project secondResult "polyChoiceNested")
-  let polyEvidence wire =
-        [ row
-        | row <- programSites wire
-        , siteDelivery row == HostAnswer
-        , ":|" `isSuffixOf` Text.unpack (siteOrigin row)
-        ]
-      assertNoAlts wire = assert (null (polyEvidence wire))
-        ("ordinary alternatives constructor received synthetic reply rows: "
-          ++ show (polyEvidence wire))
-  mapM_ assertNoAlts [firstPoly, firstNestedPoly, secondPoly, secondNestedPoly]
+  assert (null (programConstructorReplies profileWire))
+    "an effect-list witness acquired a lifted reply graph"
+  firstChoices <- mapM program ["polyChoice", "polyChoiceNested"]
+  secondChoices <- mapM (\entry -> either (ioError . userError . show) pure (project secondResult entry))
+    ["polyChoice", "polyChoiceNested"]
+  mapM_ (\wire -> do
+      choice <- verbAnswer wire ":|"
+      assert (case choice of TypeData family _ _ -> symbolOccurrence family == "Either"; _ -> False)
+        "ordinary saturated alternatives constructor lacks its intrinsic partial reply graph")
+    (firstChoices <> secondChoices)
+  customWire <- program "customSend"
+  customNode <- verbAnswer customWire "Print"
+  assert (familyOf customNode `elem` [Just "Unit", Just "()"])
+    "custom Member/send effect without KnownEffect lost intrinsic reply evidence"
+  partialWire <- program "partialReply"
+  partialNode <- verbAnswer partialWire "PartialReply"
+  case partialNode of
+    TypeData family [payload] rows -> do
+      assert (symbolOccurrence family == "Maybe" && map rowFields rows == [[], [payload]])
+        "partial Maybe reply lost its fieldless Nothing branch"
+      assert (isRefusal (nodeAt partialWire payload)) "partial Maybe payload became constructible"
+    other -> ioError (userError ("partial Maybe reply lacks its graph: " ++ show other))
+  carrierWire <- program "genuineCarrier"
+  assert (replyFor carrierWire "TypeEvidence" "GenuineCarrier" == [ReplyAtSite])
+    "genuine carrier with GADT result equality did not select AtSite"
+  mapM_ (\(entry, constructor) -> do
+      wire <- program entry
+      node <- verbAnswer wire constructor
+      assert (familyOf node == Just "Int")
+        (constructor ++ ": reply/input layout mismatch was admitted as AtSite"))
+    [("mismatchedCarrier", "MismatchedCarrier"), ("strictCarrier", "StrictCarrier"),
+     ("dictionaryCarrier", "DictionaryCarrier"), ("integerPayload", "IntegerPayload")]
   progressWire <- program "progressRequest"
   progressNode <- verbAnswer progressWire "ObserveProgress"
   case progressNode of
@@ -204,24 +201,13 @@ runTypeEvidenceChecks directory project projectWithAux = do
   familyOf node = case node of
     TypeData family _ _ -> Just (symbolOccurrence family)
     _ -> Nothing
-  synthetic site = siteId site .&. 0x8000000000000000 /= 0
-  -- The request constructor's verb-site entry names exactly one synthetic,
-  -- input-free host-answer row; return that row's wire evidence.
-  verbAnswer wire occurrence = verbAnswerFrom wire "TypeEvidence" occurrence
-  verbAnswerFrom wire moduleName occurrence = do
+  replyFor wire moduleName occurrence =
     let named = [ ConstructorId index
                 | (index, declaration) <- zip [0 ..] (programConstructors wire)
+                , symbolModule (constructorIdentity declaration) == Text.pack moduleName
                 , symbolOccurrence (constructorIdentity declaration) == Text.pack occurrence ]
-        entries = [ entry | entry@(constructor, _) <- programVerbSites wire
-                  , constructor `elem` named ]
-    case entries of
-      [(_, sid)] -> case filter ((== sid) . siteId) (programSites wire) of
-        [row] -> do
-          assert (synthetic row && siteDelivery row == HostAnswer
-              && null (siteInputs row) && siteOrdinal row == 0
-              && siteOrigin row == Text.pack (moduleName ++ "." ++ occurrence))
-            (occurrence ++ ": malformed synthetic row " ++ show row)
-          pure (nodeAt wire (siteWire row))
-        rows -> ioError (userError (occurrence ++ ": verb site names rows " ++ show rows))
-      other -> ioError (userError (occurrence ++ ": expected one verb site, got "
-        ++ show other ++ " in " ++ show (programVerbSites wire)))
+    in [reply | (constructor, reply) <- programConstructorReplies wire, constructor `elem` named]
+  verbAnswer wire occurrence = verbAnswerFrom wire "TypeEvidence" occurrence
+  verbAnswerFrom wire moduleName occurrence = case replyFor wire moduleName occurrence of
+    [StaticReply node] -> pure (nodeAt wire node)
+    other -> ioError (userError (occurrence ++ ": expected one intrinsic static reply, got " ++ show other))

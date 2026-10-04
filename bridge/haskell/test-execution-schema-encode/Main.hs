@@ -115,8 +115,8 @@ main = do
       | ordinal <- [0 .. 3]
       ]) "site evidence fields or delivery tags differ from the schema 10 contract"
   assert (evidenceFields !! 15 == TList
-      [TList [TInt 0, TInteger (fromIntegral syntheticSite)]])
-    "verb-site table must pair a constructor id with its synthetic site id"
+      [TList [TInt 0, TList [TInt 0, TInt 0]]])
+    "constructor reply table must pair an exact id with its static node"
   let callerProgram = representative
         { programSignatures = [Signature [LiftedRefRep] CallerResult] }
       callerSignatures = termList (termList (decode (encodeWireProgram callerProgram)) !! 6)
@@ -271,7 +271,7 @@ projectedGroup ordinal program = ProjectedGroup ordinal
   (ProjectedGroupBody (programEnvelope program) (programSignatures program)
     (programGlobals program) (programConstructors program) (programOperations program)
     (programBindings program) (programTypes program) (programSites program)
-    (programVerbSites program) (programJsonLayout program))
+    (programConstructorReplies program) (programJsonLayout program))
 
 decode :: BS.ByteString -> Term
 decode bytes = case deserialiseFromBytes decodeTerm (BL.fromStrict bytes) of
@@ -381,12 +381,8 @@ evidenceRepresentative = representative
           (TypeNodeId 0) [TypeNodeId 2, TypeNodeId 1]
       | (ordinal, delivery) <- zip [0 ..]
           [HostAnswer, LiveReentry, ExitCellFill, TerminalCapture] ]
-  , programVerbSites = [(ConstructorId 0, syntheticSite)]
+  , programConstructorReplies = [(ConstructorId 0, StaticReply (TypeNodeId 0))]
   }
 
  where
   family = SymbolIdentity "m3-fixture" "Fixture" "type" "Recursive" Nothing
-
--- | A synthetic reply site id: high bit set, beyond the CBOR int64 range.
-syntheticSite :: Word64
-syntheticSite = 0x8000000000000029

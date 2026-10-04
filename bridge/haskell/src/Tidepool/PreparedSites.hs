@@ -3,14 +3,12 @@ module Tidepool.PreparedSites
   , PreparedSite(..)
   , SiteAuthority
   , resolveSiteAuthority
-  , siteAuthorityEffectRequestTypeIds
+  , resolveRequestSiteTyCon
   , SiteRejection(..)
   , elaboratePreparedSites
   , lookupPreparedVerb
   , resolvePreparedSiblings
   , resolvePreparedInterfaceSiblings
-  , syntheticSiteId
-  , syntheticSiteBit
   , requestReplyIndex
   ) where
 
@@ -23,22 +21,20 @@ import Data.Set qualified as Set
 import Data.Text qualified as T
 import Data.Word (Word64)
 import GHC.Core
-import GHC.Core.Class (className)
-import GHC.Core.InstEnv (ClsInst, instEnvElts, is_cls, is_tys)
 import GHC.Core.Subst (cloneBndrs, mkEmptySubst, substExpr)
 import GHC.Core.FVs (exprFreeVars)
 import GHC.Types.Var.Env (mkInScopeSet)
 import GHC.Core.Make (mkCoreConApps)
-import GHC.Builtin.Types (intDataCon, mkListTy)
+import GHC.Builtin.Types (intDataCon, mkListTy, mkPromotedListTy, liftedTypeKind)
 import GHC.Core.TyCo.Rep (Type(..), Scaled(..))
 import GHC.Data.FastString (fsLit)
 import GHC.Types.Unique.Supply (UniqSupply, initUs, mkSplitUniqSupply, takeUniqFromSupply)
 import GHC.Core.Type
-  ( mkTyConApp, mkTyConTy, splitTyConApp_maybe, coreView
-  , isLiftedTypeKind, typeKind )
-import GHC.Core.TyCon (TyCon, isClassTyCon, tyConArity, tyConName, tyConDataCons)
+  ( mkTyConApp, splitTyConApp_maybe
+  , isLiftedTypeKind, typeKind, eqType )
+import GHC.Core.TyCon (TyCon, tyConArity, tyConDataCons)
 import GHC.Core.DataCon (DataCon, dataConOrigResTy, dataConName, dataConWorkId, dataConWrapId_maybe)
-import GHC.Driver.Env (HscEnv, hscEPS, hsc_HPT, hsc_home_unit, lookupType)
+import GHC.Driver.Env (HscEnv, hsc_HPT, hsc_home_unit, lookupType)
 import GHC.Types.TyThing.Ppr (pprTyThingInContext)
 import GHC.Types.TyThing (TyThing (..))
 import GHC.Iface.Type (ShowForAllFlag (..), ShowHowMuch (..), ShowSub (..))
@@ -52,14 +48,13 @@ import GHC.Data.Maybe (MaybeErr(Succeeded, Failed))
 import GHC.Types.PkgQual (PkgQual(NoPkgQual))
 import GHC.Iface.Env (lookupOrig)
 import GHC.Iface.Load (importDecl)
-import GHC.Unit.Home.ModInfo (HomeModInfo(..), eltsHpt, lookupHpt)
+import GHC.Unit.Home.ModInfo (HomeModInfo(..), lookupHpt)
 import GHC.Unit.Home (isHomeUnit)
 import GHC.Unit.Finder (FindResult(Found), findImportedModule)
 import GHC.Unit.Module (mkModuleName, moduleName, moduleNameString, moduleUnit)
-import GHC.Unit.Module.ModDetails (md_insts, md_types)
+import GHC.Unit.Module.ModDetails (md_types)
 import GHC.Unit.Module.ModIface (mi_module)
 import GHC.Types.TypeEnv (typeEnvIds)
-import GHC.Unit.External (ExternalPackageState(eps_inst_env))
 import GHC.Tc.Utils.Monad (initIfaceLoad)
 import GHC.Types.Unique (getKey)
 import Tidepool.CheckedCell (captureCheckedTypeWitness, captureRequestTypeSignatures)
@@ -73,21 +68,18 @@ import Tidepool.TypePolicy
   )
 
 data SiteAuthority = SiteAuthority
-  { eitherTyCon :: Maybe TyCon
-  , invocationExitTyCon :: Maybe TyCon
+  { requestSiteTyCon :: Maybe TyCon
   , responseResultTyCon :: Maybe TyCon
   , progressStateTyCon :: Maybe TyCon
   , protectedProgressIds :: Set.Set Word64
   , trustedProgressOwners :: Set.Set Word64
-  , effectRequestTypeIds :: Set.Set Word64
   }
 
 -- | Resolve wrapper authority from each type's defining module. The real GHC
 -- TyCon crosses into evidence; rendered spelling never carries authority.
-resolveSiteAuthority :: HscEnv -> [ClsInst] -> IO SiteAuthority
-resolveSiteAuthority env currentInstances = do
-  eitherType <- exactTyCon "GHC.Internal.Data.Either" "Either"
-  invocationExit <- exactTyCon "Tidepool.Effects.Core" "InvocationExit"
+resolveSiteAuthority :: HscEnv -> IO SiteAuthority
+resolveSiteAuthority env = do
+  requestSite <- resolveRequestSiteTyCon env
   responseResult <- exactTyCon "Tidepool.Agent.Reply.Internal" "ResponseResult"
   progressState <- exactTyCon "Tidepool.Agent.Reply.Internal" "ProgressState"
   replies <- exactTyCon "Tidepool.Agent.Reply.Internal" "Replies"
@@ -98,16 +90,13 @@ resolveSiteAuthority env currentInstances = do
         | spec <- sitedVerbs, vsName spec `elem` progressVerbs ]
   sited <- traverse (uncurry exactId) helpers
   sourceOwners <- traverse (exactId "Tidepool.Actor.Source") ["installSource", "attachSource"]
-  effectRequests <- knownEffectTypeIds
   pure SiteAuthority
-    { eitherTyCon = eitherType
-    , invocationExitTyCon = invocationExit
+    { requestSiteTyCon = requestSite
     , responseResultTyCon = responseResult
     , progressStateTyCon = progressState
     , protectedProgressIds = Set.fromList (map idKey (rawIds ++ [i | Just i <- sited]))
     , trustedProgressOwners = Set.fromList
         (map idKey (rawIds ++ [i | Just i <- sited ++ sourceOwners]))
-    , effectRequestTypeIds = effectRequests
     }
  where
   -- Resolve the defining module's interface and ask its declaration loader
@@ -156,37 +145,24 @@ resolveSiteAuthority env currentInstances = do
               _ -> Nothing
       _ -> pure Nothing
 
-  knownEffectTypeIds = do
-    found <- findImportedModule env (mkModuleName "Tidepool.Effects.Row") NoPkgQual
-    case found of
-      Found _ owner -> do
-        marker <- initIfaceLoad env (lookupOrig owner (mkTcOcc "KnownEffect"))
-        knownEffect <- lookupType env marker >>= \case
-          Just (ATyCon tycon) | isClassTyCon tycon -> pure True
-          Nothing -> do
-            imported <- initIfaceLoad env (importDecl marker)
-            pure $ case imported of
-              Succeeded (ATyCon tycon) -> isClassTyCon tycon
-              _ -> False
-          _ -> pure False
-        if not knownEffect then pure Set.empty else do
-          eps <- hscEPS env
-          let packageInstances = instEnvElts (eps_inst_env eps)
-              homeInstances = concatMap (instEnvElts . md_insts . hm_details)
-                (eltsHpt (hsc_HPT env))
-              effectInstances = filter
-                ((== marker) . className . is_cls)
-                (currentInstances <> homeInstances <> packageInstances)
-          pure $ Set.fromList
-            [ getKey (nameUnique (tyConName tycon))
-            | instance' <- effectInstances
-            , [effectType] <- [is_tys instance']
-            , Just (tycon, _) <- [splitTyConApp_maybe effectType]
-            ]
-      _ -> pure Set.empty
-
-siteAuthorityEffectRequestTypeIds :: SiteAuthority -> Set.Set Word64
-siteAuthorityEffectRequestTypeIds = effectRequestTypeIds
+-- Resolve the defining declaration through GHC's module/interface authority.
+-- Projection compares this exact TyCon, never its rendered module spelling.
+resolveRequestSiteTyCon :: HscEnv -> IO (Maybe TyCon)
+resolveRequestSiteTyCon env = do
+  found <- findImportedModule env (mkModuleName "Tidepool.Internal.RequestSite") NoPkgQual
+  case found of
+    Found _ owner -> do
+      name <- initIfaceLoad env (lookupOrig owner (mkTcOcc "RequestSite"))
+      loaded <- lookupType env name
+      case loaded of
+        Just (ATyCon tycon) -> pure (Just tycon)
+        Just _ -> pure Nothing
+        Nothing -> do
+          imported <- initIfaceLoad env (importDecl name)
+          pure $ case imported of
+            Succeeded (ATyCon tycon) -> Just tycon
+            _ -> Nothing
+    _ -> pure Nothing
 
 data PreparedSite = PreparedSite
   { psOwner :: Id
@@ -306,14 +282,22 @@ elaboratePreparedSites env authority siblings bindings = do
                     progress <- requestProgressType spec (spInputs plan)
                     Right (Just (spAnswer plan, progress))
                   _ -> Right Nothing
-                Right (wire, spInputs plan ++ derived, requestTypes) of
+                carrier <- maybe (Left "missing RequestSite type authority") Right (requestSiteTyCon authority)
+                let reply = case vsDelivery spec of
+                      DeliverExitCellFill -> spAnswer plan
+                      _ -> wire
+                    inputs = spInputs plan ++ derived
+                    carrierType = mkTyConApp carrier [mkPromotedListTy liftedTypeKind inputs, reply]
+                if eqType carrierType (spCarrierType plan)
+                  then Right (wire, inputs, requestTypes, carrier, reply)
+                  else Left "site-aware sibling has another RequestSite input or reply index" of
                 Left detail -> do
                   modify' (\current -> current
                     { esRejections = SiteRejection topBinder
                         (vsName spec ++ " site in " ++ T.unpack originName ++ ": " ++ detail)
                         : esRejections current })
                   pure (mkApps headExpr rewrittenArguments)
-                Right (wireType, siteInputs, requestTypes) -> do
+                Right (wireType, siteInputs, requestTypes, carrierTyCon, carrierReply) -> do
                   missing <- traverse freshEvidence (spMissingEvidence plan)
                   ordinal <- nextOrdinal originName
                   witnesses <- liftIO (traverse (captureCheckedTypeWitness env) siteInputs)
@@ -323,6 +307,9 @@ elaboratePreparedSites env authority siblings bindings = do
                         { ysInputTypeWitnesses = witnesses, ysRequestTypeSignatures = signatures }
                       literal = mkCoreConApps intDataCon
                         [Lit (LitNumber LitNumInt (fromIntegral (ysSite site)))]
+                      carrier = mkCoreConApps (head (tyConDataCons carrierTyCon))
+                        [ Type (mkPromotedListTy liftedTypeKind siteInputs)
+                        , Type carrierReply, literal ]
                   current <- get
                   let (wireNode, graph1) = runState (internType wireType) (esTypeGraph current)
                       (inputNodes, graph2) = runState (traverse internType siteInputs) graph1
@@ -335,7 +322,7 @@ elaboratePreparedSites env authority siblings bindings = do
                     }
                   current' <- get
                   let body = mkLams missing (mkApps (Var (spSibling plan))
-                        (map Type (spTypeArgs plan) ++ spEvidence plan ++ map Var missing ++ literal : spRest plan))
+                        (map Type (spTypeArgs plan) ++ spEvidence plan ++ map Var missing ++ carrier : spRest plan))
                       initialSubst = mkEmptySubst (mkInScopeSet (exprFreeVars body))
                       ((substitution, typeBinders), remainingUniques) = initUs (esUniques current')
                         (cloneBndrs initialSubst (spMissingTypes plan))
@@ -361,14 +348,6 @@ siteWireType :: SiteAuthority -> VerbSpec -> Type -> Either String Type
 siteWireType authority spec answer = case vsWireSource spec of
   SelectedAnswer -> Right answer
   ListAnswer -> Right (mkListTy answer)
-  InvocationAnswer -> do
-    eitherType <- maybe (Left "missing Either type authority") Right
-      (eitherTyCon authority)
-    invocation <- maybe (Left "missing InvocationExit type authority") Right
-      (invocationExitTyCon authority)
-    Right (mkTyConApp eitherType [mkTyConTy invocation, answer])
-  InvocationAnswers -> mkListTy <$> siteWireType authority
-    (spec { vsWireSource = InvocationAnswer }) answer
   ResponseResultEvidence -> do
     response <- maybe (Left "missing ResponseResult type authority") Right
       (responseResultTyCon authority)
@@ -488,37 +467,12 @@ siteIdentity spec origin ordinal answer inputs =
           ++ "#" ++ show answer ++ "#" ++ show inputs)
   in max 1 ((high `xor` low) .&. 0x7fffffffffffffff)
 
--- | The high bit distinguishes a synthetic reply site from every dynamic one:
--- 'siteIdentity' masks it off, so the two ranges cannot collide.
-syntheticSiteBit :: Word64
-syntheticSiteBit = 0x8000000000000000
-
--- | The reply site of an ordinary effect request, derived from the request
--- constructor's qualified identity alone. Every program compiling the same
--- constructor agrees on it, and it is nonzero by construction.
-syntheticSiteId :: T.Text -> Word64
-syntheticSiteId identity =
-  let Fingerprint high low = fingerprintString (T.unpack identity)
-  in syntheticSiteBit .|. ((high `xor` low) .&. 0x7fffffffffffffff)
-
--- | The reply index of an authorized effect request is the last argument of
--- its saturated result type (@Print :: Text -> Console ()@ gives @()@).
--- Projection separately checks generated and KnownEffect type authority.
--- Require a lifted, nominal outer constructor so a bare type variable or an
--- effect-profile index cannot acquire a synthetic host-answer site. Fields
--- inside an admitted index may remain unconstructible in the type graph.
+-- | The saturated final lifted result index is an intrinsic constructor fact.
+-- Unresolved indices remain explicit unconstructible nodes in the type graph.
 requestReplyIndex :: DataCon -> Maybe Type
 requestReplyIndex constructor = case splitTyConApp_maybe (dataConOrigResTy constructor) of
   Just (family, arguments)
     | length arguments == tyConArity family
     , index : _ <- reverse arguments
-    , isLiftedTypeKind (typeKind index)
-    , hasNominalHead index -> Just index
+    , isLiftedTypeKind (typeKind index) -> Just index
   _ -> Nothing
-
-hasNominalHead :: Type -> Bool
-hasNominalHead ty = case ty of
-  TyConApp {} -> True
-  _ -> case coreView ty of
-    Just normalized -> hasNominalHead normalized
-    Nothing -> False

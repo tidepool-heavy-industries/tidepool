@@ -32,8 +32,6 @@ pub mod console;
 pub mod context_read_write;
 pub mod event;
 pub mod exec;
-pub mod finalize;
-pub mod fork;
 pub mod forks;
 pub mod green;
 pub mod introspection;
@@ -45,7 +43,6 @@ pub mod notifications;
 pub mod read_state;
 pub mod recipe_check;
 pub mod reflect;
-pub mod run_llm_turn;
 pub mod sleep;
 pub mod source;
 pub mod subagent;
@@ -56,7 +53,7 @@ use crate::schema::Effect;
 
 /// Every effect whose contract this crate owns AND generates files for.
 ///
-/// `AskUser`/`ReadState`/`RunLLMTurn`/`Fork`/`Finalize`/`Green`/`Actor` sit
+/// `AskUser`/`ReadState`/`Green`/`Actor` sit
 /// alongside the four generated-handler base effects here even though they have no
 /// `tidepool-handlers` `EffectHandler` (`Effect::generated_handler` is `false` for
 /// all seven) — `decl_rs` still owns their Haskell decl text; `crate::gen::
@@ -77,9 +74,6 @@ pub fn all() -> Vec<Effect> {
         ask_user::ask_user(),
         read_state::read_state(),
         recipe_check::recipe_check(),
-        run_llm_turn::run_llm_turn(),
-        fork::fork(),
-        finalize::finalize(),
         green::green(),
         actor::actor(),
         actor_context::actor_context(),
@@ -126,7 +120,7 @@ pub fn all_described() -> Vec<Effect> {
 /// constructor names and payload shapes. The retained harness source is not a
 /// generated consumer.
 ///
-/// #20 steps 2-3: `AskUser`/`ReadState`/`RunLLMTurn`/`Fork`/`Finalize`/`Green`'s
+/// #20 steps 2-3: `AskUser`/`ReadState`/`Green`'s
 /// Haskell decl text has fully flipped onto [`crate::gen::decl_rs`] (see
 /// [`all`]'s doc) — they stay listed here too because `suspension_req_rs` and
 /// `decl_rs` are disjoint projections of the same effect data, not because the effects are
@@ -158,9 +152,6 @@ pub fn all_described() -> Vec<Effect> {
 #[must_use]
 pub fn suspension_roster() -> Vec<Effect> {
     vec![
-        run_llm_turn::run_llm_turn(),
-        fork::fork(),
-        finalize::finalize(),
         ask_user::ask_user(),
         read_state::read_state(),
         subagent::subagent(),
