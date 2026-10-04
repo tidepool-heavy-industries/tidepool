@@ -3619,7 +3619,7 @@ hydratedSiteSiblings = withScratch $ \work -> do
   cold <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
     Nothing target [work] Nothing
   originalSite <- evidence cold
-  writeManifestFor names work cold
+  writeGenuineCandidateManifestFor names work target [work] cold
   warm <- compile (PreparedProducts (Just (manifest work))) Nothing
   unless (sortOn id (map candidateModule (pprAcceptedCandidates warm)) == sortOn id names
       && all (`notElem` preparedNames warm) names) $
@@ -3627,14 +3627,7 @@ hydratedSiteSiblings = withScratch $ \work -> do
   warmSite <- evidence warm
   unless (warmSite == originalSite) (fail "native-candidate hydration changed exact child-site identity")
   let env = prHscEnv (pprPipelineResult cold)
-  owners <- forM names $ \name -> do
-    let hi = work </> (name ++ ".candidate.hi")
-        packages = hi ++ ".packages"
-    bytes <- BS.readFile hi
-    packageBytes <- BS.readFile packages
-    requirements <- either fail pure (selectedHomeRequirements (pprDependencies cold) "main" name)
-    pure (ExactIfaceArtifact "main" name hi (digest bytes) requirements,packages,digest packageBytes)
-  writeExactMetadataScopeWithLexical scopePath owners [(artifact,exactRequirements artifact) | (artifact,_,_) <- owners]
+  writeGenuineCandidateLexicalScope names work target [work] scopePath cold
   exact <- compile (PreparedProducts Nothing) (Just scope)
   unless (all (`notElem` preparedNames exact) names) $
     fail "hydrated sibling regression recompiled an exact defining owner"
