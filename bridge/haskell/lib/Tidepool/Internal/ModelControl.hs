@@ -110,4 +110,3 @@ instance FromJSON ModelAnnotationEnvelope where
       "annotated" -> controlObject ["kind", "text"] (\o -> pure ModelAnnotated <*> (o .: "text")) (Object o)
       "pruned" -> controlObject ["kind", "handle", "text"] (\o -> pure ModelPruned <*> (o .: "handle") <*> (o .: "text")) (Object o)
       _ -> Error "unknown ModelCall control variant"
-

@@ -315,8 +315,10 @@ pub fn generated_files() -> Vec<GeneratedFile> {
             }
         }
     }
-    while rust.ends_with("\n\n") {
-        rust.pop();
+    for source in [&mut rust, &mut hs] {
+        while source.ends_with("\n\n") {
+            source.pop();
+        }
     }
     vec![
         GeneratedFile {
