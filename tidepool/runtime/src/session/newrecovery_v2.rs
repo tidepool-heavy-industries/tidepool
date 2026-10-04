@@ -2068,18 +2068,24 @@ mod tests {
                 |_, _, _| {},
             )
             .expect("production compilation of recovery control");
+            let descriptors = compiled.artifact_view.descriptors();
+            let producer = descriptors
+                .iter()
+                .find(|descriptor| {
+                    descriptor.kind
+                        == tidepool_toolchain::artifact_inventory::ArtifactKind::OriginalModule
+                        && descriptor.owner.unit == "main"
+                        && descriptor.owner.module == "Lib"
+                })
+                .expect("compiler-certified Lib artifact descriptor")
+                .producer_sha256;
             let products = compiled
                 .recovery_products
                 .into_iter()
                 .filter(|product| product.owner().unit == "main" && product.owner().module == "Lib")
                 .collect::<Vec<_>>();
             assert_eq!(products.len(), 1, "compiler-issued Lib native product");
-            (
-                compiled
-                    .producer_identity
-                    .expect("compiler producer identity"),
-                products,
-            )
+            (producer, products)
         });
         let mut materialized = materialize_certified_products(root, *producer, products)
             .expect("materialize compiler-issued recovery control");
