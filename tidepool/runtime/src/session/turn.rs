@@ -8479,3 +8479,218 @@ mod tests {
         assert_eq!(found, PREPARED_SCAFFOLD_TARGET);
     }
 }
+
+#[cfg(test)]
+mod compiler_packet_replay {
+    //! Manual compiler-only qualification of a privately retained host-carrier offer.
+    //! Source and recipe hashes are diagnostic inputs. The parser, runtime admission,
+    //! compiler endpoint and product issuers create every new authority below.
+
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+
+    use serde::Deserialize;
+    use sha2::{Digest, Sha256};
+    use tidepool_codegen::scope::ScopeId;
+    use tidepool_toolchain::checked_cell::CheckedCellSpecification;
+
+    use super::{compile_cell_program_admitted, CellCheckRequest, TemplateSelector, TurnTemplate};
+    use crate::session::{
+        HostBindingType, ModuleEnv, PersistentSession, ResidentSession, RuntimeCompileInputs,
+        SessionLib,
+    };
+
+    #[derive(Deserialize)]
+    struct RetainedFile {
+        path: PathBuf,
+        sha256: String,
+    }
+
+    impl RetainedFile {
+        fn bytes(&self) -> Vec<u8> {
+            let bytes = std::fs::read(&self.path).unwrap();
+            assert_eq!(
+                hex(&Sha256::digest(&bytes)),
+                self.sha256,
+                "{}",
+                self.path.display()
+            );
+            bytes
+        }
+
+        fn source(&self) -> String {
+            String::from_utf8(self.bytes()).unwrap()
+        }
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "lowercase")]
+    enum TemplateKind {
+        Decl,
+        Bind,
+        Binddiscard,
+        Expr,
+    }
+
+    impl TemplateKind {
+        fn selector(&self) -> TemplateSelector {
+            match self {
+                Self::Decl => TemplateSelector::Decl,
+                Self::Bind => TemplateSelector::Bind,
+                Self::Binddiscard => TemplateSelector::BindDiscard,
+                Self::Expr => TemplateSelector::Expr,
+            }
+        }
+    }
+
+    #[derive(Deserialize)]
+    struct RetainedTemplate {
+        kind: TemplateKind,
+        file: RetainedFile,
+    }
+
+    #[derive(Deserialize)]
+    struct ReplayInputs {
+        cell: RetainedFile,
+        template: RetainedFile,
+        turn_templates: Vec<RetainedTemplate>,
+        include: Vec<PathBuf>,
+        declared_sources: Vec<RetainedFile>,
+        value_generation_before_reservation: u64,
+    }
+
+    #[derive(Clone)]
+    struct NoExecutionOutput;
+
+    impl crate::session::OutputSink for NoExecutionOutput {
+        fn drain(&self) -> Vec<String> {
+            Vec::new()
+        }
+
+        fn snapshot(&self) -> Vec<String> {
+            Vec::new()
+        }
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    /// This manual evidence consumer requires the recorded source inventory restored
+    /// at its original paths. It neither reuses old compiler proofs nor executes the
+    /// command or the compiled placeholder. Automatic host-carrier tests remain the
+    /// ordinary qualification path.
+    #[test]
+    #[ignore = "requires a private authenticated source capsule and a matched compiler"]
+    fn retained_command_job_carrier_reissues_compiler_products_without_execution() {
+        tidepool_testing::eval_harness::require_extract();
+        let manifest = std::env::var_os("TIDEPOOL_HOST_CARRIER_REPLAY_INPUTS").unwrap();
+        let manifest_bytes = std::fs::read(manifest).unwrap();
+        let inputs: ReplayInputs = serde_json::from_slice(&manifest_bytes).unwrap();
+        assert!(inputs
+            .include
+            .iter()
+            .all(|path| path.is_absolute() && path.is_dir()));
+        for file in &inputs.declared_sources {
+            file.bytes();
+        }
+        let templates = inputs
+            .turn_templates
+            .iter()
+            .map(|template| TurnTemplate {
+                kind: template.kind.selector(),
+                source: template.file.source(),
+            })
+            .collect::<Vec<_>>();
+        let specification = Arc::new(CheckedCellSpecification {
+            admission_digest: [0; 32],
+            cell_source: inputs.cell.source(),
+            template_source: inputs.template.source(),
+            turn_templates: templates
+                .iter()
+                .map(|template| {
+                    (
+                        template.kind.wire_name().to_owned(),
+                        template.source.clone(),
+                    )
+                })
+                .collect(),
+            injected_modules: Vec::new(),
+            reserved_declaration_modules: Vec::new(),
+        });
+        let plan =
+            tidepool_toolchain::artifacts::parse_cell_plan(specification.clone(), &inputs.include)
+                .unwrap();
+        assert_eq!(plan.items().len(), 1);
+        assert_eq!(plan.items()[0].binders(), ["job1"]);
+        let root = tempfile::tempdir().unwrap();
+        let library = SessionLib::open(
+            tidepool_repr::SessionId(202),
+            root.path(),
+            ModuleEnv::standalone_default(),
+        )
+        .unwrap()
+        .with_validation_include(inputs.include.clone());
+        let state = PersistentSession::new(Some(library), 1024 * 1024);
+        let mut session =
+            ResidentSession::from_persistent_for_test(frunk::HNil, NoExecutionOutput, state);
+        session.set_val_gen(tidepool_repr::Generation(
+            inputs.value_generation_before_reservation,
+        ));
+        let admission = session
+            .admit_host_carrier_cell_in(
+                ScopeId::ROOT,
+                plan,
+                specification.clone(),
+                specification.specification_digest(),
+                Sha256::digest(&manifest_bytes).into(),
+                inputs.include.clone(),
+                "job1".into(),
+                HostBindingType::COMMAND_JOB,
+                Some(RuntimeCompileInputs::new(None, Vec::new()).unwrap()),
+            )
+            .unwrap();
+        assert_eq!(
+            admission.host_carrier(),
+            Some(("job1", HostBindingType::COMMAND_JOB))
+        );
+        let view = admission.view();
+        let include = inputs
+            .include
+            .iter()
+            .map(PathBuf::as_path)
+            .collect::<Vec<&Path>>();
+        let (checked, program) = compile_cell_program_admitted(
+            CellCheckRequest {
+                exact_context: view.exact_compile_context(),
+                session_id: Some(view.session()),
+                cell_text: &specification.cell_source,
+                template: &specification.template_source,
+                include: &include,
+                session_root: view.session_root(),
+                inject_modules: &[],
+                compile_generation: view.next_value_generation().0,
+                compile_view_evidence: "",
+            },
+            admission.clone(),
+            &templates,
+        )
+        .unwrap();
+        assert_eq!(checked.items.len(), 1);
+        assert_eq!(program.items().len(), 1);
+        let item = &program.items()[0];
+        let native = item
+            .native()
+            .expect("new Haskell products passed Rust native admission");
+        let certificate = native.value_interface_certificate().unwrap();
+        assert_eq!(
+            certificate.owner(),
+            tidepool_repr::SessionModule::val(view.next_value_generation())
+        );
+        assert!(item.native_products().unwrap().checked.is_some());
+        assert!(!item.native_products().unwrap().recovery_products.is_empty());
+        assert!(!certificate.bytes_owned().is_empty());
+        assert!(session.current_binding_in(ScopeId::ROOT, "job1").is_none());
+        assert_eq!(session.parked_count(), 0);
+    }
+}
