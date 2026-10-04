@@ -166,9 +166,9 @@ pub use runtime_observation::{
     ActorActivationKind, ActorRuntimeObservation, ActorRuntimeObservationHandle,
     ActorSourceDriftObservation, ActorWorkbenchPosture, ActorWorkbenchTransfer,
     ActorWorkspaceObservation, CacheBoundaryReason, CheckoutGitDrift, FrozenSourceDrift,
-    InboundDeliveryObservation, InboundNext, InboxDelivery, ObservedSource, ProviderTurnLease,
-    ProviderUsageSample, SourceDriftTargets, SourceLayerDrift, SourceObservation,
-    TrackedMessageObservation, TrackedMessageState,
+    InboundDeliveryObservation, InboundNext, InboxDelivery, ObservedSource, ProviderUsageSample,
+    SourceDriftTargets, SourceLayerDrift, SourceObservation, TrackedMessageObservation,
+    TrackedMessageState,
 };
 pub use start::{
     ActorEffectKeyWire, ActorEffectProfileWire, ActorLaunchRoleWire, ActorReplacementDefinition,
@@ -184,3 +184,5 @@ pub use typed_request::{RequestSignatureError, ResponseExpectation};
 pub use wait::ActorWaitError;
 
 pub mod command_jobs;
+
+pub(crate) use runtime_observation::ProviderTurnLease;

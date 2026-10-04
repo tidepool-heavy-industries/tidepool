@@ -593,7 +593,7 @@ pub struct ActorRuntimeObservationHandle {
 
 /// Observation of an actual provider round. Dropping an unfinished round cannot
 /// leave the actor reporting success or an indefinitely active provider.
-pub struct ProviderTurnLease {
+pub(crate) struct ProviderTurnLease {
     owner: ActorRuntimeObservationHandle,
     turn: Option<exomonad_model::ProviderTurnObservation>,
     settled_revision: usize,
@@ -641,7 +641,7 @@ impl Drop for ProviderTurnLease {
 impl ActorRuntimeObservationHandle {
     /// Called by the round owner after it has acquired its execution lease.
     /// Success is published only after the corresponding durable settlement.
-    pub fn begin_provider_turn(
+    pub(crate) fn begin_provider_turn(
         &self,
         thread: String,
         turn: String,
