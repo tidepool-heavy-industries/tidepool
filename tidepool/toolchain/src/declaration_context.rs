@@ -5509,7 +5509,10 @@ mod tests {
             ));
         }
         let mut changed = authority.clone();
-        changed.owner.module_version = ModuleVersion([99; 32]);
+        let GeneratedScaffoldRole::Resume(owner) = &mut changed.role else {
+            panic!("resume scaffold authority must retain its closed role");
+        };
+        owner.module_version = ModuleVersion([99; 32]);
         assert!(!changed.permits(
             &context,
             &source,

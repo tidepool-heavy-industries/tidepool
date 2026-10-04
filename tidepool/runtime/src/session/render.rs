@@ -527,7 +527,7 @@ impl DeclLog {
         true
     }
 
-    pub(crate) fn commit_reserved_certified_authored(
+    pub(super) fn commit_reserved_certified_authored(
         &mut self,
         generation: Generation,
         turn: DeclTurn,
