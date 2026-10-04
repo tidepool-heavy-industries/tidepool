@@ -141,13 +141,38 @@ pub struct SessionCompileView {
         Option<Arc<tidepool_toolchain::declaration_join::ExactCompileContext>>,
 }
 
+/// The reserved declaration owner and its actual compiler import are one
+/// value, so a local original cannot masquerade as a cumulative interface.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum CompileLibrary {
+    Source(SessionModule),
+    Certified {
+        original: SessionModule,
+        projection: Arc<super::CertifiedDeclarationProjection>,
+    },
+}
+impl CompileLibrary {
+    fn original(&self) -> SessionModule {
+        match self {
+            Self::Source(module) => *module,
+            Self::Certified { original, .. } => *original,
+        }
+    }
+    fn import_name(&self) -> String {
+        match self {
+            Self::Source(module) => module.module_name(),
+            Self::Certified { projection, .. } => projection.module_name().to_owned(),
+        }
+    }
+}
+
 /// Immutable lexical metadata shared by readers of the same exact view.
 /// Request identity, generation and injection selection remain on the view.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct CompileViewProjection {
     pub(super) root: PathBuf,
     pub(super) persistent_imports: SourceImports,
-    pub(super) library: Option<SessionModule>,
+    pub(super) library: Option<CompileLibrary>,
     pub(super) visible_values: Vec<SessionModule>,
     /// Names visible from each value interface.  A generated interface can
     /// carry helper binders beside its published value; importing its whole
@@ -191,7 +216,7 @@ impl SessionCompileView {
         let bytes = serde_json::to_vec(&serde_json::json!({
             "version": "runtime-compile-view-v1", "session": self.session.0,
             "scope": self.lexical_scope.0, "imports": self.projection.persistent_imports.specs(),
-            "library": self.projection.library.map(|module| module.module_name()),
+            "library": self.projection.library.as_ref().map(CompileLibrary::import_name),
             "visible": self.projection.visible_value_names.iter().map(|(module, names)| (module.module_name(), names)).collect::<Vec<_>>(),
             "reachable": self.projection.reachable_values.iter().map(SessionModule::module_name).collect::<Vec<_>>(),
             "shadowing": items(&self.projection.shadowing),
@@ -283,12 +308,45 @@ impl SessionCompileView {
 
     #[must_use]
     pub fn library(&self) -> Option<SessionModule> {
-        self.projection.library
+        self.projection
+            .library
+            .as_ref()
+            .map(CompileLibrary::original)
     }
 
     #[must_use]
     pub fn exact_declaration_context(&self) -> Option<&Arc<ExactDeclarationContext>> {
         self.projection.exact_context.as_ref()
+    }
+
+    /// Apply the exact same proof-bearing inputs used by runtime admission.
+    /// Only the issued projection's selected lexical graph becomes visible.
+    pub fn with_compile_inputs(
+        mut self,
+        inputs: &super::prepared::RuntimeCompileInputs,
+    ) -> Result<Self, crate::CompileError> {
+        if !inputs.projections().is_empty() {
+            let mut context = match &self.projection.exact_context {
+                Some(context) => (**context).clone(),
+                None => ExactDeclarationContext::new(&[], &[], Vec::new())?,
+            };
+            let mut lexical = context.lexical_graph().to_vec();
+            let mut joins = Vec::new();
+            for projection in inputs.projections() {
+                lexical.extend_from_slice(projection.context().lexical_graph());
+                joins.push(projection.receipt().clone());
+            }
+            context = context.extend(&[], &joins, lexical)?;
+            Arc::make_mut(&mut self.projection).exact_context = Some(Arc::new(context));
+        }
+        if let Some(annotations) = inputs.annotations() {
+            self = self.with_request_annotations(annotations)?;
+        } else if !inputs.projections().is_empty() && self.request_context.is_some() {
+            return Err(crate::CompileError::ExtractFailed(
+                "certified projections must be applied before request annotations".into(),
+            ));
+        }
+        Ok(self)
     }
 
     /// Request annotations and retained type interfaces are local to this
@@ -435,7 +493,7 @@ impl SessionCompileView {
         self.hide_staged_names(declared);
         let projection = Arc::make_mut(&mut self.projection);
         projection.shadowing.extend_from_slice(declared);
-        projection.library = Some(module);
+        projection.library = Some(CompileLibrary::Source(module));
         self
     }
 
@@ -476,16 +534,17 @@ impl SessionCompileView {
         for module in projection
             .library
             .iter()
-            .chain(projection.visible_values.iter())
+            .map(CompileLibrary::original)
+            .chain(projection.visible_values.iter().copied())
         {
             if let Some((_, hidden)) = projection
                 .staged_hiding
                 .iter_mut()
-                .find(|(key, _)| key == module)
+                .find(|(key, _)| *key == module)
             {
                 hidden.extend_from_slice(names);
             } else {
-                projection.staged_hiding.push((*module, names.to_vec()));
+                projection.staged_hiding.push((module, names.to_vec()));
             }
         }
     }
@@ -498,7 +557,13 @@ impl SessionCompileView {
             .find(|(key, _)| *key == module)
             .map(|(_, hidden)| hidden.iter().collect::<Vec<_>>())
             .unwrap_or_default();
-        let name = module.module_name();
+        let name = self
+            .projection
+            .library
+            .as_ref()
+            .filter(|library| library.original() == module)
+            .map(CompileLibrary::import_name)
+            .unwrap_or_else(|| module.module_name());
         let unqualified = super::render::hide_session_heads(&name, &hidden);
         if hidden.is_empty() {
             unqualified
@@ -567,8 +632,8 @@ impl SessionCompileView {
         specs.extend_generated_imports(
             &self.shadow_preamble(&self.workbench_imports(external).declaration_prefix()),
         );
-        if let Some(module) = self.projection.library {
-            specs.extend_text(&self.staged_import(module));
+        if let Some(library) = &self.projection.library {
+            specs.extend_text(&self.staged_import(library.original()));
         }
         for module in &self.projection.visible_values {
             specs.extend_text(&self.visible_value_import(*module));
@@ -619,7 +684,7 @@ mod tests {
             projection: std::sync::Arc::new(crate::session::view::CompileViewProjection {
                 root: PathBuf::from("/session"),
                 persistent_imports: SourceImports::from_specs(["Data.Set qualified as Set"]),
-                library: Some(SessionModule::lib(Generation(3))),
+                library: Some(CompileLibrary::Source(SessionModule::lib(Generation(3)))),
                 visible_values: vec![SessionModule::val(Generation(5))],
                 visible_value_names: Vec::new(),
                 reachable_values: Vec::new(),
@@ -664,7 +729,7 @@ mod tests {
             projection: std::sync::Arc::new(crate::session::view::CompileViewProjection {
                 root: PathBuf::from("/session"),
                 persistent_imports: SourceImports::from_specs(["Data.Set qualified as Set"]),
-                library: Some(SessionModule::lib(Generation(3))),
+                library: Some(CompileLibrary::Source(SessionModule::lib(Generation(3)))),
                 visible_values: vec![SessionModule::val(Generation(5))],
                 visible_value_names: Vec::new(),
                 reachable_values: vec![
@@ -722,7 +787,7 @@ mod tests {
 
         let mut library_changed = base.clone();
         Arc::make_mut(&mut library_changed.projection).library =
-            Some(SessionModule::lib(Generation(8)));
+            Some(CompileLibrary::Source(SessionModule::lib(Generation(8))));
         assert!(!library_changed.is_current_for(&base));
     }
 

@@ -746,10 +746,74 @@ pub struct SiteTypeEvidence {
 /// Authenticated request types and the helper mode for one compiler admission.
 /// Keeping these together preserves authored reply authority when an admission
 /// reconstructs its compile view from a retained request snapshot.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RequestCompileAnnotations {
     evidence: Arc<SiteTypeEvidence>,
     helper_recipe: tidepool_toolchain::declaration_join::RequestHelperRecipe,
+}
+
+/// Exact compiler inputs retained by the runtime admission owner. A selected
+/// projection is independent of request type signatures; neither substitutes
+/// for the other.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RuntimeCompileInputs {
+    annotations: Option<RequestCompileAnnotations>,
+    projections: Vec<Arc<super::CertifiedDeclarationProjection>>,
+}
+
+impl RuntimeCompileInputs {
+    pub fn new(
+        annotations: Option<RequestCompileAnnotations>,
+        mut projections: Vec<Arc<super::CertifiedDeclarationProjection>>,
+    ) -> Result<Self, crate::CompileError> {
+        projections.sort_by(|left, right| left.module_name().cmp(right.module_name()));
+        for pair in projections.windows(2) {
+            if pair[0].module_name() == pair[1].module_name()
+                && pair[0].context().semantic_sha256() != pair[1].context().semantic_sha256()
+            {
+                return Err(crate::CompileError::ExtractFailed(
+                    "conflicting certified declaration projections".into(),
+                ));
+            }
+        }
+        projections.dedup_by(|left, right| left.module_name() == right.module_name());
+        Ok(Self {
+            annotations,
+            projections,
+        })
+    }
+
+    pub fn annotations(&self) -> Option<&RequestCompileAnnotations> {
+        self.annotations.as_ref()
+    }
+    pub fn projections(&self) -> &[Arc<super::CertifiedDeclarationProjection>] {
+        &self.projections
+    }
+
+    pub(super) fn frame_authorization(&self, frame: &mut impl FnMut(&[u8])) {
+        frame(b"TidepoolRuntimeCompileInputs1");
+        match &self.annotations {
+            Some(annotations) => {
+                frame(b"request");
+                annotations.frame_authorization(frame);
+            }
+            None => frame(b"no-request"),
+        }
+        frame(&(self.projections.len() as u64).to_le_bytes());
+        for projection in &self.projections {
+            frame(projection.module_name().as_bytes());
+            frame(&projection.context().semantic_sha256());
+        }
+    }
+}
+
+impl From<RequestCompileAnnotations> for RuntimeCompileInputs {
+    fn from(annotations: RequestCompileAnnotations) -> Self {
+        Self {
+            annotations: Some(annotations),
+            projections: Vec::new(),
+        }
+    }
 }
 
 impl RequestCompileAnnotations {

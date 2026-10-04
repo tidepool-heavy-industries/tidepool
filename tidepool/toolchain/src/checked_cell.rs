@@ -1261,13 +1261,16 @@ impl<'a, T> IntoIterator for &'a CheckedPrefixSequence<T> {
 #[derive(Clone, Debug)]
 enum CompletedCheckedItem {
     Native(Arc<ExactCompiledItem>),
-    Declaration(ExactCheckedItem),
+    Declaration {
+        item: ExactCheckedItem,
+        context: Arc<crate::declaration_context::ExactDeclarationContext>,
+    },
 }
 impl CompletedCheckedItem {
     fn native(&self) -> Option<&Arc<ExactCompiledItem>> {
         match self {
             Self::Native(item) => Some(item),
-            Self::Declaration(_) => None,
+            Self::Declaration { .. } => None,
         }
     }
 }
@@ -1884,54 +1887,15 @@ impl ExactCompiledPrefix {
     fn declaration_context(
         &self,
     ) -> Result<Arc<crate::declaration_context::ExactDeclarationContext>, CompileError> {
-        let Some(item) = self.completed_declaration(0) else {
-            return Ok(self.cell.declaration_context.clone());
-        };
-        let certificate = item
-            .planned_declaration()
-            .ok_or_else(|| failure("completed declaration has no original certificate"))?;
-        // The cell's exact compiler context also contains temporary retained
-        // value lexical authority. Revalidation reconstructs the declaration
-        // publication surface from the original declaration baseline and the
-        // certificate's reachable source closure, as publication does.
-        let baseline = &self.cell.publication_context;
-        let inherited = baseline
-            .lexical_graph()
+        Ok(self
+            .completed
             .iter()
-            .filter(|node| !node.owner.module.starts_with("Tidepool.Session."))
-            .cloned()
-            .collect::<Vec<_>>();
-        let surface = certificate.shared_source_lexical_surface(&inherited)?;
-        let mut lexical = surface
-            .lexical
-            .into_iter()
-            .map(|node| (node.owner, node.imports))
-            .collect::<BTreeMap<_, _>>();
-        let mut roots = baseline
-            .lexical_graph()
-            .iter()
-            .filter(|node| node.owner.module.starts_with("Tidepool.Session."))
-            .flat_map(|node| node.imports.iter().cloned())
-            .collect::<Vec<_>>();
-        roots.extend(surface.roots);
-        roots.sort();
-        roots.dedup();
-        let owner = crate::declaration_join::ExactModuleIdentity {
-            unit: certificate.product().owner().unit.clone(),
-            module: certificate.product().owner().module.clone(),
-        };
-        lexical.insert(owner, roots);
-        let expected = (**baseline).clone().extend(
-            std::slice::from_ref(certificate),
-            &[],
-            lexical
-                .into_iter()
-                .map(
-                    |(owner, imports)| crate::declaration_join::ExactLexicalNode { owner, imports },
-                )
-                .collect(),
-        )?;
-        Ok(Arc::new(expected))
+            .filter_map(|completed| match completed {
+                CompletedCheckedItem::Declaration { context, .. } => Some(context.clone()),
+                CompletedCheckedItem::Native(_) => None,
+            })
+            .last()
+            .unwrap_or_else(|| self.cell.declaration_context.clone()))
     }
     pub fn append_display(&self, display: Arc<ExactCompiledDisplay>) -> Result<Self, CompileError> {
         if self
@@ -1957,7 +1921,7 @@ impl ExactCompiledPrefix {
     }
     pub fn completed_declaration(&self, index: usize) -> Option<&ExactCheckedItem> {
         match self.completed.get(index) {
-            Some(CompletedCheckedItem::Declaration(item)) => Some(item),
+            Some(CompletedCheckedItem::Declaration { item, .. }) => Some(item),
             _ => None,
         }
     }
@@ -1979,17 +1943,58 @@ impl ExactCompiledPrefix {
         next.completed.push(CompletedCheckedItem::Native(completed));
         Ok(next)
     }
-    pub fn append_declaration(&self, item: ExactCheckedItem) -> Result<Self, CompileError> {
-        if item.index != self.next_item()
-            || !Arc::ptr_eq(&item.cell, &self.cell)
-            || item.planned_declaration().is_none()
-        {
+    /// Retain the compiler-issued cumulative interface without changing the
+    /// original native declaration identity or checked-item admission.
+    pub fn append_declaration_with_projection(
+        &self,
+        item: ExactCheckedItem,
+        projection: Arc<crate::declaration_join::AcceptedJoin>,
+    ) -> Result<Self, CompileError> {
+        if item.index != self.next_item() || !Arc::ptr_eq(&item.cell, &self.cell) {
             return Err(failure(
                 "declaration is not the next original certified item of this cell",
             ));
         }
+        let certificate = item
+            .planned_declaration()
+            .ok_or_else(|| failure("completed declaration has no original certificate"))?;
+        let original = certificate.product();
+        if projection.toolchain_identity_sha256() != certificate.toolchain_identity_sha256()
+            || projection
+                .input()
+                .private_tip
+                .as_ref()
+                .is_none_or(|tip| tip.module != original.owner().module)
+            || !projection
+                .recovery_products()
+                .iter()
+                .any(|product| product.artifact_id() == original.artifact_id())
+        {
+            return Err(failure(
+                "declaration projection has another original implementation",
+            ));
+        }
+        let owner = crate::declaration_join::ExactModuleIdentity {
+            unit: original.owner().unit.clone(),
+            module: original.owner().module.clone(),
+        };
+        let mut lexical = projection.context().lexical_graph().to_vec();
+        let tip = lexical
+            .iter_mut()
+            .find(|node| node.owner == owner)
+            .ok_or_else(|| failure("declaration projection lacks its original lexical tip"))?;
+        tip.owner = crate::declaration_join::ExactModuleIdentity {
+            unit: projection.reserved().unit.clone(),
+            module: projection.reserved().module.clone(),
+        };
+        let context = Arc::new(crate::declaration_context::ExactDeclarationContext::new(
+            &[],
+            std::slice::from_ref(&projection),
+            lexical,
+        )?);
         let mut next = self.clone();
-        next.completed.push(CompletedCheckedItem::Declaration(item));
+        next.completed
+            .push(CompletedCheckedItem::Declaration { item, context });
         Ok(next)
     }
     pub fn injected_modules(&self) -> Vec<String> {
@@ -2082,7 +2087,7 @@ impl ExactCompiledPrefix {
         let mut winners = BTreeMap::new();
         for completed in &self.completed {
             match completed {
-                CompletedCheckedItem::Declaration(_) => {}
+                CompletedCheckedItem::Declaration { .. } => {}
                 CompletedCheckedItem::Native(item) => {
                     for binder in &item.bound_binders {
                         let fields = row(binder, 7)?;
@@ -3690,7 +3695,10 @@ mod tests {
             index: 0,
         };
         let mut completed = CheckedPrefixSequence::new();
-        completed.push(CompletedCheckedItem::Declaration(item));
+        completed.push(CompletedCheckedItem::Declaration {
+            item,
+            context: Arc::new(expected_publication.clone()),
+        });
         let prefix = ExactCompiledPrefix {
             cell,
             completed,

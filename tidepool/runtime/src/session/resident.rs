@@ -2745,6 +2745,7 @@ where
         include_paths: Vec<PathBuf>,
         binding: String,
         expected: HostBindingType,
+        compile_inputs: Option<super::prepared::RuntimeCompileInputs>,
     ) -> Result<Arc<super::RuntimeCellAdmission>, SessionError> {
         self.settle_dropped_custody();
         self.state.admit_host_carrier_cell_in(
@@ -2756,6 +2757,7 @@ where
             include_paths,
             binding,
             expected,
+            compile_inputs,
         )
     }
 
@@ -2821,7 +2823,7 @@ where
         specification_digest: [u8; 32],
         authority_digest: [u8; 32],
         include_paths: Vec<PathBuf>,
-        request_annotations: Option<super::RequestCompileAnnotations>,
+        compile_inputs: Option<super::prepared::RuntimeCompileInputs>,
     ) -> Result<Arc<super::RuntimeCellAdmission>, SessionError> {
         self.settle_dropped_custody();
         self.state.admit_native_setup_cell_in(
@@ -2831,7 +2833,7 @@ where
             specification_digest,
             authority_digest,
             include_paths,
-            request_annotations,
+            compile_inputs,
         )
     }
 
@@ -2843,7 +2845,7 @@ where
         specification_digest: [u8; 32],
         authority_digest: [u8; 32],
         include_paths: Vec<PathBuf>,
-        request_annotations: Option<super::RequestCompileAnnotations>,
+        compile_inputs: Option<super::prepared::RuntimeCompileInputs>,
     ) -> Result<Arc<super::RuntimeCellAdmission>, SessionError> {
         self.settle_dropped_custody();
         self.state.admit_planned_cell_for_execution(
@@ -2853,7 +2855,7 @@ where
             specification_digest,
             authority_digest,
             include_paths,
-            request_annotations,
+            compile_inputs,
         )
     }
 

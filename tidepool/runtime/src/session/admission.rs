@@ -227,6 +227,14 @@ pub struct RuntimeCellAdmission {
     native_purpose: Option<NativeCellPurpose>,
     _retained_scope: Arc<RuntimeLexicalScopeLease>,
     prefix_started: std::sync::atomic::AtomicBool,
+    declaration_baseline: Option<super::lexical_projection::DeclarationProjectionBaseline>,
+    prepared_declarations: std::sync::OnceLock<
+        Vec<(
+            tidepool_toolchain::checked_cell::ExactCheckedItem,
+            Arc<super::lexical_projection::PreparedAuthoredDeclaration>,
+        )>,
+    >,
+    compile_inputs: super::prepared::RuntimeCompileInputs,
     view: SessionCompileView,
     view_digest: [u8; 32],
     visibility: PublicVisibilitySnapshot,
@@ -660,6 +668,7 @@ struct RuntimeCheckedState {
     reservation: Option<CheckedItemReservation>,
     interface_index: std::collections::BTreeMap<u64, [u8; 32]>,
     native_index: CheckedNativeIndex,
+    compile_inputs: super::prepared::RuntimeCompileInputs,
 }
 
 #[derive(Debug)]
@@ -969,7 +978,9 @@ fn settle_checked_snapshot(
     let view = session
         .compile_view_in(scope)
         .ok_or(SessionError::DeadScope(scope))?
-        .with_scoped_injection();
+        .with_scoped_injection()
+        .with_compile_inputs(&state.compile_inputs)
+        .map_err(SessionError::Compile)?;
     let view_digest = session
         .compile_view_digest_in(scope)
         .ok_or(SessionError::DeadScope(scope))?;
@@ -1155,6 +1166,59 @@ impl std::fmt::Debug for RuntimeCellAdmission {
 }
 
 impl RuntimeCellAdmission {
+    /// Issue cumulative lexical projections while the machine and prefix
+    /// mutex are stowed. Only this admission's immutable checked items enter
+    /// the prepared sequence consumed by declaration adoption.
+    pub(super) fn prepare_declaration_projections(
+        &self,
+        cell: &Arc<tidepool_toolchain::checked_cell::ExactCheckedCell>,
+    ) -> Result<(), SessionError> {
+        let mut baseline = self.declaration_baseline.clone();
+        let mut prepared = Vec::new();
+        for index in 0..cell.item_count() {
+            let item = cell.item(index)?;
+            if item.admission_digest() != self.digest() {
+                return Err(SessionError::StaleStagedDeclaration);
+            }
+            let Some(evidence) = item.planned_declaration() else {
+                continue;
+            };
+            let generation = match &self.planned {
+                Some(plan) => plan
+                    .items()
+                    .get(index)
+                    .and_then(|row| row.declaration_generation()),
+                None if index == 0 => self.reserved_generations.first().copied(),
+                None => None,
+            }
+            .ok_or(SessionError::StaleStagedDeclaration)?;
+            let projection = super::lexical_projection::prepare_authored_projection(
+                baseline.as_ref(),
+                generation,
+                evidence.clone(),
+                &[],
+                &self.include_paths,
+                self.view.session_root(),
+            )?;
+            baseline = Some(projection.next_baseline());
+            prepared.push((item, projection));
+        }
+        self.prepared_declarations
+            .set(prepared)
+            .map_err(|_| SessionError::StaleStagedDeclaration)
+    }
+
+    pub(super) fn prepared_declaration(
+        &self,
+        item: &tidepool_toolchain::checked_cell::ExactCheckedItem,
+    ) -> Result<Arc<super::lexical_projection::PreparedAuthoredDeclaration>, SessionError> {
+        self.prepared_declarations
+            .get()
+            .and_then(|rows| rows.iter().find(|(prepared_item, _)| prepared_item == item))
+            .map(|(_, prepared)| prepared.clone())
+            .ok_or(SessionError::StaleStagedDeclaration)
+    }
+
     pub fn private_execution(&self) -> Option<&Arc<PrivateExecutionAdmission>> {
         self.private_execution.as_ref()
     }
@@ -1493,8 +1557,12 @@ impl PersistentSession {
                 .first()
                 .ok_or(SessionError::StaleStagedDeclaration)?,
         };
+        let prepared = prefix.admission.prepared_declaration(item)?;
         let module = tidepool_repr::SessionModule::lib(generation);
-        if certificate.product().owner().unit != "main"
+        if prepared.generation != generation
+            || prepared.parent != self.lib().scope_tip(scope)
+            || prepared.evidence.as_ref() != certificate.as_ref()
+            || certificate.product().owner().unit != "main"
             || certificate.product().owner().module != module.module_name()
             || !self.lib().log.is_reserved(generation)
         {
@@ -1562,12 +1630,15 @@ impl PersistentSession {
                 body_line: 0,
                 hoisted_lines: false,
             },
-            certified_authored: Some((**certificate).clone()),
+            certified_authored: Some(prepared.clone()),
         };
         let compiler_prefix = state
             .snapshot
             .compiler_prefix
-            .append_declaration(item.clone())?;
+            .append_declaration_with_projection(
+                item.clone(),
+                prepared.projection.receipt().clone(),
+            )?;
         let committed = self.adopt_staged_declaration_in(staged);
         if committed.is_ok()
             || committed
@@ -1780,6 +1851,7 @@ impl PersistentSession {
             )
             .map_err(|_| SessionError::StaleStagedDeclaration)?;
         let native_index = CheckedNativeIndex::new(admission.native_imports.clone());
+        let compile_inputs = admission.compile_inputs.clone();
         Ok(Arc::new(RuntimeCheckedPrefix {
             admission,
             first_item,
@@ -1790,6 +1862,7 @@ impl PersistentSession {
                 reservation: None,
                 interface_index,
                 native_index,
+                compile_inputs,
             }),
         }))
     }
@@ -1985,7 +2058,7 @@ impl PersistentSession {
         specification_digest: [u8; 32],
         authority_digest: [u8; 32],
         include_paths: Vec<PathBuf>,
-        request_annotations: Option<super::RequestCompileAnnotations>,
+        compile_inputs: Option<super::prepared::RuntimeCompileInputs>,
     ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
         use tidepool_toolchain::cell_plan::ParsedCellPlanKind as Kind;
         if plan.items().len() != 1
@@ -2011,7 +2084,7 @@ impl PersistentSession {
             Some(plan),
             None,
             Some(NativeCellPurpose::Setup),
-            request_annotations,
+            compile_inputs,
         )
     }
 
@@ -2025,6 +2098,7 @@ impl PersistentSession {
         include_paths: Vec<PathBuf>,
         binding: String,
         expected: super::resident::HostBindingType,
+        compile_inputs: Option<super::prepared::RuntimeCompileInputs>,
     ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
         use tidepool_toolchain::cell_plan::ParsedCellPlanKind as Kind;
         if plan.items().len() != 1
@@ -2050,7 +2124,7 @@ impl PersistentSession {
             Some(plan),
             None,
             Some(NativeCellPurpose::HostCarrier { binding, expected }),
-            None,
+            compile_inputs,
         )
     }
 
@@ -2083,7 +2157,8 @@ impl PersistentSession {
                     request_evidence,
                     tidepool_toolchain::declaration_join::RequestHelperRecipe::None,
                 )
-                .map_err(SessionError::Compile)?,
+                .map_err(SessionError::Compile)?
+                .into(),
             ),
         )
     }
@@ -2112,18 +2187,24 @@ impl PersistentSession {
         plan: Option<Arc<tidepool_toolchain::cell_plan::ParsedCellPlan>>,
         private_execution: Option<Arc<PrivateExecutionAdmission>>,
         native_purpose: Option<NativeCellPurpose>,
-        request_annotations: Option<super::RequestCompileAnnotations>,
+        compile_inputs: Option<super::prepared::RuntimeCompileInputs>,
     ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
         self.reap_admission_leases();
         let view = self
             .compile_view_in(scope)
             .ok_or(SessionError::DeadScope(scope))?
             .with_scoped_injection();
-        let view = match &request_annotations {
-            Some(annotations) => view
-                .with_request_annotations(annotations)
-                .map_err(SessionError::Compile)?,
-            None => view,
+        let compile_inputs = compile_inputs.unwrap_or_default();
+        let view = view
+            .with_compile_inputs(&compile_inputs)
+            .map_err(SessionError::Compile)?;
+        let declaration_baseline = if declaration_count > 0 {
+            super::lexical_projection::DeclarationProjectionBaseline::capture(
+                self.lib(),
+                self.lib().scope_tip(scope),
+            )?
+        } else {
+            None
         };
         if let Some(plan) = &plan {
             let injected = view
@@ -2418,9 +2499,7 @@ impl PersistentSession {
         if let Some(purpose) = &native_purpose {
             purpose.frame_authorization(&mut frame);
         }
-        if let Some(annotations) = &request_annotations {
-            annotations.frame_authorization(&mut frame);
-        }
+        compile_inputs.frame_authorization(&mut frame);
         let digest = *digest.finalize().as_bytes();
         let planned = planned.map(|mut planned| {
             Arc::get_mut(&mut planned)
@@ -2435,6 +2514,9 @@ impl PersistentSession {
             native_purpose,
             _retained_scope: retained_scope,
             prefix_started: std::sync::atomic::AtomicBool::new(false),
+            declaration_baseline,
+            prepared_declarations: std::sync::OnceLock::new(),
+            compile_inputs,
             view,
             view_digest,
             visibility,
@@ -2632,7 +2714,7 @@ impl PersistentSession {
         specification_digest: [u8; 32],
         authority_digest: [u8; 32],
         include_paths: Vec<PathBuf>,
-        request_annotations: Option<super::RequestCompileAnnotations>,
+        compile_inputs: Option<super::prepared::RuntimeCompileInputs>,
     ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
         self.compile_view_for_execution(&execution)?;
         use tidepool_toolchain::cell_plan::ParsedCellPlanKind as Kind;
@@ -2651,7 +2733,7 @@ impl PersistentSession {
             Some(plan),
             Some(execution),
             None,
-            request_annotations,
+            compile_inputs,
         )
     }
 

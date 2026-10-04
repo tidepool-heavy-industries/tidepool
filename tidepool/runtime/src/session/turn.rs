@@ -2652,6 +2652,9 @@ pub fn compile_cell_program_admitted(
         req.compile_view_evidence,
     )?;
     checked.warnings = report.diagnostics;
+    admission
+        .prepare_declaration_projections(program.checked_cell())
+        .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
     checked.authority = Some(program.checked_cell().clone());
     checked.admission = Some(admission);
     Ok((checked, program))
@@ -2805,6 +2808,9 @@ fn check_cell_impl(
                 )
                 .into());
         }
+        admission
+            .prepare_declaration_projections(&authority)
+            .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
         checked.authority = Some(authority);
         checked.admission = Some(admission);
     } else if req.exact_context.is_some() {
@@ -6252,12 +6258,20 @@ mod tests {
         );
         let expression = checked.checked_item(3).unwrap();
         assert!(expression.expression_presentation().unwrap().is_some());
+        let projection = admission.prepared_declaration(&declaration).unwrap();
+        let receipt = projection.projection.receipt().clone();
         let prefix = declaration.initial_prefix().unwrap();
-        assert!(prefix.append_declaration(binding.clone()).is_err());
-        let prefix = prefix.append_declaration(declaration.clone()).unwrap();
+        assert!(prefix
+            .append_declaration_with_projection(binding.clone(), receipt.clone())
+            .is_err());
+        let prefix = prefix
+            .append_declaration_with_projection(declaration.clone(), receipt.clone())
+            .unwrap();
         assert_eq!(prefix.next_item(), 1);
         assert_eq!(prefix.completed_declaration(0), Some(&declaration));
-        assert!(prefix.append_declaration(declaration.clone()).is_err());
+        assert!(prefix
+            .append_declaration_with_projection(declaration.clone(), receipt)
+            .is_err());
         let protected = session
             .begin_checked_prefix(admission, declaration.clone())
             .unwrap();

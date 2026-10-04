@@ -1465,7 +1465,15 @@ impl PersistentSession {
             projection: Arc::new(super::view::CompileViewProjection {
                 root: PathBuf::from(lib.include_dir()),
                 persistent_imports: self.workbench_imports_in(scope),
-                library: lib.current_module_in(scope),
+                library: lib.current_module_in(scope).map(|original| {
+                    match lib.current_declaration_projection_in(scope) {
+                        Some(projection) => super::view::CompileLibrary::Certified {
+                            original,
+                            projection,
+                        },
+                        None => super::view::CompileLibrary::Source(original),
+                    }
+                }),
                 visible_values,
                 visible_value_names,
                 reachable_values,
