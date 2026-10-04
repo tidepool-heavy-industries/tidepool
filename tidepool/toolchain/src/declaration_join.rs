@@ -27,7 +27,7 @@ pub use recovery::{
     certify_recovered_declaration_tip, certify_recovered_declaration_tip_in_context,
     certify_recovered_declaration_tip_with_inventory,
     certify_recovered_declaration_tip_with_value_interfaces, RecoveredDeclarationTip,
-    RecoveryDeclarationSelection,
+    RecoveryDeclarationOrigin, RecoveryDeclarationSelection,
 };
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -2243,6 +2243,20 @@ mod authored_tests {
         assert_eq!(recovered.toolchain_identity_sha256(), expected_producer);
         assert_eq!(recovered.authored_native_root(1).unwrap(), original_root);
         assert!(recovered.authored_native_root(2).is_err());
+        let recovered_join = certify_recovered_declaration_tip_in_context(
+            Arc::new(recovered.clone()),
+            RecoveryDeclarationSelection {
+                origin: RecoveryDeclarationOrigin::Join,
+                root: recovered.lexical_graph()[0].owner.clone(),
+                lexical: recovered.lexical_graph().to_vec(),
+                exports: certificate.lexical_exports().to_vec(),
+                instances: certificate.instances().clone(),
+                family_closure: certificate.family_closure().to_vec(),
+            },
+            &[],
+        )
+        .unwrap();
+        assert_eq!(recovered_join.authored_generation(), None);
         let recovered_identity = recovered.semantic_sha256();
         let selected_instances = certificate.instances().clone();
         let extended = recovered
@@ -2306,6 +2320,47 @@ mod authored_tests {
         )
         .unwrap();
         assert_eq!(next_context.joined_interfaces().len(), 1);
+        assert_eq!(next_context.authored_native_root(1).unwrap(), original_root);
+        assert_ne!(next_context.authored_native_root(3).unwrap(), original_root);
+        let recovery_selection = |generation| RecoveryDeclarationSelection {
+            origin: RecoveryDeclarationOrigin::Authored {
+                generation,
+                introduced_exports: fresh_certificate.introduced_exports().to_vec(),
+            },
+            root: fresh_owner.clone(),
+            lexical: next_context.lexical_graph().to_vec(),
+            exports: fresh_certificate.lexical_exports().to_vec(),
+            instances: fresh_certificate.instances().clone(),
+            family_closure: fresh_certificate.family_closure().to_vec(),
+        };
+        let mut not_a_join = recovery_selection(3);
+        not_a_join.origin = RecoveryDeclarationOrigin::Join;
+        let wrong_role = certify_recovered_declaration_tip_in_context(
+            Arc::new(next_context.clone()),
+            not_a_join,
+            &[fresh_root.path().to_path_buf()],
+        )
+        .unwrap_err();
+        assert!(wrong_role
+            .to_string()
+            .contains("recovered join root has no certified lexical-join role"));
+        let wrong_original = certify_recovered_declaration_tip_in_context(
+            Arc::new(next_context.clone()),
+            recovery_selection(1),
+            &[fresh_root.path().to_path_buf()],
+        )
+        .unwrap_err();
+        assert!(wrong_original
+            .to_string()
+            .contains("recovered authored delta differs from its original compiler inventory"));
+        let recovered_fresh = certify_recovered_declaration_tip_in_context(
+            Arc::new(next_context.clone()),
+            recovery_selection(3),
+            &[fresh_root.path().to_path_buf()],
+        )
+        .unwrap();
+        assert_eq!(recovered_fresh.authored_generation(), Some(3));
+        assert_eq!(recovered_fresh.root(), &fresh_owner);
         for original in extended.recovery_products() {
             let retained = next_context
                 .recovery_products()

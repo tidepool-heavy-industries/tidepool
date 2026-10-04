@@ -4,7 +4,16 @@ use super::*;
 
 /// Durable selectors are checked against the retained interface by the bound
 /// compiler. They carry no execution certificate on their own.
+pub enum RecoveryDeclarationOrigin {
+    Join,
+    Authored {
+        generation: u64,
+        introduced_exports: Vec<DeclarationExport>,
+    },
+}
+
 pub struct RecoveryDeclarationSelection {
+    pub origin: RecoveryDeclarationOrigin,
     pub root: ExactModuleIdentity,
     pub lexical: Vec<ExactLexicalNode>,
     pub exports: Vec<DeclarationExport>,
@@ -16,6 +25,7 @@ pub struct RecoveryDeclarationSelection {
 /// compiler inventory. No authored source or publication receipt is recreated.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecoveredDeclarationTip {
+    origin: RecoveredDeclarationOrigin,
     context: Arc<ExactDeclarationContext>,
     root: ExactModuleIdentity,
     interface_sha256: String,
@@ -24,7 +34,24 @@ pub struct RecoveredDeclarationTip {
     family_closure: Vec<ExportIdentity>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RecoveredDeclarationOrigin {
+    Join,
+    Authored {
+        generation: u64,
+        native_artifact: crate::artifact_inventory::ArtifactId,
+    },
+}
+
 impl RecoveredDeclarationTip {
+    /// Present only after the original module's compiler inventory matches
+    /// the complete introduced export delta for this authenticated generation.
+    pub fn authored_generation(&self) -> Option<u64> {
+        match self.origin {
+            RecoveredDeclarationOrigin::Join => None,
+            RecoveredDeclarationOrigin::Authored { generation, .. } => Some(generation),
+        }
+    }
     pub fn context(&self) -> &Arc<ExactDeclarationContext> {
         &self.context
     }
@@ -132,6 +159,20 @@ pub fn certify_recovered_declaration_tip_in_context(
     {
         return Err(contract("recovered root lacks a certified lexical owner"));
     }
+    if matches!(selection.origin, RecoveryDeclarationOrigin::Join)
+        && !context
+            .artifact_view()
+            .descriptors()
+            .iter()
+            .any(|descriptor| {
+                descriptor.owner == selection.root
+                    && descriptor.kind == crate::artifact_inventory::ArtifactKind::LexicalJoin
+            })
+    {
+        return Err(contract(
+            "recovered join root has no certified lexical-join role",
+        ));
+    }
     let scratch = tempfile::tempdir()?;
     let materialized = context.materialize_scratch(&scratch)?;
     let roots = materialized
@@ -162,6 +203,60 @@ pub fn certify_recovered_declaration_tip_in_context(
     let inventories = outcome
         .inventories
         .ok_or_else(|| contract("recovery inventory has no interface facts"))?;
+    let origin = match &selection.origin {
+        RecoveryDeclarationOrigin::Join => RecoveredDeclarationOrigin::Join,
+        RecoveryDeclarationOrigin::Authored {
+            generation,
+            introduced_exports,
+        } => {
+            let native_artifact = context.authored_native_root(*generation)?;
+            let original = context
+                .artifact_view()
+                .entries()
+                .into_iter()
+                .find_map(|entry| match &entry.payload {
+                    crate::artifact_inventory::ArtifactPayload::Original(product)
+                        if entry.descriptor.id == native_artifact =>
+                    {
+                        Some(product.clone())
+                    }
+                    _ => None,
+                })
+                .ok_or_else(|| {
+                    contract("recovered authored native root has no original product")
+                })?;
+            let mut originals = inventories.iter().filter(|inventory| {
+                inventory.artifact.interface.unit == original.owner().unit
+                    && inventory.artifact.interface.module == original.owner().module
+            });
+            let inventory = originals.next().ok_or_else(|| {
+                contract("recovered authored original has no interface inventory")
+            })?;
+            if originals.next().is_some() {
+                return Err(contract(
+                    "recovered authored original has ambiguous interface inventory",
+                ));
+            }
+            let local_exports = inventory
+                .exports
+                .iter()
+                .filter(|export| {
+                    export.head.unit == original.owner().unit
+                        && export.head.module == original.owner().module
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            if exports_key(&local_exports) != exports_key(introduced_exports) {
+                return Err(contract(
+                    "recovered authored delta differs from its original compiler inventory",
+                ));
+            }
+            RecoveredDeclarationOrigin::Authored {
+                generation: *generation,
+                native_artifact,
+            }
+        }
+    };
     let mut roots = inventories
         .into_iter()
         .filter(|inventory| inventory.artifact.interface == root_interface)
@@ -182,6 +277,7 @@ pub fn certify_recovered_declaration_tip_in_context(
         ));
     }
     Ok(RecoveredDeclarationTip {
+        origin,
         context,
         root: selection.root,
         interface_sha256: root_interface.sha256,

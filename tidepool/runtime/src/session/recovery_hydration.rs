@@ -6,7 +6,7 @@ use std::sync::Arc;
 use tidepool_toolchain::declaration_join::{
     certify_recovered_declaration_tip_in_context, ClassInstanceEvidence, DeclarationExport,
     DeclarationKind, ExportIdentity, ExportNamespace, InstanceInventory,
-    RecoveredArtifactInventory, RecoveryDeclarationSelection,
+    RecoveredArtifactInventory, RecoveryDeclarationOrigin, RecoveryDeclarationSelection,
 };
 
 /// Configured native composition backed by the lifetime run lock. This trait
@@ -350,6 +350,24 @@ impl SessionLib {
             let evidence = Arc::new(certify_recovered_declaration_tip_in_context(
                 Arc::clone(&contexts[&generation]),
                 RecoveryDeclarationSelection {
+                    origin: match node.kind {
+                        recovery::RecoveryNodeKind::Join => RecoveryDeclarationOrigin::Join,
+                        recovery::RecoveryNodeKind::Authored => {
+                            RecoveryDeclarationOrigin::Authored {
+                                generation: generation.0,
+                                introduced_exports: node
+                                    .exports
+                                    .iter()
+                                    .map(recovered_export)
+                                    .collect::<Option<Vec<_>>>()
+                                    .ok_or_else(|| {
+                                        invalid(
+                                            "unsupported durable authored export identity".into(),
+                                        )
+                                    })?,
+                            }
+                        }
+                    },
                     root: root.clone(),
                     lexical: node.lexical.clone(),
                     exports,
@@ -404,6 +422,7 @@ impl SessionLib {
             };
             if !log.restore_recovered(
                 generation,
+                node.kind,
                 render::RecoveredDeclaration {
                     turn,
                     evidence,

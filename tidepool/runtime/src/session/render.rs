@@ -455,13 +455,24 @@ impl DeclLog {
     pub(crate) fn restore_recovered(
         &mut self,
         generation: Generation,
+        kind: super::recovery::RecoveryNodeKind,
         recovered: RecoveredDeclaration,
     ) -> bool {
+        let original_matches = match kind {
+            super::recovery::RecoveryNodeKind::Authored => {
+                recovered.evidence.authored_generation() == Some(generation.0)
+            }
+            super::recovery::RecoveryNodeKind::Join => {
+                recovered.evidence.authored_generation().is_none()
+                    && recovered.evidence.root().module
+                        == SessionModule::lib(generation).module_name()
+            }
+        };
         if generation.0 == 0
             || generation > self.high_water
             || self.turns.contains_key(&generation)
             || recovered.turn.parent.is_some()
-            || recovered.evidence.root().module != SessionModule::lib(generation).module_name()
+            || !original_matches
         {
             return false;
         }
@@ -1238,6 +1249,10 @@ pub fn render_module_with_vals(
     let prev_module = this.parent.map(|parent| {
         log.projection_at(parent)
             .map(|projection| projection.module_name().to_owned())
+            .or_else(|| {
+                log.recovered_at(parent)
+                    .map(|recovered| recovered.evidence.root().module.clone())
+            })
             .unwrap_or_else(|| SessionModule::lib(parent).module_name())
     });
 

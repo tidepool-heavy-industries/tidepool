@@ -1533,6 +1533,17 @@ impl SessionLib {
         self.log.projection_at(self.scope_tip(scope)).cloned()
     }
 
+    /// The retained compiler proof of a cold-restored lexical interface.
+    #[must_use]
+    pub fn current_recovered_declaration_in(
+        &self,
+        scope: ScopeId,
+    ) -> Option<Arc<tidepool_toolchain::declaration_join::RecoveredDeclarationTip>> {
+        self.log
+            .recovered_at(self.scope_tip(scope))
+            .map(|recovered| recovered.evidence.clone())
+    }
+
     /// Persistent imports visible at `scope`, derived from the same ordered
     /// declaration chain that is transferred during session recovery.
     #[must_use]
@@ -1558,6 +1569,10 @@ impl SessionLib {
     pub fn import_line_in(&self, scope: ScopeId) -> Option<String> {
         self.current_declaration_projection_in(scope)
             .map(|projection| format!("import {}", projection.module_name()))
+            .or_else(|| {
+                self.current_recovered_declaration_in(scope)
+                    .map(|evidence| format!("import {}", evidence.root().module))
+            })
             .or_else(|| {
                 self.current_module_in(scope)
                     .map(|module| format!("import {}", module.module_name()))
@@ -3211,6 +3226,75 @@ mod tests {
         assert!(lib.retract("DirectFlag").is_err());
         assert_eq!(lib.scope_tip(ScopeId::ROOT), Generation(1));
         assert_eq!(lib.generation(), Generation(1));
+        let projection = lib
+            .current_declaration_projection_in(ScopeId::ROOT)
+            .unwrap();
+        let recovered = Arc::new(
+            tidepool_toolchain::declaration_join::certify_recovered_declaration_tip_in_context(
+                projection.context().clone(),
+                tidepool_toolchain::declaration_join::RecoveryDeclarationSelection {
+                    origin:
+                        tidepool_toolchain::declaration_join::RecoveryDeclarationOrigin::Authored {
+                            generation: 1,
+                            introduced_exports: lib
+                                .log
+                                .certified_authored_at(Generation(1))
+                                .unwrap()
+                                .introduced_exports()
+                                .to_vec(),
+                        },
+                    root: tidepool_toolchain::declaration_join::ExactModuleIdentity {
+                        unit: projection.receipt().reserved().unit.clone(),
+                        module: projection.module_name().to_owned(),
+                    },
+                    lexical: projection.context().lexical_graph().to_vec(),
+                    exports: projection.receipt().exports().to_vec(),
+                    instances: projection.receipt().instances().clone(),
+                    family_closure: projection.receipt().family_closure().to_vec(),
+                },
+                &lib.extra_include,
+            )
+            .unwrap(),
+        );
+        let restored = render::RecoveredDeclaration {
+            turn: lib.log.turn(Generation(1)).unwrap().clone(),
+            evidence: recovered.clone(),
+            surface: lib.log.admitted_surface_at(Generation(1)).unwrap().clone(),
+        };
+        assert_eq!(
+            lib.reserve_join_generation_durable().unwrap(),
+            Generation(2)
+        );
+        let mut recovered_log = DeclLog::new();
+        assert!(recovered_log.restore_high_water(Generation(2)));
+        assert!(!recovered_log.restore_recovered(
+            Generation(2),
+            recovery::RecoveryNodeKind::Authored,
+            restored.clone()
+        ));
+        assert!(!recovered_log.restore_recovered(
+            Generation(1),
+            recovery::RecoveryNodeKind::Join,
+            restored.clone()
+        ));
+        assert!(recovered_log.restore_recovered(
+            Generation(1),
+            recovery::RecoveryNodeKind::Authored,
+            restored
+        ));
+        lib.log = recovered_log;
+        assert!(Arc::ptr_eq(
+            &lib.current_recovered_declaration_in(ScopeId::ROOT).unwrap(),
+            &recovered
+        ));
+        assert_eq!(
+            lib.current_module_in(ScopeId::ROOT),
+            Some(SessionModule::lib(Generation(1)))
+        );
+        assert_eq!(
+            lib.import_line().unwrap(),
+            format!("import {}", projection.module_name())
+        );
     }
 
     #[test]
