@@ -322,9 +322,9 @@ pub fn orchestrate_module_source(effects: &[EffectDecl]) -> String {
     out.push_str("-- the eval expr module instead of spliced into its scope.\n");
     out.push_str("module Tidepool.Orchestrate where\n");
     out.push_str("import Tidepool.Prelude hiding (error)\n");
-    out.push_str("import Tidepool.Effects\n");
-    // `send` (used by `putStrLn`) comes from freer — Tidepool.Effects does not
-    // re-export it (no export list ⇒ only its own decls), so import it here too.
+    out.push_str("import Tidepool.Effects.Authored\n");
+    // Use stable vocabulary rather than the invocation's concrete M alias.
+    // Each helper declares only the effects its body performs.
     out.push_str("import Control.Monad.Freer hiding (run)\n");
     out.push_str("import qualified Tidepool.Data.Text as T\n");
     out.push_str("import qualified Data.Map.Strict as Map\n");
@@ -426,7 +426,7 @@ pub fn orchestrate_module_source(effects: &[EffectDecl]) -> String {
     // putStrLn: Print effect + char counter in KV (when available)
     if has_console && has_kv {
         out.push_str(concat!(
-            "putStrLn :: Text -> M ()\n",
+            "putStrLn :: Members '[Console, KV] effs => Text -> Eff effs ()\n",
             "putStrLn t = do\n",
             "  send (Print t)\n",
             "  v <- kvGet \"__sayChars\" >>= liftEither\n",
@@ -435,7 +435,7 @@ pub fn orchestrate_module_source(effects: &[EffectDecl]) -> String {
         ));
     } else if has_console {
         out.push_str(concat!(
-            "putStrLn :: Text -> M ()\n",
+            "putStrLn :: Member Console effs => Text -> Eff effs ()\n",
             "putStrLn = send . Print\n",
         ));
     }
@@ -525,13 +525,13 @@ pub fn orchestrate_module_source(effects: &[EffectDecl]) -> String {
         "  Null -> \"null\"\n",
     ));
 
-    // paginate* reference `M`, which only exists on a non-empty stack
-    // (`type M = Eff '[…]` is emitted only then). Gate accordingly.
+    // Pagination variants remain available for non-empty installed profiles;
+    // importing them does not require the selected row to hold their effects.
     if !effects.is_empty() {
         // Interactive: suspend to the caller via `ask` to fetch stub chunks.
         if has_ask {
             out.push_str(concat!(
-                "paginateInteractive :: Int -> Value -> M Value\n",
+                "paginateInteractive :: Member Ask effs => Int -> Value -> Eff effs Value\n",
                 "paginateInteractive budget val\n",
                 "  | valSize val <= budget = pure val\n",
                 "  | otherwise = do\n",
@@ -554,8 +554,15 @@ pub fn orchestrate_module_source(effects: &[EffectDecl]) -> String {
         // paginateTrunc. Console variant emits a note (needs putStrLn); the
         // pure variant truncates silently when there is no Console.
         if has_console {
+            let constraints = if has_kv {
+                "Members '[Console, KV] effs"
+            } else {
+                "Member Console effs"
+            };
+            out.push_str(&format!(
+                "paginateTrunc :: {constraints} => Int -> Value -> Eff effs Value\n"
+            ));
             out.push_str(concat!(
-                "paginateTrunc :: Int -> Value -> M Value\n",
                 "paginateTrunc budget val\n",
                 "  | valSize val <= budget = pure val\n",
                 "  | otherwise = do\n",
@@ -565,7 +572,7 @@ pub fn orchestrate_module_source(effects: &[EffectDecl]) -> String {
             ));
         } else {
             out.push_str(concat!(
-                "paginateTrunc :: Int -> Value -> M Value\n",
+                "paginateTrunc :: Int -> Value -> Eff effs Value\n",
                 "paginateTrunc budget val\n",
                 "  | valSize val <= budget = pure val\n",
                 "  | otherwise = let (truncated, _) = truncVal budget val in pure truncated\n",
@@ -579,7 +586,7 @@ pub fn orchestrate_module_source(effects: &[EffectDecl]) -> String {
     if has_kv {
         out.push_str("-- KV orchestration helpers\n");
         out.push_str(concat!(
-            "memo :: Text -> M Value -> M (Either KvError Value)\n",
+            "memo :: Member KV effs => Text -> Eff effs Value -> Eff effs (Either KvError Value)\n",
             "memo k compute = do\n",
             "  cached <- kvGet k\n",
             "  case cached of\n",
@@ -594,7 +601,7 @@ pub fn orchestrate_module_source(effects: &[EffectDecl]) -> String {
         // KV). On a conflict `kvCas` refreshes the store, so the retry's kvGet
         // reads the fresh value.
         out.push_str(concat!(
-            "kvModify :: Text -> (Maybe Value -> Value) -> M (Either KvError Value)\n",
+            "kvModify :: Member KV effs => Text -> (Maybe Value -> Value) -> Eff effs (Either KvError Value)\n",
             "kvModify k f = do\n",
             "  oldResult <- kvGet k\n",
             "  case oldResult of\n",
@@ -602,7 +609,7 @@ pub fn orchestrate_module_source(effects: &[EffectDecl]) -> String {
             "    Right old -> do { r <- kvCas k old (f old); case r of { Left e -> pure (Left e); Right (Right ()) -> pure (Right (f old)); Right (Left _) -> kvModify k f } }\n",
         ));
         out.push_str(concat!(
-            "kvIncr :: Text -> M (Either KvError Int)\n",
+            "kvIncr :: Member KV effs => Text -> Eff effs (Either KvError Int)\n",
             "kvIncr k = do\n",
             "  oldResult <- kvGet k\n",
             "  case oldResult of\n",
@@ -610,7 +617,7 @@ pub fn orchestrate_module_source(effects: &[EffectDecl]) -> String {
             "    Right old -> do { let { n = case old >>= (^? _Int) of { Just i -> i; _ -> 0 }; n' = n + 1 }; r <- kvCas k old (toJSON n'); case r of { Left e -> pure (Left e); Right (Right ()) -> pure (Right n'); Right (Left _) -> kvIncr k } }\n",
         ));
         out.push_str(concat!(
-            "kvAppend :: Text -> Value -> M (Either KvError [Value])\n",
+            "kvAppend :: Member KV effs => Text -> Value -> Eff effs (Either KvError [Value])\n",
             "kvAppend k v = do\n",
             "  oldResult <- kvGet k\n",
             "  case oldResult of\n",
@@ -618,7 +625,7 @@ pub fn orchestrate_module_source(effects: &[EffectDecl]) -> String {
             "    Right old -> do { let { xs = case old >>= (^? _Array) of { Just arr -> arr; _ -> [] }; xs' = xs ++ [v] }; r <- kvCas k old (toJSON xs'); case r of { Left e -> pure (Left e); Right (Right ()) -> pure (Right xs'); Right (Left _) -> kvAppend k v } }\n",
         ));
         out.push_str(concat!(
-            "kvAll :: M (Either KvError [(Text, Value)])\n",
+            "kvAll :: Member KV effs => Eff effs (Either KvError [(Text, Value)])\n",
             "kvAll = do\n",
             "  keys <- kvKeysP \"\"\n",
             "  case keys of { Left e -> pure (Left e); Right ks -> do { values <- mapM kvGet ks; pure (sequence values >>= \\vs -> Right (zipWith (\\k mv -> (k, maybe Null id mv)) ks vs)) } }\n",
@@ -631,7 +638,7 @@ pub fn orchestrate_module_source(effects: &[EffectDecl]) -> String {
         // isolating read lives on `FsRead`; mutation requires `FsWrite` too.
         out.push_str("-- File orchestration helpers\n");
         out.push_str(concat!(
-            "mapFiles :: [Text] -> (Text -> Text -> M Text) -> M [Text]\n",
+            "mapFiles :: Members '[FsRead, FsWrite] effs => [Text] -> (Text -> Text -> Eff effs Text) -> Eff effs [Text]\n",
             "mapFiles paths transform = mapM (\\p -> do\n",
             "  content <- readFile p >>= liftEither\n",
             "  result <- transform p content\n",
@@ -639,15 +646,15 @@ pub fn orchestrate_module_source(effects: &[EffectDecl]) -> String {
             "  pure p) paths\n",
         ));
         out.push_str(concat!(
-            "mapFile :: Text -> (Text -> Text) -> M ()\n",
+            "mapFile :: Members '[FsRead, FsWrite] effs => Text -> (Text -> Text) -> Eff effs ()\n",
             "mapFile path f = do { c <- readFile path >>= liftEither; writeFile path (f c) >>= liftEither }\n",
         ));
         out.push_str(concat!(
-            "mapFileM :: Text -> (Text -> M Text) -> M ()\n",
+            "mapFileM :: Members '[FsRead, FsWrite] effs => Text -> (Text -> Eff effs Text) -> Eff effs ()\n",
             "mapFileM path f = readFile path >>= liftEither >>= f >>= writeFile path >>= liftEither\n",
         ));
         out.push_str(concat!(
-            "searchFiles :: Text -> Text -> M [Hit]\n",
+            "searchFiles :: Member FsRead effs => Text -> Text -> Eff effs [Hit]\n",
             "searchFiles pat needle = do\n",
             "  files <- glob pat >>= liftEither\n",
             "  fmap concat $ forM files $ \\p -> do\n",
@@ -656,11 +663,11 @@ pub fn orchestrate_module_source(effects: &[EffectDecl]) -> String {
             "    pure [Hit p n l | (n, l) <- ls, T.isInfixOf needle l]\n",
         ));
         out.push_str(concat!(
-            "lineCount :: Text -> M Int\n",
+            "lineCount :: Member FsRead effs => Text -> Eff effs Int\n",
             "lineCount path = length . T.lines <$> (readFile path >>= liftEither)\n",
         ));
         out.push_str(concat!(
-            "fileContains :: Text -> Text -> M Bool\n",
+            "fileContains :: Member FsRead effs => Text -> Text -> Eff effs Bool\n",
             "fileContains path needle = T.isInfixOf needle <$> (readFile path >>= liftEither)\n",
         ));
     }
@@ -668,13 +675,13 @@ pub fn orchestrate_module_source(effects: &[EffectDecl]) -> String {
         // `run` is typed (#335); abort-on-failure via `liftEither`, preserving
         // `runChecked`/`runAll`'s pre-#335 throw-on-failure behaviour.
         out.push_str(concat!(
-            "runChecked :: Text -> M Text\n",
+            "runChecked :: Member Exec effs => Text -> Eff effs Text\n",
             "runChecked cmd = do\n",
             "  p <- run cmd >>= liftEither\n",
             "  if ok p then pure p.stdout else error (\"command failed (\" <> T.pack (show p.exitCode) <> \"): \" <> p.stderr)\n",
         ));
         out.push_str(concat!(
-            "runAll :: [Text] -> M [Proc]\n",
+            "runAll :: Member Exec effs => [Text] -> Eff effs [Proc]\n",
             "runAll = mapM (\\c -> run c >>= liftEither)\n",
         ));
     }

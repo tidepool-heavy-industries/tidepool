@@ -646,7 +646,7 @@ data Console a where
         // Standard Haskell names as primary — assert the SIGNATURE lines,
         // not the `= send . …` bodies (body wording is volatile; the
         // signature is the stable contract eval authors depend on).
-        assert!(preamble.contains("putStrLn :: Text -> M ()"));
+        assert!(preamble.contains("putStrLn :: Members '[Console, KV] effs => Text -> Eff effs ()"));
         // #335: the primitive filesystem verbs expose typed failure; the composite
         // helpers below (appendFile/doesFileExist/…) absorb it and keep their
         // shape.
@@ -820,25 +820,31 @@ data Console a where
         let orch = orchestrate_module_source(&decls);
         // runChecked runs a command and returns stdout, erroring on nonzero
         // exit (assert the signature; the body is volatile).
-        assert!(orch.contains("runChecked :: Text -> M Text"));
+        assert!(orch.contains("runChecked :: Member Exec effs => Text -> Eff effs Text"));
         // File manipulation helpers
-        assert!(orch.contains("mapFile :: Text -> (Text -> Text) -> M ()"));
-        assert!(orch.contains("mapFileM :: Text -> (Text -> M Text) -> M ()"));
-        assert!(orch.contains("searchFiles :: Text -> Text -> M [Hit]"));
-        assert!(orch.contains("lineCount :: Text -> M Int"));
-        assert!(orch.contains("fileContains :: Text -> Text -> M Bool"));
-        // KV batch helper. No orchestration `kvClear :: M ()` here — it
-        // collided with the effect helper `kvClear :: Text -> Eff effs (Either KvError Int)`
-        // (dup-survey item 1); the effect helper strictly subsumes it.
-        assert!(orch.contains("kvAll :: M (Either KvError [(Text, Value)])"));
-        assert!(!orch.contains("kvClear :: M ()"));
-        assert!(orch.contains("runAll :: [Text] -> M [Proc]"));
+        assert!(orch.contains(
+            "mapFile :: Members '[FsRead, FsWrite] effs => Text -> (Text -> Text) -> Eff effs ()"
+        ));
+        assert!(orch.contains("mapFileM :: Members '[FsRead, FsWrite] effs => Text -> (Text -> Eff effs Text) -> Eff effs ()"));
+        assert!(
+            orch.contains("searchFiles :: Member FsRead effs => Text -> Text -> Eff effs [Hit]")
+        );
+        assert!(orch.contains("lineCount :: Member FsRead effs => Text -> Eff effs Int"));
+        assert!(
+            orch.contains("fileContains :: Member FsRead effs => Text -> Text -> Eff effs Bool")
+        );
+        // The primitive kvClear owns deletion; orchestration adds no duplicate helper.
+        assert!(
+            orch.contains("kvAll :: Member KV effs => Eff effs (Either KvError [(Text, Value)])")
+        );
+        assert!(!orch.contains("kvClear ::"));
+        assert!(orch.contains("runAll :: Member Exec effs => [Text] -> Eff effs [Proc]"));
         // The expr-module preamble no longer splices these bodies — it imports
         // the module and only emits the paginateResult alias.
         let preamble = build_preamble(&decls, true);
         assert!(preamble.contains("import Tidepool.Orchestrate"));
-        assert!(!preamble.contains("runChecked :: Text -> M Text"));
-        assert!(!preamble.contains("searchFiles :: Text -> Text -> M [(Text, Int, Text)]"));
+        assert!(!preamble.contains("runChecked :: Member Exec effs => Text -> Eff effs Text"));
+        assert!(!preamble.contains("searchFiles ::"));
         // The structured Ask/Llm surface's thin verb wrappers live in the
         // generated Tidepool.Effects module — one Schema vocabulary, extract
         // with optics. The Q-builder DSL and the `??`/`?!`/triage/survey/sift
@@ -909,7 +915,26 @@ data Console a where
         assert!(!build_preamble(&decls, true).contains("runChecked"));
         // The module carries them based on effects alone (Exec present here).
         let orch = orchestrate_module_source(&decls);
-        assert!(orch.contains("runChecked :: Text -> M Text"));
+        assert!(orch.contains("runChecked :: Member Exec effs => Text -> Eff effs Text"));
+        assert!(orch.contains("import Tidepool.Effects.Authored\n"));
+        for signature in orch.lines().filter(|line| line.contains(" :: ")) {
+            assert!(
+                !signature.split_whitespace().any(|token| token == "M"),
+                "imported orchestration helper depends on the selected row: {signature}"
+            );
+        }
+        let console_only = orchestrate_module_source(&[console_decl()]);
+        assert!(console_only.contains("putStrLn :: Member Console effs => Text -> Eff effs ()"));
+        assert!(console_only
+            .contains("paginateTrunc :: Member Console effs => Int -> Value -> Eff effs Value"));
+        let no_console: Vec<_> = decls
+            .iter()
+            .filter(|d| d.type_name != "Console")
+            .cloned()
+            .collect();
+        let no_console = orchestrate_module_source(&no_console);
+        assert!(!no_console.contains("putStrLn ::"));
+        assert!(no_console.contains("paginateTrunc :: Int -> Value -> Eff effs Value"));
         // An Exec-less stack omits the Exec-gated helpers.
         let no_exec: Vec<EffectDecl> = standard_decls()
             .into_iter()
