@@ -589,7 +589,7 @@
             pkgs.tmux
             pkgs.nix
           ]
-          ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.systemd ];
+          ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.systemd pkgs.util-linux ];
         };
         packages.buck-test-tools = testTools;
         packages.buck-test-tools-closure = pkgs.closureInfo {
