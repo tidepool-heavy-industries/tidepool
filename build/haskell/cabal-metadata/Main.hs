@@ -22,7 +22,7 @@ import Distribution.Types.ExeDependency (ExeDependency(..))
 import Distribution.Types.Flag
   ( FlagAssignment, flagDefault, flagName, mkFlagAssignment, unFlagAssignment
   , unFlagName )
-import Distribution.Types.LibraryName (LibraryName(..))
+import Distribution.Types.LibraryName (LibraryName(..), showLibraryName)
 import Distribution.Utils.Json (Json(..), renderJson)
 import Distribution.Utils.Path (getSymbolicPath)
 import Numeric (showHex)
@@ -149,7 +149,7 @@ componentsJson phase description = do
   where
     libraryJson component = do
       unless (null (reexportedModules component) && null (signatures component)) $
-        die (prettyShow (libName component) ++ ": module reexports/signatures need native Backpack support")
+        die (showLibraryName (libName component) ++ ": module reexports/signatures need native Backpack support")
       let name = case libName component of
             LMainLibName -> prettyShow (pkgName (package description))
             LSubLibName value -> prettyShow value
