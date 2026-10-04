@@ -79,3 +79,23 @@ tidepool_rust_isolated_test(
     ],
     visibility = ["PUBLIC"],
 )
+
+
+filegroup(
+    name = "native_qualification_inputs",
+    srcs = {
+        "exomonad/jev-integration/BUCK": "BUCK",
+        "exomonad/jev-integration/Cargo.toml": "Cargo.toml",
+        "exomonad/jev-integration/fixtures/openapi.json": "fixtures/openapi.json",
+        "exomonad/jev-integration/fixtures/structured-response.json": "fixtures/structured-response.json",
+        "exomonad/jev-integration/src/frontier.rs": "src/frontier.rs",
+        "exomonad/jev-integration/src/interpret.rs": "src/interpret.rs",
+        "exomonad/jev-integration/src/main.rs": "src/main.rs",
+        "exomonad/jev-integration/src/probes.rs": "src/probes.rs",
+        "exomonad/jev-integration/src/scenarios.rs": "src/scenarios.rs",
+        "exomonad/jev-integration/src/simulations.rs": "src/simulations.rs",
+        "exomonad/jev-integration/src/transport.rs": "src/transport.rs",
+        "exomonad/jev-integration/src/worlds.rs": "src/worlds.rs",
+    },
+    visibility = ["PUBLIC"],
+)

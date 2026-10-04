@@ -86,3 +86,15 @@ tidepool_rust_isolated_test(
     haskell_worker = True,
     visibility = ["PUBLIC"],
 )
+
+filegroup(
+    name = "native_qualification_inputs",
+    srcs = {
+        "bridge/testing/BUCK": "BUCK",
+        "bridge/testing/Cargo.toml": "Cargo.toml",
+        "bridge/testing/src/effect_surface.rs": "src/effect_surface.rs",
+        "bridge/testing/src/eval_harness.rs": "src/eval_harness.rs",
+        "bridge/testing/src/lib.rs": "src/lib.rs",
+    },
+    visibility = ["PUBLIC"],
+)

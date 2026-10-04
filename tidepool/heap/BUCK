@@ -119,3 +119,25 @@ tidepool_rust_isolated_test(
     ],
     visibility = ["PUBLIC"],
 )
+
+filegroup(
+    name = "native_qualification_inputs",
+    srcs = {
+        "tidepool/heap/BUCK": "BUCK",
+        "tidepool/heap/Cargo.toml": "Cargo.toml",
+        "tidepool/heap/src/descriptor_region.rs": "src/descriptor_region.rs",
+        "tidepool/heap/src/execution_descriptor.rs": "src/execution_descriptor.rs",
+        "tidepool/heap/src/external_storage.rs": "src/external_storage.rs",
+        "tidepool/heap/src/gc/evacuate.rs": "src/gc/evacuate.rs",
+        "tidepool/heap/src/gc/mod.rs": "src/gc/mod.rs",
+        "tidepool/heap/src/gc/promotion.rs": "src/gc/promotion.rs",
+        "tidepool/heap/src/gc/raw.rs": "src/gc/raw.rs",
+        "tidepool/heap/src/layout.rs": "src/layout.rs",
+        "tidepool/heap/src/lib.rs": "src/lib.rs",
+        "tidepool/heap/src/managed_reference.rs": "src/managed_reference.rs",
+        "tidepool/heap/src/static_region.rs": "src/static_region.rs",
+        "tidepool/heap/tests/gc_unit.rs": "tests/gc_unit.rs",
+        "tidepool/heap/tests/raw_scan_validation.rs": "tests/raw_scan_validation.rs",
+    },
+    visibility = ["PUBLIC"],
+)

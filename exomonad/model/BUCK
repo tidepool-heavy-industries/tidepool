@@ -55,3 +55,13 @@ tidepool_rust_isolated_test(
     ],
     visibility = ["PUBLIC"],
 )
+
+filegroup(
+    name = "native_qualification_inputs",
+    srcs = {
+        "exomonad/model/BUCK": "BUCK",
+        "exomonad/model/Cargo.toml": "Cargo.toml",
+        "exomonad/model/src/lib.rs": "src/lib.rs",
+    },
+    visibility = ["PUBLIC"],
+)

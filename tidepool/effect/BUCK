@@ -96,3 +96,19 @@ tidepool_rust_isolated_test(
     ],
     visibility = ["PUBLIC"],
 )
+
+filegroup(
+    name = "native_qualification_inputs",
+    srcs = {
+        "tidepool/effect/BUCK": "BUCK",
+        "tidepool/effect/Cargo.toml": "Cargo.toml",
+        "tidepool/effect/src/dispatch.rs": "src/dispatch.rs",
+        "tidepool/effect/src/error.rs": "src/error.rs",
+        "tidepool/effect/src/freer_names.rs": "src/freer_names.rs",
+        "tidepool/effect/src/lib.rs": "src/lib.rs",
+        "tidepool/effect/src/pause.rs": "src/pause.rs",
+        "tidepool/effect/src/policy.rs": "src/policy.rs",
+        "tidepool/effect/tests/proptest_effect.rs": "tests/proptest_effect.rs",
+    },
+    visibility = ["PUBLIC"],
+)

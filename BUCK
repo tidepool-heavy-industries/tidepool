@@ -1,4 +1,4 @@
-load("@prelude//:rules.bzl", "export_file")
+load("@prelude//:rules.bzl", "export_file", "filegroup")
 
 export_file(name = "workspace_cargo_manifest", src = "Cargo.toml", visibility = ["PUBLIC"])
 export_file(name = "workspace_cargo_lock", src = "Cargo.lock", visibility = ["PUBLIC"])
@@ -23,3 +23,15 @@ export_file(name = "facade_doc__exomonad_workspace_checks_route_reply_worker_hs"
 export_file(name = "facade_doc__exomonad_workspace_skills_exomonad_jev_SKILL_md", src = ".exomonad/workspace/skills/exomonad-jev/SKILL.md", visibility = ["PUBLIC"])
 export_file(name = "facade_doc__exomonad_workspace_skills_exomonad_jev_references_recent_changes_md", src = ".exomonad/workspace/skills/exomonad-jev/references/recent-changes.md", visibility = ["PUBLIC"])
 export_file(name = "facade_doc__exomonad_workspace_skills_exomonad_workbench_SKILL_md", src = ".exomonad/workspace/skills/exomonad-workbench/SKILL.md", visibility = ["PUBLIC"])
+
+filegroup(
+    name = "qualification_inputs",
+    srcs = {source: source for source in glob([
+        "BUCK", "Cargo.toml", "Cargo.lock", "flake.nix", "flake.lock", ".buckconfig", ".gitmodules", ".clippy.toml",
+        "build/native_profile.bzl", "build/native-targets.json", "build/native-workspace-gitlink.json",
+        ".exomonad/workspace/**/*.hs", ".exomonad/workspace/**/*.md", ".exomonad/workspace/**/*.toml", ".exomonad/workspace/**/*.nix",
+    ])},
+    visibility = ["PUBLIC"],
+)
+
+export_file(name = "workspace_gitlink", src = "build/native-workspace-gitlink.json", visibility = ["PUBLIC"])

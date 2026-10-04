@@ -79,3 +79,14 @@ tidepool_rust_isolated_test(
     ],
     visibility = ["PUBLIC"],
 )
+
+filegroup(
+    name = "native_qualification_inputs",
+    srcs = {
+        "tidepool/bridge-effects/BUCK": "BUCK",
+        "tidepool/bridge-effects/Cargo.toml": "Cargo.toml",
+        "tidepool/bridge-effects/src/lib.rs": "src/lib.rs",
+        "tidepool/bridge-effects/src/model_control_tests.rs": "src/model_control_tests.rs",
+    },
+    visibility = ["PUBLIC"],
+)

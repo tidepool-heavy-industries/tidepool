@@ -1,4 +1,4 @@
-load("@prelude//:rules.bzl", "export_file")
+load("@prelude//:rules.bzl", "export_file", "filegroup")
 
 export_file(
     name = "base_prompt",
@@ -138,3 +138,9 @@ export_file(
     visibility = ["PUBLIC"],
 )
 
+
+filegroup(
+    name = "qualification_inputs",
+    srcs = {"exomonad/prompts/" + source: source for source in glob(["BUCK", "*.md", "docs/**/*.md"])},
+    visibility = ["PUBLIC"],
+)

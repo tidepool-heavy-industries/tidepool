@@ -1,0 +1,7 @@
+load("@prelude//:rules.bzl", "filegroup")
+
+filegroup(
+    name = "qualification_inputs",
+    srcs = {"scripts/" + source: source for source in glob(["BUCK", "*.py", "*.sh", "*.toml"])},
+    visibility = ["PUBLIC"],
+)

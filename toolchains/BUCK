@@ -1,3 +1,4 @@
+load("@prelude//:rules.bzl", "filegroup")
 load("@prelude//toolchains:cxx.bzl", "system_cxx_toolchain")
 load("@prelude//toolchains:genrule.bzl", "system_genrule_toolchain")
 load("@prelude//toolchains:python.bzl", "system_python_bootstrap_toolchain")
@@ -176,5 +177,11 @@ nix_directory(
     name = "haskell_test_closure",
     cp = read_root_config("nix", "coreutils") + "/cp",
     store_path = read_root_config("nix", "haskell_test_closure", ""),
+    visibility = ["PUBLIC"],
+)
+
+filegroup(
+    name = "qualification_inputs",
+    srcs = {"toolchains/" + source: source for source in glob(["BUCK", "*.bzl"])},
     visibility = ["PUBLIC"],
 )

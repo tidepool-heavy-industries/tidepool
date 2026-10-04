@@ -72,3 +72,14 @@ tidepool_rust_isolated_test(
     ],
     visibility = ["PUBLIC"],
 )
+
+filegroup(
+    name = "native_qualification_inputs",
+    srcs = {
+        "tidepool/bignum/BUCK": "BUCK",
+        "tidepool/bignum/Cargo.toml": "Cargo.toml",
+        "tidepool/bignum/src/lib.rs": "src/lib.rs",
+        "tidepool/bignum/tests/show_double_oracle.rs": "tests/show_double_oracle.rs",
+    },
+    visibility = ["PUBLIC"],
+)

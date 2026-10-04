@@ -57,3 +57,14 @@ tidepool_rust_isolated_test(
     ],
     visibility = ["PUBLIC"],
 )
+
+filegroup(
+    name = "native_qualification_inputs",
+    srcs = {
+        "tidepool/extract-report/BUCK": "BUCK",
+        "tidepool/extract-report/Cargo.toml": "Cargo.toml",
+        "tidepool/extract-report/src/artifact_manifest.rs": "src/artifact_manifest.rs",
+        "tidepool/extract-report/src/lib.rs": "src/lib.rs",
+    },
+    visibility = ["PUBLIC"],
+)

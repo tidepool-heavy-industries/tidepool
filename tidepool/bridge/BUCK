@@ -114,3 +114,29 @@ tidepool_rust_isolated_test(
     ],
     visibility = ["PUBLIC"],
 )
+
+filegroup(
+    name = "native_qualification_inputs",
+    srcs = {
+        "tidepool/bridge/BUCK": "BUCK",
+        "tidepool/bridge/Cargo.toml": "Cargo.toml",
+        "tidepool/bridge/src/decimal.rs": "src/decimal.rs",
+        "tidepool/bridge/src/error.rs": "src/error.rs",
+        "tidepool/bridge/src/impls.rs": "src/impls.rs",
+        "tidepool/bridge/src/json.rs": "src/json.rs",
+        "tidepool/bridge/src/json_builder.rs": "src/json_builder.rs",
+        "tidepool/bridge/src/lib.rs": "src/lib.rs",
+        "tidepool/bridge/src/record.rs": "src/record.rs",
+        "tidepool/bridge/src/shapes.rs": "src/shapes.rs",
+        "tidepool/bridge/src/traits.rs": "src/traits.rs",
+        "tidepool/bridge/src/value.rs": "src/value.rs",
+        "tidepool/bridge/tests/constructor_authority.rs": "tests/constructor_authority.rs",
+        "tidepool/bridge/tests/error_cases.rs": "tests/error_cases.rs",
+        "tidepool/bridge/tests/haskell_record.rs": "tests/haskell_record.rs",
+        "tidepool/bridge/tests/proptest_text.rs": "tests/proptest_text.rs",
+        "tidepool/bridge/tests/roundtrip.rs": "tests/roundtrip.rs",
+        "tidepool/bridge/tests/suites/bridge.rs": "tests/suites/bridge.rs",
+        "tidepool/bridge/tests/support/mod.rs": "tests/support/mod.rs",
+    },
+    visibility = ["PUBLIC"],
+)

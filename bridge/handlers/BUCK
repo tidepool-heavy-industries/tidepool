@@ -171,6 +171,21 @@ tidepool_rust_isolated_test(
         "//tidepool/runtime:tidepool_runtime",
         "//tidepool/toolchain:tidepool_toolchain",
     ],
+    env = {
+        "LD_LIBRARY_PATH": "$(location //build/package:tidepool_extract_runtime_libraries)",
+        "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_deployment)",
+        "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
+        "TIDEPOOL_EXTRACT_RUNTIME_LIBRARIES": "$(location //build/package:tidepool_extract_runtime_libraries)",
+        "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
+        "TIDEPOOL_KEEP_TEST_LOGS": "1",
+        "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
+    },
+    resources = [
+        "//bridge/haskell:facade_embedded_sources",
+        "//build/package:compiler_deployment",
+        "//build/package:tidepool_extract_runtime_libraries",
+    ],
+    haskell_worker = True,
     visibility = ["PUBLIC"],
 )
 
@@ -238,11 +253,57 @@ tidepool_rust_isolated_test(
         "//tidepool/toolchain:tidepool_toolchain",
         ":tidepool_handlers",
     ],
+    env = {
+        "LD_LIBRARY_PATH": "$(location //build/package:tidepool_extract_runtime_libraries)",
+        "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_deployment)",
+        "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
+        "TIDEPOOL_EXTRACT_RUNTIME_LIBRARIES": "$(location //build/package:tidepool_extract_runtime_libraries)",
+        "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
+        "TIDEPOOL_KEEP_TEST_LOGS": "1",
+        "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
+    },
+    resources = [
+        "//bridge/haskell:facade_embedded_sources",
+        "//build/package:compiler_deployment",
+        "//build/package:tidepool_extract_runtime_libraries",
+    ],
+    haskell_worker = True,
     visibility = ["PUBLIC"],
 )
 
 export_file(
     name = "handler_library_source",
     src = "src/lib.rs",
+    visibility = ["PUBLIC"],
+)
+
+filegroup(
+    name = "native_qualification_inputs",
+    srcs = {
+        "bridge/handlers/BUCK": "BUCK",
+        "bridge/handlers/Cargo.toml": "Cargo.toml",
+        "bridge/handlers/src/effect_glue.rs": "src/effect_glue.rs",
+        "bridge/handlers/src/handlers/console.rs": "src/handlers/console.rs",
+        "bridge/handlers/src/handlers/entropy.rs": "src/handlers/entropy.rs",
+        "bridge/handlers/src/handlers/event.rs": "src/handlers/event.rs",
+        "bridge/handlers/src/handlers/exec.rs": "src/handlers/exec.rs",
+        "bridge/handlers/src/handlers/fs.rs": "src/handlers/fs.rs",
+        "bridge/handlers/src/handlers/git.rs": "src/handlers/git.rs",
+        "bridge/handlers/src/handlers/http.rs": "src/handlers/http.rs",
+        "bridge/handlers/src/handlers/jev.rs": "src/handlers/jev.rs",
+        "bridge/handlers/src/handlers/journal.rs": "src/handlers/journal.rs",
+        "bridge/handlers/src/handlers/journal_version.rs": "src/handlers/journal_version.rs",
+        "bridge/handlers/src/handlers/kv.rs": "src/handlers/kv.rs",
+        "bridge/handlers/src/handlers/llm.rs": "src/handlers/llm.rs",
+        "bridge/handlers/src/handlers/meta.rs": "src/handlers/meta.rs",
+        "bridge/handlers/src/handlers/mod.rs": "src/handlers/mod.rs",
+        "bridge/handlers/src/handlers/model.rs": "src/handlers/model.rs",
+        "bridge/handlers/src/handlers/source.rs": "src/handlers/source.rs",
+        "bridge/handlers/src/handlers/time.rs": "src/handlers/time.rs",
+        "bridge/handlers/src/handlers/worktree.rs": "src/handlers/worktree.rs",
+        "bridge/handlers/src/lib.rs": "src/lib.rs",
+        "bridge/handlers/src/test_support.rs": "src/test_support.rs",
+        "bridge/handlers/tests/bridged_records.rs": "tests/bridged_records.rs",
+    },
     visibility = ["PUBLIC"],
 )

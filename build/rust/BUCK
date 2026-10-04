@@ -1,4 +1,6 @@
-load("@prelude//:rules.bzl", "export_file", "python_bootstrap_binary")
+load(":source_snapshot.bzl", "native_source_snapshot")
+load(":native_qualification_sources.bzl", "NATIVE_QUALIFICATION_TREES")
+load("@prelude//:rules.bzl", "export_file", "filegroup", "python_bootstrap_binary")
 
 python_bootstrap_binary(
     name = "isolated_libtest",
@@ -15,5 +17,20 @@ export_file(
 export_file(
     name = "compile_fail_runner",
     src = "compile-fail.py",
+    visibility = ["PUBLIC"],
+)
+
+export_file(name = "source_snapshot_driver", src = "source_snapshot.py", visibility = ["PUBLIC"])
+export_file(name = "workspace_gitlink", src = "//:workspace_gitlink", visibility = ["PUBLIC"])
+
+native_source_snapshot(
+    name = "native_qualification_sources",
+    trees = NATIVE_QUALIFICATION_TREES,
+    visibility = ["PUBLIC"],
+)
+
+filegroup(
+    name = "qualification_inputs",
+    srcs = {"build/rust/" + source: source for source in glob(["BUCK", "*.bzl", "*.py"])},
     visibility = ["PUBLIC"],
 )

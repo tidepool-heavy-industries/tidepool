@@ -87,3 +87,14 @@ cxx_library(
     linker_flags = ["-ldl"],
     visibility = ["PUBLIC"],
 )
+
+filegroup(
+    name = "native_qualification_inputs",
+    srcs = {
+        "bridge/atomic-write/BUCK": "BUCK",
+        "bridge/atomic-write/Cargo.toml": "Cargo.toml",
+        "bridge/atomic-write/src/lib.rs": "src/lib.rs",
+        "bridge/atomic-write/tests/strict_directory.rs": "tests/strict_directory.rs",
+    },
+    visibility = ["PUBLIC"],
+)

@@ -1,6 +1,12 @@
-load("@prelude//:rules.bzl", "export_file", "sh_test")
+load("@prelude//:rules.bzl", "export_file", "filegroup", "sh_test")
 
 export_file(name = "corpus_fixture_driver", src = "corpus_fixture.py", visibility = ["PUBLIC"])
 export_file(name = "suite_oracle_driver", src = "suite_oracle.py", visibility = ["PUBLIC"])
 
 export_file(name = "corpus_test", src = "corpus_test.sh", visibility = ["PUBLIC"])
+
+filegroup(
+    name = "qualification_inputs",
+    srcs = {"build/haskell/" + source: source for source in glob(["BUCK", "*.bzl", "*.py", "*.sh"])},
+    visibility = ["PUBLIC"],
+)

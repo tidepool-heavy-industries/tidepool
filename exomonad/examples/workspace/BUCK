@@ -41,3 +41,9 @@ filegroup(
     srcs = {source: source for source in glob([".exomonad/**/*.hs", ".exomonad/**/*.md", ".exomonad/**/*.json"])},
     visibility = ["PUBLIC"],
 )
+
+filegroup(
+    name = "qualification_inputs",
+    srcs = {"exomonad/examples/workspace/" + source: source for source in glob(["BUCK", "flake.nix", ".exomonad/**/*.hs", ".exomonad/**/*.md", ".exomonad/**/*.toml", ".exomonad/**/*.json", ".exomonad/**/*.nix"])},
+    visibility = ["PUBLIC"],
+)

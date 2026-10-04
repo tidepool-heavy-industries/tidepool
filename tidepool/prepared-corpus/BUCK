@@ -135,3 +135,16 @@ tidepool_rust_isolated_test(
     ],
     visibility = ["PUBLIC"],
 )
+
+filegroup(
+    name = "native_qualification_inputs",
+    srcs = {
+        "tidepool/prepared-corpus/BUCK": "BUCK",
+        "tidepool/prepared-corpus/Cargo.toml": "Cargo.toml",
+        "tidepool/prepared-corpus/fixtures/prepared-corpus-expectations.json": "fixtures/prepared-corpus-expectations.json",
+        "tidepool/prepared-corpus/src/bin/prepared-corpus.rs": "src/bin/prepared-corpus.rs",
+        "tidepool/prepared-corpus/src/lib.rs": "src/lib.rs",
+        "tidepool/prepared-corpus/src/watchdog.rs": "src/watchdog.rs",
+    },
+    visibility = ["PUBLIC"],
+)

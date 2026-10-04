@@ -395,3 +395,30 @@ filegroup(
     srcs = {path[len("tests/fixtures/generated-surface/"): ]: path for path in glob(["tests/fixtures/generated-surface/*.hs"])},
     visibility = ["PUBLIC"],
 )
+
+filegroup(
+    name = "native_qualification_inputs",
+    srcs = {
+        "bridge/mcp/BUCK": "BUCK",
+        "bridge/mcp/Cargo.toml": "Cargo.toml",
+        "bridge/mcp/src/bin/tidepool-effects-gen.rs": "src/bin/tidepool-effects-gen.rs",
+        "bridge/mcp/src/describe.rs": "src/describe.rs",
+        "bridge/mcp/src/effect_decls.rs": "src/effect_decls.rs",
+        "bridge/mcp/src/effect_defs.rs": "src/effect_defs.rs",
+        "bridge/mcp/src/eval_prep.rs": "src/eval_prep.rs",
+        "bridge/mcp/src/fs_stable.rs": "src/fs_stable.rs",
+        "bridge/mcp/src/lib.rs": "src/lib.rs",
+        "bridge/mcp/src/lib_isolate.rs": "src/lib_isolate.rs",
+        "bridge/mcp/src/preamble.rs": "src/preamble.rs",
+        "bridge/mcp/tests/effect_roster_sentinel.rs": "tests/effect_roster_sentinel.rs",
+        "bridge/mcp/tests/fixtures/selected-effects.hs": "tests/fixtures/selected-effects.hs",
+        "bridge/mcp/tests/generated_surface_contracts.rs": "tests/generated_surface_contracts.rs",
+        "bridge/mcp/tests/pragma_set_consistency.rs": "tests/pragma_set_consistency.rs",
+        "bridge/mcp/tests/protocol_goldens.rs": "tests/protocol_goldens.rs",
+        "bridge/mcp/tests/protocol_schema_equivalence.rs": "tests/protocol_schema_equivalence.rs",
+        "bridge/mcp/tests/repro_print_unresolved.rs": "tests/repro_print_unresolved.rs",
+        "bridge/mcp/tests/selected_effects.rs": "tests/selected_effects.rs",
+        "bridge/mcp/tests/suites/mcp.rs": "tests/suites/mcp.rs",
+    },
+    visibility = ["PUBLIC"],
+)

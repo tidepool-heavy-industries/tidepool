@@ -175,3 +175,20 @@ tidepool_rust_isolated_test(
     ],
     visibility = ["PUBLIC"],
 )
+
+filegroup(
+    name = "native_qualification_inputs",
+    srcs = {
+        "tidepool/bridge-derive/BUCK": "BUCK",
+        "tidepool/bridge-derive/Cargo.toml": "Cargo.toml",
+        "tidepool/bridge-derive/src/codegen.rs": "src/codegen.rs",
+        "tidepool/bridge-derive/src/lib.rs": "src/lib.rs",
+        "tidepool/bridge-derive/src/parse.rs": "src/parse.rs",
+        "tidepool/bridge-derive/src/record_codegen.rs": "src/record_codegen.rs",
+        "tidepool/bridge-derive/tests/arity_disambiguation.rs": "tests/arity_disambiguation.rs",
+        "tidepool/bridge-derive/tests/derive_tests.rs": "tests/derive_tests.rs",
+        "tidepool/bridge-derive/tests/module_qualification.rs": "tests/module_qualification.rs",
+        "tidepool/bridge-derive/tests/phantom_data.rs": "tests/phantom_data.rs",
+    },
+    visibility = ["PUBLIC"],
+)
