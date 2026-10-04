@@ -28,7 +28,7 @@ runTypeEvidenceChecks directory project projectWithAux = do
     , "  AgentToolsInstallWith :: AgentTools ()"
     ])
   createDirectoryIfMissing True (directory </> "Tidepool" </> "Internal")
-  readFile "test-prepared-stg/site-fixtures/RequestSite.hs" >>= writeFile (directory </> "Tidepool" </> "Internal" </> "RequestSite.hs")
+  readFile "lib/Tidepool/Internal/RequestSite.hs" >>= writeFile (directory </> "Tidepool" </> "Internal" </> "RequestSite.hs")
   writeFile (directory </> "Tidepool" </> "Actor.hs") (unlines
     [ "{-# LANGUAGE DataKinds, ExplicitForAll #-}"
     , "module Tidepool.Actor where"

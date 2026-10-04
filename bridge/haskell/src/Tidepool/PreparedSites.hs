@@ -13,7 +13,7 @@ module Tidepool.PreparedSites
   ) where
 
 import Control.Monad.State.Strict
-import Data.Bits ((.&.), (.|.), xor)
+import Data.Bits ((.&.), xor)
 import Data.List (find, nub)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -465,7 +465,7 @@ siteIdentity spec origin ordinal answer inputs =
   let Fingerprint high low = fingerprintString
         (T.unpack origin ++ "#" ++ show ordinal ++ "#" ++ vsName spec
           ++ "#" ++ show answer ++ "#" ++ show inputs)
-  in max 1 ((high `xor` low) .&. 0x7fffffffffffffff)
+  in (high `xor` low) .&. 0x7fffffffffffffff
 
 -- | The saturated final lifted result index is an intrinsic constructor fact.
 -- Unresolved indices remain explicit unconstructible nodes in the type graph.

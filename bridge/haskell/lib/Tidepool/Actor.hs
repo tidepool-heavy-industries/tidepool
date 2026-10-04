@@ -60,6 +60,7 @@ module Tidepool.Actor
 
 import Control.Monad.Freer (Eff, Member, raise, send)
 import Data.Text (Text)
+import Tidepool.Internal.RequestSite (RequestSite, requestSiteIdentity)
 import Prelude
 import Tidepool.Actor.Source
   ( Source

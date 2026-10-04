@@ -1147,5 +1147,5 @@ fullMain = do
 writeRequestSiteFixture :: FilePath -> IO ()
 writeRequestSiteFixture dir = do
   createDirectoryIfMissing True (dir </> "Tidepool" </> "Internal")
-  readFile "test-prepared-stg/site-fixtures/RequestSite.hs" >>=
+  readFile "lib/Tidepool/Internal/RequestSite.hs" >>=
     writeFile (dir </> "Tidepool" </> "Internal" </> "RequestSite.hs")

@@ -57,7 +57,7 @@ bareRaw = ObserveProgressWith
 
 {-# OPAQUE partialRaw #-}
 partialRaw :: Int -> Replies (ProgressState ProgressNote)
-partialRaw = ObserveProgressWith 1
+partialRaw = ObserveProgressWith (error "unavailable carrier")
 
 {-# OPAQUE tickedRaw #-}
 tickedRaw :: Replies (ProgressState ProgressNote)

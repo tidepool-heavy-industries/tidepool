@@ -117,6 +117,10 @@ main = do
   assert (evidenceFields !! 15 == TList
       [TList [TInt 0, TList [TInt 0, TInt 0]]])
     "constructor reply table must pair an exact id with its static node"
+  let carrierFields = termList (decode (encodeWireProgram evidenceRepresentative
+        { programConstructorReplies = [(ConstructorId 0, ReplyAtSite)] }))
+  assert (carrierFields !! 15 == TList [TList [TInt 0, TList [TInt 1]]])
+    "constructor reply carrier must use the strict one-field AtSite tag"
   let callerProgram = representative
         { programSignatures = [Signature [LiftedRefRep] CallerResult] }
       callerSignatures = termList (termList (decode (encodeWireProgram callerProgram)) !! 6)

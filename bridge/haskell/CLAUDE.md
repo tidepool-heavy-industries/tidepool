@@ -228,6 +228,25 @@ certified interface edge. Earlier product and Home certificate versions are
 rejected. Deploy the matched worker and frontend and regenerate artifacts
 through their owning producers.
 
+## Native constructor replies
+
+Prepared schema 15 / execution ABI 9 carries an exact constructor reply table.
+Each entry is `StaticReply TypeNodeId` or `ReplyAtSite`. Static reply graphs come
+from the saturated final lifted GHC DataCon result index, independently of the
+visible effect row or `KnownEffect` instances. Unresolved replies remain
+unconstructible nodes; partial algebraic graphs retain valid fieldless branches.
+
+Only the exact `Tidepool.Internal.RequestSite` TyCon with matching reply index
+and a proven first runtime Int field selects `ReplyAtSite`. Its private newtype
+constructor and nominal input/result roles prevent authored retagging. The
+compiler emits the carrier directly. There are no synthetic constructor sites,
+open reply defaults, numeric payload fallbacks, or absent-site sentinels.
+Stateful receive has intrinsic `Maybe state` evidence and keeps its separate
+checkpoint/reply/continue correlation key.
+
+This is a strict matched producer/runtime migration. Reject schema 14 / ABI 8
+artifacts and regenerate corpus and embedded artifacts through their producers.
+
 ## Native request types
 
 Request-site result types use `TPREQUESTTYPESIGNATURES1` version 1, containing
@@ -239,7 +258,7 @@ canonical input witnesses remain separate.
 
 This is a strict sidecar migration: inline typed-site rows now have ten fields,
 and JSON rows must include `request_type_signatures` (null for nonrequest or
-synthetic sites). Seven-, eight- and nine-field inline rows and JSON rows missing
+constructor replies). Seven-, eight- and nine-field inline rows and JSON rows missing
 the new field are rejected. Deploy matched worker/frontend binaries and
 regenerate retained compiler artifacts through their producers. Request
 authority consumers must additionally require original-site native signatures;
