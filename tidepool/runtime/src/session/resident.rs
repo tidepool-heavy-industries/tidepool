@@ -5653,8 +5653,7 @@ where
         {
             return Err(ResidentError::StaleStartupEntry);
         }
-        let program = entry.program.take().expect("startup capsule consumes once");
-        let source_keys = std::mem::take(&mut entry.source_keys);
+        let program = entry.program.expect("startup capsule consumes once");
         let provenance = Arc::clone(&entry.provenance);
         let realm = entry.realm;
         let park = ParkPolicy {
@@ -5675,20 +5674,21 @@ where
                 captured,
             ))
         });
-        if let Some(engine) = self.state.prepared_mut() {
-            engine.unpin(program);
-        }
-        let run = match ran {
-            Ok(Ok(run)) => run,
-            Ok(Err(error)) => {
-                self.retire_failed_turn_source_instances(scope, &source_keys);
-                return Err(error.into());
-            }
+        let run = match ran.and_then(|run| run.map_err(ResidentError::from)) {
+            Ok(run) => run,
             Err(error) => {
-                self.retire_failed_turn_source_instances(scope, &source_keys);
+                drop(entry);
+                self.settle_dropped_custody();
                 return Err(error);
             }
         };
+        // Evaluation now owns its returned value or parked frame. Until this
+        // handoff, the capsule also guards unwinds on the calling thread.
+        entry.program = None;
+        entry.source_keys = Default::default();
+        if let Some(engine) = self.state.prepared_mut() {
+            engine.unpin(program);
+        }
         self.complete_prepared(
             run,
             PreparedTurnMode::Value,
@@ -8299,6 +8299,93 @@ mod authored_publication_tests {
         assert!(
             !session.state.require_prepared().unwrap().unpin(program),
             "the queued capsule already released its pin"
+        );
+    }
+
+    #[test]
+    fn startup_clone_unwind_releases_only_its_original_install_and_source_admission() {
+        struct PanicCloneOutput;
+        impl Clone for PanicCloneOutput {
+            fn clone(&self) -> Self {
+                panic!("startup output clone panic");
+            }
+        }
+        impl OutputSink for PanicCloneOutput {
+            fn drain(&self) -> Vec<String> {
+                Vec::new()
+            }
+            fn snapshot(&self) -> Vec<String> {
+                Vec::new()
+            }
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let lib =
+            SessionLib::open(SessionId(403), root.path(), ModuleEnv::standalone_default()).unwrap();
+        let mut session =
+            ResidentSession::unbootstrapped(frunk::HNil, PanicCloneOutput, 1024 * 1024, Some(lib));
+        let (prior, _) = crate::session::prepared::tests::install_source_publication_fixture(
+            &mut session.state,
+            ScopeId::ROOT,
+        );
+        let before = session
+            .public_visibility_snapshot_in(ScopeId::ROOT)
+            .unwrap();
+        let (program, source_keys) =
+            crate::session::prepared::tests::install_selected_source_fixture(
+                &mut session.state,
+                ScopeId::ROOT,
+                "late",
+            );
+        assert_ne!(program, prior);
+        assert!(!source_keys.is_empty());
+        let installed_keys = source_keys.to_vec();
+        // The native fixture issuer returns this exact install and admission
+        // together; the test exercises capsule custody without compiler claims.
+        let entry = PreparedStartupEntry {
+            program: Some(program),
+            source_keys,
+            provenance: Arc::default(),
+            admitted: session
+                .public_visibility_snapshot_in(ScopeId::ROOT)
+                .unwrap(),
+            realm: RealmId::ROOT,
+            cleanup: Arc::clone(&session.custody_cleanup),
+            _lease: session.lease_bindings(&[]),
+            compile_identity: StartupCompileIdentity::Fixture,
+        };
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            session.run_startup_entry(entry)
+        }))
+        .expect_err("output Clone panics before native execution");
+        assert_eq!(
+            unwind.downcast_ref::<&str>().copied(),
+            Some("startup output clone panic")
+        );
+        assert!(session.prepared_machine_ready());
+        {
+            let abandoned = session.custody_cleanup.startup_entries.lock();
+            assert_eq!(abandoned.len(), 1);
+            assert_eq!(abandoned[0].program, program);
+            assert_eq!(abandoned[0].scope, ScopeId::ROOT);
+            assert_eq!(abandoned[0].source_keys.to_vec(), installed_keys);
+        }
+        assert_eq!(session.settle_dropped_custody(), 1);
+        assert_eq!(session.outstanding_custody(), 0);
+        let after = session
+            .public_visibility_snapshot_in(ScopeId::ROOT)
+            .unwrap();
+        assert_eq!(after.source_instances, before.source_instances);
+        assert_eq!(after.source_selection, before.source_selection);
+        assert!(session.parked_holes().is_empty());
+        let engine = session.state.require_prepared().unwrap();
+        assert!(
+            !engine.unpin(program),
+            "capsule cleanup released its install pin"
+        );
+        assert!(
+            engine.unpin(prior),
+            "the independent install retains its pin"
         );
     }
 
