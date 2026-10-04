@@ -68,7 +68,7 @@ pub fn actor_kernel() -> Effect {
         helpers_row_polymorphic: true,
         extra_imports: &["import Tidepool.Actor"],
         type_defs: vec![actor_lifecycle()],
-        foreign_types: &[],
+        external_types: &[],
         errors: None,
         verbs: vec![
             Verb {

@@ -22,6 +22,20 @@ pub fn module_index(effects: &[Effect]) -> GeneratedFile {
         &effects.iter().map(module_name).collect::<Vec<_>>(),
         true,
     );
+    let imports: std::collections::BTreeSet<_> = effects
+        .iter()
+        .flat_map(|effect| {
+            effect
+                .external_types
+                .iter()
+                .filter_map(|reference| reference.core_import())
+        })
+        .collect();
+    contents.push_str("\npub(crate) const CORE_IMPORTS: &[&str] = &[\n");
+    for import in imports {
+        contents.push_str(&format!("    {},\n", rust_string_literal(&import)));
+    }
+    contents.push_str("];\n");
     contents.push_str("\n/// Every schema-owned Haskell effect declaration.\n");
     contents.push_str("pub(crate) fn schema_decls() -> Vec<crate::EffectDecl> {\n");
     contents.push_str("    vec![\n");

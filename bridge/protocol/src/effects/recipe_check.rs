@@ -52,7 +52,7 @@ pub fn recipe_check() -> Effect {
         helpers_row_polymorphic: true,
         extra_imports: &[],
         type_defs: vec![],
-        foreign_types: &[],
+        external_types: &[],
         errors: None,
         verbs: vec![
             verb("RecipeRoot", "root", vec![], actor()),

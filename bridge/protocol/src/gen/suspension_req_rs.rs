@@ -3,7 +3,7 @@
 //!
 //! These suspending effects are interpreted by their owning runtime — a
 //! suspending effect (`AskUser`, `ReadState`,
-//! `Subagent`, `Green`, `Console`'s `Print`, plus the four already-
+//! `Green`, `Console`'s `Print`, plus the four already-
 //! migrated outer effects reused from `tidepool-handlers`) is classified and
 //! handed to the driver's OWN orchestration, never routed through an
 //! `EffectHandler`. So this generator emits only the middle third of
@@ -90,7 +90,7 @@ fn body(e: &Effect, errors: bool) -> String {
     out.push_str("#[derive(FromHaskell)]\n");
     // Every variant is named EXACTLY as its Haskell constructor (this
     // module's whole point), so a shared verb-family prefix (`Async*`,
-    // `Subagent*`) is the CORRECT spelling, not a naming smell — clippy's
+    // other shared prefixes) is the correct spelling — clippy's
     // enum_variant_names lint disagrees, so it is silenced deliberately here
     // rather than by renaming variants away from their wire truth.
     // Variant payloads mirror each GADT constructor's nested argument tuple
@@ -111,7 +111,7 @@ fn body(e: &Effect, errors: bool) -> String {
                     }
                     binding => binding,
                 };
-                binding.rust_type(&a.ty, &format!("{}::{}::{}", e.name, v.ctor, a.name))
+                binding.rust_type(&a.ty, &format!("{}::{}::{}", e.name, v.ctor, a.name), e)
             })
             .collect();
         out.push_str(&super::render_variant(v.ctor, &tys));

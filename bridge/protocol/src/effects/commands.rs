@@ -256,7 +256,7 @@ pub fn commands() -> Effect {
                 ],
             ),
         ],
-        foreign_types: &[],
+        external_types: &[],
         errors: None,
         verbs: vec![
             verb(

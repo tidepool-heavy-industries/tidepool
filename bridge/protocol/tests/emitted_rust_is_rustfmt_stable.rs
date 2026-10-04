@@ -132,6 +132,7 @@ fn every_emitted_rust_file_is_a_rustfmt_fixed_point() {
     let effects = tidepool_protocol::effects::all_described();
     let files: Vec<_> = tidepool_protocol::gen::all_files(&effects)
         .into_iter()
+        .chain(tidepool_protocol::model_control::generated_files())
         .filter(|f| f.path.ends_with(".rs"))
         .collect();
 
@@ -157,7 +158,7 @@ fn every_emitted_rust_file_is_a_rustfmt_fixed_point() {
     assert!(
         drifted.is_empty(),
         "these emitted files are NOT rustfmt fixed points, so `cargo fmt --all -- --check` \
-         and `generated_files_are_current` would fight over them:\n  {}\n\
+         would rewrite generated build outputs:\n  {}\n\
          Fix the EMITTER, not the file — the file is regenerated from it.",
         drifted.join("\n  ")
     );

@@ -208,11 +208,23 @@ fn event_remaining_decl_fields_are_pinned() {
     );
     assert_eq!(ev.extra_imports, &["import Tidepool.Event"]);
     assert_eq!(
-        ev.foreign_types,
+        ev.external_types,
         &[
-            ("WorktreeId", "WtWorktreeId"),
-            ("GitOid", "WtGitOid"),
-            ("BranchName", "WtBranchName"),
+            tidepool_protocol::schema::ExternalType {
+                haskell_name: "WorktreeId",
+                rust_wire: "WtWorktreeId",
+                core_module: None
+            },
+            tidepool_protocol::schema::ExternalType {
+                haskell_name: "GitOid",
+                rust_wire: "WtGitOid",
+                core_module: None
+            },
+            tidepool_protocol::schema::ExternalType {
+                haskell_name: "BranchName",
+                rust_wire: "WtBranchName",
+                core_module: None
+            },
         ]
     );
     assert!(ev.prompt_card.is_none());

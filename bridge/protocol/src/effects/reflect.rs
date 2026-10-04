@@ -165,7 +165,7 @@ pub fn reflect() -> Effect {
                 doc: &["Why a caller's own conversation could not be returned."],
             },
         ],
-        foreign_types: &[],
+        external_types: &[],
         errors: None,
         verbs: vec![Verb {
             ctor: "ReflectWith",

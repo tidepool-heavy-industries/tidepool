@@ -27,7 +27,11 @@ pub fn sleep() -> Effect {
         helpers_row_polymorphic: true,
         extra_imports: &["import Tidepool.Duration (Duration, milliseconds, seconds, minutes)"],
         type_defs: vec![],
-        foreign_types: &[("Duration", "crate::request_effect::RequestDuration")],
+        external_types: &[crate::schema::ExternalType {
+            haskell_name: "Duration",
+            rust_wire: "crate::request_effect::RequestDuration",
+            core_module: Some("Tidepool.Duration"),
+        }],
         errors: None,
         verbs: vec![Verb {
             ctor: "SleepWith",
@@ -35,7 +39,7 @@ pub fn sleep() -> Effect {
             args: vec![Arg {
                 name: "duration",
                 ty: HsType::Named("Duration"),
-                rust: RustBinding::Path("crate::request_effect::RequestDuration"),
+                rust: RustBinding::External,
             }],
             ret: HsType::Unit,
             errors: None,

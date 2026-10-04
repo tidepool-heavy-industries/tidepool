@@ -96,7 +96,7 @@ fn body(e: &Effect) -> String {
             .iter()
             .map(|a| {
                 a.rust
-                    .rust_type(&a.ty, &format!("{}::{}::{}", e.name, v.ctor, a.name))
+                    .rust_type(&a.ty, &format!("{}::{}::{}", e.name, v.ctor, a.name), e)
             })
             .collect();
         out.push_str(&super::render_variant(v.ctor, &tys));
@@ -260,7 +260,7 @@ pub(super) fn typed_failure(e: &Effect) -> String {
                 .iter()
                 .map(|f| {
                     f.rust
-                        .rust_type(&f.ty, &format!("{}::{}::{}", e.name, adt.name, v.ctor))
+                        .rust_type(&f.ty, &format!("{}::{}::{}", e.name, adt.name, v.ctor), e)
                 })
                 .collect();
             out.push_str(&super::render_variant(v.ctor, &fields));

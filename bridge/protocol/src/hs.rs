@@ -123,8 +123,13 @@ impl HsType {
             HsType::Value => "Value".to_string(),
             HsType::Named(n) | HsType::Var(n) => (*n).to_string(),
             HsType::App(f, x) => format!("{} {}", f.render_app_head(), x.render_app_arg()),
-            HsType::TypeList(ts) => format!("'[{}]", ts.iter().map(HsType::render).collect::<Vec<_>>().join(", ")),
-            HsType::TypeCons(head, tail) => format!("{} ': {}", head.render_app_arg(), tail.render_app_arg()),
+            HsType::TypeList(ts) => format!(
+                "'[{}]",
+                ts.iter().map(HsType::render).collect::<Vec<_>>().join(", ")
+            ),
+            HsType::TypeCons(head, tail) => {
+                format!("{} ': {}", head.render_app_arg(), tail.render_app_arg())
+            }
             HsType::List(t) => format!("[{}]", t.render()),
             HsType::Maybe(t) => format!("Maybe {}", t.render_app_arg()),
             HsType::Either(e, a) => {

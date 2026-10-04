@@ -1,82 +1,64 @@
-//! Write (or check) every file the effect schema owns.
-//!
-//! ```text
-//! cargo run -p tidepool-protocol --bin tidepool-protocol-gen
-//! cargo run -p tidepool-protocol --bin tidepool-protocol-gen -- --check
-//! ```
-//!
-//! `--check` writes nothing and exits non-zero if any committed file differs,
-//! naming each one. The authoritative guard is the `generated_files_are_current`
-//! test, not this flag — a check nothing runs is not a check, and the test
-//! runner runs tests by construction. `--check` exists for a human who wants
-//! the answer without a test harness.
-
-use std::path::PathBuf;
-use std::process::ExitCode;
-
-/// The workspace root, from this crate's manifest directory.
-#[allow(
-    clippy::expect_used,
-    reason = "bridge/protocol must live two levels under the workspace root"
-)]
-fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(std::path::Path::parent)
-        .expect("bridge/protocol must live two levels under the workspace root")
-        .to_path_buf()
-}
+//! Materialize the schema under an explicitly supplied output root.
+use std::{path::PathBuf, process::ExitCode};
 
 fn main() -> ExitCode {
-    let check_only = std::env::args().any(|a| a == "--check");
-    let root = workspace_root();
-    let mut stale = Vec::new();
-    let mut wrote = 0usize;
-
+    let mut args = std::env::args().skip(1);
+    let mut root = None;
+    let mut list = false;
+    let mut expected = std::collections::BTreeSet::new();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--output-root" if root.is_none() => root = args.next().map(PathBuf::from),
+            "--list" => list = true,
+            "--expect-output" => match args.next() {
+                Some(path) => {
+                    expected.insert(path);
+                }
+                None => return ExitCode::FAILURE,
+            },
+            _ => {
+                eprintln!("usage: tidepool-protocol-gen --output-root DIRECTORY | --list");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
     let files = tidepool_protocol::generated_files()
         .into_iter()
         .chain(tidepool_protocol::runtime_generated_files())
         .chain(tidepool_protocol::actor_generated_files())
         .chain(tidepool_protocol::recipe_generated_files());
-    for f in files {
-        let path = root.join(&f.path);
-        let current = std::fs::read_to_string(&path).ok();
-        if current.as_deref() == Some(f.contents.as_str()) {
-            continue;
-        }
-        if check_only {
-            stale.push(f.path.clone());
-            continue;
-        }
-        if let Some(parent) = path.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                eprintln!("could not create {}: {e}", parent.display());
-                return ExitCode::FAILURE;
-            }
-        }
-        if let Err(e) = std::fs::write(&path, &f.contents) {
-            eprintln!("could not write {}: {e}", path.display());
-            return ExitCode::FAILURE;
-        }
-        println!("wrote {}", f.path);
-        wrote += 1;
-    }
-
-    if check_only {
-        if stale.is_empty() {
-            println!("all generated files are current");
-            return ExitCode::SUCCESS;
-        }
-        eprintln!("generated files are STALE:");
-        for p in &stale {
-            eprintln!("  {p}");
-        }
-        eprintln!("regenerate with: cargo run -p tidepool-protocol --bin tidepool-protocol-gen");
+    let files: Vec<_> = files.collect();
+    if !expected.is_empty()
+        && files
+            .iter()
+            .map(|file| file.path.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+            != expected
+    {
+        eprintln!("declared protocol output roster differs from schema; update build/protocol/outputs.txt from --list");
         return ExitCode::FAILURE;
     }
-
-    if wrote == 0 {
-        println!("all generated files were already current");
+    if list && root.is_none() {
+        for file in files {
+            println!("{}", file.path);
+        }
+        return ExitCode::SUCCESS;
+    }
+    let Some(root) = root.filter(|_| !list) else {
+        eprintln!("an explicit --output-root is required");
+        return ExitCode::FAILURE;
+    };
+    for file in files {
+        let path = root.join(&file.path);
+        let result = path
+            .parent()
+            .map(std::fs::create_dir_all)
+            .unwrap_or(Ok(()))
+            .and_then(|()| std::fs::write(&path, file.contents));
+        if let Err(error) = result {
+            eprintln!("could not materialize {}: {error}", path.display());
+            return ExitCode::FAILURE;
+        }
     }
     ExitCode::SUCCESS
 }

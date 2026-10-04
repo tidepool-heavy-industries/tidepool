@@ -38,26 +38,9 @@ pub struct ModelPolicy {
     pub efforts: Vec<Effort>,
     pub limits: Limits,
 }
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Request {
-    instructions: String,
-    input: String,
-    model: Option<String>,
-    effort: Option<Effort>,
-    limits: RequestedLimits,
-    tools: Vec<exomonad_tool::ToolDeclaration>,
-    result_schema: Option<Value>,
-    after_tool: bool,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RequestedLimits {
-    requests: Option<u64>,
-    tools: Option<u64>,
-    reported_tokens: Option<u64>,
-    seconds: Option<u64>,
-}
+use tidepool_bridge_effects::{
+    ModelAnnotationEnvelope, ModelControlStep, ModelEffortEnvelope, ModelRequestEnvelope,
+};
 enum Pending {
     Callback(Callback),
     Hook { hook: Hook, handle: String },
@@ -284,7 +267,13 @@ impl<A: Auth + 'static, C: ResponsesTransport + 'static> CellModelService<A, C> 
                 }
                 let call_id = serde_json::to_string(&callback.operation)
                     .map_err(|error| transport_error(error.to_string()))?;
-                let value = json!({"kind":"callback","invocation":token,"call_id":call_id,"name":callback.name,"arguments":callback.arguments});
+                let value = serde_json::to_value(ModelControlStep::ModelCallback {
+                    invocation: token.to_owned(),
+                    call_id,
+                    name: callback.name.clone(),
+                    arguments: callback.arguments.clone(),
+                })
+                .map_err(|error| transport_error(error.to_string()))?;
                 entry.calls.insert(
                     callback.operation.clone(),
                     (callback.name.clone(), callback.arguments.clone()),
@@ -317,7 +306,20 @@ impl<A: Auth + 'static, C: ResponsesTransport + 'static> CellModelService<A, C> 
                     .as_str()
                     .map(str::to_owned)
                     .unwrap_or_else(|| hook.output.0["output"].to_string());
-                let value = json!({"kind":"hook","invocation":token,"operation":operation,"name":name,"arguments":arguments,"handle":handle,"ordinal":hook.ordinal,"output":output});
+                let semantic = serde_json::from_str(&output).map_err(|error| {
+                    transport_error(format!("retained callback output is not JSON: {error}"))
+                })?;
+                let value = serde_json::to_value(ModelControlStep::ModelHook {
+                    invocation: token.to_owned(),
+                    operation,
+                    name: name.clone(),
+                    arguments: arguments.clone(),
+                    handle: handle.clone(),
+                    ordinal: hook.ordinal,
+                    value: semantic,
+                    output,
+                })
+                .map_err(|error| transport_error(error.to_string()))?;
                 entry.pending = Some(Pending::Hook { hook, handle });
                 Ok(value)
             }
@@ -340,7 +342,10 @@ impl<A: Auth + 'static, C: ResponsesTransport + 'static> CellModelService<A, C> 
                     ));
                 }
                 self.registry.lock().unwrap().remove(token);
-                Ok(json!({"kind":"finished","receipt":retained}))
+                let receipt = serde_json::from_value(retained)
+                    .map_err(|error| transport_error(error.to_string()))?;
+                serde_json::to_value(ModelControlStep::ModelFinished { receipt })
+                    .map_err(|error| transport_error(error.to_string()))
             }
         }
     }
@@ -348,12 +353,19 @@ impl<A: Auth + 'static, C: ResponsesTransport + 'static> CellModelService<A, C> 
 impl<A: Auth + 'static, C: ResponsesTransport + 'static> ModelService for CellModelService<A, C> {
     fn start(&self, caller: PrincipalId, request: Value) -> Result<Value, ModelBoundaryError> {
         self.authorize(caller)?;
-        let request: Request =
+        let request: ModelRequestEnvelope =
             serde_json::from_value(request).map_err(|error| rejected(error.to_string()))?;
         let model = request
             .model
             .unwrap_or_else(|| self.policy.default_model.clone());
-        let effort = request.effort.unwrap_or(self.policy.default_effort);
+        let effort = request
+            .effort
+            .map(|effort| match effort {
+                ModelEffortEnvelope::ModelLowEffort => Effort::Low,
+                ModelEffortEnvelope::ModelMediumEffort => Effort::Medium,
+                ModelEffortEnvelope::ModelHighEffort => Effort::High,
+            })
+            .unwrap_or(self.policy.default_effort);
         if !self.policy.models.contains(&model) || !self.policy.efforts.contains(&effort) {
             return Err(rejected("model or effort is outside admitted host policy"));
         }
@@ -489,28 +501,22 @@ impl<A: Auth + 'static, C: ResponsesTransport + 'static> ModelService for CellMo
         {
             return Err(rejected("hook operation identity mismatch"));
         }
-        let text = || {
-            annotation["text"]
-                .as_str()
-                .map(str::to_owned)
-                .ok_or_else(|| rejected("annotation text missing"))
-        };
-        let annotation = match annotation["kind"].as_str() {
-            Some("none") => HookAnnotation::NoAnnotation,
-            Some("abstained") => HookAnnotation::Abstained(
-                annotation["reason"]
-                    .as_str()
-                    .ok_or_else(|| rejected("abstention reason missing"))?
-                    .to_owned(),
-            ),
-            Some("annotated") => HookAnnotation::Annotated(text()?),
-            Some("pruned") if annotation["handle"].as_str() == Some(handle) => {
-                HookAnnotation::Pruned {
-                    replacement: Value::String(text()?),
-                    annotation: String::new(),
-                }
+        let annotation: ModelAnnotationEnvelope =
+            serde_json::from_value(annotation).map_err(|error| rejected(error.to_string()))?;
+        let annotation = match annotation {
+            ModelAnnotationEnvelope::ModelNoAnnotation => HookAnnotation::NoAnnotation,
+            ModelAnnotationEnvelope::ModelAbstained { reason } => HookAnnotation::Abstained(reason),
+            ModelAnnotationEnvelope::ModelAnnotated { text } => HookAnnotation::Annotated(text),
+            ModelAnnotationEnvelope::ModelPruned {
+                handle: retained,
+                text,
+            } if retained == *handle => HookAnnotation::Pruned {
+                replacement: Value::String(text),
+                annotation: String::new(),
+            },
+            ModelAnnotationEnvelope::ModelPruned { .. } => {
+                return Err(rejected("foreign retained handle"))
             }
-            _ => return Err(rejected("invalid annotation or foreign retained handle")),
         };
         let Some(Pending::Hook { hook, .. }) = entry.pending.take() else {
             unreachable!()
@@ -987,6 +993,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(hook["kind"], "hook");
+        assert_eq!(hook["value"], json!("original"));
         let operation = hook["operation"].as_str().unwrap();
         assert!(service
             .annotate(caller, token, "wrong", json!({"kind":"none"}))

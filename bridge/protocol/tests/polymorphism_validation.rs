@@ -13,7 +13,8 @@ fn result_bound_accepts_a_phantom_result_tyvar() {
 #[test]
 fn result_bound_rejects_a_tyvar_that_is_an_applied_type_param() {
     let mut eff = agent_session();
-    eff.type_params = &[TypeParam::value("input")];
+    const PARAMETERS: &[TypeParam] = &[TypeParam::value("input")];
+    eff.type_params = PARAMETERS;
     eff.default_row_args = &["Void"];
     eff.polymorphism = Polymorphism::ResultBound { tyvar: "input" };
     let errs = eff

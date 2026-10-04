@@ -1,78 +1,4 @@
-//! The inner-loop guard: every committed generated file equals what the schema
-//! generates right now.
-//!
-//! This test lives HERE, in the leaf schema crate, rather than beside the files
-//! it guards — deliberately. `tidepool-protocol` is outside
-//! `.config/nextest.toml`'s `default-filter` exclusion set and needs no GHC, so
-//! a bare `cargo nextest run` reaches it. The workspace's older instance of this
-//! idiom (`bridge/handlers/tests/bridged_records.rs`) sits inside an excluded
-//! package and therefore never runs on the inner loop despite being pure string
-//! comparison. A check nothing runs is not a check.
-//!
-//! Set `TIDEPOOL_REGEN_PROTOCOL=1` to rewrite the committed files instead of
-//! asserting on them.
-
-use std::path::PathBuf;
-
-use tidepool_protocol::GeneratedFile;
-
-fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(std::path::Path::parent)
-        .expect("bridge/protocol must live two levels under the workspace root")
-        .to_path_buf()
-}
-
-fn assert_current(files: Vec<GeneratedFile>, label: &str) {
-    let regen = std::env::var_os("TIDEPOOL_REGEN_PROTOCOL").is_some();
-    let root = workspace_root();
-    let mut stale = Vec::new();
-
-    for f in files {
-        let path = root.join(&f.path);
-        let current = std::fs::read_to_string(&path).ok();
-        if current.as_deref() == Some(f.contents.as_str()) {
-            continue;
-        }
-        if regen {
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).unwrap();
-            }
-            std::fs::write(&path, &f.contents).unwrap();
-        } else {
-            stale.push(f.path);
-        }
-    }
-
-    assert!(
-        stale.is_empty(),
-        "these committed {label} files are stale vs the schema:\n  {}\n\
-         regenerate with `cargo run -p tidepool-protocol --bin tidepool-protocol-gen` \
-         (or `TIDEPOOL_REGEN_PROTOCOL=1 cargo test -p tidepool-protocol`)",
-        stale.join("\n  ")
-    );
-}
-
-#[test]
-fn generated_files_are_current() {
-    assert_current(tidepool_protocol::generated_files(), "effect declaration");
-}
-
-/// The `Ask` suspension decoder emitted into `tidepool-runtime`.
-#[test]
-fn runtime_generated_files_are_current() {
-    assert_current(
-        tidepool_protocol::runtime_generated_files(),
-        "runtime decode",
-    );
-}
-
-/// The actor-runtime decoder emitted into `exomonad-actor`.
-#[test]
-fn actor_generated_files_are_current() {
-    assert_current(tidepool_protocol::actor_generated_files(), "actor decode");
-}
+//! Schema validation and narrow rendering pins; generated consumers are build outputs.
 
 /// The suspension-decode roster must be internally consistent too — same
 /// discipline as [`every_migrated_effect_validates`], over the disjoint
@@ -235,12 +161,4 @@ fn journal_contract_text_is_pinned() {
     assert!(journal.type_params.is_empty());
     assert!(journal.default_row_args.is_empty());
     assert!(journal.helpers_row_polymorphic);
-}
-
-#[test]
-fn recipe_generated_files_are_current() {
-    assert_current(
-        tidepool_protocol::recipe_generated_files(),
-        "recipe check decode",
-    );
 }

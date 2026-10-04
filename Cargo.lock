@@ -3555,6 +3555,7 @@ dependencies = [
 name = "tidepool-bridge-effects"
 version = "0.1.0"
 dependencies = [
+ "exomonad-tool",
  "inventory",
  "serde",
  "serde_json",
@@ -3684,6 +3685,7 @@ dependencies = [
  "parking_lot",
  "proptest",
  "serde_json",
+ "tempfile",
  "tidepool-atomic-write",
  "tidepool-bridge",
  "tidepool-bridge-derive",

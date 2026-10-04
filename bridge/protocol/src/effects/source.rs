@@ -218,7 +218,7 @@ pub fn source() -> Effect {
                 doc: &["What one reload did. Every case is an ordinary value to match on."],
             },
         ],
-        foreign_types: &[],
+        external_types: &[],
         errors: Some(ErrorAdt {
             name: "SourceError",
             variants: vec![

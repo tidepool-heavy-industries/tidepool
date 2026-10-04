@@ -196,3 +196,6 @@ pub fn bridged_records_module() -> String {
     }
     out
 }
+
+#[cfg(test)]
+mod model_control_tests;

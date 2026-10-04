@@ -28,9 +28,13 @@ pub fn agent_session() -> Effect {
         type_params: &[],
         default_row_args: &[],
         helpers_row_polymorphic: true,
-        extra_imports: &["import Tidepool.Agent.Session", "import Tidepool.Internal.RequestSite (RequestSite)"],
+        extra_imports: &["import Tidepool.Agent.Session"],
         type_defs: Vec::new(),
-        foreign_types: &[("RequestSite", "i64")],
+        external_types: &[crate::schema::ExternalType {
+            haskell_name: "RequestSite",
+            rust_wire: "i64",
+            core_module: Some("Tidepool.Internal.RequestSite"),
+        }],
         errors: None,
         verbs: vec![
             Verb {
@@ -40,10 +44,16 @@ pub fn agent_session() -> Effect {
                     Arg {
                         name: "site",
                         ty: HsType::app(
-                            HsType::app(HsType::Named("RequestSite"),
-                                HsType::TypeCons(Box::new(HsType::Var("input")), Box::new(HsType::Var("extra")))),
-                            HsType::Var("output")),
-                        rust: RustBinding::Path("i64"),
+                            HsType::app(
+                                HsType::Named("RequestSite"),
+                                HsType::TypeCons(
+                                    Box::new(HsType::Var("input")),
+                                    Box::new(HsType::Var("extra")),
+                                ),
+                            ),
+                            HsType::Var("output"),
+                        ),
+                        rust: RustBinding::External,
                     },
                     Arg {
                         name: "input",

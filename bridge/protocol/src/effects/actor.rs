@@ -195,7 +195,11 @@ pub fn actor() -> Effect {
                 doc: &["Result of a unit-returning actor call whose lifecycle failure is data."],
             },
         ],
-        foreign_types: &[("ActorEffectKey", "crate::ActorEffectKeyWire")],
+        external_types: &[crate::schema::ExternalType {
+            haskell_name: "ActorEffectKey",
+            rust_wire: "crate::ActorEffectKeyWire",
+            core_module: None,
+        }],
         errors: None,
         verbs: vec![
             Verb {

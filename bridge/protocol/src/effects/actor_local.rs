@@ -32,7 +32,7 @@ pub fn actor_local() -> Effect {
         type_params: TYPE_PARAMS,
         default_row_args: &["Maybe"],
         helpers_row_polymorphic: true,
-        extra_imports: &["import Tidepool.Actor", "import Tidepool.Internal.RequestSite (RequestSite)"],
+        extra_imports: &["import Tidepool.Actor"],
         type_defs: vec![TypeDef {
             name: "ActorInputOrigin",
             wire_rust: None,
@@ -50,7 +50,7 @@ pub fn actor_local() -> Effect {
             domain: None,
             doc: &["Runtime identity of the currently handled input; it conveys no resource authority."],
         }],
-        foreign_types: &[("RequestSite", "i64")],
+        external_types: &[crate::schema::ExternalType { haskell_name: "RequestSite", rust_wire: "i64", core_module: Some("Tidepool.Internal.RequestSite") }],
         errors: None,
         verbs: vec![
             Verb {
@@ -82,7 +82,7 @@ pub fn actor_local() -> Effect {
                         ty: HsType::app(
                             HsType::app(HsType::Named("RequestSite"), HsType::TypeList(vec![])),
                             HsType::Var("next")),
-                        rust: RustBinding::Path("i64"),
+                        rust: RustBinding::External,
                     },
                     Arg {
                         name: "handler",

@@ -110,17 +110,19 @@ fn fork_options_are_optional_at_the_existing_launch_boundary() {
         .iter()
         .find(|verb| verb.ctor == "ForksStartWith")
         .unwrap();
-    assert_eq!(launch.args.len(), 15);
-    assert_eq!(launch.args[9].name, "effort");
+    let argument = |name| launch.args.iter().find(|arg| arg.name == name).unwrap();
     assert_eq!(
-        launch.args[9].ty,
+        argument("effort").ty,
         HsType::maybe(HsType::Named("ForkEffort"))
     );
-    assert_eq!(launch.args[10].name, "budget");
     assert_eq!(
-        launch.args[10].ty,
+        argument("budget").ty,
         HsType::maybe(HsType::Tuple(vec![HsType::Int, HsType::Int]))
     );
+    for name in ["unboundLabel", "checkpoint", "instructions"] {
+        assert_eq!(argument(name).ty, HsType::maybe(HsType::Text));
+    }
+    assert_eq!(argument("lifetime").ty, HsType::Named("WorkerLifetime"));
     // Preserve the entry closure's position: the actor capture owner claims
     // its live custody by this field, independently of configuration decoding.
     assert_eq!(launch.args[1].name, "entry");

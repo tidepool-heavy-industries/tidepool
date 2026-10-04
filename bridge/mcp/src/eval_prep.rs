@@ -153,15 +153,10 @@ pub(crate) fn effects_core_module_source_for(vocab_effects: &[EffectDecl]) -> St
     out.push_str("import Tidepool.Prelude hiding (error)\n");
     out.push_str("import Control.Monad.Fail (MonadFail(..))\n");
     out.push_str("import Data.Kind (Type)\n");
-    // Stable model-facing duration type used by the resident Sleep effect.
-    // Its constructors stay hidden; authored units receive the smart
-    // constructors through Sleep's row-specific extra imports.
-    out.push_str("import Tidepool.Duration (Duration)\n");
-    // Leaf representation used by the exit-indexed private worker kernel.
-    // This module imports no effects, so the generated vocabulary can name
-    // `ExitRef exit` without creating a Core -> Actor facade -> Core cycle.
-    out.push_str("import Tidepool.Internal.ActorRef (ExitRef)\n");
-    out.push_str("import Tidepool.Internal.RequestSite (RequestSite)\n");
+    for import in crate::generated::CORE_IMPORTS {
+        out.push_str(import);
+        out.push('\n');
+    }
     out.push_str("import qualified Tidepool.Data.Text as T\n");
     out.push_str("import qualified Data.Map.Strict as Map\n");
     out.push_str("import qualified Tidepool.Aeson.KeyMap as KM\n");

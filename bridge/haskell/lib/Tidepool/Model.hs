@@ -36,6 +36,7 @@ import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import qualified Tidepool.Data.Text as T
 import Tidepool.Aeson
+import Tidepool.Internal.ModelControl
 import Tidepool.Agent.Contract
 import Tidepool.Effects.Core (ModelCall (..), ModelBoundaryError (..))
 
@@ -130,95 +131,72 @@ invokeModel turn input = case compileTools (specTools (turnSpec turn)) of
     initial <- send (ModelStartWith (request compiled))
     drive compiled Nothing initial
   where
-    request compiled = object
-      [ "instructions" .= turnInstructions turn
-      , "input" .= input
-      , "model" .= turnModel turn
-      , "effort" .= fmap effortText (turnEffort turn)
-      , "limits" .= limitsValue (turnLimits turn)
-      , "tools" .= declarationsToJson (declarations compiled)
-      , "result_schema" .= resultSchema (turnFormat turn)
-      , "after_tool" .= maybe False (const True) (afterTool (turnSpec turn))
-      ]
+    request compiled = toJSON (ModelRequestEnvelope
+      (turnInstructions turn) input (turnModel turn) (fmap controlEffort (turnEffort turn))
+      (requestLimits (turnLimits turn)) (declarationsToJson (declarations compiled))
+      (resultSchema (turnFormat turn)) (maybe False (const True) (afterTool (turnSpec turn))))
     stop Nothing failure = pure (failed failure)
     stop (Just token) failure = do
       closed <- send (ModelCloseWith token)
       pure (failed (either (ModelCleanupFailed failure) (const failure) closed))
     drive _ active (Left err) = stop active (ModelBoundary err)
-    drive compiled active (Right value) = case parseStep value of
+    drive compiled active (Right value) = case fromJSON value of
       Error err -> stop active (InvalidModelResponse (T.pack err))
-      Success (Finished receipt outcome) ->
-        pure (ModelResult (decodeOutcome (turnFormat turn) outcome) (Just receipt))
-      Success (Callback token callId name args) -> do
+      Success (ModelFinished receipt) ->
+        pure (ModelResult (decodeOutcome (turnFormat turn) (receiptOutcome receipt)) (Just (publicReceipt receipt)))
+      Success (ModelCallback token callId name args) -> do
         answer <- dispatch compiled name args
         next <- send (ModelResumeWith token callId (toolDispatchReply answer))
         drive compiled (Just token) next
-      Success (Hook token operation name args handle ordinal semantic output) -> do
+      Success (ModelHook token operation name args handle ordinal semantic output) -> do
         annotation <- case afterTool (turnSpec turn) of
           Nothing -> pure NoAnnotation
           Just hook -> hook (ToolCall name args) (ToolResult name handle ordinal semantic output)
-        next <- send (ModelAnnotateWith token operation (annotationToJson annotation))
+        next <- send (ModelAnnotateWith token operation (toJSON (controlAnnotation annotation)))
         drive compiled (Just token) next
 
 failed :: ModelFailure -> ModelResult a
 failed failure = ModelResult (Left failure) Nothing
 
-effortText :: ModelEffort -> Text
-effortText LowEffort = "low"
-effortText MediumEffort = "medium"
-effortText HighEffort = "high"
-limitsValue :: ModelLimits -> Value
-limitsValue limits = object
-  [ "requests" .= requestLimit limits, "tools" .= toolLimit limits
-  , "reported_tokens" .= reportedTokenLimit limits, "seconds" .= durationSeconds limits ]
+controlEffort :: ModelEffort -> ModelEffortEnvelope
+controlEffort LowEffort = ModelLowEffort
+controlEffort MediumEffort = ModelMediumEffort
+controlEffort HighEffort = ModelHighEffort
+requestLimits :: ModelLimits -> ModelRequestLimits
+requestLimits limits = ModelRequestLimits (requestLimit limits) (toolLimit limits)
+  (reportedTokenLimit limits) (durationSeconds limits)
+
 resultSchema :: ResultFormat a -> Maybe Value
 resultSchema TextResult = Nothing
 resultSchema (JsonResult proxy) = Just (jsonSchema proxy)
 
-data Step
-  = Callback Text Text Text Value
-  | Hook Text Text Text Value Text Int Value Text
-  | Finished ModelReceipt Value
+publicReceipt :: ModelReceiptEnvelope -> ModelReceipt
+publicReceipt (ModelReceiptEnvelope identity cell requests (ModelUsageEnvelope rq tools tokens unknown) _ _) =
+  ModelReceipt identity cell requests (ModelUsage rq tools tokens unknown)
 
-parseStep :: Value -> Result Step
-parseStep = withObject "model step" $ \o -> do
-  kind <- o .: "kind"
-  case (kind :: Text) of
-    "callback" -> Callback <$> o .: "invocation" <*> o .: "call_id" <*> o .: "name" <*> o .: "arguments"
-    "hook" -> Hook <$> o .: "invocation" <*> o .: "operation" <*> o .: "name" <*> o .: "arguments" <*> o .: "handle" <*> o .: "ordinal" <*> ((o .:? "value") .!= Null) <*> o .: "output"
-    "finished" -> do
-      receipt <- o .: "receipt"
-      withObject "model receipt" (\r -> Finished <$> parseReceipt receipt <*> r .: "outcome") receipt
-    _ -> Error "unknown model step"
+receiptOutcome :: ModelReceiptEnvelope -> ModelOutcomeEnvelope
+receiptOutcome (ModelReceiptEnvelope _ _ _ _ _ outcome) = outcome
 
-parseReceipt :: Value -> Result ModelReceipt
-parseReceipt = withObject "model receipt" $ \o -> do
-  counts <- o .: "counts"
-  usage <- withObject "model usage" (\c -> ModelUsage <$> c .: "requests" <*> c .: "tools" <*> c .: "reported_tokens" <*> c .: "unknown_usage_requests") counts
-  ModelReceipt <$> o .: "invocation_id" <*> o .: "parent_cell" <*> o .: "requests" <*> pure usage
+controlAnnotation :: Annotation -> ModelAnnotationEnvelope
+controlAnnotation NoAnnotation = ModelNoAnnotation
+controlAnnotation (Abstained reason) = ModelAbstained reason
+controlAnnotation (Annotated text) = ModelAnnotated text
+controlAnnotation (Pruned text handle) = ModelPruned handle text
 
-decodeOutcome :: ResultFormat a -> Value -> Either ModelFailure a
-decodeOutcome format value = case withObject "model outcome" decode value of
-  Error err -> Left (InvalidModelResponse (T.pack err))
-  Success result -> result
-  where
-    decode o = do
-      kind <- o .: "kind"
-      case (kind :: Text) of
-        "text" -> case format of
-          TextResult -> Right <$> o .: "value"
-          JsonResult _ -> Error "text returned for typed model turn"
-        "typed" -> case format of
-          JsonResult _ -> Right <$> o .: "value"
-          TextResult -> Error "typed value returned for text model turn"
-        "failed" -> Left . ModelFailed <$> o .: "value"
-        "cancelled" -> pure (Left ModelCancelled)
-        "exhausted" -> do
-          reason <- o .: "value"
-          case (reason :: Text) of
-            "requests" -> pure (Left (ModelBudgetExceeded ProviderRequests))
-            "tools" -> pure (Left (ModelBudgetExceeded ToolAttempts))
-            "reported_tokens" -> pure (Left (ModelBudgetExceeded ReportedTokens))
-            "deadline" -> pure (Left (ModelBudgetExceeded Deadline))
-            _ -> Error "unknown model budget dimension"
-        _ -> Error "unknown model outcome"
+decodeOutcome :: ResultFormat a -> ModelOutcomeEnvelope -> Either ModelFailure a
+decodeOutcome format outcome = case outcome of
+  ModelTextOutcome value -> case format of
+    TextResult -> Right value
+    JsonResult _ -> Left (InvalidModelResponse "text returned for typed model turn")
+  ModelTypedOutcome value -> case format of
+    JsonResult _ -> case fromJSON value of
+      Success answer -> Right answer
+      Error err -> Left (InvalidModelResponse (T.pack err))
+    TextResult -> Left (InvalidModelResponse "typed value returned for text model turn")
+  ModelFailedOutcome detail -> Left (ModelFailed detail)
+  ModelCancelledOutcome -> Left ModelCancelled
+  ModelExhaustedOutcome reason -> Left $ case reason of
+    ModelRequestsLimit -> ModelBudgetExceeded ProviderRequests
+    ModelToolsLimit -> ModelBudgetExceeded ToolAttempts
+    ModelTokensLimit -> ModelBudgetExceeded ReportedTokens
+    ModelDeadlineLimit -> ModelBudgetExceeded Deadline

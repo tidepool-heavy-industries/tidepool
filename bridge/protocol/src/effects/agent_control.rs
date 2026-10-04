@@ -121,7 +121,7 @@ pub fn agent_control() -> Effect {
                 &["Refusal-bearing receipt for one idempotent cleanup attempt."],
             ),
         ],
-        foreign_types: &[],
+        external_types: &[],
         errors: None,
         verbs: vec![
             Verb {
