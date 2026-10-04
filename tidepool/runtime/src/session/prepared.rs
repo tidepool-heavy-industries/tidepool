@@ -10131,42 +10131,57 @@ pub(super) mod tests {
 
     #[test]
     fn static_reply_ignores_leading_int_and_nested_typed_site_payload() {
-        let (engine, owner) = PreparedEngine::bootstrap(attested_request_program(
-            ConstructorReply::Static(TypeNodeId(0)),
-        ))
-        .unwrap();
-        let table = json_mount_table();
-        let nested = serde_json::json!({"payload": {"typedSite": 41}})
-            .to_value(&table)
-            .unwrap();
-        for fields in [vec![HaskellValue::Lit(Literal::LitInt(41))], vec![nested]] {
+        for (leading, payload) in [
+            (8, serde_json::Value::Null),
+            (0, serde_json::json!({"payload": {"typedSite": 8}})),
+        ] {
+            let (mut engine, owner, parked) = park_json_fixture_request(
+                Some(ConstructorReply::Static(TypeNodeId(0))),
+                leading,
+                payload,
+            );
+            let parked = parked.unwrap();
             assert_eq!(
-                engine
-                    .classify_reply(&HaskellValue::Con(DataConId(77), fields), &table)
-                    .unwrap(),
+                engine.parked(parked.id).unwrap().1.reply,
                 PreparedReplyEvidence::Static {
                     owner,
-                    constructor: DataConId(77),
-                    node: TypeNodeId(0)
+                    constructor: DataConId(903),
+                    node: TypeNodeId(0),
                 }
             );
+            assert_eq!(engine.parked_site(parked.id), None);
+            assert!(matches!(
+                engine.classify_reply(
+                    &HaskellValue::Con(DataConId(999), vec![HaskellValue::Lit(Literal::LitInt(8))]),
+                    &json_mount_table(),
+                ),
+                Err(PreparedRuntimeError::MissingReplyEvidence {
+                    constructor: DataConId(999)
+                })
+            ));
+            engine.abort_parked(parked.id).unwrap();
+            assert_eq!(engine.parked_count(), 0);
+            assert_eq!(engine.handle_count(), 0);
         }
-        assert!(matches!(
-            engine.classify_reply(
-                &HaskellValue::Con(DataConId(999), vec![HaskellValue::Lit(Literal::LitInt(41))]),
-                &table
-            ),
-            Err(PreparedRuntimeError::MissingReplyEvidence {
-                constructor: DataConId(999)
-            })
-        ));
     }
 
     #[test]
     fn at_site_requires_exact_first_carrier_and_checks_delivery() {
         let (mut engine, owner) =
             PreparedEngine::bootstrap(attested_request_program(ConstructorReply::AtSite)).unwrap();
-        let table = json_mount_table();
+        let json_fixture = json_mount_program();
+        let json_layout = json_fixture
+            .json_layout()
+            .unwrap()
+            .try_map(|constructor| {
+                json_fixture
+                    .constructors()
+                    .get(constructor.0 as usize)
+                    .map(|declaration| declaration.host_id)
+                    .ok_or(())
+            })
+            .unwrap();
+        let table = json_mount_table().with_json_layout(Some(json_layout));
         for fields in [
             vec![],
             vec![HaskellValue::Lit(Literal::LitInt(-1))],
