@@ -259,6 +259,11 @@ impl HostedTestRuntime {
         transport: Option<Arc<dyn harness::engine::ResponsesTransport>>,
         transport_factory: Option<HostTransportFactory>,
     ) -> Result<Self, String> {
+        let mut settings = settings.clone();
+        if let Some(root) = std::env::var_os("EXOMONAD_EMBEDDED_ASSET_ROOT") {
+            settings.asset_root = std::path::PathBuf::from(root);
+        }
+        settings.validate().map_err(|error| error.to_string())?;
         tidepool_testing::eval_harness::require_extract();
         let repository =
             exomonad_worktree::testing::TestRepo::init().map_err(|error| error.to_string())?;
@@ -280,7 +285,7 @@ impl HostedTestRuntime {
             workspace: repository.path().to_path_buf(),
             root_binding_path: run_root.join("root-binding.json"),
             run_root,
-            embedded: Some(settings.clone()),
+            embedded: Some(settings),
             tmux_session: "unused-hosted-acceptance".into(),
             model: "test-model".into(),
             effort: exomonad_actor::ForkEffort::Low,
