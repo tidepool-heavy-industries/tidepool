@@ -2303,7 +2303,9 @@ freshExecutionRecipeTest = withScratch $ \work -> do
   firstContext <- issue (contextual firstAbsent)
   secondContext <- issue (contextual secondAbsent)
   let contexts = [firstContext,secondContext]
-      contextRefs = [reference {executionRefGraph=executionGraphSha256 context} | context <- contexts]
+      firstRef = reference {executionRefGraph=executionGraphSha256 firstContext}
+      secondRef = reference {executionRefGraph=executionGraphSha256 secondContext}
+      contextRefs = [firstRef,secondRef]
   sharedContexts <- either (fail . show) pure (executionSourceOriginalClosure contexts contextRefs)
   sharedSupport <- case sharedContexts of
     [value] -> pure value
@@ -2326,10 +2328,10 @@ freshExecutionRecipeTest = withScratch $ \work -> do
       changedResolution = secondContext {executionGraphEvidence=(executionGraphEvidence secondContext) {
         dependencyResolutions=[row {dependencyResolutionSelected=Just secondAbsent}
           | row <- dependencyResolutions (executionGraphEvidence secondContext)]}}
-  forM_ [(changedSource,last contextRefs),(changedNative,(last contextRefs) {
+  forM_ [(changedSource,secondRef),(changedNative,secondRef {
         executionRefIdentity=support {executionNativeSha256=replicate 64 'f'}})
-      ,(changedResolution,last contextRefs)] $ \(changed,changedRef) ->
-    unless (case executionSourceOriginalClosure [firstContext,changed] [head contextRefs,changedRef] of
+      ,(changedResolution,secondRef)] $ \(changed,changedRef) ->
+    unless (case executionSourceOriginalClosure [firstContext,changed] [firstRef,changedRef] of
         Left (ExecutionSourceConflicting _) -> True; _ -> False) $
       fail "context sharing accepted a different source/native/selected-resolution identity"
   unless (refused recipe {recipeProducer=replicate 64 '0'}
