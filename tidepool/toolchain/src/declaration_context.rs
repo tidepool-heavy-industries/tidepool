@@ -1761,7 +1761,13 @@ impl ExactCompilationRequest {
                 .collect::<Result<Vec<_>, CompileError>>()?;
             let selection_evidence: crate::cache::DependencyEvidence =
                 serde_json::from_str(string(&source_selection[1])?).map_err(failure)?;
-            let entries = context.artifact_view().entries();
+            // Earlier admitted program support carries the same original proof
+            // as persisted context. This receipt cannot authorize itself.
+            let source_view = match &self.program_support {
+                Some(support) => context.artifact_view().merge(support)?,
+                None => context.artifact_view().clone(),
+            };
+            let entries = source_view.entries();
             let canonical = entries
                 .iter()
                 .filter_map(|entry| canonical_source_interface(entry))
