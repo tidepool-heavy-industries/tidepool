@@ -1,48 +1,37 @@
 #!/usr/bin/env bash
-# Run every configured recipe check of a workspace as its own `exomonad check
-# --recipe` process, several at a time, all compiling through one warm
-# compile daemon. The recipes are independent resident sessions, so the wall
-# clock is the longest recipe rather than the sum. Usage:
-#   exomonad-check-recipes.sh <workspace> [parallelism, default 1: recipe turns
-#   carry fixed timeouts that three sessions on one daemon already exceed]
+# Each recipe uses the same verified frozen host and its production compiler owner.
 set -euo pipefail
-
-cd "$(dirname "${BASH_SOURCE[0]}")/../.."
-workspace="${1:?usage: exomonad-check-recipes.sh <workspace> [parallelism]}"
-parallelism="${2:-1}"
-config="$workspace/.exomonad/config.toml"
-
-mapfile -t entries < <(python3 - "$config" <<'PY'
-import re, sys, tomllib
-with open(sys.argv[1], "rb") as handle:
-    config = tomllib.load(handle)
-for entry in config.get("haskell", {}).get("checks", []):
-    print(entry)
+bundle="${1:?usage: exomonad-check-recipes.sh BUNDLE DESCRIPTOR REPORTS WORKSPACE [PARALLELISM]}"
+descriptor="${2:?qualification descriptor required}"
+reports="${3:?fresh report directory required}"
+workspace="${4:?workspace required}"
+parallelism="${5:-1}"
+[[ $# -le 5 && "$parallelism" =~ ^[1-9][0-9]*$ ]] || { echo 'error: positive parallelism required' >&2; exit 2; }
+[[ ! -e "$reports" ]] || { echo "error: report directory already exists: $reports" >&2; exit 2; }
+mkdir -p "$reports"
+exec python3 - "$bundle/share/exomonad/qualification.py" "$descriptor" "$reports" "$workspace" "$parallelism" <<'PY'
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tomllib
+owner, descriptor, reports, workspace = map(Path, sys.argv[1:5])
+parallelism = int(sys.argv[5])
+with (workspace / ".exomonad/config.toml").open("rb") as stream:
+    entries = tomllib.load(stream).get("haskell", {}).get("checks", [])
+if not entries or any(not isinstance(entry, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z_0-9.]*", entry) for entry in entries):
+    raise SystemExit("recipe checks must contain at least one valid Haskell entrypoint")
+if len(entries) != len(set(entries)):
+    raise SystemExit("recipe checks must name distinct entrypoints")
+def run(entry):
+    with (reports / (entry + ".log")).open("xb") as stream:
+        result = subprocess.run([sys.executable, str(owner), "exec", "--report",
+            str(reports / (entry + ".process.json")), str(descriptor), "--", "check",
+            "--workspace", str(workspace), "--recipe", entry], stdout=stream, stderr=subprocess.STDOUT)
+    print(f"{'passed' if result.returncode == 0 else 'FAILED'} {entry}: {reports / (entry + '.log')}", flush=True)
+    return result.returncode
+with ThreadPoolExecutor(max_workers=parallelism) as executor:
+    statuses = list(executor.map(run, entries))
+raise SystemExit(next((code for code in statuses if code), 0))
 PY
-)
-if [ "${#entries[@]}" -eq 0 ]; then
-  echo "error: no [haskell] checks configured in $config" >&2
-  exit 1
-fi
-
-# One build and one daemon for every recipe process; exomonad-run.sh keeps an
-# inherited socket for `check`.
-source exomonad/scripts/exomonad-build.sh
-start_battery_daemon
-trap teardown_battery_daemon EXIT
-
-# Logs live under the checkout, not TMPDIR: the dev shell removes its TMPDIR
-# on exit, and a failure's reason must outlive the run.
-logs="$PWD/target/tidepool-test-runs/recipes-$(date -u +%Y%m%dT%H%M%SZ)-$$"
-mkdir -p "$logs"
-echo "==> ${#entries[@]} recipes, $parallelism at a time; logs in $logs"
-status=0
-printf '%s\n' "${entries[@]}" | xargs -P "$parallelism" -I{} bash -c '
-  entry="$1"; log="$2/$entry.log"
-  if "$PWD/target/debug/exomonad" check --workspace "$3" --recipe "$entry" >"$log" 2>&1; then
-    echo "passed  $entry ($(grep -c "^  passed" "$log") assertions)"
-  else
-    echo "FAILED  $entry — see $log"; exit 1
-  fi
-' _ {} "$logs" "$workspace" || status=1
-exit "$status"

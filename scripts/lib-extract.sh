@@ -1,255 +1,14 @@
 #!/usr/bin/env bash
-# Shared extractor resolution, validation, and test-daemon lifecycle.
-#
-# Usage: source this file, then call `resolve_tidepool_extract`. Callers must
-# already be cd'd to the repo root since
-# the build step below runs `cd bridge/haskell`.
-#
-# Also owns the resident-compile-daemon lifecycle helpers
-# (start_battery_daemon / teardown_battery_daemon) used by test wrappers, and
-# the persistent-daemon pair (daemon_start_persistent / daemon_stop_persistent,
-# driven by `just daemon-start` / `just daemon-stop`) that keeps one compile
-# daemon's GHC module memo warm across separate `just test`/`just check`
-# invocations instead of rebooting it every run. Kept here, not duplicated
-# per script, for the same reason as resolve_tidepool_extract above.
+# Verified native bundle selection and compile-daemon process custody.
+# Production host execution uses the frozen qualification owner directly.
 
-# A no-argument frontend invocation is a usage error and therefore exits
-# non-zero. Capture its complete output without letting `set -e` short-circuit
-# the caller, then validate the stable banner used as the frontend identity
-# probe.
-extract_has_usage_banner() {
-  local output
-  if output="$("$1" 2>&1)"; then
-    :
-  fi
-  grep -q '^Usage:' <<<"$output"
-}
-
-# Print the worktree source inputs compiled into tidepool-extract-bin. The five
-# library modules are embedded by Template Haskell in the internal library;
-# ordinary bridge/haskell/lib modules are loaded later by the worker and must not make
-# the binary permanently appear stale. Keep both freshness callers on this one
-# boundary.
-tidepool_extract_worker_sources() {
-  printf '%s\n' \
-    "$PWD/bridge/haskell/src" \
-    "$PWD/bridge/haskell/app" \
-    "$PWD/bridge/haskell/tidepool-extract.cabal" \
-    "$PWD/bridge/haskell/lib/Tidepool/Aeson/Scientific.hs" \
-    "$PWD/bridge/haskell/lib/Tidepool/Aeson/Value.hs" \
-    "$PWD/bridge/haskell/lib/Tidepool/Command/Types.hs" \
-    "$PWD/bridge/haskell/lib/Tidepool/Data/Time.hs" \
-    "$PWD/bridge/haskell/lib/Tidepool/Double.hs"
-}
-
-# Print, relative to the checkout root, every path whose content determines
-# the persistent daemon's producer: the Rust frontend (its crate, the workspace
-# manifest, lockfile, toolchain pin and cargo config, plus the Haskell sources
-# it include_str!s, which lie under bridge/haskell/src), the worker's build
-# inputs (tidepool_extract_worker_sources plus the cabal project files), and the
-# Nix inputs that pick the GHC libdir. The eval stdlib is not listed: requests
-# carry it as an include path from the caller's own checkout.
-tidepool_extract_producer_sources() {
-  local source
-  while IFS= read -r source; do
-    printf '%s\n' "${source#"$PWD"/}"
-  done < <(tidepool_extract_worker_sources)
-  printf '%s\n' \
-    bridge/haskell/cabal.project \
-    bridge/haskell/cabal.project.freeze \
-    tidepool/extract-cmd \
-    Cargo.toml \
-    Cargo.lock \
-    rust-toolchain.toml \
-    .cargo/config.toml \
-    flake.nix \
-    flake.lock \
-    nix
-}
-
-# Content fingerprint of this checkout's producer sources, including
-# uncommitted and untracked (non-ignored) edits: each file's path and Git blob
-# hash, hashed together. It is location-independent, so a linked worktree and
-# the main checkout agree whenever those files agree. Prints nothing and fails
-# outside a Git checkout.
-tidepool_extract_source_fingerprint() (
-  set -o pipefail
-  local paths=() files=() file
-  mapfile -t paths < <(tidepool_extract_producer_sources)
-  while IFS= read -r file; do
-    [ -f "$file" ] && files+=("$file")
-  done < <(git ls-files --cached --others --exclude-standard -- "${paths[@]}" 2>/dev/null | sort -u)
-  [ "${#files[@]}" -gt 0 ] || return 1
-  printf '%s\n' "${files[@]}" | git hash-object --stdin-paths | paste <(printf '%s\n' "${files[@]}") - \
-    | sha256sum | cut -d' ' -f1
-)
-
-# Adopt the persistent daemon's extractor when this checkout's producer sources
-# match the ones it was built from: export its frontend and worker as
-# TIDEPOOL_EXTRACT/TIDEPOOL_EXTRACT_WORKER and set
-# TIDEPOOL_PERSISTENT_DAEMON_ADOPTED=1 so start_battery_daemon reuses its
-# socket without probing. The recorded frontend must still report the recorded
-# producer, so a rebuild in the daemon's own checkout since its start is not
-# mistaken for the running daemon.
-_adopt_persistent_daemon_extractor() {
-  local dir fingerprint recorded exe worker producer
-  [ "${TIDEPOOL_EXTRACT_NO_DAEMON:-0}" != "1" ] || return 1
-  dir="$(_persistent_daemon_dir)"
-  [ -f "$dir/sources" ] && [ -f "$dir/daemon.exe" ] && [ -f "$dir/producer" ] || return 1
-  _battery_daemon_socket_alive "$dir/extract.sock" || return 1
-  recorded="$(cat "$dir/sources" 2>/dev/null)" || return 1
-  fingerprint="$(tidepool_extract_source_fingerprint)" || return 1
-  if [ "$fingerprint" != "$recorded" ]; then
-    TIDEPOOL_PERSISTENT_DAEMON_SOURCES_DIFFER=1
-    return 1
-  fi
-  exe="$(cat "$dir/daemon.exe")"
-  worker="$(cat "$dir/daemon.worker" 2>/dev/null || true)"
-  [ -x "$exe" ] || return 1
-  [ -z "$worker" ] || [ -x "$worker" ] || return 1
-  producer="$(
-    export TIDEPOOL_EXTRACT="$exe"
-    if [ -n "$worker" ]; then export TIDEPOOL_EXTRACT_WORKER="$worker"; else unset TIDEPOOL_EXTRACT_WORKER; fi
-    _current_producer_hex 2>/dev/null
-  )" || return 1
-  [ "$producer" = "$(cat "$dir/producer")" ] || return 1
-  TIDEPOOL_EXTRACT="$exe"
-  if [ -n "$worker" ]; then
-    TIDEPOOL_EXTRACT_WORKER="$worker"
-    export TIDEPOOL_EXTRACT_WORKER
-  fi
-  TIDEPOOL_EXTRACT_SOURCES="$fingerprint"
-  TIDEPOOL_PERSISTENT_DAEMON_ADOPTED=1
-  export TIDEPOOL_EXTRACT TIDEPOOL_EXTRACT_SOURCES
-  echo "==> producer sources match the persistent compile daemon's; using its extractor $exe" >&2
-}
-
-# Resolves and validates $TIDEPOOL_EXTRACT (and $TIDEPOOL_EXTRACT_WORKER),
-# building both halves from this checkout when unset. Test entry points pass
-# --prefer-persistent-daemon: when this checkout's producer sources match the
-# live persistent daemon's, they adopt its extractor instead of building one
-# whose path-bearing producer identity could never match it.
-resolve_tidepool_extract() {
-  local _prefer_persistent=0
-  [ "${1:-}" != "--prefer-persistent-daemon" ] || _prefer_persistent=1
-  TIDEPOOL_PERSISTENT_DAEMON_ADOPTED=0
-  TIDEPOOL_PERSISTENT_DAEMON_SOURCES_DIFFER=0
-  # Captured BEFORE the build-if-unset branch below: the staleness check
-  # after it only applies to a caller-SUPPLIED TIDEPOOL_EXTRACT — a binary
-  # this function just built itself is trivially fresh (see
-  # scripts/toolchain-doctor.sh, which runs the identical check standalone
-  # and explains the nix-store mtime caveat this skips around).
-  local _was_preset=0
-  [ -n "${TIDEPOOL_EXTRACT:-}" ] && _was_preset=1
-
-  if [ -z "${TIDEPOOL_EXTRACT:-}" ] && [ "$_prefer_persistent" = 1 ]; then
-    _adopt_persistent_daemon_extractor || true
-  fi
-
-  if [ -z "${TIDEPOOL_EXTRACT:-}" ]; then
-    echo "==> TIDEPOOL_EXTRACT not set — building the Rust frontend and Haskell worker"
-    # Recorded by daemon_start_persistent so later checkouts with the same
-    # producer sources can reuse the daemon it starts from this build.
-    TIDEPOOL_EXTRACT_SOURCES="$(tidepool_extract_source_fingerprint 2>/dev/null)" || TIDEPOOL_EXTRACT_SOURCES=""
-    export TIDEPOOL_EXTRACT_SOURCES
-    # The worker loads Tidepool modules at runtime, so it needs the repository
-    # with-packages compiler rather than a bare GHC. The Just recipes enter the
-    # Nix shell that provides it; refuse an incomplete ambient shell instead of
-    # scraping a separately installed extractor wrapper for a store path.
-    if ! command -v ghc-pkg >/dev/null 2>&1 \
-      || ! ghc-pkg list 2>/dev/null | grep -qE '\blens-[0-9]'; then
-      echo "error: the active GHC does not expose lens; run through 'just' or enter 'nix develop'" >&2
-      exit 1
-    fi
-    ( cd bridge/haskell && cabal build tidepool-extract-bin ) || return 1
-    # Cargo owns target-directory, profile, and target-triple resolution.
-    # Read its artifact path, including on a fresh=true cache hit.
-    TIDEPOOL_EXTRACT="$(
-      set -o pipefail
-      cargo build -p tidepool-extract-cmd --bin tidepool-extract --message-format=json-render-diagnostics |
-        jq -ser '[.[] | select(.reason == "compiler-artifact" and
-          .target.name == "tidepool-extract" and .executable != null) |
-          .executable] | unique | if length == 1 then .[0] else error("expected one extractor executable") end'
-    )" || return 1
-    # Split assignment from export: `export VAR="$(cmd)"` masks the command's
-    # exit status (SC2155), so a failed list-bin would proceed with an empty
-    # var.
-    TIDEPOOL_EXTRACT_WORKER="$(cd bridge/haskell && cabal list-bin tidepool-extract-bin)" || return 1
-    export TIDEPOOL_EXTRACT TIDEPOOL_EXTRACT_WORKER
-  fi
-
-  # Check caller-supplied worktree binaries against the sources that build
-  # each half. Nix store timestamps are canonicalized near the epoch, so they
-  # cannot support this mtime check.
-  if [ "$_was_preset" = 1 ] && [ -x "$TIDEPOOL_EXTRACT" ]; then
-    _bin_mtime="$(stat -c %Y "$TIDEPOOL_EXTRACT" 2>/dev/null || echo 0)"
-    _plausible_mtime_floor=946684800
-    if [ "$_bin_mtime" -gt "$_plausible_mtime_floor" ]; then
-      _newest_src="$(find "$PWD/tidepool/extract-cmd/src" "$PWD/tidepool/extract-cmd/Cargo.toml" -type f -printf '%T@\n' 2>/dev/null | sort -rn | head -1 | cut -d. -f1)"
-      _newest_src="${_newest_src:-0}"
-      if [ "$_bin_mtime" -lt "$_newest_src" ]; then
-        if [ "${TIDEPOOL_ALLOW_STALE_EXTRACT:-0}" = "1" ]; then
-          echo "warning: TIDEPOOL_EXTRACT='$TIDEPOOL_EXTRACT' is older than tidepool-extract-cmd sources — continuing (TIDEPOOL_ALLOW_STALE_EXTRACT=1)" >&2
-        else
-          echo "error: TIDEPOOL_EXTRACT='$TIDEPOOL_EXTRACT' is older than tidepool-extract-cmd sources" >&2
-          echo "  fix: cargo build -p tidepool-extract-cmd --bin tidepool-extract; cd bridge/haskell && cabal build tidepool-extract-bin" >&2
-          echo "  or, for a deliberate cross-worktree/pinned run: TIDEPOOL_ALLOW_STALE_EXTRACT=1" >&2
-          echo "  (full diagnostic: scripts/toolchain-doctor.sh)" >&2
-          exit 1
-        fi
-      fi
-    fi
-  fi
-
-  # A worktree frontend must resolve an executable compiler worker. Installed
-  # packages provide a sibling worker through their wrapper; local builds set
-  # this explicitly so the public/frontend and compiler halves cannot drift.
-  if [ -n "${TIDEPOOL_EXTRACT_WORKER:-}" ] && [ ! -x "$TIDEPOOL_EXTRACT_WORKER" ]; then
-    echo "error: TIDEPOOL_EXTRACT_WORKER='$TIDEPOOL_EXTRACT_WORKER' is not executable" >&2
-    exit 1
-  fi
-
-  # An adopted worker was matched by source content, not by this checkout's
-  # file times, so the mtime check below does not apply to it.
-  if [ -n "${TIDEPOOL_EXTRACT_WORKER:-}" ] && [ -x "$TIDEPOOL_EXTRACT_WORKER" ] \
-    && [ "$TIDEPOOL_PERSISTENT_DAEMON_ADOPTED" != 1 ]; then
-    _worker_mtime="$(stat -c %Y "$TIDEPOOL_EXTRACT_WORKER" 2>/dev/null || echo 0)"
-    if [ "$_worker_mtime" -gt 946684800 ]; then
-      # `bridge/haskell/lib` is loaded by the worker at evaluation time; it is not a
-      # source input to the worker binary. Including it here makes every
-      # stdlib-only edit permanently "stale": Cabal correctly declines to
-      # rebuild the unaffected executable, so its mtime can never catch up.
-      # Keep this boundary identical to scripts/toolchain-doctor.sh.
-      mapfile -t _worker_sources < <(tidepool_extract_worker_sources)
-      _newest_haskell="$(find "${_worker_sources[@]}" -type f -printf '%T@\n' 2>/dev/null | sort -rn | head -1 | cut -d. -f1)"
-      if [ "$_worker_mtime" -lt "${_newest_haskell:-0}" ] && [ "${TIDEPOOL_ALLOW_STALE_EXTRACT:-0}" != "1" ]; then
-        echo "error: TIDEPOOL_EXTRACT_WORKER='$TIDEPOOL_EXTRACT_WORKER' is older than Haskell worker sources" >&2
-        exit 1
-      fi
-    fi
-  fi
-
-  if [ ! -x "$TIDEPOOL_EXTRACT" ]; then
-    echo "error: TIDEPOOL_EXTRACT='$TIDEPOOL_EXTRACT' is not executable" >&2
-    exit 1
-  fi
-  if ! extract_has_usage_banner "$TIDEPOOL_EXTRACT"; then
-    echo "error: TIDEPOOL_EXTRACT='$TIDEPOOL_EXTRACT' is not a runnable tidepool-extract (no 'Usage:' banner)" >&2
-    exit 1
-  fi
-  if [ -z "${TIDEPOOL_COMPILER_DEPLOYMENT:-}" ]; then
-    TIDEPOOL_COMPILER_DEPLOYMENT="$PWD/target/compiler-deployment.json"
-    mkdir -p "${TIDEPOOL_COMPILER_DEPLOYMENT%/*}"
-    if ! "$TIDEPOOL_EXTRACT" --compiler-deployment-manifest "$TIDEPOOL_COMPILER_DEPLOYMENT"; then
-      echo "error: could not write configured compiler deployment manifest: $TIDEPOOL_COMPILER_DEPLOYMENT" >&2
-      return 1
-    fi
-    export TIDEPOOL_COMPILER_DEPLOYMENT
-  elif [[ "$TIDEPOOL_COMPILER_DEPLOYMENT" != /* || ! -r "$TIDEPOOL_COMPILER_DEPLOYMENT" || ! -s "$TIDEPOOL_COMPILER_DEPLOYMENT" ]]; then
-    echo "error: TIDEPOOL_COMPILER_DEPLOYMENT='$TIDEPOOL_COMPILER_DEPLOYMENT' must be an absolute path to a readable nonempty manifest" >&2
-    return 1
-  fi
-  echo "TIDEPOOL_EXTRACT=${TIDEPOOL_EXTRACT}"
+select_native_bundle() {
+  local bundle="${1:?native bundle root required}" descriptor="${2:?qualification descriptor required}" selection
+  local owner="$bundle/share/exomonad/qualification.py"
+  [[ -f "$owner" ]] || { echo "error: frozen bundle qualification owner missing: $owner" >&2; return 1; }
+  NATIVE_OPERATOR_PYTHON="$(command -v python3)" || return 1
+  selection="$("$NATIVE_OPERATOR_PYTHON" "$owner" environment "$descriptor" --shell)" || return 1
+  eval "$selection"
 }
 
 # The frontend resolves its compiler worker before publishing this identity. EOF
@@ -273,209 +32,16 @@ validate_tidepool_extract_endpoint() (
 
 # --- Resident compile daemon ---
 #
-# Globals set by start_battery_daemon and read by teardown_battery_daemon:
-#   BATTERY_DAEMON_PID         pid of the daemon THIS process started, or ""
-#   BATTERY_DAEMON_SOCKET_DIR  per-run tempdir holding the socket+log, or ""
-#   BATTERY_DAEMON_OWNED       1 iff this process owns the daemon's lifecycle
+# Globals set by start_compile_daemon and read by teardown_compile_daemon:
+#   COMPILE_DAEMON_PID         pid of the daemon THIS process started, or ""
+#   COMPILE_DAEMON_SOCKET_DIR  per-run tempdir holding the socket+log, or ""
+#   COMPILE_DAEMON_OWNED       1 iff this process owns the daemon's lifecycle
 #                               (0 when reusing an outer wrapper's daemon, or
 #                               when the daemon is disabled/failed to start)
-BATTERY_DAEMON_PID=""
-BATTERY_DAEMON_SOCKET_DIR=""
-BATTERY_DAEMON_OWNED=0
-BATTERY_DAEMON_START_FAILED=0
-BATTERY_ARTIFACT_DIR=""
-BATTERY_NEXTEST_LOG=""
-
-# Artifacts for battery entry points. Successful runs leave nothing unless
-# TIDEPOOL_KEEP_TEST_LOGS=1 (five runs, 4 MiB per log);
-# test or daemon-startup failures retain the exact command, nextest output,
-# toolchain report, and compile-daemon log under target/tidepool-test-runs/.
-prepare_battery_artifacts() {
-  local label="$1"
-  shift
-  local root="${TIDEPOOL_TEST_ARTIFACT_ROOT:-$PWD/target/tidepool-test-runs}"
-  local stamp
-  stamp="$(date -u +%Y%m%dT%H%M%SZ)"
-  BATTERY_ARTIFACT_DIR="$root/$stamp-$$-$label"
-  BATTERY_NEXTEST_LOG="$BATTERY_ARTIFACT_DIR/nextest.log"
-  NEXTTEST_PROCESS_STATUS=""
-  NEXTTEST_GATE_STATUS=""
-  mkdir -p "$BATTERY_ARTIFACT_DIR"
-  {
-    printf '#!/usr/bin/env bash\nset -euo pipefail\ncd %q\n' "$PWD"
-    printf 'bash scripts/dev-shell.sh'
-    printf ' %q' "$@"
-    printf '\n'
-  } >"$BATTERY_ARTIFACT_DIR/reproduce.sh"
-  chmod +x "$BATTERY_ARTIFACT_DIR/reproduce.sh"
-  git rev-parse HEAD >"$BATTERY_ARTIFACT_DIR/source.oid" 2>/dev/null \
-    || printf 'unknown\n' >"$BATTERY_ARTIFACT_DIR/source.oid"
-  git status --short >"$BATTERY_ARTIFACT_DIR/source-wip.txt" 2>/dev/null \
-    || printf 'unknown\n' >"$BATTERY_ARTIFACT_DIR/source-wip.txt"
-  : >"$BATTERY_NEXTEST_LOG"
-}
-
-finalize_battery_artifacts() {
-  local entrypoint_status="$1"
-  local status="$entrypoint_status"
-  local finalize_status=0
-  [[ -n "$BATTERY_ARTIFACT_DIR" ]] || return 0
-  if [[ "${TIDEPOOL_EXTRACT_MEASUREMENT:-0}" = 1 && "$BATTERY_DAEMON_OWNED" = 1 ]]; then
-    # The raw trace is written while the daemon is alive. Stop through the
-    # owning teardown helper first so its final buffered records are flushed,
-    # retain the trace below, then let the caller's ordinary teardown remove
-    # the owned temporary directory.
-    teardown_battery_daemon --preserve-logs
-  fi
-  if [[ "$status" -eq 0 && "$BATTERY_DAEMON_START_FAILED" = 0 \
-      && "${TIDEPOOL_KEEP_TEST_LOGS:-0}" != 1 \
-      && "${TIDEPOOL_EXTRACT_MEASUREMENT:-0}" != 1 ]]; then
-    rm -rf "$BATTERY_ARTIFACT_DIR"
-    return 0
-  fi
-
-  local daemon_log="${TIDEPOOL_EXTRACT_DAEMON_LOG:-}"
-  if [[ -n "$daemon_log" && -f "$daemon_log" ]]; then
-    cp "$daemon_log" "$BATTERY_ARTIFACT_DIR/daemon.log"
-  fi
-  local compiler_log="${daemon_log%/*}/compiler.log"
-  if [[ -n "$daemon_log" && -f "$compiler_log" ]]; then
-    cp "$compiler_log" "$BATTERY_ARTIFACT_DIR/compiler.log"
-  fi
-  local compiler_trace="${compiler_log%.log}.jsonl"
-  if [[ -n "$daemon_log" && -f "$compiler_trace" ]]; then
-    cp "$compiler_trace" "$BATTERY_ARTIFACT_DIR/compiler.jsonl"
-    # An explicitly owned measurement keeps its raw trace outside the bounded
-    # battery copies. Never edit the live daemon trace or overwrite evidence.
-    if [[ -n "${TIDEPOOL_TEST_COMPILER_TRACE_OUTPUT:-}" ]]; then
-      if ! python3 - "$compiler_trace" "$TIDEPOOL_TEST_COMPILER_TRACE_OUTPUT" "$BATTERY_ARTIFACT_DIR" <<'PYTRACE'
-from pathlib import Path
-import os
-import shutil
-import sys
-import tempfile
-source, destination, current = map(Path, sys.argv[1:])
-if not destination.is_absolute() or destination.resolve().is_relative_to(current.parent.resolve()):
-    raise SystemExit("raw compiler trace must select an absolute file outside bounded battery runs")
-# Publish only a complete copy, without replacing earlier evidence. A failed
-# copy must not leave a file that a measurement can mistake for its raw trace.
-with tempfile.TemporaryDirectory(prefix=".compiler-trace-", dir=destination.parent) as scratch:
-    pending = Path(scratch) / "trace"
-    with source.open("rb") as incoming, pending.open("xb") as outgoing:
-        shutil.copyfileobj(incoming, outgoing)
-    os.link(pending, destination)
-PYTRACE
-      then
-        echo "warning: could not retain the explicitly selected raw compiler trace" >&2
-        if [[ "${TIDEPOOL_EXTRACT_MEASUREMENT:-0}" = 1 ]]; then
-          finalize_status=1
-          status=1
-        fi
-      fi
-    fi
-  fi
-  if [[ "${TIDEPOOL_EXTRACT_MEASUREMENT:-0}" = 1 ]]; then
-    if [[ -n "${TIDEPOOL_TEST_COMPILER_TRACE_OUTPUT:-}" && -s "$TIDEPOOL_TEST_COMPILER_TRACE_OUTPUT" ]]; then
-      :
-    elif [[ "$status" -eq 0 ]]; then
-      echo "error: measurement run has no retained compiler trace" >&2
-      status=1
-      finalize_status=1
-    else
-      finalize_status=1
-    fi
-    if [[ -n "${TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_PID:-}" \
-        && -n "${TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_PRODUCER:-}" \
-        && -n "${TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_EPOCH:-}" ]]; then
-      if ! python3 - "$BATTERY_ARTIFACT_DIR/measurement-daemon.json" \
-          "$TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_PID" \
-          "$TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_PRODUCER" \
-          "$TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_EPOCH" \
-          "${TIDEPOOL_TEST_COMPILER_TRACE_OUTPUT:-${TIDEPOOL_PERFORMANCE_COMPILER_TRACE:-}}" <<'PYMETA'
-import json, sys
-from pathlib import Path
-destination, pid, producer, epoch, trace = sys.argv[1:]
-Path(destination).write_text(json.dumps({
-    "pid": int(pid), "producer": producer, "epoch": epoch, "trace": trace,
-}, indent=2) + "\n")
-PYMETA
-      then
-        echo "error: could not retain valid measurement daemon metadata" >&2
-        finalize_status=1
-        status=1
-      fi
-    else
-      echo "error: measurement daemon identity is incomplete" >&2
-      finalize_status=1
-      status=1
-    fi
-  fi
-  scripts/toolchain-doctor.sh >"$BATTERY_ARTIFACT_DIR/toolchain-doctor.log" 2>&1 || true
-  if [[ "$status" -eq 0 && "$finalize_status" = 0 && "$BATTERY_DAEMON_START_FAILED" = 0 ]]; then
-    # Only marked successful runs are eligible for bounded retention. Never
-    # prune failure evidence or arbitrary directories under the artifact root.
-    python3 - "$BATTERY_ARTIFACT_DIR" <<'PYLOG'
-from pathlib import Path
-import json
-import shutil
-import sys
-current = Path(sys.argv[1])
-limit = 4 * 1024 * 1024
-for log in current.glob("*.log"):
-    if log.stat().st_size > limit:
-        with log.open("rb") as stream:
-            stream.seek(-limit, 2)
-            tail = stream.read()
-        log.write_bytes(b"[truncated: last 4 MiB]\n" + tail)
-for trace in current.glob("*.jsonl"):
-    original_bytes = trace.stat().st_size
-    if original_bytes <= limit:
-        continue
-    with trace.open("rb") as stream:
-        # Include one preceding byte so an exactly aligned record is retained.
-        offset = original_bytes - limit - 1
-        stream.seek(offset)
-        tail = stream.read()
-    boundary = tail.find(b"\n") + 1
-    if boundary == 0:
-        boundary = len(tail)
-    tail = tail[boundary:]
-    complete_bytes = tail.rfind(b"\n") + 1
-    discarded_suffix_bytes = len(tail) - complete_bytes
-    tail = tail[:complete_bytes]
-    trace.write_bytes(tail)
-    trace.with_name(trace.name + ".truncation.json").write_text(json.dumps({
-        "schema": 1,
-        "policy": "successful-log-tail",
-        "byte_limit": limit,
-        "original_bytes": original_bytes,
-        "retained_bytes": len(tail),
-        "retained_records": tail.count(b"\n"),
-        "discarded_prefix_bytes": offset + boundary,
-        "discarded_suffix_bytes": discarded_suffix_bytes,
-    }, indent=2) + "\n")
-(current / ".successful-run").touch()
-runs = sorted((p.parent for p in current.parent.glob("*/.successful-run")),
-              key=lambda p: p.stat().st_mtime, reverse=True)
-for old in runs[5:]:
-    if old != current:
-        shutil.rmtree(old)
-PYLOG
-    echo "==> retained success artifacts (last five runs): $BATTERY_ARTIFACT_DIR" >&2
-  else
-    echo "==> test/daemon failure artifacts: $BATTERY_ARTIFACT_DIR" >&2
-  fi
-  {
-    printf 'nextest_process_status=%s\n' "${NEXTTEST_PROCESS_STATUS:-unknown}"
-    printf 'nextest_selection_gate_status=%s\n' "${NEXTTEST_GATE_STATUS:-unknown}"
-    printf 'entrypoint_status_before_finalization=%s\n' "$entrypoint_status"
-    printf 'artifact_finalization_status=%s\n' "$finalize_status"
-  } >"$BATTERY_ARTIFACT_DIR/run-status.txt"
-  echo "==> reproduce: $BATTERY_ARTIFACT_DIR/reproduce.sh" >&2
-  echo "==> execution/finalization status: $BATTERY_ARTIFACT_DIR/run-status.txt" >&2
-  return "$finalize_status"
-}
-
+COMPILE_DAEMON_PID=""
+COMPILE_DAEMON_SOCKET_DIR=""
+COMPILE_DAEMON_OWNED=0
+COMPILE_DAEMON_START_FAILED=0
 # Best-effort liveness check for an inherited $TIDEPOOL_EXTRACT_DAEMON_SOCKET
 # (outer-wrapper respect: a chain script that already started a daemon for
 # many shard invocations must not get a second one started underneath it).
@@ -486,11 +52,11 @@ PYLOG
 # stale socket that refuses connection safely falls back to a direct spawn;
 # once connected, ExtractCmd never replays an indeterminate request
 # (tidepool/extract-cmd/CLAUDE.md).
-_battery_daemon_socket_alive() {
+_compile_daemon_socket_alive() {
   local sock="$1"
   [ -S "$sock" ] || return 1
-  if command -v python3 >/dev/null 2>&1; then
-    python3 - "$sock" >/dev/null 2>&1 <<'PY'
+  if command -v "${NATIVE_OPERATOR_PYTHON:-python3}" >/dev/null 2>&1; then
+    "${NATIVE_OPERATOR_PYTHON:-python3}" - "$sock" >/dev/null 2>&1 <<'PY'
 import socket, sys
 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 s.settimeout(1)
@@ -508,9 +74,7 @@ PY
 
 # Regenerable cache root, mirroring tidepool_toolchain::paths::cache_dir()
 # (XDG_CACHE_HOME -> ~/.cache -> $TMPDIR, joined with "tidepool"). The ONE
-# bash reimplementation of that precedence — scripts/current-run.sh sources
-# this file and calls this function rather than keeping its own copy (root
-# CLAUDE.md's "kept-in-sync copies are forbidden" rule).
+# shell consumer of that precedence.
 cache_dir() {
   if [ -n "${XDG_CACHE_HOME:-}" ]; then
     echo "${XDG_CACHE_HOME}/tidepool"
@@ -521,29 +85,16 @@ cache_dir() {
   fi
 }
 
-# Resolves the deploy-handshake toolchain stamp path the same way the
-# servers do (tidepool-toolchain::toolchain, bridge/haskell/CLAUDE.md's deployment
-# handshake section: <cache_dir>/toolchain-stamp.json, override
-# $TIDEPOOL_TOOLCHAIN_STAMP) — not a second path-resolution mechanism, just
-# this precedence expressed in bash, via the shared cache_dir() above.
-_battery_daemon_stamp_path() {
-  if [ -n "${TIDEPOOL_TOOLCHAIN_STAMP:-}" ]; then
-    echo "$TIDEPOOL_TOOLCHAIN_STAMP"
-    return
-  fi
-  echo "$(cache_dir)/toolchain-stamp.json"
-}
-
 # Starts a per-run resident compile daemon and exports
-# TIDEPOOL_EXTRACT_DAEMON_SOCKET for the caller's whole nextest invocation.
-# Must run after resolve_tidepool_extract (needs $TIDEPOOL_EXTRACT).
+# TIDEPOOL_EXTRACT_DAEMON_SOCKET for the caller's native test invocation.
+# Must run after select_native_bundle (needs $TIDEPOOL_EXTRACT).
 #
 # Enabled by default. TIDEPOOL_EXTRACT_NO_DAEMON=1 is the unconditional kill
 # switch. Memo hits are content-validated by GhcPipeline before reuse.
 #
 # Outer-wrapper respect: if $TIDEPOOL_EXTRACT_DAEMON_SOCKET is already set
-# and looks alive, reuse it and leave BATTERY_DAEMON_OWNED=0 — a chain
-# invocation (e.g. battery.sh runs launched back-to-back by another
+# and looks alive, reuse it and leave COMPILE_DAEMON_OWNED=0 — a chain
+# invocation (e.g. native tests launched back-to-back by another
 # script that already started a daemon) must not start, or later tear down,
 # a second one. The explicit disable switch still takes precedence.
 #
@@ -552,11 +103,11 @@ _battery_daemon_stamp_path() {
 # back after a known-unsubmitted connect failure. Timeout or crash after
 # submission is surfaced rather than replayed. This function only makes
 # TIDEPOOL_EXTRACT_DAEMON_SOCKET available; it does not own request policy.
-start_battery_daemon() {
-  BATTERY_DAEMON_PID=""
-  BATTERY_DAEMON_SOCKET_DIR=""
-  BATTERY_DAEMON_OWNED=0
-  BATTERY_DAEMON_START_FAILED=0
+start_compile_daemon() {
+  COMPILE_DAEMON_PID=""
+  COMPILE_DAEMON_SOCKET_DIR=""
+  COMPILE_DAEMON_OWNED=0
+  COMPILE_DAEMON_START_FAILED=0
 
   local measurement=0
   [ "${TIDEPOOL_EXTRACT_MEASUREMENT:-0}" != 1 ] || measurement=1
@@ -582,29 +133,19 @@ start_battery_daemon() {
     return 0
   fi
 
-  if [ "$measurement" != 1 ] && [ -n "${TIDEPOOL_EXTRACT_DAEMON_SOCKET:-}" ] && _battery_daemon_socket_alive "$TIDEPOOL_EXTRACT_DAEMON_SOCKET"; then
+  if [ "$measurement" != 1 ] && [ -n "${TIDEPOOL_EXTRACT_DAEMON_SOCKET:-}" ] && _compile_daemon_socket_alive "$TIDEPOOL_EXTRACT_DAEMON_SOCKET"; then
     echo "==> reusing already-running compile daemon at $TIDEPOOL_EXTRACT_DAEMON_SOCKET (outer wrapper owns its lifecycle)" >&2
     return 0
   fi
   unset TIDEPOOL_EXTRACT_DAEMON_SOCKET
 
-  # No caller-supplied socket: check for a `just daemon-start`-managed
-  # persistent daemon before booting a per-run one. Reused when
-  # resolve_tidepool_extract adopted its extractor (matching producer
-  # sources), or when it is alive and current (producer identity matches this
-  # invocation's resolved $TIDEPOOL_EXTRACT/$TIDEPOOL_EXTRACT_WORKER). A stale
-  # one is left running (never killed out from under whoever started it) and
-  # this run falls back to its own per-run daemon below, capped at one GHC
-  # worker so it fits beside the warm one.
+  # A current persistent daemon may be reused without taking its lifecycle.
+  # A stale one remains owned by its original launcher; this caller starts a
+  # separate daemon capped at one worker instead.
   local _persistent_sock _persistent_producer_file _per_run_args=()
   _persistent_sock="$(_persistent_daemon_dir)/extract.sock"
   _persistent_producer_file="$(_persistent_daemon_dir)/producer"
-  if [ "$measurement" != 1 ] && [ "${TIDEPOOL_PERSISTENT_DAEMON_ADOPTED:-0}" = 1 ] && _battery_daemon_socket_alive "$_persistent_sock"; then
-    export TIDEPOOL_EXTRACT_DAEMON_SOCKET="$_persistent_sock"
-    echo "==> reusing persistent compile daemon at $_persistent_sock (producer sources match)" >&2
-    return 0
-  fi
-  if [ "$measurement" != 1 ] && _battery_daemon_socket_alive "$_persistent_sock"; then
+  if [ "$measurement" != 1 ] && _compile_daemon_socket_alive "$_persistent_sock"; then
     local _current_producer
     _current_producer="$(_current_producer_hex 2>/dev/null)" || _current_producer=""
     if [ -n "$_current_producer" ] && [ -f "$_persistent_producer_file" ] \
@@ -614,7 +155,6 @@ start_battery_daemon() {
       return 0
     fi
     local _why="producer mismatch"
-    [ "${TIDEPOOL_PERSISTENT_DAEMON_SOURCES_DIFFER:-0}" != 1 ] || _why="producer sources differ from this checkout"
     case " ${TIDEPOOL_DAEMON_ARGS:-} " in
       *" --workers "*) ;;
       *) _per_run_args=(--workers 1) ;;
@@ -622,83 +162,74 @@ start_battery_daemon() {
     echo "==> persistent compile daemon at $_persistent_sock is stale ($_why) — run 'just daemon-stop && just daemon-start' to refresh it; starting a per-run daemon${_per_run_args[*]:+ with one GHC worker} instead" >&2
   fi
 
-  BATTERY_DAEMON_SOCKET_DIR="$(mktemp -d -t tidepool-extract-daemon.XXXXXX)"
-  local sock="$BATTERY_DAEMON_SOCKET_DIR/extract.sock"
-  local log="$BATTERY_DAEMON_SOCKET_DIR/daemon.log"
+  COMPILE_DAEMON_SOCKET_DIR="$(mktemp -d -t tidepool-extract-daemon.XXXXXX)"
+  local sock="$COMPILE_DAEMON_SOCKET_DIR/extract.sock"
+  local log="$COMPILE_DAEMON_SOCKET_DIR/daemon.log"
   export TIDEPOOL_EXTRACT_DAEMON_LOG="$log"
-
-  local stamp
-  stamp="$(_battery_daemon_stamp_path)"
-  local watch_args=()
-  if [ -f "$stamp" ]; then
-    watch_args=(--watch-stamp "$stamp")
-  else
-    echo "==> no toolchain stamp at $stamp (nothing deployed via scripts/redeploy.sh on this machine yet) — starting compile daemon without --watch-stamp" >&2
-  fi
 
   # The detailed log carries per-request compile costs; with TIDEPOOL_TIMING=1
   # it also carries each phase and every memo miss.
-  local compiler_log="$BATTERY_DAEMON_SOCKET_DIR/compiler.log"
+  local compiler_log="$COMPILE_DAEMON_SOCKET_DIR/compiler.log"
   echo "==> starting per-run resident compile daemon: socket=$sock log=$log detail=$compiler_log" >&2
   # Rotation, RSS, and worker-count defaults stay in the frontend; set
   # TIDEPOOL_DAEMON_ARGS (e.g. "--workers 3 --rss-ceiling-mb 7168") to override.
   # Rotation, RSS, and worker-count flags are omitted so the frontend owns
   # their defaults (a persistent daemon defaults to several concurrent GHC
   # workers; see tidepool/extract-cmd/CLAUDE.md).
-  "$TIDEPOOL_EXTRACT" --daemon --persistent --socket "$sock" --log-path "$compiler_log" "${watch_args[@]}" "${_per_run_args[@]}" ${TIDEPOOL_DAEMON_ARGS:-} >"$log" 2>&1 &
-  BATTERY_DAEMON_PID=$!
-  BATTERY_DAEMON_OWNED=1
+  "$TIDEPOOL_EXTRACT" --daemon --persistent --socket "$sock" --log-path "$compiler_log" "${_per_run_args[@]}" ${TIDEPOOL_DAEMON_ARGS:-} >"$log" 2>&1 &
+  COMPILE_DAEMON_PID=$!
+  COMPILE_DAEMON_OWNED=1
   # Recorded before the boot-wait below so a signal arriving mid-wait still
   # tears this down correctly (the caller installs its cleanup trap before
   # calling this function).
 
   local started_at=$SECONDS
-  while ! _battery_daemon_socket_alive "$sock"; do
-    if ! kill -0 "$BATTERY_DAEMON_PID" 2>/dev/null; then
+  while ! _compile_daemon_socket_alive "$sock"; do
+    if ! kill -0 "$COMPILE_DAEMON_PID" 2>/dev/null; then
       echo "==> compile daemon exited before readiness (see $log)" >&2
-      wait "$BATTERY_DAEMON_PID" 2>/dev/null || true
-      BATTERY_DAEMON_PID=""
+      wait "$COMPILE_DAEMON_PID" 2>/dev/null || true
+      COMPILE_DAEMON_PID=""
       if [ "$measurement" = 1 ]; then
-        BATTERY_DAEMON_START_FAILED=1
+        COMPILE_DAEMON_START_FAILED=1
         echo "error: measurement compile daemon exited before readiness; direct fallback is forbidden (see $log)" >&2
         return 1
       fi
-      _battery_direct_fallback
+      _compile_direct_fallback
       return $?
     fi
     if [ $((SECONDS - started_at)) -ge 30 ]; then
       echo "==> compile daemon was not ready within 30s (see $log)" >&2
-      _terminate_and_wait "$BATTERY_DAEMON_PID" "compile daemon startup"
-      BATTERY_DAEMON_PID=""
+      _terminate_and_wait "$COMPILE_DAEMON_PID" "compile daemon startup"
+      COMPILE_DAEMON_PID=""
       if [ "$measurement" = 1 ]; then
-        BATTERY_DAEMON_START_FAILED=1
+        COMPILE_DAEMON_START_FAILED=1
         echo "error: measurement compile daemon was not ready within 30s; direct fallback is forbidden (see $log)" >&2
         return 1
       fi
-      _battery_direct_fallback
+      _compile_direct_fallback
       return $?
     fi
     sleep 0.5
   done
 
   export TIDEPOOL_EXTRACT_DAEMON_SOCKET="$sock"
-  BATTERY_DAEMON_OWNED=1
-  echo "==> compile daemon up: pid=$BATTERY_DAEMON_PID socket=$sock" >&2
+  COMPILE_DAEMON_OWNED=1
+  echo "==> compile daemon up: pid=$COMPILE_DAEMON_PID socket=$sock" >&2
   if [ "$measurement" = 1 ]; then
     local identity expected_producer deadline=$((SECONDS + 10))
     expected_producer="$(_current_producer_hex 2>/dev/null)" || {
       echo "error: could not determine the resolved compile producer identity" >&2
-      BATTERY_DAEMON_START_FAILED=1
-      teardown_battery_daemon --preserve-logs
+      COMPILE_DAEMON_START_FAILED=1
+      teardown_compile_daemon --preserve-logs
       return 1
     }
     while :; do
-      identity="$(_measurement_daemon_identity "${compiler_log%.log}.jsonl" "$BATTERY_DAEMON_PID" "$expected_producer")" || identity=""
+      identity="$(_measurement_daemon_identity "${compiler_log%.log}.jsonl" "$COMPILE_DAEMON_PID" "$expected_producer")" || identity=""
       [ -n "$identity" ] && break
-      if [ "$SECONDS" -ge "$deadline" ] || ! kill -0 "$BATTERY_DAEMON_PID" 2>/dev/null; then
+      if [ "$SECONDS" -ge "$deadline" ] || ! kill -0 "$COMPILE_DAEMON_PID" 2>/dev/null; then
         echo "error: owned compile daemon did not publish matching producer/pid/epoch evidence (see $log and $compiler_log)" >&2
-        BATTERY_DAEMON_START_FAILED=1
-        teardown_battery_daemon --preserve-logs
+        COMPILE_DAEMON_START_FAILED=1
+        teardown_compile_daemon --preserve-logs
         return 1
       fi
       sleep 0.1
@@ -717,7 +248,7 @@ start_battery_daemon() {
 # Emits the ready record's producer, daemon PID and epoch only when it matches
 # this owned process and the resolved frontend's producer identity.
 _measurement_daemon_identity() {
-  python3 - "$1" "$2" "$3" <<'PYIDENTITY'
+  "${NATIVE_OPERATOR_PYTHON:-python3}" - "$1" "$2" "$3" <<'PYIDENTITY'
 import json, re, sys
 path, expected_pid, expected_producer = sys.argv[1:]
 if not expected_producer:
@@ -750,30 +281,16 @@ else:
 PYIDENTITY
 }
 
-_battery_direct_fallback() {
-  BATTERY_DAEMON_START_FAILED=1
-  BATTERY_DAEMON_OWNED=0
+_compile_direct_fallback() {
+  COMPILE_DAEMON_START_FAILED=1
+  COMPILE_DAEMON_OWNED=0
   unset TIDEPOOL_EXTRACT_DAEMON_SOCKET
   validate_tidepool_extract_endpoint || return 1
   echo "==> compile daemon unavailable; direct compiler endpoint validated, using direct spawn per request" >&2
 }
 
-# Sends TERM to pid $1, waits up to a 10s grace period (polling `kill -0`),
-# escalates to KILL on that SAME pid if it's still alive, then blocks until
-# it's actually reaped (`wait`) — so a caller never proceeds while $1 or its
-# own children may still be alive. $2 is a short label for the log lines. Still "exact
-# recorded pid, never pattern-kill" — this only ever escalates signal
-# strength on the SAME identified process, never widens the target.
-#
-# The escalation is load-bearing, not defensive fluff: observed in
-# practice, a process can catch SIGTERM (it's in its signal mask) without
-# exiting promptly while idle-blocked in a syscall (e.g. the compile
-# daemon's own accept() loop — GHC's RTS defers signal handling to the next
-# safe point, which an idle blocking accept() may not reach for a while).
-# A plain TERM+wait can therefore hang the caller indefinitely; SIGKILL
-# cannot be caught or deferred, so the bound is a hard guarantee. Shared by
-# teardown_battery_daemon below and both battery scripts' on_signal, so this
-# sequence has exactly one implementation.
+# Terminate only the recorded daemon PID, escalate after ten seconds, and reap
+# children owned by this shell. Shared by transient and persistent daemon stops.
 _terminate_and_wait() {
   local pid="$1" label="$2"
   if ! kill -0 "$pid" 2>/dev/null; then
@@ -793,62 +310,38 @@ _terminate_and_wait() {
   wait "$pid" 2>/dev/null || true
 }
 
-# Tears down a daemon this process started (no-op if BATTERY_DAEMON_OWNED=0
+# Tears down a daemon this process started (no-op if COMPILE_DAEMON_OWNED=0
 # — disabled, failed to start, or reusing an outer wrapper's daemon), via
 # _terminate_and_wait above. Call from an EXIT trap installed BEFORE
-# start_battery_daemon runs, so it also fires if a signal lands mid-boot
-# (see start_battery_daemon's comment).
-teardown_battery_daemon() {
+# start_compile_daemon runs, so it also fires if a signal lands mid-boot
+# (see start_compile_daemon's comment).
+teardown_compile_daemon() {
   local preserve_logs=0
   [ "${1:-}" != "--preserve-logs" ] || preserve_logs=1
-  if [ "$BATTERY_DAEMON_OWNED" = 1 ] && [ -n "$BATTERY_DAEMON_PID" ]; then
-    _terminate_and_wait "$BATTERY_DAEMON_PID" "compile daemon"
-    echo "==> compile daemon (pid $BATTERY_DAEMON_PID) torn down" >&2
+  if [ "$COMPILE_DAEMON_OWNED" = 1 ] && [ -n "$COMPILE_DAEMON_PID" ]; then
+    _terminate_and_wait "$COMPILE_DAEMON_PID" "compile daemon"
+    echo "==> compile daemon (pid $COMPILE_DAEMON_PID) torn down" >&2
   fi
-  BATTERY_DAEMON_PID=""
-  if [ "$preserve_logs" = 0 ] && [ -n "$BATTERY_DAEMON_SOCKET_DIR" ] && [ -d "$BATTERY_DAEMON_SOCKET_DIR" ]; then
-    if [ "$BATTERY_DAEMON_START_FAILED" = 1 ] && [ -z "$BATTERY_ARTIFACT_DIR" ]; then
-      echo "==> retained compile daemon startup log: $BATTERY_DAEMON_SOCKET_DIR/daemon.log" >&2
+  COMPILE_DAEMON_PID=""
+  if [ "$preserve_logs" = 0 ] && [ -n "$COMPILE_DAEMON_SOCKET_DIR" ] && [ -d "$COMPILE_DAEMON_SOCKET_DIR" ]; then
+    if [ "$COMPILE_DAEMON_START_FAILED" = 1 ]; then
+      echo "==> retained compile daemon startup log: $COMPILE_DAEMON_SOCKET_DIR/daemon.log" >&2
     else
-      rm -rf "$BATTERY_DAEMON_SOCKET_DIR"
+      rm -rf "$COMPILE_DAEMON_SOCKET_DIR"
     fi
   fi
-  if [ "$BATTERY_DAEMON_OWNED" = 1 ]; then
+  if [ "$COMPILE_DAEMON_OWNED" = 1 ]; then
     unset TIDEPOOL_EXTRACT_DAEMON_SOCKET
   fi
   if [ "$preserve_logs" = 0 ]; then
-    BATTERY_DAEMON_SOCKET_DIR=""
-    BATTERY_DAEMON_OWNED=0
+    COMPILE_DAEMON_SOCKET_DIR=""
+    COMPILE_DAEMON_OWNED=0
     unset TIDEPOOL_EXTRACT_DAEMON_LOG
   fi
 }
 
-# --- Persistent compile daemon ---
-#
-# A second daemon lifecycle, independent of start_battery_daemon/
-# teardown_battery_daemon above: those boot a fresh daemon per script
-# invocation and always tear it down at exit, so the GHC module memo dies
-# with every `just test`. daemon_start_persistent instead boots one
-# long-lived daemon under a well-known directory and leaves it running past
-# the invoking shell; start_battery_daemon's reuse check picks it up
-# automatically (see above) whenever the caller has not already supplied its
-# own $TIDEPOOL_EXTRACT_DAEMON_SOCKET. `just daemon-start` / `just
-# daemon-stop` are the direct entry points.
-#
-# Directory layout under <cache_dir>/battery-daemon/ (cache_dir() above):
-#   extract.sock  - the daemon's listening socket
-#   daemon.pid    - pid of the daemon process this helper started
-#   daemon.log    - the daemon's stdout+stderr (includes its "compiler
-#                   daemon ready ... producer=<hex>" banner)
-#   compiler.log  - the daemon's --log-path detailed/trace log
-#   producer      - hex producer identity recorded at the daemon's last
-#                   successful start, used to detect staleness below
-#   daemon.exe    - the frontend it runs (TIDEPOOL_EXTRACT)
-#   daemon.worker - the worker it runs (TIDEPOOL_EXTRACT_WORKER, may be empty)
-#   sources       - tidepool_extract_source_fingerprint of the checkout that
-#                   built them; absent when the extractor was supplied
-#                   externally. Checkouts with the same fingerprint adopt this
-#                   daemon (_adopt_persistent_daemon_extractor).
+# Persistent daemon operations retain their exact endpoint and producer.
+# Stopping uses that recorded frontend, not a newly selected bundle.
 
 # Mirrors tidepool-toolchain's paths::persistent_compile_daemon_socket, which
 # `exomonad init`'s preflight reads; change both together.
@@ -898,17 +391,7 @@ _current_producer_hex() {
 # as-is and left running. A stale (producer mismatch) or dead/half-started
 # daemon left in the directory is cleaned up (recorded pid terminated if
 # still alive) before a fresh one is launched. Must run after
-# resolve_tidepool_extract (needs $TIDEPOOL_EXTRACT).
-_record_persistent_daemon_sources() {
-  local dir="$1"
-  printf '%s\n' "${TIDEPOOL_EXTRACT_WORKER:-}" >"$dir/daemon.worker"
-  if [ -n "${TIDEPOOL_EXTRACT_SOURCES:-}" ]; then
-    printf '%s\n' "$TIDEPOOL_EXTRACT_SOURCES" >"$dir/sources"
-  else
-    rm -f "$dir/sources"
-  fi
-}
-
+# select_native_bundle (needs $TIDEPOOL_EXTRACT).
 daemon_start_persistent() {
   local dir sock pidfile log compiler_log producer_file
   dir="$(_persistent_daemon_dir)"
@@ -925,11 +408,8 @@ daemon_start_persistent() {
     return 1
   }
 
-  if _battery_daemon_socket_alive "$sock"; then
+  if _compile_daemon_socket_alive "$sock"; then
     if [ -f "$producer_file" ] && [ "$(cat "$producer_file" 2>/dev/null)" = "$current_producer" ]; then
-      # The producer matches this checkout's fresh build, so its sources
-      # describe the running daemon too; record them if an older start did not.
-      [ -f "$dir/sources" ] || _record_persistent_daemon_sources "$dir"
       export TIDEPOOL_EXTRACT_DAEMON_SOCKET="$sock"
       echo "==> persistent compile daemon already running: socket=$sock" >&2
       echo "export TIDEPOOL_EXTRACT_DAEMON_SOCKET=$sock"
@@ -942,26 +422,20 @@ daemon_start_persistent() {
     daemon_stop_persistent
   fi
 
-  local stamp watch_args=()
-  stamp="$(_battery_daemon_stamp_path)"
-  if [ -f "$stamp" ]; then
-    watch_args=(--watch-stamp "$stamp")
-  fi
-
   echo "==> starting persistent compile daemon: socket=$sock log=$log detail=$compiler_log" >&2
   # The extractor arms PDEATHSIG against its launcher (tidepool/extract-cmd
   # process.rs), so it cannot be detached directly: it would die with the
   # `just daemon-start` shell. A setsid'd bash keeper stays as its parent
   # and waits on it; the pid file records the daemon itself. Rotation, RSS,
   # and worker-count flags are omitted so the frontend owns their defaults,
-  # matching start_battery_daemon above.
+  # matching start_compile_daemon above.
   rm -f "$pidfile"
-  # The daemon outlives this dev shell, whose TMPDIR is removed when it exits;
+  # The daemon outlives its launcher and needs a persistent temporary directory;
   # give it a TMPDIR of its own beside its socket.
   mkdir -p "$dir/tmp"
   TMPDIR="$dir/tmp" TMP="$dir/tmp" TEMP="$dir/tmp" TEMPDIR="$dir/tmp" PERSISTENT_PIDFILE="$pidfile" setsid bash -c '"$@" </dev/null & echo "$!" >"$PERSISTENT_PIDFILE"; wait "$!"' \
     persistent-daemon-keeper \
-    "$TIDEPOOL_EXTRACT" --daemon --persistent --socket "$sock" --log-path "$compiler_log" "${watch_args[@]}" ${TIDEPOOL_DAEMON_ARGS:-} \
+    "$TIDEPOOL_EXTRACT" --daemon --persistent --socket "$sock" --log-path "$compiler_log" ${TIDEPOOL_DAEMON_ARGS:-} \
     </dev/null >"$log" 2>&1 &
   local pid=""
   local pid_wait=0
@@ -975,7 +449,7 @@ daemon_start_persistent() {
   fi
 
   local started_at=$SECONDS
-  while ! _battery_daemon_socket_alive "$sock"; do
+  while ! _compile_daemon_socket_alive "$sock"; do
     if ! kill -0 "$pid" 2>/dev/null; then
       echo "error: persistent compile daemon exited before readiness (see $log)" >&2
       wait "$pid" 2>/dev/null || true
@@ -993,10 +467,9 @@ daemon_start_persistent() {
 
   printf '%s\n' "$current_producer" >"$producer_file"
   # Recorded so a later, unrelated `just daemon-stop` shell (which never
-  # calls resolve_tidepool_extract itself) can still ask THIS daemon to stop
+  # selects a bundle itself) can still ask THIS daemon to stop
   # gracefully with its own binary, matching producer_file's convention.
   printf '%s\n' "$TIDEPOOL_EXTRACT" >"$dir/daemon.exe"
-  _record_persistent_daemon_sources "$dir"
   export TIDEPOOL_EXTRACT_DAEMON_SOCKET="$sock"
   echo "==> persistent compile daemon up: pid=$pid socket=$sock" >&2
   echo "export TIDEPOOL_EXTRACT_DAEMON_SOCKET=$sock"
@@ -1014,7 +487,7 @@ daemon_start_persistent() {
 # concurrent caller is waiting on. The running daemon's own binary path,
 # recorded by daemon_start_persistent at launch (daemon.exe, alongside
 # producer_file), is invoked rather than a resolved $TIDEPOOL_EXTRACT: this
-# function runs from `just daemon-stop` before any resolve_tidepool_extract,
+# function runs from `just daemon-stop` before any bundle selection,
 # and it must speak the exact wire the running daemon does.
 daemon_stop_persistent() {
   local dir sock pidfile producer_file exe_file

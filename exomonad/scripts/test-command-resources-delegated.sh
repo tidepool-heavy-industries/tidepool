@@ -1,36 +1,15 @@
 #!/usr/bin/env bash
+# The declared runner owns discovery/counts and launches only each test process
+# into a fresh delegated service, leaving Buck and the runner outside it.
 set -euo pipefail
-
-binary="$({
-  cargo test -p exomonad-node --test command_resources --no-run --message-format=json
-} | jq -r '
-  select(
-    .reason == "compiler-artifact"
-    and .profile.test
-    and .target.name == "command_resources"
-  )
-  | .executable // empty
-' | tail -n 1)"
-
-if [[ -z "$binary" || ! -x "$binary" ]]; then
-  echo "could not locate the command_resources test binary" >&2
-  exit 1
-fi
-
-# Service mode puts only the test process in the delegated cgroup. A transient
-# --scope also contains the systemd-run client, which prevents the test owner
-# from enabling controllers after it moves itself into its control subgroup.
-unit="tidepool-command-resources-test-$$"
-systemd-run \
-  --user \
-  --pipe \
-  --wait \
-  --collect \
-  --service-type=exec \
-  --property=Delegate=yes \
-  --setenv="PATH=$PATH" \
-  --unit="$unit" \
-  "$(realpath "$binary")" \
-  --ignored \
-  --test-threads=1 \
-  --nocapture
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+output="${1:?usage: test-command-resources-delegated.sh OUTPUT}"
+[[ $# -eq 1 ]] || { echo 'error: expected a fresh evidence directory' >&2; exit 2; }
+[[ ! -e "$output" ]] || { echo "error: evidence directory already exists: $output" >&2; exit 2; }
+exec bash "$repo_root/scripts/buck2-run.sh" run --local-only -c remote.enabled=false \
+  //exomonad/node:command_resources -- \
+  --exact command_oom_and_queue_preserve_the_control_process \
+  --exact actor_admission_times_out_without_starting \
+  --exact shared_clients_retain_queued_work_after_observer_disconnect \
+  --expected-count 3 --ignored --jobs 1 --delegated-service \
+  --service-slice "${TIDEPOOL_TEST_SLICE:-app.slice}" --output-dir "$output"
