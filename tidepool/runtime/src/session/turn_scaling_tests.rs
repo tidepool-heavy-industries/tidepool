@@ -1654,20 +1654,10 @@ fn checked_cell_retained_imports_preserve_value_callable_and_generation() {
         &ScalePublication::Ephemeral,
     );
 
-    // This oracle was evaluated independently by GHC from ImportConsumerOracle.
-    let oracle: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../bridge/haskell/test-prepared-stg/ImportConsumerExpectations.json"
-    ))
-    .unwrap();
-    let expected_value = oracle["expectations"]["consumerValueAt"]["value"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|value| value.as_i64().unwrap())
-        .collect::<Vec<_>>();
-    let expected_result = oracle["expectations"]["consumerResult"]["value"]
-        .as_i64()
-        .unwrap();
+    // The producer fixture returns this exact list. Its callable adds the
+    // list length, so applying it to that length yields 3 + 3.
+    let expected_value = [1_i64, 2, 3];
+    let expected_result = 6_i64;
     let check_original = format!(
         "if consumerValue == {expected_value:?} && consumerResult == {expected_result} then pure () else error \"retained import oracle mismatch\""
     );
