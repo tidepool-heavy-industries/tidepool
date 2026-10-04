@@ -76,6 +76,35 @@ def nix_path(path: Path) -> Path:
     return resolved
 
 
+def store_root(path: Path) -> Path:
+    return Path(*nix_path(path).parts[:4])
+
+
+def nix_metadata(tools: Path, roots: list[str]) -> dict:
+    executable = str(tools / "bin/nix-store")
+    closure = sorted(set(subprocess.check_output(
+        [executable, "--query", "--requisites", *roots], text=True, timeout=60).splitlines()))
+    hashes = subprocess.check_output(
+        [executable, "--query", "--hash", *closure], text=True, timeout=60).splitlines()
+    if len(hashes) != len(closure) or not closure or any(not value.startswith("sha256:") for value in hashes):
+        raise ValueError("declared Nix closure lacks complete SHA-256 NAR evidence")
+    return {"roots": roots, "closure": closure, "nar_hashes": dict(zip(closure, hashes))}
+
+
+def pin_nix_closure(root: Path, tools: Path, selected: list[Path]) -> tuple[dict, list[dict]]:
+    roots = sorted({str(store_root(path)) for path in selected})
+    pinned = []
+    for selected_root in roots:
+        target = root / "share/exomonad/gc-roots" / hashlib.sha256(selected_root.encode()).hexdigest()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        command = [str(tools / "bin/nix-store"), "--add-root", str(target), "--indirect", "--realise", selected_root]
+        subprocess.run(command, check=True, capture_output=True, timeout=60)
+        if target.resolve(strict=True) != Path(selected_root):
+            raise ValueError(f"Nix did not retain the requested deployment root: {target}")
+        pinned.append({"path": str(target), "store_path": selected_root, "command": command, "exit_code": 0})
+    return nix_metadata(tools, roots), pinned
+
+
 def native_environment(root: Path) -> dict:
     ghc = (root / "share/exomonad/ghc-libdir.txt").read_text().strip()
     tools = (root / "share/exomonad/runtime-tools").resolve(strict=True)
@@ -141,10 +170,12 @@ def loader_evidence(root: Path, environment: dict) -> dict:
             selected = Path(match[1]).resolve(strict=True)
             if not (selected.is_relative_to(root) or str(selected).startswith("/nix/store/")):
                 raise ValueError(f"{name} still loads a non-deployment library: {selected}")
-            libraries[str(selected)] = sha256(selected)
+            libraries[str(selected)] = (
+                {"sha256": sha256(selected)} if selected.is_relative_to(root)
+                else {"store_path": str(store_root(selected))})
         if "not found" in result.stdout:
             raise ValueError(f"unresolved native runtime dependency: {name}")
-        evidence[name] = {"linkage": "dynamic", "loader": str(loader), "loader_sha256": sha256(loader),
+        evidence[name] = {"linkage": "dynamic", "loader": str(loader), "loader_store_path": str(store_root(loader)),
                           "libraries": libraries,
                           "stdout": re.sub(r"0x[0-9a-f]+", "<address>", result.stdout)}
     return evidence
@@ -232,10 +263,16 @@ def freeze(args) -> Path:
     external = {}
     for key in ("TIDEPOOL_GHC_LIBDIR", "TIDEPOOL_BROWSER_NODE", "PLAYWRIGHT_BROWSERS_PATH"):
         path = nix_path(Path(environment[key]))
-        external[key] = {"path": str(path), "inventory": inventory(path) if path.is_dir() else {"sha256": sha256(path)}}
+        external[key] = {"path": str(path), "store_path": str(store_root(path))}
     tools = (root / "share/exomonad/runtime-tools").resolve(strict=True)
-    external["runtime_tools"] = {"path": str(tools), "inventory": inventory(tools)}
+    external["runtime_tools"] = {"path": str(tools), "store_path": str(store_root(tools))}
     evidence = loader_evidence(root, execution_environment({"environment": environment}))
+    selected = [Path(item["path"]) for item in external.values()]
+    for item in evidence.values():
+        if item["linkage"] == "dynamic":
+            selected.append(Path(item["loader"]))
+            selected.extend(Path(path) for path in item["libraries"] if path.startswith("/nix/store/"))
+    closure, gc_roots = pin_nix_closure(root, tools, selected)
     copied_log = root / "share/exomonad/build.log"
     shutil.copy2(args.build_log, copied_log)
     descriptor = {
@@ -245,6 +282,7 @@ def freeze(args) -> Path:
         "source_inputs": {name: sha256(source / name) for name in ("Cargo.toml", "Cargo.lock", "flake.nix", "flake.lock", "scripts/native-profile.toml")},
         "build": {"commands": commands, "log": str(copied_log), "log_sha256": sha256(copied_log)},
         "environment": environment, "external_inputs": external, "elf_runtime": evidence,
+        "nix_closure": closure, "gc_roots": gc_roots,
         "programs": {"libtest": str(root / "bin/tidepool-tests"), "runner": str(root / "share/exomonad/isolated-libtest.py"),
                      "host": str(root / "bin/exomonad"), "host_elf": str(root / "bin/exomonad-unwrapped")},
         "cohorts": {"m2": {"tests": M2_TESTS, "expected_count": 6, "ignored": False, "timeout": 600},
@@ -275,11 +313,15 @@ def verify(path: Path) -> dict:
         raise ValueError("runtime inventory digest mismatch")
     for item in descriptor["external_inputs"].values():
         path = nix_path(Path(item["path"]))
-        expected = item.get("inventory")
-        if expected is not None and inventory(path) != expected:
-            raise ValueError(f"declared toolchain directory changed: {path}")
-        if expected is None and sha256(path) != item["sha256"]:
-            raise ValueError(f"declared toolchain executable changed: {path}")
+        if str(store_root(path)) != item["store_path"]:
+            raise ValueError(f"declared Nix selection changed: {path}")
+    if descriptor["external_inputs"]:
+        tools = Path(descriptor["external_inputs"]["runtime_tools"]["path"])
+        if nix_metadata(tools, descriptor["nix_closure"]["roots"]) != descriptor["nix_closure"]:
+            raise ValueError("declared immutable Nix closure identity changed")
+        for pinned in descriptor["gc_roots"]:
+            if Path(pinned["path"]).resolve(strict=True) != Path(pinned["store_path"]):
+                raise ValueError("deployment Nix GC root was removed or changed")
     if loader_evidence(root, execution_environment(descriptor)) != descriptor["elf_runtime"]:
         raise ValueError("native runtime loader dependency resolution changed")
     return descriptor
