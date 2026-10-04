@@ -43,6 +43,8 @@ mod embedded_checkpoint_children_survive_later_failure_tests;
 #[cfg(test)]
 mod embedded_checkpoint_children_tests;
 #[cfg(test)]
+mod embedded_checkpoint_release_tests;
+#[cfg(test)]
 mod embedded_command_tests;
 mod embedded_context;
 mod embedded_harness;
