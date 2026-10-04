@@ -51,7 +51,7 @@ class CabalMetadataTests(unittest.TestCase):
         self.assertTrue(all(value["flags"]["unrelated"] is False for value in metadata["configurations"]))
 
     def test_compiler_and_platform_conditions_use_the_pinned_identity(self):
-        metadata = self.metadata(LIBRARY + "  if os(linux) && arch(x86_64) && impl(ghc >= 9.12)\n    build-depends: unix\n  else\n    build-depends: Win32\n")
+        metadata = self.metadata(LIBRARY + "  if os(linux) && arch(x86_64) && impl(ghc >= 9.12.1)\n    build-depends: unix\n  else\n    build-depends: Win32\n")
         self.assertEqual(metadata["platform"], "x86_64-linux")
         self.assertTrue(metadata["compiler"].startswith("ghc-9.12."))
         dependencies = self.phase(metadata, "production")["components"][0]["dependencies"]

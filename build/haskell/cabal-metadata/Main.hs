@@ -7,13 +7,14 @@ import Data.ByteString.Lazy qualified as LBS
 import Data.Foldable (toList)
 import Data.List (sortOn)
 import Distribution.Compiler
-  ( CompilerFlavor(GHC), AbiTag(NoAbiTag), buildCompilerId, unknownCompilerInfo
+  ( CompilerFlavor(GHC), AbiTag(NoAbiTag), CompilerId(..), unknownCompilerInfo
   , perCompilerFlavorToList )
 import Distribution.Package (pkgName, pkgVersion)
 import Distribution.PackageDescription
 import Distribution.PackageDescription.Configuration (finalizePD)
 import Distribution.PackageDescription.Parsec
   ( parseGenericPackageDescription, runParseResult )
+import Distribution.Parsec (simpleParsec)
 import Distribution.Pretty (prettyShow)
 import Distribution.System (buildPlatform)
 import Distribution.Types.ComponentRequestedSpec (ComponentRequestedSpec(..))
@@ -25,6 +26,7 @@ import Distribution.Types.Flag
 import Distribution.Types.LibraryName (LibraryName(..), showLibraryName)
 import Distribution.Utils.Json (Json(..), renderJson)
 import Distribution.Utils.Path (getSymbolicPath)
+import GHC.Version (cProjectVersion)
 import Numeric (showHex)
 import System.Environment (getArgs)
 import System.Exit (die)
@@ -164,11 +166,11 @@ componentsJson phase description = do
           (Just (getSymbolicPath path)) [] (testBuildInfo component)
         _ -> die (prettyShow (testName component) ++ ": unsupported native test interface")
 
-finalize :: GenericPackageDescription -> Phase -> IO Json
-finalize generic phase = do
+finalize :: GenericPackageDescription -> CompilerId -> Phase -> IO Json
+finalize generic compilerId phase = do
   let requested = ComponentRequestedSpec (phase == Tests) False
       assignment = flagAssignment phase generic
-      identity = unknownCompilerInfo buildCompilerId NoAbiTag
+      identity = unknownCompilerInfo compilerId NoAbiTag
   -- Every package flag is assigned explicitly. This resolves conditions without
   -- a dependency solver; native Buck/Nix edges own actual package availability.
   (description, resolvedFlags) <- either
@@ -192,12 +194,16 @@ main = do
   -- warnings as errors here so unsupported syntax never silently changes a graph.
   unless (null warnings) (die (path ++ ": Cabal parse warnings: " ++ show warnings))
   generic <- either (\failure -> die (path ++ ": Cabal parse failure: " ++ show failure)) pure parsed
-  phases <- mapM (finalize generic) [Production, Tests, Benchmarks]
+  -- Cabal buildCompilerId omits the GHC patch version. The pinned ghc-boot
+  -- package supplies the full compiler identity used by impl(ghc ...) clauses.
+  compilerId <- maybe (die "pinned GHC has an invalid project version") (pure . CompilerId GHC)
+    (simpleParsec cProjectVersion)
+  phases <- mapM (finalize generic compilerId) [Production, Tests, Benchmarks]
   let description = packageDescription generic
   LBS.putStr $ renderJson $ JsonObject
     [ ("schema", JsonNumber 1)
     , ("source_sha256", JsonString (concatMap (\byte -> let digits = showHex byte "" in replicate (2 - length digits) '0' ++ digits) (BS.unpack (SHA256.hash bytes))))
-    , ("compiler", JsonString (prettyShow buildCompilerId))
+    , ("compiler", JsonString (prettyShow compilerId))
     , ("platform", JsonString (prettyShow buildPlatform))
     , ("package", JsonString (prettyShow (pkgName (package description))))
     , ("version", JsonString (prettyShow (pkgVersion (package description))))
