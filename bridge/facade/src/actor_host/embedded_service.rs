@@ -532,6 +532,7 @@ where
     C: harness::engine::ResponsesTransport,
 {
     let EmbeddedConversation {
+        provider_admission,
         conversation,
         mut incoming,
         round_control,
@@ -607,8 +608,24 @@ where
         let round = round_control
             .begin()
             .map_err(|error| format!("could not begin embedded Engine round: {error}"))?;
-        let observed_round =
-            observation.begin_provider_turn(provider_thread.clone(), round.id().0.to_string())?;
+        let observed_round = match provider_admission
+            .begin_provider_turn(provider_thread.clone(), round.id().0.to_string())
+        {
+            Ok(lease) => lease,
+            Err(exomonad_actor::NativeProviderStartError::RetirementPending) => {
+                drop(round);
+                tokio::select! {
+                    biased;
+                    changed = cancellation.changed() => {
+                        if changed.is_err() || *cancellation.borrow() { return Ok(()); }
+                    }
+                    () = provider_admission.wait_for_retirement_decision() => {}
+                }
+                continue;
+            }
+            Err(exomonad_actor::NativeProviderStartError::Closed) => return Ok(()),
+            Err(error) => return Err(error.to_string().into()),
+        };
         let result = {
             lifecycle.publish(actor_ref, harness::server::HostActorLifecycle::Running);
             let run = async {
@@ -709,6 +726,7 @@ where
         if !advanced.map_err(|error| error.to_string())? {
             return Err(format!("embedded conversation {} lost its durable head", actor.0).into());
         }
+        drop(round);
         // Provider idleness authorizes typed cleanup. Publish it only after
         // Engine settlement and the matching durable head transition.
         if interrupted {
@@ -718,7 +736,6 @@ where
         } else {
             observed_round.succeed();
         }
-        drop(round);
         if lifetime_stopped || *cancellation.borrow() {
             return Ok(());
         }
