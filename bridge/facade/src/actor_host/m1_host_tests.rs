@@ -166,7 +166,7 @@ async fn browser_socket(
     tokio_tungstenite::connect_async(request).await.unwrap().0
 }
 
-async fn next_browser_event(
+pub(super) async fn next_browser_event(
     socket: &mut tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     >,

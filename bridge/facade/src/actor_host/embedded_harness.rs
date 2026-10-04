@@ -1347,10 +1347,7 @@ mod round_control_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::actor_host::embedded_projection::{EmbeddedProjection, LifecycleState};
-    use crate::actor_host::embedded_service::{
-        attach_actor, drive_conversation_with_transport, submit_browser_command,
-    };
+    use crate::actor_host::hosted_test_context::HostedTestRuntime;
     use crate::actor_host::test_campaign::TestCampaign;
     use async_trait::async_trait;
     use futures_util::StreamExt;
@@ -1358,8 +1355,7 @@ mod tests {
         embedding::InputObservation,
         engine::ResponsesTransport,
         item::Item,
-        model::Effort,
-        transport::{Auth, ResponsesRequest, ResponsesTurn, TransportError},
+        transport::{ResponsesRequest, ResponsesTurn, TransportError},
     };
     use std::{sync::Mutex, time::Duration};
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -1483,14 +1479,6 @@ mod tests {
     }
 
     #[derive(Clone)]
-    struct Offline;
-    impl Auth for Offline {
-        fn access(&self) -> Result<(String, String), TransportError> {
-            panic!("offline transport must not request credentials")
-        }
-    }
-
-    #[derive(Clone)]
     struct ParkUntilInput {
         entered: Arc<tokio::sync::Notify>,
         completed: Arc<tokio::sync::Notify>,
@@ -1560,11 +1548,6 @@ mod tests {
 
     #[tokio::test]
     async fn production_embedded_engine_compacts_and_publishes_checkpoint_effect() {
-        let campaign = TestCampaign::start().await;
-        let actor = campaign.actor.identity();
-        let installation = Arc::new(EmbeddedPolicyInstallation::from_installation(
-            &campaign.root_installation,
-        ));
         let files = tempfile::tempdir().unwrap();
         let assets = files.path().join("assets");
         std::fs::create_dir_all(&assets).unwrap();
@@ -1586,34 +1569,6 @@ mod tests {
             context_capacity_tokens: 200_000,
             concurrent_jobs: 1,
         };
-        let mut service = campaign.prepare_embedded_service(&settings).await.unwrap();
-        let identity = HostIdentity {
-            run: super::super::runtime_namespace(campaign.session_root.path()),
-            actor: AgentPath("/root".into()),
-            incarnation: actor.incarnation.0.to_string(),
-        };
-        let wrong = HostIdentity {
-            incarnation: "wrong-incarnation".into(),
-            ..identity.clone()
-        };
-        assert!(service
-            .runtime
-            .attach(wrong, campaign.actor.clone(), installation.clone(), None)
-            .is_err());
-        let wrong_run = HostIdentity {
-            run: "another-run".into(),
-            ..identity.clone()
-        };
-        assert!(service
-            .runtime
-            .attach(
-                wrong_run,
-                campaign.actor.clone(),
-                installation.clone(),
-                None
-            )
-            .is_err());
-
         let transport = ParkUntilInput {
             entered: Arc::new(tokio::sync::Notify::new()),
             completed: Arc::new(tokio::sync::Notify::new()),
@@ -1621,54 +1576,24 @@ mod tests {
             requests: Arc::new(Mutex::new(vec![])),
             compactions: Arc::new(AtomicU64::new(0)),
         };
-        let embedded = attach_actor(
-            &service,
-            campaign.session_root.path(),
-            AgentPath("/root".into()),
-            None,
-            campaign.root_installation.clone(),
-            Some("start".into()),
+        let provider: Arc<dyn ResponsesTransport> = Arc::new(transport.clone());
+        let host = HostedTestRuntime::start(&settings, &provider)
+            .await
+            .unwrap();
+        let conversation = host
+            .context
+            .binding(host.context.actor.identity())
+            .unwrap()
+            .conversation()
+            .unwrap();
+        tokio::time::timeout(
+            COLD_NATIVE_CELL_SETTLEMENT_BUDGET,
+            transport.entered.notified(),
         )
         .await
-        .unwrap();
-        let conversation = Arc::clone(&embedded.conversation);
-        let cancellation = embedded.cancellation;
-        let (lifecycle, _lifecycle_rx) = tokio::sync::watch::channel((
-            Some(actor),
-            harness::server::HostActorLifecycle::Waiting,
-        ));
-        let settings_for_engine = settings.clone();
-        let runtime = Arc::clone(&service.runtime);
-        let transport_for_engine = transport.clone();
-        let mut running = tokio::spawn(async move {
-            drive_conversation_with_transport::<Offline, _>(
-                embedded.driver,
-                runtime,
-                &settings_for_engine,
-                "offline".into(),
-                Effort::Medium,
-                "resident test".into(),
-                embedded.cancellation_rx,
-                lifecycle,
-                actor,
-                transport_for_engine,
-            )
-            .await
-        });
-        tokio::select! {
-            result = &mut running => panic!("Engine stopped before completing its Haskell call: {result:?}"),
-            ready = tokio::time::timeout(COLD_NATIVE_CELL_SETTLEMENT_BUDGET, transport.entered.notified()) => {
-                if let Err(elapsed) = ready {
-                    panic!(
-                        "first native Haskell cell did not settle before provider round two within {elapsed:?}; provider_rounds={}, compactions={}, expected_call=raw-cell-1",
-                        transport.requests.lock().unwrap().len(),
-                        transport.compactions.load(Ordering::Relaxed),
-                    );
-                }
-            }
-        }
-        let origin = format!("https://{}", service.address);
-        let api = format!("http://{}/api", service.address);
+        .expect("actual admitted Haskell cell must settle before provider round two");
+        let origin = format!("https://{}", host.address);
+        let api = format!("http://{}/api", host.address);
         let client = reqwest::Client::new();
         let login = client
             .post(format!("{api}/session"))
@@ -1685,24 +1610,40 @@ mod tests {
             assert!(set_cookie.split(';').any(|part| part.trim() == flag));
         }
         let cookie = set_cookie.split(';').next().unwrap().to_owned();
+        let (mut receipt_socket, _) =
+            crate::actor_host::m1_host_tests::browser_snapshot(host.address, &cookie).await;
         let response = client
             .post(format!("{api}/commands"))
             .header("Origin", &origin)
             .header(reqwest::header::COOKIE, &cookie)
-            .json(&harness::server::ClientCommand::Submit {
-                command: "wake me".into(),
+            .json(&harness::server::ClientCommand::Host {
+                operation_id: harness::embedding::ClientOperationId(uuid::Uuid::new_v4()),
+                command: harness::server::HostCommand::Input {
+                    target: conversation.identity().clone(),
+                    text: "wake me".into(),
+                },
             })
             .send()
             .await
             .unwrap();
         assert_eq!(response.status(), reqwest::StatusCode::ACCEPTED);
-        let command = service.commands.recv().await.unwrap();
-        let command_id = command.command_id.clone();
-        let input_receipt = submit_browser_command(command, &conversation, &service.control)
-            .await
+        let accepted: serde_json::Value = response.json().await.unwrap();
+        let command_id = accepted["command_id"].as_str().unwrap().to_owned();
+        let receipt = crate::actor_host::m1_host_tests::next_browser_event(
+            &mut receipt_socket,
+            "command.receipt",
+        )
+        .await;
+        let receipt = &receipt["event"]["event"]["value"];
+        assert_eq!(receipt["commandId"], command_id);
+        assert_eq!(receipt["outcome"], "admitted");
+        let envelope_id = receipt["envelopeId"]
+            .as_str()
+            .unwrap()
+            .parse::<i64>()
             .unwrap();
-        assert!(input_receipt.wake_error.is_none(), "{input_receipt:?}");
-        let store = service.runtime.store();
+        receipt_socket.close(None).await.unwrap();
+        let store = host.runtime.store();
         let call = harness::model::CallId("raw-cell-1".into());
         let host_identity = conversation.identity().clone();
         let embedded_origin = ConversationIdentity::Embedded {
@@ -1718,7 +1659,7 @@ mod tests {
             .expect("the real Engine call must retain its exact embedded operation");
         let output = tokio::time::timeout(
             COLD_NATIVE_CELL_SETTLEMENT_BUDGET,
-            service.runtime.scheduler().wait(&claim.operation),
+            host.runtime.scheduler().wait(&claim.operation),
         )
         .await
         .unwrap_or_else(|_| {
@@ -1748,7 +1689,7 @@ mod tests {
             .expect("the real Engine checkpoint call must retain its exact operation");
         let checkpoint_output = tokio::time::timeout(
             COLD_NATIVE_CELL_SETTLEMENT_BUDGET,
-            service
+            host
                 .runtime
                 .scheduler()
                 .wait(&checkpoint_claim.operation),
@@ -1788,15 +1729,6 @@ mod tests {
             "{checkpoint_response}"
         );
         assert_eq!(checkpoint_item["output"], "True", "{checkpoint_response}");
-        cancellation.send_replace(true);
-        let engine_result = tokio::time::timeout(Duration::from_secs(5), running)
-            .await
-            .unwrap()
-            .unwrap();
-        match engine_result {
-            Ok(()) => {}
-            Err(error) => panic!("embedded Engine failed: {error}"),
-        }
         let requests = transport.requests.lock().unwrap();
         assert_eq!(requests.len(), 3);
         assert_eq!(transport.compactions.load(Ordering::Relaxed), 1);
@@ -1817,34 +1749,13 @@ mod tests {
             requests[2].input
         );
         assert!(matches!(
-            conversation
-                .input_observation(input_receipt.envelope_id)
-                .unwrap(),
+            conversation.input_observation(envelope_id).unwrap(),
             InputObservation::Included(_)
         ));
         drop(requests);
-        let mut projection = EmbeddedProjection::default();
-        projection.attached(actor, conversation.identity());
-        projection
-            .publish(
-                &service.control,
-                &conversation.identity().run,
-                &campaign.forest.inspect_host_graph(),
-                &LifecycleState::default(),
-                |_| conversation.active_round(),
-                |identity| {
-                    service
-                        .runtime
-                        .store()
-                        .embedded_agent_head(identity)
-                        .map(|head| head.map(|request| request.0))
-                },
-                |_| true,
-            )
-            .unwrap();
         let mut reconnect_identity = None;
         for _ in 0..2 {
-            let mut request = format!("ws://{}/api/ws", service.address)
+            let mut request = format!("ws://{}/api/ws", host.address)
                 .into_client_request()
                 .unwrap();
             request
@@ -1877,21 +1788,24 @@ mod tests {
                 command_receipts.iter().any(|command_receipt| {
                     command_receipt["commandId"] == command_id
                         && command_receipt["outcome"] == "admitted"
-                        && command_receipt["envelopeId"] == input_receipt.envelope_id.to_string()
+                        && command_receipt["envelopeId"] == envelope_id.to_string()
                 }),
                 "reconnect snapshot lost the admitted browser input receipt: {command_receipts:?}"
             );
             socket.close(None).await.unwrap();
         }
-        service.shutdown().await.unwrap();
-        drop(service);
+        host.stop().await.unwrap();
         let rotated_secret = "rotated-embedded-browser-test-secret-32-bytes";
         std::fs::write(
             settings.session_secret_file.as_ref().unwrap(),
             rotated_secret,
         )
         .unwrap();
-        let mut restarted = campaign.prepare_embedded_service(&settings).await.unwrap();
+        let (idle_provider, _held_requests) =
+            crate::actor_host::test_campaign::hosted_script_provider();
+        let restarted = HostedTestRuntime::start(&settings, &idle_provider)
+            .await
+            .unwrap();
         let restarted_api = format!("http://{}/api", restarted.address);
         let restarted_origin = format!("https://{}", restarted.address);
         let stale = client
@@ -1905,7 +1819,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(stale.status(), reqwest::StatusCode::UNAUTHORIZED);
-        assert!(restarted.commands.try_recv().is_err());
         for (secret, expected) in [
             (secret, reqwest::StatusCode::UNAUTHORIZED),
             (rotated_secret, reqwest::StatusCode::OK),
@@ -1919,9 +1832,7 @@ mod tests {
                 .unwrap();
             assert_eq!(login.status(), expected);
         }
-        restarted.shutdown().await.unwrap();
-        campaign.forest.shutdown().await;
-        campaign.hosted.await.unwrap();
+        restarted.stop().await.unwrap();
     }
 
     #[tokio::test]
@@ -1936,6 +1847,22 @@ mod tests {
             actor: AgentPath("/root".into()),
             incarnation: actor.incarnation.0.to_string(),
         };
+        let scratch_runtime =
+            EmbeddedHarnessRuntime::open(campaign.session_root.path(), 1).unwrap();
+        for foreign in [
+            HostIdentity {
+                incarnation: "wrong-incarnation".into(),
+                ..identity.clone()
+            },
+            HostIdentity {
+                run: "another-run".into(),
+                ..identity.clone()
+            },
+        ] {
+            assert!(scratch_runtime
+                .attach(foreign, campaign.actor.clone(), installation.clone(), None)
+                .is_err());
+        }
         let (wakes, _incoming) = mpsc::unbounded_channel();
         let scratch = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(scratch.path().join("store.sqlite")).unwrap());
