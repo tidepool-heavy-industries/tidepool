@@ -44,8 +44,11 @@ class FirstPartySources(unittest.TestCase):
         self.write("bridge/atomic-write/tests/fixtures/directory_fault.c", "fixture")
         self.write("tidepool/repr/src/lib.rs",
                    'const M3: &[u8] = include_bytes!("../../../bridge/haskell/test-prepared-stg/fixtures/m3-vertical.cbor");\n')
-        self.write("tidepool/repr/tests/suites/repr.rs",
-                   '#[path = "../execution_schema_contract.rs"] mod contract;\n')
+        self.write("tidepool/repr/tests/suites/repr.rs", "\n".join(
+            f'#[path = "../{name}.rs"] mod {name};'
+            for name in ("execution_schema_contract", "execution_schema_codec",
+                         "extend_checked_equivalence", "metadata_strictness", "strict_jsonl_directory")
+        ))
         for module in ("execution_schema_codec", "extend_checked_equivalence",
                        "metadata_strictness", "strict_jsonl_directory"):
             self.write(f"tidepool/repr/tests/{module}.rs", "")
@@ -137,9 +140,6 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
             self.package("exomonad-agent", "exomonad/agent", [
                 ("exomonad_agent", "lib", "src/lib.rs"),
             ])]
-        for package in self.packages:
-            if package["name"] in {"tidepool", "exomonad-agent"}:
-                package["features"] = {"default": ["codex-compat"], "codex-compat": []}
         self.write("bridge/facade/build.rs", "fn main() {}\n")
         for source in ("src/lib.rs", "src/main.rs", "src/bin/exomonad.rs", "src/view_helper.rs",
                        "src/compile_report_main.rs"):
@@ -188,7 +188,7 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         self.assertTrue(matches, buck)
         return buck, {name: ast.literal_eval(mapping) for name, mapping in matches}
 
-    def test_codegen_emits_native_units_and_only_the_md5_integration_test(self):
+    def test_codegen_emits_native_units_and_all_registered_integration_tests(self):
         result = self.generate()
         self.assertEqual(result.returncode, 0, result.stderr)
         buck, groups = self.groups("tidepool/codegen")
@@ -196,7 +196,7 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         self.assertIn('crate_root = "tidepool/codegen/tests/native_md5_link.rs"', buck)
         self.assertIn('deps = [\n        ":tidepool_codegen",', buck)
         self.assertIn("tests/native_md5_link.rs", groups["native_md5_link_sources"])
-        self.assertNotIn("prepared_control", buck)
+        self.assertIn("prepared_control", buck)
         self.assertIn("tidepool_codegen_unit_tests", buck)
         self.assertIn("tidepool_codegen_unit_tests_sources", groups)
 
@@ -260,21 +260,10 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
                 if name != "tidepool_unit_tests_sources":
                     self.assertNotIn(path, sources, name)
 
-    def test_plain_profile_disables_both_roots_and_omits_codex_source_tree(self):
-        result = self.generate("--package", "tidepool", "--package", "exomonad-agent")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        facade = (self.root / "bridge/facade/BUCK").read_text()
-        self.assertNotIn('"codex-compat"', facade)
-        facade, facade_groups = self.groups("bridge/facade")
-        self.assertIn("src/lib.rs", facade_groups["tidepool_sources"])
-        self.assertNotIn("src/main.rs", facade_groups["tidepool_sources"])
-        self.assertIn("src/main.rs", facade_groups["tidepool_bin_sources"])
-        agent, groups = self.groups("exomonad/agent")
-        self.assertNotIn('"codex-compat"', agent)
-        self.assertIn("src/backend/mod.rs", groups["exomonad_agent_sources"])
-        self.assertNotIn("src/backend/codex/mod.rs", groups["exomonad_agent_sources"])
-        check = self.generate("--package", "tidepool", "--package", "exomonad-agent", "--check")
-        self.assertEqual(check.returncode, 0, check.stderr)
+    def test_retired_agent_is_not_a_native_root(self):
+        result = self.generate("--package", "exomonad-agent")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unsupported: exomonad-agent", result.stderr)
 
     def test_binary_sources_preserve_module_layouts_and_their_includes(self):
         metadata = json.loads(self.metadata.read_text())
@@ -379,10 +368,6 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         self.write("bridge/facade/src/actor_host/m1_host_tests.rs", "#[path = \"m1_browser_runner.rs\"] mod browser_runner; #[test] fn browser_gate() {}\n")
         self.write("bridge/facade/src/actor_host/m1_browser_runner.rs", "pub fn run() {}\n")
         self.write("bridge/facade/src/actor_host/test_campaign.rs", "pub struct TestCampaign;\n")
-        self.write("bridge/facade/src/host_dynamic_tools.rs", "#[cfg(test)] mod tui_resource_tests;\n")
-        self.write("bridge/facade/src/host_dynamic_tools/tui_resource_tests.rs", 'const OMITTED: &str = include_str!("../../../../.exomonad/workspace/skills/exomonad-command/SKILL.md");\n')
-        self.write("bridge/facade/src/actor_host/documentation_tests.rs", 'const OMITTED: &str = include_str!("../../../../.exomonad/workspace/checks/not-in-profile.hs");\n')
-        self.write("bridge/facade/src/actor_host/agent_spec_tests.rs", 'const OMITTED: &str = include_str!("../../../../exomonad/examples/workspace/.exomonad/AgentSpec.hs");\n')
         self.write("bridge/facade/src/exomonad.rs", '''
 const AGENT_SPEC: &str = include_str!("../../../exomonad/examples/workspace/.exomonad/AgentSpec.hs");
 const JEV_OPERATORS: &str = include_str!("../../../.exomonad/workspace/Jev/Operators.hs");
@@ -404,8 +389,6 @@ const REVIEW_PROMPT: &str = include_str!("../../../exomonad/examples/workspace/.
             "src/actor_host/test_campaign.rs", "src/exomonad.rs",
         ):
             self.assertIn(source, groups["tidepool_unit_tests_sources"])
-        for source in ("src/actor_host/documentation_tests.rs", "src/actor_host/agent_spec_tests.rs"):
-            self.assertNotIn(source, groups["tidepool_unit_tests_sources"])
         self.assertIn("//bridge/testing:tidepool_testing", unit_rule)
         self.assertIn('rustc_flags = ["--test"]', unit_rule)
         for runtime_only in ("TIDEPOOL_EXTRACT", "TIDEPOOL_BROWSER", "//web:dist", "resources ="):
@@ -618,20 +601,18 @@ source = "git+https://example.invalid/tokio-tungstenite?rev=aaaaaaaaaaaaaaaaaaaa
             "//bridge/haskell:schema6_intrinsic_fixture",
             "//bridge/atomic-write:directory_fault_fixture",
         })
-        # An unlisted future #[path] module is absent from the Buck source
-        # tree, so Rust compilation must fail visibly rather than silently
-        # widening the target to every tests/*.rs file.
+        # A new #[path] sibling belongs only to the root that imports it.
         self.write("tidepool/heap/tests/future.rs", "#[test] fn future() {}\n")
         self.write("tidepool/heap/tests/gc_unit.rs", '#[path = "future.rs"] mod future;\n')
         result = self.generate()
         self.assertEqual(result.returncode, 0, result.stderr)
         _, heap_groups = self.groups("tidepool/heap")
-        self.assertNotIn("tests/future.rs", heap_groups["gc_unit_sources"])
+        self.assertIn("tests/future.rs", heap_groups["gc_unit_sources"])
         self.assertNotIn("tests/future.rs", heap_groups["raw_scan_validation_sources"])
         (self.root / "tidepool/repr/tests/metadata_strictness.rs").unlink()
         result = self.generate()
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("missing integration source", result.stderr)
+        self.assertIn("unresolved integration modules", result.stderr)
 
     def test_rejects_missing_and_outside_repository_inputs(self):
         source = self.root / "tidepool/repr/src/lib.rs"
@@ -678,50 +659,34 @@ source = "git+https://example.invalid/tokio-tungstenite?rev=aaaaaaaaaaaaaaaaaaaa
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("unsupported Linux dependency selector", result.stderr)
 
-    def test_feature_selection_keeps_optional_vendor_protocol_out_of_embedded_graph(self):
+    def test_local_development_features_refuse_before_any_graph_publication(self):
+        control = self.generate()
+        self.assertEqual(control.returncode, 0, control.stderr)
+        previous = (self.root / "tidepool/repr/BUCK").read_bytes()
         metadata = json.loads(self.metadata.read_text())
         package = next(p for p in metadata["packages"] if p["name"] == "tidepool-repr")
-        package["features"] = {
-            "default": ["codex-compat"],
-            "codex-compat": ["dep:codex-shoal-protocol"],
-            "embedded": [],
-        }
         package["dependencies"].append({
-            "name": "codex-shoal-protocol", "rename": None, "kind": None,
-            "target": None, "optional": True, "uses_default_features": True,
-            "features": [], "req": "=0.1.0",
+            "name": "tidepool-heap", "rename": "heap_fixture", "kind": "dev",
+            "target": None, "optional": False, "uses_default_features": False,
+            "features": ["test-support"],
         })
-        vendor_id = "registry+https://github.com/rust-lang/crates.io-index#codex-shoal-protocol@0.1.0"
-        metadata["packages"].append({
-            "id": vendor_id, "name": "codex-shoal-protocol", "version": "0.1.0",
-            "source": "registry+https://github.com/rust-lang/crates.io-index",
-        })
-        node = next(n for n in metadata["resolve"]["nodes"] if n["id"] == package["id"])
-        codex_edge = {
-            "name": "codex_shoal_protocol", "pkg": vendor_id,
-            "dep_kinds": [{"kind": None, "target": None}],
-        }
-        node["deps"].append(codex_edge)
         self.metadata.write_text(json.dumps(metadata))
-
-        node["deps"].remove(codex_edge)
-        self.metadata.write_text(json.dumps(metadata))
-        embedded = self.generate(
-            "--no-default-features", "tidepool-repr",
-            "--features", "tidepool-repr=embedded",
-        )
-        self.assertEqual(embedded.returncode, 0, embedded.stderr)
-        buck = (self.root / "tidepool/repr/BUCK").read_text()
-        self.assertNotIn("codex-shoal-protocol", buck)
-        self.assertIn('features = [\n        "embedded",\n    ]', buck)
-
-        node["deps"].append(codex_edge)
-        self.metadata.write_text(json.dumps(metadata))
-        previous = (self.root / "tidepool/repr/BUCK").read_bytes()
-        activated = self.generate("--features", "tidepool-repr=default")
-        self.assertNotEqual(activated.returncode, 0)
-        self.assertIn("forbidden Codex package codex-shoal-protocol", activated.stderr)
+        result = self.generate()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unsupported local Cargo feature(s) test-support", result.stderr)
+        self.assertIn("package tidepool-heap; native root tidepool-repr", result.stderr)
+        self.assertIn("tidepool-repr --dev:heap_fixture--> tidepool-heap", result.stderr)
         self.assertEqual((self.root / "tidepool/repr/BUCK").read_bytes(), previous)
+
+    def test_workspace_resolve_features_do_not_change_first_party_configuration(self):
+        metadata = json.loads(self.metadata.read_text())
+        node = next(n for n in metadata["resolve"]["nodes"] if n["id"] == "tidepool-repr")
+        node["features"] = ["test-support"]
+        self.metadata.write_text(json.dumps(metadata))
+        result = self.generate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        buck = (self.root / "tidepool/repr/BUCK").read_text()
+        self.assertNotIn('"test-support"', buck)
 
     def test_registry_dependency_labels_follow_resolved_package_versions(self):
         metadata = json.loads(self.metadata.read_text())

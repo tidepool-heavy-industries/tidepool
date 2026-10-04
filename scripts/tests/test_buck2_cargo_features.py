@@ -98,72 +98,33 @@ class CargoFeatureGraph(unittest.TestCase):
         self.assertEqual(dependencies, {"other_alias"})
         self.assertEqual(forwarded, {})
 
-    def test_workspace_facade_default_cannot_reactivate_embedded_agent_backend(self):
-        root = self.root / "workspace"
-        (root / "agent/src").mkdir(parents=True)
-        (root / "facade/src").mkdir(parents=True)
-        (root / "protocol/src").mkdir(parents=True)
-        (root / "scripts").mkdir()
-        (root / "scripts/native-profile.toml").write_bytes(PROFILE.read_bytes())
-        (root / "Cargo.toml").write_text(
-            "[workspace]\nmembers=['agent','facade','protocol']\nresolver='2'\n"
-        )
-        (root / "agent/Cargo.toml").write_text(
-            "[package]\nname='exomonad-agent'\nversion='0.1.0'\nedition='2021'\n"
-            "[features]\ndefault=['codex-compat']\n"
-            "codex-compat=['dep:codex-shoal-protocol']\n"
-            "[dependencies]\n"
-            "codex-shoal-protocol={path='../protocol',optional=true,default-features=false}\n"
-        )
-        (root / "facade/Cargo.toml").write_text(
-            "[package]\nname='tidepool'\nversion='0.1.0'\nedition='2021'\n"
-            "[features]\ndefault=['codex-compat']\n"
-            "codex-compat=['exomonad-agent/codex-compat','dep:codex-shoal-protocol']\n"
-            "[dependencies]\n"
-            "exomonad-agent={path='../agent',default-features=false}\n"
-            "codex-shoal-protocol={path='../protocol',optional=true,default-features=false}\n"
-        )
-        (root / "protocol/Cargo.toml").write_text(
-            "[package]\nname='codex-shoal-protocol'\nversion='0.1.0'\nedition='2021'\n"
-        )
-        for package in ("agent", "facade", "protocol"):
-            (root / package / "src/lib.rs").write_text("")
+class NativeLocalFeatureAdmission(unittest.TestCase):
+    def metadata(self, *, feature=None, kind="dev"):
+        root = {"id": "actor", "name": "exomonad-actor", "source": None,
+                "features": {}, "dependencies": [{"name": "tidepool-toolchain",
+                "rename": "compiler_proof", "kind": kind, "target": None,
+                "optional": False, "uses_default_features": False,
+                "features": [feature] if feature else []}]}
+        owner = {"id": "toolchain", "name": "tidepool-toolchain", "source": None,
+                 "features": {}, "dependencies": []}
+        return {"packages": [root, owner], "workspace_members": ["actor", "toolchain"]}
 
-        base = ["cargo", "metadata", "--manifest-path", str(root / "Cargo.toml"), "--format-version", "1"]
-        baseline = json.loads(subprocess.check_output(base, cwd=root, text=True))
-        default_graph = json.loads(subprocess.check_output(base, cwd=root, text=True))
-        default_nodes = {node["id"]: node for node in default_graph["resolve"]["nodes"]}
-        agent_id = next(p["id"] for p in default_graph["packages"] if p["name"] == "exomonad-agent")
-        self.assertIn("codex-compat", default_nodes[agent_id]["features"])
+    def test_empty_local_requests_have_one_native_configuration(self):
+        from buck2_cargo_features import reject_local_feature_requests
+        reject_local_feature_requests(self.metadata(), {"exomonad-actor"})
 
-        disabled, overrides = effective_feature_selection(
-            root, {"tidepool", "exomonad-agent", "codex-shoal-protocol"}, set(), {}
-        )
-        self.assertEqual(disabled, {"tidepool", "exomonad-agent"})
-        command = [*base, "--no-default-features"]
-        command.extend(metadata_feature_args(baseline, disabled, overrides))
-        embedded_graph = json.loads(subprocess.check_output(command, cwd=root, text=True))
-        packages = {package["id"]: package for package in embedded_graph["packages"]}
-        nodes = {node["id"]: node for node in embedded_graph["resolve"]["nodes"]}
-        agent = next(package for package in packages.values() if package["name"] == "exomonad-agent")
-        facade = next(package for package in packages.values() if package["name"] == "tidepool")
-        protocol_id = next(package["id"] for package in packages.values() if package["name"] == "codex-shoal-protocol")
-        self.assertNotIn("codex-compat", nodes[agent["id"]]["features"])
-        self.assertFalse(any(edge["pkg"] == protocol_id for edge in nodes[agent["id"]]["deps"]))
-        self.assertFalse(any(edge["pkg"] == protocol_id for edge in nodes[facade["id"]]["deps"]))
-        reject_forbidden_closure(embedded_graph, {"tidepool", "exomonad-agent"})
+    def test_development_feature_diagnostic_names_root_package_alias_and_kind(self):
+        from buck2_cargo_features import reject_local_feature_requests
+        with self.assertRaisesRegex(ValueError,
+            "package tidepool-toolchain; native root exomonad-actor; "
+            "edge exomonad-actor --dev:compiler_proof--> tidepool-toolchain"):
+            reject_local_feature_requests(self.metadata(feature="test-support"), {"exomonad-actor"})
 
-        _, compatibility = effective_feature_selection(
-            root,
-            {"tidepool", "exomonad-agent", "codex-shoal-protocol"},
-            set(),
-            {"tidepool": {"default"}},
-        )
-        command = [*base, "--no-default-features"]
-        command.extend(metadata_feature_args(baseline, disabled, compatibility))
-        compatibility_graph = json.loads(subprocess.check_output(command, cwd=root, text=True))
-        with self.assertRaisesRegex(ValueError, "forbidden Codex package codex-shoal-protocol"):
-            reject_forbidden_closure(compatibility_graph, {"tidepool", "exomonad-agent"})
+    def test_root_override_requires_explicit_native_variant(self):
+        from buck2_cargo_features import reject_local_feature_requests
+        with self.assertRaisesRegex(ValueError, r"unsupported local Cargo feature\(s\) custom"):
+            reject_local_feature_requests(self.metadata(), {"exomonad-actor"},
+                                          overrides={"exomonad-actor": {"custom"}})
 
 
 if __name__ == "__main__":

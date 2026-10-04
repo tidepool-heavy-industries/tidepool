@@ -19,8 +19,9 @@ ROOT_NAMES = (
     "tidepool-extract-cmd", "tidepool-extract-report", "tidepool-toolchain",
     "tidepool-bridge-derive", "tidepool-runtime",
     "exomonad-model", "exomonad-tool", "tidepool-bridge-effects",
-    "exomonad-node", "exomonad-worktree", "exomonad-actor", "exomonad-agent",
+    "exomonad-node", "exomonad-worktree", "exomonad-actor", "exomonad-model-output", "jev-integration",
     "tidepool-mcp", "tidepool-handlers", "tidepool", "tidepool-testing",
+    "tidepool-test-data", "tidepool-prepared-corpus", "tidepool-protocol",
 )
 HARNESS_GIT_SOURCE = (
     "git+https://github.com/tidepool-heavy-industries/exomonad-harness.git"
@@ -179,7 +180,6 @@ print(open(os.environ['FAKE_METADATA']).read())
             "exomonad-node": [],
             "exomonad-worktree": [],
             "exomonad-actor": [],
-            "exomonad-agent": [],
             "tidepool-mcp": [],
             "tidepool-handlers": [],
             "tidepool": [
@@ -202,7 +202,8 @@ print(open(os.environ['FAKE_METADATA']).read())
             ],
         }
         edges_by_root = {}
-        for root_name, deps in declarations.items():
+        for root_name in ROOT_NAMES:
+            deps = declarations.get(root_name, [])
             root_id = local_ids[root_name]
             package_deps = []
             edges = []
@@ -242,13 +243,6 @@ print(open(os.environ['FAKE_METADATA']).read())
             })
             edges_by_root[root_id] = edges
 
-        for name in ("tidepool-test-data",):
-            packages.append({
-                "id": local_ids[name], "name": name, "version": "0.1.0", "source": None,
-                "manifest_path": f"/fixture/{name}/Cargo.toml", "features": {},
-                "dependencies": [], "targets": [],
-            })
-
         # Cargo metadata nodes exist for all local package dependencies, including
         # local-only edges. The generator should skip local edges and use Buck labels.
         nodes = [{"id": package_id, "deps": edges_by_root.get(package_id, [])}
@@ -280,8 +274,8 @@ print(open(os.environ['FAKE_METADATA']).read())
         self.assertEqual(deps["serde_json"]["features"], ["arbitrary_precision", "float_roundtrip"])
         self.assertEqual(deps["serde_json"]["default-features"], True)
         self.assertIn("proptest", deps)  # existing repr/atomic test roots retain it
-        self.assertNotIn("bridge-dev-only", deps)
-        self.assertNotIn("effect-dev-only", deps)
+        self.assertIn("bridge-dev-only", deps)
+        self.assertIn("effect-dev-only", deps)
         self.assertNotIn("cc", deps)
         self.assertNotIn("tidepool-bridge-derive", deps)
         self.assertNotIn("tidepool-test-data", deps)
@@ -327,55 +321,23 @@ print(open(os.environ['FAKE_METADATA']).read())
         self.assertIn("Missing or ambiguous Linux-resolved dependency libc", result.stderr)
         self.assertFalse((self.output / "Cargo.toml").exists())
 
-    def test_no_default_feature_selection_excludes_optional_vendor_dependency(self):
-        metadata, _ = self.fixture_metadata()
-        package = next(p for p in metadata["packages"] if p["name"] == "tidepool-codegen")
-        package["features"] = {
-            "default": ["codex-compat"],
-            "codex-compat": [
-                "dep:codex_proto", "codex_proto/json", "codex_proto?/transport",
-            ],
-            "weak-only": ["codex_proto?/transport"],
-            "embedded": [],
-        }
-        package["dependencies"].append({
-            "name": "codex-shoal-protocol", "rename": "codex_proto", "kind": None,
-            "target": None, "optional": True, "uses_default_features": True,
-            "features": [],
-        })
-        vendor_id = "registry+fixture#codex-shoal-protocol@1.0.0"
-        metadata["packages"].append({
-            "id": vendor_id, "name": "codex-shoal-protocol", "version": "1.0.0",
-            "source": REGISTRY, "features": {}, "dependencies": [], "targets": [],
-        })
-        node = next(n for n in metadata["resolve"]["nodes"] if n["id"] == package["id"])
-        codex_edge = {
-            "name": "codex_proto", "pkg": vendor_id,
-            "dep_kinds": [{"kind": None, "target": None}],
-        }
-        node["deps"].append(codex_edge)
-        node["deps"].remove(codex_edge)
-        result = self.run_generator(
-            metadata, "--no-default-features", "tidepool-codegen",
-            "--features", "tidepool-codegen=embedded",
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        manifest = tomllib.loads((self.output / "Cargo.toml").read_text())
-        self.assertNotIn("codex-shoal-protocol", manifest["dependencies"])
+    def test_local_development_features_refuse_before_manifest_publication(self):
+        control = self.run_generator()
+        self.assertEqual(control.returncode, 0, control.stderr)
         previous = (self.output / "Cargo.toml").read_bytes()
-        node["deps"].append(codex_edge)
+        metadata, _ = self.fixture_metadata()
+        runtime = next(p for p in metadata["packages"] if p["name"] == "tidepool-runtime")
+        runtime["dependencies"].append({
+            "name": "tidepool-toolchain", "rename": "proof_fixture", "kind": "dev",
+            "target": None, "optional": False, "uses_default_features": False,
+            "features": ["test-support"],
+        })
         result = self.run_generator(metadata)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("forbidden Codex package codex-shoal-protocol", result.stderr)
+        self.assertIn("unsupported local Cargo feature(s) test-support", result.stderr)
+        self.assertIn("package tidepool-toolchain; native root tidepool-runtime", result.stderr)
+        self.assertIn("tidepool-runtime --dev:proof_fixture--> tidepool-toolchain", result.stderr)
         self.assertEqual((self.output / "Cargo.toml").read_bytes(), previous)
-        node["deps"].remove(codex_edge)
-        result = self.run_generator(
-            metadata, "--no-default-features", "tidepool-codegen",
-            "--features", "tidepool-codegen=weak-only",
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        manifest = tomllib.loads((self.output / "Cargo.toml").read_text())
-        self.assertNotIn("codex-shoal-protocol", manifest["dependencies"])
 
     def test_plain_shared_profile_rejects_transitive_codex_closure_without_publishing(self):
         metadata, _ = self.fixture_metadata()

@@ -8,6 +8,8 @@ import tomllib
 
 from buck2_cargo_features import (
     CRATES_IO_SOURCE,
+    NATIVE_PACKAGES,
+    reject_local_feature_requests,
     FeatureSelectionError,
     dependency_aliases,
     effective_feature_selection,
@@ -25,21 +27,10 @@ parser.add_argument("--features", action="append", default=[], metavar="PACKAGE=
 options = parser.parse_args()
 DEST = options.output_dir.resolve()
 DEST.mkdir(parents=True, exist_ok=True)
-# Test roots retain their direct dev-dependency closure. The remaining roots
-# are library-only; their dev dependencies and codegen's replaced build script
-# are not part of the native library dependency bundle.
-TEST_ROOTS = {
-    "tidepool-atomic-write", "tidepool-repr", "tidepool-heap",
-    "tidepool-extract-cmd", "tidepool-toolchain", "tidepool",
-}
-LIBRARY_ROOTS = {
-    "tidepool-bignum", "tidepool-bridge", "tidepool-effect", "tidepool-codegen",
-    "tidepool-extract-report", "tidepool-bridge-derive", "tidepool-runtime",
-    "exomonad-model", "exomonad-tool", "tidepool-bridge-effects",
-    "exomonad-node", "exomonad-worktree", "exomonad-actor", "exomonad-agent",
-    "tidepool-mcp", "tidepool-handlers", "tidepool-testing",
-}
-ROOTS = TEST_ROOTS | LIBRARY_ROOTS
+# Every retained package owns its direct development closure. Transitive local
+# libraries are also explicit roots, so test-data/corpus and actor/runtime test
+# dependencies contribute their external feature requests without local unions.
+ROOTS = NATIVE_PACKAGES
 LINUX_TARGETS = {None, "cfg(unix)"}
 metadata_command = [
     "cargo", "metadata", "--locked", "--filter-platform", "x86_64-unknown-linux-gnu",
@@ -77,28 +68,25 @@ if len(selected) != len(ROOTS) or {p["name"] for p in selected} != ROOTS:
     raise SystemExit("Missing migrated Cargo package")
 try:
     reject_forbidden_closure(metadata, ROOTS)
+    reject_local_feature_requests(metadata, ROOTS, no_default, feature_overrides)
 except FeatureSelectionError as error:
     raise SystemExit(str(error)) from error
 
 
 dependencies = {}
 for package in selected:
-    library_only = package["name"] in LIBRARY_ROOTS
     resolved_deps = nodes[package["id"]]["deps"]
     try:
         _, active_dependencies, dependency_features = resolve_cargo_features(
             package,
             feature_overrides.get(package["name"], set()),
             package["name"] not in no_default,
-            resolved_node=nodes[package["id"]],
+            resolved_node=None,
         )
     except FeatureSelectionError as error:
         raise SystemExit(str(error)) from error
     for dependency in package["dependencies"]:
         kind = dependency["kind"]
-        # The generated library-only packages don't build their test targets.
-        if library_only and kind == "dev":
-            continue
         # codegen's build.rs is replaced by the checked-in native Buck C action.
         if package["name"] == "tidepool-codegen" and kind == "build":
             if dependency["name"] != "cc" or dependency["rename"] is not None or dependency["target"] is not None:
@@ -134,9 +122,12 @@ for package in selected:
             )
         edge = matching_edges[0]
         target = packages[edge["pkg"]]
+        if package["name"] == "tidepool-runtime" and kind == "dev" and target["name"] == "trybuild":
+            # Native compile-fail actions invoke declared rustc inputs directly.
+            continue
         if target["source"] is None:
             if target["name"] not in ROOTS:
-                raise SystemExit(f"Unmigrated local dependency: {target['name']}")
+                raise SystemExit(f"Unmigrated local dependency: {package['name']} --{kind or 'normal'}:{dependency_key}--> {target['name']}")
             continue
         source = target["source"]
         git = None

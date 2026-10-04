@@ -14,15 +14,16 @@ import tomllib
 
 from buck2_cargo_features import (
     CRATES_IO_SOURCE,
+    NATIVE_PACKAGES,
+    reject_local_feature_requests,
     FeatureSelectionError,
     effective_feature_selection,
-    load_profile,
     metadata_feature_args,
     parse_locked_git_source,
     reject_forbidden_closure,
     resolve as resolve_cargo_features,
 )
-from test_source_ownership import TEST_ONLY_SOURCES
+from test_source_ownership import TEST_ONLY_SOURCES, integration_target_sources
 
 
 def cargo_dependency_key(dependency):
@@ -44,34 +45,8 @@ options = arguments.parse_args()
 selected = set(options.package)
 if selected & {"tidepool", "tidepool-runtime"}:
     selected.add("tidepool-testing")
-SUPPORTED_PACKAGES = {
-    "tidepool-atomic-write", "tidepool-repr", "tidepool-heap", "tidepool-bignum",
-    "tidepool-bridge", "tidepool-effect", "tidepool-codegen", "tidepool-extract-cmd",
-    "tidepool-extract-report", "tidepool-toolchain", "tidepool-bridge-derive",
-    "tidepool-runtime", "tidepool-mcp", "tidepool-handlers", "tidepool",
-    "exomonad-model", "exomonad-tool", "tidepool-bridge-effects",
-    "exomonad-node", "exomonad-worktree", "exomonad-actor", "exomonad-agent",
-    "tidepool-testing",
-}
-NORMAL_DEPENDENCY_ONLY_PACKAGES = {
-    "tidepool-bignum", "tidepool-bridge", "tidepool-effect", "tidepool-codegen",
-    "tidepool-extract-report", "tidepool-bridge-derive", "tidepool-runtime",
-    "exomonad-model", "exomonad-tool", "tidepool-bridge-effects",
-    "exomonad-node", "exomonad-worktree", "exomonad-actor", "exomonad-agent",
-    "tidepool-mcp", "tidepool-handlers", "tidepool",
-    "tidepool-testing",
-}
-UNIT_TEST_PACKAGES = {
-    "tidepool-atomic-write", "tidepool-repr", "tidepool-heap", "tidepool-codegen",
-    "tidepool-extract-cmd", "tidepool-toolchain", "tidepool", "tidepool-runtime",
-}
-ISOLATED_UNIT_TEST_PACKAGES = {
-    "tidepool-codegen", "tidepool-extract-cmd", "tidepool-toolchain",
-}
-EXTRACTOR_FREE_ONLY_PACKAGES = {"tidepool-extract-cmd", "tidepool-toolchain"}
-LIBRARY_TARGET_ONLY_PACKAGES = {
-    "tidepool-extract-report", "tidepool-toolchain",
-}
+SUPPORTED_PACKAGES = NATIVE_PACKAGES
+ISOLATED_UNIT_TEST_PACKAGES = {"tidepool-codegen", "tidepool-extract-cmd", "tidepool-toolchain"}
 unsupported = selected - SUPPORTED_PACKAGES
 if unsupported:
     raise SystemExit(
@@ -127,6 +102,7 @@ try:
     reject_forbidden_closure(
         metadata, selected | NO_DEFAULT_FEATURES | set(FEATURE_OVERRIDES)
     )
+    reject_local_feature_requests(metadata, selected | set(FEATURE_OVERRIDES), NO_DEFAULT_FEATURES, FEATURE_OVERRIDES)
 except FeatureSelectionError as error:
     raise SystemExit(str(error)) from error
 
@@ -137,7 +113,7 @@ def feature_plan(package):
             package,
             FEATURE_OVERRIDES.get(package["name"], set()),
             package["name"] not in NO_DEFAULT_FEATURES,
-            resolved_node=resolved_nodes[package["id"]],
+            resolved_node=None,
         )
     except FeatureSelectionError as error:
         raise SystemExit(str(error)) from error
@@ -293,19 +269,6 @@ def render_strings(values, indent=4):
     return "\n".join(" " * indent + json.dumps(value) + "," for value in values)
 
 
-# The repr Cargo suite is one explicit integration target with sibling module
-# files. Other current integration targets are standalone crate roots.
-INTEGRATION_SOURCES = {
-    ("tidepool-repr", "repr"): (
-        "tests/suites/repr.rs",
-        "tests/execution_schema_codec.rs",
-        "tests/execution_schema_contract.rs",
-        "tests/extend_checked_equivalence.rs",
-        "tests/metadata_strictness.rs",
-        "tests/strict_jsonl_directory.rs",
-    ),
-}
-
 # These codegen fixture includes are inside #[cfg(test)] modules. Keep the
 # library action independent of the Haskell test corpus until test migration.
 CODEGEN_TEST_FIXTURES = {
@@ -349,33 +312,6 @@ CODEGEN_TEST_ONLY_SOURCES = {
     "retention_tests.rs", "settlement_tests.rs", "tests.rs",
 }
 
-# The no-default facade test profile does not compile these test modules: each
-# is guarded by `cfg(all(test, feature = "codex-compat"))` at its owning
-# module declaration. Keep them out of its source and fixture closure too.
-TIDEPOOL_CODEX_TEST_ONLY_SOURCES = {
-    "src/actor_host/agent_spec_tests.rs",
-    "src/actor_host/background_command_example_tests.rs",
-    "src/actor_host/call_timing_tests.rs",
-    "src/actor_host/cell_compile_cost_tests.rs",
-    "src/actor_host/command_jobs_tests.rs",
-    "src/actor_host/custody_tests.rs",
-    "src/actor_host/hosted_retirement.rs",
-    "src/actor_host/hosted_tools_tests.rs",
-    "src/actor_host/jev_tests.rs",
-    "src/actor_host/lookup_availability_tests.rs",
-    "src/actor_host/observation_budget_tests.rs",
-    "src/actor_host/research_policy_tests.rs",
-    "src/actor_host/resource_tests.rs",
-    "src/actor_host/source_reload_tests.rs",
-    "src/actor_host/tests.rs",
-    "src/actor_host/tui_resource_tests.rs",
-    "src/actor_host/tui_sleep_tests.rs",
-    "src/actor_host/workspace_tests.rs",
-}
-
-NO_DEFAULT_PROFILE = load_profile(ROOT)
-
-
 def source_inputs(package, target, features=(), test_target=False):
     directory = ROOT / CURRENT_DIR
     source_root = pathlib.Path(target["src_path"]).resolve()
@@ -389,13 +325,6 @@ def source_inputs(package, target, features=(), test_target=False):
         sources = {source for source in sources
                    if source.relative_to(ROOT).as_posix() not in test_only}
         facade_unit_test = package["name"] == "tidepool" and target["name"].endswith("_unit_tests")
-        if package["name"] == "tidepool" and "codex-compat" not in features:
-            codex_root = directory / "src/host_dynamic_tools.rs"
-            codex_modules = directory / "src/host_dynamic_tools"
-            sources = {
-                source for source in sources
-                if source != codex_root and not source.is_relative_to(codex_modules)
-            }
         if package["name"] == "tidepool" and not facade_unit_test:
             sources = {
                 source for source in sources
@@ -403,18 +332,6 @@ def source_inputs(package, target, features=(), test_target=False):
                 and not source.stem.endswith("_tests")
                 and source.stem != "test_campaign"
             }
-        if facade_unit_test and "codex-compat" not in features:
-            sources = {
-                source for source in sources
-                if source.relative_to(directory).as_posix() not in TIDEPOOL_CODEX_TEST_ONLY_SOURCES
-            }
-        if (
-            package["name"] == "exomonad-agent"
-            and package["name"] in NO_DEFAULT_PROFILE
-            and "codex-compat" not in features
-        ):
-            codex_sources = directory / "src/backend/codex"
-            sources = {source for source in sources if not source.is_relative_to(codex_sources)}
         if "lib" in target["kind"] or "proc-macro" in target["kind"]:
             binary_roots = {
                 pathlib.Path(candidate["src_path"]).resolve()
@@ -431,17 +348,16 @@ def source_inputs(package, target, features=(), test_target=False):
                     raise SystemExit(f"missing declared codegen test-only source {source}")
                 sources.discard(source)
     else:
-        # Cargo gives the crate root. The repr suite has explicit sibling
-        # modules; standalone integration targets need only their own root.
-        declared = INTEGRATION_SOURCES.get((package["name"], target["name"]))
-        if declared is None:
-            sources.add(source_root)
+        # The shared module walker owns each integration root and its #[path]
+        # children. Unknown declarations refuse generation rather than widening
+        # a target to every test source or losing a sibling module.
+        if "test" in target["kind"]:
+            graph, unknown = integration_target_sources([target])
+            if unknown:
+                raise SystemExit(f"unresolved integration modules for {package['name']}:{target['name']}")
+            sources.update(graph)
         else:
-            for relative in declared:
-                source = directory / relative
-                if not source.is_file():
-                    raise SystemExit(f"missing integration source {source}")
-                sources.add(source)
+            sources.add(source_root)
     includes = re.compile(r'include_(?:str|bytes)!\s*\(\s*"([^\"]+)"')
     pending = [path for path in sources if path.suffix == ".rs"]
     external_labels = {
@@ -778,21 +694,14 @@ load("//build/rust:defs.bzl", "tidepool_rust_test_cases")
     normal_deps, normal_named = dependency_sets(package, enabled_dependencies, forwarded_features)
     if package_name == "tidepool-codegen":
         normal_named["prepared_md5_native"] = ":prepared_md5_native"
-    dev_deps, dev_named = dependency_sets(package, enabled_dependencies, forwarded_features, include_dev=True) if package_name not in NORMAL_DEPENDENCY_ONLY_PACKAGES else ([], {})
+    dev_deps, dev_named = dependency_sets(package, enabled_dependencies, forwarded_features, include_dev=True)
     unit_deps, unit_named = dev_deps, dev_named
-    if package_name == "tidepool-codegen":
-        # Native engine unit tests use exactly the library's dependency surface.
-        # Admit a new dev dependency explicitly before expanding this closure.
-        if any(dependency["kind"] == "dev" for dependency in package["dependencies"]):
-            raise SystemExit("Model codegen dev dependencies before extending its native unit target")
-        unit_deps, unit_named = normal_deps, normal_named
     if package_name == "tidepool":
         unit_deps, unit_named = dependency_sets(
             package, enabled_dependencies, forwarded_features, include_dev=True
         )
     if package_name == "tidepool-runtime":
-        # trybuild belongs only to the separate compile_fail integration target.
-        # It runs Cargo itself and is deliberately outside this native libtest.
+        # Compile-fail actions use declared rustc inputs instead of trybuild Cargo.
         unit_package = dict(package)
         unit_package["dependencies"] = [
             dependency for dependency in package["dependencies"]
@@ -844,8 +753,6 @@ tidepool_buildscript_run(
 ''')
     libraries = [target for target in targets if "lib" in target["kind"] or "proc-macro" in target["kind"]]
     binaries = [target for target in targets if "bin" in target["kind"]]
-    if package_name in LIBRARY_TARGET_ONLY_PACKAGES:
-        binaries = []
     tests = [target for target in targets if "test" in target["kind"]]
     for target in libraries:
         extra = "    proc_macro = True," if "proc-macro" in target["kind"] else ""
@@ -862,7 +769,7 @@ tidepool_buildscript_run(
         if package_name == "tidepool":
             extra = '    env = {"OUT_DIR": "$(location :tidepool_build_script_run[out_dir])"},'
         rules.append(render_rule("tidepool_rust_binary", binary_name, target, package, deps, normal_named, extra, features=package_features))
-    if libraries and package_name in UNIT_TEST_PACKAGES:
+    if libraries and libraries[0].get("test", True):
         library = libraries[0]
         unit_target = dict(library)
         unit_target["name"] = library["name"] + "_unit_tests"
@@ -890,13 +797,9 @@ tidepool_buildscript_run(
             rules.append(facade_test_cases(unit_target["name"]))
         if package_name == "tidepool-runtime":
             rules.append(runtime_test_cases(unit_target["name"]))
-    selected_tests = [
-        target for target in tests
-        if (
-            package_name not in EXTRACTOR_FREE_ONLY_PACKAGES
-            and package_name not in NORMAL_DEPENDENCY_ONLY_PACKAGES
-        ) or (package_name == "tidepool-codegen" and target["name"] in CODEGEN_NATIVE_TESTS)
-    ]
+    selected_tests = [target for target in tests if not (
+        package_name == "tidepool-runtime" and target["name"] == "compile_fail"
+    )]
     for target in selected_tests:
         deps = dev_deps + ([":" + libraries[0]["name"]] if libraries else [])
         extra = ""
