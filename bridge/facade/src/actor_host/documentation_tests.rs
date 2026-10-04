@@ -1,7 +1,9 @@
 //! Focused execution of the published examples through the real resident tool.
 
 use super::test_campaign::TestCampaign;
-use super::test_campaign::{dispatch_haskell_script, dispatch_lookup, dispatch_status};
+use super::test_campaign::{
+    dispatch_haskell_script, dispatch_haskell_script_result, dispatch_lookup, dispatch_status,
+};
 use super::*;
 use exomonad_tool::{ToolArguments, ToolInvocation, ToolInvocationContext};
 
@@ -125,18 +127,18 @@ async fn assert_deferred_original_owner(source: &str, checkpoint: bool) {
         )
         .await;
     }
-    let parent_failure = dispatch_haskell_script(
+    let parent_failure = dispatch_haskell_script_result(
         root.as_ref(),
         "error \"parent-failure-after-deferred-release\" >> pure ()",
     )
-    .await;
-    assert_ne!(parent_failure["status"], "committed", "{parent_failure}");
-    assert!(
-        parent_failure
-            .to_string()
-            .contains("parent-failure-after-deferred-release"),
-        "{parent_failure}"
+    .await
+    .expect_err("the parent cell deliberately fails after deferred publication");
+    assert_authored_workbench_failure(
+        parent_failure,
+        campaign.actor.identity(),
+        "parent-failure-after-deferred-release",
     );
+    assert!(campaign.actor.terminal().get().is_none());
     let reply = dispatch_haskell_script(
         child.policy.as_ref(),
         "case sessionInput of DeferredInput n -> respond (DeferredReply (n + 1))",
@@ -179,16 +181,13 @@ async fn failed_deferred_capture_does_not_release_child_tools() {
             arguments: ToolArguments::Raw(source),
         })
         .await
-        .unwrap()
-        .into_json()
-        .expect("structured observer receives the typed workbench response");
-    assert_ne!(result["status"], "committed", "{result}");
-    assert!(
-        result
-            .to_string()
-            .contains("deferred-before-commit-failure"),
-        "{result}"
+        .expect_err("the deferred group creator deliberately fails before completion");
+    assert_authored_workbench_failure(
+        result,
+        campaign.actor.identity(),
+        "deferred-before-commit-failure",
     );
+    assert!(campaign.actor.terminal().get().is_none());
     root.complete_boxed(tidepool_runtime::session::WorkbenchForkBoundary::external(
         "original-owner-test".into(),
         call_id.clone(),
@@ -225,6 +224,25 @@ async fn failed_deferred_capture_does_not_release_child_tools() {
     });
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
+}
+
+fn assert_authored_workbench_failure(
+    error: exomonad_actor::ResidentToolError,
+    actor: exomonad_actor::ActorRef,
+    marker: &str,
+) {
+    let exomonad_actor::ResidentToolError::Invocation(
+        exomonad_actor::KernelInvocationFailure::Workbench(failure),
+    ) = error
+    else {
+        panic!("expected an authored workbench failure: {error:?}");
+    };
+    assert_eq!(failure.actor, actor);
+    assert!(matches!(
+        failure.point,
+        tidepool_runtime::session::WorkbenchFailurePoint::InputUnit { .. }
+    ));
+    assert!(failure.detail.contains(marker), "{failure:?}");
 }
 
 async fn committed(
