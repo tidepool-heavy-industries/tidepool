@@ -457,9 +457,9 @@ scopeExecutionNativeOwners scope =
       && exactSha256 iface == originalIfaceSha256 product') (scopeInterfaces scope)]
 
 -- Current source-import authority is separate from retained native ownership.
--- Each row names the ultimate fresh recipe authenticated by that original.
+-- Each row binds one admitted canonical certificate to its current source bytes.
 data SourceSelectedOriginals = SourceSelectedOriginals
-  { selectedOriginalRows :: [(ExecutionSourceIdentity,String)]
+  { selectedOriginalRows :: [((String,String),String,String,String)]
   , selectedOriginalEvidence :: DependencyEvidence
   }
 
@@ -475,7 +475,7 @@ extendSourceSelectedOriginals :: Maybe SourceSelectedOriginals -> ExactScope -> 
 extendSourceSelectedOriginals Nothing scope = Right scope
 extendSourceSelectedOriginals (Just selected) scope = do
   let rows = selectedOriginalRows selected
-      selectedKeys = Set.fromList (map (executionIdentityKey . fst) rows)
+      selectedKeys = Set.fromList [key | (key,_,_,_) <- rows]
       nodes = dependencyModules (selectedOriginalEvidence selected)
       byKey = Map.fromList [((dependencyModuleUnit node,dependencyModuleName node),node) | node <- nodes]
       available = Map.fromList [((exactUnit artifact,exactModule artifact),artifact) | (artifact,_,_) <- scopeInterfaces scope]
@@ -485,17 +485,16 @@ extendSourceSelectedOriginals (Just selected) scope = do
         | edge <- dependencyModuleImports node, dependencyImportSelected edge /= Nothing])
   unless (length rows == Set.size selectedKeys && Map.keysSet byKey == selectedKeys)
     (Left "source selection owner rows differ from their matched sources")
-  lexical <- forM rows $ \(original,_) -> do
-    let key = executionIdentityKey original
+  lexical <- forM rows $ \(key,certificate,interfaceSha,sourceSha) -> do
     artifact <- maybe (Left "source-selected original lacks exact interface") Right (Map.lookup key available)
-    let native = [originalProduct | originalProduct <- scopeProducts scope
-          , (originalUnit originalProduct,originalModule originalProduct) == key
-          , originalVersion originalProduct == executionVersion original
-          , originalIfaceSha256 originalProduct == executionIfaceSha256 original
-          , originalProductSha256 originalProduct == executionNativeSha256 original]
-    unless (exactSha256 artifact == executionIfaceSha256 original
-        && not ("Tidepool.Session." `isPrefixOf` snd key) && length native == 1)
-      (Left "source-selected original has another exact interface/native owner")
+    proof <- case Map.lookup key (scopeInterfaceEvidence scope) of
+      Just (ModuleInterfaceEvidence canonical) | canonicalOrigin canonical == SourceOriginal -> Right canonical
+      _ -> Left "source-selected original lacks canonical source origin"
+    unless (exactSha256 artifact == interfaceSha
+        && canonicalCertificateSha256 proof == certificate
+        && canonicalSourceSha256 proof == sourceSha
+        && not ("Tidepool.Session." `isPrefixOf` snd key))
+      (Left "source-selected original has another canonical owner")
     node <- maybe (Left "source-selected original lacks source adjacency") Right (Map.lookup key byKey)
     let imports = adjacency node
     unless (all (`Set.member` Set.union selectedKeys (Map.keysSet existing)) imports)
@@ -860,17 +859,15 @@ writeExactCompilation compilation evidence = do
       moduleRow ((unit, name, boot), edges) = encodeArray
         [text unit, text name, E.encodeBool boot, encodeArray (map importRow edges)]
       receipt = encodeArray
-        [text "TPEXACTCOMPILE", text "2", text (scopeRequestSha256 scope)
+        [text "TPEXACTCOMPILE", text "3", text (scopeRequestSha256 scope)
         , text (scopeSemanticSha256 scope), text path, text (digest bytes)
         , text snapshot, text (renderDependencyEvidence evidence)
         , encodeArray (map moduleRow imports)
         , case compilationSourceSelection compilation of
             Nothing -> encodeArray [encodeArray [], E.encodeNull]
             Just selected -> encodeArray
-              [ encodeArray [encodeArray [text (executionUnit original),text (executionModule original)
-                    ,text (executionVersion original),text (executionIfaceSha256 original)
-                    ,text (executionNativeSha256 original),text graph]
-                  | (original,graph) <- selectedOriginalRows selected]
+              [ encodeArray [encodeArray [text unit,text name,text certificate,text interfaceSha,text sourceSha]
+                  | ((unit,name),certificate,interfaceSha,sourceSha) <- selectedOriginalRows selected]
               , text (renderDependencyEvidence (selectedOriginalEvidence selected))]]
   BS.writeFile snapshot bytes
   BS.writeFile (directory </> "receipt.cbor") (toStrictByteString receipt)

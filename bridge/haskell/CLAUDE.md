@@ -113,18 +113,19 @@ This is an internal matched worker/frontend migration: previous workers reject
 
 ## Current source selection of retained originals
 
-`TPEXACTCOMPILE` version 2 retains the fresh source receipt fields and adds a
-separate current original-source selection section. Each selected row names the
-exact unit/module, native version, interface/product hashes and ultimate fresh
-original recipe digest. The accompanying source evidence records current path,
-bytes, import adjacency and resolution witnesses; these rows never become fresh
-module products. Version 1 receipts are rejected by the matched Rust consumer.
+`TPEXACTCOMPILE` version 3 retains the fresh source receipt fields and a
+separate current source-selection section. Each selected row names the exact
+unit/module, canonical certificate SHA, interface SHA and source SHA. Current
+source evidence records bytes, authored import adjacency and resolution
+witnesses. This proof needs no native product or execution-source graph and
+never grants native execution or Core-loading authority. Version 2 receipts
+are rejected by the matched Rust consumer.
 
 Only actual current imports under a checked request's complete sealed search
-order can issue this proof. The worker validates the authenticated original
-recipe, current source and GHC interface compatibility before installing its
-source-import graph. Retained artifact requirements alone grant no lexical
-selection. Session implementation anchors use their existing independent
+order can issue this proof. The worker validates the admitted canonical source
+origin, current source and GHC exact-interface compatibility before installing
+its source-import graph. Retained canonical type requirements alone grant no
+lexical selection. Session implementation anchors use their existing independent
 checked-value and lexical authorities, never ordinary source-selection rows.
 
 An explicit import in a submitted cell prologue requests current source

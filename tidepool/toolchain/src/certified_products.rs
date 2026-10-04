@@ -2076,6 +2076,18 @@ pub(crate) fn fixture_module_interface(
     module: &str,
     requirements: BTreeMap<(String, String), [u8; 32]>,
 ) -> CertifiedModuleInterface {
+    fixture_source_module_interface(producer, unit, module, [1; 32], requirements, None)
+}
+
+#[cfg(test)]
+pub(crate) fn fixture_source_module_interface(
+    producer: [u8; 32],
+    unit: &str,
+    module: &str,
+    source_sha256: [u8; 32],
+    requirements: BTreeMap<(String, String), [u8; 32]>,
+    package: Option<&Path>,
+) -> CertifiedModuleInterface {
     let bytes = module.as_bytes().to_vec();
     let value = value_array([
         value_text("TPPKGROOTS"),
@@ -2085,7 +2097,14 @@ pub(crate) fn fixture_module_interface(
             value_text(module),
             value_text(hex(&sha(&bytes))),
         ]),
-        value_array([]),
+        value_array(package.into_iter().map(|path| {
+            value_array([
+                value_text("package-unit"),
+                value_text("Package.Module"),
+                value_text(path.to_str().unwrap()),
+                value_text(hex(&sha(&std::fs::read(path).unwrap()))),
+            ])
+        })),
         value_array([]),
     ]);
     let mut packages = Vec::new();
@@ -2094,7 +2113,7 @@ pub(crate) fn fixture_module_interface(
         producer,
         unit,
         module,
-        [1; 32],
+        source_sha256,
         bytes,
         packages,
         requirements,
@@ -7112,7 +7131,7 @@ pub(crate) mod tests {
             std::fs::write(&snapshot, source).unwrap();
             let exact_receipt = Value::Array(vec![
                 Value::Text("TPEXACTCOMPILE".into()),
-                Value::Text("2".into()),
+                Value::Text("3".into()),
                 Value::Text(request.request_sha256.clone()),
                 Value::Text(hex(&request.semantic_sha256)),
                 Value::Text(input.to_string_lossy().into_owned()),

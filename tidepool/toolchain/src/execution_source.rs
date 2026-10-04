@@ -27,27 +27,23 @@ const OWNER_LIMIT: usize = 4096;
 const EDGE_LIMIT: usize = 65536;
 const PROFILE: &str = "tidepool-ghc-pipeline-v1";
 
-/// Untrusted receipt claims are distinct from source-selection authority.
+/// Untrusted canonical source-selection claims carry no native execution owner.
 pub(crate) struct SourceSelectedOriginalClaim {
-    pub(crate) owner: CachedHomeOwner,
-    pub(crate) local_recipe_sha256: [u8; 32],
+    pub(crate) owner: ExactModuleIdentity,
+    pub(crate) certificate_sha256: [u8; 32],
+    pub(crate) interface_sha256: [u8; 32],
+    pub(crate) source_sha256: [u8; 32],
 }
 
-/// One original selected by current source lookup, with its authenticated local
-/// recipe. This never changes its native owner or grants lexical visibility.
 #[derive(Clone, Debug)]
 pub(crate) struct SourceSelectedOriginal {
-    owner: CachedHomeOwner,
-    local_recipe_sha256: [u8; 32],
+    interface: crate::certified_products::CertifiedModuleInterface,
     imports: Vec<ExactModuleIdentity>,
 }
 
 impl SourceSelectedOriginal {
-    pub(crate) fn owner(&self) -> &CachedHomeOwner {
-        &self.owner
-    }
-    pub(crate) fn local_recipe_sha256(&self) -> [u8; 32] {
-        self.local_recipe_sha256
+    pub(crate) fn interface(&self) -> &crate::certified_products::CertifiedModuleInterface {
+        &self.interface
     }
     pub(crate) fn imports(&self) -> &[ExactModuleIdentity] {
         &self.imports
@@ -56,7 +52,8 @@ impl SourceSelectedOriginal {
 
 pub(crate) struct SourceSelectionContext<'a> {
     pub(crate) producer: [u8; 32],
-    pub(crate) originals: &'a [&'a crate::recovery_artifacts::CertifiedRecoveryProduct],
+    pub(crate) interfaces: &'a [crate::certified_products::CertifiedModuleInterface],
+    pub(crate) exact_interfaces: &'a BTreeMap<ExactModuleIdentity, [u8; 32]>,
     pub(crate) include: &'a [PathBuf],
     pub(crate) fresh: &'a DependencyEvidence,
     pub(crate) roots: &'a [(ExactModuleIdentity, ImportQualifier, ExactModuleIdentity)],
@@ -92,6 +89,8 @@ pub(crate) fn validate_source_selected_originals(
         || evidence.modules.len() != claims.len()
         || !resolution_candidates_fit(&evidence.resolutions)
         || evidence.packages.len() > OWNER_LIMIT
+        || context.include.len() > OWNER_LIMIT
+        || context.include.iter().any(|root| !root.is_absolute())
         || evidence
             .modules
             .iter()
@@ -102,418 +101,237 @@ pub(crate) fn validate_source_selected_originals(
             .map(|module| module.imports.len())
             .sum::<usize>()
             > EDGE_LIMIT
-        || context.include.len() > OWNER_LIMIT
-        || context.include.iter().any(|root| !root.is_absolute())
     {
         return Err(refused("invalid or incomplete selection evidence"));
     }
-    let originals = context
-        .originals
+    let interfaces = context
+        .interfaces
         .iter()
-        .map(|product| {
+        .map(|interface| {
             (
                 ExactModuleIdentity {
-                    unit: product.owner().unit.clone(),
-                    module: product.owner().module.clone(),
+                    unit: interface.unit().into(),
+                    module: interface.module().into(),
                 },
-                *product,
+                interface,
             )
         })
         .collect::<BTreeMap<_, _>>();
-    if originals.len() != context.originals.len() {
-        return Err(refused("ambiguous original owner"));
+    if interfaces.len() != context.interfaces.len() {
+        return Err(refused("ambiguous canonical owner"));
     }
-    let graphs = context
-        .originals
+    let sources = evidence
+        .sources
         .iter()
-        .filter_map(|product| product.execution_source())
-        .map(|graph| (graph.digest(), graph))
+        .map(|source| (&source.path, &source.sha256))
         .collect::<BTreeMap<_, _>>();
-    if graphs.len() > OWNER_LIMIT
-        || graphs.values().fold(0usize, |total, graph| {
-            total.saturating_add(graph.bytes().len())
-        }) > GRAPH_BYTES_LIMIT
-    {
-        return Err(refused("original graph inventory exceeds its bound"));
+    let modules = evidence
+        .modules
+        .iter()
+        .map(|node| {
+            (
+                ExactModuleIdentity {
+                    unit: node.unit.clone(),
+                    module: node.module.clone(),
+                },
+                node,
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    if sources.len() != evidence.sources.len() || modules.len() != evidence.modules.len() {
+        return Err(refused("duplicate source evidence"));
     }
-    let mut decoded = BTreeMap::new();
     let mut selected = BTreeMap::new();
-    let mut recipes = BTreeMap::new();
     let mut paths = BTreeSet::new();
-    for claim in claims {
-        let key = ExactModuleIdentity {
-            unit: claim.owner.unit.clone(),
-            module: claim.owner.module.clone(),
+    let mut package_validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+    let mut packages = BTreeSet::new();
+    let mut expected_resolutions = BTreeMap::new();
+    let mut record_resolution =
+        |qualifier: &ImportQualifier, module: &str, path: Option<PathBuf>| {
+            let key = (String::from(qualifier.clone()), module.to_owned(), false);
+            if expected_resolutions
+                .insert(key, path.clone())
+                .is_some_and(|old| old != path)
+            {
+                Err(refused("conflicting current import resolutions"))
+            } else {
+                Ok(())
+            }
         };
+    for claim in claims {
+        let key = claim.owner;
+        let interface = interfaces
+            .get(&key)
+            .ok_or_else(|| refused("selected owner lacks a canonical interface"))?;
         if key.unit.is_empty()
             || key.module.is_empty()
             || SessionModule::is_reserved_name(&key.module)
             || selected.contains_key(&key)
-        {
-            return Err(refused("duplicate or unsupported selected owner"));
-        }
-        let original = originals
-            .get(&key)
-            .ok_or_else(|| refused("selected owner has no original native product"))?;
-        if original.owner() != &claim.owner {
-            return Err(refused("selected original native identity changed"));
-        }
-        let digest = resolve_local_recipe(
-            claim.local_recipe_sha256,
-            &claim.owner,
-            context.producer,
-            &graphs,
-            &mut decoded,
-        )?;
-        if digest != claim.local_recipe_sha256 {
-            return Err(refused("selected digest is not the ultimate fresh recipe"));
-        }
-        let (node, source_sha256, imports) = local_source_recipe(&decoded[&digest], &key)?;
-        if !paths.insert(node.source.clone()) {
-            return Err(refused("selected owners share a source path"));
-        }
-        selected.insert(
-            key.clone(),
-            SourceSelectedOriginal {
-                owner: claim.owner,
-                local_recipe_sha256: digest,
-                imports,
-            },
-        );
-        recipes.insert(key, (node, source_sha256, digest));
-    }
-    if selected
-        .values()
-        .map(|proof| proof.imports.len())
-        .sum::<usize>()
-        > EDGE_LIMIT
-    {
-        return Err(refused("selected source adjacency exceeds its bound"));
-    }
-    let selected_sources = evidence
-        .sources
-        .iter()
-        .map(|source| (source.path.clone(), source.sha256.clone()))
-        .collect::<BTreeMap<_, _>>();
-    let current_modules = evidence
-        .modules
-        .iter()
-        .map(|module| {
-            (
-                ExactModuleIdentity {
-                    unit: module.unit.clone(),
-                    module: module.module.clone(),
-                },
-                module,
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-    if selected_sources.len() != evidence.sources.len()
-        || current_modules.len() != evidence.modules.len()
-        || current_modules.keys().ne(selected.keys())
-    {
-        return Err(refused("selection evidence has another source owner"));
-    }
-    let fresh_modules = context
-        .fresh
-        .modules
-        .iter()
-        .filter(|module| !module.boot)
-        .map(|module| ExactModuleIdentity {
-            unit: module.unit.clone(),
-            module: module.module.clone(),
-        })
-        .collect::<BTreeSet<_>>();
-    let mut expected_resolutions = BTreeMap::new();
-    let mut pending = Vec::new();
-    let mut causal_recipes = BTreeSet::new();
-    for (source, qualifier, imported) in context.roots {
-        if let Some((node, _, _)) = recipes.get(imported) {
-            if !fresh_modules.contains(source)
-                || source.unit != imported.unit
-                || !matches!(qualifier, ImportQualifier::Unqualified)
-                    && !matches!(qualifier, ImportQualifier::ThisUnit(unit) if unit == &imported.unit)
-            {
-                return Err(refused(
-                    "selected root leaves the actual fresh import graph",
-                ));
-            }
-            expected_resolutions.insert(
-                (
-                    String::from(qualifier.clone()),
-                    imported.module.clone(),
-                    false,
-                ),
-                Some(node.source.clone()),
-            );
-            let owner = selected[imported].owner();
-            let root_graph = originals[imported]
-                .execution_source()
-                .ok_or_else(|| refused("source root lacks its original graph"))?
-                .digest();
-            let root_recipe =
-                resolve_local_recipe(root_graph, owner, context.producer, &graphs, &mut decoded)?;
-            if !same_local_recipe(
-                &decoded[&root_recipe],
-                &decoded[&recipes[imported].2],
-                imported,
-            )? {
-                return Err(refused("source root differs from its original recipe"));
-            }
-            schedule_causal_recipe(&mut causal_recipes, &mut pending, imported, root_recipe)?;
-        }
-    }
-    let mut reachable = BTreeSet::new();
-    let mut package_names = BTreeSet::new();
-    let mut package_validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
-    for (key, original) in &selected {
-        let (node, source_digest, digest) = &recipes[key];
-        let current = current_modules[key];
-        if current.boot
-            || current.product != ProductAvailability::InterfaceOnly
-            || current.source != node.source
-            || selected_sources.get(&node.source) != Some(&hex(source_digest))
-            || std::fs::canonicalize(&node.source).ok().as_ref() != Some(&node.source)
+            || interface.origin() != crate::certified_products::CanonicalOrigin::SourceOriginal
+            || interface.producer_sha256() != context.producer
+            || interface.interface_sha256() != claim.interface_sha256
+            || interface.source_sha256() != claim.source_sha256
+            || <[u8; 32]>::from(Sha256::digest(interface.certificate_bytes()))
+                != claim.certificate_sha256
+            || context.exact_interfaces.get(&key) != Some(&claim.interface_sha256)
         {
             return Err(refused(
-                "current source selection differs from the original path or digest",
+                "selected canonical identity, origin or producer changed",
             ));
+        }
+        for ((unit, module), sha) in interface.requirements() {
+            if context.exact_interfaces.get(&ExactModuleIdentity {
+                unit: unit.clone(),
+                module: module.clone(),
+            }) != Some(sha)
+            {
+                return Err(refused("canonical interface dependency missing or changed"));
+            }
+        }
+        let node = modules
+            .get(&key)
+            .ok_or_else(|| refused("selected owner lacks current source"))?;
+        if node.boot
+            || node.product != ProductAvailability::InterfaceOnly
+            || !paths.insert(node.source.clone())
+            || sources.get(&node.source).copied() != Some(&hex(&claim.source_sha256))
+            || std::fs::canonicalize(&node.source).ok().as_ref() != Some(&node.source)
+        {
+            return Err(refused("current source owner, path or digest changed"));
         }
         let metadata = std::fs::metadata(&node.source)?;
         if !metadata.is_file() || metadata.len() > SOURCE_BYTES_LIMIT as u64 {
             return Err(refused("selected source exceeds its bound"));
         }
-        let mut source_bytes = Vec::new();
+        let mut bytes = Vec::new();
         std::fs::File::open(&node.source)?
             .take(SOURCE_BYTES_LIMIT as u64 + 1)
-            .read_to_end(&mut source_bytes)?;
-        if source_bytes.len() > SOURCE_BYTES_LIMIT
-            || <[u8; 32]>::from(Sha256::digest(&source_bytes)) != *source_digest
+            .read_to_end(&mut bytes)?;
+        if bytes.len() > SOURCE_BYTES_LIMIT
+            || <[u8; 32]>::from(Sha256::digest(&bytes)) != claim.source_sha256
         {
             return Err(refused("selected original source changed"));
         }
-        let mut expected = node
-            .imports
-            .iter()
-            .map(|edge| {
-                let imported = ExactModuleIdentity {
-                    unit: key.unit.clone(),
-                    module: edge.module.clone(),
-                };
-                let path = edge.selected.clone().or_else(|| {
-                    original
-                        .imports
-                        .contains(&imported)
-                        .then(|| {
-                            recipes
-                                .get(&imported)
-                                .map(|(node, _, _)| node.source.clone())
-                        })
-                        .flatten()
-                });
-                (
-                    String::from(edge.qualifier.clone()),
-                    edge.module.clone(),
-                    edge.boot,
-                    path,
-                )
-            })
-            .collect::<BTreeSet<_>>();
-        let ordinary_names = node
-            .imports
-            .iter()
-            .map(|edge| edge.module.as_str())
-            .collect::<BTreeSet<_>>();
-        let missing_exact = decoded[digest]
-            .exact_imports
-            .iter()
-            .filter(|row| row.owner == *key)
-            .flat_map(|row| row.imports.iter())
-            .filter(|owner| !ordinary_names.contains(owner.module.as_str()))
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        let exact_rows = current
-            .imports
-            .iter()
-            .filter(|edge| {
-                missing_exact.contains(&ExactModuleIdentity {
-                    unit: key.unit.clone(),
-                    module: edge.module.clone(),
-                })
-            })
-            .collect::<Vec<_>>();
-        if exact_rows.len() != missing_exact.len()
-            || exact_rows
-                .iter()
-                .map(|edge| ExactModuleIdentity {
-                    unit: key.unit.clone(),
-                    module: edge.module.clone(),
-                })
-                .collect::<BTreeSet<_>>()
-                != missing_exact
-        {
-            return Err(refused(
-                "current source omits an authenticated original exact import",
-            ));
-        }
-        for edge in exact_rows {
-            let imported = ExactModuleIdentity {
-                unit: key.unit.clone(),
-                module: edge.module.clone(),
-            };
-            let child = recipes.get(&imported).ok_or_else(|| {
-                refused("original exact import lacks its selected child source recipe")
-            })?;
+        let package_proof =
+            crate::recovery_artifacts::validate_package_import_evidence_with_validation(
+                interface.package_imports_bytes(),
+                interface.unit(),
+                interface.module(),
+                &claim.interface_sha256,
+                Path::new("canonical-source-selection"),
+                &mut package_validation,
+            )
+            .map_err(|_| refused("canonical package interface changed"))?;
+        let mut imports = BTreeSet::new();
+        let mut edges = BTreeSet::new();
+        for edge in &node.imports {
             if edge.boot
-                || !matches!(&edge.qualifier, ImportQualifier::Unqualified)
-                    && !matches!(&edge.qualifier, ImportQualifier::ThisUnit(unit) if unit == &key.unit)
-                || edge.selected.as_ref() != Some(&child.0.source)
-            {
-                return Err(refused(
-                    "original exact import has another current source resolution",
-                ));
-            }
-            expected.insert((
-                String::from(edge.qualifier.clone()),
-                edge.module.clone(),
-                false,
-                Some(child.0.source.clone()),
-            ));
-        }
-        let actual = current
-            .imports
-            .iter()
-            .map(|edge| {
-                (
+                || !edges.insert((
                     String::from(edge.qualifier.clone()),
                     edge.module.clone(),
-                    edge.boot,
                     edge.selected.clone(),
-                )
-            })
-            .collect::<BTreeSet<_>>();
-        if actual.len() != current.imports.len()
-            || expected.len() != node.imports.len() + missing_exact.len()
-            || expected != actual
-        {
-            return Err(refused("current original source imports changed"));
-        }
-        for edge in &current.imports {
-            if edge.boot {
-                return Err(refused("boot source imports are unsupported"));
+                ))
+            {
+                return Err(refused("duplicate or unsupported source import"));
             }
-            let imported = ExactModuleIdentity {
-                unit: key.unit.clone(),
-                module: edge.module.clone(),
-            };
-            if let Some(path) = &edge.selected {
+            if edge.selected.is_some() {
                 if !matches!(&edge.qualifier, ImportQualifier::Unqualified)
                     && !matches!(&edge.qualifier, ImportQualifier::ThisUnit(unit) if unit == &key.unit)
-                    || recipes
-                        .get(&imported)
-                        .is_none_or(|(node, _, _)| &node.source != path)
                 {
-                    return Err(refused(
-                        "selected home edge lacks its exact original source",
-                    ));
+                    return Err(refused("home source import has another package qualifier"));
                 }
-            } else if !original.imports.contains(&imported) {
-                package_names.insert(edge.module.clone());
+                imports.insert(ExactModuleIdentity {
+                    unit: key.unit.clone(),
+                    module: edge.module.clone(),
+                });
+            } else {
+                if !package_proof.roots().keys().any(|(unit, module)| {
+                    module == &edge.module
+                        && match &edge.qualifier {
+                            ImportQualifier::OtherUnit(wanted) => unit == wanted,
+                            _ => true,
+                        }
+                }) && !(edge.module == "GHC.Prim"
+                    && !package_proof.compiler_provided().is_empty())
+                {
+                    return Err(refused("current package import lacks canonical evidence"));
+                }
+                packages.insert(edge.module.clone());
             }
-            let resolution = (
-                String::from(edge.qualifier.clone()),
-                edge.module.clone(),
-                edge.boot,
-            );
-            if expected_resolutions
-                .insert(resolution, edge.selected.clone())
-                .is_some_and(|previous| previous != edge.selected)
+            record_resolution(&edge.qualifier, &edge.module, edge.selected.clone())?;
+        }
+        selected.insert(
+            key,
+            SourceSelectedOriginal {
+                interface: (*interface).clone(),
+                imports: imports.into_iter().collect(),
+            },
+        );
+    }
+    if modules.keys().ne(selected.keys()) {
+        return Err(refused("selection has another current owner"));
+    }
+    let fresh = context
+        .fresh
+        .modules
+        .iter()
+        .filter(|node| !node.boot)
+        .map(|node| ExactModuleIdentity {
+            unit: node.unit.clone(),
+            module: node.module.clone(),
+        })
+        .collect::<BTreeSet<_>>();
+    let mut pending = Vec::new();
+    for (source, qualifier, owner) in context.roots {
+        if selected.contains_key(owner) {
+            if !fresh.contains(source)
+                || source.unit != owner.unit
+                || !matches!(qualifier, ImportQualifier::Unqualified)
+                    && !matches!(qualifier,ImportQualifier::ThisUnit(unit) if unit == &owner.unit)
             {
-                return Err(refused("conflicting current import resolutions"));
+                return Err(refused(
+                    "selected root leaves the actual fresh import graph",
+                ));
             }
-        }
-        let graph = &decoded[digest];
-        validate_local_negative_context(graph, key, &original.imports)?;
-        for package in &graph.packages {
-            package_validation
-                .verify(&package.selected_path, &package.sha256)
-                .map_err(|_| refused("original package interface changed"))?;
+            record_resolution(
+                qualifier,
+                &owner.module,
+                Some(modules[owner].source.clone()),
+            )?;
+            pending.push(owner.clone());
         }
     }
-    while let Some((key, causal_digest)) = pending.pop() {
-        // Equivalent local recipes retain separate negative-resolution contexts.
-        // Validate every reached context, including those not named by a claim.
-        validate_local_negative_context(&decoded[&causal_digest], &key, &selected[&key].imports)?;
-        reachable.insert(key.clone());
-        for imported in selected[&key].imports() {
-            if selected.contains_key(imported) {
-                let graph = &decoded[&causal_digest];
-                let expected = graph
-                    .owners
-                    .iter()
-                    .find(|owner| owner.unit == imported.unit && owner.module == imported.module)
-                    .ok_or_else(|| refused("original source dependency lacks its native owner"))?;
-                if expected.owner() != *selected[imported].owner() {
-                    return Err(refused(
-                        "original source dependency has another native identity",
-                    ));
+    let mut reachable = BTreeSet::new();
+    while let Some(owner) = pending.pop() {
+        if !reachable.insert(owner.clone()) {
+            continue;
+        }
+        for imported in selected[&owner].imports() {
+            let edge = modules[&owner]
+                .imports
+                .iter()
+                .find(|edge| edge.module == imported.module)
+                .unwrap();
+            if let Some(child) = modules.get(imported) {
+                if edge.selected.as_ref() != Some(&child.source) {
+                    return Err(refused("selected dependency source changed"));
                 }
-                let expected_graph = match (expected.fresh, expected.original_graph_sha256) {
-                    (true, None) => causal_digest,
-                    (false, Some(digest)) => digest,
-                    _ => return Err(refused("original dependency lacks a source recipe")),
-                };
-                let dependency_recipe = resolve_local_recipe(
-                    expected_graph,
-                    selected[imported].owner(),
-                    context.producer,
-                    &graphs,
-                    &mut decoded,
-                )?;
-                if !same_local_recipe(
-                    &decoded[&dependency_recipe],
-                    &decoded[&recipes[imported].2],
-                    imported,
-                )? {
-                    return Err(refused(
-                        "original dependency differs from its authenticated recipe",
-                    ));
-                }
-                schedule_causal_recipe(
-                    &mut causal_recipes,
-                    &mut pending,
-                    imported,
-                    dependency_recipe,
-                )?;
-            } else if !context.independent.contains(imported) && !fresh_modules.contains(imported) {
-                return Err(refused("selected original source closure is incomplete"));
+                pending.push(imported.clone());
+            } else if !context.independent.contains(imported) && !fresh.contains(imported) {
+                return Err(refused("selected source closure is incomplete"));
             }
-        }
-    }
-    if selected.iter().any(|(owner, proof)| {
-        !causal_recipes.contains(&(owner.clone(), proof.local_recipe_sha256()))
-    }) {
-        return Err(refused(
-            "claimed recipe was not reached by actual source imports",
-        ));
-    }
-    for graph in decoded.values() {
-        for package in &graph.packages {
-            package_validation
-                .verify(&package.selected_path, &package.sha256)
-                .map_err(|_| refused("authenticated original package interface changed"))?;
         }
     }
     if reachable.iter().ne(selected.keys()) {
         return Err(refused(
-            "selected owners are not the actual fresh import closure",
+            "selected owners are unreachable from actual imports",
         ));
     }
-    if evidence.packages.iter().collect::<BTreeSet<_>>()
-        != package_names.iter().collect::<BTreeSet<_>>()
-        || evidence.packages.len() != package_names.len()
+    if evidence.packages.len() != packages.len()
+        || evidence.packages.iter().collect::<BTreeSet<_>>()
+            != packages.iter().collect::<BTreeSet<_>>()
     {
-        return Err(refused("current package import selection changed"));
+        return Err(refused("current package selection changed"));
     }
     let mut observed = BTreeSet::new();
     for resolution in &evidence.resolutions {
@@ -526,283 +344,32 @@ pub(crate) fn validate_source_selected_originals(
             || expected_resolutions.get(&key) != Some(&resolution.selected)
         {
             return Err(refused(
-                "current resolution witness leaves the selected source graph",
+                "resolution witness leaves the selected source graph",
             ));
         }
-        let expected_candidates = source_search_candidates(
-            &context.include,
-            &resolution.qualifier,
-            &resolution.module,
-            resolution.boot,
-            resolution.selected.as_deref(),
-        )?;
-        if resolution.candidates != expected_candidates {
+        if resolution.candidates
+            != source_search_candidates(
+                context.include,
+                &resolution.qualifier,
+                &resolution.module,
+                resolution.boot,
+                resolution.selected.as_deref(),
+            )?
+        {
             return Err(refused(
-                "current resolution witness omits or reorders search candidates",
+                "resolution omits or reorders current search candidates",
             ));
         }
-        for candidate in &resolution.candidates {
-            if Some(candidate) != resolution.selected.as_ref() {
-                validate_absent_source(candidate)?;
+        for path in &resolution.candidates {
+            if Some(path) != resolution.selected.as_ref() {
+                validate_absent_source(path)?;
             }
         }
     }
     if observed.len() != expected_resolutions.len() {
-        return Err(refused(
-            "current selection omits import-resolution evidence",
-        ));
+        return Err(refused("selection omits resolution evidence"));
     }
     Ok(selected)
-}
-
-fn resolve_local_recipe(
-    mut digest: [u8; 32],
-    owner: &CachedHomeOwner,
-    producer: [u8; 32],
-    graphs: &BTreeMap<[u8; 32], &Arc<CertifiedExecutionSourceGraph>>,
-    decoded: &mut BTreeMap<[u8; 32], GraphWire>,
-) -> Result<[u8; 32], CompileError> {
-    let mut visited = BTreeSet::new();
-    loop {
-        if visited.len() >= EDGE_LIMIT {
-            return Err(failure(
-                "current source selection: original reference traversal exceeds its bound",
-            ));
-        }
-        if !visited.insert(digest) {
-            return Err(failure(
-                "current source selection: original reference cycle",
-            ));
-        }
-        if !decoded.contains_key(&digest) {
-            let graph = graphs.get(&digest).ok_or_else(|| {
-                failure(&format!(
-                    "current source selection: original graph {} unavailable for {}:{}",
-                    hex(&digest),
-                    owner.unit,
-                    owner.module
-                ))
-            })?;
-            if graph.producer_sha256() != producer {
-                return Err(failure(
-                    "current source selection: another original producer",
-                ));
-            }
-            decoded.insert(digest, GraphWire::decode(graph.bytes())?);
-        }
-        let rows = decoded[&digest]
-            .owners
-            .iter()
-            .filter(|row| row.owner() == *owner)
-            .collect::<Vec<_>>();
-        let [row] = rows.as_slice() else {
-            return Err(failure(
-                "current source selection: original graph does not own exact product",
-            ));
-        };
-        match (row.fresh, row.original_graph_sha256) {
-            (false, Some(parent)) => digest = parent,
-            (true, None) => return Ok(digest),
-            _ => {
-                return Err(failure(
-                    "current source selection: original source recipe unavailable",
-                ))
-            }
-        }
-    }
-}
-
-fn local_source_recipe(
-    graph: &GraphWire,
-    key: &ExactModuleIdentity,
-) -> Result<(ModuleEvidence, [u8; 32], Vec<ExactModuleIdentity>), CompileError> {
-    let nodes = graph
-        .evidence
-        .modules
-        .iter()
-        .filter(|node| node.unit == key.unit && node.module == key.module && !node.boot)
-        .collect::<Vec<_>>();
-    let [node] = nodes.as_slice() else {
-        return Err(failure(
-            "current source selection: original lacks one source owner",
-        ));
-    };
-    if node.product != ProductAvailability::Ready
-        || !node.source.is_absolute()
-        || node.imports.iter().any(|edge| edge.boot)
-    {
-        return Err(failure(
-            "current source selection: unsupported original source recipe",
-        ));
-    }
-    let sources = graph
-        .evidence
-        .sources
-        .iter()
-        .filter(|source| source.path == node.source)
-        .collect::<Vec<_>>();
-    let [source] = sources.as_slice() else {
-        return Err(failure(
-            "current source selection: original lacks source digest",
-        ));
-    };
-    let mut imports = node
-        .imports
-        .iter()
-        .filter(|edge| edge.selected.is_some())
-        .map(|edge| ExactModuleIdentity {
-            unit: key.unit.clone(),
-            module: edge.module.clone(),
-        })
-        .collect::<BTreeSet<_>>();
-    imports.extend(
-        graph
-            .exact_imports
-            .iter()
-            .filter(|row| row.owner == *key)
-            .flat_map(|row| row.imports.iter().cloned()),
-    );
-    Ok((
-        (**node).clone(),
-        parse_digest(&source.sha256)?,
-        imports.into_iter().collect(),
-    ))
-}
-
-// A shared transaction graph is not an individual source recipe's identity.
-// Authenticate the causal graph first, then compare the same local obligations
-// that the worker uses when different original graphs reach one owner.
-fn same_local_recipe(
-    left: &GraphWire,
-    right: &GraphWire,
-    key: &ExactModuleIdentity,
-) -> Result<bool, CompileError> {
-    let normalize = |graph: &GraphWire| -> Result<_, CompileError> {
-        let (node, source, requirements) = local_source_recipe(graph, key)?;
-        let imports = node
-            .imports
-            .iter()
-            .map(|edge| {
-                (
-                    String::from(edge.qualifier.clone()),
-                    edge.module.clone(),
-                    edge.boot,
-                    edge.selected.clone(),
-                )
-            })
-            .collect::<BTreeSet<_>>();
-        let obligations = requirements
-            .iter()
-            .map(|key| {
-                let rows = graph
-                    .owners
-                    .iter()
-                    .filter(|owner| owner.unit == key.unit && owner.module == key.module)
-                    .collect::<Vec<_>>();
-                let [owner] = rows.as_slice() else {
-                    return Err(failure(
-                        "current source selection: ambiguous local obligation",
-                    ));
-                };
-                Ok((owner.owner(), owner.fresh, owner.original_graph_sha256))
-            })
-            .collect::<Result<Vec<_>, CompileError>>()?;
-        let resolutions = graph
-            .evidence
-            .resolutions
-            .iter()
-            .filter(|row| {
-                imports.iter().any(|edge| {
-                    edge.0 == String::from(row.qualifier.clone())
-                        && edge.1 == row.module
-                        && edge.2 == row.boot
-                })
-            })
-            .map(|row| {
-                (
-                    String::from(row.qualifier.clone()),
-                    row.module.clone(),
-                    row.boot,
-                    row.selected.clone(),
-                )
-            })
-            .collect::<BTreeSet<_>>();
-        Ok((
-            node.unit,
-            node.module,
-            node.boot,
-            node.source,
-            node.product,
-            source,
-            imports,
-            obligations,
-            resolutions,
-        ))
-    };
-    Ok(normalize(left)? == normalize(right)?)
-}
-
-// Context identity is the authenticated graph digest, not the set of absent
-// paths. Deduplicate before allocation and bound all queued/settled contexts.
-fn schedule_causal_recipe(
-    seen: &mut BTreeSet<(ExactModuleIdentity, [u8; 32])>,
-    pending: &mut Vec<(ExactModuleIdentity, [u8; 32])>,
-    key: &ExactModuleIdentity,
-    digest: [u8; 32],
-) -> Result<(), CompileError> {
-    if seen.contains(&(key.clone(), digest)) {
-        return Ok(());
-    }
-    if seen.len() >= EDGE_LIMIT {
-        return Err(failure(
-            "current source selection: causal recipe traversal exceeds its bound",
-        ));
-    }
-    seen.insert((key.clone(), digest));
-    pending.push((key.clone(), digest));
-    Ok(())
-}
-
-fn validate_local_negative_context(
-    graph: &GraphWire,
-    key: &ExactModuleIdentity,
-    exact_imports: &[ExactModuleIdentity],
-) -> Result<(), CompileError> {
-    let (node, _, _) = local_source_recipe(graph, key)?;
-    let import_keys = node
-        .imports
-        .iter()
-        .map(|edge| {
-            (
-                String::from(edge.qualifier.clone()),
-                edge.module.as_str(),
-                edge.boot,
-            )
-        })
-        .collect::<BTreeSet<_>>();
-    for resolution in graph.evidence.resolutions.iter().filter(|row| {
-        import_keys.contains(&(
-            String::from(row.qualifier.clone()),
-            row.module.as_str(),
-            row.boot,
-        ))
-    }) {
-        let imported = ExactModuleIdentity {
-            unit: key.unit.clone(),
-            module: resolution.module.clone(),
-        };
-        // Exact-native edges are validated by their original carrier; their
-        // current positive resolution is independently checked against roots.
-        if exact_imports.contains(&imported) && resolution.selected.is_none() {
-            continue;
-        }
-        for candidate in &resolution.candidates {
-            if Some(candidate) != resolution.selected.as_ref() {
-                validate_absent_source(candidate)?;
-            }
-        }
-    }
-    Ok(())
 }
 
 fn validate_absent_source(path: &Path) -> Result<(), CompileError> {
@@ -1115,6 +682,356 @@ mod tests {
         .is_err());
     }
 
+    #[test]
+    fn canonical_source_selection_needs_no_native_recipe_and_refuses_drift() {
+        let root = tempfile::tempdir().unwrap();
+        let owner = ExactModuleIdentity {
+            unit: "main".into(),
+            module: "A".into(),
+        };
+        let consumer = ExactModuleIdentity {
+            unit: "main".into(),
+            module: "Consumer".into(),
+        };
+        let source = root.path().join("A.hs");
+        let bytes = b"module A where\ntype Answer = Int\n";
+        std::fs::write(&source, bytes).unwrap();
+        let source_sha: [u8; 32] = Sha256::digest(bytes).into();
+        let interface = crate::certified_products::fixture_source_module_interface(
+            [2; 32],
+            "main",
+            "A",
+            source_sha,
+            BTreeMap::new(),
+            None,
+        );
+        let exact = BTreeMap::from([(owner.clone(), interface.interface_sha256())]);
+        let interfaces = [interface.clone()];
+        let include = [root.path().to_path_buf()];
+        let fresh = DependencyEvidence {
+            version: 4,
+            cache_safe: true,
+            selection_complete: true,
+            sources: vec![],
+            resolutions: vec![],
+            packages: vec![],
+            modules: vec![ModuleEvidence {
+                unit: "main".into(),
+                module: "Consumer".into(),
+                boot: false,
+                source: root.path().join("Consumer.hs"),
+                imports: vec![],
+                product: ProductAvailability::Ready,
+            }],
+        };
+        let evidence = DependencyEvidence {
+            version: 4,
+            cache_safe: true,
+            selection_complete: true,
+            sources: vec![SourceEvidence {
+                path: source.clone(),
+                sha256: hex(&source_sha),
+            }],
+            modules: vec![ModuleEvidence {
+                unit: "main".into(),
+                module: "A".into(),
+                boot: false,
+                source: source.clone(),
+                imports: vec![],
+                product: ProductAvailability::InterfaceOnly,
+            }],
+            packages: vec![],
+            resolutions: vec![ResolutionEvidence {
+                qualifier: ImportQualifier::Unqualified,
+                module: "A".into(),
+                boot: false,
+                selected: Some(source.clone()),
+                candidates: vec![source.clone()],
+            }],
+        };
+        let roots = [(consumer, ImportQualifier::Unqualified, owner.clone())];
+        let independent = BTreeSet::new();
+        let context = || SourceSelectionContext {
+            producer: [2; 32],
+            interfaces: &interfaces,
+            exact_interfaces: &exact,
+            include: &include,
+            fresh: &fresh,
+            roots: &roots,
+            independent: &independent,
+        };
+        let claim = || SourceSelectedOriginalClaim {
+            owner: owner.clone(),
+            source_sha256: source_sha,
+            certificate_sha256: Sha256::digest(interface.certificate_bytes()).into(),
+            interface_sha256: interface.interface_sha256(),
+        };
+        assert!(validate_source_selected_originals(vec![claim()], &evidence, context()).is_ok());
+        // A duplicated alias/preamble edge retains the same actual source demand.
+        let duplicate = [roots[0].clone(), roots[0].clone()];
+        assert!(validate_source_selected_originals(
+            vec![claim()],
+            &evidence,
+            SourceSelectionContext {
+                roots: &duplicate,
+                ..context()
+            }
+        )
+        .is_ok());
+        for field in 0..3 {
+            let mut forged = claim();
+            match field {
+                0 => forged.certificate_sha256[0] ^= 1,
+                1 => forged.interface_sha256[0] ^= 1,
+                _ => forged.source_sha256[0] ^= 1,
+            };
+            assert!(
+                validate_source_selected_originals(vec![forged], &evidence, context()).is_err()
+            );
+        }
+        assert!(validate_source_selected_originals(
+            vec![claim()],
+            &evidence,
+            SourceSelectionContext {
+                producer: [9; 32],
+                ..context()
+            }
+        )
+        .is_err());
+        assert!(validate_source_selected_originals(
+            vec![claim()],
+            &evidence,
+            SourceSelectionContext {
+                roots: &[],
+                ..context()
+            }
+        )
+        .is_err());
+        std::fs::write(&source, b"module A where\ntype Answer = Bool\n").unwrap();
+        assert!(validate_source_selected_originals(vec![claim()], &evidence, context()).is_err());
+        std::fs::remove_file(&source).unwrap();
+        assert!(validate_source_selected_originals(vec![claim()], &evidence, context()).is_err());
+        std::fs::write(&source, bytes).unwrap();
+        let earlier = root.path().join("earlier");
+        std::fs::create_dir(&earlier).unwrap();
+        let include_earlier = [earlier.clone(), root.path().to_path_buf()];
+        assert!(validate_source_selected_originals(
+            vec![claim()],
+            &evidence,
+            SourceSelectionContext {
+                include: &include_earlier,
+                ..context()
+            }
+        )
+        .is_err());
+        let package = root.path().join("package.hi");
+        std::fs::write(&package, b"canonical package interface").unwrap();
+        let packaged = crate::certified_products::fixture_source_module_interface(
+            [2; 32],
+            "main",
+            "A",
+            source_sha,
+            BTreeMap::new(),
+            Some(&package),
+        );
+        let package_claim = || SourceSelectedOriginalClaim {
+            owner: owner.clone(),
+            source_sha256: source_sha,
+            certificate_sha256: Sha256::digest(packaged.certificate_bytes()).into(),
+            interface_sha256: packaged.interface_sha256(),
+        };
+        let packaged_interfaces = [packaged.clone()];
+        assert!(validate_source_selected_originals(
+            vec![package_claim()],
+            &evidence,
+            SourceSelectionContext {
+                interfaces: &packaged_interfaces,
+                ..context()
+            }
+        )
+        .is_ok());
+        std::fs::write(&package, b"changed package interface").unwrap();
+        assert!(validate_source_selected_originals(
+            vec![package_claim()],
+            &evidence,
+            SourceSelectionContext {
+                interfaces: &packaged_interfaces,
+                ..context()
+            }
+        )
+        .is_err());
+        // A failed selection cannot contaminate a later valid request.
+        assert!(validate_source_selected_originals(vec![claim()], &evidence, context()).is_ok());
+    }
+
+    #[test]
+    fn canonical_source_selection_traverses_authored_edges_without_promoting_type_requirements() {
+        let root = tempfile::tempdir().unwrap();
+        let key = |name: &str| ExactModuleIdentity {
+            unit: "main".into(),
+            module: name.into(),
+        };
+        let a = root.path().join("A.hs");
+        let b = root.path().join("B.hs");
+        let a_bytes = b"module A where\nimport B\ntype Answer = B.Answer\n";
+        let b_bytes = b"module B where\ntype Answer = Int\n";
+        std::fs::write(&a, a_bytes).unwrap();
+        std::fs::write(&b, b_bytes).unwrap();
+        let b_interface = crate::certified_products::fixture_source_module_interface(
+            [2; 32],
+            "main",
+            "B",
+            Sha256::digest(b_bytes).into(),
+            BTreeMap::new(),
+            None,
+        );
+        let a_interface = crate::certified_products::fixture_source_module_interface(
+            [2; 32],
+            "main",
+            "A",
+            Sha256::digest(a_bytes).into(),
+            BTreeMap::from([(("main".into(), "B".into()), b_interface.interface_sha256())]),
+            None,
+        );
+        let interfaces = [a_interface.clone(), b_interface.clone()];
+        let exact = interfaces
+            .iter()
+            .map(|interface| (key(interface.module()), interface.interface_sha256()))
+            .collect::<BTreeMap<_, _>>();
+        let evidence = DependencyEvidence {
+            version: 4,
+            cache_safe: true,
+            selection_complete: true,
+            sources: vec![
+                SourceEvidence {
+                    path: a.clone(),
+                    sha256: hex(&a_interface.source_sha256()),
+                },
+                SourceEvidence {
+                    path: b.clone(),
+                    sha256: hex(&b_interface.source_sha256()),
+                },
+            ],
+            modules: vec![
+                ModuleEvidence {
+                    unit: "main".into(),
+                    module: "A".into(),
+                    boot: false,
+                    source: a.clone(),
+                    product: ProductAvailability::InterfaceOnly,
+                    imports: vec![ModuleImportEvidence {
+                        qualifier: ImportQualifier::Unqualified,
+                        module: "B".into(),
+                        boot: false,
+                        selected: Some(b.clone()),
+                    }],
+                },
+                ModuleEvidence {
+                    unit: "main".into(),
+                    module: "B".into(),
+                    boot: false,
+                    source: b.clone(),
+                    product: ProductAvailability::InterfaceOnly,
+                    imports: vec![],
+                },
+            ],
+            packages: vec![],
+            resolutions: vec![
+                ResolutionEvidence {
+                    qualifier: ImportQualifier::Unqualified,
+                    module: "A".into(),
+                    boot: false,
+                    selected: Some(a.clone()),
+                    candidates: vec![a.clone()],
+                },
+                ResolutionEvidence {
+                    qualifier: ImportQualifier::Unqualified,
+                    module: "B".into(),
+                    boot: false,
+                    selected: Some(b.clone()),
+                    candidates: vec![b.clone()],
+                },
+            ],
+        };
+        let fresh = DependencyEvidence {
+            modules: vec![ModuleEvidence {
+                unit: "main".into(),
+                module: "Consumer".into(),
+                boot: false,
+                source: root.path().join("Consumer.hs"),
+                product: ProductAvailability::Ready,
+                imports: vec![],
+            }],
+            ..evidence.clone()
+        };
+        let roots = [(key("Consumer"), ImportQualifier::Unqualified, key("A"))];
+        let includes = [root.path().to_path_buf()];
+        let independent = BTreeSet::new();
+        let context = || SourceSelectionContext {
+            producer: [2; 32],
+            interfaces: &interfaces,
+            exact_interfaces: &exact,
+            include: &includes,
+            fresh: &fresh,
+            roots: &roots,
+            independent: &independent,
+        };
+        let claims = || {
+            interfaces
+                .iter()
+                .map(|interface| SourceSelectedOriginalClaim {
+                    owner: key(interface.module()),
+                    certificate_sha256: Sha256::digest(interface.certificate_bytes()).into(),
+                    interface_sha256: interface.interface_sha256(),
+                    source_sha256: interface.source_sha256(),
+                })
+                .collect::<Vec<_>>()
+        };
+        assert!(validate_source_selected_originals(claims(), &evidence, context()).is_ok());
+        let missing = BTreeMap::from([(key("A"), a_interface.interface_sha256())]);
+        assert!(validate_source_selected_originals(
+            claims(),
+            &evidence,
+            SourceSelectionContext {
+                exact_interfaces: &missing,
+                ..context()
+            }
+        )
+        .is_err());
+        let changed = BTreeMap::from([
+            (key("A"), a_interface.interface_sha256()),
+            (key("B"), [9; 32]),
+        ]);
+        assert!(validate_source_selected_originals(
+            claims(),
+            &evidence,
+            SourceSelectionContext {
+                exact_interfaces: &changed,
+                ..context()
+            }
+        )
+        .is_err());
+        let mut inventory_only = evidence.clone();
+        inventory_only.modules[0].imports.clear();
+        inventory_only.resolutions.pop();
+        assert!(validate_source_selected_originals(claims(), &inventory_only, context()).is_err());
+        let mut missing_child = evidence.clone();
+        missing_child.modules.pop();
+        missing_child.sources.pop();
+        let mut only_a = claims();
+        only_a.pop();
+        assert!(validate_source_selected_originals(only_a, &missing_child, context()).is_err());
+        let mut packages = evidence.clone();
+        packages.modules[1].imports.push(ModuleImportEvidence {
+            qualifier: ImportQualifier::Unqualified,
+            module: "Data.List".into(),
+            boot: false,
+            selected: None,
+        });
+        assert!(validate_source_selected_originals(claims(), &packages, context()).is_err());
+        assert!(validate_source_selected_originals(claims(), &evidence, context()).is_ok());
+    }
+
     fn valid_wire() -> GraphWire {
         let root = tempfile::tempdir().unwrap();
         let (graph, _) = test_graph(root.path());
@@ -1131,123 +1048,6 @@ mod tests {
             message,
             format!("original execution source proof: {expected}")
         );
-    }
-
-    #[test]
-    fn equivalent_source_recipes_preserve_each_negative_context() {
-        let root = tempfile::tempdir().unwrap();
-        let (graph, _) = test_graph_with_local_source_dependency(root.path());
-        let mut left = GraphWire::decode(graph.bytes()).unwrap();
-        let mut right = GraphWire::decode(graph.bytes()).unwrap();
-        let first = root.path().join("first/B.hs");
-        let second = root.path().join("second/B.hs");
-        left.evidence.resolutions[0]
-            .candidates
-            .insert(0, first.clone());
-        right.evidence.resolutions[0]
-            .candidates
-            .insert(0, second.clone());
-        let key = ExactModuleIdentity {
-            unit: "main".into(),
-            module: "A".into(),
-        };
-        assert!(same_local_recipe(&left, &right, &key).unwrap());
-        let mut left = GraphWire::decode(&left.encode().unwrap()).unwrap();
-        let right = GraphWire::decode(&right.encode().unwrap()).unwrap();
-        for appeared in [&first, &second] {
-            validate_local_negative_context(&left, &key, &[]).unwrap();
-            validate_local_negative_context(&right, &key, &[]).unwrap();
-            std::fs::create_dir_all(appeared.parent().unwrap()).unwrap();
-            std::fs::write(appeared, "module B where\n").unwrap();
-            let results = [
-                validate_local_negative_context(&left, &key, &[]),
-                validate_local_negative_context(&right, &key, &[]),
-            ];
-            assert_eq!(results.iter().filter(|result| result.is_err()).count(), 1);
-            std::fs::remove_file(appeared).unwrap();
-        }
-        // Unrelated complete graph inventory is not selected source authority.
-        left.evidence.resolutions.push(ResolutionEvidence {
-            qualifier: ImportQualifier::Unqualified,
-            module: "Unused".into(),
-            boot: false,
-            selected: None,
-            candidates: vec![root.path().join("A.hs")],
-        });
-        validate_local_negative_context(&left, &key, &[]).unwrap();
-        assert!(same_local_recipe(&left, &right, &key).unwrap());
-    }
-
-    #[test]
-    fn source_recipe_equivalence_refuses_positive_and_native_identity_changes() {
-        let root = tempfile::tempdir().unwrap();
-        let (graph, _) = test_graph_with_local_source_dependency(root.path());
-        let original = GraphWire::decode(graph.bytes()).unwrap();
-        let key = ExactModuleIdentity {
-            unit: "main".into(),
-            module: "A".into(),
-        };
-        for component in 0..5 {
-            let mut changed = GraphWire::decode(graph.bytes()).unwrap();
-            match component {
-                0 => {
-                    changed
-                        .evidence
-                        .sources
-                        .iter_mut()
-                        .find(|source| source.path == root.path().join("A.hs"))
-                        .unwrap()
-                        .sha256 = hex(&[9; 32])
-                }
-                1 => {
-                    changed
-                        .evidence
-                        .modules
-                        .iter_mut()
-                        .find(|node| node.module == "A")
-                        .unwrap()
-                        .source = root.path().join("Other.hs")
-                }
-                2 => changed.evidence.resolutions[0].selected = Some(root.path().join("Other.hs")),
-                3 => {
-                    changed
-                        .owners
-                        .iter_mut()
-                        .find(|owner| owner.module == "B")
-                        .unwrap()
-                        .product_sha256 = [9; 32]
-                }
-                _ => {
-                    changed
-                        .owners
-                        .iter_mut()
-                        .find(|owner| owner.module == "B")
-                        .unwrap()
-                        .skinny_iface_sha256 = [9; 32]
-                }
-            }
-            assert!(!same_local_recipe(&original, &changed, &key).unwrap_or(false));
-        }
-    }
-
-    #[test]
-    fn causal_recipe_schedule_bounds_unique_contexts_before_queueing() {
-        let key = ExactModuleIdentity {
-            unit: "main".into(),
-            module: "A".into(),
-        };
-        let mut seen = BTreeSet::new();
-        let mut pending = Vec::new();
-        for index in 0..EDGE_LIMIT {
-            let mut digest = [0; 32];
-            digest[..8].copy_from_slice(&(index as u64).to_le_bytes());
-            schedule_causal_recipe(&mut seen, &mut pending, &key, digest).unwrap();
-        }
-        schedule_causal_recipe(&mut seen, &mut pending, &key, [0; 32]).unwrap();
-        assert_eq!(pending.len(), EDGE_LIMIT);
-        assert!(schedule_causal_recipe(&mut seen, &mut pending, &key, [255; 32]).is_err());
-        assert_eq!(seen.len(), EDGE_LIMIT);
-        assert_eq!(pending.len(), EDGE_LIMIT);
     }
 
     #[test]

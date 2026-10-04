@@ -37,7 +37,7 @@ import GHC.Driver.Env (hscUpdateFlags, hscUpdateHPT, hsc_HPT, hsc_home_unit, run
 import GHC.Driver.Env.Types (HscEnv(hsc_mod_graph, hsc_unit_env, hsc_logger, hsc_dflags, hsc_FC, hsc_targets, hsc_hooks, hsc_interp))
 import GHC.Driver.Monad (reflectGhc, reifyGhc, Session(..))
 import GHC.Unit.Home.ModInfo (HomeModInfo(..), HomeModLinkable(..), emptyHomeModInfoLinkable, justBytecode, addToHpt, lookupHpt)
-import GHC.Unit.Module.ModDetails (ModDetails, md_types, md_insts)
+import GHC.Unit.Module.ModDetails (ModDetails, md_types)
 import GHC.Unit.Module.Status (HscBackendAction(..))
 import GHC.Types.ForeignStubs (ForeignStubs(NoStubs))
 import GHC.Driver.Config.Diagnostic (initDiagOpts, initPrintConfig)
@@ -105,7 +105,7 @@ import GHC.Core.TyCo.FVs (scopedSort, tyConsOfType)
 import GHC.Core.TyCon (isTupleTyCon, tyConDataCons_maybe, unwrapNewTyCon_maybe, tyConUnique, tyConName)
 import GHC.Types.SrcLoc (mkRealSrcSpan, mkRealSrcLoc)
 import GHC.Core.Class (className)
-import GHC.Core.InstEnv (is_cls, is_tys, instEnvElts)
+import GHC.Core.InstEnv (is_cls, is_tys)
 import GHC.Core.FamInstEnv (fi_fam, fi_tys)
 import GHC.Core.Predicate (mkClassPred, getClassPredTys_maybe)
 import GHC.Builtin.Names (gHC_PRIM, fUNTyConKey, unrestrictedFunTyConKey, genClassKey, repTyConKey)
@@ -187,7 +187,7 @@ import Tidepool.Timing
 import Tidepool.PreparedStg (PreparedElaboration(..), PreparedModule(..), prepareModule)
 import Tidepool.PreparedSites
   ( elaboratePreparedSites, resolvePreparedSiblings, resolvePreparedInterfaceSiblings, resolveSiteAuthority
-  , siteAuthorityEffectRequestTypeIds )
+  )
 import Tidepool.ExecutionSchema (SymbolIdentity)
 import Tidepool.RetainedUnfoldings
   ( RetainedContext, retainedContext, emptyRetainedContext
@@ -213,7 +213,7 @@ import Tidepool.ExactScope
   , scopeSourceOriginalInterfaces, admittedInterfaceRequirements
   , validateCandidateCanonicalInterfaceProof
   , canonicalCertificatePath, canonicalCertificateSha256, canonicalCoreArtifact
-  , canonicalCorePath, canonicalCoreSha256 )
+  , canonicalCorePath, canonicalCoreSha256, scopeDurableInterfaces, canonicalSourceSha256 )
 import Tidepool.ExecutionSource
   ( ExecutionSourceGraph(..), ExecutionSourceNode(..), ExecutionSourceIdentity(..)
   , ExecutionSourceFailure(..), ExecutionSourceValidationStage(..), ExecutionSourceInterfaceReason(..)
@@ -2177,8 +2177,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                     let known' = Map.union ownedSiblings (Map.union known importedSiblings)
                     in (known', known')
                   siteAuthority <- timePhase timing "prepared_site_authority" $ liftIO
-                    (resolveSiteAuthority env (instEnvElts
-                      (md_insts (hm_details (finalizedHomeModInfo (loadedFinalized loaded))))))
+                    (resolveSiteAuthority env)
                   (elaboratedBindings, yieldSites, preparedSites, typeGraph, rejections) <- timePhase timing "prepared_sites" $ liftIO $
                     elaboratePreparedSites env siteAuthority siblings (cg_binds cgGuts)
                   let elaboration = PreparedElaboration
@@ -2188,7 +2187,6 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                         , peYieldSites = yieldSites
                         , pePreparedSites = preparedSites
                         , peTypeGraph = typeGraph
-                        , peEffectRequestTypeIds = siteAuthorityEffectRequestTypeIds siteAuthority
                         , peSiteRejections = rejections
                         }
                   Just <$> timePhase timing "prepared_stg" (liftIO (prepareModule env summary elaboration))
@@ -3959,7 +3957,7 @@ checkedRecipeOriginal admitted = do
     _ -> Left "checked recipe original lacks its admitted native declaration proof"
   pure original
 
--- Explicit authored imports demand current recipe proof even for a captured
+-- Explicit authored imports demand current canonical source proof even for a captured
 -- lexical owner. Generated imports and use of captured names keep that owner.
 -- Available retained requirements alone never create a source demand.
 selectCurrentSourceOriginals
@@ -4030,7 +4028,7 @@ selectCurrentSourceOriginals admitted intents recipe sourceGraph = do
               >>= either (liftIO . fail) pure
           _ -> liftIO (fail "generated scaffold target summary is missing or duplicated")
     let roots = Set.toAscList (Set.fromList [key | (summary,imported,key) <- hiddenImports
-          , not (permitsGeneratedScaffoldImport scaffold summary key imported)])
+          , key `Set.member` authoredOwners || not (permitsGeneratedScaffoldImport scaffold summary key imported)])
     case roots of
       [] -> pure Nothing
       root : _ -> do
@@ -4038,11 +4036,8 @@ selectCurrentSourceOriginals admitted intents recipe sourceGraph = do
           (scopeIncludePaths admitted)
         unless (all ((== includes) . importPaths . ms_hspp_opts) sourceSummaries) $
           liftIO (throwIO (ExecutionSourceUnsupported root))
-        nodes <- either (liftIO . throwIO) pure (executionSourceClosure
-          (scopeExecutionGraphs admitted) (scopeExecutionOwners admitted) (scopeExecutionNativeOwners admitted) roots)
-        validation <- validateExactOriginalSources admitted interfaces sourceGraph nodes
-        let selectedKeys = Set.fromList (map (executionIdentityKey . executionNodeIdentity) nodes)
-            selectedGraph = mkModuleGraph [node | node@(ModuleNode _ summary) <-
+        (validation,selectedKeys) <- validateCurrentCanonicalSources admitted interfaces sourceGraph roots
+        let selectedGraph = mkModuleGraph [node | node@(ModuleNode _ summary) <-
               mgModSummaries' (validatedOriginalGraph validation)
               , (unitString (moduleUnit (ms_mod summary)),moduleNameString (ms_mod_name summary)) `Set.member` selectedKeys]
             current = validatedOriginalEvidence validation
@@ -4055,7 +4050,7 @@ selectCurrentSourceOriginals admitted intents recipe sourceGraph = do
                 [(dependencyQualifier qualifier,moduleNameString (unLoc name),False)
                 | (summary,imported@(qualifier,name),key) <- hiddenImports
                 , key `Set.member` selectedKeys
-                , not (permitsGeneratedScaffoldImport scaffold summary key imported)]
+                , key `Set.member` authoredOwners || not (permitsGeneratedScaffoldImport scaffold summary key imported)]
             relevant resolution = (dependencyResolutionQualifier resolution,dependencyResolutionModule resolution,
               dependencyResolutionBoot resolution) `Set.member` relevantImports
         unless (all ((== includes) . importPaths . ms_hspp_opts)
@@ -4077,7 +4072,8 @@ selectCurrentSourceOriginals admitted intents recipe sourceGraph = do
                   [dependencyImportName edge | node <- selectedModules, edge <- dependencyModuleImports node
                   , isNothing (dependencyImportSelected edge)]) }
             selected = SourceSelectedOriginals
-              [(executionNodeIdentity node,executionGraphSha256 (executionNodeGraph node)) | node <- nodes] evidence
+              [(key,canonicalCertificateSha256 proof,exactSha256 (exactOwners Map.! key),canonicalSourceSha256 proof)
+              | key <- Set.toAscList selectedKeys, let proof = scopeDurableInterfaces admitted Map.! key] evidence
         setSession initial
         pure (Just selected)
 
@@ -4086,8 +4082,103 @@ data ValidatedOriginalSources = ValidatedOriginalSources
   , validatedOriginalEvidence :: DependencyEvidence
   }
 
--- Current source selection and compile-time bytecode loading share the same
--- original recipe checks. Selection alone never loads or replaces a product.
+-- Current source lookup authenticates canonical interfaces, never native
+-- products or execution recipes. GHC's exact-interface compatibility check
+-- retains usage/type requirements without making them lexical source imports.
+validateCurrentCanonicalSources
+  :: ExactScope -> [(ExactIfaceArtifact, ModIface)] -> ModuleGraph -> [(String,String)]
+  -> Ghc (ValidatedOriginalSources,Set.Set (String,String))
+validateCurrentCanonicalSources admitted interfaces sourceGraph roots = do
+  initial <- getSession
+  let ownerKey owner = (unitString (moduleUnit owner),moduleNameString (moduleName owner))
+      proofs = Map.filter ((== SourceOriginal) . canonicalOrigin) (scopeDurableInterfaces admitted)
+      originals = Map.fromList [((exactUnit artifact,exactModule artifact),iface) | (artifact,iface) <- interfaces]
+      excluded = [mkModuleName (exactModule artifact) | (artifact,_,_) <- scopeInterfaces admitted
+        , Map.notMember (exactUnit artifact,exactModule artifact) proofs]
+        ++ [mkModuleName (exactModule artifact) | artifact <- scopeValueInterfaces admitted]
+  finder <- liftIO initFinderCache
+  setSession initial {hsc_FC=finder}
+  currentEnv <- getSession
+  targets <- forM roots $ \key@(_,name) -> do
+    unless (Map.member key proofs && not ("Tidepool.Session." `isPrefixOf` name)) $
+      liftIO (throwIO (ExecutionSourceIncomplete key))
+    found <- liftIO (findImportedModule currentEnv (mkModuleName name) NoPkgQual)
+    source <- case found of
+      Found location owner | ownerKey owner == key -> maybe
+        (liftIO (throwIO (ExecutionSourceUnavailable key))) pure (ml_hs_file location)
+      _ -> liftIO (throwIO (ExecutionSourceUnavailable key))
+    target <- guessTarget source Nothing Nothing
+    pure target {targetAllowObjCode=False}
+  setTargets (hsc_targets initial ++ targets)
+  graph <- depanal excluded False
+  env <- getSession
+  current <- liftIO (dependencyEvidenceFor env ([],True) graph [])
+  let summaries = Map.fromList [(ownerKey (ms_mod summary),summary)
+        | ModuleNode _ summary <- mgModSummaries' graph, ms_hsc_src summary == HsSrcFile]
+      modules = Map.fromList [((dependencyModuleUnit node,dependencyModuleName node),node)
+        | node <- dependencyModules current, not (dependencyModuleBoot node)]
+      selectedClosure selected =
+        let children = [key | owner <- Set.toList selected, Just node <- [Map.lookup owner modules]
+              , edge <- dependencyModuleImports node, dependencyImportSelected edge /= Nothing
+              , let key = (fst owner,dependencyImportName edge), Map.member key proofs]
+            grown = Set.union selected (Set.fromList children)
+         in if grown == selected then selected else selectedClosure grown
+      selected = selectedClosure (Set.fromList roots)
+      fresh = Map.fromList [(ownerKey (ms_mod summary),summary)
+        | ModuleNode _ summary <- mgModSummaries' sourceGraph, Map.notMember (ownerKey (ms_mod summary)) originals]
+  forM_ (Map.toList fresh) $ \(key,old) -> forM_ (Map.lookup key summaries) $ \now -> do
+    oldPath <- liftIO (traverse canonicalizePath (ml_hs_file (ms_location old)))
+    nowPath <- liftIO (traverse canonicalizePath (ml_hs_file (ms_location now)))
+    unless (ms_mod old == ms_mod now && oldPath == nowPath && ms_hs_hash old == ms_hs_hash now) $
+      liftIO (throwIO (ExecutionSourceIncomplete key))
+  native <- liftIO (hydrateExactScope env interfaces)
+  let nativeEnv = native {hsc_mod_graph=mapMG (\summary -> summary
+        {ms_hspp_opts=canonicalizeDFlags (ms_hspp_opts summary)}) graph}
+  forM_ (Set.toAscList selected) $ \key -> do
+    proof <- maybe (liftIO (throwIO (ExecutionSourceIncomplete key))) pure (Map.lookup key proofs)
+    summary <- maybe (liftIO (throwIO (ExecutionSourceIncomplete key))) pure (Map.lookup key summaries)
+    node <- maybe (liftIO (throwIO (ExecutionSourceIncomplete key))) pure (Map.lookup key modules)
+    source <- liftIO (canonicalizePath (dependencyModuleSource node))
+    (sourceProof,fingerprint) <- liftIO (sourceEvidenceWithFingerprint source)
+    unless (dependencySourceSha256 sourceProof == canonicalSourceSha256 proof && fingerprint == ms_hs_hash summary) $
+      liftIO (throwIO (ExecutionSourceChangedDuring key
+        (OriginalSourceBytesChanged source (canonicalSourceSha256 proof) (dependencySourceSha256 sourceProof))))
+    quotes <- if xopt LangExt.QuasiQuotes (ms_hspp_opts summary)
+      then quasiQuoteOccurrences (ms_hspp_opts summary) . pm_parsed_source <$> parseModule summary
+      else pure []
+    unless (not (hasUnconditionallyUntrackedCompileTimeExecution (ms_hspp_opts summary))
+        && not (gopt Opt_Pp (ms_hspp_opts summary)) && not (xopt LangExt.StaticPointers (ms_hspp_opts summary))
+        && null quotes && not (any dependencyImportBoot (dependencyModuleImports node))) $
+      liftIO (throwIO (ExecutionSourceUnsupported key))
+    packageProof <- case [(artifact,path,sha) | (artifact,path,sha) <- scopeInterfaces admitted
+        , (exactUnit artifact,exactModule artifact) == key] of
+      [(artifact,path,sha)] -> liftIO (readPackageImports path sha artifact)
+        >>= either (const (liftIO (throwIO (ExecutionSourcePackageChanged key)))) pure
+      _ -> liftIO (throwIO (ExecutionSourceIncomplete key))
+    forM_ (ms_textual_imps summary) $ \(qualifier,name) -> do
+      resolved <- liftIO (findImportedModule env (unLoc name) qualifier)
+      case resolved of
+        Found _ owner | isHomeUnit (hsc_home_unit env) (moduleUnit owner) -> pure ()
+        Found _ owner | owner == gHC_PRIM -> unless (CompilerPrimitive `elem` compilerProvided packageProof) $
+          liftIO (throwIO (ExecutionSourcePackageChanged key))
+        Found _ owner -> do
+          package <- liftIO (packageImportRoot env owner) >>= either
+            (const (liftIO (throwIO (ExecutionSourcePackageChanged key)))) pure
+          unless (package `elem` packageInterfaces packageProof) $
+            liftIO (throwIO (ExecutionSourcePackageChanged key))
+        _ -> liftIO (throwIO (ExecutionSourcePackageChanged key))
+    iface <- maybe (liftIO (throwIO (ExecutionSourceIncomplete key))) pure (Map.lookup key originals)
+    let canonical = summary {ms_hspp_opts=canonicalizeDFlags (ms_hspp_opts summary)}
+    decision <- liftIO (checkOldIface (scopeRetainedSummaryHscEnv canonical nativeEnv) canonical (Just iface))
+    case decision of
+      UpToDateItem _ -> pure ()
+      OutOfDateItem reason _ -> liftIO (throwIO (ExecutionSourceChangedDuring key
+        (OriginalInterfaceRecompileRequired (ExecutionSourceInterfaceReason reason))))
+  setSession env {hsc_targets=hsc_targets initial}
+  pure (ValidatedOriginalSources graph current,selected)
+
+-- The legacy source-execution consumer validates its retained native recipe
+-- before bytecode loading. Canonical source selection uses its separate proof.
 validateExactOriginalSources
   :: ExactScope -> [(ExactIfaceArtifact, ModIface)] -> ModuleGraph
   -> [ExecutionSourceNode] -> Ghc ValidatedOriginalSources

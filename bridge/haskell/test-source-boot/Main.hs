@@ -188,14 +188,14 @@ exactCompilationCacheSafety expectedSource bytes = do
   unless (BSL.null remaining) (Left "exact compilation receipt has trailing CBOR bytes")
   case term of
     TList (TString "TPEXACTCOMPILE" : TString version : fields)
-      | version /= "2" -> Left ("unsupported exact compilation receipt schema " ++ T.unpack version)
-      | length fields /= 8 -> Left ("exact compilation receipt v2 has "
+      | version /= "3" -> Left ("unsupported exact compilation receipt schema " ++ T.unpack version)
+      | length fields /= 8 -> Left ("exact compilation receipt v3 has "
           ++ show (length fields + 2) ++ " fields; expected 10")
       | otherwise -> case fields of
           [_, _, TString source, _, _, TString facts, _, _]
             | source /= T.pack expectedSource -> Right Nothing
             | otherwise -> Just <$> dependencyCacheSafe (T.unpack facts)
-          _ -> Left "exact compilation receipt v2 has invalid source or evidence fields"
+          _ -> Left "exact compilation receipt v3 has invalid source or evidence fields"
     _ -> Left "exact compilation receipt has an invalid tag or outer record"
   where
     dependencyCacheSafe facts = case stripPrefix "{\"version\":4,\"cache_safe\":" facts of
@@ -232,6 +232,7 @@ main = getArgs >>= \case
     mixedGraph True 10
   ["--candidate-sited-siblings"] -> candidateSitedSiblings
   ["--candidate-sited-siblings", work] -> candidateSitedSiblingsAt work
+  ["--canonical-current-source"] -> canonicalCurrentSource
   ["--generated-scaffold-imports"] -> generatedScaffoldImports
   ["--generated-scaffold-retained",scope,seal] -> generatedScaffoldRetained scope seal
   ["--hydrated-site-siblings"] -> hydratedSiteSiblings
@@ -695,6 +696,53 @@ checkedValueTypeClosure effects = withScratch $ \work -> do
         unless (fmap renderType (crResultType checked) == Just "Command") $
           fail "dependency-ordered command value injection changed its captured type"
   putStrLn "checked command value: complete type closure, delayed injection and missing/changed-owner refusal passed"
+
+canonicalCurrentSource :: IO ()
+canonicalCurrentSource = withTiming $ withScratch $ \work -> do
+  forM_ ["CanonicalSource.hs","CanonicalDependency.hs","CanonicalConsumer.hs"] $ \name ->
+    copyFile ("test-source-boot/fixtures" </> name) (work </> name)
+  let owner = work </> "CanonicalSource.hs"
+      consumer = work </> "CanonicalConsumer.hs"
+      scopePath = work </> "canonical-source-scope.cbor"
+      includes = [work]
+  original <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
+    Nothing owner includes Nothing
+  writeGenuineMetadataScope scopePath work owner includes ["CanonicalSource","CanonicalDependency"] original
+  base <- readExactScope scopePath >>= either fail pure
+  unless (null (scopeProducts base) && null (scopeExecutionOwners base) && null (scopeExecutionGraphs base)) $
+    fail "canonical current-source fixture unexpectedly retained native execution authority"
+  let admitted = base {scopePurpose=ExactCellPurpose (CheckedCellAdmission (replicate 64 '0')
+        (replicate 64 '0') (replicate 64 '0') [] [] [] [] Nothing AuthoredCellCheck) includes}
+      session = emptySessionScope {ssRoot=work,ssExactScope=Just scopePath}
+      check compile purpose = compile CheckedEnvironment Set.empty (CellProgramCompile purpose admitted)
+        (Just session) consumer includes Nothing
+  parsed <- analyzeCellWithFlags (hsc_dflags (prHscEnv (pprPipelineResult original))) ""
+    "import CanonicalSource as Source (Answer)\nimport CanonicalSource (Answer)\n(1 :: Answer)"
+    >>= either (fail . show) pure
+  let purpose = withSourceImportIntents (cellPlanPrologue parsed) GeneralCompile
+  originalBytes <- BS.readFile owner
+  withResidentPipelineSelected includes $ \compile -> do
+    _ <- check compile purpose
+    receipts <- listDirectory (work </> ".exact-compilations")
+    receiptBytes <- BS.readFile (work </> ".exact-compilations" </> head receipts </> "receipt.cbor")
+    term <- case deserialiseFromBytes decodeTerm (BSL.fromStrict receiptBytes) of
+      Right (rest,decoded) | BSL.null rest -> pure decoded
+      _ -> fail "canonical source receipt has invalid CBOR"
+    case term of
+      TList [TString "TPEXACTCOMPILE",TString "3",_,_,_,_,_,_,_,TList [TList selected,TString _]] -> do
+        unless (length selected == 2 && all (\row -> case row of TList fields -> length fields == 5; _ -> False) selected) $
+          fail "canonical source receipt lost transitive source closure or retained a native identity"
+      _ -> fail "canonical source receipt is not the strict matched version 3"
+    BS.writeFile owner "module CanonicalSource where\ntype Answer = Bool\n"
+    drift <- try (void (check compile purpose)) :: IO (Either SomeException ())
+    unless (either (const True) (const False) drift) $ fail "canonical current-source selection accepted changed source"
+    removeFile owner
+    missing <- try (void (check compile purpose)) :: IO (Either SomeException ())
+    unless (either (const True) (const False) missing) $ fail "canonical current-source selection accepted missing source"
+    BS.writeFile owner originalBytes
+    _ <- check compile purpose
+    pure ()
+  putStrLn "canonical current source: interface-only closure, empty native refs, duplicate imports, drift/missing refusal and recovery"
 
 generatedScaffoldImports :: IO ()
 generatedScaffoldImports = withTiming $ withScratch $ \work -> do
@@ -3432,7 +3480,7 @@ exactLoadedMetadata = withTiming $ withScratch $ \work -> do
         exactCompilationCacheSafety (work </> "MetadataUntrackedTarget.hs") bytes'
     case receiptSafety of
       [cacheSafe] -> do
-        putStrLn ("untracked target receipt: schema=TPEXACTCOMPILE/2 fields=10 "
+        putStrLn ("untracked target receipt: schema=TPEXACTCOMPILE/3 fields=10 "
           ++ "dependency_evidence=v4 cache_safe=" ++ show cacheSafe)
         unless (not cacheSafe) $
           fail "untracked dependency receipt marked dependency evidence cache_safe=true"
