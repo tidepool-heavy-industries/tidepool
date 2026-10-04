@@ -598,6 +598,26 @@ pub struct ResidentToolPolicy {
 pub type ResidentToolFuture =
     Pin<Box<dyn Future<Output = Result<serde_json::Value, ResidentToolError>> + Send + 'static>>;
 
+/// A completed endpoint dispatch keeps workbench execution receipts typed
+/// until the host chooses how to present them to its model provider.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(untagged)]
+pub enum ResidentToolResponse {
+    Workbench(WorkbenchResponse),
+    Value(serde_json::Value),
+}
+
+impl ResidentToolResponse {
+    /// Project a typed dispatch result for existing structured observers.
+    /// Model hosts should match the enum and present `Workbench` directly.
+    pub fn into_json(self) -> Result<serde_json::Value, serde_json::Error> {
+        serde_json::to_value(self)
+    }
+}
+
+pub type ResidentToolDispatchFuture =
+    Pin<Box<dyn Future<Output = Result<ResidentToolResponse, ResidentToolError>> + Send + 'static>>;
+
 /// Opaque host-owned half of a resident context checkpoint. The actor keeps
 /// this share with its checkpoint lease; only the host that created the value
 /// can interpret it.
@@ -665,13 +685,6 @@ pub trait HostedCheckpointCapture: Send + Sync {
     ) -> Result<HostedCheckpointAttachment, HostedCheckpointCaptureError>;
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-pub enum ResidentToolOutput {
-    #[default]
-    Value,
-    Workbench,
-}
-
 /// Transport-neutral interface projected by an actor-local tool host.
 /// Implementations retain actor admission and execution ownership behind
 /// their dispatcher; a concrete host sees only declarations and typed
@@ -698,12 +711,8 @@ pub trait ResidentToolEndpoint: Send + Sync {
     }
 
     fn tools(&self) -> &[HostedTool];
-    /// The owning endpoint chooses interpretation; tool input syntax does not.
-    fn output_format(&self) -> ResidentToolOutput {
-        ResidentToolOutput::Value
-    }
     fn instructions(&self) -> Option<&str>;
-    fn dispatch_boxed(&self, invocation: ToolInvocation) -> ResidentToolFuture;
+    fn dispatch_boxed(&self, invocation: ToolInvocation) -> ResidentToolDispatchFuture;
     /// Expand an actor-issued display without compiling Haskell source.
     fn expand_display_boxed(&self, _identity: (i64, i64, i64), _key: i64) -> ResidentToolFuture {
         Box::pin(async {
@@ -719,7 +728,7 @@ pub trait ResidentToolEndpoint: Send + Sync {
         &self,
         invocation: ToolInvocation,
         capture: Option<Arc<dyn HostedCheckpointCapture>>,
-    ) -> ResidentToolFuture {
+    ) -> ResidentToolDispatchFuture {
         if capture.is_some() {
             Box::pin(async {
                 Err(ResidentToolError::Unavailable(
@@ -737,7 +746,7 @@ pub trait ResidentToolEndpoint: Send + Sync {
         invocation: ToolInvocation,
         capture: Option<Arc<dyn HostedCheckpointCapture>>,
         context: Option<Arc<dyn crate::HostedContextBinding>>,
-    ) -> ResidentToolFuture {
+    ) -> ResidentToolDispatchFuture {
         if context.is_some() {
             Box::pin(async {
                 Err(ResidentToolError::Unavailable(
@@ -1129,6 +1138,9 @@ impl ResidentToolClient {
     ) -> Result<serde_json::Value, ResidentToolError> {
         self.dispatch_workbench_issued_with_context(request, invocation, None, None, None, None)
             .await
+            .and_then(|response| {
+                serde_json::to_value(response).map_err(ResidentToolError::Encoding)
+            })
     }
 
     pub(crate) async fn dispatch_workbench_issued_with_context(
@@ -1139,7 +1151,7 @@ impl ResidentToolClient {
         hosted_checkpoint_capture: Option<Arc<dyn HostedCheckpointCapture>>,
         context_binding: Option<Arc<dyn crate::HostedContextBinding>>,
         selected_tool: Option<HostedTool>,
-    ) -> Result<serde_json::Value, ResidentToolError> {
+    ) -> Result<WorkbenchResponse, ResidentToolError> {
         let Some(invocation) = invocation else {
             if hosted_checkpoint_capture.is_some() || context_binding.is_some() {
                 return Err(ResidentToolError::Unavailable(
@@ -1207,7 +1219,7 @@ impl ResidentToolClient {
         hosted_checkpoint_capture: Option<Arc<dyn HostedCheckpointCapture>>,
         context_binding: Option<Arc<dyn crate::HostedContextBinding>>,
         selected_tool: Option<HostedTool>,
-    ) -> Result<serde_json::Value, ResidentToolError> {
+    ) -> Result<WorkbenchResponse, ResidentToolError> {
         let (response, receive) = oneshot::channel();
         if let Err(error) = self
             .actor
@@ -1245,7 +1257,7 @@ impl ResidentToolClient {
             }
         };
         let response = reply.map_err(ResidentToolError::Invocation)?;
-        serde_json::to_value(response).map_err(ResidentToolError::Encoding)
+        Ok(response)
     }
 }
 
@@ -1305,7 +1317,7 @@ impl ResidentToolEndpoint for ResidentToolPolicy {
         Box::pin(async move { client.expand_display(identity, key).await })
     }
 
-    fn dispatch_boxed(&self, invocation: ToolInvocation) -> ResidentToolFuture {
+    fn dispatch_boxed(&self, invocation: ToolInvocation) -> ResidentToolDispatchFuture {
         let client = self.client.clone();
         let tools = self.tools.clone();
         Box::pin(async move {
@@ -1317,7 +1329,10 @@ impl ResidentToolEndpoint for ResidentToolPolicy {
                     "unknown tool or invalid argument kind".into(),
                 ));
             }
-            client.dispatch(invocation).await
+            client
+                .dispatch(invocation)
+                .await
+                .map(ResidentToolResponse::Value)
         })
     }
 
@@ -1325,7 +1340,7 @@ impl ResidentToolEndpoint for ResidentToolPolicy {
         &self,
         invocation: ToolInvocation,
         capture: Option<Arc<dyn HostedCheckpointCapture>>,
-    ) -> ResidentToolFuture {
+    ) -> ResidentToolDispatchFuture {
         let client = self.client.clone();
         let tools = self.tools.clone();
         Box::pin(async move {
@@ -1337,14 +1352,15 @@ impl ResidentToolEndpoint for ResidentToolPolicy {
                     "unknown tool or invalid argument kind".into(),
                 ));
             }
-            match capture {
+            let value = match capture {
                 Some(capture) => {
                     client
                         .dispatch_with_checkpoint_capture(invocation, capture)
                         .await
                 }
                 None => client.dispatch(invocation).await,
-            }
+            }?;
+            Ok(ResidentToolResponse::Value(value))
         })
     }
 }
@@ -1444,10 +1460,10 @@ mod tests {
             None
         }
 
-        fn dispatch_boxed(&self, _invocation: ToolInvocation) -> ResidentToolFuture {
+        fn dispatch_boxed(&self, _invocation: ToolInvocation) -> ResidentToolDispatchFuture {
             self.dispatches
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Box::pin(async { Ok(serde_json::Value::Null) })
+            Box::pin(async { Ok(ResidentToolResponse::Value(serde_json::Value::Null)) })
         }
     }
 
@@ -1488,7 +1504,7 @@ mod tests {
             endpoint
                 .dispatch_with_checkpoint_boxed(invocation(), None)
                 .await,
-            Ok(serde_json::Value::Null)
+            Ok(ResidentToolResponse::Value(serde_json::Value::Null))
         ));
         assert_eq!(dispatches.load(std::sync::atomic::Ordering::SeqCst), 1);
     }

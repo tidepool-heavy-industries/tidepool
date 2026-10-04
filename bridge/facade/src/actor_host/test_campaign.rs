@@ -507,6 +507,16 @@ pub(super) async fn dispatch_haskell_script_result(
     endpoint: &dyn exomonad_actor::ResidentToolEndpoint,
     script: &str,
 ) -> Result<serde_json::Value, exomonad_actor::ResidentToolError> {
+    dispatch_haskell_script_response(endpoint, script)
+        .await?
+        .into_json()
+        .map_err(exomonad_actor::ResidentToolError::Encoding)
+}
+
+pub(super) async fn dispatch_haskell_script_response(
+    endpoint: &dyn exomonad_actor::ResidentToolEndpoint,
+    script: &str,
+) -> Result<exomonad_actor::ResidentToolResponse, exomonad_actor::ResidentToolError> {
     let call_id = uuid::Uuid::new_v4().simple().to_string();
     let result = endpoint
         .dispatch_boxed(ToolInvocation {
@@ -539,7 +549,7 @@ pub(super) async fn dispatch_structured_tool(
 ) -> serde_json::Value {
     let call_id = uuid::Uuid::new_v4().simple().to_string();
     let result = endpoint
-        .dispatch_boxed(ToolInvocation {
+        .dispatch_json_boxed(ToolInvocation {
             context: Some(ToolInvocationContext::external(
                 "actor-host-vertical".into(),
                 call_id.clone(),

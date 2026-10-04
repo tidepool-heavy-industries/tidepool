@@ -11,7 +11,7 @@ use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use exomonad_actor::{
-    ResidentToolEndpoint, ResidentToolError, WorkbenchBoundaryReconciliation,
+    ResidentToolEndpoint, ResidentToolError, ResidentToolResponse, WorkbenchBoundaryReconciliation,
     WorkbenchCancellationOutcome,
 };
 use exomonad_agent::backend::codex::dynamic_tools::DynamicToolFunctionSpec;
@@ -810,8 +810,8 @@ enum CallContent {
 }
 
 impl CallResponse {
-    fn workbench(value: serde_json::Value) -> Self {
-        Self::text(workbench_transcript(&value).unwrap_or_else(|| serialize(value)))
+    fn workbench(value: tidepool_runtime::session::WorkbenchResponse) -> Self {
+        Self::text(workbench_transcript(&value))
     }
 
     fn domain(kind: ToolKind, value: serde_json::Value) -> Self {
@@ -1029,77 +1029,58 @@ fn serialize(value: serde_json::Value) -> String {
     serde_json::to_string(&value).unwrap_or_else(|_| "{\"status\":\"rejected\"}".into())
 }
 
-/// What a processed unit did that a reader stopped at a later failure would
-/// otherwise have no way to know: it handed off the turn's terminal
-/// transfer, or it installed bindings into the persistent environment.
-/// `None` when the unit did neither (an ordinary committed expression, or a
-/// unit not yet run).
-fn unit_effect_description(item: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
-    let mut parts = Vec::new();
-    if let Some(transfer) = item.get("terminalTransfer").and_then(|v| v.as_str()) {
-        let phrase = match transfer {
-            "replyAccepted" => Some("submitted the reply"),
-            "commandBackgrounded" => Some("backgrounded the command"),
-            "cancellationAcknowledged" => Some("acknowledged the cancellation"),
-            _ => None,
-        };
-        parts.extend(phrase.map(str::to_string));
-    }
-    if let Some(bindings) = item.get("installedBindings").and_then(|v| v.as_array()) {
-        let names: Vec<&str> = bindings.iter().filter_map(|v| v.as_str()).collect();
-        if !names.is_empty() {
-            parts.push(format!("bound {}", names.join(", ")));
-        }
-    }
-    if parts.is_empty() {
-        None
-    } else {
-        Some(parts.join(" and "))
-    }
-}
-
-fn workbench_transcript(value: &serde_json::Value) -> Option<String> {
-    let response = value.as_object()?;
-    let status = response.get("status")?.as_str()?;
-    let next_index = response.get("nextIndex")?.as_u64()?;
-    let total = response.get("total")?.as_u64()?;
-    let items = response.get("items")?.as_array()?;
+fn workbench_transcript(response: &tidepool_runtime::session::WorkbenchResponse) -> String {
+    use tidepool_runtime::session::{WorkbenchRunStatus, WorkbenchTerminalTransfer};
     let mut transcript = String::new();
-    let mut unit_effects: Vec<(u64, String)> = Vec::new();
+    let mut unit_effects = Vec::new();
     let mut displays = Vec::new();
-    for item in items {
-        let item = item.as_object()?;
-        let index = item.get("index")?.as_u64()?;
-        item.get("status")?.as_str()?;
-        let output = item.get("output")?.as_str()?;
+    for item in &response.items {
+        let output = &item.output;
         if !transcript.is_empty() && !transcript.ends_with('\n') && !output.is_empty() {
             transcript.push('\n');
         }
         transcript.push_str(output);
-        if let Some(effect) = unit_effect_description(item) {
-            unit_effects.push((index, effect));
+        let mut effects: Vec<String> = Vec::new();
+        if let Some(transfer) = item.terminal_transfer {
+            match transfer {
+                WorkbenchTerminalTransfer::ReplyAccepted => {
+                    effects.push("submitted the reply".into())
+                }
+                WorkbenchTerminalTransfer::CommandBackgrounded => {
+                    effects.push("backgrounded the command".into())
+                }
+                WorkbenchTerminalTransfer::CancellationAcknowledged => {
+                    effects.push("acknowledged the cancellation".into())
+                }
+            }
         }
-        if let Some(operations) = item.get("operations").and_then(serde_json::Value::as_array) {
-            for operation in operations {
-                let Some(publication) = operation.get("displayPublication") else {
-                    continue;
-                };
+        if !item.installed_bindings.is_empty() {
+            effects.push(format!("bound {}", item.installed_bindings.join(", ")));
+        }
+        if !effects.is_empty() {
+            unit_effects.push((item.index, effects.join(" and ")));
+        }
+        for operation in &item.operations {
+            if let Some(publication) = &operation.display_publication {
                 let mut display = serde_json::json!({"publication": publication});
-                if let Some(page) = operation.get("display") {
-                    display["identity"] = page["identity"].clone();
-                    display["expansions"] = page["expansions"].clone();
-                    display["unavailable"] = page["unavailable"].clone();
+                if let Some(page) = &operation.display {
+                    display["identity"] = serde_json::to_value(page.identity).unwrap_or_default();
+                    display["expansions"] =
+                        serde_json::to_value(&page.expansions).unwrap_or_default();
+                    display["unavailable"] = serde_json::Value::Bool(page.unavailable);
                 }
                 displays.push(display);
             }
         }
     }
-    let processed = match status {
-        "completed" => next_index,
-        "rejected" | "backgrounded" | "replied" => next_index.saturating_add(1).min(total),
-        _ => total,
+    let processed = match response.status {
+        WorkbenchRunStatus::Completed => response.next_index,
+        WorkbenchRunStatus::Rejected
+        | WorkbenchRunStatus::Backgrounded
+        | WorkbenchRunStatus::Replied => response.next_index.saturating_add(1).min(response.total),
+        WorkbenchRunStatus::Committed | WorkbenchRunStatus::RequestCancelled => response.total,
     };
-    let not_run = total.saturating_sub(processed);
+    let not_run = response.total.saturating_sub(processed);
     if not_run > 0 {
         if !transcript.is_empty() && !transcript.ends_with('\n') {
             transcript.push('\n');
@@ -1109,12 +1090,16 @@ fn workbench_transcript(value: &serde_json::Value) -> Option<String> {
                 transcript.push_str(&format!("unit {} {effect}\n", index + 1));
             }
         }
-        match status {
-            "rejected" | "backgrounded" | "replied" => transcript.push_str(&format!(
-                "[stopped after GHCi input unit {processed} of {total}; {not_run} not run]"
+        match response.status {
+            WorkbenchRunStatus::Rejected
+            | WorkbenchRunStatus::Backgrounded
+            | WorkbenchRunStatus::Replied => transcript.push_str(&format!(
+                "[stopped after GHCi input unit {processed} of {}; {not_run} not run]",
+                response.total
             )),
-            "completed" => transcript.push_str(&format!(
-                "[actor completed after GHCi input unit {processed} of {total}; {not_run} not run]"
+            WorkbenchRunStatus::Completed => transcript.push_str(&format!(
+                "[actor completed after GHCi input unit {processed} of {}; {not_run} not run]",
+                response.total
             )),
             _ => {}
         }
@@ -1128,7 +1113,7 @@ fn workbench_transcript(value: &serde_json::Value) -> Option<String> {
         }
         transcript.push_str(&line);
     }
-    Some(transcript)
+    transcript
 }
 
 /// The tool-call level of the run's span tree. Its identity is the model
@@ -1258,9 +1243,9 @@ async fn call(
         }
     };
     let response = match result {
-        Ok(Ok(value)) => match state.endpoint.output_format() {
-            exomonad_actor::ResidentToolOutput::Value => CallResponse::domain(kind, value),
-            exomonad_actor::ResidentToolOutput::Workbench => CallResponse::workbench(value),
+        Ok(Ok(value)) => match value {
+            ResidentToolResponse::Value(value) => CallResponse::domain(kind, value),
+            ResidentToolResponse::Workbench(response) => CallResponse::workbench(response),
         },
         Ok(Err(error)) => {
             let failure = HostToolFailure::Dispatch(error);
@@ -1304,11 +1289,49 @@ async fn record_operation_response(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use exomonad_actor::ResidentToolFuture;
+    use exomonad_actor::ResidentToolDispatchFuture;
     use exomonad_tool::{CustomToolDeclaration, ToolDeclaration, ToolInvocationOrigin};
     use std::num::NonZeroU64;
     use std::sync::Mutex as StdMutex;
     use tidepool_runtime::session::{WorkbenchExecutionId, WorkbenchResponse, WorkbenchRunStatus};
+
+    fn workbench_item(
+        index: usize,
+        status: tidepool_runtime::session::WorkbenchItemStatus,
+        output: impl Into<String>,
+    ) -> tidepool_runtime::session::WorkbenchItemReceipt {
+        tidepool_runtime::session::WorkbenchItemReceipt {
+            index,
+            kind: None,
+            span: None,
+            source_items: Vec::new(),
+            status,
+            output: output.into(),
+            value: None,
+            diagnostics: Vec::new(),
+            failure_layer: None,
+            warnings: Vec::new(),
+            installed_bindings: Vec::new(),
+            operations: Vec::new(),
+            terminal_transfer: None,
+        }
+    }
+
+    fn workbench_response(
+        status: WorkbenchRunStatus,
+        next_index: usize,
+        total: usize,
+        items: Vec<tidepool_runtime::session::WorkbenchItemReceipt>,
+    ) -> WorkbenchResponse {
+        WorkbenchResponse {
+            status,
+            summary: None,
+            items,
+            next_index,
+            total,
+            publication: None,
+        }
+    }
 
     struct EchoEndpoint {
         tools: Vec<HostedTool>,
@@ -1323,25 +1346,27 @@ pub(crate) mod tests {
             Some("raw Haskell")
         }
 
-        fn dispatch_boxed(&self, invocation: ToolInvocation) -> ResidentToolFuture {
+        fn dispatch_boxed(&self, invocation: ToolInvocation) -> ResidentToolDispatchFuture {
             Box::pin(async move {
                 let context = invocation.context;
                 match invocation.arguments {
-                    ToolArguments::Raw(source) => Ok(serde_json::json!({
-                        "source": source,
-                        "threadId": context.as_ref().and_then(|value| match &value.origin {
-                            ToolInvocationOrigin::Model(operation) => match &operation.origin {
-                                ConversationOrigin::External { thread_id } => Some(thread_id),
-                                ConversationOrigin::Embedded { .. } => None,
-                            },
-                            ToolInvocationOrigin::Direct { origin: ConversationOrigin::External { thread_id }, .. } => Some(thread_id),
-                            ToolInvocationOrigin::Direct { .. } => None,
-                        }),
-                        "turnId": context.as_ref().map(ToolInvocationContext::request_id),
-                        "callId": context.as_ref().map(|value| &value.call_id),
-                        "contextCallId": context.as_ref().and_then(ToolInvocationContext::model_operation).map(|operation| &operation.call_id),
-                        "namespace": context.as_ref().and_then(|value| value.namespace.as_ref()),
-                    })),
+                    ToolArguments::Raw(source) => {
+                        Ok(ResidentToolResponse::Value(serde_json::json!({
+                            "source": source,
+                            "threadId": context.as_ref().and_then(|value| match &value.origin {
+                                ToolInvocationOrigin::Model(operation) => match &operation.origin {
+                                    ConversationOrigin::External { thread_id } => Some(thread_id),
+                                    ConversationOrigin::Embedded { .. } => None,
+                                },
+                                ToolInvocationOrigin::Direct { origin: ConversationOrigin::External { thread_id }, .. } => Some(thread_id),
+                                ToolInvocationOrigin::Direct { .. } => None,
+                            }),
+                            "turnId": context.as_ref().map(ToolInvocationContext::request_id),
+                            "callId": context.as_ref().map(|value| &value.call_id),
+                            "contextCallId": context.as_ref().and_then(ToolInvocationContext::model_operation).map(|operation| &operation.call_id),
+                            "namespace": context.as_ref().and_then(|value| value.namespace.as_ref()),
+                        })))
+                    }
                     ToolArguments::Structured(_) => Err(ResidentToolError::InvalidInvocation(
                         "unexpected structured call".into(),
                     )),
@@ -1376,7 +1401,7 @@ pub(crate) mod tests {
             None
         }
 
-        fn dispatch_boxed(&self, _invocation: ToolInvocation) -> ResidentToolFuture {
+        fn dispatch_boxed(&self, _invocation: ToolInvocation) -> ResidentToolDispatchFuture {
             Box::pin(async {
                 Err(ResidentToolError::InvalidInvocation(
                     "dispatch must not be used for cancellation".into(),
@@ -1770,10 +1795,10 @@ pub(crate) mod tests {
             None
         }
 
-        fn dispatch_boxed(&self, _invocation: ToolInvocation) -> ResidentToolFuture {
+        fn dispatch_boxed(&self, _invocation: ToolInvocation) -> ResidentToolDispatchFuture {
             self.dispatches
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Box::pin(async { Ok(serde_json::Value::Null) })
+            Box::pin(async { Ok(ResidentToolResponse::Value(serde_json::Value::Null)) })
         }
 
         fn reconcile_workbench_boxed(
@@ -1910,11 +1935,13 @@ pub(crate) mod tests {
             None
         }
 
-        fn dispatch_boxed(&self, _invocation: ToolInvocation) -> ResidentToolFuture {
+        fn dispatch_boxed(&self, _invocation: ToolInvocation) -> ResidentToolDispatchFuture {
             match self.outcome {
-                ControlledOutcome::Reject => {
-                    Box::pin(async { Ok(serde_json::json!({"status": "rejected"})) })
-                }
+                ControlledOutcome::Reject => Box::pin(async {
+                    Ok(ResidentToolResponse::Value(
+                        serde_json::json!({"status": "rejected"}),
+                    ))
+                }),
                 ControlledOutcome::Error => Box::pin(async {
                     Err(ResidentToolError::InvalidInvocation(
                         "controlled dispatch failure".into(),
@@ -1994,7 +2021,7 @@ pub(crate) mod tests {
             None
         }
 
-        fn dispatch_boxed(&self, invocation: ToolInvocation) -> ResidentToolFuture {
+        fn dispatch_boxed(&self, invocation: ToolInvocation) -> ResidentToolDispatchFuture {
             self.dispatches
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Box::pin(async move {
@@ -2003,7 +2030,9 @@ pub(crate) mod tests {
                         "expected raw source".into(),
                     ));
                 };
-                Ok(serde_json::json!({ "source": source }))
+                Ok(ResidentToolResponse::Value(
+                    serde_json::json!({ "source": source }),
+                ))
             })
         }
     }
@@ -2039,7 +2068,7 @@ pub(crate) mod tests {
             None
         }
 
-        fn dispatch_boxed(&self, _invocation: ToolInvocation) -> ResidentToolFuture {
+        fn dispatch_boxed(&self, _invocation: ToolInvocation) -> ResidentToolDispatchFuture {
             self.dispatches
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let entered = Arc::clone(&self.entered);
@@ -2047,7 +2076,9 @@ pub(crate) mod tests {
             Box::pin(async move {
                 entered.notify_one();
                 release.notified().await;
-                Ok(serde_json::json!({ "released": true }))
+                Ok(ResidentToolResponse::Value(
+                    serde_json::json!({ "released": true }),
+                ))
             })
         }
     }
@@ -2236,6 +2267,7 @@ pub(crate) mod tests {
     struct WorkbenchFunctionEndpoint {
         tools: Vec<HostedTool>,
         expected_arguments: serde_json::Value,
+        response: ResidentToolResponse,
     }
 
     impl ResidentToolEndpoint for WorkbenchFunctionEndpoint {
@@ -2243,31 +2275,17 @@ pub(crate) mod tests {
             &self.tools
         }
 
-        fn output_format(&self) -> exomonad_actor::ResidentToolOutput {
-            exomonad_actor::ResidentToolOutput::Workbench
-        }
-
         fn instructions(&self) -> Option<&str> {
             None
         }
 
-        fn dispatch_boxed(&self, invocation: ToolInvocation) -> ResidentToolFuture {
+        fn dispatch_boxed(&self, invocation: ToolInvocation) -> ResidentToolDispatchFuture {
             assert_eq!(
                 invocation.arguments,
                 ToolArguments::Structured(self.expected_arguments.clone())
             );
-            Box::pin(async {
-                Ok(serde_json::json!({
-                    "status": "committed",
-                    "nextIndex": 1,
-                    "total": 1,
-                    "items": [{
-                        "index": 0,
-                        "status": "committed",
-                        "output": ":: Int -> Int\n  id :: a -> a"
-                    }]
-                }))
-            })
+            let response = self.response.clone();
+            Box::pin(async move { Ok(response) })
         }
     }
 
@@ -2275,6 +2293,16 @@ pub(crate) mod tests {
     async fn workbench_function_result_uses_endpoint_owned_text_boundary() {
         let endpoint = Arc::new(WorkbenchFunctionEndpoint {
             expected_arguments: serde_json::json!({"queries": [":: Int -> Int"]}),
+            response: ResidentToolResponse::Workbench(workbench_response(
+                WorkbenchRunStatus::Committed,
+                1,
+                1,
+                vec![workbench_item(
+                    0,
+                    tidepool_runtime::session::WorkbenchItemStatus::Committed,
+                    ":: Int -> Int\n  id :: a -> a",
+                )],
+            )),
             tools: vec![HostedTool::Function(ToolDeclaration {
                 name: "lookup".into(),
                 description: "Search current Haskell scope; returns deterministic text.".into(),
@@ -2300,6 +2328,37 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn value_result_with_workbench_like_shape_stays_application_json() {
+        let value = serde_json::json!({
+            "items": [{"index": 0, "output": "application data", "status": "committed"}],
+            "status": "committed", "nextIndex": 1, "total": 1
+        });
+        let endpoint = Arc::new(WorkbenchFunctionEndpoint {
+            expected_arguments: serde_json::json!({"queries": []}),
+            response: ResidentToolResponse::Value(value.clone()),
+            tools: vec![HostedTool::Function(ToolDeclaration {
+                name: "lookup".into(),
+                description: "Search current Haskell scope.".into(),
+                input_schema: serde_json::json!({"type":"object"}),
+                output_schema: None,
+                kind: exomonad_tool::ToolKind::Call,
+                schedule: exomonad_tool::ToolScheduling::default(),
+                implementation: exomonad_tool::ToolImplementation::default(),
+                effect_keys: Vec::new(),
+            })],
+        });
+        let state = attached_state(endpoint).await;
+        let mut request = call_request(serde_json::json!({"queries": []}));
+        request.tool = "lookup".into();
+        let response = call(State(state), Json(request)).await.0;
+        let CallContent::InputText { text } = &response.content_items[0];
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(text).unwrap(),
+            value
+        );
+    }
+
+    #[tokio::test]
     async fn function_arguments_retain_non_object_json_for_endpoint_validation() {
         for arguments in [
             serde_json::json!("awaitSettled"),
@@ -2308,6 +2367,16 @@ pub(crate) mod tests {
         ] {
             let endpoint = Arc::new(WorkbenchFunctionEndpoint {
                 expected_arguments: arguments.clone(),
+                response: ResidentToolResponse::Workbench(workbench_response(
+                    WorkbenchRunStatus::Committed,
+                    1,
+                    1,
+                    vec![workbench_item(
+                        0,
+                        tidepool_runtime::session::WorkbenchItemStatus::Committed,
+                        ":: Int -> Int\n  id :: a -> a",
+                    )],
+                )),
                 tools: vec![HostedTool::Function(ToolDeclaration {
                     name: "inspect".into(),
                     description: "Inspect a value".into(),
@@ -2377,13 +2446,23 @@ pub(crate) mod tests {
             CallResponse::domain(ToolKind::Custom, serde_json::json!({"large": huge})),
             CallResponse::domain(ToolKind::Function, serde_json::json!({"large": huge})),
             CallResponse::failure(&HostToolFailure::PanicInFuture(huge.clone())),
-            CallResponse::workbench(serde_json::json!({
-                "status": "committed", "nextIndex": 2, "total": 2,
-                "items": [
-                    {"index": 0, "status": "committed", "output": huge},
-                    {"index": 1, "status": "committed", "output": "final evidence"}
-                ]
-            })),
+            CallResponse::workbench(workbench_response(
+                WorkbenchRunStatus::Committed,
+                2,
+                2,
+                vec![
+                    workbench_item(
+                        0,
+                        tidepool_runtime::session::WorkbenchItemStatus::Committed,
+                        huge,
+                    ),
+                    workbench_item(
+                        1,
+                        tidepool_runtime::session::WorkbenchItemStatus::Committed,
+                        "final evidence",
+                    ),
+                ],
+            )),
         ];
         for response in responses {
             let CallContent::InputText { text } = &response.content_items[0];
@@ -2417,6 +2496,7 @@ pub(crate) mod tests {
                 source_items: Vec::new(),
                 status: WorkbenchItemStatus::Rejected,
                 output: output.clone(),
+                value: None,
                 diagnostics: Vec::new(),
                 warnings: vec![],
                 installed_bindings: vec![],
@@ -2468,15 +2548,14 @@ pub(crate) mod tests {
         let unknown_text = workbench_failure_transcript(&uncertain);
         assert!(unknown_text.contains("display 3:5:7 page 11 unconfirmed (acknowledgement lost)"));
         assert!(unknown_text.len() <= MODEL_OUTPUT_LIMIT);
-        let mut cancelled = serde_json::to_value(WorkbenchResponse {
+        let mut cancelled = WorkbenchResponse {
             status: WorkbenchRunStatus::RequestCancelled,
             summary: None,
             items: uncertain.receipts.clone(),
             next_index: 0,
             total: 1,
             publication: None,
-        })
-        .unwrap();
+        };
         let cancelled_response = CallResponse::workbench(cancelled.clone());
         let CallContent::InputText {
             text: cancelled_text,
@@ -2484,20 +2563,26 @@ pub(crate) mod tests {
         assert!(cancelled_text.contains("\"status\":\"unconfirmed\""));
         assert!(cancelled_text.contains("\"display\":[3,5,7]"));
         assert!(cancelled_text.contains("\"pageOrdinal\":11"));
-        cancelled["items"][0]["output"] = "canonical preview".into();
-        cancelled["items"][0]["operations"][0]["displayPublication"] = serde_json::to_value(
+        cancelled.items[0].output = "canonical preview".into();
+        let operation = &mut cancelled.items[0].operations[0];
+        let output_reference = tidepool_runtime::session::ActorOutputReference {
+            run: "run".into(),
+            sequence: 17,
+        };
+        operation.display_publication = Some(
             tidepool_runtime::session::WorkbenchDisplayPublication::Published {
                 publication: page,
-                output: tidepool_runtime::session::ActorOutputReference {
-                    run: "run".into(),
-                    sequence: 17,
-                },
+                output: output_reference.clone(),
             },
-        )
-        .unwrap();
-        cancelled["items"][0]["operations"][0]["display"] = serde_json::json!({
-            "identity": [3,5,7], "text": "canonical preview", "expansions": [[1,"line\n\"label"]], "unavailable": false,
-            "output": {"run":"run", "sequence":17}
+        );
+        operation.display = Some(tidepool_runtime::session::WorkbenchDisplayOutput {
+            page: tidepool_runtime::session::WorkbenchDisplayPage {
+                identity: (3, 5, 7),
+                text: "canonical preview".into(),
+                expansions: vec![(1, "line\n\"label".into())],
+                unavailable: false,
+            },
+            output: output_reference,
         });
         let published_response = CallResponse::workbench(cancelled);
         let CallContent::InputText {
@@ -2556,6 +2641,7 @@ pub(crate) mod tests {
                 source_items: Vec::new(),
                 status: WorkbenchItemStatus::Rejected,
                 output: rendered.into(),
+                value: None,
                 diagnostics: vec![
                     StructuredDiagnostic {
                         severity: DiagnosticLevel::Error,
@@ -2607,20 +2693,23 @@ pub(crate) mod tests {
 
     #[test]
     fn custom_workbench_receipt_projects_only_ghci_output() {
-        let response = CallResponse::workbench(serde_json::json!({
-            "items": [{
-                "index": 0,
-                "output": "response :: Response ReviewReport",
-                "status": "committed"
-            }, {
-                "index": 1,
-                "output": "readiness :: Watch ReviewReport",
-                "status": "committed"
-            }],
-            "nextIndex": 2,
-            "status": "committed",
-            "total": 2
-        }));
+        let response = CallResponse::workbench(workbench_response(
+            WorkbenchRunStatus::Committed,
+            2,
+            2,
+            vec![
+                workbench_item(
+                    0,
+                    tidepool_runtime::session::WorkbenchItemStatus::Committed,
+                    "response :: Response ReviewReport",
+                ),
+                workbench_item(
+                    1,
+                    tidepool_runtime::session::WorkbenchItemStatus::Committed,
+                    "readiness :: Watch ReviewReport",
+                ),
+            ],
+        ));
         let CallContent::InputText { text } = &response.content_items[0];
         assert_eq!(
             text,
@@ -2647,16 +2736,16 @@ pub(crate) mod tests {
 
     #[test]
     fn custom_workbench_receipt_marks_unrun_suffix_compactly() {
-        let response = CallResponse::workbench(serde_json::json!({
-            "items": [{
-                "index": 0,
-                "output": "Not in scope: `missing`",
-                "status": "rejected"
-            }],
-            "nextIndex": 0,
-            "status": "rejected",
-            "total": 3
-        }));
+        let response = CallResponse::workbench(workbench_response(
+            WorkbenchRunStatus::Rejected,
+            0,
+            3,
+            vec![workbench_item(
+                0,
+                tidepool_runtime::session::WorkbenchItemStatus::Rejected,
+                "Not in scope: `missing`",
+            )],
+        ));
         let CallContent::InputText { text } = &response.content_items[0];
         assert_eq!(
             text,
@@ -2674,21 +2763,26 @@ pub(crate) mod tests {
     /// get.
     #[test]
     fn custom_workbench_receipt_reports_a_processed_units_reply_before_a_later_rejection() {
-        let response = CallResponse::workbench(serde_json::json!({
-            "items": [{
-                "index": 0,
-                "output": "Reply submitted.",
-                "status": "committed",
-                "terminalTransfer": "replyAccepted"
-            }, {
-                "index": 1,
-                "output": "Not in scope: `respond`",
-                "status": "rejected"
-            }],
-            "nextIndex": 1,
-            "status": "rejected",
-            "total": 3
-        }));
+        let mut reply = workbench_item(
+            0,
+            tidepool_runtime::session::WorkbenchItemStatus::Committed,
+            "Reply submitted.",
+        );
+        reply.terminal_transfer =
+            Some(tidepool_runtime::session::WorkbenchTerminalTransfer::ReplyAccepted);
+        let response = CallResponse::workbench(workbench_response(
+            WorkbenchRunStatus::Rejected,
+            1,
+            3,
+            vec![
+                reply,
+                workbench_item(
+                    1,
+                    tidepool_runtime::session::WorkbenchItemStatus::Rejected,
+                    "Not in scope: `respond`",
+                ),
+            ],
+        ));
         let CallContent::InputText { text } = &response.content_items[0];
         assert_eq!(
             text,
@@ -2702,17 +2796,19 @@ pub(crate) mod tests {
     /// later units never ran. A retried actor would see no suffix at all.
     #[test]
     fn custom_workbench_receipt_marks_unrun_suffix_for_a_replied_run() {
-        let response = CallResponse::workbench(serde_json::json!({
-            "items": [{
-                "index": 0,
-                "output": "Reply submitted.",
-                "status": "committed",
-                "terminalTransfer": "replyAccepted"
-            }],
-            "nextIndex": 0,
-            "status": "replied",
-            "total": 2
-        }));
+        let mut reply = workbench_item(
+            0,
+            tidepool_runtime::session::WorkbenchItemStatus::Committed,
+            "Reply submitted.",
+        );
+        reply.terminal_transfer =
+            Some(tidepool_runtime::session::WorkbenchTerminalTransfer::ReplyAccepted);
+        let response = CallResponse::workbench(workbench_response(
+            WorkbenchRunStatus::Replied,
+            0,
+            2,
+            vec![reply],
+        ));
         let CallContent::InputText { text } = &response.content_items[0];
         assert_eq!(
             text,
@@ -3168,7 +3264,10 @@ pub(crate) mod tests {
             crate::actor_host::command_jobs_tests::result_presentation_cases().await
         {
             let response = match result {
-                Ok(value) => CallResponse::workbench(value),
+                Ok(ResidentToolResponse::Workbench(value)) => CallResponse::workbench(value),
+                Ok(ResidentToolResponse::Value(_)) => {
+                    panic!("command fixture must return a workbench receipt")
+                }
                 Err(error) => CallResponse::failure(&HostToolFailure::Dispatch(error)),
             };
             cases.push(case(

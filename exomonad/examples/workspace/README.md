@@ -14,6 +14,9 @@ checks.
 observations and retained output. The lookup record uses
 [`Project/Lookup.hs`](.exomonad/Project/Lookup.hs) to select among typed lookup
 candidates with Jev. These presenters and selectors are part of their tools.
+Every installed function tool chooses its model-facing text explicitly:
+`presentWith id` for `Text`, `presentWith presentJson` for JSON, or
+`presentWith presentDisplay` for an existing `Display` rendering.
 
 The spec has no blanket after-tool monitor. Execution owners use the
 [recursive-work procedure](.exomonad/RECURSIVE-WORK.md): scaffold a shared boundary,

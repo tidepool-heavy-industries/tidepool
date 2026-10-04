@@ -9,6 +9,7 @@ fn receipt(status: WorkbenchItemStatus) -> WorkbenchItemReceipt {
         source_items: Vec::new(),
         status,
         output: String::new(),
+        value: None,
         diagnostics: Vec::new(),
         failure_layer: None,
         warnings: Vec::new(),

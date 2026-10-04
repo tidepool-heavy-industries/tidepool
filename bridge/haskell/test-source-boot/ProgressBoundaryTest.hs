@@ -59,9 +59,9 @@ progressBoundaryChecks effects = bracket scratch removeDirectoryRecursive $ \wor
         (prHscEnv (pprPipelineResult result)) (pprProductInterfaces result)
         context (pprModules result)
       originalRefusals =
-        [refusal | (owner, refusal) <- preparedModuleGroupRefusals products
+        [refusal | (owner, refusals) <- preparedModuleProductOmissions products, refusal <- refusals
         , owner == pmModule prepared]
-      omitted = Set.fromList (concatMap refusedBinders originalRefusals)
+      omitted = Set.fromList (concatMap omittedOriginalBinders originalRefusals)
   groups <- case [outcome | (owner, outcome) <- preparedModuleProductOutcomes products
                 , owner == pmModule prepared] of
     [Right values] -> pure values
@@ -77,8 +77,8 @@ progressBoundaryChecks effects = bracket scratch removeDirectoryRecursive $ \wor
   unless (any (any ((== "publish") . symbolOccurrence) . projectedBinders) groups) $
     fail "compiler-issued concrete progress publisher lost its original native group"
   forM_ ["rawAlias", "rawAliasChain"] $ \occurrence -> unless
-    (any (\refusal -> any ((== T.pack occurrence) . symbolOccurrence) (refusedBinders refusal)
-      && case refusedProjection refusal of MissingPreparedTop _ -> True; _ -> False) originalRefusals) $
+    (any (\refusal -> any ((== T.pack occurrence) . symbolOccurrence) (omittedOriginalBinders refusal)
+      && case omittedOriginalReason refusal of DependsOnUnavailable _ -> True; _ -> False) originalRefusals) $
     fail ("original product retained a dependent of an omitted raw group: " ++ occurrence)
   unless (all (\group -> all ((`Set.notMember` omitted) . globalIdentity)
       (projectedGlobals (projectedBody group))) groups) $

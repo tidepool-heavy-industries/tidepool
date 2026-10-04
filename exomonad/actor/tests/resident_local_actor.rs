@@ -12,12 +12,32 @@ use tidepool_effect::error::EffectError;
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy, Response};
 use tidepool_runtime::session::{
     insert_preamble_imports, resident_workbench_templates, run_turn, ModuleEnv, OutputSink,
-    ResidentSession, SessionLib, TurnRequest as HaskellTurnRequest, TurnResult,
+    ResidentSession, SessionLib, TurnRequest as HaskellTurnRequest, TurnResult, WorkbenchRequest,
 };
 use tidepool_runtime::DEFAULT_NURSERY_SIZE;
 use tidepool_testing::eval_harness;
 
 use super::support;
+
+trait ResidentToolEndpointTestProjection {
+    fn dispatch_json_boxed(&self, invocation: ToolInvocation)
+        -> exomonad_actor::ResidentToolFuture;
+}
+
+impl<T: exomonad_actor::ResidentToolEndpoint + ?Sized> ResidentToolEndpointTestProjection for T {
+    fn dispatch_json_boxed(
+        &self,
+        invocation: ToolInvocation,
+    ) -> exomonad_actor::ResidentToolFuture {
+        let response = exomonad_actor::ResidentToolEndpoint::dispatch_boxed(self, invocation);
+        Box::pin(async move {
+            response
+                .await?
+                .into_json()
+                .map_err(exomonad_actor::ResidentToolError::Encoding)
+        })
+    }
+}
 
 #[path = "resident_local_actor/completion_progress.rs"]
 mod completion_progress;
@@ -361,6 +381,16 @@ async fn resident_structured_tool_command_presentation_retains_job_and_resumes()
 }
 
 #[tokio::test]
+async fn resident_command_retain_binding_returns_reference_without_command_presentation() {
+    resident_await_watch_case(WatchCase::PrimaryCommandRetainBinding).await;
+}
+
+#[tokio::test]
+async fn resident_command_binding_is_recovered_after_later_cell_failure() {
+    resident_await_watch_case(WatchCase::PrimaryCommandRetainBindingFailure).await;
+}
+
+#[tokio::test]
 async fn resident_primary_await_watch_cancels_an_unpublished_cell() {
     resident_await_watch_case(WatchCase::PrimaryCancellation).await;
 }
@@ -393,10 +423,37 @@ async fn resident_parked_cell_publishes_into_latest_environment() {
 type ResidentCellCall =
     tokio::task::JoinHandle<Result<serde_json::Value, exomonad_actor::ResidentToolError>>;
 
-async fn wait_for_armed_call(
+async fn dispatch_unbound_workbench_cell(
+    actor: &exomonad_actor::LocalActorRef,
+    source: &str,
+) -> Result<serde_json::Value, exomonad_actor::ResidentToolError> {
+    let (reply, receive) = tokio::sync::oneshot::channel();
+    actor
+        .address()
+        .send_message(exomonad_actor::KernelMessage::Workbench {
+            invocation: exomonad_actor::ActorWorkbenchInvocation::unbound(
+                WorkbenchRequest::from_cell_input(source),
+            ),
+            control: None,
+            reply: reply.into(),
+        })
+        .expect("queue direct owned workbench cell");
+    match receive.await.map_err(|_| {
+        exomonad_actor::ResidentToolError::Unavailable(
+            "actor stopped before workbench cell completion".into(),
+        )
+    })? {
+        Ok(response) => {
+            serde_json::to_value(response).map_err(exomonad_actor::ResidentToolError::Encoding)
+        }
+        Err(error) => Err(exomonad_actor::ResidentToolError::Invocation(error)),
+    }
+}
+
+async fn wait_for_armed_call<T: std::fmt::Debug>(
     actor: &exomonad_actor::LocalActorRef,
     context: &ToolInvocationContext,
-    call: &mut ResidentCellCall,
+    call: &mut tokio::task::JoinHandle<Result<T, exomonad_actor::ResidentToolError>>,
 ) -> tidepool_runtime::session::WorkbenchExecutionId {
     tokio::time::timeout(std::time::Duration::from_secs(180), async {
         tokio::select! {
@@ -542,7 +599,7 @@ impl ConcurrentResident {
         let context = Self::cell_context(key);
         tokio::spawn(async move {
             policy
-                .dispatch_boxed(ToolInvocation {
+                .dispatch_json_boxed(ToolInvocation {
                     context: Some(context),
                     name: exomonad_actor::HASKELL_TOOL.into(),
                     arguments: ToolArguments::Raw(source),
@@ -891,6 +948,8 @@ enum WatchCase {
     PrimaryInterleavedPublication,
     StructuredRoundTrip,
     StructuredCommandPresentation,
+    PrimaryCommandRetainBinding,
+    PrimaryCommandRetainBindingFailure,
     PrimaryCancellation,
     PrimarySleepCancellation,
     PrimaryCommandAwaitCancellation,
@@ -901,6 +960,9 @@ enum WatchCase {
 async fn resident_await_watch_case(case: WatchCase) {
     let interleaved = matches!(case, WatchCase::PrimaryInterleavedPublication);
     let structured_command = matches!(case, WatchCase::StructuredCommandPresentation);
+    let binding_failure = matches!(case, WatchCase::PrimaryCommandRetainBindingFailure);
+    let retain_command_binding = matches!(case, WatchCase::PrimaryCommandRetainBinding);
+    let direct_binding_cell = binding_failure || retain_command_binding;
     let primary = !matches!(
         case,
         WatchCase::StructuredRoundTrip | WatchCase::StructuredCommandPresentation
@@ -930,7 +992,11 @@ async fn resident_await_watch_case(case: WatchCase) {
     }
     eval_harness::require_extract();
 
-    let session = support::process_unique_session(if command_observation.is_some() {
+    let session = support::process_unique_session(if retain_command_binding {
+        185
+    } else if binding_failure {
+        186
+    } else if command_observation.is_some() {
         184
     } else if cancel_sleep {
         183
@@ -941,31 +1007,38 @@ async fn resident_await_watch_case(case: WatchCase) {
     } else {
         181
     });
-    let declarations = [
-        tidepool_mcp::agent_tools_decl(),
-        tidepool_mcp::actor_decl(),
-        tidepool_mcp::actor_kernel_decl(),
-        tidepool_mcp::actor_local_decl(),
-        tidepool_mcp::commands_decl(),
-        tidepool_mcp::fs_read_decl(),
-        tidepool_mcp::sleep_decl(),
-    ];
+    let declarations = if direct_binding_cell {
+        vec![tidepool_mcp::commands_decl()]
+    } else {
+        vec![
+            tidepool_mcp::agent_tools_decl(),
+            tidepool_mcp::actor_decl(),
+            tidepool_mcp::actor_kernel_decl(),
+            tidepool_mcp::actor_local_decl(),
+            tidepool_mcp::commands_decl(),
+            tidepool_mcp::fs_read_decl(),
+            tidepool_mcp::sleep_decl(),
+        ]
+    };
     let effects = tidepool_mcp::ensure_effects_module(&declarations).expect("actor effects");
     let mut include = effects.include_paths().to_vec();
     include.push(eval_harness::prelude_path());
-    let preamble = insert_preamble_imports(
-        &tidepool_mcp::build_preamble(&declarations, false),
-        "Tidepool.Agent.Contract",
-    );
-    let preamble = insert_preamble_imports(&preamble, "qualified Tidepool.Agent.Watch as Watch");
-    let preamble = insert_preamble_imports(&preamble, "Tidepool.Agent.Watch (Watches)");
-    let preamble = format!(
-        "{preamble}\
-         type ActorEffects = '[AgentTools, Actor, Commands, Watch.Watches, Sleep]\n\
-         data WaitInput = WaitInput {{ delay :: Int }} deriving (Generic, FromJSON, JsonSchema)\n\
-         data WaitOutput = WaitOutput {{ settled :: Bool }} deriving (Generic, ToJSON, JsonSchema)\n\
-         data ResidentTools mode = ResidentTools {{ waitForCommand :: mode :- Call WaitInput WaitOutput }} deriving (Generic)\n"
-    );
+    let preamble = tidepool_mcp::build_preamble(&declarations, false);
+    let preamble = if direct_binding_cell {
+        format!("{preamble}type ActorEffects = '[Commands]\n")
+    } else {
+        let preamble = insert_preamble_imports(&preamble, "Tidepool.Agent.Contract");
+        let preamble =
+            insert_preamble_imports(&preamble, "qualified Tidepool.Agent.Watch as Watch");
+        let preamble = insert_preamble_imports(&preamble, "Tidepool.Agent.Watch (Watches)");
+        format!(
+            "{preamble}\
+             type ActorEffects = '[AgentTools, Actor, Commands, Watch.Watches, Sleep]\n\
+             data WaitInput = WaitInput {{ delay :: Int }} deriving (Generic, FromJSON, JsonSchema)\n\
+             data WaitOutput = WaitOutput {{ settled :: Bool }} deriving (Generic, ToJSON, JsonSchema)\n\
+             data ResidentTools mode = ResidentTools {{ waitForCommand :: mode :- Call WaitInput WaitOutput }} deriving (Generic)\n"
+        )
+    };
     let templates = resident_workbench_templates(&preamble, "ActorEffects", "");
     let include_refs: Vec<_> = include.iter().map(std::path::PathBuf::as_path).collect();
     let session_root = tempfile::tempdir().expect("session root");
@@ -1037,11 +1110,15 @@ async fn resident_await_watch_case(case: WatchCase) {
         let actor = forest
             .new_workbench(
                 "resident-await-watch".into(),
-                exomonad_actor::EffectiveRole::root().with_effect_keys(vec![
-                    exomonad_actor::ActorEffectKey::Commands,
-                    exomonad_actor::ActorEffectKey::Watches,
-                    exomonad_actor::ActorEffectKey::Sleep,
-                ]),
+                exomonad_actor::EffectiveRole::root().with_effect_keys(if direct_binding_cell {
+                    vec![exomonad_actor::ActorEffectKey::Commands]
+                } else {
+                    vec![
+                        exomonad_actor::ActorEffectKey::Commands,
+                        exomonad_actor::ActorEffectKey::Watches,
+                        exomonad_actor::ActorEffectKey::Sleep,
+                    ]
+                }),
             )
             .await
             .expect("spawn primary workbench");
@@ -1077,30 +1154,49 @@ async fn resident_await_watch_case(case: WatchCase) {
             None,
         );
         let mut settled_call = {
+            let actor = actor.clone();
             let policy = policy.clone();
             let context = settled_context.clone();
             tokio::spawn(async move {
-                policy
-                    .dispatch_boxed(ToolInvocation {
-                        context: Some(context),
-                        name: if primary {
-                            exomonad_actor::HASKELL_TOOL
-                        } else {
-                            "wait_for_command"
-                        }
-                        .into(),
-                        arguments: if primary {
-                            ToolArguments::Raw(if interleaved {
-                                include_str!("resident_local_actor/interleaved_bind_cell.hs").into()
-                            } else {
-                                include_str!("resident_local_actor/await_watch_cell.hs")
-                                    .replace("DELAY", "1")
-                            })
-                        } else {
-                            ToolArguments::Structured(serde_json::json!({"delay": 1}))
-                        },
+                let arguments = if primary {
+                    ToolArguments::Raw(if retain_command_binding {
+                        include_str!("resident_local_actor/command_retain_binding_cell.hs").into()
+                    } else if binding_failure {
+                        include_str!("resident_local_actor/command_retain_binding_failure_cell.hs")
+                            .into()
+                    } else if interleaved {
+                        include_str!("resident_local_actor/interleaved_bind_cell.hs").into()
+                    } else {
+                        include_str!("resident_local_actor/await_watch_cell.hs")
+                            .replace("DELAY", "1")
                     })
-                    .await
+                } else {
+                    ToolArguments::Structured(serde_json::json!({"delay": 1}))
+                };
+                if direct_binding_cell {
+                    let ToolArguments::Raw(source) = arguments else {
+                        unreachable!("binding tests always dispatch source cells")
+                    };
+                    dispatch_unbound_workbench_cell(&actor, &source).await
+                } else {
+                    policy
+                        .dispatch_boxed(ToolInvocation {
+                            context: Some(context),
+                            name: if primary {
+                                exomonad_actor::HASKELL_TOOL
+                            } else {
+                                "wait_for_command"
+                            }
+                            .into(),
+                            arguments,
+                        })
+                        .await
+                        .map(|response| {
+                            response
+                                .into_json()
+                                .expect("serialize typed resident tool response")
+                        })
+                }
             })
         };
         tokio::time::timeout(std::time::Duration::from_secs(180), async {
@@ -1109,7 +1205,7 @@ async fn resident_await_watch_case(case: WatchCase) {
             reply = &mut settled_call => panic!("watch cell settled before starting its command: {reply:?}"),
         }
     }).await.expect("command start is bounded");
-        if primary {
+        if primary && !direct_binding_cell {
             wait_for_armed_call(&actor, &settled_context, &mut settled_call).await;
         }
         assert!(
@@ -1136,7 +1232,9 @@ async fn resident_await_watch_case(case: WatchCase) {
             )
             .await
             .expect("B publishes while A remains parked")
-            .expect("B publication");
+            .expect("B publication")
+            .into_json()
+            .expect("serialize B publication");
             assert_eq!(second["status"], "committed", "{second:?}");
             assert!(
                 !settled_call.is_finished(),
@@ -1144,7 +1242,7 @@ async fn resident_await_watch_case(case: WatchCase) {
             );
             command_backend.release.notify_one();
         }
-        if primary {
+        if primary && !direct_binding_cell {
             tokio::time::timeout(std::time::Duration::from_secs(2), async {
                 while !actor.hosted_cell_computing() && !settled_call.is_finished() {
                     tokio::task::yield_now().await;
@@ -1161,8 +1259,74 @@ async fn resident_await_watch_case(case: WatchCase) {
         )
         .await
         .expect("watch settles")
-        .expect("watch call task")
-        .expect("watch tool call");
+        .expect("watch call task");
+        if binding_failure {
+            let Err(error) = settled else {
+                panic!("the deliberately failing post-effect cell must fail: {settled:?}");
+            };
+            let exomonad_actor::ResidentToolError::Invocation(
+                exomonad_actor::KernelInvocationFailure::Workbench(failure),
+            ) = error
+            else {
+                panic!("post-effect failure should retain a workbench receipt: {error:?}");
+            };
+            let receipt = failure
+                .receipts
+                .last()
+                .expect("failed unit receipt is retained");
+            assert_eq!(receipt.installed_bindings.len(), 1, "{receipt:?}");
+            let binding = &receipt.installed_bindings[0];
+            assert!(!binding.contains("session_id:"), "{receipt:?}");
+            assert!(
+                receipt.output.contains(binding),
+                "the recovery receipt names the retained binding: {receipt:?}"
+            );
+            assert_eq!(
+                receipt.operations.len(),
+                3,
+                "start, retain binding, and await committed before the later cell failure: {receipt:?}"
+            );
+            assert!(
+                receipt
+                    .operations
+                    .iter()
+                    .all(|operation| operation.effect == "command job"),
+                "all three operations belong to the Commands effect: {receipt:?}"
+            );
+            for (ordinal, operation) in receipt.operations.iter().enumerate() {
+                assert_eq!(operation.id.effect_ordinal, ordinal);
+                assert_eq!(
+                    operation.disposition,
+                    tidepool_runtime::session::WorkbenchOperationDisposition::Committed
+                );
+            }
+            assert!(
+                receipt
+                    .operations
+                    .iter()
+                    .all(|operation| !operation.effect.contains("Present")),
+                "retaining a binding does not implicitly present command output: {receipt:?}"
+            );
+            assert!(
+                receipt
+                    .operations
+                    .iter()
+                    .all(|operation| operation.display.is_none()),
+                "retaining the command job produces no display output: {receipt:?}"
+            );
+            let binding_read =
+                dispatch_unbound_workbench_cell(&actor, &format!("Cmd.await {binding} >> pure ()"))
+                    .await
+                    .expect("the binding remains usable after the failed cell");
+            assert_eq!(binding_read["status"], "committed", "{binding_read:?}");
+            assert_eq!(
+                binding_read["items"][0]["operations"][0]["effect"], "command job",
+                "{binding_read:?}"
+            );
+            forest.shutdown().await;
+            return;
+        }
+        let settled = settled.expect("watch tool call");
         if primary {
             assert_eq!(settled["status"], "committed", "{settled:?}");
             if interleaved {
@@ -1180,9 +1344,65 @@ async fn resident_await_watch_case(case: WatchCase) {
                         arguments: ToolArguments::Raw("a + b".into()),
                     })
                     .await
-                    .expect("read joined values");
+                    .expect("read joined values")
+                    .into_json()
+                    .expect("serialize joined values");
                 assert_eq!(joined["status"], "committed", "{joined:?}");
                 assert_eq!(joined["items"][0]["output"], "42", "{joined:?}");
+                forest.shutdown().await;
+                return;
+            }
+            if retain_command_binding {
+                let installed_bindings = settled["items"][0]["installedBindings"]
+                    .as_array()
+                    .expect("host binding references");
+                let observation_binding = installed_bindings
+                    .first()
+                    .and_then(serde_json::Value::as_str)
+                    .expect("ordinary result observation is listed first");
+                assert!(
+                    observation_binding.starts_with("observation"),
+                    "the automatic result binder is distinct from the retained job: {settled:?}"
+                );
+                let binding = installed_bindings
+                    .last()
+                    .and_then(serde_json::Value::as_str)
+                    .expect("the command retain effect returns the retained binding reference");
+                assert!(!binding.contains("session_id:"), "{settled:?}");
+                assert_eq!(installed_bindings.len(), 2, "{settled:?}");
+                assert_ne!(binding, observation_binding, "{settled:?}");
+                assert_eq!(
+                    settled["items"][0]["output"],
+                    format!("[bound {observation_binding}]"),
+                    "only the cell's automatic observation is reported"
+                );
+                let operations = settled["items"][0]["operations"]
+                    .as_array()
+                    .expect("retained binding effect receipts");
+                assert_eq!(operations.len(), 3, "{settled:?}");
+                assert!(
+                    operations
+                        .iter()
+                        .all(|operation| operation["effect"] == "command job"),
+                    "retaining and awaiting the job does not emit a presentation operation: {settled:?}"
+                );
+                assert!(
+                    operations
+                        .iter()
+                        .all(|operation| operation["display"].is_null()),
+                    "the effect receipt carries no display output: {settled:?}"
+                );
+                let binding_read = dispatch_unbound_workbench_cell(
+                    &actor,
+                    &format!("Cmd.await {binding} >> pure ()"),
+                )
+                .await
+                .expect("the retained binding can be used by a later cell");
+                assert_eq!(binding_read["status"], "committed", "{binding_read:?}");
+                assert_eq!(
+                    binding_read["items"][0]["operations"][0]["effect"], "command job",
+                    "{binding_read:?}"
+                );
                 forest.shutdown().await;
                 return;
             }
@@ -1219,7 +1439,7 @@ async fn resident_await_watch_case(case: WatchCase) {
         let context = cancelled_context.clone();
         tokio::spawn(async move {
             policy
-                .dispatch_boxed(ToolInvocation {
+                .dispatch_json_boxed(ToolInvocation {
                     context: Some(context),
                     name: exomonad_actor::HASKELL_TOOL.into(),
                     arguments: ToolArguments::Raw(if cancel_sleep {
@@ -1529,7 +1749,7 @@ async fn resident_cleanup_case(fail_hook: bool) {
 
     let changed = sibling_installation
         .policy
-        .dispatch_boxed(ToolInvocation {
+        .dispatch_json_boxed(ToolInvocation {
             context: None,
             name: "set_value".into(),
             arguments: ToolArguments::Structured(serde_json::json!({"next": 73})),
@@ -1546,7 +1766,7 @@ async fn resident_cleanup_case(fail_hook: bool) {
         ("finish_value", serde_json::json!({"confirm": "bad"})),
     ] {
         let error = policy
-            .dispatch_boxed(ToolInvocation {
+            .dispatch_json_boxed(ToolInvocation {
                 context: None,
                 name: name.into(),
                 arguments: ToolArguments::Structured(arguments),
@@ -1564,7 +1784,7 @@ async fn resident_cleanup_case(fail_hook: bool) {
         );
     }
     let unchanged = policy
-        .dispatch_boxed(ToolInvocation {
+        .dispatch_json_boxed(ToolInvocation {
             context: None,
             name: "current_value".into(),
             arguments: ToolArguments::Structured(serde_json::json!({})),
@@ -1574,7 +1794,7 @@ async fn resident_cleanup_case(fail_hook: bool) {
     assert_eq!(unchanged, serde_json::json!({"current": 0}));
 
     let doubled = policy
-        .dispatch_boxed(ToolInvocation {
+        .dispatch_json_boxed(ToolInvocation {
             context: None,
             name: "double_value".into(),
             arguments: ToolArguments::Structured(serde_json::json!({"value": 6})),
@@ -1584,7 +1804,7 @@ async fn resident_cleanup_case(fail_hook: bool) {
     assert_eq!(doubled, serde_json::json!({"doubled": 12}));
 
     let spawned = policy
-        .dispatch_boxed(ToolInvocation {
+        .dispatch_json_boxed(ToolInvocation {
             context: None,
             name: "spawn_child".into(),
             arguments: ToolArguments::Structured(serde_json::json!({"seed": 19})),
@@ -1605,7 +1825,7 @@ async fn resident_cleanup_case(fail_hook: bool) {
             if terminal.kind == exomonad_actor::ActorExitKind::Completed
     ));
     let finished = policy
-        .dispatch_boxed(ToolInvocation {
+        .dispatch_json_boxed(ToolInvocation {
             context: None,
             name: "finish_value".into(),
             arguments: ToolArguments::Structured(serde_json::json!({"confirm": true})),
@@ -1651,7 +1871,7 @@ async fn resident_cleanup_case(fail_hook: bool) {
     // The first tree's retirement must preserve the sibling's live closures.
     let retained = sibling_installation
         .policy
-        .dispatch_boxed(ToolInvocation {
+        .dispatch_json_boxed(ToolInvocation {
             context: None,
             name: "current_value".into(),
             arguments: ToolArguments::Structured(serde_json::json!({})),
@@ -1661,7 +1881,7 @@ async fn resident_cleanup_case(fail_hook: bool) {
     assert_eq!(retained, serde_json::json!({"current": 73}));
     sibling_installation
         .policy
-        .dispatch_boxed(ToolInvocation {
+        .dispatch_json_boxed(ToolInvocation {
             context: None,
             name: "finish_value".into(),
             arguments: ToolArguments::Structured(serde_json::json!({"confirm": true})),

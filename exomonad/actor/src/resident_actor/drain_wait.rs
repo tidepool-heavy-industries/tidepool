@@ -71,6 +71,7 @@ where
                     disposition,
                     outcome,
                     started_job: None,
+                    retained_job_binding: None,
                 };
             }
             "drainActor interrupted by delivered input".into()
@@ -105,5 +106,6 @@ where
         disposition,
         outcome,
         started_job: None,
+        retained_job_binding: None,
     }
 }

@@ -2738,7 +2738,18 @@ mod tests {
         module: &str,
         interface: &[u8],
         products: Vec<u8>,
-    ) {
+    ) -> crate::recovery_artifacts::RecoveryModuleInterfaceRef {
+        write_record_with_interface(root, source, unit, module, products, interface.to_vec())
+    }
+
+    fn write_record_with_interface(
+        root: &Path,
+        source: &Path,
+        unit: &str,
+        module: &str,
+        products: Vec<u8>,
+        interface: Vec<u8>,
+    ) -> crate::recovery_artifacts::RecoveryModuleInterfaceRef {
         let source = fs::canonicalize(source).unwrap();
         let source_bytes = fs::read(&source).unwrap();
         let target_source = "target".to_owned();
@@ -2787,7 +2798,7 @@ mod tests {
                 source: source.clone(),
                 source_sha256: digest(&source_bytes),
                 interface: interface.to_vec(),
-                package_imports: package_imports(unit, module, interface),
+                package_imports: package_imports(unit, module, &interface),
                 target_source,
                 version_origin: CandidateVersionOrigin::Ordinary,
                 original_owner: OriginalOwner {
@@ -2833,6 +2844,7 @@ mod tests {
             )
             .unwrap(),
         );
+        let module_interface = record.module_interface.clone().unwrap();
         record.original_certification = original.certification_bytes().to_vec();
         let bytes = encode_record(&record).unwrap();
         shared_evidence::publish(producer_dir, &record.evidence).unwrap();
@@ -2841,6 +2853,7 @@ mod tests {
             sha(format!("{unit}:{module}:{}", source.display()).as_bytes())
         );
         fs::write(dir.join(name), bytes).unwrap();
+        module_interface
     }
 
     pub(super) fn candidate_fixture(root: &Path, module: &str) -> Record {
@@ -2850,7 +2863,7 @@ mod tests {
         // contains its owner; sharing one marker across owners fabricates a
         // package-sidecar conflict at the immutable interface-content path.
         let interface = format!("u:{module}").into_bytes();
-        write_record(
+        let module_interface = write_record(
             root,
             &source,
             "u",
@@ -2863,6 +2876,8 @@ mod tests {
             .map(|entry| read_record_path(&entry.unwrap().path()).unwrap())
             .find(|r| r.module == module)
             .unwrap();
+        // The durable record and retained proof select the same authenticated carrier.
+        assert_eq!(record.module_interface.as_ref(), Some(&module_interface));
         record.module_interface_proof = Some(
             crate::recovery_artifacts::recover_module_interface(
                 fixture_record_dir(root).parent().unwrap(),

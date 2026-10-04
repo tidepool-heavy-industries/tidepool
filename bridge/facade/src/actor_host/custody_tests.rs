@@ -265,6 +265,7 @@ async fn custody_activation(
 // Exhaustive diagnostics keep new deployment variants visible to this regression.
 fn custody_event_description(event: &LocalResidentDeployment) -> String {
     match event {
+        LocalResidentDeployment::DisplayPublished(_) => "DisplayPublished".into(),
         LocalResidentDeployment::PolicyInstalled(child) => {
             format!("PolicyInstalled {:?}", child.actor.identity())
         }

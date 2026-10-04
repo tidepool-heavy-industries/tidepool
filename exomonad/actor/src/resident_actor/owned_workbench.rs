@@ -1032,6 +1032,7 @@ where
                                 source_items: Vec::new(),
                                 status: WorkbenchItemStatus::Committed,
                                 output,
+                                value: None,
                                 warnings: Vec::new(),
                                 installed_bindings: Vec::new(),
                                 operations: Vec::new(),
@@ -1302,6 +1303,10 @@ where
                         );
                         slot.receipt.status = WorkbenchItemStatus::Stopped;
                         slot.receipt.failure_layer = Some(WorkbenchFailureLayer::Effect);
+                        super::merge_retained_bindings(
+                            &mut slot.receipt,
+                            &owned.state.cursor.unit.recovered_bindings,
+                        );
                         slot.receipt.operations =
                             std::mem::take(&mut owned.state.cursor.unit.operations);
                         owned.state.cursor.receipts.push(slot.receipt);
@@ -1322,6 +1327,10 @@ where
                 }
                 slot.receipt.output =
                     behavior.render_owned_after_tool(&slot.frame, answer, binding);
+                super::merge_retained_bindings(
+                    &mut slot.receipt,
+                    &owned.state.cursor.unit.recovered_bindings,
+                );
                 owned.state.cursor.completed = Some(slot.receipt);
                 Ok(WorkbenchAdvance::Park(Self::continue_owned_task(owned)))
             },
@@ -1815,20 +1824,21 @@ where
                     timing.sync_scope(|| {
                         cleanup.sync_scope(|| {
                             let result = prepared.and_then(|prepared| {
+                                let cursor = &mut owned.state.cursor;
+                                let fragment = cursor
+                                    .running
+                                    .as_mut()
+                                    .expect("same presentation fragment")
+                                    .fragment
+                                    .as_mut()
+                                    .expect("presentation retains its fragment");
                                 prepared.apply(
                                     &environment.commands,
                                     owned.state.effects.context.actor,
-                                    owned
-                                        .state
-                                        .cursor
-                                        .running
-                                        .as_mut()
-                                        .expect("same presentation fragment")
-                                        .fragment
-                                        .as_mut()
-                                        .expect("presentation retains its fragment"),
-                                    &mut owned.state.cursor.unit.display_remaining,
-                                    &mut owned.state.cursor.unit.command_output,
+                                    fragment,
+                                    &mut cursor.unit.display_remaining,
+                                    &mut cursor.unit.command_output,
+                                    &mut cursor.unit.recovered_bindings,
                                 )
                             });
                             if let Err(error) = result {
@@ -1886,6 +1896,52 @@ where
             .effect_keys()
             .contains(&crate::ActorEffectKey::Commands);
         let context = owned.state.effects.context.clone();
+        let pending = {
+            let ParkedWorkbenchEffect {
+                display,
+                success_disposition,
+                wait,
+                ordinal,
+                effect,
+                started,
+            } = pending;
+            let wait = match wait {
+                OwnedWorkbenchWait::Command {
+                    continuation,
+                    request: crate::generated::commands::CommandsReq::CommandRetainJobWith(job),
+                } => {
+                    let workbench = owned
+                        .workbench
+                        .as_ref()
+                        .expect("prepared execution has its workbench")
+                        .shared_for_command_binding();
+                    let jobs = environment.commands.clone();
+                    let context = context.clone();
+                    OwnedWorkbenchWait::RetainCommandBinding {
+                        continuation,
+                        operation: Box::pin(async move {
+                            command_presentation::retain_job_binding(
+                                &jobs,
+                                &context,
+                                &workbench,
+                                job,
+                                commands_permitted,
+                            )
+                            .await
+                        }),
+                    }
+                }
+                wait => wait,
+            };
+            ParkedWorkbenchEffect {
+                display,
+                success_disposition,
+                wait,
+                ordinal,
+                effect,
+                started,
+            }
+        };
         let control = owned
             .state
             .effects
@@ -1940,6 +1996,24 @@ where
                         .as_mut()
                         .expect("captured command owns its fragment")
                         .record_started_job(job);
+                }
+                if let Some(binding) = result.retained_job_binding {
+                    owned
+                        .state
+                        .cursor
+                        .unit
+                        .recovered_bindings
+                        .push(binding.clone());
+                    owned
+                        .state
+                        .cursor
+                        .running
+                        .as_mut()
+                        .expect("retained command binding belongs to this effect fragment")
+                        .fragment
+                        .as_mut()
+                        .expect("captured command owns its fragment")
+                        .retain_job_binding(binding);
                 }
                 let current = owned
                     .state
@@ -2370,6 +2444,23 @@ where
             unreachable!("child launch requires fenced actor application")
         }
         OwnedWorkbenchWait::Prepared(operation) => operation.await,
+        OwnedWorkbenchWait::RetainCommandBinding {
+            continuation,
+            operation,
+        } => {
+            let (answer, retained_job_binding) = operation.await;
+            let disposition = commands::disposition(&answer);
+            let outcome = environment
+                .runner
+                .resume_value(context.clone(), continuation, answer)
+                .await;
+            return commands::CommandResolution {
+                disposition,
+                outcome,
+                started_job: None,
+                retained_job_binding,
+            };
+        }
         OwnedWorkbenchWait::Drain {
             continuation,
             target,
@@ -2480,6 +2571,7 @@ where
         },
         outcome: result,
         started_job: None,
+        retained_job_binding: None,
     }
 }
 

@@ -15,6 +15,7 @@ pub fn commands_decl() -> crate::EffectDecl {
             "CommandAwaitAndNotifyWith :: Text -> Int -> Commands (Either CommandError CommandStatus)",
             "CommandWaitWith :: Text -> Commands (Either CommandError CommandObservation)",
             "CommandPresentWith :: Text -> CommandPresentation -> Commands ()",
+            "CommandRetainJobWith :: Text -> Commands (Either CommandError Text)",
             "CommandOutputWith :: Text -> Int -> Commands (Either CommandError CommandOutput)",
             "CommandReadWith :: Text -> CommandStream -> CommandPosition -> Commands (Either CommandError CommandPage)",
             "CommandInputWith :: Text -> Text -> Commands (Either CommandError ())",

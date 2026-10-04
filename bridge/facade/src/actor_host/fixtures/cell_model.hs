@@ -29,7 +29,7 @@ data EchoTools mode = EchoTools { echo :: mode :- Call EchoArgs Text }
 callbackTurn :: (Member Sleep effects, Member Console effects)
              => ModelTurn EchoTools effects Text
 callbackTurn = textTurn (AgentSpec
-  { specTools = EchoTools (tool "Echo with the caller's effects" (\args -> do
+  { specTools = EchoTools (presentWith id $ tool "Echo with the caller's effects" (\args -> do
       send (SleepWith (milliseconds 1))
       send (Print "model callback")
       pure (message args)))
@@ -47,7 +47,7 @@ callbackCell = do
 
 nestedTurn :: Member ModelCall effects => ModelTurn EchoTools effects Text
 nestedTurn = textTurn (AgentSpec
-  { specTools = EchoTools (tool "Invoke a nested model in this cell" (\_ -> do
+  { specTools = EchoTools (presentWith id $ tool "Invoke a nested model in this cell" (\_ -> do
       result <- invokeModel (textTurn defaultSpec "nested") "inner"
       pure (either (const "nested failed") id (modelOutcome result))))
   , afterTool = Nothing

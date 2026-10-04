@@ -20,7 +20,7 @@ agentSpec :: (Member AgentLaunch effects, Member Cmd.Commands effects)
           => AgentSpec LifetimeTools effects
 agentSpec = defaultSpec
   { specTools = LifetimeTools
-      { lifetimeProbe = tool "Exercise the invocation lifetime boundary." (\() -> pure "original-result") }
+      { lifetimeProbe = presentWith id $ tool "Exercise the invocation lifetime boundary." (\() -> pure "original-result") }
   , afterTool = Just afterProbe
   }
 

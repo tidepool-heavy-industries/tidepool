@@ -83,7 +83,9 @@ workspace modules, then `reload_agent_spec` to rebuild its own typed tool
 record (a changed tool surface requires a new actor incarnation). Workers use
 the run's tooling; editing a child checkout does not reload it. `Project.Shell`,
 `Project.Lookup` and `Exomonad.Contrib.Routing` are the worked examples of presenters,
-selectors and event routing.
+selectors and event routing. Each installed function tool explicitly selects
+its model-facing text with `presentWith`; see the API guide for `Text`, JSON and
+`Display` choices.
 
 # Notebook contract
 

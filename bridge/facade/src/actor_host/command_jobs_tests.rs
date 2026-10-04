@@ -159,7 +159,7 @@ async fn structured_bash_uses_compiled_handler_and_shared_command_owner() {
             None,
         )),
     };
-    let first = tokio::spawn(policy.dispatch_boxed(invocation.clone()));
+    let first = tokio::spawn(policy.dispatch_json_boxed(invocation.clone()));
     let backend = TestCommands::new();
     backend.finish.send_replace(true);
     backend_request(&mut campaign)
@@ -179,7 +179,10 @@ async fn structured_bash_uses_compiled_handler_and_shared_command_owner() {
         "{receipt}"
     );
     assert_eq!(
-        policy.dispatch_boxed(invocation.clone()).await.unwrap(),
+        policy
+            .dispatch_json_boxed(invocation.clone())
+            .await
+            .unwrap(),
         receipt
     );
     assert_eq!(
@@ -195,7 +198,7 @@ async fn structured_bash_uses_compiled_handler_and_shared_command_owner() {
     assert_eq!(backend.specs.lock()[0].memory, 1024 * 1024 * 1024);
     let mut changed = invocation;
     changed.arguments = ToolArguments::Structured(serde_json::json!({"cmd":"changed"}));
-    assert!(policy.dispatch_boxed(changed).await.is_err());
+    assert!(policy.dispatch_json_boxed(changed).await.is_err());
     committed(&campaign, "40 + 2 :: Int").await;
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
@@ -206,7 +209,7 @@ async fn structured_shell_tools_retain_sessions_and_navigate_without_reexecution
     let mut campaign = TestCampaign::start_with_shell().await;
     let policy = campaign.root_installation.policy.clone();
     let call = |name: &str, arguments| {
-        policy.dispatch_boxed(ToolInvocation {
+        policy.dispatch_json_boxed(ToolInvocation {
             context: None,
             name: name.into(),
             arguments: ToolArguments::Structured(arguments),
@@ -456,7 +459,7 @@ async fn structured_bash_oversized_output_retains_a_real_job() {
     *backend.stdout.lock() = format!("BEGIN\n{}\nEND\n", "λ".repeat(32_000));
     backend.finish.send_replace(true);
     let policy = campaign.root_installation.policy.clone();
-    let running = tokio::spawn(policy.dispatch_boxed(ToolInvocation {
+    let running = tokio::spawn(policy.dispatch_json_boxed(ToolInvocation {
         context: None,
         name: "bash".into(),
         arguments: ToolArguments::Structured(serde_json::json!({"cmd":"large"})),
@@ -480,7 +483,7 @@ async fn structured_bash_oversized_output_retains_a_real_job() {
         .next()
         .unwrap();
     let page = policy
-        .dispatch_boxed(ToolInvocation {
+        .dispatch_json_boxed(ToolInvocation {
             context: None,
             name: "read_output".into(),
             arguments: ToolArguments::Structured(serde_json::json!({"session_id":session})),
@@ -502,7 +505,7 @@ async fn structured_bash_oversized_output_retains_a_real_job() {
         .parse()
         .unwrap();
     let next_page = policy
-        .dispatch_boxed(ToolInvocation {
+        .dispatch_json_boxed(ToolInvocation {
             context: None,
             name: "read_output".into(),
             arguments: ToolArguments::Structured(
@@ -542,7 +545,7 @@ async fn structured_bash_timeout_preserves_the_command_for_haskell_continuation(
     let mut campaign = TestCampaign::start_with_shell().await;
     let backend = TestCommands::new();
     let policy = campaign.root_installation.policy.clone();
-    let running = tokio::spawn(policy.dispatch_boxed(ToolInvocation {
+    let running = tokio::spawn(policy.dispatch_json_boxed(ToolInvocation {
         context: None,
         name: "bash".into(),
         arguments: ToolArguments::Structured(
@@ -580,7 +583,7 @@ async fn structured_bash_timeout_preserves_the_command_for_haskell_continuation(
     );
     assert!(!output.contains("superseded"), "{output}");
     let direct = policy
-        .dispatch_boxed(ToolInvocation {
+        .dispatch_json_boxed(ToolInvocation {
             context: None,
             name: "write_stdin".into(),
             arguments: ToolArguments::Structured(
@@ -606,17 +609,16 @@ async fn structured_bash_timeout_preserves_the_command_for_haskell_continuation(
     campaign.hosted.await.unwrap();
 }
 
-/// Every direct command tool — not only the ones that happen to overflow the
-/// display budget — leaves the same retained job bound in Haskell scope, and
-/// names it in its own result text. `write_stdin` and `cancel_command` are
-/// the two tools not covered by the other command-jobs tests in this file.
+/// A launch introduces the retained job once. Later observations and
+/// cancellation use the supplied session without repeating the introduction.
+
 #[tokio::test]
-async fn write_stdin_and_cancel_command_each_name_the_same_retained_binding() {
+async fn later_command_tools_keep_recovery_without_repeating_binding_introductions() {
     let mut campaign = TestCampaign::start_with_shell().await;
     let backend = TestCommands::new();
     let policy = campaign.root_installation.policy.clone();
     let call = |name: &str, arguments| {
-        policy.dispatch_boxed(ToolInvocation {
+        policy.dispatch_json_boxed(ToolInvocation {
             context: None,
             name: name.into(),
             arguments: ToolArguments::Structured(arguments),
@@ -652,15 +654,9 @@ async fn write_stdin_and_cancel_command_each_name_the_same_retained_binding() {
     .await
     .unwrap();
     assert_eq!(write["status"], "committed", "{write}");
-    let write_binding = write["items"][0]["installedBindings"][0].as_str().unwrap();
-    assert_eq!(write_binding, started_binding, "{write}");
-    assert!(
-        write["items"][0]["output"]
-            .as_str()
-            .unwrap()
-            .contains(&format!("retained as {write_binding} :: Cmd.Job")),
-        "{write}"
-    );
+    let write_output = write["items"][0]["output"].as_str().unwrap();
+    assert!(!write_output.contains("retained as"), "{write}");
+    assert!(!write_output.contains("session_id:"), "{write}");
 
     let cancel = call(
         "cancel_command",
@@ -669,21 +665,14 @@ async fn write_stdin_and_cancel_command_each_name_the_same_retained_binding() {
     .await
     .unwrap();
     assert_eq!(cancel["status"], "committed", "{cancel}");
-    let cancel_binding = cancel["items"][0]["installedBindings"][0].as_str().unwrap();
-    assert_eq!(cancel_binding, started_binding, "{cancel}");
-    assert!(
-        cancel["items"][0]["output"]
-            .as_str()
-            .unwrap()
-            .contains(&format!("retained as {cancel_binding} :: Cmd.Job")),
-        "{cancel}"
-    );
+    let cancel_output = cancel["items"][0]["output"].as_str().unwrap();
+    assert!(!cancel_output.contains("retained as"), "{cancel}");
+    assert!(!cancel_output.contains("session_id:"), "{cancel}");
+    // The original launch binding remains usable after later tool calls.
 
-    // The binding named by both write_stdin and cancel_command resolves in a
-    // later cell exactly as a cell-created binding would.
     let resolved = committed(
         &campaign,
-        &format!("saved <- Cmd.await {started_binding}\nCmd.status {started_binding}"),
+        &format!("saved <- Cmd.await {started_binding}\ndisplay =<< Cmd.status {started_binding}"),
     )
     .await;
     assert!(resolved.to_string().contains("Cancelled"), "{resolved}");
@@ -1296,7 +1285,7 @@ async fn command_jobs_cancel_before_backend_cannot_start_later() {
     let started = campaign
         .root_installation
         .policy
-        .dispatch_boxed(ToolInvocation {
+        .dispatch_json_boxed(ToolInvocation {
             context: None,
             name: "bash".into(),
             arguments: ToolArguments::Structured(
@@ -1317,7 +1306,7 @@ async fn command_jobs_cancel_before_backend_cannot_start_later() {
         let cancelled = campaign
             .root_installation
             .policy
-            .dispatch_boxed(ToolInvocation {
+            .dispatch_json_boxed(ToolInvocation {
                 context: None,
                 name: "cancel_command".into(),
                 arguments: ToolArguments::Structured(
@@ -1339,7 +1328,7 @@ async fn command_jobs_cancel_before_backend_cannot_start_later() {
     let result = campaign
         .root_installation
         .policy
-        .dispatch_boxed(ToolInvocation {
+        .dispatch_json_boxed(ToolInvocation {
             context: None,
             name: "write_stdin".into(),
             arguments: ToolArguments::Structured(
@@ -1376,7 +1365,7 @@ async fn command_jobs_cancel_before_backend_cannot_start_later() {
 async fn command_cancel_is_bounded_when_the_backend_never_confirms() {
     let mut campaign = TestCampaign::start_with_shell().await;
     let policy = campaign.root_installation.policy.clone();
-    let running = tokio::spawn(policy.clone().dispatch_boxed(ToolInvocation {
+    let running = tokio::spawn(policy.clone().dispatch_json_boxed(ToolInvocation {
         context: None,
         name: "bash".into(),
         arguments: ToolArguments::Structured(
@@ -1400,7 +1389,7 @@ async fn command_cancel_is_bounded_when_the_backend_never_confirms() {
 
     let started = std::time::Instant::now();
     let cancelled = policy
-        .dispatch_boxed(ToolInvocation {
+        .dispatch_json_boxed(ToolInvocation {
             context: None,
             name: "cancel_command".into(),
             arguments: ToolArguments::Structured(
@@ -1469,7 +1458,7 @@ async fn disconnected_command_wait_retries_the_same_invocation_without_reexecuti
     };
     let policy = campaign.root_installation.policy.clone();
     let first = invocation();
-    let waiter = tokio::spawn(async move { policy.dispatch_boxed(first).await });
+    let waiter = tokio::spawn(async move { policy.dispatch_json_boxed(first).await });
     backend_request(&mut campaign)
         .await
         .supply(Ok(backend.clone()));
@@ -1498,8 +1487,8 @@ async fn disconnected_command_wait_retries_the_same_invocation_without_reexecuti
         .await
         .supply(Ok(suffix.clone()));
     let policy = campaign.root_installation.policy.as_ref();
-    let recovered = policy.dispatch_boxed(invocation()).await.unwrap();
-    let repeated = policy.dispatch_boxed(invocation()).await.unwrap();
+    let recovered = policy.dispatch_json_boxed(invocation()).await.unwrap();
+    let repeated = policy.dispatch_json_boxed(invocation()).await.unwrap();
     assert_eq!(
         recovered, repeated,
         "exact transport retry changed the receipt"
@@ -1937,7 +1926,7 @@ async fn completed_command_output_survives_a_later_failure_in_the_same_computati
 pub(crate) async fn result_presentation_cases() -> Vec<(
     &'static str,
     &'static str,
-    Result<serde_json::Value, exomonad_actor::ResidentToolError>,
+    Result<exomonad_actor::ResidentToolResponse, exomonad_actor::ResidentToolError>,
     Vec<&'static str>,
     Option<bool>,
     bool,
@@ -1954,7 +1943,7 @@ pub(crate) async fn result_presentation_cases() -> Vec<(
     backend_request(&mut campaign)
         .await
         .supply(Ok(backend.clone()));
-    let prefix = super::tests::dispatch_haskell_script_result(
+    let prefix = super::test_campaign::dispatch_haskell_script_response(
         campaign.root_installation.policy.as_ref(),
         include_str!("command_prefix_failure.hs"),
     )
@@ -2017,7 +2006,7 @@ pub(crate) async fn result_presentation_cases() -> Vec<(
     backend_request(&mut campaign)
         .await
         .supply(Ok(backend.clone()));
-    let recovery = super::tests::dispatch_haskell_script_result(
+    let recovery = super::test_campaign::dispatch_haskell_script_response(
         campaign.root_installation.policy.as_ref(),
         include_str!("command_binding_failure.hs"),
     )
@@ -2047,9 +2036,10 @@ pub(crate) async fn result_presentation_cases() -> Vec<(
         .supply(Ok(backend.clone()));
     let large = running.await.unwrap();
     assert_eq!(backend.executions(), 1);
-    let large_output = large.as_ref().unwrap()["items"][0]["output"]
-        .as_str()
-        .unwrap();
+    let exomonad_actor::ResidentToolResponse::Workbench(receipt) = large.as_ref().unwrap() else {
+        panic!("named command must return a workbench receipt");
+    };
+    let large_output = &receipt.items[0].output;
     assert!(large_output.contains("BEGIN") && large_output.contains("END"));
     cases.push((
         "retained-result-reference-amid-large-output",
@@ -2076,7 +2066,7 @@ async fn flat_input_lifecycle_preserves_partial_acknowledgments() {
     let mut campaign = TestCampaign::start_with_shell().await;
     let policy = campaign.root_installation.policy.clone();
     let call = |name: &str, arguments| {
-        policy.dispatch_boxed(ToolInvocation {
+        policy.dispatch_json_boxed(ToolInvocation {
             context: None,
             name: name.into(),
             arguments: ToolArguments::Structured(arguments),
@@ -2233,7 +2223,7 @@ async fn flat_output_pending_is_distinct_from_empty_and_failure() {
     let mut campaign = TestCampaign::start_with_shell().await;
     let policy = campaign.root_installation.policy.clone();
     let call = |name: &str, arguments| {
-        policy.dispatch_boxed(ToolInvocation {
+        policy.dispatch_json_boxed(ToolInvocation {
             context: None,
             name: name.into(),
             arguments: ToolArguments::Structured(arguments),
@@ -2336,7 +2326,7 @@ async fn flat_pty_eof_rejection_proves_no_input_submitted() {
     let mut campaign = TestCampaign::start_with_shell().await;
     let policy = campaign.root_installation.policy.clone();
     let call = |name: &str, arguments| {
-        policy.dispatch_boxed(ToolInvocation {
+        policy.dispatch_json_boxed(ToolInvocation {
             context: None,
             name: name.into(),
             arguments: ToolArguments::Structured(arguments),
@@ -2416,7 +2406,7 @@ async fn command_settlement(campaign: &mut TestCampaign) -> exomonad_actor::Sett
 async fn structured_bash_explicit_yield_retains_owned_job_without_completion_notice() {
     let mut campaign = TestCampaign::start_with_shell().await;
     let policy = campaign.root_installation.policy.clone();
-    let running = tokio::spawn(policy.clone().dispatch_boxed(ToolInvocation {
+    let running = tokio::spawn(policy.clone().dispatch_json_boxed(ToolInvocation {
         context: None,
         name: "bash".into(),
         arguments: ToolArguments::Structured(
@@ -2448,7 +2438,7 @@ async fn structured_bash_explicit_yield_retains_owned_job_without_completion_not
         .next()
         .unwrap();
     let cancelled = policy
-        .dispatch_boxed(ToolInvocation {
+        .dispatch_json_boxed(ToolInvocation {
             context: None,
             name: "cancel_command".into(),
             arguments: ToolArguments::Structured(
@@ -2486,7 +2476,7 @@ async fn structured_bash_explicit_yield_retains_owned_job_without_completion_not
 async fn structured_bash_default_waits_until_terminal_without_completion_notice() {
     let mut campaign = TestCampaign::start_with_shell().await;
     let policy = campaign.root_installation.policy.clone();
-    let mut running = tokio::spawn(policy.dispatch_boxed(ToolInvocation {
+    let mut running = tokio::spawn(policy.dispatch_json_boxed(ToolInvocation {
         context: None,
         name: "bash".into(),
         arguments: ToolArguments::Structured(serde_json::json!({"cmd":"long-running"})),
@@ -2663,7 +2653,7 @@ async fn sibling_actor_progresses_during_foreground_command_wait() {
 async fn background_bash_returns_at_once_and_its_notice_carries_the_source() {
     let mut campaign = TestCampaign::start_with_shell().await;
     let policy = campaign.root_installation.policy.clone();
-    let running = tokio::spawn(policy.dispatch_boxed(ToolInvocation {
+    let running = tokio::spawn(policy.dispatch_json_boxed(ToolInvocation {
         context: None,
         name: "bash".into(),
         arguments: ToolArguments::Structured(serde_json::json!({

@@ -65,7 +65,7 @@ async fn bash_call_logs_one_call_timing_summary_line() {
             None,
         )),
     };
-    let dispatch = tokio::spawn(policy.dispatch_boxed(invocation));
+    let dispatch = tokio::spawn(policy.dispatch_json_boxed(invocation));
     // The command settles only after a real ~50ms delay, so the effect
     // boundary that awaits it (`Cmd.observe`'s `CommandAwaitWith`) spends
     // measurable wall time — proving `exec_ms` reports the command's own

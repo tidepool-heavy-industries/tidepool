@@ -13,9 +13,11 @@ pub(super) struct CommandResolution {
     /// tagged with the exact job it names — see
     /// `resident_workbench::settle_fragment`.
     pub started_job: Option<String>,
+    /// Binding installed by the host for this exact notebook item.
+    pub retained_job_binding: Option<String>,
 }
 
-fn disposition<T>(result: &Result<T, CommandError>) -> WorkbenchOperationDisposition {
+pub(super) fn disposition<T>(result: &Result<T, CommandError>) -> WorkbenchOperationDisposition {
     match result {
         Ok(_) | Err(CommandError::CommandOutputPending) => WorkbenchOperationDisposition::Committed,
         Err(
@@ -186,6 +188,14 @@ where
                     .resume_unit(context.clone(), continuation)
                     .await
             }
+            // Only the owned workbench can install a command job in its
+            // active notebook scope. The ordinary actor interpreter has no
+            // such notebook binding owner.
+            CommandsReq::CommandRetainJobWith(_) => {
+                answer!(Err::<String, _>(CommandError::CommandUnavailable(
+                    "command job bindings require an owned workbench".into(),
+                ),))
+            }
             CommandsReq::CommandOutputWith(id, bytes) => answer!({
                 match usize::try_from(bytes) {
                     Ok(bytes) => jobs.output(owner, &id, bytes).await,
@@ -245,6 +255,7 @@ where
         disposition: settled,
         outcome,
         started_job,
+        retained_job_binding: None,
     }
 }
 

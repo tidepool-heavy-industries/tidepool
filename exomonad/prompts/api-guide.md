@@ -27,6 +27,13 @@ are not inherited. Calls in one cell share its model budget. Match `modelOutcome
 retain `modelReceipt`, and handle typed failure before cleanup. An absent admitted
 service returns a typed boundary failure.
 
+Every function tool in an installed `AgentSpec` selects its model-facing text
+explicitly: use `presentWith id` for `Text`, `presentWith presentJson` for JSON,
+or `presentWith presentDisplay` for a `Display` value. For example,
+`lookup = presentWith id $ tool description handler`. The hook receives
+`toolResultValue` as semantic JSON and `toolResultOutput` as the selected text;
+it does not render or replace the tool's text.
+
 ## Delegate and inspect
 
 Scaffold, admit ready parallel work and integrate checked results. Recursive

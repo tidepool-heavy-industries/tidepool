@@ -356,7 +356,7 @@ encodeGlobalWitness env resolvePackage packageRef binders homeModules identity r
       Nothing
         | (symbolUnit identity, symbolModule identity) `Set.member` homeModules
             || toUnitId (moduleUnit (symbolOwner identity)) `Set.member` hsc_all_home_unit_ids env ->
-            pure (Left "external home global has no certified source group")
+            pure (Left ("external home global has no certified source group: " ++ show identity))
         | otherwise -> packageOwner resolvePackage packageRef identity Nothing
   pure $ do
     owner <- selected

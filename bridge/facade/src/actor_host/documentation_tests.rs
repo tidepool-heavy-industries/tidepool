@@ -766,7 +766,7 @@ launcher <- R.start (R.withWorktree (worktreeId launcherTree) launchDefinition)"
         .await;
     let reply = child
         .policy
-        .dispatch_boxed(ToolInvocation {
+        .dispatch_json_boxed(ToolInvocation {
             context: None,
             name: exomonad_actor::HASKELL_TOOL.into(),
             arguments: ToolArguments::Raw("respond (\"review complete\" :: Text)".into()),
@@ -1492,7 +1492,7 @@ async fn reattachment_preserves_completed_unacknowledged_forks() {
         "minimal-unfold".into(),
     );
     let result = root
-        .dispatch_boxed(ToolInvocation {
+        .dispatch_json_boxed(ToolInvocation {
             context: Some(ToolInvocationContext::external(
                 boundary.hosted().unwrap().external_thread().unwrap().into(),
                 "minimal-turn".into(),
@@ -1588,7 +1588,7 @@ async fn execute_examples(rich_response: bool, suffix: Option<&str>, groups: usi
     let call_id = "documentation-unfold".to_owned();
     let result = tokio::time::timeout(
         Duration::from_secs(120),
-        root.dispatch_boxed(ToolInvocation {
+        root.dispatch_json_boxed(ToolInvocation {
             context: Some(ToolInvocationContext::external(
                 "actor-host-vertical".into(),
                 call_id.clone(),

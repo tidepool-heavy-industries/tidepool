@@ -2723,6 +2723,7 @@ pub(crate) fn tool_control_reply(
                 source_items: Vec::new(),
                 status: tidepool_runtime::session::WorkbenchItemStatus::Committed,
                 output: value.to_string(),
+                value: None,
                 diagnostics: Vec::new(),
                 failure_layer: None,
                 warnings: Vec::new(),

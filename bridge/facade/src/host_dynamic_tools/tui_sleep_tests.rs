@@ -11,8 +11,8 @@ use super::*;
 use crate::host_dynamic_tools::HostDynamicToolService;
 use axum::{extract::State, routing::post, Json, Router};
 use exomonad_actor::{
-    HostedWorkSeal, ResidentToolEndpoint, ResidentToolError, ResidentToolFuture,
-    WorkbenchCancellationOutcome,
+    HostedWorkSeal, ResidentToolDispatchFuture, ResidentToolEndpoint, ResidentToolError,
+    ResidentToolFuture, WorkbenchCancellationOutcome,
 };
 use exomonad_agent::{
     native_interactive_agent_from_parts, native_interactive_backend, read_interactive_binding,
@@ -198,7 +198,7 @@ impl ResidentToolEndpoint for ObservedEndpoint {
         self.inner.instructions()
     }
 
-    fn dispatch_boxed(&self, invocation: ToolInvocation) -> ResidentToolFuture {
+    fn dispatch_boxed(&self, invocation: ToolInvocation) -> ResidentToolDispatchFuture {
         self.started.store(true, Ordering::Release);
         self.changed.notify_waiters();
         self.inner.dispatch_boxed(invocation)

@@ -244,6 +244,7 @@ pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[
             "CommandAwaitAndNotifyWith",
             "CommandWaitWith",
             "CommandPresentWith",
+            "CommandRetainJobWith",
             "CommandOutputWith",
             "CommandReadWith",
             "CommandInputWith",

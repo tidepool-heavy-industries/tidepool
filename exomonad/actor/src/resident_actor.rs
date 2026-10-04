@@ -2306,15 +2306,20 @@ fn workbench_failure_after_operations(
 ) -> WorkbenchExecutionFailure {
     settle_prepared_operations(&mut operations, WorkbenchOperationDisposition::Unknown);
     let failure_layer = resident_actor_failure_layer(&source);
+    let recovered_bindings = source.recovered_bindings().to_vec();
     let mut receipts = completed.to_vec();
-    if !operations.is_empty() {
+    if !operations.is_empty() || failure_layer.is_some() || !recovered_bindings.is_empty() {
         receipts.push(WorkbenchItemReceipt {
             diagnostics: Vec::new(),
             index: failed_index,
             kind: None,
             span: None,
             source_items: Vec::new(),
-            status: WorkbenchItemStatus::Rejected,
+            status: if failure_layer == Some(WorkbenchFailureLayer::Observation) {
+                WorkbenchItemStatus::Diagnostic
+            } else {
+                WorkbenchItemStatus::Rejected
+            },
             // The failure's own diagnostic lives on `source`/`detail`
             // instead of here; this field otherwise stays empty. The one
             // exception is a short, human-facing framing sentence for the
@@ -2322,8 +2327,9 @@ fn workbench_failure_after_operations(
             // can say plainly, since a reader sees this receipt without
             // necessarily reading `detail`.
             output: failure_layer_output_hint(failure_layer),
+            value: None,
             warnings: Vec::new(),
-            installed_bindings: Vec::new(),
+            installed_bindings: recovered_bindings,
             operations,
             terminal_transfer: None,
             failure_layer,
@@ -2337,6 +2343,81 @@ fn workbench_failure_after_operations(
         publication: None,
         total,
         source,
+    }
+}
+
+fn workbench_failure_after_unit(
+    completed: &[WorkbenchItemReceipt],
+    failed_index: usize,
+    total: usize,
+    source: ResidentActorWorkbenchError,
+    operations: Vec<WorkbenchOperationReceipt>,
+    unit_bindings: &[String],
+) -> WorkbenchExecutionFailure {
+    let mut failure =
+        workbench_failure_after_operations(completed, failed_index, total, source, operations);
+    let has_bindings = !unit_bindings.is_empty()
+        || failure
+            .receipts
+            .iter()
+            .any(|receipt| receipt.index == failed_index && !receipt.installed_bindings.is_empty());
+    if !has_bindings {
+        return failure;
+    }
+    let layer = resident_actor_failure_layer(&failure.source);
+    let receipt_index = match failure
+        .receipts
+        .iter()
+        .rposition(|receipt| receipt.index == failed_index)
+    {
+        Some(index) => index,
+        None => {
+            failure.receipts.push(WorkbenchItemReceipt {
+                diagnostics: Vec::new(),
+                index: failed_index,
+                kind: None,
+                span: None,
+                source_items: Vec::new(),
+                status: WorkbenchItemStatus::Stopped,
+                output: failure_layer_output_hint(layer),
+                value: None,
+                warnings: Vec::new(),
+                installed_bindings: Vec::new(),
+                operations: Vec::new(),
+                terminal_transfer: None,
+                failure_layer: layer,
+            });
+            failure.receipts.len() - 1
+        }
+    };
+    let receipt = &mut failure.receipts[receipt_index];
+    let mut names = receipt.installed_bindings.clone();
+    names.extend_from_slice(unit_bindings);
+    merge_retained_bindings(receipt, &names);
+    if layer == Some(WorkbenchFailureLayer::Effect) {
+        receipt.status = WorkbenchItemStatus::Stopped;
+    }
+    failure
+}
+
+fn merge_retained_bindings(receipt: &mut WorkbenchItemReceipt, bindings: &[String]) {
+    for binding in bindings {
+        if !receipt.installed_bindings.contains(binding) {
+            receipt.installed_bindings.push(binding.clone());
+        }
+    }
+    if bindings.is_empty() || receipt.output.contains("retained bindings:") {
+        return;
+    }
+    let retained = format!(
+        "retained bindings: {}",
+        receipt.installed_bindings.join(", ")
+    );
+    if receipt.output.is_empty() {
+        receipt.output = retained;
+    } else {
+        receipt.output.push('\n');
+        receipt.output.push_str(&retained);
     }
 }
 
@@ -2360,6 +2441,16 @@ fn failure_layer_output_hint(layer: Option<WorkbenchFailureLayer>) -> String {
     }
 }
 
+/// A reload receipt leads with where it ended and how long it took. The
+/// lines beneath retain the selected source and publication details.
+fn reload_receipt(outcome: &str, started: std::time::Instant, lines: Vec<String>) -> String {
+    format!(
+        "{outcome} ({:.1}s)\n{}",
+        started.elapsed().as_secs_f64(),
+        lines.join("\n")
+    )
+}
+
 /// Which failure layer produced `error`, for a receipt built from it.
 /// `Compile`/`CellCheck`/`CompileInfrastructure` never ran an effect at all;
 /// `Resident`/`Delivered` wrap a [`tidepool_runtime::session::ResidentError`],
@@ -2369,17 +2460,6 @@ fn failure_layer_output_hint(layer: Option<WorkbenchFailureLayer>) -> String {
 /// still known to be post-commit (its doc: the response was already handed
 /// to the machine before this failed), so it defaults to `Effect` rather
 /// than staying unclassified.
-/// A reload receipt leads with where it ended and how long it took. The
-/// lines beneath say how far it got; a reader deciding what to do next should
-/// not have to read them to learn the outcome.
-fn reload_receipt(outcome: &str, started: std::time::Instant, lines: Vec<String>) -> String {
-    format!(
-        "outcome: {outcome} ({:.1}s)\n{}",
-        started.elapsed().as_secs_f64(),
-        lines.join("\n")
-    )
-}
-
 fn resident_actor_failure_layer(
     error: &ResidentActorWorkbenchError,
 ) -> Option<WorkbenchFailureLayer> {
@@ -2390,6 +2470,9 @@ fn resident_actor_failure_layer(
             Some(WorkbenchFailureLayer::Compile)
         }
         ResidentActorWorkbenchError::Resident(inner) => inner.failure_layer(),
+        ResidentActorWorkbenchError::CompletedResultObservation { .. } => {
+            Some(WorkbenchFailureLayer::Observation)
+        }
         ResidentActorWorkbenchError::Delivered(inner) => Some(
             inner
                 .failure_layer()
@@ -2505,6 +2588,7 @@ struct WorkbenchUnitExecution<'a> {
     effect_ordinal: &'a mut usize,
     display_remaining: &'a mut usize,
     command_output: &'a mut Vec<String>,
+    recovered_bindings: &'a mut Vec<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -2884,6 +2968,7 @@ struct WorkbenchUnitState {
     effect_ordinal: usize,
     operations: Vec<WorkbenchOperationReceipt>,
     command_output: Vec<String>,
+    recovered_bindings: Vec<String>,
     display_remaining: usize,
 }
 
@@ -2942,6 +3027,16 @@ enum OwnedWorkbenchWait {
             Result<ResidentOutcome, ResidentActorWorkbenchError>,
         >,
     ),
+    RetainCommandBinding {
+        continuation: ResidentHole,
+        operation: futures_util::future::BoxFuture<
+            'static,
+            (
+                Result<String, tidepool_bridge_effects::CommandError>,
+                Option<String>,
+            ),
+        >,
+    },
     Watch(crate::request_effect::WatchPoll),
     Drain {
         continuation: ResidentHole,
@@ -9623,6 +9718,7 @@ where
                                     next_fragment,
                                     unit.display_remaining,
                                     unit.command_output,
+                                    unit.recovered_bindings,
                                 )?;
                             }
                             let (resolved, command_disposition) = match boundary {
@@ -9739,6 +9835,7 @@ where
         dispatch: Arc<RootCustody>,
         call: &tidepool_runtime::session::workbench::WorkbenchToolCall,
         output: String,
+        value: Option<serde_json::Value>,
     ) -> String {
         use crate::after_tool::{Annotation, Disposition, Invocation};
 
@@ -9774,15 +9871,7 @@ where
             // it and names it back when it prunes. It is defined only if the slot
             // actually prunes.
             let handle = format!("toolResult{ordinal}");
-            let payload = serde_json::json!({
-                "call": { "name": call.name, "arguments": call.arguments },
-                "result": {
-                    "name": call.name,
-                    "handle": handle,
-                    "ordinal": ordinal,
-                    "output": output,
-                },
-            });
+            let payload = after_tool_wait::result_payload(call, &handle, ordinal, &output, value);
             let started = std::time::Instant::now();
             let wait = crate::after_tool::wait();
             let observation = self.runtime_observation.clone();
@@ -9956,6 +10045,7 @@ where
         let mut effect_ordinal = 0;
         let mut display_remaining = 16usize * 1024;
         let mut command_output = Vec::new();
+        let mut recovered_bindings = Vec::new();
         let step = workbench
             .begin_after_tool(context.clone(), dispatch, tool, payload)
             .await?;
@@ -9978,6 +10068,7 @@ where
                             effect_ordinal: &mut effect_ordinal,
                             display_remaining: &mut display_remaining,
                             command_output: &mut command_output,
+                            recovered_bindings: &mut recovered_bindings,
                         },
                     )
                     .await?
@@ -10196,6 +10287,7 @@ where
                             source_items: Vec::new(),
                             status: WorkbenchItemStatus::Committed,
                             output,
+                            value: None,
                             warnings: Vec::new(),
                             installed_bindings: Vec::new(),
                             operations: Vec::new(),
@@ -10250,12 +10342,13 @@ where
                                 &mut cursor.unit.operations,
                                 WorkbenchOperationDisposition::Unknown,
                             );
-                            return Err(workbench_failure_after_operations(
+                            return Err(workbench_failure_after_unit(
                                 &cursor.receipts,
                                 cursor.index,
                                 request.items.len(),
                                 ResidentActorWorkbenchError::ActorProtocol(source.to_string()),
                                 std::mem::take(&mut cursor.unit.operations),
+                                &cursor.unit.recovered_bindings,
                             ));
                         }
                         settle_prepared_operations(
@@ -10277,21 +10370,23 @@ where
                             &mut cursor.unit.operations,
                             WorkbenchOperationDisposition::Rejected,
                         );
-                        cursor.receipts.push(WorkbenchItemReceipt {
-                            diagnostics: Vec::new(),
-                            index: cursor.index,
-                            kind: None,
-                            span: None,
-                            source_items: Vec::new(),
-                            status: WorkbenchItemStatus::Rejected,
-                            output: "unfold admission ended without committing every fork group"
-                                .into(),
-                            warnings: Vec::new(),
-                            installed_bindings: Vec::new(),
-                            operations: std::mem::take(&mut cursor.unit.operations),
-                            terminal_transfer: None,
-                            failure_layer: Some(WorkbenchFailureLayer::Effect),
-                        });
+                        let mut failure_receipt = receipt;
+                        failure_receipt.status = if cursor.unit.recovered_bindings.is_empty() {
+                            WorkbenchItemStatus::Rejected
+                        } else {
+                            WorkbenchItemStatus::Stopped
+                        };
+                        failure_receipt.output = format!(
+                            "{}\nunfold admission ended without committing every fork group",
+                            failure_receipt.output
+                        );
+                        failure_receipt.operations = std::mem::take(&mut cursor.unit.operations);
+                        failure_receipt.failure_layer = Some(WorkbenchFailureLayer::Effect);
+                        merge_retained_bindings(
+                            &mut failure_receipt,
+                            &cursor.unit.recovered_bindings,
+                        );
+                        cursor.receipts.push(failure_receipt);
                         return Ok(WorkbenchRunAdvance::Complete(KernelStep::Continue(
                             workbench_response(
                                 WorkbenchRunStatus::Rejected,
@@ -10346,6 +10441,7 @@ where
                                     effect_ordinal: &mut cursor.unit.effect_ordinal,
                                     display_remaining: &mut cursor.unit.display_remaining,
                                     command_output: &mut cursor.unit.command_output,
+                                    recovered_bindings: &mut cursor.unit.recovered_bindings,
                                 },
                             )
                             .await
@@ -10535,6 +10631,7 @@ where
                                     effect_ordinal: &mut cursor.unit.effect_ordinal,
                                     display_remaining: &mut cursor.unit.display_remaining,
                                     command_output: &mut cursor.unit.command_output,
+                                    recovered_bindings: &mut cursor.unit.recovered_bindings,
                                 },
                             )
                             .await
@@ -10555,12 +10652,13 @@ where
                                     Some(effects.invocation_work.as_ref()),
                                 )
                                 .await;
-                                let mut failure = workbench_failure_after_operations(
+                                let mut failure = workbench_failure_after_unit(
                                     &cursor.receipts,
                                     cursor.index,
                                     request.items.len(),
                                     source,
                                     std::mem::take(&mut cursor.unit.operations),
+                                    &cursor.unit.recovered_bindings,
                                 );
                                 if let Some(receipt) = failure
                                     .receipts
@@ -10584,6 +10682,7 @@ where
                 match step {
                     ResidentWorkbenchStep::Committed {
                         output,
+                        value,
                         warnings,
                         installed_bindings,
                     } => {
@@ -10594,10 +10693,6 @@ where
                             .map(|checked| committed_declaration_warnings(checked, cursor.index))
                             .unwrap_or_default();
                         warnings.extend(checked_warnings);
-                        let output = crate::workbench_display::resolve_job_binding_placeholder(
-                            output,
-                            &installed_bindings,
-                        );
                         let output = if request.tool_call().is_some() {
                             crate::bound_workbench_display(&output, cursor.unit.display_remaining)
                         } else {
@@ -10647,6 +10742,7 @@ where
                             source_items: Vec::new(),
                             status: WorkbenchItemStatus::Committed,
                             output,
+                            value: value.clone(),
                             warnings,
                             installed_bindings,
                             operations: Vec::new(),
@@ -10668,6 +10764,7 @@ where
                                         dispatch,
                                         call,
                                         std::mem::take(&mut receipt.output),
+                                        receipt.value.clone(),
                                         self.after_tool.begin(),
                                         cursor.unit.display_remaining,
                                     );
@@ -10698,6 +10795,7 @@ where
                                         dispatch,
                                         &call,
                                         receipt.output,
+                                        receipt.value.clone(),
                                     )
                                     .await;
                             }
@@ -10732,20 +10830,34 @@ where
                             Some(effects.invocation_work.as_ref()),
                         )
                         .await;
-                        cursor.receipts.push(WorkbenchItemReceipt {
+                        let mut failure_receipt = WorkbenchItemReceipt {
                             diagnostics,
                             index: cursor.index,
                             kind: None,
                             span: None,
                             source_items: Vec::new(),
-                            status: WorkbenchItemStatus::Rejected,
+                            status: if cursor.unit.recovered_bindings.is_empty() {
+                                WorkbenchItemStatus::Rejected
+                            } else {
+                                WorkbenchItemStatus::Stopped
+                            },
                             output,
+                            value: None,
                             warnings: Vec::new(),
                             installed_bindings: Vec::new(),
                             operations: std::mem::take(&mut cursor.unit.operations),
                             terminal_transfer: None,
-                            failure_layer: Some(WorkbenchFailureLayer::Compile),
-                        });
+                            failure_layer: Some(if cursor.unit.recovered_bindings.is_empty() {
+                                WorkbenchFailureLayer::Compile
+                            } else {
+                                WorkbenchFailureLayer::Effect
+                            }),
+                        };
+                        merge_retained_bindings(
+                            &mut failure_receipt,
+                            &cursor.unit.recovered_bindings,
+                        );
+                        cursor.receipts.push(failure_receipt);
                         return Ok(WorkbenchRunAdvance::Complete(KernelStep::Continue(
                             workbench_response(
                                 WorkbenchRunStatus::Rejected,
@@ -10778,15 +10890,16 @@ where
                         )
                         .await
                         .map_err(|error| {
-                            workbench_failure_after_operations(
+                            workbench_failure_after_unit(
                                 &cursor.receipts,
                                 cursor.index,
                                 request.items.len(),
                                 error,
                                 cursor.unit.operations.clone(),
+                                &cursor.unit.recovered_bindings,
                             )
                         })?;
-                        cursor.receipts.push(WorkbenchItemReceipt {
+                        let mut receipt = WorkbenchItemReceipt {
                             diagnostics: Vec::new(),
                             index: cursor.index,
                             kind: None,
@@ -10794,12 +10907,15 @@ where
                             source_items: Vec::new(),
                             status: WorkbenchItemStatus::Committed,
                             output: "Reply submitted.".to_owned(),
+                            value: None,
                             warnings: Vec::new(),
                             installed_bindings: Vec::new(),
                             operations: std::mem::take(&mut cursor.unit.operations),
                             terminal_transfer: Some(WorkbenchTerminalTransfer::ReplyAccepted),
                             failure_layer: None,
-                        });
+                        };
+                        merge_retained_bindings(&mut receipt, &cursor.unit.recovered_bindings);
+                        cursor.receipts.push(receipt);
                         return Ok(WorkbenchRunAdvance::Complete(KernelStep::ContinueLater(
                             workbench_response(
                                 WorkbenchRunStatus::Replied,
@@ -10829,7 +10945,7 @@ where
                             self.environment
                                 .requests
                                 .rollback_cancellation_acknowledgement(request_id);
-                            return Err(workbench_failure_after_operations(
+                            return Err(workbench_failure_after_unit(
                             &cursor.receipts,
                             cursor.index,
                             request.items.len(),
@@ -10838,6 +10954,7 @@ where
                                     .into(),
                             ),
                             std::mem::take(&mut cursor.unit.operations),
+                            &cursor.unit.recovered_bindings,
                         ));
                         }
                         if self.pending_program.is_some()
@@ -10847,7 +10964,7 @@ where
                             self.environment
                                 .requests
                                 .rollback_cancellation_acknowledgement(request_id);
-                            return Err(workbench_failure_after_operations(
+                            return Err(workbench_failure_after_unit(
                                 &cursor.receipts,
                                 cursor.index,
                                 request.items.len(),
@@ -10856,6 +10973,7 @@ where
                                         .into(),
                                 ),
                                 std::mem::take(&mut cursor.unit.operations),
+                                &cursor.unit.recovered_bindings,
                             ));
                         }
                         let awaiting =
@@ -10877,7 +10995,7 @@ where
                                     self.environment
                                         .requests
                                         .rollback_cancellation_acknowledgement(request_id);
-                                    return Err(workbench_failure_after_operations(
+                                    return Err(workbench_failure_after_unit(
                                         &cursor.receipts,
                                         cursor.index,
                                         request.items.len(),
@@ -10885,6 +11003,7 @@ where
                                             "cancellation did not match the active request".into(),
                                         ),
                                         std::mem::take(&mut cursor.unit.operations),
+                                        &cursor.unit.recovered_bindings,
                                     ));
                                 }
                                 standing => {
@@ -10892,7 +11011,7 @@ where
                                     self.environment
                                         .requests
                                         .rollback_cancellation_acknowledgement(request_id);
-                                    return Err(workbench_failure_after_operations(
+                                    return Err(workbench_failure_after_unit(
                                         &cursor.receipts,
                                         cursor.index,
                                         request.items.len(),
@@ -10900,6 +11019,7 @@ where
                                             "cancellation lost its active request".into(),
                                         ),
                                         std::mem::take(&mut cursor.unit.operations),
+                                        &cursor.unit.recovered_bindings,
                                     ));
                                 }
                             };
@@ -10908,7 +11028,7 @@ where
                             self.environment
                                 .requests
                                 .rollback_cancellation_acknowledgement(request_id);
-                            return Err(workbench_failure_after_operations(
+                            return Err(workbench_failure_after_unit(
                                 &cursor.receipts,
                                 cursor.index,
                                 request.items.len(),
@@ -10916,6 +11036,7 @@ where
                                     "cancellation lost its mailbox continuation".into(),
                                 ),
                                 std::mem::take(&mut cursor.unit.operations),
+                                &cursor.unit.recovered_bindings,
                             ));
                         };
                         let outcome = match self
@@ -10935,12 +11056,13 @@ where
                                 self.environment
                                     .requests
                                     .rollback_cancellation_acknowledgement(request_id);
-                                return Err(workbench_failure_after_operations(
+                                return Err(workbench_failure_after_unit(
                                     &cursor.receipts,
                                     cursor.index,
                                     request.items.len(),
                                     error,
                                     std::mem::take(&mut cursor.unit.operations),
+                                    &cursor.unit.recovered_bindings,
                                 ));
                             }
                         };
@@ -10971,19 +11093,20 @@ where
                                     .outcome,
                             )
                             .map_err(|error| {
-                                workbench_failure_after_operations(
+                                workbench_failure_after_unit(
                                     &cursor.receipts,
                                     cursor.index,
                                     request.items.len(),
                                     error,
                                     cursor.unit.operations.clone(),
+                                    &cursor.unit.recovered_bindings,
                                 )
                             })?;
                         self.pending_program
                             .as_mut()
                             .expect("native cancellation pending")
                             .cleanup = cleanup;
-                        cursor.receipts.push(WorkbenchItemReceipt {
+                        let mut receipt = WorkbenchItemReceipt {
                             diagnostics: Vec::new(),
                             index: cursor.index,
                             kind: None,
@@ -10991,6 +11114,7 @@ where
                             source_items: Vec::new(),
                             status: WorkbenchItemStatus::Committed,
                             output: String::new(),
+                            value: None,
                             warnings: Vec::new(),
                             installed_bindings: Vec::new(),
                             operations: std::mem::take(&mut cursor.unit.operations),
@@ -10998,7 +11122,9 @@ where
                                 WorkbenchTerminalTransfer::CancellationAcknowledged,
                             ),
                             failure_layer: None,
-                        });
+                        };
+                        merge_retained_bindings(&mut receipt, &cursor.unit.recovered_bindings);
+                        cursor.receipts.push(receipt);
                         return Ok(WorkbenchRunAdvance::Complete(KernelStep::ContinueLater(
                             workbench_response(
                                 WorkbenchRunStatus::RequestCancelled,
@@ -12596,6 +12722,7 @@ where
                         source_items: Vec::new(),
                         status: WorkbenchItemStatus::Committed,
                         output: output.page.text,
+                        value: None,
                         diagnostics: Vec::new(),
                         failure_layer: None,
                         warnings: Vec::new(),
@@ -14924,6 +15051,7 @@ fn cell_check_rejection(
             source_items: Vec::new(),
             status: WorkbenchItemStatus::NotRun,
             output: String::new(),
+            value: None,
             warnings: Vec::new(),
             installed_bindings: Vec::new(),
             operations: Vec::new(),
@@ -15114,6 +15242,7 @@ fn workbench_response(
                 .unwrap_or_default(),
             status: WorkbenchItemStatus::NotRun,
             output: String::new(),
+            value: None,
             warnings: Vec::new(),
             installed_bindings: Vec::new(),
             operations: Vec::new(),
@@ -15343,7 +15472,8 @@ mod tests {
     use super::{
         checkpoint_capture_delivered, disposition_for_non_command_failure,
         failed_checkpoint_cleanup_response, lookup_response, settlement_refusal,
-        workbench_failure_after_operations, workbench_response, ChildExitObservations,
+        workbench_failure_after_operations, workbench_failure_after_unit, workbench_response,
+        ChildExitObservations,
     };
 
     #[test]
@@ -15358,12 +15488,12 @@ mod tests {
         assert!(!checkpoint_capture_delivered(&before_delivery));
     }
     use crate::resident_workbench::{AgentStopProjection, CleanupStepProjection};
-    use crate::{ActorId, ActorRef, Incarnation};
+    use crate::{ActorId, ActorRef, Incarnation, ResidentActorWorkbenchError};
     use tidepool_runtime::session::{
         CellAnalysisItem, CellAnalysisSourceItem, CellCheck, CellSourceSpan, InfoEntry,
         InspectionAvailability, InspectionResult, ResidentError, TurnClassification, TurnKind,
         TypeMatch, TypeMatchQuality, WorkbenchCellItemKind, WorkbenchExecutionId,
-        WorkbenchFailurePoint, WorkbenchItemReceipt, WorkbenchItemStatus,
+        WorkbenchFailureLayer, WorkbenchFailurePoint, WorkbenchItemReceipt, WorkbenchItemStatus,
         WorkbenchOperationDisposition, WorkbenchOperationId, WorkbenchOperationReceipt,
         WorkbenchResponse, WorkbenchRunStatus, WorkbenchTerminalTransfer,
     };
@@ -15378,6 +15508,7 @@ mod tests {
             source_items: Vec::new(),
             status: WorkbenchItemStatus::Committed,
             output: "effect already completed".into(),
+            value: None,
             warnings: Vec::new(),
             installed_bindings: Vec::new(),
             operations: Vec::new(),
@@ -15878,6 +16009,7 @@ mod tests {
                     source_items: Vec::new(),
                     status: WorkbenchItemStatus::Committed,
                     output: "42".into(),
+                    value: None,
                     warnings: Vec::new(),
                     installed_bindings: Vec::new(),
                     operations: vec![WorkbenchOperationReceipt {
@@ -16537,6 +16669,7 @@ mod tests {
             source_items: Vec::new(),
             status: WorkbenchItemStatus::Committed,
             output: "[bound prior]".into(),
+            value: None,
             warnings: Vec::new(),
             installed_bindings: vec!["prior".into()],
             operations: Vec::new(),
@@ -16555,6 +16688,7 @@ mod tests {
                     source_items: Vec::new(),
                     status: WorkbenchItemStatus::Rejected,
                     output: "<cell item 2>: runtime error: pattern match failure: Just x".into(),
+                    value: None,
                     warnings: Vec::new(),
                     installed_bindings: Vec::new(),
                     operations: Vec::new(),
@@ -16651,6 +16785,7 @@ mod tests {
                 source_items: Vec::new(),
                 status: WorkbenchItemStatus::Committed,
                 output: "[bound request]".into(),
+                value: None,
                 warnings,
                 installed_bindings: vec!["request".into()],
                 operations: Vec::new(),
@@ -16700,6 +16835,84 @@ mod tests {
         assert_eq!(
             failure.receipts[0].operations[0].disposition,
             WorkbenchOperationDisposition::Unknown
+        );
+    }
+
+    #[test]
+    fn completed_observation_failure_keeps_recovered_bindings_and_classification() {
+        let recovered = vec!["commandJob".to_owned()];
+        let source = ResidentActorWorkbenchError::CompletedResultObservation {
+            detail: "presenter result exceeded observation budget".into(),
+            recovered_bindings: Vec::new(),
+        };
+        let execution = WorkbenchExecutionId::from_digest([10; 16]);
+        let operation = WorkbenchOperationReceipt {
+            display_publication: None,
+            display: None,
+            id: WorkbenchOperationId {
+                execution,
+                input_unit_index: 0,
+                effect_ordinal: 0,
+            },
+            effect: "retain command job binding".into(),
+            disposition: WorkbenchOperationDisposition::Committed,
+        };
+        let failure = workbench_failure_after_unit(&[], 0, 1, source, vec![operation], &recovered);
+
+        let receipt = failure
+            .receipts
+            .last()
+            .expect("completed observation failure has a receipt");
+        assert_eq!(receipt.status, WorkbenchItemStatus::Diagnostic);
+        assert_eq!(
+            receipt.failure_layer,
+            Some(WorkbenchFailureLayer::Observation)
+        );
+        assert_eq!(receipt.installed_bindings, recovered);
+        assert!(receipt.output.contains("effects committed"));
+        assert!(receipt.output.contains("retained bindings: commandJob"));
+        assert_eq!(
+            receipt.operations[0].disposition,
+            WorkbenchOperationDisposition::Committed
+        );
+    }
+
+    #[test]
+    fn displayed_receipt_failure_keeps_committed_command_binding_recovery() {
+        let recovered = vec!["commandJob".to_owned()];
+        let source = ResidentActorWorkbenchError::CompletedResultObservation {
+            detail: "command observation receipt: displayed-page bookkeeping failed".into(),
+            recovered_bindings: recovered.clone(),
+        };
+        let execution = WorkbenchExecutionId::from_digest([12; 16]);
+        let operation = WorkbenchOperationReceipt {
+            display_publication: None,
+            display: None,
+            id: WorkbenchOperationId {
+                execution,
+                input_unit_index: 0,
+                effect_ordinal: 0,
+            },
+            effect: "retain command job binding".into(),
+            disposition: WorkbenchOperationDisposition::Committed,
+        };
+        let failure = workbench_failure_after_unit(&[], 0, 1, source, vec![operation], &recovered);
+        let receipt = failure
+            .receipts
+            .last()
+            .expect("display receipt failure retains its completed effect evidence");
+
+        assert_eq!(receipt.status, WorkbenchItemStatus::Diagnostic);
+        assert_eq!(
+            receipt.failure_layer,
+            Some(WorkbenchFailureLayer::Observation)
+        );
+        assert_eq!(receipt.installed_bindings, recovered);
+        assert!(receipt.output.contains("effects committed"));
+        assert!(receipt.output.contains("retained bindings: commandJob"));
+        assert_eq!(
+            receipt.operations[0].disposition,
+            WorkbenchOperationDisposition::Committed
         );
     }
 

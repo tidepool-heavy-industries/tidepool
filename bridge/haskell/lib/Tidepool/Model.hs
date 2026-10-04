@@ -153,10 +153,10 @@ invokeModel turn input = case compileTools (specTools (turnSpec turn)) of
         answer <- dispatch compiled name args
         next <- send (ModelResumeWith token callId (toolDispatchReply answer))
         drive compiled (Just token) next
-      Success (Hook token operation name args handle ordinal output) -> do
+      Success (Hook token operation name args handle ordinal semantic output) -> do
         annotation <- case afterTool (turnSpec turn) of
           Nothing -> pure NoAnnotation
-          Just hook -> hook (ToolCall name args) (ToolResult name handle ordinal output)
+          Just hook -> hook (ToolCall name args) (ToolResult name handle ordinal semantic output)
         next <- send (ModelAnnotateWith token operation (annotationToJson annotation))
         drive compiled (Just token) next
 
@@ -177,7 +177,7 @@ resultSchema (JsonResult proxy) = Just (jsonSchema proxy)
 
 data Step
   = Callback Text Text Text Value
-  | Hook Text Text Text Value Text Int Text
+  | Hook Text Text Text Value Text Int Value Text
   | Finished ModelReceipt Value
 
 parseStep :: Value -> Result Step
@@ -185,7 +185,7 @@ parseStep = withObject "model step" $ \o -> do
   kind <- o .: "kind"
   case (kind :: Text) of
     "callback" -> Callback <$> o .: "invocation" <*> o .: "call_id" <*> o .: "name" <*> o .: "arguments"
-    "hook" -> Hook <$> o .: "invocation" <*> o .: "operation" <*> o .: "name" <*> o .: "arguments" <*> o .: "handle" <*> o .: "ordinal" <*> o .: "output"
+    "hook" -> Hook <$> o .: "invocation" <*> o .: "operation" <*> o .: "name" <*> o .: "arguments" <*> o .: "handle" <*> o .: "ordinal" <*> ((o .:? "value") .!= Null) <*> o .: "output"
     "finished" -> do
       receipt <- o .: "receipt"
       withObject "model receipt" (\r -> Finished <$> parseReceipt receipt <*> r .: "outcome") receipt

@@ -201,7 +201,7 @@ async fn accepted_stdin_is_acknowledged_even_when_presentation_would_exhaust_obs
         let policy = policy.clone();
         tokio::spawn(async move {
             policy
-                .dispatch_boxed(exomonad_tool::ToolInvocation {
+                .dispatch_json_boxed(exomonad_tool::ToolInvocation {
                     context: None,
                     name: "bash".into(),
                     arguments: exomonad_tool::ToolArguments::Structured(serde_json::json!({
@@ -249,7 +249,7 @@ async fn accepted_stdin_is_acknowledged_even_when_presentation_would_exhaust_obs
     // invoke that optional presenter.
     large_context.store(true, Ordering::Release);
     let input = policy
-        .dispatch_boxed(exomonad_tool::ToolInvocation {
+        .dispatch_json_boxed(exomonad_tool::ToolInvocation {
             context: None,
             name: "write_stdin".into(),
             arguments: exomonad_tool::ToolArguments::Structured(serde_json::json!({
@@ -273,7 +273,7 @@ async fn accepted_stdin_is_acknowledged_even_when_presentation_would_exhaust_obs
     // reinterpret the earlier accepted write as a failed call.
     backend.finish();
     let poll = policy
-        .dispatch_boxed(exomonad_tool::ToolInvocation {
+        .dispatch_json_boxed(exomonad_tool::ToolInvocation {
             context: None,
             name: "write_stdin".into(),
             arguments: exomonad_tool::ToolArguments::Structured(serde_json::json!({

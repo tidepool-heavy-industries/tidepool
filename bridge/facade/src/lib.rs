@@ -16,9 +16,9 @@ pub mod actor_host;
 pub mod compile_report;
 pub mod exomonad;
 pub mod haskell_sources;
-pub mod model_turn;
 #[cfg(feature = "codex-compat")]
 mod host_dynamic_tools;
+pub mod model_turn;
 pub mod run_map;
 pub use tidepool_bridge as bridge;
 pub use tidepool_bridge_derive as bridge_derive;
@@ -39,3 +39,32 @@ pub use tidepool_runtime::{compile_and_run, compile_haskell, EvalResult, Runtime
 pub mod operator;
 
 mod generated;
+
+#[cfg(test)]
+mod transport_test_support {
+    use exomonad_actor::{
+        ResidentToolDispatchFuture, ResidentToolEndpoint, ResidentToolError, ResidentToolFuture,
+    };
+
+    pub(crate) trait ResidentToolEndpointTestExt {
+        fn dispatch_json_boxed(
+            &self,
+            invocation: exomonad_tool::ToolInvocation,
+        ) -> ResidentToolFuture;
+    }
+
+    impl<T: ResidentToolEndpoint + ?Sized> ResidentToolEndpointTestExt for T {
+        fn dispatch_json_boxed(
+            &self,
+            invocation: exomonad_tool::ToolInvocation,
+        ) -> ResidentToolFuture {
+            let future: ResidentToolDispatchFuture = self.dispatch_boxed(invocation);
+            Box::pin(async move {
+                future
+                    .await?
+                    .into_json()
+                    .map_err(ResidentToolError::Encoding)
+            })
+        }
+    }
+}

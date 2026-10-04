@@ -88,7 +88,7 @@ async fn parked_cell_does_not_block_another_calls_acknowledgement_or_control() {
     assert_eq!(c["items"][0]["output"], "43");
     let status = tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        fixture.policy.dispatch_boxed(ToolInvocation {
+        fixture.policy.dispatch_json_boxed(ToolInvocation {
             context: Some(ConcurrentResident::cell_context("completion-status")),
             name: "status".into(),
             arguments: ToolArguments::Structured(serde_json::json!({"view": "summary"})),

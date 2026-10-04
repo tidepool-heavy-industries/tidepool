@@ -595,6 +595,7 @@ mod tests {
                 source_items: Vec::new(),
                 status: WorkbenchItemStatus::Committed,
                 output: String::new(),
+                value: None,
                 warnings: Vec::new(),
                 installed_bindings: vec![binding.to_owned()],
                 operations: Vec::new(),

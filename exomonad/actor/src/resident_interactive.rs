@@ -7,7 +7,8 @@ use tidepool_runtime::session::WorkbenchRequest;
 
 use crate::prompt_catalog::PromptId;
 use crate::resident_tools::{
-    ResidentToolClient, ResidentToolEndpoint, ResidentToolError, ResidentToolFuture,
+    ResidentToolClient, ResidentToolDispatchFuture, ResidentToolEndpoint, ResidentToolError,
+    ResidentToolFuture, ResidentToolResponse,
 };
 
 pub const HASKELL_TOOL: &str = "haskell";
@@ -206,10 +207,6 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
         &self.tools
     }
 
-    fn output_format(&self) -> crate::ResidentToolOutput {
-        crate::ResidentToolOutput::Workbench
-    }
-
     fn instructions(&self) -> Option<&str> {
         Some(haskell_tool_instructions())
     }
@@ -248,7 +245,7 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
         Box::pin(async move { client.abort(boundary).await })
     }
 
-    fn dispatch_boxed(&self, invocation: ToolInvocation) -> ResidentToolFuture {
+    fn dispatch_boxed(&self, invocation: ToolInvocation) -> ResidentToolDispatchFuture {
         self.dispatch_with_checkpoint_boxed(invocation, None)
     }
 
@@ -256,7 +253,7 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
         &self,
         invocation: ToolInvocation,
         capture: Option<std::sync::Arc<dyn crate::HostedCheckpointCapture>>,
-    ) -> ResidentToolFuture {
+    ) -> ResidentToolDispatchFuture {
         self.dispatch_with_context_boxed(invocation, capture, None)
     }
 
@@ -265,7 +262,7 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
         invocation: ToolInvocation,
         capture: Option<Arc<dyn crate::HostedCheckpointCapture>>,
         context: Option<Arc<dyn crate::HostedContextBinding>>,
-    ) -> ResidentToolFuture {
+    ) -> ResidentToolDispatchFuture {
         let client = self.client.clone();
         let tools = self.tools.clone();
         let installed_tools = self.issued_tools.clone();
@@ -296,6 +293,7 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
                     selected_contract(declaration),
                 )
                 .await
+                .map(ResidentToolResponse::Workbench)
         })
     }
 

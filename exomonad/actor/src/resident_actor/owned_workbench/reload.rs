@@ -434,6 +434,22 @@ fn prepare_source(
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reload_receipt_leads_with_outcome_and_keeps_selected_revision_details() {
+        let receipt = reload_receipt(
+            "swapped",
+            std::time::Instant::now(),
+            vec!["spec: install 4 from helpers revision abc".into()],
+        );
+        assert!(receipt.starts_with("swapped ("));
+        assert!(receipt.contains("spec: install 4 from helpers revision abc"));
+    }
+}
+
 fn reload_result(
     output: String,
 ) -> Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure> {
@@ -447,6 +463,7 @@ fn reload_result(
             source_items: Vec::new(),
             status: WorkbenchItemStatus::Committed,
             output,
+            value: None,
             warnings: Vec::new(),
             installed_bindings: Vec::new(),
             operations: Vec::new(),

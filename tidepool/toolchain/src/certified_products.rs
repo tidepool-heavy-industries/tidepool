@@ -369,6 +369,13 @@ pub enum CertificationError {
         expected_sha256: String,
         selected_sha256: Option<String>,
     },
+    #[error("compiler product certificate interface closure mismatch: {owner:?} requires {dependency:?} at {expected}, admitted {actual:?}")]
+    OriginalInterfaceClosure {
+        owner: (String, String),
+        dependency: (String, String),
+        expected: String,
+        actual: Option<String>,
+    },
     #[error("compiler product evidence is no longer valid")]
     StaleEvidence,
     #[error("original candidate evidence for {unit}:{module} failed: {failure:?}")]
@@ -3598,20 +3605,6 @@ pub(crate) fn certify_products(
             return Err(CertificationError::Mismatch("duplicate interface owner"));
         }
     }
-    // Finalized interface-only owners carry type authority even when they
-    // have no native groups. Their authenticated closure was admitted above.
-    for interface in &module_interfaces {
-        let key = (interface.unit().to_owned(), interface.module().to_owned());
-        let seal = interface.interface_sha256();
-        if admitted_interfaces
-            .insert(key, seal)
-            .is_some_and(|previous| previous != seal)
-        {
-            return Err(CertificationError::Mismatch(
-                "conflicting finalized interface owner",
-            ));
-        }
-    }
     if let Some(admission) = exact {
         for artifact in &admission.request.artifacts {
             let key = (
@@ -3629,17 +3622,13 @@ pub(crate) fn certify_products(
             }
         }
     }
-    for module in &receipt.modules {
-        for (key, seal) in &module.interface_requirements {
-            if key == &(module.unit.clone(), module.module.clone())
-                || admitted_interfaces.get(key) != Some(seal)
-            {
-                return Err(CertificationError::Mismatch(
-                    "original interface owner closure",
-                ));
-            }
-        }
-    }
+    admit_canonical_interface_owners(
+        &mut admitted_interfaces,
+        module_interfaces
+            .iter()
+            .chain(inherited_module_interfaces.iter()),
+    )?;
+    validate_original_interface_owner_closure(&receipt.modules, &admitted_interfaces)?;
     let mut seen_modules = BTreeSet::new();
     let mut origin_counts = [[0_u64; 3]; 2];
     let mut fresh_modules = BTreeSet::new();
@@ -4155,6 +4144,51 @@ pub(crate) fn certify_products(
         recovery_products,
         module_interfaces,
     })
+}
+
+/// Add seals only from canonical interfaces already authenticated by fresh
+/// finalization or the exact request's protected declaration context. These
+/// include source-only owners that intentionally have no native product row.
+/// Executable group and source ownership remain governed by their separate
+/// receipt checks.
+fn admit_canonical_interface_owners<'a>(
+    admitted: &mut BTreeMap<(String, String), [u8; 32]>,
+    interfaces: impl IntoIterator<Item = &'a crate::certified_products::CertifiedModuleInterface>,
+) -> CertResult<()> {
+    for interface in interfaces {
+        let key = (interface.unit().to_owned(), interface.module().to_owned());
+        let seal = interface.interface_sha256();
+        if admitted
+            .insert(key, seal)
+            .is_some_and(|previous| previous != seal)
+        {
+            return Err(CertificationError::Mismatch(
+                "conflicting admitted interface owner",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_original_interface_owner_closure(
+    modules: &[CertifiedModuleReceipt],
+    admitted: &BTreeMap<(String, String), [u8; 32]>,
+) -> CertResult<()> {
+    for module in modules {
+        for (key, seal) in &module.interface_requirements {
+            if key == &(module.unit.clone(), module.module.clone())
+                || admitted.get(key) != Some(seal)
+            {
+                return Err(CertificationError::OriginalInterfaceClosure {
+                    owner: (module.unit.clone(), module.module.clone()),
+                    dependency: key.clone(),
+                    expected: hex(seal),
+                    actual: admitted.get(key).map(|seal| hex(seal)),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Bind a target's declared globals to the same compiler transaction's
@@ -8072,6 +8106,115 @@ pub(crate) mod tests {
             bind_home_execution_source(&sealed, &owner, [7; 32], &mut validation).unwrap(),
             sealed
         );
+    }
+
+    #[test]
+    fn source_only_canonical_interfaces_close_original_receipt_requirements() {
+        let package_imports = |module: &str, interface: &[u8]| {
+            let value = value_array([
+                value_text("TPPKGROOTS"),
+                value_text("2"),
+                value_array([
+                    value_text("main"),
+                    value_text(module),
+                    value_text(hex(&sha(interface))),
+                ]),
+                value_array([]),
+                value_array([]),
+            ]);
+            let mut bytes = Vec::new();
+            ciborium::ser::into_writer(&value, &mut bytes).unwrap();
+            bytes
+        };
+        let dependency_bytes = b"source-only interface".to_vec();
+        let fresh = fixture_interface_bytes(
+            [3; 32],
+            "main",
+            "Aeson",
+            dependency_bytes.clone(),
+            package_imports("Aeson", &dependency_bytes),
+        );
+        let inherited_bytes = b"inherited source interface".to_vec();
+        let inherited = fixture_interface_bytes(
+            [3; 32],
+            "main",
+            "JsonSupport",
+            inherited_bytes.clone(),
+            package_imports("JsonSupport", &inherited_bytes),
+        );
+        let mut accepted = receipt(&[], &evidence("source"), "source");
+        accepted.module = "Prelude".into();
+        accepted.interface_requirements = BTreeMap::from([
+            (("main".into(), "Aeson".into()), sha(&dependency_bytes)),
+            (("main".into(), "JsonSupport".into()), sha(&inherited_bytes)),
+        ]);
+
+        // Aeson and JsonSupport have authenticated interface carriers but no
+        // executable product rows. Fresh finalization and exact inherited
+        // context are both valid sources for interface-only closure.
+        let mut admitted = BTreeMap::new();
+        admit_canonical_interface_owners(&mut admitted, [&fresh, &inherited]).unwrap();
+        validate_original_interface_owner_closure(&[accepted], &admitted).unwrap();
+    }
+
+    #[test]
+    fn source_only_interface_closure_rejects_missing_changed_and_conflicting_seals() {
+        let package_imports = |interface: &[u8]| {
+            let value = value_array([
+                value_text("TPPKGROOTS"),
+                value_text("2"),
+                value_array([
+                    value_text("main"),
+                    value_text("Aeson"),
+                    value_text(hex(&sha(interface))),
+                ]),
+                value_array([]),
+                value_array([]),
+            ]);
+            let mut bytes = Vec::new();
+            ciborium::ser::into_writer(&value, &mut bytes).unwrap();
+            bytes
+        };
+        let original_bytes = b"canonical source-only interface".to_vec();
+        let canonical = fixture_interface_bytes(
+            [3; 32],
+            "main",
+            "Aeson",
+            original_bytes.clone(),
+            package_imports(&original_bytes),
+        );
+        let changed = fixture_interface_bytes(
+            [3; 32],
+            "main",
+            "Aeson",
+            b"different interface".to_vec(),
+            package_imports(b"different interface"),
+        );
+        let mut accepted = receipt(&[], &evidence("source"), "source");
+        accepted.module = "Prelude".into();
+        accepted.interface_requirements =
+            BTreeMap::from([(("main".into(), "Aeson".into()), sha(&original_bytes))]);
+
+        let absent = BTreeMap::new();
+        assert!(matches!(
+            validate_original_interface_owner_closure(&[accepted.clone()], &absent),
+            Err(CertificationError::OriginalInterfaceClosure { actual: None, .. })
+        ));
+
+        let mut stale_seal = BTreeMap::new();
+        admit_canonical_interface_owners(&mut stale_seal, [&changed]).unwrap();
+        assert!(matches!(
+            validate_original_interface_owner_closure(&[accepted], &stale_seal),
+            Err(CertificationError::OriginalInterfaceClosure { .. })
+        ));
+
+        let mut conflicting = BTreeMap::from([(("main".into(), "Aeson".into()), [9; 32])]);
+        assert!(matches!(
+            admit_canonical_interface_owners(&mut conflicting, [&canonical]),
+            Err(CertificationError::Mismatch(
+                "conflicting admitted interface owner"
+            ))
+        ));
     }
 
     #[test]

@@ -12,7 +12,10 @@ input and output types define the values its body receives and returns. Tool
 implementations can compose existing effects without first flattening their
 results into a text or JSON protocol.
 
-Presentation policies plug into the relevant tool directly. The example
+Installed handlers choose their model-facing text with `presentWith`: use `id`
+for `Text`, `presentJson` for JSON, or `presentDisplay` for an existing
+`Display` rendering. The structured result remains separate for hooks and
+programmatic callers. The example
 workspace's [Shell presenter](examples/workspace/.exomonad/Project/Shell.hs)
 receives typed command observations and retained output; its
 [Lookup selector](examples/workspace/.exomonad/Project/Lookup.hs) receives

@@ -12,7 +12,7 @@ async fn unbounded_repository_event_await_joins_before_actor_retirement() {
     let policy = campaign.root_installation.policy.clone();
     let invocation = tokio::spawn(async move {
         policy
-            .dispatch_boxed(ToolInvocation {
+            .dispatch_json_boxed(ToolInvocation {
                 context: None,
                 name: exomonad_actor::HASKELL_TOOL.into(),
                 arguments: ToolArguments::Raw(
@@ -667,7 +667,7 @@ async fn released_checkpoint_keeps_an_admitted_childs_hosted_context() {
     let capture_call_id = uuid::Uuid::new_v4().simple().to_string();
     let capture = issuer
         .policy
-        .dispatch_boxed(ToolInvocation {
+        .dispatch_json_boxed(ToolInvocation {
             context: Some(ToolInvocationContext::external(
                 "actor-host-vertical".into(),
                 capture_call_id.clone(),
@@ -773,8 +773,6 @@ async fn released_checkpoint_keeps_an_admitted_childs_hosted_context() {
 
 #[tokio::test]
 async fn root_recovery_replays_lost_workbench_reply_without_repeating_effects() {
-    use exomonad_actor::ResidentToolEndpoint as _;
-
     let mut campaign = test_campaign::TestCampaign::start().await;
     let target = campaign
         .forest
@@ -801,7 +799,7 @@ async fn root_recovery_replays_lost_workbench_reply_without_repeating_effects() 
         arguments: exomonad_tool::ToolArguments::Raw(source),
     };
     let policy = campaign.root_installation.policy.clone();
-    let mut first = tokio::spawn(policy.dispatch_boxed(request.clone()));
+    let mut first = tokio::spawn(policy.dispatch_json_boxed(request.clone()));
     let mut effects = 0;
     let notification = tokio::time::timeout(Duration::from_secs(60), async {
         tokio::select! {
@@ -827,7 +825,7 @@ async fn root_recovery_replays_lost_workbench_reply_without_repeating_effects() 
     notification.admitted("recovery-test-inbox".into(), 1);
     let retained = tokio::time::timeout(
         Duration::from_secs(60),
-        policy.dispatch_boxed(request.clone()),
+        policy.dispatch_json_boxed(request.clone()),
     )
     .await
     .unwrap()
@@ -864,7 +862,7 @@ async fn root_recovery_replays_lost_workbench_reply_without_repeating_effects() 
         .await
         .is_err());
     let successor_policy = exomonad_actor::ResidentInteractivePolicy::local(successor.clone());
-    let mut retry = tokio::spawn(successor_policy.dispatch_boxed(request.clone()));
+    let mut retry = tokio::spawn(successor_policy.dispatch_json_boxed(request.clone()));
     let replay = tokio::time::timeout(Duration::from_secs(60), async {
         loop {
             tokio::select! {
@@ -892,7 +890,10 @@ async fn root_recovery_replays_lost_workbench_reply_without_repeating_effects() 
     );
     let mut altered = request;
     altered.arguments = exomonad_tool::ToolArguments::Raw("pure (99 :: Int)".into());
-    let conflict = successor_policy.dispatch_boxed(altered).await.unwrap_err();
+    let conflict = successor_policy
+        .dispatch_json_boxed(altered)
+        .await
+        .unwrap_err();
     assert!(conflict.to_string().contains("different Haskell input"));
     campaign.forest.shutdown().await;
     task.await.unwrap();
