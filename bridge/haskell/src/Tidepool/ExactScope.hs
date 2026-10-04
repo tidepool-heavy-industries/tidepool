@@ -652,6 +652,10 @@ captureFinalizedSourceOriginals compilation accepted target finalized evidence =
         , not (dependencyModuleBoot node)] of
       [node] -> pure node
       _ -> fail "captured source original lacks its original import receipt"
+    unless ([dependencySourceSha256 source | source <- dependencySources evidence
+        , dependencySourcePath source == dependencyModuleSource node]
+        == [localFinalizedSourceSha256 admission])
+      (fail "captured source original import receipt differs from its consumed source")
     ordinary <- forM (dependencyModuleImports node) $ \edge -> do
       home <- case dependencyImportSelected edge of
         Nothing -> pure Nothing
