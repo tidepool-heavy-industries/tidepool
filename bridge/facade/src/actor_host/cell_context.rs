@@ -34,10 +34,19 @@ enum DraftLifecycle {
         execution: WorkbenchExecutionId,
         principal: PrincipalId,
     },
-    Finished(CellExit),
+    Finished {
+        exit: CellExit,
+        draft: DraftEligibility,
+    },
     Cancelled {
         execution: Option<WorkbenchExecutionId>,
     },
+}
+
+#[derive(Clone, Copy)]
+enum DraftEligibility {
+    Retained,
+    Revoked,
 }
 
 impl EmbeddedContextBinding {
@@ -65,7 +74,7 @@ impl EmbeddedContextBinding {
     fn terminal(&self) -> Option<CellExit> {
         let state = self.state.lock();
         match &state.lifecycle {
-            DraftLifecycle::Finished(exit) => Some(exit.clone()),
+            DraftLifecycle::Finished { exit, .. } => Some(exit.clone()),
             _ => None,
         }
     }
@@ -74,7 +83,7 @@ impl EmbeddedContextBinding {
 impl InvocationCompletionSource for EmbeddedContextBinding {
     fn completion(&self, output: JobOutput) -> Option<ProviderCompletion> {
         let state = self.state.lock();
-        let DraftLifecycle::Finished(exit) = &state.lifecycle else {
+        let DraftLifecycle::Finished { exit, draft } = &state.lifecycle else {
             return None;
         };
         // Native finalization seals this exact exit before delivering the
@@ -94,11 +103,12 @@ impl InvocationCompletionSource for EmbeddedContextBinding {
         };
         let full_success =
             exit.permits_context_commit() && matches!(&output, JobOutput::Completed(Ok(_)));
-        let context = if full_success && state.changed {
-            ContextDisposition::Draft(state.draft.clone())
-        } else {
-            ContextDisposition::Unedited
-        };
+        let context =
+            if full_success && state.changed && matches!(draft, DraftEligibility::Retained) {
+                ContextDisposition::Draft(state.draft.clone())
+            } else {
+                ContextDisposition::Unedited
+            };
         Some(ProviderCompletion {
             output,
             full_success,
@@ -186,22 +196,22 @@ impl HostedContextBinding for EmbeddedContextBinding {
         let execution = match &state.lifecycle {
             DraftLifecycle::Waiting => None,
             DraftLifecycle::Active { execution, .. } => Some(execution.clone()),
-            DraftLifecycle::Finished(_) | DraftLifecycle::Cancelled { .. } => return,
+            DraftLifecycle::Finished { .. } | DraftLifecycle::Cancelled { .. } => return,
         };
         state.lifecycle = DraftLifecycle::Cancelled { execution };
     }
 
     fn finish(&self, exit: CellExit) {
         let mut state = self.state.lock();
-        let admitted = match &state.lifecycle {
-            DraftLifecycle::Active { execution, .. }
-            | DraftLifecycle::Cancelled {
+        let (execution, draft) = match &state.lifecycle {
+            DraftLifecycle::Active { execution, .. } => (execution, DraftEligibility::Retained),
+            DraftLifecycle::Cancelled {
                 execution: Some(execution),
-            } => execution == &exit.execution,
-            _ => false,
+            } => (execution, DraftEligibility::Revoked),
+            _ => return,
         };
-        if admitted {
-            state.lifecycle = DraftLifecycle::Finished(exit);
+        if execution == &exit.execution {
+            state.lifecycle = DraftLifecycle::Finished { exit, draft };
         }
     }
 }
@@ -284,6 +294,38 @@ mod tests {
             principal
         )
         .is_err());
+    }
+
+    #[test]
+    fn revoked_draft_stays_revoked_when_native_publication_wins_cancellation() {
+        let binding = binding();
+        let execution = WorkbenchExecutionId::from_digest([6; 16]);
+        let principal = PrincipalId::new(1, 1);
+        binding
+            .admit(&execution, &binding.invocation, principal)
+            .unwrap();
+        prepare_result(
+            &binding,
+            ContextReq::SetNextModelWith("updated-model".into()),
+            principal,
+        )
+        .unwrap();
+        binding.cancel();
+        let exit = CellExit {
+            execution,
+            cause: CellExitCause::FullReturn,
+            cleanup_confirmed: true,
+        };
+        binding.finish(exit.clone());
+        assert_eq!(binding.terminal(), Some(exit));
+        assert!(prepare_result(&binding, ContextReq::GetContextWith, principal).is_err());
+        let output = JobOutput::Completed(Ok(serde_json::json!({"published": true})));
+        for _ in 0..2 {
+            let completion = binding.completion(output.clone()).unwrap();
+            assert_eq!(completion.output, output);
+            assert!(completion.full_success);
+            assert_eq!(completion.context, ContextDisposition::Unedited);
+        }
     }
 
     #[test]
