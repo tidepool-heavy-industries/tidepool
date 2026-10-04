@@ -700,7 +700,8 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
   copyFile "test-source-boot/fixtures/GeneratedScaffoldExpr.hs" target
   original <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
     Nothing supportPath includes Nothing
-  writeExecutionScope hiddenPath work original []
+  writeGenuineCandidateNativeScope [] (preparedNames original)
+    work supportPath includes hiddenPath original
   protected <- readFile target
   recipe <- generatedScaffoldRecipe [] protected protected target "Expr" >>= either fail pure
   let purpose = GeneratedScaffoldCompile recipe (CheckedItemCompile [] Nothing [])
@@ -711,7 +712,7 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
             let detail = show reason
             unless (label /= "same target under general purpose" ||
                 "source graph imports unadmitted home implementation" `isInfixOf` detail) $
-              fail "baseline scaffold fixture did not reproduce the actual graph refusal"
+              fail ("baseline scaffold fixture did not reproduce the actual graph refusal: " ++ detail)
             putStrLn ("scaffold refused " ++ label ++ ": " ++ take 512 detail)
           Right _ -> fail ("scaffold authority accepted " ++ label)
   withResidentPipelineSelected includes $ \compile -> do
@@ -803,7 +804,8 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
     missingExport <- compile (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
       Nothing supportPath [] Nothing
     let missingExportPath = work </> "missing-export.cbor"
-    writeExecutionScope missingExportPath work missingExport []
+    writeGenuineCandidateNativeScope [] (preparedNames missingExport)
+      work supportPath includes missingExportPath missingExport
     requireRejected "missing actual resumeLifted export" $
       compile (PreparedProducts Nothing) Set.empty purpose
         (Just hidden {ssExactScope=Just missingExportPath}) target [] Nothing
@@ -815,7 +817,8 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
     hiddenNeighbor <- compile (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
       Nothing supportPath [] Nothing
     let neighborPath = work </> "hidden-neighbor.cbor"
-    writeExecutionScope neighborPath work hiddenNeighbor []
+    writeGenuineCandidateNativeScope [] (preparedNames hiddenNeighbor)
+      work supportPath includes neighborPath hiddenNeighbor
     requireRejected "hidden orphan neighbor through scaffold support" $
       compile (PreparedProducts Nothing) Set.empty purpose
         (Just hidden {ssExactScope=Just neighborPath}) target [] Nothing
@@ -826,7 +829,8 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
     hiddenFamily <- compile (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
       Nothing supportPath [] Nothing
     let familyPath = work </> "hidden-family.cbor"
-    writeExecutionScope familyPath work hiddenFamily []
+    writeGenuineCandidateNativeScope [] (preparedNames hiddenFamily)
+      work supportPath includes familyPath hiddenFamily
     requireRejected "hidden family neighbor through scaffold support" $
       compile (PreparedProducts Nothing) Set.empty purpose
         (Just hidden {ssExactScope=Just familyPath}) target [] Nothing
