@@ -16,6 +16,35 @@ pub(super) struct BoundaryAbortCleanup {
     pub scopes: Vec<tidepool_codegen::scope::ScopeId>,
 }
 
+/// Exact admitted journal owner for abort extraction and progressive cleanup.
+pub(super) struct BoundaryAbortOwner {
+    journal: Arc<Mutex<WorkbenchExecutions>>,
+    key: WorkbenchReplayKey,
+}
+
+impl BoundaryAbortOwner {
+    pub(super) fn collect_cleanup(
+        &self,
+        collect: impl FnOnce() -> BoundaryAbortCleanup,
+    ) -> BoundaryAbortCleanup {
+        let retained = self.journal.lock().0[&self.key].boundary_abort.clone();
+        // The serial actor owns extraction; release the journal lock before
+        // entering the fork registry and retain the obligation before awaiting.
+        let cleanup = retained.unwrap_or_else(collect);
+        self.retain_cleanup(cleanup.clone());
+        cleanup
+    }
+
+    pub(super) fn retain_cleanup(&self, cleanup: BoundaryAbortCleanup) {
+        self.journal
+            .lock()
+            .0
+            .get_mut(&self.key)
+            .expect("admitted abort records remain in the journal")
+            .boundary_abort = Some(cleanup);
+    }
+}
+
 #[derive(Clone)]
 enum WorkbenchExecutionState {
     Unconfirmed,
@@ -240,43 +269,36 @@ impl WorkbenchExecutions {
         );
     }
 
-    pub(super) fn boundary_abort(
-        &self,
+    pub(super) fn boundary_abort_owner(
+        journal: &Arc<Mutex<Self>>,
         boundary: &tidepool_runtime::session::WorkbenchForkBoundary,
-    ) -> Option<BoundaryAbortCleanup> {
-        self.0.iter().find_map(|(key, record)| match key {
-            WorkbenchReplayKey::Hosted(invocation)
-                if invocation.is_original_invocation() && invocation.matches_boundary(boundary) =>
-            {
-                record.boundary_abort.clone()
-            }
-            _ => None,
-        })
-    }
-
-    pub(super) fn retain_boundary_abort(
-        &mut self,
-        boundary: &tidepool_runtime::session::WorkbenchForkBoundary,
-        cleanup: BoundaryAbortCleanup,
-    ) -> Result<(), KernelBehaviorError> {
-        let record = self.0.iter_mut().find_map(|(key, record)| match key {
-            WorkbenchReplayKey::Hosted(invocation)
-                if invocation.is_original_invocation() && invocation.matches_boundary(boundary) =>
-            {
-                Some(record)
-            }
-            _ => None,
+        has_pending_work: impl FnOnce() -> bool,
+    ) -> Result<Option<BoundaryAbortOwner>, KernelBehaviorError> {
+        let records = journal.lock();
+        let mut matches = records.0.keys().filter(|key| {
+            matches!(key, WorkbenchReplayKey::Hosted(invocation)
+                if invocation.is_original_invocation() && invocation.matches_boundary(boundary))
         });
-        if let Some(record) = record {
-            record.boundary_abort = Some(cleanup);
-            return Ok(());
+        let key = matches.next().cloned();
+        if matches.next().is_some() {
+            return Err(KernelBehaviorError {
+                detail: "output abort has ambiguous admitted invocation owners".into(),
+            });
         }
-        if cleanup.children.is_empty() && cleanup.scopes.is_empty() {
-            return Ok(());
+        drop(matches);
+        drop(records);
+        if let Some(key) = key {
+            return Ok(Some(BoundaryAbortOwner {
+                journal: journal.clone(),
+                key,
+            }));
         }
-        Err(KernelBehaviorError {
-            detail: "output abort has no exact admitted invocation owner".into(),
-        })
+        if has_pending_work() {
+            return Err(KernelBehaviorError {
+                detail: "output abort has no exact admitted invocation owner".into(),
+            });
+        }
+        Ok(None)
     }
 
     pub(super) fn retain_cell_terminal(
@@ -403,6 +425,157 @@ impl WorkbenchExecutions {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn abort_owner_refuses_nested_and_foreign_operations_before_checkpoint_extraction() {
+        use tidepool_codegen::scope::ScopeId;
+        use tidepool_repr::SessionId;
+        use tidepool_runtime::session::WorkbenchForkBoundary;
+
+        let journal = Arc::new(Mutex::new(WorkbenchExecutions::default()));
+        let groups = crate::ForkGroupRegistry::new(crate::ActorLineageRegistry::default());
+        let actor = crate::ActorRef::first(crate::ActorId(1));
+        let boundary =
+            WorkbenchForkBoundary::external("thread".into(), "turn".into(), "call".into());
+        assert!(
+            WorkbenchExecutions::boundary_abort_owner(&journal, &boundary, || {
+                groups.has_abort_work_at_boundary(actor, &boundary)
+            })
+            .unwrap()
+            .is_none()
+        );
+        assert!(!groups.has_abort_work_at_boundary(actor, &boundary));
+        let token = groups.capture_checkpoint(
+            "research".into(),
+            actor,
+            crate::EffectiveRole::root(),
+            None,
+            None,
+            crate::CheckpointSourceLayer::default(),
+            SessionId(7),
+            ScopeId(3),
+            boundary.clone(),
+        );
+        for (index, (thread, request, local, original, namespace)) in [
+            ("thread", "turn", "call", "call", Some("haskell")),
+            ("thread", "turn", "inner", "call", None),
+            ("other-thread", "turn", "call", "call", None),
+            ("thread", "other-turn", "call", "call", None),
+            ("thread", "turn", "other-call", "other-call", None),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let invocation = crate::resident_tools::WorkbenchCallKey::from(
+                exomonad_tool::ToolInvocationContext::external(
+                    thread.into(),
+                    request.into(),
+                    local.into(),
+                    Some(original.into()),
+                    namespace.map(str::to_owned),
+                ),
+            );
+            let execution = WorkbenchExecutionId::from_digest([index as u8; 16]);
+            journal.lock().begin(
+                &execution,
+                WorkbenchRequest::from_cell_input("pure ()").with_execution_id(execution.clone()),
+                Some(&invocation),
+            );
+            let error = WorkbenchExecutions::boundary_abort_owner(&journal, &boundary, || {
+                assert!(
+                    journal.try_lock().is_some(),
+                    "read-only registry query must run unlocked"
+                );
+                groups.has_abort_work_at_boundary(actor, &boundary)
+            })
+            .err()
+            .expect("pending custody needs its exact original owner");
+            assert_eq!(
+                error.detail,
+                "output abort has no exact admitted invocation owner"
+            );
+            assert!(groups.has_abort_work_at_boundary(actor, &boundary));
+            assert!(groups.checkpoint(&token, SessionId(7)).is_ok());
+        }
+    }
+
+    #[test]
+    fn abort_cleanup_survives_retry_without_reextracting_obligations() {
+        use tidepool_codegen::scope::ScopeId;
+        use tidepool_repr::SessionId;
+        use tidepool_runtime::session::WorkbenchForkBoundary;
+
+        let journal = Arc::new(Mutex::new(WorkbenchExecutions::default()));
+        let invocation = crate::resident_tools::WorkbenchCallKey::from(
+            exomonad_tool::ToolInvocationContext::external(
+                "thread".into(),
+                "turn".into(),
+                "call".into(),
+                Some("call".into()),
+                None,
+            ),
+        );
+        let execution = WorkbenchExecutionId::from_digest([9; 16]);
+        journal.lock().begin(
+            &execution,
+            WorkbenchRequest::from_cell_input("pure ()").with_execution_id(execution.clone()),
+            Some(&invocation),
+        );
+        let actor = crate::ActorRef::first(crate::ActorId(1));
+        let groups = crate::ForkGroupRegistry::new(crate::ActorLineageRegistry::default());
+        let boundary =
+            WorkbenchForkBoundary::external("thread".into(), "turn".into(), "call".into());
+        let token = groups.capture_checkpoint(
+            "research".into(),
+            actor,
+            crate::EffectiveRole::root(),
+            None,
+            None,
+            crate::CheckpointSourceLayer::default(),
+            SessionId(7),
+            ScopeId(3),
+            boundary.clone(),
+        );
+        let owner = WorkbenchExecutions::boundary_abort_owner(&journal, &boundary, || {
+            groups.has_abort_work_at_boundary(actor, &boundary)
+        })
+        .unwrap()
+        .unwrap();
+        let cleanup = owner.collect_cleanup(|| {
+            assert!(
+                journal.try_lock().is_some(),
+                "fork extraction must run unlocked"
+            );
+            BoundaryAbortCleanup {
+                children: Vec::new(),
+                scopes: groups
+                    .settle_checkpoints(actor, &boundary, false)
+                    .into_iter()
+                    .map(|(_, scope)| scope)
+                    .collect(),
+            }
+        });
+        assert_eq!(cleanup.scopes, vec![ScopeId(3)]);
+        assert!(!groups.has_abort_work_at_boundary(actor, &boundary));
+        assert!(matches!(
+            groups.checkpoint(&token, SessionId(7)),
+            Err(crate::CheckpointRefusal::CaptureFailed)
+        ));
+        drop(owner);
+        // A failed retirement leaves the exact obligation in the admitted journal.
+        let retry = WorkbenchExecutions::boundary_abort_owner(&journal, &boundary, || {
+            groups.has_abort_work_at_boundary(actor, &boundary)
+        })
+        .unwrap()
+        .unwrap();
+        let mut cleanup = retry.collect_cleanup(|| panic!("retry must not detach custody again"));
+        assert_eq!(cleanup.scopes, vec![ScopeId(3)]);
+        cleanup.scopes.clear();
+        retry.retain_cleanup(cleanup);
+        let completed = retry.collect_cleanup(|| panic!("completed abort remains idempotent"));
+        assert!(completed.children.is_empty());
+        assert!(completed.scopes.is_empty());
+    }
 
     #[test]
     fn recovered_workbench_fences_unsettled_native_calls_and_conflicting_input() {

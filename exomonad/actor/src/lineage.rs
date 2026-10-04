@@ -1721,6 +1721,25 @@ impl ForkGroupRegistry {
         self.abort_pending(owner, true, None, ForkGroupBoundary::Any)
     }
 
+    /// Inspect abort obligations without detaching their existing custody.
+    #[must_use]
+    pub(crate) fn has_abort_work_at_boundary(
+        &self,
+        owner: ActorRef,
+        boundary: &WorkbenchForkBoundary,
+    ) -> bool {
+        let state = self.state.lock();
+        state.groups.values().any(|group| {
+            group.owner == owner
+                && group.completion_boundary.as_ref() == Some(boundary)
+                && *group.phase.borrow() != ForkGroupPhase::Committed
+        }) || state.checkpoints.values().any(|lease| {
+            lease.issuer == owner
+                && &lease.boundary == boundary
+                && *lease.phase.borrow() == CheckpointPhase::Pending
+        })
+    }
+
     pub(crate) fn abort_unpublished_at_boundary(
         &self,
         owner: ActorRef,
@@ -3323,6 +3342,9 @@ mod tests {
         };
         let (first, _, first_child) = make("first", 2);
         let (second, second_group, second_child) = make("second", 3);
+        assert!(groups.has_abort_work_at_boundary(owner, &first));
+        assert!(groups.has_abort_work_at_boundary(owner, &second));
+        assert!(!groups.has_abort_work_at_boundary(ActorRef::first(ActorId(9)), &first));
         assert_eq!(
             groups.abort_unpublished_at_boundary(owner, &first),
             vec![first_child]
@@ -3330,6 +3352,8 @@ mod tests {
         assert!(groups
             .abort_unpublished_at_boundary(owner, &first)
             .is_empty());
+        assert!(!groups.has_abort_work_at_boundary(owner, &first));
+        assert!(groups.has_abort_work_at_boundary(owner, &second));
         assert_eq!(
             groups.ready_groups_at_boundary(owner, &second),
             vec![(second_group, vec![second_child])]

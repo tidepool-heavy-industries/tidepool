@@ -12098,8 +12098,20 @@ where
                 return Ok(());
             }
             let context = self.context(kernel.identity());
-            let retained = self.workbench_executions.lock().boundary_abort(&boundary);
-            let mut cleanup = retained.unwrap_or_else(|| {
+            let owner = WorkbenchExecutions::boundary_abort_owner(
+                &self.workbench_executions,
+                &boundary,
+                || {
+                    self.environment
+                        .fork_groups
+                        .has_abort_work_at_boundary(context.actor, &boundary)
+                },
+            )?;
+            let Some(owner) = owner else {
+                self.settled_fork_boundaries.push(boundary);
+                return Ok(());
+            };
+            let mut cleanup = owner.collect_cleanup(|| {
                 let scopes = self
                     .environment
                     .fork_groups
@@ -12115,9 +12127,6 @@ where
                     .abort_unpublished_at_boundary(context.actor, &boundary);
                 workbench_ledger::BoundaryAbortCleanup { children, scopes }
             });
-            self.workbench_executions
-                .lock()
-                .retain_boundary_abort(&boundary, cleanup.clone())?;
             while let Some(child) = cleanup.children.last().copied() {
                 if let Some(child) = kernel.resolve(child) {
                     child
@@ -12129,9 +12138,7 @@ where
                         .map_err(Self::failure)?;
                 }
                 cleanup.children.pop();
-                self.workbench_executions
-                    .lock()
-                    .retain_boundary_abort(&boundary, cleanup.clone())?;
+                owner.retain_cleanup(cleanup.clone());
             }
             self.environment
                 .runner
@@ -12139,9 +12146,7 @@ where
                 .await
                 .map_err(Self::failure)?;
             cleanup.scopes.clear();
-            self.workbench_executions
-                .lock()
-                .retain_boundary_abort(&boundary, cleanup)?;
+            owner.retain_cleanup(cleanup);
             self.settled_fork_boundaries.push(boundary);
             Ok(())
         })
