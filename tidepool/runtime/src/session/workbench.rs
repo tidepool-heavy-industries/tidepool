@@ -485,6 +485,9 @@ pub struct WorkbenchResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(tag = "status", rename_all = "camelCase")]
 pub enum WorkbenchPublicationOutcome {
+    NotPublished {
+        reason: WorkbenchNotPublishedReason,
+    },
     Published {
         bindings: Vec<String>,
     },
@@ -497,12 +500,20 @@ pub enum WorkbenchPublicationOutcome {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum WorkbenchNotPublishedReason {
+    Failed,
+    Rejected,
+    Cancelled,
+}
+
 impl WorkbenchPublicationOutcome {
     #[must_use]
     pub fn public_bindings(&self) -> &[String] {
         match self {
             Self::Published { bindings } | Self::DurabilityUnconfirmed { bindings, .. } => bindings,
-            Self::Rejected { .. } => &[],
+            Self::NotPublished { .. } | Self::Rejected { .. } => &[],
         }
     }
 }

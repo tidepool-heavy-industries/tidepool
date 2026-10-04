@@ -208,12 +208,6 @@ impl PrivateExecutionAdmission {
     pub fn durable_owner(&self) -> Option<&super::RecoveryPublicOwner> {
         self.durable_owner.as_ref()
     }
-
-    /// Whether this execution has accepted any independently completed native
-    /// writes. Receipt strings and an unfinished item's status are irrelevant.
-    pub fn has_completed_native_writes(&self) -> bool {
-        !self.completed_values.lock().is_empty()
-    }
 }
 
 /// Protected inputs for one whole-cell compiler offer. The opaque retained

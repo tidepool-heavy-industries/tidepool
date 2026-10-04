@@ -150,10 +150,10 @@ where
                     (8 * 1024).min(limit).saturating_sub(512),
                 );
                 *text = format!(
-                    "retained as {name} :: Cmd.Job\nnext: read_output session_id={job}, stream=Stdout (or Stderr), offset=0. Do not rerun.\n{text}"
+                    "private binding {name} :: Cmd.Job (available if this cell publishes)\nnext: read_output session_id={job}, stream=Stdout (or Stderr), offset=0. Do not rerun.\n{text}"
                 );
             } else {
-                *text = format!("retained as {name} :: Cmd.Job\n{text}");
+                *text = format!("private binding {name} :: Cmd.Job (available if this cell publishes)\nrecover: read_output session_id={job}, stream=Stdout (or Stderr), offset=0. Do not rerun.\n{text}");
             }
             binding = Some(retained);
         }

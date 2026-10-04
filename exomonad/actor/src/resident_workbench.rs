@@ -3353,14 +3353,6 @@ pub enum ResidentActorWorkbenchError {
     /// variant proves that it did.
     #[error("resident workbench execution failed after delivering a response: {0}")]
     Delivered(ResidentError),
-    /// A completed machine prefix could not be published after the authored
-    /// cell had already failed. The original failure remains authoritative.
-    #[error("{original}; completed-prefix publication also failed: {publication}")]
-    PrefixPublication {
-        #[source]
-        original: Box<ResidentActorWorkbenchError>,
-        publication: Box<ResidentActorWorkbenchError>,
-    },
     /// An earlier cell hit an integrity failure; this actor's machine refuses
     /// all further execution.
     #[error(
@@ -3412,15 +3404,8 @@ pub enum ResidentActorWorkbenchError {
 }
 
 impl ResidentActorWorkbenchError {
-    pub(crate) fn primary_failure(&self) -> &Self {
-        match self {
-            Self::PrefixPublication { original, .. } => original.primary_failure(),
-            original => original,
-        }
-    }
-
     pub(crate) fn recovered_bindings(&self) -> &[String] {
-        match self.primary_failure() {
+        match self {
             Self::CompletedResultObservation {
                 recovered_bindings, ..
             } => recovered_bindings,
@@ -3431,7 +3416,7 @@ impl ResidentActorWorkbenchError {
     pub(crate) fn failure_diagnostic(
         &self,
     ) -> Option<tidepool_toolchain::failclass::FailureEnvelope> {
-        match self.primary_failure() {
+        match self {
             Self::PrivatePublication { source, .. } => source.failure_diagnostic(),
             Self::Compile(error) => Some(classify_compile(error)),
             Self::CellCheck(failure) => Some(classify_compile(&failure.error)),
@@ -6840,7 +6825,6 @@ where
         &self,
         context: crate::ActorSessionContext,
         execution: Arc<ExecutionPrivateScope>,
-        publication: tidepool_runtime::session::ExecutionPublicationIntent,
     ) -> Result<PrivateExecutionPublication, ResidentActorWorkbenchError> {
         if context.placement.lexical_scope != execution.private_scope {
             return Err(ResidentActorWorkbenchError::ActorProtocol(
@@ -6868,7 +6852,7 @@ where
             .access
             .with_machine(context.clone(), move |session, _, _| {
                 session
-                    .freeze_private_execution(&admission, publication)
+                    .freeze_private_execution(&admission)
                     .map_err(|error| {
                         ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
                     })
@@ -11957,7 +11941,7 @@ mod request_tests {
     }
 
     #[tokio::test]
-    async fn failed_private_prefix_selects_completed_native_and_accepted_host_writes_only() {
+    async fn successful_private_cell_publishes_declarations_and_accepted_host_writes_only() {
         let (machines, public, source, _root) = actor_registry_fixture();
         let (workbench, private) = ResidentActorWorkbench::new(machines, source, None)
             .admit_private_cell_for_test(public.clone())
@@ -12007,11 +11991,7 @@ mod request_tests {
             .unwrap();
         let execution = workbench.private_execution.as_ref().unwrap().clone();
         let selected = workbench_runner_for_test(&workbench)
-            .publish_private_execution(
-                private.clone(),
-                execution,
-                tidepool_runtime::session::ExecutionPublicationIntent::CommittedNativePrefix,
-            )
+            .publish_private_execution(private.clone(), execution)
             .await
             .unwrap();
         let PrivateExecutionPublication::Manifest {
@@ -12019,7 +11999,7 @@ mod request_tests {
             native_bindings,
         } = selected
         else {
-            panic!("completed exact native prefix must publish");
+            panic!("successful cell must publish");
         };
         assert_eq!(
             commit,
@@ -12047,7 +12027,7 @@ mod request_tests {
                 assert!(session
                     .current_binding_in(scope, &unaccepted_name)
                     .is_none());
-                assert!(!session
+                assert!(session
                     .current_decl_heads_in(scope)
                     .iter()
                     .any(|(name, _)| name == "PrivateOnly"));
@@ -12057,7 +12037,7 @@ mod request_tests {
             .unwrap();
         assert!(
             unaccepted.accept().is_err(),
-            "a sealed native prefix refuses late effect acceptance"
+            "a sealed cell refuses late effect acceptance"
         );
     }
 
@@ -12099,8 +12079,7 @@ mod request_tests {
             proof.accept(&wrong).is_err(),
             "a mount cannot transfer to a different private owner"
         );
-        assert!(!wrong.has_completed_native_writes());
-        assert!(!execution.admission.has_completed_native_writes());
+
         execution.decision.request_cancellation();
         drop(pending);
         tokio::time::timeout(Duration::from_secs(10), async {
@@ -12124,11 +12103,7 @@ mod request_tests {
         .await
         .expect("unaccepted mount guard retires its exact binding");
         let outcome = workbench_runner_for_test(&workbench)
-            .publish_private_execution(
-                private,
-                execution,
-                tidepool_runtime::session::ExecutionPublicationIntent::CommittedNativePrefix,
-            )
+            .publish_private_execution(private, execution)
             .await
             .unwrap();
         assert!(matches!(
@@ -12970,11 +12945,7 @@ mod request_tests {
                 .as_ref()
                 .expect("admitted private cell");
             let published = workbench_runner_for_test(self)
-                .publish_private_execution(
-                    context.clone(),
-                    Arc::clone(execution),
-                    tidepool_runtime::session::ExecutionPublicationIntent::CompletedCell,
-                )
+                .publish_private_execution(context.clone(), Arc::clone(execution))
                 .await?;
             assert!(matches!(
                 published,
@@ -16125,7 +16096,6 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             .publish_private_execution(
                 context,
                 workbench.private_execution.as_ref().unwrap().clone(),
-                tidepool_runtime::session::ExecutionPublicationIntent::CompletedCell,
             )
             .await
             .unwrap();
@@ -16789,12 +16759,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             )
             .unwrap();
         assert!(matches!(outcome, ResidentOutcome::BindingsCommitted { .. }));
-        let intent = session
-            .freeze_private_execution(
-                &execution,
-                tidepool_runtime::session::ExecutionPublicationIntent::CompletedCell,
-            )
-            .unwrap();
+        let intent = session.freeze_private_execution(&execution).unwrap();
         let tidepool_runtime::session::ExecutionPublication::Bindings(publication) = session
             .restage_ephemeral_execution_publication(intent)
             .unwrap()

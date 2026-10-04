@@ -65,11 +65,11 @@ pub use admission::{
     PrivateExecutionAdmission, RuntimeCellAdmission, RuntimeCheckedItemAdmission,
     RuntimeCheckedPrefix, RuntimeCheckedPrefixSnapshot, RuntimeLexicalScopeLease,
 };
+pub use paired_publication::FinalExecutionIntent;
 pub use paired_publication::{
     AcceptedDeclarationPublication, CertifiedDeclarationPublication, DeclarationPublicationBase,
     DeclarationPublicationRejection, ExecutionPublication, RejectedDeclarationPublication,
 };
-pub use paired_publication::{ExecutionPublicationIntent, FinalExecutionIntent};
 pub use planned_cell::{
     RuntimeCellPlanReservation, RuntimePlannedCellItem, RuntimePlannedCellItemKind,
     RuntimePlannedCellSlot,
@@ -127,9 +127,9 @@ pub use workbench::{
     WorkbenchDisplayOutput, WorkbenchDisplayPage, WorkbenchDisplayPublication,
     WorkbenchDisplayPublicationIdentity, WorkbenchExecutionId, WorkbenchFailureLayer,
     WorkbenchFailurePoint, WorkbenchForkBoundary, WorkbenchItem, WorkbenchItemReceipt,
-    WorkbenchItemStatus, WorkbenchOperationDisposition, WorkbenchOperationId,
-    WorkbenchOperationReceipt, WorkbenchPublicationOutcome, WorkbenchRequest, WorkbenchResponse,
-    WorkbenchRunStatus, WorkbenchTerminalTransfer,
+    WorkbenchItemStatus, WorkbenchNotPublishedReason, WorkbenchOperationDisposition,
+    WorkbenchOperationId, WorkbenchOperationReceipt, WorkbenchPublicationOutcome, WorkbenchRequest,
+    WorkbenchResponse, WorkbenchRunStatus, WorkbenchTerminalTransfer,
 };
 
 pub use turn::{

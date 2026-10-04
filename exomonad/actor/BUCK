@@ -97,7 +97,7 @@ rust_filegroup(
         "src/resident_actor/invocation_work.rs": "exomonad/actor/src/resident_actor/invocation_work.rs",
         "src/resident_actor/invocation_work_tests.rs": "exomonad/actor/src/resident_actor/invocation_work_tests.rs",
         "src/resident_actor/owned_workbench.rs": "exomonad/actor/src/resident_actor/owned_workbench.rs",
-        "src/resident_actor/owned_workbench/prefix_tests.rs": "exomonad/actor/src/resident_actor/owned_workbench/prefix_tests.rs",
+        "src/resident_actor/owned_workbench/publication_tests.rs": "exomonad/actor/src/resident_actor/owned_workbench/publication_tests.rs",
         "src/resident_actor/owned_workbench/reload.rs": "exomonad/actor/src/resident_actor/owned_workbench/reload.rs",
         "src/resident_actor/provider_owner_tests.rs": "exomonad/actor/src/resident_actor/provider_owner_tests.rs",
         "src/resident_actor/replacement.rs": "exomonad/actor/src/resident_actor/replacement.rs",

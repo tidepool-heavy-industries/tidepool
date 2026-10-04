@@ -310,10 +310,7 @@ fn publish_checked_fixture(
     native_writes: usize,
 ) {
     let intent = resident
-        .freeze_private_execution(
-            execution,
-            crate::session::ExecutionPublicationIntent::CompletedCell,
-        )
+        .freeze_private_execution(execution)
         .expect("freeze the checked fixture publication");
     assert_eq!(intent.native_write_ids().len(), native_writes);
     let publication = resident

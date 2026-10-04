@@ -214,8 +214,18 @@ fn defining_execution(
     )],
 ) -> Option<(WorkbenchExecutionId, String, usize)> {
     executions.iter().find_map(|(execution, request, reply)| {
-        let response = reply.as_ref().ok()?;
-        response.items.iter().find_map(|item| {
+        let (items, publication) = match reply {
+            Ok(response) => (response.items.as_slice(), response.publication.as_ref()),
+            Err(failure) => (failure.receipts(), failure.publication()),
+        };
+        if !publication?
+            .public_bindings()
+            .iter()
+            .any(|binding| binding == name)
+        {
+            return None;
+        }
+        items.iter().find_map(|item| {
             if !item
                 .installed_bindings
                 .iter()
@@ -253,11 +263,13 @@ pub(super) fn render_bindings_section(
     }
     let mut journal_names: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for (_, _, reply) in executions {
-        if let Ok(response) = reply {
-            for item in &response.items {
-                for name in &item.installed_bindings {
-                    journal_names.insert(name.as_str());
-                }
+        let publication = match reply {
+            Ok(response) => response.publication.as_ref(),
+            Err(failure) => failure.publication(),
+        };
+        if let Some(publication) = publication {
+            for name in publication.public_bindings() {
+                journal_names.insert(name.as_str());
             }
         }
     }
@@ -604,7 +616,11 @@ mod tests {
             }],
             next_index: 1,
             total: 1,
-            publication: None,
+            publication: Some(
+                tidepool_runtime::session::WorkbenchPublicationOutcome::Published {
+                    bindings: vec![binding.to_owned()],
+                },
+            ),
         };
         (execution, request, Ok(response))
     }
@@ -656,6 +672,25 @@ mod tests {
         assert_eq!(source, "x = 5");
         assert_eq!(group_size, 0);
         assert_eq!(defining_execution("never_bound", &executions), None);
+    }
+
+    #[test]
+    fn source_attribution_ignores_discarded_same_name_progress() {
+        let (discarded, discarded_request, mut discarded_reply) =
+            committed_execution(1, "x = 0", "x");
+        discarded_reply.as_mut().unwrap().publication = Some(
+            tidepool_runtime::session::WorkbenchPublicationOutcome::NotPublished {
+                reason: tidepool_runtime::session::WorkbenchNotPublishedReason::Failed,
+            },
+        );
+        let (published, published_request, published_reply) = committed_execution(2, "x = 1", "x");
+        let executions = [
+            (discarded, &discarded_request, &discarded_reply),
+            (published.clone(), &published_request, &published_reply),
+        ];
+        let (found, source, _) = defining_execution("x", &executions).unwrap();
+        assert_eq!(found, published);
+        assert_eq!(source, "x = 1");
     }
 
     #[test]

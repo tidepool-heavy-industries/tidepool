@@ -140,6 +140,7 @@ pub enum KernelInvocationFailure {
     },
     #[error("actor {actor} invocation cleanup remains unconfirmed: {detail}")]
     CleanupUnconfirmed {
+        publication: Option<tidepool_runtime::session::WorkbenchPublicationOutcome>,
         actor: ActorRef,
         detail: String,
         receipts: Vec<tidepool_runtime::session::WorkbenchItemReceipt>,
@@ -167,6 +168,16 @@ impl KernelInvocationFailure {
             | Self::CleanupUnconfirmed { receipts, .. } => receipts,
             Self::TerminalTransferFailed { source, .. } => source.receipts(),
             Self::ActorExited(_) => &[],
+        }
+    }
+
+    /// Public visibility survives terminal transfer and cleanup failures.
+    pub fn publication(&self) -> Option<&tidepool_runtime::session::WorkbenchPublicationOutcome> {
+        match self {
+            Self::Workbench(failure) => failure.publication.as_ref(),
+            Self::CleanupUnconfirmed { publication, .. } => publication.as_ref(),
+            Self::TerminalTransferFailed { source, .. } => source.publication(),
+            _ => None,
         }
     }
 

@@ -2922,7 +2922,6 @@ where
     pub fn freeze_private_execution(
         &mut self,
         admission: &super::PrivateExecutionAdmission,
-        publication: super::ExecutionPublicationIntent,
     ) -> Result<Arc<super::FinalExecutionIntent>, SessionError> {
         self.settle_dropped_custody();
         let scope = admission.private_scope();
@@ -2938,8 +2937,7 @@ where
                 self.state.bindings().get(*id).and_then(|entry| {
                     (entry.scope == scope
                         && !self.hidden_host_bindings.contains_key(id)
-                        && (publication == super::ExecutionPublicationIntent::CompletedCell
-                            || completed.get(id).is_some_and(|proof| proof.matches(entry))))
+                        && completed.get(id).is_some_and(|proof| proof.matches(entry)))
                     .then_some(*id)
                 })
             })
@@ -2948,7 +2946,6 @@ where
             admission,
             writes,
             snapshot.source_instances,
-            publication,
             &completed,
         )
     }
@@ -3712,12 +3709,12 @@ where
             .iter()
             .find(|entry| entry.name == hole.cont_id())
             .ok_or_else(invalid)?;
-        let (_, evidence) = self
+        let parked_site = self
             .state
             .prepared_mut()
-            .and_then(|engine| engine.parked(entry.id))
+            .and_then(|engine| engine.parked_site(entry.id))
             .ok_or_else(invalid)?;
-        if evidence.site != site {
+        if parked_site != site {
             return Err(invalid());
         }
         let provenance = self.parked_program_provenance(hole).ok_or_else(invalid)?;
@@ -3786,12 +3783,11 @@ where
             .iter()
             .find(|entry| entry.name == continuation)
             .ok_or(ResidentError::InvalidActivationInput { site: 0 })?;
-        let (_, evidence) = self
+        let site = self
             .state
             .prepared_mut()
-            .and_then(|engine| engine.parked(entry.id))
+            .and_then(|engine| engine.parked_site(entry.id))
             .ok_or(ResidentError::InvalidActivationInput { site: 0 })?;
-        let site = evidence.site;
         let invalid = || ResidentError::InvalidActivationInput { site };
         let provenance = Arc::clone(&entry.provenance);
         if !provenance.authenticated_inputs.contains_key(&site) {
@@ -8744,12 +8740,7 @@ mod authored_publication_tests {
             .certified_authored_arc_at(d_generation)
             .unwrap();
         let d_owner = original_d.product().owner().clone();
-        let intent = session
-            .freeze_private_execution(
-                &d,
-                crate::session::ExecutionPublicationIntent::CompletedCell,
-            )
-            .unwrap();
+        let intent = session.freeze_private_execution(&d).unwrap();
         let ExecutionPublication::Declarations(base) = session
             .restage_execution_publication(owner.clone(), intent)
             .unwrap()
@@ -8817,12 +8808,7 @@ mod authored_publication_tests {
             *original_d.product(),
             "capture preserves full immutable original D"
         );
-        let intent = session
-            .freeze_private_execution(
-                &e,
-                crate::session::ExecutionPublicationIntent::CompletedCell,
-            )
-            .unwrap();
+        let intent = session.freeze_private_execution(&e).unwrap();
         let ExecutionPublication::Declarations(base) = session
             .restage_execution_publication(owner, intent)
             .unwrap()

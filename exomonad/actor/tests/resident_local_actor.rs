@@ -386,7 +386,7 @@ async fn resident_command_retain_binding_returns_reference_without_command_prese
 }
 
 #[tokio::test]
-async fn resident_command_binding_is_recovered_after_later_cell_failure() {
+async fn resident_failed_cell_discards_command_binding_and_retains_job_output() {
     resident_await_watch_case(WatchCase::PrimaryCommandRetainBindingFailure).await;
 }
 
@@ -1277,16 +1277,21 @@ async fn resident_await_watch_case(case: WatchCase) {
             assert_eq!(receipt.installed_bindings.len(), 1, "{receipt:?}");
             let binding = &receipt.installed_bindings[0];
             assert!(
-                matches!(failure.publication.as_ref(), Some(
-                tidepool_runtime::session::WorkbenchPublicationOutcome::Published { bindings }
-            ) if bindings == &vec![binding.clone()]),
-                "recovery requires the actual exact native publication: {:?}",
+                matches!(
+                    failure.publication.as_ref(),
+                    Some(
+                        tidepool_runtime::session::WorkbenchPublicationOutcome::NotPublished {
+                            reason: tidepool_runtime::session::WorkbenchNotPublishedReason::Failed
+                        }
+                    )
+                ),
+                "a failed cell publishes no names: {:?}",
                 failure.publication
             );
             assert!(!binding.contains("session_id:"), "{receipt:?}");
             assert!(
                 receipt.output.contains(binding),
-                "the recovery receipt names the retained binding: {receipt:?}"
+                "the receipt retains private progress: {receipt:?}"
             );
             assert_eq!(
                 receipt.operations.len(),
@@ -1324,18 +1329,29 @@ async fn resident_await_watch_case(case: WatchCase) {
             let binding_read =
                 dispatch_unbound_workbench_cell(&actor, &format!("Cmd.await {binding} >> pure ()"))
                     .await
-                    .expect("the binding remains usable after the failed cell");
-            assert_eq!(binding_read["status"], "committed", "{binding_read:?}");
+                    .expect("discarded name produces a structured rejection");
+            assert_eq!(binding_read["status"], "rejected", "{binding_read:?}");
+            let job = command_backend
+                .output
+                .lock()
+                .expect("backend output lock")
+                .iter()
+                .find_map(|(job, text)| text.is_empty().then(|| job.clone()))
+                .expect("the completed command retains its output by session id");
+            let recovered = exomonad_actor::command_jobs::CommandBackend::output(
+                command_backend.as_ref(),
+                &job,
+                1024,
+            )
+            .await
+            .expect("same session id recovers output after the cell fails");
+            assert!(recovered.stdout.finished);
             assert_eq!(
                 command_backend
                     .completion_count
                     .load(std::sync::atomic::Ordering::SeqCst),
                 1,
-                "recovering the binding observes the original command, without replay"
-            );
-            assert_eq!(
-                binding_read["items"][0]["operations"][0]["effect"], "command job",
-                "{binding_read:?}"
+                "recovering by session id observes the original command without replay"
             );
             forest.shutdown().await;
             return;

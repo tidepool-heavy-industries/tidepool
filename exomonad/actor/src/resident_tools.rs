@@ -198,7 +198,9 @@ impl WorkbenchExecutionControl {
             execution,
             result,
             cleanup_confirmed,
-            self.cancellation_requested() || self.context_cancellation_requested(),
+            // This flag proves cancellation won the arbiter and survives acknowledgement.
+            self.native_cancel
+                .load(std::sync::atomic::Ordering::Acquire),
         );
         *terminal = Some(exit.clone());
         exit
@@ -376,11 +378,14 @@ impl WorkbenchExecutionControl {
                     },
                 )
                 .is_ok();
+            // Keep winning evidence inside the publication decision lock.
+            if claimed {
+                self.native_cancel
+                    .store(true, std::sync::atomic::Ordering::Release);
+            }
             claimed
         });
         if claimed {
-            self.native_cancel
-                .store(true, std::sync::atomic::Ordering::Release);
             self.changed.notify_waiters();
         }
         if matches!(
@@ -1768,7 +1773,7 @@ mod tests {
     }
 
     #[test]
-    fn cancellation_before_whole_cell_cutoff_vetoes_published_native_value_and_stays_cancelled() {
+    fn losing_cancellation_revokes_context_draft_without_reclassifying_published_cell() {
         let control = WorkbenchExecutionControl::untracked();
         let binding = Arc::new(ContextCancellation(std::sync::atomic::AtomicUsize::new(0)));
         control.bind_context(binding.clone());
@@ -1792,20 +1797,47 @@ mod tests {
         };
         let result = Ok(crate::KernelStep::Continue(response.clone()));
         let exit = control.finish_cell(execution.clone(), &result, true);
-        assert_eq!(exit.cause, crate::CellExitCause::Cancelled);
-        assert!(!exit.permits_context_commit());
+        assert_eq!(exit.cause, crate::CellExitCause::FullReturn);
+        assert!(exit.permits_context_commit());
         control.settle(Ok(response.clone()));
         assert!(!control.request_cancellation());
         assert_eq!(binding.0.load(std::sync::atomic::Ordering::Acquire), 1);
         assert!(matches!(
             control.cancellation_outcome(execution.clone(), Ok(response.clone())),
-            WorkbenchCancellationOutcome::Cancelled { reply, .. } if reply == Ok(response)
+            WorkbenchCancellationOutcome::PublicationSettled { reply, .. } if reply == Ok(response)
         ));
         assert_eq!(
             control.finish_cell(execution, &result, false),
             exit,
             "terminal evidence is immutable"
         );
+    }
+
+    #[test]
+    fn winning_cancellation_remains_the_cell_exit_after_native_acknowledgement() {
+        let control = WorkbenchExecutionControl::untracked();
+        assert!(control.request_cancellation());
+        assert!(control.publication_decision().claim_commit().is_none());
+        control.acknowledge_cancellation();
+        let response = WorkbenchResponse {
+            publication: Some(
+                tidepool_runtime::session::WorkbenchPublicationOutcome::NotPublished {
+                    reason: tidepool_runtime::session::WorkbenchNotPublishedReason::Cancelled,
+                },
+            ),
+            status: WorkbenchRunStatus::Committed,
+            summary: None,
+            items: Vec::new(),
+            next_index: 1,
+            total: 1,
+        };
+        let exit = control.finish_cell(
+            WorkbenchExecutionId::from_digest([29; 16]),
+            &Ok(crate::KernelStep::Continue(response)),
+            true,
+        );
+        assert_eq!(exit.cause, crate::CellExitCause::Cancelled);
+        assert!(!exit.permits_context_commit());
     }
 
     #[test]
@@ -1854,6 +1886,7 @@ mod tests {
             assert!(control.request_cancellation());
             control.acknowledge_cancellation();
             let failure = Err(crate::KernelInvocationFailure::CleanupUnconfirmed {
+                publication: None,
                 receipts: Vec::new(),
                 actor: crate::ActorRef::first(crate::ActorId(1)),
                 detail: "model invocation terminal receipt unavailable".into(),
@@ -1929,6 +1962,41 @@ mod tests {
             control.cancellation_outcome(execution, control.settled().await),
             WorkbenchCancellationOutcome::PublicationSettled { reply: Err(_), .. }
         ));
+    }
+
+    #[test]
+    fn losing_cancellation_preserves_the_failed_publication_cell_exit() {
+        let control = WorkbenchExecutionControl::untracked();
+        let claim = control.publication_decision().claim_commit().unwrap();
+        assert_eq!(
+            control.admit_cancellation().1,
+            Some(PublicationCancellation::PendingCommitOutcome)
+        );
+        assert!(claim.before_rename_failure());
+        let publication = tidepool_runtime::session::WorkbenchPublicationOutcome::Rejected {
+            detail: "rename failed".into(),
+        };
+        let failure = crate::KernelInvocationFailure::Workbench(crate::KernelWorkbenchFailure {
+            actor: crate::ActorRef::first(crate::ActorId(1)),
+            receipts: Vec::new(),
+            point: tidepool_runtime::session::WorkbenchFailurePoint::Publication {
+                completed_input_units: 1,
+            },
+            total: 1,
+            publication: Some(publication),
+            detail: "rename failed".into(),
+            diagnostic: None,
+        });
+        let result = Err(failure.clone());
+        let execution = WorkbenchExecutionId::from_digest([28; 16]);
+        let exit = control.finish_cell(execution.clone(), &result, true);
+        assert_eq!(exit.cause, crate::CellExitCause::Failed);
+        assert!(control.context_cancellation_requested());
+        control.settle(Err(failure.clone()));
+        assert!(
+            matches!(control.cancellation_outcome(execution, Err(failure.clone())),
+            WorkbenchCancellationOutcome::PublicationSettled { reply: Err(retained), .. } if retained == failure)
+        );
     }
 
     #[test]

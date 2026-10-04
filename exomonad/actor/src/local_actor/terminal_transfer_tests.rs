@@ -74,6 +74,7 @@ impl KernelBehavior for CompletionProbe {
                 behavior.completions += 1;
                 if behavior.completions == 1 {
                     let source = KernelInvocationFailure::CleanupUnconfirmed {
+                        publication: None,
                         receipts: Vec::new(),
                         actor,
                         detail: "controlled finalization refusal".into(),

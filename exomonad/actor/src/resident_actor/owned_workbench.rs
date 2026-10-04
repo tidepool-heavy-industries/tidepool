@@ -1,6 +1,6 @@
 //! Single-admission preparation and watch tasks retain one execution cursor.
 
-use tidepool_runtime::session::ExecutionPublicationIntent;
+use tidepool_runtime::session::WorkbenchNotPublishedReason;
 
 mod reload;
 
@@ -10,7 +10,7 @@ use crate::{OwnedWorkbenchCompletion, OwnedWorkbenchTask, WorkbenchAdvance, Work
 #[cfg(test)]
 mod model_tests;
 #[cfg(test)]
-mod prefix_tests;
+mod publication_tests;
 
 /// Source and tool owners admitted once for this hosted execution. Compiler
 /// recipe observations are added by the workbench's original snapshot owner.
@@ -509,6 +509,7 @@ where
     if !failures.is_empty() {
         control.mark_unconfirmed();
         return Err(KernelInvocationFailure::CleanupUnconfirmed {
+            publication: None,
             receipts: Vec::new(),
             actor: owned.state.effects.context.actor,
             detail: failures.join("; "),
@@ -552,18 +553,19 @@ pub(super) fn retain_cleanup_failure(
     mut detail: String,
     finalized: WorkbenchFinalizationResult,
 ) -> WorkbenchFinalizationResult {
-    let receipts = match finalized.result {
+    let (receipts, publication) = match finalized.result {
         Ok(KernelStep::Continue(response) | KernelStep::ContinueLater(response))
         | Ok(KernelStep::Stop {
             output: response, ..
-        }) => response.items,
+        }) => (response.items, response.publication),
         Err(error) => {
             detail.push_str(&format!("; workbench finalization: {error}"));
-            error.receipts().to_vec()
+            (error.receipts().to_vec(), error.publication().cloned())
         }
     };
     WorkbenchFinalizationResult {
         result: Err(KernelInvocationFailure::CleanupUnconfirmed {
+            publication,
             actor,
             detail,
             receipts,
@@ -2116,17 +2118,12 @@ where
                 .as_ref()
                 .map(|checked| checked.items.as_slice()),
         );
-        // Native prefixes survive failure; declarations require whole-cell success.
-        // Cancellation retains the original publication decision's veto.
-        if let Some(publication) = owned.private.as_ref().and_then(|private| {
-            private_publication_intent(&result, private.admission.has_completed_native_writes())
-        }) {
+        if owned.private.is_some() && private_nonpublication_reason(&result).is_none() {
             return Ok(WorkbenchAdvance::Park(Self::publish_owned_execution_task(
                 owned,
                 behavior.environment.clone(),
                 kernel.clone(),
                 result,
-                publication,
             )));
         }
         owned
@@ -2137,6 +2134,26 @@ where
             .expect("owned execution retains its original control")
             .publication_decision()
             .terminate();
+        if owned.private.is_some() {
+            let reason = if owned
+                .state
+                .effects
+                .control
+                .as_ref()
+                .unwrap()
+                .native_cancel()
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                WorkbenchNotPublishedReason::Cancelled
+            } else {
+                private_nonpublication_reason(&result)
+                    .expect("unsuccessful admitted cell has a nonpublication reason")
+            };
+            set_private_publication(
+                &mut result,
+                WorkbenchPublicationOutcome::NotPublished { reason },
+            );
+        }
         Self::settle_owned_execution(behavior, kernel, owned, result)
     }
 
@@ -2167,7 +2184,6 @@ where
         environment: ResidentEnvironment<H, O>,
         kernel: KernelContext,
         result: Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
-        publication: ExecutionPublicationIntent,
     ) -> OwnedWorkbenchTask<Self> {
         let runner = environment.runner.clone();
         Self::owned_step_task(
@@ -2182,9 +2198,7 @@ where
                 Box::pin(async move {
                     let actor = context.actor;
                     tracing::info!(target: "exomonad_actor::workbench_phase", actor = %actor, phase = "private_publish_started", "workbench phase");
-                    let published = runner
-                        .publish_private_execution(context, private, publication)
-                        .await;
+                    let published = runner.publish_private_execution(context, private).await;
                     tracing::info!(target: "exomonad_actor::workbench_phase", actor = %actor, phase = "private_publish_completed", "workbench phase");
                     published
                 })
@@ -2215,6 +2229,51 @@ where
                             native_bindings,
                         ),
                     )),
+                    Ok(PrivateExecutionPublication::Manifest {
+                        commit: PublicManifestCommit::Cancelled,
+                        ..
+                    }) => {
+                        if !owned
+                            .state
+                            .effects
+                            .control
+                            .as_ref()
+                            .unwrap()
+                            .native_cancel()
+                            .load(std::sync::atomic::Ordering::Acquire)
+                        {
+                            let error = ResidentActorWorkbenchError::ActorProtocol(
+                                "private publication refused after execution terminated".into(),
+                            );
+                            let publication = WorkbenchPublicationOutcome::Rejected {
+                                detail: error.to_string(),
+                            };
+                            return Self::settle_owned_execution(
+                                behavior,
+                                &kernel,
+                                owned,
+                                Err(private_publication_failure(result, error, publication)),
+                            );
+                        }
+                        let mut result = result;
+                        match &mut result {
+                            Ok(
+                                KernelStep::Continue(response)
+                                | KernelStep::ContinueLater(response),
+                            )
+                            | Ok(KernelStep::Stop {
+                                output: response, ..
+                            }) => response.status = WorkbenchRunStatus::RequestCancelled,
+                            Err(_) => {}
+                        }
+                        set_private_publication(
+                            &mut result,
+                            WorkbenchPublicationOutcome::NotPublished {
+                                reason: WorkbenchNotPublishedReason::Cancelled,
+                            },
+                        );
+                        Self::settle_owned_execution(behavior, &kernel, owned, result)
+                    }
                     failure => {
                         let error = match failure {
                             Err(error) => error,
@@ -2367,29 +2426,39 @@ where
     }
 }
 
-fn private_publication_intent(
+fn private_nonpublication_reason(
     result: &Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
-    completed_native_writes: bool,
-) -> Option<ExecutionPublicationIntent> {
-    let completed_prefix = |receipts: &[WorkbenchItemReceipt]| {
-        (completed_native_writes
-            || receipts.iter().any(|receipt| {
-                receipt.status == WorkbenchItemStatus::Committed
-                    && receipt.kind != Some(WorkbenchCellItemKind::Declaration)
-            }))
-        .then_some(ExecutionPublicationIntent::CommittedNativePrefix)
-    };
+) -> Option<WorkbenchNotPublishedReason> {
     let response = match result {
         Ok(KernelStep::Continue(response) | KernelStep::ContinueLater(response))
         | Ok(KernelStep::Stop {
             output: response, ..
         }) => response,
-        Err(failure) => return completed_prefix(&failure.receipts),
+        Err(_) => return Some(WorkbenchNotPublishedReason::Failed),
     };
     match response.status {
-        WorkbenchRunStatus::Rejected => completed_prefix(&response.items),
-        WorkbenchRunStatus::RequestCancelled => None,
-        _ => Some(ExecutionPublicationIntent::CompletedCell),
+        WorkbenchRunStatus::Rejected => Some(WorkbenchNotPublishedReason::Rejected),
+        WorkbenchRunStatus::RequestCancelled => Some(WorkbenchNotPublishedReason::Cancelled),
+        WorkbenchRunStatus::Committed | WorkbenchRunStatus::Completed
+            if response.next_index == response.total =>
+        {
+            None
+        }
+        WorkbenchRunStatus::Replied | WorkbenchRunStatus::Backgrounded => None,
+        _ => Some(WorkbenchNotPublishedReason::Failed),
+    }
+}
+
+fn set_private_publication(
+    result: &mut Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
+    publication: WorkbenchPublicationOutcome,
+) {
+    match result {
+        Ok(KernelStep::Continue(response) | KernelStep::ContinueLater(response))
+        | Ok(KernelStep::Stop {
+            output: response, ..
+        }) => response.publication = Some(publication),
+        Err(failure) => failure.publication = Some(publication),
     }
 }
 
@@ -2404,13 +2473,10 @@ fn private_publication_bindings(
         }) => &response.items,
         Err(failure) => &failure.receipts,
     };
-    let publication = private_publication_intent(result, !native_bindings.is_empty());
-    if publication == Some(ExecutionPublicationIntent::CommittedNativePrefix) {
-        return native_bindings.to_vec();
-    }
     receipts
         .iter()
         .flat_map(|receipt| receipt.installed_bindings.iter().cloned())
+        .chain(native_bindings.iter().cloned())
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
         .collect()
@@ -2422,13 +2488,7 @@ fn mark_private_publication(
 ) -> Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure> {
     let bindings = private_publication_bindings(&result, native_bindings);
     let publication = WorkbenchPublicationOutcome::Published { bindings };
-    match &mut result {
-        Ok(KernelStep::Continue(response) | KernelStep::ContinueLater(response))
-        | Ok(KernelStep::Stop {
-            output: response, ..
-        }) => response.publication = Some(publication),
-        Err(failure) => failure.publication = Some(publication),
-    }
+    set_private_publication(&mut result, publication);
     result
 }
 
@@ -2451,10 +2511,7 @@ fn private_publication_failure(
             source,
         },
         Err(failure) => WorkbenchExecutionFailure {
-            source: ResidentActorWorkbenchError::PrefixPublication {
-                original: Box::new(failure.source),
-                publication: Box::new(source),
-            },
+            source,
             publication: Some(publication),
             ..failure
         },

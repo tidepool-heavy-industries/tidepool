@@ -2406,11 +2406,15 @@ fn merge_retained_bindings(receipt: &mut WorkbenchItemReceipt, bindings: &[Strin
             receipt.installed_bindings.push(binding.clone());
         }
     }
-    if bindings.is_empty() || receipt.output.contains("retained bindings:") {
+    if bindings.is_empty()
+        || receipt
+            .output
+            .contains("private bindings (discarded unless this cell publishes):")
+    {
         return;
     }
     let retained = format!(
-        "retained bindings: {}",
+        "private bindings (discarded unless this cell publishes): {}",
         receipt.installed_bindings.join(", ")
     );
     if receipt.output.is_empty() {
@@ -2463,7 +2467,7 @@ fn reload_receipt(outcome: &str, started: std::time::Instant, lines: Vec<String>
 fn resident_actor_failure_layer(
     error: &ResidentActorWorkbenchError,
 ) -> Option<WorkbenchFailureLayer> {
-    match error.primary_failure() {
+    match error {
         ResidentActorWorkbenchError::Compile(_)
         | ResidentActorWorkbenchError::CellCheck(_)
         | ResidentActorWorkbenchError::InputCompilation { .. }
@@ -2859,10 +2863,9 @@ where
     };
     let result = result.map_err(|failure| {
         let source = failure.source;
-        if matches!(
-            source.primary_failure(),
-            ResidentActorWorkbenchError::ToolDispatch(_)
-        ) {
+        if matches!(&source, ResidentActorWorkbenchError::ToolDispatch(_))
+            && failure.publication.is_none()
+        {
             let detail = match &source {
                 ResidentActorWorkbenchError::ToolDispatch(error) => error.to_string(),
                 _ => source.to_string(),
@@ -16900,7 +16903,9 @@ mod tests {
         );
         assert_eq!(receipt.installed_bindings, recovered);
         assert!(receipt.output.contains("effects committed"));
-        assert!(receipt.output.contains("retained bindings: commandJob"));
+        assert!(receipt
+            .output
+            .contains("private bindings (discarded unless this cell publishes): commandJob"));
         assert_eq!(
             receipt.operations[0].disposition,
             WorkbenchOperationDisposition::Committed
@@ -16939,7 +16944,9 @@ mod tests {
         );
         assert_eq!(receipt.installed_bindings, recovered);
         assert!(receipt.output.contains("effects committed"));
-        assert!(receipt.output.contains("retained bindings: commandJob"));
+        assert!(receipt
+            .output
+            .contains("private bindings (discarded unless this cell publishes): commandJob"));
         assert_eq!(
             receipt.operations[0].disposition,
             WorkbenchOperationDisposition::Committed
