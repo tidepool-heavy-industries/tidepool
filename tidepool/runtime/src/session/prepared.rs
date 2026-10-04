@@ -61,6 +61,42 @@ pub enum PreparedFailureStage {
     Run,
 }
 
+/// Bounded reply roots observed at a refused installation. These diagnostics
+/// neither establish type equality nor authorize an alternate reply owner.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConstructorReplyConflictEvidence {
+    pub constructor: Option<SymbolIdentity>,
+    pub existing: ConstructorReplyObservation,
+    pub incoming: ConstructorReplyObservation,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ConstructorReplyObservation {
+    AtSite,
+    Static {
+        node: TypeNodeId,
+        shape: ReplyTypeObservation,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ReplyTypeObservation {
+    Missing,
+    Data {
+        family: SymbolIdentity,
+        argument_count: usize,
+        constructor_count: usize,
+    },
+    Text,
+    Integer,
+    Natural,
+    Scalar(RuntimeRep),
+    Unconstructible {
+        reason: String,
+        rendered: String,
+    },
+}
+
 /// The package evidence observed when a sealed package owner cannot be
 /// resolved. These facts explain the refusal; they never authorize a fallback.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -279,14 +315,18 @@ pub enum PreparedRuntimeError {
     #[error("request constructor {constructor:?} has a malformed first RequestSite carrier")]
     MalformedRequestSite { constructor: DataConId },
     #[error(
-        "reply evidence for constructor {constructor:?} conflicts with installed program {owner:?}"
+        "reply evidence for constructor {constructor:?} conflicts with installed program {owner:?}: {evidence:?}"
     )]
     ConstructorReplyConflict {
         constructor: DataConId,
         owner: ProgramId,
+        evidence: Box<ConstructorReplyConflictEvidence>,
     },
-    #[error("duplicate reply evidence for constructor {constructor:?}")]
-    DuplicateConstructorReply { constructor: DataConId },
+    #[error("duplicate reply evidence for constructor {constructor:?}: {evidence:?}")]
+    DuplicateConstructorReply {
+        constructor: DataConId,
+        evidence: Box<ConstructorReplyConflictEvidence>,
+    },
     #[error("program {owner:?} has no reply site row {row}")]
     MissingReplySiteRow { owner: ProgramId, row: usize },
     /// The turn suspended under `HandleOrError`. The prepared route parks
@@ -2027,6 +2067,74 @@ fn constructor_replies_equivalent(
     }
 }
 
+fn reply_conflict_evidence(
+    constructor: DataConId,
+    existing: &ProgramFacts,
+    existing_reply: ConstructorReply,
+    incoming: &ProgramFacts,
+    incoming_reply: ConstructorReply,
+) -> Box<ConstructorReplyConflictEvidence> {
+    fn text(value: &str) -> String {
+        const MAX_CHARS: usize = 256;
+        let mut chars = value.chars();
+        let mut bounded: String = chars.by_ref().take(MAX_CHARS).collect();
+        if chars.next().is_some() {
+            bounded.push('…');
+        }
+        bounded
+    }
+
+    fn identity(value: &SymbolIdentity) -> SymbolIdentity {
+        SymbolIdentity {
+            unit: text(&value.unit),
+            module: text(&value.module),
+            namespace: text(&value.namespace),
+            occurrence: text(&value.occurrence),
+            record_parent: value.record_parent.as_deref().map(text),
+        }
+    }
+
+    fn observe(facts: &ProgramFacts, reply: ConstructorReply) -> ConstructorReplyObservation {
+        match reply {
+            ConstructorReply::AtSite => ConstructorReplyObservation::AtSite,
+            ConstructorReply::Static(node) => ConstructorReplyObservation::Static {
+                node,
+                shape: match facts.type_node(node) {
+                    None => ReplyTypeObservation::Missing,
+                    Some(TypeNode::Data {
+                        family,
+                        arguments,
+                        rows,
+                    }) => ReplyTypeObservation::Data {
+                        family: identity(family),
+                        argument_count: arguments.len(),
+                        constructor_count: rows.len(),
+                    },
+                    Some(TypeNode::Text) => ReplyTypeObservation::Text,
+                    Some(TypeNode::Integer) => ReplyTypeObservation::Integer,
+                    Some(TypeNode::Natural) => ReplyTypeObservation::Natural,
+                    Some(TypeNode::Scalar(rep)) => ReplyTypeObservation::Scalar(*rep),
+                    Some(TypeNode::Unconstructible { reason, rendered }) => {
+                        ReplyTypeObservation::Unconstructible {
+                            reason: text(reason),
+                            rendered: text(rendered),
+                        }
+                    }
+                },
+            },
+        }
+    }
+
+    Box::new(ConstructorReplyConflictEvidence {
+        constructor: existing
+            .constructors
+            .iter()
+            .find_map(|(symbol, host, _)| (*host == constructor).then(|| identity(symbol))),
+        existing: observe(existing, existing_reply),
+        incoming: observe(incoming, incoming_reply),
+    })
+}
+
 fn sites_equivalent(a: &ProgramFacts, a_row: &SiteRow, b: &ProgramFacts, b_row: &SiteRow) -> bool {
     if a_row.delivery != b_row.delivery || a_row.inputs.len() != b_row.inputs.len() {
         return false;
@@ -2959,9 +3067,23 @@ impl PreparedEngine {
                     Some(owner) => PreparedRuntimeError::ConstructorReplyConflict {
                         constructor: host_id,
                         owner,
+                        evidence: reply_conflict_evidence(
+                            host_id,
+                            owner_facts,
+                            owner_reply,
+                            facts,
+                            reply,
+                        ),
                     },
                     None => PreparedRuntimeError::DuplicateConstructorReply {
                         constructor: host_id,
+                        evidence: reply_conflict_evidence(
+                            host_id,
+                            owner_facts,
+                            owner_reply,
+                            facts,
+                            reply,
+                        ),
                     },
                 });
             }
@@ -3017,6 +3139,13 @@ impl PreparedEngine {
                     ) {
                         return Err(PreparedRuntimeError::DuplicateConstructorReply {
                             constructor: host_id,
+                            evidence: reply_conflict_evidence(
+                                host_id,
+                                &facts[prior_group],
+                                facts[prior_group].constructor_replies[prior_row].1,
+                                group_facts,
+                                group_facts.constructor_replies[row].1,
+                            ),
                         });
                     }
                 } else {
@@ -10430,10 +10559,28 @@ pub(super) mod tests {
         let error = engine
             .install(verb_program(6, TypeNode::Integer), &bindings, &index)
             .expect_err("a conflicting verb reply refuses the install");
-        assert!(
-            matches!(error, PreparedRuntimeError::ConstructorReplyConflict { owner, .. } if owner == first),
-            "expected SiteConflict, got {error:?}"
-        );
+        match error {
+            PreparedRuntimeError::ConstructorReplyConflict {
+                owner, evidence, ..
+            } => {
+                assert_eq!(owner, first);
+                assert!(matches!(
+                    evidence.existing,
+                    ConstructorReplyObservation::Static {
+                        shape: ReplyTypeObservation::Text,
+                        ..
+                    }
+                ));
+                assert!(matches!(
+                    evidence.incoming,
+                    ConstructorReplyObservation::Static {
+                        shape: ReplyTypeObservation::Integer,
+                        ..
+                    }
+                ));
+            }
+            other => panic!("expected ConstructorReplyConflict, got {other:?}"),
+        }
         assert_eq!(engine.programs.len(), 2);
     }
 
@@ -10596,7 +10743,7 @@ pub(super) mod tests {
         let before = engine.residency();
         assert!(matches!(
             engine.revalidate_and_install(snapshot, compiled, &bindings, &index),
-            Err(PreparedRuntimeError::ConstructorReplyConflict { constructor: rejected, owner: actual })
+            Err(PreparedRuntimeError::ConstructorReplyConflict { constructor: rejected, owner: actual, .. })
                 if rejected == DataConId(77) && actual == owner
         ));
         assert_eq!(engine.residency(), before);
