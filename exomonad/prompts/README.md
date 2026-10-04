@@ -18,8 +18,6 @@ environment override, or fallback copy.
 | `haskell-tool-description.md` | `exomonad-actor::resident_interactive` | Hosted-tool description |
 | `haskell-tool-instructions.md` | `exomonad-actor::resident_interactive` | Hosted-tool usage instructions |
 
-`harness/system-framing.md` is consumed by the retained harness prompt catalog;
-`selfharness/memory-curator.md` is seeded as the memory repository's `AGENTS.md`.
 User tasks, Haskell-authored startup values, and operator input are authored
 content, not stable prompt artifacts.
 

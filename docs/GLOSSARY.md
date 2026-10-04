@@ -53,7 +53,7 @@ task.
 | custody / custody receipt / token | **owned handle** or **lease**, per actual behavior |
 | wave | A local scaffold/unfold/fold cycle; not a global barrier or runtime identity. |
 | ledger / receipt log | **journal** |
-| branch position (model-facing) | show the type: `Either InvocationExit T` |
+| branch position (model-facing) | show the type: `Either ResponseFailure T` |
 | effect row (model-facing) | **available effects** / the effect list itself (row is fine internally) |
 | hylo boundary | say what crosses: the Haskell-expand / Rust-collapse split |
 | one-session collapse / pillar A/B/D / lane coordinates | name the mechanism plainly; project coordinates never leave `plans/` |
@@ -107,7 +107,7 @@ and remain serialized.
    declarations persist beyond this session", "child sessions inherit
    ancestor declarations, never a sibling's".
 3. Let types carry concepts: show the effect list, show
-   `Either InvocationExit T`, say `ContextRef` is runtime-issued and
+   `Either ResponseFailure T`, say `ContextRef` is runtime-issued and
    unforgeable.
 4. Prefer the vocabulary models already know: notebook cells, Haskell,
    `Control.Concurrent.Async`.
