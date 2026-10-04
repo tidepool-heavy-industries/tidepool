@@ -524,8 +524,9 @@ impl TemplateSelector {
 ///   the normalization the repl's `push_braced_stmt` performs today (a `let`
 ///   turn is rewritten to the layout-safe explicit-brace `let { … }` form, so
 ///   a `let` at column 1 can't break the block's layout). A template uses
-///   exactly one of the two — this is two placement modes, not a template
-///   language: no conditionals, loops, or further placeholders.
+///   exactly one of the two. Declaration templates also carry
+///   `{{CELL_IMPORTS}}` for the compiler-parsed prologue imports, before
+///   declaration bodies enter the template.
 ///
 /// Byte-exactness is the contract: for a given verdict, the module the
 /// extract compiles must be byte-identical to the module a caller wraps by
@@ -543,7 +544,7 @@ pub struct TurnTemplate {
 }
 
 /// The decl template source `run_turn`'s `Decl` verdict selects — the parse
-/// wrapper, authored once and spliced via `{{TURN}}`.
+/// wrapper, with a header import slot and a `{{TURN}}` declaration slot.
 ///
 /// The pragma block is deliberately a SUBSET of the canonical eval dialect
 /// ([`super::EVAL_PRAGMAS`]): this pass PARSES but never
