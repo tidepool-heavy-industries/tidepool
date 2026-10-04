@@ -895,11 +895,14 @@ retainedExecutionPublication = withTiming $ withScratch $ \work -> do
       provider = mkModuleName "MetadataQuoter"
       target = mkModuleName "MetadataQuotedTarget"
       helperPath = work </> "MetadataQuoteSupport.hs"
+      providerPath = work </> "MetadataQuoter.hs"
       targetPath = work </> "MetadataQuotedTarget.hs"
       scopePath = work </> "original-execution.cbor"
       session = emptySessionScope {ssRoot=work,ssExactScope=Just scopePath}
-  original <- runPipelineSelected (PreparedProducts Nothing) helperPath [work]
-  writeGenuineOriginalExecutionScope ["MetadataQuoteSupport"] work helperPath [work] scopePath original
+  -- The request target is generated-source evidence, not an original recipe.
+  -- Capture the helper as real source support of the quoter producer.
+  original <- runPipelineSelected (PreparedProducts Nothing) providerPath [work]
+  writeGenuineOriginalExecutionScope ["MetadataQuoteSupport"] work providerPath [work] scopePath original
   exact <- readExactScope scopePath >>= either fail pure
   originalBytes <- BS.readFile scopePath
   withResidentPipelineSelected [work] $ \compile -> do
