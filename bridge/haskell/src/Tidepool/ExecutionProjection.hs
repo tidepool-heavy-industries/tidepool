@@ -60,7 +60,8 @@ import GHC.Core.DataCon
   , isMarkedStrict, isUnboxedTupleDataCon )
 import GHC.Core.TyCo.Rep (Scaled(..), Type(..))
 import GHC.Core.TyCo.FVs (tyCoVarsOfType)
-import GHC.Core.Type (splitFunTys, splitTyConApp_maybe, eqType)
+import GHC.Core.Type (splitFunTys, splitTyConApp_maybe)
+import GHC.Core.TyCo.Compare (eqType)
 import GHC.Core.TyCon qualified as GHC
 import GHC.Data.FastString (fsLit, unpackFS)
 import GHC.Driver.Env.Types (HscEnv, hsc_unit_env)

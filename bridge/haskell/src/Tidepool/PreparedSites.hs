@@ -31,7 +31,8 @@ import GHC.Data.FastString (fsLit)
 import GHC.Types.Unique.Supply (UniqSupply, initUs, mkSplitUniqSupply, takeUniqFromSupply)
 import GHC.Core.Type
   ( mkTyConApp, splitTyConApp_maybe
-  , isLiftedTypeKind, typeKind, eqType )
+  , isLiftedTypeKind, typeKind )
+import GHC.Core.TyCo.Compare (eqType)
 import GHC.Core.TyCon (TyCon, tyConArity, tyConDataCons)
 import GHC.Core.DataCon (DataCon, dataConOrigResTy, dataConName, dataConWorkId, dataConWrapId_maybe)
 import GHC.Driver.Env (HscEnv, hsc_HPT, hsc_home_unit, lookupType)

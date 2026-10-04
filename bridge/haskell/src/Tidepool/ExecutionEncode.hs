@@ -17,7 +17,6 @@ import Data.List (mapAccumL)
 import Data.Sequence (Seq, (|>))
 import Data.Sequence qualified as Seq
 import Data.Text (Text)
-import Data.Word (Word64)
 import Tidepool.ExecutionSchema
 
 encodeWireProgram :: WireProgram -> ByteString
