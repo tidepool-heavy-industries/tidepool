@@ -2401,6 +2401,7 @@ type ContinuationResourceOwner = Arc<dyn std::any::Any + Send + Sync>;
 struct ParkedContinuation {
     name: String,
     id: ContinuationId,
+    provenance: Arc<ProgramProvenance>,
     // The native frame owns this lease until exact retirement or machine loss.
     resource_owners: Vec<ContinuationResourceOwner>,
 }
@@ -2433,7 +2434,6 @@ pub struct ResidentSession<H, O> {
     parked: Vec<ParkedContinuation>,
     continuation_resource_owner: Option<ContinuationResourceOwner>,
     continuation_observer: Option<Arc<dyn Fn(ResidentContinuationEvent) + Send + Sync>>,
-    parked_provenance: HashMap<ContinuationId, Arc<ProgramProvenance>>,
     binding_provenance: HashMap<u64, Arc<ProgramProvenance>>,
     /// Host-owned text identities for materialized bindings whose equality is
     /// meaningful to a caller (currently retained command jobs). The binding
@@ -2509,7 +2509,6 @@ where
             parked: Vec::new(),
             continuation_resource_owner: None,
             continuation_observer: None,
-            parked_provenance: HashMap::new(),
             binding_provenance: HashMap::new(),
             host_text_bindings: HashMap::new(),
             hidden_host_bindings: HashMap::new(),
@@ -3526,7 +3525,7 @@ where
             .parked
             .iter()
             .find(|entry| entry.name == hole.cont_id())?;
-        self.parked_provenance.get(&entry.id).cloned()
+        Some(Arc::clone(&entry.provenance))
     }
 
     /// Whether the session has no parked frames (ready and quiescent).
@@ -3605,8 +3604,6 @@ where
         let counts = self.state.close_realm(realm);
         let survivors = self.state.parked_ids();
         self.parked.retain(|entry| survivors.contains(&entry.id));
-        self.parked_provenance
-            .retain(|id, _| survivors.contains(id));
         counts
     }
 
@@ -3654,7 +3651,7 @@ where
             return Ok(None);
         };
         let id = entry.id;
-        let provenance = self.parked_provenance.get(&id).cloned().unwrap_or_default();
+        let provenance = Arc::clone(&entry.provenance);
         let handle = match self.state.prepared_mut() {
             Some(engine) => engine.live_payload_handle(id)?,
             None => return Ok(None),
@@ -3682,7 +3679,7 @@ where
             return Ok(None);
         };
         let id = entry.id;
-        let provenance = self.parked_provenance.get(&id).cloned().unwrap_or_default();
+        let provenance = Arc::clone(&entry.provenance);
         let handle = match self.state.prepared_mut() {
             Some(engine) => match engine.live_payload_handle_owned_by(id, realm)? {
                 Some(handle) => handle,
@@ -3800,11 +3797,7 @@ where
             .ok_or(ResidentError::InvalidActivationInput { site: 0 })?;
         let site = evidence.site;
         let invalid = || ResidentError::InvalidActivationInput { site };
-        let provenance = self
-            .parked_provenance
-            .get(&entry.id)
-            .cloned()
-            .ok_or_else(invalid)?;
+        let provenance = Arc::clone(&entry.provenance);
         if !provenance.authenticated_inputs.contains_key(&site) {
             return Err(ResidentError::UnauthenticatedActivationInputWitness { site });
         }
@@ -6567,11 +6560,7 @@ where
             ));
         };
         let frame_id = entry.id;
-        let mut provenance = self
-            .parked_provenance
-            .get(&frame_id)
-            .map(|value| (**value).clone())
-            .unwrap_or_default();
+        let mut provenance = (*entry.provenance).clone();
         if let Some(additional) = additional_provenance {
             provenance
                 .merge(additional)
@@ -6801,9 +6790,9 @@ where
                 self.parked.push(ParkedContinuation {
                     name: cont_id.clone(),
                     id,
+                    provenance,
                     resource_owners,
                 });
-                self.parked_provenance.insert(id, provenance);
                 if let Some(observer) = &self.continuation_observer {
                     observer(ResidentContinuationEvent::Parked(cont_id.clone()));
                 }
@@ -6820,9 +6809,9 @@ where
                 self.parked.push(ParkedContinuation {
                     name: cont_id.clone(),
                     id,
+                    provenance,
                     resource_owners,
                 });
-                self.parked_provenance.insert(id, provenance);
                 if let Some(observer) = &self.continuation_observer {
                     observer(ResidentContinuationEvent::Parked(cont_id.clone()));
                 }
@@ -6846,7 +6835,6 @@ where
     fn reconcile_failed_reentry(&mut self, cont_id: &str, frame_id: ContinuationId) {
         let still_parked = self.state.parked_ids().contains(&frame_id);
         if !still_parked {
-            self.parked_provenance.remove(&frame_id);
             self.parked.retain(|entry| entry.name != cont_id);
             if let Some(observer) = &self.continuation_observer {
                 observer(ResidentContinuationEvent::Retired(cont_id.to_owned()));
@@ -7103,9 +7091,6 @@ where
         let Some(hole) = resumed else {
             return;
         };
-        if let Some(entry) = self.parked.iter().find(|entry| entry.name == hole) {
-            self.parked_provenance.remove(&entry.id);
-        }
         self.parked.retain(|entry| entry.name != hole);
         if let Some(observer) = &self.continuation_observer {
             observer(ResidentContinuationEvent::Retired(hole.to_owned()));
