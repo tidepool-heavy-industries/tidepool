@@ -22,6 +22,7 @@ const TYPED_CHILD_REPLY_SETTLEMENT_BUDGET: Duration = Duration::from_secs(90);
 enum CapturedScenario {
     Success,
     FailureAfterReplies,
+    ConcurrentNominalJoin,
 }
 
 struct ChildRounds {
@@ -84,6 +85,7 @@ impl CapturedHostTransport {
                     "input":match self.scenario {
                         CapturedScenario::Success => include_str!("embedded_later_failure_scope_setup.hs"),
                         CapturedScenario::FailureAfterReplies => include_str!("embedded_checkpoint_scope_setup.hs"),
+                        CapturedScenario::ConcurrentNominalJoin => include_str!("embedded_nominal_join_setup.hs"),
                     }
                 }))],
                 2 => {
@@ -94,6 +96,7 @@ impl CapturedHostTransport {
                         "input":match self.scenario {
                             CapturedScenario::Success => include_str!("embedded_captured_unfold_and_await.hs"),
                             CapturedScenario::FailureAfterReplies => include_str!("embedded_captured_unfold_await_then_fail.hs"),
+                            CapturedScenario::ConcurrentNominalJoin => include_str!("embedded_nominal_join_a.hs"),
                         }
                     }))]
                 }
@@ -105,7 +108,7 @@ impl CapturedHostTransport {
                     }))]
                 }
                 3 | 4
-                    if (round == 3 && self.scenario == CapturedScenario::Success)
+                    if (round == 3 && self.scenario != CapturedScenario::FailureAfterReplies)
                         || (round == 4
                             && self.scenario == CapturedScenario::FailureAfterReplies) =>
                 {
@@ -229,7 +232,10 @@ impl CapturedHostTransport {
                     }
                     vec![harness::item::Item(json!({
                         "type":"custom_tool_call", "call_id":format!("captured-child-{path}"),
-                        "name":"haskell", "input":"respond capturedGetter"
+                        "name":"haskell", "input":match self.scenario {
+                            CapturedScenario::ConcurrentNominalJoin => "respond (m2MakeReply sessionInput)",
+                            _ => "respond capturedGetter",
+                        }
                     }))]
                 }
                 2 if self.scenario == CapturedScenario::FailureAfterReplies && ordinal < 2 => {
@@ -391,6 +397,11 @@ async fn embedded_captured_unfold_awaits_two_child_replies_before_parent_call_re
 #[tokio::test]
 async fn embedded_captured_children_and_capture_survive_failure_of_the_unfinished_parent_cell() {
     captured_host_scenario(CapturedScenario::FailureAfterReplies).await;
+}
+
+#[tokio::test]
+async fn embedded_same_root_parked_nominal_a_joins_later_b_publication() {
+    captured_host_scenario(CapturedScenario::ConcurrentNominalJoin).await;
 }
 
 async fn captured_host_scenario(scenario: CapturedScenario) {
@@ -625,6 +636,41 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
     eprintln!(
         "[captured-engine] two child provider branches ready while exact parent claim is pending"
     );
+    if scenario == CapturedScenario::ConcurrentNominalJoin {
+        // B uses the same root actor's public policy while A owns its original
+        // private continuation. Child replies remain behind the existing gate.
+        let published_b = tokio::time::timeout(
+            COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+            campaign
+                .root_installation
+                .policy
+                .dispatch_json_boxed(preflight_invocation(
+                    "nominal-join-root-b",
+                    "nominal-join-root-b",
+                    include_str!("embedded_nominal_join_b.hs").into(),
+                )),
+        )
+        .await
+        .expect("same-root B settles while A is parked")
+        .expect("same-root B publishes its nominal shadow and declaration");
+        assert_committed_haskell_value(&published_b, "True");
+        assert_eq!(
+            published_b["publication"]["status"], "published",
+            "{published_b}"
+        );
+        let original_a = transport.operation(&root_origin, PENDING_CALL);
+        assert!(
+            runtime
+                .store()
+                .claims(&original_a.call)
+                .unwrap()
+                .iter()
+                .any(|claim| claim.operation == original_a
+                    && claim.request == original_a.request
+                    && claim.state == harness::store::ClaimState::Pending),
+            "B must publish before the original root A call settles"
+        );
+    }
     transport.reply_children.send_replace(true);
     // Observe each admitted child's terminal reply before waiting for the parent:
     // a rejected child cell cannot deliver the typed response the parent awaits.
@@ -661,6 +707,29 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
     .await;
     match scenario {
         CapturedScenario::Success => assert_committed_haskell_value(&result.unwrap(), "True"),
+        CapturedScenario::ConcurrentNominalJoin => {
+            let published_a = result.unwrap();
+            assert_committed_haskell_value(&published_a, "True");
+            assert_eq!(
+                published_a["publication"]["status"], "published",
+                "{published_a}"
+            );
+            let joined = tokio::time::timeout(
+                COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+                campaign
+                    .root_installation
+                    .policy
+                    .dispatch_json_boxed(preflight_invocation(
+                        "nominal-join-final-read",
+                        "nominal-join-final-read",
+                        include_str!("embedded_nominal_join_final.hs").into(),
+                    )),
+            )
+            .await
+            .expect("joined root declarations remain readable")
+            .expect("final root reads A and B through the selected public context");
+            assert_committed_haskell_value(&joined, "True");
+        }
         CapturedScenario::FailureAfterReplies => {
             let failure = result.expect_err(
                 "the original unfinished parent cell must fail after its child replies",
@@ -781,7 +850,7 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
             transport.finish_children.send_replace(true);
         }
     }
-    let expected_children = if scenario == CapturedScenario::Success {
+    let expected_children = if scenario != CapturedScenario::FailureAfterReplies {
         2
     } else {
         3
