@@ -177,7 +177,7 @@ Keep detailed design references out of always-loaded instructions.
 | Process mount boundary and durable inbox | `exomonad/node/src/process_boundary.rs`, `exomonad/node/src/inbox.rs` |
 | Git invocation and managed checkout registry | `exomonad/worktree/src/git.rs`, `exomonad/worktree/src/registry.rs` |
 | Discovery, artifact cache, paths and toolchain fingerprints | `tidepool-toolchain`; extractor process/daemon invocation: `tidepool-extract-cmd` |
-| Machine-session checkout, supervision and source sequencing | `tidepool/runtime/src/session/{registry,supervisor,workbench}.rs` |
+| Machine-session checkout, parked continuations and source sequencing | `tidepool/runtime/src/session/{registry,kernel,workbench}.rs` |
 | Durable JSONL and version migrations | `tidepool/repr/src/{jsonl,version_ladder}.rs` |
 | Effect schemas and generated bridge | `tidepool-protocol`; generated consumers in `tidepool-mcp` and `haskell` |
 

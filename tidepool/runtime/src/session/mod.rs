@@ -36,7 +36,6 @@ pub use recovery_hydration::{RecoveryRunAuthority, RecoverySuccessorAuthority};
 pub mod registry;
 pub mod render;
 pub mod resident;
-pub mod supervisor;
 pub mod turn;
 pub mod view;
 pub mod workbench;
@@ -107,8 +106,6 @@ pub trait OutputSink: Clone + Send + 'static {
 pub use facade::{
     ExactExportError, ExactExportSurface, ExactFacadeError, FacadeIdentity, MaterializedFacade,
 };
-
-pub use supervisor::{GraceOutcome, TurnSupervisor};
 
 pub use resident::{
     truncate_preview_at_line, CompiledActivationInput, HostBindingType, HostCarrier, HostPayload,
