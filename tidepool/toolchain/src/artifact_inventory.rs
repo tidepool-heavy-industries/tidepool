@@ -883,14 +883,20 @@ impl ArtifactInventory {
         let mut supplied = BTreeMap::new();
         for entry in expanded {
             let id = entry.descriptor.id;
-            if let Some(previous) = state.payloads.get(&id).or_else(|| supplied.get(&id)) {
-                if previous != &entry {
-                    return Err(admission_failure(
-                        ArtifactInventoryFailure::MetadataConflict { artifact: id },
-                    ));
-                }
-            }
-            supplied.insert(id, entry);
+            let retained =
+                if let Some(previous) = state.payloads.get(&id).or_else(|| supplied.get(&id)) {
+                    if previous != &entry {
+                        return Err(admission_failure(
+                            ArtifactInventoryFailure::MetadataConflict { artifact: id },
+                        ));
+                    }
+                    // Implicit carriers must reuse an already admitted or supplied
+                    // entry rather than replace its immutable shared allocation.
+                    Arc::clone(previous)
+                } else {
+                    entry
+                };
+            supplied.insert(id, retained);
         }
         let roots = supplied.keys().copied().collect::<Vec<_>>();
         // Reused immutable nodes bring their actual graph targets, never the
