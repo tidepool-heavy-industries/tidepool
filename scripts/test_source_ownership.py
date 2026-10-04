@@ -16,6 +16,7 @@ TEST_ONLY_SOURCES = {
     }),
     'tidepool': frozenset({
         'bridge/facade/src/actor_host/embedded_agent_spec_tests.rs',
+        'bridge/facade/src/actor_host/embedded_idle_retirement_tests.rs',
         'bridge/facade/src/actor_host/fixtures/retained_handler_agent_spec.hs',
         'bridge/facade/src/actor_host/fixtures/retained_handler_tools.hs',
         'bridge/facade/src/actor_host/embedded_captured_child_reuse_nominal.hs',

@@ -34,6 +34,15 @@ use tokio::sync::{mpsc, watch};
 use super::cell_context::{EmbeddedContextBinding, ModelResolver};
 use super::embedded_policy::{EmbeddedPolicyInstallation, EmbeddedPolicySnapshot};
 
+/// Observes real transaction boundaries without replacing admission or Store checks.
+#[cfg(test)]
+#[derive(Default)]
+pub(super) struct EmbeddedAdmissionTestHooks {
+    pub(super) before_input_wake:
+        Option<Arc<dyn Fn(i64) -> futures_util::future::BoxFuture<'static, ()> + Send + Sync>>,
+    pub(super) before_idle_probe: Option<Arc<dyn Fn() + Send + Sync>>,
+}
+
 struct StoreAdmission {
     _lease: ActorAdmissionLease,
 }
@@ -49,6 +58,8 @@ pub(super) struct EmbeddedHarnessRuntime {
     output_observer: OnceLock<harness::server::ServerControl>,
     recovery: OnceLock<Arc<super::embedded_recovery::EmbeddedApplicationRecovery>>,
     context_models: Arc<OnceLock<ModelResolver>>,
+    #[cfg(test)]
+    admission_test_hooks: OnceLock<Arc<EmbeddedAdmissionTestHooks>>,
 }
 
 impl EmbeddedHarnessRuntime {
@@ -60,12 +71,24 @@ impl EmbeddedHarnessRuntime {
             output_observer: OnceLock::new(),
             recovery: OnceLock::new(),
             context_models: Arc::new(OnceLock::new()),
+            #[cfg(test)]
+            admission_test_hooks: OnceLock::new(),
             store,
             scheduler: Arc::new(
                 JobScheduler::new(concurrent_jobs)
                     .map_err(|error| EmbeddedError::Binding(error.to_string()))?,
             ),
         })
+    }
+
+    #[cfg(test)]
+    pub(super) fn configure_admission_test_hooks(
+        &self,
+        hooks: Arc<EmbeddedAdmissionTestHooks>,
+    ) -> Result<(), String> {
+        self.admission_test_hooks
+            .set(hooks)
+            .map_err(|_| "embedded admission test hooks were already configured".into())
     }
 
     pub(super) fn configure_context_models(
@@ -176,17 +199,18 @@ impl EmbeddedHarnessRuntime {
         self.prepare_application(actor_identity, &identity)?;
         let (wakes, incoming) = mpsc::unbounded_channel();
         let round_control = Arc::new(EmbeddedRoundControl::default());
-        let host = Arc::new(
-            EmbeddedHostActor::new(
-                identity,
-                actor,
-                installation,
-                self.store.clone(),
-                wakes,
-                round_control.clone(),
-            )?
-            .with_context_models(self.context_models.clone()),
-        );
+        let host = EmbeddedHostActor::new(
+            identity,
+            actor,
+            installation,
+            self.store.clone(),
+            wakes,
+            round_control.clone(),
+        )?
+        .with_context_models(self.context_models.clone());
+        #[cfg(test)]
+        let host = host.with_admission_test_hooks(self.admission_test_hooks.get().cloned());
+        let host = Arc::new(host);
         let conversation = Arc::new(Conversation::attach(
             self.store.clone(),
             host.clone(),
@@ -198,6 +222,8 @@ impl EmbeddedHarnessRuntime {
             &conversation,
             self.store.clone(),
             observation.clone(),
+            #[cfg(test)]
+            self.admission_test_hooks.get().cloned(),
         )?;
         Ok(EmbeddedConversation {
             provider_admission,
@@ -260,17 +286,18 @@ impl EmbeddedHarnessRuntime {
         self.prepare_application(actor_identity, &identity)?;
         let (wakes, incoming) = mpsc::unbounded_channel();
         let round_control = Arc::new(EmbeddedRoundControl::default());
-        let host = Arc::new(
-            EmbeddedHostActor::new(
-                identity,
-                actor,
-                policy,
-                self.store.clone(),
-                wakes,
-                round_control.clone(),
-            )?
-            .with_context_models(self.context_models.clone()),
-        );
+        let host = EmbeddedHostActor::new(
+            identity,
+            actor,
+            policy,
+            self.store.clone(),
+            wakes,
+            round_control.clone(),
+        )?
+        .with_context_models(self.context_models.clone());
+        #[cfg(test)]
+        let host = host.with_admission_test_hooks(self.admission_test_hooks.get().cloned());
+        let host = Arc::new(host);
         // The embedded root also records an empty contract. This installation
         // has no authoritative checkout revision to record for the child.
         let conversation = Arc::new(Conversation::from_checkpoint(
@@ -287,6 +314,8 @@ impl EmbeddedHarnessRuntime {
             &conversation,
             self.store.clone(),
             installation.runtime_observation.clone(),
+            #[cfg(test)]
+            self.admission_test_hooks.get().cloned(),
         )?;
         Ok(EmbeddedConversation {
             provider_admission,
@@ -311,10 +340,19 @@ fn attach_native_provider(
     conversation: &Conversation,
     store: Arc<Store>,
     observation: exomonad_actor::ActorRuntimeObservationHandle,
+    #[cfg(test)] test_hooks: Option<Arc<EmbeddedAdmissionTestHooks>>,
 ) -> Result<exomonad_actor::NativeProviderAdmission, EmbeddedError> {
     let identity = conversation.identity().clone();
     actor
         .attach_native_provider(observation, move || {
+            // The real private claim is held; no admission or Store lock is held.
+            #[cfg(test)]
+            if let Some(probe) = test_hooks
+                .as_ref()
+                .and_then(|hooks| hooks.before_idle_probe.as_ref())
+            {
+                probe();
+            }
             let frontier = store
                 .embedded_round_frontier(&identity)
                 .map_err(|error| error.to_string())?;
@@ -532,9 +570,17 @@ pub(super) struct EmbeddedHostActor {
     round_control: Arc<EmbeddedRoundControl>,
     next_surface: AtomicU64,
     context_models: Arc<OnceLock<ModelResolver>>,
+    #[cfg(test)]
+    admission_test_hooks: Option<Arc<EmbeddedAdmissionTestHooks>>,
 }
 
 impl EmbeddedHostActor {
+    #[cfg(test)]
+    fn with_admission_test_hooks(mut self, hooks: Option<Arc<EmbeddedAdmissionTestHooks>>) -> Self {
+        self.admission_test_hooks = hooks;
+        self
+    }
+
     fn with_context_models(mut self, models: Arc<OnceLock<ModelResolver>>) -> Self {
         self.context_models = models;
         self
@@ -566,6 +612,8 @@ impl EmbeddedHostActor {
             round_control,
             next_surface: AtomicU64::new(1),
             context_models: Arc::new(OnceLock::new()),
+            #[cfg(test)]
+            admission_test_hooks: None,
         })
     }
 }
@@ -640,6 +688,15 @@ impl HostActor for EmbeddedHostActor {
     }
 
     async fn wake(&self, envelope_id: i64) -> Result<(), String> {
+        // Harness has committed input and released its ActorAdmissionLease.
+        #[cfg(test)]
+        if let Some(wake) = self
+            .admission_test_hooks
+            .as_ref()
+            .and_then(|hooks| hooks.before_input_wake.as_ref())
+        {
+            wake(envelope_id).await;
+        }
         self.wakes
             .send(DurableMailboxWake { envelope_id })
             .map_err(|_| "embedded Engine wake receiver closed".into())

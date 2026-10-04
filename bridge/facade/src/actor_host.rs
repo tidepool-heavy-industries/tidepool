@@ -40,6 +40,8 @@ mod embedded_checkpoint_children_tests;
 mod embedded_checkpoint_release_tests;
 #[cfg(test)]
 mod embedded_command_tests;
+#[cfg(test)]
+mod embedded_idle_retirement_tests;
 mod embedded_context;
 mod embedded_harness;
 #[cfg(test)]

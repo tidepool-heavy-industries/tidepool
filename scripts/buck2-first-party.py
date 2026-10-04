@@ -888,6 +888,10 @@ def facade_test_cases(binary):
             "host_cancellation_stops_a_real_running_haskell_cell",
             "production_host_marks_embedded_root_ready_and_retires_invalid_auth_failure",
         )], host_env, host_resources, True, False, 600),
+        ("facade_idle_retirement_tests", ["actor_host::embedded_idle_retirement_tests::" + name for name in (
+            "committed_input_before_wake_refuses_idle_retirement_and_runs_after_release",
+            "idle_claim_before_input_refuses_store_mutation_and_confirms_cleanup",
+        )], host_env, host_resources, True, False, 600),
         ("facade_host_raw_test", [prefix +
             "production_host_retains_http_haskell_commands_and_reconnects_without_replay"],
          host_env, host_resources, True, False, 600),

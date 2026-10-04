@@ -1386,6 +1386,7 @@ rust_filegroup(
         "src/actor_host/embedded_command_tests.rs": "bridge/facade/src/actor_host/embedded_command_tests.rs",
         "src/actor_host/embedded_context.rs": "bridge/facade/src/actor_host/embedded_context.rs",
         "src/actor_host/embedded_harness.rs": "bridge/facade/src/actor_host/embedded_harness.rs",
+        "src/actor_host/embedded_idle_retirement_tests.rs": "bridge/facade/src/actor_host/embedded_idle_retirement_tests.rs",
         "src/actor_host/embedded_later_failure_capture_and_unfold.hs": "bridge/facade/src/actor_host/embedded_later_failure_capture_and_unfold.hs",
         "src/actor_host/embedded_later_failure_parent_error.hs": "bridge/facade/src/actor_host/embedded_later_failure_parent_error.hs",
         "src/actor_host/embedded_later_failure_scope_setup.hs": "bridge/facade/src/actor_host/embedded_later_failure_scope_setup.hs",
@@ -1709,6 +1710,38 @@ tidepool_rust_test_cases(
     jobs = 1,
     timeout = 600,
     test_rule_timeout_ms = 1860000,
+    env = {
+        "TIDEPOOL_TEST_BASH": "$(exe toolchains//:bash)",
+        "TIDEPOOL_TEST_SLEEP": "$(exe toolchains//:sleep)",
+        "EXOMONAD_EMBEDDED_ASSET_ROOT": "$(location //web:dist)/web",
+        "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_deployment)",
+        "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
+        "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
+        "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
+        "TIDEPOOL_KEEP_TEST_LOGS": "1",
+    },
+    resources = [
+        "toolchains//:test_tools_closure",
+        "//web:dist",
+        "//bridge/haskell:facade_embedded_sources",
+        "//build/package:compiler_deployment",
+    ],
+    haskell_worker = True,
+    visibility = ["PUBLIC"],
+)
+
+tidepool_rust_test_cases(
+    name = "facade_idle_retirement_tests",
+    binary = ":tidepool_unit_tests",
+    exact_tests = [
+        "actor_host::embedded_idle_retirement_tests::committed_input_before_wake_refuses_idle_retirement_and_runs_after_release",
+        "actor_host::embedded_idle_retirement_tests::idle_claim_before_input_refuses_store_mutation_and_confirms_cleanup",
+    ],
+    expected_count = 2,
+    ignored = False,
+    jobs = 1,
+    timeout = 600,
+    test_rule_timeout_ms = 1260000,
     env = {
         "TIDEPOOL_TEST_BASH": "$(exe toolchains//:bash)",
         "TIDEPOOL_TEST_SLEEP": "$(exe toolchains//:sleep)",
