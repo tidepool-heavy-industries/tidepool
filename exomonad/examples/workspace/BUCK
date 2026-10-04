@@ -1,3 +1,4 @@
+load(":authored_sources.bzl", "declare_authored_haskell_sources")
 load("@prelude//:rules.bzl", "export_file", "filegroup")
 
 export_file(
@@ -44,15 +45,8 @@ filegroup(
 
 filegroup(
     name = "qualification_inputs",
-    srcs = {"exomonad/examples/workspace/" + source: source for source in glob(["BUCK", "flake.nix", ".exomonad/**/*.hs", ".exomonad/**/*.md", ".exomonad/**/*.toml", ".exomonad/**/*.json", ".exomonad/**/*.nix"])},
+    srcs = {"exomonad/examples/workspace/" + source: source for source in glob(["BUCK", "*.bzl", "flake.nix", ".exomonad/**/*.hs", ".exomonad/**/*.md", ".exomonad/**/*.toml", ".exomonad/**/*.json", ".exomonad/**/*.nix"])},
     visibility = ["PUBLIC"],
 )
 
-# Package-owned projections for Cabal-declared authored modules.
-for source in glob([".exomonad/**/*.hs"]):
-    relative = source[len(".exomonad/"):]
-    export_file(
-        name = "authored_haskell_" + relative.replace("/", "_").replace(".", "_").replace("-", "_"),
-        src = source,
-        visibility = ["PUBLIC"],
-    )
+declare_authored_haskell_sources(glob([".exomonad/**/*.hs"]))
