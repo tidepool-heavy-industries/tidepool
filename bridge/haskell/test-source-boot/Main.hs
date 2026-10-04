@@ -812,7 +812,7 @@ canonicalSourceObligations = withTiming $ withScratch $ \work -> do
           (dependencySources (pprDependencies ordinary))) $
       fail "ordinary fresh source refresh inherited an exact retained obligation"
     BS.writeFile dependency originalBytes
-    _ <- check compile
+    void (check compile)
   putStrLn ("canonical source obligations: actual GHC usage=" ++ show required
     ++ ", ordinary fresh refresh accepted, source import shape preserved, " ++ if required
       then "held dependency drift refused and recovered"
