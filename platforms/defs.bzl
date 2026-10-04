@@ -5,9 +5,10 @@ def _tidepool_execution_platforms(ctx):
     properties = {"OSFamily": "linux"}
     if remote:
         properties["toolchain"] = ctx.attrs.toolchain
+    configuration = ctx.attrs.host_platform[PlatformInfo].configuration
     platform = ExecutionPlatformInfo(
         label = ctx.label.raw_target(),
-        configuration = ctx.attrs.host_platform[PlatformInfo].configuration,
+        configuration = configuration,
         executor_config = CommandExecutorConfig(
             local_enabled = not remote,
             remote_enabled = remote,
@@ -16,7 +17,12 @@ def _tidepool_execution_platforms(ctx):
             remote_output_paths = "output_paths",
         ),
     )
-    return [DefaultInfo(), ExecutionPlatformRegistrationInfo(platforms = [platform])]
+    return [
+        DefaultInfo(),
+        platform,
+        PlatformInfo(label = str(ctx.label.raw_target()), configuration = configuration),
+        ExecutionPlatformRegistrationInfo(platforms = [platform]),
+    ]
 
 tidepool_execution_platforms = rule(
     impl = _tidepool_execution_platforms,
