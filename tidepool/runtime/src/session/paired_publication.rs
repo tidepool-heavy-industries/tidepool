@@ -358,25 +358,22 @@ pub(super) fn recovery_instances(
             .classes
             .iter()
             .map(|instance| recovery::RecoveryInstanceEvidence {
-                dfun: super::authored_identity(&instance.dfun).expect("compiler identity"),
-                class: super::authored_identity(&instance.class).expect("compiler identity"),
+                dfun: super::authored_identity(&instance.dfun),
+                class: super::authored_identity(&instance.class),
                 selected: true,
                 selected_axioms: instance
                     .selected_axioms
                     .iter()
-                    .map(|axiom| super::authored_identity(axiom).expect("compiler identity"))
+                    .map(super::authored_identity)
                     .collect(),
             })
             .collect(),
         selected_family_axioms: instances
             .families
             .iter()
-            .map(|axiom| super::authored_identity(axiom).expect("compiler identity"))
+            .map(super::authored_identity)
             .collect(),
-        family_consistency_closure: closure
-            .iter()
-            .map(|axiom| super::authored_identity(axiom).expect("compiler identity"))
-            .collect(),
+        family_consistency_closure: closure.iter().map(super::authored_identity).collect(),
     }
 }
 
@@ -1083,12 +1080,8 @@ impl AcceptedDeclarationPublication {
             let exports = receipt
                 .exports()
                 .iter()
-                .map(|export| {
-                    super::certified_recovery_export(export).ok_or_else(|| {
-                        invalid_at(&error_path, "unsupported joined export identity")
-                    })
-                })
-                .collect::<Result<Vec<_>, _>>()?;
+                .map(super::certified_recovery_export)
+                .collect();
             let mut implementation_refs = base
                 .intent
                 .writes

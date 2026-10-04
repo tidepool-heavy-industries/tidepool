@@ -708,7 +708,7 @@ fn certified_native_dependencies(
 
 fn authored_identity(
     identity: &tidepool_toolchain::declaration_join::ExportIdentity,
-) -> Option<recovery::RecoverySymbolIdentity> {
+) -> recovery::RecoverySymbolIdentity {
     use tidepool_toolchain::declaration_join::ExportNamespace;
 
     let namespace = match identity.namespace {
@@ -717,7 +717,7 @@ fn authored_identity(
         ExportNamespace::Constructor => "constructor",
         ExportNamespace::Field => "field",
     };
-    Some(recovery::RecoverySymbolIdentity {
+    recovery::RecoverySymbolIdentity {
         unit: identity.unit.clone(),
         module: identity.module.clone(),
         namespace: namespace.into(),
@@ -731,27 +731,23 @@ fn authored_identity(
                 record_parent: None,
             })
         }),
-    })
+    }
 }
 
 fn certified_recovery_export(
     export: &tidepool_toolchain::declaration_join::DeclarationExport,
-) -> Option<recovery::RecoveryExport> {
+) -> recovery::RecoveryExport {
     use tidepool_toolchain::declaration_join::DeclarationKind;
 
-    Some(recovery::RecoveryExport {
-        identity: authored_identity(&export.head)?,
+    recovery::RecoveryExport {
+        identity: authored_identity(&export.head),
         kind: match export.kind {
             DeclarationKind::Value => recovery::RecoveryExportKind::Value,
             DeclarationKind::Type => recovery::RecoveryExportKind::Type,
             DeclarationKind::Class => recovery::RecoveryExportKind::Class,
         },
-        children: export
-            .children
-            .iter()
-            .map(authored_identity)
-            .collect::<Option<_>>()?,
-    })
+        children: export.children.iter().map(authored_identity).collect(),
+    }
 }
 
 /// A resident session's declaration library. Owns the ordered decl log, the
@@ -2168,11 +2164,8 @@ impl SessionLib {
         let exports = certified
             .introduced_exports()
             .iter()
-            .map(|export| {
-                certified_recovery_export(export)
-                    .ok_or_else(|| invalid("unsupported authored export identity"))
-            })
-            .collect::<Result<Vec<_>, SessionError>>()?;
+            .map(certified_recovery_export)
+            .collect();
         let mut artifacts = refs
             .into_iter()
             .map(recovery::RecoveryArtifactClosure::Home)
@@ -2235,8 +2228,7 @@ impl SessionLib {
                 )?
                 .iter()
                 .map(authored_identity)
-                .collect::<Option<Vec<_>>>()
-                .ok_or_else(|| invalid("unsupported exact retraction identity"))?,
+                .collect(),
                 workbench_imports: staged.turn.workbench_imports.specs().to_vec(),
                 instances: paired_publication::recovery_instances(
                     certified.instances(),
