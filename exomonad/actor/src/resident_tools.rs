@@ -817,6 +817,14 @@ impl From<ToolInvocationContext> for WorkbenchCallKey {
 }
 
 impl WorkbenchCallKey {
+    pub(crate) fn original(operation: &exomonad_tool::OriginalOperation) -> Self {
+        Self(ToolInvocationContext {
+            origin: exomonad_tool::ToolInvocationOrigin::Model(operation.clone()),
+            call_id: operation.call_id.clone(),
+            namespace: None,
+        })
+    }
+
     pub(crate) fn invocation(&self) -> &ToolInvocationContext {
         &self.0
     }
@@ -1583,6 +1591,13 @@ mod tests {
             ..first.0.clone()
         });
         let boundary = WorkbenchForkBoundary::Hosted(original.clone());
+        let owner = WorkbenchCallKey::original(&original);
+        assert!(owner.is_original_invocation());
+        assert!(owner.matches_boundary(&boundary));
+        assert!(!first.is_original_invocation());
+        assert!(!second.is_original_invocation());
+        assert_ne!(owner, first);
+        assert_ne!(owner, second);
         assert!(first.matches_boundary(&boundary));
         assert!(second.matches_boundary(&boundary));
         let actor = crate::ActorRef::first(crate::ActorId(7));

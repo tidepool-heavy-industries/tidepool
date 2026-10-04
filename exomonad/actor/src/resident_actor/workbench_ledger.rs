@@ -274,19 +274,14 @@ impl WorkbenchExecutions {
         boundary: &tidepool_runtime::session::WorkbenchForkBoundary,
         has_pending_work: impl FnOnce() -> bool,
     ) -> Result<Option<BoundaryAbortOwner>, KernelBehaviorError> {
-        let records = journal.lock();
-        let mut matches = records.0.keys().filter(|key| {
-            matches!(key, WorkbenchReplayKey::Hosted(invocation)
-                if invocation.is_original_invocation() && invocation.matches_boundary(boundary))
-        });
-        let key = matches.next().cloned();
-        if matches.next().is_some() {
-            return Err(KernelBehaviorError {
-                detail: "output abort has ambiguous admitted invocation owners".into(),
-            });
-        }
-        drop(matches);
-        drop(records);
+        let key = boundary
+            .hosted()
+            .map(|operation| {
+                WorkbenchReplayKey::Hosted(crate::resident_tools::WorkbenchCallKey::original(
+                    operation,
+                ))
+            })
+            .filter(|key| journal.lock().0.contains_key(key));
         if let Some(key) = key {
             return Ok(Some(BoundaryAbortOwner {
                 journal: journal.clone(),
