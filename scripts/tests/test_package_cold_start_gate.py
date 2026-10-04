@@ -17,6 +17,23 @@ SPEC.loader.exec_module(gate)
 
 
 class ColdStartObservationTests(unittest.TestCase):
+    def test_only_missing_session_pointer_is_absent(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            self.assertIsNone(gate.read_session_run_id(workspace, 'session'))
+            pointer = workspace / '.exomonad/sessions/session/run-id'
+            pointer.parent.mkdir(parents=True)
+            pointer.write_text('valid-run-123\n')
+            self.assertEqual(gate.read_session_run_id(workspace, 'session'), 'valid-run-123')
+            for content in (b'', b'\xff', b'../unknown'):
+                pointer.write_bytes(content)
+                with self.assertRaises(gate.GateError):
+                    gate.read_session_run_id(workspace, 'session')
+            for error in (PermissionError('denied'), OSError('I/O failure')):
+                with mock.patch.object(Path, 'read_text', side_effect=error):
+                    with self.assertRaisesRegex(gate.GateError, 'unreadable'):
+                        gate.read_session_run_id(workspace, 'session')
+
     def test_sample_completion_is_bound_to_stopped_trace_bytes(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

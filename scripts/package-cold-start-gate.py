@@ -109,10 +109,12 @@ def read_session_run_id(workspace: Path, session: str) -> str | None:
     pointer = workspace / ".exomonad" / "sessions" / session / "run-id"
     try:
         run_id = pointer.read_text().strip()
-    except (OSError, UnicodeDecodeError):
+    except FileNotFoundError:
         return None
+    except (OSError, UnicodeDecodeError) as error:
+        raise GateError(f"session run-id pointer is unreadable: {pointer}: {error}") from error
     if not run_id:
-        return None
+        raise GateError("session run-id pointer contains an empty run identity")
     if not all(char.isascii() and (char.isalnum() or char == "-") for char in run_id):
         raise GateError("session run-id pointer contains an invalid run identity")
     return run_id

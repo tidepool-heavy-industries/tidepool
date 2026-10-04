@@ -93,20 +93,36 @@ class LaunchAcceptanceTests(unittest.TestCase):
             self.assertEqual(control.call_args.args[:3], ('systemctl', '--user', 'daemon-reload'))
 
     def test_invalid_partial_identity_does_not_skip_known_run_cleanup(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            output = Path(temporary)
-            env = {'XDG_RUNTIME_DIR': str(output / 'runtime')}
-            operator = Mock()
-            operator.run.return_value = subprocess.CompletedProcess([], 0, '', '')
-            with patch.object(acceptance.gate, 'read_session_run_id', side_effect=acceptance.gate.GateError('invalid identity')), \
-                 patch.object(acceptance, 'run') as control, \
-                 patch.object(acceptance, 'service', return_value='MainPID=0\n'):
-                with self.assertRaisesRegex(acceptance.gate.GateError, 'identity is unconfirmed'):
-                    acceptance.cleanup_runs(operator, [('known-run', 'known-session')], output, env,
-                                            [(output / 'unknown-workspace', 'unknown-session')])
-            self.assertEqual(operator.run.call_args.args[0][:3], ['stop', '--run-id', 'known-run'])
-            self.assertEqual(control.call_args.args[:3], ('systemctl', '--user', 'stop'))
-            self.assertFalse(json.loads((output / 'cleanup.json').read_text())['confirmed'])
+        read_text = Path.read_text
+        for kind, content in (('utf8', b'\xff'), ('empty', b''), ('malformed', b'../unknown'),
+                              ('permission', b'unknown-run'), ('io', None)):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temporary:
+                output = Path(temporary)
+                workspace = output / 'unknown-workspace'
+                pointer = workspace / '.exomonad/sessions/unknown-session/run-id'
+                pointer.parent.mkdir(parents=True)
+                if content is None:
+                    pointer.mkdir()
+                else:
+                    pointer.write_bytes(content)
+                def read_pointer(path, *args, **kwargs):
+                    if kind == 'permission' and path == pointer:
+                        raise PermissionError('pointer access refused')
+                    return read_text(path, *args, **kwargs)
+                env = {'XDG_RUNTIME_DIR': str(output / 'runtime')}
+                operator = Mock()
+                operator.run.return_value = subprocess.CompletedProcess([], 0, '', '')
+                with patch.object(Path, 'read_text', read_pointer), \
+                     patch.object(acceptance, 'run') as control, \
+                     patch.object(acceptance, 'service', return_value='MainPID=0\n'):
+                    with self.assertRaisesRegex(acceptance.gate.GateError, 'identity is unconfirmed'):
+                        acceptance.cleanup_runs(operator, [('known-run', 'known-session')], output, env,
+                                                [(workspace, 'unknown-session')])
+                self.assertEqual(operator.run.call_args.args[0][:3], ['stop', '--run-id', 'known-run'])
+                self.assertEqual(control.call_args.args[:3], ('systemctl', '--user', 'stop'))
+                receipt = json.loads((output / 'cleanup.json').read_text())
+                self.assertFalse(receipt['confirmed'])
+                self.assertEqual(len(receipt['failures']), 1)
 
     def test_cleanup_failure_is_retained_and_cannot_pass(self):
         with tempfile.TemporaryDirectory() as temporary:
