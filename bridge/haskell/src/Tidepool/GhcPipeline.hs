@@ -220,7 +220,7 @@ import Tidepool.ExecutionSource
   , ExecutionSourceRef(..), executionSourceClosure, executionIdentityKey
   , executionSourceGraphsFit, executionNodeOriginalResolutions )
 import Tidepool.PackageWitness
-  ( PackageImportRoot(..), PackageImportEvidence(..), CompilerProvidedImport(..), emptyPackageImports, packageImportRoot, readPackageImports
+  ( PackageImportEvidence(..), CompilerProvidedImport(..), emptyPackageImports, packageImportRoot, readPackageImports
   , validatePackageImportRoot )
 import Tidepool.ModuleCandidates
   ( ModuleCandidate(..), CandidateImport(..), CandidateQualifier(..)
@@ -1589,12 +1589,13 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
       current <- getSession
       fresh <- liftIO (freshExactState current)
       setSession fresh
+    originalMetaHook <- runMetaHook . hsc_hooks <$> getSession
     -- Observe the actual splice evaluator, including audited quasiquoters,
     -- without adding an authored effect that would change cacheability.
     -- withCycleHooks restores the delegate on every exit from this request.
     when timing $ do
       current <- getSession
-      let delegate = fromMaybe defaultRunMeta (runMetaHook (hsc_hooks current))
+      let delegate = fromMaybe defaultRunMeta originalMetaHook
           observe request expression = do
             owner <- tcg_mod <$> getGblEnv
             let unit = unitString (moduleUnit owner)
@@ -1700,7 +1701,13 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
     setupT1 <- monotonicTime
     endResourceTiming setupResources "compile" "ghc_setup"
     liftIO (emitPhase timing "ghc_setup" (elapsedMs sessionT0 setupT1))
-    originalPlan <- pvPlan variant compilerViewDirectory timing modGraphRaw selectedExact
+    observedPlan <- pvPlan variant compilerViewDirectory timing modGraphRaw selectedExact
+    -- Returned environments outlive this request's observer, just as the
+    -- resident session does. Keep all plan-owned hooks, restoring only ours.
+    let originalPlan = observedPlan
+          { cpFinalEnv = \env ->
+              let final = cpFinalEnv observedPlan env
+              in final {hsc_hooks=(hsc_hooks final) {runMetaHook=originalMetaHook}} }
     certifiedEnv <- getSession
     let acceptedNames = Map.keysSet acceptedCandidates
         loadRequired = any ((== CandidateLoadForExecution) . admittedCandidateLoading)
