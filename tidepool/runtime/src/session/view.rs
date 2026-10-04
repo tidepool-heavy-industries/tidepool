@@ -302,6 +302,15 @@ impl SessionCompileView {
         Ok(self)
     }
 
+    /// Reconstruct the complete request-local compiler authority atomically.
+    pub fn with_request_annotations(
+        self,
+        annotations: &super::RequestCompileAnnotations,
+    ) -> Result<Self, crate::CompileError> {
+        self.with_request_type_evidence(annotations.evidence())?
+            .with_request_helper_recipe(annotations.helper_recipe())
+    }
+
     /// Bind helpers only to the authenticated request context in this view.
     pub fn with_request_helper_recipe(
         mut self,

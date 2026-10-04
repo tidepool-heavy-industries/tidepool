@@ -74,7 +74,7 @@ pub use planned_cell::{
 };
 pub use prepared::{
     CancelHandle, PreparedEngine, PreparedFailureKind, PreparedFailureStage, PreparedRuntimeError,
-    PreparedSettlement, RealmId, SiteTypeEvidence,
+    PreparedSettlement, RealmId, RequestCompileAnnotations, SiteTypeEvidence,
 };
 pub use publication::{PublicationCancellation, PublicationDecision, PublicationPhase};
 // Re-exported for callers that pass a value across two resident sessions'

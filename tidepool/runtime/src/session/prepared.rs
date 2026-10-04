@@ -743,6 +743,45 @@ pub struct SiteTypeEvidence {
     request_context: Option<Arc<tidepool_toolchain::declaration_join::ExactCompileContext>>,
 }
 
+/// Authenticated request types and the helper mode for one compiler admission.
+/// Keeping these together preserves authored reply authority when an admission
+/// reconstructs its compile view from a retained request snapshot.
+#[derive(Clone, Debug)]
+pub struct RequestCompileAnnotations {
+    evidence: Arc<SiteTypeEvidence>,
+    helper_recipe: tidepool_toolchain::declaration_join::RequestHelperRecipe,
+}
+
+impl RequestCompileAnnotations {
+    pub fn new(
+        evidence: Arc<SiteTypeEvidence>,
+        helper_recipe: tidepool_toolchain::declaration_join::RequestHelperRecipe,
+    ) -> Result<Self, crate::CompileError> {
+        if evidence.request_type_signatures().is_none() {
+            return Err(crate::CompileError::ExtractFailed(
+                "request annotations require original compiler authentication".into(),
+            ));
+        }
+        Ok(Self {
+            evidence,
+            helper_recipe,
+        })
+    }
+
+    pub fn evidence(&self) -> &Arc<SiteTypeEvidence> {
+        &self.evidence
+    }
+
+    pub fn helper_recipe(&self) -> tidepool_toolchain::declaration_join::RequestHelperRecipe {
+        self.helper_recipe
+    }
+
+    pub(super) fn frame_authorization(&self, frame: &mut impl FnMut(&[u8])) {
+        frame(&self.evidence.commitment());
+        frame(self.helper_recipe.as_str().as_bytes());
+    }
+}
+
 impl SiteTypeEvidence {
     pub fn request_type_signatures(
         &self,
@@ -9495,6 +9534,12 @@ pub(super) mod tests {
         let commitment = evidence.commitment();
         assert_eq!(commitment, evidence.clone().commitment());
         assert!(evidence.request_type_signatures().is_none());
+        for helper in [
+            tidepool_toolchain::declaration_join::RequestHelperRecipe::None,
+            tidepool_toolchain::declaration_join::RequestHelperRecipe::ActorReply,
+        ] {
+            assert!(RequestCompileAnnotations::new(Arc::new(evidence.clone()), helper).is_err());
+        }
         assert!(
             evidence.compile_context(None).is_err(),
             "public type graphs cannot authenticate native request signatures"

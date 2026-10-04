@@ -437,14 +437,6 @@ impl ActorCompileView {
         self.session.exact_compile_context()
     }
 
-    pub(crate) fn with_request_helper_recipe(
-        mut self,
-        recipe: tidepool_toolchain::declaration_join::RequestHelperRecipe,
-    ) -> Result<Self, tidepool_runtime::CompileError> {
-        self.session = self.session.with_request_helper_recipe(recipe)?;
-        Ok(self)
-    }
-
     /// Exact external, declaration, and live-value imports for a turn template.
     #[must_use]
     pub fn turn_imports(&self) -> String {

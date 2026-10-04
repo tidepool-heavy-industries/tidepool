@@ -86,6 +86,26 @@ pub(crate) fn execution_control() -> Option<Arc<crate::WorkbenchExecutionControl
 }
 
 impl ActorWorkbenchSource {
+    fn request_annotations(
+        &self,
+    ) -> Result<Option<tidepool_runtime::session::RequestCompileAnnotations>, CompileError> {
+        match &self.request_evidence {
+            Some(evidence) => tidepool_runtime::session::RequestCompileAnnotations::new(
+                evidence.clone(),
+                self.request_helper_recipe,
+            )
+            .map(Some),
+            None if self.request_helper_recipe
+                == tidepool_toolchain::declaration_join::RequestHelperRecipe::None =>
+            {
+                Ok(None)
+            }
+            None => Err(CompileError::ExtractFailed(
+                "actor reply helpers require authenticated request evidence".into(),
+            )),
+        }
+    }
+
     fn request_preamble(&self, request: crate::RequestId, effects_alias: &str) -> String {
         let preamble = &self.preamble;
         let signatures = self
@@ -4655,7 +4675,9 @@ where
                     include: prepared.include,
                     evidence,
                     declaration_imports: snapshot.view.workbench_imports(),
-                    request_evidence: source.request_evidence.clone(),
+                    request_annotations: source
+                        .request_annotations()
+                        .map_err(ResidentActorWorkbenchError::Compile)?,
                 });
                 Ok(specification)
             })
@@ -4697,7 +4719,7 @@ where
                         reservation_specification.cell.specification_digest(),
                         reservation_specification._authority.authority_digest(),
                         reservation_specification.include.clone(),
-                        reservation_specification.request_evidence.clone(),
+                        reservation_specification.request_annotations.clone(),
                     ),
                     (None, None) => session.admit_native_setup_cell_in(
                         context.placement.lexical_scope,
@@ -4706,7 +4728,7 @@ where
                         reservation_specification.cell.specification_digest(),
                         reservation_specification._authority.authority_digest(),
                         reservation_specification.include.clone(),
-                        reservation_specification.request_evidence.clone(),
+                        reservation_specification.request_annotations.clone(),
                     ),
                     (Some(_), Some(_)) => {
                         return Err(ResidentActorWorkbenchError::ActorProtocol(
@@ -9718,7 +9740,7 @@ struct WorkbenchCompilationSpec {
     include: Vec<PathBuf>,
     evidence: String,
     declaration_imports: SourceImports,
-    request_evidence: Option<Arc<tidepool_runtime::session::SiteTypeEvidence>>,
+    request_annotations: Option<tidepool_runtime::session::RequestCompileAnnotations>,
 }
 
 struct PreparedCellStep {
@@ -9795,17 +9817,18 @@ where
             .map_err(|error| {
                 ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
             })?;
-        let session_view = match &source.request_evidence {
-            Some(evidence) => session_view
-                .with_request_type_evidence(evidence)
+        let session_view = match source
+            .request_annotations()
+            .map_err(ResidentActorWorkbenchError::Compile)?
+        {
+            Some(annotations) => session_view
+                .with_request_annotations(&annotations)
                 .map_err(ResidentActorWorkbenchError::Compile)?,
             None => session_view,
         };
         context
             .compile_view(session_view)?
             .with_workbench_imports(&source.workbench_imports)
-            .with_request_helper_recipe(source.request_helper_recipe)
-            .map_err(ResidentActorWorkbenchError::Compile)?
     } else {
         let session_view = session
             .compile_view_in(context.placement.lexical_scope)
@@ -9815,17 +9838,18 @@ where
                 )),
             ))?
             .with_scoped_injection();
-        let session_view = match &source.request_evidence {
-            Some(evidence) => session_view
-                .with_request_type_evidence(evidence)
+        let session_view = match source
+            .request_annotations()
+            .map_err(ResidentActorWorkbenchError::Compile)?
+        {
+            Some(annotations) => session_view
+                .with_request_annotations(&annotations)
                 .map_err(ResidentActorWorkbenchError::Compile)?,
             None => session_view,
         };
         context
             .compile_view(session_view)?
             .with_workbench_imports(&source.workbench_imports)
-            .with_request_helper_recipe(source.request_helper_recipe)
-            .map_err(ResidentActorWorkbenchError::Compile)?
     };
     Ok((
         source,
@@ -9993,17 +10017,18 @@ where
                 tidepool_runtime::session::SessionError::DeadScope(context.placement.lexical_scope),
             ))
         })?;
-    let session_view = match &source.request_evidence {
-        Some(evidence) => session_view
-            .with_request_type_evidence(evidence)
+    let session_view = match source
+        .request_annotations()
+        .map_err(ResidentActorWorkbenchError::Compile)?
+    {
+        Some(annotations) => session_view
+            .with_request_annotations(&annotations)
             .map_err(ResidentActorWorkbenchError::Compile)?,
         None => session_view,
     };
     Ok(context
         .compile_view(session_view)?
-        .with_workbench_imports(&source.workbench_imports)
-        .with_request_helper_recipe(source.request_helper_recipe)
-        .map_err(ResidentActorWorkbenchError::Compile)?)
+        .with_workbench_imports(&source.workbench_imports))
 }
 
 /// Compile one fresh, payload-independent value interface. Its binder is
@@ -16544,6 +16569,67 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             }
         }
         (session, context, source, inputs, root)
+    }
+
+    #[test]
+    fn request_annotations_survive_planned_admission() {
+        use tidepool_runtime::session::RequestCompileAnnotations;
+        use tidepool_toolchain::declaration_join::RequestHelperRecipe;
+        let (mut session, context, source, inputs, _root) = activation_input_fixture(|_| {});
+        let evidence = inputs[0].type_evidence().clone();
+        let signatures = evidence.request_type_signatures().unwrap().clone();
+        let execution = Arc::new(
+            session
+                .begin_ephemeral_private_execution(context.placement.lexical_scope)
+                .unwrap(),
+        );
+        let view = session.compile_view_for_execution(&execution).unwrap();
+        let prepared = source
+            .prepare_effectful(
+                &context.compile_view(view.clone()).unwrap(),
+                &context.haskell_effects_alias,
+            )
+            .unwrap();
+        let template = resident_cell_check_template(
+            &prepared.preamble,
+            &context.haskell_effects_alias,
+            &prepared.imports,
+        );
+        let specification = Arc::new(tidepool_toolchain::checked_cell::CheckedCellSpecification {
+            admission_digest: [0; 32],
+            cell_source: "pure ()".into(),
+            template_source: template,
+            turn_templates: Vec::new(),
+            injected_modules: prepared.injected,
+            reserved_declaration_modules: Vec::new(),
+        });
+        let plan = tidepool_toolchain::artifacts::parse_cell_plan(
+            specification.clone(),
+            &prepared.include,
+        )
+        .unwrap();
+        for helper in [RequestHelperRecipe::None, RequestHelperRecipe::ActorReply] {
+            let annotations = RequestCompileAnnotations::new(evidence.clone(), helper).unwrap();
+            assert!(Arc::ptr_eq(annotations.evidence(), &evidence));
+            let admission = session
+                .admit_planned_cell_for_execution(
+                    execution.clone(),
+                    plan.clone(),
+                    specification.clone(),
+                    specification.specification_digest(),
+                    [7; 32],
+                    prepared.include.clone(),
+                    Some(annotations),
+                )
+                .unwrap();
+            let admitted = admission.view().exact_compile_context().unwrap();
+            let annotations = admitted.request_annotations().unwrap();
+            assert!(Arc::ptr_eq(annotations.signatures(), &signatures));
+            assert_eq!(annotations.helper_recipe(), helper);
+        }
+        let mut missing = source;
+        missing.request_helper_recipe = RequestHelperRecipe::ActorReply;
+        assert!(missing.request_annotations().is_err());
     }
 
     #[tokio::test]
