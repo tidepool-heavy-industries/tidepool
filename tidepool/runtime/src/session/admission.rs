@@ -2138,7 +2138,28 @@ impl PersistentSession {
         specification_digest: [u8; 32],
         authority_digest: [u8; 32],
         include_paths: Vec<PathBuf>,
+        compile_inputs: Option<super::prepared::RuntimeCompileInputs>,
     ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
+        let annotations = super::RequestCompileAnnotations::new(
+            request_evidence,
+            tidepool_toolchain::declaration_join::RequestHelperRecipe::None,
+        )
+        .map_err(SessionError::Compile)?;
+        let projections = match compile_inputs {
+            Some(inputs) => {
+                if inputs
+                    .annotations()
+                    .is_some_and(|provided| provided != &annotations)
+                {
+                    return Err(SessionError::StaleStagedDeclaration);
+                }
+                inputs.projections().to_vec()
+            }
+            None => Vec::new(),
+        };
+        let compile_inputs =
+            super::prepared::RuntimeCompileInputs::new(Some(annotations), projections)
+                .map_err(SessionError::Compile)?;
         self.admit_cell_with_plan(
             scope,
             0,
@@ -2152,14 +2173,7 @@ impl PersistentSession {
                 input_commitment,
                 input_type_witness,
             }),
-            Some(
-                super::RequestCompileAnnotations::new(
-                    request_evidence,
-                    tidepool_toolchain::declaration_join::RequestHelperRecipe::None,
-                )
-                .map_err(SessionError::Compile)?
-                .into(),
-            ),
+            Some(compile_inputs),
         )
     }
 

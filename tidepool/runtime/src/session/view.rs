@@ -314,6 +314,16 @@ impl SessionCompileView {
             .map(CompileLibrary::original)
     }
 
+    /// The actual lexical interface imported by fresh source. This may differ
+    /// from the reserved native declaration identity returned by library().
+    #[must_use]
+    pub fn library_import_module(&self) -> Option<String> {
+        self.projection
+            .library
+            .as_ref()
+            .map(CompileLibrary::import_name)
+    }
+
     #[must_use]
     pub fn exact_declaration_context(&self) -> Option<&Arc<ExactDeclarationContext>> {
         self.projection.exact_context.as_ref()

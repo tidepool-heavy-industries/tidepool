@@ -1340,20 +1340,6 @@ impl PersistentSession {
         v
     }
 
-    /// The current persistent declaration environment module (`Lib.G<g>`), if any (also `None` when the
-    /// session has no persistent declaration environment at all).
-    pub fn current_lib_module(&self) -> Option<SessionModule> {
-        self.lib.as_ref().and_then(|l| l.current_module())
-    }
-
-    /// Scoped [`Self::current_lib_module`]: the `Lib.G<g>` module at `scope`'s
-    /// OWN tip — the module a turn compiled in that scope imports, and the head
-    /// of a re-export chain that already runs up through its ancestors.
-    /// `current_lib_module() == current_lib_module_in(ScopeId::ROOT)`.
-    pub fn current_lib_module_in(&self, scope: ScopeId) -> Option<SessionModule> {
-        self.lib.as_ref().and_then(|l| l.current_module_in(scope))
-    }
-
     #[must_use]
     pub fn next_lib_module(&self) -> Option<SessionModule> {
         self.lib.as_ref().map(SessionLib::next_module)

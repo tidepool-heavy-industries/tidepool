@@ -2665,6 +2665,7 @@ where
         authority_digest: [u8; 32],
         include_paths: Vec<PathBuf>,
         compile_view_evidence: String,
+        compile_inputs: Option<super::prepared::RuntimeCompileInputs>,
     ) -> Result<RuntimeActivationInputAdmission, ResidentError> {
         self.settle_dropped_custody();
         if !Arc::ptr_eq(&input.custody.cleanup.0, &self.custody_cleanup) {
@@ -2720,6 +2721,7 @@ where
             specification.specification_digest(),
             authority_digest,
             include_paths,
+            compile_inputs,
         )?;
         let templates = vec![super::TurnTemplate {
             kind: super::TemplateSelector::Bind,
@@ -3167,21 +3169,14 @@ where
         self.state.discard_staged_declaration(staged);
     }
 
-    /// The current persistent declaration environment module name (`Tidepool.Session.Lib.G<g>`) a later
-    /// turn imports to see accumulated declarations, or `None` before any decl.
+    /// The compiler-issued cumulative lexical interface for ROOT.
     pub fn session_import_module(&self) -> Option<String> {
-        self.state.current_lib_module().map(|m| m.module_name())
+        self.session_import_module_in(ScopeId::ROOT)
     }
 
-    /// Scoped [`Self::session_import_module`]: the `Lib.G<g>` module at
-    /// `scope`'s tip. A turn compiled in a child scope imports THIS, not
-    /// ROOT's — which is the whole of "parent declarations callable in every
-    /// child" on the real compile path, since the child's tip module re-exports
-    /// its parent's chain.
+    /// The actual cumulative declaration interface retained by this scope.
     pub fn session_import_module_in(&self, scope: ScopeId) -> Option<String> {
-        self.state
-            .current_lib_module_in(scope)
-            .map(|m| m.module_name())
+        self.state.compile_view_in(scope)?.library_import_module()
     }
 
     #[must_use]

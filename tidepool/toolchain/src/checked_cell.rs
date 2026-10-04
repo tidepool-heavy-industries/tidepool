@@ -424,7 +424,6 @@ pub struct ExactCheckedCell {
     producer: [u8; 32],
     context: [u8; 32],
     declaration_context: Arc<crate::declaration_context::ExactDeclarationContext>,
-    publication_context: Arc<crate::declaration_context::ExactDeclarationContext>,
     receipt_digest: [u8; 32],
     checked_source: String,
     evidence: Vec<(String, crate::cache::DependencyEvidence)>,
@@ -1145,6 +1144,15 @@ pub struct ExactCompiledPrefix {
     cell: Arc<ExactCheckedCell>,
     completed: CheckedPrefixSequence<CompletedCheckedItem>,
     displays: CheckedPrefixSequence<Arc<ExactCompiledDisplay>>,
+    declaration_projection: PrefixDeclarationProjection,
+}
+
+/// Native program sealing and settled compilation have distinct authority.
+#[derive(Clone, Debug)]
+enum PrefixDeclarationProjection {
+    Initial,
+    ProgramOriginal,
+    Certified(Arc<crate::declaration_context::ExactDeclarationContext>),
 }
 
 /// Immutable ordered proof links. Appending shares the historical leaves and
@@ -1261,16 +1269,13 @@ impl<'a, T> IntoIterator for &'a CheckedPrefixSequence<T> {
 #[derive(Clone, Debug)]
 enum CompletedCheckedItem {
     Native(Arc<ExactCompiledItem>),
-    Declaration {
-        item: ExactCheckedItem,
-        context: Arc<crate::declaration_context::ExactDeclarationContext>,
-    },
+    Declaration(ExactCheckedItem),
 }
 impl CompletedCheckedItem {
     fn native(&self) -> Option<&Arc<ExactCompiledItem>> {
         match self {
             Self::Native(item) => Some(item),
-            Self::Declaration { .. } => None,
+            Self::Declaration(_) => None,
         }
     }
 }
@@ -1887,16 +1892,35 @@ impl ExactCompiledPrefix {
     fn declaration_context(
         &self,
     ) -> Result<Arc<crate::declaration_context::ExactDeclarationContext>, CompileError> {
-        Ok(self
-            .completed
-            .iter()
-            .filter_map(|completed| match completed {
-                CompletedCheckedItem::Declaration { context, .. } => Some(context.clone()),
-                CompletedCheckedItem::Native(_) => None,
-            })
-            .last()
-            .unwrap_or_else(|| self.cell.declaration_context.clone()))
+        match &self.declaration_projection {
+            PrefixDeclarationProjection::Certified(context) => Ok(context.clone()),
+            PrefixDeclarationProjection::ProgramOriginal => Err(failure(
+                "program original is not a settled declaration projection",
+            )),
+            PrefixDeclarationProjection::Initial => Ok(self.cell.declaration_context.clone()),
+        }
     }
+
+    /// During same-request sealing, original declaration authority belongs to
+    /// its checked item. It cannot authorize later source compilation.
+    pub(crate) fn append_program_original(
+        &self,
+        item: ExactCheckedItem,
+    ) -> Result<Self, CompileError> {
+        if item.index != self.next_item()
+            || !Arc::ptr_eq(&item.cell, &self.cell)
+            || item.planned_declaration().is_none()
+        {
+            return Err(failure(
+                "program original is not the next checked declaration",
+            ));
+        }
+        let mut next = self.clone();
+        next.completed.push(CompletedCheckedItem::Declaration(item));
+        next.declaration_projection = PrefixDeclarationProjection::ProgramOriginal;
+        Ok(next)
+    }
+
     pub fn append_display(&self, display: Arc<ExactCompiledDisplay>) -> Result<Self, CompileError> {
         if self
             .completed_item(display.capture.item.index())
@@ -1921,7 +1945,7 @@ impl ExactCompiledPrefix {
     }
     pub fn completed_declaration(&self, index: usize) -> Option<&ExactCheckedItem> {
         match self.completed.get(index) {
-            Some(CompletedCheckedItem::Declaration { item, .. }) => Some(item),
+            Some(CompletedCheckedItem::Declaration(item)) => Some(item),
             _ => None,
         }
     }
@@ -1993,8 +2017,8 @@ impl ExactCompiledPrefix {
             lexical,
         )?);
         let mut next = self.clone();
-        next.completed
-            .push(CompletedCheckedItem::Declaration { item, context });
+        next.completed.push(CompletedCheckedItem::Declaration(item));
+        next.declaration_projection = PrefixDeclarationProjection::Certified(context);
         Ok(next)
     }
     pub fn injected_modules(&self) -> Vec<String> {
@@ -2087,7 +2111,7 @@ impl ExactCompiledPrefix {
         let mut winners = BTreeMap::new();
         for completed in &self.completed {
             match completed {
-                CompletedCheckedItem::Declaration { .. } => {}
+                CompletedCheckedItem::Declaration(_) => {}
                 CompletedCheckedItem::Native(item) => {
                     for binder in &item.bound_binders {
                         let fields = row(binder, 7)?;
@@ -2390,6 +2414,7 @@ impl ExactCheckedItem {
             cell: self.cell.clone(),
             completed: CheckedPrefixSequence::new(),
             displays: CheckedPrefixSequence::new(),
+            declaration_projection: PrefixDeclarationProjection::Initial,
         })
     }
     pub fn validate_observations(
@@ -2798,7 +2823,6 @@ pub(crate) fn admit_checked_cell(
     producer: &[u8],
     context: [u8; 32],
     declaration_context: Arc<crate::declaration_context::ExactDeclarationContext>,
-    publication_context: Arc<crate::declaration_context::ExactDeclarationContext>,
     request_digest: &str,
     specification: &CheckedCellSpecification,
     admissions: Vec<ExactSourceAdmission>,
@@ -3022,7 +3046,6 @@ pub(crate) fn admit_checked_cell(
         .sha256(),
         context,
         declaration_context,
-        publication_context,
         receipt_digest: Sha256::digest(&receipt).into(),
         evidence,
         checked_source,
@@ -3667,7 +3690,6 @@ mod tests {
             .sha256(),
             context: enriched_context.semantic_sha256(),
             declaration_context: enriched_context,
-            publication_context,
             receipt_digest: [9; 32],
             checked_source: source.into(),
             evidence: Vec::new(),
@@ -3695,14 +3717,14 @@ mod tests {
             index: 0,
         };
         let mut completed = CheckedPrefixSequence::new();
-        completed.push(CompletedCheckedItem::Declaration {
-            item,
-            context: Arc::new(expected_publication.clone()),
-        });
+        completed.push(CompletedCheckedItem::Declaration(item));
         let prefix = ExactCompiledPrefix {
             cell,
             completed,
             displays: CheckedPrefixSequence::new(),
+            declaration_projection: PrefixDeclarationProjection::Certified(Arc::new(
+                expected_publication.clone(),
+            )),
         };
 
         prefix
@@ -3896,10 +3918,6 @@ mod tests {
             producer: [7; 32],
             context: [8; 32],
             declaration_context: Arc::new(
-                crate::declaration_context::ExactDeclarationContext::new(&[], &[], Vec::new())
-                    .unwrap(),
-            ),
-            publication_context: Arc::new(
                 crate::declaration_context::ExactDeclarationContext::new(&[], &[], Vec::new())
                     .unwrap(),
             ),

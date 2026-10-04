@@ -6326,6 +6326,54 @@ mod tests {
             |node| node.owner.module == SessionModule::lib(inherited_generation).module_name()
         ));
         assert_eq!(protected.snapshot().compiler_prefix().next_item(), 1);
+        let adopted = protected.snapshot();
+        let imports = adopted
+            .view()
+            .turn_imports(&crate::session::SourceImports::new());
+        assert!(
+            imports
+                .lines()
+                .any(|line| line == projection.projection.module_name()),
+            "new source imports the compiler-issued cumulative projection"
+        );
+        assert!(
+            !imports.lines().any(|line| line == module),
+            "the local native original is not the future lexical import"
+        );
+        assert_eq!(
+            adopted.view().library().unwrap().module_name(),
+            module,
+            "the reserved native declaration identity remains unchanged"
+        );
+        assert!(adopted
+            .view()
+            .exact_declaration_context()
+            .unwrap()
+            .lexical_graph()
+            .iter()
+            .any(|node| node.owner.module == projection.projection.module_name()));
+        let source_inputs = crate::session::RuntimeCompileInputs::new(
+            None,
+            vec![projection.projection.clone(), projection.projection.clone()],
+        )
+        .unwrap();
+        assert_eq!(
+            source_inputs.projections().len(),
+            1,
+            "repeated transfer retains one exact issued capsule"
+        );
+        let projected = protected
+            .admission()
+            .view()
+            .clone()
+            .with_compile_inputs(&source_inputs)
+            .unwrap();
+        assert!(projected
+            .exact_declaration_context()
+            .unwrap()
+            .lexical_graph()
+            .iter()
+            .any(|node| node.owner.module == projection.projection.module_name()));
         assert!(resident.adopt_checked_declaration(reservation).is_err());
         let original_context = protected
             .snapshot()

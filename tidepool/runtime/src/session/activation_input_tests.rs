@@ -493,6 +493,7 @@ fn checked_captured_input(
             recipe.digest(),
             view.include_paths(&recipe.include),
             String::new(),
+            None,
         )
         .expect("seal original input under the owning scope and source recipe");
     assert_eq!(
