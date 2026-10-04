@@ -393,8 +393,7 @@ fn custody_resume_classifies_rejected_frame_and_consumed_failure() {
 /// Parcel 5b: a value crosses two independent [`ResidentSession`]s (their
 /// own machines, sharing one [`tidepool_runtime::session::ImageRegistry`])
 /// through [`ResidentSession::export_custody`]/[`ResidentSession::import_parcel`].
-/// Both sessions run identical turns, so a wired-in constructor like `Int`
-/// shares descriptor content across the two independently bootstrapped
+/// Both sessions install the same immutable compiler output in distinct
 /// machines. A heap-allocated value is copied on export; a static top retains
 /// its exact source installation instance in the parcel.
 #[test]
@@ -405,12 +404,9 @@ fn parcel_crosses_two_resident_sessions_sharing_one_image_registry() {
     let mut left = Notebook::new();
     let mut right = Notebook::new();
 
-    // Bootstrap each machine with a throwaway turn before sharing a
-    // registry: `set_image_registry` is a no-op before a machine exists.
-    // Both machines see `Int`'s descriptor from this alone.
+    // Bootstrap independent machines from one immutable compiler output.
     let warm = left.prepare_expression("pure (0 :: Int)");
     left.expression(&warm);
-    let warm = right.prepare_expression("pure (0 :: Int)");
     right.expression(&warm);
 
     let registry = Arc::new(ImageRegistry::new());
@@ -423,12 +419,37 @@ fn parcel_crosses_two_resident_sessions_sharing_one_image_registry() {
     // code, while each install owns a distinct static region. Import must
     // admit the source instance carried by the parcel even when the sibling
     // already installed that same compiled code.
-    left.bind("held <- pure (999999 :: Int)");
-    right.bind("held <- pure (999999 :: Int)");
+    let TurnResult::Bind {
+        bound, compiled, ..
+    } = left.compile("held <- pure (999999 :: Int)")
+    else {
+        panic!("held must compile as a binding");
+    };
+    let [binder] = bound.as_slice() else {
+        panic!("held must have one original binder");
+    };
+    let generation = Generation(left.generation);
+    let install = |notebook: &mut Notebook| {
+        let outcome = notebook
+            .session
+            .run_bind_with_sites("shared_held", compiled.code(), binder, generation)
+            .expect("install the original immutable binding in an independent machine");
+        assert!(matches!(outcome, ResidentOutcome::Completed { .. }));
+        notebook.generation = generation.0;
+        notebook.injected.push(binder.module.clone());
+    };
+    install(&mut left);
+    let hits_before_sibling = registry.hits();
+    install(&mut right);
     assert!(
-        registry.hits() > 0,
-        "left and right's identical `held` bind should share compiled code"
+        registry.hits() > hits_before_sibling,
+        "the sibling installation must reuse the original compiled image"
     );
+    let root = tidepool_codegen::scope::ScopeId::ROOT;
+    let left_binding = left.session.current_binding_in(root, "held").unwrap();
+    let right_binding = right.session.current_binding_in(root, "held").unwrap();
+    assert_eq!(left_binding.0, right_binding.0, "same original binder ID");
+    assert_eq!(left_binding.1, right_binding.1, "same original module");
     let custody = left
         .session
         .retain_binding_custody("held")
@@ -444,6 +465,11 @@ fn parcel_crosses_two_resident_sessions_sharing_one_image_registry() {
         .session
         .export_custody(custody)
         .expect("the bound value exports as a parcel");
+    assert_eq!(
+        parcel.bytes(),
+        0,
+        "the parcel retains the static source instance"
+    );
     assert_eq!(
         left.session.value_handle_count(),
         left_handles_before - 1,
@@ -467,6 +493,7 @@ fn parcel_crosses_two_resident_sessions_sharing_one_image_registry() {
         .is_some());
 
     let right_handles_before = right.session.value_handle_count();
+    let right_programs_before = right.session.residency().unwrap().programs;
     let imported = right
         .session
         .import_parcel(parcel, tidepool_runtime::session::RealmId::ROOT)
@@ -475,6 +502,14 @@ fn parcel_crosses_two_resident_sessions_sharing_one_image_registry() {
         right.session.value_handle_count(),
         right_handles_before + 2,
         "import mints the value handle and one retained source-binding handle"
+    );
+    assert!(
+        right.session.residency().unwrap().programs > right_programs_before,
+        "import retains the left installation, even with the same code installed on the right"
+    );
+    assert_eq!(
+        right.session.current_binding_in(root, "held"),
+        Some(right_binding)
     );
     drop(left);
 
