@@ -1585,6 +1585,18 @@ async fn admitted_cell_late_type_error_has_no_effect_or_publication_on_retry() {
         .await;
     assert_committed_haskell_value(&control, "42");
     assert_eq!(binding.inbox.watermark(), 1);
+    assert!(
+        transport
+            .requests
+            .lock()
+            .last()
+            .unwrap()
+            .input
+            .iter()
+            .any(|item| { item.0["content"] == "whole-cell-preflight-sentinel" }),
+        "positive control notification must reach the actual provider"
+    );
+    assert!(host.runtime.store().unread("/root").unwrap().is_empty());
 
     let (operation, rejected) = transport.cell("bad-final-call", &source).await;
     assert_preflight_rejection(&rejected);
@@ -1659,6 +1671,10 @@ async fn admitted_cell_late_type_error_has_no_effect_or_publication_on_retry() {
     )
     .await;
     assert!(waiting.active_round.is_none());
+    assert!(
+        host.runtime.store().unread("/root").unwrap().is_empty(),
+        "the interrupted round must await explicit input"
+    );
     let requests_before = transport.requests.lock().len();
     let compiler_before = tidepool_extract_cmd::extract_spawn_count();
     let mut changed = transport.changed.subscribe();
@@ -1687,6 +1703,10 @@ async fn admitted_cell_late_type_error_has_no_effect_or_publication_on_retry() {
     })
     .await
     .expect("real recovery provider request");
+    assert!(recovered
+        .input
+        .iter()
+        .any(|item| { item.0["content"] == "retry retained preflight rejection" }));
     let returned = recovered
         .input
         .iter()
