@@ -32,7 +32,12 @@ def _prepared_fixture_impl(ctx):
         "--deployment", _output(ctx.attrs.deployment),
         "--ghc-libdir", ghc_libdir,
         "--runtime-libraries", _output(ctx.attrs.runtime_libraries),
-    ], hidden = [ctx.attrs.extra_inputs, ctx.attrs.ghc[RunInfo]])
+    ], hidden = [
+        ctx.attrs.extra_inputs,
+        ctx.attrs.ghc[RunInfo],
+        ctx.attrs.frontend[RunInfo],
+        ctx.attrs.worker[RunInfo],
+    ])
     for tree, subdirectory in ctx.attrs.source_roots:
         if subdirectory.startswith("/") or any([part in [".", ".."] for part in subdirectory.split("/")]):
             fail("source root subtree must be a relative directory: {}".format(subdirectory))

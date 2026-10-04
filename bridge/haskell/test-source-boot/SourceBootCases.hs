@@ -10,7 +10,7 @@ import CandidateGraphDescriptorTest (candidateGraphDescriptorChecks)
 import GenuineCandidateFixture
   ( writeGenuineCandidateManifestFor, writeGenuineMetadataScope, writeGenuineEmptyMetadataScope
   , writeGenuineCandidateNativeScope, writeGenuineCandidateLexicalScope, writeGenuineAuthoredDeclarationScope
-  , writeGenuineOriginalExecutionScope, writeGenuineExecutionScope )
+  , writeGenuineExecutionScope )
 
 import Codec.CBOR.Encoding (encodeBool, encodeListLen, encodeString)
 import Codec.CBOR.Write (toStrictByteString)

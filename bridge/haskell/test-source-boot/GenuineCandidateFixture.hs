@@ -4,7 +4,7 @@
 module GenuineCandidateFixture
   ( writeGenuineCandidateManifestFor, writeGenuineMetadataScope
   , writeGenuineEmptyMetadataScope, writeGenuineCandidateNativeScope
-  , writeGenuineCandidateLexicalScope, writeGenuineOriginalExecutionScope
+  , writeGenuineCandidateLexicalScope
   , writeGenuineExecutionScope
   , writeGenuineAuthoredDeclarationScope ) where
 
@@ -63,13 +63,6 @@ writeGenuineCandidateNativeScope
   :: [String] -> [String] -> FilePath -> FilePath -> [FilePath] -> FilePath -> PreparedPipelineResult -> IO ()
 writeGenuineCandidateNativeScope candidates nativeOwners work source includes destination prepared =
   writePacket work (Just (source, includes, prepared)) candidates candidates nativeOwners [] (Just destination)
-
--- Lexical source originals can supply GHC bytecode without being offered as
--- fresh products or cache candidates in the consuming transaction.
-writeGenuineOriginalExecutionScope
-  :: [String] -> FilePath -> FilePath -> [FilePath] -> FilePath -> PreparedPipelineResult -> IO ()
-writeGenuineOriginalExecutionScope owners work source includes destination prepared =
-  writePacket work (Just (source, includes, prepared)) [] owners owners owners (Just destination)
 
 -- Compiler dependency closure and native implementation selection are separate.
 -- Lexical adjacency comes from the same admitted original compilation.

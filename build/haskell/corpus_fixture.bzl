@@ -36,7 +36,12 @@ def _corpus_impl(ctx):
         "--output", output.as_output(),
         "--ghc-libdir", libdir,
         "--runtime-libraries", _output(ctx.attrs.runtime_libraries),
-    ], hidden = [ctx.attrs.extra_inputs, ctx.attrs.ghc[RunInfo]])
+    ], hidden = [
+        ctx.attrs.extra_inputs,
+        ctx.attrs.ghc[RunInfo],
+        ctx.attrs.producer[RunInfo],
+        ctx.attrs.validator[RunInfo],
+    ])
     _roots(command, ctx.attrs.source_roots)
     if ctx.attrs.all_tops:
         command.add("--all-tops")
