@@ -2277,8 +2277,6 @@ mod tests {
     use super::*;
 
     #[test]
-    #[test]
-    #[test]
     fn launch_host_filesystem_configuration_is_optional_and_validated() {
         let omitted: LaunchConfig = toml::from_str("").unwrap();
         assert_eq!(omitted.host_filesystem, Default::default());

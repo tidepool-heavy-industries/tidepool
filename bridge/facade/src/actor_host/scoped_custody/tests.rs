@@ -151,7 +151,6 @@ impl Fixture {
                 fork_gate: None,
                 custody: Some(self.custody.clone()),
                 scoped_retention: None,
-                hosted: Arc::new(Mutex::new(None)),
                 embedded_policy: None,
                 embedded: None,
                 terminal: None,
@@ -491,10 +490,19 @@ async fn scoped_custody_lost_spawn_and_retirement_result_remain_addressable() {
             .as_ref()
             .map(|retention| retention.slot.clone())
     };
-    let exact_outcome = retire_scoped_process(retained_slot, NativeRetirement::Terminate)
-        .await
-        .unwrap();
-    assert_eq!(exact_outcome, CleanupComponentOutcome::Completed);
+    let retained_slot = retained_slot.expect("exact process slot remains retained");
+    let exact_status =
+        tidepool_runtime::spawn_blocking_in_span(move || stop_slot(&retained_slot, deadline()))
+            .await
+            .unwrap()
+            .unwrap();
+    assert!(matches!(
+        *map.lock().get(&fixture.custody.actor).unwrap()
+            .scoped_retention.as_ref().unwrap().slot.lock(),
+        ScopedProcessSlot::Owned(ref scope)
+            if matches!(scope.observation().unwrap(), exomonad_node::ScopeObservation::ProcessStopped(status)
+                if status.monitor_status() == exact_status.monitor_status())
+    ));
     {
         let mut rows = map.lock();
         let row = rows.get_mut(&fixture.custody.actor).unwrap();
@@ -574,8 +582,8 @@ async fn scoped_custody_lost_spawn_and_retirement_result_remain_addressable() {
     fixture.retained(); // No successful binding settlement is claimed.
 }
 
-#[tokio::test]
-async fn scoped_retirement_preserve_keeps_exact_process_and_reports_uncertainty() {
+#[test]
+fn scoped_process_retention_keeps_exact_pinned_scope_until_explicit_stop() {
     let fixture = Fixture::new(1);
     let map = owners();
     fixture.register(&map);
@@ -589,13 +597,10 @@ async fn scoped_retirement_preserve_keeps_exact_process_and_reports_uncertainty(
         .pin(deadline())
         .unwrap();
 
-    let outcome = retire_scoped_process(Some(slot), NativeRetirement::Preserve)
-        .await
-        .unwrap();
     assert!(matches!(
-        outcome,
-        CleanupComponentOutcome::Failed { detail }
-            if detail.contains("intentionally preserved")
+        *slot.lock(),
+        ScopedProcessSlot::Owned(ref scope)
+            if matches!(scope.observation().unwrap(), exomonad_node::ScopeObservation::Pinned)
     ));
     fixture.retained();
 

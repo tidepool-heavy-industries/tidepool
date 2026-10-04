@@ -4,6 +4,7 @@
 )]
 use super::*;
 use exomonad_actor::{ForkWorkspaceCustody, ResidentToolEndpoint};
+use exomonad_worktree::WorktreeHandle;
 
 pub(super) fn custody_fixture() -> (
     exomonad_worktree::testing::TestRepo,
@@ -27,13 +28,8 @@ pub(super) fn custody_fixture() -> (
         .unwrap();
     let bindings = Arc::new(Mutex::new(bindings));
     let authority = ActorWorktreeAuthority::new("custody-test", bindings.clone());
-    let admission = fork_workspace_admission(
-        manager,
-        authority,
-        bindings.clone(),
-        "custody-test".into(),
-        None,
-    );
+    let admission =
+        fork_workspace_admission(manager, authority, bindings.clone(), "custody-test".into());
     (repository, runtime, tree, bindings, admission)
 }
 

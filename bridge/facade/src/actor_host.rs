@@ -40,10 +40,10 @@ mod embedded_checkpoint_children_tests;
 mod embedded_checkpoint_release_tests;
 #[cfg(test)]
 mod embedded_command_tests;
-#[cfg(test)]
-mod embedded_idle_retirement_tests;
 mod embedded_context;
 mod embedded_harness;
+#[cfg(test)]
+mod embedded_idle_retirement_tests;
 #[cfg(test)]
 mod embedded_notification_tests;
 #[cfg(test)]
@@ -153,7 +153,7 @@ use serde::{Deserialize, Serialize};
 
 use exomonad_node::DurableInbox;
 
-use exomonad_node::{ProcessMountBoundary, TmuxPaneId, TmuxSession, BUBBLEWRAP_PROGRAM};
+use exomonad_node::{ProcessMountBoundary, TmuxPaneId, BUBBLEWRAP_PROGRAM};
 
 use exomonad_worktree::{
     ActiveBinding, AgentRef as WorktreePrincipal, BindingTable, EventJournal, GitCli, WorktreeId,
@@ -1692,8 +1692,6 @@ fn handoff_application_owners(
     run_result
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-
 async fn apply_application_failure(
     actor: LocalActorRef,
     failure: ExternalApplicationFailure,
@@ -2030,7 +2028,7 @@ async fn run_owned(
             )
         })
         .transpose()?;
-    let (mut root_actor, mut root_task, startup_release) = if let Some(intent) = &startup_intent {
+    let (root_actor, mut root_task, startup_release) = if let Some(intent) = &startup_intent {
         let exomonad_actor::ResidentRootEntry::Startup(entry) = outcome else {
             return Err(runtime_error(
                 "embedded root startup lost its executable entry",
@@ -2461,7 +2459,7 @@ async fn run_owned(
                 }
                 result = &mut root_task, if root_active => {
                     result.map_err(join_error)?;
-                    let terminal = root_actor.terminal().get().ok_or_else(|| runtime_error("root stopped without terminal"))?;
+                    root_actor.terminal().get().ok_or_else(|| runtime_error("root stopped without terminal"))?;
                     root_active = false;
 
                 }
@@ -3717,12 +3715,12 @@ fn developer_instructions_selected(
         exomonad_actor::ActorRole::Integration => "integration",
     };
     if let Some(body) = inputs.and_then(|inputs| inputs.prompts.get(key)) {
-        let mut body = body.clone();
+        let body = body.clone();
 
         return append_effective_role(body, effective_role);
     }
     if role == exomonad_actor::ActorRole::Root {
-        let mut instructions = PromptId::ExomonadRoot.body().to_string();
+        let instructions = PromptId::ExomonadRoot.body().to_string();
 
         append_effective_role(instructions, effective_role)
     } else {

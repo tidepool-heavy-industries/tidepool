@@ -96,9 +96,8 @@ pub(super) async fn run_interactive_applications(
             .map_err(str::to_owned)?;
     }
 
-    let mut retirements: JoinSet<()> = JoinSet::new();
     // Supervisors waiting for a stopped actor's release receipt. Served from
-    // the receipt slot when it already exists, else when retirement joins.
+    // the receipt slot when it already exists, else when native cleanup joins.
     let mut release_waiters: HashMap<ActorRef, Vec<Arc<exomonad_actor::ReleaseAwait>>> =
         HashMap::new();
     let mut notifications: JoinSet<(ActorRef, Result<(), String>)> = JoinSet::new();
@@ -435,9 +434,6 @@ pub(super) async fn run_interactive_applications(
                                 installation.actor.identity(),
                             )),
                         };
-                        let embedded_policy = Arc::new(
-                            embedded_policy::EmbeddedPolicyInstallation::from_installation(&installation),
-                        );
                         if installation.creator.is_none() {
                             launch_context.config = root_config.borrow_and_update().clone();
                             root_identity = installation.actor.identity();
@@ -877,8 +873,6 @@ pub(super) async fn run_interactive_applications(
                             continue;
                         }
 
-
-                        unreachable!("featureless actor host only admits embedded activations");
                     }
 
                     LocalResidentDeployment::Retired { actor, terminal } => {
@@ -1004,10 +998,6 @@ pub(super) async fn run_interactive_applications(
                 }
             }
 
-
-            retired = retirements.join_next(), if !retirements.is_empty() => {
-
-            }
             notified = notifications.join_next(), if !notifications.is_empty() => {
 
 
