@@ -16,5 +16,5 @@ makeLocal = LocalBox
 historical :: Int
 historical = 40
 let historical = 41
-let local = (makeLocal historical :: LocalBox)
+let local = (makeLocal (historical + priorNumber (PriorNominal 0 :: PriorPayload Int)) :: LocalBox)
 (localValue local, {{DECLARATION_MODULE}}.historical, local == LocalBox historical, P.show local)

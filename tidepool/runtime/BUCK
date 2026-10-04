@@ -118,6 +118,7 @@ rust_filegroup(
         "src/session/fixtures/checked-interleaved-declaration.hs": "tidepool/runtime/src/session/fixtures/checked-interleaved-declaration.hs",
         "src/session/fixtures/checked-local-declaration.hs": "tidepool/runtime/src/session/fixtures/checked-local-declaration.hs",
         "src/session/fixtures/checked-native-support.hs": "tidepool/runtime/src/session/fixtures/checked-native-support.hs",
+        "src/session/fixtures/checked-prior-declaration.hs": "tidepool/runtime/src/session/fixtures/checked-prior-declaration.hs",
         "src/session/fixtures/checked-search-alternate.hs": "tidepool/runtime/src/session/fixtures/checked-search-alternate.hs",
         "src/session/fixtures/checked-search-invalid.hs": "tidepool/runtime/src/session/fixtures/checked-search-invalid.hs",
         "src/session/fixtures/checked-search-original.hs": "tidepool/runtime/src/session/fixtures/checked-search-original.hs",

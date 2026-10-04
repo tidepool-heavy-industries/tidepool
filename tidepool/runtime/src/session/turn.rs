@@ -6162,16 +6162,21 @@ mod tests {
         let _daemon = TestEnvGuard::unset("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
         let root = tempfile::tempdir().unwrap();
         let effects = TestEffectSurface::minimal(&[]).unwrap();
-        let mut lib =
-            SessionLib::open(SessionId(995), root.path(), ModuleEnv::standalone_default())
-                .unwrap()
-                .with_validation_include(effects.include_paths().to_vec());
+        let mut env = ModuleEnv::standalone_default();
+        env.pragmas.push_str("\n{-# LANGUAGE TypeFamilies #-}");
+        let mut lib = SessionLib::open(SessionId(995), root.path(), env)
+            .unwrap()
+            .with_validation_include(effects.include_paths().to_vec());
         lib.attach_recovery_graph_v2(&root.path().join("declarations.json"))
             .unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
         let public = session.mint_scope(ScopeId::ROOT).unwrap();
+        let prior_declarations = include_str!("fixtures/checked-prior-declaration.hs")
+            .trim()
+            .split("\n\n")
+            .collect::<Vec<_>>();
         let inherited_generation = session
-            .define_scoped_in(public, &["data PriorNominal = PriorNominal Int"])
+            .define_scoped_in(public, &prior_declarations)
             .unwrap();
         let inherited_surface = session.exact_exports_in(public, &["PriorNominal"]).unwrap();
         let inherited_exports = inherited_surface.declarations().unwrap().to_vec();

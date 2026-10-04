@@ -40,9 +40,9 @@ checkedAdmissionChecks = withScratch $ \root -> do
       item = CheckedItemAdmission AuthoredCheckedItem "item-admission" "cell-receipt" 2
         (digest source) "bind" ["café"] inventory ["Val7"]
         [CheckedSignature "__tidepool_cell_pin_2_café" "Int" (BS.singleton 0) []]
-        Nothing Nothing 7 "prefix" [] Nothing Nothing [] []
+        Nothing Nothing 7 "prefix" [] Nothing Nothing [] [] []
       display = CheckedDisplayAdmission "display-admission" "cell-receipt" 2
-        "observation" 6 7 "prefix" 32 [] inventory ["Val7"] [] "rendered" Nothing [] []
+        "observation" 6 7 "prefix" 32 [] inventory ["Val7"] [] "rendered" Nothing [] [] []
       verdict = StmtBinders KBind ["café"] []
       displayVerdict = StmtBinders KBind (checkedDisplayBinders display) []
       observation = SymbolIdentity "main" "Tidepool.Session.Val.G6" "value" "observation" Nothing

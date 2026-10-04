@@ -114,7 +114,7 @@ import Tidepool.DependencyEvidence
   , DependencyQualifier(..), renderDependencyQualifier
   , selectedHomeRequirements, renderDependencyEvidence )
 import Tidepool.ExactHydration
-  ( newOriginalInterfaceArtifacts, originalInterfaceBytes, ExactIfaceArtifact(..), freshExactState, noCheckedValueImports, installExactLexicalGraph
+  ( CheckedTemplateInterface(..), newOriginalInterfaceArtifacts, originalInterfaceBytes, ExactIfaceArtifact(..), freshExactState, noCheckedValueImports, installExactLexicalGraph
   , readCheckedValueImportAuthority, readExactIfaceArtifacts, hydrateExactScope
   , readVerifiedExactIfaceClosure, readVerifiedExactIfaceClosureWithCheckedValues
   , selectVerifiedExactInterfaces, selectVerifiedValueInterfaces, checkedValueImportAuthorityFromVerified )
@@ -702,7 +702,7 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
     Nothing supportPath includes Nothing
   writeExecutionScope hiddenPath work original []
   protected <- readFile target
-  recipe <- generatedScaffoldRecipe protected protected target "Expr" >>= either fail pure
+  recipe <- generatedScaffoldRecipe [] protected protected target "Expr" >>= either fail pure
   let purpose = GeneratedScaffoldCompile recipe (CheckedItemCompile [] Nothing [])
       requireRejected label action = do
         result <- try (void action) :: IO (Either SomeException ())
@@ -722,7 +722,7 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
       fail "generated scaffold lost its actual settled result"
     let extra = unlines (take 5 (lines protected) ++ ["import Tidepool.Internal.Resume"] ++ drop 5 (lines protected))
     writeFile target extra
-    duplicate <- generatedScaffoldRecipe protected extra target "Expr" >>= either fail pure
+    duplicate <- generatedScaffoldRecipe [] protected extra target "Expr" >>= either fail pure
     requireRejected "additional authored hidden import" $
       compile (PreparedProducts Nothing) Set.empty (GeneratedScaffoldCompile duplicate GeneralCompile)
         (Just hidden) target [] Nothing
@@ -733,22 +733,57 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
     copyFile "test-source-boot/fixtures/GeneratedScaffoldHelper.hs" (work </> "GeneratedScaffoldHelper.hs")
     let helperTarget = unlines (take 5 (lines protected) ++ ["import GeneratedScaffoldHelper"] ++ drop 5 (lines protected))
     writeFile target helperTarget
-    helperRecipe <- generatedScaffoldRecipe protected helperTarget target "Expr" >>= either fail pure
+    helperRecipe <- generatedScaffoldRecipe [] protected helperTarget target "Expr" >>= either fail pure
     requireRejected "fresh helper importing hidden support" $
       compile (PreparedProducts Nothing) Set.empty (GeneratedScaffoldCompile helperRecipe GeneralCompile)
         (Just hidden) target [] Nothing
     writeFile target ("{-# LINE 100 \"authored.hs\" #-}\n" ++ protected)
-    lineRecipe <- generatedScaffoldRecipe protected ("{-# LINE 100 \"authored.hs\" #-}\n" ++ protected) target "Expr" >>= either fail pure
+    lineRecipe <- generatedScaffoldRecipe [] protected ("{-# LINE 100 \"authored.hs\" #-}\n" ++ protected) target "Expr" >>= either fail pure
     requireRejected "logical LINE import location differs from protected occurrence" $
       compile (PreparedProducts Nothing) Set.empty (GeneratedScaffoldCompile lineRecipe GeneralCompile)
         (Just hidden) target [] Nothing
     writeFile target protected
     admittedScope <- readExactScope hiddenPath >>= either fail pure
+    supportInterface <- case [artifact | (artifact,_,_) <- scopeInterfaces admittedScope
+        , exactUnit artifact == "main", exactModule artifact == "Tidepool.Internal.Resume"] of
+      [artifact] -> pure artifact
+      _ -> fail "template interface fixture lacks its exact captured owner"
+    let templateInterface = CheckedTemplateInterface (exactUnit supportInterface)
+          (exactModule supportInterface) (exactSha256 supportInterface) []
+        withTemplate = unlines (take 5 (lines protected)
+          ++ ["import Tidepool.Internal.Resume"] ++ drop 5 (lines protected))
+    writeFile target withTemplate
+    capturedTemplate <- generatedScaffoldRecipe [templateInterface] withTemplate withTemplate target "Expr"
+      >>= either fail pure
+    let capturedPurpose = GeneratedScaffoldCompile capturedTemplate (CheckedItemCompile [] Nothing [])
+    interfaceOnly <- compile (PreparedProducts Nothing) Set.empty capturedPurpose (Just hidden) target [] Nothing
+    unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult interfaceOnly))) $
+      fail "initial template interface changed the native result"
+    requireRejected "template interface cannot replace paired native owner" $
+      compile (PreparedProducts Nothing) Set.empty
+        (CellProgramCompile capturedPurpose admittedScope {scopeProducts=[]}) (Just hidden) target [] Nothing
+    wrongSeal <- generatedScaffoldRecipe [templateInterface {templateInterfaceSha256=replicate 64 'f'}]
+      withTemplate withTemplate target "Expr" >>= either fail pure
+    requireRejected "changed initial template interface seal" $
+      compile (PreparedProducts Nothing) Set.empty (GeneratedScaffoldCompile wrongSeal GeneralCompile)
+        (Just hidden) target [] Nothing
+    let secondImport = unlines (take 5 (lines withTemplate)
+          ++ ["import qualified Tidepool.Internal.Resume as AuthoredSecond"] ++ drop 5 (lines withTemplate))
+    writeFile target secondImport
+    secondRecipe <- generatedScaffoldRecipe [templateInterface] withTemplate secondImport target "Expr"
+      >>= either fail pure
+    requireRejected "authored second import beside permitted initial template import" $
+      compile (PreparedProducts Nothing) Set.empty (GeneratedScaffoldCompile secondRecipe GeneralCompile)
+        (Just hidden) target [] Nothing
+    writeFile target (withTemplate ++ "\ntamperedTemplateTarget = 0 :: Int\n")
+    requireRejected "same owner with changed template target bytes" $
+      compile (PreparedProducts Nothing) Set.empty capturedPurpose (Just hidden) target [] Nothing
+    writeFile target protected
     forM_ ["Bind","Display"] $ \name -> do
       let rendered = T.unpack (T.replace "module Expr where" (T.pack ("module " ++ name ++ " where")) (T.pack protected))
           generatedPath = work </> (name ++ ".hs")
       writeFile generatedPath rendered
-      generated <- generatedScaffoldRecipe protected rendered generatedPath name >>= either fail pure
+      generated <- generatedScaffoldRecipe [] protected rendered generatedPath name >>= either fail pure
       let wrapped = CellProgramCompile (GeneratedScaffoldCompile generated (CheckedItemCompile [] Nothing [])) admittedScope
       checked <- compile (PreparedProducts Nothing) Set.empty wrapped (Just hidden) generatedPath [] Nothing
       unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult checked))) $
@@ -839,7 +874,7 @@ generatedScaffoldRetained manifestPath sealPath = withTiming $ withScratch $ \wo
   let target = work </> "Expr.hs"
   copyFile "test-source-boot/fixtures/GeneratedScaffoldExpr.hs" target
   source <- readFile target
-  recipe <- generatedScaffoldRecipe source source target "Expr" >>= either fail pure
+  recipe <- generatedScaffoldRecipe [] source source target "Expr" >>= either fail pure
   let purpose = GeneratedScaffoldCompile recipe (CheckedItemCompile [] Nothing [])
       reject label expected action = do
         refused <- try (void action) :: IO (Either SomeException ())
@@ -2171,9 +2206,9 @@ hostActivationPurposeTest destination = withScratch $ \work -> do
   let sha = TString (T.replicate 64 "a")
       empty = TList []
       text = TString . T.pack
-      authorization = [text "host-activation-input1",sha,sha,TInt 0,sha,text "bind"
+      authorization = [text "host-activation-input2",sha,sha,TInt 0,sha,text "bind"
         ,TList [text "sessionInput"],TList [TList [text "bind",sha]],empty,TList [signature]
-        ,TNull,TInt 1,sha,empty,TNull,TNull,empty,empty,TList [text work]]
+        ,TNull,TInt 1,sha,empty,TNull,TNull,empty,empty,empty,TList [text work]]
       -- These stage/purpose syntax checks wrap a genuinely issued immutable
       -- scope and native GHC signatures; they do not issue execution receipts.
       hostManifest auth = TList (replace 8 (TList auth) issuedFields)
@@ -2184,10 +2219,10 @@ hostActivationPurposeTest destination = withScratch $ \work -> do
   admitted <- decode authorization >>= either fail pure
   unless (fmap itemPurpose (scopeCheckedItem admitted) == Just HostActivationInput) $
     fail "host purpose lost its sealed role"
-  authored <- decode (replace 0 (text "checked-item2") authorization) >>= either fail pure
+  authored <- decode (replace 0 (text "checked-item3") authorization) >>= either fail pure
   unless (fmap itemPurpose (scopeCheckedItem authored) == Just AuthoredCheckedItem) $
     fail "ordinary purpose acquired host authority"
-  forM_ [(0,text "host-activation-input2"),(3,TInt 1),(5,text "expr")
+  forM_ [(0,text "host-activation-input1"),(3,TInt 1),(5,text "expr")
       ,(6,TList [text "other"]),(7,TList [TList [text "expr",sha]])
       ,(9,empty),(11,TInt 0),(12,TString (T.replicate 64 "0"))] $ \(index,value) -> do
     refused <- decode (replace index value authorization)

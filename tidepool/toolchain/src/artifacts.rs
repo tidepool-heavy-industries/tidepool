@@ -475,9 +475,9 @@ fn checked_search_authorization(
             CheckedPurpose::Inspection => "inspection1",
             CheckedPurpose::Cell => "cell-check2",
             CheckedPurpose::HostInputCell => "host-input-check1",
-            CheckedPurpose::Item => "checked-item2",
-            CheckedPurpose::HostActivationInput => "host-activation-input1",
-            CheckedPurpose::Display => "checked-display2",
+            CheckedPurpose::Item => "checked-item3",
+            CheckedPurpose::HostActivationInput => "host-activation-input2",
+            CheckedPurpose::Display => "checked-display3",
         }
         .into(),
     );
@@ -1188,6 +1188,10 @@ impl ModuleCandidateOffer {
                             .iter()
                             .map(|(_, source)| source.as_str()),
                     )
+                    .with_initial_template_interfaces(
+                        checked_item.item.template_context(),
+                        &checked_item.item.template_sources(),
+                    )?
                     .with_generated_planned_imports(
                         checked_item
                             .prefix
@@ -1301,6 +1305,10 @@ impl ModuleCandidateOffer {
                             .iter()
                             .map(|(_, source)| source.as_str()),
                     )
+                    .with_initial_template_interfaces(
+                        display.capture.item().template_context(),
+                        &display.capture.item().template_sources(),
+                    )?
                     .with_generated_planned_imports(
                         display
                             .prefix

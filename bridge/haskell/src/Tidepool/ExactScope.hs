@@ -48,7 +48,7 @@ import System.Directory (createDirectory, createDirectoryIfMissing, makeAbsolute
 import System.FilePath (isAbsolute, takeDirectory, (</>))
 import System.IO (IOMode(ReadMode), withBinaryFile)
 import System.IO.Error (isAlreadyExistsError)
-import Tidepool.ExactHydration (ExactIfaceArtifact(..))
+import Tidepool.ExactHydration (ExactIfaceArtifact(..), CheckedTemplateInterface(..))
 import Tidepool.Session (Generation(..), SessionModule(..), SessionModuleKind(..), parseSessionModule, sessionModuleString)
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import Tidepool.CheckedCell
@@ -271,6 +271,7 @@ data CheckedDisplayAdmission = CheckedDisplayAdmission
   , displayPlannedDeclaration :: Maybe ((String,String),String)
   , displayCompletedValues :: [CompletedValueImport]
   , displayValueInterfaces :: [ExactIfaceArtifact]
+  , displayTemplateInterfaces :: [CheckedTemplateInterface]
   } deriving (Eq, Show)
 
 data CheckedCellPurpose = AuthoredCellCheck | HostInputCellCheck CheckedSignature
@@ -323,6 +324,7 @@ data CheckedItemAdmission = CheckedItemAdmission
   , itemPlannedDeclaration :: Maybe ((String,String),String)
   , itemCompletedValues :: [CompletedValueImport]
   , itemValueInterfaces :: [ExactIfaceArtifact]
+  , itemTemplateInterfaces :: [CheckedTemplateInterface]
   } deriving (Eq, Show)
 
 data ExactProduct = ExactProduct
@@ -1034,8 +1036,8 @@ decodeScope = do
         validateInterfaces (checkedInjectedModules admission) (checkedValueInterfaces admission)
         paths <- includePaths
         pure (ExactCellPurpose admission paths)
-      tag | tag == "checked-item2" || tag == "host-activation-input1" -> do
-        unless (authCount == 19) (fail "invalid checked-item admission")
+      tag | tag == "checked-item3" || tag == "host-activation-input2" -> do
+        unless (authCount == 20) (fail "invalid checked-item admission")
         admissionDigest <- digestField
         receiptDigest <- digestField
         index <- decodeWord64
@@ -1074,9 +1076,10 @@ decodeScope = do
         planned <- plannedDeclaration
         values <- completedValues
         valueInputs <- valueInterfaces
+        templateInputs <- templateInterfaces
         validateInterfaces injected valueInputs
         validateValues valueImports values
-        let role = if tag == "host-activation-input1" then HostActivationInput else AuthoredCheckedItem
+        let role = if tag == "host-activation-input2" then HostActivationInput else AuthoredCheckedItem
         when (role == HostActivationInput) $
           unless (index == 0 && kind == "bind" && binders == ["sessionInput"]
               && generation > 0
@@ -1087,9 +1090,9 @@ decodeScope = do
             (fail "invalid host activation input admission")
         paths <- includePaths
         pure (ExactItemPurpose (CheckedItemAdmission role admissionDigest receiptDigest index sourceDigest kind binders
-          templates injected signatures liftPlan presentation generation prefix valueImports observation planned values valueInputs) paths)
-      "checked-display2" -> do
-        unless (authCount == 18) (fail "invalid checked-display admission")
+          templates injected signatures liftPlan presentation generation prefix valueImports observation planned values valueInputs templateInputs) paths)
+      "checked-display3" -> do
+        unless (authCount == 19) (fail "invalid checked-display admission")
         admission <- CheckedDisplayAdmission <$> digestField <*> digestField <*> decodeWord64
           <*> nonempty <*> decodeWord64 <*> decodeWord64 <*> digestField <*> decodeWord64
           <*> bounded 65536 string <*> bounded 64 (array 2 >> (,) <$> nonempty <*> digestField)
@@ -1097,7 +1100,7 @@ decodeScope = do
           <*> bounded 4096 (array 2 >> ((,) <$> nonempty <*> bounded 65536 nonempty))
           <*> nonempty
           <*> plannedDeclaration
-          <*> completedValues <*> valueInterfaces
+          <*> completedValues <*> valueInterfaces <*> templateInterfaces
         validateInterfaces (displayInjectedModules admission) (displayValueInterfaces admission)
         validateValues (displayValueImports admission) (displayCompletedValues admission)
         unique "display injected modules" (displayInjectedModules admission)
@@ -1132,6 +1135,18 @@ decodeScope = do
       (map (\value -> (completedValueModule value,map fst (completedValueBinders value))) values == imports
         && all ((== "main") . completedValueUnit) values)
       (fail "completed value identities differ from exact prefix imports")
+    templateInterfaces = do
+      inputs <- bounded 4096 (array 4 >> CheckedTemplateInterface <$> nonempty <*> nonempty <*> digestField
+        <*> bounded 4096 (array 2 >> (,) <$> nonempty <*> nonempty))
+      let owners = [(templateInterfaceUnit input,templateInterfaceModule input) | input <- inputs]
+      unique "checked template interfaces" owners
+      unless (sum (map (length . templateInterfaceImports) inputs) <= 65536)
+        (fail "checked template graph exceeds its edge bound")
+      forM_ inputs $ \input -> do
+        unique "checked template edges" (templateInterfaceImports input)
+        unless (all (`elem` owners) (templateInterfaceImports input))
+          (fail "checked template edge leaves its captured graph")
+      pure inputs
     plannedDeclaration = do
       token <- peekTokenType
       if token == TypeNull then decodeNull >> pure Nothing else do

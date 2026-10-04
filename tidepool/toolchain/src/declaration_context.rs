@@ -719,6 +719,12 @@ pub(crate) struct ExactCompilationRequest {
     generated_scaffold_imports: Vec<GeneratedScaffoldImportAuthority>,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct TemplateInterfaceNode {
+    pub(crate) interface_sha256: [u8; 32],
+    pub(crate) imports: Vec<ExactModuleIdentity>,
+}
+
 /// The compiler-only import belongs to a hash-sealed checked template and one
 /// original native/interface owner. It never grants authored lexical visibility.
 #[derive(Clone)]
@@ -729,6 +735,12 @@ struct GeneratedScaffoldImportAuthority {
 
 #[derive(Clone)]
 enum GeneratedScaffoldRole {
+    Native(NativeScaffoldRole),
+    InitialTemplateInterfaces(Arc<ExactDeclarationContext>),
+}
+
+#[derive(Clone)]
+enum NativeScaffoldRole {
     Resume(tidepool_repr::execution_schema::CachedHomeOwner),
     PlannedDeclaration(Arc<CertifiedAuthoredDeclaration>),
 }
@@ -747,9 +759,38 @@ impl GeneratedScaffoldImportAuthority {
         qualifier: &str,
         boot: bool,
     ) -> bool {
-        let owner = match &self.role {
-            GeneratedScaffoldRole::Resume(owner) => owner,
-            GeneratedScaffoldRole::PlannedDeclaration(certificate) => certificate.product().owner(),
+        let native =
+            match &self.role {
+                GeneratedScaffoldRole::Native(native) => native,
+                GeneratedScaffoldRole::InitialTemplateInterfaces(initial) => {
+                    if target != module_source
+                        || boot
+                        || qualifier != "none"
+                        || initial.producer != context.producer
+                    {
+                        return false;
+                    }
+                    let key = identity(unit, module);
+                    let Ok(selected) = initial.template_interface_graph(&self.protected_templates)
+                    else {
+                        return false;
+                    };
+                    let Some(node) = selected.get(&key) else {
+                        return false;
+                    };
+                    let import = format!("import {module}");
+                    return self.protected_templates.iter().any(|template| {
+                        template.lines().filter(|line| *line == import).count() == 1
+                    }) && source.lines().filter(|line| *line == import).count() == 1
+                        && context.artifact_view().entries().iter().any(|entry| {
+                            entry.descriptor.owner == key
+                                && entry.descriptor.interface_sha256 == node.interface_sha256
+                        });
+                }
+            };
+        let owner = match native {
+            NativeScaffoldRole::Resume(owner) => owner,
+            NativeScaffoldRole::PlannedDeclaration(certificate) => certificate.product().owner(),
         };
         if target != module_source
             || boot
@@ -759,9 +800,9 @@ impl GeneratedScaffoldImportAuthority {
         {
             return false;
         }
-        let compiler_import = match &self.role {
-            GeneratedScaffoldRole::Resume(_) => GENERATED_RESUME_IMPORT.to_owned(),
-            GeneratedScaffoldRole::PlannedDeclaration(_) => format!("import {}", owner.module),
+        let compiler_import = match native {
+            NativeScaffoldRole::Resume(_) => GENERATED_RESUME_IMPORT.to_owned(),
+            NativeScaffoldRole::PlannedDeclaration(_) => format!("import {}", owner.module),
         };
         if source
             .lines()
@@ -774,15 +815,15 @@ impl GeneratedScaffoldImportAuthority {
         if !self
             .protected_templates
             .iter()
-            .any(|template| match &self.role {
-                GeneratedScaffoldRole::Resume(_) => {
+            .any(|template| match native {
+                NativeScaffoldRole::Resume(_) => {
                     template
                         .lines()
                         .filter(|line| *line == GENERATED_RESUME_IMPORT)
                         .count()
                         == 1
                 }
-                GeneratedScaffoldRole::PlannedDeclaration(_) => {
+                NativeScaffoldRole::PlannedDeclaration(_) => {
                     template
                         .lines()
                         .filter(|line| *line == "-- tidepool-preamble-imports-v1")
@@ -795,9 +836,9 @@ impl GeneratedScaffoldImportAuthority {
         }
         context.artifact_view().entries().iter().any(|entry| {
             matches!(&entry.payload, ArtifactPayload::Original(product) if
-            match &self.role {
-                GeneratedScaffoldRole::Resume(owner) => product.owner() == owner,
-                GeneratedScaffoldRole::PlannedDeclaration(certificate) =>
+            match native {
+                NativeScaffoldRole::Resume(owner) => product.owner() == owner,
+                NativeScaffoldRole::PlannedDeclaration(certificate) =>
                     product == certificate.product()
                     && certificate.toolchain_identity_sha256() == context.producer,
             })
@@ -1085,13 +1126,51 @@ impl ExactCompilationRequest {
             if let [owner] = owners.as_slice() {
                 self.generated_scaffold_imports
                     .push(GeneratedScaffoldImportAuthority {
-                        role: GeneratedScaffoldRole::Resume((*owner).clone()),
+                        role: GeneratedScaffoldRole::Native(NativeScaffoldRole::Resume(
+                            (*owner).clone(),
+                        )),
                         protected_templates: protected_templates.into(),
                     });
             }
         }
         self
     }
+    pub(crate) fn with_initial_template_interfaces(
+        mut self,
+        initial: Arc<ExactDeclarationContext>,
+        templates: &[String],
+    ) -> Result<Self, CompileError> {
+        let selected = initial.template_interface_graph(templates)?;
+        if selected.is_empty() {
+            return Ok(self);
+        }
+        if initial.producer != self.producer_sha256 {
+            return Err(failure("checked template interface producer differs"));
+        }
+        let entries = self.context.artifact_view().entries();
+        for (owner, node) in selected {
+            if !entries.iter().any(|entry| {
+                entry.descriptor.owner == owner
+                    && entry.descriptor.interface_sha256 == node.interface_sha256
+            }) || self
+                .context
+                .lexical_graph()
+                .iter()
+                .any(|current| current.owner == owner && current.imports != node.imports)
+            {
+                return Err(failure(
+                    "checked template interface differs from its initial selection",
+                ));
+            }
+        }
+        self.generated_scaffold_imports
+            .push(GeneratedScaffoldImportAuthority {
+                role: GeneratedScaffoldRole::InitialTemplateInterfaces(initial),
+                protected_templates: templates.to_vec().into(),
+            });
+        Ok(self)
+    }
+
     pub(crate) fn with_generated_planned_imports<'a>(
         mut self,
         certificate: Option<&Arc<CertifiedAuthoredDeclaration>>,
@@ -1112,7 +1191,9 @@ impl ExactCompilationRequest {
             let protected_templates = templates.into_iter().map(str::to_owned).collect::<Vec<_>>();
             self.generated_scaffold_imports
                 .push(GeneratedScaffoldImportAuthority {
-                    role: GeneratedScaffoldRole::PlannedDeclaration(certificate.clone()),
+                    role: GeneratedScaffoldRole::Native(NativeScaffoldRole::PlannedDeclaration(
+                        certificate.clone(),
+                    )),
                     protected_templates: protected_templates.into(),
                 });
         }
@@ -2146,6 +2227,63 @@ impl ExactDeclarationContext {
         self.inventory = self.inventory.merge(&interfaces)?;
         self.normalize()?;
         Ok(self)
+    }
+
+    /// Project only interfaces selected by the original checked template. The
+    /// immutable context owns their seals; template text selects imports, never
+    /// manufactures interface or native authority.
+    pub(crate) fn template_interface_graph(
+        &self,
+        templates: &[String],
+    ) -> Result<BTreeMap<ExactModuleIdentity, TemplateInterfaceNode>, CompileError> {
+        let entries = self.artifact_view().entries();
+        let lexical = self
+            .lexical_graph()
+            .iter()
+            .map(|node| (&node.owner, node))
+            .collect::<BTreeMap<_, _>>();
+        let mut pending = self
+            .lexical_graph()
+            .iter()
+            .filter(|node| {
+                let import = format!("import {}", node.owner.module);
+                templates
+                    .iter()
+                    .any(|template| template.lines().any(|line| line == import))
+            })
+            .map(|node| node.owner.clone())
+            .collect::<Vec<_>>();
+        let mut selected = BTreeMap::new();
+        while let Some(owner) = pending.pop() {
+            if selected.contains_key(&owner) {
+                continue;
+            }
+            let node = lexical
+                .get(&owner)
+                .ok_or_else(|| failure("checked template lexical closure is incomplete"))?;
+            let seals = entries
+                .iter()
+                .filter(|entry| entry.descriptor.owner == owner)
+                .map(|entry| entry.descriptor.interface_sha256)
+                .collect::<BTreeSet<_>>();
+            if seals.len() != 1 {
+                return Err(failure(
+                    "checked template selection lacks one exact interface seal",
+                ));
+            }
+            pending.extend(node.imports.iter().cloned());
+            selected.insert(
+                owner,
+                TemplateInterfaceNode {
+                    interface_sha256: *seals
+                        .iter()
+                        .next()
+                        .ok_or_else(|| failure("missing template interface seal"))?,
+                    imports: node.imports.clone(),
+                },
+            );
+        }
+        Ok(selected)
     }
 
     pub(crate) fn interface_owners(&self) -> Vec<ExactInterfaceOwner> {
@@ -5462,6 +5600,183 @@ mod tests {
     }
 
     #[test]
+    fn checked_template_graph_retains_lexical_dependencies_without_artifact_promotion() {
+        let (initial, _) = metadata_fixture();
+        let template = "module Expr where\nimport Joined\n";
+        let graph = initial
+            .template_interface_graph(&[template.to_owned()])
+            .unwrap();
+        assert_eq!(graph.len(), 2);
+        assert_eq!(
+            graph[&identity("fixture", "Joined")].imports,
+            vec![identity("fixture", "Alpha")]
+        );
+        assert!(graph.contains_key(&identity("fixture", "Alpha")));
+        assert!(
+            !graph.contains_key(&identity("fixture", "Beta")),
+            "artifact requirements cannot grant lexical instances"
+        );
+        let mut current = initial.as_ref().clone();
+        current.lexical.clear();
+        let authority = GeneratedScaffoldImportAuthority {
+            role: GeneratedScaffoldRole::InitialTemplateInterfaces(initial),
+            protected_templates: Arc::from([template.to_owned()]),
+        };
+        let target = Path::new("/owned/Expr.hs");
+        assert!(authority
+            .permits(&current, template, target, target, "fixture", "Joined", "none", false));
+        assert!(
+            !authority.permits(
+                &current,
+                &format!("{template}import Alpha\n"),
+                target,
+                target,
+                "fixture",
+                "Alpha",
+                "none",
+                false
+            ),
+            "retained lexical dependencies are not independent target imports"
+        );
+    }
+
+    #[test]
+    fn checked_template_interfaces_preserve_seals_without_native_or_lexical_authority() {
+        let make_context = |bytes: &[u8], selected: bool| {
+            let owner = identity("main", "CapturedInterface");
+            let mut packages = Vec::new();
+            ciborium::ser::into_writer(
+                &Value::Array(vec![
+                    text("TPPKGROOTS"),
+                    text("2"),
+                    Value::Array(vec![
+                        text(&owner.unit),
+                        text(&owner.module),
+                        text(sha256(bytes)),
+                    ]),
+                    Value::Array(vec![]),
+                    Value::Array(vec![]),
+                ]),
+                &mut packages,
+            )
+            .unwrap();
+            let interface = CertifiedJoinedInterface::from_certification(
+                [7; 32],
+                owner.unit.clone(),
+                owner.module.clone(),
+                bytes.to_vec(),
+                packages,
+            )
+            .unwrap();
+            let inventory = ArtifactInventory::default();
+            Arc::new(ExactDeclarationContext {
+                producer: [7; 32],
+                inventory: inventory
+                    .admit(
+                        &inventory.empty_view(),
+                        vec![ArtifactEntry::interface(
+                            interface,
+                            JoinedInterfaceRole::LexicalJoin,
+                            vec![],
+                        )],
+                    )
+                    .unwrap(),
+                lexical: if selected {
+                    vec![ExactLexicalNode {
+                        owner,
+                        imports: vec![],
+                    }]
+                } else {
+                    vec![]
+                },
+            })
+        };
+        let initial = make_context(b"first interface", true);
+        let current = make_context(b"first interface", false);
+        let changed = make_context(b"changed interface", false);
+        let source = "module Expr where\nimport CapturedInterface\n";
+        let authority = GeneratedScaffoldImportAuthority {
+            role: GeneratedScaffoldRole::InitialTemplateInterfaces(initial.clone()),
+            protected_templates: Arc::from([source.to_owned()]),
+        };
+        let target = Path::new("/owned/Expr.hs");
+        let permits = |context: &ExactDeclarationContext, source: &str, module_source: &Path| {
+            authority.permits(
+                context,
+                source,
+                target,
+                module_source,
+                "main",
+                "CapturedInterface",
+                "none",
+                false,
+            )
+        };
+        assert!(permits(&current, source, target));
+        assert!(current.recovery_products().is_empty());
+        assert!(current.lexical_graph().is_empty());
+        assert!(!permits(&changed, source, target));
+        assert!(!permits(&current, source, Path::new("/owned/Authored.hs")));
+        assert!(!permits(
+            &current,
+            "module Expr where\nimport qualified CapturedInterface as Hidden\n",
+            target
+        ));
+        assert!(!permits(
+            &current,
+            &format!("{source}import CapturedInterface\n"),
+            target
+        ));
+        let no_initial_selection = GeneratedScaffoldImportAuthority {
+            role: GeneratedScaffoldRole::InitialTemplateInterfaces(current.clone()),
+            protected_templates: Arc::from([source.to_owned()]),
+        };
+        assert!(!no_initial_selection.permits(
+            &current,
+            source,
+            target,
+            target,
+            "main",
+            "CapturedInterface",
+            "none",
+            false
+        ));
+        let no_protected_import = GeneratedScaffoldImportAuthority {
+            role: GeneratedScaffoldRole::InitialTemplateInterfaces(initial.clone()),
+            protected_templates: Arc::from(["module Expr where\n".to_owned()]),
+        };
+        assert!(!no_protected_import.permits(
+            &current,
+            source,
+            target,
+            target,
+            "main",
+            "CapturedInterface",
+            "none",
+            false
+        ));
+        assert_eq!(initial.lexical_graph().len(), 1);
+        let directory = tempfile::tempdir().unwrap();
+        let empty = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
+        let request = empty
+            .prepare_compilation_authorizing(directory.path(), b"new compiler producer", |_| {
+                Ok(Value::Null)
+            })
+            .unwrap();
+        let unchanged = request
+            .clone()
+            .with_initial_template_interfaces(empty, &[source.to_owned()])
+            .unwrap();
+        assert!(unchanged.generated_scaffold_imports.is_empty());
+        let wrong_producer =
+            request.with_initial_template_interfaces(initial, &[source.to_owned()]);
+        assert!(
+            matches!(wrong_producer, Err(CompileError::ExtractFailed(reason))
+            if reason == "exact declaration context: checked template interface producer differs")
+        );
+    }
+
+    #[test]
     fn generated_scaffold_authority_preserves_target_and_original_owner() {
         let directory = tempfile::tempdir().unwrap();
         let (graph, owners) = crate::execution_source::test_graph(directory.path());
@@ -5477,7 +5792,7 @@ mod tests {
             lexical: vec![],
         };
         let authority = GeneratedScaffoldImportAuthority {
-            role: GeneratedScaffoldRole::Resume(owners[0].clone()),
+            role: GeneratedScaffoldRole::Native(NativeScaffoldRole::Resume(owners[0].clone())),
             protected_templates: Arc::from([format!(
                 "module Expr where\n{GENERATED_RESUME_IMPORT}\n"
             )]),
@@ -5563,7 +5878,8 @@ mod tests {
             ));
         }
         let mut changed = authority.clone();
-        let GeneratedScaffoldRole::Resume(owner) = &mut changed.role else {
+        let GeneratedScaffoldRole::Native(NativeScaffoldRole::Resume(owner)) = &mut changed.role
+        else {
             panic!("resume scaffold authority must retain its closed role");
         };
         owner.module_version = ModuleVersion([99; 32]);

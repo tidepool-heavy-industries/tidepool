@@ -916,6 +916,10 @@ compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb binde
           (Just authority,Nothing) -> Just (displayTurnTemplates authority)
           (Nothing,Just authority) -> Just (itemTurnTemplates authority)
           _ -> Nothing
+        templateInterfaces = case (display,admitted) of
+          (Just authority,Nothing) -> displayTemplateInterfaces authority
+          (Nothing,Just authority) -> itemTemplateInterfaces authority
+          _ -> []
         verifyProtectedTemplate path captured = forM_ protectedTemplates $ \expected ->
           unless (any (\(kind,file) -> file == path
               && lookup kind expected == Just (shaHex (TE.encodeUtf8 (T.pack captured)))) templates)
@@ -1018,7 +1022,7 @@ compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb binde
               checkPurpose <- case protectedTemplates of
                 Nothing -> pure basePurpose
                 Just _ -> do
-                  recipe <- generatedScaffoldRecipe checkProtected checkSource checkPath checkModule >>= either fail pure
+                  recipe <- generatedScaffoldRecipe templateInterfaces checkProtected checkSource checkPath checkModule >>= either fail pure
                   pure (GeneratedScaffoldCompile recipe basePurpose)
               checked <- compiler CheckedEnvironment Set.empty checkPurpose
                 (Just (scopeFromWorkerRequest args)) checkPath (requestIncludes args) (requestBuildProductsDir args)
@@ -1056,7 +1060,7 @@ compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb binde
           purpose <- case protectedTemplates of
             Nothing -> pure basePurpose
             Just _ -> do
-              recipe <- generatedScaffoldRecipe protected spliced modulePath modName >>= either fail pure
+              recipe <- generatedScaffoldRecipe templateInterfaces protected spliced modulePath modName >>= either fail pure
               pure (GeneratedScaffoldCompile recipe basePurpose)
           compiler (PreparedProducts (requestModuleCandidates args))
             (Map.keysSet (requestRetainedGenerations args)) purpose
@@ -1422,7 +1426,7 @@ runCellProgramMode compiler caches args cellPath exact planned = do
             (fmap (\value -> case expressionPlanLift value of ExpressionPure -> "pure"; ExpressionEffectful -> "effectful") expression)
             (fmap (\value -> case expressionPlanPresentation value of ExpressionRendered -> "rendered"; ExpressionOpaque -> "opaque") expression)
             generation (checkedAdmissionDigest admission) (map programValueImport prefix) observation (programOriginal state)
-            prefix (scopeValues scope)
+            prefix (scopeValues scope) []
           localArgs = args { requestBindGen = Just generation, requestSessionRoot = Just root
             , requestInjectVals = map exactModule (scopeValues scope)
             , requestRetainedGenerations = programRetained state }
@@ -1460,7 +1464,7 @@ runCellProgramMode compiler caches args cellPath exact planned = do
             (fromIntegral index) observation capture generation (checkedAdmissionDigest admission)
             0 [] (checkedTurnTemplates admission) (map exactModule (scopeValues scope)) (map programValueImport prefix)
             (case expressionPlanPresentation expression of ExpressionRendered -> "rendered"; ExpressionOpaque -> "opaque")
-            (programOriginal state) prefix (scopeValues scope)
+            (programOriginal state) prefix (scopeValues scope) []
           localArgs = args { requestBindGen = Just generation, requestSessionRoot = Just root
             , requestInjectVals = map exactModule (scopeValues scope), requestRetainedGenerations = programRetained state }
           scoped :: Compiler

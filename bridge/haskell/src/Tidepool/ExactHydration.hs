@@ -18,6 +18,7 @@ module Tidepool.ExactHydration
   , selectVerifiedExactInterfaces
   , selectVerifiedValueInterfaces
   , checkedValueImportAuthorityFromVerified
+  , CheckedTemplateInterface(..)
   , GeneratedScaffoldRecipe, generatedScaffoldRecipe, captureGeneratedScaffoldTarget
   , permitsGeneratedScaffoldImport
   , GeneratedScaffoldImportAuthority, noGeneratedScaffoldImports, readGeneratedScaffoldImportAuthority
@@ -32,7 +33,7 @@ import Data.List (mapAccumL)
 import Control.Exception
   ( Exception, IOException, SomeException, SomeAsyncException, bracket, try, fromException, throwIO )
 import Data.Char (isHexDigit, toLower)
-import Data.Maybe (isJust, isNothing)
+import Data.Maybe (isJust, isNothing, catMaybes)
 import qualified Data.ByteString as BS
 import qualified Crypto.Hash.SHA256 as SHA256
 import GHC.Driver.Env
@@ -205,50 +206,86 @@ noCheckedValueImports = CheckedValueImportAuthority Set.empty
 -- A protected turn producer records the compiler's import before authored
 -- bytes are inserted. The resulting capability belongs to one rendered
 -- target, not to the support module's name or to the surrounding scope.
+data CheckedTemplateInterface = CheckedTemplateInterface
+  { templateInterfaceUnit :: String
+  , templateInterfaceModule :: String
+  , templateInterfaceSha256 :: String
+  , templateInterfaceImports :: [(String,String)]
+  } deriving (Eq, Show)
+
 data GeneratedScaffoldRecipe = GeneratedScaffoldRecipe FilePath String BS.ByteString Int
+  [(CheckedTemplateInterface,Int)] [CheckedTemplateInterface]
   deriving (Eq)
 
 instance Show GeneratedScaffoldRecipe where
-  show (GeneratedScaffoldRecipe path name _ line) =
-    "GeneratedScaffoldRecipe " ++ show (path,name,line)
+  show (GeneratedScaffoldRecipe path name _ line interfaces _) =
+    "GeneratedScaffoldRecipe " ++ show (path,name,line,interfaces)
 
-generatedScaffoldRecipe :: String -> String -> FilePath -> String
+generatedScaffoldRecipe :: [CheckedTemplateInterface] -> String -> String -> FilePath -> String
   -> IO (Either String GeneratedScaffoldRecipe)
-generatedScaffoldRecipe protectedTemplate rendered path name = do
+generatedScaffoldRecipe interfaces protectedTemplate rendered path name = do
   canonical <- canonicalizePath path
   let compilerImport = "import qualified Tidepool.Internal.Resume as TidepoolResume"
       occurrences text' = [line | (line,textLine) <- zip [1..] (lines text'), textLine == compilerImport]
       bytes = TextEncoding.encodeUtf8 (Text.pack rendered)
-  pure $ case (occurrences protectedTemplate,occurrences rendered) of
-    ([_],[line]) -> Right (GeneratedScaffoldRecipe canonical name bytes line)
-    _ -> Left "generated scaffold import is missing or duplicated"
+      templateOccurrence interface =
+        let importLine = "import " ++ templateInterfaceModule interface
+            matching text' = [line | (line,textLine) <- zip [1..] (lines text'), textLine == importLine]
+        in case (matching protectedTemplate,matching rendered) of
+          ([],_) -> Right Nothing
+          ([_],[line]) -> Right (Just (interface,line))
+          _ -> Left "checked template interface import is missing or duplicated"
+  pure $ do
+    selected <- catMaybes <$> mapM templateOccurrence interfaces
+    let key interface = (templateInterfaceUnit interface,templateInterfaceModule interface)
+        graph = Map.fromList [(key interface,interface) | interface <- interfaces]
+        reachable seen [] = Right (Map.elems seen)
+        reachable seen (owner:rest)
+          | Map.member owner seen = reachable seen rest
+          | otherwise = do
+              interface <- maybe (Left "checked template graph is incomplete") Right (Map.lookup owner graph)
+              reachable (Map.insert owner interface seen) (templateInterfaceImports interface ++ rest)
+    unless (Map.size graph == length interfaces) (Left "duplicate checked template interface")
+    closure <- reachable Map.empty (map (key . fst) selected)
+    case (occurrences protectedTemplate,occurrences rendered) of
+      ([_],[line]) -> Right (GeneratedScaffoldRecipe canonical name bytes line selected closure)
+      _ -> Left "generated scaffold import is missing or duplicated"
 
 captureGeneratedScaffoldTarget :: GeneratedScaffoldRecipe -> FilePath -> IO (Either String BS.ByteString)
-captureGeneratedScaffoldTarget (GeneratedScaffoldRecipe path _ expected _) requested = do
+captureGeneratedScaffoldTarget (GeneratedScaffoldRecipe path _ expected _ _ _) requested = do
   canonical <- canonicalizePath requested
   actual <- BS.readFile canonical
   pure $ if canonical == path && actual == expected then Right expected
     else Left "generated scaffold target differs from its protected recipe"
 
+data GeneratedScaffoldOwner
+  = NativeScaffoldOwner ExecutionSourceIdentity
+  | TemplateInterfaceOwner
+
+-- Interface-only template edges never enter the native/source replay inventory.
 data GeneratedScaffoldImportAuthority = GeneratedScaffoldImportAuthority
-  [(Module,Fingerprint,ExecutionSourceIdentity,SrcSpan,ExactIfaceArtifact)]
+  [(Module,Fingerprint,GeneratedScaffoldOwner,SrcSpan,ExactIfaceArtifact)]
+  [(ExactIfaceArtifact,[(String,String)])]
 
 noGeneratedScaffoldImports :: GeneratedScaffoldImportAuthority
-noGeneratedScaffoldImports = GeneratedScaffoldImportAuthority []
+noGeneratedScaffoldImports = GeneratedScaffoldImportAuthority [] []
 
 permitsGeneratedScaffoldImport
   :: GeneratedScaffoldImportAuthority -> ModSummary -> (String,String)
   -> (PkgQual, Located ModuleName) -> Bool
-permitsGeneratedScaffoldImport (GeneratedScaffoldImportAuthority scaffold) summary requested (qualifier,imported) =
+permitsGeneratedScaffoldImport (GeneratedScaffoldImportAuthority scaffold _) summary requested (qualifier,imported) =
   qualifier == NoPkgQual && any
-    (\(target,fingerprint,native,span',_) -> ms_mod summary == target && ms_hs_hash summary == fingerprint
-      && requested == (executionUnit native,executionModule native) && getLoc imported == span') scaffold
+    (\(target,fingerprint,owner,span',artifact) -> ms_mod summary == target && ms_hs_hash summary == fingerprint
+      && requested == (case owner of
+          NativeScaffoldOwner native -> (executionUnit native,executionModule native)
+          TemplateInterfaceOwner -> (exactUnit artifact,exactModule artifact))
+      && getLoc imported == span') scaffold
 
 readGeneratedScaffoldImportAuthority :: VerifiedExactIfaceClosure -> [ExecutionSourceIdentity]
   -> Maybe ((String,String),String) -> GeneratedScaffoldRecipe -> ParsedModule -> ModuleGraph -> HscEnv
   -> IO (Either String GeneratedScaffoldImportAuthority)
 readGeneratedScaffoldImportAuthority (VerifiedExactIfaceClosure captured) nativeOwners planned
-    recipe@(GeneratedScaffoldRecipe path target expected line) parsed sourceGraph env = do
+    recipe@(GeneratedScaffoldRecipe path target expected line templateInterfaces templateGraph) parsed sourceGraph env = do
   checked <- captureGeneratedScaffoldTarget recipe path
   (source,fingerprint) <- sourceEvidenceWithFingerprint path
   targetPaths <- forM [summary | ModuleNode _ summary <- mgModSummaries' sourceGraph
@@ -311,7 +348,7 @@ readGeneratedScaffoldImportAuthority (VerifiedExactIfaceClosure captured) native
             && ideclSource declaration == NotBoot && ideclImportList declaration == Nothing
             && case ideclPkgQual declaration of NoRawPkgQual -> True; _ -> False)
           (Left "generated scaffold parsed import differs from its protected shape")
-        pure (GeneratedScaffoldImportAuthority [(ms_mod summary,fingerprint,native,getLoc imported,artifact)])
+        pure (GeneratedScaffoldImportAuthority [(ms_mod summary,fingerprint,NativeScaffoldOwner native,getLoc imported,artifact)] [(artifact,[])])
     originals <- case planned of
       Nothing -> Right noGeneratedScaffoldImports
       Just (owner,expectedFingerprint) -> do
@@ -352,10 +389,42 @@ readGeneratedScaffoldImportAuthority (VerifiedExactIfaceClosure captured) native
           (Left "checked recipe original import has another shape")
         -- Original instances and families belong to this sealed declaration;
         -- only the protected recipe edge receives visibility.
-        pure (GeneratedScaffoldImportAuthority [(ms_mod summary,fingerprint,native,getLoc imported,artifact)])
-    let GeneratedScaffoldImportAuthority resumeEdges = resume
-        GeneratedScaffoldImportAuthority originalEdges = originals
-    pure (GeneratedScaffoldImportAuthority (resumeEdges ++ originalEdges))
+        pure (GeneratedScaffoldImportAuthority [(ms_mod summary,fingerprint,NativeScaffoldOwner native,getLoc imported,artifact)] [(artifact,[])])
+    templateNodes <- forM templateGraph $ \selected -> do
+      let owner = (templateInterfaceUnit selected,templateInterfaceModule selected)
+      (artifact,_,_) <- maybe (Left "checked template graph interface is not retained") Right (Map.lookup owner captured)
+      unless (exactSha256 artifact == templateInterfaceSha256 selected)
+        (Left "checked template graph interface seal changed")
+      pure (artifact,templateInterfaceImports selected)
+    templateEdges <- forM templateInterfaces $ \(selected,importLine) -> do
+      let owner = (templateInterfaceUnit selected,templateInterfaceModule selected)
+          original = mkModule (stringToUnit (fst owner)) (mkModuleName (snd owner))
+      unless (moduleUnit original == homeUnitAsUnit (hsc_home_unit env)
+          && not (any (\case ModuleNode _ loaded -> ms_mod loaded == original; _ -> False)
+            (mgModSummaries' sourceGraph)))
+        (Left "checked template interface conflicts with current source")
+      (artifact,iface,_) <- maybe (Left "checked template interface is not retained") Right
+        (Map.lookup owner captured)
+      unless (exactSha256 artifact == templateInterfaceSha256 selected && mi_module iface == original)
+        (Left "checked template interface seal changed")
+      imported <- case [name | (NoPkgQual,name) <- ms_textual_imps summary
+          , unLoc name == moduleName original
+          , case getLoc name of RealSrcSpan span' _ -> srcSpanStartLine span' == importLine; _ -> False] of
+        [name] -> Right name
+        _ -> Left "checked template interface import occurrence differs"
+      declaration <- case [unLoc located | located <- hsmodImports (unLoc (pm_parsed_source parsed))
+          , getLocA (ideclName (unLoc located)) == getLoc imported] of
+        [declaration] -> Right declaration
+        _ -> Left "checked template parsed import differs"
+      unless (ideclQualified declaration == NotQualified && isNothing (ideclAs declaration)
+          && ideclSource declaration == NotBoot && ideclImportList declaration == Nothing
+          && case ideclPkgQual declaration of NoRawPkgQual -> True; _ -> False)
+        (Left "checked template interface import has another shape")
+      pure (ms_mod summary,fingerprint,TemplateInterfaceOwner,getLoc imported,artifact)
+    let GeneratedScaffoldImportAuthority resumeEdges resumeNodes = resume
+        GeneratedScaffoldImportAuthority originalEdges originalNodes = originals
+    pure (GeneratedScaffoldImportAuthority (resumeEdges ++ originalEdges ++ templateEdges)
+      (resumeNodes ++ originalNodes ++ templateNodes))
 
 readCheckedValueImportAuthority
   :: HscEnv -> [ExactIfaceArtifact] -> IO (Either String CheckedValueImportAuthority)
@@ -647,12 +716,16 @@ installExactLexicalGraphWithScaffold
   -> CheckedValueImportAuthority -> GeneratedScaffoldImportAuthority -> HscEnv
   -> IO (Either String HscEnv)
 installExactLexicalGraphWithScaffold sourceGraph lexical (CheckedValueImportAuthority checkedValues)
-    (GeneratedScaffoldImportAuthority scaffold) env
-  | Set.size moduleNames /= length lexical = pure (Left "duplicate virtual lexical owner")
-  | any (\(_, deps) -> any (`Set.notMember` owners) deps) lexical =
+    (GeneratedScaffoldImportAuthority scaffold scaffoldGraph) env
+  | not (null conflictingRows) = pure (Left "checked template graph conflicts with current exact lexical graph")
+  | Set.size lexicalModuleNames /= length lexical = pure (Left "duplicate virtual lexical owner")
+  | Set.size virtualModuleNames /= length virtualRows = pure (Left "duplicate virtual graph module name")
+  | any (\(artifact, _) -> exactUnit artifact /= unitString home) virtualRows =
+      pure (Left "virtual graph owner is outside active home unit")
+  | any (\(_, deps) -> any (`Set.notMember` virtualOwners) deps) virtualRows =
       pure (Left "virtual lexical edge leaves admitted graph")
   | any (\node -> case node of
-      ModuleNode _ summary -> keyOf summary `Set.member` Set.union owners checkedValues
+      ModuleNode _ summary -> keyOf summary `Set.member` Set.union virtualOwners checkedValues
       _ -> False) (mgModSummaries' sourceGraph) =
       pure (Left "virtual lexical owner collides with source graph")
   | any (\(artifact, _) -> case lookupHpt (hsc_HPT env)
@@ -660,23 +733,28 @@ installExactLexicalGraphWithScaffold sourceGraph lexical (CheckedValueImportAuth
       Nothing -> True
       Just hmi -> mi_module (hm_iface hmi) /=
         mkModule (stringToUnit (exactUnit artifact))
-          (mkModuleName (exactModule artifact))) lexical =
+          (mkModuleName (exactModule artifact))) virtualRows =
       pure (Left "virtual lexical interface missing from exact HPT")
   | not (null unadmittedHomeEdges) =
       pure (Left ("source graph imports unadmitted home implementation: "
         ++ show unadmittedHomeEdges))
   | otherwise = do
-      forM_ lexical $ \(artifact, _) ->
-        addHomeModuleToFinder (hsc_FC env) (hsc_home_unit env)
-          (GWIB (mkModuleName (exactModule artifact)) NotBoot)
-          (ms_location (virtualSummary env artifact))
-      forM_ scaffold $ \(_,_,_,_,artifact) ->
+      forM_ virtualRows $ \(artifact, _) ->
         addHomeModuleToFinder (hsc_FC env) (hsc_home_unit env)
           (GWIB (mkModuleName (exactModule artifact)) NotBoot)
           (ms_location (virtualSummary env artifact))
       pure (Right env { hsc_mod_graph = mkModuleGraph (sourceNodes ++ virtualNodes) })
   where
-    moduleNames = Set.fromList [exactModule artifact | (artifact, _) <- lexical]
+    keyOfArtifact artifact = (exactUnit artifact,exactModule artifact)
+    graphRows = lexical ++ scaffoldGraph
+    rowGroups = Map.fromListWith (++) [(keyOfArtifact artifact,[(artifact,deps)]) | (artifact,deps) <- graphRows]
+    conflictingRows = [owner | (owner,first:rest) <- Map.toList rowGroups, any (/= first) rest]
+    virtualRows = Map.elems (Map.fromList [(keyOfArtifact artifact,(artifact,deps)) | (artifact,deps) <- graphRows])
+    lexicalModuleNames = Set.fromList [exactModule artifact | (artifact, _) <- lexical]
+    virtualModuleNames = Set.fromList [exactModule artifact | (artifact, _) <- virtualRows]
+    virtualOwners = Set.fromList (map (keyOfArtifact . fst) virtualRows)
+    -- Graph validation includes protected template dependencies. General authored
+    -- import permission still belongs only to the current lexical selection.
     owners = Set.fromList
       [(exactUnit artifact, exactModule artifact) | (artifact, _) <- lexical]
     home = homeUnitId (hsc_home_unit env)
@@ -693,7 +771,7 @@ installExactLexicalGraphWithScaffold sourceGraph lexical (CheckedValueImportAuth
            ++ [owner | imported <- ms_textual_imps summary ++ ms_srcimps summary
               , Just owner <- [hiddenImport summary imported]]))]
     permitted summary requested qualifier imported = permitsGeneratedScaffoldImport
-      (GeneratedScaffoldImportAuthority scaffold) summary requested (qualifier,imported)
+      (GeneratedScaffoldImportAuthority scaffold scaffoldGraph) summary requested (qualifier,imported)
     hiddenImport summary (qualifier, imported) =
       let name = unLoc imported
           local = case qualifier of
@@ -726,12 +804,15 @@ installExactLexicalGraphWithScaffold sourceGraph lexical (CheckedValueImportAuth
                   OtherPkg _ -> False
               ]
             added = [nodeKey owner | owner <- imports, owner `Set.member` owners]
+              ++ [nodeKey owner | (qualifier,name) <- ms_textual_imps summary
+                  , let owner = (unitString home,moduleNameString (unLoc name))
+                  , permitted summary owner qualifier name]
         in ModuleNode (Set.toList (Set.fromList (edges ++ added))) summary
       other -> other
       | node <- mgModSummaries' sourceGraph]
     virtualNodes =
       [ ModuleNode (map nodeKey deps) (virtualSummary env artifact)
-      | (artifact, deps) <- lexical ]
+      | (artifact, deps) <- virtualRows ]
 
 virtualSummary :: HscEnv -> ExactIfaceArtifact -> ModSummary
 virtualSummary env artifact = ModSummary

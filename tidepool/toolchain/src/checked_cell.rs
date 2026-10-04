@@ -1635,6 +1635,7 @@ impl CheckedDisplayOffer {
             self.prefix.planned_authorization(),
             Value::Array(self.settled_values.authorization.clone()),
             self.prefix.value_interface_authorization()?,
+            self.capture.item.template_interface_authorization()?,
         ]))
     }
     pub(crate) fn seal(
@@ -2344,6 +2345,40 @@ impl PartialEq for ExactCheckedItem {
 impl Eq for ExactCheckedItem {}
 
 impl ExactCheckedItem {
+    pub(crate) fn template_context(
+        &self,
+    ) -> Arc<crate::declaration_context::ExactDeclarationContext> {
+        self.cell.declaration_context.clone()
+    }
+    pub(crate) fn template_sources(&self) -> Vec<String> {
+        self.turn_templates()
+            .iter()
+            .map(|(_, source)| source.clone())
+            .collect()
+    }
+    fn template_interface_authorization(&self) -> Result<Value, CompileError> {
+        Ok(Value::Array(
+            self.cell
+                .declaration_context
+                .template_interface_graph(&self.template_sources())?
+                .into_iter()
+                .map(|(owner, node)| {
+                    array([
+                        text(&owner.unit),
+                        text(&owner.module),
+                        text(hex(&node.interface_sha256)),
+                        Value::Array(
+                            node.imports
+                                .iter()
+                                .map(|owner| array([text(&owner.unit), text(&owner.module)]))
+                                .collect(),
+                        ),
+                    ])
+                })
+                .collect(),
+        ))
+    }
+
     pub fn specification_digest(&self) -> [u8; 32] {
         self.cell.specification.specification_digest()
     }
@@ -2603,6 +2638,7 @@ impl CheckedItemOffer {
             self.prefix.planned_authorization(),
             Value::Array(self.settled_values.authorization.clone()),
             self.prefix.value_interface_authorization()?,
+            self.item.template_interface_authorization()?,
         ]))
     }
     pub(crate) fn validate_templates(
