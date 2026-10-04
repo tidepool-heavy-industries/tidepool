@@ -30,7 +30,7 @@ UNSET_ENVIRONMENT = (
     "TIDEPOOL_EXTRACT_DAEMON_SOCKET", "TIDEPOOL_COMPILER_MODULES",
     "TIDEPOOL_COMPILER_DEPLOYMENT", "TIDEPOOL_EXTRACT_WORKER",
     "TIDEPOOL_EXTRACT", "TIDEPOOL_PRELUDE_DIR", "TIDEPOOL_GHC_LIBDIR",
-    "EXOMONAD_EMBEDDED_ASSET_ROOT", "LD_LIBRARY_PATH", "TIDEPOOL_EXTRACT_NO_DAEMON",
+    "EXOMONAD_EMBEDDED_ASSET_ROOT", "EXOMONAD_WORKSPACE_GITLINK", "LD_LIBRARY_PATH", "TIDEPOOL_EXTRACT_NO_DAEMON",
 )
 ARTIFACT_TARGETS = {
     "bin/exomonad-unwrapped": "//bridge/facade:exomonad",
@@ -180,6 +180,27 @@ def verify_artifact_contract(bundle: Path, contract: dict) -> None:
             raise ValueError(f"mixed native build artifact: {relative}")
 
 
+def workspace_gitlink(path: Path) -> dict:
+    record = json.loads(path.read_text())
+    if not isinstance(record, dict):
+        raise ValueError("workspace Gitlink input must be an object")
+    expected = {"schema": 1, "path": ".exomonad/workspace", "mode": "160000", "revision": record.get("revision")}
+    if record != expected or not isinstance(record["revision"], str) or re.fullmatch(r"[0-9a-f]{40}", record["revision"]) is None:
+        raise ValueError("workspace Gitlink input must describe one exact recorded submodule revision")
+    return record
+
+
+def verify_workspace_gitlink(source: Path, path: Path) -> dict:
+    record = workspace_gitlink(path)
+    actual = subprocess.check_output([
+        "git", "-C", str(source), "ls-tree", "HEAD", "--", record["path"],
+    ], text=True)
+    expected = f'{record["mode"]} commit {record["revision"]}\t{record["path"]}\n'
+    if actual != expected:
+        raise ValueError("bundled workspace Gitlink differs from the source HEAD recorded submodule")
+    return record
+
+
 def native_environment(root: Path) -> dict:
     ghc = (root / "share/exomonad/ghc-libdir.txt").read_text().strip()
     tools = (root / "share/exomonad/runtime-tools").resolve(strict=True)
@@ -190,6 +211,7 @@ def native_environment(root: Path) -> dict:
         "TIDEPOOL_PRELUDE_DIR": str(root / "share/exomonad/stdlib"),
         "TIDEPOOL_GHC_LIBDIR": ghc,
         "EXOMONAD_EMBEDDED_ASSET_ROOT": str(root / "share/exomonad/web"),
+        "EXOMONAD_WORKSPACE_GITLINK": str(root / "share/exomonad/workspace-gitlink.json"),
         "LD_LIBRARY_PATH": str(root / "lib/tidepool"),
         "PATH": str(tools / "bin") + ":" + str(root / "bin"),
         "TIDEPOOL_KEEP_TEST_LOGS": "1",
@@ -268,6 +290,7 @@ def assemble(args) -> None:
     for source in args.libraries.iterdir():
         shutil.copy2(source.resolve(strict=True), root / "lib/tidepool" / source.name)
     shutil.copy2(args.harness_revision, shared / "harness-source-revision.txt")
+    shutil.copy2(args.workspace_gitlink, shared / "workspace-gitlink.json")
     tools, ghc = nix_path(args.runtime_tools), nix_path(args.ghc_libdir)
     (shared / "runtime-tools").symlink_to(tools)
     (shared / "ghc-libdir.txt").write_text(str(ghc) + "\n")
@@ -302,6 +325,7 @@ def freeze(args) -> Path:
     if contract["feature_profile"] != "embedded-native" or contract["stdlib_mode"] != "source-backed":
         raise ValueError("qualification requires the native source-backed bundle")
     verify_build_contract(source, args.bundle, contract, args.expect_profile)
+    recorded_workspace = verify_workspace_gitlink(source, args.bundle / "share/exomonad/workspace-gitlink.json")
     haskell_sources = declared_haskell_sources(source, args.bundle)
     lock = tomllib.loads((source / "Cargo.lock").read_text())
     harness = [row for row in lock["package"] if row["name"] == "harness"]
@@ -357,6 +381,7 @@ def freeze(args) -> Path:
         "schema": 1, "kind": "native-runtime-qualification", "bundle_root": str(root),
         "source_oid": oid, "harness_revision": revision, **contract,
         "source_submodules": submodules,
+        "workspace_gitlink": recorded_workspace,
         "declared_haskell_sources": haskell_sources,
         "source_metadata_inputs": {name: sha256(source / name) for name in ("Cargo.toml", "Cargo.lock", "flake.nix", "flake.lock", "scripts/native-profile.toml")},
         "build": {"commands": commands, "log": str(copied_log), "log_sha256": sha256(copied_log)},
@@ -399,6 +424,8 @@ def verify(path: Path) -> dict:
     if not contract["source_inputs"] or digest_inventory(contract["source_inputs"]) != contract["source_inputs_sha256"]:
         raise ValueError("native build source manifest is missing or has an invalid digest")
     verify_artifact_contract(root, contract)
+    if workspace_gitlink(root / "share/exomonad/workspace-gitlink.json") != descriptor["workspace_gitlink"]:
+        raise ValueError("qualification differs from its recorded workspace Gitlink")
     if set(descriptor["external_inputs"]) != EXTERNAL_INPUTS:
         raise ValueError("qualification requires every declared Nix runtime input")
     for item in descriptor["external_inputs"].values():
@@ -470,7 +497,7 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     stage = commands.add_parser("assemble")
-    for key in ("output", "host", "view-helper", "frontend", "worker", "libtest", "build-sources", "sources", "assets", "libraries", "harness-revision", "runtime-tools", "ghc-libdir", "entrypoint-template"):
+    for key in ("output", "host", "view-helper", "frontend", "worker", "libtest", "build-sources", "workspace-gitlink", "sources", "assets", "libraries", "harness-revision", "runtime-tools", "ghc-libdir", "entrypoint-template"):
         stage.add_argument("--" + key, required=True, type=Path)
     stage.add_argument("--profile", required=True, choices=("fast-dev", "debug", "production"))
     frozen = commands.add_parser("freeze")

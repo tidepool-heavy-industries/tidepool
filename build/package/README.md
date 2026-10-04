@@ -23,6 +23,9 @@ records their hashes and the declared native source snapshot under one selected
 profile. Freezing compares that snapshot with the clean recorded Git source and
 rejects a different requested profile, source revision, or substituted binary.
 The source OID and build log add provenance; they do not replace those byte checks.
+The bundled workspace Gitlink is also checked against the source HEAD's recorded
+`.exomonad/workspace` submodule. Hosted tests and the actual binary receive that
+same frozen file through `EXOMONAD_WORKSPACE_GITLINK`.
 
 ```sh
 python3 build/package/qualification.py freeze \

@@ -15,6 +15,28 @@ SPEC.loader.exec_module(qualification)
 
 
 class NativeQualificationTests(unittest.TestCase):
+    def test_workspace_descriptor_must_match_the_actual_committed_gitlink(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory)
+            subprocess.run(['git', 'init', '-q', str(source)], check=True)
+            (source / 'tracked.txt').write_text('first commit\n')
+            subprocess.run(['git', '-C', str(source), 'add', 'tracked.txt'], check=True)
+            commit = ['git', '-C', str(source), '-c', 'user.name=Qualification test',
+                      '-c', 'user.email=qualification@example.invalid', 'commit', '-qm']
+            subprocess.run([*commit, 'fixture commit'], check=True)
+            revision = subprocess.check_output(['git', '-C', str(source), 'rev-parse', 'HEAD'], text=True).strip()
+            subprocess.run(['git', '-C', str(source), 'update-index', '--add', '--cacheinfo',
+                            f'160000,{revision},.exomonad/workspace'], check=True)
+            subprocess.run([*commit, 'record workspace Gitlink'], check=True)
+            descriptor = source / 'workspace-gitlink.json'
+            record = {'schema': 1, 'path': '.exomonad/workspace', 'mode': '160000', 'revision': revision}
+            qualification.write_json(descriptor, record)
+            self.assertEqual(qualification.verify_workspace_gitlink(source, descriptor), record)
+            record['revision'] = '0' * 40
+            qualification.write_json(descriptor, record)
+            with self.assertRaisesRegex(ValueError, 'differs from the source HEAD recorded submodule'):
+                qualification.verify_workspace_gitlink(source, descriptor)
+
     def test_owned_build_contract_rejects_mixed_revision_profile_and_binary(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -86,12 +108,13 @@ class NativeQualificationTests(unittest.TestCase):
             'TIDEPOOL_COMPILER_MODULES': '/nix/store/older-project/catalog.json',
             'TIDEPOOL_EXTRACT_NO_DAEMON': '1',
             'TIDEPOOL_EXTRACT': '/tmp/older-extract',
+            'EXOMONAD_WORKSPACE_GITLINK': '/tmp/older-workspace-gitlink.json',
         }):
             environment = qualification.execution_environment({'environment': {
                 'TIDEPOOL_EXTRACT': '/frozen/bin/tidepool-extract',
             }})
         self.assertEqual(environment['TIDEPOOL_EXTRACT'], '/frozen/bin/tidepool-extract')
-        for key in ('TIDEPOOL_EXTRACT_DAEMON_SOCKET', 'TIDEPOOL_COMPILER_MODULES', 'TIDEPOOL_EXTRACT_NO_DAEMON'):
+        for key in ('TIDEPOOL_EXTRACT_DAEMON_SOCKET', 'TIDEPOOL_COMPILER_MODULES', 'TIDEPOOL_EXTRACT_NO_DAEMON', 'EXOMONAD_WORKSPACE_GITLINK'):
             self.assertNotIn(key, environment)
 
     def test_frozen_bytes_may_not_change_and_descriptor_may_not_move(self):

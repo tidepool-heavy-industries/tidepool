@@ -90,6 +90,7 @@ genrule(
         ":native_entrypoint",
         "toolchains//:exomonad_runtime_tools",
         "//build/rust:native_qualification_sources",
+        "//build/rust:workspace_gitlink",
     ],
     out = ".",
     env = {
@@ -104,6 +105,7 @@ genrule(
   --view-helper "$PWD/$(location //bridge/facade:exomonad-view-helper)" \
   --libtest "$PWD/$(location //bridge/facade:tidepool_unit_tests)" \
   --build-sources "$PWD/$(location //build/rust:native_qualification_sources)" \
+  --workspace-gitlink "$PWD/$(location //build/rust:workspace_gitlink)" \
   --frontend "$PWD/$(location //tidepool/extract-cmd:tidepool-extract)" \
   --worker "$PWD/$(location //bridge/haskell:tidepool_extract_bin)" \
   --sources "$PWD/$(location //bridge/haskell:facade_embedded_sources)" \
