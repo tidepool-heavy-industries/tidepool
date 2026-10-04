@@ -1533,6 +1533,7 @@ rust_filegroup(
         "src/actor_host/research_policy_setup.hs": "bridge/facade/src/actor_host/research_policy_setup.hs",
         "src/actor_host/research_policy_tests.rs": "bridge/facade/src/actor_host/research_policy_tests.rs",
         "src/actor_host/research_policy_width.hs": "bridge/facade/src/actor_host/research_policy_width.hs",
+        "src/actor_host/restart_effect_once.hs": "bridge/facade/src/actor_host/restart_effect_once.hs",
         "src/actor_host/root_declaration_recovery.rs": "bridge/facade/src/actor_host/root_declaration_recovery.rs",
         "src/actor_host/roster_observe.hs": "bridge/facade/src/actor_host/roster_observe.hs",
         "src/actor_host/roster_setup.hs": "bridge/facade/src/actor_host/roster_setup.hs",

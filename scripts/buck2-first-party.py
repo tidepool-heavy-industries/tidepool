@@ -1163,7 +1163,7 @@ cxx_library(
     visibility = ["PUBLIC"],
 )
 ''')
-    output = "\n".join(rules)
+    output = "\n".join(rules).rstrip() + "\n"
     output_path = ROOT / CURRENT_DIR / "BUCK"
     outputs[output_path] = output
 

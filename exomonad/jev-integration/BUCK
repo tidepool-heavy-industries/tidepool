@@ -79,4 +79,3 @@ tidepool_rust_isolated_test(
     ],
     visibility = ["PUBLIC"],
 )
-
