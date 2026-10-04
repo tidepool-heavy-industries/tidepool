@@ -1,15 +1,7 @@
-//! GHC-heavy integration test for the resident compile daemon. One binary and
-//! daemon boot are shared across most checks. The rotation checks each own a
-//! daemon because they deliberately use a one-request rotation threshold.
-//!
-//! Needs a resolvable `tidepool-extract` binary (`$TIDEPOOL_EXTRACT` or
-//! `PATH`) and a GHC on `PATH` that can load it (see bridge/haskell/CLAUDE.md).
-//! Under a bare `cargo nextest run` this test must not
-//! fail loud just because the toolchain isn't set up: `daemon_toolchain()`
-//! skips (prints and returns early, still a PASS) rather than panicking when
-//! the extract binary can't be resolved. Run explicitly via
-//! `scripts/battery.sh -p tidepool-extract-cmd -E 'binary(daemon_integration)'`
-//! (which builds/sets `$TIDEPOOL_EXTRACT` automatically) to actually exercise it.
+//! GHC-backed acceptance for the resident compiler daemon.
+//! Requires explicitly selected matched frontend/worker inputs. Missing source,
+//! process startup failure, and readiness timeout are test failures.
+//! Failed daemon logs are retained beside the test socket and named in diagnostics.
 
 #![allow(
     clippy::unwrap_used,
@@ -19,18 +11,20 @@
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use tidepool_extract_cmd::{resolve_bin, ExtractCmd, ResolvedExtractBin, SymbolIdentity};
+use tidepool_extract_cmd::{ExtractCmd, ResolvedExtractBin, SymbolIdentity};
+#[path = "support/compiler_inputs.rs"]
+mod compiler_inputs;
 
-/// The stdlib root every fixture's `--include` points at — this crate's own
-/// workspace-relative path, not the general-purpose 5-tier locator
-/// `tidepool-toolchain::toolchain` owns (that crate cannot be a dependency
-/// here — see this crate's own CLAUDE.md). A test running inside this
-/// repo's cargo workspace always has this path; that is the only case this
-/// helper needs to serve.
+/// Honor declared native source resources; Cargo uses this checkout's library.
 fn stdlib_lib_dir() -> PathBuf {
+    if let Some(root) = std::env::var_os("TIDEPOOL_PRELUDE_DIR") {
+        let root = PathBuf::from(root);
+        compiler_inputs::required_source(&root, "Tidepool/Prelude.hs").unwrap();
+        return root;
+    }
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("tidepool-extract-cmd has a source-root parent")
@@ -39,41 +33,29 @@ fn stdlib_lib_dir() -> PathBuf {
         .join("bridge/haskell/lib")
 }
 
-/// `test-prepared-stg` fixture source root, sibling of [`stdlib_lib_dir`] —
-/// home of `ImportProducerExposed.hs`/`ImportConsumerExposed.hs`, used by
-/// `check_j_retained_generation_transitions_through_warm_daemon`.
+/// Declared native source resource; Cargo uses the checkout's real source tree.
 fn prepared_stg_fixture_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("tidepool-extract-cmd has a source-root parent")
-        .parent()
-        .expect("tidepool source root has a workspace parent")
-        .join("bridge/haskell/test-prepared-stg")
+    let root = std::env::var_os("TIDEPOOL_RETAINED_IMPORT_FIXTURE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("bridge/haskell/test-prepared-stg")
+        });
+    for relative in ["ImportProducerExposed.hs", "ImportConsumerExposed.hs"] {
+        compiler_inputs::required_source(&root, relative).unwrap();
+    }
+    root
 }
 
-/// Resolve the extract binary the same way [`ExtractCmd::new`] would.
-/// `None` when unresolvable (unset `$TIDEPOOL_EXTRACT` outside a toolchain
-/// dev shell, or a set-but-broken one) — every check below skips cleanly on
-/// `None` rather than failing, so a bare `cargo nextest run` (which is not
-/// excluded from running this binary at all — see the module doc) stays
-/// green in an environment with no Haskell toolchain.
-fn daemon_toolchain() -> Option<(PathBuf, PathBuf)> {
-    let bin = match resolve_bin() {
-        Ok(r) => r.path,
-        Err(e) => {
-            eprintln!("daemon_integration: SKIPPED (extract binary unresolvable: {e})");
-            return None;
-        }
-    };
+fn daemon_toolchain() -> (PathBuf, PathBuf) {
+    let bin = compiler_inputs::require_compiler_executables();
     let lib = stdlib_lib_dir();
-    if !lib.join("Tidepool/Prelude.hs").is_file() {
-        eprintln!(
-            "daemon_integration: SKIPPED (stdlib root not found at {})",
-            lib.display()
-        );
-        return None;
-    }
-    Some((bin, lib))
+    compiler_inputs::required_source(&lib, "Tidepool/Prelude.hs").unwrap();
+    (bin, lib)
 }
 
 fn unique_scratch_dir(name: &str) -> PathBuf {
@@ -87,10 +69,7 @@ fn unique_scratch_dir(name: &str) -> PathBuf {
     dir
 }
 
-/// A socket path short enough for `sockaddr_un`'s ~108-byte `sun_path`
-/// (observed live: a scratch path under a long session-scoped `/tmp`
-/// subtree overflows it — see the module doc's own toolchain-availability
-/// caveat). `/tmp` directly, not the scratch dir, keeps this well clear.
+/// Keep test socket paths directly in the temporary root, below sun_path's bound.
 fn unique_socket_path(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("tp-ecmd-it-{name}-{}.sock", std::process::id()))
 }
@@ -98,84 +77,172 @@ fn unique_socket_path(name: &str) -> PathBuf {
 struct DaemonHandle {
     child: Child,
     socket: PathBuf,
+    logs: PathBuf,
+    ready: bool,
 }
 
 impl Drop for DaemonHandle {
     fn drop(&mut self) {
-        if let Err(error) = self.child.kill() {
-            eprintln!("daemon_integration: failed to kill test daemon process: {error}");
+        if matches!(self.child.try_wait(), Ok(None)) {
+            if let Err(error) = self.child.kill() {
+                eprintln!("daemon_integration: failed to kill test daemon process: {error}");
+            }
         }
         if let Err(error) = self.child.wait() {
             eprintln!("daemon_integration: failed to reap test daemon process: {error}");
         }
-        // best-effort: cleanup of a temp socket path.
         fs::remove_file(&self.socket).ok();
+        if self.ready && !std::thread::panicking() {
+            fs::remove_dir_all(&self.logs).ok();
+        } else {
+            eprintln!(
+                "daemon_integration: retained daemon logs: {}",
+                self.logs.display()
+            );
+        }
     }
 }
 
-/// `None` when the socket never appears within the bound — e.g. the
-/// resolved `$TIDEPOOL_EXTRACT`/`PATH` binary is a STALE build predating
-/// `--daemon` support (observed live: an old installed extract treats
-/// `--daemon` as a positional file and exits with a diagnostics error
-/// instead of ever binding a socket). Every caller treats `None` the same
-/// way `daemon_toolchain`'s own `None` is treated: skip the test cleanly
-/// rather than fail loud over an environment/toolchain-freshness problem
-/// this test cannot fix.
-fn spawn_daemon(bin: &Path, socket: &Path, extra_args: &[&str]) -> Option<DaemonHandle> {
-    // best-effort: cleanup of a stale socket path from a prior run.
+fn startup_diagnostics(logs: &Path, failure: &str) -> String {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut detail = format!("{failure}; retained daemon logs: {}", logs.display());
+    for name in ["stdout.log", "stderr.log"] {
+        let path = logs.join(name);
+        let text = fs::File::open(&path).and_then(|mut file| {
+            let len = file.metadata()?.len();
+            file.seek(SeekFrom::Start(len.saturating_sub(8192)))?;
+            let mut tail = Vec::new();
+            file.read_to_end(&mut tail)?;
+            Ok(String::from_utf8_lossy(&tail).into_owned())
+        });
+        detail.push_str(&format!(
+            "\n{name}: {}",
+            text.unwrap_or_else(|error| format!("unreadable: {error}"))
+        ));
+    }
+    detail
+}
+
+/// Readiness must be the actual daemon protocol, with one bounded startup wait.
+/// Failed handles reap their child and retain file-backed stdout/stderr.
+fn try_spawn_daemon(
+    bin: &Path,
+    socket: &Path,
+    extra_args: &[&str],
+) -> Result<DaemonHandle, String> {
     fs::remove_file(socket).ok();
+    let logs = socket.with_extension("startup");
+    fs::create_dir_all(&logs).map_err(|error| format!("create {}: {error}", logs.display()))?;
     #[allow(
         clippy::disallowed_methods,
-        reason = "integration test: launches the extract binary under test directly, exercising its own --daemon process boundary, not a call this crate's launcher owns"
+        reason = "integration test: invokes the frontend's own daemon boundary"
     )]
     let mut cmd = Command::new(bin);
-    cmd.arg("--daemon").arg("--socket").arg(socket);
-    for a in extra_args {
-        cmd.arg(a);
-    }
-    let mut child = cmd.spawn().expect("spawn daemon process");
-
-    let start = Instant::now();
-    let timeout = Duration::from_secs(30);
+    cmd.arg("--daemon")
+        .arg("--socket")
+        .arg(socket)
+        .args(extra_args)
+        .stdout(Stdio::from(
+            fs::File::create(logs.join("stdout.log")).map_err(|error| error.to_string())?,
+        ))
+        .stderr(Stdio::from(
+            fs::File::create(logs.join("stderr.log")).map_err(|error| error.to_string())?,
+        ));
+    let child = cmd.spawn().map_err(|error| {
+        startup_diagnostics(&logs, &format!("spawn {} failed: {error}", bin.display()))
+    })?;
+    let mut daemon = DaemonHandle {
+        child,
+        socket: socket.to_path_buf(),
+        logs,
+        ready: false,
+    };
+    let deadline = Instant::now() + Duration::from_secs(30);
     loop {
+        match daemon.child.try_wait() {
+            Ok(Some(status)) => {
+                return Err(startup_diagnostics(
+                    &daemon.logs,
+                    &format!("daemon exited before readiness: {status}"),
+                ))
+            }
+            Err(error) => {
+                return Err(startup_diagnostics(
+                    &daemon.logs,
+                    &format!("observe daemon startup: {error}"),
+                ))
+            }
+            Ok(None) => {}
+        }
+        if Instant::now() >= deadline {
+            return Err(startup_diagnostics(
+                &daemon.logs,
+                "daemon protocol readiness timed out after 30s",
+            ));
+        }
         if socket.exists() {
-            return Some(DaemonHandle {
-                child,
-                socket: socket.to_path_buf(),
+            let path = socket.to_path_buf();
+            let (completed, result) = std::sync::mpsc::channel();
+            let preflight = std::thread::spawn(move || {
+                let _ = completed.send(tidepool_extract_cmd::preflight_compiler_daemon(&path));
             });
-        }
-        if let Ok(Some(status)) = child.try_wait() {
-            eprintln!(
-                "daemon_integration: SKIPPED (--daemon process exited early with {status:?} — \
-                 likely a stale extract binary predating daemon support; run via \
-                 scripts/battery.sh to build a fresh one)"
-            );
-            return None;
-        }
-        if start.elapsed() >= timeout {
-            eprintln!(
-                "daemon_integration: SKIPPED (daemon socket {} did not appear within {:?})",
-                socket.display(),
-                timeout
-            );
-            if let Err(error) = child.kill() {
-                eprintln!(
-                    "daemon_integration: failed to kill unready test daemon process: {error}"
-                );
+            match result.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(Ok(_)) => {
+                    preflight
+                        .join()
+                        .expect("daemon preflight observer panicked");
+                    daemon.ready = true;
+                    return Ok(daemon);
+                }
+                Ok(Err(_)) => {
+                    preflight
+                        .join()
+                        .expect("daemon preflight observer panicked");
+                }
+                Err(error) => {
+                    // Killing our child closes the preflight socket, so the
+                    // observer cannot outlive the failed startup transaction.
+                    daemon.child.kill().ok();
+                    daemon.child.wait().ok();
+                    preflight
+                        .join()
+                        .expect("daemon preflight observer panicked");
+                    return Err(startup_diagnostics(
+                        &daemon.logs,
+                        &format!("daemon protocol readiness timed out: {error}"),
+                    ));
+                }
             }
-            if let Err(error) = child.wait() {
-                eprintln!(
-                    "daemon_integration: failed to reap unready test daemon process: {error}"
-                );
-            }
-            return None;
         }
         #[allow(
             clippy::disallowed_methods,
-            reason = "test: sync poll loop waiting for the daemon socket to appear"
+            reason = "bounded integration daemon readiness polling"
         )]
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+fn spawn_daemon(bin: &Path, socket: &Path, extra_args: &[&str]) -> DaemonHandle {
+    try_spawn_daemon(bin, socket, extra_args).unwrap_or_else(|error| panic!("{error}"))
+}
+
+#[test]
+fn rejected_daemon_startup_fails_with_retained_diagnostics() {
+    let (bin, _) = daemon_toolchain();
+    let socket = unique_socket_path("rejected-startup");
+    let failure = match try_spawn_daemon(&bin, &socket, &["--invalid-daemon-acceptance-option"]) {
+        Err(failure) => failure,
+        Ok(_) => panic!("invalid daemon argument unexpectedly passed protocol readiness"),
+    };
+    assert!(failure.contains("exited before readiness"), "{failure}");
+    assert!(
+        failure.contains("invalid-daemon-acceptance-option"),
+        "{failure}"
+    );
+    assert!(socket
+        .with_extension("startup")
+        .join("stderr.log")
+        .is_file());
 }
 
 fn write_fixture(dir: &Path, name: &str, contents: &str) -> PathBuf {
@@ -292,15 +359,11 @@ fn cmd_for(bin: &Path, dir: &Path, out_dir: &str, target_file: &str, lib: &Path)
 
 #[test]
 fn daemon_integration() {
-    let Some((bin, lib)) = daemon_toolchain() else {
-        return;
-    };
+    let (bin, lib) = daemon_toolchain();
 
     let dir = unique_scratch_dir("main");
     let socket = unique_socket_path("main");
-    let Some(daemon) = spawn_daemon(&bin, &socket, &[]) else {
-        return;
-    };
+    let daemon = spawn_daemon(&bin, &socket, &[]);
 
     // (a) runs LAST, not first: it must exercise a WARM daemon session (its
     // Unique counter already advanced by (b)/(c)/(d)'s many prior compiles),
@@ -1065,11 +1128,7 @@ fn check_e_rotation_then_fallback(bin: &Path, lib: &Path) {
         "module Expr where\nimport Tidepool.Prelude\nresult :: Int\nresult = 5\n",
     );
 
-    let Some(daemon) = spawn_daemon(bin, &socket, &["--rotate-after", "1"]) else {
-        // best-effort: test cleanup of a temp path.
-        fs::remove_dir_all(&dir).ok();
-        return;
-    };
+    let daemon = spawn_daemon(bin, &socket, &["--rotate-after", "1"]);
 
     let first = run_via_env_socket(&cmd_for(bin, &dir, "out-e-first", "Expr.hs", lib), &socket);
     assert!(first.status.success(), "rotation request should succeed");
@@ -1122,12 +1181,7 @@ fn check_i_persistent_rotation_keeps_serving(bin: &Path, lib: &Path) {
         "module Expr where\nimport Tidepool.Prelude\nresult :: Int\nresult = 6\n",
     );
 
-    let Some(mut daemon) = spawn_daemon(bin, &socket, &["--rotate-after", "1", "--persistent"])
-    else {
-        // best-effort: test cleanup of a temp path.
-        fs::remove_dir_all(&dir).ok();
-        return;
-    };
+    let mut daemon = spawn_daemon(bin, &socket, &["--rotate-after", "1", "--persistent"]);
 
     for output in ["out-i-first", "out-i-second"] {
         let result = run_via_env_socket(&cmd_for(bin, &dir, output, "Expr.hs", lib), &socket);
@@ -1178,18 +1232,12 @@ fn bound_identity(bin: &Path, socket: &Path) -> tidepool_extract_cmd::CompilerId
 /// that half of the contract.
 #[test]
 fn producer_identity_survives_independent_daemon_boots() {
-    let Some((bin, _lib)) = daemon_toolchain() else {
-        return;
-    };
+    let (bin, _lib) = daemon_toolchain();
 
     let socket_a = unique_socket_path("producer-a");
     let socket_b = unique_socket_path("producer-b");
-    let Some(daemon_a) = spawn_daemon(&bin, &socket_a, &[]) else {
-        return;
-    };
-    let Some(daemon_b) = spawn_daemon(&bin, &socket_b, &[]) else {
-        return;
-    };
+    let daemon_a = spawn_daemon(&bin, &socket_a, &[]);
+    let daemon_b = spawn_daemon(&bin, &socket_b, &[]);
 
     let identity_a = bound_identity(&bin, &socket_a);
     let identity_b = bound_identity(&bin, &socket_b);

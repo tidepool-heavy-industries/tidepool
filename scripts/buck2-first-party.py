@@ -554,7 +554,11 @@ def test_runtime_inputs(package_name, target_name, unit=False):
         variable, label = PREPARED_FIXTURE_RESOURCES[name]
         env[variable] = "$(location " + label + ")"
         resources.append(label)
-    if package_name in {"tidepool-toolchain", "tidepool-runtime", "tidepool-testing", "tidepool-handlers", "exomonad-actor"}:
+    if (
+        package_name in {"tidepool-toolchain", "tidepool-runtime", "tidepool-testing", "tidepool-handlers", "exomonad-actor"}
+        or (package_name == "tidepool-extract-cmd" and not unit
+            and target_name in {"daemon_integration", "transaction_integration"})
+    ):
         worker = True
         env.update({
             "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_deployment)",
@@ -566,6 +570,9 @@ def test_runtime_inputs(package_name, target_name, unit=False):
             "TIDEPOOL_KEEP_TEST_LOGS": "1",
         })
         resources.extend(["//build/package:compiler_deployment", "//bridge/haskell:facade_embedded_sources", "//build/package:tidepool_extract_runtime_libraries"])
+    if package_name == "tidepool-extract-cmd" and target_name == "daemon_integration":
+        env["TIDEPOOL_RETAINED_IMPORT_FIXTURE_DIR"] = "$(location //bridge/haskell:retained_import_test_sources)"
+        resources.append("//bridge/haskell:retained_import_test_sources")
     if package_name == "tidepool-toolchain" and target_name == "prepared_fixture":
         env["TIDEPOOL_PREPARED_FIXTURE_COMPILER"] = "$(exe //tidepool/toolchain:prepared-fixture)"
         resources.append("//tidepool/toolchain:prepared-fixture")

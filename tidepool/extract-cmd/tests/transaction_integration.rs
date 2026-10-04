@@ -4,6 +4,8 @@
     reason = "integration tests assert on known-good values; .clippy.toml allows this in test code"
 )]
 use tidepool_extract_cmd::{with_compiler_transaction, ExtractCmd};
+#[path = "support/compiler_inputs.rs"]
+mod compiler_inputs;
 
 struct TestEnvironment {
     dir: std::path::PathBuf,
@@ -33,12 +35,7 @@ impl Drop for TestEnvironment {
 
 #[test]
 fn direct_transaction_executes_multiple_compiler_requests() {
-    if std::env::var_os("TIDEPOOL_EXTRACT").is_none()
-        || std::env::var_os("TIDEPOOL_EXTRACT_WORKER").is_none()
-    {
-        eprintln!("transaction_integration: SKIPPED (worktree frontend/worker not selected)");
-        return;
-    }
+    compiler_inputs::require_compiler_executables();
     let dir = std::env::temp_dir().join(format!(
         "tidepool-compiler-transaction-{}",
         std::process::id()
@@ -132,12 +129,7 @@ fn direct_transaction_executes_multiple_compiler_requests() {
 /// assert byte-identical stdout (the CBOR/artifact payload).
 #[test]
 fn memo_trace_flag_adds_diagnostics_without_changing_compiled_output() {
-    if std::env::var_os("TIDEPOOL_EXTRACT").is_none()
-        || std::env::var_os("TIDEPOOL_EXTRACT_WORKER").is_none()
-    {
-        eprintln!("memo_trace_flag: SKIPPED (worktree frontend/worker not selected)");
-        return;
-    }
+    compiler_inputs::require_compiler_executables();
     let dir = std::env::temp_dir().join(format!("tidepool-memo-trace-{}", std::process::id()));
     // best-effort: test cleanup of a temp path from a prior run.
     std::fs::remove_dir_all(&dir).ok();

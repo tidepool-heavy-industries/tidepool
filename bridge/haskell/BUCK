@@ -269,6 +269,16 @@ filegroup(
     visibility = ["PUBLIC"],
 )
 
+# Runtime source for the extractor daemon's retained-generation transitions.
+filegroup(
+    name = "retained_import_test_sources",
+    srcs = {
+        "ImportProducerExposed.hs": "test-prepared-stg/ImportProducerExposed.hs",
+        "ImportConsumerExposed.hs": "test-prepared-stg/ImportConsumerExposed.hs",
+    },
+    visibility = ["PUBLIC"],
+)
+
 # Source modules compile once per requested target set. Test binaries consume
 # these directories at runtime, independently of their Rust compilation.
 tidepool_prepared_fixture(
