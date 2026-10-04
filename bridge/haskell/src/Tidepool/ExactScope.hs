@@ -1139,12 +1139,13 @@ decodeScope = do
       inputs <- bounded 4096 (array 4 >> CheckedTemplateInterface <$> nonempty <*> nonempty <*> digestField
         <*> bounded 4096 (array 2 >> (,) <$> nonempty <*> nonempty))
       let owners = [(templateInterfaceUnit input,templateInterfaceModule input) | input <- inputs]
+          ownerSet = Set.fromList owners
       unique "checked template interfaces" owners
       unless (sum (map (length . templateInterfaceImports) inputs) <= 65536)
         (fail "checked template graph exceeds its edge bound")
       forM_ inputs $ \input -> do
         unique "checked template edges" (templateInterfaceImports input)
-        unless (all (`elem` owners) (templateInterfaceImports input))
+        unless (all (`Set.member` ownerSet) (templateInterfaceImports input))
           (fail "checked template edge leaves its captured graph")
       pure inputs
     plannedDeclaration = do
