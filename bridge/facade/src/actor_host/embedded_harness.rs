@@ -849,13 +849,74 @@ fn provider_tool_error(error: ResidentToolError) -> ProviderError {
         )) => failure.diagnostic.as_ref(),
         _ => None,
     };
-    let failure = match diagnostic {
-        Some(diagnostic) => ToolFailure::with_metadata(
-            error.to_string(),
+    let invocation = match &error {
+        ResidentToolError::Invocation(failure) => Some(failure),
+        _ => None,
+    };
+    let mut metadata = diagnostic
+        .map(|diagnostic| {
             serde_json::to_value(diagnostic)
-                .expect("failure diagnostics contain only serializable data"),
-        ),
-        None => error.to_string().into(),
+                .expect("failure diagnostics contain only serializable data")
+        })
+        .unwrap_or_else(|| json!({}));
+    if let Some(invocation) = invocation {
+        metadata["publication"] = serde_json::to_value(invocation.publication()).unwrap();
+        metadata["items"] = serde_json::to_value(invocation.receipts()).unwrap();
+    }
+    let failure = if diagnostic.is_some() || invocation.is_some() {
+        let full = ToolFailure::with_metadata(error.to_string(), metadata.clone());
+        if full.metadata_omitted().is_none() {
+            full
+        } else {
+            // Preserve committed operation identities before reducing large output payloads.
+            metadata["items"] = json!(invocation
+                .map(|failure| failure
+                    .receipts()
+                    .iter()
+                    .map(|item| json!({
+                        "index": item.index, "status": item.status,
+                        "terminalTransfer": item.terminal_transfer,
+                        "operations": item.operations.iter().map(|operation| json!({
+                            "id": operation.id, "effect": operation.effect,
+                            "disposition": operation.disposition,
+                        })).collect::<Vec<_>>(),
+                    }))
+                    .collect::<Vec<_>>())
+                .unwrap_or_default());
+            metadata["itemsReduced"] = json!(true);
+            let reduced = ToolFailure::with_metadata(error.to_string(), metadata);
+            if reduced.metadata_omitted().is_none() {
+                reduced
+            } else {
+                let mut publication =
+                    serde_json::to_value(invocation.and_then(|failure| failure.publication()))
+                        .unwrap();
+                if let Some(fields) = publication.as_object_mut() {
+                    if let Some(bindings) = fields.remove("bindings") {
+                        fields.insert(
+                            "bindingsOmitted".into(),
+                            json!(bindings.as_array().map_or(0, Vec::len)),
+                        );
+                    }
+                    if let Some(detail) = fields.get_mut("detail") {
+                        *detail = json!(exomonad_actor::bound_workbench_display(
+                            detail.as_str().unwrap_or_default(),
+                            512
+                        ));
+                    }
+                }
+                ToolFailure::with_metadata(
+                    error.to_string(),
+                    json!({
+                        "publication": publication,
+                        "itemsOmitted": invocation.map_or(0, |failure| failure.receipts().len()),
+                        "diagnosticOmitted": diagnostic.is_some(),
+                    }),
+                )
+            }
+        }
+    } else {
+        error.to_string().into()
     };
     ProviderError::Tool(failure)
 }
@@ -1132,9 +1193,41 @@ mod round_control_tests {
             ResidentToolError::Invocation(exomonad_actor::KernelInvocationFailure::Workbench(
                 exomonad_actor::KernelWorkbenchFailure {
                     actor: ActorRef::first(exomonad_actor::ActorId(7)),
-                    receipts: vec![],
+                    receipts: vec![tidepool_runtime::session::WorkbenchItemReceipt {
+                        index: 0,
+                        kind: None,
+                        span: None,
+                        source_items: Vec::new(),
+                        status: tidepool_runtime::session::WorkbenchItemStatus::Committed,
+                        output: "large retained command output".repeat(1024),
+                        value: None,
+                        diagnostics: Vec::new(),
+                        failure_layer: None,
+                        warnings: Vec::new(),
+                        installed_bindings: vec!["privateValue".into()],
+                        operations: vec![tidepool_runtime::session::WorkbenchOperationReceipt {
+                            id: tidepool_runtime::session::WorkbenchOperationId {
+                                execution:
+                                    tidepool_runtime::session::WorkbenchExecutionId::from_digest(
+                                        [7; 16],
+                                    ),
+                                input_unit_index: 0,
+                                effect_ordinal: 0,
+                            },
+                            effect: "record_send".into(),
+                            disposition:
+                                tidepool_runtime::session::WorkbenchOperationDisposition::Committed,
+                            display: None,
+                            display_publication: None,
+                        }],
+                        terminal_transfer: None,
+                    }],
                     point: tidepool_runtime::session::WorkbenchFailurePoint::InputUnit { index: 0 },
-                    publication: None,
+                    publication: Some(
+                        tidepool_runtime::session::WorkbenchPublicationOutcome::NotPublished {
+                            reason: tidepool_runtime::session::WorkbenchNotPublishedReason::Failed,
+                        },
+                    ),
                     total: 1,
                     detail: "retained owner missing".into(),
                     diagnostic: Some(diagnostic),
@@ -1143,6 +1236,23 @@ mod round_control_tests {
         let original = error.to_string();
         let failure = provider_tool_error(error).into_tool_failure();
         assert_eq!(failure.message(), format!("tool failed: {original}"));
+        assert_eq!(
+            failure.metadata().unwrap()["publication"]["status"],
+            "notPublished"
+        );
+        assert_eq!(
+            failure.metadata().unwrap()["publication"]["reason"],
+            "failed"
+        );
+        assert_eq!(failure.metadata().unwrap()["itemsReduced"], true);
+        assert_eq!(
+            failure.metadata().unwrap()["items"][0]["status"],
+            "committed"
+        );
+        assert_eq!(
+            failure.metadata().unwrap()["items"][0]["operations"][0]["disposition"],
+            "committed"
+        );
         assert_eq!(failure.metadata().unwrap()["class"], "version-skew");
         assert_eq!(failure.metadata().unwrap()["phase"], "compile");
         assert_eq!(

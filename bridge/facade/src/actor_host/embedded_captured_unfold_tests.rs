@@ -488,43 +488,59 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
         context_capacity_tokens: 200_000,
         concurrent_jobs: 3,
     };
-    let mut campaign = test_campaign::TestCampaign::start_with_embedded_host_services(|config| {
-        config.embedded = Some(settings.clone());
-    })
-    .await;
-    let actor = campaign.actor.identity();
-    let mut service =
-        embedded_service::EmbeddedService::prepare(&campaign.config.run_root, &settings)
-            .await
-            .unwrap();
-    let runtime = Arc::clone(&service.runtime);
-    let root_origin = ConversationIdentity::Embedded {
-        run: runtime_namespace(&campaign.config.run_root),
-        actor: AgentPath("/root".into()),
-        incarnation: actor.incarnation.0.to_string(),
-    };
     let (requests_tx, mut requests_rx) = mpsc::unbounded_channel();
     let (reads_tx, mut reads_rx) = mpsc::unbounded_channel();
     let (root_steps_tx, root_steps) = mpsc::unbounded_channel();
-    let transport = Arc::new(CapturedHostTransport {
-        runtime: runtime.clone(),
-        scenario,
-        root_origin: root_origin.clone(),
-        root_round: AtomicUsize::new(0),
-        operations: Mutex::new(HashMap::new()),
-        scope_setup_issued: Notify::new(),
-        setup_requested: Notify::new(),
-        setup_ready: Notify::new(),
-        root_steps: tokio::sync::Mutex::new(root_steps),
-        root_steps_tx,
-        children: Mutex::new(HashMap::new()),
-        parent_failed: watch::channel(false).0,
-        reply_children: watch::channel(false).0,
-        finish_children: watch::channel(false).0,
-        reads: reads_tx,
-        requests: requests_tx,
-    });
-    service.set_test_transport(transport.clone());
+    let prepared_transport = Arc::new(Mutex::new(None));
+    let transport_slot = prepared_transport.clone();
+    let (mut campaign, service) = test_campaign::TestCampaign::start_with_embedded_engine(
+        |config| {
+            config.embedded = Some(settings.clone());
+        },
+        move |service, config| {
+            let root_origin = ConversationIdentity::Embedded {
+                run: runtime_namespace(&config.run_root),
+                actor: AgentPath("/root".into()),
+                incarnation: exomonad_actor::Incarnation::FIRST.0.to_string(),
+            };
+            let transport = Arc::new(CapturedHostTransport {
+                runtime: service.runtime.clone(),
+                scenario,
+                root_origin,
+                root_round: AtomicUsize::new(0),
+                operations: Mutex::new(HashMap::new()),
+                scope_setup_issued: Notify::new(),
+                setup_requested: Notify::new(),
+                setup_ready: Notify::new(),
+                root_steps: tokio::sync::Mutex::new(root_steps),
+                root_steps_tx,
+                children: Mutex::new(HashMap::new()),
+                parent_failed: watch::channel(false).0,
+                reply_children: watch::channel(false).0,
+                finish_children: watch::channel(false).0,
+                reads: reads_tx,
+                requests: requests_tx,
+            });
+            service.set_test_transport(transport.clone());
+            *transport_slot.lock() = Some(transport);
+        },
+    )
+    .await;
+    let transport = prepared_transport
+        .lock()
+        .take()
+        .expect("scripted Responses transport");
+    let actor = campaign.actor.identity();
+    let runtime = Arc::clone(&service.runtime);
+    let root_origin = transport.root_origin.clone();
+    assert_eq!(
+        root_origin,
+        ConversationIdentity::Embedded {
+            run: runtime_namespace(&campaign.config.run_root),
+            actor: AgentPath("/root".into()),
+            incarnation: actor.incarnation.0.to_string(),
+        }
+    );
     let (lifecycle_tx, lifecycle_rx) = mpsc::channel(32);
     let mut installation = campaign.root_installation.clone();
     installation.initial_user_message = Some("start checkpoint fixture".into());
@@ -731,15 +747,20 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
             .await
             .expect("exact original parent operation settles after retirement")
             .unwrap();
-        assert!(
-            matches!(
-                cancelled,
-                JobOutput::Cancelled
-                    | JobOutput::CancelledWithReceipt(_)
-                    | JobOutput::Completed(Err(_))
-            ),
-            "{cancelled:?}"
-        );
+        match cancelled {
+            JobOutput::CancelledWithReceipt(Ok(receipt)) => {
+                assert_eq!(receipt["publication"]["status"], "notPublished");
+                assert_eq!(receipt["publication"]["reason"], "cancelled");
+            }
+            JobOutput::CancelledWithReceipt(Err(failure)) | JobOutput::Completed(Err(failure)) => {
+                let metadata = failure
+                    .metadata()
+                    .expect("cancellation retains its publication outcome");
+                assert_eq!(metadata["publication"]["status"], "notPublished");
+                assert_eq!(metadata["publication"]["reason"], "cancelled");
+            }
+            other => panic!("parked pipeline did not settle as cancelled: {other:?}"),
+        }
         let known_children = captured_actors.lock().clone();
         assert_eq!(known_children.len(), 2);
         for child in std::iter::once(&campaign.actor).chain(known_children.iter()) {
@@ -858,6 +879,23 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
             result.expect_err(
                 "the original unfinished parent cell must fail after its child replies",
             );
+            let failed = scheduler
+                .wait(&transport.operation(&root_origin, PENDING_CALL))
+                .await
+                .unwrap();
+            let JobOutput::Completed(Err(failure)) = failed else {
+                panic!("failed creator must retain its exact tool failure: {failed:?}");
+            };
+            let metadata = failure
+                .metadata()
+                .expect("failed creator retains structured publication");
+            assert_eq!(metadata["publication"]["status"], "notPublished");
+            assert_eq!(metadata["publication"]["reason"], "failed");
+            assert!(metadata["items"]
+                .as_array()
+                .is_some_and(|items| items.iter().any(|item| item["operations"]
+                    .as_array()
+                    .is_some_and(|operations| !operations.is_empty()))));
             assert!(
                 campaign.actor.terminal().get().is_none(),
                 "the fixture fails a cell while its parent actor remains live"

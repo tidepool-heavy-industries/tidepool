@@ -159,6 +159,11 @@ enum CampaignRoot {
     },
     Dedicated,
     EmbeddedHost,
+    EmbeddedEngine {
+        configure_service:
+            Box<dyn FnOnce(&mut super::embedded_service::EmbeddedService, &ActorHostConfig) + Send>,
+        prepared: Arc<Mutex<Option<super::embedded_service::EmbeddedService>>>,
+    },
 }
 
 impl TestCampaign {
@@ -417,6 +422,27 @@ impl TestCampaign {
         .await
     }
 
+    pub(super) async fn start_with_embedded_engine(
+        configure: impl FnOnce(&mut ActorHostConfig),
+        configure_service: impl FnOnce(&mut super::embedded_service::EmbeddedService, &ActorHostConfig)
+            + Send
+            + 'static,
+    ) -> (Self, super::embedded_service::EmbeddedService) {
+        let prepared = Arc::new(Mutex::new(None));
+        let campaign = Self::start_configured(
+            exomonad_actor::ResearchPolicy::default(),
+            |admission| admission,
+            configure,
+            CampaignRoot::EmbeddedEngine {
+                configure_service: Box::new(configure_service),
+                prepared: prepared.clone(),
+            },
+        )
+        .await;
+        let service = prepared.lock().take().expect("prepared embedded service");
+        (campaign, service)
+    }
+
     /// A campaign whose root can read its own conversation, so `reflect`
     /// returns the supplied turns instead of reporting the context unbound.
     pub async fn start_with_conversation(
@@ -484,7 +510,10 @@ impl TestCampaign {
             jev: Some(exomonad_actor::unconfigured_jev()),
         };
         configure(&mut config);
-        if matches!(&root, CampaignRoot::EmbeddedHost) {
+        if matches!(
+            &root,
+            CampaignRoot::EmbeddedHost | CampaignRoot::EmbeddedEngine { .. }
+        ) {
             config.backend = crate::exomonad::HostBackendOptions::Embedded;
             // Select the same lazy HostJev client as production. No configured
             // test backend or fabricated installation flag substitutes for it.
@@ -527,6 +556,24 @@ impl TestCampaign {
                     &config, transform,
                 )
                 .await
+            }
+            CampaignRoot::EmbeddedEngine {
+                configure_service,
+                prepared,
+            } => {
+                let mut service = super::embedded_service::EmbeddedService::prepare(
+                    &config.run_root,
+                    config.embedded.as_ref().expect("embedded launch settings"),
+                )
+                .await
+                .unwrap();
+                configure_service(&mut service, &config);
+                let session = super::model_free::ModelFreeSession::start_with_embedded_service(
+                    &config, transform, &service,
+                )
+                .await;
+                *prepared.lock() = Some(service);
+                session
             }
         }
         .unwrap();

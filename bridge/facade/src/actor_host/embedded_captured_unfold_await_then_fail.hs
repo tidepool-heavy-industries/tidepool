@@ -39,4 +39,3 @@ do
       error "intentional captured parent Haskell execution failure" >> pure True
     _ -> error "captured same-cell reply contract failed" >> pure True
 capturedSuffix <- pure (99 :: Int)
-capturedSuffix <- pure (99 :: Int)
