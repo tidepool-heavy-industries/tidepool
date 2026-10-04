@@ -15,6 +15,9 @@ async fn embedded_checkpoint_scope_setup_starts_its_haskell_actor() {
     let host = HostedTestRuntime::start(&settings, &provider)
         .await
         .expect("production checkpoint host starts");
+    host.input("Exercise checkpoint scope and retained children.")
+        .await
+        .unwrap();
     let mut pending = std::collections::VecDeque::new();
     let root = AgentPath("/root".into());
     next_hosted_script_round(&mut requests, &mut pending, &root)
@@ -39,6 +42,9 @@ async fn published_embedded_checkpoint_survives_capture_cell_failure() {
     let host = HostedTestRuntime::start(&settings, &provider)
         .await
         .expect("production checkpoint host starts");
+    host.input("Exercise checkpoint scope and retained children.")
+        .await
+        .unwrap();
     let mut pending = std::collections::VecDeque::new();
     let root = AgentPath("/root".into());
     let actor = host.context.actor.identity();

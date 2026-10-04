@@ -21,6 +21,9 @@ async fn released_checkpoint_keeps_an_admitted_childs_hosted_context() {
     })
     .await
     .expect("production checkpoint host starts");
+    host.input("Exercise issuer retirement and checkpoint release.")
+        .await
+        .unwrap();
     let mut pending = std::collections::VecDeque::new();
     let root = AgentPath("/root".into());
     next_hosted_script_round(&mut requests, &mut pending, &root)

@@ -121,6 +121,31 @@ impl Drop for HostedTestRuntime {
 }
 
 impl HostedTestRuntime {
+    /// Admit ordinary user input through the actual attached root conversation.
+    /// Startup remains idle until a scenario explicitly calls this or submits
+    /// input through the browser command owner.
+    pub(super) async fn input(
+        &self,
+        text: &str,
+    ) -> Result<harness::embedding::InputReceipt, String> {
+        let conversation = self
+            .context
+            .binding(self.context.actor.identity())
+            .and_then(|binding| binding.conversation())
+            .ok_or_else(|| "production root conversation is not attached".to_owned())?;
+        let receipt = conversation
+            .input(&uuid::Uuid::new_v4().simple().to_string(), "operator", text)
+            .await
+            .map_err(|error| error.to_string())?;
+        if let Some(error) = &receipt.wake_error {
+            return Err(format!(
+                "user input {} was admitted but its wake failed: {error}",
+                receipt.envelope_id
+            ));
+        }
+        Ok(receipt)
+    }
+
     pub(super) async fn cell_settlement_diagnostic(&self, call_id: &str) -> String {
         let call = harness::model::CallId(call_id.into());
         let store = self.runtime.store();

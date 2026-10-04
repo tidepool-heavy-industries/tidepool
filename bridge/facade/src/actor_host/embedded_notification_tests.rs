@@ -204,6 +204,9 @@ async fn production_engine_advances_queued_notifications_and_reconciles_inclusio
     let host = hosted_test_context::HostedTestRuntime::start(&settings, &provider)
         .await
         .expect("production notification host starts");
+    host.input("Begin the round that receives queued notifications.")
+        .await
+        .unwrap();
     let actor = host.context.actor.identity();
     let binding = host
         .context

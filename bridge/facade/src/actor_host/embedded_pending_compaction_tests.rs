@@ -678,6 +678,9 @@ async fn attached_round_interrupt_preserves_host_and_accepts_later_input() {
     let host = super::hosted_test_context::HostedTestRuntime::start(&settings, &provider)
         .await
         .expect("production interrupt host starts");
+    host.input("Begin the provider round to interrupt.")
+        .await
+        .unwrap();
     let actor = host.context.actor.identity();
     let binding = host
         .context

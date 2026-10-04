@@ -733,6 +733,9 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
     )
     .await
     .expect("production embedded host starts");
+    host.input("Exercise the captured checkpoint scenario.")
+        .await
+        .unwrap();
     let transport = prepared_transport
         .lock()
         .take()
@@ -1561,6 +1564,9 @@ async fn admitted_cell_late_type_error_has_no_effect_or_publication_on_retry() {
             transport
         },
     ).await.expect("production hosted preflight starts");
+    host.input("Exercise whole-cell preflight admission.")
+        .await
+        .unwrap();
     let transport = slot.lock().take().unwrap();
     let actor = host.context.actor.identity();
     let binding = tokio::time::timeout(Duration::from_secs(30), async {
@@ -1573,7 +1579,11 @@ async fn admitted_cell_late_type_error_has_no_effect_or_publication_on_retry() {
     })
     .await
     .expect("actual attached root binding");
-    assert_eq!(binding.inbox.watermark(), 0);
+    assert_eq!(
+        binding.inbox.watermark(),
+        0,
+        "ordinary user input must not publish an actor notification"
+    );
     let source = include_str!("embedded_bad_final_cell.hs")
         .replace("TARGET_ID", &actor.id.0.to_string())
         .replace("TARGET_INCARNATION", &actor.incarnation.0.to_string());

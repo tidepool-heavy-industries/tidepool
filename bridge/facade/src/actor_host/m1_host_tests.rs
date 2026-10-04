@@ -515,6 +515,9 @@ async fn host_cancellation_stops_a_real_running_haskell_cell() {
     let host = HostedTestRuntime::start(&settings, &provider)
         .await
         .unwrap();
+    host.input("Run the resident Sleep cell before cancellation.")
+        .await
+        .unwrap();
     tokio::time::timeout(Duration::from_secs(300), async {
         transport.successor.notified().await;
         loop {

@@ -71,6 +71,9 @@ async fn driver_reopens_retained_final_without_provider_then_waits_for_explicit_
     })
     .await
     .unwrap();
+    host.input("Establish the retained final response.")
+        .await
+        .unwrap();
     let root = AgentPath("/root".into());
     let mut pending = VecDeque::new();
     next_hosted_script_round(&mut requests, &mut pending, &root)
@@ -264,6 +267,7 @@ async fn driver_retains_actor_after_eof_and_explicit_input_never_redispatches_ad
         )
         .await
         .unwrap();
+        host.input("first explicit input").await.unwrap();
         let conversation = host
             .context
             .binding(host.context.actor.identity())
@@ -358,14 +362,16 @@ async fn driver_retains_actor_after_eof_and_explicit_input_never_redispatches_ad
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         let retained_inputs = inputs.lock();
         let continued = &retained_inputs[1];
-        assert_eq!(
-            continued
-                .input
-                .iter()
-                .filter(|item| item.0["content"] == "continue explicitly")
-                .count(),
-            1
-        );
+        for text in ["first explicit input", "continue explicitly"] {
+            assert_eq!(
+                continued
+                    .input
+                    .iter()
+                    .filter(|item| item.0["content"] == text)
+                    .count(),
+                1
+            );
+        }
         if emit_call {
             assert_eq!(
                 continued

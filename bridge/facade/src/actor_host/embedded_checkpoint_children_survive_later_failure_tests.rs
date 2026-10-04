@@ -231,6 +231,9 @@ async fn embedded_checkpoint_children_survive_a_later_parent_cell_failure() {
     let host = hosted_test_context::HostedTestRuntime::start(&settings, &provider)
         .await
         .expect("production checkpoint host starts");
+    host.input("Capture child contexts before the later parent failure.")
+        .await
+        .unwrap();
     let actor = host.context.actor.identity();
     let runtime = Arc::clone(&host.runtime);
     let root_origin = ConversationIdentity::Embedded {

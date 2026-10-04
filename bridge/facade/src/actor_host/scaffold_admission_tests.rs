@@ -34,6 +34,9 @@ async fn freshly_scaffolded_agent_spec_installs_notebook_and_workspace_tools() {
     let host = HostedTestRuntime::start_configured(&settings, &provider, scaffold)
         .await
         .unwrap();
+    host.input("Exercise the scaffolded tool and retained shell contracts.")
+        .await
+        .unwrap();
     let mut pending = VecDeque::new();
     let root = harness::model::AgentPath("/root".into());
     let round = next_hosted_script_round(&mut requests, &mut pending, &root).await;

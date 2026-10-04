@@ -1637,6 +1637,9 @@ mod tests {
         let host = HostedTestRuntime::start(&settings, &provider)
             .await
             .unwrap();
+        host.input("Run the cell before browser compaction and checkpoint capture.")
+            .await
+            .unwrap();
         let conversation = host
             .context
             .binding(host.context.actor.identity())
