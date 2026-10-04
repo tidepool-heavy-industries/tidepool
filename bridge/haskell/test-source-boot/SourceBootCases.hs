@@ -1341,11 +1341,19 @@ exactExecutionValues = withTiming $ withScratch $ \work -> do
   let marker = work </> "checked-value-quoter-executed"
       target = work </> "CheckedValueQuoterTarget.hs"
       quoter = work </> "MetadataQuoter.hs"
+      ordinaryTarget = work </> "CheckedValueQuoterControl.hs"
   source <- TE.decodeUtf8 <$> BS.readFile quoter
   writeFile quoter (T.unpack (T.replace
     "quoteExp = \\_ -> pure"
     (T.pack ("quoteExp = \\_ -> runIO (writeFile " ++ show marker ++ " \"executed\") >> pure"))
     (T.replace "import MetadataQuoteSupport" "import Language.Haskell.TH.Syntax (runIO)\nimport MetadataQuoteSupport" source)))
+  writeFile ordinaryTarget $ unlines
+    [ "{-# LANGUAGE QuasiQuotes #-}"
+    , "module CheckedValueQuoterControl where"
+    , "import MetadataQuoter (answer)"
+    , "__result :: Int"
+    , "__result = [answer|quoted|]"
+    ]
   produced <- runPipelineSelected (PreparedProducts Nothing) (work </> "CheckedValueQuoterProducer.hs") [work]
   let result = pprPipelineResult produced
       scopePath = work </> "value-scope.cbor"
@@ -1360,6 +1368,13 @@ exactExecutionValues = withTiming $ withScratch $ \work -> do
         (replicate 64 '0') [] ["Tidepool.Session.Val.G8"] [] [value] Nothing AuthoredCellCheck) [work]}
       scope = emptySessionScope {ssRoot=work,ssExactScope=Just scopePath,ssValIfaces=[valueOwner]}
   withResidentPipelineSelected [work] $ \compile -> do
+    positive <- compile CheckedEnvironment Set.empty GeneralCompile Nothing ordinaryTarget [work] Nothing
+    case crResultType positive of
+      Just inferred | eqType inferred intTy -> pure ()
+      _ -> fail "ordinary positive control lost the real quoter's result type"
+    positiveRan <- doesFileExist marker
+    unless positiveRan (fail "ordinary positive control did not execute the instrumented quoter")
+    removeFile marker
     refused <- try (compile CheckedEnvironment Set.empty
       (CellProgramCompile GeneralCompile admitted) (Just scope) target [work] Nothing)
       :: IO (Either SomeException CheckedEnvironmentResult)
