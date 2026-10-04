@@ -1081,9 +1081,13 @@ impl ResidentHole {
     }
 
     fn mint(id: String, seed: HoleSeed) -> Self {
-        match seed {
-            HoleSeed::Plain => ResidentHole::Plain(PlainHole { id, checked: None }),
-            HoleSeed::Binding {
+        let HoleSeed {
+            obligation,
+            checked,
+        } = seed;
+        match obligation {
+            HoleObligation::Plain => ResidentHole::Plain(PlainHole { id, checked }),
+            HoleObligation::Binding {
                 binder,
                 generation,
                 observation,
@@ -1094,18 +1098,9 @@ impl ResidentHole {
                 generation,
                 observation,
                 lexical_scope,
-                checked: None,
+                checked,
             }),
-            HoleSeed::Checked { seed, completion } => {
-                let mut hole = Self::mint(id, *seed);
-                match &mut hole {
-                    Self::Plain(hole) => hole.checked = Some(completion),
-                    Self::Binding(hole) => hole.checked = Some(completion),
-                    Self::ProjectedBinding(hole) => hole.checked = Some(completion),
-                }
-                hole
-            }
-            HoleSeed::ProjectedBinding {
+            HoleObligation::ProjectedBinding {
                 binders,
                 generation,
                 lexical_scope,
@@ -1114,7 +1109,7 @@ impl ResidentHole {
                 binders,
                 generation,
                 lexical_scope,
-                checked: None,
+                checked,
             }),
         }
     }
@@ -1124,26 +1119,30 @@ impl ResidentHole {
     /// of re-suspensions all carry the SAME binder/generation/scope through to
     /// whichever one finally completes.
     fn seed(&self) -> HoleSeed {
-        let seed = match self {
-            ResidentHole::Plain(_) => HoleSeed::Plain,
-            ResidentHole::Binding(h) => HoleSeed::Binding {
-                binder: h.binder.clone(),
-                generation: h.generation,
-                observation: h.observation.clone(),
-                lexical_scope: h.lexical_scope,
-            },
-            ResidentHole::ProjectedBinding(h) => HoleSeed::ProjectedBinding {
-                binders: h.binders.clone(),
-                generation: h.generation,
-                lexical_scope: h.lexical_scope,
-            },
+        let (obligation, checked) = match self {
+            ResidentHole::Plain(h) => (HoleObligation::Plain, h.checked.clone()),
+            ResidentHole::Binding(h) => (
+                HoleObligation::Binding {
+                    binder: h.binder.clone(),
+                    generation: h.generation,
+                    observation: h.observation.clone(),
+                    lexical_scope: h.lexical_scope,
+                },
+                h.checked.clone(),
+            ),
+            ResidentHole::ProjectedBinding(h) => (
+                HoleObligation::ProjectedBinding {
+                    binders: h.binders.clone(),
+                    generation: h.generation,
+                    lexical_scope: h.lexical_scope,
+                },
+                h.checked.clone(),
+            ),
         };
-        let checked = match self {
-            Self::Plain(hole) => &hole.checked,
-            Self::Binding(hole) => &hole.checked,
-            Self::ProjectedBinding(hole) => &hole.checked,
-        };
-        seed.with_checked(checked.clone())
+        HoleSeed {
+            obligation,
+            checked,
+        }
     }
 
     /// Construct a `Plain` hole from a bare continuation id, for a caller
@@ -1166,14 +1165,17 @@ impl ResidentHole {
     }
 }
 
-/// What kind of hole [`ResidentSession::classify_parked`] mints on a fresh
-/// suspension — [`ResidentHole`] minus the id, which is minted alongside it.
+/// The id-free completion obligation and optional checked owner retained
+/// when [`ResidentSession::classify_parked`] mints a hole. A completion owner
+/// accompanies exactly one obligation; it cannot wrap another checked seed.
 #[derive(Clone)]
-enum HoleSeed {
-    Checked {
-        seed: Box<HoleSeed>,
-        completion: Arc<CheckedTurnCompletion>,
-    },
+struct HoleSeed {
+    obligation: HoleObligation,
+    checked: Option<Arc<CheckedTurnCompletion>>,
+}
+
+#[derive(Clone)]
+enum HoleObligation {
     Plain,
     Binding {
         binder: BoundBinder,
@@ -1186,24 +1188,6 @@ enum HoleSeed {
         generation: Generation,
         lexical_scope: ScopeId,
     },
-}
-
-impl HoleSeed {
-    fn with_checked(self, checked: Option<Arc<CheckedTurnCompletion>>) -> Self {
-        match checked {
-            Some(completion) => Self::Checked {
-                seed: Box::new(self),
-                completion,
-            },
-            None => self,
-        }
-    }
-    fn into_unchecked(self) -> (Self, Option<Arc<CheckedTurnCompletion>>) {
-        match self {
-            Self::Checked { seed, completion } => (*seed, Some(completion)),
-            seed => (seed, None),
-        }
-    }
 }
 
 /// The classified result of driving a resident turn to its first yield.
@@ -1777,14 +1761,18 @@ pub(crate) enum PreparedRun {
 
 /// The hole a suspension of a turn run in `mode` mints, carrying its
 /// completion obligation forward across resumes.
-fn hole_seed_of(mode: &PreparedTurnMode<'_>, lexical_scope: ScopeId) -> HoleSeed {
-    match mode {
-        PreparedTurnMode::Value => HoleSeed::Plain,
+fn hole_seed_of(
+    mode: &PreparedTurnMode<'_>,
+    lexical_scope: ScopeId,
+    checked: Option<Arc<CheckedTurnCompletion>>,
+) -> HoleSeed {
+    let obligation = match mode {
+        PreparedTurnMode::Value => HoleObligation::Plain,
         PreparedTurnMode::Binding {
             binder,
             generation,
             observation,
-        } => HoleSeed::Binding {
+        } => HoleObligation::Binding {
             binder: (*binder).clone(),
             generation: *generation,
             observation: observation.clone(),
@@ -1793,11 +1781,15 @@ fn hole_seed_of(mode: &PreparedTurnMode<'_>, lexical_scope: ScopeId) -> HoleSeed
         PreparedTurnMode::Projected {
             binders,
             generation,
-        } => HoleSeed::ProjectedBinding {
+        } => HoleObligation::ProjectedBinding {
             binders: binders.to_vec(),
             generation: *generation,
             lexical_scope,
         },
+    };
+    HoleSeed {
+        obligation,
+        checked,
     }
 }
 
@@ -4078,11 +4070,14 @@ where
         tracing::debug!(
             continuation = %cont_id,
             handle = ?transfer.handle,
-            obligation = match &seed {
-                HoleSeed::Checked { .. } => "checked",
-                HoleSeed::Plain => "plain",
-                HoleSeed::Binding { .. } => "binding",
-                HoleSeed::ProjectedBinding { .. } => "projected-binding",
+            obligation = if seed.checked.is_some() {
+                "checked"
+            } else {
+                match &seed.obligation {
+                    HoleObligation::Plain => "plain",
+                    HoleObligation::Binding { .. } => "binding",
+                    HoleObligation::ProjectedBinding { .. } => "projected-binding",
+                }
             },
             actor_scope = ?self.run_context.lexical_scope,
             actor_realm = ?self.run_context.resource_scope,
@@ -5929,7 +5924,7 @@ where
         resumed: Option<&str>,
         checked: Option<Arc<CheckedTurnCompletion>>,
     ) -> Result<ResidentOutcome, ResidentError> {
-        let seed = hole_seed_of(&mode, lexical_scope).with_checked(checked.clone());
+        let seed = hole_seed_of(&mode, lexical_scope, checked.clone());
         let outcome = match run {
             PreparedRun::Done { handle, value } => {
                 let engine = self.state.require_prepared()?;
@@ -6063,11 +6058,14 @@ where
         interface_source: ValueInterfaceSource,
     ) -> Result<(), ResidentError> {
         let binders = bound.iter().map(|(binder, _)| *binder).collect::<Vec<_>>();
-        let overlay_validation = checked
-            .map(|completion| completion.validates_private_overlay(&self.state, scope, &binders))
-            .transpose();
+        let overlay_validation = match checked {
+            Some(completion) => completion
+                .validates_private_overlay(&self.state, scope, &binders)
+                .map(|private| private.then_some(completion)),
+            None => Ok(None),
+        };
         let private_overlay = match overlay_validation {
-            Ok(validation) => validation.unwrap_or(false),
+            Ok(completion) => completion,
             Err(error) => {
                 if let Some(engine) = self.state.prepared_mut() {
                     engine.release_all(bound.iter().map(|(_, handle)| *handle));
@@ -6124,13 +6122,9 @@ where
             };
             entries.push(entry);
         }
-        if private_overlay {
-            self.state.bind_checked_private_values_in(
-                checked.expect("private overlay has its sealed completion owner"),
-                scope,
-                entries,
-                &binders,
-            )?;
+        if let Some(completion) = private_overlay {
+            self.state
+                .bind_checked_private_values_in(completion, scope, entries, &binders)?;
         } else {
             self.state.bind_replacing_decls_in(scope, entries)?;
         }
@@ -6545,7 +6539,10 @@ where
         self.reenter(
             cont_id,
             ResidentResumeInput::Abort(reason),
-            HoleSeed::Plain,
+            HoleSeed {
+                obligation: HoleObligation::Plain,
+                checked: None,
+            },
             None,
         )
         .map_err(ResidentResumeError::into_inner)
@@ -6875,7 +6872,10 @@ where
         seed: HoleSeed,
         provenance: Arc<ProgramProvenance>,
     ) -> Result<ResidentOutcome, ResidentError> {
-        let (seed, checked) = seed.into_unchecked();
+        let HoleSeed {
+            obligation,
+            checked,
+        } = seed;
         let input = match input {
             ResidentResumeInput::Abort(reason) => {
                 let aborted = self.on_eval_thread(move |engine, _table, _handlers, _captured| {
@@ -6891,9 +6891,9 @@ where
         };
         // The hole's own obligation says how the resumed run completes; the
         // frame carries the runner whose entry re-enters the continuation.
-        let (lexical_scope, mode) = match &seed {
-            HoleSeed::Plain => (self.run_context.lexical_scope, PreparedTurnMode::Value),
-            HoleSeed::Binding {
+        let (lexical_scope, mode) = match &obligation {
+            HoleObligation::Plain => (self.run_context.lexical_scope, PreparedTurnMode::Value),
+            HoleObligation::Binding {
                 binder,
                 generation,
                 observation,
@@ -6906,7 +6906,7 @@ where
                     observation: observation.clone(),
                 },
             ),
-            HoleSeed::ProjectedBinding {
+            HoleObligation::ProjectedBinding {
                 binders,
                 generation,
                 lexical_scope,
@@ -6917,9 +6917,6 @@ where
                     generation: *generation,
                 },
             ),
-            HoleSeed::Checked { .. } => {
-                unreachable!("checked completion was separated from its hole obligation")
-            }
         };
         let plan = settle_plan_of(&mode);
         let park = ParkPolicy {
@@ -7355,7 +7352,13 @@ mod custody_release_tests {
                 ..SessionRunContext::ROOT
             })
             .unwrap();
-        let hole = ResidentHole::mint("not-a-parked-hole".into(), HoleSeed::Plain);
+        let hole = ResidentHole::mint(
+            "not-a-parked-hole".into(),
+            HoleSeed {
+                obligation: HoleObligation::Plain,
+                checked: None,
+            },
+        );
         let before = session.value_handle_count();
         assert!(matches!(
             session.resume_framed_binding_sources_classified(
