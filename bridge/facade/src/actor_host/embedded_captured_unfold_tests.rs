@@ -623,7 +623,7 @@ async fn root_browser_projection(
                     return actor;
                 }
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            tokio::task::yield_now().await;
         }
     })
     .await
@@ -1346,38 +1346,6 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
         .expect("production shutdown confirms host and forest cleanup");
 }
 
-fn preflight_invocation(
-    request_id: &str,
-    call_id: &str,
-    source: String,
-) -> exomonad_tool::ToolInvocation {
-    exomonad_tool::ToolInvocation {
-        context: Some(exomonad_tool::ToolInvocationContext::external(
-            "whole-cell-preflight".into(),
-            request_id.into(),
-            call_id.into(),
-            Some(call_id.into()),
-            Some("haskell".into()),
-        )),
-        name: exomonad_actor::HASKELL_TOOL.into(),
-        arguments: exomonad_tool::ToolArguments::Raw(source),
-    }
-}
-
-async fn preflight_dispatch_without_effect(
-    campaign: &mut test_campaign::TestCampaign,
-    invocation: exomonad_tool::ToolInvocation,
-) -> Value {
-    let policy = campaign.root_installation.policy.clone();
-    tokio::select! {
-        result = policy.dispatch_json_boxed(invocation) => result.expect("actual admitted Haskell invocation settles"),
-        effect = campaign.next_deployment("forbidden preflight notification", Duration::from_secs(120), |event| match event {
-            LocalResidentDeployment::NotificationSend(command) => Ok(command),
-            other => Err(other),
-        }) => panic!("effect ran before complete-cell rejection: {}", effect.message()),
-    }
-}
-
 fn assert_preflight_rejection(response: &Value) {
     use tidepool_runtime::session::{WorkbenchItemStatus, WorkbenchRunStatus};
     assert_eq!(
@@ -1406,10 +1374,165 @@ fn assert_preflight_rejection(response: &Value) {
     }
 }
 
+enum PreflightStep {
+    Cell { call: String, source: String },
+    InterruptStream,
+    Finish,
+}
+
+struct PreflightTransport {
+    runtime: Arc<embedded_harness::EmbeddedHarnessRuntime>,
+    origin: ConversationIdentity,
+    steps: tokio::sync::Mutex<mpsc::UnboundedReceiver<PreflightStep>>,
+    sender: mpsc::UnboundedSender<PreflightStep>,
+    operations: Mutex<HashMap<String, OperationId>>,
+    requests: Mutex<Vec<ResponsesRequest>>,
+    changed: watch::Sender<u64>,
+}
+
+#[async_trait]
+impl ResponsesTransport for PreflightTransport {
+    async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+        panic!("hosted preflight requires the Engine's exact request identity")
+    }
+
+    async fn create_streaming_for_request(
+        &self,
+        request_id: &RequestId,
+        request: ResponsesRequest,
+        sink: mpsc::Sender<harness::transport::sse::StreamEvent>,
+    ) -> Result<ResponsesTurn, TransportError> {
+        self.requests.lock().push(request);
+        self.changed.send_modify(|revision| *revision += 1);
+        let items = match self
+            .steps
+            .lock()
+            .await
+            .recv()
+            .await
+            .expect("preflight script")
+        {
+            PreflightStep::Cell { call, source } => {
+                let operation = OperationId {
+                    origin: self.origin.clone(),
+                    request: request_id.clone(),
+                    call: CallId(call.clone()),
+                };
+                assert!(self
+                    .operations
+                    .lock()
+                    .insert(call.clone(), operation)
+                    .is_none());
+                self.changed.send_modify(|revision| *revision += 1);
+                vec![haskell_call(&call, &source, CallMode::Blocking)]
+            }
+            PreflightStep::InterruptStream => {
+                return Err(TransportError::IncompleteResponse(
+                    harness::transport::StreamInterruption::MissingCompletion,
+                ));
+            }
+            PreflightStep::Finish => vec![harness::item::Item(json!({
+                "type":"message", "role":"assistant", "phase":"final_answer",
+                "content":[{"type":"output_text","text":"preflight and recovery confirmed"}]
+            }))],
+        };
+        for item in &items {
+            sink.send(harness::transport::sse::StreamEvent::ItemDone(item.clone()))
+                .await
+                .map_err(|_| TransportError::Stream("preflight provider receiver closed".into()))?;
+        }
+        Ok(ResponsesTurn {
+            response_id: format!("preflight-{}", request_id.0),
+            items,
+            usage: Usage::default(),
+        })
+    }
+}
+
+impl PreflightTransport {
+    async fn cell(&self, call: &str, source: &str) -> (OperationId, Value) {
+        let mut changed = self.changed.subscribe();
+        self.sender
+            .send(PreflightStep::Cell {
+                call: call.into(),
+                source: source.into(),
+            })
+            .unwrap();
+        let operation = tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, async {
+            loop {
+                if let Some(operation) = self.operations.lock().get(call).cloned() {
+                    break operation;
+                }
+                changed.changed().await.unwrap();
+            }
+        })
+        .await
+        .expect("actual provider issued preflight cell");
+        let output = tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, async {
+            loop {
+                if let Ok(Some(output)) = self.runtime.scheduler().output(&operation).await {
+                    break output;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("real preflight cell settled");
+        durable_output(&self.runtime, &operation, &output).await;
+        let JobOutput::Completed(Ok(receipt)) = output else {
+            panic!("expected actual Haskell receipt: {output:?}");
+        };
+        let durable = self
+            .runtime
+            .store()
+            .replay_output_operation(&operation)
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, async {
+            loop {
+                if self
+                    .requests
+                    .lock()
+                    .iter()
+                    .any(|request| request.input.contains(&durable))
+                {
+                    break;
+                }
+                changed.changed().await.unwrap();
+            }
+        })
+        .await
+        .expect("real provider received exact durable preflight output");
+        (operation, receipt)
+    }
+}
+
 #[tokio::test]
 async fn admitted_cell_late_type_error_has_no_effect_or_publication_on_retry() {
-    let mut campaign = test_campaign::TestCampaign::start_with_config(
-        exomonad_actor::ResearchPolicy::default(), |admission| admission,
+    let files = tempfile::tempdir().unwrap();
+    let assets = files.path().join("assets");
+    std::fs::create_dir_all(&assets).unwrap();
+    std::fs::write(assets.join("index.html"), "<!doctype html>").unwrap();
+    let secret_file = files.path().join("session-secret");
+    std::fs::write(&secret_file, "whole-cell-preflight-secret-is-long-enough").unwrap();
+    let auth_file = files.path().join("codex-auth.json");
+    std::fs::write(&auth_file, "{}").unwrap();
+    let settings = crate::exomonad::EmbeddedLaunchConfig {
+        listen: "127.0.0.1:0".parse().unwrap(),
+        public_origin_scheme: crate::exomonad::EmbeddedPublicOriginScheme::Https,
+        public_origin: None,
+        asset_root: assets,
+        browser_auth: crate::exomonad::EmbeddedBrowserAuth::Secret,
+        session_secret_file: Some(secret_file),
+        provider: crate::exomonad::EmbeddedModelProvider::Codex,
+        credential_file: auth_file,
+        context_capacity_tokens: 200_000,
+        concurrent_jobs: 3,
+    };
+    let slot = Arc::new(Mutex::new(None));
+    let prepared = slot.clone();
+    let host = super::hosted_test_context::HostedTestRuntime::start_with_factory(
+        &settings,
         |config| {
 
             let authored = config.workspace.join(".exomonad");
@@ -1419,170 +1542,228 @@ async fn admitted_cell_late_type_error_has_no_effect_or_publication_on_retry() {
             test_campaign::commit_workspace(&config.workspace);
             config.workspace_inputs = Some(crate::exomonad::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root).unwrap());
         },
-    ).await;
-    let actor = campaign.actor.identity();
-    let policy = campaign.root_installation.policy.clone();
-    let status = policy
-        .dispatch_json_boxed(exomonad_tool::ToolInvocation {
-            context: None,
-            name: "status".into(),
-            arguments: exomonad_tool::ToolArguments::Structured(json!({"view":"detailed"})),
-        })
-        .await
-        .unwrap();
-    assert!(
-        status.to_string().contains("AgentSpec.agentSpec"),
-        "actual AgentSpec must be installed: {status}"
-    );
-
-    let runtime =
-        embedded_harness::EmbeddedHarnessRuntime::open(campaign.session_root.path(), 1).unwrap();
-    let embedded = runtime
-        .attach(
-            harness::embedding::HostIdentity {
-                run: runtime_namespace(campaign.session_root.path()),
-                actor: AgentPath("/root".into()),
-                incarnation: actor.incarnation.0.to_string(),
-            },
-            campaign.actor.clone(),
-            Arc::new(
-                embedded_policy::EmbeddedPolicyInstallation::from_installation(
-                    &campaign.root_installation,
-                ),
-            ),
-            None,
-        )
-        .unwrap();
-    let binding = open_embedded_actor_binding(
-        campaign.session_root.path(),
-        actor,
-        AgentPath("/root".into()),
-        Some(embedded.conversation.clone()),
-    )
-    .unwrap();
+        move |runtime, config| {
+            let (sender, steps) = mpsc::unbounded_channel();
+            let transport = Arc::new(PreflightTransport {
+                runtime: runtime.clone(),
+                origin: ConversationIdentity::Embedded {
+                    run: runtime_namespace(&config.run_root),
+                    actor: AgentPath("/root".into()),
+                    incarnation: exomonad_actor::Incarnation::FIRST.0.to_string(),
+                },
+                steps: tokio::sync::Mutex::new(steps), sender,
+                operations: Mutex::new(HashMap::new()),
+                requests: Mutex::new(Vec::new()), changed: watch::channel(0).0,
+            });
+            *prepared.lock() = Some(transport.clone());
+            transport
+        },
+    ).await.expect("production hosted preflight starts");
+    let transport = slot.lock().take().unwrap();
+    let actor = host.context.actor.identity();
+    let binding = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if let Some(binding) = host.context.binding(actor) {
+                break binding;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("actual attached root binding");
     assert_eq!(binding.inbox.watermark(), 0);
     let source = include_str!("embedded_bad_final_cell.hs")
         .replace("TARGET_ID", &actor.id.0.to_string())
         .replace("TARGET_INCARNATION", &actor.incarnation.0.to_string());
-    let invocation = preflight_invocation("bad-final-request", "bad-final-call", source.clone());
-    let rejected = preflight_dispatch_without_effect(&mut campaign, invocation.clone()).await;
+
+    // Prove this installed tool, effect route and target before a negative check.
+    let control_source = source
+        .replace("neverPublished", "publishedControl")
+        .replace("pure (True :: Int)", "display (42 :: Int)");
+    let (_, control) = transport
+        .cell("preflight-positive-control", &control_source)
+        .await;
+    assert_committed_haskell_value(&control, "42");
+    assert_eq!(binding.inbox.watermark(), 1);
+
+    let (operation, rejected) = transport.cell("bad-final-call", &source).await;
     assert_preflight_rejection(&rejected);
+    assert_eq!(
+        rejected["publication"]["status"], "notPublished",
+        "{rejected}"
+    );
+    assert_eq!(rejected["publication"]["reason"], "rejected", "{rejected}");
     let diagnostics = rejected.to_string();
     assert!(
         diagnostics.contains("Bool") && diagnostics.contains("Int"),
-        "must reject the real final Bool::Int type error: {rejected}"
+        "{rejected}"
     );
-    assert_eq!(binding.inbox.watermark(), 0);
-    campaign.assert_no_deployment("preflight rejected all effects", |event| {
-        matches!(event, LocalResidentDeployment::NotificationSend(_))
-    });
-    policy
-        .complete_boxed(tidepool_runtime::session::WorkbenchForkBoundary::external(
-            "whole-cell-preflight".into(),
-            "bad-final-request".into(),
-            "bad-final-call".into(),
-        ))
+    assert_eq!(
+        binding.inbox.watermark(),
+        1,
+        "type rejection must execute no notification"
+    );
+    let durable = host
+        .runtime
+        .store()
+        .replay_output_operation(&operation)
+        .unwrap()
+        .unwrap();
+    let claims = host
+        .runtime
+        .store()
+        .claims_for_operation(&operation)
+        .unwrap();
+    assert!(!claims.is_empty());
+    assert!(claims
+        .iter()
+        .all(|claim| claim.state == harness::store::ClaimState::Settled));
+
+    // The interrupted stream is real Engine input. Explicit host input recovers
+    // its retained lineage without dispatching the settled Haskell call again.
+    transport
+        .sender
+        .send(PreflightStep::InterruptStream)
+        .unwrap();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .unwrap();
+    let api = format!("http://{}/api", host.address);
+    let origin = format!("https://{}", host.address);
+    let login = client
+        .post(format!("{api}/session"))
+        .header("Origin", &origin)
+        .json(&json!({"secret":"whole-cell-preflight-secret-is-long-enough"}))
+        .send()
         .await
         .unwrap();
-    let requests = tidepool_extract_cmd::extract_spawn_count();
-    let retry = preflight_dispatch_without_effect(&mut campaign, invocation).await;
+    assert_eq!(login.status(), reqwest::StatusCode::OK);
+    let cookie = login.headers()[reqwest::header::SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let target = harness::embedding::HostIdentity {
+        run: runtime_namespace(&host.context.config.run_root),
+        actor: AgentPath("/root".into()),
+        incarnation: actor.incarnation.0.to_string(),
+    };
+    let waiting = root_browser_projection(
+        host.address,
+        &cookie,
+        &target,
+        harness::server::HostActorLifecycle::Waiting,
+    )
+    .await;
+    assert!(waiting.active_round.is_none());
+    let requests_before = transport.requests.lock().len();
+    let compiler_before = tidepool_extract_cmd::extract_spawn_count();
+    let mut changed = transport.changed.subscribe();
+    let wake = client
+        .post(format!("{api}/commands"))
+        .header("Origin", &origin)
+        .header(reqwest::header::COOKIE, &cookie)
+        .json(&harness::server::ClientCommand::Host {
+            operation_id: harness::embedding::ClientOperationId(uuid::Uuid::new_v4()),
+            command: harness::server::HostCommand::Input {
+                target: target.clone(),
+                text: "retry retained preflight rejection".into(),
+            },
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wake.status(), reqwest::StatusCode::ACCEPTED);
+    let recovered = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if let Some(request) = transport.requests.lock().get(requests_before).cloned() {
+                break request;
+            }
+            changed.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("real recovery provider request");
+    let returned = recovered
+        .input
+        .iter()
+        .filter(|item| {
+            item.0["type"] == "custom_tool_call_output" && item.0["call_id"] == operation.call.0
+        })
+        .cloned()
+        .collect::<Vec<_>>();
     assert_eq!(
-        retry, rejected,
-        "same exact operation must retain its rejection"
+        returned,
+        vec![durable.clone()],
+        "recovery returns the original receipt exactly once"
     );
     assert_eq!(
         tidepool_extract_cmd::extract_spawn_count(),
-        requests,
-        "retained rejection must not resubmit compiler work"
+        compiler_before,
+        "recovery of a settled rejection must not resubmit compiler work"
     );
-    assert_eq!(binding.inbox.watermark(), 0);
-    let absent = preflight_dispatch_without_effect(
-        &mut campaign,
-        preflight_invocation(
-            "binding-probe-request",
-            "binding-probe-call",
-            "neverPublished".into(),
-        ),
-    )
-    .await;
-    assert_preflight_rejection(&absent);
-    let absent_diagnostic = absent.to_string();
-    assert!(
-        absent_diagnostic.contains("neverPublished") && absent_diagnostic.contains("not in scope"),
-        "rejected bind must remain absent from the public lexical environment: {absent}"
+    assert_eq!(
+        host.runtime
+            .store()
+            .replay_output_operation(&operation)
+            .unwrap(),
+        Some(durable)
     );
-    assert!(
-        campaign.actor.terminal().get().is_none(),
-        "type rejection keeps the admitted actor live"
+    assert_eq!(
+        host.runtime
+            .store()
+            .claims_for_operation(&operation)
+            .unwrap()
+            .len(),
+        claims.len()
     );
+    assert_eq!(
+        transport
+            .operations
+            .lock()
+            .keys()
+            .filter(|call| call.as_str() == "bad-final-call")
+            .count(),
+        1
+    );
+    assert_eq!(binding.inbox.watermark(), 1);
 
-    let valid = source.replace("pure (True :: Int)", "display (42 :: Int)");
-    let mut control = tokio::spawn(async move {
-        policy
-            .dispatch_json_boxed(preflight_invocation(
-                "valid-control-request",
-                "valid-control-call",
-                valid,
-            ))
-            .await
-    });
-    let notification = tokio::select! {
-        result = &mut control => panic!("valid first statement returned before emitting its effect: {result:?}"),
-        effect = campaign.next_deployment("valid first-statement control", Duration::from_secs(120), |event| match event {
-            LocalResidentDeployment::NotificationSend(command) => Ok(command), other => Err(other),
-        }) => effect,
-    };
-    assert_eq!(notification.owner(), actor);
-    assert_eq!(notification.target(), actor);
-    assert_eq!(notification.message(), "whole-cell-preflight-sentinel");
-    let mut notifications = JoinSet::new();
-    schedule_embedded_notification_send(notification, &binding, &mut notifications);
-    let (_, admitted) = tokio::time::timeout(Duration::from_secs(30), notifications.join_next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    admitted.unwrap();
-    let store = super::display_output::open_run_store(campaign.session_root.path()).unwrap();
-    let committed = campaign
-        .drive_actor_output(&store, async {
-            tokio::time::timeout(Duration::from_secs(120), control)
-                .await
-                .unwrap()
-                .unwrap()
-                .unwrap()
-        })
+    let (_, absent) = transport
+        .cell(
+            "preflight-binding-absent",
+            "display (neverPublished :: Int)",
+        )
         .await;
-    assert_committed_haskell_value(&committed, "42");
+    assert_absent_binding(&absent, "neverPublished");
+    let (_, valid) = transport
+        .cell(
+            "preflight-valid-after-retry",
+            &source.replace("pure (True :: Int)", "display (42 :: Int)"),
+        )
+        .await;
+    assert_committed_haskell_value(&valid, "42");
     assert!(
-        committed["items"]
+        valid["items"]
             .as_array()
             .unwrap()
             .iter()
             .any(|item| item["installedBindings"]
                 .as_array()
                 .is_some_and(|names| names.iter().any(|name| name == "neverPublished"))),
-        "valid control publishes its binding: {committed}"
+        "valid control publishes the binding: {valid}"
     );
     assert_eq!(
         binding.inbox.watermark(),
-        1,
-        "only valid control can publish the actual effect"
+        2,
+        "only valid cells send notifications"
     );
-    let unread = runtime.store().unread("/root").unwrap();
-    assert_eq!(unread.len(), 1);
-    assert_eq!(
-        runtime
-            .store()
-            .get_item(&unread[0].item_hash)
-            .unwrap()
-            .unwrap()
-            .0["content"],
-        "whole-cell-preflight-sentinel"
-    );
-    campaign.assert_no_deployment("valid control executes once", |event| {
-        matches!(event, LocalResidentDeployment::NotificationSend(_))
-    });
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+    assert!(host.context.actor.terminal().get().is_none());
+    transport.sender.send(PreflightStep::Finish).unwrap();
+    successful_rounds(&host.context, &[actor]).await;
+    host.stop()
+        .await
+        .expect("production shutdown confirms preflight cleanup");
 }
