@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import shlex
 import struct
 import subprocess
 import sys
@@ -25,6 +26,32 @@ M2_TESTS = [
 ]
 M1_TESTS = ["actor_host::m1_host_tests::production_browser_executes_resident_haskell_retries_and_controls_root"]
 DESCRIPTOR = "share/exomonad/qualification.json"
+UNSET_ENVIRONMENT = (
+    "TIDEPOOL_EXTRACT_DAEMON_SOCKET", "TIDEPOOL_COMPILER_MODULES",
+    "TIDEPOOL_COMPILER_DEPLOYMENT", "TIDEPOOL_EXTRACT_WORKER",
+    "TIDEPOOL_EXTRACT", "TIDEPOOL_PRELUDE_DIR", "TIDEPOOL_GHC_LIBDIR",
+    "EXOMONAD_EMBEDDED_ASSET_ROOT", "LD_LIBRARY_PATH", "TIDEPOOL_EXTRACT_NO_DAEMON",
+)
+ARTIFACT_TARGETS = {
+    "bin/exomonad-unwrapped": "//bridge/facade:exomonad",
+    "bin/exomonad-view-helper": "//bridge/facade:exomonad-view-helper",
+    "bin/tidepool-extract": "//tidepool/extract-cmd:tidepool-extract",
+    "bin/tidepool-extract-bin": "//bridge/haskell:tidepool_extract_bin",
+    "bin/tidepool-tests": "//bridge/facade:tidepool_unit_tests",
+}
+EXTERNAL_INPUTS = {"TIDEPOOL_GHC_LIBDIR", "TIDEPOOL_BROWSER_NODE", "PLAYWRIGHT_BROWSERS_PATH", "runtime_tools"}
+BUILD_CONTRACT_FIELDS = ("profile", "feature_profile", "stdlib_mode", "source_inputs", "source_inputs_sha256", "artifacts")
+
+
+def programs(root: Path) -> dict:
+    return {"libtest": str(root / "bin/tidepool-tests"),
+            "runner": str(root / "share/exomonad/isolated-libtest.py"),
+            "host": str(root / "bin/exomonad"), "host_elf": str(root / "bin/exomonad-unwrapped")}
+
+
+def cohorts() -> dict:
+    return {"m2": {"tests": M2_TESTS, "expected_count": 6, "ignored": False, "timeout": 600},
+            "m1": {"tests": M1_TESTS, "expected_count": 1, "ignored": True, "timeout": 900}}
 
 
 def sha256(path: Path) -> str:
@@ -126,6 +153,33 @@ def declared_haskell_sources(source: Path, bundle: Path) -> dict:
     return evidence
 
 
+def verify_build_contract(source: Path, bundle: Path, contract: dict, expected_profile: str) -> None:
+    if contract["profile"] != expected_profile:
+        raise ValueError("native bundle profile differs from the requested qualification profile")
+    inputs = contract["source_inputs"]
+    if not inputs or digest_inventory(inputs) != contract["source_inputs_sha256"]:
+        raise ValueError("native build source manifest is missing or has an invalid digest")
+    tracked = set(subprocess.check_output([
+        "git", "-C", str(source), "ls-files", "-z", "--recurse-submodules",
+    ]).decode().split("\0"))
+    for relative, expected in inputs.items():
+        path = Path(relative)
+        if path.is_absolute() or ".." in path.parts or relative not in tracked:
+            raise ValueError(f"native build input is not tracked in the recorded source: {relative}")
+        if sha256(source / relative) != expected:
+            raise ValueError(f"native bundle was built from different source bytes: {relative}")
+    verify_artifact_contract(bundle, contract)
+
+
+def verify_artifact_contract(bundle: Path, contract: dict) -> None:
+    if set(contract["artifacts"]) != set(ARTIFACT_TARGETS):
+        raise ValueError("native build contract does not own every qualified executable")
+    for relative, target in ARTIFACT_TARGETS.items():
+        artifact = contract["artifacts"][relative]
+        if artifact["target"] != target or artifact["sha256"] != sha256(bundle / relative):
+            raise ValueError(f"mixed native build artifact: {relative}")
+
+
 def native_environment(root: Path) -> dict:
     ghc = (root / "share/exomonad/ghc-libdir.txt").read_text().strip()
     tools = (root / "share/exomonad/runtime-tools").resolve(strict=True)
@@ -146,11 +200,7 @@ def execution_environment(descriptor: dict) -> dict:
     environment = dict(os.environ)
     # No resident endpoint, project catalog or compiler selection may override
     # the pair and source mode that the exact bundle was qualified with.
-    for key in ("TIDEPOOL_EXTRACT_DAEMON_SOCKET", "TIDEPOOL_COMPILER_MODULES",
-                "TIDEPOOL_COMPILER_DEPLOYMENT", "TIDEPOOL_EXTRACT_WORKER",
-                "TIDEPOOL_EXTRACT", "TIDEPOOL_PRELUDE_DIR", "TIDEPOOL_GHC_LIBDIR",
-                "EXOMONAD_EMBEDDED_ASSET_ROOT", "LD_LIBRARY_PATH",
-                "TIDEPOOL_EXTRACT_NO_DAEMON"):
+    for key in UNSET_ENVIRONMENT:
         environment.pop(key, None)
     environment.update(descriptor["environment"])
     return environment
@@ -210,7 +260,8 @@ def assemble(args) -> None:
     shared = root / "share/exomonad"
     shared.mkdir(parents=True, exist_ok=True)
     for name, source in (("exomonad-unwrapped", args.host), ("exomonad-view-helper", args.view_helper),
-                         ("tidepool-extract", args.frontend), ("tidepool-extract-bin", args.worker)):
+                         ("tidepool-extract", args.frontend), ("tidepool-extract-bin", args.worker),
+                         ("tidepool-tests", args.libtest)):
         shutil.copy2(source.resolve(strict=True), root / "bin" / name)
     for name, source in (("stdlib", args.sources / "lib"), ("actors", args.sources / "actors"), ("web", args.assets / "web")):
         shutil.copytree(source, shared / name, symlinks=False)
@@ -223,10 +274,13 @@ def assemble(args) -> None:
     wrapper = root / "bin/exomonad"
     wrapper.write_text(f"#!{tools}/bin/bash\n" + args.entrypoint_template.read_text().split("\n", 1)[1])
     wrapper.chmod(0o755)
+    source_inputs = {path.relative_to(args.build_sources).as_posix(): sha256(path)
+                     for path in sorted(args.build_sources.rglob("*")) if path.is_file()}
     write_json(shared / "native-build-contract.json", {
         "profile": args.profile, "feature_profile": "embedded-native", "stdlib_mode": "source-backed",
-        "targets": ["//bridge/facade:exomonad", "//bridge/facade:exomonad-view-helper",
-                    "//tidepool/extract-cmd:tidepool-extract", "//bridge/haskell:tidepool_extract_bin"],
+        "source_inputs": source_inputs, "source_inputs_sha256": digest_inventory(source_inputs),
+        "artifacts": {relative: {"target": target, "sha256": sha256(root / relative)}
+                      for relative, target in ARTIFACT_TARGETS.items()},
     })
 
 
@@ -247,6 +301,7 @@ def freeze(args) -> Path:
     contract = json.loads((args.bundle / "share/exomonad/native-build-contract.json").read_text())
     if contract["feature_profile"] != "embedded-native" or contract["stdlib_mode"] != "source-backed":
         raise ValueError("qualification requires the native source-backed bundle")
+    verify_build_contract(source, args.bundle, contract, args.expect_profile)
     haskell_sources = declared_haskell_sources(source, args.bundle)
     lock = tomllib.loads((source / "Cargo.lock").read_text())
     harness = [row for row in lock["package"] if row["name"] == "harness"]
@@ -262,12 +317,13 @@ def freeze(args) -> Path:
     if not isinstance(commands, list) or not commands or any(not isinstance(command, list) or not command or not all(isinstance(word, str) for word in command) for command in commands):
         raise ValueError("--build-commands must be a JSON array of actual argv arrays")
     root = args.output.absolute()
+    if root != root.resolve():
+        raise ValueError("freeze requires a canonical final bundle path")
     root.mkdir(parents=True, exist_ok=False)
     # Dereference Buck source trees; retain only the declared Nix tool closure.
     shutil.copytree(args.bundle, root, symlinks=False, dirs_exist_ok=True,
                     ignore=lambda directory, names: ["runtime-tools"] if Path(directory).name == "exomonad" else [])
     (root / "share/exomonad/runtime-tools").symlink_to((args.bundle / "share/exomonad/runtime-tools").resolve(strict=True))
-    shutil.copy2(args.libtest.resolve(strict=True), root / "bin/tidepool-tests")
     shutil.copytree(args.browser_driver, root / "share/exomonad/browser-driver", symlinks=False)
     shutil.copy2(source / "build/rust/isolated-libtest.py", root / "share/exomonad/isolated-libtest.py")
     shutil.copy2(source / "build/package/qualification.py", root / "share/exomonad/qualification.py")
@@ -302,14 +358,11 @@ def freeze(args) -> Path:
         "source_oid": oid, "harness_revision": revision, **contract,
         "source_submodules": submodules,
         "declared_haskell_sources": haskell_sources,
-        "source_inputs": {name: sha256(source / name) for name in ("Cargo.toml", "Cargo.lock", "flake.nix", "flake.lock", "scripts/native-profile.toml")},
+        "source_metadata_inputs": {name: sha256(source / name) for name in ("Cargo.toml", "Cargo.lock", "flake.nix", "flake.lock", "scripts/native-profile.toml")},
         "build": {"commands": commands, "log": str(copied_log), "log_sha256": sha256(copied_log)},
         "environment": environment, "external_inputs": external, "elf_runtime": evidence,
         "nix_closure": closure, "gc_roots": gc_roots,
-        "programs": {"libtest": str(root / "bin/tidepool-tests"), "runner": str(root / "share/exomonad/isolated-libtest.py"),
-                     "host": str(root / "bin/exomonad"), "host_elf": str(root / "bin/exomonad-unwrapped")},
-        "cohorts": {"m2": {"tests": M2_TESTS, "expected_count": 6, "ignored": False, "timeout": 600},
-                    "m1": {"tests": M1_TESTS, "expected_count": 1, "ignored": True, "timeout": 900}},
+        "programs": programs(root), "cohorts": cohorts(),
     }
     descriptor["inventory"] = inventory(root, [DESCRIPTOR])
     descriptor["inventory_sha256"] = digest_inventory(descriptor["inventory"])
@@ -323,28 +376,60 @@ def freeze(args) -> Path:
     return destination
 
 
-def verify(path: Path) -> dict:
-    descriptor = json.loads(path.read_text())
-    root = Path(descriptor["bundle_root"])
-    if path.absolute() != root / DESCRIPTOR or descriptor["schema"] != 1 or descriptor["kind"] != "native-runtime-qualification":
-        raise ValueError("qualification descriptor was relocated or has an unsupported schema")
-    if descriptor["stdlib_mode"] != "source-backed" or descriptor["feature_profile"] != "embedded-native":
-        raise ValueError("qualification is not the selected native source mode")
+def verify_frozen_inventory(root: Path, descriptor: dict) -> None:
     if inventory(root, [DESCRIPTOR]) != descriptor["inventory"]:
         raise ValueError("frozen runtime inventory changed")
     if digest_inventory(descriptor["inventory"]) != descriptor["inventory_sha256"]:
         raise ValueError("runtime inventory digest mismatch")
+
+
+def verify(path: Path) -> dict:
+    descriptor = json.loads(path.read_text())
+    root = Path(descriptor["bundle_root"])
+    if not root.is_absolute() or root != root.resolve(strict=True) or path.absolute() != root / DESCRIPTOR or descriptor["schema"] != 1 or descriptor["kind"] != "native-runtime-qualification":
+        raise ValueError("qualification descriptor was relocated or has an unsupported schema")
+    if descriptor["stdlib_mode"] != "source-backed" or descriptor["feature_profile"] != "embedded-native":
+        raise ValueError("qualification is not the selected native source mode")
+    if descriptor["programs"] != programs(root) or descriptor["cohorts"] != cohorts():
+        raise ValueError("qualification cannot replace its owned programs or mandatory test cohorts")
+    verify_frozen_inventory(root, descriptor)
+    contract = json.loads((root / "share/exomonad/native-build-contract.json").read_text())
+    if any(descriptor[field] != contract[field] for field in BUILD_CONTRACT_FIELDS):
+        raise ValueError("qualification differs from the owning native build contract")
+    if not contract["source_inputs"] or digest_inventory(contract["source_inputs"]) != contract["source_inputs_sha256"]:
+        raise ValueError("native build source manifest is missing or has an invalid digest")
+    verify_artifact_contract(root, contract)
+    if set(descriptor["external_inputs"]) != EXTERNAL_INPUTS:
+        raise ValueError("qualification requires every declared Nix runtime input")
     for item in descriptor["external_inputs"].values():
         path = nix_path(Path(item["path"]))
         if str(store_root(path)) != item["store_path"]:
             raise ValueError(f"declared Nix selection changed: {path}")
-    if descriptor["external_inputs"]:
-        tools = Path(descriptor["external_inputs"]["runtime_tools"]["path"])
-        if nix_metadata(tools, descriptor["nix_closure"]["roots"]) != descriptor["nix_closure"]:
-            raise ValueError("declared immutable Nix closure identity changed")
-        for pinned in descriptor["gc_roots"]:
-            if Path(pinned["path"]).resolve(strict=True) != Path(pinned["store_path"]):
-                raise ValueError("deployment Nix GC root was removed or changed")
+    tools = Path(descriptor["external_inputs"]["runtime_tools"]["path"])
+    expected_roots = {item["store_path"] for item in descriptor["external_inputs"].values()}
+    for item in descriptor["elf_runtime"].values():
+        if item["linkage"] == "dynamic":
+            expected_roots.add(item["loader_store_path"])
+            expected_roots.update(library["store_path"] for library in item["libraries"].values() if "store_path" in library)
+    if descriptor["nix_closure"]["roots"] != sorted(expected_roots):
+        raise ValueError("Nix closure does not retain every selected runtime dependency")
+    if nix_metadata(tools, descriptor["nix_closure"]["roots"]) != descriptor["nix_closure"]:
+        raise ValueError("declared immutable Nix closure identity changed")
+    expected_gc_roots = {str(root / "share/exomonad/gc-roots" / hashlib.sha256(selected.encode()).hexdigest()): selected
+                         for selected in expected_roots}
+    if len(descriptor["gc_roots"]) != len(expected_gc_roots) or {item["path"]: item["store_path"] for item in descriptor["gc_roots"]} != expected_gc_roots:
+        raise ValueError("deployment must pin exactly its declared Nix runtime roots")
+    for pinned in descriptor["gc_roots"]:
+        if Path(pinned["path"]).resolve(strict=True) != Path(pinned["store_path"]):
+            raise ValueError("deployment Nix GC root was removed or changed")
+    expected_environment = native_environment(root)
+    expected_environment.update(
+        TIDEPOOL_BROWSER_NODE=descriptor["external_inputs"]["TIDEPOOL_BROWSER_NODE"]["path"],
+        TIDEPOOL_BROWSER_DRIVER=str(root / "share/exomonad/browser-driver/driver.mjs"),
+        PLAYWRIGHT_BROWSERS_PATH=descriptor["external_inputs"]["PLAYWRIGHT_BROWSERS_PATH"]["path"],
+    )
+    if descriptor["environment"] != expected_environment:
+        raise ValueError("qualification cannot replace its declared runtime environment")
     if loader_evidence(root, execution_environment(descriptor)) != descriptor["elf_runtime"]:
         raise ValueError("native runtime loader dependency resolution changed")
     return descriptor
@@ -385,14 +470,18 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     stage = commands.add_parser("assemble")
-    for key in ("output", "host", "view-helper", "frontend", "worker", "sources", "assets", "libraries", "harness-revision", "runtime-tools", "ghc-libdir", "entrypoint-template"):
+    for key in ("output", "host", "view-helper", "frontend", "worker", "libtest", "build-sources", "sources", "assets", "libraries", "harness-revision", "runtime-tools", "ghc-libdir", "entrypoint-template"):
         stage.add_argument("--" + key, required=True, type=Path)
     stage.add_argument("--profile", required=True, choices=("fast-dev", "debug", "production"))
     frozen = commands.add_parser("freeze")
-    for key in ("bundle", "output", "source-root", "libtest", "browser-driver", "browser-node", "playwright-browsers", "build-log", "build-commands"):
+    for key in ("bundle", "output", "source-root", "browser-driver", "browser-node", "playwright-browsers", "build-log", "build-commands"):
         frozen.add_argument("--" + key, required=True, type=Path)
+    frozen.add_argument("--expect-profile", required=True, choices=("fast-dev", "debug", "production"))
     checked = commands.add_parser("verify")
     checked.add_argument("descriptor", type=Path)
+    environment = commands.add_parser("environment")
+    environment.add_argument("descriptor", type=Path)
+    environment.add_argument("--shell", action="store_true")
     run = commands.add_parser("run")
     run.add_argument("descriptor", type=Path)
     run.add_argument("--cohort", required=True, choices=("m2", "m1"))
@@ -409,6 +498,17 @@ def main(argv=None) -> int:
             print(freeze(args))
         elif args.command == "verify":
             verify(args.descriptor.absolute())
+        elif args.command == "environment":
+            descriptor = verify(args.descriptor.absolute())
+            selected = dict(descriptor["environment"])
+            selected.update(TIDEPOOL_NATIVE_LIBTEST=descriptor["programs"]["libtest"],
+                            TIDEPOOL_NATIVE_DESCRIPTOR=str(args.descriptor.absolute()))
+            if args.shell:
+                print("unset " + " ".join(UNSET_ENVIRONMENT))
+                for key, value in sorted(selected.items()):
+                    print("export " + key + "=" + shlex.quote(value))
+            else:
+                print(json.dumps({"set": selected, "unset": UNSET_ENVIRONMENT}, sort_keys=True))
         elif args.command == "run":
             return run_cohort(args)
         elif args.command == "exec":

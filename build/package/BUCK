@@ -1,9 +1,15 @@
-load("@prelude//:rules.bzl", "export_file", "genrule", "sh_test")
+load("@prelude//:rules.bzl", "export_file", "filegroup", "genrule", "sh_test")
 load(":runtime_shared_libraries.bzl", "tidepool_runtime_shared_libraries")
 load("//build:native_profile.bzl", "selected_native_profile")
 
 export_file(name = "qualification_script", src = "qualification.py", visibility = ["PUBLIC"])
 export_file(name = "native_entrypoint", src = "native-entrypoint.sh", visibility = ["PUBLIC"])
+
+filegroup(
+    name = "qualification_inputs",
+    srcs = {"build/package/" + path: path for path in glob(["BUCK", "*.bzl", "*.py", "*.sh", "README.md"])},
+    visibility = ["PUBLIC"],
+)
 
 tidepool_runtime_shared_libraries(
     name = "tidepool_extract_runtime_libraries",
@@ -73,6 +79,7 @@ genrule(
     srcs = [
         "//bridge/facade:exomonad",
         "//bridge/facade:exomonad-view-helper",
+        "//bridge/facade:tidepool_unit_tests",
         "//tidepool/extract-cmd:tidepool-extract",
         "//bridge/haskell:tidepool_extract_bin",
         "//bridge/haskell:facade_embedded_sources",
@@ -82,6 +89,7 @@ genrule(
         ":qualification_script",
         ":native_entrypoint",
         "toolchains//:exomonad_runtime_tools",
+        "//build/rust:native_qualification_sources",
     ],
     out = ".",
     env = {
@@ -94,6 +102,8 @@ genrule(
   --output "$PWD/$OUT" \
   --host "$PWD/$(location //bridge/facade:exomonad)" \
   --view-helper "$PWD/$(location //bridge/facade:exomonad-view-helper)" \
+  --libtest "$PWD/$(location //bridge/facade:tidepool_unit_tests)" \
+  --build-sources "$PWD/$(location //build/rust:native_qualification_sources)" \
   --frontend "$PWD/$(location //tidepool/extract-cmd:tidepool-extract)" \
   --worker "$PWD/$(location //bridge/haskell:tidepool_extract_bin)" \
   --sources "$PWD/$(location //bridge/haskell:facade_embedded_sources)" \
