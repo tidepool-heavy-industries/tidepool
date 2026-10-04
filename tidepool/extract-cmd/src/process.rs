@@ -141,6 +141,7 @@ mod tests {
         let status = Command::new(std::env::current_exe().unwrap())
             .args([
                 "process::tests::parent_transition_helper",
+                "--ignored",
                 "--exact",
                 "--nocapture",
             ])
@@ -158,15 +159,20 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "private subprocess entry for parent-transition acceptance"]
     #[allow(
         clippy::zombie_processes,
         reason = "fixture exits before child signal setup to exercise reparenting"
     )]
     fn parent_transition_helper() {
-        let Some(work) = std::env::var_os(TRANSITION_ENV) else {
-            return;
-        };
+        let work = std::env::var_os(TRANSITION_ENV)
+            .filter(|value| !value.is_empty())
+            .expect("private transition helper requires its parent's scratch directory");
         let work = std::path::PathBuf::from(work);
+        assert!(
+            work.is_dir(),
+            "private transition helper scratch directory must exist"
+        );
         if let Some(parent) = std::env::var_os(EXPECTED_PARENT_ENV) {
             let parent = parent.to_str().unwrap().parse().unwrap();
             std::fs::write(work.join("ready"), b"ready").unwrap();
@@ -191,6 +197,7 @@ mod tests {
         let mut child = Command::new(std::env::current_exe().unwrap())
             .args([
                 "process::tests::parent_transition_helper",
+                "--ignored",
                 "--exact",
                 "--nocapture",
             ])
@@ -234,11 +241,12 @@ mod tests {
                 ])
                 .env(NAMESPACE_ENV, "1");
             if through_shell {
-                namespace.args(["sh", "-c", "\"$1\" process::tests::namespace_parent_helper --exact --nocapture; result=$?; exit \"$result\"", "sh"])
+                namespace.args(["sh", "-c", "\"$1\" process::tests::namespace_parent_helper --ignored --exact --nocapture; result=$?; exit \"$result\"", "sh"])
                     .arg(&executable);
             } else {
                 namespace.arg(&executable).args([
                     "process::tests::namespace_parent_helper",
+                    "--ignored",
                     "--exact",
                     "--nocapture",
                 ]);
@@ -248,10 +256,13 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "private subprocess entry for PID-namespace acceptance"]
     fn namespace_parent_helper() {
-        if std::env::var_os(NAMESPACE_ENV).is_none() {
-            return;
-        }
+        assert_eq!(
+            std::env::var(NAMESPACE_ENV)
+                .expect("private namespace helper requires its parent marker"),
+            "1"
+        );
         let parent = unsafe { getppid() };
         assert_eq!(parent, if std::process::id() == 1 { 0 } else { 1 });
         eprintln!("namespace process={} parent={parent}", std::process::id());
@@ -281,6 +292,7 @@ mod tests {
         )]
         let status = Command::new(std::env::current_exe().unwrap())
             .arg("process::tests::parent_death_helper")
+            .arg("--ignored")
             .arg("--exact")
             .arg("--nocapture")
             .env(HELPER_ENV, "1")
@@ -315,14 +327,17 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "private subprocess entry for parent-death acceptance"]
     #[allow(
         clippy::zombie_processes,
         reason = "the helper must exit without waiting to test parent-death cleanup"
     )]
     fn parent_death_helper() {
-        if std::env::var_os(HELPER_ENV).is_none() {
-            return;
-        }
+        assert_eq!(
+            std::env::var(HELPER_ENV)
+                .expect("private parent-death helper requires its parent marker"),
+            "1"
+        );
         let pid_file = std::env::var_os(PID_FILE_ENV).expect("helper pid file is required");
         #[allow(
             clippy::disallowed_methods,
