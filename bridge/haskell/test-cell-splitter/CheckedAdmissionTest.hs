@@ -184,7 +184,7 @@ inspectionScopeChecks root = do
         BS.writeFile path (envelope injected modules paths)
         readExactScope path
   -- These legacy inspection envelopes have no typed interface evidence or
-  -- producer certificate. Even matching inventories cannot authorize v8.
+  -- producer certificate. Even matching inventories cannot authorize the current scope.
   let owner9 = "Tidepool.Session.Val.G9"
       owner10 = "Tidepool.Session.Val.G10"
   forM_ [([owner],[owner],[root])

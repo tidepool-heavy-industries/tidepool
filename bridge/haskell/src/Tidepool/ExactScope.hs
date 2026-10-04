@@ -536,7 +536,7 @@ scopeValueInterfaces scope = case scopePurpose scope of
   ExactDisplayPurpose admission _ -> displayValueInterfaces admission
   ExactInspectionPurpose values _ -> values
 
--- Scope v8 separates the bounded metadata envelope from the independently
+-- The exact scope separates the bounded metadata envelope from the independently
 -- bounded original graph bytes. The request hash seals each path and digest.
 readExactScope :: FilePath -> IO (Either String ExactScope)
 readExactScope path = do
