@@ -289,10 +289,10 @@
 
           shellHook = ''
             export TIDEPOOL_GHC_LIBDIR="$(ghc --print-libdir)"
-            echo "tidepool dev shell"
-            echo "  Rust: $(rustc --version)"
-            echo "  GHC:  $(ghc --version)"
-            echo "  sccache (rustc-wrapper, from ~/.cargo/config.toml): $(sccache --version 2>/dev/null || echo 'not on PATH')"
+            echo "tidepool dev shell" >&2
+            echo "  Rust: $(rustc --version)" >&2
+            echo "  GHC:  $(ghc --version)" >&2
+            echo "  sccache (rustc-wrapper, from ~/.cargo/config.toml): $(sccache --version 2>/dev/null || echo 'not on PATH')" >&2
           '';
         };
 
@@ -311,7 +311,7 @@
           EXOMONAD_NIX_BIN = "${pkgs.nix}/bin/nix";
           shellHook = ''
             export TIDEPOOL_GHC_LIBDIR="$(ghc --print-libdir)"
-            echo "exomonad dev shell"
+            echo "exomonad dev shell" >&2
           '';
         };
 
