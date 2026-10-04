@@ -35,6 +35,8 @@ mod display_output;
 #[cfg(test)]
 mod documentation_tests;
 #[cfg(test)]
+mod scaffold_admission_tests;
+#[cfg(test)]
 mod embedded_captured_unfold_tests;
 #[cfg(test)]
 mod embedded_checkpoint_children_survive_later_failure_tests;

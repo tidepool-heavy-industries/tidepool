@@ -885,6 +885,7 @@ rust_filegroup(
         "src/actor_host/recipe_checks.rs": "bridge/facade/src/actor_host/recipe_checks.rs",
         "src/actor_host/record_actor_unfold.hs": "bridge/facade/src/actor_host/record_actor_unfold.hs",
         "src/actor_host/root_declaration_recovery.rs": "bridge/facade/src/actor_host/root_declaration_recovery.rs",
+        "src/actor_host/scaffold_admission_tests.rs": "bridge/facade/src/actor_host/scaffold_admission_tests.rs",
         "src/actor_host/scoped_custody.rs": "bridge/facade/src/actor_host/scoped_custody.rs",
         "src/actor_host/scoped_custody/tests.rs": "bridge/facade/src/actor_host/scoped_custody/tests.rs",
         "src/actor_host/shared_api_guide_unavailable.hs": "bridge/facade/src/actor_host/shared_api_guide_unavailable.hs",
