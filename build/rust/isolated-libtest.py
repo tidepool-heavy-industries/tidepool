@@ -44,7 +44,8 @@ def _signal_active_processes(signum, _frame):
     # Signal handlers do not take locks: a repeated signal must not deadlock
     # against a worker registering or retiring a child process.
     for process in ACTIVE_PROCESS_SNAPSHOT:
-        _kill_group(process.pid)
+        if getattr(process, 'returncode', None) is None:
+            _kill_group(process.pid)
 
 
 def _kill_group(pgid):
@@ -74,7 +75,8 @@ def _unregister_process(process):
 
 
 def _kill_and_reap(process):
-    _kill_group(process.pid)
+    if not getattr(process, '_tidepool_delegated', False) or getattr(process, 'returncode', None) is None:
+        _kill_group(process.pid)
     try:
         return process.communicate(timeout=5)
     except subprocess.TimeoutExpired:
@@ -123,6 +125,26 @@ def delegated_command(args, timeout, service_slice, record):
     return command, unit
 
 
+def observe_delegated_admission(unit, record, finished):
+    """A registered transient invocation proves this launch reached the manager."""
+    while not finished.is_set():
+        try:
+            observed = subprocess.run([
+                'systemctl', '--user', 'show', '--property=Id',
+                '--property=LoadState', '--property=Transient',
+                '--property=InvocationID', unit,
+            ], capture_output=True, text=True, timeout=1, check=False)
+            state = dict(line.split('=', 1) for line in observed.stdout.splitlines() if '=' in line)
+            if (observed.returncode == 0 and state.get('Id') == unit
+                    and state.get('LoadState') == 'loaded' and state.get('Transient') == 'yes'
+                    and re.fullmatch(r'[a-fA-F0-9]{32}', state.get('InvocationID', ''))):
+                record['manager_admission'] = state
+                return
+        except (OSError, subprocess.SubprocessError) as error:
+            record['manager_observation_error'] = str(error)
+        finished.wait(0.05)
+
+
 def stop_delegated_service(unit, record):
     """Stop only this launch's service, including descendants outside client PGID."""
     base = ['systemctl', '--user']
@@ -141,11 +163,14 @@ def stop_delegated_service(unit, record):
         state = dict(line.split('=', 1) for line in observed.stdout.splitlines() if '=' in line)
         record.update(stop_exit_code=stopped.returncode,
                       observation_exit_code=observed.returncode, state=state,
-                      cleanup_confirmed=(state.get('LoadState') == 'not-found'
-                          or (stopped.returncode == 0 and observed.returncode == 0
-                              and state.get('ActiveState') == 'inactive')))
+                      cleanup_confirmed=(bool(record.get('manager_admission'))
+                          and record.get('admission_observer_stopped', True)
+                          and (state.get('LoadState') == 'not-found'
+                              or (stopped.returncode == 0 and observed.returncode == 0
+                                  and state.get('ActiveState') == 'inactive'))))
         if not record['cleanup_confirmed']:
-            record['cleanup_error'] = 'exact delegated service is not confirmed stopped'
+            record['cleanup_error'] = ('delegated launch admission is unknown; absent unit does not fence a queued start'
+                if not record.get('manager_admission') else 'exact delegated service is not confirmed stopped')
     except (OSError, subprocess.SubprocessError) as error:
         record.update(cleanup_confirmed=False, cleanup_error=str(error))
 
@@ -164,8 +189,14 @@ def execute(args, timeout, service_slice=None, service_record=None):
         text=True,
         start_new_session=True,
     )
+    process._tidepool_delegated = unit is not None
+    observer, observer_finished = None, threading.Event()
     try:
         _register_process(process)
+        if unit is not None:
+            observer = threading.Thread(target=observe_delegated_admission,
+                args=(unit, service_record, observer_finished), daemon=True)
+            observer.start()
         stdout, stderr = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired as error:
         stdout, stderr = _kill_and_reap(process)
@@ -178,10 +209,15 @@ def execute(args, timeout, service_slice=None, service_record=None):
     finally:
         _unregister_process(process)
         if unit is not None:
+            observer_finished.set()
+            if observer is not None:
+                observer.join(timeout=2)
+            service_record['admission_observer_stopped'] = observer is None or not observer.is_alive()
             stop_delegated_service(unit, service_record)
     # Test leaders sometimes leave a detached same-group child after a passing
     # result. The process group remains the cleanup owner through this point.
-    _kill_group(process.pid)
+    if unit is None:
+        _kill_group(process.pid)
     return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
 
 
@@ -279,6 +315,21 @@ def select_tests(all_names, ignored_names, options):
     return selected
 
 
+def record_actual_counts(record, stdout, delegated=False):
+    if record is None:
+        return
+    if isinstance(stdout, bytes):
+        stdout = stdout.decode(errors='replace')
+    actual = list(EXECUTION_RESULT.finditer(stdout or ''))
+    if actual:
+        passed, failed, ignored = map(int, actual[-1].groups())
+        record.update(executed_test_count=passed + failed,
+                      passed_test_count=passed, failed_test_count=failed,
+                      ignored_test_count=ignored)
+        if delegated and passed + failed > 0:
+            record['process_execution_count'] = 1
+
+
 def run_one(binary, name, ignored, timeout, record=None, service_slice=None):
     args = [binary, '--exact', name, '--nocapture']
     if ignored:
@@ -298,10 +349,16 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None):
         if record is not None:
             record.update(status='timeout', process_execution_count=(None if service_record is not None else 1),
                           elapsed_ns=time.monotonic_ns() - started)
+        record_actual_counts(record, error.output, service_record is not None)
         detail = f'timed out after {timeout:g}s'
         if error.output:
             detail += f'\n{error.output}'
         return False, detail, error.stderr or ''
+    except RunnerInterrupted as error:
+        if record is not None:
+            record.update(status='interrupted', interrupt_signal=error.signum,
+                          process_execution_count=None, elapsed_ns=time.monotonic_ns() - started)
+        return False, f'interrupted by signal {error.signum}', ''
     except OSError as error:
         if record is not None:
             record.update(status='spawn_failed', elapsed_ns=time.monotonic_ns() - started)
@@ -309,14 +366,7 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None):
     if record is not None:
         record.update(status='finished', process_execution_count=(None if service_record is not None else 1),
                       exit_code=result.returncode, elapsed_ns=time.monotonic_ns() - started)
-        actual = list(EXECUTION_RESULT.finditer(result.stdout))
-        if actual:
-            passed_count, failed_count, ignored_count = map(int, actual[-1].groups())
-            record.update(executed_test_count=passed_count + failed_count,
-                          passed_test_count=passed_count, failed_test_count=failed_count,
-                          ignored_test_count=ignored_count)
-            if service_record is not None and passed_count + failed_count > 0:
-                record['process_execution_count'] = 1
+    record_actual_counts(record, result.stdout, service_record is not None)
     summaries = list(RESULT.finditer(result.stdout))
     summary = summaries[-1] if summaries else None
     passed = (
@@ -399,6 +449,19 @@ def main(argv=None):
             )
             return name, outcome, record
 
+        def retain_result(name, outcome):
+            nonlocal failures
+            _, (passed, output, stderr), record = outcome
+            if options.output_dir is not None:
+                retain_output(options.output_dir, name, passed, output, stderr, record)
+            print(f'{"PASS" if passed else "FAIL"} {name}', flush=True)
+            if not passed:
+                failures += 1
+                if output:
+                    print(output, end='' if output.endswith('\n') else '\n')
+                if stderr:
+                    print(stderr, end='' if stderr.endswith('\n') else '\n', file=sys.stderr)
+
         jobs = options.jobs
         if jobs is None:
             jobs = 1 if options.exact_names else min(8, os.cpu_count() or 1)
@@ -424,19 +487,10 @@ def main(argv=None):
                 for future in completed:
                     name = pending.pop(future)
                     try:
-                        _, (passed, output, stderr), record = future.result()
+                        retain_result(name, future.result())
                     except RunnerInterrupted:
                         interrupted = INTERRUPT_SIGNAL or signal.SIGTERM
                         continue
-                    if options.output_dir is not None:
-                        retain_output(options.output_dir, name, passed, output, stderr, record)
-                    print(f'{"PASS" if passed else "FAIL"} {name}', flush=True)
-                    if not passed:
-                        failures += 1
-                        if output:
-                            print(output, end='' if output.endswith('\n') else '\n')
-                        if stderr:
-                            print(stderr, end='' if stderr.endswith('\n') else '\n', file=sys.stderr)
                 if interrupted is not None or INTERRUPT_SIGNAL is not None:
                     interrupted = interrupted or INTERRUPT_SIGNAL
                     for future in pending:
@@ -450,6 +504,13 @@ def main(argv=None):
             for future in pending:
                 future.cancel()
             pool.shutdown(wait=True, cancel_futures=True)
+            for future, name in pending.items():
+                if future.cancelled():
+                    continue
+                try:
+                    retain_result(name, future.result())
+                except RunnerInterrupted:
+                    interrupted = INTERRUPT_SIGNAL or signal.SIGTERM
         if interrupted is not None:
             print(f'libtest runner interrupted by signal {interrupted}', file=sys.stderr)
             return 128 + interrupted

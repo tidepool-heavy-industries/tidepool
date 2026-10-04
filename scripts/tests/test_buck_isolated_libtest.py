@@ -110,6 +110,7 @@ class IsolatedLibtestTests(unittest.TestCase):
                  subprocess.TimeoutExpired(['fake-test'], 1), ('', '')]), \
              patch.object(runner.os, 'killpg'), \
              patch.object(runner, 'stop_delegated_service') as stop, \
+             patch.object(runner, 'observe_delegated_admission'), \
              self.assertRaises(subprocess.TimeoutExpired):
             runner.execute(['fake-test'], 1, 'app.slice', {})
         self.assertEqual(stop.call_count, 1)
@@ -124,7 +125,8 @@ class IsolatedLibtestTests(unittest.TestCase):
                 raise subprocess.TimeoutExpired(args, 10)
             output = 'LoadState=loaded\nActiveState=inactive\n' if 'show' in args else ''
             return subprocess.CompletedProcess(args, 0, output, '')
-        record = {}
+        record = {'manager_admission': {'Id': unit, 'Transient': 'yes',
+                                        'InvocationID': 'ab' * 16}}
         with patch.object(runner.subprocess, 'run', side_effect=control):
             runner.stop_delegated_service(unit, record)
         self.assertTrue(record['cleanup_confirmed'])
@@ -154,6 +156,81 @@ class IsolatedLibtestTests(unittest.TestCase):
             runner.parse_args([str(self.binary), '--service-slice', 'app.slice'])
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             runner.parse_args([str(self.binary), '--delegated-service', '--service-slice', '../unsafe'])
+
+    def test_absent_unknown_launch_cannot_confirm_before_late_manager_registration(self):
+        unit = 'tidepool-libtest-late.service'
+        record = {}
+        def absent(args, **_kwargs):
+            return subprocess.CompletedProcess(args, 5 if 'stop' in args else 1,
+                                                'LoadState=not-found\nActiveState=inactive\n', '')
+        with patch.object(runner.subprocess, 'run', side_effect=absent):
+            runner.stop_delegated_service(unit, record)
+        self.assertFalse(record['cleanup_confirmed'])
+        self.assertIn('queued start', record['cleanup_error'])
+        late = f'Id={unit}\nLoadState=loaded\nTransient=yes\nInvocationID={"ab" * 16}\n'
+        with patch.object(runner.subprocess, 'run', return_value=subprocess.CompletedProcess(
+                [], 0, late, '')):
+            runner.observe_delegated_admission(unit, record, runner.threading.Event())
+        self.assertEqual(record['manager_admission']['Id'], unit)
+        self.assertFalse(record['cleanup_confirmed'], 'late registration requires a new exact stop')
+        with patch.object(runner.subprocess, 'run', return_value=subprocess.CompletedProcess(
+                [], 0, 'LoadState=loaded\nActiveState=inactive\n', '')):
+            runner.stop_delegated_service(unit, record)
+        self.assertTrue(record['cleanup_confirmed'])
+
+    def test_successful_delegated_launcher_is_not_signalled_after_reaping(self):
+        class Process:
+            pid = 781236
+            stdout = None
+            stderr = None
+            returncode = 0
+            def communicate(self, timeout=None):
+                return 'test result: ok. 1 passed; 0 failed; 0 ignored;\n', ''
+        with patch.object(runner.subprocess, 'Popen', return_value=Process()), \
+             patch.object(runner, 'observe_delegated_admission'), \
+             patch.object(runner, 'stop_delegated_service'), \
+             patch.object(runner.os, 'killpg') as kill:
+            runner.execute(['fake-libtest'], 2, 'app.slice', {})
+        kill.assert_not_called()
+
+    def test_interrupted_launched_future_retains_unconfirmed_service_receipt(self):
+        retained = Path(self.tmp.name) / 'interrupted'
+        starts = []
+        def run(args, timeout, service_slice=None, service_record=None):
+            discovered = self.discover(args)
+            if discovered is not None:
+                return discovered
+            starts.append(args[2])
+            service_record.update(unit='tidepool-libtest-pending.service',
+                                  cleanup_confirmed=False, cleanup_error='launch admission unknown')
+            runner._signal_active_processes(signal.SIGTERM, None)
+            raise runner.RunnerInterrupted(signal.SIGTERM)
+        result, _, _ = self.invoke(['--exact', 'suite::works', '--exact', 'suite::also_works',
+            '--expected-count', '2', '--jobs', '1', '--delegated-service',
+            '--output-dir', str(retained)], run)
+        self.assertEqual(result, 128 + signal.SIGTERM)
+        self.assertEqual(starts, ['suite::works'])
+        records = [json.loads(path.read_text()) for path in retained.glob('*.json')]
+        self.assertEqual(len(records), 1)
+        self.assertFalse(records[0]['passed'])
+        execution = records[0]['execution']
+        self.assertEqual(execution['status'], 'interrupted')
+        self.assertIsNone(execution['executed_test_count'])
+        self.assertEqual(execution['delegated_service']['unit'], 'tidepool-libtest-pending.service')
+        self.assertFalse(execution['delegated_service']['cleanup_confirmed'])
+        runner.INTERRUPT_SIGNAL = None
+
+    def test_timeout_preserves_actual_partial_libtest_count_without_passing(self):
+        record = {}
+        with patch.object(runner, 'execute', side_effect=subprocess.TimeoutExpired(
+                ['fake-libtest'], 2, output='test result: ok. 1 passed; 0 failed; 0 ignored;\n')):
+            passed, _, _ = runner.run_one(str(self.binary), 'suite::works', False,
+                                          2, record, 'app.slice')
+        self.assertFalse(passed)
+        self.assertEqual(record['status'], 'timeout')
+        self.assertIsNone(record['exit_code'])
+        self.assertEqual(record['executed_test_count'], 1)
+        self.assertEqual(record['process_execution_count'], 1)
 
     def test_actual_failed_execution_count_is_retained_without_changing_pass_rule(self):
         record = {}
