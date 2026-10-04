@@ -5,7 +5,7 @@ module Tidepool.ExactScope
   , CheckedCellAdmission(..), CheckedCellPurpose(..), CheckedItemAdmission(..), CheckedItemPurpose(..), CheckedDisplayAdmission(..)
   , PlannedCellAdmission(..), PlannedCellSlot(..)
   , ExactInterfaceEvidence(..), CanonicalOrigin(..), CanonicalInterfaceProof, CanonicalCoreArtifact
-  , CanonicalInterfaceAdmission(..), scopeCanonicalInterfaces, scopeDurableInterfaces
+  , CanonicalInterfaceAdmission(..), scopeCanonicalInterfaces, scopeSourceOriginalInterfaces, scopeDurableInterfaces
   , admittedInterfaceHomeUnits, admittedInterfaceSourceSha256, resolveShippedHomeModule
   , admittedInterfaceRequirements, admittedInterfaceCore
   , validateCanonicalInterfaceProof, validateCandidateCanonicalInterfaceProof
@@ -196,6 +196,16 @@ scopeCanonicalInterfaces = Map.mapMaybe select . scopeInterfaceEvidence
     select (ModuleInterfaceEvidence proof) = Just (DurableInterfaceAdmission proof)
     select (LocalModuleInterfaceEvidence proof) = Just (LocalInterfaceAdmission proof)
     select (LocalNativeDeclarationEvidence native) = Just (LocalInterfaceAdmission (localNativeProof native))
+    select _ = Nothing
+
+-- GHC executable imports select source originals only. Native authored
+-- declarations retain their independent runtime execution authority.
+scopeSourceOriginalInterfaces :: ExactScope -> Map.Map (String,String) CanonicalInterfaceAdmission
+scopeSourceOriginalInterfaces = Map.mapMaybe select . scopeInterfaceEvidence
+  where
+    select (ModuleInterfaceEvidence proof)
+      | canonicalOrigin proof == SourceOriginal = Just (DurableInterfaceAdmission proof)
+    select (LocalModuleInterfaceEvidence proof) = Just (LocalInterfaceAdmission proof)
     select _ = Nothing
 
 scopeDurableInterfaces :: ExactScope -> Map.Map (String,String) CanonicalInterfaceProof

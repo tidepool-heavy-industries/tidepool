@@ -4,7 +4,8 @@
 module Tidepool.HomeProducts
   ( hydrateCandidateHomeProducts, hydrateCandidateHomeProductsWithOriginals
   , CandidateCoreFailure(..), validateCandidateInterfaceRequirements
-  , materializeCandidateCompilerView ) where
+  , materializeCandidateCompilerView, materializeAdmittedCompilerView
+  , admittedCompilerInterface, validateAdmittedInterfaceRequirements ) where
 
 import Control.Exception
   ( Exception, SomeException, SomeAsyncException, bracket, displayException, fromException, throwIO, try )
@@ -67,8 +68,8 @@ import Tidepool.FamilyConsistency (validateEnvironmentFamilies)
 import Tidepool.RetainedUnfoldings (scopeRetainedSummaryHscEnv, scopeRetainedModuleGraph)
 import Tidepool.Timing (emitCount, readTimingEnabled, timeDetailPhase)
 import Tidepool.ExactScope
-  ( CanonicalInterfaceProof, canonicalCoreArtifact, canonicalCorePath
-  , canonicalCoreSha256, canonicalHomeUnits, canonicalRequirements )
+  ( CanonicalInterfaceProof, CanonicalInterfaceAdmission(..)
+  , admittedInterfaceCore, admittedInterfaceHomeUnits, admittedInterfaceRequirements )
 import Tidepool.FinalizedCore (FinalizedCoreFailure, attachFinalizedCore)
 import System.Directory (getModificationTime, getTemporaryDirectory, removeDirectoryRecursive)
 import System.FilePath ((</>))
@@ -89,12 +90,17 @@ instance Exception CandidateCoreFailure
 -- Authored source import adjacency cannot substitute for this native census.
 validateCandidateInterfaceRequirements
   :: CanonicalInterfaceProof -> ModIface -> Either CandidateCoreFailure ()
-validateCandidateInterfaceRequirements proof iface =
+validateCandidateInterfaceRequirements proof =
+  validateAdmittedInterfaceRequirements (DurableInterfaceAdmission proof)
+
+validateAdmittedInterfaceRequirements
+  :: CanonicalInterfaceAdmission -> ModIface -> Either CandidateCoreFailure ()
+validateAdmittedInterfaceRequirements proof iface =
   unless (all (`Set.member` homes) (map fst actual)
-      && Set.fromList actual == Map.keysSet (canonicalRequirements proof))
+      && Set.fromList actual == Map.keysSet (admittedInterfaceRequirements proof))
     (Left CandidateInterfaceRequirementsMismatch)
   where
-    homes = canonicalHomeUnits proof
+    homes = admittedInterfaceHomeUnits proof
     self = (unitString (moduleUnit (mi_module iface)), moduleNameString (moduleName (mi_module iface)))
     actual = Set.toAscList (Set.delete self (Set.fromList (concatMap owner (mi_usages iface))))
     owner UsageHomeModule{usg_mod_name = name, usg_unit_id = unit} =
@@ -112,20 +118,38 @@ validateCandidateInterfaceRequirements proof iface =
 materializeCandidateCompilerView
   :: FilePath -> Int -> HscEnv -> CanonicalInterfaceProof -> ModSummary
   -> IO ModSummary
-materializeCandidateCompilerView directory index env proof summary = do
+materializeCandidateCompilerView directory index env proof =
+  materializeAdmittedCompilerView directory index env (DurableInterfaceAdmission proof)
+
+materializeAdmittedCompilerView
+  :: FilePath -> Int -> HscEnv -> CanonicalInterfaceAdmission -> ModSummary
+  -> IO ModSummary
+materializeAdmittedCompilerView directory index env proof summary = do
   let flags = ms_hspp_opts summary
   unless (not (gopt Opt_BuildDynamicToo flags) && not (dynamicNow flags))
     (throwIO CandidateCompilerViewUnsupportedProfile)
-  home <- maybe (throwIO CandidateCoreHomeMissing) pure
-    (lookupHpt (hsc_HPT env) (ms_mod_name summary))
-  unless (mi_module (hm_iface home) == ms_mod summary) (throwIO CandidateCoreHomeMissing)
-  either throwIO pure (validateCandidateInterfaceRequirements proof (hm_iface home))
   interface <- if backendGeneratesCode (backend flags)
-    then do
-      bytes <- readCandidateCore proof
-      attachFinalizedCore env home bytes >>= either (throwIO . CandidateCoreDecodeFailure) pure
-    else pure (set_mi_extra_decls Nothing (hm_iface home))
+    then admittedCompilerInterface env proof (ms_mod summary)
+    else set_mi_extra_decls Nothing . hm_iface <$> admittedHomeInterface env proof (ms_mod summary)
   materializeInterfaceView directory index interface summary
+
+-- Exact executable demand can consume this interface through GHC's native
+-- interface-to-bytecode API without reconstructing an authored source summary.
+admittedCompilerInterface
+  :: HscEnv -> CanonicalInterfaceAdmission -> Module -> IO ModIface
+admittedCompilerInterface env proof owner = do
+  home <- admittedHomeInterface env proof owner
+  bytes <- readAdmittedCore proof
+  attachFinalizedCore env home bytes >>= either (throwIO . CandidateCoreDecodeFailure) pure
+
+admittedHomeInterface
+  :: HscEnv -> CanonicalInterfaceAdmission -> Module -> IO HomeModInfo
+admittedHomeInterface env proof owner = do
+  home <- maybe (throwIO CandidateCoreHomeMissing) pure
+    (lookupHpt (hsc_HPT env) (moduleName owner))
+  unless (mi_module (hm_iface home) == owner) (throwIO CandidateCoreHomeMissing)
+  either throwIO pure (validateAdmittedInterfaceRequirements proof (hm_iface home))
+  pure home
 
 -- Both validation and executable make consume request-owned copies. Source
 -- paths and usage fingerprints stay on the original finalized interface.
@@ -142,13 +166,13 @@ materializeInterfaceView directory index interface summary = do
     , ms_iface_date = Just modified
     }
 
-readCandidateCore :: CanonicalInterfaceProof -> IO BS.ByteString
-readCandidateCore proof = do
-  core <- maybe (throwIO CandidateCoreMissing) pure (canonicalCoreArtifact proof)
-  bytes <- withBinaryFile (canonicalCorePath core) ReadMode $ \handle ->
+readAdmittedCore :: CanonicalInterfaceAdmission -> IO BS.ByteString
+readAdmittedCore proof = do
+  (path, sha) <- maybe (throwIO CandidateCoreMissing) pure (admittedInterfaceCore proof)
+  bytes <- withBinaryFile path ReadMode $ \handle ->
     BS.hGet handle (32 * 1024 * 1024 + 1)
   unless (BS.length bytes <= 32 * 1024 * 1024) (throwIO CandidateCoreTooLarge)
-  unless (digest bytes == canonicalCoreSha256 core) (throwIO CandidateCoreBytesMismatch)
+  unless (digest bytes == sha) (throwIO CandidateCoreBytesMismatch)
   pure bytes
   where
     digest = concatMap (\byte -> let rendered = showHex byte ""

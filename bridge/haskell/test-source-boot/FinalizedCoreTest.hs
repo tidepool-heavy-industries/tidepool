@@ -9,6 +9,7 @@ import Crypto.Hash.SHA256 qualified as SHA256
 import Data.ByteString qualified as BS
 import Data.Dynamic (fromDynamic)
 import Data.IORef (newIORef, modifyIORef', readIORef)
+import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text qualified as T
 import Codec.CBOR.Encoding
@@ -23,7 +24,7 @@ import GHC.Cmm.CLabel (mkInitializerStubLabel)
 import GHC.Data.FastString (fsLit)
 import GHC.Types.ForeignStubs (ForeignStubs(..), CHeader(..), CStub(..))
 import GHC.Utils.Outputable qualified as Outputable
-import GHC.Driver.Main (hscTidy)
+import GHC.Driver.Main (hscTidy, loadIfaceByteCode)
 import GHC.Driver.Make (load')
 import GHC.Driver.Pipeline.Execute (runPhase)
 import GHC.Driver.Pipeline.Phases (TPhase(..), PhaseHook(..))
@@ -39,7 +40,7 @@ import GHC.Types.Name (getOccString)
 import GHC.Types.SptEntry (SptEntry(..))
 import GHC.Types.TypeEnv (lookupTypeEnv)
 import GHC.Types.Var (varName)
-import GHC.Unit.Home.ModInfo (HomeModInfo(..), HomeModLinkable(..), emptyHomeModInfoLinkable, lookupHpt)
+import GHC.Unit.Home.ModInfo (HomeModInfo(..), HomeModLinkable(..), emptyHomeModInfoLinkable, justBytecode, addToHpt, lookupHpt)
 import GHC.Unit.Module.ModDetails (md_types)
 import GHC.Unit.Module.ModGuts (CgGuts(..))
 import GHC.Unit.Module.ModIface
@@ -47,9 +48,9 @@ import GHC.Unit.Module.ModIface
   , set_mi_usages, set_mi_final_exts, set_mi_module )
 import GHC.Unit.Module.Deps (Usage(..))
 import GHC.Unit.Module.Graph (ModuleGraphNode(..))
-import GHC.Unit.Types (unitString, unitIdString, toUnitId, GenWithIsBoot(..))
+import GHC.Unit.Types (unitString, unitIdString, toUnitId, stringToUnit, GenWithIsBoot(..))
 import GHC.Unit.Finder (addHomeModuleToFinder)
-import GHC.Driver.Env (HscEnv(..), hsc_HPT, hsc_dflags, hsc_all_home_unit_ids, hsc_home_unit)
+import GHC.Driver.Env (HscEnv(..), hsc_HPT, hscUpdateHPT, hsc_dflags, hsc_all_home_unit_ids, hsc_home_unit)
 import GHC.Types.Error (mkUnknownDiagnostic)
 import GHC.ForeignSrcLang (ForeignSrcLang(..))
 import Numeric (showHex)
@@ -59,15 +60,23 @@ import System.Directory
 import System.FilePath ((</>))
 import System.IO (hClose, openTempFile)
 import Tidepool.ExactHydration
-  ( ExactIfaceArtifact(..), readExactIfaceArtifacts, hydrateExactScope )
+  ( ExactIfaceArtifact(..), readExactIfaceArtifacts, hydrateExactScope
+  , newOriginalInterfaceArtifacts )
 import Tidepool.ExtractUtil (getLibdir)
 import Tidepool.FinalizedCore
 import Tidepool.FinalizedModule (FinalizedModule(..))
-import Tidepool.ExactScope (CanonicalInterfaceProof, validateCandidateCanonicalInterfaceProof)
+import Tidepool.ExactScope
+  ( CanonicalInterfaceProof, CanonicalInterfaceAdmission(..), admittedInterfaceCore
+  , validateCandidateCanonicalInterfaceProof )
+import Tidepool.FinalizedModuleArtifacts
+  ( LocalFinalizedAdmission, captureFinalizedModuleArtifacts, finalizedLocalAdmissions )
+import Tidepool.DependencyEvidence
+  ( DependencyEvidence(..), DependencyModule(..), ProductAvailability(..), sourceEvidence )
 import Tidepool.ModuleCandidates (readModuleCandidates)
 import Tidepool.PackageWitness (emptyPackageImports, encodePackageImports)
 import Tidepool.HomeProducts
   ( CandidateCoreFailure(..), materializeCandidateCompilerView
+  , admittedCompilerInterface, validateAdmittedInterfaceRequirements
   , validateCandidateInterfaceRequirements )
 import Tidepool.PreparedStg (PreparedModule(..), prepareModule, unelaboratedModule)
 
@@ -80,7 +89,7 @@ finalizedCoreChecks = bracket scratch removeDirectoryRecursive $ \work -> do
       interfacePath = work </> "captured-skinny.hi"
   copyFile "test-source-boot/fixtures/FinalizedCoreFixture.hs" source
   libdir <- getLibdir
-  (artifact, bytes, summary, proof, groups, tyconNames, instanceNames, packages) <- runGhc (Just libdir) $ do
+  (artifact, bytes, summary, proof, localProof, groups, tyconNames, instanceNames, packages) <- runGhc (Just libdir) $ do
     configure work
     target <- guessTarget source Nothing Nothing
     setTargets [target]
@@ -131,7 +140,8 @@ finalizedCoreChecks = bracket scratch removeDirectoryRecursive $ \work -> do
           artifact = ExactIfaceArtifact (unitString (moduleUnit owner))
             "FinalizedCoreFixture" interfacePath (hexBytes (SHA256.hash interfaceBytes)) []
       proof <- captureProof env artifact source bytes work
-      pure (artifact, bytes, summary {ms_hspp_buf = Nothing}, proof, bindingGroups guts,
+      localProof <- captureLocalProof env finalized source work
+      pure (artifact, bytes, summary {ms_hspp_buf = Nothing}, proof, localProof, bindingGroups guts,
         map (getOccString . tyConName) (cg_tycons guts),
         map (getOccString . is_dfun) (finalizedCoreSiteInstances finalized), cg_dep_pkgs guts)
   removeFile source
@@ -155,6 +165,32 @@ finalizedCoreChecks = bracket scratch removeDirectoryRecursive $ \work -> do
           (set_mi_usages (usage : mi_usages (hm_iface home)) (hm_iface home))
             == Left CandidateInterfaceRequirementsMismatch)
           "native home interface usage escaped canonical requirement checks"
+      forM_ [DurableInterfaceAdmission proof, LocalInterfaceAdmission localProof] $ \admission -> do
+        assert (validateAdmittedInterfaceRequirements admission (hm_iface home) == Right ())
+          "admitted interface lost its original home dependency inventory"
+        forM_ [homeUsage,packageUsage] $ \usage ->
+          assert (validateAdmittedInterfaceRequirements admission
+            (set_mi_usages (usage : mi_usages (hm_iface home)) (hm_iface home))
+              == Left CandidateInterfaceRequirementsMismatch)
+            "admitted interface usage escaped canonical requirement checks"
+        attached <- admittedCompilerInterface env admission (ms_mod summary)
+        assert (mi_module attached == ms_mod summary && case mi_extra_decls attached of
+            Just _ -> True; Nothing -> False)
+          "admitted executable interface lost its original owner or defining Core"
+        wrongOwner <- try (admittedCompilerInterface env admission
+          (mkModule (stringToUnit "another-home-unit") (ms_mod_name summary)))
+          :: IO (Either CandidateCoreFailure ModIface)
+        assert (case wrongOwner of Left CandidateCoreHomeMissing -> True; _ -> False)
+          "admitted executable interface accepted a different exact unit"
+      (localCorePath,_) <- maybe (fail "local capture lost its canonical Core") pure
+        (admittedInterfaceCore (LocalInterfaceAdmission localProof))
+      localBytes <- BS.readFile localCorePath
+      bracket (BS.writeFile localCorePath (BS.take 1 localBytes))
+        (\_ -> BS.writeFile localCorePath localBytes) $ \_ -> do
+          changed <- try (admittedCompilerInterface env (LocalInterfaceAdmission localProof)
+            (ms_mod summary)) :: IO (Either CandidateCoreFailure ModIface)
+          assert (case changed of Left CandidateCoreBytesMismatch -> True; _ -> False)
+            "local admitted executable interface accepted substituted Core"
       finalized <- requireRight =<< decodeFinalizedCore env home (ms_location summary) bytes
       let guts = finalizedTidyGuts finalized
       assert (bindingGroups guts == groups) "canonical binding order or recursive groups changed"
@@ -195,8 +231,9 @@ finalizedCoreChecks = bracket scratch removeDirectoryRecursive $ \work -> do
       malformed <- decodeFinalizedCore env home (ms_location summary) (BS.take 1 bytes)
       assert (case malformed of Left FinalizedCoreDecodeFailure{} -> True; _ -> False)
         "truncated canonical companion did not fail closed"
+  directBytecodeChecks libdir work artifact summary (LocalInterfaceAdmission localProof)
   makeViewChecks libdir work artifact bytes summary proof
-  putStrLn "finalized Core: executed one case; source-free STG and GHC make execution with zero module frontends; staged type-only/Core views, durable interface, native requirements, Core seal and unsupported metadata checked"
+  putStrLn "finalized Core: executed one case; source-free STG, direct bytecode and GHC make execution with zero module frontends; staged type-only/Core views, durable interface, native requirements, Core seal and unsupported metadata checked"
   where
     configure work = do
       flags <- getSessionDynFlags
@@ -211,6 +248,57 @@ finalizedCoreChecks = bracket scratch removeDirectoryRecursive $ \work -> do
       removeFile path
       createDirectory path
       pure path
+
+-- One cold compiler consumes the same captured local original through GHC's
+-- supported bytecode API, without a make node or another fixture compilation.
+directBytecodeChecks
+  :: FilePath -> FilePath -> ExactIfaceArtifact -> ModSummary
+  -> CanonicalInterfaceAdmission -> IO ()
+directBytecodeChecks libdir work artifact summary proof = runGhc (Just libdir) $ do
+  _ <- setSessionDynFlags (ms_hspp_opts summary)
+    { backend = interpreterBackend, ghcLink = LinkInMemory
+    , importPaths = [work], hiDir = Just work, objectDir = Just work }
+  fresh <- getSession
+  interfaces <- liftIO (requireRight =<< readExactIfaceArtifacts fresh [artifact])
+  admitted <- liftIO (hydrateExactScope fresh interfaces)
+  home <- maybe (fail "direct bytecode has no original home owner") pure
+    (lookupHpt (hsc_HPT admitted) (ms_mod_name summary))
+  frontends <- liftIO (newIORef (0 :: Int))
+  let hook :: TPhase result -> IO result
+      hook phase@T_Hsc{} = do
+        modifyIORef' frontends (+1)
+        runPhase phase
+      hook phase = runPhase phase
+      location = (ms_location summary) {ml_hs_file = Nothing}
+      observed = admitted {hsc_hooks = (hsc_hooks admitted)
+        {runPhaseHook = Just (PhaseHook hook)}}
+      selectedSummary = summary {ms_location = location, ms_hspp_opts = hsc_dflags observed}
+  attached <- liftIO (admittedCompilerInterface observed proof (ms_mod summary))
+  compile <- maybe (fail "admitted Core has no supported bytecode compiler") pure
+    (loadIfaceByteCode observed attached location (md_types (hm_details home)))
+  bytecode <- liftIO compile
+  let executable = home {hm_linkable = justBytecode bytecode}
+      ready = (hscUpdateHPT (\table -> addToHpt table (ms_mod_name summary) executable) observed)
+        {hsc_mod_graph = mkModuleGraph [ModuleNode [] selectedSummary]}
+  setSession ready
+  _ <- liftIO $ addHomeModuleToFinder (hsc_FC ready)
+    (hsc_home_unit ready) (GWIB (ms_mod_name summary) NotBoot) location
+  imported <- parseImportDecl "import qualified FinalizedCoreFixture"
+  setContext [IIDecl imported]
+  answer <- dynCompileExpr
+    "case FinalizedCoreFixture.evenBox 1 of FinalizedCoreFixture.Box value -> value"
+  liftIO $ do
+    assert ((fromDynamic answer :: Maybe Int) == Just 1)
+      "direct bytecode lost its original recursive/private bindings"
+    count <- readIORef frontends
+    assert (count == 0) "direct bytecode invoked a module frontend"
+    assert (case homeMod_object (hm_linkable executable) of Nothing -> True; _ -> False)
+      "direct bytecode unexpectedly supplied native object code"
+    original <- BS.readFile (exactPath artifact)
+    assert (hexBytes (SHA256.hash original) == exactSha256 artifact)
+      "direct bytecode changed its original admitted interface"
+    present <- doesFileExist (work </> "FinalizedCoreFixture.hs")
+    assert (not present) "direct bytecode restored original source"
 
 -- This qualifies GHC's make handoff using a genuine finalized pair and the
 -- fixture's structural certificate, independently of Rust certificate issuance.
@@ -302,6 +390,25 @@ makeViewChecks libdir work artifact bytes summary proof = runGhc (Just libdir) $
       liftIO $ assert (count == 0) "staged make view invoked a module frontend"
       setSession env {hsc_hooks = hsc_hooks admitted}
       pure (home,frontends)
+
+-- Local authority comes from the same completed GHC finalization capture.
+-- This isolates Core attachment with a structural package/source fixture;
+-- complete import receipt issuance belongs to the genuine pipeline tests.
+captureLocalProof :: HscEnv -> FinalizedModule -> FilePath -> FilePath
+  -> IO LocalFinalizedAdmission
+captureLocalProof env finalized source work = do
+  sourceProof <- sourceEvidence source
+  let owner = mi_module (hm_iface (finalizedHomeModInfo finalized))
+      name = moduleName owner
+      key = (unitString (moduleUnit owner),moduleNameString name)
+      originals = Map.singleton name finalized
+      evidence = DependencyEvidence True True [sourceProof] [] []
+        [DependencyModule (fst key) (snd key) False source [] ProductReady]
+  interfaces <- newOriginalInterfaceArtifacts env originals [] work
+  captured <- captureFinalizedModuleArtifacts interfaces env originals
+    (Map.singleton name emptyPackageImports) evidence work
+  maybe (fail "completed finalization did not issue its local admission") pure
+    (Map.lookup key (finalizedLocalAdmissions captured))
 
 -- The structural certificate exercises the matched decoder/validator with
 -- compiler-produced interface/Core bytes; it does not prove Rust issuance.
