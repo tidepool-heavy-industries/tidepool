@@ -16555,53 +16555,230 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             &context.haskell_effects_alias,
             &prepared.imports,
         );
-        let compile = |text: &str| {
-            let include = prepared
-                .include
-                .iter()
-                .map(PathBuf::as_path)
-                .collect::<Vec<_>>();
-            tidepool_runtime::session::turn::run_turn(TurnRequest {
-                exact_context: None,
-                session_id: None,
-                turn_text: text,
-                templates: &templates,
-                include: &include,
-                session_root: view.session_root(),
-                inject_modules: &[],
-                gen: view.next_value_generation().0,
-                verdict: None,
-                target: None,
-                retained_imports: &[],
-            })
-            .unwrap()
-        };
+        let include = prepared
+            .include
+            .iter()
+            .map(PathBuf::as_path)
+            .collect::<Vec<_>>();
         let TurnResult::Bind {
-            compiled: producer, ..
-        } = compile(include_str!(
-            "../../../tidepool/runtime/src/session/fixtures/activation-input-function.hs"
-        ))
+            compiled: producer,
+            bound: producer_bound,
+            ..
+        } = tidepool_runtime::session::turn::run_turn(TurnRequest {
+            exact_context: None,
+            session_id: None,
+            turn_text: include_str!(
+                "../../../tidepool/runtime/src/session/fixtures/activation-input-function.hs"
+            ),
+            templates: &templates,
+            include: &include,
+            session_root: view.session_root(),
+            inject_modules: &[],
+            gen: view.next_value_generation().0,
+            verdict: None,
+            target: None,
+            retained_imports: &[],
+        })
+        .unwrap()
         else {
             panic!("native input producer must execute a bind");
         };
+        assert!(
+            producer_bound.is_empty(),
+            "request producer creates no persistent binding"
+        );
+        let previous_context = session.run_context();
+        let execution = Arc::new(
+            session
+                .begin_ephemeral_private_execution(context.placement.lexical_scope)
+                .unwrap(),
+        );
+        let mut private_context = context.clone();
+        private_context.placement.lexical_scope = execution.private_scope();
+        session
+            .set_run_context(private_context.run_context())
+            .unwrap();
+        let (receiver_source, snapshot) = snapshot_cell_program(
+            &mut session,
+            &private_context,
+            source.clone(),
+            None,
+            None,
+            CellSnapshotAdmission::PrivateExecution(&execution),
+        )
+        .unwrap();
+        let prepared = receiver_source
+            .prepare_effectful(&snapshot.view, &private_context.haskell_effects_alias)
+            .unwrap();
+        let preamble =
+            cell_module_preamble(&prepared.preamble, &snapshot.candidate_module.module_name())
+                .unwrap();
+        let template = resident_cell_check_template(
+            &preamble,
+            &private_context.haskell_effects_alias,
+            &prepared.imports,
+        );
+        let templates = resident_workbench_templates(
+            &prepared.preamble,
+            &private_context.haskell_effects_alias,
+            &prepared.imports,
+        );
+        let receiver_text = include_str!(
+            "../../../tidepool/runtime/src/session/fixtures/activation-input-receiver.hs"
+        );
+        let specification = Arc::new(tidepool_toolchain::checked_cell::CheckedCellSpecification {
+            admission_digest: [0; 32],
+            cell_source: receiver_text.into(),
+            template_source: template.clone(),
+            turn_templates: templates
+                .iter()
+                .map(|template| {
+                    let kind = match template.kind {
+                        tidepool_runtime::session::TemplateSelector::Decl => "decl",
+                        tidepool_runtime::session::TemplateSelector::Bind => "bind",
+                        tidepool_runtime::session::TemplateSelector::BindDiscard => "binddiscard",
+                        tidepool_runtime::session::TemplateSelector::Expr => "expr",
+                    };
+                    (kind.into(), template.source.clone())
+                })
+                .collect(),
+            injected_modules: prepared.injected.clone(),
+            reserved_declaration_modules: Vec::new(),
+        });
+        let plan = tidepool_toolchain::artifacts::parse_cell_plan(
+            specification.clone(),
+            &prepared.include,
+        )
+        .unwrap();
+        let authority =
+            crate::resident_actor::WorkbenchCompilationAuthority::for_test(context.clone());
+        let admission = session
+            .admit_planned_cell_for_execution(
+                execution.clone(),
+                plan,
+                specification.clone(),
+                specification.specification_digest(),
+                authority.authority_digest(),
+                prepared.include.clone(),
+                None,
+            )
+            .unwrap();
+        let view = admission.view();
+        let include = admission
+            .include_paths()
+            .iter()
+            .map(PathBuf::as_path)
+            .collect::<Vec<_>>();
+        let injected = view.injected_module_names();
+        let (checked, program) = tidepool_runtime::session::turn::compile_cell_program_admitted(
+            tidepool_runtime::session::CellCheckRequest {
+                exact_context: view.exact_compile_context(),
+                session_id: Some(view.session()),
+                cell_text: receiver_text,
+                template: &template,
+                include: &include,
+                session_root: view.session_root(),
+                inject_modules: &injected,
+                compile_generation: admission.initial_value_generation().0,
+                compile_view_evidence: "",
+            },
+            admission.clone(),
+            &templates,
+        )
+        .unwrap();
+        assert_eq!(
+            checked.items.len(),
+            1,
+            "receiver setup is one grouped binding"
+        );
+        let prefix = session
+            .begin_cell_program(admission, program)
+            .unwrap()
+            .unwrap();
+        let reservation = session
+            .admit_checked_item(prefix.clone(), checked.checked_item(0).unwrap())
+            .unwrap();
         let TurnResult::Bind {
             compiled: receiver,
             bound,
             ..
-        } = compile(include_str!(
-            "../../../tidepool/runtime/src/session/fixtures/activation-input-receiver.hs"
-        ))
+        } = tidepool_runtime::session::turn::consume_cell_program_item(reservation.clone())
+            .unwrap()
         else {
             panic!("native receiver must install retained bindings");
         };
-        session
+        assert_eq!(bound.len(), 2, "receiver and original native Unit reply");
+        let receiver_interface = receiver
+            .certification
+            .as_ref()
+            .unwrap()
+            .checked_execution()
+            .unwrap()
+            .value_interface_certificate()
+            .unwrap();
+        assert_eq!(
+            receiver_interface.owner(),
+            tidepool_repr::SessionModule::val(reservation.generation())
+        );
+        let outcome = session
             .run_projected_bind_with_sites(
                 "activationReceiverFixture",
                 receiver.code(),
                 &bound,
-                view.next_value_generation(),
+                reservation.generation(),
             )
             .unwrap();
+        assert!(matches!(outcome, ResidentOutcome::BindingsCommitted { .. }));
+        let intent = session
+            .freeze_private_execution(
+                &execution,
+                tidepool_runtime::session::ExecutionPublicationIntent::CompletedCell,
+            )
+            .unwrap();
+        assert_eq!(intent.native_write_ids().len(), bound.len());
+        let tidepool_runtime::session::ExecutionPublication::Bindings(publication) = session
+            .restage_ephemeral_execution_publication(intent)
+            .unwrap()
+        else {
+            panic!("receiver setup publishes only native bindings");
+        };
+        let ticket = publication.stage().unwrap();
+        assert_eq!(
+            session
+                .publish_staged_public_manifest(
+                    ticket,
+                    &tidepool_runtime::session::PublicationDecision::new(),
+                )
+                .unwrap(),
+            tidepool_runtime::session::PublicManifestCommit::Ephemeral
+        );
+        session.set_run_context(previous_context).unwrap();
+        drop(receiver);
+        drop(reservation);
+        drop(prefix);
+        drop(execution);
+        session.retire_scope(private_context.placement.lexical_scope);
+        assert!(session
+            .compile_view_in(private_context.placement.lexical_scope)
+            .is_none());
+        let public = session
+            .compile_view_in(context.placement.lexical_scope)
+            .unwrap();
+        let captured = session.capture_inspection_inputs(&public).unwrap();
+        assert!(captured
+            .view()
+            .reachable_values()
+            .contains(&receiver_interface.owner()));
+        for binder in &bound {
+            assert_eq!(
+                session
+                    .current_binding_in(context.placement.lexical_scope, &binder.name)
+                    .unwrap()
+                    .0,
+                tidepool_repr::SessionVarId::from_extract(binder.var_id)
+            );
+        }
+        drop(captured);
         let suspend = |outcome| match outcome {
             ResidentOutcome::Suspended { hole, .. } => hole,
             other => panic!("native activation fixture must suspend: {other:?}"),
