@@ -5,7 +5,6 @@ module Tidepool.ExactScope
   , CheckedCellAdmission(..), CheckedCellPurpose(..), CheckedItemAdmission(..), CheckedItemPurpose(..), CheckedDisplayAdmission(..)
   , PlannedCellAdmission(..), PlannedCellSlot(..)
   , ExactInterfaceEvidence(..), CanonicalOrigin(..), CanonicalInterfaceProof, CanonicalCoreArtifact
-  , admitLocalNativeDeclaration
   , CanonicalInterfaceAdmission(..), scopeCanonicalInterfaces, scopeDurableInterfaces
   , admittedInterfaceHomeUnits, admittedInterfaceSourceSha256, resolveShippedHomeModule
   , admittedInterfaceRequirements, admittedInterfaceCore
@@ -34,7 +33,6 @@ import Data.Char (isHexDigit)
 import Data.List (isPrefixOf)
 import Data.Maybe (isJust)
 import qualified Data.Text as T
-import qualified Data.Text.Encoding as TE
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import GHC.Driver.Env (HscEnv, hsc_home_unit)
@@ -66,8 +64,8 @@ import Tidepool.ExecutionSource
   , readExecutionSourceGraphs, executionSourceGraphsFit
   , ExecutionSourceFailure(..), executionIdentityKey, executionSourceClosure, executionSourceOriginalNode
   , executionSourceOriginalClosure )
-import Tidepool.PlannedDeclaration
-  ( PlannedDeclaration, PlannedDeclarationInventory, plannedModule, plannedSource, plannedOriginalOwner, plannedSourceMatches )
+import Tidepool.LocalNativeDeclaration
+  ( LocalNativeDeclarationAdmission, localNativeOwner, localNativeProof )
 import Tidepool.PackageWitness
   ( revalidatePackageImports )
 import Tidepool.FinalizedModuleArtifacts
@@ -182,30 +180,6 @@ data ParsedInterfaceEvidence
   | ParsedLocalNativeEvidence LocalNativeDeclarationAdmission
   | ParsedJoinEvidence
   | ParsedValueEvidence
-
--- Only the protected planned declaration can associate local finalized facts
--- with native authored provenance. Neither a wire role nor a namespace can.
-data LocalNativeDeclarationAdmission = LocalNativeDeclarationAdmission
-  PlannedDeclarationInventory LocalFinalizedAdmission
-  deriving (Eq, Show)
-
-admitLocalNativeDeclaration
-  :: PlannedDeclaration -> PlannedDeclarationInventory -> LocalFinalizedAdmission
-  -> Either String ExactInterfaceEvidence
-admitLocalNativeDeclaration planned inventory proof = do
-  let (iface,_,_) = localFinalizedInterface proof
-      key = (exactUnit iface,exactModule iface)
-  unless (plannedOriginalOwner inventory == key && plannedSourceMatches planned inventory
-      && localFinalizedSourceSha256 proof == digest (TE.encodeUtf8 (T.pack (plannedSource planned))))
-    (Left "local native declaration differs from its protected owner or source")
-  case parseSessionModule (plannedModule planned) of
-    Just owner | smKind owner == LibMod, Generation generation <- smGen owner
-      , generation > 0, sessionModuleString owner == plannedModule planned ->
-        pure (LocalNativeDeclarationEvidence (LocalNativeDeclarationAdmission inventory proof))
-    _ -> Left "local native declaration has an invalid reserved identity"
-
-localNativeProof :: LocalNativeDeclarationAdmission -> LocalFinalizedAdmission
-localNativeProof (LocalNativeDeclarationAdmission _ proof) = proof
 
 -- The consumer sees the same finalized facts whether their owner is this
 -- request's capture or a Rust-issued durable certificate. Only durable
@@ -599,9 +573,9 @@ validateInterfaceEvidence scope offered = do
         | (iface,packages,packageSha) <- scopeInterfaces scope]
       locals = Map.fromList ([(key,proof) | (key,ParsedLocalModuleEvidence proof) <- offered]
         ++ [(key,localNativeProof native) | (key,ParsedLocalNativeEvidence native) <- offered])
-  forM_ [(key,native) | (key,ParsedLocalNativeEvidence native) <- offered] $ \(key,LocalNativeDeclarationAdmission inventory proof) ->
-    unless (plannedOriginalOwner inventory == key
-        && let (iface,_,_) = localFinalizedInterface proof
+  forM_ [(key,native) | (key,ParsedLocalNativeEvidence native) <- offered] $ \(key,native) ->
+    unless (localNativeOwner native == key
+        && let (iface,_,_) = localFinalizedInterface (localNativeProof native)
            in (exactUnit iface,exactModule iface) == key)
       (fail "local native declaration leaves its protected original owner")
   forM_ (Map.toAscList locals) $ \(key,proof) -> do

@@ -7,12 +7,14 @@ module Tidepool.PlannedDeclaration
   , PlannedDeclarationInventory, plannedExports, plannedInstances
   , plannedOriginalOwner, plannedInterfaceFingerprint, plannedSourceMatches, plannedFamilyClosure
   , renderPlannedDeclarationInventory
-  , certifyPlannedDeclaration, hydratePlannedDeclarationInventory
+  , certifyPlannedDeclaration, hydratePlannedDeclarationInventory, admitLocalNativeDeclaration
   , transformPlannedDeclarationImports, transformPlannedDeclarationImportsWithCompleted
   , transformProgramDeclarationImports
   ) where
 
 import Control.Monad (unless)
+import Crypto.Hash.SHA256 qualified as SHA
+import Data.ByteString qualified as BS
 import Data.Char (isSpace)
 import Data.List (intercalate, isPrefixOf, nub, sort, tails)
 import Data.Text qualified as T
@@ -44,9 +46,14 @@ import Tidepool.DeclarationJoin
   , InstanceInventory(..), ClassInstanceEvidence(..), JoinDecision(..)
   , interfaceExports, interfaceInventory, validateRetainedFamilyInstances
   , renderDeclarationSelection )
+import Numeric (showHex)
 import Tidepool.Json (jsonString)
+import Tidepool.ExactHydration (ExactIfaceArtifact(..))
+import Tidepool.FinalizedModuleArtifacts
+  ( LocalFinalizedAdmission, localFinalizedInterface, localFinalizedSourceSha256 )
+import Tidepool.LocalNativeDeclaration (LocalNativeDeclarationAdmission(..))
 import Tidepool.Session
-  ( SessionModule(..), SessionModuleKind(..), parseSessionModule, sessionModuleString, scaffoldTargetName )
+  ( Generation(..), SessionModule(..), SessionModuleKind(..), parseSessionModule, sessionModuleString, scaffoldTargetName )
 
 data PlannedDeclaration = PlannedDeclaration
   { plannedModule :: String
@@ -90,6 +97,26 @@ plannedInterfaceFingerprint = show . inventoryInterface
 plannedSourceMatches :: PlannedDeclaration -> PlannedDeclarationInventory -> Bool
 plannedSourceMatches planned inventory = plannedModule planned == snd (plannedOriginalOwner inventory)
   && inventorySource inventory == fingerprintByteString (TE.encodeUtf8 (T.pack (plannedSource planned)))
+
+-- Local native provenance is admitted at the owning planned declaration,
+-- after its opaque compiler inventory and finalized capture agree exactly.
+admitLocalNativeDeclaration
+  :: PlannedDeclaration -> PlannedDeclarationInventory -> LocalFinalizedAdmission
+  -> Either String LocalNativeDeclarationAdmission
+admitLocalNativeDeclaration planned inventory proof = do
+  let (iface,_,_) = localFinalizedInterface proof
+      key = (exactUnit iface,exactModule iface)
+      sourceDigest = concatMap hexByte
+        (BS.unpack (SHA.hash (TE.encodeUtf8 (T.pack (plannedSource planned)))))
+      hexByte byte = let value = showHex byte "" in replicate (2 - length value) '0' ++ value
+  unless (plannedOriginalOwner inventory == key && plannedSourceMatches planned inventory
+      && localFinalizedSourceSha256 proof == sourceDigest)
+    (Left "local native declaration differs from its protected owner or source")
+  case parseSessionModule (plannedModule planned) of
+    Just owner | smKind owner == LibMod, Generation generation <- smGen owner
+      , generation > 0, sessionModuleString owner == plannedModule planned ->
+        pure (LocalNativeDeclarationAdmission (inventoryOwner inventory) proof)
+    _ -> Left "local native declaration has an invalid reserved identity"
 
 renderPlannedDeclarationInventory :: PlannedDeclarationInventory -> String
 renderPlannedDeclarationInventory inventory = "{" ++ intercalate ","

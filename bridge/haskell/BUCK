@@ -29,6 +29,7 @@ _EXTRACTOR_SRCS = {
     "Tidepool/FatIface.hs": "src/Tidepool/FatIface.hs",
     "Tidepool/FinalizedModule.hs": "src/Tidepool/FinalizedModule.hs",
     "Tidepool/FinalizedModuleArtifacts.hs": "src/Tidepool/FinalizedModuleArtifacts.hs",
+    "Tidepool/LocalNativeDeclaration.hs": "src/Tidepool/LocalNativeDeclaration.hs",
     "Tidepool/FinalizedCore.hs": "src/Tidepool/FinalizedCore.hs",
     "Tidepool/GhcPipeline.hs": "src/Tidepool/GhcPipeline.hs",
     "Tidepool/QuasiQuoteOccurrences.hs": "src/Tidepool/QuasiQuoteOccurrences.hs",

@@ -99,6 +99,7 @@ library tidepool-extract-internal
     Tidepool.Timing
     Tidepool.TypePolicy
     Tidepool.TurnSource
+  other-modules:   Tidepool.LocalNativeDeclaration
   build-depends:
     base         >= 4.20 && < 5,
     ghc          >= 9.12 && < 9.13,

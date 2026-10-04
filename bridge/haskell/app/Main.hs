@@ -118,7 +118,7 @@ import Tidepool.ExactScope
   , scopeCheckedCell, scopeCheckedItem, scopeCheckedDisplay, scopeIncludePaths
   , originalGroupFromProjected, originalGroupFromCandidate
   , CheckedCellAdmission(..), CheckedCellPurpose(..), CheckedItemAdmission(..), CheckedItemPurpose(..), CheckedDisplayAdmission(..), PlannedCellAdmission(..), PlannedCellSlot(..)
-  , ExactInterfaceEvidence(..), admitLocalNativeDeclaration, validateCandidateCanonicalInterfaceProof, canonicalCertificateSha256
+  , ExactInterfaceEvidence(..), validateCandidateCanonicalInterfaceProof, canonicalCertificateSha256
   , readExactScope, revalidateExactScope, writeExactCompilation, scopeValueInterfaces, extendSourceSelectedOriginals, extendExactExecutionSources, extendExactExecutionSourcesWithinBudget )
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import Tidepool.CellProgramState
@@ -127,7 +127,7 @@ import Tidepool.CheckedCell (encodeCheckedSignature
   , captureCheckedTypeWitness, sealCheckedTypeWitness, encodeCheckedTypeWitness)
 import Tidepool.PlannedDeclaration
   ( PlannedDeclaration, PlannedDeclarationRejection(..), PlannedDeclarationInventory, plannedExports, plannedSource, plannedCheckPlan, replaceTemplateModuleHeader
-  , preparePlannedDeclaration, certifyPlannedDeclaration
+  , preparePlannedDeclaration, certifyPlannedDeclaration, admitLocalNativeDeclaration
   , renderPlannedDeclarationInventory, plannedInterfaceFingerprint )
 import Tidepool.Session
   ( SessionScope(..), preparedScaffoldTargetName, preparedResumeTargetName
@@ -1614,7 +1614,7 @@ prepareOriginalCellDeclaration compiler caches args template outDir scope exact 
       extended = supportScope
         { scopeProducts = scopeProducts supportScope ++ [originalProduct]
         , scopeInterfaces = scopeInterfaces supportScope ++ [(interface, packagesPath, packagesSha)]
-        , scopeInterfaceEvidence = Map.insert (unit,reserved) nativeEvidence
+        , scopeInterfaceEvidence = Map.insert (unit,reserved) (LocalNativeDeclarationEvidence nativeEvidence)
             (scopeInterfaceEvidence supportScope)
         , scopeLexical = scopeLexical supportScope ++ [((unit,reserved), lexicalRequirements)] }
       text = encodeString . T.pack
