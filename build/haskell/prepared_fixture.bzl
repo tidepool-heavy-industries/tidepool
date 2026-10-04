@@ -1,8 +1,8 @@
 """One declared compiler transaction for a module and its prepared targets."""
 
 PreparedFixtureInfo = provider(fields = {
-    "directory": "Portable prepared programs and metadata; no source-bound certificates.",
-    "targets": "Requested target names mapped to prepared Artifact projections.",
+    "directory": Artifact,
+    "targets": dict[str, Artifact],
 })
 
 def _output(dependency):

@@ -14,11 +14,11 @@ def _roots(command, roots):
         command.add("--include", cmd_args(tree, format = "{}/" + subdirectory) if subdirectory else tree)
 
 PreparedCorpusInfo = provider(fields = {
-    "directory": "Complete validated source-derived corpus output.",
-    "manifest": "Compiler-owned projection manifest.",
-    "metadata": "Same-transaction constructor metadata.",
-    "dependencies": "Compiler-consumed source evidence.",
-    "inventory": "Compiler diagnostic facts.",
+    "directory": Artifact,
+    "manifest": Artifact,
+    "metadata": Artifact,
+    "dependencies": Artifact,
+    "inventory": Artifact,
 })
 
 def _corpus_impl(ctx):
