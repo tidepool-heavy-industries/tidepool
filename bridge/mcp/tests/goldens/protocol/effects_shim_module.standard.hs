@@ -9,6 +9,6 @@ import Tidepool.Effects.Authored
 import Control.Monad.Freer hiding (run)
 import Tidepool.Prelude hiding (error)
 
-type M = Eff '[Console, KV, FsRead, FsWrite, Http, Exec, Llm, Git, Time, Entropy, Ask, RunLLMTurn]
+type M = Eff '[Console, KV, FsRead, FsWrite, Http, Exec, Llm, Git, Time, Entropy, Ask]
 __shimProbe :: M ()
 __shimProbe = pure ()

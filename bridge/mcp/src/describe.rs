@@ -288,11 +288,7 @@ mod tests {
     fn derived_index_excludes_substrate_helpers() {
         let decls = standard_decls();
         let index = describe_effects_index(&decls);
-        for name in [
-            "isOpt",
-            "innerSchema",
-            "schemaToValue",
-        ] {
+        for name in ["isOpt", "innerSchema", "schemaToValue"] {
             assert!(
                 !index.contains(name),
                 "index must not advertise substrate helper {name}: {index}"

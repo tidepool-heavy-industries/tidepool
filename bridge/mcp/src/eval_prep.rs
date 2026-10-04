@@ -1090,14 +1090,23 @@ mod tests {
     fn actor_local_row_entry_is_applied_to_its_protocol() {
         let decls = vec![crate::askuser_decl(), crate::actor_local_decl()];
         let core = effects_core_module_source_for(&decls);
-        assert!(core.contains("data ActorLocal (api :: Type -> Type) a where"), "{core}");
+        assert!(
+            core.contains("data ActorLocal (api :: Type -> Type) a where"),
+            "{core}"
+        );
         assert!(core.contains("RequestSite '[] next"), "{core}");
         assert!(!core.contains("type M ="), "{core}");
         let shim = effects_shim_module_source(&decls, &crate::RowArgs::default());
-        assert!(shim.contains("type M = Eff '[AskUser, ActorLocal Maybe]"), "{shim}");
+        assert!(
+            shim.contains("type M = Eff '[AskUser, ActorLocal Maybe]"),
+            "{shim}"
+        );
         let row = crate::RowArgs::at("ActorLocal", ["Protocol"]).importing(["ActorTypes"]);
         let pinned = effects_shim_module_source(&decls, &row);
-        assert!(pinned.contains("type M = Eff '[AskUser, ActorLocal Protocol]"), "{pinned}");
+        assert!(
+            pinned.contains("type M = Eff '[AskUser, ActorLocal Protocol]"),
+            "{pinned}"
+        );
         assert!(pinned.contains("\nimport ActorTypes\n"), "{pinned}");
         let other = crate::RowArgs::at("ActorLocal", ["OtherProtocol"]).importing(["ActorTypes"]);
         assert_ne!(pinned, effects_shim_module_source(&decls, &other));
@@ -1136,7 +1145,10 @@ mod tests {
     fn parameterized_effect_is_generic_and_nameable() {
         let vocab = vec![crate::askuser_decl(), crate::actor_local_decl()];
         let core = effects_core_module_source_for(&vocab);
-        assert!(core.contains("data ActorLocal (api :: Type -> Type) a where"), "{core}");
+        assert!(
+            core.contains("data ActorLocal (api :: Type -> Type) a where"),
+            "{core}"
+        );
         // The shim can omit an effect without changing its stable vocabulary.
         let shim = effects_shim_module_source(&[crate::askuser_decl()], &crate::RowArgs::default());
         assert!(shim.contains("type M = Eff '[AskUser]"), "{shim}");

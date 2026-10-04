@@ -18,5 +18,3 @@
       verbs: getCurrentTime
   Entropy: Randomness.
   Ask: Suspend execution and ask the calling agent a STRUCTURED question.
-  RunLLMTurn: Suspend for a TYPED answer.
-      verbs: runLLMTurn, runLLMTurnFork, runLLMTurnFanout, renderInvocationExit

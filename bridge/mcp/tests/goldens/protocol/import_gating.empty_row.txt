@@ -1,4 +1,4 @@
--- build_preamble (1220 bytes) --
+-- build_preamble (1252 bytes) --
 {-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, FlexibleContexts, FlexibleInstances, UndecidableInstances, GADTs, KindSignatures, RankNTypes, PartialTypeSignatures, ScopedTypeVariables, ExtendedDefaultRules, LambdaCase, TupleSections, MultiWayIf, RecordWildCards, NamedFieldPuns, ViewPatterns, BangPatterns, TypeApplications, BlockArguments, NumericUnderscores, MultilineStrings, DeriveFunctor, DeriveFoldable, DeriveTraversable, DeriveGeneric, DeriveAnyClass, StandaloneDeriving, QuasiQuotes, DuplicateRecordFields, OverloadedRecordDot, OverloadedLabels #-}
 module Expr where
 import Tidepool.Prelude hiding (error)
@@ -17,6 +17,7 @@ import qualified Tidepool.Patch as Patch
 import Control.Monad.Freer hiding (run)
 import qualified Prelude as P
 import Tidepool.Orchestrate
+-- tidepool-preamble-imports-v1
 default (Int, Double, Text)
 
 -- end build_preamble --

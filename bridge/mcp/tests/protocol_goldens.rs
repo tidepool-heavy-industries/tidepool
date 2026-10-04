@@ -187,7 +187,9 @@ fn hardcoded_pins_survive_a_blind_regen() {
 
     let console = tidepool_mcp::console_decl();
     assert!(
-        console.constructors.contains(&"Print :: Text -> Console ()"),
+        console
+            .constructors
+            .contains(&"Print :: Text -> Console ()"),
         "Console's text-printing contract changed"
     );
 }
@@ -244,7 +246,10 @@ fn import_gating_standard_row_golden_matches_committed_file() {
 
 #[test]
 fn import_gating_actor_local_row_golden_matches_committed_file() {
-    let effects = vec![tidepool_mcp::askuser_decl(), tidepool_mcp::actor_local_decl()];
+    let effects = vec![
+        tidepool_mcp::askuser_decl(),
+        tidepool_mcp::actor_local_decl(),
+    ];
     check_import_gating("actor_local_row", &effects);
 }
 
