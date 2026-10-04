@@ -2619,15 +2619,7 @@ pub fn compile_invocation(
     inv: &CompileInvocation<'_>,
     mut on_stage: impl FnMut(&str, Duration, u64),
 ) -> Result<CompiledArtifacts, CompileError> {
-    compile_invocation_inner(
-        inv,
-        &mut on_stage,
-        CompilationPolicy::Runtime,
-        None,
-        None,
-        None,
-        None,
-    )
+    compile_invocation_inner(inv, &mut on_stage, CompilationPolicy::Runtime)
 }
 
 /// Compile fresh source against immutable declaration owners through the same
@@ -2638,15 +2630,7 @@ pub fn compile_invocation_in_context(
     context: Arc<crate::declaration_join::ExactDeclarationContext>,
     mut on_stage: impl FnMut(&str, Duration, u64),
 ) -> Result<CompiledArtifacts, CompileError> {
-    compile_invocation_inner(
-        inv,
-        &mut on_stage,
-        CompilationPolicy::FreshRuntime,
-        None,
-        Some(context),
-        None,
-        None,
-    )
+    compile_invocation_inner(inv, &mut on_stage, CompilationPolicy::Exact { context })
 }
 
 /// Compile a declaration probe in full-home-product mode, which produces
@@ -2670,11 +2654,11 @@ pub(crate) fn compile_authored_products(
     compile_invocation_inner(
         &inv,
         &mut |_, _, _| {},
-        CompilationPolicy::FreshRuntime,
-        Some(session_root),
-        context,
-        None,
-        Some(authored),
+        CompilationPolicy::Authored {
+            session_root,
+            context,
+            admission: authored,
+        },
     )
 }
 
@@ -2703,11 +2687,10 @@ pub fn build_deployment_module_package(
     compile_invocation_inner(
         &invocation,
         &mut |_, _, _| {},
-        CompilationPolicy::FreshRuntime,
-        None,
-        None,
-        Some((output_root, &source_root)),
-        None,
+        CompilationPolicy::Deployment {
+            output_root,
+            source_root: &source_root,
+        },
     )?;
     Ok(crate::toolchain::DeploymentModulePackage::load(
         &output_root.join("catalog.json"),
@@ -2716,10 +2699,22 @@ pub fn build_deployment_module_package(
 }
 
 /// Authority selected by the compilation owner, independently of cache hints.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum CompilationPolicy<'a> {
     Runtime,
     FreshRuntime,
+    Exact {
+        context: Arc<crate::declaration_join::ExactDeclarationContext>,
+    },
+    Authored {
+        session_root: &'a Path,
+        context: Option<Arc<crate::declaration_join::ExactDeclarationContext>>,
+        admission: &'a crate::declaration_join::NativeAuthoredDeclarationAdmission,
+    },
+    Deployment {
+        output_root: &'a Path,
+        source_root: &'a Path,
+    },
     BuildAction {
         source_path: &'a Path,
         scratch: &'a Path,
@@ -2785,10 +2780,6 @@ pub fn build_prepared_fixture(
             scratch,
             output,
         },
-        None,
-        None,
-        None,
-        None,
     )
     .map(|_| ())
 }
@@ -2854,10 +2845,6 @@ fn compile_invocation_inner(
     inv: &CompileInvocation<'_>,
     mut on_stage: &mut impl FnMut(&str, Duration, u64),
     policy: CompilationPolicy<'_>,
-    session_root: Option<&Path>,
-    exact_context: Option<Arc<crate::declaration_join::ExactDeclarationContext>>,
-    deployment_export: Option<(&Path, &Path)>,
-    authored: Option<&crate::declaration_join::NativeAuthoredDeclarationAdmission>,
 ) -> Result<CompiledArtifacts, CompileError> {
     assert!(
         !inv.targets.is_empty(),
@@ -2865,8 +2852,28 @@ fn compile_invocation_inner(
     );
     let multi = inv.targets.len() > 1;
 
-    let allow_candidates = matches!(policy, CompilationPolicy::Runtime);
-    let temp_dir = match policy {
+    let (session_root, exact_context, deployment_export, authored) = match &policy {
+        CompilationPolicy::Runtime
+        | CompilationPolicy::FreshRuntime
+        | CompilationPolicy::BuildAction { .. } => (None, None, None, None),
+        CompilationPolicy::Exact { context } => (None, Some(context), None, None),
+        CompilationPolicy::Authored {
+            session_root,
+            context,
+            admission,
+        } => (
+            Some(*session_root),
+            context.as_ref(),
+            None,
+            Some(*admission),
+        ),
+        CompilationPolicy::Deployment {
+            output_root,
+            source_root,
+        } => (None, None, Some((*output_root, *source_root)), None),
+    };
+    let allow_candidates = matches!(&policy, CompilationPolicy::Runtime);
+    let temp_dir = match &policy {
         CompilationPolicy::BuildAction { scratch, .. } => TempDir::new_in(scratch)?,
         _ => TempDir::new()?,
     };
@@ -2875,8 +2882,8 @@ fn compile_invocation_inner(
     // differs per lane.
     let module =
         extract_module_name(inv.source).unwrap_or_else(|| inv.fallback_module_name.to_string());
-    let input_path = match policy {
-        CompilationPolicy::BuildAction { source_path, .. } => source_path.to_owned(),
+    let input_path = match &policy {
+        CompilationPolicy::BuildAction { source_path, .. } => source_path.to_path_buf(),
         _ => {
             let path = temp_dir.path().join(format!("{module}.hs"));
             std::fs::write(&path, inv.source)?;
@@ -2895,7 +2902,7 @@ fn compile_invocation_inner(
     if deployment_export.is_some() {
         cmd.certify_home_products();
     }
-    let exact_request = if let Some(context) = exact_context.as_ref() {
+    let exact_request = if let Some(context) = exact_context {
         let endpoint = cmd
             .bind()
             .map_err(|error| CompileError::Io(extract_spawn_error(error.source)))?;
@@ -2929,14 +2936,14 @@ fn compile_invocation_inner(
     let attempt = retry_bounded(
         || {
             let mut cmd = base_cmd.clone();
-            let endpoint = match policy {
+            let endpoint = match &policy {
                 CompilationPolicy::BuildAction { .. } => cmd.bind_direct(),
                 _ => cmd.bind(),
             }
             .map_err(CompileAttemptError::Endpoint)?;
             let deployment = crate::toolchain::admit_bound_endpoint(&endpoint)
                 .map_err(CompileAttemptError::Deployment)?;
-            match policy {
+            match &policy {
                 CompilationPolicy::BuildAction { .. } => {
                     cmd.build_products_dir(temp_dir.path().join("build-products"));
                 }
@@ -3085,18 +3092,10 @@ fn compile_invocation_inner(
                     .is_some_and(|set| !set.by_owner.is_empty()) =>
         {
             tracing::warn!(%error, "candidate compile failed; retrying without candidates");
-            return compile_invocation_inner(
-                inv,
-                on_stage,
-                CompilationPolicy::FreshRuntime,
-                session_root,
-                exact_context,
-                deployment_export,
-                authored,
-            );
+            return compile_invocation_inner(inv, on_stage, CompilationPolicy::FreshRuntime);
         }
         Err(error) => {
-            return Err(match policy {
+            return Err(match &policy {
                 CompilationPolicy::BuildAction { .. } => error,
                 _ => retain_compiler_failure(temp_dir.path(), &compiler_stderr, error),
             });
@@ -3110,7 +3109,7 @@ fn compile_invocation_inner(
         let evidence_bytes = std::fs::read(temp_dir.path().join("dependencies.json"))?;
         let package_bundle_bytes =
             std::fs::read(temp_dir.path().join("module-package-imports.cbor"))?;
-        if matches!(policy, CompilationPolicy::BuildAction { .. }) {
+        if matches!(&policy, CompilationPolicy::BuildAction { .. }) {
             validate_prepared_fixture_sources(&evidence_bytes, &input_path, inv.include)?;
         }
         let exact_source = exact_request
@@ -3234,7 +3233,7 @@ fn compile_invocation_inner(
             .collect::<Result<_, _>>()?;
         let fresh_count = fresh_products.products().len();
         let (fresh_products, publication) =
-            if !matches!(policy, CompilationPolicy::BuildAction { .. })
+            if !matches!(&policy, CompilationPolicy::BuildAction { .. })
                 && (exact_request.is_none() || deployment_export.is_some())
                 && evidence.is_some()
             {
@@ -3374,22 +3373,14 @@ fn compile_invocation_inner(
                     .is_some_and(|set| !set.by_owner.is_empty()) =>
         {
             tracing::warn!(%error, "candidate certification failed; retrying without candidates");
-            compile_invocation_inner(
-                inv,
-                on_stage,
-                CompilationPolicy::FreshRuntime,
-                session_root,
-                exact_context,
-                deployment_export,
-                authored,
-            )
+            compile_invocation_inner(inv, on_stage, CompilationPolicy::FreshRuntime)
         }
         result => {
-            let artifacts = result.map_err(|error| match policy {
+            let artifacts = result.map_err(|error| match &policy {
                 CompilationPolicy::BuildAction { .. } => error,
                 _ => retain_compiler_failure(temp_dir.path(), &compiler_stderr, error),
             })?;
-            if let CompilationPolicy::BuildAction { output, .. } = policy {
+            if let CompilationPolicy::BuildAction { output, .. } = &policy {
                 std::fs::create_dir(output)?;
                 // Portable code has no authority to hydrate the source-bound
                 // native products or certificates from this transaction.
