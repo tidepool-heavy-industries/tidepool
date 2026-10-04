@@ -5,6 +5,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 output="${1:?usage: test-command-resources-delegated.sh OUTPUT}"
 [[ $# -eq 1 ]] || { echo 'error: expected a fresh evidence directory' >&2; exit 2; }
+output="$(realpath -m -- "$output")"
 [[ ! -e "$output" ]] || { echo "error: evidence directory already exists: $output" >&2; exit 2; }
 exec bash "$repo_root/scripts/buck2-run.sh" run --local-only -c remote.enabled=false \
   //exomonad/node:command_resources -- \

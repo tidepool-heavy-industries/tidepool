@@ -40,6 +40,32 @@ printf '%s\\n' "$*" >> "$RECORD"
             self.assertEqual(repeated.returncode, 2)
             self.assertEqual(len(record.read_text().splitlines()), 6)
 
+    def test_delegated_resources_keeps_caller_evidence_path_when_buck_changes_directory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            frontend = root / 'repo/exomonad/scripts/test-command-resources-delegated.sh'
+            frontend.parent.mkdir(parents=True)
+            shutil.copyfile(REPO / 'exomonad/scripts/test-command-resources-delegated.sh', frontend)
+            (root / 'repo/scripts').mkdir()
+            buck = root / 'repo/scripts/buck2-run.sh'
+            buck.write_text("""#!/usr/bin/env bash
+cd "$(dirname "$0")/.."
+while [[ $# -gt 0 ]]; do
+  if [[ "$1" == --output-dir ]]; then
+    mkdir "$2"
+    pwd > "$2/launch-directory"
+    exit 0
+  fi
+  shift
+done
+exit 8
+""")
+            result = subprocess.run(['bash', str(frontend), 'evidence'], cwd=root,
+                                    text=True, capture_output=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertTrue((root / 'evidence/launch-directory').is_file())
+            self.assertFalse((root / 'repo/evidence').exists())
+
     def test_recipe_checks_keep_frozen_owner_receipts_and_fail_on_actual_child_status(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

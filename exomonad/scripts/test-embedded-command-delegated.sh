@@ -7,7 +7,7 @@ descriptor="${2:?qualification descriptor required}"
 output="${3:?fresh evidence directory required}"
 [[ $# -eq 3 ]] || { echo 'error: expected BUNDLE DESCRIPTOR OUTPUT' >&2; exit 2; }
 [[ ! -e "$output" ]] || { echo "error: evidence directory already exists: $output" >&2; exit 2; }
-mkdir -p "$output"
+mkdir -m 700 -p "$output"
 source "$repo_root/scripts/lib-extract.sh"
 select_native_bundle "$bundle" "$descriptor"
 cleanup() {

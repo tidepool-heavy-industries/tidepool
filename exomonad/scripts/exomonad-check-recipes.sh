@@ -8,7 +8,7 @@ workspace="${4:?workspace required}"
 parallelism="${5:-1}"
 [[ $# -le 5 && "$parallelism" =~ ^[1-9][0-9]*$ ]] || { echo 'error: positive parallelism required' >&2; exit 2; }
 [[ ! -e "$reports" ]] || { echo "error: report directory already exists: $reports" >&2; exit 2; }
-mkdir -p "$reports"
+mkdir -m 700 -p "$reports"
 exec python3 - "$bundle/share/exomonad/qualification.py" "$descriptor" "$reports" "$workspace" "$parallelism" <<'PY'
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
