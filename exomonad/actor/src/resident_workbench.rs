@@ -2620,7 +2620,10 @@ impl ResidentRequest {
             ) => "attach lifecycle source",
             Self::ActorLocal(crate::generated::actor_local::ActorLocalReq::ActorReceiveWith(
                 ..,
-            )) => "receive",
+            ))
+            | Self::ActorLocal(
+                crate::generated::actor_local::ActorLocalReq::ActorReceiveStatefulWith(..),
+            ) => "receive",
             Self::ActorLocal(
                 crate::generated::actor_local::ActorLocalReq::ActorCheckpointWith(..),
             ) => "state checkpoint",
@@ -7237,6 +7240,7 @@ where
                     && !matches!(&decoded, ResidentRequest::ActorLocal(
                         crate::generated::actor_local::ActorLocalReq::ActorCheckpointWith(..)
                         | crate::generated::actor_local::ActorLocalReq::ActorReceiveWith(..)
+                        | crate::generated::actor_local::ActorLocalReq::ActorReceiveStatefulWith(..)
                     ))
                 {
                     return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
@@ -7671,6 +7675,9 @@ where
                         Ok(ResidentActorBoundary::ActorLocalContext(hole)),
                     ResidentRequest::ActorLocal(
                         crate::generated::actor_local::ActorLocalReq::ActorReceiveWith(site, _),
+                    )
+                    | ResidentRequest::ActorLocal(
+                        crate::generated::actor_local::ActorLocalReq::ActorReceiveStatefulWith(site, _),
                     ) => capture_receiver_boundary(session, hole, site, actor_realm),
                     ResidentRequest::ActorLocal(
                         crate::generated::actor_local::ActorLocalReq::ActorCheckpointWith(site, _),

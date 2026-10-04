@@ -22,11 +22,12 @@ and retirement are authoritative.
 
 `session::workbench` owns frontend-neutral source classification,
 meta-command tokenization, canonical resident turn templates, and
-prefix-preserving ordered cursors. Frontends own command meaning, execution
+ordered cursors that retain completed execution evidence. Frontends own command meaning, execution
 settlement, presentation, provider loops, and lifecycle policy.
 
-Ordered execution preserves committed prefixes. A later rejection does not
-roll back earlier external effects; preserve effect receipts rather than
+An admitted cell publishes its declarations and bindings together on successful
+completion. Failure or cancellation before publication publishes no cell names.
+Neither failure nor rejection rolls back earlier external effects; preserve effect receipts rather than
 inferring that a missing binding means nothing happened. Exact transport
 retries return retained receipts, while newly submitted source is new intent.
 Keep workbench observation formatting separate from execution and authority;
