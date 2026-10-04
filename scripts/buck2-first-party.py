@@ -554,7 +554,7 @@ def test_runtime_inputs(package_name, target_name, unit=False):
         variable, label = PREPARED_FIXTURE_RESOURCES[name]
         env[variable] = "$(location " + label + ")"
         resources.append(label)
-    if package_name in {"tidepool-toolchain", "tidepool-runtime", "tidepool-testing", "exomonad-actor"}:
+    if package_name in {"tidepool-toolchain", "tidepool-runtime", "tidepool-testing", "tidepool-handlers", "exomonad-actor"}:
         worker = True
         env.update({
             "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_deployment)",

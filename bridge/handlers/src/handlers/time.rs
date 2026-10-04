@@ -80,10 +80,7 @@ mod tests {
     /// tidepool-extract compile.
     #[tokio::test]
     async fn test_jit_time_family() {
-        if !tidepool_testing::eval_harness::extract_available() {
-            eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-            return;
-        }
+        tidepool_testing::eval_harness::require_extract();
         let decls = tidepool_mcp::standard_decls();
         let source = jit_test_source(&[
             "let t0 = UTCTime 0",

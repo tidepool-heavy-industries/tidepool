@@ -80,10 +80,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_jit_entropy_family() {
-        if !tidepool_testing::eval_harness::extract_available() {
-            eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-            return;
-        }
+        tidepool_testing::eval_harness::require_extract();
         let decls = tidepool_mcp::standard_decls();
         let source = jit_test_source(&[
             "let check nm ok = if ok then [] else [nm]",

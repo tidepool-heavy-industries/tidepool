@@ -919,23 +919,12 @@ mod tests {
         }
     }
 
-    /// Bundles `test_jit_git_log_returns_commit` (full JIT end-to-end:
-    /// `gitLog 1` on the real repo returns a Commit record with a
-    /// 40-character sha field, exercising the generated Tidepool.Effects
-    /// wiring + Records visibility + con-name/arity agreement through the
-    /// JIT) + `test_jit_git_show_unknown_revision_is_typed_left` (#335 acceptance:
-    /// `gitShow` with an unknown revision is typed `Left (GitFailed _ _)`
-    /// data the eval pattern-matches, never an abort) + a `gitLogNumstat 1` exercise
-    /// (the new bulk verb: `CommitDeltas{commit,deltas}` resolves through the
-    /// real `Tidepool.Records.Bridged`/`.Stable` wiring, nested record-dot
-    /// access included) into one tidepool-extract compile. Skips cleanly
-    /// when TIDEPOOL_EXTRACT is unavailable.
+    /// Compile Git log, typed failure and numstat operations together. Check
+    /// nominal records, nested fields and constructor arity through generated
+    /// effects and actual JIT execution.
     #[tokio::test]
     async fn test_jit_git_family() {
-        if !tidepool_testing::eval_harness::extract_available() {
-            eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-            return;
-        }
+        tidepool_testing::eval_harness::require_extract();
         let decls = tidepool_mcp::standard_decls();
         // Return the observed values (not collapsed Bools) so a failure names
         // which invariant broke and what we actually saw.
