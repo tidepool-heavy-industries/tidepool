@@ -39,6 +39,6 @@ export_file(name = "workspace_gitlink", src = "build/native-workspace-gitlink.js
 
 filegroup(
     name = "operator_test_sources",
-    srcs = {source: source for source in glob(["exomonad/scripts/*.sh"])},
+    srcs = {source: source for source in glob(["exomonad/scripts/*.sh", "exomonad/scripts/tests/*.py"])},
     visibility = ["PUBLIC"],
 )

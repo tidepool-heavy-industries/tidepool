@@ -29,7 +29,7 @@ native_source_snapshot(
 sh_test(
     name = "toolchain_script_tests",
     test = "run-unittests.sh",
-    args = ["scripts.tests.test_lib_extract", "scripts.tests.test_native_operator_frontends"],
+    args = ["scripts.tests.test_lib_extract", "scripts.tests.test_native_operator_frontends", "scripts.tests.test_exomonad_launch_acceptance"],
     env = {
         "TIDEPOOL_TEST_PYTHON": "$(exe toolchains//:python)",
         "TIDEPOOL_SCRIPT_TEST_ROOT": "$(location :script_test_resources)",
