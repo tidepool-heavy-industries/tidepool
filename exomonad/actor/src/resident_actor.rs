@@ -478,7 +478,7 @@ fn retain_retired_metadata<H, O>(
     }
     environment.fork_groups.retire_actor(actor);
     if let Some(record) = environment.actors.lock().get_mut(&actor) {
-        record.descriptor.source_imports().release_inherited_scope();
+        record.descriptor.source_imports().release_capture();
         record.terminal = Some(terminal.clone());
         record.displays.lock().retire();
     }
@@ -4686,7 +4686,7 @@ where
     /// returns and nothing else calls a method on a stopped behavior
     /// first, so nothing reads any of these fields again afterwards.
     fn release_session_state(&mut self) {
-        self.descriptor.source_imports().release_inherited_scope();
+        self.descriptor.source_imports().release_capture();
         self.shutdown_hook.take();
         self.checkpoint.take();
         self.admitted_checkpoint.take();

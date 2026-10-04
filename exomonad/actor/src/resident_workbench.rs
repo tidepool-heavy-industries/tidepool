@@ -86,6 +86,18 @@ pub(crate) fn execution_control() -> Option<Arc<crate::WorkbenchExecutionControl
 }
 
 impl ActorWorkbenchSource {
+    fn compile_inputs(
+        &self,
+        context: &crate::ActorSessionContext,
+    ) -> Result<tidepool_runtime::session::RuntimeCompileInputs, ResidentActorWorkbenchError> {
+        tidepool_runtime::session::RuntimeCompileInputs::new(
+            self.request_annotations()
+                .map_err(ResidentActorWorkbenchError::Compile)?,
+            context.source_imports.declaration_projections()?,
+        )
+        .map_err(ResidentActorWorkbenchError::Compile)
+    }
+
     fn request_annotations(
         &self,
     ) -> Result<Option<tidepool_runtime::session::RequestCompileAnnotations>, CompileError> {
@@ -2640,11 +2652,8 @@ impl ResidentRequest {
     }
 }
 
-/// Write `source` to `path`, creating parent directories as needed — the
-/// same shape [`tidepool_runtime::session::ExactExportSurface::materialize`]
-/// itself uses to put a facade under the launching session's own root, used
-/// here to put a copy of that same content (and the `Lib.G<n>` sources it
-/// re-exports from) under a CHILD session's own root instead.
+/// Materialize the source-only facade variant in a fresh child session. Issued
+/// interfaces are materialized by their protected compiler admission instead.
 fn write_seed_source(path: &std::path::Path, source: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| {
@@ -2765,9 +2774,8 @@ impl<H, O> ResidentActorRunner<H, O> {
     /// once the checkout that captured the launch has long since been
     /// released): construct the private session, bootstrap it (install the
     /// same compiled program the root itself bootstrapped with — required
-    /// before either `set_image_registry` or a later
-    /// [`ResidentActorRunner::transfer_custody`] import will do anything
-    /// but no-op/refuse on a virgin engine), install this run's shared
+    /// before a later [`ResidentActorRunner::transfer_custody`] import can
+    /// enter the destination engine), install this run's shared
     /// image registry, and mint the child's OWN lexical scope on the
     /// machine that will actually own it (never the parent's — copying a
     /// `ScopeId` across sessions is not evidence of destination scope
@@ -2777,27 +2785,21 @@ impl<H, O> ResidentActorRunner<H, O> {
     /// it — the shared registry is unchanged.
     ///
     /// `source_layer` is the descriptor's fixed helper snapshot. The factory
-    /// puts it on the validation path before bootstrap compiles inherited
-    /// declarations.
+    /// puts it on the validation path for subsequent protected compilation.
     ///
     /// `resource_scope` is the descriptor's own resource scope, minted at
     /// capture time (`crate::start::capture_decoded`'s `child_realm`) — the
     /// SAME realm `transfer_custody` will later import the entry under, not
     /// a second one of this call's own minting nothing afterward would use.
     ///
-    /// `seed`, when the launch carried one (`crate::start::ChildSessionSeed`
-    /// — an eligible launch always does), is written to the child's own
-    /// session root BEFORE the bootstrap install: any declaration facade
-    /// `capture_decoded` materialized under the PARENT's session root (its
-    /// `import Tidepool.Session.Lib.G<n> (...)` line names generations that
-    /// otherwise exist nowhere the child can find them) and every
-    /// `Lib.G<n>.hs` source it might reference, at the same relative paths
-    /// (`tidepool_atomic_write`, exactly as `ExactExportSurface::materialize`
-    /// itself writes the facade on the parent). The child's own value-binding
-    /// generation counter is then raised to the parent's
-    /// (`ResidentSession::set_val_gen`'s own monotonic-max, never lowers it)
-    /// so nothing the child declares on its own later can mint a generation
-    /// number a just-copied file already uses.
+    /// An eligible launch retains `crate::start::ChildSessionSeed` through
+    /// bootstrap, including its selected issued interface and original
+    /// implementation closure. Certified projections become compiler inputs
+    /// through the descriptor, then the existing protected
+    /// admission materializes that same closure; no authored Lib source is copied.
+    /// Legacy source facades alone copy their regenerable source artifact.
+    /// Both identity allocators advance past the captured parent counters without
+    /// installing any additional lexical roots.
     ///
     /// Returns the child's own freshly minted lexical scope
     /// (`ActorDescriptor::with_lexical_scope` replaces the placeholder the
@@ -2828,14 +2830,9 @@ impl<H, O> ResidentActorRunner<H, O> {
         let source_layer = source_layer.to_vec();
         let seed = seed.map(|seed| {
             (
-                seed.facade.as_ref().map(|facade| {
-                    (
-                        facade.identity().relative_hs_path(),
-                        facade.source().to_owned(),
-                    )
-                }),
-                seed.lib_sources.clone(),
+                seed.facade.clone(),
                 seed.val_generation,
+                seed.declaration_high_water,
             )
         });
         let image_registry = self.access.image_registry.clone();
@@ -2856,7 +2853,7 @@ impl<H, O> ResidentActorRunner<H, O> {
                     tidepool_effect::LivePayloadPolicy::HASKELL_EFFECT_VALUE,
                 )
                 .map_err(|error| format!("child session bootstrap context: {error}"))?;
-            if let Some((facade, lib_sources, val_generation)) = seed {
+            if let Some((facade, val_generation, declaration_high_water)) = seed {
                 let root = machine
                     .compile_view_in(tidepool_codegen::scope::ScopeId::ROOT)
                     .ok_or_else(|| {
@@ -2864,13 +2861,22 @@ impl<H, O> ResidentActorRunner<H, O> {
                     })?
                     .session_root()
                     .to_path_buf();
-                if let Some((facade_path, facade_source)) = facade {
-                    write_seed_source(&root.join(facade_path), &facade_source)?;
-                }
-                for (relative, source) in &lib_sources {
-                    write_seed_source(&root.join(relative), source)?;
+                if let Some(facade) = facade {
+                    if let Some((_, source)) = facade.source_artifact() {
+                        write_seed_source(
+                            &root.join(facade.identity().relative_hs_path()),
+                            source,
+                        )?;
+                    }
                 }
                 machine.set_val_gen(val_generation);
+                if let Some(high_water) = declaration_high_water {
+                    machine
+                        .initialize_captured_declaration_high_water(high_water)
+                        .map_err(|error| {
+                            format!("child declaration identity reservation: {error}")
+                        })?;
+                }
             }
             if let Some(registry) = &image_registry {
                 // Before the bootstrap, so the child's first install is the
@@ -4345,7 +4351,8 @@ where
                 declaration_worth_showing(module, &self.access.source.workspace_modules)
             })
         });
-        let source = self.access.source.clone().for_activation(&context);
+        let mut source = self.access.source.clone().for_activation(&context);
+        source.request_evidence = Some(input.type_evidence().clone());
 
         let authority = self.compilation_authority.clone().ok_or_else(|| {
             ResidentActorWorkbenchError::ActorProtocol(
@@ -4381,6 +4388,7 @@ where
                     authority.authority_digest(),
                     prepared.include,
                     evidence,
+                    Some(view.compile_inputs().clone()),
                 ).map_err(ResidentActorWorkbenchError::Resident)?;
                 let checked = check_activation_input(&owner).map_err(|failure| {
                     ResidentActorWorkbenchError::InputCompilation {
@@ -4768,9 +4776,7 @@ where
                     include: prepared.include,
                     evidence,
                     declaration_imports: snapshot.view.workbench_imports(),
-                    request_annotations: source
-                        .request_annotations()
-                        .map_err(ResidentActorWorkbenchError::Compile)?,
+                    compile_inputs: snapshot.view.compile_inputs().clone(),
                 });
                 Ok(specification)
             })
@@ -4804,6 +4810,7 @@ where
                         reservation_specification.include.clone(),
                         binding,
                         expected,
+                        Some(reservation_specification.compile_inputs.clone()),
                     ),
                     (Some(execution), None) => session.admit_planned_cell_for_execution(
                         execution.admission.clone(),
@@ -4812,7 +4819,7 @@ where
                         reservation_specification.cell.specification_digest(),
                         reservation_specification._authority.authority_digest(),
                         reservation_specification.include.clone(),
-                        reservation_specification.request_annotations.clone(),
+                        Some(reservation_specification.compile_inputs.clone()),
                     ),
                     (None, None) => session.admit_native_setup_cell_in(
                         context.placement.lexical_scope,
@@ -4821,7 +4828,7 @@ where
                         reservation_specification.cell.specification_digest(),
                         reservation_specification._authority.authority_digest(),
                         reservation_specification.include.clone(),
-                        reservation_specification.request_annotations.clone(),
+                        Some(reservation_specification.compile_inputs.clone()),
                     ),
                     (Some(_), Some(_)) => {
                         return Err(ResidentActorWorkbenchError::ActorProtocol(
@@ -9833,7 +9840,7 @@ struct WorkbenchCompilationSpec {
     include: Vec<PathBuf>,
     evidence: String,
     declaration_imports: SourceImports,
-    request_annotations: Option<tidepool_runtime::session::RequestCompileAnnotations>,
+    compile_inputs: tidepool_runtime::session::RuntimeCompileInputs,
 }
 
 struct PreparedCellStep {
@@ -9897,6 +9904,7 @@ where
         )
     })?;
     let source = source.for_workbench(context, request_scope);
+    let inputs = source.compile_inputs(context)?;
     let view = if let CellSnapshotAdmission::PrivateExecution(execution) = admission {
         if execution.private_scope() != context.placement.lexical_scope {
             return Err(ResidentActorWorkbenchError::Resident(
@@ -9910,17 +9918,8 @@ where
             .map_err(|error| {
                 ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
             })?;
-        let session_view = match source
-            .request_annotations()
-            .map_err(ResidentActorWorkbenchError::Compile)?
-        {
-            Some(annotations) => session_view
-                .with_request_annotations(&annotations)
-                .map_err(ResidentActorWorkbenchError::Compile)?,
-            None => session_view,
-        };
         context
-            .compile_view(session_view)?
+            .compile_view_with_inputs(session_view, inputs)?
             .with_workbench_imports(&source.workbench_imports)
     } else {
         let session_view = session
@@ -9931,17 +9930,8 @@ where
                 )),
             ))?
             .with_scoped_injection();
-        let session_view = match source
-            .request_annotations()
-            .map_err(ResidentActorWorkbenchError::Compile)?
-        {
-            Some(annotations) => session_view
-                .with_request_annotations(&annotations)
-                .map_err(ResidentActorWorkbenchError::Compile)?,
-            None => session_view,
-        };
         context
-            .compile_view(session_view)?
+            .compile_view_with_inputs(session_view, inputs)?
             .with_workbench_imports(&source.workbench_imports)
     };
     Ok((
@@ -10110,17 +10100,9 @@ where
                 tidepool_runtime::session::SessionError::DeadScope(context.placement.lexical_scope),
             ))
         })?;
-    let session_view = match source
-        .request_annotations()
-        .map_err(ResidentActorWorkbenchError::Compile)?
-    {
-        Some(annotations) => session_view
-            .with_request_annotations(&annotations)
-            .map_err(ResidentActorWorkbenchError::Compile)?,
-        None => session_view,
-    };
+    let inputs = source.compile_inputs(context)?;
     Ok(context
-        .compile_view(session_view)?
+        .compile_view_with_inputs(session_view, inputs)?
         .with_workbench_imports(&source.workbench_imports))
 }
 
@@ -16893,7 +16875,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                     specification.specification_digest(),
                     [7; 32],
                     prepared.include.clone(),
-                    Some(annotations),
+                    Some(annotations.into()),
                 )
                 .unwrap();
             let admitted = admission.view().exact_compile_context().unwrap();

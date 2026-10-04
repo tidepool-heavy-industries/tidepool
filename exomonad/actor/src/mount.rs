@@ -6,8 +6,8 @@ use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 use tidepool_repr::{Generation, PrincipalId, SessionId, SessionModule};
 use tidepool_runtime::session::{
-    MaterializedFacade, OutputSink, ResidentError, ResidentSession, SessionCompileView,
-    SessionRunContext, SourceImports,
+    MaterializedFacade, OutputSink, ResidentError, ResidentSession, RuntimeCompileInputs,
+    SessionCompileView, SessionRunContext, SourceImports,
 };
 
 use crate::ActorRef;
@@ -31,6 +31,12 @@ pub struct ActorPlacement {
 pub struct ActorSourceImports {
     imports: SourceImports,
     inherited_scope: Option<std::sync::Arc<InheritedScopeCapture>>,
+    selected_facades: Option<std::sync::Arc<SelectedFacadeCapture>>,
+}
+
+#[derive(Debug)]
+struct SelectedFacadeCapture {
+    facades: parking_lot::Mutex<Option<Vec<MaterializedFacade>>>,
 }
 
 #[derive(Debug)]
@@ -44,6 +50,11 @@ impl PartialEq for ActorSourceImports {
     fn eq(&self, other: &Self) -> bool {
         self.imports == other.imports
             && match (&self.inherited_scope, &other.inherited_scope) {
+                (Some(left), Some(right)) => std::sync::Arc::ptr_eq(left, right),
+                (None, None) => true,
+                _ => false,
+            }
+            && match (&self.selected_facades, &other.selected_facades) {
                 (Some(left), Some(right)) => std::sync::Arc::ptr_eq(left, right),
                 (None, None) => true,
                 _ => false,
@@ -206,6 +217,11 @@ impl ActorSourceImports {
         Self {
             imports: SourceImports::from_specs(facades.iter().map(|facade| facade.module_name())),
             inherited_scope: None,
+            selected_facades: (!facades.is_empty()).then(|| {
+                std::sync::Arc::new(SelectedFacadeCapture {
+                    facades: parking_lot::Mutex::new(Some(facades.into_iter().cloned().collect())),
+                })
+            }),
         }
     }
 
@@ -217,6 +233,7 @@ impl ActorSourceImports {
             inherited_scope: Some(std::sync::Arc::new(InheritedScopeCapture {
                 lease: parking_lot::Mutex::new(Some(scope)),
             })),
+            selected_facades: None,
         }
     }
 
@@ -240,10 +257,32 @@ impl ActorSourceImports {
 
     /// Descriptor and directory observations share this slot, so retained
     /// terminal metadata cannot keep the actor's capture alive.
-    pub(crate) fn release_inherited_scope(&self) {
+    pub(crate) fn release_capture(&self) {
         if let Some(capture) = &self.inherited_scope {
             capture.lease.lock().take();
         }
+        if let Some(capture) = &self.selected_facades {
+            capture.facades.lock().take();
+        }
+    }
+
+    pub(crate) fn declaration_projections(
+        &self,
+    ) -> Result<
+        Vec<std::sync::Arc<tidepool_runtime::session::CertifiedDeclarationProjection>>,
+        ActorCompileViewError,
+    > {
+        let Some(capture) = &self.selected_facades else {
+            return Ok(Vec::new());
+        };
+        let facades = capture.facades.lock();
+        let facades = facades
+            .as_ref()
+            .ok_or(ActorCompileViewError::ReleasedDeclarationCapture)?;
+        Ok(facades
+            .iter()
+            .filter_map(|facade| facade.projection().cloned())
+            .collect())
     }
 }
 
@@ -421,9 +460,14 @@ pub struct ActorCompileView {
     session: SessionCompileView,
     external: SourceImports,
     source_layer: std::sync::Arc<[PathBuf]>,
+    compile_inputs: RuntimeCompileInputs,
 }
 
 impl ActorCompileView {
+    pub(crate) fn compile_inputs(&self) -> &RuntimeCompileInputs {
+        &self.compile_inputs
+    }
+
     /// Add trusted imports supplied by the hosted workbench itself. These are
     /// source vocabulary, not ambient lexical ancestry.
     pub(crate) fn with_workbench_imports(mut self, imports: &SourceImports) -> Self {
@@ -614,10 +658,14 @@ impl ActorCompileView {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum ActorCompileViewError {
     #[error("actor inherited declaration capture has been released")]
     ReleasedInheritedScope,
+    #[error("actor selected declaration capture has been released")]
+    ReleasedDeclarationCapture,
+    #[error(transparent)]
+    CompileInputs(#[from] tidepool_runtime::CompileError),
     #[error("nonempty actor helper source requires an owned source capsule")]
     UnownedSourceLayer,
     #[error("actor source view belongs to session {actual:?}, expected {expected:?}")]
@@ -679,6 +727,16 @@ impl ActorSessionContext {
         &self,
         session: SessionCompileView,
     ) -> Result<ActorCompileView, ActorCompileViewError> {
+        let inputs =
+            RuntimeCompileInputs::new(None, self.source_imports.declaration_projections()?)?;
+        self.compile_view_with_inputs(session, inputs)
+    }
+
+    pub(crate) fn compile_view_with_inputs(
+        &self,
+        session: SessionCompileView,
+        inputs: RuntimeCompileInputs,
+    ) -> Result<ActorCompileView, ActorCompileViewError> {
         if session.session() != self.placement.session {
             return Err(ActorCompileViewError::WrongSession {
                 expected: self.placement.session,
@@ -691,10 +749,12 @@ impl ActorSessionContext {
                 actual: session.lexical_scope(),
             });
         }
+        let session = session.with_compile_inputs(&inputs)?;
         Ok(ActorCompileView {
             session,
             external: self.source_imports.imports.clone(),
             source_layer: self.source_layer.clone(),
+            compile_inputs: inputs,
         })
     }
 }
@@ -818,10 +878,10 @@ mod source_authority_tests {
     fn unowned_default_cannot_select_nonempty_source() {
         let source = CheckpointSourceLayer::default();
         let result = context(vec![PathBuf::from("ambient")]).with_issued_source(&source);
-        assert_eq!(
-            result.unwrap_err(),
-            ActorCompileViewError::UnownedSourceLayer
-        );
+        assert!(matches!(
+            result,
+            Err(ActorCompileViewError::UnownedSourceLayer)
+        ));
         assert!(context(vec![]).with_issued_source(&source).is_ok());
     }
 
