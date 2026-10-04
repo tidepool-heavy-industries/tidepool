@@ -6,7 +6,7 @@ haskell_binary(
     srcs = {"Main.hs": "Main.hs"},
     _haskell_toolchain = "toolchains//cabal-metadata:haskell",
     link_style = "static_pic",
-    compiler_flags = ["-Wall", "-XGHC2024", "-package", "Cabal", "-package", "Cabal-syntax", "-package", "bytestring"],
-    linker_flags = ["-dynamic", "-package", "Cabal", "-package", "Cabal-syntax", "-package", "bytestring"],
+    compiler_flags = ["-Wall", "-XGHC2024", "-package", "Cabal", "-package", "Cabal-syntax", "-package", "bytestring", "-package", "cryptohash-sha256"],
+    linker_flags = ["-dynamic", "-package", "Cabal", "-package", "Cabal-syntax", "-package", "bytestring", "-package", "cryptohash-sha256"],
     visibility = ["PUBLIC"],
 )

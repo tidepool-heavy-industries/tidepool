@@ -1,6 +1,7 @@
 module Main (main) where
 
 import Control.Monad (unless)
+import Crypto.Hash.SHA256 qualified as SHA256
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as LBS
 import Data.Foldable (toList)
@@ -24,6 +25,7 @@ import Distribution.Types.Flag
 import Distribution.Types.LibraryName (LibraryName(..))
 import Distribution.Utils.Json (Json(..), renderJson)
 import Distribution.Utils.Path (getSymbolicPath)
+import Numeric (showHex)
 import System.Environment (getArgs)
 import System.Exit (die)
 
@@ -194,6 +196,7 @@ main = do
   let description = packageDescription generic
   LBS.putStr $ renderJson $ JsonObject
     [ ("schema", JsonNumber 1)
+    , ("source_sha256", JsonString (concatMap (\byte -> let digits = showHex byte "" in replicate (2 - length digits) '0' ++ digits) (BS.unpack (SHA256.hash bytes))))
     , ("compiler", JsonString (prettyShow buildCompilerId))
     , ("platform", JsonString (prettyShow buildPlatform))
     , ("package", JsonString (prettyShow (pkgName (package description))))
