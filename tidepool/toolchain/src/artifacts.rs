@@ -1943,7 +1943,10 @@ impl ModuleCandidateOffer {
             source,
             &self.producer,
             &sealed,
-            &admission,
+            &crate::declaration_context::ExactProductAdmission {
+                request: exact,
+                source: &admission,
+            },
             &self.include,
             (!empty).then_some(baseline),
             string(&fields[6])?.as_bytes(),

@@ -742,6 +742,7 @@ fn certify_authored_declaration_inner(
             &evidence,
             compiled.exact_source_admission.as_ref(),
             context.as_ref(),
+            &[],
             includes,
         )?;
     let outcome = inspect_declaration_artifacts_with_producer(
