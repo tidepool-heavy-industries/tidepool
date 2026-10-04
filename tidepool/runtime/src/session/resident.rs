@@ -3380,17 +3380,21 @@ where
         if let Some(provenance) = provenance {
             self.binding_provenance.insert(id.raw(), provenance);
         }
-        self.prune_binding_provenance();
+        self.prune_binding_metadata();
         Ok(committed)
     }
 
-    fn prune_binding_provenance(&mut self) {
+    fn prune_binding_metadata(&mut self) {
         self.binding_provenance.retain(|id, _| {
             self.state
                 .bindings()
                 .get(SessionVarId::from_extract(*id))
                 .is_some()
         });
+        self.host_text_bindings
+            .retain(|id, _| self.state.bindings().get(*id).is_some());
+        self.hidden_host_bindings
+            .retain(|id, _| self.state.bindings().get(*id).is_some());
     }
 
     /// Reserve identities for compiled cell values before releasing exclusive
@@ -5166,12 +5170,8 @@ where
     /// scope is a no-op returning an all-zero receipt.
     pub fn retire_scope(&mut self, scope: ScopeId) -> ScopeRetirement {
         let retirement = self.state.retire_scope(scope);
-        self.prune_binding_provenance();
+        self.prune_binding_metadata();
         self.advance_public_visibility(scope);
-        self.host_text_bindings
-            .retain(|id, _| self.state.bindings().get(*id).is_some());
-        self.hidden_host_bindings
-            .retain(|id, _| self.state.bindings().get(*id).is_some());
         retirement
     }
 
@@ -6212,7 +6212,7 @@ where
         if let Some(scope) = scope {
             self.advance_public_visibility(scope);
         }
-        self.prune_binding_provenance();
+        self.prune_binding_metadata();
     }
 
     /// Run one GHC-classified pattern bind and materialize every projected
@@ -6694,6 +6694,7 @@ where
     /// Release affine roots whose handles were dropped while the machine was
     /// checked into a registry or otherwise unavailable to the token itself.
     fn settle_dropped_custody(&mut self) -> usize {
+        let bindings_before = self.state.bindings().mutation_revision();
         self.state.reap_admission_leases();
         let startup_entries = std::mem::take(&mut *self.custody_cleanup.startup_entries.lock());
         let startup_count = startup_entries.len();
@@ -6721,10 +6722,12 @@ where
         for scope in changed_scopes {
             self.advance_public_visibility(scope);
         }
-        self.host_text_bindings
-            .retain(|id, _| self.state.bindings().get(*id).is_some());
-        self.hidden_host_bindings
-            .retain(|id, _| self.state.bindings().get(*id).is_some());
+        // Last leases can remove entries after their scopes were retired.
+        // Exhausted revision witnesses require pruning on every owner entry.
+        if bindings_before.is_none() || self.state.bindings().mutation_revision() != bindings_before
+        {
+            self.prune_binding_metadata();
+        }
         let handles = self.custody_cleanup.take_all();
         let count = handles.len();
         if let Some(engine) = self.state.prepared_mut() {
@@ -7258,64 +7261,87 @@ mod custody_release_tests {
 
     #[test]
     fn exclusive_binding_custody_survives_source_scope_retirement() {
-        let mut session = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, None);
-        let other_scope = session.mint_scope(ScopeId::ROOT).unwrap();
-        let other_id = bind_fixture(&mut session, other_scope, 43);
-        let other_provenance = Arc::new(ProgramProvenance::default());
-        session
-            .binding_provenance
-            .insert(other_id.raw(), Arc::clone(&other_provenance));
-        let scope = session.mint_scope(ScopeId::ROOT).unwrap();
-        let id = bind_fixture(&mut session, scope, 42);
-        let provenance = Arc::new(ProgramProvenance::default());
-        let weak = Arc::downgrade(&provenance);
-        session
-            .binding_provenance
-            .insert(id.raw(), Arc::clone(&provenance));
-        session
-            .set_run_context(SessionRunContext {
-                lexical_scope: scope,
-                ..SessionRunContext::ROOT
-            })
-            .unwrap();
-        let custody = session
-            .retain_binding_custody_in(scope, "x", id)
-            .unwrap()
-            .unwrap();
-        assert!(Arc::ptr_eq(&custody.provenance, &provenance));
-        drop(provenance);
-        let retained = custody.handle.unwrap();
-        session.set_run_context(SessionRunContext::ROOT).unwrap();
-        session.retire_scope(scope);
-        assert!(!session.binding_provenance.contains_key(&id.raw()));
-        assert!(Arc::ptr_eq(
-            &session.binding_provenance[&other_id.raw()],
-            &other_provenance
-        ));
-        assert!(
-            Arc::ptr_eq(&weak.upgrade().unwrap(), &custody.provenance),
-            "retained value keeps its original compiler metadata independently"
-        );
-        major_collect(&mut session);
-        assert!(
-            matches!(session.state.prepared_mut().unwrap().inspect_retained(retained).unwrap(),
-            PreparedOuter::Constructor { fields, .. } if matches!(fields.as_slice(),
-                [PreparedResult::Scalar(99)]))
-        );
-        assert_live_binding(&mut session, other_scope, other_id);
-        assert!(matches!(
-            session.retain_binding_custody_in(scope, "x", id),
-            Err(ResidentError::Session(SessionError::DeadScope(_)))
-        ));
-        assert!(session.discard_custody(custody));
-        assert!(
-            weak.upgrade().is_none(),
-            "last metadata share retires with actual custody"
-        );
-        session.retire_scope(other_scope);
-        assert!(!session.binding_provenance.contains_key(&other_id.raw()));
-        major_collect(&mut session);
-        assert_eq!(session.value_handle_count(), 0);
+        for (retain_binding, retain_lexical) in [(false, false), (true, false), (false, true)] {
+            let mut session = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, None);
+            let other_scope = session.mint_scope(ScopeId::ROOT).unwrap();
+            let other_id = bind_fixture(&mut session, other_scope, 43);
+            let other_provenance = Arc::new(ProgramProvenance::default());
+            session
+                .binding_provenance
+                .insert(other_id.raw(), Arc::clone(&other_provenance));
+            let scope = session.mint_scope(ScopeId::ROOT).unwrap();
+            let id = bind_fixture(&mut session, scope, 42);
+            let provenance = Arc::new(ProgramProvenance::default());
+            let weak = Arc::downgrade(&provenance);
+            session
+                .binding_provenance
+                .insert(id.raw(), Arc::clone(&provenance));
+            let binding_lease = retain_binding.then(|| session.lease_bindings(&[id.var()]));
+            let lexical_lease =
+                retain_lexical.then(|| session.retain_lexical_scope(scope).unwrap());
+            let retained_scope = lexical_lease.as_ref().map(|lease| lease.scope());
+            let leased = retain_binding || retain_lexical;
+            session
+                .set_run_context(SessionRunContext {
+                    lexical_scope: scope,
+                    ..SessionRunContext::ROOT
+                })
+                .unwrap();
+            let custody = session
+                .retain_binding_custody_in(scope, "x", id)
+                .unwrap()
+                .unwrap();
+            assert!(Arc::ptr_eq(&custody.provenance, &provenance));
+            drop(provenance);
+            let retained = custody.handle.unwrap();
+            session.set_run_context(SessionRunContext::ROOT).unwrap();
+            session.retire_scope(scope);
+            assert_eq!(session.state.bindings().get(id).is_some(), leased);
+            assert_eq!(session.binding_provenance.contains_key(&id.raw()), leased);
+            assert!(Arc::ptr_eq(
+                &session.binding_provenance[&other_id.raw()],
+                &other_provenance
+            ));
+            assert!(
+                Arc::ptr_eq(&weak.upgrade().unwrap(), &custody.provenance),
+                "retained value keeps its original compiler metadata independently"
+            );
+            major_collect(&mut session);
+            assert!(
+                matches!(session.state.prepared_mut().unwrap().inspect_retained(retained).unwrap(),
+                PreparedOuter::Constructor { fields, .. } if matches!(fields.as_slice(),
+                    [PreparedResult::Scalar(99)]))
+            );
+            assert_live_binding(&mut session, other_scope, other_id);
+            assert!(matches!(
+                session.retain_binding_custody_in(scope, "x", id),
+                Err(ResidentError::Session(SessionError::DeadScope(_)))
+            ));
+            assert!(session.discard_custody(custody));
+            assert_eq!(weak.upgrade().is_some(), leased);
+            drop(binding_lease);
+            drop(lexical_lease);
+            assert_eq!(session.outstanding_custody(), 0);
+            if let Some(retained_scope) = retained_scope {
+                assert!(!session.state.scope_tree().is_live(retained_scope));
+            }
+            assert!(session.state.bindings().get(id).is_none());
+            assert!(!session.binding_provenance.contains_key(&id.raw()));
+            assert!(
+                weak.upgrade().is_none(),
+                "last metadata share retires after the owning lease cleanup"
+            );
+            assert!(Arc::ptr_eq(
+                &session.binding_provenance[&other_id.raw()],
+                &other_provenance
+            ));
+            major_collect(&mut session);
+            assert_live_binding(&mut session, other_scope, other_id);
+            session.retire_scope(other_scope);
+            assert!(!session.binding_provenance.contains_key(&other_id.raw()));
+            major_collect(&mut session);
+            assert_eq!(session.value_handle_count(), 0);
+        }
     }
 
     #[test]
