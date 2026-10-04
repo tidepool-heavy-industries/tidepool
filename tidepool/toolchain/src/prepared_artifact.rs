@@ -107,8 +107,9 @@ mod tests {
     use tidepool_repr::execution_schema::{ImportedValue, RuntimeRep};
 
     fn fixture() -> Vec<u8> {
-        include_bytes!("../../../bridge/haskell/test-prepared-stg/fixtures/m3-vertical.cbor")
-            .to_vec()
+        tidepool_test_data::prepared_encode::encode_wire_program(
+            &tidepool_test_data::prepared::callable_import_program(),
+        )
     }
 
     fn imports(prepared: &PreparedProgram) -> MachineImports {

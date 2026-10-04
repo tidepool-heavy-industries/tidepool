@@ -5203,13 +5203,11 @@ mod constructor_identity_tests {
 
     /// A real, GHC-produced prepared program — `M3Vertical.hs`'s `entry`,
     /// which allocates a user `Box` constructor. `PreparedArtifact` has no
-    /// Rust-side encoder (the wire format is Haskell-authored, decode-only
-    /// here — see `execution_schema::decode::parse_program`), so this
-    /// checked-in fixture is the only way to exercise `assemble` against a
-    /// real prepared program without shelling out to GHC.
+    /// Typed structural input for artifact assembly and custody checks.
     fn prepared_fixture_bytes() -> Vec<u8> {
-        include_bytes!("../../../bridge/haskell/test-prepared-stg/fixtures/m3-vertical.cbor")
-            .to_vec()
+        tidepool_test_data::prepared_encode::encode_wire_program(
+            &tidepool_test_data::prepared::callable_import_program(),
+        )
     }
 
     #[test]

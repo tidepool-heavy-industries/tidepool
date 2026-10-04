@@ -783,8 +783,10 @@ fn cancellation_at_every_poll_of_a_foreign_excess_call_is_reusable_and_retries()
 #[test]
 #[ignore = "manual compilation cost observation; run with --run-ignored only --no-capture"]
 fn foreign_dispatch_cost_on_freer_artifact() {
-    let pinned: &[u8] =
-        include_bytes!("../../../../bridge/haskell/test-prepared-stg/fixtures/freer-resume.cbor");
+    let pinned = tidepool_test_data::prepared_resources::read_target(
+        "TIDEPOOL_FREER_RESUME_FIXTURE_DIR",
+        "freerResumeEntries",
+    );
     let (label, owned) = match std::env::var_os("TIDEPOOL_COST_ARTIFACT") {
         Some(path) => (
             path.to_string_lossy().into_owned(),
@@ -792,7 +794,7 @@ fn foreign_dispatch_cost_on_freer_artifact() {
         ),
         None => ("freer-resume".to_owned(), None),
     };
-    let bytes = owned.as_deref().unwrap_or(pinned);
+    let bytes = owned.as_deref().unwrap_or(&pinned);
     let envelope = testing::envelope();
     let requirements = ProgramRequirements {
         schema_version: envelope.schema_version,

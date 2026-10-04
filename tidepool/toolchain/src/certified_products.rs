@@ -2131,7 +2131,7 @@ pub(crate) fn fixture_module_source_imports(
     finalized_module::fixture_source_imports(interface, imports)
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub(crate) fn fixture_interface_bytes(
     producer: [u8; 32],
     unit: &str,
@@ -4701,9 +4701,9 @@ pub(crate) mod tests {
         };
         use tidepool_repr::execution_schema::{parse_program, parse_projected_group, Group};
         let bytes =
-            include_bytes!("../../../bridge/haskell/test-prepared-stg/fixtures/m3-vertical.cbor");
+            tidepool_test_data::prepared_encode::encode_wire_program(&testing::wire_program());
         let requirements = crate::prepared_artifact::production_requirements().unwrap();
-        let prepared = parse_program(bytes, &requirements, DecodeLimits::default()).unwrap();
+        let prepared = parse_program(&bytes, &requirements, DecodeLimits::default()).unwrap();
         let mut binders = prepared
             .bindings()
             .iter()
@@ -5619,10 +5619,8 @@ pub(crate) mod tests {
         let mut encoded_groups = Vec::new();
         if let Some(import) = &import {
             let Value::Array(mut fields) = ciborium::de::from_reader(
-                include_bytes!(
-                    "../../../bridge/haskell/test-prepared-stg/fixtures/m3-vertical.cbor"
-                )
-                .as_slice(),
+                tidepool_test_data::prepared_encode::encode_wire_program(&testing::wire_program())
+                    .as_slice(),
             )
             .unwrap() else {
                 unreachable!()

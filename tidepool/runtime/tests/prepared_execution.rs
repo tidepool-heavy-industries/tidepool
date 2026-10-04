@@ -81,12 +81,30 @@ fn run_prepared_once_with_nursery(
         })
 }
 
-const ARTIFACT: &[u8] =
-    include_bytes!("../../../bridge/haskell/test-prepared-stg/fixtures/m3-vertical.cbor");
-const FREER_RETENTION_ARTIFACT: &[u8] =
-    include_bytes!("../../../bridge/haskell/test-prepared-stg/fixtures/freer-retention.cbor");
-const FREER_RESUME_ARTIFACT: &[u8] =
-    include_bytes!("../../../bridge/haskell/test-prepared-stg/fixtures/freer-resume.cbor");
+fn artifact() -> &'static [u8] {
+    static BYTES: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    BYTES.get_or_init(|| {
+        tidepool_test_data::prepared_resources::read_target("TIDEPOOL_M3_FIXTURE_DIR", "result")
+    })
+}
+fn freer_retention_artifact() -> &'static [u8] {
+    static BYTES: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    BYTES.get_or_init(|| {
+        tidepool_test_data::prepared_resources::read_target(
+            "TIDEPOOL_FREER_RETENTION_FIXTURE_DIR",
+            "freerRequest",
+        )
+    })
+}
+fn freer_resume_artifact() -> &'static [u8] {
+    static BYTES: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    BYTES.get_or_init(|| {
+        tidepool_test_data::prepared_resources::read_target(
+            "TIDEPOOL_FREER_RESUME_FIXTURE_DIR",
+            "freerResumeEntries",
+        )
+    })
+}
 /// `program`'s GHC-computed final `Int`, transcribed from
 /// `FreerResumeOracle.hs` run under the pinned GHC 9.12.2 (see that file's
 /// header and `FreerResume.md`). Never hand-derived.
@@ -792,7 +810,7 @@ fn requirements() -> ProgramRequirements {
 }
 
 fn imports() -> MachineImports {
-    let prepared = parse_program(ARTIFACT, &requirements(), DecodeLimits::default()).unwrap();
+    let prepared = parse_program(artifact(), &requirements(), DecodeLimits::default()).unwrap();
     MachineImports {
         values: prepared
             .globals()
@@ -815,7 +833,7 @@ fn imports() -> MachineImports {
 
 fn freer_effect_identity() -> DataConId {
     let prepared = parse_program(
-        FREER_RETENTION_ARTIFACT,
+        freer_retention_artifact(),
         &requirements(),
         DecodeLimits::default(),
     )
@@ -849,7 +867,7 @@ fn one_shot_runs_closed_compiled_program_and_returns_values() {
 fn one_shot_rejects_missing_import_malformed_and_precancel() {
     let cancel = Arc::new(AtomicBool::new(false));
     let missing = run_prepared_once(
-        ARTIFACT,
+        artifact(),
         &requirements(),
         DecodeLimits::default(),
         MachineImports::default(),
@@ -870,7 +888,7 @@ fn one_shot_rejects_missing_import_malformed_and_precancel() {
 
     cancel.store(true, std::sync::atomic::Ordering::Release);
     let cancelled = run_prepared_once(
-        ARTIFACT,
+        artifact(),
         &requirements(),
         DecodeLimits::default(),
         imports(),
@@ -912,7 +930,7 @@ fn retained_session_caches_closed_program_and_rejects_unclosed_artifact() {
     ));
     assert_eq!(machine.disposition(), MachineDisposition::Reusable);
 
-    // `imports()` builds a `MachineImports` whose facts satisfy `ARTIFACT`'s
+    // `imports()` builds a `MachineImports` whose facts satisfy `artifact()`'s
     // own declared globals exactly (so `link_program` succeeds), but no real
     // `PreparedHandle` backs any of those identities: `install_program`
     // refuses with `ExecutionError::UnknownPreparedHandle`, the same
@@ -923,13 +941,13 @@ fn retained_session_caches_closed_program_and_rejects_unclosed_artifact() {
     // existing machine reusable.
     let (mut unclosed_machine, _first) = open_strict_machine();
     let unclosed_linked = link_program(
-        parse_program(ARTIFACT, &requirements(), DecodeLimits::default()).unwrap(),
+        parse_program(artifact(), &requirements(), DecodeLimits::default()).unwrap(),
         &imports(),
     )
-    .expect("ARTIFACT's declared globals satisfy imports()'s fabricated facts");
+    .expect("artifact()'s declared globals satisfy imports()'s fabricated facts");
     let unclosed_compiled = unclosed_machine
         .compile_for_install(&unclosed_linked)
-        .expect("ARTIFACT compiles");
+        .expect("artifact() compiles");
     let rejected = unclosed_machine
         .install_program(unclosed_compiled, ImportBindings::new())
         .unwrap_err();
@@ -958,7 +976,7 @@ fn retained_session_caches_closed_program_and_rejects_unclosed_artifact() {
 
 #[test]
 fn runtime_retains_a_real_freer_continuation_without_observing_it() {
-    let (mut machine, program, entry) = open_closed_machine(FREER_RETENTION_ARTIFACT);
+    let (mut machine, program, entry) = open_closed_machine(freer_retention_artifact());
     let first = machine
         .run_entry_retained(program, entry, &[], call_options(false), RealmId::ROOT)
         .expect("first Freer request is retained");
@@ -1001,7 +1019,7 @@ fn runtime_retains_a_real_freer_continuation_without_observing_it() {
 }
 
 /// One `TopBinding` (with its enclosing group's recursion flattened) matching
-/// `occurrence` in `FREER_RESUME_ARTIFACT`'s home module. Panics rather than
+/// `occurrence` in `freer_resume_artifact()`'s home module. Panics rather than
 /// returning `Option` because every caller below treats a missing top as a
 /// probe-shape failure, not a runtime condition to branch on.
 fn freer_resume_top(
@@ -1104,7 +1122,7 @@ fn expected_program_value() -> i64 {
 /// Resolve a freer constructor from the artifact by its defining module.
 fn freer_resume_constructor_identity(module: &str, occurrence: &str) -> DataConId {
     let prepared = parse_program(
-        FREER_RESUME_ARTIFACT,
+        freer_resume_artifact(),
         &requirements(),
         DecodeLimits::default(),
     )
@@ -1321,7 +1339,7 @@ fn freer_resume_loop_drives_qapp_to_completion_via_managed_resume_arguments(
 }
 
 /// Every top and constructor identity `E3`'s parking-semantics tests below
-/// need out of `FREER_RESUME_ARTIFACT`, gathered once so each test states
+/// need out of `freer_resume_artifact()`, gathered once so each test states
 /// only what it actually exercises.
 struct FreerResumeFixture {
     program_top: TopBinding,
@@ -1337,7 +1355,7 @@ struct FreerResumeFixture {
 impl FreerResumeFixture {
     fn load() -> Self {
         let prepared = parse_program(
-            FREER_RESUME_ARTIFACT,
+            freer_resume_artifact(),
             &requirements(),
             DecodeLimits::default(),
         )
@@ -1852,7 +1870,7 @@ fn unrelated_entry_runs_while_a_parked_k_stays_untouched_and_machine_reusable(
 fn cancellation_before_commit_leaves_a_parked_k_valid_for_retry() {
     let requirements = requirements();
     let prepared = parse_program(
-        FREER_RESUME_ARTIFACT,
+        freer_resume_artifact(),
         &requirements,
         DecodeLimits::default(),
     )
@@ -2164,7 +2182,7 @@ fn drive_direct_to_val(
 fn two_realms_share_one_machine_cancel_reset_close_independently_of_each_other() {
     let fixture = FreerResumeFixture::load();
     let prepared = parse_program(
-        FREER_RESUME_ARTIFACT,
+        freer_resume_artifact(),
         &requirements(),
         DecodeLimits::default(),
     )
@@ -2459,7 +2477,7 @@ fn park_second_program(
     machine: &mut PreparedMachine<'static>,
     fixture: &FreerResumeFixture,
 ) -> (ProgramId, PreparedHandle) {
-    let program = install_closed(machine, FREER_RESUME_ARTIFACT);
+    let program = install_closed(machine, freer_resume_artifact());
     let result = machine
         .run_entry_retained(
             program,

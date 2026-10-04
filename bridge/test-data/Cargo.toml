@@ -11,6 +11,7 @@ publish = false
 
 [dependencies]
 tidepool-repr.workspace = true
+ciborium.workspace = true
 
 [lints]
 workspace = true

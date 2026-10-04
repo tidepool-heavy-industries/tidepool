@@ -18,6 +18,7 @@ serde_json.workspace = true
 tidepool-atomic-write.workspace = true
 
 [dev-dependencies]
+tidepool-test-data.workspace = true
 proptest.workspace = true
 
 [[test]]

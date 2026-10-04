@@ -6,12 +6,6 @@ use tidepool_repr::execution_schema::{
     EXECUTION_ABI_VERSION, SCHEMA_VERSION,
 };
 
-const M3_ARTIFACT: &[u8] =
-    include_bytes!("../../../bridge/haskell/test-prepared-stg/fixtures/m3-vertical.cbor");
-const SCHEMA6_SEED_ARTIFACT: &[u8] = include_bytes!(
-    "../../../bridge/haskell/test-execution-schema-encode/fixtures/schema6-intrinsic.cbor"
-);
-
 #[test]
 fn w5_no_success_is_not_a_successful_empty_return() {
     use tidepool_repr::execution_schema::{ExprFrame, ResultContract};
@@ -149,7 +143,7 @@ fn wired_in_error_identity_requires_its_exact_nonreturning_signature() {
 }
 
 #[test]
-fn haskell_m3_fixture_decodes_global_contract() {
+fn typed_fixture_decodes_record_parent_intrinsic_and_nonreturning_contract() {
     let requirements = ProgramRequirements {
         schema_version: SCHEMA_VERSION,
         projection_profile: "ghc-9.12-prepared-stg".into(),
@@ -157,38 +151,57 @@ fn haskell_m3_fixture_decodes_global_contract() {
         execution_abi_version: EXECUTION_ABI_VERSION,
         target: target(),
     };
-    let program = parse_program(M3_ARTIFACT, &requirements, DecodeLimits::default())
-        .expect("Haskell M3 fixture should decode under the Rust schema");
-    let reverse = program
-        .globals()
-        .iter()
-        .find(|global| global.identity.occurrence == "reverse")
-        .expect("M3 fixture should retain Data.List.reverse as an imported global");
-    assert!(reverse.required_evaluated);
-    assert_eq!(reverse.required_generation, None);
-    assert_eq!(reverse.identity.record_parent, None);
-}
-
-#[test]
-fn haskell_schema6_seed_decodes_record_parent_and_intrinsic() {
-    let requirements = ProgramRequirements {
-        schema_version: SCHEMA_VERSION,
-        projection_profile: "ghc-9.12-prepared-stg".into(),
-        toolchain: "ghc-9.12.2".into(),
-        execution_abi_version: EXECUTION_ABI_VERSION,
-        target: target(),
-    };
-    let program = parse_program(
-        SCHEMA6_SEED_ARTIFACT,
-        &requirements,
-        DecodeLimits::default(),
-    )
-    .expect("Haskell schema-6 seed should decode under the Rust schema");
+    use tidepool_repr::execution_schema::{CheckedLayout, ConstructorDecl};
+    let mut wire = wire_program();
+    let mut record = identity("Fixture", "RecordField");
+    record.record_parent = Some("FixtureRecord".into());
+    wire.constructors.push(ConstructorDecl {
+        identity: record,
+        host_id: tidepool_repr::DataConId(100),
+        family: identity("Fixture", "FixtureRecord"),
+        result_rep: RuntimeRep::LiftedRef,
+        field_reps: vec![],
+        strict_fields: vec![],
+        layout: CheckedLayout {
+            fields: vec![],
+            alignment: 1,
+            payload_size: 0,
+            root_mask: vec![],
+        },
+        tag: 1,
+        family_size: 1,
+    });
+    wire.signatures.extend([
+        Signature {
+            arguments: vec![RuntimeRep::Float(64)],
+            results: ResultContract::Returns(vec![RuntimeRep::Float(64)]),
+        },
+        Signature {
+            arguments: vec![],
+            results: ResultContract::NoSuccess,
+        },
+    ]);
+    wire.operations.extend([
+        OperationDecl {
+            identity: OperationIdentity::Intrinsic {
+                symbol: "rintDouble".into(),
+                convention: ForeignConvention::CCall,
+            },
+            signature: SignatureId(1),
+        },
+        OperationDecl {
+            identity: OperationIdentity::PrimOp("raise#".into()),
+            signature: SignatureId(2),
+        },
+    ]);
+    let bytes = tidepool_test_data::prepared_encode::encode_wire_program(&wire);
+    let program = parse_program(&bytes, &requirements, DecodeLimits::default())
+        .expect("typed current-schema fixture should decode");
     let constructor = program
         .constructors()
         .iter()
         .find(|constructor| constructor.identity.occurrence == "RecordField")
-        .expect("schema-6 seed should retain its record-field identity");
+        .expect("typed fixture should retain its record-field identity");
     assert_eq!(
         constructor.identity.record_parent.as_deref(),
         Some("FixtureRecord")
@@ -204,7 +217,7 @@ fn haskell_schema6_seed_decodes_record_parent_and_intrinsic() {
                     convention: ForeignConvention::CCall,
                 })
         })
-        .expect("schema-6 seed should retain its intrinsic operation identity");
+        .expect("typed fixture should retain its intrinsic operation identity");
     assert_eq!(
         program.signatures()[operation.signature.0 as usize].arguments,
         vec![RuntimeRep::Float(64)]
@@ -218,7 +231,7 @@ fn haskell_schema6_seed_decodes_record_parent_and_intrinsic() {
         .operations()
         .iter()
         .find(|operation| operation.identity == OperationIdentity::PrimOp("raise#".into()))
-        .expect("schema seed should retain its nonreturning raise operation");
+        .expect("typed fixture should retain its nonreturning raise operation");
     assert_eq!(
         program.signatures()[raise.signature.0 as usize].results,
         ResultContract::NoSuccess

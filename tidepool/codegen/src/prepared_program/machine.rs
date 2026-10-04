@@ -3819,8 +3819,9 @@ mod tests {
             },
         };
         let prepared = parse_program(
-            include_bytes!(
-                "../../../../bridge/haskell/test-prepared-stg/fixtures/freer-retention.cbor"
+            &tidepool_test_data::prepared_resources::read_target(
+                "TIDEPOOL_FREER_RETENTION_FIXTURE_DIR",
+                "freerRequest",
             ),
             &requirements,
             DecodeLimits::default(),

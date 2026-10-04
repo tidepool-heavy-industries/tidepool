@@ -74,8 +74,15 @@ const IMPORT_CONSUMER_ARTIFACT: &[u8] =
 /// drives `consumerValueAt`.
 const IMPORT_CONSUMER_EXPECTATIONS: &str =
     include_str!("../../../bridge/haskell/test-prepared-stg/ImportConsumerExpectations.json");
-const FREER_RESUME_ARTIFACT: &[u8] =
-    include_bytes!("../../../bridge/haskell/test-prepared-stg/fixtures/freer-resume.cbor");
+fn freer_resume_artifact() -> &'static [u8] {
+    static BYTES: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    BYTES.get_or_init(|| {
+        tidepool_test_data::prepared_resources::read_target(
+            "TIDEPOOL_FREER_RESUME_FIXTURE_DIR",
+            "freerResumeEntries",
+        )
+    })
+}
 const FREER_RESUME_EXPECTATIONS: &str =
     include_str!("../../../bridge/haskell/test-prepared-stg/FreerResumeExpectations.json");
 
@@ -250,7 +257,7 @@ struct FreerResumeFixture {
 impl FreerResumeFixture {
     fn load() -> Self {
         let prepared = parse_program(
-            FREER_RESUME_ARTIFACT,
+            freer_resume_artifact(),
             &requirements(),
             DecodeLimits::default(),
         )
@@ -528,7 +535,7 @@ fn session_registry_drives_prepared_runtime_through_bind_import_park_resume_canc
 
     let freer_linked = link_program(
         parse_program(
-            FREER_RESUME_ARTIFACT,
+            freer_resume_artifact(),
             &requirements(),
             DecodeLimits::default(),
         )

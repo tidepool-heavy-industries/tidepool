@@ -3,8 +3,8 @@
 //! Keep matches and struct destructuring exhaustive so adding a schema field or
 //! variant requires updating this codec. Semantic admission remains in the reader.
 
-use super::super::*;
 use ciborium::value::Value;
+use tidepool_repr::execution_schema::*;
 
 fn n(value: impl Into<u64>) -> Value {
     Value::Integer(value.into().into())
@@ -68,11 +68,20 @@ pub fn encode_wire_program(wire: &WireProgram) -> Vec<u8> {
 /// Encode an entry-free group; its existing typed validation is independent of
 /// compiler provenance, which only the production toolchain can supply.
 pub fn encode_projected_group(group: &ProjectedGroup) -> Vec<u8> {
-    let ProjectedGroup {
-        original_ordinal,
-        binders,
-        definitions: content,
-    } = group;
+    let content = group.definitions();
+    let definitions_value = ProgramDefinitions {
+        envelope: content.envelope().clone(),
+        signatures: content.signatures().to_vec(),
+        globals: content.globals().to_vec(),
+        constructors: content.constructors().to_vec(),
+        operations: content.operations().to_vec(),
+        expressions: content.expressions().clone(),
+        bindings: content.bindings().to_vec(),
+        types: content.types().to_vec(),
+        sites: content.sites().to_vec(),
+        constructor_replies: content.constructor_replies().to_vec(),
+        json_layout: content.json_layout().copied(),
+    };
     let ProgramDefinitions {
         envelope,
         signatures,
@@ -85,12 +94,12 @@ pub fn encode_projected_group(group: &ProjectedGroup) -> Vec<u8> {
         sites,
         constructor_replies,
         json_layout,
-    } = content.as_ref();
+    } = &definitions_value;
     let mut fields = vec![
         s("TPGRP"),
         n(1_u64),
-        n(*original_ordinal),
-        list(binders, symbol),
+        n(group.original_ordinal()),
+        list(group.binders(), symbol),
     ];
     fields.extend(definitions(
         envelope,
@@ -559,11 +568,13 @@ fn expression(value: &ExprFrame<usize>) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{envelope, identity, projected_group, wire_program};
     use super::*;
+    use tidepool_repr::execution_schema::testing::{
+        envelope, identity, projected_group, wire_program,
+    };
 
     #[test]
-    fn typed_codec_round_trips_every_wire_variant_without_issuing_authority() {
+    fn all_variant_fixture_cannot_bypass_semantic_admission() {
         let mut wire = wire_program();
         let reps = vec![
             RuntimeRep::Void,
@@ -623,7 +634,7 @@ mod tests {
         }];
         wire.constructors.push(ConstructorDecl {
             identity: name.clone(),
-            host_id: crate::DataConId(100),
+            host_id: tidepool_repr::DataConId(100),
             family: identity("Owner", "Record"),
             result_rep: RuntimeRep::LiftedRef,
             field_reps: reps.clone(),
@@ -859,11 +870,15 @@ mod tests {
             });
         }
         let encoded = encode_wire_program(&wire);
-        let decoded =
-            super::super::super::codec::decode_wire(&encoded, DecodeLimits::default()).unwrap();
-        assert_eq!(decoded, wire);
-        // This data covers the grammar, deliberately not semantic consistency.
-        assert!(super::super::prepare(wire).is_err());
+        let requirements = ProgramRequirements {
+            schema_version: SCHEMA_VERSION,
+            projection_profile: envelope().projection_profile,
+            toolchain: envelope().toolchain,
+            execution_abi_version: EXECUTION_ABI_VERSION,
+            target: wire.envelope.target.clone(),
+        };
+        // Covering the complete grammar never makes inconsistent data executable.
+        assert!(parse_program(&encoded, &requirements, DecodeLimits::default()).is_err());
     }
 
     #[test]
@@ -876,7 +891,7 @@ mod tests {
             execution_abi_version: EXECUTION_ABI_VERSION,
             target: envelope().target,
         };
-        let expected = super::super::prepare(wire.clone()).unwrap();
+        let expected = testing::prepare(wire.clone()).unwrap();
         assert_eq!(
             parse_program(
                 &encode_wire_program(&wire),

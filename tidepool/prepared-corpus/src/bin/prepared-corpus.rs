@@ -1373,8 +1373,8 @@ mod tests {
         let invalid = parent.join(&invalid_name);
         fs::write(
             &artifact,
-            include_bytes!(
-                "../../../../bridge/haskell/test-prepared-stg/fixtures/m3-vertical.cbor"
+            tidepool_test_data::prepared_encode::encode_wire_program(
+                &tidepool_repr::execution_schema::testing::wire_program(),
             ),
         )
         .unwrap();
