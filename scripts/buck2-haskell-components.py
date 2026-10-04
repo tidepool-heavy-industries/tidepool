@@ -237,7 +237,7 @@ def render(metadata=None):
             rule += ['    link_style = "static_pic",']
         rule += [f'    _haskell_toolchain = "toolchains//:{toolchain}",',
                  f"    compiler_flags = haskell_component_flags({literal(packages)}, {literal(flags)}),",
-                 f"    linker_flags = haskell_component_link_flags({literal(link_packages)}, {literal([flag for flag in flags if flag.startswith(('-rtsopts', '-with-rtsopts'))])}, dynamic = {not library}),",
+                 f"    linker_flags = haskell_component_link_flags({literal(link_packages)}, {literal(list(component.ghc_options))}, dynamic = {not library}),",
                  '    visibility = ["PUBLIC"],', ")", ""]
         lines.extend("    " + line if line else "" for line in "\n".join(rule).splitlines())
         if name in {"tidepool_extract_internal", "tidepool_extract_bin"}:

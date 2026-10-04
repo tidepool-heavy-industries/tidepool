@@ -126,7 +126,9 @@ def declare_haskell_components():
         "time",
         "unix",
         "witherable"
-    ], [], dynamic = False),
+    ], [
+        "-Wall"
+    ], dynamic = False),
         visibility = ["PUBLIC"],
     )
     haskell_library(
@@ -248,7 +250,9 @@ def declare_haskell_components():
         "time",
         "unix",
         "witherable"
-    ], [], dynamic = False),
+    ], [
+        "-Wall"
+    ], dynamic = False),
         visibility = ["PUBLIC"],
     )
     haskell_library(
@@ -267,7 +271,9 @@ def declare_haskell_components():
     ]),
         linker_flags = haskell_component_link_flags([
         "text"
-    ], [], dynamic = False),
+    ], [
+        "-Wall"
+    ], dynamic = False),
         visibility = ["PUBLIC"],
     )
     haskell_binary(
@@ -317,6 +323,7 @@ def declare_haskell_components():
         "unix",
         "witherable"
     ], [
+        "-Wall",
         "-with-rtsopts=-T"
     ], dynamic = True),
         visibility = ["PUBLIC"],
@@ -371,6 +378,7 @@ def declare_haskell_components():
         "unix",
         "witherable"
     ], [
+        "-Wall",
         "-with-rtsopts=-T"
     ], dynamic = True),
         visibility = ["PUBLIC"],
@@ -420,7 +428,9 @@ def declare_haskell_components():
         "time",
         "unix",
         "witherable"
-    ], [], dynamic = True),
+    ], [
+        "-Wall"
+    ], dynamic = True),
         visibility = ["PUBLIC"],
     )
     haskell_binary(
@@ -481,6 +491,7 @@ def declare_haskell_components():
         "unix",
         "witherable"
     ], [
+        "-Wall",
         "-rtsopts"
     ], dynamic = True),
         visibility = ["PUBLIC"],
@@ -527,7 +538,9 @@ def declare_haskell_components():
         "time",
         "unix",
         "witherable"
-    ], [], dynamic = True),
+    ], [
+        "-Wall"
+    ], dynamic = True),
         visibility = ["PUBLIC"],
     )
     haskell_binary(
@@ -575,7 +588,9 @@ def declare_haskell_components():
         "time",
         "unix",
         "witherable"
-    ], [], dynamic = True),
+    ], [
+        "-Wall"
+    ], dynamic = True),
         visibility = ["PUBLIC"],
     )
     haskell_binary(
@@ -640,6 +655,7 @@ def declare_haskell_components():
         "unix",
         "witherable"
     ], [
+        "-Wall",
         "-rtsopts"
     ], dynamic = True),
         visibility = ["PUBLIC"],
@@ -910,7 +926,9 @@ def declare_haskell_components():
         "time",
         "unix",
         "witherable"
-    ], [], dynamic = True),
+    ], [
+        "-Wall"
+    ], dynamic = True),
         visibility = ["PUBLIC"],
     )
     filegroup(
@@ -1175,7 +1193,9 @@ def declare_haskell_components():
         "time",
         "unix",
         "witherable"
-    ], [], dynamic = True),
+    ], [
+        "-Wall"
+    ], dynamic = True),
         visibility = ["PUBLIC"],
     )
     filegroup(
@@ -1417,7 +1437,9 @@ def declare_haskell_components():
         "tasty",
         "tasty-hunit",
         "text"
-    ], [], dynamic = True),
+    ], [
+        "-Wall"
+    ], dynamic = True),
         visibility = ["PUBLIC"],
     )
     filegroup(
@@ -1597,7 +1619,9 @@ def declare_haskell_components():
         "time",
         "unix",
         "witherable"
-    ], [], dynamic = True),
+    ], [
+        "-Wall"
+    ], dynamic = True),
         visibility = ["PUBLIC"],
     )
     filegroup(
@@ -1788,7 +1812,9 @@ def declare_haskell_components():
         "time",
         "unix",
         "witherable"
-    ], [], dynamic = True),
+    ], [
+        "-Wall"
+    ], dynamic = True),
         visibility = ["PUBLIC"],
     )
     filegroup(
@@ -1969,7 +1995,9 @@ def declare_haskell_components():
         "time",
         "unix",
         "witherable"
-    ], [], dynamic = True),
+    ], [
+        "-Wall"
+    ], dynamic = True),
         visibility = ["PUBLIC"],
     )
     filegroup(
@@ -2157,7 +2185,9 @@ def declare_haskell_components():
         "time",
         "unix",
         "witherable"
-    ], [], dynamic = True),
+    ], [
+        "-Wall"
+    ], dynamic = True),
         visibility = ["PUBLIC"],
     )
     filegroup(
@@ -2447,7 +2477,9 @@ def declare_haskell_components():
         "time",
         "unix",
         "witherable"
-    ], [], dynamic = True),
+    ], [
+        "-Wall"
+    ], dynamic = True),
         visibility = ["PUBLIC"],
     )
     filegroup(
@@ -2633,7 +2665,9 @@ def declare_haskell_components():
         "time",
         "unix",
         "witherable"
-    ], [], dynamic = True),
+    ], [
+        "-Wall"
+    ], dynamic = True),
         visibility = ["PUBLIC"],
     )
     filegroup(
@@ -2847,6 +2881,7 @@ def declare_haskell_components():
         "unix",
         "witherable"
     ], [
+        "-Wall",
         "-rtsopts"
     ], dynamic = True),
         visibility = ["PUBLIC"],
@@ -3439,7 +3474,9 @@ def declare_haskell_components():
         "time",
         "unix",
         "witherable"
-    ], [], dynamic = True),
+    ], [
+        "-Wall"
+    ], dynamic = True),
         visibility = ["PUBLIC"],
     )
     filegroup(
@@ -3603,7 +3640,9 @@ def declare_haskell_components():
         "tasty",
         "tasty-hunit",
         "tasty-quickcheck"
-    ], [], dynamic = True),
+    ], [
+        "-Wall"
+    ], dynamic = True),
         visibility = ["PUBLIC"],
     )
     filegroup(
@@ -3784,7 +3823,9 @@ def declare_haskell_components():
         "time",
         "unix",
         "witherable"
-    ], [], dynamic = True),
+    ], [
+        "-Wall"
+    ], dynamic = True),
         visibility = ["PUBLIC"],
     )
     filegroup(
@@ -4070,7 +4111,9 @@ def declare_haskell_components():
         "time",
         "unix",
         "witherable"
-    ], [], dynamic = True),
+    ], [
+        "-Wall"
+    ], dynamic = True),
         visibility = ["PUBLIC"],
     )
     filegroup(
@@ -4357,7 +4400,9 @@ def declare_haskell_components():
         "time",
         "unix",
         "witherable"
-    ], [], dynamic = True),
+    ], [
+        "-Wall"
+    ], dynamic = True),
         visibility = ["PUBLIC"],
     )
     filegroup(
@@ -4646,6 +4691,7 @@ def declare_haskell_components():
         "unix",
         "witherable"
     ], [
+        "-Wall",
         "-rtsopts",
         "-with-rtsopts=-T"
     ], dynamic = True),
@@ -4832,7 +4878,9 @@ def declare_haskell_components():
         "time",
         "unix",
         "witherable"
-    ], [], dynamic = True),
+    ], [
+        "-Wall"
+    ], dynamic = True),
         visibility = ["PUBLIC"],
     )
     filegroup(
@@ -5063,7 +5111,9 @@ def declare_haskell_components():
         "text",
         "time",
         "witherable"
-    ], [], dynamic = True),
+    ], [
+        "-Wall"
+    ], dynamic = True),
         visibility = ["PUBLIC"],
     )
     filegroup(
@@ -5257,7 +5307,10 @@ def declare_haskell_components():
         "tasty-hunit",
         "text",
         "witherable"
-    ], [], dynamic = True),
+    ], [
+        "-Wall",
+        "-Wno-simplifiable-class-constraints"
+    ], dynamic = True),
         visibility = ["PUBLIC"],
     )
     filegroup(
@@ -5465,7 +5518,10 @@ def declare_haskell_components():
         "tasty-hunit",
         "text",
         "witherable"
-    ], [], dynamic = True),
+    ], [
+        "-Wall",
+        "-Wno-simplifiable-class-constraints"
+    ], dynamic = True),
         visibility = ["PUBLIC"],
     )
     filegroup(
@@ -5715,7 +5771,10 @@ def declare_haskell_components():
         "template-haskell",
         "text",
         "witherable"
-    ], [], dynamic = True),
+    ], [
+        "-Wall",
+        "-Wno-simplifiable-class-constraints"
+    ], dynamic = True),
         visibility = ["PUBLIC"],
     )
     filegroup(
@@ -6069,7 +6128,10 @@ def declare_haskell_components():
         "template-haskell",
         "text",
         "witherable"
-    ], [], dynamic = True),
+    ], [
+        "-Wall",
+        "-Wno-simplifiable-class-constraints"
+    ], dynamic = True),
         visibility = ["PUBLIC"],
     )
     filegroup(
@@ -6423,7 +6485,10 @@ def declare_haskell_components():
         "template-haskell",
         "text",
         "witherable"
-    ], [], dynamic = True),
+    ], [
+        "-Wall",
+        "-Wno-simplifiable-class-constraints"
+    ], dynamic = True),
         visibility = ["PUBLIC"],
     )
     filegroup(
@@ -6652,7 +6717,10 @@ def declare_haskell_components():
         "tasty-hunit",
         "text",
         "witherable"
-    ], [], dynamic = True),
+    ], [
+        "-Wall",
+        "-Wno-simplifiable-class-constraints"
+    ], dynamic = True),
         visibility = ["PUBLIC"],
     )
     filegroup(
@@ -6844,6 +6912,7 @@ def declare_haskell_components():
         "unix",
         "witherable"
     ], [
+        "-Wall",
         "-rtsopts",
         "-with-rtsopts=-T"
     ], dynamic = True),
@@ -6898,6 +6967,7 @@ def declare_haskell_components():
         "unix",
         "witherable"
     ], [
+        "-Wall",
         "-rtsopts"
     ], dynamic = True),
         visibility = ["PUBLIC"],
@@ -6949,6 +7019,7 @@ def declare_haskell_components():
         "unix",
         "witherable"
     ], [
+        "-Wall",
         "-rtsopts"
     ], dynamic = True),
         visibility = ["PUBLIC"],
@@ -7000,6 +7071,7 @@ def declare_haskell_components():
         "unix",
         "witherable"
     ], [
+        "-Wall",
         "-rtsopts"
     ], dynamic = True),
         visibility = ["PUBLIC"],

@@ -68,6 +68,7 @@ class ComponentProjectionTests(unittest.TestCase):
         self.assertIn('"cryptohash-sha256"', after)
         _, roster = G.normalized_components(changed)
         self.assertEqual(G.fields_for(roster["internal"], roster, "example")[-1][-4:], ["-optc", "a", "-optc", "b"])
+        self.assertEqual(after.count('"-optc"'), 4)  # Two ordered options at compile and link.
         self.assertNotEqual(before, after)
 
     def test_changed_local_library_cannot_silently_unify_test_flag_variant(self):
