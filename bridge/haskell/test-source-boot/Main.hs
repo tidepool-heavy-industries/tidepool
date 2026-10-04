@@ -691,17 +691,20 @@ generatedScaffoldImports :: IO ()
 generatedScaffoldImports = withTiming $ withScratch $ \work -> do
   let supportDirectory = work </> "Tidepool/Internal"
       supportPath = supportDirectory </> "Resume.hs"
+      capturePath = work </> "GeneratedScaffoldCapture.hs"
       target = work </> "Expr.hs"
       hiddenPath = work </> "hidden-scaffold.cbor"
       hidden = emptySessionScope {ssRoot=work,ssExactScope=Just hiddenPath}
       includes = [work]
+      originalOwners = filter (/= "GeneratedScaffoldCapture") . preparedNames
   createDirectoryIfMissing True supportDirectory
   copyFile "lib/Tidepool/Internal/Resume.hs" supportPath
+  copyFile "test-source-boot/fixtures/GeneratedScaffoldCapture.hs" capturePath
   copyFile "test-source-boot/fixtures/GeneratedScaffoldExpr.hs" target
   original <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
-    Nothing supportPath includes Nothing
-  writeGenuineCandidateNativeScope [] (preparedNames original)
-    work supportPath includes hiddenPath original
+    Nothing capturePath includes Nothing
+  writeGenuineCandidateNativeScope [] (originalOwners original)
+    work capturePath includes hiddenPath original
   protected <- readFile target
   recipe <- generatedScaffoldRecipe [] protected protected target "Expr" >>= either fail pure
   let purpose = GeneratedScaffoldCompile recipe (CheckedItemCompile [] Nothing [])
@@ -745,6 +748,10 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
         (Just hidden) target [] Nothing
     writeFile target protected
     admittedScope <- readExactScope hiddenPath >>= either fail pure
+    unless (null (scopeLexical admittedScope)
+        && Set.fromList (map originalModule (scopeProducts admittedScope))
+          == Set.fromList (originalOwners original)) $
+      fail "scaffold capture changed lexical authority or original native inventory"
     supportInterface <- case [artifact | (artifact,_,_) <- scopeInterfaces admittedScope
         , exactUnit artifact == "main", exactModule artifact == "Tidepool.Internal.Resume"] of
       [artifact] -> pure artifact
@@ -802,10 +809,10 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
     let incompleteExports = unlines [if line == "  , resumeLifted" then "" else line | line <- lines supportText]
     writeFile supportPath incompleteExports
     missingExport <- compile (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
-      Nothing supportPath [] Nothing
+      Nothing capturePath [] Nothing
     let missingExportPath = work </> "missing-export.cbor"
-    writeGenuineCandidateNativeScope [] (preparedNames missingExport)
-      work supportPath includes missingExportPath missingExport
+    writeGenuineCandidateNativeScope [] (originalOwners missingExport)
+      work capturePath includes missingExportPath missingExport
     requireRejected "missing actual resumeLifted export" $
       compile (PreparedProducts Nothing) Set.empty purpose
         (Just hidden {ssExactScope=Just missingExportPath}) target [] Nothing
@@ -815,10 +822,10 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
           "import Prelude\nimport ExecutionHiddenOrphan ()" else line | line <- lines supportText]
     writeFile supportPath withOrphan
     hiddenNeighbor <- compile (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
-      Nothing supportPath [] Nothing
+      Nothing capturePath [] Nothing
     let neighborPath = work </> "hidden-neighbor.cbor"
-    writeGenuineCandidateNativeScope [] (preparedNames hiddenNeighbor)
-      work supportPath includes neighborPath hiddenNeighbor
+    writeGenuineCandidateNativeScope [] (originalOwners hiddenNeighbor)
+      work capturePath includes neighborPath hiddenNeighbor
     requireRejected "hidden orphan neighbor through scaffold support" $
       compile (PreparedProducts Nothing) Set.empty purpose
         (Just hidden {ssExactScope=Just neighborPath}) target [] Nothing
@@ -827,10 +834,10 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
           "import Prelude\nimport MetadataHiddenFamily ()" else line | line <- lines supportText]
     writeFile supportPath withFamily
     hiddenFamily <- compile (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
-      Nothing supportPath [] Nothing
+      Nothing capturePath [] Nothing
     let familyPath = work </> "hidden-family.cbor"
-    writeGenuineCandidateNativeScope [] (preparedNames hiddenFamily)
-      work supportPath includes familyPath hiddenFamily
+    writeGenuineCandidateNativeScope [] (originalOwners hiddenFamily)
+      work capturePath includes familyPath hiddenFamily
     requireRejected "hidden family neighbor through scaffold support" $
       compile (PreparedProducts Nothing) Set.empty purpose
         (Just hidden {ssExactScope=Just familyPath}) target [] Nothing
