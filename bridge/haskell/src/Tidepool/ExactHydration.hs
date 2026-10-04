@@ -30,7 +30,7 @@ import Control.Monad (forM, forM_, unless)
 import Control.Exception
   ( Exception, IOException, SomeException, SomeAsyncException, bracket, try, fromException, throwIO )
 import Data.Char (isHexDigit, toLower)
-import Data.Maybe (isJust)
+import Data.Maybe (isJust, isNothing)
 import qualified Data.ByteString as BS
 import qualified Crypto.Hash.SHA256 as SHA256
 import GHC.Driver.Env
@@ -238,9 +238,9 @@ permitsGeneratedScaffoldImport (GeneratedScaffoldImportAuthority scaffold) summa
       && requested == (executionUnit native,executionModule native) && getLoc imported == span') scaffold
 
 readGeneratedScaffoldImportAuthority :: VerifiedExactIfaceClosure -> [ExecutionSourceIdentity]
-  -> GeneratedScaffoldRecipe -> ParsedModule -> ModuleGraph -> HscEnv
+  -> Maybe ((String,String),String) -> GeneratedScaffoldRecipe -> ParsedModule -> ModuleGraph -> HscEnv
   -> IO (Either String GeneratedScaffoldImportAuthority)
-readGeneratedScaffoldImportAuthority (VerifiedExactIfaceClosure captured) nativeOwners
+readGeneratedScaffoldImportAuthority (VerifiedExactIfaceClosure captured) nativeOwners planned
     recipe@(GeneratedScaffoldRecipe path target expected line) parsed sourceGraph env = do
   checked <- captureGeneratedScaffoldTarget recipe path
   (source,fingerprint) <- sourceEvidenceWithFingerprint path
@@ -261,7 +261,7 @@ readGeneratedScaffoldImportAuthority (VerifiedExactIfaceClosure captured) native
     let support = mkModule (stringToUnit (unitString (homeUnitId (hsc_home_unit env))))
           (mkModuleName "Tidepool.Internal.Resume")
         key = (unitString (moduleUnit support),moduleNameString (moduleName support))
-    if any (\case ModuleNode _ loaded -> ms_mod loaded == support; _ -> False)
+    resume <- if any (\case ModuleNode _ loaded -> ms_mod loaded == support; _ -> False)
         (mgModSummaries' sourceGraph)
       then Right noGeneratedScaffoldImports
       else do
@@ -305,6 +305,50 @@ readGeneratedScaffoldImportAuthority (VerifiedExactIfaceClosure captured) native
             && case ideclPkgQual declaration of NoRawPkgQual -> True; _ -> False)
           (Left "generated scaffold parsed import differs from its protected shape")
         pure (GeneratedScaffoldImportAuthority [(ms_mod summary,fingerprint,native,getLoc imported,artifact)])
+    originals <- case planned of
+      Nothing -> Right noGeneratedScaffoldImports
+      Just (owner,expectedFingerprint) -> do
+        let original = mkModule (stringToUnit (fst owner)) (mkModuleName (snd owner))
+            importLine = "import " ++ snd owner
+            occurrences = [number | (number,textLine) <- zip [1..] (lines (Text.unpack (TextEncoding.decodeUtf8 expected)))
+              , textLine == importLine]
+        unless (moduleUnit original == homeUnitAsUnit (hsc_home_unit env))
+          (Left "checked recipe original belongs to another home unit")
+        unless (not (any (\case ModuleNode _ loaded -> ms_mod loaded == original; _ -> False)
+          (mgModSummaries' sourceGraph)))
+          (Left "checked recipe original collides with fresh source")
+        (artifact,iface,_) <- maybe (Left "checked recipe lacks its verified original interface") Right
+          (Map.lookup owner captured)
+        unless (mi_module iface == original
+          && show (mi_iface_hash (mi_final_exts iface)) == expectedFingerprint)
+          (Left "checked recipe original fingerprint differs")
+        native <- case [candidate | candidate <- nativeOwners
+            , (executionUnit candidate,executionModule candidate) == owner
+            && executionIfaceSha256 candidate == exactSha256 artifact] of
+          [candidate] -> Right candidate
+          _ -> Left "checked recipe lacks its paired original native owner"
+        originalLine <- case occurrences of
+          [number] -> Right number
+          _ -> Left "checked recipe original import is missing or duplicated"
+        imported <- case [name | (NoPkgQual,name) <- ms_textual_imps summary
+            , unLoc name == moduleName original
+            , case getLoc name of RealSrcSpan span' _ -> srcSpanStartLine span' == originalLine; _ -> False] of
+          [name] -> Right name
+          _ -> Left "checked recipe original import occurrence differs"
+        declaration <- case [unLoc located | located <- hsmodImports (unLoc (pm_parsed_source parsed))
+            , getLocA (ideclName (unLoc located)) == getLoc imported] of
+          [declaration] -> Right declaration
+          _ -> Left "checked recipe original parsed import differs"
+        unless (ideclQualified declaration == NotQualified && isNothing (ideclAs declaration)
+          && ideclSource declaration == NotBoot && ideclImportList declaration == Nothing
+          && case ideclPkgQual declaration of NoRawPkgQual -> True; _ -> False)
+          (Left "checked recipe original import has another shape")
+        -- Original instances and families belong to this sealed declaration;
+        -- only the protected recipe edge receives visibility.
+        pure (GeneratedScaffoldImportAuthority [(ms_mod summary,fingerprint,native,getLoc imported,artifact)])
+    let GeneratedScaffoldImportAuthority resumeEdges = resume
+        GeneratedScaffoldImportAuthority originalEdges = originals
+    pure (GeneratedScaffoldImportAuthority (resumeEdges ++ originalEdges))
 
 readCheckedValueImportAuthority
   :: HscEnv -> [ExactIfaceArtifact] -> IO (Either String CheckedValueImportAuthority)

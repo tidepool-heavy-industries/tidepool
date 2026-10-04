@@ -1208,6 +1208,16 @@ impl RuntimeCellAdmission {
             .map_err(|_| SessionError::StaleStagedDeclaration)
     }
 
+    pub(super) fn retained_declaration_projections(
+        &self,
+    ) -> Vec<Arc<tidepool_toolchain::declaration_join::AcceptedJoin>> {
+        self.compile_inputs
+            .projections()
+            .iter()
+            .map(|projection| projection.receipt().clone())
+            .collect()
+    }
+
     pub(super) fn prepared_declaration(
         &self,
         item: &tidepool_toolchain::checked_cell::ExactCheckedItem,

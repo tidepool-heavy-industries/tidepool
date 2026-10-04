@@ -1457,7 +1457,12 @@ impl PersistentSession {
                             original,
                             projection,
                         },
-                        None => super::view::CompileLibrary::Source(original),
+                        None => match lib.current_recovered_declaration_in(scope) {
+                            Some(evidence) => {
+                                super::view::CompileLibrary::Recovered { original, evidence }
+                            }
+                            None => super::view::CompileLibrary::Source(original),
+                        },
                     }
                 }),
                 visible_values,

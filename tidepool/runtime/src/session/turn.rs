@@ -2630,6 +2630,7 @@ pub fn compile_cell_program_admitted(
             .iter()
             .map(|interface| interface.checked_artifact().clone())
             .collect::<Vec<_>>(),
+        &admission.retained_declaration_projections(),
     )?;
     if let Some(root) = offer.checked_value_root() {
         command.session_root(root);
@@ -2742,6 +2743,7 @@ fn check_cell_impl(
                 .iter()
                 .map(|interface| interface.checked_artifact().clone())
                 .collect::<Vec<_>>(),
+            &admission.retained_declaration_projections(),
         )?
     } else {
         select_module_candidate_offer(
@@ -5512,6 +5514,7 @@ mod tests {
             tidepool_toolchain::artifacts::CheckedCellPurpose::Authored,
             vec![(fixture.home.owner(), Arc::from(&b"changed interface"[..]))],
             std::slice::from_ref(&fixture.home),
+            &[],
         )
         .err()
         .expect("another interface cannot borrow the retained certificate");
@@ -5569,6 +5572,7 @@ mod tests {
             tidepool_toolchain::artifacts::CheckedCellPurpose::Authored,
             Vec::new(),
             &[],
+            &admission.retained_declaration_projections(),
         )?;
         cmd.session_root(offer.checked_value_root().unwrap())
             .session_artifacts(offer.exact_scope_path().unwrap());

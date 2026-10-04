@@ -204,8 +204,8 @@ import Tidepool.ExactHydration
   , GeneratedScaffoldRecipe, generatedScaffoldRecipe, captureGeneratedScaffoldTarget
   , noGeneratedScaffoldImports, readGeneratedScaffoldImportAuthority, permitsGeneratedScaffoldImport, installExactLexicalGraphWithScaffold )
 import Tidepool.ExactScope
-  ( ExactScope(..), ExactScopePurpose(..), ExactCompilation(..), SourceSelectedOriginals(..), extendSourceSelectedOriginals, CheckedCellAdmission(..), CheckedCellPurpose(..), CheckedItemAdmission(..), CheckedItemPurpose(..), readExactScope, revalidateExactScope, scopeValueInterfaces
-  , scopeCheckedCell, scopeCheckedItem, scopeIncludePaths
+  ( ExactScope(..), ExactScopePurpose(..), ExactCompilation(..), SourceSelectedOriginals(..), extendSourceSelectedOriginals, CheckedCellAdmission(..), CheckedCellPurpose(..), CheckedItemAdmission(..), CheckedItemPurpose(..), CheckedDisplayAdmission(..), readExactScope, revalidateExactScope, scopeValueInterfaces
+  , scopeCheckedCell, scopeCheckedItem, scopeCheckedDisplay, scopeIncludePaths
   , writeExactCompilation, scopeExecutionNativeOwners, ExactInterfaceEvidence(..), CanonicalOrigin(..), canonicalOrigin )
 import Tidepool.ExactScope
   ( CanonicalInterfaceProof, CanonicalInterfaceAdmission, scopeCanonicalInterfaces
@@ -3927,6 +3927,22 @@ withSourceSelectionRefusal action = reifyGhc $ \session ->
     refuseInput :: IOException -> IO a
     refuseInput = throwIO . OriginalSourceSelectionInputUnavailable . show
 
+-- The original import is owned by a protected checked recipe, never by the
+-- persistent lexical surface or the mere presence of its interface.
+checkedRecipeOriginal :: ExactScope -> Either String (Maybe ((String,String),String))
+checkedRecipeOriginal admitted = do
+  let original = case (scopeCheckedItem admitted, scopeCheckedDisplay admitted) of
+        (Just item,Nothing) -> itemPlannedDeclaration item
+        (Nothing,Just display) -> displayPlannedDeclaration display
+        _ -> Nothing
+  forM_ original $ \(owner,_) -> case Map.lookup owner (scopeInterfaceEvidence admitted) of
+    Just (ModuleInterfaceEvidence proof) -> case canonicalOrigin proof of
+      NativeAuthoredDeclaration _ -> Right ()
+      _ -> Left "checked recipe original lacks native declaration origin"
+    Just (LocalNativeDeclarationEvidence _) -> Right ()
+    _ -> Left "checked recipe original lacks its admitted native declaration proof"
+  pure original
+
 -- Explicit authored imports demand current recipe proof even for a captured
 -- lexical owner. Generated imports and use of captured names keep that owner.
 -- Available retained requirements alone never create a source demand.
@@ -3992,8 +4008,9 @@ selectCurrentSourceOriginals admitted intents recipe sourceGraph = do
         case candidates of
           [summary] -> do
             parsed <- parseModule summary
+            original <- either (liftIO . fail) pure (checkedRecipeOriginal admitted)
             liftIO (readGeneratedScaffoldImportAuthority closure'
-              (scopeExecutionNativeOwners admitted) protected parsed sourceGraph hydrated)
+              (scopeExecutionNativeOwners admitted) original protected parsed sourceGraph hydrated)
               >>= either (liftIO . fail) pure
           _ -> liftIO (fail "generated scaffold target summary is missing or duplicated")
     let roots = Set.toAscList (Set.fromList [key | (summary,imported,key) <- hiddenImports
@@ -4437,8 +4454,9 @@ sessionVariant purpose scope path = do
                 [summary] -> pure summary
                 _ -> liftIO (fail "generated scaffold target summary is missing or duplicated")
               parsedScaffold <- parseModule targetSummary
+              original <- either (liftIO . fail) pure (checkedRecipeOriginal admitted)
               liftIO (readGeneratedScaffoldImportAuthority closure'
-                (scopeExecutionNativeOwners admitted) recipe parsedScaffold modGraphRaw hydrated)
+                (scopeExecutionNativeOwners admitted) original recipe parsedScaffold modGraphRaw hydrated)
                 >>= either (liftIO . fail) pure
           liftIO (writeIORef scaffoldRef scaffold)
           preflight <- liftIO (installExactLexicalGraphWithScaffold modGraphRaw lexical checkedValues scaffold hydrated)

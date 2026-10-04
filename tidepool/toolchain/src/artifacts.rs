@@ -419,6 +419,7 @@ pub struct ModuleCandidateOffer {
     checked_cell: Option<crate::checked_cell::CheckedCellSpecification>,
     planned_cell: Option<crate::checked_cell::CheckedPlannedCellSpecification>,
     checked_values: Option<Arc<crate::checked_cell::CheckedValueInputs>>,
+    checked_projections: Vec<Arc<crate::declaration_join::AcceptedJoin>>,
     checked_item: Option<crate::checked_cell::CheckedItemOffer>,
     checked_display: Option<crate::checked_cell::CheckedDisplayOffer>,
 }
@@ -770,6 +771,7 @@ impl ModuleCandidateOffer {
             checked_cell: None,
             planned_cell: None,
             checked_values: None,
+            checked_projections: Vec::new(),
             checked_item: None,
             checked_display: None,
         })
@@ -793,6 +795,7 @@ impl ModuleCandidateOffer {
             checked_cell: None,
             planned_cell: None,
             checked_values: None,
+            checked_projections: Vec::new(),
             checked_item: None,
             checked_display: None,
         })
@@ -846,6 +849,7 @@ impl ModuleCandidateOffer {
             checked_cell: None,
             planned_cell: None,
             checked_values: Some(inputs),
+            checked_projections: Vec::new(),
             checked_item: None,
             checked_display: None,
         })
@@ -860,6 +864,7 @@ impl ModuleCandidateOffer {
         purpose: CheckedCellPurpose<'_>,
         checked_values: Vec<(tidepool_repr::SessionModule, Arc<[u8]>)>,
         retained_interfaces: &[Arc<crate::checked_cell::CheckedValueArtifact>],
+        retained_projections: &[Arc<crate::declaration_join::AcceptedJoin>],
     ) -> Result<Self, CompileError> {
         let expected = specification
             .injected_modules
@@ -886,6 +891,8 @@ impl ModuleCandidateOffer {
             retained_interfaces,
         )?;
         let context = checked_value_context(Some(publication_context), &checked_values)?;
+        let checked_projections =
+            crate::checked_cell::retain_projection_inputs(&context, retained_projections)?;
         let authorization =
             checked_cell_authorization(purpose, &specification, &checked_values, include)?;
         Ok(Self {
@@ -919,6 +926,7 @@ impl ModuleCandidateOffer {
             checked_cell: Some(specification),
             planned_cell: None,
             checked_values: Some(checked_values),
+            checked_projections,
             checked_item: None,
             checked_display: None,
         })
@@ -934,6 +942,7 @@ impl ModuleCandidateOffer {
         values: Vec<(tidepool_repr::SessionModule, Arc<[u8]>)>,
         planned: crate::checked_cell::CheckedPlannedCellSpecification,
         retained_interfaces: &[Arc<crate::checked_cell::CheckedValueArtifact>],
+        retained_projections: &[Arc<crate::declaration_join::AcceptedJoin>],
     ) -> Result<Self, CompileError> {
         let producer = endpoint.identity().producer_bytes();
         let expected = specification
@@ -961,6 +970,8 @@ impl ModuleCandidateOffer {
         let inputs =
             crate::checked_cell::CheckedValueInputs::capture_checked(values, retained_interfaces)?;
         let context = checked_value_context(Some(publication_context), &inputs)?;
+        let checked_projections =
+            crate::checked_cell::retain_projection_inputs(&context, retained_projections)?;
         let Value::Array(fields) = &mut authorization else {
             unreachable!("closed authorization")
         };
@@ -1004,6 +1015,7 @@ impl ModuleCandidateOffer {
             checked_cell: Some(specification),
             planned_cell: Some(planned),
             checked_values: Some(inputs),
+            checked_projections,
             checked_item: None,
             checked_display: None,
         })
@@ -1175,11 +1187,23 @@ impl ModuleCandidateOffer {
                             .turn_templates()
                             .iter()
                             .map(|(_, source)| source.as_str()),
-                    ),
+                    )
+                    .with_generated_planned_imports(
+                        checked_item
+                            .prefix
+                            .planned_declaration_proof()
+                            .map(|proof| &proof.certificate),
+                        checked_item
+                            .item
+                            .turn_templates()
+                            .iter()
+                            .map(|(_, source)| source.as_str()),
+                    )?,
             ),
             checked_cell: None,
             planned_cell: None,
             checked_values: None,
+            checked_projections: Vec::new(),
             checked_item: Some(checked_item),
             checked_display: None,
         })
@@ -1276,11 +1300,24 @@ impl ModuleCandidateOffer {
                             .turn_templates()
                             .iter()
                             .map(|(_, source)| source.as_str()),
-                    ),
+                    )
+                    .with_generated_planned_imports(
+                        display
+                            .prefix
+                            .planned_declaration_proof()
+                            .map(|proof| &proof.certificate),
+                        display
+                            .capture
+                            .item()
+                            .turn_templates()
+                            .iter()
+                            .map(|(_, source)| source.as_str()),
+                    )?,
             ),
             checked_cell: None,
             planned_cell: None,
             checked_values: None,
+            checked_projections: Vec::new(),
             checked_item: None,
             checked_display: Some(display),
         })
@@ -1361,6 +1398,7 @@ impl ModuleCandidateOffer {
             &self.producer,
             exact.semantic_sha256,
             exact.context.clone(),
+            self.checked_projections.clone(),
             &exact.request_sha256,
             specification,
             exact.validate_outputs_with_planned(
@@ -1599,6 +1637,7 @@ impl ModuleCandidateOffer {
             &self.producer,
             initial.semantic_sha256,
             initial.context.clone(),
+            self.checked_projections.clone(),
             &initial.request_sha256,
             specification,
             admissions,
@@ -1735,6 +1774,7 @@ impl ModuleCandidateOffer {
             checked_cell: None,
             planned_cell: None,
             checked_values: None,
+            checked_projections: Vec::new(),
             checked_item: None,
             checked_display: None,
         }

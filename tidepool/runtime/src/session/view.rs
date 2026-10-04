@@ -150,18 +150,23 @@ pub(super) enum CompileLibrary {
         original: SessionModule,
         projection: Arc<super::CertifiedDeclarationProjection>,
     },
+    Recovered {
+        original: SessionModule,
+        evidence: Arc<tidepool_toolchain::declaration_join::RecoveredDeclarationTip>,
+    },
 }
 impl CompileLibrary {
     fn original(&self) -> SessionModule {
         match self {
             Self::Source(module) => *module,
-            Self::Certified { original, .. } => *original,
+            Self::Certified { original, .. } | Self::Recovered { original, .. } => *original,
         }
     }
     fn import_name(&self) -> String {
         match self {
             Self::Source(module) => module.module_name(),
             Self::Certified { projection, .. } => projection.module_name().to_owned(),
+            Self::Recovered { evidence, .. } => evidence.root().module.clone(),
         }
     }
 }

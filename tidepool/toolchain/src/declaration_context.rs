@@ -716,15 +716,21 @@ pub(crate) struct ExactCompilationRequest {
     source_selected_support: BTreeSet<ExactModuleIdentity>,
     source_search_include: Option<Arc<[PathBuf]>>,
     checked_value_imports: crate::checked_cell::CheckedValueImportAuthority,
-    generated_scaffold_imports: Option<GeneratedScaffoldImportAuthority>,
+    generated_scaffold_imports: Vec<GeneratedScaffoldImportAuthority>,
 }
 
 /// The compiler-only import belongs to a hash-sealed checked template and one
 /// original native/interface owner. It never grants authored lexical visibility.
 #[derive(Clone)]
 struct GeneratedScaffoldImportAuthority {
-    owner: tidepool_repr::execution_schema::CachedHomeOwner,
+    role: GeneratedScaffoldRole,
     protected_templates: Arc<[String]>,
+}
+
+#[derive(Clone)]
+enum GeneratedScaffoldRole {
+    Resume(tidepool_repr::execution_schema::CachedHomeOwner),
+    PlannedDeclaration(Arc<CertifiedAuthoredDeclaration>),
 }
 
 const GENERATED_RESUME_IMPORT: &str = "import qualified Tidepool.Internal.Resume as TidepoolResume";
@@ -741,36 +747,60 @@ impl GeneratedScaffoldImportAuthority {
         qualifier: &str,
         boot: bool,
     ) -> bool {
+        let owner = match &self.role {
+            GeneratedScaffoldRole::Resume(owner) => owner,
+            GeneratedScaffoldRole::PlannedDeclaration(certificate) => certificate.product().owner(),
+        };
         if target != module_source
             || boot
             || qualifier != "none"
-            || unit != self.owner.unit
-            || module != self.owner.module
+            || unit != owner.unit
+            || module != owner.module
         {
             return false;
         }
-        let lines = source
+        let compiler_import = match &self.role {
+            GeneratedScaffoldRole::Resume(_) => GENERATED_RESUME_IMPORT.to_owned(),
+            GeneratedScaffoldRole::PlannedDeclaration(_) => format!("import {}", owner.module),
+        };
+        if source
             .lines()
-            .enumerate()
-            .filter_map(|(line, text)| (text == GENERATED_RESUME_IMPORT).then_some(line + 1))
-            .collect::<Vec<_>>();
-        // GHC inserts admitted pragmas/imports before rendering the protected
-        // recipe. Its captured occurrence is therefore derived from rendered
-        // bytes, while both protected and rendered inputs must contain it once.
-        if lines.len() != 1
-            || !self.protected_templates.iter().any(|template| {
-                template
-                    .lines()
-                    .filter(|line| *line == GENERATED_RESUME_IMPORT)
-                    .count()
-                    == 1
+            .filter(|line| *line == compiler_import)
+            .count()
+            != 1
+        {
+            return false;
+        }
+        if !self
+            .protected_templates
+            .iter()
+            .any(|template| match &self.role {
+                GeneratedScaffoldRole::Resume(_) => {
+                    template
+                        .lines()
+                        .filter(|line| *line == GENERATED_RESUME_IMPORT)
+                        .count()
+                        == 1
+                }
+                GeneratedScaffoldRole::PlannedDeclaration(_) => {
+                    template
+                        .lines()
+                        .filter(|line| *line == "-- tidepool-preamble-imports-v1")
+                        .count()
+                        == 1
+                }
             })
         {
             return false;
         }
         context.artifact_view().entries().iter().any(|entry| {
-            matches!(&entry.payload, ArtifactPayload::Original(product)
-                if product.owner() == &self.owner)
+            matches!(&entry.payload, ArtifactPayload::Original(product) if
+            match &self.role {
+                GeneratedScaffoldRole::Resume(owner) => product.owner() == owner,
+                GeneratedScaffoldRole::PlannedDeclaration(certificate) =>
+                    product.artifact_id() == certificate.product().artifact_id()
+                    && certificate.toolchain_identity_sha256() == context.producer,
+            })
         })
     }
 }
@@ -1053,14 +1083,42 @@ impl ExactCompilationRequest {
                 })
                 .collect::<Vec<_>>();
             if let [owner] = owners.as_slice() {
-                self.generated_scaffold_imports = Some(GeneratedScaffoldImportAuthority {
-                    owner: (*owner).clone(),
-                    protected_templates: protected_templates.into(),
-                });
+                self.generated_scaffold_imports
+                    .push(GeneratedScaffoldImportAuthority {
+                        role: GeneratedScaffoldRole::Resume((*owner).clone()),
+                        protected_templates: protected_templates.into(),
+                    });
             }
         }
         self
     }
+    pub(crate) fn with_generated_planned_imports<'a>(
+        mut self,
+        certificate: Option<&Arc<CertifiedAuthoredDeclaration>>,
+        templates: impl IntoIterator<Item = &'a str>,
+    ) -> Result<Self, CompileError> {
+        if let Some(certificate) = certificate {
+            if certificate.toolchain_identity_sha256() != self.producer_sha256
+                || !self
+                    .context
+                    .recovery_products()
+                    .iter()
+                    .any(|product| product.artifact_id() == certificate.product().artifact_id())
+            {
+                return Err(failure(
+                    "checked recipe original differs from its admitted certificate",
+                ));
+            }
+            let protected_templates = templates.map(str::to_owned).collect::<Vec<_>>();
+            self.generated_scaffold_imports
+                .push(GeneratedScaffoldImportAuthority {
+                    role: GeneratedScaffoldRole::PlannedDeclaration(certificate.clone()),
+                    protected_templates: protected_templates.into(),
+                });
+        }
+        Ok(self)
+    }
+
     pub(crate) fn in_program_context(
         &self,
         root: &Path,
@@ -1661,40 +1719,36 @@ impl ExactCompilationRequest {
                 let name = string(&edge[1])?;
                 let boot = boolean(&edge[2])?;
                 let unit = string(&edge[3])?;
-                let scaffold_import =
-                    self.generated_scaffold_imports
-                        .as_ref()
-                        .is_some_and(|authority| {
-                            evidence
-                                .modules
-                                .iter()
-                                .find(|module| {
-                                    module.unit == owner.0
-                                        && module.module == owner.1
-                                        && module.boot == owner.2
-                                })
-                                .is_some_and(|module| {
-                                    // from_worker has already bound this marker to
-                                    // the hash-verified receipt target snapshot.
-                                    let module_source = if module.source
-                                        == Path::new(crate::cache::GENERATED_SOURCE)
-                                    {
-                                        &source_path
-                                    } else {
-                                        &module.source
-                                    };
-                                    authority.permits(
-                                        context,
-                                        source,
-                                        &source_path,
-                                        module_source,
-                                        unit,
-                                        name,
-                                        qualifier,
-                                        boot,
-                                    )
-                                })
-                        });
+                let scaffold_import = self.generated_scaffold_imports.iter().any(|authority| {
+                    evidence
+                        .modules
+                        .iter()
+                        .find(|module| {
+                            module.unit == owner.0
+                                && module.module == owner.1
+                                && module.boot == owner.2
+                        })
+                        .is_some_and(|module| {
+                            // from_worker has already bound this marker to
+                            // the hash-verified receipt target snapshot.
+                            let module_source =
+                                if module.source == Path::new(crate::cache::GENERATED_SOURCE) {
+                                    &source_path
+                                } else {
+                                    &module.source
+                                };
+                            authority.permits(
+                                context,
+                                source,
+                                &source_path,
+                                module_source,
+                                unit,
+                                name,
+                                qualifier,
+                                boot,
+                            )
+                        })
+                });
                 if boot
                     || !(selected.contains(&(unit, name))
                         || scaffold_import
@@ -2968,7 +3022,7 @@ impl ExactDeclarationContext {
             source_selected_support: BTreeSet::new(),
             source_search_include: None,
             checked_value_imports: Default::default(),
-            generated_scaffold_imports: None,
+            generated_scaffold_imports: Vec::new(),
         })
     }
 }
@@ -3699,7 +3753,7 @@ mod tests {
             source_selected_support: BTreeSet::new(),
             source_search_include: None,
             checked_value_imports: Default::default(),
-            generated_scaffold_imports: None,
+            generated_scaffold_imports: Vec::new(),
         }
     }
 
@@ -4995,7 +5049,7 @@ mod tests {
             source_selected_support: BTreeSet::new(),
             source_search_include: None,
             checked_value_imports: Default::default(),
-            generated_scaffold_imports: None,
+            generated_scaffold_imports: Vec::new(),
         };
         let root = directory.path().join("program-inputs");
         assert!(!root.exists());
@@ -5068,7 +5122,7 @@ mod tests {
             source_selected_support: BTreeSet::new(),
             source_search_include: None,
             checked_value_imports: Default::default(),
-            generated_scaffold_imports: None,
+            generated_scaffold_imports: Vec::new(),
         };
         let materialization_root = directory.path().join("program-inputs");
         let effective = request
@@ -5216,7 +5270,7 @@ mod tests {
             .witness
             .matches_source(&directory.path().join("Consumer.hs"), &source));
         let mut unprotected = request.clone();
-        unprotected.generated_scaffold_imports = None;
+        unprotected.generated_scaffold_imports.clear();
         assert!(unprotected
             .validate_receipt(&receipt, None, &context)
             .is_err());
@@ -5243,6 +5297,116 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires the matched Haskell worker and frontend"]
+    fn generated_planned_import_is_bound_to_original_certificate_and_target() {
+        let directory = tempfile::tempdir().unwrap();
+        let owner = tidepool_repr::SessionModule::lib(tidepool_repr::Generation(1));
+        let original_source = include_str!("../tests/fixtures/checked-prefix-publication/G1.hs");
+        let original_path = directory.path().join(owner.relative_hs_path());
+        std::fs::create_dir_all(original_path.parent().unwrap()).unwrap();
+        std::fs::write(&original_path, original_source).unwrap();
+        std::fs::write(
+            directory.path().join("PrefixSelectedSupport.hs"),
+            include_str!("../tests/fixtures/checked-prefix-publication/PrefixSelectedSupport.hs"),
+        )
+        .unwrap();
+        let certificate = Arc::new(
+            crate::declaration_join::certify_authored_declaration(
+                owner,
+                &original_path,
+                original_source,
+                &[directory.path().to_path_buf()],
+                directory.path(),
+            )
+            .expect("matched issuer supplies the original native and canonical carriers"),
+        );
+        let context = Arc::new(
+            ExactDeclarationContext::new(std::slice::from_ref(&certificate), &[], Vec::new())
+                .unwrap(),
+        );
+        assert!(context.lexical_graph().is_empty());
+        let source = format!(
+            "module Consumer where\n-- tidepool-preamble-imports-v1\nimport {}\n",
+            owner.module_name()
+        );
+        let mut request = program_request(directory.path(), context.clone());
+        request.producer_sha256 = certificate.toolchain_identity_sha256();
+        let ordinary = request.clone();
+        let request = request
+            .with_generated_planned_imports(Some(&certificate), [source.as_str()])
+            .unwrap();
+        let receipt = import_receipt_source_owner(
+            directory.path(),
+            &request,
+            "main",
+            &owner.module_name(),
+            "none",
+            false,
+            &source,
+        );
+        request.validate_receipt(&receipt, None, &context).unwrap();
+        let later_error = ordinary
+            .validate_receipt(&receipt, None, &context)
+            .err()
+            .expect("ordinary input lacks protected original permission");
+        assert!(matches!(later_error, CompileError::ExtractFailed(detail)
+            if detail.contains("exact import witness leaves selected lexical graph: source fixture:Consumer")));
+        let mut wrong_producer = ordinary.clone();
+        wrong_producer.producer_sha256 = [0; 32];
+        assert!(wrong_producer
+            .with_generated_planned_imports(Some(&certificate), [source.as_str()])
+            .is_err());
+        let mut absent_original = ordinary;
+        absent_original.context =
+            Arc::new(ExactDeclarationContext::new(&[], &[], Vec::new()).unwrap());
+        assert!(absent_original
+            .with_generated_planned_imports(Some(&certificate), [source.as_str()])
+            .is_err());
+
+        // The protected target remains valid; a second source copying both
+        // its marker and original import cannot borrow its edge permission.
+        let mut value: Value =
+            ciborium::de::from_reader(std::fs::read(&receipt).unwrap().as_slice()).unwrap();
+        let fields = value.as_array_mut().unwrap();
+        let mut evidence: crate::cache::DependencyEvidence =
+            serde_json::from_str(fields[7].as_text().unwrap()).unwrap();
+        let helper = directory.path().join("Helper.hs");
+        let helper_source = source.replace("module Consumer where", "module Helper where");
+        std::fs::write(&helper, &helper_source).unwrap();
+        evidence.sources.push(crate::cache::SourceEvidence {
+            path: helper.clone(),
+            sha256: sha256(helper_source.as_bytes()),
+        });
+        evidence.modules.push(crate::cache::ModuleEvidence {
+            unit: "fixture".into(),
+            module: "Helper".into(),
+            boot: false,
+            source: helper,
+            imports: vec![],
+            product: crate::cache::ProductAvailability::Ready,
+        });
+        fields[7] = text(serde_json::to_string(&evidence).unwrap());
+        fields[8].as_array_mut().unwrap().push(Value::Array(vec![
+            text("fixture"),
+            text("Helper"),
+            Value::Bool(false),
+            Value::Array(vec![Value::Array(vec![
+                text("none"),
+                text(owner.module_name()),
+                Value::Bool(false),
+                text("main"),
+            ])]),
+        ]));
+        write_receipt(&receipt, &value);
+        let helper_error = request
+            .validate_receipt(&receipt, None, &context)
+            .err()
+            .expect("helper cannot borrow the protected target edge");
+        assert!(matches!(helper_error, CompileError::ExtractFailed(detail)
+            if detail.contains("exact import witness leaves selected lexical graph: source fixture:Helper")));
+    }
+
+    #[test]
     fn generated_scaffold_authority_preserves_target_and_original_owner() {
         let directory = tempfile::tempdir().unwrap();
         let (graph, owners) = crate::execution_source::test_graph(directory.path());
@@ -5258,7 +5422,7 @@ mod tests {
             lexical: vec![],
         };
         let authority = GeneratedScaffoldImportAuthority {
-            owner: owners[0].clone(),
+            role: GeneratedScaffoldRole::Resume(owners[0].clone()),
             protected_templates: Arc::from([format!(
                 "module Expr where\n{GENERATED_RESUME_IMPORT}\n"
             )]),

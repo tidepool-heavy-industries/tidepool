@@ -424,6 +424,7 @@ pub struct ExactCheckedCell {
     producer: [u8; 32],
     context: [u8; 32],
     declaration_context: Arc<crate::declaration_context::ExactDeclarationContext>,
+    retained_projections: Vec<Arc<crate::declaration_join::AcceptedJoin>>,
     receipt_digest: [u8; 32],
     checked_source: String,
     evidence: Vec<(String, crate::cache::DependencyEvidence)>,
@@ -1869,9 +1870,17 @@ impl ExactCompiledPrefix {
             .collect()
     }
 
+    pub(crate) fn planned_declaration_proof(&self) -> Option<&PlannedCheckedDeclaration> {
+        self.completed_declaration(0).and_then(|item| {
+            item.cell
+                .planned_declarations
+                .get(&item.index)
+                .or(item.cell.planned_declaration.as_ref())
+        })
+    }
+
     fn planned_authorization(&self) -> Value {
-        self.completed_declaration(0)
-            .and_then(|item| item.cell.planned_declaration.as_ref())
+        self.planned_declaration_proof()
             .map_or(Value::Null, |planned| {
                 array([
                     text(&planned.certificate.product().owner().unit),
@@ -2011,9 +2020,50 @@ impl ExactCompiledPrefix {
             unit: projection.reserved().unit.clone(),
             module: projection.reserved().module.clone(),
         };
+        let retained_projections = &self.cell.retained_projections;
+        let initial = &self.cell.declaration_context;
+        let initial_lexical = initial
+            .lexical_graph()
+            .iter()
+            .map(|node| (node.owner.clone(), node))
+            .collect::<BTreeMap<_, _>>();
+        let initial_interfaces = initial.interface_owners();
+        let mut selected = BTreeSet::new();
+        for retained in retained_projections {
+            let owner = crate::declaration_join::ExactModuleIdentity {
+                unit: retained.reserved().unit.clone(),
+                module: retained.reserved().module.clone(),
+            };
+            if retained.toolchain_identity_sha256() != self.cell.producer
+                || !initial_lexical.contains_key(&owner)
+                || !initial_interfaces.iter().any(|interface| {
+                    interface.owner == owner && interface.sha256 == hash(retained.interface_bytes())
+                })
+            {
+                return Err(failure(
+                    "retained projection was not selected by this checked cell",
+                ));
+            }
+            let mut pending = vec![owner];
+            while let Some(owner) = pending.pop() {
+                if selected.insert(owner.clone()) {
+                    let node = initial_lexical.get(&owner).ok_or_else(|| {
+                        failure("retained projection leaves the checked cell lexical graph")
+                    })?;
+                    pending.extend(node.imports.iter().cloned());
+                }
+            }
+        }
+        lexical.extend(
+            selected
+                .into_iter()
+                .map(|owner| initial_lexical[&owner].clone()),
+        );
+        let mut joins = vec![projection];
+        joins.extend_from_slice(retained_projections);
         let context = Arc::new(crate::declaration_context::ExactDeclarationContext::new(
             &[],
-            std::slice::from_ref(&projection),
+            &joins,
             lexical,
         )?);
         let mut next = self.clone();
@@ -2818,11 +2868,49 @@ pub(crate) fn same_include_paths(
             .all(|(left, right)| left.as_os_str() == right.as_os_str())
 }
 
+/// Independent captured projections are admitted with the initial checked
+/// offer. A continuation cannot relabel its replaced parent as such an input.
+pub(crate) fn retain_projection_inputs(
+    context: &crate::declaration_context::ExactDeclarationContext,
+    projections: &[Arc<crate::declaration_join::AcceptedJoin>],
+) -> Result<Vec<Arc<crate::declaration_join::AcceptedJoin>>, CompileError> {
+    let interfaces = context.interface_owners();
+    let selected = context
+        .lexical_graph()
+        .iter()
+        .map(|node| &node.owner)
+        .collect::<BTreeSet<_>>();
+    let mut seen = BTreeSet::new();
+    for projection in projections {
+        let owner = crate::declaration_join::ExactModuleIdentity {
+            unit: projection.reserved().unit.clone(),
+            module: projection.reserved().module.clone(),
+        };
+        if !seen.insert(owner.clone())
+            || !selected.contains(&owner)
+            || !interfaces.iter().any(|interface| {
+                interface.owner == owner && interface.sha256 == hash(projection.interface_bytes())
+            })
+        {
+            return Err(failure(
+                "captured projection lacks one exact selected initial interface",
+            ));
+        }
+        context.clone().extend(
+            &[],
+            std::slice::from_ref(projection),
+            context.lexical_graph().to_vec(),
+        )?;
+    }
+    Ok(projections.to_vec())
+}
+
 pub(crate) fn admit_checked_cell(
     root: &Path,
     producer: &[u8],
     context: [u8; 32],
     declaration_context: Arc<crate::declaration_context::ExactDeclarationContext>,
+    retained_projections: Vec<Arc<crate::declaration_join::AcceptedJoin>>,
     request_digest: &str,
     specification: &CheckedCellSpecification,
     admissions: Vec<ExactSourceAdmission>,
@@ -3046,6 +3134,7 @@ pub(crate) fn admit_checked_cell(
         .sha256(),
         context,
         declaration_context,
+        retained_projections,
         receipt_digest: Sha256::digest(&receipt).into(),
         evidence,
         checked_source,
@@ -3690,6 +3779,7 @@ mod tests {
             .sha256(),
             context: enriched_context.semantic_sha256(),
             declaration_context: enriched_context,
+            retained_projections: Vec::new(),
             receipt_digest: [9; 32],
             checked_source: source.into(),
             evidence: Vec::new(),
@@ -3716,6 +3806,16 @@ mod tests {
             cell: Arc::clone(&cell),
             index: 0,
         };
+        let unsettled = item
+            .initial_prefix()
+            .unwrap()
+            .append_program_original(item.clone())
+            .unwrap();
+        let error = unsettled
+            .revalidate_context(producer, &expected_publication.semantic_sha256())
+            .unwrap_err();
+        assert!(matches!(error, CompileError::ExtractFailed(detail)
+            if detail == "checked cell: program original is not a settled declaration projection"));
         let mut completed = CheckedPrefixSequence::new();
         completed.push(CompletedCheckedItem::Declaration(item));
         let prefix = ExactCompiledPrefix {
@@ -3921,6 +4021,7 @@ mod tests {
                 crate::declaration_context::ExactDeclarationContext::new(&[], &[], Vec::new())
                     .unwrap(),
             ),
+            retained_projections: Vec::new(),
             receipt_digest: [9; 32],
             checked_source: source.into(),
             evidence: Vec::new(),
