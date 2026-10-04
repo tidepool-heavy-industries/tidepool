@@ -193,7 +193,9 @@ writeModuleProducts :: OriginalInterfaceArtifacts -> FilePath -> Maybe PreparedM
   -> Map.Map ModuleName PackageImportEvidence
   -> IO (Map.Map (String, String) ProductAvailability,
          [ModuleProductEncoding])
-writeModuleProducts _ _ Nothing _ _ = pure (Map.empty, [])
+writeModuleProducts _ outDir Nothing _ _ = do
+  writeProductInventory outDir [] []
+  pure (Map.empty, [])
 writeModuleProducts originalInterfaces outDir (Just inventory) interfaces packageRoots = do
   timing <- readTimingEnabled
   forM_ (preparedModuleProductOmissions inventory) $ \(owner, omissions) ->
@@ -234,6 +236,14 @@ writeModuleProducts originalInterfaces outDir (Just inventory) interfaces packag
       packageBundles =
         [(unit, moduleName', sidecar)
         | ((unit, moduleName'), _, Just _, Just sidecar) <- outcomes]
+  writeProductInventory outDir products packageBundles
+  pure (Map.fromList [(key, status) | (key, status, _, _) <- outcomes], products)
+
+-- Interface-only captures emit the same valid inventory framing with no native
+-- rows. Product absence never prevents retaining the actual finalization.
+writeProductInventory :: FilePath -> [ModuleProductEncoding] -> [(String,String,BS.ByteString)] -> IO ()
+writeProductInventory outDir products packageBundles = do
+  timing <- readTimingEnabled
   timeDetailPhase timing "module_products" "encode_products" $
     BS.writeFile (outDir </> "module-products.cbor") (encodeModuleProductInventory products)
   timeDetailPhase timing "module_products" "encode_package_bundles" $
@@ -244,7 +254,6 @@ writeModuleProducts originalInterfaces outDir (Just inventory) interfaces packag
       <> foldMap (\(unit, moduleName', sidecar) -> encodeListLen 3
         <> encodeString (T.pack unit) <> encodeString (T.pack moduleName')
         <> encodeBytes sidecar) packageBundles))
-  pure (Map.fromList [(key, status) | (key, status, _, _) <- outcomes], products)
 
 
 -- A later item can execute a quoter defined by an original retained here.
