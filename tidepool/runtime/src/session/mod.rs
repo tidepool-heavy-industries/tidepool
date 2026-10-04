@@ -76,7 +76,7 @@ pub use planned_cell::{
 };
 pub use prepared::{
     CancelHandle, PreparedEngine, PreparedFailureKind, PreparedFailureStage, PreparedRuntimeError,
-    PreparedSettlement, RealmId, RequestCompileAnnotations, SiteTypeEvidence,
+    PreparedSettlement, RealmId, RequestCompileAnnotations, RuntimeCompileInputs, SiteTypeEvidence,
 };
 pub use publication::{PublicationCancellation, PublicationDecision, PublicationPhase};
 // Re-exported for callers that pass a value across two resident sessions'
@@ -2257,7 +2257,13 @@ impl SessionLib {
                 _ => None,
             })
             .ok_or_else(|| invalid("authored native root is absent from its artifact closure"))?;
-        let live_dependencies = certified_native_dependencies(context, &[authored_root])?;
+        let certified_root = context.authored_native_root(staged.generation.0)?;
+        if certified_root != authored_root {
+            return Err(invalid(
+                "authored native origin differs from the staged original product",
+            ));
+        }
+        let live_dependencies = certified_native_dependencies(context, &[certified_root])?;
         graph
             .insert_node(recovery::RecoveryNode {
                 id: staged.generation,
@@ -3031,6 +3037,24 @@ mod tests {
         );
         let staged = validate_declaration_candidate(candidate, lib.include_dir()).unwrap();
         let exact_evidence = staged.certified_authored.clone().unwrap();
+        let original_root = exact_evidence
+            .projection
+            .context()
+            .authored_native_root(1)
+            .unwrap();
+        let original_entry = exact_evidence
+            .projection
+            .context()
+            .artifact_view()
+            .entries()
+            .iter()
+            .find(|entry| {
+                matches!(&entry.payload,
+                tidepool_toolchain::artifact_inventory::ArtifactPayload::Original(product)
+                    if product.owner() == exact_evidence.evidence.product().owner())
+            })
+            .unwrap();
+        assert_eq!(original_root, original_entry.descriptor.id);
         let committed_copy = staged.clone();
         assert_eq!(
             lib.reserve_join_generation_durable().unwrap(),
@@ -3074,6 +3098,17 @@ mod tests {
             .artifact_refs
             .is_empty());
         assert!(retained.graph.public_surfaces().next().is_none());
+        let node = retained.graph.nodes().next().unwrap();
+        assert!(node.artifact_refs.contains(&original_root));
+        assert_eq!(
+            node.lexical_roots[0].module,
+            exact_evidence.projection.module_name()
+        );
+        assert_ne!(
+            node.lexical_roots[0].module,
+            committed_copy.module().module_name()
+        );
+        assert!(node.artifact_refs.iter().any(|id| *id != original_root));
         assert_eq!(
             lib.reserve_join_generation_durable().unwrap(),
             Generation(3)

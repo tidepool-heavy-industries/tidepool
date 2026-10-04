@@ -298,7 +298,12 @@ fn source_lexical_surface_inner(
             .iter()
             .filter_map(|owner| {
                 if !owner.module.starts_with("Tidepool.Session.") {
-                    return Some(Ok(owner.clone()));
+                    // Compiler-issued lexical projections are implementation
+                    // interfaces even when their owner is content-addressed.
+                    // Their retained artifacts do not grant historical source imports.
+                    return (implementations.get(owner)
+                        != Some(&crate::artifact_inventory::ArtifactKind::LexicalJoin))
+                    .then(|| Ok(owner.clone()));
                 }
                 let module = match implementations.get(owner) {
                     Some(crate::artifact_inventory::ArtifactKind::ValueInterface) => owner
@@ -336,9 +341,17 @@ fn source_lexical_surface_inner(
     let roots = shared_edges(roots)?;
     let mut lexical = BTreeMap::new();
     for node in inherited {
+        if implementations.get(&node.owner)
+            == Some(&crate::artifact_inventory::ArtifactKind::LexicalJoin)
+        {
+            // Validate reserved session-owner spelling/role as usual, then
+            // retain this interface only as an implementation dependency.
+            shared_edges(std::slice::from_ref(&node.owner))?;
+            continue;
+        }
         if node.owner.module.starts_with("Tidepool.Session.")
             || lexical
-                .insert(node.owner.clone(), node.imports.clone())
+                .insert(node.owner.clone(), shared_edges(&node.imports)?)
                 .is_some()
         {
             return Err(contract(
@@ -1383,6 +1396,60 @@ mod tests {
             &implementations
         )
         .is_err());
+    }
+
+    #[test]
+    fn admitted_join_role_never_promotes_a_historical_projection_to_shared_source() {
+        use crate::artifact_inventory::ArtifactKind;
+        use std::collections::BTreeMap;
+        let owner = |module: &str| ExactModuleIdentity {
+            unit: "main".into(),
+            module: module.into(),
+        };
+        let original = owner("Tidepool.Session.Lib.G3");
+        let projection = owner("ArbitraryCompilerProjection");
+        let helper = owner("SharedHelper");
+        let unrelated = owner("UnrelatedSharedSource");
+        let imports = BTreeMap::from([
+            (original.clone(), vec![projection.clone(), helper.clone()]),
+            (helper.clone(), vec![projection.clone()]),
+        ]);
+        let inherited = [
+            ExactLexicalNode {
+                owner: projection.clone(),
+                imports: vec![],
+            },
+            ExactLexicalNode {
+                owner: unrelated.clone(),
+                imports: vec![projection.clone()],
+            },
+        ];
+        let roles = BTreeMap::from([(projection.clone(), ArtifactKind::LexicalJoin)]);
+        let selected =
+            original_source_lexical_surface(&original, &imports, &inherited, &roles).unwrap();
+        assert_eq!(selected.roots, vec![helper.clone()]);
+        assert_eq!(
+            selected.lexical,
+            vec![
+                ExactLexicalNode {
+                    owner: helper,
+                    imports: vec![]
+                },
+                ExactLexicalNode {
+                    owner: unrelated,
+                    imports: vec![]
+                }
+            ]
+        );
+        assert!(!selected
+            .lexical
+            .iter()
+            .any(|node| node.owner == projection || node.imports.contains(&projection)));
+        // A module spelling does not certify an implementation role.
+        let source =
+            original_source_lexical_surface(&original, &imports, &inherited, &BTreeMap::new())
+                .unwrap();
+        assert!(source.lexical.iter().any(|node| node.owner == projection));
     }
 
     #[test]

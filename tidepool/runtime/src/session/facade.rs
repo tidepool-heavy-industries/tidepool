@@ -295,7 +295,9 @@ mod tests {
             projection: std::sync::Arc::new(crate::session::view::CompileViewProjection {
                 root: dir.path().to_path_buf(),
                 persistent_imports: SourceImports::new(),
-                library: Some(SessionModule::lib(Generation(4))),
+                library: Some(super::super::view::CompileLibrary::Source(
+                    SessionModule::lib(Generation(4)),
+                )),
                 visible_values: Vec::new(),
                 visible_value_names: Vec::new(),
                 reachable_values: Vec::new(),
