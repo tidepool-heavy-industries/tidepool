@@ -71,6 +71,7 @@ exactScopeV8Checks manifest = do
   forM_ ["2","4","6","7"] $ \version ->
     refuse manifest "unsupported exact scope" (TList (replace 1 (TString version) fields))
   refuse manifest "unsupported exact scope" (TList (take 8 fields))
+  checkedPurposeCases manifest fields
   refuse manifest "invalid exact scope row" (replaced (TList (take 7 selectedFields)))
   forM_ [TNull,TList [],TList [TString "other"]
         ,TList (tail role),TList (role ++ [TNull])] $ \invalid ->
@@ -129,6 +130,38 @@ exactScopeV8Checks manifest = do
   where
     -- A fixed altered seal for negative wire cases.
     differentSHA = TString (T.replicate 64 "f")
+
+-- Mutate only request-purpose syntax around the genuine immutable owner
+-- closure. These parsing checks do not issue executable admission receipts.
+checkedPurposeCases :: FilePath -> [Term] -> IO ()
+checkedPurposeCases manifest fields = do
+  let sha = TString (T.replicate 64 "a")
+      empty = TList []
+      paths = [takeDirectory manifest]
+      includes = TList (map (TString . T.pack) paths)
+      cell = [TString "cell-check2",sha,sha,sha,empty,empty,empty,empty,includes]
+      item = [TString "checked-item2",sha,sha,TInt 0,sha,TString "bind",empty,empty,empty,empty
+        ,TNull,TInt 1,sha,empty,TNull,TNull,empty,empty,includes]
+      display = [TString "checked-display2",sha,sha,TInt 0,TString "observation",TInt 1,TInt 2,sha
+        ,TInt 32,empty,empty,empty,empty,TString "rendered",TNull,empty,empty,includes]
+      inspection = [TString "inspection1",empty,empty,includes]
+      acceptsCell purpose = case purpose of ExactCellPurpose _ _ -> True; _ -> False
+      acceptsItem purpose = case purpose of ExactItemPurpose _ _ -> True; _ -> False
+      acceptsDisplay purpose = case purpose of ExactDisplayPurpose _ _ -> True; _ -> False
+      acceptsInspection purpose = case purpose of ExactInspectionPurpose _ _ -> True; _ -> False
+      envelope purpose = TList (replace 8 purpose fields)
+  noPurpose <- readCandidate manifest (envelope TNull) >>= either fail pure
+  unless (scopePurpose noPurpose == NoCheckedPurpose && scopeIncludePaths noPurpose == Nothing
+      && null (scopeValueInterfaces noPurpose))
+    (fail "null checked purpose acquired stage or search-input authority")
+  forM_ [(cell,acceptsCell),(item,acceptsItem),(display,acceptsDisplay),(inspection,acceptsInspection)] $
+    \(purpose,accepts) -> do
+      accepted <- readCandidate manifest (envelope (TList purpose)) >>= either fail pure
+      unless (accepts (scopePurpose accepted) && scopeIncludePaths accepted == Just paths)
+        (fail "checked purpose lost its exclusive stage or ordered search inputs")
+      refuse manifest "" (envelope (TList (purpose ++ [TList inspection])))
+      refuse manifest "" (envelope (TList (take (length purpose - 1) purpose)))
+  refuse manifest "" (envelope (TList [TList cell,TList inspection]))
 
 -- The worker offer and exact context are both emitted by their real Rust owners.
 -- This checks durable promotion without minting or rewriting a certificate.

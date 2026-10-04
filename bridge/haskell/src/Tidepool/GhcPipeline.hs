@@ -203,7 +203,8 @@ import Tidepool.ExactHydration
   , GeneratedScaffoldRecipe, generatedScaffoldRecipe, captureGeneratedScaffoldTarget
   , noGeneratedScaffoldImports, readGeneratedScaffoldImportAuthority, permitsGeneratedScaffoldImport, installExactLexicalGraphWithScaffold )
 import Tidepool.ExactScope
-  ( ExactScope(..), ExactCompilation(..), SourceSelectedOriginals(..), extendSourceSelectedOriginals, CheckedCellAdmission(..), CheckedCellPurpose(..), CheckedItemAdmission(..), CheckedItemPurpose(..), readExactScope, revalidateExactScope, scopeValueInterfaces
+  ( ExactScope(..), ExactScopePurpose(..), ExactCompilation(..), SourceSelectedOriginals(..), extendSourceSelectedOriginals, CheckedCellAdmission(..), CheckedCellPurpose(..), CheckedItemAdmission(..), CheckedItemPurpose(..), readExactScope, revalidateExactScope, scopeValueInterfaces
+  , scopeCheckedCell, scopeCheckedItem, scopeIncludePaths
   , writeExactCompilation, scopeExecutionNativeOwners, ExactInterfaceEvidence(..) )
 import Tidepool.ExactScope
   ( CanonicalInterfaceProof, CanonicalInterfaceAdmission, scopeCanonicalInterfaces
@@ -4547,8 +4548,7 @@ sessionVariant purpose scope path = do
                 ((hscInjected, completedCap), injectMs) <- timeSection $ do
                   hsc0 <- getSession
                   case selectedExact of
-                    Just admitted | isJust (scopeCheckedCell admitted) || isJust (scopeCheckedItem admitted)
-                        || isJust (scopeCheckedDisplay admitted) || isJust (scopeCheckedInspection admitted) -> do
+                    Just admitted | scopePurpose admitted /= NoCheckedPurpose -> do
                       let wanted = map (moduleNameString . renderSessionModule) needed
                           artifacts = [value | value <- scopeValueInterfaces admitted, exactModule value `elem` wanted]
                       when (length artifacts /= length needed) $ liftIO $ ioError $ userError

@@ -114,7 +114,8 @@ import Tidepool.ExtractRequest (RequestShapeError(..), validateRequestShape, Wor
 import Tidepool.Introspection (encodeInspectionResults, runInspection)
 import Tidepool.InspectionRunner (isInspectionTypeQuery, runInspectionRequests)
 import Tidepool.ExactScope
-  ( ExactCompilation(..), ExactScope(..), ExactProduct(..), ExactOriginalGroup(..)
+  ( ExactCompilation(..), ExactScope(..), ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..)
+  , scopeCheckedCell, scopeCheckedItem, scopeCheckedDisplay, scopeIncludePaths
   , originalGroupFromProjected, originalGroupFromCandidate
   , CheckedCellAdmission(..), CheckedCellPurpose(..), CheckedItemAdmission(..), CheckedItemPurpose(..), CheckedDisplayAdmission(..), PlannedCellAdmission(..), PlannedCellSlot(..)
   , ExactInterfaceEvidence(..), validateCandidateCanonicalInterfaceProof, canonicalCertificateSha256
@@ -260,27 +261,30 @@ dispatch compiler caches timing args = do
       forM_ (scopeIncludePaths scope) $ \includes ->
         unless (requestIncludes args == includes)
           (throwIO SearchInputsChanged)
-      forM_ (scopeCheckedInspection scope) $ \values ->
-        unless (matchesInspectionAdmission args (map exactModule values))
-          (throwIO CheckedPurposeMismatch)
-      forM_ (scopeCheckedCell scope) $ \_ ->
-        unless (requestCell args && not (requestTurn args) && not (requestClassify args)
-          && null (requestInspections args) && not (isJust (requestDeclarationJoin args))
-          && not (requestCertifyHomeProducts args) && not (requestActivationPreview args))
-          (throwIO CheckedPurposeMismatch)
-      forM_ (scopeCheckedItem scope) $ \admission -> do
-        let previewPurpose = case itemPurpose admission of
-              AuthoredCheckedItem -> not (requestActivationPreview args)
-              HostActivationInput -> requestActivationPreview args
-                && length (requestFiles args) == 1
-                && not (requestCellPlan args) && not (requestCheckSource args)
-                && not (requestHarnessProfile args)
-                && null (requestTargets args)
-        unless (requestTurn args && not (requestCell args) && not (requestClassify args)
-          && null (requestInspections args) && not (isJust (requestDeclarationJoin args))
-          && not (requestCertifyHomeProducts args) && previewPurpose
-          && not (isJust (requestTarget args)))
-          (throwIO CheckedPurposeMismatch)
+      case scopePurpose scope of
+        NoCheckedPurpose -> pure ()
+        ExactInspectionPurpose values _ ->
+          unless (matchesInspectionAdmission args (map exactModule values))
+            (throwIO CheckedPurposeMismatch)
+        ExactCellPurpose _ _ ->
+          unless (requestCell args && not (requestTurn args) && not (requestClassify args)
+            && null (requestInspections args) && not (isJust (requestDeclarationJoin args))
+            && not (requestCertifyHomeProducts args) && not (requestActivationPreview args))
+            (throwIO CheckedPurposeMismatch)
+        ExactItemPurpose admission _ -> do
+          let previewPurpose = case itemPurpose admission of
+                AuthoredCheckedItem -> not (requestActivationPreview args)
+                HostActivationInput -> requestActivationPreview args
+                  && length (requestFiles args) == 1
+                  && not (requestCellPlan args) && not (requestCheckSource args)
+                  && not (requestHarnessProfile args)
+                  && null (requestTargets args)
+          unless (requestTurn args && not (requestCell args) && not (requestClassify args)
+            && null (requestInspections args) && not (isJust (requestDeclarationJoin args))
+            && not (requestCertifyHomeProducts args) && previewPurpose
+            && not (isJust (requestTarget args)))
+            (throwIO CheckedPurposeMismatch)
+        ExactDisplayPurpose _ _ -> pure ()
   case admitted of
     Left failure -> reportDiags (Left failure)
     Right () -> case requestDeclarationJoin args of
@@ -1516,13 +1520,15 @@ addProgramValue root generation binders@(firstBinder:_) state = do
   let digest = shaHex bytes
       artifact = ExactIfaceArtifact "main" (bbModule firstBinder) path digest requirements
       exact = programExact state
-      admission = maybe (error "compiled cell lost admission") id (scopeCheckedCell exact)
       selection = CompletedValueImport "main" (bbModule firstBinder) path digest
         [(bbName binder,bbVarId binder) | binder <- binders, not ("__tidepoolMetadata" `isPrefixOf` bbName binder)]
   lexicalRequirements <- programLexicalRequirements exact [] requirements
+  extendedPurpose <- case scopePurpose exact of
+    ExactCellPurpose admission paths -> pure (ExactCellPurpose
+      (admission { checkedValueInterfaces = checkedValueInterfaces admission ++ [artifact] }) paths)
+    _ -> fail "compiled cell lost admission"
   let
-      extended = exact { scopeCheckedCell = Just admission
-            { checkedValueInterfaces = checkedValueInterfaces admission ++ [artifact] }
+      extended = exact { scopePurpose = extendedPurpose
         , scopeInterfaces = scopeInterfaces exact ++ [(artifact,path ++ ".packages",shaHex packages)]
         , scopeInterfaceEvidence = Map.insert ("main",bbModule firstBinder)
             CheckedValueEvidence (scopeInterfaceEvidence exact)

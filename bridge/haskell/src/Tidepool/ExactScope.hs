@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 module Tidepool.ExactScope
-  ( ExactScope(..), ExactProduct(..), ExactOriginalGroup(..), ExactCompilation(..), SourceSelectedOriginals(..)
+  ( ExactScope(..), ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..), ExactCompilation(..), SourceSelectedOriginals(..)
   , CheckedCellAdmission(..), CheckedCellPurpose(..), CheckedItemAdmission(..), CheckedItemPurpose(..), CheckedDisplayAdmission(..)
   , PlannedCellAdmission(..), PlannedCellSlot(..)
   , ExactInterfaceEvidence(..), CanonicalInterfaceProof, CanonicalCoreArtifact
@@ -12,6 +12,7 @@ module Tidepool.ExactScope
   , canonicalCertificatePath, canonicalCertificateSha256, canonicalCoreArtifact
   , canonicalCorePath, canonicalCoreSha256, canonicalHomeUnits, canonicalSourceSha256
   , canonicalRequirements
+  , scopeCheckedCell, scopeCheckedItem, scopeCheckedDisplay, scopeIncludePaths
   , readExactScope, revalidateExactScope, scopeValueInterfaces
   , writeExactCompilation, extendSourceSelectedOriginals
   , extendExactExecutionSources, extendExactExecutionSourcesWithinBudget
@@ -85,16 +86,45 @@ data ExactScope = ExactScope
   , scopeProducts :: [ExactProduct]
   , scopeExecutionGraphs :: [ExecutionSourceGraph]
   , scopeExecutionOwners :: [ExecutionSourceRef]
-  , scopeCheckedCell :: Maybe CheckedCellAdmission
-  , scopeCheckedItem :: Maybe CheckedItemAdmission
-  , scopeCheckedDisplay :: Maybe CheckedDisplayAdmission
-  , scopeCheckedInspection :: Maybe [ExactIfaceArtifact]
-  , scopeIncludePaths :: Maybe [FilePath]
+  , scopePurpose :: ExactScopePurpose
   , scopeRequestTypes :: Maybe (RequestHelperRecipe, RequestTypeSignatures)
   -- Request-local source proof roots are revalidated by subsequent stages;
   -- they are never serialized as baseline lexical authority.
   , scopeSourceSelectedOwners :: Set.Set (String,String)
   } deriving (Eq, Show)
+
+-- One checked purpose owns its admission and ordered search inputs. Native
+-- request-type evidence is an independent wrapper, not another checked stage.
+data ExactScopePurpose
+  = NoCheckedPurpose
+  | ExactCellPurpose CheckedCellAdmission [FilePath]
+  | ExactItemPurpose CheckedItemAdmission [FilePath]
+  | ExactDisplayPurpose CheckedDisplayAdmission [FilePath]
+  | ExactInspectionPurpose [ExactIfaceArtifact] [FilePath]
+  deriving (Eq, Show)
+
+scopeCheckedCell :: ExactScope -> Maybe CheckedCellAdmission
+scopeCheckedCell scope = case scopePurpose scope of
+  ExactCellPurpose admission _ -> Just admission
+  _ -> Nothing
+
+scopeCheckedItem :: ExactScope -> Maybe CheckedItemAdmission
+scopeCheckedItem scope = case scopePurpose scope of
+  ExactItemPurpose admission _ -> Just admission
+  _ -> Nothing
+
+scopeCheckedDisplay :: ExactScope -> Maybe CheckedDisplayAdmission
+scopeCheckedDisplay scope = case scopePurpose scope of
+  ExactDisplayPurpose admission _ -> Just admission
+  _ -> Nothing
+
+scopeIncludePaths :: ExactScope -> Maybe [FilePath]
+scopeIncludePaths scope = case scopePurpose scope of
+  NoCheckedPurpose -> Nothing
+  ExactCellPurpose _ paths -> Just paths
+  ExactItemPurpose _ paths -> Just paths
+  ExactDisplayPurpose _ paths -> Just paths
+  ExactInspectionPurpose _ paths -> Just paths
 
 -- Canonical proof belongs to its exact interface row. Core is a separate
 -- compiler-input capability, never an imported declaration or native grant.
@@ -451,11 +481,12 @@ data ExactCompilation = ExactCompilation
   } deriving (Eq, Show)
 
 scopeValueInterfaces :: ExactScope -> [ExactIfaceArtifact]
-scopeValueInterfaces scope =
-  maybe [] checkedValueInterfaces (scopeCheckedCell scope)
-    ++ maybe [] itemValueInterfaces (scopeCheckedItem scope)
-    ++ maybe [] displayValueInterfaces (scopeCheckedDisplay scope)
-    ++ maybe [] id (scopeCheckedInspection scope)
+scopeValueInterfaces scope = case scopePurpose scope of
+  NoCheckedPurpose -> []
+  ExactCellPurpose admission _ -> checkedValueInterfaces admission
+  ExactItemPurpose admission _ -> itemValueInterfaces admission
+  ExactDisplayPurpose admission _ -> displayValueInterfaces admission
+  ExactInspectionPurpose values _ -> values
 
 -- Scope v8 separates the bounded metadata envelope from the independently
 -- bounded original graph bytes. The request hash seals each path and digest.
@@ -883,10 +914,10 @@ decodeScope = do
     pure (graphs, references)
     else decodeNull >> pure ([], [])
   nullPurpose <- (== TypeNull) <$> peekTokenType
-  (requestTypes, (checked, checkedItem, checkedDisplay, inspectionValues, includes)) <- if nullPurpose
+  (requestTypes, checkedPurpose) <- if nullPurpose
     then do
-      when nullPurpose decodeNull
-      pure (Nothing, (Nothing,Nothing,Nothing,Nothing,Nothing))
+      decodeNull
+      pure (Nothing, NoCheckedPurpose)
     else do
     outerCount <- decodeListLen
     outerPurpose <- string
@@ -902,11 +933,11 @@ decodeScope = do
         else Just <$> ((,) <$> decodeListLen <*> string)
       pure (Just (recipe, native), inner)
       else pure (Nothing, Just (outerCount, outerPurpose))
-    admission <- maybe (pure (Nothing,Nothing,Nothing,Nothing,Nothing))
+    admission <- maybe (pure NoCheckedPurpose)
       (uncurry decodePurpose) purpose
     pure (requestTypes, admission)
   pure (ExactScope "" "" producer semantic interfaces Map.empty lexical products [] executionOwners
-    checked checkedItem checkedDisplay inspectionValues includes requestTypes Set.empty, descriptors, interfaceEvidence)
+    checkedPurpose requestTypes Set.empty, descriptors, interfaceEvidence)
   where
     decodePurpose authCount purpose = case purpose of
       "inspection1" -> do
@@ -916,7 +947,7 @@ decodeScope = do
         unique "inspection injected modules" injected
         validateInterfaces injected values
         paths <- includePaths
-        pure (Nothing,Nothing,Nothing,Just values,Just paths)
+        pure (ExactInspectionPurpose values paths)
       tag | tag == "cell-check2" || tag == "host-input-check1" -> do
         unless (authCount == if tag == "host-input-check1" then 10 else 9) (fail "invalid cell-check admission")
         admission <- CheckedCellAdmission <$> digestField <*> digestField <*> digestField
@@ -932,7 +963,7 @@ decodeScope = do
         unique "checked injected modules" (checkedInjectedModules admission)
         unique "checked reserved modules" (checkedReservedModules admission)
         paths <- includePaths
-        pure (Just admission,Nothing,Nothing,Nothing,Just paths)
+        pure (ExactCellPurpose admission paths)
       "cell-program1" -> do
         unless (authCount == 14) (fail "invalid compiled cell admission")
         admission <- CheckedCellAdmission <$> digestField <*> digestField <*> digestField
@@ -951,7 +982,7 @@ decodeScope = do
           <*> pure AuthoredCellCheck
         validateInterfaces (checkedInjectedModules admission) (checkedValueInterfaces admission)
         paths <- includePaths
-        pure (Just admission,Nothing,Nothing,Nothing,Just paths)
+        pure (ExactCellPurpose admission paths)
       tag | tag == "checked-item2" || tag == "host-activation-input1" -> do
         unless (authCount == 19) (fail "invalid checked-item admission")
         admissionDigest <- digestField
@@ -1004,8 +1035,8 @@ decodeScope = do
               && liftPlan == Nothing && presentation == Nothing && observation == Nothing)
             (fail "invalid host activation input admission")
         paths <- includePaths
-        pure (Nothing, Just (CheckedItemAdmission role admissionDigest receiptDigest index sourceDigest kind binders
-          templates injected signatures liftPlan presentation generation prefix valueImports observation planned values valueInputs), Nothing, Nothing, Just paths)
+        pure (ExactItemPurpose (CheckedItemAdmission role admissionDigest receiptDigest index sourceDigest kind binders
+          templates injected signatures liftPlan presentation generation prefix valueImports observation planned values valueInputs) paths)
       "checked-display2" -> do
         unless (authCount == 18) (fail "invalid checked-display admission")
         admission <- CheckedDisplayAdmission <$> digestField <*> digestField <*> decodeWord64
@@ -1025,7 +1056,7 @@ decodeScope = do
             && all ((`elem` displayInjectedModules admission) . fst) (displayValueImports admission))
           (fail "invalid display presentation or imported owner")
         paths <- includePaths
-        pure (Nothing,Nothing,Just admission,Nothing,Just paths)
+        pure (ExactDisplayPurpose admission paths)
       _ -> fail "unsupported exact compile purpose"
     includePaths = bounded 4096 $ do
       path <- absolute

@@ -8,13 +8,13 @@ import Tidepool.Binders
 import Tidepool.CellProgramState
 import Tidepool.CheckedCell (CheckedSignature(..))
 import Tidepool.CborEncode (encodeCellOut)
-import Tidepool.ExactScope (ExactScope(..))
+import Tidepool.ExactScope (ExactScope(..), ExactScopePurpose(..))
 
 cellProgramStateChecks :: IO ()
 cellProgramStateChecks = do
   let prologue = SourcePrologue [] []
       exact = ExactScope "" "" "" "" [] Map.empty [] [] [] []
-        Nothing Nothing Nothing Nothing Nothing Nothing Set.empty
+        NoCheckedPurpose Nothing Set.empty
       initial = initialProgramCellState prologue exact Map.empty
       item index kind = CellAnalysisItem (CellSourceSpan index 1 index 2) (show index)
         (StmtBinders kind [] []) [] False

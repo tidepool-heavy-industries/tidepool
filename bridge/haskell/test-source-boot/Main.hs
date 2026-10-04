@@ -134,7 +134,11 @@ import Tidepool.FatIface (readExactInterface)
 import Tidepool.Session (SessionScope(..), emptySessionScope)
 import Tidepool.SessionArtifacts (mkBoundBinders, parseValModule)
 import Tidepool.Session (sessionHiPath)
-import Tidepool.ExactScope (ExactScope(..), ExactProduct(..), ExactOriginalGroup(..), CheckedCellAdmission(..), CheckedCellPurpose(..), CheckedItemAdmission(..), CheckedItemPurpose(..), readExactScope, extendExactExecutionSources, extendExactExecutionSourcesWithinBudget, scopeExecutionNativeOwners)
+import Tidepool.ExactScope
+  ( ExactScope(..), ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..)
+  , CheckedCellAdmission(..), CheckedCellPurpose(..), CheckedItemAdmission(..), CheckedItemPurpose(..)
+  , scopeCheckedCell, scopeCheckedItem, scopeIncludePaths, readExactScope
+  , extendExactExecutionSources, extendExactExecutionSourcesWithinBudget, scopeExecutionNativeOwners )
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import ProgressBoundaryTest (progressBoundaryChecks)
 import FinalizedCoreTest (finalizedCoreChecks)
@@ -452,8 +456,7 @@ executionSourceWire :: FilePath -> IO ()
 executionSourceWire path = do
   scope <- readExactScope path >>= either fail pure
   unless (length (scopeExecutionGraphs scope) == 1 && length (scopeExecutionOwners scope) == 1
-      && scopeCheckedCell scope == Nothing && scopeCheckedItem scope == Nothing
-      && scopeCheckedDisplay scope == Nothing && scopeIncludePaths scope == Nothing) $
+      && scopePurpose scope == NoCheckedPurpose && scopeIncludePaths scope == Nothing) $
     fail "Rust ordinary exact scope lost its execution payload or NULL purpose"
   nodes <- either (fail . show) pure (executionSourceClosure (scopeExecutionGraphs scope)
     (scopeExecutionOwners scope) (scopeExecutionNativeOwners scope)
@@ -613,8 +616,8 @@ checkedValueTypeClosure effects = withScratch $ \work -> do
   let admitted = base
         { scopeInterfaces = scopeInterfaces base ++ [(value,valuePath ++ ".packages",digest valuePackages)]
         , scopeLexical = scopeLexical base ++ [(("main","Tidepool.Session.Val.G7"),requirements)]
-        , scopeCheckedCell = Just (CheckedCellAdmission (replicate 64 '0') (replicate 64 '0')
-            (replicate 64 '0') [] ["Tidepool.Session.Val.G7"] [] [value] Nothing AuthoredCellCheck) }
+        , scopePurpose = ExactCellPurpose (CheckedCellAdmission (replicate 64 '0') (replicate 64 '0')
+            (replicate 64 '0') [] ["Tidepool.Session.Val.G7"] [] [value] Nothing AuthoredCellCheck) [work,"lib",effects] }
       scope = emptySessionScope { ssRoot = work, ssExactScope = Just scopePath, ssValIfaces = [valueOwner] }
   isolated <- readCheckedValueImportAuthority environment [value]
   unless (case isolated of Left "incomplete exact interface dependency closure" -> True; _ -> False) $
@@ -649,8 +652,9 @@ checkedValueTypeClosure effects = withScratch $ \work -> do
     forM_ [(value,GeneralCompile),(alias,CheckedItemCompile [] Nothing
         [CompletedValueImport "main" "Tidepool.Session.Val.G7" aliasPath (digest valueBytes) [("cmd",identifier)]])]
       $ \(input,purpose) -> do
-        let capture = admitted {scopeCheckedCell = fmap
-              (\admission -> admission {checkedValueInterfaces=[input]}) (scopeCheckedCell admitted)}
+        let capture = admitted {scopePurpose = case scopePurpose admitted of
+              ExactCellPurpose admission paths -> ExactCellPurpose (admission {checkedValueInterfaces=[input]}) paths
+              purpose' -> purpose'}
         checked <- compile CheckedEnvironment Set.empty (CellProgramCompile purpose capture)
           (Just scope) consumerPath [work,"lib",effects] Nothing
         unless (fmap renderType (crResultType checked) == Just "Command") $
@@ -1253,8 +1257,8 @@ exactExecutionValues = withTiming $ withScratch $ \work -> do
   let value = ExactIfaceArtifact "main" "Tidepool.Session.Val.G8" valuePath (digest bytes) []
   writeExactMetadataScope scopePath []
   base <- readExactScope scopePath >>= either fail pure
-  let admitted = base {scopeCheckedCell=Just (CheckedCellAdmission (replicate 64 '0') (replicate 64 '0')
-        (replicate 64 '0') [] ["Tidepool.Session.Val.G8"] [] [value] Nothing AuthoredCellCheck)}
+  let admitted = base {scopePurpose=ExactCellPurpose (CheckedCellAdmission (replicate 64 '0') (replicate 64 '0')
+        (replicate 64 '0') [] ["Tidepool.Session.Val.G8"] [] [value] Nothing AuthoredCellCheck) [work]}
       scope = emptySessionScope {ssRoot=work,ssExactScope=Just scopePath,ssValIfaces=[valueOwner]}
   withResidentPipelineSelected [work] $ \compile -> do
     (refused,diagnostics) <- captureDiagnostics (try (compile CheckedEnvironment Set.empty
@@ -2121,8 +2125,7 @@ hostActivationPurposeTest destination = withScratch $ \work -> do
   forM_ [("none",NoRequestHelpers),("actor-reply",ActorReplyHelpers)] $ \(tag,recipe) -> do
     requestScope <- decode (nativeAuthorization tag TNull) >>= either fail pure
     unless (scopeRequestTypes requestScope == Just (recipe,RequestTypeSignatures replySignature Nothing)
-        && isNothing (scopeCheckedCell requestScope) && isNothing (scopeCheckedItem requestScope)
-        && isNothing (scopeCheckedDisplay requestScope) && isNothing (scopeCheckedInspection requestScope)
+        && scopePurpose requestScope == NoCheckedPurpose
         && isNothing (scopeIncludePaths requestScope))
       (fail "native request wrapper lost recipe or granted an inner purpose")
     graphFree <- decodeManifest (TList [text "TPEXACTSCOPE",text "4",sha,sha,empty,empty,empty
@@ -2369,7 +2372,7 @@ freshExecutionRecipeTest = withScratch $ \work -> do
   let original = ExactProduct "main" "Support" sha sha sha "" []
       scope = ExactScope "" sha sha sha
         [(ExactIfaceArtifact "main" "Support" "" sha [],"",sha)] Map.empty [] [original]
-        [] [] Nothing Nothing Nothing Nothing Nothing Nothing Set.empty
+        [] [] NoCheckedPurpose Nothing Set.empty
       oversized = graph {executionGraphBytes=BS.replicate (executionSourceGraphBytesLimit+1) 0}
   unless (case decodeExecutionSourceGraph (executionGraphSha256 graph)
       (executionGraphBytes oversized) of Left _ -> True; _ -> False) $
