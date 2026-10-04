@@ -5166,7 +5166,9 @@ mod tests {
                 &run.output.stderr,
             )
             .map_err(|error| offer.retain_failure(scratch.path(), &run.output.stderr, error))?;
-            let cell = offer.admit_checked_cell(scratch.path())?;
+            let cell = offer
+                .admit_checked_cell(scratch.path())
+                .map_err(|error| offer.retain_failure(scratch.path(), &run.output.stderr, error))?;
             Ok((scratch, cell))
         };
         let (_, current_original) = check_original_source(
@@ -5197,14 +5199,19 @@ mod tests {
             include_str!("fixtures/checked-home-value.hs").replace("41", "42"),
         )
         .unwrap();
-        assert!(matches!(
-            check_original_source(
-                "let changed = CheckedHomeValue.homeValue",
-                &template,
-                admission.include_paths()
-            ),
-            Err(CompileError::InputRejected(_))
-        ));
+        let changed_source = check_original_source(
+            "let changed = CheckedHomeValue.homeValue",
+            &template,
+            admission.include_paths(),
+        );
+        match changed_source {
+            Err(CompileError::InputRejected(_)) => {}
+            Err(error) => {
+                let diagnostic = format!("{error:?}").chars().take(4096).collect::<String>();
+                panic!("changed original source must return InputRejected; observed {diagnostic}");
+            }
+            Ok(_) => panic!("changed original source was accepted by the checked offer"),
+        }
         std::fs::write(&support, include_str!("fixtures/checked-home-value.hs")).unwrap();
         let shadow = root.path().join("shadow");
         std::fs::create_dir(&shadow).unwrap();
@@ -5215,14 +5222,19 @@ mod tests {
         .unwrap();
         let mut shadow_include = admission.include_paths().to_vec();
         shadow_include.insert(0, shadow);
-        assert!(matches!(
-            check_original_source(
-                "let shadowed = CheckedHomeValue.homeValue",
-                &template,
-                &shadow_include
-            ),
-            Err(CompileError::InputRejected(_))
-        ));
+        let shadowed_source = check_original_source(
+            "let shadowed = CheckedHomeValue.homeValue",
+            &template,
+            &shadow_include,
+        );
+        match shadowed_source {
+            Err(CompileError::InputRejected(_)) => {}
+            Err(error) => {
+                let diagnostic = format!("{error:?}").chars().take(4096).collect::<String>();
+                panic!("shadowed original source must return InputRejected; observed {diagnostic}");
+            }
+            Ok(_) => panic!("shadowed original source was accepted by the checked offer"),
+        }
         std::fs::remove_file(relay).unwrap();
         std::fs::remove_file(support).unwrap();
         let scratch = tempfile::tempdir().unwrap();
