@@ -5,7 +5,7 @@ use futures_util::StreamExt;
 use harness::{
     engine::ResponsesTransport,
     model::AgentPath,
-    transport::{Auth, ResponsesRequest, ResponsesTurn, TransportError, Usage},
+    transport::{ResponsesRequest, ResponsesTurn, TransportError, Usage},
 };
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -75,15 +75,6 @@ struct HostCellTransport {
 struct CancelRunningCellTransport {
     requests: Arc<AtomicUsize>,
     successor: Arc<tokio::sync::Notify>,
-}
-
-#[derive(Clone)]
-struct OfflineHostAuth;
-
-impl Auth for OfflineHostAuth {
-    fn access(&self) -> Result<(String, String), TransportError> {
-        panic!("deterministic host transport must not request credentials")
-    }
 }
 
 #[async_trait]
@@ -516,79 +507,64 @@ async fn host_cancellation_stops_a_real_running_haskell_cell() {
         context_capacity_tokens: 2_000_000,
         concurrent_jobs: 1,
     };
-    let campaign = test_campaign::TestCampaign::start_with_config(
-        exomonad_actor::ResearchPolicy::default(),
-        |admission| admission,
-        |config| {
-            config.embedded = Some(settings.clone());
-        },
-    )
-    .await;
-    std::fs::create_dir_all(&campaign.config.run_root).unwrap();
-    let actor = campaign.actor.identity();
-    let mut service =
-        embedded_service::EmbeddedService::prepare(&campaign.config.run_root, &settings)
-            .await
-            .unwrap();
-    let embedded = embedded_service::attach_actor(
-        &service,
-        &campaign.config.run_root,
-        AgentPath("/root".into()),
-        None,
-        campaign.root_installation.clone(),
-        Some("start a cell".into()),
-    )
-    .await
-    .unwrap();
     let transport = CancelRunningCellTransport {
         requests: Arc::new(AtomicUsize::new(0)),
         successor: Arc::new(tokio::sync::Notify::new()),
     };
-    let (lifecycle, _lifecycle_rx) =
-        tokio::sync::watch::channel((Some(actor), harness::server::HostActorLifecycle::Waiting));
-    let cancellation = embedded.cancellation.clone();
-    let runtime = Arc::clone(&service.runtime);
-    let settings_for_engine = settings.clone();
-    let transport_for_engine = transport.clone();
-    let mut running = tokio::spawn(async move {
-        embedded_service::drive_conversation_with_transport::<OfflineHostAuth, _>(
-            embedded.driver,
-            runtime,
-            &settings_for_engine,
-            "offline".into(),
-            harness::model::Effort::Medium,
-            "resident test".into(),
-            embedded.cancellation_rx,
-            lifecycle,
-            actor,
-            transport_for_engine,
-        )
+    let provider: Arc<dyn ResponsesTransport> = Arc::new(transport.clone());
+    let host = HostedTestRuntime::start(&settings, &provider)
         .await
-    });
-    tokio::select! {
-        result = &mut running => panic!("Engine stopped before the long Haskell cell ran: {result:?}"),
-        ready = tokio::time::timeout(Duration::from_secs(30), transport.successor.notified()) => {
-            ready.expect("Engine did not advance while the resident Haskell cell was pending");
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(300), async {
+        transport.successor.notified().await;
+        loop {
+            let claims = host
+                .runtime
+                .store()
+                .claims(&harness::model::CallId("host-cancel-cell".into()))
+                .unwrap();
+            if let [claim] = claims.as_slice() {
+                assert_eq!(claim.state, harness::store::ClaimState::Pending);
+                let context = exomonad_tool::ToolInvocationContext {
+                    origin: exomonad_tool::ToolInvocationOrigin::Model(
+                        embedded_harness::original_operation(
+                            &browser_target(&host.context),
+                            &claim.operation,
+                        )
+                        .unwrap(),
+                    ),
+                    call_id: claim.operation.call.0.clone(),
+                    namespace: None,
+                };
+                if host
+                    .context
+                    .actor
+                    .hosted_workbench_waiting(&context)
+                    .is_some()
+                {
+                    assert!(host
+                        .runtime
+                        .scheduler()
+                        .output(&claim.operation)
+                        .await
+                        .unwrap()
+                        .is_none());
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
-    }
+    })
+    .await
+    .expect("the admitted resident Haskell cell must reach its actual Sleep suspension");
 
     let started = tokio::time::Instant::now();
-    cancellation.send_replace(true);
-    let result = tokio::time::timeout(Duration::from_secs(8), running)
+    tokio::time::timeout(Duration::from_secs(8), host.stop())
         .await
         .expect("host cancellation failed to stop the 30-second resident Haskell cell")
         .unwrap();
-    match result {
-        Ok(()) => {}
-        Err(error) => {
-            panic!("embedded Engine failed while cancelling its real Haskell call: {error}")
-        }
-    }
     assert!(started.elapsed() < Duration::from_secs(8));
     assert_eq!(transport.requests.load(Ordering::SeqCst), 2);
-    service.shutdown().await.unwrap();
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
 }
 
 struct RejectFirstRequest {
