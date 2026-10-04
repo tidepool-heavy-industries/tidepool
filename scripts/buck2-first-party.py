@@ -450,6 +450,9 @@ def source_inputs(package, target, features=(), test_target=False):
         "bridge/atomic-write/tests/fixtures/directory_fault.c": "//bridge/atomic-write:directory_fault_fixture",
         "tidepool/runtime/src/session/fixtures/activation-input-function.hs": "//tidepool/runtime:activation_input_function_fixture",
         "tidepool/runtime/src/session/fixtures/activation-input-receiver.hs": "//tidepool/runtime:activation_input_receiver_fixture",
+        "tidepool/runtime/src/session/fixtures/activation-input-resident-original.hs": "//tidepool/runtime:activation_input_resident_original_fixture",
+        "tidepool/runtime/src/session/fixtures/activation-input-resident-request.hs": "//tidepool/runtime:activation_input_resident_request_fixture",
+        "tidepool/runtime/src/session/fixtures/activation-input-resident-shadow.hs": "//tidepool/runtime:activation_input_resident_shadow_fixture",
         "bridge/haskell/test-prepared-stg/fixtures/freer-resume.cbor": "//bridge/haskell:freer_resume_fixture",
         "bridge/haskell/test-prepared-stg/fixtures/freer-retention.cbor": "//bridge/haskell:freer_retention_fixture",
         "bridge/haskell/src/Tidepool/ExtractRequest.hs": "//bridge/haskell:extract_request_source",
@@ -914,9 +917,11 @@ tidepool_buildscript_run(
             )
         )
     if package["name"] == "tidepool-runtime":
-        for fixture in ("function", "receiver"):
+        for fixture in (
+            "function", "receiver", "resident-original", "resident-request", "resident-shadow",
+        ):
             rules.append(f'''export_file(
-    name = "activation_input_{fixture}_fixture",
+    name = "activation_input_{fixture.replace("-", "_")}_fixture",
     src = "src/session/fixtures/activation-input-{fixture}.hs",
     visibility = ["PUBLIC"],
 )

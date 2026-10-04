@@ -897,6 +897,7 @@ rust_filegroup(
         "src/actor_host/workspace_cleanup.rs": "bridge/facade/src/actor_host/workspace_cleanup.rs",
         "src/actor_host/workspace_publication.rs": "bridge/facade/src/actor_host/workspace_publication.rs",
         "src/actor_host_fixtures/generic_actor/activation_preview_setup.hs": "bridge/facade/src/actor_host_fixtures/generic_actor/activation_preview_setup.hs",
+        "src/actor_host_fixtures/generic_actor/deferred_checkpoint_original_owner.hs": "bridge/facade/src/actor_host_fixtures/generic_actor/deferred_checkpoint_original_owner.hs",
         "src/actor_host_fixtures/generic_actor/deferred_original_owner.hs": "bridge/facade/src/actor_host_fixtures/generic_actor/deferred_original_owner.hs",
         "src/actor_host_fixtures/generic_actor/deferred_unfold_example.hs": "bridge/facade/src/actor_host_fixtures/generic_actor/deferred_unfold_example.hs",
         "src/actor_host_fixtures/generic_actor/documentation_setup.hs": "bridge/facade/src/actor_host_fixtures/generic_actor/documentation_setup.hs",
