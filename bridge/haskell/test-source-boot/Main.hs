@@ -3447,6 +3447,11 @@ packageInputs = withScratch $ \work -> do
       fail "cold input fixture did not leave its unused support validation-only"
     warmer <- compile (PreparedProducts Nothing) Set.empty GeneralCompile Nothing
       (work </> "OptionalWarmer.hs") [] Nothing
+    unless (null (pprAcceptedCandidates warmer)
+        && all (`elem` preparedNames warmer) ["OptionalAnchor", "OptionalSupport"]
+        && all (\name -> Map.member (mkModuleName name) (pprFinalizedModules warmer))
+          ["OptionalAnchor", "OptionalSupport"]) $
+      fail "warmer input fixture lacks both fresh finalized candidate owners"
     writeGenuineCandidateManifestFor ["OptionalAnchor"] work
       (work </> "OptionalWarmer.hs") [work] warmer
     warm <- root (PreparedProducts (Just (manifest work)))
@@ -3470,8 +3475,10 @@ packageInputs = withScratch $ \work -> do
     putStrLn ("package-input-products cold=" ++ show (preparedNames cold)
       ++ " candidate=" ++ show (preparedNames warm)
       ++ " checked=" ++ show (length (dependencyModules (pprDependencies cold))))
+    -- Both offers share the complete fresh warmer capture. This fixture
+    -- checks input identity; mixed fresh/retained reissuance has separate owners.
     writeGenuineCandidateManifestFor ["OptionalAnchor", "OptionalSupport"] work
-      (work </> "OptionalRoot.hs") [work] warm
+      (work </> "OptionalWarmer.hs") [work] warmer
     reused <- root (PreparedProducts (Just (manifest work)))
     unless (map candidateModule (pprAcceptedCandidates reused) == ["OptionalAnchor", "OptionalSupport"]) $
       fail "input fixture did not exercise authenticated candidate hydration"
