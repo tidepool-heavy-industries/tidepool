@@ -51,7 +51,7 @@ SUPPORTED_PACKAGES = {
     "tidepool-runtime", "tidepool-mcp", "tidepool-handlers", "tidepool",
     "exomonad-model", "exomonad-tool", "tidepool-bridge-effects",
     "exomonad-node", "exomonad-worktree", "exomonad-actor", "exomonad-agent",
-    "tidepool-testing",
+    "tidepool-testing", "tidepool-test-data",
 }
 NORMAL_DEPENDENCY_ONLY_PACKAGES = {
     "tidepool-bignum", "tidepool-bridge", "tidepool-effect", "tidepool-codegen",
@@ -64,6 +64,7 @@ NORMAL_DEPENDENCY_ONLY_PACKAGES = {
 UNIT_TEST_PACKAGES = {
     "tidepool-atomic-write", "tidepool-repr", "tidepool-heap", "tidepool-codegen",
     "tidepool-extract-cmd", "tidepool-toolchain", "tidepool", "tidepool-runtime",
+    "exomonad-actor",
 }
 ISOLATED_UNIT_TEST_PACKAGES = {
     "tidepool-codegen", "tidepool-extract-cmd", "tidepool-toolchain",
@@ -606,6 +607,22 @@ def render_rule(rule, name, target, package, deps, named, extra="", features=(),
     return "\n".join(lines)
 
 
+def actor_observation_test_cases(binary):
+    tests = ["runtime_observation::provider_health_tests::" + name for name in (
+        "owned_provider_round_authorizes_idle_only_after_success",
+        "abandoned_provider_round_requires_attention_until_a_new_success",
+        "obsolete_provider_round_cannot_overwrite_newer_observation",
+    )]
+    return "\n".join([
+        "tidepool_rust_test_cases(",
+        '    name = "actor_runtime_observation_lease_tests",',
+        f"    binary = {json.dumps(':' + binary)},",
+        "    exact_tests = [", render_strings(tests, 8), "    ],",
+        "    expected_count = 3,", "    jobs = 1,", "    timeout = 30,",
+        "    test_rule_timeout_ms = 150000,", '    visibility = ["PUBLIC"],', ")", "",
+    ])
+
+
 def runtime_test_cases(binary):
     """Admission checks use native machines but do not start a compiler worker."""
     tests = ["session::admission::tests::" + name for name in (
@@ -768,7 +785,7 @@ for package_name, package in local.items():
         rules.append('load("//build/rust:codegen-md5.bzl", "tidepool_codegen_md5")\n')
     if package_name in ISOLATED_UNIT_TEST_PACKAGES:
         rules.append('load("//build/rust:defs.bzl", "tidepool_rust_isolated_test")\n')
-    if package_name == "tidepool-runtime":
+    if package_name in {"tidepool-runtime", "exomonad-actor"}:
         rules.append('load("//build/rust:defs.bzl", "tidepool_rust_test_cases")\n')
     if package_name == "tidepool":
         rules.append('''load("//build/rust:buildscript.bzl", "tidepool_buildscript_run")
@@ -787,6 +804,10 @@ load("//build/rust:defs.bzl", "tidepool_rust_test_cases")
             raise SystemExit("Model codegen dev dependencies before extending its native unit target")
         unit_deps, unit_named = normal_deps, normal_named
     if package_name == "tidepool":
+        unit_deps, unit_named = dependency_sets(
+            package, enabled_dependencies, forwarded_features, include_dev=True
+        )
+    if package_name == "exomonad-actor":
         unit_deps, unit_named = dependency_sets(
             package, enabled_dependencies, forwarded_features, include_dev=True
         )
@@ -890,6 +911,8 @@ tidepool_buildscript_run(
             rules.append(facade_test_cases(unit_target["name"]))
         if package_name == "tidepool-runtime":
             rules.append(runtime_test_cases(unit_target["name"]))
+        if package_name == "exomonad-actor":
+            rules.append(actor_observation_test_cases(unit_target["name"]))
     selected_tests = [
         target for target in tests
         if (
