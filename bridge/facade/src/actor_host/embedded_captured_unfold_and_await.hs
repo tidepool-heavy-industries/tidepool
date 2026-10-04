@@ -38,5 +38,5 @@ do
   result <- awaitWatch replies
   case (inheritedRefusal, deferredRefusal, firstRelease, secondRelease, releasedRefusal, result) of
     (Left (UnfoldUncapturedContext _), Left (UnfoldDeferredInvocationOwned _), Right (), Right (),
-      Left (UnfoldCheckpointRefused ReleasedCheckpoint), Right (42, 42)) -> pure True
-    _ -> error "captured same-cell reply contract failed" >> pure True
+      Left (UnfoldCheckpointRefused ReleasedCheckpoint), Right (42, 42)) -> display True
+    _ -> error "captured same-cell reply contract failed" >> display True

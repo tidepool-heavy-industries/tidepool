@@ -83,9 +83,9 @@ impl CapturedHostTransport {
                 1 => vec![harness::item::Item(json!({
                     "type":"custom_tool_call", "call_id":"captured-scope-setup", "name":"haskell",
                     "input":match self.scenario {
-                        CapturedScenario::Success => include_str!("embedded_later_failure_scope_setup.hs"),
-                        CapturedScenario::FailureAfterReplies => include_str!("embedded_checkpoint_scope_setup.hs"),
-                        CapturedScenario::ConcurrentNominalJoin => include_str!("embedded_nominal_join_setup.hs"),
+                        CapturedScenario::Success => format!("{}\ndisplay True", include_str!("embedded_later_failure_scope_setup.hs")),
+                        CapturedScenario::FailureAfterReplies => format!("{}\ndisplay True", include_str!("embedded_checkpoint_scope_setup.hs")),
+                        CapturedScenario::ConcurrentNominalJoin => include_str!("embedded_nominal_join_setup.hs").into(),
                     }
                 }))],
                 2 => {
@@ -245,7 +245,7 @@ impl CapturedHostTransport {
                     }
                     vec![harness::item::Item(json!({
                         "type":"custom_tool_call", "call_id":format!("captured-child-after-failure-{path}"),
-                        "name":"haskell", "input":"(capturedValue, capturedGetter)"
+                        "name":"haskell", "input":"display (show (capturedValue, capturedGetter))"
                     }))]
                 }
                 3 if self.scenario == CapturedScenario::FailureAfterReplies && ordinal < 2 => {
@@ -340,7 +340,22 @@ fn assert_committed_haskell_value(response: &Value, expected: &str) {
         .last()
         .expect("Haskell operation must have a result item");
     assert_eq!(item["status"], committed_item, "{response}");
-    assert_eq!(item["output"], expected, "{response}");
+    let displays = response["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|item| item["operations"].as_array().into_iter().flatten())
+        .filter_map(|operation| operation.get("display"))
+        .collect::<Vec<_>>();
+    let [display] = displays.as_slice() else {
+        panic!("expected one explicit display: {response}");
+    };
+    assert_eq!(display["text"], expected, "{response}");
+    assert!(
+        display["output"]["sequence"].as_i64().is_some(),
+        "{response}"
+    );
+    assert!(display["output"]["run"].as_str().is_some(), "{response}");
 }
 
 async fn embedded_operation(
@@ -753,25 +768,25 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
                 policy.dispatch_json_boxed(preflight_invocation(
                     "captured-parent-public-probe",
                     "captured-parent-public-probe",
-                    "(x, getX)".into(),
+                    "display (show (x, getX))".into(),
                 )),
             )
             .await
             .expect("earlier parent public names remain readable within the cell budget")
             .expect("earlier parent public names remain installed");
-            assert_committed_haskell_value(&public_names, "(41, 42)");
+            assert_committed_haskell_value(&public_names, "(41,42)");
             let prefix = tokio::time::timeout(
                 COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
                 policy.dispatch_json_boxed(preflight_invocation(
                     "captured-parent-prefix-probe",
                     "captured-parent-prefix-probe",
-                    "(capturedValue, capturedGetter)".into(),
+                    "display (show (capturedValue, capturedGetter))".into(),
                 )),
             )
             .await
             .expect("completed parent native prefix probe settles")
             .expect("completed parent native prefix remains installed");
-            assert_committed_haskell_value(&prefix, "(41, 42)");
+            assert_committed_haskell_value(&prefix, "(41,42)");
             for name in ["privateCapturedHelper", "capturedSuffix"] {
                 let private_name = tokio::time::timeout(
                     COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
@@ -805,11 +820,11 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
                 policy.dispatch_json_boxed(preflight_invocation(
                     "captured-parent-rebind",
                     "captured-parent-rebind",
-                    "capturedValue <- pure (99 :: Int)\nlet capturedGetter = capturedValue + 1\n(capturedValue, capturedGetter)".into(),
+                    "capturedValue <- pure (99 :: Int)\nlet capturedGetter = capturedValue + 1\ndisplay (show (capturedValue, capturedGetter))".into(),
                 )),
             ).await.expect("parent prefix rebinding settles")
                 .expect("parent prefix rebinding succeeds");
-            assert_committed_haskell_value(&rebound, "(99, 100)");
+            assert_committed_haskell_value(&rebound, "(99,100)");
             transport.parent_failed.send_replace(true);
             let mut retained = std::collections::HashSet::new();
             for _ in 0..2 {
@@ -827,7 +842,7 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
                 )
                 .await
                 .unwrap();
-                assert_committed_haskell_value(&value, "(41, 42)");
+                assert_committed_haskell_value(&value, "(41,42)");
                 retained.insert(origin);
             }
             assert_eq!(retained.len(), 2);
@@ -1045,7 +1060,7 @@ async fn admitted_cell_late_type_error_has_no_effect_or_publication_on_retry() {
         "type rejection keeps the admitted actor live"
     );
 
-    let valid = source.replace("pure (True :: Int)", "pure (42 :: Int)");
+    let valid = source.replace("pure (True :: Int)", "display (42 :: Int)");
     let mut control = tokio::spawn(async move {
         policy
             .dispatch_json_boxed(preflight_invocation(
@@ -1072,11 +1087,16 @@ async fn admitted_cell_late_type_error_has_no_effect_or_publication_on_retry() {
         .unwrap()
         .unwrap();
     admitted.unwrap();
-    let committed = tokio::time::timeout(Duration::from_secs(120), control)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
+    let store = super::display_output::open_run_store(campaign.session_root.path()).unwrap();
+    let committed = campaign
+        .drive_actor_output(&store, async {
+            tokio::time::timeout(Duration::from_secs(120), control)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+        })
+        .await;
     assert_committed_haskell_value(&committed, "42");
     assert!(
         committed["items"]

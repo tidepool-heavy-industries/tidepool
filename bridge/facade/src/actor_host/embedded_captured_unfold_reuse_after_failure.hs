@@ -10,5 +10,5 @@ do
   firstRelease <- releaseCheckpoint seed
   secondRelease <- releaseCheckpoint seed
   case (result, firstRelease, secondRelease) of
-    (Right 42, Right (), Right ()) -> pure True
-    _ -> error "retained failed-cell capture contract failed" >> pure True
+    (Right 42, Right (), Right ()) -> display True
+    _ -> error "retained failed-cell capture contract failed" >> display True

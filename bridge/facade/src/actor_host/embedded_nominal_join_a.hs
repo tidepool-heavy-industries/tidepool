@@ -15,4 +15,4 @@ m2JoinA <- do
   case result of
     Right (M2Reply 43, M2Reply 43) -> pure (M2JoinA 43)
     _ -> error "original nominal replies changed during same-root publication"
-pure True
+display True
