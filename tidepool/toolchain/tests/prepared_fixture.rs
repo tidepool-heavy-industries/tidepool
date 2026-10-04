@@ -62,6 +62,103 @@ fn names(directory: &Path) -> Vec<String> {
 }
 
 #[test]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "integration control compiles with the declared pinned GHC executable"
+)]
+fn build_fixture_uses_declared_packages_despite_poisoned_user_databases() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("Fixture.hs");
+    std::fs::write(
+        &source,
+        "module Fixture where\nimport Data.Text (pack, unpack)\nresult :: String\nresult = unpack (pack \"declared package stack\")\n",
+    )
+    .unwrap();
+    let home = root.path().join("home");
+    let xdg = root.path().join("data");
+    std::fs::create_dir(&home).unwrap();
+    std::fs::create_dir(&xdg).unwrap();
+    let native = || {
+        let mut command = Command::new("ghc");
+        command
+            .current_dir(root.path())
+            .args(["-fno-code", "-fforce-recomp", "-v0", "-outputdir"])
+            .arg(root.path().join("native-control"))
+            .arg(&source)
+            .env("HOME", &home)
+            .env("XDG_DATA_HOME", &xdg)
+            .env("GHC_ENVIRONMENT", "-")
+            .env_remove("GHC_PACKAGE_PATH")
+            .env_remove("GHCRTS");
+        command.output().unwrap()
+    };
+    require_success(native());
+    let clean = root.path().join("clean-prepared");
+    require_success(
+        compiler(&source, &clean, &["result"], &[])
+            .env("HOME", &home)
+            .env("XDG_DATA_HOME", &xdg)
+            .output()
+            .unwrap(),
+    );
+    // Both GHC 9.12's legacy HOME and current XDG discovery locations are
+    // poisoned. The plain GHC refusal establishes that the witness is live.
+    for directory in [
+        home.join(".ghc/x86_64-linux-9.12.2/package.conf.d"),
+        xdg.join("ghc/x86_64-linux-9.12.2/package.conf.d"),
+    ] {
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join("package.cache"),
+            b"invalid ambient package database",
+        )
+        .unwrap();
+    }
+    let poisoned = native();
+    assert!(
+        !poisoned.status.success(),
+        "default GHC must observe the poisoned user database control"
+    );
+    let direct = root.path().join("direct-compiler");
+    require_success(
+        Command::new(configured("TIDEPOOL_EXTRACT"))
+            .current_dir(root.path())
+            .arg(&source)
+            .arg("--output-dir")
+            .arg(&direct)
+            .args(["--target", "result"])
+            .env("HOME", &home)
+            .env("XDG_DATA_HOME", &xdg)
+            .env("GHC_ENVIRONMENT", "-")
+            .env("GHC_PACKAGE_PATH", root.path().join("undeclared-database"))
+            .output()
+            .unwrap(),
+    );
+    PreparedArtifact::parse(
+        std::fs::read(direct.join("result.prepared.cbor")).unwrap(),
+        DecodeLimits::default(),
+    )
+    .unwrap();
+    let isolated = root.path().join("isolated-prepared");
+    require_success(
+        compiler(&source, &isolated, &["result"], &[])
+            .env("HOME", &home)
+            .env("XDG_DATA_HOME", &xdg)
+            .env("GHC_PACKAGE_PATH", root.path().join("undeclared-database"))
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(names(&clean), names(&isolated));
+    for artifact in names(&clean) {
+        assert_eq!(
+            std::fs::read(clean.join(&artifact)).unwrap(),
+            std::fs::read(isolated.join(&artifact)).unwrap(),
+            "ambient package discovery changed {artifact}"
+        );
+    }
+}
+
+#[test]
 fn build_fixture_exports_complete_target_set_without_inherited_runtime_authority() {
     let root = tempfile::tempdir().unwrap();
     let source = root.path().join("Fixture.hs");

@@ -75,7 +75,8 @@ import GHC.Driver.Session
       , Opt_WarnIncompleteUniPatterns
       )
   , wopt_set
-  , PackageFlag(..), PackageArg(..), ModRenaming(..) )
+  , PackageFlag(..), PackageArg(..), ModRenaming(..)
+  , PackageDBFlag(..), PkgDbRef(..) )
 import GHC.Unit.Module.ModGuts (ModGuts(..), CgGuts(..))
 import GHC.Core (CoreBind, CoreExpr, Bind(..), Expr(..), Alt(..))
 import qualified Data.Set as Set
@@ -3742,6 +3743,11 @@ diagnosticCollectorHook targetPath warningRef errorRef fallback flags msgClass s
 extractionDynFlags :: DynFlags -> [FilePath] -> DynFlags
 extractionDynFlags dflags includes = canonicalizeDFlags dflags
   { importPaths = importPaths dflags ++ includes
+  -- Producer identity binds this libdir's complete pinned global database.
+  -- GHC stores database flags in reverse command-line order. Clearing first
+  -- removes both user databases and ambient GHC_PACKAGE_PATH entries before
+  -- the initial setSessionDynFlags loads any package interfaces.
+  , packageDBFlags = [PackageDB GlobalPkgDb, ClearPackageDBs]
   , packageFlags = packageFlags dflags
       ++ [ExposePackage "-package ghc" (PackageArg "ghc")
                         (ModRenaming True [])]

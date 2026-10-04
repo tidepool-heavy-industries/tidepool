@@ -7,7 +7,7 @@ import signal
 import subprocess
 import tempfile
 
-FLAGS = ["-package", "ghc", "-O2", "-fno-full-laziness", "-fno-cpr-anal", "-fexpose-all-unfoldings", "-fexpose-overloaded-unfoldings"]
+FLAGS = ["-clear-package-db", "-global-package-db", "-package", "ghc", "-O2", "-fno-full-laziness", "-fno-cpr-anal", "-fexpose-all-unfoldings", "-fexpose-overloaded-unfoldings"]
 
 
 def evaluate(executable, occurrence, environment, scratch, timeout):
