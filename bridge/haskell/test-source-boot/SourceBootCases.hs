@@ -1492,8 +1492,10 @@ originalPackageProjection = withScratch $ \work -> do
 originalPackageCohort :: FilePath -> FilePath -> IO ()
 originalPackageCohort coreRoot output = do
   createDirectoryIfMissing True output
+  let target = output </> "OriginalPackageCohort.hs"
+  copyFile "test-source-boot/fixtures/OriginalPackageCohort.hs" target
   original <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
-    Nothing (coreRoot </> "Tidepool/Effects/Core.hs") [coreRoot,"lib"] Nothing
+    Nothing target [output,coreRoot,"lib"] Nothing
   let env = prHscEnv (pprPipelineResult original)
       modules = pprModules original
   formatting <- resolveFormattingAuthority env

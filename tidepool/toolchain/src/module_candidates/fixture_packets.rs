@@ -116,26 +116,29 @@ fn source_boot_candidate_packet_producer() {
                 .unwrap();
         }
         if !lexical_roots.is_empty() {
-            // Read adjacency from the genuinely certified original recipes.
-            // The owning traversal checks full closure and implementation roles;
-            // fixture-selected roots cannot invent edges or promote native bodies.
+            // Canonical interfaces retain authenticated source imports even
+            // when a source-only owner has no executable recovery graph.
+            // Native ownership and implementation roles remain separate.
             let imports = certified
-                .recovery_products
+                .module_interfaces
                 .iter()
-                .filter_map(|product| {
-                    let graph = product.execution_source()?;
-                    let edges = graph.direct_source_owners(product.owner()).unwrap();
+                .filter_map(|interface| {
+                    let edges = interface.source_imports()?;
                     Some((
                         ExactModuleIdentity {
-                            unit: product.owner().unit.clone(),
-                            module: product.owner().module.clone(),
+                            unit: interface.unit().to_owned(),
+                            module: interface.module().to_owned(),
                         },
                         edges
-                            .into_iter()
-                            .map(|owner| ExactModuleIdentity {
-                                unit: owner.unit.clone(),
-                                module: owner.module.clone(),
+                            .iter()
+                            .filter_map(|edge| {
+                                Some(ExactModuleIdentity {
+                                    unit: edge.home_unit.as_ref()?.clone(),
+                                    module: edge.module.clone(),
+                                })
                             })
+                            .collect::<BTreeSet<_>>()
+                            .into_iter()
                             .collect(),
                     ))
                 })
