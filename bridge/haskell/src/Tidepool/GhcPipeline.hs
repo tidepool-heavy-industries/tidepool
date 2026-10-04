@@ -218,7 +218,8 @@ import Tidepool.ExecutionSource
   ( ExecutionSourceGraph(..), ExecutionSourceIdentity(..)
   , ExecutionSourceFailure(..), ExecutionSourceValidationStage(..), ExecutionSourceInterfaceReason(..)
   , ExecutionSourceRef(..), executionSourceClosure, executionIdentityKey
-  , executionSourceGraphsFit )
+  , executionSourceGraphsFit
+  , executionNodeIdentity, executionNodeModule, executionNodeSourceSha256, executionNodeRequirements )
 import Tidepool.PackageWitness
   ( PackageImportEvidence(..), CompilerProvidedImport(..), emptyPackageImports, packageImportRoot, readPackageImports
   , validatePackageImportRoot )
