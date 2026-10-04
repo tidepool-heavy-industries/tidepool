@@ -4,7 +4,7 @@
 module GenuineCandidateFixture
   ( writeGenuineCandidateManifestFor, writeGenuineMetadataScope
   , writeGenuineEmptyMetadataScope, writeGenuineCandidateNativeScope
-  , writeGenuineCandidateLexicalScope
+  , writeGenuineCandidateLexicalScope, writeGenuineOriginalExecutionScope
   , writeGenuineAuthoredDeclarationScope ) where
 
 import Codec.CBOR.Encoding
@@ -61,6 +61,13 @@ writeGenuineCandidateNativeScope
   :: [String] -> [String] -> FilePath -> FilePath -> [FilePath] -> FilePath -> PreparedPipelineResult -> IO ()
 writeGenuineCandidateNativeScope candidates nativeOwners work source includes destination prepared =
   writePacket work (Just (source, includes, prepared)) candidates candidates nativeOwners [] (Just destination)
+
+-- Lexical source originals can supply GHC bytecode without being offered as
+-- fresh products or cache candidates in the consuming transaction.
+writeGenuineOriginalExecutionScope
+  :: [String] -> FilePath -> FilePath -> [FilePath] -> FilePath -> PreparedPipelineResult -> IO ()
+writeGenuineOriginalExecutionScope owners work source includes destination prepared =
+  writePacket work (Just (source, includes, prepared)) [] owners owners owners (Just destination)
 
 -- Source-free metadata imports retain the actual original source closure.
 -- Candidate delivery and lexical selection share this one immutable capture;

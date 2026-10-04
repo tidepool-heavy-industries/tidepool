@@ -5,7 +5,8 @@ import ExactScopeV9Test (exactScopeV9Checks, nativeOriginChecks, candidateCanoni
 import CandidateGraphDescriptorTest (candidateGraphDescriptorChecks)
 import GenuineCandidateFixture
   ( writeGenuineCandidateManifestFor, writeGenuineMetadataScope, writeGenuineEmptyMetadataScope
-  , writeGenuineCandidateNativeScope, writeGenuineCandidateLexicalScope, writeGenuineAuthoredDeclarationScope )
+  , writeGenuineCandidateNativeScope, writeGenuineCandidateLexicalScope, writeGenuineAuthoredDeclarationScope
+  , writeGenuineOriginalExecutionScope )
 
 import Codec.CBOR.Encoding (encodeBool, encodeListLen, encodeString)
 import Codec.CBOR.Write (toStrictByteString)
@@ -239,6 +240,7 @@ main = getArgs >>= \case
   ["--execution-source-wire", path] -> executionSourceWire path
   ["--execution-source-closure-wire", path] -> executionSourceClosureWire path
   ["--exact-retained-quoter"] -> exactRetainedQuoter
+  ["--retained-execution-publication"] -> retainedExecutionPublication
   ["--exact-reexport-quoter"] -> exactReexportQuoter
   ["--exact-execution-hidden-instance"] -> exactExecutionHiddenInstance
   ["--exact-execution-values"] -> exactExecutionValues
@@ -883,6 +885,55 @@ generatedScaffoldRetained manifestPath sealPath = withTiming $ withScratch $ \wo
   after <- term sealPath
   unless (after == seal) (fail "scaffold consumer changed the original Home seal")
   putStrLn "retained scaffold: real production full owner/native/interface/seal self-custody admitted, foreign and wrong-unit requirements refused; original proof unchanged"
+
+retainedExecutionPublication :: IO ()
+retainedExecutionPublication = withTiming $ withScratch $ \work -> do
+  forM_ ["MetadataQuoteSupport.hs", "MetadataQuoter.hs", "MetadataQuotedTarget.hs"] $ \name ->
+    copyFile ("test-source-boot/fixtures" </> name) (work </> name)
+  let helper = mkModuleName "MetadataQuoteSupport"
+      provider = mkModuleName "MetadataQuoter"
+      target = mkModuleName "MetadataQuotedTarget"
+      helperPath = work </> "MetadataQuoteSupport.hs"
+      targetPath = work </> "MetadataQuotedTarget.hs"
+      scopePath = work </> "original-execution.cbor"
+      session = emptySessionScope {ssRoot=work,ssExactScope=Just scopePath}
+  original <- runPipelineSelected (PreparedProducts Nothing) helperPath [work]
+  writeGenuineOriginalExecutionScope ["MetadataQuoteSupport"] work helperPath [work] scopePath original
+  exact <- readExactScope scopePath >>= either fail pure
+  originalBytes <- BS.readFile scopePath
+  withResidentPipelineSelected [work] $ \compile -> do
+    (prepared, diagnostics) <- captureDiagnostics $ compile (PreparedProducts Nothing) Set.empty GeneralCompile
+      (Just session) targetPath [work] Nothing
+    let result = pprPipelineResult prepared
+        environment = prHscEnv result
+        freshOwners = Map.keysSet (pprFinalizedModules prepared)
+    unless (hasIntResultLiteral 42 (prBinds result)
+        && counterValues "exact_execution_original_load_owners" diagnostics == [1]
+        && counterValues "exact_execution_fresh_provider_compiles" diagnostics == [1]
+        && freshOwners == Set.fromList [provider,target]
+        && Map.notMember helper (pprProductInterfaces prepared)) $
+      fail "retained executable acquired fresh finalization ownership or fresh provider lost it"
+    case lookupHpt (hsc_HPT environment) helper of
+      Just hmi | isJust (homeMod_bytecode (hm_linkable hmi)) -> pure ()
+      _ -> fail "retained original lost its authorized GHC bytecode"
+    let captured = work </> "fresh-publication"
+    createDirectory captured
+    originals <- newOriginalInterfaceArtifacts environment (pprFinalizedModules prepared)
+      [artifact | (artifact,_,_) <- scopeInterfaces exact] captured
+    _ <- captureFinalizedModuleArtifacts originals environment (pprFinalizedModules prepared)
+      (pprPackageImports prepared) (pprDependencies prepared) captured
+    after <- BS.readFile scopePath
+    unless (after == originalBytes) $ fail "execution mutated its original immutable admission"
+    copyFile "test-source-boot/fixtures/MetadataQuoteSupportChanged.hs" helperPath
+    fresh <- compile (PreparedProducts Nothing) Set.empty GeneralCompile Nothing helperPath [work] Nothing
+    unless (Map.member helper (pprFinalizedModules fresh)
+        && Map.member helper (pprProductInterfaces fresh)) $
+      fail "ordinary source refresh inherited retained execution ownership"
+    changed <- try (compile (PreparedProducts Nothing) Set.empty GeneralCompile
+      (Just session) targetPath [work] Nothing) :: IO (Either SomeException PreparedPipelineResult)
+    unless (case changed of Left failure -> "ExecutionSourceChanged" `isInfixOf` show failure; _ -> False) $
+      fail "retained execution accepted the refreshed source under its old admission"
+  putStrLn "retained execution publication: bytecode retained, only fresh providers captured, source refresh separate"
 
 exactRetainedQuoter :: IO ()
 exactRetainedQuoter = withTiming $ withScratch $ \work -> do

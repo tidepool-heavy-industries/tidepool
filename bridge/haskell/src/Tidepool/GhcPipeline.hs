@@ -894,6 +894,8 @@ data CompilePlan = CompilePlan
     -- ^ The graph handed to @load'@ (the skeleton applies @unpoison@ itself).
   , cpLoadTargets :: Maybe [Target]
     -- ^ Authenticated execution targets, scoped to the load barrier only.
+  , cpExecutionOriginals :: [ExecutionSourceIdentity]
+    -- ^ Exact originals whose source is loaded only for this execution.
   , cpAfterLoad :: Ghc ()
     -- ^ Runs immediately after @load'@ and its @ghc_load@ phase emit, before
     -- summaries are taken, after the shared load barrier. The session path
@@ -944,8 +946,18 @@ data LoadedModule = LoadedModule
   { loadedSummary :: ModSummary
   , loadedFacts :: ModuleFacts
   , loadedOutput :: ModuleOutput
-  , loadedFinalized :: FinalizedModule
+  , loadedPublication :: LoadedPublication
   }
+
+-- Retained execution owns a GHC executable, not a new source finalization.
+data LoadedPublication
+  = FreshSourcePublication FinalizedModule
+  | RetainedExecutionPublication ExecutionSourceIdentity FinalizedModule
+
+loadedFinalized :: LoadedModule -> FinalizedModule
+loadedFinalized loaded = case loadedPublication loaded of
+  FreshSourcePublication finalized -> finalized
+  RetainedExecutionPublication _ finalized -> finalized
 
 data CanonicalFrontendFailure
   = CustomLoadPhaseHook
@@ -954,6 +966,8 @@ data CanonicalFrontendFailure
   | CompilerProducerUnavailable
   | CompilerProducerScopeMismatch
   | LoadedFinalizationOwnerMismatch
+  | RetainedExecutionFreshSourceConflict String String
+  | DuplicateRetainedExecutionOwner String String
   | MissingLoadedFrontend
   | MissingLoadedFinalization
   | UnfinishedLoadedFrontend
@@ -1504,11 +1518,13 @@ payloadProduct :: MemoPayload -> Maybe ModuleProduct
 payloadProduct (ValidationOnly _ _ _) = Nothing
 payloadProduct (ExecutableProduct moduleProduct) = Just moduleProduct
 
-payloadLoaded :: ModSummary -> MemoPayload -> LoadedModule
-payloadLoaded summary (ValidationOnly facts output finalized) =
-  LoadedModule summary facts output finalized
-payloadLoaded summary (ExecutableProduct product') =
-  LoadedModule summary (productFacts product') (productOutput product') (productFinalized product')
+payloadLoaded :: (ModSummary -> FinalizedModule -> LoadedPublication)
+  -> ModSummary -> MemoPayload -> LoadedModule
+payloadLoaded publication summary (ValidationOnly facts output finalized) =
+  LoadedModule summary facts output (publication summary finalized)
+payloadLoaded publication summary (ExecutableProduct product') =
+  LoadedModule summary (productFacts product') (productOutput product')
+    (publication summary (productFinalized product'))
 
 requireProduct :: ModuleFacts -> ModuleOutput -> Maybe PreparedModule
   -> FinalizedModule -> Ghc ModuleProduct
@@ -1783,7 +1799,29 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
     frontendOriginsRef <- liftIO (newIORef Map.empty)
     pendingFinalizationsRef <- liftIO (newIORef Map.empty)
     beforeLoad <- getSession
+    let freshSourceOwners = Set.fromList
+          [(unitString (moduleUnit (ms_mod summary)), moduleNameString (ms_mod_name summary))
+          | ModuleNode _ summary <- mgModSummaries' modGraphRaw
+          , ms_hsc_src summary == HsSrcFile]
+    executionOriginals <- liftIO $ foldM (\known original -> do
+      let key = executionIdentityKey original
+          failure constructor = throwIO (constructor (executionUnit original) (executionModule original))
+      when (key `Map.member` known) (failure DuplicateRetainedExecutionOwner)
+      when (key `Set.member` freshSourceOwners) (failure RetainedExecutionFreshSourceConflict)
+      pure (Map.insert key original known)) Map.empty (cpExecutionOriginals plan)
     let originalPhaseHook = runPhaseHook (hsc_hooks beforeLoad)
+        sourcePublication summary finalized = case Map.lookup
+            (unitString (moduleUnit (ms_mod summary)), moduleNameString (ms_mod_name summary)) executionOriginals of
+          Nothing -> FreshSourcePublication finalized
+          Just original -> RetainedExecutionPublication original finalized
+        publishLoadedFinalization loaded = case loadedPublication loaded of
+          RetainedExecutionPublication _ _ -> pure ()
+          FreshSourcePublication finalized -> do
+            let name = ms_mod_name (loadedSummary loaded)
+            unless (name `Map.member` acceptedCandidates) $ do
+              atomicModifyIORef' finalizedModulesRef (\known -> (Map.insert name finalized known, ()))
+              when captureProducts $ atomicModifyIORef' productInterfacesRef
+                (\known -> (Map.insert name (hm_iface (finalizedHomeModInfo finalized)) known, ()))
         runOriginalPhase :: TPhase a -> IO a
         runOriginalPhase phase = case originalPhaseHook of
           Nothing -> runPhase phase
@@ -1811,7 +1849,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                 (HomeModInfo skinny (pendingDetails pending) emptyHomeModInfoLinkable)
                 (pendingTidyGuts pending)
               loaded = LoadedModule (pendingSummary pending) (pendingFacts pending)
-                (pendingOutput pending) finalized
+                (pendingOutput pending) (sourcePublication (pendingSummary pending) finalized)
               name = ms_mod_name (pendingSummary pending)
           -- A candidate's bytecode may be needed by a splice. Its recompilation
           -- may not supply a different interface to an importer while the old
@@ -1819,10 +1857,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
           validateCandidateInterface (pendingEnvironment pending) name skinny
           atomicModifyIORef' loadedModulesRef (\known ->
             (Map.insert (ms_mod (pendingSummary pending)) loaded known, ()))
-          unless (name `Map.member` acceptedCandidates) $ do
-            atomicModifyIORef' finalizedModulesRef (\known -> (Map.insert name finalized known, ()))
-            when captureProducts $
-              atomicModifyIORef' productInterfacesRef (\known -> (Map.insert name skinny known, ()))
+          publishLoadedFinalization loaded
         canonicalLoadPhase :: TPhase a -> IO a
         canonicalLoadPhase (T_Hsc phaseEnv summary)
           | ms_hsc_src summary == HsSrcFile = do
@@ -2121,10 +2156,6 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                 let interfaceReuse = if isJust mMemoRef then MemoMiss else MemoDisabled
                 (interfaceMs, registration) <- registerPreparedInterface timing requestIdentity interfaceReuse
                   interfaceUse (mfSummary mf) (mfTcGblEnv mf) (mfHscEnv mf) simplified
-                liftIO $ do
-                  modifyIORef' finalizedModulesRef (Map.insert (ms_mod_name (mfSummary mf)) registration)
-                  when captureProducts $ modifyIORef' productInterfacesRef (Map.insert
-                    (ms_mod_name (mfSummary mf)) (hm_iface (finalizedHomeModInfo registration)))
                 liftIO $ recordInterface (mfSummary mf) (Just interfaceMs)
                 let externalized = externalizeInternalTops simplified
                 pure
@@ -2176,13 +2207,9 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                     front <- compileFront summary
                     (_, output, finalized) <- compileBack interfaceUse front
                     facts <- liftIO (frontFacts front)
-                    pure (LoadedModule (mfSummary front) facts output finalized)
-              rememberFinalized loaded = do
-                let name = ms_mod_name (loadedSummary loaded)
-                    finalized = loadedFinalized loaded
-                liftIO (modifyIORef' finalizedModulesRef (Map.insert name finalized))
-                when captureProducts $ liftIO (modifyIORef' productInterfacesRef
-                  (Map.insert name (hm_iface (finalizedHomeModInfo finalized))))
+                    pure (LoadedModule (mfSummary front) facts output
+                      (sourcePublication (mfSummary front) finalized))
+              rememberFinalized loaded = liftIO (publishLoadedFinalization loaded)
               rememberPreparedSiblings prepared = liftIO $
                 modifyIORef' preparedSiblingsRef (\known -> Map.union (pmSitedSiblings prepared) known)
           -- Module names do not identify generated content across independent
@@ -2281,7 +2308,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
               cachedInterface modSum entry
                 | dropMemoInterface == Just (moduleNameString (ms_mod_name modSum)) = Nothing
                 | otherwise = Just (finalizedHomeModInfo
-                    (loadedFinalized (payloadLoaded modSum (gmePayload entry))))
+                    (loadedFinalized (payloadLoaded sourcePublication modSum (gmePayload entry))))
               interfaceReady _ modSum entry = isJust (cachedInterface modSum entry)
           -- Under TIDEPOOL_TIMING, name why a memoized module was recompiled.
           let memoMiss modSum reason = when timing $ liftIO $ hPutStrLn stderr $
@@ -2460,10 +2487,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                         recordValidity modSum True
                         recordExecutableValidity modSum True
                         rememberPreparedSiblings (productPrepared moduleProduct)
-                        let finalized = productFinalized moduleProduct
-                        liftIO $ modifyIORef' finalizedModulesRef (Map.insert mn finalized)
-                        when captureProducts $ liftIO $
-                          modifyIORef' productInterfacesRef (Map.insert mn (hm_iface (finalizedHomeModInfo finalized)))
+                        rememberFinalized (payloadLoaded sourcePublication modSum (gmePayload entry))
                         when (needsPreparedInterface interfaceUse) $
                           forM_ (cachedInterface modSum entry) (installPreparedInterface mn)
                         pure (CachedObservation modSum entry, Just (productOutput moduleProduct), Just (productPrepared moduleProduct))
@@ -2479,7 +2503,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                           memoMissTrace modSum reason (Just entry)
                         loaded <- case cached of
                           Just entry | interfaceReady interfaceUse modSum entry ->
-                            pure (payloadLoaded modSum (gmePayload entry))
+                            pure (payloadLoaded sourcePublication modSum (gmePayload entry))
                           _ -> finalizeCurrent interfaceUse modSum
                         rememberFinalized loaded
                         let r = loadedOutput loaded
@@ -2512,7 +2536,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                 case cached of
                   Just entry
                     | interfaceReady interfaceUse modSum entry -> do
-                    let loaded = payloadLoaded modSum (gmePayload entry)
+                    let loaded = payloadLoaded sourcePublication modSum (gmePayload entry)
                     recordValidity modSum True
                     rememberFinalized loaded
                     when (needsPreparedInterface interfaceUse) $
@@ -2557,7 +2581,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                     let modSum = observationSummary observation
                     loaded <- case observation of
                       LoadedObservation captured -> pure captured
-                      CachedObservation _ entry -> pure (payloadLoaded modSum (gmePayload entry))
+                      CachedObservation _ entry -> pure (payloadLoaded sourcePublication modSum (gmePayload entry))
                       HydratedObservation _ _ _ -> liftIO (throwIO MissingLoadedFinalization)
                     rememberFinalized loaded
                     let r = loadedOutput loaded
@@ -2569,7 +2593,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                     let modSum = observationSummary observation
                     loaded <- case observation of
                       LoadedObservation value -> pure value
-                      CachedObservation _ entry -> pure (payloadLoaded modSum (gmePayload entry))
+                      CachedObservation _ entry -> pure (payloadLoaded sourcePublication modSum (gmePayload entry))
                       HydratedObservation _ _ _ -> liftIO (throwIO MissingLoadedFinalization)
                     case mMemoRef of
                       Just ref -> liftIO (modifyIORef' ref
@@ -3811,6 +3835,7 @@ normalVariant purpose path = do
    , pvPlan = \_timing modGraphRaw _selectedExact -> pure CompilePlan
       { cpLoadGraph = modGraphRaw
       , cpLoadTargets = Nothing
+      , cpExecutionOriginals = []
       , cpAfterLoad = pure ()
         -- Consume load captures and finalize any deferred source in dependency
         -- order before selecting prepared STG.
@@ -4432,6 +4457,7 @@ sessionVariant purpose scope path = do
         -- but without compiling the target prematurely.
         { cpLoadGraph = executionLoadGraph executionPlan
         , cpLoadTargets = executionLoadTargets executionPlan
+        , cpExecutionOriginals = map executionNodeIdentity executionNodes
         , cpAfterLoad = do
             -- Restore the FULL module graph (target included) so the
             -- per-module typecheck can see HPT instances from dep modules:
