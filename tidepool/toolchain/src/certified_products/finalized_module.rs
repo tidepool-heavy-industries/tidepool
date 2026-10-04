@@ -8,27 +8,117 @@ pub(crate) const FINALIZATION_PROFILE: &str = "tidepool-ghc-finalized-module-v1"
 const CORE_LIMIT: u64 = 32 << 20;
 const FINALIZATION_PAYLOAD_LIMIT: usize = 128 << 20;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CanonicalSourceImport {
+    pub(crate) qualifier: crate::cache::ImportQualifier,
+    pub(crate) module: String,
+    pub(crate) boot: bool,
+    pub(crate) home_unit: Option<String>,
+}
+
+impl CanonicalSourceImport {
+    pub(crate) fn key(&self) -> (String, String, bool, Option<String>) {
+        (
+            String::from(self.qualifier.clone()),
+            self.module.clone(),
+            self.boot,
+            self.home_unit.clone(),
+        )
+    }
+    fn encode(&self) -> Value {
+        value_array([
+            value_text(String::from(self.qualifier.clone())),
+            value_text(&self.module),
+            Value::Bool(self.boot),
+            self.home_unit.as_ref().map_or(Value::Null, value_text),
+        ])
+    }
+    fn decode(value: &Value, homes: &BTreeSet<String>) -> CertResult<Self> {
+        let row = sized(value, 4)?;
+        let qualifier = crate::cache::ImportQualifier::try_from(string(&row[0])?.to_owned())
+            .map_err(|_| CertificationError::Receipt("canonical source import qualifier"))?;
+        let module = string(&row[1])?.to_owned();
+        let boot = match &row[2] {
+            Value::Bool(boot) => *boot,
+            _ => return Err(CertificationError::Receipt("canonical source import boot")),
+        };
+        let home_unit = match &row[3] {
+            Value::Null => None,
+            _ => Some(string(&row[3])?.to_owned()),
+        };
+        use crate::cache::ImportQualifier;
+        let valid_classification = match (&qualifier, &home_unit) {
+            (ImportQualifier::Unqualified | ImportQualifier::OtherUnit(_), None) => true,
+            (ImportQualifier::Unqualified, Some(unit)) => homes.contains(unit),
+            (ImportQualifier::ThisUnit(wanted), Some(unit)) => {
+                wanted == unit && homes.contains(unit)
+            }
+            _ => false,
+        };
+        if module.is_empty() || !valid_classification {
+            return Err(CertificationError::Receipt("canonical source import owner"));
+        }
+        Ok(Self {
+            qualifier,
+            module,
+            boot,
+            home_unit,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum CanonicalOrigin {
-    SourceOriginal,
-    NativeAuthoredDeclaration { generation: u64 },
+    SourceOriginal {
+        imports: Arc<[CanonicalSourceImport]>,
+    },
+    NativeAuthoredDeclaration {
+        generation: u64,
+    },
 }
 
 impl CanonicalOrigin {
-    fn encode(self) -> Value {
+    fn encode(&self) -> Value {
         match self {
-            Self::SourceOriginal => value_array([value_text("source-original")]),
+            Self::SourceOriginal { imports } => value_array([
+                value_text("source-original"),
+                value_array(imports.iter().map(CanonicalSourceImport::encode)),
+            ]),
             Self::NativeAuthoredDeclaration { generation } => value_array([
                 value_text("native-authored-declaration"),
-                Value::Integer(generation.into()),
+                Value::Integer((*generation).into()),
             ]),
         }
     }
 
-    fn decode(value: &Value, owner: &FinalizedModuleReceipt) -> CertResult<Self> {
+    fn decode(
+        value: &Value,
+        owner: &FinalizedModuleReceipt,
+        homes: &BTreeSet<String>,
+    ) -> CertResult<Self> {
         let row = array(value)?;
         match row {
-            [tag] if string(tag)? == "source-original" => Ok(Self::SourceOriginal),
+            [tag, rows] if string(tag)? == "source-original" => {
+                let rows = array(rows)?;
+                if rows.len() > 4096 {
+                    return Err(CertificationError::Receipt("canonical source import bound"));
+                }
+                let imports = rows
+                    .iter()
+                    .map(|row| CanonicalSourceImport::decode(row, homes))
+                    .collect::<CertResult<Vec<_>>>()?;
+                if imports.windows(2).any(|pair| {
+                    pair[0].key() >= pair[1].key()
+                        || (pair[0].qualifier == pair[1].qualifier
+                            && pair[0].module == pair[1].module
+                            && pair[0].boot == pair[1].boot)
+                }) {
+                    return Err(CertificationError::Receipt("canonical source import order"));
+                }
+                Ok(Self::SourceOriginal {
+                    imports: imports.into(),
+                })
+            }
             [tag, generation] if string(tag)? == "native-authored-declaration" => {
                 let generation = number(generation)?;
                 if generation == 0
@@ -336,7 +426,13 @@ impl Eq for CertifiedModuleInterface {}
 
 impl CertifiedModuleInterface {
     pub(crate) fn origin(&self) -> CanonicalOrigin {
-        self.origin
+        self.origin.clone()
+    }
+    pub(crate) fn source_imports(&self) -> Option<&[CanonicalSourceImport]> {
+        match &self.origin {
+            CanonicalOrigin::SourceOriginal { imports } => Some(imports),
+            _ => None,
+        }
     }
     pub(crate) fn unit(&self) -> &str {
         &self.receipt.unit
@@ -428,12 +524,12 @@ fn canonical_certificate(
     producer: [u8; 32],
     envelope: &FinalizationEnvelope,
     module: &FinalizedModuleReceipt,
-    origin: CanonicalOrigin,
+    origin: &CanonicalOrigin,
 ) -> CertResult<Vec<u8>> {
     // Scratch paths and descriptor sizes are not durable semantic identity.
     let value = value_array([
         value_text("TPFINALMODULE"),
-        Value::Integer(2.into()),
+        Value::Integer(3.into()),
         value_text(FINALIZATION_PROFILE),
         value_text(hex(&producer)),
         value_array(envelope.home_units.iter().map(value_text)),
@@ -465,6 +561,10 @@ pub(super) fn issue_interfaces(
     evidence: &DependencyEvidence,
     inherited: &BTreeMap<(String, String), [u8; 32]>,
     authored: Option<&crate::declaration_join::NativeAuthoredDeclarationAdmission>,
+    exact_source_imports: &BTreeMap<
+        crate::declaration_join::ExactModuleIdentity,
+        Vec<CanonicalSourceImport>,
+    >,
     validation: &mut PackageInterfaceValidation,
 ) -> CertResult<Vec<CertifiedModuleInterface>> {
     envelope.validate_structure()?;
@@ -549,9 +649,58 @@ pub(super) fn issue_interfaces(
                     generation: admission.generation(),
                 }
             }
-            _ => CanonicalOrigin::SourceOriginal,
+            _ => {
+                // This is ORIGINAL compiler evidence already admitted by the
+                // finalization owner, before any later source-selection receipt.
+                let mut imports = BTreeMap::new();
+                for edge in &node.imports {
+                    let home_unit = match &edge.selected {
+                        None => None,
+                        Some(path) => {
+                            let owners = evidence
+                                .modules
+                                .iter()
+                                .filter(|child| {
+                                    child.module == edge.module
+                                        && child.boot == edge.boot
+                                        && &child.source == path
+                                })
+                                .collect::<Vec<_>>();
+                            let [child] = owners.as_slice() else {
+                                return Err(CertificationError::Mismatch(
+                                    "canonical original source import owner",
+                                ));
+                            };
+                            Some(child.unit.clone())
+                        }
+                    };
+                    let row = CanonicalSourceImport {
+                        qualifier: edge.qualifier.clone(),
+                        module: edge.module.clone(),
+                        boot: edge.boot,
+                        home_unit,
+                    };
+                    imports.insert(row.key(), row);
+                }
+                let owner = crate::declaration_join::ExactModuleIdentity {
+                    unit: module.unit.clone(),
+                    module: module.module.clone(),
+                };
+                for row in exact_source_imports.get(&owner).into_iter().flatten() {
+                    imports.insert(row.key(), row.clone());
+                }
+                if imports.len() > 4096 {
+                    return Err(CertificationError::Receipt("canonical source import bound"));
+                }
+                let origin = CanonicalOrigin::SourceOriginal {
+                    imports: imports.into_values().collect::<Vec<_>>().into(),
+                };
+                // Issuance enforces the same classification and uniqueness
+                // invariants as cold recovery, including exact parser rows.
+                CanonicalOrigin::decode(&origin.encode(), module, &envelope.home_units)?
+            }
         };
-        let certificate = canonical_certificate(producer, envelope, module, origin)?;
+        let certificate = canonical_certificate(producer, envelope, module, &origin)?;
         issued.push(CertifiedModuleInterface {
             producer_sha256: producer,
             receipt: module.clone(),
@@ -589,7 +738,7 @@ pub(super) fn recover_interface(
     }
     let row = sized(&value, 13)?;
     if string(&row[0])? != "TPFINALMODULE"
-        || number(&row[1])? != 2
+        || number(&row[1])? != 3
         || string(&row[2])? != FINALIZATION_PROFILE
         || digest(&row[3])? != producer
         || producer == [0; 32]
@@ -634,7 +783,7 @@ pub(super) fn recover_interface(
         .into_values()
         .next()
         .ok_or(CertificationError::Receipt("finalized certificate owner"))?;
-    let origin = CanonicalOrigin::decode(&row[12], &receipt)?;
+    let origin = CanonicalOrigin::decode(&row[12], &receipt, &envelope.home_units)?;
     if sha(&interface) != receipt.interface.sha256
         || sha(&package_imports) != receipt.package_imports.sha256
         || core.as_ref().map(|bytes| sha(bytes)) != receipt.core.as_ref().map(|item| item.sha256)
@@ -657,7 +806,7 @@ pub(super) fn recover_interface(
         home_units: envelope.home_units,
         modules: BTreeMap::new(),
     };
-    if canonical_certificate(producer, &canonical_envelope, &receipt, origin)? != certificate {
+    if canonical_certificate(producer, &canonical_envelope, &receipt, &origin)? != certificate {
         return Err(CertificationError::Receipt(
             "noncanonical finalized certificate",
         ));
@@ -718,7 +867,9 @@ pub(super) fn fixture_interface(
         producer,
         &envelope,
         &receipt,
-        CanonicalOrigin::SourceOriginal,
+        &CanonicalOrigin::SourceOriginal {
+            imports: Arc::from([]),
+        },
     )
     .unwrap();
     recover_interface(
@@ -727,6 +878,44 @@ pub(super) fn fixture_interface(
         interface,
         package_imports,
         core,
+        &mut PackageInterfaceValidation::default(),
+    )
+    .unwrap()
+}
+
+#[cfg(test)]
+pub(super) fn fixture_source_imports(
+    interface: CertifiedModuleInterface,
+    imports: Vec<CanonicalSourceImport>,
+) -> CertifiedModuleInterface {
+    let mut rows = imports
+        .into_iter()
+        .map(|row| (row.key(), row))
+        .collect::<BTreeMap<_, _>>();
+    let origin = CanonicalOrigin::SourceOriginal {
+        imports: std::mem::take(&mut rows)
+            .into_values()
+            .collect::<Vec<_>>()
+            .into(),
+    };
+    let envelope = FinalizationEnvelope {
+        profile: FINALIZATION_PROFILE.into(),
+        home_units: (*interface.home_units).clone(),
+        modules: BTreeMap::new(),
+    };
+    let certificate = canonical_certificate(
+        interface.producer_sha256,
+        &envelope,
+        &interface.receipt,
+        &origin,
+    )
+    .unwrap();
+    recover_interface(
+        interface.producer_sha256,
+        certificate,
+        interface.interface.to_vec(),
+        interface.package_imports.to_vec(),
+        interface.core.as_ref().map(|bytes| bytes.to_vec()),
         &mut PackageInterfaceValidation::default(),
     )
     .unwrap()
@@ -772,9 +961,148 @@ mod tests {
     }
 
     #[test]
+    fn canonical_source_imports_reject_contradictory_home_classification() {
+        use crate::cache::ImportQualifier;
+        let original = interface(None);
+        let edge = CanonicalSourceImport {
+            qualifier: ImportQualifier::Unqualified,
+            module: "Dependency".into(),
+            boot: false,
+            home_unit: Some("home-a".into()),
+        };
+        let decode = |imports: Vec<CanonicalSourceImport>| {
+            let origin = CanonicalOrigin::SourceOriginal {
+                imports: imports.into(),
+            };
+            CanonicalOrigin::decode(&origin.encode(), &original.receipt, original.home_units())
+        };
+        assert!(decode(vec![edge.clone()]).is_ok());
+        assert!(decode(vec![CanonicalSourceImport {
+            qualifier: ImportQualifier::ThisUnit("home-a".into()),
+            home_unit: None,
+            ..edge.clone()
+        }])
+        .is_err());
+        assert!(decode(vec![CanonicalSourceImport {
+            qualifier: ImportQualifier::ThisUnit("other-home".into()),
+            ..edge.clone()
+        }])
+        .is_err());
+        assert!(decode(vec![CanonicalSourceImport {
+            qualifier: ImportQualifier::OtherUnit("home-a".into()),
+            ..edge.clone()
+        }])
+        .is_err());
+        assert!(decode(vec![
+            CanonicalSourceImport {
+                home_unit: None,
+                ..edge.clone()
+            },
+            edge
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn canonical_source_issuer_seals_original_exact_import_shapes_for_interface_only_owner() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("Owner.hs");
+        let bytes =
+            b"module Owner where\nimport {-# SOURCE #-} \"home-a\" Dependency\ntype Answer = Int\n";
+        std::fs::write(&source, bytes).unwrap();
+        let fixture = interface(None);
+        std::fs::write(root.path().join("module.hi"), fixture.interface_bytes()).unwrap();
+        std::fs::write(
+            root.path().join("module.hi.packages"),
+            fixture.package_imports_bytes(),
+        )
+        .unwrap();
+        let mut receipt = fixture.receipt.clone();
+        receipt.source_sha256 = sha(bytes);
+        let envelope = FinalizationEnvelope {
+            profile: FINALIZATION_PROFILE.into(),
+            home_units: fixture.home_units().clone(),
+            modules: BTreeMap::from([(("home-a".into(), "Owner".into()), receipt)]),
+        };
+        let evidence = DependencyEvidence {
+            version: 4,
+            cache_safe: true,
+            selection_complete: true,
+            sources: vec![crate::cache::SourceEvidence {
+                path: source.clone(),
+                sha256: hex(&sha(bytes)),
+            }],
+            modules: vec![crate::cache::ModuleEvidence {
+                unit: "home-a".into(),
+                module: "Owner".into(),
+                boot: false,
+                source,
+                imports: vec![],
+                product: ProductAvailability::InterfaceOnly,
+            }],
+            resolutions: vec![],
+            packages: vec![],
+        };
+        // The normalized original graph omitted this exact edge; its original
+        // receipt still retains the GHC parser's package qualifier and owner.
+        let imported = CanonicalSourceImport {
+            qualifier: crate::cache::ImportQualifier::ThisUnit("home-a".into()),
+            module: "Dependency".into(),
+            boot: true,
+            home_unit: Some("home-a".into()),
+        };
+        let exact = BTreeMap::from([(
+            crate::declaration_join::ExactModuleIdentity {
+                unit: "home-a".into(),
+                module: "Owner".into(),
+            },
+            vec![imported.clone()],
+        )]);
+        let issued = issue_interfaces(
+            &envelope,
+            root.path(),
+            [7; 32],
+            &evidence,
+            &BTreeMap::new(),
+            None,
+            &exact,
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap();
+        assert!(issued[0].requirements().is_empty());
+        assert_eq!(issued[0].source_imports(), Some([imported].as_slice()));
+        let recovered = recover_interface(
+            [7; 32],
+            issued[0].certificate_bytes().to_vec(),
+            issued[0].interface_bytes().to_vec(),
+            issued[0].package_imports_bytes().to_vec(),
+            None,
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap();
+        assert_eq!(recovered, issued[0]);
+        let mut old: Value = ciborium::de::from_reader(issued[0].certificate_bytes()).unwrap();
+        old.as_array_mut().unwrap()[1] = Value::Integer(2.into());
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&old, &mut bytes).unwrap();
+        assert!(recover_interface(
+            [7; 32],
+            bytes,
+            issued[0].interface_bytes().to_vec(),
+            issued[0].package_imports_bytes().to_vec(),
+            None,
+            &mut PackageInterfaceValidation::default()
+        )
+        .is_err());
+    }
+
+    #[test]
     fn canonical_origin_is_explicit_and_survives_recovery() {
         let source = interface_for_owner("main", "Tidepool.Session.Lib.G7", None);
-        assert_eq!(source.origin(), CanonicalOrigin::SourceOriginal);
+        assert!(matches!(
+            source.origin(),
+            CanonicalOrigin::SourceOriginal { .. }
+        ));
         let envelope = FinalizationEnvelope {
             profile: FINALIZATION_PROFILE.into(),
             home_units: source.home_units().clone(),
@@ -782,7 +1110,7 @@ mod tests {
         };
         let native = CanonicalOrigin::NativeAuthoredDeclaration { generation: 7 };
         let certificate =
-            canonical_certificate([7; 32], &envelope, &source.receipt, native).unwrap();
+            canonical_certificate([7; 32], &envelope, &source.receipt, &native).unwrap();
         let recovered = recover_interface(
             [7; 32],
             certificate,
@@ -798,7 +1126,7 @@ mod tests {
             CanonicalOrigin::NativeAuthoredDeclaration { generation: 8 },
         ] {
             let certificate =
-                canonical_certificate([7; 32], &envelope, &source.receipt, origin).unwrap();
+                canonical_certificate([7; 32], &envelope, &source.receipt, &origin).unwrap();
             assert!(recover_interface(
                 [7; 32],
                 certificate,

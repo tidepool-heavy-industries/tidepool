@@ -11,7 +11,7 @@ module Tidepool.ExactScope
   , validateCanonicalInterfaceProof, validateCandidateCanonicalInterfaceProof
   , canonicalCertificatePath, canonicalCertificateSha256, canonicalCoreArtifact
   , canonicalCorePath, canonicalCoreSha256, canonicalHomeUnits, canonicalSourceSha256
-  , canonicalRequirements, canonicalOrigin
+  , canonicalRequirements, canonicalOrigin, canonicalSourceImports, isSourceOriginal
   , scopeCheckedCell, scopeCheckedItem, scopeCheckedDisplay, scopeIncludePaths
   , readExactScope, revalidateExactScope, scopeValueInterfaces
   , writeExactCompilation, extendSourceSelectedOriginals
@@ -76,7 +76,7 @@ import Tidepool.FinalizedModuleArtifacts
 import Tidepool.Timing (readTimingEnabled, timeDetailPhase, emitCount)
 import Tidepool.DependencyEvidence
   ( DependencyEvidence(..), DependencySource(..), DependencyModule(..), DependencyImport(..), DependencyResolution(..), renderDependencyEvidence
-  , DependencyQualifier, renderDependencyQualifier, revalidateDependencyEvidence )
+  , DependencyQualifier(..), renderDependencyQualifier, parseDependencyQualifier, revalidateDependencyEvidence )
 
 data ExactScope = ExactScope
   { scopeManifestPath :: FilePath
@@ -136,8 +136,14 @@ data CanonicalCoreArtifact = CanonicalCoreArtifact
   , canonicalCoreSha256 :: String
   } deriving (Eq, Show)
 
-data CanonicalOrigin = SourceOriginal | NativeAuthoredDeclaration Generation
+type CanonicalSourceImport = (DependencyQualifier,String,Bool,Maybe String)
+
+data CanonicalOrigin = SourceOriginal [CanonicalSourceImport] | NativeAuthoredDeclaration Generation
   deriving (Eq, Show)
+
+isSourceOriginal :: CanonicalOrigin -> Bool
+isSourceOriginal (SourceOriginal _) = True
+isSourceOriginal _ = False
 
 data CanonicalInterfaceRole = SourceOriginalRole | NativeDeclarationRole
   deriving (Eq, Show)
@@ -147,7 +153,7 @@ data CanonicalInterfacePurpose = ScopeInterface CanonicalInterfaceRole | Candida
   deriving (Eq, Show)
 
 originRole :: CanonicalOrigin -> CanonicalInterfaceRole
-originRole SourceOriginal = SourceOriginalRole
+originRole (SourceOriginal _) = SourceOriginalRole
 originRole (NativeAuthoredDeclaration _) = NativeDeclarationRole
 
 data CanonicalInterfaceDescriptor = CanonicalInterfaceDescriptor
@@ -166,6 +172,11 @@ data CanonicalInterfaceProof = CanonicalInterfaceProof
   , canonicalRequirements :: Map.Map (String,String) String
   , canonicalOrigin :: CanonicalOrigin
   } deriving (Eq, Show)
+
+canonicalSourceImports :: CanonicalInterfaceProof -> Maybe [CanonicalSourceImport]
+canonicalSourceImports proof = case canonicalOrigin proof of
+  SourceOriginal imports -> Just imports
+  _ -> Nothing
 
 data ExactInterfaceEvidence
   = ModuleInterfaceEvidence CanonicalInterfaceProof
@@ -204,7 +215,7 @@ scopeSourceOriginalInterfaces :: ExactScope -> Map.Map (String,String) Canonical
 scopeSourceOriginalInterfaces = Map.mapMaybe select . scopeInterfaceEvidence
   where
     select (ModuleInterfaceEvidence proof)
-      | canonicalOrigin proof == SourceOriginal = Just (DurableInterfaceAdmission proof)
+      | isSourceOriginal (canonicalOrigin proof) = Just (DurableInterfaceAdmission proof)
     select (LocalModuleInterfaceEvidence proof) = Just (LocalInterfaceAdmission proof)
     select _ = Nothing
 
@@ -488,7 +499,7 @@ extendSourceSelectedOriginals (Just selected) scope = do
   lexical <- forM rows $ \(key,certificate,interfaceSha,sourceSha) -> do
     artifact <- maybe (Left "source-selected original lacks exact interface") Right (Map.lookup key available)
     proof <- case Map.lookup key (scopeInterfaceEvidence scope) of
-      Just (ModuleInterfaceEvidence canonical) | canonicalOrigin canonical == SourceOriginal -> Right canonical
+      Just (ModuleInterfaceEvidence canonical) | isSourceOriginal (canonicalOrigin canonical) -> Right canonical
       _ -> Left "source-selected original lacks canonical source origin"
     unless (exactSha256 artifact == interfaceSha
         && canonicalCertificateSha256 proof == certificate
@@ -723,7 +734,7 @@ decodeCanonicalModuleCertificate = do
   magic <- string
   version <- decodeWord
   profile <- string
-  unless (magic == "TPFINALMODULE" && version == 2
+  unless (magic == "TPFINALMODULE" && version == 3
       && profile == "tidepool-ghc-finalized-module-v1")
     (fail "unsupported canonical module certificate")
   producer <- canonicalDigest
@@ -744,7 +755,29 @@ decodeCanonicalModuleCertificate = do
   originCount <- decodeListLen
   originTag <- string
   origin <- case (originTag,originCount) of
-    ("source-original",1) -> pure SourceOriginal
+    ("source-original",2) -> do
+      imports <- bounded 4096 $ do
+        array 4
+        rawQualifier <- string
+        qualifier <- maybe (fail "invalid canonical source qualifier") pure (parseDependencyQualifier rawQualifier)
+        name <- nonempty
+        boot <- decodeBool
+        token' <- peekTokenType
+        home <- if token' == TypeNull then decodeNull >> pure Nothing else Just <$> nonempty
+        unless (case home of
+          Nothing -> case qualifier of
+            DependencyThisUnit _ -> False
+            _ -> True
+          Just importedUnit -> importedUnit `elem` homes && case qualifier of
+            DependencyUnqualified -> True
+            DependencyThisUnit selectedUnit -> selectedUnit == importedUnit
+            DependencyOtherUnit _ -> False) (fail "invalid canonical source owner")
+        pure (qualifier,name,boot,home)
+      let shape (qualifier,name,boot,_) = (qualifier,name,boot)
+      unless (and (zipWith (<) imports (drop 1 imports))
+          && and (zipWith (/=) (map shape imports) (drop 1 (map shape imports))))
+        (fail "invalid canonical source import order")
+      pure (SourceOriginal imports)
     ("native-authored-declaration",2) -> do
       generation <- decodeWord64
       let nativeOwner = SessionModule LibMod (Generation generation)
@@ -756,7 +789,7 @@ decodeCanonicalModuleCertificate = do
 
 encodeCanonicalModuleCertificate :: CanonicalModuleCertificate -> E.Encoding
 encodeCanonicalModuleCertificate certificate = E.encodeListLen 13
-  <> text "TPFINALMODULE" <> E.encodeWord 2 <> text "tidepool-ghc-finalized-module-v1"
+  <> text "TPFINALMODULE" <> E.encodeWord 3 <> text "tidepool-ghc-finalized-module-v1"
   <> text (certificateProducer certificate)
   <> list text (certificateHomeUnits certificate)
   <> text (fst (certificateOwner certificate)) <> text (snd (certificateOwner certificate))
@@ -766,7 +799,10 @@ encodeCanonicalModuleCertificate certificate = E.encodeListLen 13
   <> list (\((unit,name),seal) -> E.encodeListLen 3 <> text unit <> text name <> text seal)
       (certificateRequirements certificate)
   <> case certificateOrigin certificate of
-    SourceOriginal -> E.encodeListLen 1 <> text "source-original"
+    SourceOriginal imports -> E.encodeListLen 2 <> text "source-original"
+      <> list (\(qualifier,name,boot,home) -> E.encodeListLen 4
+        <> text (renderDependencyQualifier qualifier) <> text name <> E.encodeBool boot
+        <> maybe E.encodeNull text home) imports
     NativeAuthoredDeclaration (Generation generation) ->
       E.encodeListLen 2 <> text "native-authored-declaration" <> E.encodeWord64 generation
   where

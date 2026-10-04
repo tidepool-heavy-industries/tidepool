@@ -88,6 +88,7 @@ import System.Process (readProcessWithExitCode)
 import System.Timeout (timeout)
 import Tidepool.CertifiedProducts (encodeCertifiedProducts, resolvePackageGlobal)
 import Tidepool.FinalizedModuleArtifacts (captureFinalizedModuleArtifacts, emptyFinalizedModuleArtifacts)
+import Tidepool.FinalizedModule (finalizedHomeModInfo, homeInterfaceUsageOwners)
 import Tidepool.ExecutionEncode (encodeModuleProducts)
 
 import Tidepool.ExecutionProjection
@@ -233,6 +234,7 @@ main = getArgs >>= \case
   ["--candidate-sited-siblings"] -> candidateSitedSiblings
   ["--candidate-sited-siblings", work] -> candidateSitedSiblingsAt work
   ["--canonical-current-source"] -> canonicalCurrentSource
+  ["--canonical-source-obligations"] -> canonicalSourceObligations
   ["--generated-scaffold-imports"] -> generatedScaffoldImports
   ["--generated-scaffold-retained",scope,seal] -> generatedScaffoldRetained scope seal
   ["--hydrated-site-siblings"] -> hydratedSiteSiblings
@@ -721,6 +723,7 @@ canonicalCurrentSource = withTiming $ withScratch $ \work -> do
     >>= either (fail . show) pure
   let purpose = withSourceImportIntents (cellPlanPrologue parsed) GeneralCompile
   originalBytes <- BS.readFile owner
+  dependencyBytes <- BS.readFile (work </> "CanonicalDependency.hs")
   withResidentPipelineSelected includes $ \compile -> do
     _ <- check compile purpose
     receipts <- listDirectory (work </> ".exact-compilations")
@@ -733,6 +736,12 @@ canonicalCurrentSource = withTiming $ withScratch $ \work -> do
         unless (length selected == 2 && all (\row -> case row of TList fields -> length fields == 5; _ -> False) selected) $
           fail "canonical source receipt lost transitive source closure or retained a native identity"
       _ -> fail "canonical source receipt is not the strict matched version 3"
+    copyFile "test-source-boot/fixtures/CanonicalDependencyChanged.hs" (work </> "CanonicalDependency.hs")
+    changedDependency <- try (void (check compile purpose)) :: IO (Either SomeException ())
+    unless (either (const True) (const False) changedDependency) $
+      fail "canonical current-source selection accepted changed admitted dependency"
+    BS.writeFile (work </> "CanonicalDependency.hs") dependencyBytes
+    _ <- check compile purpose
     BS.writeFile owner "module CanonicalSource where\ntype Answer = Bool\n"
     drift <- try (void (check compile purpose)) :: IO (Either SomeException ())
     unless (either (const True) (const False) drift) $ fail "canonical current-source selection accepted changed source"
@@ -742,7 +751,72 @@ canonicalCurrentSource = withTiming $ withScratch $ \work -> do
     BS.writeFile owner originalBytes
     _ <- check compile purpose
     pure ()
-  putStrLn "canonical current source: interface-only closure, empty native refs, duplicate imports, drift/missing refusal and recovery"
+  putStrLn "canonical current source: interface-only closure, empty native refs, duplicate imports, admitted dependency drift/missing refusal and recovery"
+
+-- GHC owns whether an authored import contributes an interface obligation.
+-- Inspect that evidence before projecting custody; import text is never used
+-- to manufacture an absent type or native dependency.
+canonicalSourceObligations :: IO ()
+canonicalSourceObligations = withTiming $ withScratch $ \work -> do
+  forM_ ["CanonicalUnusedSource.hs","CanonicalUnusedDependency.hs","CanonicalUnusedConsumer.hs"] $ \name ->
+    copyFile ("test-source-boot/fixtures" </> name) (work </> name)
+  let owner = work </> "CanonicalUnusedSource.hs"
+      dependency = work </> "CanonicalUnusedDependency.hs"
+      consumer = work </> "CanonicalUnusedConsumer.hs"
+      scopePath = work </> "canonical-unused-scope.cbor"
+      includes = [work]
+      ownerName = mkModuleName "CanonicalUnusedSource"
+      dependencyKey = ("main","CanonicalUnusedDependency")
+  original <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
+    Nothing owner includes Nothing
+  finalized <- maybe (fail "unused import fixture lacks its original finalized owner") pure
+    (Map.lookup ownerName (pprFinalizedModules original))
+  let environment = prHscEnv (pprPipelineResult original)
+      usageOwners = homeInterfaceUsageOwners environment (hm_iface (finalizedHomeModInfo finalized))
+      required = dependencyKey `elem` usageOwners
+      retained = "CanonicalUnusedSource" : ["CanonicalUnusedDependency" | required]
+      imported = [edge | node <- dependencyModules (pprDependencies original)
+        , dependencyModuleName node == "CanonicalUnusedSource", edge <- dependencyModuleImports node
+        , dependencyImportName edge == "CanonicalUnusedDependency"]
+  unless (length imported == 1 && all ((== Just dependency) . dependencyImportSelected) imported) $
+    fail "unused import fixture lacks its genuine parsed home edge"
+  writeGenuineMetadataScope scopePath work owner includes retained original
+  base <- readExactScope scopePath >>= either fail pure
+  ownerProof <- maybe (fail "unused import fixture lacks canonical custody") pure
+    (Map.lookup ("main","CanonicalUnusedSource") (scopeDurableInterfaces base))
+  unless (Map.keys (canonicalRequirements ownerProof) == usageOwners
+      && Map.member dependencyKey (scopeDurableInterfaces base) == required
+      && null (scopeProducts base) && null (scopeExecutionGraphs base)) $
+    fail "unused import scope invented an interface or native obligation"
+  parsed <- analyzeCellWithFlags (hsc_dflags environment) ""
+    "import CanonicalUnusedSource (Answer)\n(1 :: Answer)" >>= either (fail . show) pure
+  let purpose = withSourceImportIntents (cellPlanPrologue parsed) GeneralCompile
+      admitted = base {scopePurpose=ExactCellPurpose (CheckedCellAdmission (replicate 64 '0')
+        (replicate 64 '0') (replicate 64 '0') [] [] [] [] Nothing AuthoredCellCheck) includes}
+      session = emptySessionScope {ssRoot=work,ssExactScope=Just scopePath}
+      check compile = compile CheckedEnvironment Set.empty (CellProgramCompile purpose admitted)
+        (Just session) consumer includes Nothing
+  originalBytes <- BS.readFile dependency
+  withResidentPipelineSelected includes $ \compile -> do
+    _ <- check compile
+    copyFile "test-source-boot/fixtures/CanonicalUnusedDependencyChanged.hs" dependency
+    result <- try (void (check compile)) :: IO (Either SomeException ())
+    unless (either (const required) (const (not required)) result) $
+      fail "current source import ignored GHC's actual retained versus fresh obligation"
+    ordinary <- compile (PreparedProducts Nothing) Set.empty GeneralCompile
+      Nothing consumer includes Nothing
+    changedSource <- sourceEvidence dependency
+    unless (Map.member (mkModuleName "CanonicalUnusedDependency") (pprFinalizedModules ordinary)
+        && any (\source -> dependencySourcePath source == dependencySourcePath changedSource
+          && dependencySourceSha256 source == dependencySourceSha256 changedSource)
+          (dependencySources (pprDependencies ordinary))) $
+      fail "ordinary fresh source refresh inherited an exact retained obligation"
+    BS.writeFile dependency originalBytes
+    _ <- check compile
+  putStrLn ("canonical source obligations: actual GHC usage=" ++ show required
+    ++ ", ordinary fresh refresh accepted, source import shape preserved, " ++ if required
+      then "held dependency drift refused and recovered"
+      else "unretained dependency remained fresh after drift")
 
 generatedScaffoldImports :: IO ()
 generatedScaffoldImports = withTiming $ withScratch $ \work -> do

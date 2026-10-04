@@ -39,7 +39,7 @@ exactScopeV9Checks manifest = do
     (fail "genuine v9 context lost its typed interface evidence")
   let sourceOriginals = scopeSourceOriginalInterfaces scope
       expectedSourceOwners = Map.keysSet (Map.filter
-        ((== SourceOriginal) . canonicalOrigin) (scopeDurableInterfaces scope))
+        (isSourceOriginal . canonicalOrigin) (scopeDurableInterfaces scope))
   unless (Map.keysSet sourceOriginals == expectedSourceOwners)
     (fail "source executable selection admitted native declarations or lost source originals")
   let proofs = scopeDurableInterfaces scope
@@ -93,12 +93,12 @@ exactScopeV9Checks manifest = do
   refuse manifest "canonical module certificate changed"
     (evidence (TList (replace 2 differentSHA role)))
   forM_ [(0,TString "TPFINALMODULE_OLD","unsupported canonical module certificate")
-        ,(1,TInt 1,"unsupported canonical module certificate")
+        ,(1,TInt 2,"unsupported canonical module certificate")
         ,(2,TString "another-profile","unsupported canonical module certificate")
         ,(3,differentSHA,"canonical module certificate differs")
         ,(5,TString "another-home-unit","invalid canonical module requirement inventory")
         ,(6,TString "Another.Module",case canonicalOrigin proof of
-            SourceOriginal -> "canonical module certificate differs"
+            SourceOriginal _ -> "canonical module certificate differs"
             NativeAuthoredDeclaration _ -> "native canonical origin differs")
         ,(7,TString (T.replicate 64 "0"),"invalid canonical digest")
         ,(8,differentSHA,"canonical module certificate differs")
@@ -211,7 +211,7 @@ nativeOriginChecks manifest = do
   scope <- readExactScope manifest >>= either fail pure
   unless (any (\proof -> case canonicalOrigin proof of
       NativeAuthoredDeclaration _ -> True
-      SourceOriginal -> False) (Map.elems (scopeDurableInterfaces scope)))
+      SourceOriginal _ -> False) (Map.elems (scopeDurableInterfaces scope)))
     (fail "v9 origin fixture lacks a genuine native authored declaration")
   exactScopeV9Checks manifest
 
@@ -226,7 +226,7 @@ originRoleCases manifest scope fields interfaces = do
     selectedFields <- row 8 selected
     role <- row 5 (selectedFields !! 7)
     let (expected,contradictory) = case canonicalOrigin proof of
-          SourceOriginal -> ("module","native-declaration")
+          SourceOriginal _ -> ("module","native-declaration")
           NativeAuthoredDeclaration _ -> ("native-declaration","module")
     unless (head role == TString expected)
       (fail "genuine scope role differs from canonical origin")
@@ -234,7 +234,7 @@ originRoleCases manifest scope fields interfaces = do
     refuse manifest "canonical module origin differs from its exact interface role"
       (TList (replace 4 (TList (map (replaceOwner key changed) interfaces)) fields))
     case canonicalOrigin proof of
-      SourceOriginal -> pure ()
+      SourceOriginal _ -> pure ()
       NativeAuthoredDeclaration (Generation generation) -> do
         certificate <- BS.readFile (canonicalCertificatePath proof) >>= decode >>= row 13
         let changedOrigin expected origin = withTemporary (takeDirectory manifest) "native-origin-cert.cbor" $ \path -> do
@@ -247,7 +247,7 @@ originRoleCases manifest scope fields interfaces = do
                 (TList (map (replaceOwner key alteredRow) interfaces)) fields))
             otherGeneration = if generation == 1 then TInt 2 else TInt 1
         changedOrigin "canonical module origin differs from its exact interface role"
-          (TList [TString "source-original"])
+          (TList [TString "source-original",TList []])
         changedOrigin "native canonical origin differs from its reserved identity"
           (TList [TString "native-authored-declaration",otherGeneration])
 

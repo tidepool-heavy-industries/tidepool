@@ -124,9 +124,11 @@ are rejected by the matched Rust consumer.
 Only actual current imports under a checked request's complete sealed search
 order can issue this proof. The worker validates the admitted canonical source
 origin, current source and GHC exact-interface compatibility before installing
-its source-import graph. Retained canonical type requirements alone grant no
-lexical selection. Session implementation anchors use their existing independent
-checked-value and lexical authorities, never ordinary source-selection rows.
+its source-import graph. Both consumers compare current adjacency with original
+imports sealed by canonical issuance. Retained canonical type requirements
+alone grant no lexical selection. Fresh dependencies remain fresh; import shapes
+do not retain an original child or add compiler execution obligations. Session
+implementation anchors use their existing independent checked-value and lexical authorities, never ordinary source-selection rows.
 
 An explicit import in a submitted cell prologue requests current source
 selection. The original GHC parser carries its module and package qualifier
@@ -151,9 +153,11 @@ receipts. Worker fields 34 (`--turn-pin`) and 45 (`--cell-fold-turn`) are retire
 and rejected explicitly. Whole-cell checking remains the initial admission step
 for host inputs; execution uses admitted item recipes.
 
-Canonical `TPFINALMODULE` version 2 certificates have thirteen fields. The final
-field is `["source-original"]` or `["native-authored-declaration", generation]`;
-the latter binds the issuer's protected native declaration reservation. Scope
+Canonical `TPFINALMODULE` version 3 certificates have thirteen fields. The final
+field is `["source-original", imports]` or `["native-authored-declaration", generation]`;
+the source list seals original authored import qualifiers, boot flags, and resolved
+home owners separately from type requirements; the native form binds the issuer's
+protected native declaration reservation. Scope
 roles must match that authenticated origin. The finalization profile remains
 `tidepool-ghc-finalized-module-v1`. Prior certificate and scope versions are
 rejected; deploy the matched issuer and worker and regenerate evidence through

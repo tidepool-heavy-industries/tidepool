@@ -167,7 +167,7 @@ pub(crate) fn validate_source_selected_originals(
             || key.module.is_empty()
             || SessionModule::is_reserved_name(&key.module)
             || selected.contains_key(&key)
-            || interface.origin() != crate::certified_products::CanonicalOrigin::SourceOriginal
+            || interface.source_imports().is_none()
             || interface.producer_sha256() != context.producer
             || interface.interface_sha256() != claim.interface_sha256
             || interface.source_sha256() != claim.source_sha256
@@ -195,22 +195,49 @@ pub(crate) fn validate_source_selected_originals(
             || node.product != ProductAvailability::InterfaceOnly
             || !paths.insert(node.source.clone())
             || sources.get(&node.source).copied() != Some(&hex(&claim.source_sha256))
-            || std::fs::canonicalize(&node.source).ok().as_ref() != Some(&node.source)
+            || !node.source.is_absolute()
         {
             return Err(refused("current source owner, path or digest changed"));
         }
-        let metadata = std::fs::metadata(&node.source)?;
+        let file = std::fs::File::open(&node.source)?;
+        let metadata = file.metadata()?;
         if !metadata.is_file() || metadata.len() > SOURCE_BYTES_LIMIT as u64 {
             return Err(refused("selected source exceeds its bound"));
         }
         let mut bytes = Vec::new();
-        std::fs::File::open(&node.source)?
-            .take(SOURCE_BYTES_LIMIT as u64 + 1)
+        file.take(SOURCE_BYTES_LIMIT as u64 + 1)
             .read_to_end(&mut bytes)?;
+        use std::os::unix::fs::MetadataExt;
+        let current_metadata = std::fs::metadata(&node.source)?;
+        if metadata.dev() != current_metadata.dev() || metadata.ino() != current_metadata.ino() {
+            return Err(refused("selected source path changed during capture"));
+        }
         if bytes.len() > SOURCE_BYTES_LIMIT
             || <[u8; 32]>::from(Sha256::digest(&bytes)) != claim.source_sha256
         {
             return Err(refused("selected original source changed"));
+        }
+        let actual_imports = node
+            .imports
+            .iter()
+            .map(|edge| crate::certified_products::CanonicalSourceImport {
+                qualifier: edge.qualifier.clone(),
+                module: edge.module.clone(),
+                boot: edge.boot,
+                home_unit: edge.selected.as_ref().map(|_| key.unit.clone()),
+            })
+            .map(|edge| edge.key())
+            .collect::<BTreeSet<_>>();
+        let original_imports = interface
+            .source_imports()
+            .expect("checked source origin")
+            .iter()
+            .map(|edge| edge.key())
+            .collect::<BTreeSet<_>>();
+        if actual_imports.len() != node.imports.len() || actual_imports != original_imports {
+            return Err(refused(
+                "current source import adjacency differs from its original certificate",
+            ));
         }
         let package_proof =
             crate::recovery_artifacts::validate_package_import_evidence_with_validation(
@@ -824,6 +851,24 @@ mod tests {
             }
         )
         .is_err());
+        let alias_root = root.path().join("active");
+        std::os::unix::fs::symlink(root.path(), &alias_root).unwrap();
+        let alias_source = alias_root.join("A.hs");
+        let mut alias_evidence = evidence.clone();
+        alias_evidence.sources[0].path = alias_source.clone();
+        alias_evidence.modules[0].source = alias_source.clone();
+        alias_evidence.resolutions[0].selected = Some(alias_source.clone());
+        alias_evidence.resolutions[0].candidates = vec![alias_source];
+        let alias_include = [alias_root];
+        assert!(validate_source_selected_originals(
+            vec![claim()],
+            &alias_evidence,
+            SourceSelectionContext {
+                include: &alias_include,
+                ..context()
+            }
+        )
+        .is_ok());
         let package = root.path().join("package.hi");
         std::fs::write(&package, b"canonical package interface").unwrap();
         let packaged = crate::certified_products::fixture_source_module_interface(
@@ -892,6 +937,15 @@ mod tests {
             Sha256::digest(a_bytes).into(),
             BTreeMap::from([(("main".into(), "B".into()), b_interface.interface_sha256())]),
             None,
+        );
+        let a_interface = crate::certified_products::fixture_module_source_imports(
+            a_interface,
+            vec![crate::certified_products::CanonicalSourceImport {
+                qualifier: ImportQualifier::Unqualified,
+                module: "B".into(),
+                boot: false,
+                home_unit: Some("main".into()),
+            }],
         );
         let interfaces = [a_interface.clone(), b_interface.clone()];
         let exact = interfaces
@@ -1021,6 +1075,32 @@ mod tests {
         let mut only_a = claims();
         only_a.pop();
         assert!(validate_source_selected_originals(only_a, &missing_child, context()).is_err());
+        // Drop both the reported edge and its claimed child. Canonical type
+        // requirements still have B available, but cannot authenticate this lie.
+        let mut omitted = evidence.clone();
+        omitted.modules[0].imports.clear();
+        omitted.modules.pop();
+        omitted.sources.pop();
+        omitted.resolutions.pop();
+        let mut omitted_claims = claims();
+        omitted_claims.pop();
+        assert!(validate_source_selected_originals(omitted_claims, &omitted, context()).is_err());
+        // A type requirement alone cannot manufacture an authored import.
+        let type_only_a =
+            crate::certified_products::fixture_module_source_imports(a_interface.clone(), vec![]);
+        let type_only_interfaces = [type_only_a.clone(), b_interface.clone()];
+        let mut promoted_claims = claims();
+        promoted_claims[0].certificate_sha256 =
+            Sha256::digest(type_only_a.certificate_bytes()).into();
+        assert!(validate_source_selected_originals(
+            promoted_claims,
+            &evidence,
+            SourceSelectionContext {
+                interfaces: &type_only_interfaces,
+                ..context()
+            }
+        )
+        .is_err());
         let mut packages = evidence.clone();
         packages.modules[1].imports.push(ModuleImportEvidence {
             qualifier: ImportQualifier::Unqualified,
@@ -1030,6 +1110,132 @@ mod tests {
         });
         assert!(validate_source_selected_originals(claims(), &packages, context()).is_err());
         assert!(validate_source_selected_originals(claims(), &evidence, context()).is_ok());
+    }
+
+    #[test]
+    fn canonical_source_selection_allows_authenticated_edges_to_fresh_or_independent_owners() {
+        let root = tempfile::tempdir().unwrap();
+        let key = |name: &str| ExactModuleIdentity {
+            unit: "main".into(),
+            module: name.into(),
+        };
+        let a = root.path().join("A.hs");
+        let b = root.path().join("B.hs");
+        let bytes = b"module A where\nimport B ()\ntype Answer = Int\n";
+        std::fs::write(&a, bytes).unwrap();
+        std::fs::write(&b, b"module B where\nvalue = 43\n").unwrap();
+        // This is a Rust boundary fixture, not a claim that GHC omits usage
+        // for this syntax. The real compiler fixture inspects its own usages.
+        let interface = crate::certified_products::fixture_module_source_imports(
+            crate::certified_products::fixture_source_module_interface(
+                [2; 32],
+                "main",
+                "A",
+                Sha256::digest(bytes).into(),
+                BTreeMap::new(),
+                None,
+            ),
+            vec![crate::certified_products::CanonicalSourceImport {
+                qualifier: ImportQualifier::Unqualified,
+                module: "B".into(),
+                boot: false,
+                home_unit: Some("main".into()),
+            }],
+        );
+        let interfaces = [interface.clone()];
+        let exact = BTreeMap::from([(key("A"), interface.interface_sha256())]);
+        let node = |name: &str, source: PathBuf| ModuleEvidence {
+            unit: "main".into(),
+            module: name.into(),
+            boot: false,
+            source,
+            product: ProductAvailability::Ready,
+            imports: vec![],
+        };
+        let evidence = DependencyEvidence {
+            version: 4,
+            cache_safe: true,
+            selection_complete: true,
+            sources: vec![SourceEvidence {
+                path: a.clone(),
+                sha256: hex(&interface.source_sha256()),
+            }],
+            modules: vec![ModuleEvidence {
+                product: ProductAvailability::InterfaceOnly,
+                imports: vec![ModuleImportEvidence {
+                    qualifier: ImportQualifier::Unqualified,
+                    module: "B".into(),
+                    boot: false,
+                    selected: Some(b.clone()),
+                }],
+                ..node("A", a.clone())
+            }],
+            packages: vec![],
+            resolutions: [(&a, "A"), (&b, "B")]
+                .into_iter()
+                .map(|(path, name)| ResolutionEvidence {
+                    qualifier: ImportQualifier::Unqualified,
+                    module: name.into(),
+                    boot: false,
+                    selected: Some(path.clone()),
+                    candidates: vec![path.clone()],
+                })
+                .collect(),
+        };
+        let fresh = DependencyEvidence {
+            modules: vec![
+                node("Consumer", root.path().join("Consumer.hs")),
+                node("B", b),
+            ],
+            ..evidence.clone()
+        };
+        let roots = [(key("Consumer"), ImportQualifier::Unqualified, key("A"))];
+        let includes = [root.path().to_path_buf()];
+        let independent = BTreeSet::new();
+        let context = || SourceSelectionContext {
+            producer: [2; 32],
+            interfaces: &interfaces,
+            exact_interfaces: &exact,
+            include: &includes,
+            fresh: &fresh,
+            roots: &roots,
+            independent: &independent,
+        };
+        let claims = || {
+            vec![SourceSelectedOriginalClaim {
+                owner: key("A"),
+                certificate_sha256: Sha256::digest(interface.certificate_bytes()).into(),
+                interface_sha256: interface.interface_sha256(),
+                source_sha256: interface.source_sha256(),
+            }]
+        };
+        assert!(validate_source_selected_originals(claims(), &evidence, context()).is_ok());
+        let mut without_b = fresh.clone();
+        without_b.modules.pop();
+        assert!(validate_source_selected_originals(
+            claims(),
+            &evidence,
+            SourceSelectionContext {
+                fresh: &without_b,
+                ..context()
+            }
+        )
+        .is_err());
+        let admitted = BTreeSet::from([key("B")]);
+        assert!(validate_source_selected_originals(
+            claims(),
+            &evidence,
+            SourceSelectionContext {
+                fresh: &without_b,
+                independent: &admitted,
+                ..context()
+            }
+        )
+        .is_ok());
+        let mut omitted = evidence.clone();
+        omitted.modules[0].imports.clear();
+        omitted.resolutions.pop();
+        assert!(validate_source_selected_originals(claims(), &omitted, context()).is_err());
     }
 
     fn valid_wire() -> GraphWire {

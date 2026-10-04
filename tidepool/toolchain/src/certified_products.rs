@@ -14,7 +14,9 @@ use tidepool_repr::execution_schema::{
 };
 
 mod finalized_module;
-pub(crate) use finalized_module::{CanonicalOrigin, CertifiedModuleInterface};
+pub(crate) use finalized_module::{
+    CanonicalOrigin, CanonicalSourceImport, CertifiedModuleInterface,
+};
 pub use finalized_module::{
     CapturedArtifactDescriptor, FinalizationEnvelope, FinalizedModuleReceipt,
 };
@@ -2121,6 +2123,14 @@ pub(crate) fn fixture_source_module_interface(
     )
 }
 
+#[cfg(test)]
+pub(crate) fn fixture_module_source_imports(
+    interface: CertifiedModuleInterface,
+    imports: Vec<CanonicalSourceImport>,
+) -> CertifiedModuleInterface {
+    finalized_module::fixture_source_imports(interface, imports)
+}
+
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) fn fixture_interface_bytes(
     producer: [u8; 32],
@@ -2155,6 +2165,25 @@ pub(crate) fn fixture_finalized_product_with_requirements(
     producer: [u8; 32],
     requirements: Option<BTreeMap<(String, String), [u8; 32]>>,
 ) -> crate::recovery_artifacts::CertifiedRecoveryProduct {
+    fixture_finalized_product_inner(product, producer, requirements, None)
+}
+
+#[cfg(test)]
+pub(crate) fn fixture_source_finalized_product(
+    product: crate::recovery_artifacts::CertifiedRecoveryProduct,
+    producer: [u8; 32],
+    imports: Vec<CanonicalSourceImport>,
+) -> crate::recovery_artifacts::CertifiedRecoveryProduct {
+    fixture_finalized_product_inner(product, producer, None, Some(imports))
+}
+
+#[cfg(test)]
+fn fixture_finalized_product_inner(
+    product: crate::recovery_artifacts::CertifiedRecoveryProduct,
+    producer: [u8; 32],
+    requirements: Option<BTreeMap<(String, String), [u8; 32]>>,
+    imports: Option<Vec<CanonicalSourceImport>>,
+) -> crate::recovery_artifacts::CertifiedRecoveryProduct {
     let mut witness = decode_home_witness(product.certification_bytes()).unwrap();
     if let Some(requirements) = requirements {
         witness.interface_requirements = requirements;
@@ -2187,6 +2216,10 @@ pub(crate) fn fixture_finalized_product_with_requirements(
         witness.interface_requirements.clone(),
         Some(b"fixture-core".to_vec()),
     );
+    let interface = match imports {
+        Some(imports) => finalized_module::fixture_source_imports(interface, imports),
+        None => interface,
+    };
     witness.finalized_module_sha256 = Some(sha(interface.certificate_bytes()));
     let binding = validate_module_binding(
         &witness,
@@ -4204,6 +4237,9 @@ pub(crate) fn certify_products(
         final_evidence,
         &inherited_seals,
         authored,
+        exact.map_or(&BTreeMap::new(), |admission| {
+            &admission.source.exact_source_imports
+        }),
         &mut validation,
     )?;
     let inherited_module_interfaces = exact

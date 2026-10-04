@@ -883,6 +883,8 @@ pub(crate) struct ExactSourceAdmission {
     pub(crate) evidence: crate::cache::DependencyEvidence,
     pub(crate) evidence_bytes: Vec<u8>,
     pub(crate) exact_imports: BTreeMap<ExactModuleIdentity, Vec<ExactModuleIdentity>>,
+    pub(crate) exact_source_imports:
+        BTreeMap<ExactModuleIdentity, Vec<crate::certified_products::CanonicalSourceImport>>,
     pub(crate) selected_originals:
         BTreeMap<ExactModuleIdentity, crate::execution_source::SourceSelectedOriginal>,
 }
@@ -1801,6 +1803,7 @@ impl ExactCompilationRequest {
         };
         let mut seen = BTreeSet::new();
         let mut exact_imports = BTreeMap::new();
+        let mut exact_source_imports = BTreeMap::new();
         for module in edges {
             let module = row(module, 4)?;
             let owner = (
@@ -1815,6 +1818,7 @@ impl ExactCompilationRequest {
             }
             let mut imported = BTreeSet::new();
             let mut resolved = BTreeSet::new();
+            let mut source_imports = Vec::new();
             for edge in list(&module[3], 4096)? {
                 let edge = row(edge, 4)?;
                 let qualifier = string(&edge[0])?;
@@ -1866,7 +1870,15 @@ impl ExactCompilationRequest {
                     )));
                 }
                 resolved.insert(identity(unit, name));
+                source_imports.push(crate::certified_products::CanonicalSourceImport {
+                    qualifier: crate::cache::ImportQualifier::try_from(qualifier.to_owned())
+                        .map_err(failure)?,
+                    module: name.to_owned(),
+                    boot,
+                    home_unit: Some(unit.to_owned()),
+                });
             }
+            exact_source_imports.insert(identity(owner.0, owner.1), source_imports);
             exact_imports.insert(identity(owner.0, owner.1), resolved.into_iter().collect());
         }
         if seen != source_owners {
@@ -1880,6 +1892,7 @@ impl ExactCompilationRequest {
             evidence,
             evidence_bytes,
             exact_imports,
+            exact_source_imports,
             selected_originals,
         })
     }
@@ -1998,7 +2011,7 @@ fn scope_interface_evidence(
     .map_err(failure)?;
     Ok(Value::Array(vec![
         text(match interface.origin() {
-            crate::certified_products::CanonicalOrigin::SourceOriginal => "module",
+            crate::certified_products::CanonicalOrigin::SourceOriginal { .. } => "module",
             crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration { .. } => {
                 "native-declaration"
             }
@@ -3619,6 +3632,7 @@ mod tests {
             evidence_bytes: serde_json::to_vec(&evidence).unwrap(),
             evidence,
             exact_imports: BTreeMap::new(),
+            exact_source_imports: BTreeMap::new(),
             selected_originals: BTreeMap::new(),
         }
     }
@@ -4161,7 +4175,17 @@ mod tests {
                 let ArtifactPayload::Original(product) = &entry.payload else {
                     unreachable!()
                 };
-                let product = crate::certified_products::fixture_finalized_product(
+                let original_imports = if dependency && owner.module == "A" {
+                    vec![crate::certified_products::CanonicalSourceImport {
+                        qualifier: crate::cache::ImportQualifier::Unqualified,
+                        module: "B".into(),
+                        boot: false,
+                        home_unit: Some(owner.unit.clone()),
+                    }]
+                } else {
+                    vec![]
+                };
+                let product = crate::certified_products::fixture_source_finalized_product(
                     product.clone().with_source_sha256(
                         Sha256::digest(
                             std::fs::read(root.join(format!("{}.hs", owner.module))).unwrap(),
@@ -4169,6 +4193,7 @@ mod tests {
                         .into(),
                     ),
                     [7; 32],
+                    original_imports,
                 )
                 .with_execution_source(Arc::clone(&graph))
                 .unwrap();
@@ -4542,12 +4567,9 @@ mod tests {
                     originals
                         .values()
                         .map(|entry| {
-                            Arc::new(
-                                ArtifactEntry::canonical(
-                                    canonical_source_interface(entry).unwrap().clone(),
-                                )
-                                .unwrap(),
-                            )
+                            Arc::new(ArtifactEntry::canonical(
+                                canonical_source_interface(entry).unwrap().clone(),
+                            ))
                         })
                         .collect(),
                 )
