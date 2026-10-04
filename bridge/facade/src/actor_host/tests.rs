@@ -1,6 +1,6 @@
 pub(super) use super::test_campaign::{
-    dispatch_haskell_script, dispatch_haskell_script_response, dispatch_haskell_script_result,
-    dispatch_lookup, dispatch_status, dispatch_structured_tool,
+    dispatch_haskell_script, dispatch_haskell_script_result, dispatch_lookup, dispatch_status,
+    dispatch_structured_tool,
 };
 use super::*;
 use exomonad_tool::{ToolArguments, ToolInvocation, ToolInvocationContext};
@@ -2268,7 +2268,7 @@ async fn forest_operator_survives_model_root_recovery() {
     campaign.hosted.await.unwrap();
     assert_eq!(
         campaign.forest.resident_session_state(),
-        exomonad_actor::ResidentSessionState::Reusable,
+        tidepool_runtime::session::ResidentSessionState::Reusable,
         "actor failure must not imply that the resident machine is safe to replace"
     );
     let (replacement, task) = campaign
@@ -2283,7 +2283,7 @@ async fn forest_operator_survives_model_root_recovery() {
         .unwrap();
     assert_eq!(
         campaign.forest.resident_session_state(),
-        exomonad_actor::ResidentSessionState::Reusable
+        tidepool_runtime::session::ResidentSessionState::Reusable
     );
     assert_ne!(replacement.identity(), campaign.actor.identity());
     assert_eq!(

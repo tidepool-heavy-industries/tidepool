@@ -1,6 +1,7 @@
 //! Request-owned installed handlers across actor reload and pending compaction.
 
 use super::*;
+use exomonad_actor::ResidentToolEndpoint;
 use harness::{
     item::Item,
     model::{CallId, ConversationIdentity, OperationId, RequestId},
@@ -311,16 +312,20 @@ async fn real_host_pins_typed_handler_across_reload_and_pending_compaction() {
         SPEC.replace("offset = 2", "offset = 3"),
     )
     .unwrap();
-    host.context
-        .root_installation
-        .policy
+    // The issued provider request stays held while its exact actor reloads.
+    // This production projection only routes to the already-owned actor; it
+    // creates neither an installation nor additional admission authority.
+    let reloaded = exomonad_actor::ResidentInteractivePolicy::local(host.context.actor.clone())
         .dispatch_boxed(exomonad_tool::ToolInvocation {
             context: None,
             name: "reload_agent_spec".into(),
             arguments: exomonad_tool::ToolArguments::Structured(json!({})),
         })
         .await
-        .expect("actual actor-local reload authority must answer");
+        .expect("actual actor-local reload authority must answer")
+        .into_json()
+        .expect("reload receipt must encode");
+    assert!(reloaded.to_string().contains("swapped"), "{reloaded}");
     let compiled_after_reload = tidepool_extract_cmd::extract_spawn_count();
     first
         .reply
