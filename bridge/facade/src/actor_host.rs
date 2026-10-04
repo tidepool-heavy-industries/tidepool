@@ -6,6 +6,8 @@
 
 #[cfg(all(test, feature = "codex-compat"))]
 mod agent_spec_tests;
+#[cfg(test)]
+mod embedded_agent_spec_tests;
 
 #[cfg(test)]
 pub(crate) use crate::transport_test_support::ResidentToolEndpointTestExt;

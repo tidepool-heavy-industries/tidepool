@@ -15,6 +15,9 @@ TEST_ONLY_SOURCES = {
         'tidepool/codegen/src/prepared_program/machine/literal_manifest_tests.rs',
     }),
     'tidepool': frozenset({
+        'bridge/facade/src/actor_host/embedded_agent_spec_tests.rs',
+        'bridge/facade/src/actor_host/fixtures/retained_handler_agent_spec.hs',
+        'bridge/facade/src/actor_host/fixtures/retained_handler_tools.hs',
         'bridge/facade/src/actor_host/embedded_captured_child_reuse_nominal.hs',
         'bridge/facade/src/actor_host/command_tool_facts_gate.hs',
         'bridge/facade/src/actor_host/prepared_display_tests.rs',
