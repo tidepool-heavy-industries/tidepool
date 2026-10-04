@@ -5,7 +5,7 @@ load("@prelude//toolchains:genrule.bzl", "system_genrule_toolchain")
 load("@prelude//toolchains:python.bzl", "system_python_bootstrap_toolchain")
 load("@prelude//toolchains:remote_test_execution.bzl", "remote_test_execution_toolchain")
 load("@prelude//tests:test_toolchain.bzl", "noop_test_toolchain")
-load("@root//bridge/haskell:tests.bzl", "JEV_SOURCE_PATHS")
+load("@root//bridge/haskell:components.bzl", "JEV_SOURCE_PATHS")
 load(":tidepool.bzl", "nix_directory", "nix_haskell_toolchain", "nix_rust_toolchain", "nix_tool")
 
 nix_rust_toolchain(

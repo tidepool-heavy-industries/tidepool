@@ -58,6 +58,19 @@ class NativeWorkflowTests(unittest.TestCase):
                     workflow.main(arguments)
                 buck.assert_not_called()
 
+    def test_verify_discovers_haskell_suite_targets_from_the_native_graph(self):
+        discovery = types.SimpleNamespace(stdout="root//bridge/haskell:control\n")
+        with patch.object(workflow, "roster", return_value=ROSTER), patch.object(workflow, "buck", return_value=0) as buck, patch.object(workflow.subprocess, "run", return_value=discovery) as query:
+            self.assertEqual(workflow.main(["verify"]), 0)
+        self.assertIn("haskell_component_suite", query.call_args.args[0][-1])
+        self.assertIn("root//bridge/haskell:control", buck.call_args_list[-1].args[1])
+
+    def test_verify_refuses_empty_haskell_graph_selection(self):
+        with patch.object(workflow, "roster", return_value=ROSTER), patch.object(workflow, "buck") as buck, patch.object(workflow.subprocess, "run", return_value=types.SimpleNamespace(stdout="")):
+            with self.assertRaisesRegex(ValueError, "no valid owning targets"):
+                workflow.main(["verify"])
+            buck.assert_not_called()
+
     def test_standard_unittest_adapter_executes_control_and_refuses_zero(self):
         adapter_spec = importlib.util.spec_from_file_location("native_unittest", Path(__file__).parents[1] / "unittest-main.py")
         adapter = importlib.util.module_from_spec(adapter_spec)

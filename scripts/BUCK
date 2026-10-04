@@ -78,3 +78,16 @@ sh_test(
     resources = [":script_test_resources", "//build/haskell/cabal-metadata:metadata", "toolchains//:python", "toolchains//:test_tools_closure"],
     visibility = ["PUBLIC"],
 )
+
+sh_test(
+    name = "haskell_component_projection_tests",
+    test = "run-unittests.sh",
+    args = ["scripts.tests.test_buck2_haskell_components"],
+    env = {
+        "TIDEPOOL_TEST_PYTHON": "$(exe toolchains//:python)",
+        "TIDEPOOL_SCRIPT_TEST_ROOT": "$(location :script_test_resources)",
+        "PATH": read_root_config("nix", "action_path"),
+    },
+    resources = [":script_test_resources", "toolchains//:python", "toolchains//:test_tools_closure"],
+    visibility = ["PUBLIC"],
+)

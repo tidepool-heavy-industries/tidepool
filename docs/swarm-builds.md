@@ -88,7 +88,7 @@ are distinct from accepted execution evidence.
 `build/native-targets.json` is generated from Cargo metadata and the reviewed
 module ownership walk. Registered native wrappers own libtest discovery,
 nonzero counts, bounded isolated execution and reports. Haskell target/module
-rosters come from Cabal through `scripts/buck2-haskell-tests.py` and execute
+rosters come from Cabal through `scripts/buck2-haskell-components.py` and execute
 shared Tasty trees. Test GHC packages are separate from the production worker's
 package environment. Configure with `--tests` to prepare and retain
 `.#buck-test-ghc`, `.#buck-haskell-test-closure` and `.#buck-jev-sources`

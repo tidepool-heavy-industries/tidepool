@@ -11,7 +11,7 @@ in `tidepool-toolchain`; CBOR decoding lives in `tidepool-repr`.
 From the repository root, after materializing and configuring pinned tools:
 
 ```bash
-just build //bridge/haskell:tidepool-extract-bin
+just build //bridge/haskell:tidepool_extract_bin
 just test-native //bridge/haskell:source_boot_product_reuse_test --list-tests
 ```
 
@@ -21,7 +21,7 @@ only the versioned request protocol emitted by `tidepool-extract-cmd`, or
 carry matched frontend, worker, deployment, GHC and source resources. The
 production worker uses its production toolchain; host Tasty compilation uses
 `toolchains//:haskell_tests`. Cabal declarations own component module/package
-rosters, from which `scripts/buck2-haskell-tests.py` generates native targets.
+rosters, from which `scripts/buck2-haskell-components.py` generates native targets.
 
 ## Toolchain resolution and deployment
 

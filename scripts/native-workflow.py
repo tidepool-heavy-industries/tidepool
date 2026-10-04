@@ -125,12 +125,16 @@ def main(argv=None):
     if options.command == "verify":
         test_labels.update("//bridge/haskell:corpus_" + cohort.replace("-", "_") + "_test" for cohort in COHORTS)
         test_labels.update(("//tidepool/runtime:compile_fail_machine_lease_double_borrow", "//tidepool/runtime:compile_fail_machine_lease_consumes_pending", "//tidepool/runtime:compile_fail_machine_lease_crossed_image"))
-        # Tasty component registration is generated from the owning Cabal roster.
-        from importlib.util import module_from_spec, spec_from_file_location
-        spec = spec_from_file_location("haskell_components", ROOT / "scripts/buck2-haskell-tests.py")
-        owner = module_from_spec(spec)
-        spec.loader.exec_module(owner)
-        test_labels.update("//bridge/haskell:" + component["name"].replace("-", "_") for component in owner.components((ROOT / "bridge/haskell/tidepool-extract.cabal").read_text()).values() if component["kind"] == "test-suite")
+        # Suite ownership is declared by generated native rules; query the graph
+        # rather than maintaining or parsing a second component inventory.
+        discovery = subprocess.run(
+            ["bash", str(ROOT / "scripts/buck2-run.sh"), "uquery", "-c", "remote.enabled=false",
+             'attrfilter(labels, haskell_component_suite, //bridge/haskell:)'],
+            cwd=ROOT, check=True, text=True, stdout=subprocess.PIPE)
+        suites = discovery.stdout.splitlines()
+        if not suites or any(not label.startswith("root//bridge/haskell:") for label in suites):
+            raise ValueError("native Haskell suite discovery returned no valid owning targets")
+        test_labels.update(suites)
         check_status = buck("build", ["//build/rust:native_checks", "//bridge/haskell:probe_opacity"])
         test_status = buck("test", sorted(test_labels))
         return check_status or test_status
