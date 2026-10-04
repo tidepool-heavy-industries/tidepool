@@ -768,3 +768,191 @@ pub(super) fn pinned_jev_workspace(config: &mut ActorHostConfig) {
             .expect("resolve the pinned Haskell source"),
     );
 }
+
+/// A scripted provider reply. This observes requests from the real host; it
+/// neither attaches an actor nor constructs a tool installation.
+pub(super) struct HostedScriptRound {
+    pub request: harness::transport::ResponsesRequest,
+    reply: tokio::sync::oneshot::Sender<harness::transport::ResponsesTurn>,
+}
+
+impl HostedScriptRound {
+    pub fn origin(&self) -> harness::model::ConversationIdentity {
+        let (prefix, incarnation) = self.request.session_id.rsplit_once(':').unwrap();
+        let (run, actor) = prefix.rsplit_once(':').unwrap();
+        harness::model::ConversationIdentity::Embedded {
+            run: run.into(),
+            actor: harness::model::AgentPath(actor.into()),
+            incarnation: incarnation.into(),
+        }
+    }
+
+    pub fn call(self, call_id: &str, source: &str) {
+        self.reply
+            .send(harness::transport::ResponsesTurn {
+                response_id: format!("script-{call_id}"),
+                items: vec![harness::item::Item(serde_json::json!({
+                    "type":"custom_tool_call", "call_id":call_id,
+                    "name":"haskell_sync", "input":source,
+                }))],
+                usage: Default::default(),
+            })
+            .expect("production provider request remains live");
+    }
+
+    pub fn finish(self) {
+        self.reply
+            .send(harness::transport::ResponsesTurn {
+                response_id: uuid::Uuid::new_v4().simple().to_string(),
+                items: vec![harness::item::Item(serde_json::json!({
+                    "type":"message", "role":"assistant", "phase":"final_answer",
+                    "content":[{"type":"output_text","text":"fixture complete"}],
+                }))],
+                usage: Default::default(),
+            })
+            .expect("production provider request remains live");
+    }
+
+    pub fn assert_committed(&self, call_id: &str) {
+        let output = self
+            .request
+            .input
+            .iter()
+            .find(|item| {
+                item.0["type"] == "custom_tool_call_output" && item.0["call_id"] == call_id
+            })
+            .unwrap_or_else(|| panic!("{call_id}: actual provider request has no settled output"));
+        let value: serde_json::Value =
+            serde_json::from_str(output.0["output"].as_str().unwrap()).unwrap();
+        assert!(
+            matches!(value["status"].as_str(), Some("completed" | "committed")),
+            "{value}"
+        );
+        assert!(
+            value["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|item| item["status"] == "committed"),
+            "{value}"
+        );
+    }
+
+    pub fn assert_failure(&self, call_id: &str, expected: &str) {
+        let output = self
+            .request
+            .input
+            .iter()
+            .find(|item| {
+                item.0["type"] == "custom_tool_call_output" && item.0["call_id"] == call_id
+            })
+            .unwrap_or_else(|| panic!("{call_id}: actual provider request has no failure output"));
+        let value: serde_json::Value =
+            serde_json::from_str(output.0["output"].as_str().unwrap()).unwrap();
+        assert!(
+            !matches!(value["status"].as_str(), Some("completed" | "committed")),
+            "{value}"
+        );
+        assert!(value.to_string().contains(expected), "{value}");
+    }
+
+    pub fn assert_value(&self, call_id: &str, expected: &str) {
+        let output = self
+            .request
+            .input
+            .iter()
+            .find(|item| {
+                item.0["type"] == "custom_tool_call_output" && item.0["call_id"] == call_id
+            })
+            .unwrap_or_else(|| panic!("{call_id}: actual provider request has no settled output"));
+        let value: serde_json::Value =
+            serde_json::from_str(output.0["output"].as_str().unwrap()).unwrap();
+        assert!(
+            matches!(value["status"].as_str(), Some("completed" | "committed")),
+            "{value}"
+        );
+        let item = value["items"].as_array().unwrap().last().unwrap();
+        assert_eq!(item["status"], "committed", "{value}");
+        assert_eq!(item["output"], expected, "{value}");
+    }
+}
+
+struct HostedScriptProvider(tokio::sync::mpsc::UnboundedSender<HostedScriptRound>);
+
+#[async_trait::async_trait]
+impl harness::engine::ResponsesTransport for HostedScriptProvider {
+    async fn create(
+        &self,
+        request: harness::transport::ResponsesRequest,
+    ) -> Result<harness::transport::ResponsesTurn, harness::transport::TransportError> {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        self.0
+            .send(HostedScriptRound { request, reply })
+            .expect("script observer remains live");
+        Ok(response.await.expect("script supplies the provider reply"))
+    }
+}
+
+pub(super) fn hosted_script_provider() -> (
+    Arc<dyn harness::engine::ResponsesTransport>,
+    tokio::sync::mpsc::UnboundedReceiver<HostedScriptRound>,
+) {
+    let (requests, receiver) = tokio::sync::mpsc::unbounded_channel();
+    (Arc::new(HostedScriptProvider(requests)), receiver)
+}
+
+/// Preserve interleaved provider requests while one actor's reply is awaited.
+pub(super) async fn next_hosted_script_round(
+    requests: &mut tokio::sync::mpsc::UnboundedReceiver<HostedScriptRound>,
+    pending: &mut std::collections::VecDeque<HostedScriptRound>,
+    actor: &harness::model::AgentPath,
+) -> HostedScriptRound {
+    let matches = |round: &HostedScriptRound| match round.origin() {
+        harness::model::ConversationIdentity::Embedded { actor: path, .. } => &path == actor,
+        _ => false,
+    };
+    if let Some(index) = pending.iter().position(matches) {
+        return pending.remove(index).unwrap();
+    }
+    tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, async {
+        loop {
+            let round = requests
+                .recv()
+                .await
+                .expect("production provider requests closed");
+            if matches(&round) {
+                return round;
+            }
+            pending.push_back(round);
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!("production actor {actor:?} did not request its next scripted reply")
+    })
+}
+
+pub(super) fn hosted_test_settings(
+    files: &tempfile::TempDir,
+    concurrent_jobs: usize,
+) -> crate::exomonad::EmbeddedLaunchConfig {
+    let assets = files.path().join("assets");
+    std::fs::create_dir_all(&assets).unwrap();
+    std::fs::write(assets.join("index.html"), "<!doctype html>").unwrap();
+    let session_secret_file = files.path().join("session-secret");
+    std::fs::write(&session_secret_file, "hosted-script-test-secret-32-bytes").unwrap();
+    let credential_file = files.path().join("codex-auth.json");
+    std::fs::write(&credential_file, "{}").unwrap();
+    crate::exomonad::EmbeddedLaunchConfig {
+        listen: "127.0.0.1:0".parse().unwrap(),
+        public_origin_scheme: crate::exomonad::EmbeddedPublicOriginScheme::Https,
+        public_origin: None,
+        asset_root: assets,
+        browser_auth: crate::exomonad::EmbeddedBrowserAuth::Secret,
+        session_secret_file: Some(session_secret_file),
+        provider: crate::exomonad::EmbeddedModelProvider::Codex,
+        credential_file,
+        context_capacity_tokens: 200_000,
+        concurrent_jobs,
+    }
+}

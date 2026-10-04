@@ -1,213 +1,174 @@
 //! Releasing a checkpoint prevents new children without revoking admitted custody.
 
-use super::test_campaign::dispatch_haskell_script;
+use super::hosted_test_context::HostedTestRuntime;
+use super::test_campaign::{
+    hosted_script_provider, hosted_test_settings, next_hosted_script_round,
+};
 use super::*;
-use exomonad_tool::{ToolArguments, ToolInvocation, ToolInvocationContext};
+use harness::model::AgentPath;
 
 #[tokio::test]
 async fn released_checkpoint_keeps_an_admitted_childs_hosted_context() {
-    let mut campaign =
-        test_campaign::TestCampaign::start_with_research_policy(exomonad_actor::ResearchPolicy {
+    let files = tempfile::tempdir().unwrap();
+    let settings = hosted_test_settings(&files, 3);
+    let (provider, mut requests) = hosted_script_provider();
+    let host = HostedTestRuntime::start_configured(&settings, &provider, |config| {
+        config.research_policy = exomonad_actor::ResearchPolicy {
             maximum_depth: 1,
             maximum_active_children: Some(2),
             default_depth: 1,
-        })
-        .await;
-    let root = campaign.root_installation.policy.clone();
-    let output_store = display_output::open_run_store(campaign.session_root.path()).unwrap();
-    let root_for_setup = root.clone();
-    let mut setup = tokio::spawn(async move {
-        dispatch_haskell_script(
-            root_for_setup.as_ref(),
+        };
+    })
+    .await
+    .expect("production checkpoint host starts");
+    let mut pending = std::collections::VecDeque::new();
+    let root = AgentPath("/root".into());
+    next_hosted_script_round(&mut requests, &mut pending, &root)
+        .await
+        .call(
+            "checkpoint-issuer-setup",
             include_str!("checkpoint_issuer_setup.hs"),
-        )
+        );
+    let next_root = next_hosted_script_round(&mut requests, &mut pending, &root).await;
+    next_root.assert_committed("checkpoint-issuer-setup");
+    let issuer = tokio::time::timeout(Duration::from_secs(120), async {
+        loop {
+            if let Some(installation) = host
+                .context
+                .observer
+                .installations()
+                .into_iter()
+                .find(|installation| installation.actor.identity() != host.context.actor.identity())
+            {
+                return installation;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("actual issuer attaches through production readiness");
+    let issuer_id = issuer.actor.identity();
+    let issuer_path = AgentPath(format!(
+        "/root/a{}_i{}",
+        issuer_id.id.0, issuer_id.incarnation.0
+    ));
+    next_hosted_script_round(&mut requests, &mut pending, &issuer_path)
         .await
-    });
-    let mut setup_finished = false;
-    let issuer = tokio::select! {
-        result = &mut setup => {
-            let result = result.expect("checkpoint setup task");
-            assert_eq!(result["status"], "committed", "checkpoint issuer setup failed: {result:?}");
-            setup_finished = true;
-            campaign.next_deployment(
-                "issuer admitted by completed checkpoint setup", Duration::from_secs(5),
-                |event| match event {
-                    LocalResidentDeployment::PolicyInstalled(installation) => Ok(installation),
-                    other => Err(other),
-                },
-            ).await
-        },
-        issuer = campaign.next_deployment(
-            "checkpoint issuer", Duration::from_secs(120),
-            |event| match event {
-                LocalResidentDeployment::PolicyInstalled(installation) => Ok(installation),
-                other => Err(other),
-            },
-        ) => issuer,
-    };
-    campaign.authority.install_grant(
-        issuer.actor.identity().into(),
-        worktree_grant(issuer.effective_role.role()),
+        .call(
+            "checkpoint-issuer-capture",
+            include_str!("checkpoint_issuer_capture.hs"),
+        );
+    let issuer_done = next_hosted_script_round(&mut requests, &mut pending, &issuer_path).await;
+    issuer_done.assert_committed("checkpoint-issuer-capture");
+    issuer_done.finish();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let succeeded = host
+                .context
+                .forest
+                .inspect_host_graph()
+                .into_iter()
+                .find(|node| node.actor == issuer_id)
+                .and_then(|node| node.provider_turn)
+                .is_some_and(|turn| turn.state == exomonad_model::ProviderTurnState::Succeeded);
+            if succeeded {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("issuer succeeds through its real provider turn before retirement");
+    next_root.call(
+        "checkpoint-issuer-cleanup",
+        "planCleanupFor producer >>= executeCleanup >>= display . cleanupReceiptComplete",
     );
-    issuer.fork_gate.as_ref().unwrap().mark_ready().unwrap();
-    if !setup_finished {
-        let result = setup.await.unwrap();
-        assert_eq!(result["status"], "committed", "{result:?}");
-    }
-
-    let capture_call_id = uuid::Uuid::new_v4().simple().to_string();
-    let capture = issuer
-        .policy
-        .dispatch_json_boxed(ToolInvocation {
-            context: Some(ToolInvocationContext::external(
-                "actor-host-vertical".into(),
-                capture_call_id.clone(),
-                capture_call_id.clone(),
-                Some(capture_call_id.clone()),
-                Some("haskell".into()),
-            )),
-            name: exomonad_actor::HASKELL_TOOL.into(),
-            arguments: ToolArguments::Raw(include_str!("checkpoint_issuer_capture.hs").into()),
-        })
-        .await
-        .unwrap();
-    assert_eq!(capture["status"], "committed", "{capture:?}");
-    issuer
-        .policy
-        .complete_boxed(tidepool_runtime::session::WorkbenchForkBoundary::external(
-            "actor-host-vertical".into(),
-            capture_call_id.clone(),
-            capture_call_id.clone(),
-        ))
-        .await
-        .unwrap();
-    issuer
-        .actor
-        .shutdown(ActorTerminal {
-            kind: ActorExitKind::Completed,
-            summary: "checkpoint issuer retired".into(),
-        })
-        .await
-        .unwrap();
-
+    let root_after_cleanup = next_hosted_script_round(&mut requests, &mut pending, &root).await;
+    root_after_cleanup.assert_value("checkpoint-issuer-cleanup", "True");
     let issuer_cleanup = issuer
         .actor
         .terminal()
         .cleanup()
-        .expect("issuer cleanup evidence");
-    assert_eq!(issuer_cleanup.actor(), issuer.actor.identity());
+        .expect("actual issuer cleanup evidence");
+    assert_eq!(issuer_cleanup.actor(), issuer_id);
     assert!(issuer_cleanup.is_confirmed(), "{issuer_cleanup:?}");
-
-    let root_for_branch = root.clone();
-    let mut branch = tokio::spawn(async move {
-        dispatch_haskell_script(
-            root_for_branch.as_ref(),
-            include_str!("checkpoint_deferred_branch.hs"),
-        )
-        .await
-    });
-    let mut branch_finished = false;
-    let observer = tokio::select! {
-        result = &mut branch => {
-            let result = result.unwrap();
-            assert_eq!(result["status"], "committed", "{result:?}");
-            branch_finished = true;
-            campaign.next_deployment(
-                "checkpoint observer after completed branch",
-                Duration::from_secs(5),
-                |event| match event {
-                    LocalResidentDeployment::PolicyInstalled(installation) => Ok(installation),
-                    other => Err(other),
-                },
-            ).await
-        },
-        installation = campaign.next_deployment(
-            "checkpoint observer",
-            Duration::from_secs(120),
-            |event| match event {
-                LocalResidentDeployment::PolicyInstalled(installation) => Ok(installation),
-                other => Err(other),
-            },
-        ) => installation,
-    };
-    assert_eq!(observer.context_parent, Some(issuer.actor.identity()));
-    let checkpoint = observer.checkpoint.as_ref().expect("delegated checkpoint");
-    let operation = checkpoint.boundary.hosted().expect("hosted checkpoint");
-    assert_eq!(operation.external_thread(), Some("actor-host-vertical"));
-    assert_eq!(operation.call_id, capture_call_id);
-    campaign.authority.install_grant(
-        observer.actor.identity().into(),
-        worktree_grant(observer.effective_role.role()),
+    root_after_cleanup.call(
+        "checkpoint-observer-admission",
+        include_str!("checkpoint_deferred_branch.hs"),
     );
-    observer.fork_gate.as_ref().unwrap().mark_ready().unwrap();
-    if !branch_finished {
-        assert_eq!(branch.await.unwrap()["status"], "committed");
-    }
-
-    let release = campaign
-        .drive_actor_output(
-            &output_store,
-            dispatch_haskell_script(root.as_ref(), include_str!("checkpoint_release_twice.hs")),
-        )
-        .await;
-    assert_eq!(release["status"], "committed", "{release:?}");
+    let root_after_admission = next_hosted_script_round(&mut requests, &mut pending, &root).await;
+    root_after_admission.assert_committed("checkpoint-observer-admission");
+    let observer = tokio::time::timeout(Duration::from_secs(120), async {
+        loop {
+            if let Some(installation) =
+                host.context
+                    .observer
+                    .installations()
+                    .into_iter()
+                    .find(|installation| {
+                        installation.checkpoint && installation.context_parent == Some(issuer_id)
+                    })
+            {
+                return installation;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("retired issuer's genuine checkpoint admits an observer");
+    let observer_id = observer.actor.identity();
+    let observer_path = AgentPath(format!(
+        "/root/a{}_i{}",
+        observer_id.id.0, observer_id.incarnation.0
+    ));
+    // Hold the observer's first real provider request while the root releases
+    // the token and probes refusal. The observer already owns its exact custody.
+    let observer_round =
+        next_hosted_script_round(&mut requests, &mut pending, &observer_path).await;
+    root_after_admission.call(
+        "checkpoint-release-twice",
+        include_str!("checkpoint_release_twice.hs"),
+    );
+    let root_after_release = next_hosted_script_round(&mut requests, &mut pending, &root).await;
+    root_after_release.assert_value("checkpoint-release-twice", "True");
+    root_after_release.call(
+        "checkpoint-released-refusal",
+        include_str!("checkpoint_released_refusal.hs"),
+    );
+    let root_after_refusal = next_hosted_script_round(&mut requests, &mut pending, &root).await;
+    root_after_refusal.assert_value("checkpoint-released-refusal", "True");
     assert_eq!(
-        test_campaign::committed_display_text(&release),
-        "True",
-        "{release:?}"
+        host.context
+            .observer
+            .installations()
+            .iter()
+            .filter(|installation| installation.checkpoint)
+            .count(),
+        1
     );
-    let refused = campaign
-        .drive_actor_output(
-            &output_store,
-            dispatch_haskell_script(
-                root.as_ref(),
-                include_str!("checkpoint_released_refusal.hs"),
-            ),
-        )
-        .await;
-    assert_eq!(refused["status"], "committed", "{refused:?}");
-    assert_eq!(
-        test_campaign::committed_display_text(&refused),
-        "True",
-        "{refused:?}"
+    observer_round.call(
+        "checkpoint-inherited-read",
+        "display (x == 41 && getX == 42)",
     );
-
-    let inherited = campaign
-        .drive_actor_output(
-            &output_store,
-            dispatch_haskell_script(observer.policy.as_ref(), "display (x == 41 && getX == 42)"),
-        )
-        .await;
-    assert_eq!(inherited["status"], "committed", "{inherited:?}");
-    assert_eq!(
-        test_campaign::committed_display_text(&inherited),
-        "True",
-        "{inherited:?}"
+    let observer_after_read =
+        next_hosted_script_round(&mut requests, &mut pending, &observer_path).await;
+    observer_after_read.assert_value("checkpoint-inherited-read", "True");
+    observer_after_read.finish();
+    root_after_refusal.call(
+        "checkpoint-observer-cleanup",
+        "planCleanupFor observer >>= executeCleanup >>= display . cleanupReceiptComplete",
     );
-
-    let cleaned = campaign
-        .drive_actor_output(
-            &output_store,
-            dispatch_haskell_script(
-                root.as_ref(),
-                "planCleanupFor observer >>= executeCleanup >>= display . cleanupReceiptComplete",
-            ),
-        )
-        .await;
-    assert_eq!(cleaned["status"], "committed", "{cleaned:?}");
-    assert_eq!(
-        test_campaign::committed_display_text(&cleaned),
-        "True",
-        "{cleaned:?}"
-    );
+    let root_done = next_hosted_script_round(&mut requests, &mut pending, &root).await;
+    root_done.assert_value("checkpoint-observer-cleanup", "True");
     let observer_cleanup = observer
         .actor
         .terminal()
         .cleanup()
-        .expect("observer cleanup evidence");
-    assert_eq!(observer_cleanup.actor(), observer.actor.identity());
+        .expect("actual observer cleanup evidence");
+    assert_eq!(observer_cleanup.actor(), observer_id);
     assert!(observer_cleanup.is_confirmed(), "{observer_cleanup:?}");
-
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+    root_done.finish();
+    host.stop()
+        .await
+        .expect("production checkpoint host acknowledges final cleanup");
 }
