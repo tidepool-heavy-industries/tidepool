@@ -15,10 +15,10 @@ import Tidepool.Binders
   ( TurnOut(..), BoundBinder(..), ExportItem(..), ValueTier(..), HostBindingAuthority(..)
   , CellSourcePlan(..), CellAnalysisItem(..), CellAnalysisSourceItem(..)
   , CellSourceSpan(..), CheckedBinderPin(..), SourcePrologue(..)
-  , CellExpressionPlan(..), ExpressionLiftPlan(..), ExpressionPresentation(..)
+  , CellExpressionPlan
   , LocatedPragma(..), LocatedImport(..), PragmaKind(..), DeclarationSource(..)
   , StmtBinders(..), turnKindWireName )
-import Tidepool.CheckedCell (encodeCheckedTypeWitness, encodeRequestTypeSignatures)
+import Tidepool.CheckedCell (encodeCheckedTypeWitness, encodeRequestTypeSignatures, encodeCellExpressionPlan)
 import Tidepool.EffectSchema (NominalHead(..), SiteType(..), YieldSite(..))
 
 -- | 8-byte version header: magic 'TPLR' + version 4.0.
@@ -141,25 +141,6 @@ encodeCellOut plan pins expressions checkedSource = toStrictByteString $
   <> encodeSourcePrologue (cellPlanPrologue plan)
   <> encodeListLen (fromIntegral (length expressions))
   <> foldMap encodeCellExpressionPlan expressions
-
-encodeCellExpressionPlan :: CellExpressionPlan -> Encoding
-encodeCellExpressionPlan CellExpressionPlan
-  { expressionPlanKey = key
-  , expressionPlanLift = liftPlan
-  , expressionPlanPresentation = presentation
-  , expressionPlanType = ty
-  , expressionPlanHeads = heads
-  } =
-  encodeListLen 5
-  <> encodeString (T.pack key)
-  <> encodeString (case liftPlan of
-       ExpressionEffectful -> "effectful"
-       ExpressionPure -> "pure")
-  <> encodeString (case presentation of
-       ExpressionRendered -> "rendered"
-       ExpressionOpaque -> "opaque")
-  <> encodeString (T.pack ty)
-  <> encodeHeads heads
 
 encodeDeclarationSource :: DeclarationSource -> Encoding
 encodeDeclarationSource (DeclarationSource prologue body) =

@@ -20,6 +20,9 @@ import Numeric (showHex)
 import System.Directory (doesFileExist, removeFile)
 import System.FilePath (takeDirectory)
 import System.IO (hClose, openBinaryTempFile)
+import Tidepool.CheckedCell
+  ( CellExpressionPlan(..), ExpressionLiftPlan(..), ExpressionPresentation(..), encodeCellExpressionPlan )
+import Tidepool.EffectSchema (NominalHead(..))
 import Tidepool.ExactHydration (ExactIfaceArtifact(..))
 import Tidepool.ExactScope
 import Tidepool.ModuleCandidates
@@ -174,6 +177,26 @@ checkedPurposeCases manifest fields = do
         (fail "checked purpose lost its exclusive stage or ordered search inputs")
       refuse manifest "" (envelope (TList (purpose ++ [TList inspection])))
       refuse manifest "" (envelope (TList (take (length purpose - 1) purpose)))
+  forM_ [(ExpressionPure,"pure"),(ExpressionEffectful,"effectful")] $ \(liftPlan,liftName) ->
+    forM_ [(ExpressionRendered,"rendered"),(ExpressionOpaque,"opaque")] $ \(presentation,presentationName) -> do
+      let plan = CellExpressionPlan "__tidepool_cell_expr_0" liftPlan presentation "Int"
+            [NominalHead "ghc-prim" "GHC.Types" "Int"]
+      encoded <- decode (toStrictByteString (encodeCellExpressionPlan plan))
+      let expressionPurpose value = TList (replace 14 (TString "observation")
+            (replace 10 value (replace 5 (TString "expr") item)))
+      accepted <- readCandidate manifest (envelope (expressionPurpose encoded)) >>= either fail pure
+      case scopeCheckedItem accepted of
+        Just admitted | itemExpressionLift admitted == Just liftName
+            && itemExpressionPresentation admitted == Just presentationName -> pure ()
+        _ -> fail "compiler expression encoder and exact-item consumer disagree"
+      expressionFields <- row 5 encoded
+      forM_ [TList (expressionFields ++ [empty]),TList (take 4 expressionFields)
+        ,TList (replace 0 (TString "") expressionFields)
+        ,TList (replace 1 (TString "unknown") expressionFields)
+        ,TList (replace 2 (TString "unknown") expressionFields)
+        ,TList (replace 4 (TList [TList [TString "ghc-prim",TString "GHC.Types"]]) expressionFields)] $ \malformed ->
+          refuse manifest "" (envelope (expressionPurpose malformed))
+      refuse manifest "" (envelope (TList (replace 10 encoded item)))
   refuse manifest "" (envelope (TList [TList cell,TList inspection]))
 
 -- The positive native origin must come from the protected authored producer,

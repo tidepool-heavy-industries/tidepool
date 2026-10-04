@@ -52,7 +52,8 @@ import Tidepool.ExactHydration (ExactIfaceArtifact(..), CheckedTemplateInterface
 import Tidepool.Session (Generation(..), SessionModule(..), SessionModuleKind(..), parseSessionModule, sessionModuleString)
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import Tidepool.CheckedCell
-  ( CheckedSignature(..), RequestTypeSignatures, RequestHelperRecipe(..), decodeCheckedSignature, decodeRequestTypeSignatures )
+  ( CheckedSignature(..), RequestTypeSignatures, RequestHelperRecipe(..), decodeCheckedSignature, decodeRequestTypeSignatures
+  , CellExpressionPlan(..), ExpressionLiftPlan(..), ExpressionPresentation(..), decodeCellExpressionPlan )
 import Tidepool.ExecutionSchema
   ( SymbolIdentity(..), ProjectedGroup(..), ProjectedGroupBody(..), GlobalDecl(..) )
 import Tidepool.ModuleCandidates
@@ -1053,16 +1054,12 @@ decodeScope = do
         unique "checked item signatures" (map signatureKey signatures)
         token <- peekTokenType
         (liftPlan,presentation) <- if token == TypeNull then decodeNull >> pure (Nothing,Nothing) else do
-          array 6
-          _key <- nonempty
-          liftPlan <- nonempty
-          presentation <- nonempty
-          unless (kind == "expr" && liftPlan `elem` ["pure","effectful"] && presentation `elem` ["rendered","opaque"])
-            (fail "invalid checked expression plan")
-          _rendering <- string
-          _heads <- bounded 65536 (array 3 >> ((,,) <$> nonempty <*> nonempty <*> nonempty))
-          _imports <- bounded 4096 nonempty
-          pure (Just liftPlan,Just presentation)
+          expression <- decodeCellExpressionPlan
+          unless (kind == "expr") (fail "expression plan belongs to a non-expression item")
+          pure (Just (case expressionPlanLift expression of
+              ExpressionPure -> "pure"; ExpressionEffectful -> "effectful")
+            ,Just (case expressionPlanPresentation expression of
+              ExpressionRendered -> "rendered"; ExpressionOpaque -> "opaque"))
         generation <- decodeWord64
         prefix <- digestField
         valueImports <- bounded 4096 (array 2 >> ((,) <$> nonempty <*> bounded 65536 nonempty))

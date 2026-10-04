@@ -94,7 +94,9 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Word (Word64)
 import Tidepool.ExtractUtil (getLibdir)
-import Tidepool.CheckedCell (renderCheckedTypeWitness, renderRequestTypeSignatures)
+import Tidepool.CheckedCell
+  ( renderCheckedTypeWitness, renderRequestTypeSignatures
+  , CellExpressionPlan(..), ExpressionLiftPlan(..), ExpressionPresentation(..) )
 import Tidepool.EffectSchema (NominalHead(..), SiteType(..), YieldSite(..))
 import Tidepool.HostBindingAuthority (HostBindingAuthority(..))
 import Tidepool.Json (jsonString)
@@ -570,22 +572,6 @@ data CellAnalysisItem = CellAnalysisItem
   , cellAnalysisVerdict :: StmtBinders
   , cellAnalysisSourceItems :: [CellAnalysisSourceItem]
   , cellAnalysisPrologueOnly :: Bool
-  } deriving (Eq, Show)
-
-data ExpressionLiftPlan = ExpressionEffectful | ExpressionPure
-  deriving (Eq, Show)
-
-data ExpressionPresentation = ExpressionRendered | ExpressionOpaque
-  deriving (Eq, Show)
-
--- | Compiler-owned execution decision for one expression item. The key is
--- the reserved local binder whose zonked type supplied this evidence.
-data CellExpressionPlan = CellExpressionPlan
-  { expressionPlanKey :: String
-  , expressionPlanLift :: ExpressionLiftPlan
-  , expressionPlanPresentation :: ExpressionPresentation
-  , expressionPlanType :: String
-  , expressionPlanHeads :: [NominalHead]
   } deriving (Eq, Show)
 
 -- | One original source item retained beneath its execution item. Declaration

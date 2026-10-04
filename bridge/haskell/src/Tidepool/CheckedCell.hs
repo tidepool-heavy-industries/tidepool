@@ -2,6 +2,8 @@
 
 module Tidepool.CheckedCell
   ( CheckedSignature(..), CheckedSignatureName(..)
+  , CellExpressionPlan(..), ExpressionLiftPlan(..), ExpressionPresentation(..)
+  , encodeCellExpressionPlan, decodeCellExpressionPlan
   , captureCheckedSignature, encodeCheckedSignature, decodeCheckedSignature
   , RequestTypeSignatures(..), RequestHelperRecipe(..), captureRequestTypeSignatures
   , encodeRequestTypeSignatures, decodeRequestTypeSignatures, renderRequestTypeSignatures
@@ -13,6 +15,7 @@ module Tidepool.CheckedCell
   ) where
 
 import Codec.CBOR.Encoding (Encoding, encodeListLen, encodeString, encodeBytes, encodeInt, encodeNull)
+import qualified Codec.CBOR.Decoding as D
 import Codec.CBOR.Decoding
   ( Decoder, TokenType(TypeNull), decodeListLen, decodeString, decodeBytes
   , decodeNull, peekTokenType, peekByteOffset )
@@ -41,7 +44,7 @@ import GHC.Utils.Binary (openBinMem, withBinBuffer, unsafeUnpackBinBuffer)
 import GHC.Core.TyCo.Rep (Type(..), TyLit(..))
 import GHC.Data.FastString (unpackFS)
 import GHC.Types.Var (VarBndr(..), ForAllTyFlag(..), Specificity(..), FunTyFlag(..), isTyVar, varType)
-import Tidepool.TypePolicy (stabilizeEffectRows)
+import Tidepool.TypePolicy (stabilizeEffectRows, NominalHead(..))
 import GHC.Core.TyCon (tyConName)
 import GHC.Driver.Env (lookupType, hsc_home_unit, hsc_NC, hscSetFlags)
 import GHC.Driver.Main (hscTypecheckRenameWithDiagnostics)
@@ -64,6 +67,73 @@ import GHC.Unit.Types (unitString)
 import GHC.Unit.Home (isHomeUnit, mkHomeModule)
 import GHC.Utils.Outputable hiding ((<>), text)
 import qualified GHC.Utils.Outputable as Outputable
+
+data ExpressionLiftPlan = ExpressionEffectful | ExpressionPure
+  deriving (Eq, Show)
+
+data ExpressionPresentation = ExpressionRendered | ExpressionOpaque
+  deriving (Eq, Show)
+
+-- | Compiler-owned execution decision for one expression item. The key is
+-- the reserved local binder whose zonked type supplied this evidence.
+data CellExpressionPlan = CellExpressionPlan
+  { expressionPlanKey :: String
+  , expressionPlanLift :: ExpressionLiftPlan
+  , expressionPlanPresentation :: ExpressionPresentation
+  , expressionPlanType :: String
+  , expressionPlanHeads :: [NominalHead]
+  } deriving (Eq, Show)
+
+encodeCellExpressionPlan :: CellExpressionPlan -> Encoding
+encodeCellExpressionPlan CellExpressionPlan
+  { expressionPlanKey = key
+  , expressionPlanLift = liftPlan
+  , expressionPlanPresentation = presentation
+  , expressionPlanType = ty
+  , expressionPlanHeads = heads
+  } =
+  encodeListLen 5
+  <> encodeString (T.pack key)
+  <> encodeString (case liftPlan of
+       ExpressionEffectful -> "effectful"
+       ExpressionPure -> "pure")
+  <> encodeString (case presentation of
+       ExpressionRendered -> "rendered"
+       ExpressionOpaque -> "opaque")
+  <> encodeString (T.pack ty)
+  <> encodeListLen (fromIntegral (length heads))
+  <> foldMap (\(NominalHead unit modul name) ->
+      encodeListLen 3 <> encodeString unit <> encodeString modul <> encodeString name) heads
+
+-- Decode the same compiler-owned plan carried unchanged through checked-item
+-- admission. Rendered types and heads remain observations, not native evidence.
+decodeCellExpressionPlan :: D.Decoder s CellExpressionPlan
+decodeCellExpressionPlan = do
+  fields <- D.decodeListLen
+  unless (fields == 5) (fail "invalid cell expression plan row")
+  key <- nonempty
+  liftPlan <- D.decodeString >>= \value -> case value of
+    "effectful" -> pure ExpressionEffectful
+    "pure" -> pure ExpressionPure
+    _ -> fail "invalid cell expression lift"
+  presentation <- D.decodeString >>= \value -> case value of
+    "rendered" -> pure ExpressionRendered
+    "opaque" -> pure ExpressionOpaque
+    _ -> fail "invalid cell expression presentation"
+  ty <- T.unpack <$> D.decodeString
+  count <- D.decodeListLen
+  unless (count <= 65536) (fail "cell expression heads exceed bound")
+  heads <- replicateM count $ do
+    headFields <- D.decodeListLen
+    unless (headFields == 3) (fail "invalid cell expression head")
+    NominalHead <$> nonemptyText <*> nonemptyText <*> nonemptyText
+  pure (CellExpressionPlan key liftPlan presentation ty heads)
+  where
+    nonemptyText = do
+      value <- D.decodeString
+      unless (not (T.null value)) (fail "empty cell expression identity")
+      pure value
+    nonempty = T.unpack <$> nonemptyText
 
 -- The human-readable type is presentation only. The compiler consumes its own
 -- binary IfaceType and resolves its Names against the admitted environment.
