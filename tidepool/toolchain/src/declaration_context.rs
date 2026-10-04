@@ -4555,7 +4555,7 @@ mod tests {
         let (mut request, native, receipt) = source_selected_receipt(directory.path(), true, None);
         let originals = native
             .artifact_view()
-            .entries_for_owners([identity("main", "A"), identity("main", "B")])
+            .entries_for_owners([identity("main", "A"), identity("main", "B")].into_iter())
             .unwrap();
         let inventory = ArtifactInventory::default();
         let context = Arc::new(ExactDeclarationContext {
