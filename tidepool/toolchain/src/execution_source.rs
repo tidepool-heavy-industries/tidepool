@@ -1023,7 +1023,7 @@ mod tests {
             module: "A".into(),
         };
         assert!(same_local_recipe(&left, &right, &key).unwrap());
-        let left = GraphWire::decode(&left.encode().unwrap()).unwrap();
+        let mut left = GraphWire::decode(&left.encode().unwrap()).unwrap();
         let right = GraphWire::decode(&right.encode().unwrap()).unwrap();
         for appeared in [&first, &second] {
             validate_local_negative_context(&left, &key, &[]).unwrap();
