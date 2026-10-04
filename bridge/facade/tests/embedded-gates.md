@@ -5,37 +5,70 @@ embedded host. Haskell runs through the resident compiler and native machine;
 the fixture never supplies Haskell results or replaces the actor supervisor.
 No live provider credentials are used.
 
-| Gate | Exact libtest name | What it proves |
+| Gate | Exact libtest name | Required check |
 |---|---|---|
 | M1 browser | `actor_host::m1_host_tests::production_browser_executes_resident_haskell_retries_and_controls_root` | Playwright input and real raw Haskell output, request-pinned reload/retry, interruption of the active operation, continue and root retirement. |
 | Complete-cell preflight | `actor_host::embedded_captured_unfold_tests::admitted_cell_late_type_error_has_no_effect_or_publication_on_retry` | An installed AgentSpec and admitted root reject a final type error before the first notification effect or binding publication; exact operation retry retains rejection without compiler work. |
 | Warm production cells | `actor_host::m1_host_tests::warm_cell_performance::production_engine_store_warm_display_cells_50` | Fifty source-backed displays across ten workloads through the production HTTP/Engine/Store host, exact original operations and exclusive daemon request attribution. |
 | Active cancellation | `actor_host::m1_host_tests::cancel_performance::production_engine_store_active_cancellation_50` | Fifty production interrupts of exact armed native Sleep calls, actual retained owner acknowledgment and separate durable output/round cleanup timings. |
-| M2 captured replies | `actor_host::embedded_captured_unfold_tests::embedded_captured_unfold_awaits_two_child_replies_before_parent_call_returns` | Two independent captured children reply while the parent call is unfinished; release refuses new use while admitted children retain their scope. |
-| M2 failure and reuse | `actor_host::embedded_captured_unfold_tests::embedded_captured_children_and_capture_survive_failure_of_the_unfinished_parent_cell` | Both children reply, the same parent cell fails, both children still read its completed private prefix, and a third child uses the retained checkpoint independently. |
+| M2 captured replies | `actor_host::embedded_captured_unfold_tests::embedded_captured_unfold_awaits_two_child_replies_before_parent_call_returns` | Two captured children reply while the parent call is unfinished; double release and refusal of a new child preserve already admitted context. |
+| M2 failure and reuse | `actor_host::embedded_captured_unfold_tests::embedded_captured_children_and_capture_survive_failure_of_the_unfinished_parent_cell` | The creator cell fails after both replies and publishes no names; actor-owned children and a transferred checkpoint retain its private prefix, including direct private helper execution in a third child. |
+| M2 nominal A/B join | `actor_host::embedded_captured_unfold_tests::embedded_same_root_parked_nominal_a_joins_later_b_publication` | A parks with original nominal types, B publishes nominal shadows through a real Engine tool call, and A resumes; a final Engine tool reads both published results and B's current shadow. |
+| M2 interrupt and continuation | `actor_host::embedded_captured_unfold_tests::embedded_parked_captured_pipeline_cancellation_settles_invocation_owned_children` | A browser interrupt targets the actual root round, retains `NotPublished Cancelled`, and cleans invocation-owned children while the root stays alive; durable browser input wakes the driver and a new Haskell tool call succeeds. |
+| Checkpoint release | `actor_host::embedded_checkpoint_release_tests::released_checkpoint_keeps_an_admitted_childs_hosted_context` | An admitted child retains its captured context after issuer retirement and double checkpoint release, a new child is refused, and issuer/observer cleanup records name the correct owners. |
 
-The M2 parent call first completes `capturedValue <- pure (x :: Int)` and a
-native `let capturedGetter = ...` binding before creating its checkpoint. The children read
-these new private names, not just the earlier published `x` and `getX`.
-The scripted child turns remain held until both branches are observed with the
-original exact Store claim pending. Real Haskell `respond capturedGetter`
-settles each typed reply; the parent awaits the pair `Right (42, 42)`.
-Every observed operation retains the Engine's request ID, conversation identity
-and provider call ID, and is checked against its recorded provider response.
-Child history contains earlier provider provenance and excludes the current
-unfinished parent call.
+M2 provider scenarios install the real embedded service, admitted model factory,
+conversation reader, Store and Scheduler before root admission. Only
+`ResponsesTransport` is replaced. Every Haskell tool call runs through the
+Engine's actual dispatcher, actor, compiler and native machine. The preflight
+and checkpoint-release gates use the real admitted policy directly; they do not
+claim provider-driven admission.
 
-The failure gate raises an authored Haskell error after those replies. It fails
-the parent **cell**, leaving its actor alive, and therefore retains the normal
-`ParentOwned` child lifetime. Changing the children to `SwarmOwned` would test a
-different contract. No declaration or binding from the failed cell becomes
-public; the earlier successful cell's bindings remain available. The parent
-then publishes new values in a successful cell. The children's subsequent real
-reads must still return `(41, 42)`, then the
-checkpoint retained in the seed-store actor admits a third reader after the
-failed original operation has durably settled. Releasing that checkpoint twice
-must succeed. Issuer actor retirement and final native reader reclamation have
-separate native-owner gates; these tests do not substitute for those proofs.
+The captured-reply and failure scenarios complete private native bindings
+`capturedValue` and `capturedGetter` before creating their checkpoint. Their
+children read those names, rather than only the earlier published `x` and
+`getX`. Both child provider requests remain held until the original exact Store
+claim is observed pending. Real Haskell `respond capturedGetter` settles each
+typed reply, and the parent awaits `Right (42, 42)`. Every observed operation
+retains its Engine request ID, conversation identity and provider call ID and
+is checked against its recorded provider response. Child history contains
+previous provider provenance and excludes the unfinished parent call.
+
+The success and interrupt scenarios use `InvocationOwned` children. The failure
+scenario explicitly gives its original two children `ActorOwned` lifetime so
+they can survive the creator invocation's failure. That failure retains `NotPublished Failed`: neither its
+native prefix nor its declarations or unrun suffix become public. Earlier
+`x` and `getX` remain readable; `capturedValue`, `capturedGetter`,
+`privateCapturedHelper` and `capturedSuffix` remain absent. The parent then
+publishes new bindings with values `(99, 100)`, while both retained children's
+reads must still return `(41, 42)`.
+
+Before failure, the creator transfers its checkpoint and original group handle
+to typed record services installed by the earlier setup cell. After the failed
+operation settles, a third child uses that checkpoint to evaluate
+`privateCapturedHelper capturedValue` inside a fresh `CapturedReuseValue` and
+reply `42`. This executes the retained helper instead of reading a memoized
+getter. Checkpoint reuse checks double release and refusal of further admission.
+Typed cleanup handles the third child and the original group; each known
+child's retained cleanup outcome must identify its owner and be confirmed.
+
+The nominal join holds A's `ActorOwned` children behind the same reply barrier while a
+provider-issued B tool call publishes on the same root. B must settle with A's
+exact original claim still pending. After releasing the children, A publishes
+its original result. The final provider-issued Haskell probe checks both results
+and the current B shadow, including the different original/current reply values.
+This checks independent cell publication on one root actor.
+
+The interrupt gate obtains the exact root identity and active round from the
+real browser projection, then submits `HostCommand::Interrupt`. Its admitted
+parent operation must retain `NotPublished Cancelled`; bare scheduler
+cancellation is insufficient. Both invocation-owned children must settle with
+confirmed cleanup, and the root must remain live and return to waiting without
+an active round. A durable `HostCommand::Input` wakes the interrupted driver
+while a queued scripted step supplies a new Haskell tool call. The resumed
+provider request must contain that input, the new binding must commit, and the
+cancelled prefix must remain absent. Typed group cleanup and ordinary final
+shutdown follow independently of the interrupt.
 
 M2 uses a named 300-second cold-debug settlement budget for its real setup,
 parent cells, post-failure reader cells and checkpoint reuse. This semantic
@@ -88,20 +121,26 @@ python3 build/rust/isolated-libtest.py "$FACADE_TEST_BINARY" \
 
 python3 build/rust/isolated-libtest.py "$FACADE_TEST_BINARY" \
   --exact actor_host::embedded_captured_unfold_tests::admitted_cell_late_type_error_has_no_effect_or_publication_on_retry \
-  --expected-count 1 --jobs 1 --timeout 600
-
-python3 build/rust/isolated-libtest.py "$FACADE_TEST_BINARY" \
   --exact actor_host::embedded_captured_unfold_tests::embedded_captured_unfold_awaits_two_child_replies_before_parent_call_returns \
   --exact actor_host::embedded_captured_unfold_tests::embedded_captured_children_and_capture_survive_failure_of_the_unfinished_parent_cell \
-  --expected-count 2 --jobs 1 --timeout 600
+  --exact actor_host::embedded_captured_unfold_tests::embedded_same_root_parked_nominal_a_joins_later_b_publication \
+  --exact actor_host::embedded_captured_unfold_tests::embedded_parked_captured_pipeline_cancellation_settles_invocation_owned_children \
+  --exact actor_host::embedded_checkpoint_release_tests::released_checkpoint_keeps_an_admitted_childs_hosted_context \
+  --expected-count 6 --jobs 1 --timeout 600
 ```
 
-Keep each test's actual outcome, executed count, elapsed boundaries and cleanup
-separate from compilation and discovery. The amended private-prefix fixtures
-still require execution on the joined compiler/actor candidate; this guide is
-not an acceptance report. The retained browser native failure on `32bd98b7b`
-preceded Sleep and supplies no passing cancellation evidence. Its older compiler
-pair cannot validate the current whole-cell protocol or deployment authority.
+Select these six tests from the native no-Codex test target. The
+historical `actor_host::tests::descendants_list_the_spawn_tree_and_drop_a_retired_leaf`
+is gated by `codex-compat` and is absent from that profile; a zero-match selection
+cannot establish descendant coverage. A fresh live recursive delegation smoke
+is separate from this finite deterministic cohort. Retain its actual descendant
+relationships, replies and cleanup evidence independently.
+
+Keep each test's actual outcome, nonzero executed count, elapsed boundaries and
+cleanup separate from compilation and discovery. Replay the selected tests on
+the joined compiler/actor revision and retain their evidence before reporting
+acceptance. This guide specifies checks and commands; it records no execution
+outcome.
 
 ## Warm production measurement
 
@@ -128,8 +167,8 @@ publication and result return; it does not measure DOM painting. Warm-up lines
 use `resident-performance-warmup`; fifty measured lines use the existing
 `resident-performance` schema with `composition: engine-store`, actual source,
 source SHA-256, original operation and every consumed compiler correlation.
-Retain both streams and the complete trace for the owning reporter. The fixture
-has only been compile checked until a matching real-worker execution is retained.
+Retain both streams and the complete trace for the owning reporter. Record
+compile checks separately until a matching real-worker execution is retained.
 
 ```sh
 python3 build/rust/isolated-libtest.py "$FACADE_TEST_BINARY" \
@@ -184,9 +223,10 @@ sending `HostCommand::Interrupt` for that round. Compilation and readiness polls
 finish before the timer starts.
 
 The `cancel_ack` interval runs from HTTP interrupt submission to receipt of the
-exact scheduler `Cancelled` result and its retained
-`CancellationAcknowledgment::Stopped`. The production dispatcher can return
-`Stopped` only after the original native cancellation owner confirms abort.
+exact scheduler `CancelledWithReceipt` result and its retained
+`CancellationAcknowledgment::StoppedWithReceipt`. The production dispatcher can
+return that acknowledgment only after the original native cancellation owner
+confirms abort.
 The fixture awaits that real acknowledgment concurrently with the HTTP request;
 HTTP `202` or a control-request receipt alone never qualifies. Every row retains
 actual monotonic `started_ns`, `settled_ns`, `effect_active_ns`, the exact original
