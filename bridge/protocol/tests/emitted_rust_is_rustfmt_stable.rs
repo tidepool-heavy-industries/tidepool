@@ -1,22 +1,6 @@
-//! Every emitted `.rs` file must be a FIXED POINT of rustfmt.
-//!
-//! This is an acceptance property, not a nicety. Generated `.rs` is subject to
-//! `cargo fmt --all -- --check` like any
-//! other source, so if the emitter's output is not already formatted, the format
-//! gate and the golden gate fight each other: `cargo fmt` rewrites the file,
-//! `generated_files_are_current` then declares it stale, and regenerating it
-//! puts the fight back. There is no stable state.
-//!
-//! It is a TEST rather than a manual check for the reason every guard in this
-//! program follows: a check nothing runs is not a check. `tidepool-protocol`
-//! is outside `.config/nextest.toml`'s `default-filter` exclusion set and needs
-//! no GHC, so a bare `cargo nextest run` reaches this.
-//!
-//! Scope is every emitted `.rs` for every DESCRIBED effect, not just the
-//! migrated ones — `effects::all_described()` includes Worktree, whose wire and
-//! adapter modules are the largest emitted files in the crate and are not on
-//! disk yet. Waiting for the flip to discover a formatting drift in them would
-//! discover it at exactly the wrong moment.
+//! Formatting contract for schema-produced Rust build artifacts.
+//! Formatting checks prove renderer stability; compiled consumers and codecs
+//! prove type and wire behavior.
 
 #![allow(
     clippy::disallowed_methods,

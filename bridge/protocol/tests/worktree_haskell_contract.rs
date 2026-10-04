@@ -141,9 +141,8 @@ fn worktree_remaining_decl_fields_are_pinned() {
 /// decls-then-instances-then-error-ADT emission order
 /// ([`tidepool_protocol::schema::Effect::type_def_texts`]) must be a no-op for
 /// them: Exec still renders exactly its one error-ADT entry, and Journal still
-/// renders nothing. `generated_files_are_current.rs` already owns their full
-/// pinned bytes — this test only guards that the new Worktree-motivated
-/// emission order didn't change their shape.
+/// renders nothing. The schema validation suite pins their full declarations;
+/// this check covers the declaration ordering.
 #[test]
 fn exec_and_journal_type_def_emission_order_is_unchanged() {
     let exec = tidepool_protocol::effects::exec::exec();
