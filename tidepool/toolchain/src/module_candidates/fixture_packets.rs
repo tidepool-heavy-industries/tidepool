@@ -71,7 +71,7 @@ fn source_boot_candidate_packet_producer() {
     );
     let mut context = ExactDeclarationContext::new(&[], &[], vec![])
         .unwrap()
-        .extend_checked_original_products(producer_sha, &[], &BTreeMap::new())
+        .extend_checked_original_products(producer_sha, &[])
         .unwrap();
 
     if !matches!(fields[1], Value::Null) {
@@ -188,7 +188,7 @@ fn source_boot_candidate_packet_producer() {
                 "native execution scope requires original authenticated source recipes"
             );
             context = context
-                .extend_checked_original_products(producer_sha, &native, &BTreeMap::new())
+                .extend_checked_original_products(producer_sha, &native)
                 .unwrap();
         }
         if !requested.is_empty() {

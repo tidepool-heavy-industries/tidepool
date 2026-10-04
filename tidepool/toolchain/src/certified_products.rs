@@ -5440,12 +5440,9 @@ pub(crate) mod tests {
                 sources
             );
             assert_eq!(&original_native_requirements(product).unwrap(), native);
-            let entry = crate::artifact_inventory::ArtifactEntry::original(
-                [1; 32],
-                (*product).clone(),
-                vec![],
-            )
-            .unwrap();
+            let entry =
+                crate::artifact_inventory::ArtifactEntry::original([1; 32], (*product).clone())
+                    .unwrap();
             assert_eq!(entry.native_requirements, native.artifact_edges);
             assert_eq!(entry.retained_packages, native.retained_packages);
         }

@@ -412,7 +412,7 @@ impl CertifiedValueInterface {
     pub fn artifact_id(&self) -> crate::artifact_inventory::ArtifactId {
         crate::artifact_inventory::ArtifactEntry::interface(
             self.interface.clone(),
-            crate::artifact_inventory::ArtifactKind::ValueInterface,
+            crate::artifact_inventory::JoinedInterfaceRole::ValueInterface,
             self.requirements.clone(),
         )
         .descriptor

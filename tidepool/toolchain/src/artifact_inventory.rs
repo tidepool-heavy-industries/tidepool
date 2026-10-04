@@ -261,19 +261,19 @@ impl ArtifactDescriptor {
         )
     }
     pub fn from_recovery_join(reference: &crate::recovery_artifacts::RecoveryJoinRef) -> Self {
-        Self::from_recovery_interface(reference, ArtifactKind::LexicalJoin)
+        Self::from_recovery_interface(reference, JoinedInterfaceRole::LexicalJoin)
     }
     pub fn from_recovery_value_interface(
         reference: &crate::recovery_artifacts::RecoveryValueInterfaceRef,
     ) -> Self {
-        Self::from_recovery_interface(&reference.interface, ArtifactKind::ValueInterface)
+        Self::from_recovery_interface(&reference.interface, JoinedInterfaceRole::ValueInterface)
     }
     fn from_recovery_interface(
         reference: &crate::recovery_artifacts::RecoveryJoinRef,
-        kind: ArtifactKind,
+        role: JoinedInterfaceRole,
     ) -> Self {
         descriptor(
-            kind,
+            role.artifact_kind(),
             ExactModuleIdentity {
                 unit: reference.unit.clone(),
                 module: reference.module.clone(),
@@ -287,11 +287,38 @@ impl ArtifactDescriptor {
     }
 }
 
+/// The two roles carried by a certified joined interface. Native products and
+/// canonical module interfaces have their own payloads.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum JoinedInterfaceRole {
+    LexicalJoin,
+    ValueInterface,
+}
+
+impl JoinedInterfaceRole {
+    fn artifact_kind(self) -> ArtifactKind {
+        match self {
+            Self::LexicalJoin => ArtifactKind::LexicalJoin,
+            Self::ValueInterface => ArtifactKind::ValueInterface,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum ArtifactPayload {
     Original(CertifiedRecoveryProduct),
     Canonical(crate::certified_products::CertifiedModuleInterface),
-    Interface(CertifiedJoinedInterface, ArtifactKind),
+    Interface(CertifiedJoinedInterface, JoinedInterfaceRole),
+}
+
+impl ArtifactPayload {
+    pub(crate) fn artifact_kind(&self) -> ArtifactKind {
+        match self {
+            Self::Original(_) => ArtifactKind::OriginalModule,
+            Self::Canonical(_) => ArtifactKind::CanonicalModuleInterface,
+            Self::Interface(_, role) => role.artifact_kind(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -309,7 +336,6 @@ impl ArtifactEntry {
     pub(crate) fn original(
         producer: [u8; 32],
         product: CertifiedRecoveryProduct,
-        _requirements: Vec<ExactModuleIdentity>,
     ) -> Result<Self, CompileError> {
         let owner = product.owner();
         let canonical = product
@@ -415,11 +441,11 @@ impl ArtifactEntry {
 
     pub(crate) fn interface(
         interface: CertifiedJoinedInterface,
-        kind: ArtifactKind,
+        role: JoinedInterfaceRole,
         requirements: Vec<ExactModuleIdentity>,
     ) -> Self {
         let descriptor = descriptor(
-            kind,
+            role.artifact_kind(),
             ExactModuleIdentity {
                 unit: interface.unit().into(),
                 module: interface.module().into(),
@@ -432,7 +458,7 @@ impl ArtifactEntry {
         );
         Self {
             descriptor,
-            payload: ArtifactPayload::Interface(interface, kind),
+            payload: ArtifactPayload::Interface(interface, role),
             requirements,
             interface_seals: BTreeMap::new(),
             native_requirements: Vec::new(),
@@ -1535,12 +1561,7 @@ mod tests {
         )
         .with_module_interface(interface)
         .unwrap();
-        let mut entry = ArtifactEntry::original(
-            [2; 32],
-            product,
-            requirements.iter().map(|name| module(name)).collect(),
-        )
-        .unwrap();
+        let mut entry = ArtifactEntry::original([2; 32], product).unwrap();
         for required in ["Original", "Helper"] {
             entry.native_owners.insert(
                 module(required),
@@ -1579,7 +1600,7 @@ mod tests {
         )
         .with_module_interface(interface)
         .unwrap();
-        ArtifactEntry::original(entry.descriptor.producer_sha256, variant, Vec::new()).unwrap()
+        ArtifactEntry::original(entry.descriptor.producer_sha256, variant).unwrap()
     }
 
     #[test]
