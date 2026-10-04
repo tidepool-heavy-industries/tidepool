@@ -201,15 +201,44 @@ fn source_boot_candidate_packet_producer() {
                 CandidateVersionOrigin::Ordinary,
                 &certified.recovery_products,
             );
+            let delivery = packet.parent().unwrap();
+            let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
             let records = publication
                 .records
                 .into_iter()
                 .filter(|record| requested.contains(&record.module))
-                .map(|record| (record, CandidateOrigin::Ordinary))
-                .collect();
-            let selected =
-                select_records_inner(producer, &include, packet.parent().unwrap(), records, None)
-                    .expect("production candidate delivery");
+                .map(|mut record| {
+                    let canonical = record
+                        .module_interface_proof
+                        .as_ref()
+                        .expect("publication requires the genuinely issued canonical interface");
+                    // Publication normally creates this descriptor before a
+                    // durable record becomes selectable. Keep the fixture's
+                    // real proof and descriptor together in its own delivery.
+                    record.data.module_interface = Some(
+                        crate::recovery_artifacts::materialize_module_interface(
+                            delivery,
+                            canonical,
+                            &mut validation,
+                            crate::recovery_artifacts::MaterializationMode::Scratch,
+                        )
+                        .expect("genuine publication canonical descriptor materialization"),
+                    );
+                    (record, CandidateOrigin::Ordinary)
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                records
+                    .iter()
+                    .map(|(record, _)| record.module.clone())
+                    .collect::<BTreeSet<_>>(),
+                requested,
+                "genuine publication omitted a requested owner before candidate selection"
+            );
+            let selected = select_records_inner(producer, &include, delivery, records, None)
+                .unwrap_or_else(|| {
+                    panic!("production candidate delivery refused requested owners {requested:?}")
+                });
             assert_eq!(
                 selected
                     .by_owner

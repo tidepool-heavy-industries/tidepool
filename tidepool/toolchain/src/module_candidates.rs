@@ -388,7 +388,17 @@ impl ValidatedRecord {
         record: Record,
         canonical: crate::certified_products::CertifiedModuleInterface,
     ) -> Option<Self> {
-        if !canonical.matches_recovery_reference(record.module_interface.as_ref()?) {
+        let unavailable = match record.module_interface.as_ref() {
+            None => Some(CandidateInterfaceUnavailable::MissingCanonicalReference),
+            Some(reference) if !canonical.matches_recovery_reference(reference) => {
+                Some(CandidateInterfaceUnavailable::CanonicalReferenceMismatch)
+            }
+            Some(_) => None,
+        };
+        if let Some(reason) = unavailable {
+            tracing::debug!(target: "tidepool_toolchain::module_candidates",
+                unit = record.unit.as_str(), module = record.module.as_str(), ?reason,
+                "candidate canonical descriptor admission refused");
             return None;
         }
         Some(Self {
@@ -2001,6 +2011,10 @@ fn select_records_inner(
 
 #[derive(Clone, Debug, thiserror::Error)]
 enum CandidateInterfaceUnavailable {
+    #[error("canonical module recovery descriptor is absent")]
+    MissingCanonicalReference,
+    #[error("canonical module recovery descriptor differs from its admitted proof")]
+    CanonicalReferenceMismatch,
     #[error("canonical module producer or source differs")]
     ProducerOrSourceMismatch,
     #[error("required interface {owner:?} needs {expected:?}; available {available:?}")]
@@ -2920,6 +2934,14 @@ mod tests {
         let reference = record.module_interface.as_ref().unwrap();
         let core = reference.core.as_ref().unwrap();
         assert!(ValidatedRecord::admit(record.clone(), canonical.clone()).is_some());
+        let absent = Record {
+            data: RecordData {
+                module_interface: None,
+                ..record.data.clone()
+            },
+            ..record.clone()
+        };
+        assert!(ValidatedRecord::admit(absent, canonical.clone()).is_none());
         let mismatches = [
             RecoveryModuleInterfaceRef {
                 interface: RecoveryJoinRef {
