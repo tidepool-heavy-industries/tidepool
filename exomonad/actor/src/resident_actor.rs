@@ -76,7 +76,7 @@ use crate::request::{RequestRegistry, RequestReservationOwner};
 use crate::resident_workbench::{
     AgentStopProjection, ForkGroupBoundary, PreparedCell, ResidentActorBoundary,
     ResidentActorStartupStep, ResidentKernelBoundary, ResidentWorkbenchFragment,
-    ResidentWorkbenchStep,
+    ResidentWorkbenchStep, ResidentWorkbenchSuspension,
 };
 use crate::{
     ActorDescriptor, ActorExitKind, ActorMachineRegistry, ActorRef, ActorSessionContext,
@@ -2950,7 +2950,7 @@ struct WorkbenchFragmentExecution {
 }
 
 impl WorkbenchFragmentExecution {
-    fn new(fragment: ResidentWorkbenchFragment, outcome: ResidentOutcome) -> Self {
+    fn new(fragment: ResidentWorkbenchFragment, outcome: ResidentWorkbenchSuspension) -> Self {
         Self {
             native_start: None,
             native_result: None,
@@ -2958,7 +2958,7 @@ impl WorkbenchFragmentExecution {
             inflight_effect: None,
             resume_failure: None,
             fragment: Some(fragment),
-            outcome: Some(outcome),
+            outcome: Some(outcome.into()),
         }
     }
 }

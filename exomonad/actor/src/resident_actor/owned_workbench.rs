@@ -379,7 +379,11 @@ where
     match step {
         ResidentWorkbenchStep::Running { fragment, outcome } => {
             let boundary = runner
-                .capture_boundary(context.clone(), *outcome, context.placement.resource_scope)
+                .capture_boundary(
+                    context.clone(),
+                    (*outcome).into(),
+                    context.placement.resource_scope,
+                )
                 .await?;
             Ok(WorkbenchFragmentAdvance::Captured {
                 fragment: *fragment,

@@ -1518,7 +1518,7 @@ pub(crate) enum ResidentWorkbenchStep {
     Rejected(tidepool_runtime::session::CompileRejection),
     Running {
         fragment: Box<ResidentWorkbenchFragment>,
-        outcome: Box<ResidentOutcome>,
+        outcome: Box<ResidentWorkbenchSuspension>,
     },
     Replied {
         request: crate::RequestId,
@@ -1528,6 +1528,107 @@ pub(crate) enum ResidentWorkbenchStep {
     CancellationAcknowledged {
         request: crate::RequestId,
     },
+}
+
+/// A fragment has already collected its output before returning a parked frame.
+/// Completion belongs to the settled step; external work remains owned here
+/// until the same continuation is dispatched or aborted.
+pub(crate) enum ResidentWorkbenchSuspension {
+    Ask {
+        hole: ResidentHole,
+        request: HaskellValue,
+    },
+    Deferred {
+        hole: ResidentHole,
+        request: HaskellValue,
+        work: tidepool_effect::DeferredEffect,
+    },
+}
+
+#[cfg(test)]
+impl ResidentWorkbenchSuspension {
+    fn continuation_id(&self) -> &str {
+        match self {
+            Self::Ask { hole, .. } | Self::Deferred { hole, .. } => hole.cont_id(),
+        }
+    }
+}
+
+impl From<ResidentWorkbenchSuspension> for ResidentOutcome {
+    fn from(suspension: ResidentWorkbenchSuspension) -> Self {
+        match suspension {
+            ResidentWorkbenchSuspension::Ask { hole, request } => Self::Suspended {
+                output: Vec::new(),
+                hole,
+                request,
+            },
+            ResidentWorkbenchSuspension::Deferred {
+                hole,
+                request,
+                work,
+            } => Self::Deferred {
+                output: Vec::new(),
+                hole,
+                request,
+                work,
+            },
+        }
+    }
+}
+
+fn tool_installation_request<H, O>(
+    session: &mut ResidentSession<H, O>,
+    registration: &ParkedHoleAbortRegistration,
+    suspension: ResidentWorkbenchSuspension,
+) -> Result<(ResidentHole, HaskellValue), ResidentActorWorkbenchError>
+where
+    H: DispatchEffect<O> + Send,
+    O: OutputSink + Sync,
+{
+    match suspension {
+        ResidentWorkbenchSuspension::Ask { hole, request } => Ok((hole, request)),
+        ResidentWorkbenchSuspension::Deferred { hole, work, .. } => {
+            let reason = "tool installer crossed an external effect boundary before publication";
+            match session.abort(hole.cont_id(), reason.into()) {
+                Ok(settled) => registration.replace_in_checkout(session, &settled),
+                Err(abort_error) => tracing::warn!(
+                    hole = hole.cont_id(),
+                    %abort_error,
+                    "failed to abort deferred tool installation"
+                ),
+            }
+            drop(work);
+            Err(ResidentActorWorkbenchError::ActorProtocol(reason.into()))
+        }
+    }
+}
+
+fn require_tool_installation_completion<H, O>(
+    session: &mut ResidentSession<H, O>,
+    registration: &ParkedHoleAbortRegistration,
+    settled: &ResidentOutcome,
+) -> Result<(), ResidentActorWorkbenchError>
+where
+    H: DispatchEffect<O> + Send,
+    O: OutputSink + Sync,
+{
+    if let Some(cont_id) = outcome_continuation_id(settled) {
+        match session.abort(
+            &cont_id,
+            "tool installer must finish after publication".into(),
+        ) {
+            Ok(outcome) => registration.replace_in_checkout(session, &outcome),
+            Err(abort_error) => tracing::warn!(
+                hole = cont_id,
+                %abort_error,
+                "failed to abort parked hole after tool installer overrun"
+            ),
+        }
+        return Err(ResidentActorWorkbenchError::ActorProtocol(
+            "tool installer did not finish after publication".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// The one machine-entry component for installed actor program segments.
@@ -3850,21 +3951,17 @@ where
                     "tool installation: {detail}"
                 )));
             };
-            let ResidentOutcome::Suspended { hole, request, .. } = *outcome else {
-                unreachable!("running fragment has a suspension")
-            };
-            // `hole` is plain session-held data held across the checkout below
-            // being acquired; if this future is dropped while still awaiting
-            // that checkout, nothing else resumes or aborts the continuation it
-            // parked. `ParkedHoleAbortGuard` covers that gap the same way
-            // `HostInputRetirement` covers the planned cell's mounted input:
-            // Drop can't await, so it spawns one more checkout in the
-            // background to abort the hole there, retaining the installer
-            // scope until retirement. Successful publication disarms it.
+            // The registration observes either parked state before this
+            // checkout is awaited. Its armed guard retains the installation
+            // scope and aborts the exact hole if this future is dropped.
+            // Deferred work remains unstarted until the checkout rejects and
+            // aborts it; successful publication alone disarms the guard.
             let resumption_registration = registration.clone();
             let publication = registration.scope(self
                 .access
                 .with_machine(compile_context, move |session, context, _| {
+                    let (hole, request) = tool_installation_request(
+                        session, &resumption_registration, *outcome)?;
                     let publication = (|| {
                         let ResidentRequest::AgentTools(
                             crate::generated::agent_tools::AgentToolsReq::AgentToolsInstallWith(
@@ -3938,28 +4035,7 @@ where
                         .resume_classified(hole, ())
                         .map_err(classify_resumption)?;
                     resumption_registration.replace_in_checkout(session, &settled);
-                    if !matches!(
-                        settled,
-                        ResidentOutcome::Completed { .. }
-                            | ResidentOutcome::BindingsCommitted { .. }
-                    ) {
-                        if let ResidentOutcome::Suspended { hole, .. } = settled {
-                            match session.abort(
-                                hole.cont_id(),
-                                "tool installer must finish after publication".into(),
-                            ) {
-                                Ok(outcome) => resumption_registration.replace_in_checkout(session, &outcome),
-                                Err(abort_error) => tracing::warn!(
-                                    hole = hole.cont_id(),
-                                    %abort_error,
-                                    "failed to abort parked hole after tool installer overrun"
-                                ),
-                            }
-                        }
-                        return Err(ResidentActorWorkbenchError::ActorProtocol(
-                            "tool installer did not finish after publication".into(),
-                        ));
-                    }
+                    require_tool_installation_completion(session, &resumption_registration, &settled)?;
                     Ok(ResidentWorkbenchTools {
                         declarations,
                         dispatch: Arc::new(dispatch),
@@ -6201,8 +6277,7 @@ where
             fragment.output.extend(output);
             Ok(ResidentWorkbenchStep::Running {
                 fragment: Box::new(fragment),
-                outcome: Box::new(ResidentOutcome::Deferred {
-                    output: Vec::new(),
+                outcome: Box::new(ResidentWorkbenchSuspension::Deferred {
                     hole,
                     request,
                     work,
@@ -6218,11 +6293,7 @@ where
             let _ = ResidentRequest::decode(&request, session.data_con_table())?;
             Ok(ResidentWorkbenchStep::Running {
                 fragment: Box::new(fragment),
-                outcome: Box::new(ResidentOutcome::Suspended {
-                    output: Vec::new(),
-                    hole,
-                    request,
-                }),
+                outcome: Box::new(ResidentWorkbenchSuspension::Ask { hole, request }),
             })
         }
     }
@@ -12743,7 +12814,7 @@ mod request_tests {
                     .await?;
                 let settled = match step {
                     ResidentWorkbenchStep::Running { fragment, outcome } => {
-                        self.settle_item(context.clone(), *fragment, *outcome)
+                        self.settle_item(context.clone(), *fragment, (*outcome).into())
                             .await?
                     }
                     other => other,
@@ -13260,7 +13331,7 @@ mod request_tests {
                 }
                 _ => panic!("lookup fixture returned an unexpected workbench step"),
             };
-            let ResidentOutcome::Suspended { hole, .. } = *outcome else {
+            let ResidentWorkbenchSuspension::Ask { hole, .. } = *outcome else {
                 panic!("lookup effect should park a continuation")
             };
             let (probe, completed, release) = lookup_inspection_probe::install();
@@ -13442,7 +13513,7 @@ mod request_tests {
         let ResidentWorkbenchStep::Running { outcome, .. } = step else {
             panic!("lookup fragment should suspend")
         };
-        let ResidentOutcome::Suspended { hole, .. } = *outcome else {
+        let ResidentWorkbenchSuspension::Ask { hole, .. } = *outcome else {
             panic!("lookup effect should park continuation")
         };
         let continuation_id = hole.cont_id().to_owned();
@@ -13538,7 +13609,7 @@ mod request_tests {
         let ResidentWorkbenchStep::Running { fragment, outcome } = step else {
             panic!("lookup effect should suspend the fragment")
         };
-        let ResidentOutcome::Suspended { hole, .. } = *outcome else {
+        let ResidentWorkbenchSuspension::Ask { hole, .. } = *outcome else {
             panic!("lookup effect should park a continuation")
         };
         let continuation_id = hole.cont_id().to_owned();
@@ -13602,7 +13673,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         let ResidentWorkbenchStep::Running { outcome, .. } = step else {
             panic!("lookup effect should suspend the fragment")
         };
-        let ResidentOutcome::Suspended { hole, .. } = *outcome else {
+        let ResidentWorkbenchSuspension::Ask { hole, .. } = *outcome else {
             panic!("lookup effect should park a continuation")
         };
         let continuation_id = hole.cont_id().to_owned();
@@ -13800,7 +13871,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         match step {
             ResidentWorkbenchStep::Running { fragment, outcome } => {
                 workbench
-                    .settle_item(private_context, *fragment, *outcome)
+                    .settle_item(private_context, *fragment, (*outcome).into())
                     .await
                     .unwrap();
             }
@@ -16100,7 +16171,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             match step {
                 ResidentWorkbenchStep::Running { fragment, outcome } => {
                     workbench
-                        .settle_item(context.clone(), *fragment, *outcome)
+                        .settle_item(context.clone(), *fragment, (*outcome).into())
                         .await
                         .expect("JSON bind settles");
                 }
@@ -16221,7 +16292,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                 .unwrap();
             let settled = match step {
                 ResidentWorkbenchStep::Running { fragment, outcome } => workbench
-                    .settle_item(context.clone(), *fragment, *outcome)
+                    .settle_item(context.clone(), *fragment, (*outcome).into())
                     .await
                     .unwrap(),
                 other => other,
@@ -16743,7 +16814,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             .expect("source value compiles");
         if let ResidentWorkbenchStep::Running { fragment, outcome } = step {
             workbench
-                .settle_item(context.clone(), *fragment, *outcome)
+                .settle_item(context.clone(), *fragment, (*outcome).into())
                 .await
                 .expect("source value binds");
         }
@@ -16801,7 +16872,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         match step {
             ResidentWorkbenchStep::Running { fragment, outcome } => {
                 workbench
-                    .settle_item(context.clone(), *fragment, *outcome)
+                    .settle_item(context.clone(), *fragment, (*outcome).into())
                     .await
                     .unwrap();
             }
@@ -16848,7 +16919,11 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             panic!("request parks")
         };
         let boundary = runner
-            .capture_boundary(context.clone(), *outcome, context.placement.resource_scope)
+            .capture_boundary(
+                context.clone(),
+                (*outcome).into(),
+                context.placement.resource_scope,
+            )
             .await
             .unwrap();
         let ResidentActorBoundary::CurrentRequest {
@@ -16953,7 +17028,11 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             panic!("request access must produce a suspended effect")
         };
         let boundary = runner
-            .capture_boundary(context.clone(), *outcome, context.placement.resource_scope)
+            .capture_boundary(
+                context.clone(),
+                (*outcome).into(),
+                context.placement.resource_scope,
+            )
             .await
             .expect("capture request access");
         let ResidentActorBoundary::CurrentRequest { continuation, site } = boundary else {
@@ -17250,7 +17329,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             .expect("Haskell binding compiles");
         if let ResidentWorkbenchStep::Running { fragment, outcome } = step {
             workbench
-                .settle_item(context.clone(), *fragment, *outcome)
+                .settle_item(context.clone(), *fragment, (*outcome).into())
                 .await
                 .expect("Haskell binding settles");
         }
@@ -17312,7 +17391,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         let ResidentWorkbenchStep::Running { outcome, .. } = step else {
             panic!("expected a running fragment: {}", describe_step(&step));
         };
-        let ResidentOutcome::Suspended { hole, .. } = *outcome else {
+        let ResidentWorkbenchSuspension::Ask { hole, .. } = *outcome else {
             panic!("sleep effect must suspend");
         };
         let failure = runner
@@ -17353,7 +17432,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             .expect("parent Haskell binding compiles");
         let parent = match parent {
             ResidentWorkbenchStep::Running { fragment, outcome } => workbench
-                .settle_item(context.clone(), *fragment, *outcome)
+                .settle_item(context.clone(), *fragment, (*outcome).into())
                 .await
                 .expect("parent binding commits"),
             step => step,
@@ -17463,7 +17542,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             let ResidentWorkbenchStep::Running { outcome, .. } = failed else {
                 panic!("parent failing continuation runs");
             };
-            let ResidentOutcome::Suspended { hole, .. } = *outcome else {
+            let ResidentWorkbenchSuspension::Ask { hole, .. } = *outcome else {
                 panic!("parent suspends before failure");
             };
             assert!(matches!(
@@ -17557,7 +17636,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                 .expect("child compiles against inherited binding after final capsule release");
             let step = match step {
                 ResidentWorkbenchStep::Running { fragment, outcome } => workbench
-                    .settle_item(child.clone(), *fragment, *outcome)
+                    .settle_item(child.clone(), *fragment, (*outcome).into())
                     .await
                     .expect("child uses independently retained binding"),
                 step => step,
@@ -17668,6 +17747,127 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         );
     }
 
+    enum InstallerDeferredStage {
+        BeforePublication,
+        AfterPublication,
+    }
+
+    async fn assert_installer_deferred_rejection(stage: InstallerDeferredStage) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let (machines, mut context, source, _root) = actor_registry_fixture();
+        context.haskell_effects_alias = "'[Exomonad.Notifications, Exomonad.ActorContext]".into();
+        let workbench = ResidentActorWorkbench::new(machines, source.clone(), None);
+        let retained = workbench
+            .access
+            .with_machine(context.clone(), |session, context, _| {
+                Ok(session.retain_lexical_scope(context.placement.lexical_scope)?)
+            })
+            .await
+            .expect("retain actual installation scope");
+        let retained_weak = Arc::downgrade(&retained);
+        let guard = ParkedHoleAbortGuard::with_retained_latest(
+            &workbench.access,
+            context.clone(),
+            None,
+            "unexpected installer work was abandoned".into(),
+            Some(retained),
+        );
+        let registration = guard.registration();
+        let (block, verdict) = suspending_fragment();
+        let step = registration
+            .scope(workbench.begin_fragment_split(context.clone(), source, block, Some(verdict)))
+            .await
+            .expect("real native frame parks under the installation guard");
+        let ResidentWorkbenchStep::Running { outcome, .. } = step else {
+            panic!("fixture must park a native frame")
+        };
+        let ResidentWorkbenchSuspension::Ask { hole, request } = *outcome else {
+            panic!("fixture must yield an actor request")
+        };
+        let cont_id = hole.cont_id().to_owned();
+        assert!(registration.awaiting_acknowledgement().contains(&cont_id));
+        let started = Arc::new(AtomicBool::new(false));
+        let work_started = Arc::clone(&started);
+        let work_owner = Arc::new(());
+        let work_weak = Arc::downgrade(&work_owner);
+        // Only this refusal fixture supplies an unexpected deferred state.
+        // Its actual native frame and scope remain owned by the guard.
+        let suspension = ResidentWorkbenchSuspension::Deferred {
+            hole,
+            request,
+            work: tidepool_effect::DeferredEffect::blocking(move || {
+                work_started.store(true, Ordering::SeqCst);
+                drop(work_owner);
+                Err(tidepool_effect::EffectError::Handler(
+                    "installer work must remain unstarted".into(),
+                ))
+            }),
+        };
+        let checked_registration = registration.clone();
+        registration
+            .scope(
+                workbench
+                    .access
+                    .with_machine(context, move |session, _, _| {
+                        assert!(session.parked_holes().contains(&cont_id.as_str()));
+                        assert_eq!(session.stowed_roots_count(), 1);
+                        let (result, expected) = match stage {
+                            InstallerDeferredStage::BeforePublication => (
+                                tool_installation_request(
+                                    session,
+                                    &checked_registration,
+                                    suspension,
+                                )
+                                .map(|_| ()),
+                                "external effect boundary before publication",
+                            ),
+                            InstallerDeferredStage::AfterPublication => {
+                                let settled = ResidentOutcome::from(suspension);
+                                let result = require_tool_installation_completion(
+                                    session,
+                                    &checked_registration,
+                                    &settled,
+                                );
+                                drop(settled);
+                                (result, "did not finish after publication")
+                            }
+                        };
+                        assert!(matches!(result,
+                    Err(ResidentActorWorkbenchError::ActorProtocol(detail))
+                    if detail.contains(expected)));
+                        assert_eq!(session.parked_count(), 0);
+                        assert_eq!(session.stowed_roots_count(), 0);
+                        assert!(checked_registration.awaiting_acknowledgement().is_empty());
+                        Ok(())
+                    }),
+            )
+            .await
+            .expect("installer rejection confirms native retirement");
+        assert!(!started.load(Ordering::SeqCst));
+        assert!(work_weak.upgrade().is_none());
+        assert!(retained_weak.upgrade().is_some());
+        drop(guard);
+        drop(registration);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while retained_weak.upgrade().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("installation scope releases after its frame and guard retire");
+    }
+
+    #[tokio::test]
+    async fn tool_installer_refuses_deferred_work_before_publication_and_releases_its_frame() {
+        assert_installer_deferred_rejection(InstallerDeferredStage::BeforePublication).await;
+    }
+
+    #[tokio::test]
+    async fn tool_installer_refuses_deferred_work_after_publication_and_releases_its_frame() {
+        assert_installer_deferred_rejection(InstallerDeferredStage::AfterPublication).await;
+    }
+
     #[tokio::test]
     async fn external_work_releases_machine_until_its_failure_settles() {
         let (machines, mut context, source, _root) = actor_registry_fixture();
@@ -17685,7 +17885,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         let ResidentWorkbenchStep::Running { outcome, .. } = step else {
             panic!("expected a parked fragment");
         };
-        let ResidentOutcome::Suspended { hole, .. } = *outcome else {
+        let ResidentWorkbenchSuspension::Ask { hole, request } = *outcome else {
             panic!("expected a parked continuation");
         };
         let cont_id = hole.cont_id().to_string();
@@ -17695,19 +17895,28 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             let runner = Arc::clone(&runner);
             let context = context.clone();
             tokio::spawn(async move {
-                runner
-                    .run_external(
-                        context,
-                        hole,
-                        tidepool_effect::DeferredEffect::blocking(move || {
-                            started_tx.send(()).expect("observer waiting");
-                            release_rx.recv().expect("release external work");
-                            Err(tidepool_effect::EffectError::Handler(
-                                "external refusal".into(),
-                            ))
-                        }),
+                let suspension = ResidentWorkbenchSuspension::Deferred {
+                    hole,
+                    request,
+                    work: tidepool_effect::DeferredEffect::blocking(move || {
+                        started_tx.send(()).expect("observer waiting");
+                        release_rx.recv().expect("release external work");
+                        Err(tidepool_effect::EffectError::Handler(
+                            "external refusal".into(),
+                        ))
+                    }),
+                };
+                let boundary = runner
+                    .capture_boundary(
+                        context.clone(),
+                        suspension.into(),
+                        context.placement.resource_scope,
                     )
-                    .await
+                    .await?;
+                let ResidentActorBoundary::External { continuation, work } = boundary else {
+                    panic!("deferred fragment must retain its external work")
+                };
+                runner.run_external(context, continuation, work).await
             })
         };
         started_rx.await.expect("external work started");
@@ -17775,10 +17984,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         let ResidentWorkbenchStep::Running { outcome, .. } = step else {
             panic!("expected a suspension: {}", describe_step(&step));
         };
-        let ResidentOutcome::Suspended { hole, .. } = *outcome else {
-            panic!("running fragment has a suspension")
-        };
-        let cont_id = hole.cont_id().to_string();
+        let cont_id = outcome.continuation_id().to_owned();
 
         let parked_before = workbench
             .access
@@ -17866,7 +18072,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         let registration = cell.registration();
         let (successor, other) = registration
             .scope(async {
-                let mut outcomes = Vec::new();
+                let mut outcomes: Vec<ResidentOutcome> = Vec::new();
                 for _ in 0..2 {
                     let (block, verdict) = suspending_fragment();
                     let step = workbench
@@ -17876,7 +18082,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                     let ResidentWorkbenchStep::Running { outcome, .. } = step else {
                         panic!("expected native suspension");
                     };
-                    outcomes.push(*outcome);
+                    outcomes.push((*outcome).into());
                 }
                 let other = outcomes.pop().unwrap();
                 (outcomes.pop().unwrap(), other)
@@ -18015,7 +18221,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             let ResidentWorkbenchStep::Running { outcome, .. } = step else {
                 panic!("expected a parked fragment")
             };
-            *outcome
+            ResidentOutcome::from(*outcome)
         };
         let owned = park(Arc::clone(&workbench), context.clone(), source.clone()).await;
         let unrelated = park(Arc::clone(&workbench), context.clone(), source).await;
@@ -18087,7 +18293,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         let ResidentWorkbenchStep::Running { outcome, .. } = unrelated else {
             panic!("expected unrelated suspension")
         };
-        let unrelated_id = outcome_continuation_id(&outcome).expect("unrelated hole");
+        let unrelated_id = outcome.continuation_id().to_owned();
 
         let (parked_tx, parked_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
@@ -18116,7 +18322,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                                     panic!("expected late suspension")
                                 };
                                 parked_tx
-                                    .send(outcome_continuation_id(outcome).expect("late hole"))
+                                    .send(outcome.continuation_id().to_owned())
                                     .expect("test waits for late hole");
                                 release_rx.recv().expect("test releases checkout");
                                 Ok(step)
@@ -18175,7 +18381,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         let ResidentWorkbenchStep::Running { outcome, .. } = unrelated else {
             panic!("expected an unrelated suspension")
         };
-        let unrelated_id = outcome_continuation_id(&outcome).expect("unrelated hole");
+        let unrelated_id = outcome.continuation_id().to_owned();
 
         let (parked_tx, parked_rx) = tokio::sync::oneshot::channel();
         let task_workbench = Arc::clone(&workbench);
@@ -18196,7 +18402,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                             panic!("expected slot suspension")
                         };
                         parked_tx
-                            .send(outcome_continuation_id(&outcome).expect("slot hole"))
+                            .send(outcome.continuation_id().to_owned())
                             .expect("test waiting for slot hole");
                         std::future::pending::<()>().await;
                     },
@@ -18268,7 +18474,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             let ResidentWorkbenchStep::Running { fragment, outcome } = step else {
                 panic!("fixture must retain a native continuation");
             };
-            let id = outcome_continuation_id(&outcome).expect("fixture suspends");
+            let id = outcome.continuation_id().to_owned();
             assert!(registration.awaiting_acknowledgement().contains(&id));
             let mut foreign = context.clone();
             foreign.actor.incarnation.0 += 1;
@@ -18339,7 +18545,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         let ResidentWorkbenchStep::Running { outcome, .. } = step else {
             panic!("expected a native suspension")
         };
-        let owned_id = outcome_continuation_id(&outcome).expect("owned hole");
+        let owned_id = outcome.continuation_id().to_owned();
         drop(outcome);
         drop(guard);
         drop(registration);
