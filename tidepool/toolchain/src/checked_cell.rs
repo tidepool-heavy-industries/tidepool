@@ -3444,46 +3444,115 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires the matched Haskell worker and frontend"]
     fn planned_prefix_revalidation_uses_publication_context_not_unrelated_value_rows() {
         use super::*;
         use crate::declaration_join::{ExactLexicalNode, ExactModuleIdentity};
 
-        let module = |name: &str| ExactModuleIdentity {
-            unit: "main".into(),
-            module: name.into(),
-        };
-        let authored = module("Authored");
-        let selected = module("CheckedHomeValue");
-        let unrelated = module("UnrelatedHomeValue");
-        let certificate = Arc::new(
-            crate::declaration_join::CertifiedAuthoredDeclaration::test_certificate(
-                authored.clone(),
-                vec![selected.clone()],
-                vec![ExactLexicalNode {
-                    owner: selected.clone(),
-                    imports: Vec::new(),
-                }],
-                vec![selected.clone(), unrelated.clone()],
+        let root = tempfile::tempdir().unwrap();
+        let source = include_str!("../tests/fixtures/checked-prefix-publication/G1.hs");
+        let other_source = include_str!("../tests/fixtures/checked-prefix-publication/G2.hs");
+        for (name, bytes) in [
+            (
+                "PrefixSelectedSupport.hs",
+                include_str!(
+                    "../tests/fixtures/checked-prefix-publication/PrefixSelectedSupport.hs"
+                ),
             ),
+            (
+                "PrefixUnrelatedSupport.hs",
+                include_str!(
+                    "../tests/fixtures/checked-prefix-publication/PrefixUnrelatedSupport.hs"
+                ),
+            ),
+        ] {
+            std::fs::write(root.path().join(name), bytes).unwrap();
+        }
+        let certify = |generation, source: &str, context| {
+            let owner = tidepool_repr::SessionModule::lib(tidepool_repr::Generation(generation));
+            let path = root.path().join(owner.relative_hs_path());
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, source).unwrap();
+            let includes = [root.path().to_path_buf()];
+            let certificate = match context {
+                None => crate::declaration_join::certify_authored_declaration(
+                    owner,
+                    &path,
+                    source,
+                    &includes,
+                    root.path(),
+                ),
+                Some(context) => crate::declaration_join::certify_authored_declaration_in_context(
+                    owner,
+                    &path,
+                    source,
+                    &includes,
+                    root.path(),
+                    context,
+                ),
+            };
+            Arc::new(
+                certificate.expect(
+                    "matched producer issues original canonical/native declaration carriers",
+                ),
+            )
+        };
+        let certificate = certify(1, source, None);
+        let selected_context = Arc::new(
+            crate::declaration_join::ExactDeclarationContext::new(
+                std::slice::from_ref(&certificate),
+                &[],
+                Vec::new(),
+            )
+            .unwrap(),
         );
-
+        let unrelated_certificate = certify(2, other_source, Some(selected_context));
+        assert_eq!(
+            certificate.product().module_interface().unwrap().origin(),
+            crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration { generation: 1 },
+        );
+        assert_eq!(
+            unrelated_certificate
+                .product()
+                .module_interface()
+                .unwrap()
+                .origin(),
+            crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration { generation: 2 },
+        );
+        let owner = certificate.product().owner();
+        let authored = ExactModuleIdentity {
+            unit: owner.unit.clone(),
+            module: owner.module.clone(),
+        };
+        let selected = ExactModuleIdentity {
+            unit: "main".into(),
+            module: "PrefixSelectedSupport".into(),
+        };
+        let unrelated = ExactModuleIdentity {
+            unit: "main".into(),
+            module: "PrefixUnrelatedSupport".into(),
+        };
+        let surface = certificate.shared_source_lexical_surface(&[]).unwrap();
+        assert!(surface.roots.contains(&selected));
+        assert!(!surface.lexical.iter().any(|node| node.owner == unrelated));
+        let mut expected_lexical = surface.lexical;
+        expected_lexical.push(ExactLexicalNode {
+            owner: authored.clone(),
+            imports: surface.roots,
+        });
+        let mut enriched_lexical = expected_lexical.clone();
+        enriched_lexical.push(ExactLexicalNode {
+            owner: unrelated.clone(),
+            imports: Vec::new(),
+        });
         let publication_context = Arc::new(
             crate::declaration_join::ExactDeclarationContext::new(&[], &[], Vec::new()).unwrap(),
         );
         let enriched_context = Arc::new(
             crate::declaration_join::ExactDeclarationContext::new(
-                std::slice::from_ref(&certificate),
+                &[certificate.clone(), unrelated_certificate.clone()],
                 &[],
-                vec![
-                    ExactLexicalNode {
-                        owner: selected.clone(),
-                        imports: Vec::new(),
-                    },
-                    ExactLexicalNode {
-                        owner: unrelated.clone(),
-                        imports: Vec::new(),
-                    },
-                ],
+                enriched_lexical.clone(),
             )
             .unwrap(),
         );
@@ -3495,20 +3564,7 @@ mod tests {
         let expected_publication = publication_context
             .as_ref()
             .clone()
-            .extend(
-                std::slice::from_ref(&certificate),
-                &[],
-                vec![
-                    ExactLexicalNode {
-                        owner: authored.clone(),
-                        imports: vec![selected.clone()],
-                    },
-                    ExactLexicalNode {
-                        owner: selected.clone(),
-                        imports: Vec::new(),
-                    },
-                ],
-            )
+            .extend(std::slice::from_ref(&certificate), &[], expected_lexical)
             .unwrap();
         assert!(!expected_publication
             .lexical_graph()
@@ -3518,22 +3574,9 @@ mod tests {
             .as_ref()
             .clone()
             .extend(
-                std::slice::from_ref(&certificate),
+                &[certificate.clone(), unrelated_certificate],
                 &[],
-                vec![
-                    ExactLexicalNode {
-                        owner: authored.clone(),
-                        imports: vec![selected.clone()],
-                    },
-                    ExactLexicalNode {
-                        owner: selected.clone(),
-                        imports: Vec::new(),
-                    },
-                    ExactLexicalNode {
-                        owner: unrelated,
-                        imports: Vec::new(),
-                    },
-                ],
+                enriched_lexical,
             )
             .unwrap();
         assert!(prefix_context_differs_only_by_unrelated_owner(
@@ -3541,15 +3584,16 @@ mod tests {
             &incorrectly_promoted_publication
         ));
 
-        let producer = b"checked-prefix revalidation fixture";
+        let (endpoint, _) = crate::toolchain::bind_extract_endpoint().unwrap();
+        let producer = endpoint.identity().producer_bytes();
         let cell = Arc::new(ExactCheckedCell {
             specification: CheckedCellSpecification {
                 admission_digest: [4; 32],
-                cell_source: "module Authored where".into(),
+                cell_source: source.into(),
                 template_source: String::new(),
                 turn_templates: Vec::new(),
                 injected_modules: Vec::new(),
-                reserved_declaration_modules: vec!["Authored".into()],
+                reserved_declaration_modules: vec![authored.module.clone()],
             },
             producer: crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
                 producer,
@@ -3559,12 +3603,12 @@ mod tests {
             declaration_context: enriched_context,
             publication_context,
             receipt_digest: [9; 32],
-            checked_source: "module Authored where".into(),
+            checked_source: source.into(),
             evidence: Vec::new(),
             observations: Vec::new(),
             items: vec![CheckedItem {
                 kind: CheckedItemKind::Declaration,
-                source: "module Authored where".into(),
+                source: source.into(),
                 binders: Vec::new(),
                 pins: Vec::new(),
                 expression: None,
@@ -3572,7 +3616,7 @@ mod tests {
             }],
             include: Vec::new(),
             planned_declaration: Some(PlannedCheckedDeclaration {
-                source: "module Authored where".into(),
+                source: source.into(),
                 interface_fingerprint: "fixture".into(),
                 certificate,
                 receipt_digest: [10; 32],
