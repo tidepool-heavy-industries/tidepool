@@ -103,6 +103,7 @@ DELEGATED_ENVIRONMENT = (
     'TIDEPOOL_EXTRACT_DAEMON_LOG', 'TIDEPOOL_KEEP_TEST_LOGS',
     'TIDEPOOL_TEST_BASH', 'TIDEPOOL_TEST_SLEEP', 'TIDEPOOL_BROWSER_NODE',
     'TIDEPOOL_BROWSER_DRIVER', 'EXOMONAD_EMBEDDED_ASSET_ROOT',
+    'EXOMONAD_WORKSPACE_GITLINK',
     'PLAYWRIGHT_BROWSERS_PATH', 'TIDEPOOL_M3_FIXTURE_DIR',
     'TIDEPOOL_FREER_RESUME_FIXTURE_DIR', 'TIDEPOOL_FREER_RETENTION_FIXTURE_DIR',
 )
@@ -349,11 +350,17 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None):
         if record is not None:
             record.update(status='timeout', process_execution_count=(None if service_record is not None else 1),
                           elapsed_ns=time.monotonic_ns() - started)
-        record_actual_counts(record, error.output, service_record is not None)
+        stdout = error.output or ''
+        stderr = error.stderr or ''
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode(errors='replace')
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode(errors='replace')
+        record_actual_counts(record, stdout, service_record is not None)
         detail = f'timed out after {timeout:g}s'
-        if error.output:
-            detail += f'\n{error.output}'
-        return False, detail, error.stderr or ''
+        if stdout:
+            detail += f'\n{stdout}'
+        return False, detail, stderr
     except RunnerInterrupted as error:
         if record is not None:
             record.update(status='interrupted', interrupt_signal=error.signum,

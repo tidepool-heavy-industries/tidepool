@@ -42,6 +42,7 @@ class IsolatedLibtestTests(unittest.TestCase):
     def test_delegated_command_exports_declared_inputs_and_only_test_process(self):
         record = {}
         with patch.dict(os.environ, {'TIDEPOOL_EXTRACT': '/qualified/compiler',
+                                     'EXOMONAD_WORKSPACE_GITLINK': '/qualified/workspace-pin',
                                      'OPENAI_API_KEY': 'never-forward',
                                      'UNRELATED_VARIABLE': 'never-forward'}):
             command, unit = runner.delegated_command(
@@ -51,6 +52,7 @@ class IsolatedLibtestTests(unittest.TestCase):
         self.assertIn('--property=Delegate=yes', command)
         self.assertIn('--property=KillMode=control-group', command)
         self.assertIn('--setenv=TIDEPOOL_EXTRACT=/qualified/compiler', command)
+        self.assertIn('--setenv=EXOMONAD_WORKSPACE_GITLINK=/qualified/workspace-pin', command)
         self.assertFalse(any('never-forward' in word for word in command))
         self.assertIn('--unit=' + unit, command)
         self.assertFalse(record['cleanup_confirmed'])
@@ -231,6 +233,34 @@ class IsolatedLibtestTests(unittest.TestCase):
         self.assertIsNone(record['exit_code'])
         self.assertEqual(record['executed_test_count'], 1)
         self.assertEqual(record['process_execution_count'], 1)
+
+    def test_timeout_bytes_retain_output_and_exact_cleanup_receipt(self):
+        retained = Path(self.tmp.name) / 'timeout-bytes'
+        def run(args, timeout, service_slice=None, service_record=None):
+            discovered = self.discover(args)
+            if discovered is not None:
+                return discovered
+            service_record.update(unit='tidepool-libtest-timeout.service',
+                                  cleanup_confirmed=False, cleanup_error='launch admission unknown')
+            raise subprocess.TimeoutExpired(args, timeout,
+                output=b'test result: ok. 1 passed; 0 failed; 0 ignored;\n',
+                stderr=b'inherited pipe stalled\xff')
+        result, _, _ = self.invoke(['--exact', 'suite::works', '--expected-count', '1',
+            '--delegated-service', '--output-dir', str(retained)], run)
+        self.assertEqual(result, 1)
+        records = [json.loads(path.read_text()) for path in retained.glob('*.json')]
+        self.assertEqual(len(records), 1)
+        self.assertFalse(records[0]['passed'])
+        execution = records[0]['execution']
+        self.assertEqual(execution['status'], 'timeout')
+        self.assertEqual(execution['executed_test_count'], 1)
+        self.assertIsNone(execution['exit_code'])
+        self.assertEqual(execution['delegated_service']['unit'], 'tidepool-libtest-timeout.service')
+        self.assertFalse(execution['delegated_service']['cleanup_confirmed'])
+        self.assertIn('test result: ok. 1 passed',
+            (retained / records[0]['streams']['stdout']['path']).read_text())
+        self.assertEqual((retained / records[0]['streams']['stderr']['path']).read_text(),
+                         'inherited pipe stalled\ufffd')
 
     def test_actual_failed_execution_count_is_retained_without_changing_pass_rule(self):
         record = {}
