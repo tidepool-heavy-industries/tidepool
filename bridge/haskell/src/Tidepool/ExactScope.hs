@@ -168,17 +168,17 @@ resolveShippedHomeModule :: HscEnv
 resolveShippedHomeModule env admitted name expected = do
   found <- findImportedModule env (mkModuleName name) NoPkgQual
   case found of
-    Found location owner
-      | moduleUnit owner == homeUnitAsUnit (hsc_home_unit env) ->
+    Found location exactHome
+      | moduleUnit exactHome == homeUnitAsUnit (hsc_home_unit env) ->
         case ml_hs_file location of
           Just source -> do
             actual <- try (BS.readFile source) :: IO (Either IOException BS.ByteString)
             pure $ case actual of
-              Right bytes | bytes == expected -> Just owner
+              Right bytes | bytes == expected -> Just exactHome
               _ -> Nothing
           Nothing -> pure $ case Map.lookup
-              (unitString (moduleUnit owner), moduleNameString (moduleName owner)) admitted of
-            Just proof | admittedInterfaceSourceSha256 proof == digest expected -> Just owner
+              (unitString (moduleUnit exactHome), moduleNameString (moduleName exactHome)) admitted of
+            Just proof | admittedInterfaceSourceSha256 proof == digest expected -> Just exactHome
             _ -> Nothing
     _ -> pure Nothing
 
