@@ -300,8 +300,11 @@ executionScopeDescriptorChecks path = do
   withParcel "inline graph bytes" (replaceFirst (descriptor (TBytes graphBytes)))
   withParcel "missing promised graph" (TList [TList [],snd parcel])
   withParcel "duplicate graph" (TList [TList (fst parcel ++ fst parcel),snd parcel])
-  bracket (openTempFile (takeDirectory (takeDirectory path)) "outside-exact-graph")
-    (\(outside,handle) -> hClose handle >> removeFile outside) $ \(outside,_) -> do
+  bracket (do
+      (outside,handle) <- openTempFile (takeDirectory (takeDirectory path)) "outside-exact-graph"
+      hClose handle
+      pure outside)
+    removeFile $ \outside -> do
       BS.writeFile outside graphBytes
       withParcel "graph outside request directory" (replaceFirst (descriptor (TString (T.pack outside))))
   restored <- readExactScope path >>= either fail pure

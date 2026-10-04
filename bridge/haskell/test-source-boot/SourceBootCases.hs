@@ -130,7 +130,7 @@ import Tidepool.ExtractUtil (getLibdir)
 import Tidepool.HomeProducts (hydrateCandidateHomeProducts, CandidateCoreFailure(..))
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedPipelineResult(..), PipelineResult(..), CheckedEnvironmentResult(..)
-  , finalizedTidyGuts
+  , finalizedTidyGuts, FinalizedExecutionFailure(..)
   , renderType, generatedScaffoldRecipe, activationPreviewInputType, withSourceImportIntents
   , CompilePurpose(..), runPipelineSelected, runPipelineSessionSelected, withResidentPipelineSelected
   , withResidentPipelineSelectedRequests )
@@ -1338,6 +1338,14 @@ exactExecutionValues :: IO ()
 exactExecutionValues = withTiming $ withScratch $ \work -> do
   forM_ ["MetadataQuoteSupport.hs","MetadataQuoter.hs","CheckedValueQuoterProducer.hs","CheckedValueQuoterTarget.hs"] $ \name ->
     copyFile ("test-source-boot/fixtures" </> name) (work </> name)
+  let marker = work </> "checked-value-quoter-executed"
+      target = work </> "CheckedValueQuoterTarget.hs"
+      quoter = work </> "MetadataQuoter.hs"
+  source <- TE.decodeUtf8 <$> BS.readFile quoter
+  writeFile quoter (T.unpack (T.replace
+    "quoteExp = \\_ -> pure"
+    (T.pack ("quoteExp = \\_ -> runIO (writeFile " ++ show marker ++ " \"executed\") >> pure"))
+    (T.replace "import MetadataQuoteSupport" "import Language.Haskell.TH.Syntax (runIO)\nimport MetadataQuoteSupport" source)))
   produced <- runPipelineSelected (PreparedProducts Nothing) (work </> "CheckedValueQuoterProducer.hs") [work]
   let result = pprPipelineResult produced
       scopePath = work </> "value-scope.cbor"
@@ -1352,14 +1360,29 @@ exactExecutionValues = withTiming $ withScratch $ \work -> do
         (replicate 64 '0') [] ["Tidepool.Session.Val.G8"] [] [value] Nothing AuthoredCellCheck) [work]}
       scope = emptySessionScope {ssRoot=work,ssExactScope=Just scopePath,ssValIfaces=[valueOwner]}
   withResidentPipelineSelected [work] $ \compile -> do
-    (refused,diagnostics) <- captureDiagnostics (try (compile CheckedEnvironment Set.empty
-      (CellProgramCompile GeneralCompile admitted) (Just scope) (work </> "CheckedValueQuoterTarget.hs") [work] Nothing)
-      :: IO (Either SomeException CheckedEnvironmentResult))
-    unless (case refused of
-      Left reason -> "ExecutionSourceMissing" `isInfixOf` show reason
-        && "Tidepool.Session.Val.G8" `isInfixOf` show reason
-        && not ("tidepool-timing phase=ghc_load" `isInfixOf` diagnostics)
-      _ -> False) $ fail "checked value quoter entered GHC execution without an original source capability"
+    refused <- try (compile CheckedEnvironment Set.empty
+      (CellProgramCompile GeneralCompile admitted) (Just scope) target [work] Nothing)
+      :: IO (Either SomeException CheckedEnvironmentResult)
+    case refused of
+      Left reason | fromException reason == Just (FinalizedExecutionOwnerMissing ("main", "Tidepool.Session.Val.G8")) -> pure ()
+      Left reason -> fail ("checked value execution lost its typed owner refusal: " ++ show reason)
+      Right _ -> fail "checked value quoter entered GHC execution without a canonical original owner"
+    ran <- doesFileExist marker
+    when ran (fail "checked value refusal ran the real quoter")
+    writeFile target $ unlines
+      [ "{-# LANGUAGE QuasiQuotes #-}"
+      , "module CheckedValueQuoterTarget where"
+      , "import Tidepool.Session.Val.G8 (answer)"
+      , "__result :: Int"
+      , "__result = 7"
+      ]
+    recovered <- compile CheckedEnvironment Set.empty
+      (CellProgramCompile GeneralCompile admitted) (Just scope) target [work] Nothing
+    case crResultType recovered of
+      Just inferred | eqType inferred intTy -> pure ()
+      _ -> fail "checked value execution refusal prevented an extension-only metadata retry"
+    ranAfterRetry <- doesFileExist marker
+    when ranAfterRetry (fail "extension-only metadata retry executed its unused quoter")
   putStrLn "execution values: protected value quoter refuses missing execution capability before GHC load"
 
 originalPackageProjection :: IO ()

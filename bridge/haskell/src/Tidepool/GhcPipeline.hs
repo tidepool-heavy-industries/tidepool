@@ -11,6 +11,7 @@ module Tidepool.GhcPipeline
   , CompilePurpose(..), withSourceImportIntents, PipelineResult(..)
   , generatedScaffoldRecipe
   , FinalizedModule, finalizedHomeModInfo, finalizedTidyGuts
+  , FinalizedExecutionFailure(..)
     -- * Bound-value type analysis
   , stripMonadHead, isClosureType, renderType
   , splitTupleType
