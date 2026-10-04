@@ -44,8 +44,8 @@ module Tidepool.Binders
   , CellAnalysisSourceItem(..)
   , analyzeCellWithFlags
   , analyzeCell
-  , analyzeOrderedCell
-  , defaultParserDynFlags
+  , analyzeOrderedCell, analyzeOrderedCellWithFlags
+  , defaultParserDynFlags, templateParserFlags
   , renderCellCheckSource
   , CellExpressionPlan(..), ExpressionLiftPlan(..), ExpressionPresentation(..)
   , CheckedBinderPin(..)
@@ -99,7 +99,9 @@ import Tidepool.EffectSchema (NominalHead(..), SiteType(..), YieldSite(..))
 import Tidepool.HostBindingAuthority (HostBindingAuthority(..))
 import Tidepool.Json (jsonString)
 import Tidepool.Timing (timeSection, emitPhase)
-import Tidepool.TurnSource (spliceTemplate)
+import Tidepool.TurnSource
+  ( spliceTemplate, CompilerDefaultRecipe, emptyCompilerDefaultRecipe
+  , captureCompilerDefaultRecipe, qualifyCompilerDefault, importQualifierNamespaces )
 
 -- | A binder a declaration introduces.
 --
@@ -314,11 +316,13 @@ data LocatedImport = LocatedImport
   { locatedImportSpan :: CellSourceSpan
   , locatedImportSource :: String
   , locatedImportIntent :: ImportIntent
+  , locatedImportNamespaces :: [ModuleName]
   } deriving (Eq, Show)
 
 data SourcePrologue = SourcePrologue
   { prologuePragmas :: [LocatedPragma]
   , prologueImports :: [LocatedImport]
+  , prologueCompilerDefault :: CompilerDefaultRecipe
   } deriving (Eq, Show)
 
 data DeclarationSource = DeclarationSource
@@ -440,7 +444,7 @@ structuralDisplayInstance qualifier target =
     ++ " where\n  displayTree = " ++ qualifier ++ ".genericDisplayTree\n"
 
 emptyPrologue :: SourcePrologue
-emptyPrologue = SourcePrologue [] []
+emptyPrologue = SourcePrologue [] [] emptyCompilerDefaultRecipe
 
 spanToCellSpan :: SrcSpan -> CellSourceSpan
 spanToCellSpan (RealSrcSpan sourceSpan _) = CellSourceSpan
@@ -512,6 +516,7 @@ collectPrologue flags = go emptyPrologue [] False
                     (showSDocOneLine defaultSDocContext (ppr (unLoc parsed)))
                     (AuthoredSourceImport (unLoc (ideclName (unLoc parsed)))
                       (ideclPkgQual (unLoc parsed)))
+                    (importQualifierNamespaces (unLoc parsed))
                in go prologue { prologueImports = prologueImports prologue ++ [imported] }
                     (headerItem item (length headers) : headers) True rest
         _ -> finish prologue headers items
@@ -615,6 +620,7 @@ analyzeCellWithGrouping ordered dflags template source = do
   flags <- cellEffectiveFlags dflags template source
   pure $ do
     effective <- flags
+    defaults <- either (Left . CellHeaderFailure) Right (captureCompilerDefaultRecipe effective template)
     lexical <- splitCellWithFlags effective source
     (prologue, headerItems, bodyItems) <- collectPrologue effective lexical
     let firstBodyLine = case bodyItems of
@@ -632,11 +638,15 @@ analyzeCellWithGrouping ordered dflags template source = do
           (structuralDisplayTargets effective classified)
         generatedImports =
           [ LocatedImport (CellSourceSpan 1 1 1 1) ("import qualified GHC.Generics as " ++ genericAlias) RetainedGeneratedImport
+              [mkModuleName "GHC.Generics", mkModuleName genericAlias]
           | not (null generated) ] ++
           [ LocatedImport (CellSourceSpan 1 1 1 1) ("import qualified Tidepool.Inspection.Display as " ++ displayAlias) RetainedGeneratedImport
+              [mkModuleName "Tidepool.Inspection.Display", mkModuleName displayAlias]
           | not (null targets) ]
         plan = CellSourcePlan
-          { cellPlanPrologue = prologue { prologueImports = prologueImports prologue ++ generatedImports }
+          { cellPlanPrologue = prologue
+              { prologueImports = prologueImports prologue ++ generatedImports
+              , prologueCompilerDefault = defaults }
           , cellPlanItems = grouped
           , cellPlanStructuralDisplayTargets = targets
           , cellPlanStructuralDisplayAlias = displayAlias
@@ -797,6 +807,9 @@ analyzeCell template source = do
 analyzeOrderedCell :: String -> String -> IO (Either CellSplitError CellSourcePlan)
 analyzeOrderedCell = analyzeCellUsing True
 
+analyzeOrderedCellWithFlags :: DynFlags -> String -> String -> IO (Either CellSplitError CellSourcePlan)
+analyzeOrderedCellWithFlags = analyzeCellWithGrouping True
+
 analyzeCellUsing :: Bool -> String -> String -> IO (Either CellSplitError CellSourcePlan)
 analyzeCellUsing ordered template source = do
   libdir <- getLibdir
@@ -807,6 +820,9 @@ analyzeCellUsing ordered template source = do
 -- | Obtain the parser defaults for one request. Parse-only operations need
 -- 'DynFlags', not a live compiler session; request owners can share this value
 -- across several such operations.
+templateParserFlags :: DynFlags -> String -> IO (Either CellSplitError DynFlags)
+templateParserFlags flags template = cellEffectiveFlags flags template ""
+
 defaultParserDynFlags :: IO DynFlags
 defaultParserDynFlags = do
   libdir <- getLibdir
@@ -828,12 +844,13 @@ declarationSourceWithTemplateFlags dflags template source = do
   flags <- cellEffectiveFlags dflags template source
   pure $ do
     effective <- flags
+    defaults <- either (Left . CellHeaderFailure) Right (captureCompilerDefaultRecipe effective template)
     lexical <- splitCellWithFlags effective source
     (prologue, _, bodyItems) <- collectPrologue effective lexical
     let firstBodyLine = case bodyItems of
           item : _ -> cellStartLine (cellSourceSpan item)
           [] -> maxBound
-    pure (DeclarationSource prologue (blankBeforeLine firstBodyLine source))
+    pure (DeclarationSource (prologue { prologueCompilerDefault = defaults }) (blankBeforeLine firstBodyLine source))
 
 renderDeclarationForTemplate :: String -> DeclarationSource -> Either String String
 renderDeclarationForTemplate template source = do
@@ -852,9 +869,15 @@ renderDeclarationForTemplate template source = do
                 let after = T.drop (length ("{{CELL_IMPORTS}}" :: String)) remaining
                 in if "{{CELL_IMPORTS}}" `T.isInfixOf` after
                   then Left "declaration template has duplicate import placeholders"
-                  else Right (spliceTemplate (T.unpack before ++ imports ++ T.unpack after)
-                    (declarationBody source) "")
-            else Right (spliceTemplate withPragmas (imports ++ declarationBody source) "")
+                  else do
+                    prepared <- qualifyCompilerDefault (prologueCompilerDefault (declarationPrologue source))
+                      (concatMap locatedImportNamespaces (prologueImports (declarationPrologue source)))
+                      (T.unpack before ++ imports ++ T.unpack after)
+                    Right (spliceTemplate prepared (declarationBody source) "")
+            else do
+              prepared <- qualifyCompilerDefault (prologueCompilerDefault (declarationPrologue source))
+                (concatMap locatedImportNamespaces (prologueImports (declarationPrologue source))) withPragmas
+              Right (spliceTemplate prepared (imports ++ declarationBody source) "")
   where
     moduleHeader line = "module " `isPrefixOf` dropWhile isSpace line
 
@@ -869,7 +892,9 @@ renderCellCheckSource :: String -> CellSourcePlan -> Either String String
 renderCellCheckSource template plan = do
   withPragmas <- replaceOnce "{{CELL_PRAGMAS}}" pragmas template
   withImports <- replaceOnce "{{CELL_IMPORTS}}" imports withPragmas
-  withDecls <- replaceOnce "{{CELL_DECLS}}" declarations withImports
+  prepared <- qualifyCompilerDefault (prologueCompilerDefault (cellPlanPrologue plan))
+    (concatMap locatedImportNamespaces (prologueImports (cellPlanPrologue plan))) withImports
+  withDecls <- replaceOnce "{{CELL_DECLS}}" declarations prepared
   renderedBody <- body
   replaceOnce "{{CELL_BODY}}" renderedBody withDecls
   where

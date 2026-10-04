@@ -146,7 +146,7 @@ pub use turn::{
     HostBindingAuthority, LocatedImport, LocatedPragma, PragmaKind, SourcePrologue,
     TemplateSelector, TurnClassification, TurnCode, TurnFailure, TurnKind, TurnRequest, TurnResult,
     TurnTemplate, ValueTier, AMBIGUOUS_TYPE_ADVICE, CELL_PURE_DISPATCH_ADVICE,
-    DECL_TEMPLATE_SOURCE, PREPARED_SCAFFOLD_TARGET,
+    DECL_TEMPLATE_SOURCE, PREAMBLE_DEFAULT_DECL, PREAMBLE_IMPORT_MARKER, PREPARED_SCAFFOLD_TARGET,
 };
 
 /// Host-visible reentry state for one resident session.

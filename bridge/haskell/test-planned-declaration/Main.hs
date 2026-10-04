@@ -181,15 +181,15 @@ main = withScratch $ \work -> do
   fieldCheck <- either fail pure (renderCellCheckSource fieldCheckWrapper (plannedCheckPlan fieldOriginal))
   writeFile checkFile fieldCheck
   _ <- checkImports checkFile fieldEnv fieldInventory Nothing
-  checkOriginalDeclarationShadow work checkWrapper
+  checkOriginalDeclarationShadow work
   putStrLn "planned original declarations: source identity, inventories, import shadowing and declaration/bind/expression check passed"
 
 -- Exercise the original's pre-renamer seam, before its inventory can exist.
 -- Both target hooks resolve an ordinary source predecessor. Exact retained
 -- inventory refinement is exercised separately by checkImports; this fixture
 -- checks parser-owned shadowing and qualified Names before that inventory exists.
-checkOriginalDeclarationShadow :: FilePath -> String -> IO ()
-checkOriginalDeclarationShadow work checkWrapper = do
+checkOriginalDeclarationShadow :: FilePath -> IO ()
+checkOriginalDeclarationShadow work = do
   let directory = work </> "original-shadow"
       previousName = sessionModuleString (SessionModule LibMod (Generation 6))
       originalName = sessionModuleString (SessionModule LibMod (Generation 10))
@@ -202,7 +202,7 @@ checkOriginalDeclarationShadow work checkWrapper = do
   writeFile (directory </> "Foreign.hs") foreignSource
   authored <- readFile "test-planned-declaration/fixtures/shadow-cell.hs"
   wrapper <- readFile "test-planned-declaration/fixtures/shadow-decl-wrapper.hs"
-  plan <- analyzeCell checkWrapper authored >>= either (fail . show) pure
+  plan <- analyzeCell wrapper authored >>= either (fail . show) pure
   original <- either (fail . show) pure (preparePlannedDeclaration originalName wrapper plan)
   unless (not (null (cellPlanGenericDeclarations plan))
       && not (null (cellPlanStructuralDisplayTargets plan))
@@ -226,12 +226,14 @@ checkOriginalDeclarationShadow work checkWrapper = do
             , Just owner <- [nameModule_maybe (greName entry)]]
           qualified owner occurrence = Qual (mkModuleName owner) occurrence
       forM_ [mkTcOcc "Input", mkTcOcc "Tagged", mkVarOcc "make", mkVarOcc "project", mkVarOcc "tag"
-        , mkDataOcc "Record", mkTcOcc "ConstructorOnly", mkTcOcc "Maybe", mkTcOcc "Box"] $ \occurrence ->
+        , mkDataOcc "Record", mkTcOcc "ConstructorOnly", mkTcOcc "Maybe", mkTcOcc "Box"
+        , mkTcOcc "Text", mkTcOcc "Double"] $ \occurrence ->
           unless (owners (mkRdrUnqual occurrence) == [originalName]) $
             fail "parsed original declaration did not replace its unqualified imported occurrence"
       unless (owners (qualified previousName (mkTcOcc "Input")) == [previousName]
           && owners (qualified previousName (mkVarOcc "project")) == [previousName]
           && owners (qualified "Selected" (mkTcOcc "Box")) == ["Foreign"]
+          && owners (qualified "OriginalText" (mkTcOcc "Text")) == ["Data.Text.Internal"]
           && owners (mkRdrUnqual (mkDataOcc "ConstructorOnly")) == [previousName]
           && owners (mkRdrUnqual (mkRecFieldOcc (mkFastString "Record") "field")) == [originalName]
           && owners (mkRdrUnqual (mkRecFieldOcc (mkFastString "OtherRecord") "field")) == [previousName]) $

@@ -14,6 +14,8 @@ data Record = Record { field :: Bool }
 data ConstructorOnly = FreshConstructorOnly
 data Maybe = LocalMaybe
 data Box = LocalBox
+data Text = LocalText Bool
+data Double = LocalDouble
 
 historical :: Tidepool.Session.Lib.G6.Input -> Bool
 historical = Tidepool.Session.Lib.G6.project
@@ -27,3 +29,6 @@ historicalField :: OtherRecord
 historicalField = OtherRecord { field = True }
 local :: Bool
 local = tag (make True)
+
+historicalText :: OriginalText.Text -> OriginalText.Text
+historicalText = id

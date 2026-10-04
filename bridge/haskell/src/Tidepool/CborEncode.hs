@@ -166,7 +166,7 @@ encodeDeclarationSource (DeclarationSource prologue body) =
   encodeListLen 2 <> encodeSourcePrologue prologue <> encodeString (T.pack body)
 
 encodeSourcePrologue :: SourcePrologue -> Encoding
-encodeSourcePrologue (SourcePrologue pragmas imports) =
+encodeSourcePrologue SourcePrologue { prologuePragmas = pragmas, prologueImports = imports } =
   encodeListLen 2
   <> encodeListLen (fromIntegral (length pragmas))
   <> foldMap encodeLocatedPragma pragmas

@@ -5,6 +5,7 @@ import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Tidepool.Binders
+import Tidepool.TurnSource (emptyCompilerDefaultRecipe)
 import Tidepool.CellProgramState
 import Tidepool.CheckedCell (CheckedSignature(..))
 import Tidepool.CborEncode (encodeCellOut)
@@ -12,7 +13,7 @@ import Tidepool.ExactScope (ExactScope(..), ExactScopePurpose(..))
 
 cellProgramStateChecks :: IO ()
 cellProgramStateChecks = do
-  let prologue = SourcePrologue [] []
+  let prologue = SourcePrologue [] [] emptyCompilerDefaultRecipe
       exact = ExactScope "" "" "" "" [] Map.empty [] [] [] []
         NoCheckedPurpose Nothing Set.empty
       initial = initialProgramCellState prologue exact Map.empty

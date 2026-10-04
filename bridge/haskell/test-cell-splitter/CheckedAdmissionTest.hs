@@ -19,6 +19,7 @@ import System.IO.Error (isDoesNotExistError)
 import Tidepool.Binders (StmtBinders(..), TurnKind(..))
 import Tidepool.CheckedAdmission
 import Tidepool.CheckedCell (CheckedSignature(..))
+import Tidepool.TurnSource (emptyCompilerDefaultRecipe)
 import Tidepool.CheckedRecipe (writeCheckedItemReceipt, writeCheckedDisplayReceipt, checkedRecipeSource)
 import Tidepool.ExecutionSchema (SymbolIdentity(..))
 import Tidepool.ExactScope
@@ -90,7 +91,7 @@ checkedAdmissionChecks = withScratch $ \root -> do
   -- Literal placement must never rescan authored text for protected markers.
   let template = "__result = do {\n{{TURN_STMT}}\npure ({{BINDERS}})\n}"
       authored = "let café = \"{{BINDERS}}\""
-  rendered <- checkedRecipeSource item template authored
+  rendered <- checkedRecipeSource emptyCompilerDefaultRecipe [] item template authored
   unless ("\"{{BINDERS}}\"" `T.isInfixOf` T.pack rendered) (fail "authored placeholder was rescanned")
   let inspect = args { requestInspections = [InspectNameInfo "visible"], requestInspectOut = Just "inspection.cbor", requestBindGen = Nothing }
   unless (matchesInspectionAdmission inspect ["Val7"]) (fail "inspection cap rejected matching inputs")

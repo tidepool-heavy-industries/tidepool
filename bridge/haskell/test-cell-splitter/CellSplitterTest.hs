@@ -35,7 +35,8 @@ import GHC.Types.SourceError (SourceError)
 import Tidepool.Agent.Assignment.Internal (NameError (..), renderNameError)
 import Tidepool.Binders
 import Tidepool.TurnSource
-  ( spliceTemplate, generatedScaffoldModuleName, renameScaffoldModuleHeader )
+  ( spliceTemplate, generatedScaffoldModuleName, renameScaffoldModuleHeader
+  , captureCompilerDefaultRecipe, qualifyCompilerDefault, preambleDefaultDeclaration )
 import Tidepool.SessionArtifacts (mkBoundBinders)
 import Tidepool.DiagJson (Diag (..), DiagSeverity(..), DependencyLoadFailure(..), diagsFromSourceError)
 import Tidepool.ExtractUtil (getLibdir)
@@ -88,6 +89,7 @@ main = getArgs >>= \case
   ["--cell-accumulation"] -> cellProgramStateChecks
   ["--request-validation"] -> requestValidationChecks
   ["--check-source-request"] -> checkingSourceRequestRoundTrip >> putStrLn "checking source request: 1 passed"
+  ["--compiler-defaults"] -> compilerDefaultRecipeChecks >> putStrLn "compiler default recipes: 1 passed"
   ["--ordered-segments"] -> orderedInferenceSegments >> putStrLn "ordered inference segments: 1 passed"
   ["--program-originals"] -> programOriginalImportsCompilation >> putStrLn "program original imports: 1 passed"
   ["--function-value-iface"] -> functionValueInterfaceCompilation >> putStrLn "function value interface: 1 passed"
@@ -133,6 +135,7 @@ runAllTests = do
       multilineLetPlacement flags
   requestOwnedParserDefaults
   orderedInferenceSegments
+  compilerDefaultRecipeChecks
   interfaceMeasurementDiagnostics
   multilineLetCompilation
   renderNameErrorTeachesGroupPaths
@@ -368,6 +371,33 @@ collectFixityData :: (Data value, Typeable selected) => value -> [selected]
 collectFixityData value = case cast value of
   Just selected -> [selected]
   Nothing -> concat (gmapQ collectFixityData value)
+
+compilerDefaultRecipeChecks :: IO ()
+compilerDefaultRecipeChecks = do
+  flags <- defaultParserDynFlags
+  let template = unlines
+        [ "{-# LANGUAGE ImportQualifiedPost #-}"
+        , "{{CELL_PRAGMAS}}"
+        , "module CompilerDefaults where"
+        , "import Prelude qualified as TidepoolCompilerDefaultInt"
+        , "import Data.Text qualified as TidepoolCompilerDefaultText"
+        , "{{CELL_IMPORTS}}"
+        ] ++ preambleDefaultDeclaration ++ "{{CELL_DECLS}}\n{{CELL_BODY}}\n"
+      authored = "import qualified Data.Text as TidepoolCompilerDefaultDouble\n"
+        ++ "default (TidepoolCompilerDefaultDouble.Text)\n"
+      wrappers = ["{{CELL_PRAGMAS}}", "{{CELL_IMPORTS}}", "{{CELL_DECLS}}", "{{CELL_BODY}}"]
+  plan <- analyzeOrderedCellWithFlags flags template authored >>= either (fail . show) pure
+  rendered <- either fail pure (renderCellCheckSource template plan)
+  unless ("default (TidepoolCompilerDefaultIntX.Int, TidepoolCompilerDefaultDoubleX.Double, TidepoolCompilerDefaultTextX.Text)"
+      `isInfixOf` rendered
+      && "default (TidepoolCompilerDefaultDouble.Text)" `isInfixOf` rendered
+      && all (not . (`isInfixOf` rendered)) wrappers) $
+    fail "compiler default aliases collided with native import namespaces or rewrote an authored default"
+  -- A bare authored/default fixture does not issue a compiler default recipe.
+  plain <- either fail pure (captureCompilerDefaultRecipe flags "module Plain where\nimport Prelude\ndefault (Int)\n")
+  unchanged <- either fail pure (qualifyCompilerDefault plain [] "module Plain where\nimport Prelude\ndefault (Int)\n")
+  unless (unchanged == "module Plain where\nimport Prelude\ndefault (Int)\n") $
+    fail "compiler default recipe changed an authored declaration"
 
 orderedInferenceSegments :: IO ()
 orderedInferenceSegments = do

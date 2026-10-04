@@ -3,8 +3,9 @@
 -- This remains in the compiler worker because binder names come from GHC's
 -- classification result and must be inserted before the same resident worker
 -- compiles the selected wrapper. Moving it to the launcher would require a
--- second worker round trip. All template authorship and selection policy stay
--- on the Rust side; this module only performs literal placement.
+-- second worker round trip. Rust owns template selection; this module protects
+-- fixed compiler default identities and places source before authored syntax
+-- enters the selected module.
 module Tidepool.TurnSource
   ( extractModuleName
   , spliceTemplate
@@ -12,16 +13,94 @@ module Tidepool.TurnSource
   , replaceTemplateMarker
   , generatedScaffoldModuleName
   , renameScaffoldModuleHeader
+  , CompilerDefaultRecipe, emptyCompilerDefaultRecipe, captureCompilerDefaultRecipe
+  , qualifyCompilerDefault, preambleDefaultDeclaration, preambleImportMarker, importQualifierNamespaces
   ) where
 
-import GHC.Types.Name.Occurrence (isSymOcc, mkVarOcc)
+import GHC (GhcPs, ImportDecl(..), ModuleName, hsmodImports, unLoc, moduleNameString, mkModuleName)
+import GHC.Builtin.Types (intTyConName, doubleTyConName)
+import GHC.Driver.Config.Parser (initParserOpts)
+import GHC.Driver.Session (DynFlags, xopt_set)
+import GHC.LanguageExtensions (Extension(PackageImports))
+import GHC.Parser (parseHeader)
+import GHC.Parser.Lexer (ParseResult(..), initParserState, unP)
+import GHC.Data.StringBuffer (stringToStringBuffer)
+import GHC.Data.FastString (mkFastString)
+import GHC.Types.SrcLoc (mkRealSrcLoc)
+import GHC.Types.Name (nameModule, nameOccName)
+import GHC.Unit.Types (moduleUnit, moduleName, unitString)
+import GHC.Types.Name.Occurrence (isSymOcc, mkVarOcc, occNameString)
 import Data.Char (isAlphaNum, isSpace)
 import Data.List (isPrefixOf, isSuffixOf, stripPrefix)
-import Data.Maybe (listToMaybe)
+import Data.Maybe (listToMaybe, maybeToList)
+import qualified Data.Set as Set
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.ByteString as BS
 import Tidepool.ExtractUtil (shaHex)
+
+-- This is the shared Rust/Haskell preamble ABI marker. Import insertion
+-- consumes it before the compiler qualifies the protected default declaration.
+preambleDefaultDeclaration :: String
+preambleDefaultDeclaration = preambleImportMarker ++ "default (Int, Double, Text)\n"
+
+preambleImportMarker :: String
+preambleImportMarker = "-- tidepool-preamble-imports-v1\n"
+
+-- Only the protected template supplies this recipe. Keep native namespace facts
+-- from its parsed header; later rendering adds the parsed authored/import facts.
+data CompilerDefaultRecipe
+  = NoCompilerDefault
+  | PrimitiveCompilerDefault [ModuleName]
+  deriving (Eq, Show)
+
+emptyCompilerDefaultRecipe :: CompilerDefaultRecipe
+emptyCompilerDefaultRecipe = NoCompilerDefault
+
+importQualifierNamespaces :: ImportDecl GhcPs -> [ModuleName]
+importQualifierNamespaces imported = unLoc (ideclName imported)
+  : map unLoc (maybeToList (ideclAs imported))
+
+captureCompilerDefaultRecipe :: DynFlags -> String -> Either String CompilerDefaultRecipe
+captureCompilerDefaultRecipe flags template =
+  case T.breakOn (T.pack preambleDefaultDeclaration) (T.pack template) of
+    (_, remaining) | T.null remaining -> Right NoCompilerDefault
+    (before, remaining) -> do
+      let after = T.drop (length preambleDefaultDeclaration) remaining
+      if T.pack preambleDefaultDeclaration `T.isInfixOf` after
+        then Left "compiler preamble repeats its default declaration"
+        else do
+          -- These placeholders belong to the trusted template, not authored
+          -- imports. The latter remain native facts in SourcePrologue.
+          let header = T.unpack (T.replace "{{CELL_PRAGMAS}}" ""
+                (T.replace "{{CELL_IMPORTS}}" "" before))
+          case unP parseHeader (initParserState
+            (initParserOpts (xopt_set flags PackageImports))
+            (stringToStringBuffer header)
+            (mkRealSrcLoc (mkFastString "<compiler-preamble>") 1 1)) of
+            PFailed _ -> Left "GHC could not parse the compiler preamble imports"
+            POk _ parsed -> Right (PrimitiveCompilerDefault
+              (concatMap (importQualifierNamespaces . unLoc) (hsmodImports (unLoc parsed))))
+
+qualifyCompilerDefault :: CompilerDefaultRecipe -> [ModuleName] -> String -> Either String String
+qualifyCompilerDefault NoCompilerDefault _ template = Right template
+qualifyCompilerDefault (PrimitiveCompilerDefault templateNamespaces) importedNamespaces template = do
+  let occupied = Set.fromList (templateNamespaces ++ importedNamespaces)
+      fresh candidate namespaces
+        | candidate `Set.member` namespaces = fresh (mkModuleName (moduleNameString candidate ++ "X")) namespaces
+        | otherwise = candidate
+      intAlias = fresh (mkModuleName "TidepoolCompilerDefaultInt") occupied
+      doubleAlias = fresh (mkModuleName "TidepoolCompilerDefaultDouble") (Set.insert intAlias occupied)
+      textAlias = fresh (mkModuleName "TidepoolCompilerDefaultText") (Set.insert doubleAlias (Set.insert intAlias occupied))
+      primitive alias name = "import qualified " ++ show (unitString (moduleUnit (nameModule name)))
+        ++ " " ++ moduleNameString (moduleName (nameModule name)) ++ " as " ++ moduleNameString alias ++ "\n"
+      qualified alias name = moduleNameString alias ++ "." ++ occNameString (nameOccName name)
+      replacement = primitive intAlias intTyConName ++ primitive doubleAlias doubleTyConName
+        ++ "import qualified \"text\" Data.Text as " ++ moduleNameString textAlias ++ "\n"
+        ++ preambleImportMarker ++ "default (" ++ qualified intAlias intTyConName ++ ", " ++ qualified doubleAlias doubleTyConName
+        ++ ", " ++ moduleNameString textAlias ++ ".Text)\n"
+  prepared <- replaceTemplateMarker preambleDefaultDeclaration replacement template
+  pure ("{-# LANGUAGE PackageImports #-}\n" ++ prepared)
 
 -- | Give generated turn scaffolds a stable owner name. The length-prefixed
 -- UTF-8 fields make the identity independent of concatenation boundaries and

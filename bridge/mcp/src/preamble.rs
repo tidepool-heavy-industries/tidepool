@@ -18,11 +18,7 @@ use tidepool_runtime::session::ModuleEnv;
 
 pub use tidepool_runtime::session::{declaration_pragmas as decl_pragmas, EVAL_PRAGMAS};
 
-/// The `default` declaration emitted after all imports in the preamble.
-/// Exported as the canonical injection-point marker: `insert_imports` in
-/// `tidepool-repl` uses it to locate where session/user imports must go,
-/// avoiding a magic-substring dependency on the literal text (AUDIT-3).
-pub const PREAMBLE_DEFAULT_DECL: &str = "default (Int, Double, Text)\n";
+pub use tidepool_runtime::session::{PREAMBLE_DEFAULT_DECL, PREAMBLE_IMPORT_MARKER};
 
 /// The canonical ordered import lines shared by the eval `Expr` module and the
 /// session decl modules — the SINGLE source of truth for the eval vocabulary

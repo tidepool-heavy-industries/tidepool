@@ -752,7 +752,7 @@ pub fn prepared_resume_apply_binding() -> String {
 /// [`prepared_scaffold_binding`]/[`prepared_resume_apply_binding`]'s aliases
 /// need in scope. [`with_resume_import`] splices these in through
 /// [`insert_preamble_imports`]'s own marker
-/// ([`PREAMBLE_DEFAULT_MARKER`], the production preamble's shape); a caller
+/// ([`PREAMBLE_IMPORT_MARKER`], the production preamble's shape); a caller
 /// assembling a differently-shaped preamble (a test fixture with its own
 /// import-splicing marker) can still get the exact same alias names by
 /// splicing this text in itself, rather than hand-duplicating the aliases.
@@ -1865,16 +1865,17 @@ pub struct DeclarationReceipt {
     pub items: Vec<ExportItem>,
 }
 
-/// The preamble's `default (...)` declaration line — the same import
-/// injection point `tidepool_mcp::template_haskell` uses. MUST match
-/// `tidepool_mcp::PREAMBLE_DEFAULT_DECL` byte-for-byte; duplicated as a
-/// literal (rather than depending on it) because `tidepool-mcp` depends on
-/// `tidepool-runtime`, not the other way — a real (non-dev) dependency here
-/// would be circular.
-const PREAMBLE_DEFAULT_MARKER: &str = "default (Int, Double, Text)\n";
+/// Versioned import insertion point in a compiler-owned preamble.
+pub const PREAMBLE_IMPORT_MARKER: &str = "-- tidepool-preamble-imports-v1\n";
+/// The compiler qualifies these primitive default identities before inserting
+/// authored declarations, preserving the independent import insertion marker.
+pub const PREAMBLE_DEFAULT_DECL: &str = concat!(
+    "-- tidepool-preamble-imports-v1\n",
+    "default (Int, Double, Text)\n"
+);
 
 /// Insert `import <m>` lines into `preamble` immediately before its
-/// [`PREAMBLE_DEFAULT_MARKER`] line — the same injection point
+/// [`PREAMBLE_IMPORT_MARKER`] line — the same injection point
 /// `template_haskell` uses. A no-op (returns `preamble` unchanged) when
 /// `imports` is blank. The ONE import-insertion mechanism a session-turn
 /// module builder needs — `tidepool-repl`'s and `exomonad-harness`'s own turn
@@ -1884,7 +1885,7 @@ pub fn insert_preamble_imports(preamble: &str, imports: &str) -> String {
         return preamble.to_string();
     }
     let insert_point = preamble
-        .find(PREAMBLE_DEFAULT_MARKER)
+        .find(PREAMBLE_IMPORT_MARKER)
         .unwrap_or(preamble.len());
     let mut out = String::new();
     out.push_str(&preamble[..insert_point]);
@@ -7198,7 +7199,7 @@ mod tests {
     fn eff_cell_preamble() -> String {
         format!(
             "{}\n{{-# LANGUAGE PolyKinds #-}}\nmodule CellCheck where\nimport Prelude\nimport Data.Text (Text)\n\
-             default (Int, Double, Text)\n",
+             {PREAMBLE_DEFAULT_DECL}",
             crate::session::EVAL_PRAGMAS,
         )
     }
@@ -7215,7 +7216,7 @@ mod tests {
             "{}\nmodule CellCheck where\nimport Prelude\nimport Data.Text (Text)\n\
              import Control.Monad.Freer (Eff)\n\
              import Data.Proxy (Proxy(..))\n\
-             default (Int, Double, Text)\n",
+             {PREAMBLE_DEFAULT_DECL}",
             crate::session::EVAL_PRAGMAS,
         )
     }
@@ -7488,12 +7489,12 @@ mod tests {
         assert_eq!(repeated.items.last().unwrap().source, final_item.source);
     }
 
-    /// [`PREAMBLE_DEFAULT_MARKER`] is duplicated (not depended-on) from
-    /// `tidepool_mcp::PREAMBLE_DEFAULT_DECL` to avoid a circular crate
-    /// dependency — this pins the two from drifting apart silently.
+    /// The MCP producer uses the runtime-owned template marker.
     #[test]
     fn preamble_default_marker_matches_mcp_constant() {
-        assert_eq!(PREAMBLE_DEFAULT_MARKER, tidepool_mcp::PREAMBLE_DEFAULT_DECL);
+        assert_eq!(PREAMBLE_DEFAULT_DECL, tidepool_mcp::PREAMBLE_DEFAULT_DECL);
+        assert_eq!(PREAMBLE_IMPORT_MARKER, tidepool_mcp::PREAMBLE_IMPORT_MARKER);
+        assert!(PREAMBLE_DEFAULT_DECL.starts_with(PREAMBLE_IMPORT_MARKER));
     }
 
     #[test]

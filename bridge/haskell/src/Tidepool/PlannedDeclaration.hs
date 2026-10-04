@@ -167,7 +167,7 @@ preparePlannedDeclaration reserved wrapper plan = do
         { cellPlanItems = map cleared (cellPlanItems plan)
         , cellPlanPrologue = prologue
             { prologueImports = prologueImports prologue ++
-                [LocatedImport (CellSourceSpan 1 1 1 1) ("import " ++ reserved) RetainedGeneratedImport] }
+                [LocatedImport (CellSourceSpan 1 1 1 1) ("import " ++ reserved) RetainedGeneratedImport [mkModuleName reserved]] }
         , cellPlanDeclarationBase = ""
         , cellPlanGenericDeclarations = []
         , cellPlanStructuralDisplayDeclarations = ""

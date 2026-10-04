@@ -1576,8 +1576,9 @@ mod tests {
     #[test]
     fn the_session_dialect_and_default_declaration_reach_every_checked_cell() {
         let preamble = format!(
-            "{}\nmodule Expr where\nimport Tidepool.Prelude\ndefault (Int, Double, Text)\n",
+            "{}\nmodule Expr where\nimport Tidepool.Prelude\n{}",
             crate::session::EVAL_PRAGMAS,
+            crate::session::PREAMBLE_DEFAULT_DECL,
         );
         let template = resident_cell_check_template(&preamble, "ActorEffects", "");
 

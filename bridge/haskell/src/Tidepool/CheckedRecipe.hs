@@ -10,7 +10,7 @@ import qualified Data.ByteString as BS
 import Data.List (intercalate, isInfixOf, stripPrefix)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import GHC (moduleUnit, moduleName, moduleNameString)
+import GHC (ModuleName, mkModuleName, moduleUnit, moduleName, moduleNameString)
 import GHC.Builtin.Types (intTyConName)
 import GHC.Types.Name (nameModule)
 import GHC.Unit.Types (unitString)
@@ -21,16 +21,18 @@ import Tidepool.ExactScope
   ( ExactScope(..), CheckedItemAdmission(..), CheckedItemPurpose(..), CheckedDisplayAdmission(..) )
 import Tidepool.ExtractUtil (shaHex)
 import Tidepool.GhcPipeline (CompilePurpose(..))
-import Tidepool.TurnSource (spliceTemplate, replaceTemplateMarker, renderImportBinder)
+import Tidepool.TurnSource
+  ( spliceTemplate, replaceTemplateMarker, renderImportBinder
+  , CompilerDefaultRecipe, qualifyCompilerDefault, preambleImportMarker )
 
-checkedDisplayRecipe :: CheckedDisplayAdmission -> String -> IO String
+checkedDisplayRecipe :: CompilerDefaultRecipe -> [ModuleName] -> CheckedDisplayAdmission -> String -> IO String
 checkedDisplayRecipe = checkedDisplayRecipeWithInputs False
 
-checkedProgramDisplayRecipe :: CheckedDisplayAdmission -> String -> IO String
+checkedProgramDisplayRecipe :: CompilerDefaultRecipe -> [ModuleName] -> CheckedDisplayAdmission -> String -> IO String
 checkedProgramDisplayRecipe = checkedDisplayRecipeWithInputs True
 
-checkedDisplayRecipeWithInputs :: Bool -> CheckedDisplayAdmission -> String -> IO String
-checkedDisplayRecipeWithInputs generic admission template = do
+checkedDisplayRecipeWithInputs :: Bool -> CompilerDefaultRecipe -> [ModuleName] -> CheckedDisplayAdmission -> String -> IO String
+checkedDisplayRecipeWithInputs generic defaults namespaces admission template = do
   let rowPrefix = "{{TURN_STMT}} ; _ <- (pure () :: Eff "
       rows = [suffix | line <- lines template, Just suffix <- [stripPrefix rowPrefix line]]
   effectRow <- case rows of
@@ -39,13 +41,13 @@ checkedDisplayRecipeWithInputs generic admission template = do
         Just row | not (T.null row) -> pure (T.unpack row)
         _ -> fail "display requires the canonical bind effect-row pin"
     _ -> fail "display requires one exact bind effect-row pin"
-  withImports <- replaceRecipeMarker "default (Int, Double, Text)\n"
+  withImports <- replaceRecipeMarker preambleImportMarker
     ("import qualified Tidepool.Inspection as TidepoolInspection\n"
       ++ (if generic then "import qualified " ++ show (unitString (moduleUnit (nameModule intTyConName)))
         ++ " " ++ moduleNameString (moduleName (nameModule intTyConName))
         ++ " as TidepoolProgramTypes\nimport qualified \"text\" Data.Text as TidepoolProgramText\n" else "")
       ++ concatMap (\(name, binders) -> "import " ++ name ++ " (" ++ intercalate ", " (map renderImportBinder binders) ++ ")\n")
-        (displayValueImports admission) ++ "default (Int, Double, Text)\n") template
+        (displayValueImports admission) ++ preambleImportMarker) template
   unless ("__result = do {\n{{TURN_STMT}}" `isInfixOf` withImports)
     (fail "display requires canonical bind recipe version one")
   (page,metadata,alias) <- case checkedDisplayBinders admission of
@@ -64,7 +66,10 @@ checkedDisplayRecipeWithInputs generic admission template = do
         ++ metadata ++ " <- pure (T.copy (TidepoolInspection.text " ++ page ++ "), TidepoolInspection.pageHasMore "
         ++ page ++ ", TidepoolInspection.pageUnavailable " ++ page ++ ");\n"
         ++ alias ++ " <- pure " ++ page ++ ";\npure (" ++ intercalate ", " [page,metadata,alias] ++ ")\n}"
-  let spliced = (if generic then ("{-# LANGUAGE PackageImports, ScopedTypeVariables #-}\n" ++) else id) (spliceTemplate withImports statement (intercalate ", " [page,metadata,alias]))
+  preparedTemplate <- either fail pure (qualifyCompilerDefault defaults
+    (namespaces ++ map mkModuleName ["TidepoolInspection", "TidepoolProgramTypes", "TidepoolProgramText"]
+      ++ map (mkModuleName . fst) (displayValueImports admission)) withImports)
+  let spliced = (if generic then ("{-# LANGUAGE PackageImports, ScopedTypeVariables #-}\n" ++) else id) (spliceTemplate preparedTemplate statement (intercalate ", " [page,metadata,alias]))
   if generic then do
     withArgument <- replaceRecipeMarker "__result = do {" "__result ((__tidepoolBudget :: TidepoolProgramTypes.Int), (__tidepoolPresented :: [TidepoolProgramText.Text])) = do {" spliced
     prepared <- replaceRecipeMarker "__prepared = TidepoolResume.settle __result" "__prepared input = TidepoolResume.settle (__result input)" withArgument
@@ -96,8 +101,8 @@ checkedItemCompilePurpose admission = case itemPurpose admission of
 
 -- The admitted template is a versioned recipe input. Transform its markers
 -- before inserting authored bytes, so authored syntax is never rescanned.
-checkedRecipeSource :: CheckedItemAdmission -> String -> String -> IO String
-checkedRecipeSource admission template source = case itemKind admission of
+checkedRecipeSource :: CompilerDefaultRecipe -> [ModuleName] -> CheckedItemAdmission -> String -> String -> IO String
+checkedRecipeSource defaults namespaces admission template source = case itemKind admission of
   "bind" -> do
     unless ("__result = do {\n{{TURN_STMT}}" `isInfixOf` template)
       (fail "checked bind requires canonical recipe version one")
@@ -107,7 +112,8 @@ checkedRecipeSource admission template source = case itemKind admission of
         result = intercalate ", " (map fst aliases)
     amended <- if null aliases then pure template else replaceRecipeMarker "{{TURN_STMT}}"
       ("{{TURN_STMT}}\n; let { " ++ declarations ++ " }\n") template
-    pure (spliceTemplate amended source result)
+    prepared <- either fail pure (qualifyCompilerDefault defaults namespaces amended)
+    pure (spliceTemplate prepared source result)
   "expr" -> case checkedRecipeAnnotations admission of
     [(alias,_)] -> do
       observation <- maybe (fail "checked expression has no owning observation name") pure (itemObservationName admission)
@@ -121,7 +127,8 @@ checkedRecipeSource admission template source = case itemKind admission of
       when (null liftStatement) (fail "checked expression has no certified lift plan")
       let statement = "let { " ++ alias ++ " :: (); "
             ++ alias ++ " = (\n" ++ source ++ "\n) }\n; " ++ liftStatement
-      pure (spliceTemplate template statement observation)
+      prepared <- either fail pure (qualifyCompilerDefault defaults namespaces template)
+      pure (spliceTemplate prepared statement observation)
     _ -> fail "checked expression has no unique full signature"
   _ -> fail "checked declaration lacks an original identity certificate"
 
