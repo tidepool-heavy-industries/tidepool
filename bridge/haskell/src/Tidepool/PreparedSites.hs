@@ -25,16 +25,20 @@ import GHC.Core.Subst (cloneBndrs, mkEmptySubst, substExpr)
 import GHC.Core.FVs (exprFreeVars)
 import GHC.Types.Var.Env (mkInScopeSet)
 import GHC.Core.Make (mkCoreConApps)
-import GHC.Builtin.Types (intDataCon, mkListTy, mkPromotedListTy, liftedTypeKind)
+import GHC.Builtin.Types (intDataCon, intTy, mkListTy, mkPromotedListTy, liftedTypeKind)
 import GHC.Core.TyCo.Rep (Type(..), Scaled(..))
+import GHC.Core.TyCo.Subst (substTyWith)
+import GHC.Core.Coercion (Role(Nominal))
 import GHC.Data.FastString (fsLit)
 import GHC.Types.Unique.Supply (UniqSupply, initUs, mkSplitUniqSupply, takeUniqFromSupply)
 import GHC.Core.Type
   ( mkTyConApp, splitTyConApp_maybe
   , isLiftedTypeKind, typeKind )
 import GHC.Core.TyCo.Compare (eqType)
-import GHC.Core.TyCon (TyCon, tyConArity, tyConDataCons)
-import GHC.Core.DataCon (DataCon, dataConOrigResTy, dataConName, dataConWorkId, dataConWrapId_maybe)
+import GHC.Core.TyCon (TyCon, isNewTyCon, tyConArity, tyConDataCons, tyConRoles, tyConTyVars)
+import GHC.Core.DataCon
+  ( DataCon, dataConOrigResTy, dataConName, dataConWorkId, dataConWrapId_maybe
+  , dataConInstOrigArgTys, dataConUnivTyVars, isVanillaDataCon )
 import GHC.Driver.Env (HscEnv, hsc_HPT, hsc_home_unit, lookupType)
 import GHC.Types.TyThing.Ppr (pprTyThingInContext)
 import GHC.Types.TyThing (TyThing (..))
@@ -43,6 +47,7 @@ import GHC.Types.Literal (LitNumType (..), Literal (..))
 import GHC.Types.Name (isSystemName, nameModule_maybe, nameOccName, nameUnique)
 import GHC.Types.Name.Occurrence (mkTcOcc, mkVarOcc, occNameString)
 import GHC.Types.Id (Id, idName, mkSysLocal)
+import GHC.Types.Var (varType)
 import GHC.Utils.Fingerprint (Fingerprint (..), fingerprintString)
 import GHC.Utils.Outputable (SDocContext(sdocSuppressUniques), defaultSDocContext, ppr, renderWithContext)
 import GHC.Data.Maybe (MaybeErr(Succeeded, Failed))
@@ -284,17 +289,37 @@ elaboratePreparedSites env authority siblings bindings = do
                     Right (Just (spAnswer plan, progress))
                   _ -> Right Nothing
                 carrier <- maybe (Left "missing RequestSite type authority") Right (requestSiteTyCon authority)
+                -- Injection applies exactly two type arguments and one boxed Int.
+                -- Prove that ABI even when the defining module was captured anew.
+                let validKinds = case tyConTyVars carrier of
+                      [inputsVariable, replyVariable] ->
+                        eqType (varType inputsVariable) (mkListTy liftedTypeKind)
+                          && eqType (varType replyVariable) liftedTypeKind
+                      _ -> False
+                if isNewTyCon carrier && tyConArity carrier == 2
+                    && tyConRoles carrier == [Nominal, Nominal] && validKinds
+                  then Right ()
+                  else Left "RequestSite constructor ABI must be a nominal newtype indexed by [Type] and Type"
                 carrierConstructor <- case tyConDataCons carrier of
-                  [constructor] -> Right constructor
-                  _ -> Left "RequestSite type authority must have one constructor"
+                  [constructor] | isVanillaDataCon constructor
+                    , length (dataConUnivTyVars constructor) == 2 -> Right constructor
+                  _ -> Left "RequestSite constructor ABI must have one constructor without hidden evidence"
                 let reply = case vsDelivery spec of
                       DeliverExitCellFill -> spAnswer plan
                       _ -> wire
                     inputs = spInputs plan ++ derived
                     carrierType = mkTyConApp carrier [mkPromotedListTy liftedTypeKind inputs, reply]
-                if eqType carrierType (spCarrierType plan)
-                  then Right (wire, inputs, requestTypes, carrierConstructor, reply)
-                  else Left "site-aware sibling has another RequestSite input or reply index" of
+                    carrierArguments = [mkPromotedListTy liftedTypeKind inputs, reply]
+                    instantiatedResult = substTyWith (dataConUnivTyVars carrierConstructor)
+                      carrierArguments (dataConOrigResTy carrierConstructor)
+                    validField = case dataConInstOrigArgTys carrierConstructor carrierArguments of
+                      [Scaled _ field] -> eqType field intTy
+                      _ -> False
+                if not (eqType instantiatedResult carrierType && validField)
+                  then Left "RequestSite constructor ABI must accept exactly one Int field"
+                  else if eqType carrierType (spCarrierType plan)
+                    then Right (wire, inputs, requestTypes, carrierConstructor, reply)
+                    else Left "site-aware sibling has another RequestSite input or reply index" of
                 Left detail -> do
                   modify' (\current -> current
                     { esRejections = SiteRejection topBinder

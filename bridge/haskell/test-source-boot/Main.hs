@@ -3702,7 +3702,20 @@ hydratedSiteSiblings = withScratch $ \work -> do
   incompatible <- compile (PreparedProducts Nothing) Nothing >>= targetModule
   unless (any (isInfixOf "RequestSite input or reply index" . srMessage) (pmSiteRejections incompatible)) $
     fail "incompatible typed sibling did not remain a source rejection"
-  putStrLn "hydrated site siblings: 10 checks passed (native/exact, private native/exact, wrong interface owner, foreign surface unit, two missing owners, missing sibling, incompatible sibling)"
+  -- A captured owner may retain the exact nominal name and indices while
+  -- changing the private value field. Reject it before synthesizing Core.
+  writeFile unfoldPath source
+  carrierSource <- readFile "lib/Tidepool/Internal/RequestSite.hs"
+  writeFile (work </> "Tidepool/Internal/RequestSite.hs")
+    (T.unpack (T.replace "RequestSite Int" "RequestSite Bool"
+      (T.replace "requestSiteIdentity (RequestSite identity) = identity"
+        "requestSiteIdentity _ = 0" (T.pack carrierSource))))
+  malformed <- compile (PreparedProducts Nothing) Nothing >>= targetModule
+  unless (null (pmYieldSites malformed)
+      && any (isInfixOf "RequestSite constructor ABI must accept exactly one Int field" . srMessage)
+        (pmSiteRejections malformed)) $
+    fail "a malformed captured carrier field was admitted for Int injection"
+  putStrLn "hydrated site siblings: 11 checks passed (native/exact, private native/exact, wrong interface owner, foreign surface unit, two missing owners, missing sibling, incompatible sibling, malformed carrier ABI)"
 
 writeExactMetadataScope :: FilePath -> [(ExactIfaceArtifact, FilePath, String)] -> IO ()
 writeExactMetadataScope path owners = writeExactMetadataScopeWithLexical path owners []

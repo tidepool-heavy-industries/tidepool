@@ -102,7 +102,7 @@ fn assert_matches_golden(name: &str, generated: &str) {
         current.unwrap(),
         generated,
         "committed {} is stale vs the generated artifact — regenerate with \
-         TIDEPOOL_REGEN_PROTOCOL_GOLDENS=1 cargo test -p tidepool-mcp --test protocol_goldens",
+         TIDEPOOL_REGEN_PROTOCOL_GOLDENS=1 cargo test -p tidepool-mcp --test mcp protocol_goldens::",
         path.display()
     );
 }
