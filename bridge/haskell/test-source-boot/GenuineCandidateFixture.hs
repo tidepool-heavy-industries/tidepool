@@ -123,7 +123,7 @@ writePacket work input candidates exactOwners nativeOwners lexicalOwners destina
   createDirectory packet
   case input of
     Nothing -> pure ()
-    Just (_, _, prepared) -> capturePacket work packet prepared
+    Just (source, _, prepared) -> capturePacket source packet prepared
   let text = encodeString . T.pack
       names values = encodeListLen (fromIntegral (length values)) <> foldMap text values
       optional = maybe encodeNull text
@@ -144,8 +144,11 @@ writePacket work input candidates exactOwners nativeOwners lexicalOwners destina
       putStr output
 
 capturePacket :: FilePath -> FilePath -> PreparedPipelineResult -> IO ()
-capturePacket work packet prepared = do
-  let env = prHscEnv (pprPipelineResult prepared)
+capturePacket source packet prepared = do
+  -- Finalization receipt paths belong to the actual compiler input directory.
+  -- Fixture workspaces may contain nested module source paths.
+  let captureRoot = takeDirectory source
+      env = prHscEnv (pprPipelineResult prepared)
   formatting <- resolveFormattingAuthority env
   time <- resolveTimeAuthority env
   json <- resolveJsonAuthority env
@@ -165,7 +168,7 @@ capturePacket work packet prepared = do
           else Map.findWithDefault (dependencyModuleProduct node)
             (dependencyModuleUnit node, dependencyModuleName node) availability }
         | node <- dependencyModules (pprDependencies prepared)] }
-  originals <- newOriginalInterfaceArtifacts env (pprFinalizedModules prepared) [] work
+  originals <- newOriginalInterfaceArtifacts env (pprFinalizedModules prepared) [] captureRoot
   rows <- forM [(owner, groups) | (owner, Right groups) <- outcomes] $ \(owner, groups) -> do
     bytes <- originalInterfaceBytes originals owner
       >>= maybe (fail "genuine fixture lost its finalized original interface") pure
@@ -181,7 +184,7 @@ capturePacket work packet prepared = do
       products = encodeModuleProducts fresh
       dependencies = BSC.pack (renderDependencyEvidence evidence)
   finalized <- captureFinalizedModuleArtifacts originals env (pprFinalizedModules prepared)
-    (pprPackageImports prepared) evidence work
+    (pprPackageImports prepared) evidence captureRoot
   receipt <- encodeCertifiedProducts env OrdinaryExecutionSource (pprProductInterfaces prepared) finalized [] Nothing
     fresh [] evidence products dependencies >>= either fail pure
   BS.writeFile (packet </> "module-products.cbor") products
