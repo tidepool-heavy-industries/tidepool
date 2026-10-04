@@ -2466,6 +2466,7 @@ fn resident_actor_failure_layer(
     match error.primary_failure() {
         ResidentActorWorkbenchError::Compile(_)
         | ResidentActorWorkbenchError::CellCheck(_)
+        | ResidentActorWorkbenchError::InputCompilation { .. }
         | ResidentActorWorkbenchError::CompileInfrastructure(_) => {
             Some(WorkbenchFailureLayer::Compile)
         }

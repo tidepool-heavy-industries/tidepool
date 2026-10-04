@@ -238,6 +238,55 @@ mod failure_diagnostic_tests {
     use super::*;
 
     #[test]
+    fn activation_compile_failure_keeps_stage_typed_diagnostics_and_bounded_text() {
+        use tidepool_toolchain::diag::{DiagSpan, DiagnosticSeverity, ExtractDiag};
+        for stage in [
+            ActivationCompileStage::Check,
+            ActivationCompileStage::Native,
+        ] {
+            let message = format!(
+                "original compiler detail\n{}\nlast compiler detail",
+                "λ".repeat(8192)
+            );
+            let error = ResidentActorWorkbenchError::InputCompilation {
+                stage,
+                error: CompileError::Diagnostics(vec![ExtractDiag {
+                    span: Some(DiagSpan {
+                        file: "CellCheck.hs".into(),
+                        start_line: 46,
+                        start_col: 3,
+                        end_line: 46,
+                        end_col: 19,
+                    }),
+                    severity: DiagnosticSeverity::Error,
+                    message: message.clone(),
+                }]),
+            };
+            let diagnostic = error.failure_diagnostic().unwrap();
+            assert_eq!(diagnostic.class, FailureClass::UserHaskell);
+            assert_eq!(
+                diagnostic.cause,
+                Some(tidepool_toolchain::failclass::CompileFailureCause::SourceDiagnostics,)
+            );
+            assert!(diagnostic.message.len() <= ACTIVATION_COMPILE_DIAGNOSTIC_BYTES);
+            assert!(diagnostic.message.contains("CellCheck.hs:46:3"));
+            assert!(diagnostic.message.contains("original compiler detail"));
+            assert!(diagnostic.message.contains("last compiler detail"));
+            assert!(error.to_string().contains(&stage.to_string()));
+            assert!(error.to_string().contains("original compiler detail"));
+            let ResidentActorWorkbenchError::InputCompilation {
+                stage: retained_stage,
+                error: CompileError::Diagnostics(retained),
+            } = error
+            else {
+                panic!("typed compiler failure lost")
+            };
+            assert_eq!(retained_stage, stage);
+            assert_eq!(retained[0].message, message);
+        }
+    }
+
+    #[test]
     fn preflight_infrastructure_failure_keeps_compiler_class_and_cause() {
         let failure =
             CompileError::MissingOutput(std::path::PathBuf::from("missing-output")).into();
@@ -3193,6 +3242,37 @@ pub enum PrivatePublicationPhase {
     RevalidateRejection,
 }
 
+/// Compiler stage that rejected the native completion input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivationCompileStage {
+    Check,
+    Native,
+}
+
+impl std::fmt::Display for ActivationCompileStage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Check => "source check",
+            Self::Native => "native compilation",
+        })
+    }
+}
+
+const ACTIVATION_COMPILE_DIAGNOSTIC_BYTES: usize = 8192;
+
+fn activation_compile_diagnostic(
+    error: &CompileError,
+) -> tidepool_toolchain::failclass::FailureEnvelope {
+    let mut diagnostic = classify_compile(error);
+    // Activation source is generated. Preserve original diagnostic coordinates
+    // without inventing an authored excerpt or a wrapper-to-cell offset.
+    diagnostic.message = crate::workbench_display::bounded_output(
+        &tidepool_runtime::session::render_cell_compile_error(error, ""),
+        ACTIVATION_COMPILE_DIAGNOSTIC_BYTES,
+    );
+    diagnostic
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ResidentActorWorkbenchError {
     #[error(
@@ -3257,6 +3337,12 @@ pub enum ResidentActorWorkbenchError {
     MachineLost,
     #[error("resident workbench task panicked or was cancelled: {0}")]
     Join(tokio::task::JoinError),
+    #[error("could not compile the typed completion input during {stage}:\n{}", activation_compile_diagnostic(.error).message)]
+    InputCompilation {
+        stage: ActivationCompileStage,
+        #[source]
+        error: CompileError,
+    },
     #[error("could not mount the typed completion input: {0}")]
     InputMount(String),
     #[error("could not inspect the saved value: {0}")]
@@ -3315,6 +3401,7 @@ impl ResidentActorWorkbenchError {
             Self::PrivatePublication { source, .. } => source.failure_diagnostic(),
             Self::Compile(error) => Some(classify_compile(error)),
             Self::CellCheck(failure) => Some(classify_compile(&failure.error)),
+            Self::InputCompilation { error, .. } => Some(activation_compile_diagnostic(error)),
             Self::CompileInfrastructure(diagnostic) => Some(diagnostic.clone()),
             Self::Resident(ResidentError::Session(error))
             | Self::Delivered(ResidentError::Session(error)) => {
@@ -4296,12 +4383,18 @@ where
                     evidence,
                 ).map_err(ResidentActorWorkbenchError::Resident)?;
                 let checked = check_activation_input(&owner).map_err(|failure| {
-                    ResidentActorWorkbenchError::InputMount(failure.error.to_string())
+                    ResidentActorWorkbenchError::InputCompilation {
+                        stage: ActivationCompileStage::Check,
+                        error: failure.error,
+                    }
                 })?;
                 let item = session.admit_activation_input_item(&owner, &checked)
                     .map_err(ResidentActorWorkbenchError::Resident)?;
                 let compiled = compile_activation_input(&owner, item).map_err(|failure| {
-                    ResidentActorWorkbenchError::InputMount(failure.error.to_string())
+                    ResidentActorWorkbenchError::InputCompilation {
+                        stage: ActivationCompileStage::Native,
+                        error: failure.error,
+                    }
                 })?;
                 let mounted = session.mount_activation_input(owner, compiled)
                     .map_err(ResidentActorWorkbenchError::Resident)?;

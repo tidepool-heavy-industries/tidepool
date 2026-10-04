@@ -153,8 +153,8 @@ pub use resident_tools::{
     WorkbenchCancellationOutcome, WorkbenchExecutionControl,
 };
 pub use resident_workbench::{
-    ActorMachineRegistry, ActorWorkbenchSource, ChildSessionFactory, InstalledToolLease,
-    RequestWorkbenchScope, ResidentActorRunner, ResidentActorWorkbench,
+    ActivationCompileStage, ActorMachineRegistry, ActorWorkbenchSource, ChildSessionFactory,
+    InstalledToolLease, RequestWorkbenchScope, ResidentActorRunner, ResidentActorWorkbench,
     ResidentActorWorkbenchError, ResidentMachineMeasurement, ToolDispatchError, ToolDispatchReply,
 };
 pub use role::{
