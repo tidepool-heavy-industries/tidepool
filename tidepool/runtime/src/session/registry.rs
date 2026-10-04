@@ -593,12 +593,12 @@ fn take_machine<M, H>(slot: &mut Slot<M, H>, holes: Vec<H>) -> Box<M> {
 }
 
 /// RAII proof that a session's machine is OUT on a turn (`Slot::Running`).
-/// Owns the machine for the turn; settle it exactly once via
-/// [`Self::restore_suspended`] or [`Self::mark_wedged`].
+/// Owns the machine for the turn; explicit restoration consumes this guard
+/// through [`Self::restore_suspended`].
 ///
 /// Dropping a checkout restores the machine and its original parked holes
-/// while it still owns the machine. After [`Self::take`], the caller must put
-/// the machine back or explicitly settle the slot.
+/// unless an explicit settlement consumes the guard. Detached work consumes
+/// the checkout through [`Self::into_parts`] and settles its owned receipt.
 #[must_use = "a checkout owns machine custody until restored or explicitly settled"]
 pub struct Checkout<'r, M, H: Clone + PartialEq + std::fmt::Debug> {
     registry: &'r SessionRegistry<M, H>,
@@ -641,19 +641,6 @@ impl<M, H: Clone + PartialEq + std::fmt::Debug> Checkout<'_, M, H> {
             .expect("machine present until settled")
     }
 
-    /// Take boxed ownership of the machine off the checkout (e.g. to move it onto
-    /// an eval thread). Return it with [`Self::put`] before restoring the slot,
-    /// or settle the missing machine via [`Self::mark_wedged`].
-    pub fn take(&mut self) -> Box<M> {
-        #[allow(clippy::expect_used, reason = "machine present until settled")]
-        self.machine.take().expect("machine present until settled")
-    }
-
-    /// Put the machine back after a `take`, ahead of [`Self::restore_suspended`].
-    pub fn put(&mut self, machine: Box<M>) {
-        self.machine = Some(machine);
-    }
-
     /// Split boxed machine ownership from an owned settlement receipt so a
     /// detached task can settle the turn through a fresh registry borrow.
     pub fn into_parts(mut self) -> (Box<M>, CheckoutReceipt) {
@@ -677,16 +664,6 @@ impl<M, H: Clone + PartialEq + std::fmt::Debug> Checkout<'_, M, H> {
         self.registry
             .restore_suspended(self.id, self.epoch, machine, holes);
     }
-
-    /// Settle this checkout as `Wedged{since}` — the machine was moved off
-    /// this checkout (via [`Self::take`]) onto a task that never gave it
-    /// back. There is nothing left to restore; this just records the reason
-    /// where a reaper/caller can find it instead of leaving the slot
-    /// `Running` forever.
-    pub fn mark_wedged(mut self, since: Instant) {
-        self.machine = None;
-        self.registry.mark_wedged(self.id, self.epoch, since);
-    }
 }
 
 /// Panic safety net: if a `Checkout` is dropped while it still owns the
@@ -695,10 +672,9 @@ impl<M, H: Clone + PartialEq + std::fmt::Debug> Checkout<'_, M, H> {
 /// CARRIED OUT rather than leaving the slot `Running` forever — or silently
 /// dropping parked frames to a bare `Idle`.
 ///
-/// This does NOT cover [`Checkout::take`]: once the machine has been moved
-/// off the checkout, `Drop` has nothing to restore — a caller that loses the
-/// machine that way must settle explicitly instead (`mark_wedged`, or the
-/// harness's `terminate_node`).
+/// [`Checkout::into_parts`] consumes this guard and transfers settlement to
+/// an owned [`CheckoutReceipt`]. Its detached owner must settle explicitly;
+/// the consumed checkout has no machine left for this safety net to restore.
 impl<M, H: Clone + PartialEq + std::fmt::Debug> Drop for Checkout<'_, M, H> {
     fn drop(&mut self) {
         if let Some(machine) = self.machine.take() {
@@ -774,8 +750,9 @@ impl<M, H: Clone + PartialEq + std::fmt::Debug> SessionRegistry<M, H> {
         self.restore_suspended(id, receipt.into_epoch(), machine, holes);
     }
 
-    /// Settle an OWNED [`CheckoutReceipt`] as `Wedged{since}` — see
-    /// [`Checkout::mark_wedged`].
+    /// Settle an owned [`CheckoutReceipt`] as `Wedged{since}` when detached
+    /// execution cannot return its machine. A stale epoch leaves the current
+    /// entry untouched.
     pub fn settle_wedged(&self, receipt: CheckoutReceipt, since: Instant) {
         let id = receipt.session_id();
         self.mark_wedged(id, receipt.into_epoch(), since);
@@ -868,23 +845,31 @@ mod tests {
             .spawn(move || {
                 let mut checkout = registry.checkout_run(id).unwrap();
                 assert_eq!(checkout.machine().as_ptr() as usize, original);
-                let mut machine = checkout.take();
-                machine[0] = 9;
-                checkout.put(machine);
+                checkout.machine()[0] = 9;
                 checkout.restore_suspended(vec![Hole("large")]);
 
                 let checkout = registry.checkout_resume(id, &Hole("large")).unwrap();
-                let (machine, receipt) = checkout.into_parts();
+                assert_eq!(checkout.holes_at_checkout(), &[Hole("large")]);
+                let (mut machine, receipt) = checkout.into_parts();
                 assert_eq!(machine.as_ptr() as usize, original);
                 assert_eq!(machine[0], 9);
+                assert_eq!(registry.kind(id), Some(SlotKind::Running));
+                machine[1] = 11;
                 registry.settle_suspended(receipt, machine, vec![Hole("large")]);
                 // RAII settlement also preserves the same allocation and parked holes.
-                drop(registry.checkout_child(id).unwrap());
+                let mut checkout = registry.checkout_child(id).unwrap();
+                assert_eq!(checkout.holes_at_checkout(), &[Hole("large")]);
+                assert_eq!(checkout.machine().as_ptr() as usize, original);
+                assert_eq!(&checkout.machine()[..2], &[9, 11]);
+                drop(checkout);
                 assert_eq!(registry.kind(id), Some(SlotKind::Suspended));
                 assert_eq!(
                     registry.peek(id, |machine| machine.as_ptr() as usize),
                     Some(original)
                 );
+                let checkout = registry.checkout_resume(id, &Hole("large")).unwrap();
+                assert_eq!(checkout.holes_at_checkout(), &[Hole("large")]);
+                drop(checkout);
                 assert!(registry.remove(id, "test teardown").is_some());
             })
             .unwrap()
@@ -1202,7 +1187,9 @@ mod tests {
         let id = SessionId(30);
         reg.insert_idle(id, Box::new(FakeMachine { turns: 0 }));
         let co = reg.checkout_run(id).expect("idle -> run");
-        co.mark_wedged(Instant::now());
+        let (machine, receipt) = co.into_parts();
+        drop(machine);
+        reg.settle_wedged(receipt, Instant::now());
 
         assert!(matches!(
             err(reg.checkout_run(id)),
