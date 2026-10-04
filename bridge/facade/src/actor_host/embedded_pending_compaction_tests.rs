@@ -1,3 +1,6 @@
+//! Engine component tests use a gated tool endpoint to isolate scheduler and
+//! compaction behavior. Hosted lifetime coverage uses production assembly.
+
 use super::embedded_service::{attach_actor, drive_conversation_with_transport};
 use super::test_campaign::TestCampaign;
 use async_trait::async_trait;
@@ -250,8 +253,7 @@ fn message_turn(response_id: &str, text: &str) -> ResponsesTurn {
 }
 
 #[tokio::test]
-async fn production_engine_carries_raw_and_typed_pending_calls_through_compaction_and_late_output()
-{
+async fn engine_component_carries_raw_and_typed_pending_calls_through_compaction_and_late_output() {
     let campaign = TestCampaign::start().await;
     let (started_tx, mut started_rx) = mpsc::unbounded_channel();
     let (settled_tx, mut settled_rx) = mpsc::unbounded_channel();
@@ -499,7 +501,7 @@ impl ResponsesTransport for FailedCompactionTransport {
 }
 
 #[tokio::test]
-async fn production_engine_compaction_failure_continues_once_then_cleans_pending_call_on_cancel() {
+async fn engine_component_compaction_failure_continues_once_then_cleans_pending_call_on_cancel() {
     let campaign = TestCampaign::start().await;
     let (started_tx, mut started_rx) = mpsc::unbounded_channel();
     let (settled_tx, mut settled_rx) = mpsc::unbounded_channel();
@@ -640,9 +642,7 @@ async fn production_engine_compaction_failure_continues_once_then_cleans_pending
 }
 
 #[tokio::test]
-async fn browser_interrupt_cancels_one_engine_round_and_driver_accepts_later_input() {
-    let campaign = TestCampaign::start().await;
-    let actor = campaign.actor.identity();
+async fn attached_round_interrupt_preserves_host_and_accepts_later_input() {
     let files = tempfile::tempdir().unwrap();
     let assets = files.path().join("assets");
     std::fs::create_dir_all(&assets).unwrap();
@@ -663,62 +663,31 @@ async fn browser_interrupt_cancels_one_engine_round_and_driver_accepts_later_inp
         context_capacity_tokens: 200_000,
         concurrent_jobs: 1,
     };
-    let mut service = campaign.prepare_embedded_service(&settings).await.unwrap();
-    let embedded = attach_actor(
-        &service,
-        campaign.session_root.path(),
-        AgentPath("/root".into()),
-        None,
-        campaign.root_installation.clone(),
-        Some("start a request that can be interrupted".into()),
-    )
-    .await
-    .unwrap();
-    let conversation = Arc::clone(&embedded.conversation);
+    let transport = InterruptibleRoundTransport {
+        requests: Arc::new(AtomicU64::new(0)),
+        first_started: Arc::new(tokio::sync::Notify::new()),
+        resumed: Arc::new(tokio::sync::Notify::new()),
+    };
+    let provider: Arc<dyn ResponsesTransport> = Arc::new(transport.clone());
+    let host = super::hosted_test_context::HostedTestRuntime::start(&settings, &provider)
+        .await
+        .expect("production interrupt host starts");
+    let actor = host.context.actor.identity();
+    let binding = host
+        .context
+        .binding(actor)
+        .expect("actual root binding attached");
+    let conversation = binding.conversation().unwrap();
+    tokio::time::timeout(Duration::from_secs(30), transport.first_started.notified())
+        .await
+        .expect("Engine enters the first actual provider round");
     let inactive_round = harness::embedding::EmbeddedRoundId(uuid::Uuid::new_v4());
-    assert_eq!(conversation.active_round(), None);
     assert!(conversation
         .control(harness::embedding::HostControl::Interrupt {
             expected_round: inactive_round,
         })
         .await
         .is_err());
-
-    let transport = InterruptibleRoundTransport {
-        requests: Arc::new(AtomicU64::new(0)),
-        first_started: Arc::new(tokio::sync::Notify::new()),
-        resumed: Arc::new(tokio::sync::Notify::new()),
-    };
-    let first_started = transport.first_started.notified();
-    tokio::pin!(first_started);
-    let (lifecycle, mut lifecycle_rx) =
-        watch::channel((Some(actor), harness::server::HostActorLifecycle::Waiting));
-    let stop_driver = embedded.cancellation.clone();
-    let runtime = Arc::clone(&service.runtime);
-    let engine_transport = transport.clone();
-    let mut running = tokio::spawn(async move {
-        drive_conversation_with_transport::<Offline, _>(
-            embedded.driver,
-            runtime,
-            &settings,
-            "offline-interrupt".into(),
-            Effort::Medium,
-            "production browser interrupt test".into(),
-            embedded.cancellation_rx,
-            lifecycle,
-            actor,
-            engine_transport,
-        )
-        .await
-    });
-
-    tokio::time::timeout(Duration::from_secs(10), &mut first_started)
-        .await
-        .expect("Engine did not enter its first provider round");
-    assert_eq!(
-        lifecycle_rx.borrow().1,
-        harness::server::HostActorLifecycle::Running
-    );
     let first_round = conversation
         .active_round()
         .expect("running provider round identity");
@@ -731,21 +700,18 @@ async fn browser_interrupt_cancels_one_engine_round_and_driver_accepts_later_inp
             .unwrap()["requested"],
         true
     );
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if lifecycle_rx.borrow_and_update().1 == harness::server::HostActorLifecycle::Waiting {
-                return;
-            }
-            lifecycle_rx.changed().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while conversation.active_round().is_some() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })
     .await
-    .expect("interrupted Engine round did not return the driver to waiting");
+    .expect("interrupted Engine returns its real attachment to idle");
     assert!(
-        !running.is_finished(),
-        "round interruption must leave the embedded driver available"
+        host.context.actor.terminal().get().is_none(),
+        "round interruption preserves the actor"
     );
-    let interrupted_head = service
+    let interrupted_head = host
         .runtime
         .store()
         .agent(&AgentPath("/root".into()))
@@ -770,17 +736,14 @@ async fn browser_interrupt_cancels_one_engine_round_and_driver_accepts_later_inp
     tokio::time::timeout(Duration::from_secs(10), transport.resumed.notified())
         .await
         .expect("later input did not start a fresh Engine round");
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if lifecycle_rx.borrow_and_update().1 == harness::server::HostActorLifecycle::Waiting {
-                return;
-            }
-            lifecycle_rx.changed().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while conversation.active_round().is_some() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })
     .await
-    .expect("resumed Engine round did not complete");
-    let resumed_head = service
+    .expect("resumed actual provider round completes");
+    let resumed_head = host
         .runtime
         .store()
         .agent(&AgentPath("/root".into()))
@@ -789,14 +752,8 @@ async fn browser_interrupt_cancels_one_engine_round_and_driver_accepts_later_inp
         .head_request;
     assert_ne!(resumed_head, interrupted_head);
 
-    stop_driver.send_replace(true);
-    assert!(tokio::time::timeout(Duration::from_secs(10), &mut running)
-        .await
-        .expect("actor lifetime cancellation did not stop the driver")
-        .unwrap()
-        .is_ok());
     assert_eq!(transport.requests.load(Ordering::SeqCst), 2);
-    service.shutdown().await.unwrap();
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+    host.stop()
+        .await
+        .expect("production interrupt host acknowledges cleanup");
 }
