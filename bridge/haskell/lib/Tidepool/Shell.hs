@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings, OverloadedRecordDot #-}
+{-# LANGUAGE FlexibleContexts, OverloadedStrings, OverloadedRecordDot #-}
 
 -- | Shell-effect affordance: typed combinators over 'runArgv'.
 --
@@ -22,19 +22,20 @@ module Tidepool.Shell
   ) where
 
 import Prelude
+import Control.Monad.Freer (Eff, Member)
 import Data.Text (Text)
 import qualified Tidepool.Data.Text as T
 import Tidepool.Aeson.Value (Value)
 import Tidepool.Aeson.FromJSON (eitherDecode)
 import Tidepool.Records (Proc(..), ok)
-import Tidepool.Effects (ExecError(..), M, run, runArgv, runIn, liftEither)
+import Tidepool.Effects.Authored (Exec, ExecError(..), run, runArgv, runIn, liftEither)
 
 -- | Run a shell-string command, strip stdout, throw on nonzero exit — the
 -- shell-string sibling of 'sh1'. Shell metachars (@$VAR@, globs, pipes, @&&@)
 -- are LIVE here, unlike 'sh1's argv (no expansion at all). A nonzero exit is
 -- DATA, not a spawn failure: when it's expected, inspect it directly via
 -- `run` (`Right p <- run cmd; p.exitCode`) instead of `sh`.
-sh :: Text -> M Text
+sh :: Member Exec effs => Text -> Eff effs Text
 sh cmd = do
   p <- run cmd >>= liftEither
   if ok p
@@ -44,7 +45,7 @@ sh cmd = do
 -- | Run a command (argv, no shell), strip stdout, throw on nonzero exit.
 -- `runArgv` is typed (#335): a spawn failure aborts via `liftEither`, same as
 -- pre-#335 (a nonzero exit is not a spawn failure — it's still checked below).
-sh1 :: [Text] -> M Text
+sh1 :: Member Exec effs => [Text] -> Eff effs Text
 sh1 argv = do
   p <- runArgv argv >>= liftEither
   if ok p
@@ -52,7 +53,7 @@ sh1 argv = do
     else Prelude.error ("sh: exit " ++ show p.exitCode ++ ": " ++ T.unpack (T.strip p.stderr))
 
 -- | Run and split stdout into non-empty lines.
-shLines :: [Text] -> M [Text]
+shLines :: Member Exec effs => [Text] -> Eff effs [Text]
 shLines argv = do
   out <- sh1 argv
   let ls = T.lines out
@@ -60,13 +61,13 @@ shLines argv = do
 
 -- | Run and parse stdout as JSON via the pure 'eitherDecode'. Throws on parse
 -- error (the `Left msg` aborts via `liftEither`).
-shJson :: [Text] -> M Value
+shJson :: Member Exec effs => [Text] -> Eff effs Value
 shJson argv = sh1 argv >>= liftEither . eitherDecode
 
 -- | Run; return @Right stdout@ on zero exit, @Left stderr@ on nonzero. A
 -- spawn failure still aborts (via `liftEither`) — this @Either@ is purely the
 -- exit-code check, distinct from `runArgv`'s own typed `ExecError`.
-shTry :: [Text] -> M (Either Text Text)
+shTry :: Member Exec effs => [Text] -> Eff effs (Either Text Text)
 shTry argv = do
   p <- runArgv argv >>= liftEither
   if ok p
@@ -79,7 +80,7 @@ shTry argv = do
 -- `proc.exitCode`/`ok proc` yourself; @Left@ reports an execution or capture
 -- failure, rendered via 'renderExecError'. Do NOT collapse a spawn error into
 -- the exit-code check: the two are typed separately (#335) for a reason.
-runInTry :: Text -> Text -> M (Either Text Proc)
+runInTry :: Member Exec effs => Text -> Text -> Eff effs (Either Text Proc)
 runInTry dir cmd = do
   r <- runIn dir cmd
   pure (either (Left . renderExecError) Right r)

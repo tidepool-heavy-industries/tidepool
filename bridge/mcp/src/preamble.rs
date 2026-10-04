@@ -83,11 +83,8 @@ fn eval_import_lines(user_library: bool, hides: PreludeHides) -> Vec<&'static st
         "import qualified Tidepool.TextFormat as TF",
         "import qualified Tidepool.Table as Tab",
         "import qualified Tidepool.Patch as Patch",
-        // NOTE: Tidepool.Shell/Git/Cargo are NOT here — Shell/Cargo depend on
-        // the Exec (`runArgv`) effect helper and Git on the Git verbs, so
-        // they're imported conditionally in `pragmas_and_imports` only when
-        // those effects are in the stack (else they fail to load on a
-        // minimal/Console-only stack).
+        // Effect-specific companions are declared by their effect owner and
+        // folded in separately; the fixed vocabulary does not select them.
         "import Control.Monad.Freer hiding (run)",
     ];
     if user_library {
@@ -331,13 +328,6 @@ pub fn orchestrate_module_source(effects: &[EffectDecl]) -> String {
     out.push_str("import qualified Tidepool.Aeson.KeyMap as KM\n");
     out.push_str("import qualified Data.List as L\n");
     let has_exec = names.contains("Exec");
-    let has_http = names.contains("Http");
-    if has_exec && has_http {
-        out.push_str("import qualified Tidepool.Shell as Shell\n");
-        out.push_str("import Tidepool.Shell (sh)\n");
-        out.push_str("import qualified Tidepool.Git as Git\n");
-        out.push_str("import qualified Tidepool.Cargo as Cargo\n");
-    }
     // `paginateInteractive` (gated on Ask below) calls `ask SStr …`, whose
     // composed verb and Schema constructors live in the authored stdlib
     // since the #24 move out of the Ask decl. Orchestrate — unlike the

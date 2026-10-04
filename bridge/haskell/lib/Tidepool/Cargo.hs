@@ -21,7 +21,7 @@ import qualified Tidepool.Data.Text as T
 import Tidepool.Aeson.Value (Value)
 import Tidepool.Aeson.FromJSON (eitherDecode)
 import Tidepool.Records (Proc (..))
-import Tidepool.Effects (Exec, ExecError, M, runArgv)
+import Tidepool.Effects.Authored (Exec, ExecError, runArgv)
 import qualified Tidepool.Shell as Shell
 
 -- | The command failed to execute, or a non-empty JSON output line was invalid.
@@ -55,7 +55,7 @@ cargoClippy extras = runCargoJson ("clippy" : "--message-format=json" : extras)
 
 -- | Run @cargo metadata --format-version=1@ and return the parsed 'Value'.
 -- This keeps its existing throwing contract.
-cargoMetadata :: M Value
+cargoMetadata :: Member Exec effects => Eff effects Value
 cargoMetadata = Shell.shJson ["cargo", "metadata", "--format-version=1"]
 
 runCargoJson :: Member Exec effects => [Text] -> Eff effects (Either CargoError CargoReport)
