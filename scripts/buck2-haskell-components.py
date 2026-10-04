@@ -27,6 +27,20 @@ class Phase(Enum):
     BENCHMARKS = "benchmarks"
 
 
+class RuntimeInputRole(Enum):
+    FILE = "file"
+    EXECUTABLE = "executable"
+    DIRECTORY = "directory"
+    SEARCH_LIST = "search-list"
+    LIBRARY_SEARCH_LIST = "library-search-list"
+
+
+@dataclass(frozen=True)
+class RuntimeInput:
+    expression: str
+    role: RuntimeInputRole
+
+
 @dataclass(frozen=True)
 class Dependency:
     package: str
@@ -269,12 +283,14 @@ def render(metadata=None):
         resources["lib/Tidepool/Internal/ModelControl.hs"] = "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Internal_ModelControl_hs]"
         rule = ["filegroup(", f"    name = {literal(name + '_resources')},", f"    srcs = {literal(resources)},", ")", ""]
         lines.extend("    " + line if line else "" for line in "\n".join(rule).splitlines())
+        # One declaration owns each path's Buck expression and runtime role.
+        # The runner roots these inputs before entering its mutable fixture copy.
         env = {
-            "PATH": None,
-            "TIDEPOOL_GHC_LIBDIR": None,
-            "TIDEPOOL_TEST_EFFECTS_DIR": "$(location //bridge/mcp:effects_generated)",
-            "TIDEPOOL_PRELUDE_DIR": "$(location :facade_embedded_sources)/lib",
-            "TIDEPOOL_TEST_PYTHON": "$(exe toolchains//:python)",
+            "PATH": RuntimeInput('read_root_config("nix", "ghc_bin") + ":" + read_root_config("nix", "action_path")', RuntimeInputRole.SEARCH_LIST),
+            "TIDEPOOL_GHC_LIBDIR": RuntimeInput('read_root_config("nix", "ghc_libdir")', RuntimeInputRole.DIRECTORY),
+            "TIDEPOOL_TEST_EFFECTS_DIR": RuntimeInput(literal("$(location //bridge/mcp:effects_generated)"), RuntimeInputRole.DIRECTORY),
+            "TIDEPOOL_PRELUDE_DIR": RuntimeInput(literal("$(location :facade_embedded_sources)/lib"), RuntimeInputRole.DIRECTORY),
+            "TIDEPOOL_TEST_PYTHON": RuntimeInput(literal("$(exe toolchains//:python)"), RuntimeInputRole.EXECUTABLE),
         }
         runtime = [":" + binary, ":" + name + "_resources", "//bridge/mcp:effects_generated", ":facade_embedded_sources", "toolchains//:haskell_test_closure", "toolchains//:test_tools_closure"]
         children = {"declaration_join_test": ("DECLARATION_JOIN", "declaration_join_consumer"),
@@ -289,20 +305,23 @@ def render(metadata=None):
             variable, child = children[name]
             if declared_tools != [child]:
                 raise ValueError(f"{component.name} child-process contract differs from Cabal build-tool-depends")
-            env["TIDEPOOL_TEST_" + variable + "_CHILD"] = "$(exe :" + child + ")"
+            env["TIDEPOOL_TEST_" + variable + "_CHILD"] = RuntimeInput(literal("$(exe :" + child + ")"), RuntimeInputRole.EXECUTABLE)
             runtime.append(":" + child)
         elif declared_tools:
             raise ValueError(f"{component.name} needs a native runtime binding for its Cabal build tools")
         if name == "source_boot_product_reuse_test":
             env.update({
-                "TIDEPOOL_CANDIDATE_FIXTURE_ISSUER": "$(exe //tidepool/toolchain:candidate_fixture_issuer)",
-                "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_deployment)",
-                "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
-                "TIDEPOOL_EXTRACT_WORKER": "$(exe :tidepool_extract_bin)",
-                "LD_LIBRARY_PATH": "$(location //build/package:tidepool_extract_runtime_libraries)",
+                "TIDEPOOL_CANDIDATE_FIXTURE_ISSUER": RuntimeInput(literal("$(exe //tidepool/toolchain:candidate_fixture_issuer)"), RuntimeInputRole.EXECUTABLE),
+                "TIDEPOOL_COMPILER_DEPLOYMENT": RuntimeInput(literal("$(location //build/package:compiler_deployment)"), RuntimeInputRole.FILE),
+                "TIDEPOOL_EXTRACT": RuntimeInput(literal("$(exe //tidepool/extract-cmd:tidepool-extract)"), RuntimeInputRole.EXECUTABLE),
+                "TIDEPOOL_EXTRACT_WORKER": RuntimeInput(literal("$(exe :tidepool_extract_bin)"), RuntimeInputRole.EXECUTABLE),
+                "LD_LIBRARY_PATH": RuntimeInput(literal("$(location //build/package:tidepool_extract_runtime_libraries)"), RuntimeInputRole.LIBRARY_SEARCH_LIST),
             })
             runtime.extend(["//tidepool/toolchain:candidate_fixture_issuer", "//build/package:compiler_deployment", "//build/package:tidepool_extract_runtime_libraries"])
-        env_text = "{\n" + "\n".join("    " + literal(key) + ": " + (('read_root_config("nix", "ghc_bin") + ":" + read_root_config("nix", "action_path")') if key == "PATH" else 'read_root_config("nix", "ghc_libdir")') + "," if value is None else "    " + literal(key) + ": " + literal(value) + "," for key, value in env.items()) + "\n}"
+        path_roles = " ".join(key + ":" + value.role.value for key, value in env.items())
+        env_text = "{\n" + "\n".join("    " + literal(key) + ": " + value.expression + ","
+                                    for key, value in env.items())
+        env_text += "\n    " + literal("TIDEPOOL_TEST_INPUT_PATHS") + ": " + literal(path_roles) + ",\n}"
         rule = ["sh_test(", f"    name = {literal(name)},", '    test = "test-with-fixtures.sh",',
                 f"    args = {literal(['$(exe :' + binary + ')', '$(location :' + name + '_resources)'])},",
                 f"    resources = {literal(runtime)},", f"    env = {env_text},", "    labels = [\"haskell_component_suite\"],", "    test_rule_timeout_ms = 14400000,", '    visibility = ["PUBLIC"],', ")", ""]

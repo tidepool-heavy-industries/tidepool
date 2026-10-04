@@ -3,6 +3,9 @@ import copy
 import hashlib
 import importlib.util
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 import tempfile
 import unittest
@@ -119,6 +122,9 @@ class ComponentProjectionTests(unittest.TestCase):
         rendered = G.render(metadata)
         self.assertIn('"test/Negative.hs": "test/Negative.hs"', rendered)
         self.assertIn('labels = ["haskell_component_suite"]', rendered)
+        self.assertIn("PATH:search-list TIDEPOOL_GHC_LIBDIR:directory "
+                      "TIDEPOOL_TEST_EFFECTS_DIR:directory TIDEPOOL_PRELUDE_DIR:directory "
+                      "TIDEPOOL_TEST_PYTHON:executable", rendered)
 
     def test_generated_sources_and_workspace_sources_keep_owning_producers(self):
         self.assertEqual(G.source("Tidepool.Internal.ModelControl", ["generated/protocol"])[1],
@@ -144,6 +150,104 @@ class ComponentProjectionTests(unittest.TestCase):
         self.assertIn("//build/haskell/cabal-metadata:metadata", arguments)
         self.assertIn("remote.enabled=false", arguments)
         self.assertNotIn("runghc", arguments)
+
+
+class FixtureInputBoundaryTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.wrapper = SCRIPT.parents[1] / "bridge/haskell/test-with-fixtures.sh"
+        self.fixtures = self.root / "fixture tree"
+        self.fixtures.mkdir()
+        (self.fixtures / "input").write_text("immutable fixture")
+        self.directory = self.root / "declared directory"
+        self.directory.mkdir()
+        self.file = self.root / "declared file"
+        self.file.write_text("original input")
+        self.tool = self.root / "declared tool"
+        self.tool.write_text("#!/usr/bin/env bash\nprintf 'declared tool result'\n")
+        self.tool.chmod(0o755)
+        self.record = self.root / "result.json"
+        self.binary = self.root / "test binary"
+        self.binary.write_text("""#!/usr/bin/env bash
+set -euo pipefail
+[[ "$("$DECLARED_EXECUTABLE")" == 'declared tool result' ]]
+"$TIDEPOOL_TEST_PYTHON" - "$TEST_RECORD" "$@" <<'PYPROBE'
+import json, os, pathlib, sys
+names = ['DECLARED_DIRECTORY', 'DECLARED_FILE', 'DECLARED_EXECUTABLE',
+         'ORDERED_SEARCH', 'ORDERED_LIBRARIES', 'SCALAR_VALUE', 'TASTY_PATTERN']
+pathlib.Path(sys.argv[1]).write_text(json.dumps(dict(
+    cwd=os.getcwd(), args=sys.argv[2:], values={name: os.environ[name] for name in names})))
+pathlib.Path('input').write_text('private mutation')
+PYPROBE
+""")
+        self.binary.chmod(0o755)
+        self.env = os.environ | {
+            "DECLARED_DIRECTORY": self.directory.name,
+            "DECLARED_FILE": self.file.name,
+            "DECLARED_EXECUTABLE": self.tool.name,
+            "ORDERED_SEARCH": "first::/absolute:last:$ORIGIN/lib:",
+            "ORDERED_LIBRARIES": "libdir:$ORIGIN/lib::${LIB}/suffix:$PLATFORM",
+            "SCALAR_VALUE": "retain this scalar: exactly",
+            "TASTY_PATTERN": "/canonical current source/",
+            "TIDEPOOL_TEST_PYTHON": sys.executable,
+            "TIDEPOOL_TEST_INPUT_PATHS": "DECLARED_DIRECTORY:directory DECLARED_FILE:file "
+                "DECLARED_EXECUTABLE:executable ORDERED_SEARCH:search-list "
+                "ORDERED_LIBRARIES:library-search-list "
+                "TIDEPOOL_TEST_PYTHON:executable",
+            "TEST_RECORD": str(self.record),
+        }
+        # This is a runner boundary probe, independent of compiler issuance.
+        self.env.pop("TIDEPOOL_CANDIDATE_FIXTURE_ISSUER", None)
+
+    def run_wrapper(self, env):
+        return subprocess.run(['bash', str(self.wrapper), self.binary.name, self.fixtures.name,
+                               '--pattern', '/canonical current source/'], cwd=self.root,
+                              env=env, text=True, capture_output=True, timeout=10)
+
+    def test_relative_declared_inputs_survive_private_cwd_and_preserve_search_order(self):
+        result = self.run_wrapper(self.env)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        record = json.loads(self.record.read_text())
+        self.assertEqual(record['values']['DECLARED_DIRECTORY'], str(self.directory))
+        self.assertEqual(record['values']['DECLARED_FILE'], str(self.file))
+        self.assertEqual(record['values']['DECLARED_EXECUTABLE'], str(self.tool))
+        self.assertEqual(record['values']['ORDERED_SEARCH'], ':'.join([
+            str(self.root / 'first'), str(self.root) + '/.', '/absolute',
+            str(self.root / 'last'), str(self.root / '$ORIGIN/lib'), str(self.root) + '/.']))
+        self.assertEqual(record['values']['ORDERED_LIBRARIES'], ':'.join([
+            str(self.root / 'libdir'), '$ORIGIN/lib', str(self.root) + '/.', '${LIB}/suffix', '$PLATFORM']))
+        self.assertEqual(record['values']['SCALAR_VALUE'], self.env['SCALAR_VALUE'])
+        self.assertEqual(record['values']['TASTY_PATTERN'], self.env['TASTY_PATTERN'])
+        self.assertEqual(record['args'], ['--pattern', '/canonical current source/'])
+        self.assertNotEqual(record['cwd'], str(self.root))
+        self.assertFalse(Path(record['cwd']).exists())
+        self.assertEqual((self.fixtures / 'input').read_text(), 'immutable fixture')
+
+    def test_absolute_declared_inputs_keep_their_artifact_roles(self):
+        env = self.env | {
+            'DECLARED_DIRECTORY': str(self.directory), 'DECLARED_FILE': str(self.file),
+            'DECLARED_EXECUTABLE': str(self.tool), 'ORDERED_SEARCH': '/first:/second',
+        }
+        result = self.run_wrapper(env)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        values = json.loads(self.record.read_text())['values']
+        self.assertEqual(values['ORDERED_SEARCH'], env['ORDERED_SEARCH'])
+        for name in ('DECLARED_DIRECTORY', 'DECLARED_FILE', 'DECLARED_EXECUTABLE'):
+            self.assertEqual(values[name], env[name])
+
+    def test_absent_input_wrong_artifact_role_and_unknown_role_refuse_before_execution(self):
+        for changed in [
+            {'DECLARED_FILE': 'missing'}, {'DECLARED_FILE': self.directory.name},
+            {'DECLARED_EXECUTABLE': self.file.name},
+            {'TIDEPOOL_TEST_INPUT_PATHS': 'DECLARED_FILE:unknown'},
+            {'TIDEPOOL_TEST_INPUT_PATHS': 'ABSENT_INPUT:file'},
+        ]:
+            with self.subTest(changed=changed):
+                result = self.run_wrapper(self.env | changed)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(self.record.exists())
 
 
 if __name__ == "__main__":

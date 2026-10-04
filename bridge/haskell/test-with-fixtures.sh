@@ -9,6 +9,59 @@ fi
 test_binary=$(realpath -- "$1")
 fixture_tree=$(realpath -- "$2")
 shift 2
+# RunInfo may supply paths relative to the launch directory; TestInfo supplies
+# absolute paths. Input roles come from the same native component declarations.
+launch_directory=$PWD
+normalize_search_list() {
+  local remaining=$1 role=$2 entry rooted result="" separator="" more
+  while true; do
+    if [[ "$remaining" == *:* ]]; then
+      entry=${remaining%%:*}
+      remaining=${remaining#*:}
+      more=true
+    else
+      entry=$remaining
+      more=false
+    fi
+    # Dynamic loader tokens belong to the loaded artifact rather than CWD.
+    if [[ "$entry" == /* ]] || [[ "$role" == library-search-list && (
+      "$entry" == *'$ORIGIN'* || "$entry" == *'${ORIGIN}'*
+      || "$entry" == *'$LIB'* || "$entry" == *'${LIB}'*
+      || "$entry" == *'$PLATFORM'* || "$entry" == *'${PLATFORM}'*) ]]; then
+      rooted=$entry
+    else
+      # Empty search entries select the launch CWD, including a trailing colon.
+      rooted=$launch_directory/${entry:-.}
+    fi
+    result+=$separator$rooted
+    separator=:
+    [[ "$more" == true ]] || break
+  done
+  printf '%s' "$result"
+}
+read -ra path_inputs <<< "${TIDEPOOL_TEST_INPUT_PATHS:?missing declared native test input roles}"
+for input in "${path_inputs[@]}"; do
+  name=${input%%:*}
+  role=${input#*:}
+  if [[ ! "$name" =~ ^[A-Z_][A-Z_0-9]*$ || ! -v "$name" ]]; then
+    echo "missing or invalid declared native test input: $name" >&2
+    exit 2
+  fi
+  value=${!name}
+  case "$role" in
+    search-list|library-search-list) rooted=$(normalize_search_list "$value" "$role") ;;
+    file|directory|executable)
+      rooted=$(realpath -e -- "$value")
+      case "$role" in
+        file) [[ -f "$rooted" ]] ;;
+        directory) [[ -d "$rooted" ]] ;;
+        executable) [[ -f "$rooted" && -x "$rooted" ]] ;;
+      esac || { echo "invalid declared $role input: $name" >&2; exit 2; }
+      ;;
+    *) echo "invalid declared native test input role: $role" >&2; exit 2 ;;
+  esac
+  export "$name=$rooted"
+done
 # Read configured authority; the Rust issuer still independently admits the
 # exact frontend/worker deployment before issuing any certificate.
 if [[ -n ${TIDEPOOL_CANDIDATE_FIXTURE_ISSUER:-} ]]; then

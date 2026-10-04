@@ -614,6 +614,9 @@ native_probe_opacity(
 
 filegroup(
     name = "main_acceptance_script_tree",
-    srcs = {"bridge/haskell/test-check/run-main-acceptance.sh": "test-check/run-main-acceptance.sh"},
+    srcs = {
+        "bridge/haskell/test-check/run-main-acceptance.sh": "test-check/run-main-acceptance.sh",
+        "bridge/haskell/test-with-fixtures.sh": "test-with-fixtures.sh",
+    },
     visibility = ["PUBLIC"],
 )
