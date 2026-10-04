@@ -30,6 +30,15 @@ class IsolatedLibtestTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def test_regeneration_modes_refuse_before_discovery_or_execution(self):
+        for name in ('TIDEPOOL_REGEN_BRIDGED', 'TIDEPOOL_REGEN_PROTOCOL_GOLDENS'):
+            with self.subTest(name=name), patch.dict(os.environ, {name: '1'}), \
+                 patch.object(runner, 'execute') as execute, \
+                 contextlib.redirect_stderr(io.StringIO()) as errors:
+                self.assertEqual(runner.main([str(self.binary)]), 2)
+                execute.assert_not_called()
+                self.assertIn(name, errors.getvalue())
+
     def test_actual_failed_execution_count_is_retained_without_changing_pass_rule(self):
         record = {}
         result = subprocess.CompletedProcess([], 101,

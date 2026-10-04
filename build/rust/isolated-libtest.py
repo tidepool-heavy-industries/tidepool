@@ -270,6 +270,12 @@ def retain_output(directory, name, passed, stdout, stderr, record=None):
 def main(argv=None):
     global INTERRUPT_SIGNAL
     options = parse_args(sys.argv[1:] if argv is None else argv)
+    mutation_modes = sorted(name for name in (
+        'TIDEPOOL_REGEN_BRIDGED', 'TIDEPOOL_REGEN_PROTOCOL_GOLDENS',
+    ) if name in os.environ)
+    if mutation_modes:
+        print('libtest acceptance refuses fixture regeneration: ' + ', '.join(mutation_modes), file=sys.stderr)
+        return 2
     with ACTIVE_PROCESSES_LOCK:
         if ACTIVE_PROCESSES:
             raise RuntimeError('libtest runner already has active child processes')
