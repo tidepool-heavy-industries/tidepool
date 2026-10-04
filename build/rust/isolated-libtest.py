@@ -11,6 +11,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 
 
 DEFAULT_TIMEOUT = 300
@@ -18,6 +19,10 @@ DISCOVERY_TIMEOUT = 30
 OUTPUT_LIMIT = 4 << 20
 RESULT = re.compile(
     r"^test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored;.*$",
+    re.MULTILINE,
+)
+EXECUTION_RESULT = re.compile(
+    r"^test result: (?:ok|FAILED)\. (\d+) passed; (\d+) failed; (\d+) ignored;.*$",
     re.MULTILINE,
 )
 ACTIVE_PROCESSES = {}
@@ -198,19 +203,38 @@ def select_tests(all_names, ignored_names, options):
     return selected
 
 
-def run_one(binary, name, ignored, timeout):
+def run_one(binary, name, ignored, timeout, record=None):
     args = [binary, '--exact', name, '--nocapture']
     if ignored:
         args.append('--ignored')
+    started = time.monotonic_ns()
+    if record is not None:
+        record.update(command=args, started_ns=started, exit_code=None,
+                      executed_test_count=None, passed_test_count=None,
+                      failed_test_count=None, process_execution_count=0)
     try:
         result = execute(args, timeout)
     except subprocess.TimeoutExpired as error:
+        if record is not None:
+            record.update(status='timeout', process_execution_count=1,
+                          elapsed_ns=time.monotonic_ns() - started)
         detail = f'timed out after {timeout:g}s'
         if error.output:
             detail += f'\n{error.output}'
         return False, detail, error.stderr or ''
     except OSError as error:
+        if record is not None:
+            record.update(status='spawn_failed', elapsed_ns=time.monotonic_ns() - started)
         return False, f'could not start test process: {error}', ''
+    if record is not None:
+        record.update(status='finished', process_execution_count=1,
+                      exit_code=result.returncode, elapsed_ns=time.monotonic_ns() - started)
+        actual = list(EXECUTION_RESULT.finditer(result.stdout))
+        if actual:
+            passed_count, failed_count, ignored_count = map(int, actual[-1].groups())
+            record.update(executed_test_count=passed_count + failed_count,
+                          passed_test_count=passed_count, failed_test_count=failed_count,
+                          ignored_test_count=ignored_count)
     summaries = list(RESULT.finditer(result.stdout))
     summary = summaries[-1] if summaries else None
     passed = (
@@ -222,7 +246,7 @@ def run_one(binary, name, ignored, timeout):
 
 
 
-def retain_output(directory, name, passed, stdout, stderr):
+def retain_output(directory, name, passed, stdout, stderr, record=None):
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     key = hashlib.sha256(name.encode()).hexdigest()
     streams = {}
@@ -238,7 +262,8 @@ def retain_output(directory, name, passed, stdout, stderr):
             "truncated": len(data) > OUTPUT_LIMIT,
         }
     (directory / f"{key}.json").write_text(json.dumps({
-        "version": 1, "test": name, "passed": passed, "streams": streams,
+        "version": 2, "test": name, "passed": passed, "streams": streams,
+        "execution": record,
     }, indent=2) + "\n")
 
 
@@ -275,9 +300,11 @@ def main(argv=None):
         def run(name):
             if INTERRUPT_SIGNAL is not None:
                 raise RunnerInterrupted(INTERRUPT_SIGNAL)
-            return name, run_one(
-                options.binary, name, name in ignored_names, options.timeout
+            record = {}
+            outcome = run_one(
+                options.binary, name, name in ignored_names, options.timeout, record
             )
+            return name, outcome, record
 
         jobs = options.jobs
         if jobs is None:
@@ -304,12 +331,12 @@ def main(argv=None):
                 for future in completed:
                     name = pending.pop(future)
                     try:
-                        _, (passed, output, stderr) = future.result()
+                        _, (passed, output, stderr), record = future.result()
                     except RunnerInterrupted:
                         interrupted = INTERRUPT_SIGNAL or signal.SIGTERM
                         continue
                     if options.output_dir is not None:
-                        retain_output(options.output_dir, name, passed, output, stderr)
+                        retain_output(options.output_dir, name, passed, output, stderr, record)
                     print(f'{"PASS" if passed else "FAIL"} {name}', flush=True)
                     if not passed:
                         failures += 1

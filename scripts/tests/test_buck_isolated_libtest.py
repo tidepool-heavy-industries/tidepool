@@ -30,6 +30,33 @@ class IsolatedLibtestTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def test_actual_failed_execution_count_is_retained_without_changing_pass_rule(self):
+        record = {}
+        result = subprocess.CompletedProcess([], 101,
+            'test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out\n', '')
+        with patch.object(runner, 'execute', return_value=result):
+            passed, _, _ = runner.run_one(str(self.binary), 'suite::fails', False, 2, record)
+        self.assertFalse(passed)
+        self.assertEqual(record['exit_code'], 101)
+        self.assertEqual(record['executed_test_count'], 1)
+        self.assertEqual(record['failed_test_count'], 1)
+        self.assertGreaterEqual(record['elapsed_ns'], 0)
+
+    def test_zero_execution_and_unknown_timeout_remain_distinct(self):
+        record = {}
+        result = subprocess.CompletedProcess([], 0,
+            'test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n', '')
+        with patch.object(runner, 'execute', return_value=result):
+            passed, _, _ = runner.run_one(str(self.binary), 'suite::absent', False, 2, record)
+        self.assertFalse(passed)
+        self.assertEqual(record['executed_test_count'], 0)
+        with patch.object(runner, 'execute', side_effect=subprocess.TimeoutExpired([], 2)):
+            passed, _, _ = runner.run_one(str(self.binary), 'suite::hung', False, 2, record)
+        self.assertFalse(passed)
+        self.assertIsNone(record['exit_code'])
+        self.assertIsNone(record['executed_test_count'])
+        self.assertEqual(record['status'], 'timeout')
+
     def invoke(self, arguments, run):
         output = io.StringIO()
         errors = io.StringIO()

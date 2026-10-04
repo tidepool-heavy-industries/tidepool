@@ -1,5 +1,9 @@
-load("@prelude//:rules.bzl", "genrule", "sh_test")
+load("@prelude//:rules.bzl", "export_file", "genrule", "sh_test")
 load(":runtime_shared_libraries.bzl", "tidepool_runtime_shared_libraries")
+load("//build:native_profile.bzl", "selected_native_profile")
+
+export_file(name = "qualification_script", src = "qualification.py", visibility = ["PUBLIC"])
+export_file(name = "native_entrypoint", src = "native-entrypoint.sh", visibility = ["PUBLIC"])
 
 tidepool_runtime_shared_libraries(
     name = "tidepool_extract_runtime_libraries",
@@ -74,22 +78,31 @@ genrule(
         "//bridge/haskell:facade_embedded_sources",
         "//web:dist",
         ":embedded_web_provenance",
+        ":tidepool_extract_runtime_libraries",
+        ":qualification_script",
+        ":native_entrypoint",
+        "toolchains//:exomonad_runtime_tools",
     ],
     out = ".",
     env = {
         "PACKAGE_GHC_LIBDIR": read_root_config("nix", "ghc_libdir"),
+        "PACKAGE_RUNTIME_TOOLS": read_root_config("nix", "exomonad_runtime_tools", ""),
+        "PACKAGE_NATIVE_PROFILE": selected_native_profile(),
     },
     bash = """set -euo pipefail
-OUTPUT="$PWD/$OUT"
-mkdir -p "$OUTPUT/bin" "$OUTPUT/share/exomonad/web" "$OUTPUT/share/exomonad/stdlib"
-cp -L "$PWD/$(location //bridge/facade:exomonad)" "$OUTPUT/bin/exomonad"
-cp -L "$PWD/$(location //bridge/facade:exomonad-view-helper)" "$OUTPUT/bin/exomonad-view-helper"
-cp -L "$PWD/$(location //tidepool/extract-cmd:tidepool-extract)" "$OUTPUT/bin/tidepool-extract"
-cp -L "$PWD/$(location //bridge/haskell:tidepool_extract_bin)" "$OUTPUT/bin/tidepool-extract-bin"
-cp -a "$PWD/$(location //bridge/haskell:facade_embedded_sources)/lib/." "$OUTPUT/share/exomonad/stdlib/"
-cp -a "$PWD/$(location //web:dist)/web/." "$OUTPUT/share/exomonad/web/"
-cp -L "$PWD/$(location :embedded_web_provenance)" "$OUTPUT/share/exomonad/harness-source-revision.txt"
-printf '%s\\n' "$PACKAGE_GHC_LIBDIR" > "$OUTPUT/share/exomonad/ghc-libdir.txt"
+"$(exe toolchains//:python)" "$PWD/$(location :qualification_script)" assemble \
+  --output "$PWD/$OUT" \
+  --host "$PWD/$(location //bridge/facade:exomonad)" \
+  --view-helper "$PWD/$(location //bridge/facade:exomonad-view-helper)" \
+  --frontend "$PWD/$(location //tidepool/extract-cmd:tidepool-extract)" \
+  --worker "$PWD/$(location //bridge/haskell:tidepool_extract_bin)" \
+  --sources "$PWD/$(location //bridge/haskell:facade_embedded_sources)" \
+  --assets "$PWD/$(location //web:dist)" \
+  --libraries "$PWD/$(location :tidepool_extract_runtime_libraries)" \
+  --harness-revision "$PWD/$(location :embedded_web_provenance)" \
+  --runtime-tools "$PACKAGE_RUNTIME_TOOLS" --ghc-libdir "$PACKAGE_GHC_LIBDIR" \
+  --entrypoint-template "$PWD/$(location :native_entrypoint)" \
+  --profile "$PACKAGE_NATIVE_PROFILE"
 """,
     visibility = ["PUBLIC"],
 )
