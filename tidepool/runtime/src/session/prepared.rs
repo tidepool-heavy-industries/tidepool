@@ -552,7 +552,6 @@ pub(crate) struct InstallSnapshot {
     values: MachineImports,
     imports: ImportBindings,
     facts: ProgramFacts,
-    plan: EvidencePlan,
     exports: Vec<(SymbolIdentity, ValueId, Option<Signature>)>,
     compile: tidepool_codegen::prepared_program::PreparedCompileSnapshot,
     /// This engine's registry, carried into the off-checkout step so a miss
@@ -4285,7 +4284,7 @@ impl PreparedEngine {
         let (values, imports) = self.resolve_imports(&prepared, bindings, index)?;
         let exports = exportable_code_tops(&prepared);
         let facts = ProgramFacts::of(&prepared);
-        let plan = self.plan_evidence(&facts)?;
+        self.plan_evidence(&facts)?;
         let linked = link_program(prepared, &values)?;
         let precompiled = self
             .registry
@@ -4298,7 +4297,6 @@ impl PreparedEngine {
             values,
             imports,
             facts,
-            plan,
             exports,
             compile,
             registry,
@@ -4351,19 +4349,21 @@ impl PreparedEngine {
             return Ok(None);
         }
         let import_count = snapshot.imports.len();
-        let definitions = Arc::clone(compiled.definition_facts());
+        snapshot.facts.definitions = Arc::clone(compiled.definition_facts());
+        // Evidence ownership can change while compilation releases checkout.
+        // Replan against current installations before any native mutation.
+        let plan = self.plan_evidence(&snapshot.facts)?;
         let program = self
             .machine
             .install_shared(compiled, snapshot.imports)
             .map_err(PreparedRuntimeError::Install)?;
-        snapshot.facts.definitions = definitions;
         tracing::info!(
             target: "tidepool_runtime::prepared_install",
             imports = import_count,
             compiled_off_checkout = true,
             "prepared install"
         );
-        self.finish_program_install(program, snapshot.facts, snapshot.plan, snapshot.exports)?;
+        self.finish_program_install(program, snapshot.facts, plan, snapshot.exports)?;
         Ok(Some(program))
     }
 
@@ -9788,6 +9788,60 @@ pub(super) mod tests {
                 .lookup(&key)
                 .expect("installed code remains shared")
         ));
+    }
+
+    #[test]
+    fn off_checkout_install_rejects_intervening_evidence_conflict() {
+        use tidepool_repr::execution_schema::SYNTHETIC_SITE_BIT;
+        let mut engine = PreparedEngine::empty_certified(64 * 1024, None).unwrap();
+        let bindings = BindingTable::new();
+        let index = BindingIndex::new();
+        let site = SYNTHETIC_SITE_BIT | 42;
+        let mut snapshot = engine
+            .snapshot_install(verb_program(site, TypeNode::Text), &bindings, &index)
+            .unwrap();
+        let compiled = PreparedEngine::compile_off_checkout(&mut snapshot).unwrap();
+        let owner = engine
+            .install(verb_program(site, TypeNode::Integer), &bindings, &index)
+            .unwrap();
+        let before = engine.residency();
+        assert!(matches!(
+            engine.revalidate_and_install(snapshot, compiled, &bindings, &index),
+            Err(PreparedRuntimeError::SiteConflict { site: rejected, owner: actual })
+                if rejected == site && actual == owner
+        ));
+        assert_eq!(engine.residency(), before);
+        assert_eq!(engine.programs.len(), 1);
+        assert_eq!(engine.sites[&site].owner, owner);
+        assert_eq!(engine.verb_sites[&DataConId(77)].owner, owner);
+    }
+
+    #[test]
+    fn off_checkout_install_restores_retired_evidence_ownership() {
+        use tidepool_repr::execution_schema::SYNTHETIC_SITE_BIT;
+        let site = SYNTHETIC_SITE_BIT | 43;
+        let prepared = verb_program(site, TypeNode::Text);
+        let (mut engine, owner) = PreparedEngine::bootstrap(prepared.clone()).unwrap();
+        let bindings = BindingTable::new();
+        let index = BindingIndex::new();
+        let mut snapshot = engine
+            .snapshot_install(prepared, &bindings, &index)
+            .unwrap();
+        let compiled = PreparedEngine::compile_off_checkout(&mut snapshot).unwrap();
+        assert!(engine.unpin(owner));
+        for export in std::mem::take(&mut engine.code_exports).into_values() {
+            assert!(engine.release(export.handle));
+        }
+        engine.quiesce_and_collect_now().unwrap();
+        assert!(!engine.programs.contains_key(&owner));
+        assert!(!engine.sites.contains_key(&site));
+        assert!(!engine.verb_sites.contains_key(&DataConId(77)));
+        let installed = engine
+            .revalidate_and_install(snapshot, compiled, &bindings, &index)
+            .unwrap()
+            .unwrap();
+        assert_eq!(engine.sites[&site].owner, installed);
+        assert_eq!(engine.verb_sites[&DataConId(77)].owner, installed);
     }
 
     #[test]
