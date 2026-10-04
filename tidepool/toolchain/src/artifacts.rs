@@ -5201,12 +5201,10 @@ mod constructor_identity_tests {
     use tidepool_repr::serial::{write_metadata, MetaWarnings};
     use tidepool_repr::{DataCon, SrcBang};
 
-    /// A real, GHC-produced prepared program — `M3Vertical.hs`'s `entry`,
-    /// which allocates a user `Box` constructor. `PreparedArtifact` has no
-    /// Typed structural input for artifact assembly and custody checks.
+    /// Typed constructor input for artifact assembly and custody checks.
     fn prepared_fixture_bytes() -> Vec<u8> {
         tidepool_test_data::prepared_encode::encode_wire_program(
-            &tidepool_test_data::prepared::callable_import_program(),
+            &tidepool_test_data::prepared::constructor_program(),
         )
     }
 
@@ -5289,9 +5287,7 @@ mod constructor_identity_tests {
         }
     }
 
-    /// TEST 1: a table built to agree with every constructor the real
-    /// prepared fixture declares — exactly what one compile's own metadata
-    /// and prepared output look like paired together — must assemble.
+    /// Every paired constructor identity agrees in the valid structural control.
     #[test]
     fn correctly_paired_artifact_and_table_assembles() {
         let prepared_bytes = prepared_fixture_bytes();
