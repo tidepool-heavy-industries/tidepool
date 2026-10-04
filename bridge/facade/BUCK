@@ -1813,12 +1813,14 @@ tidepool_rust_test_cases(
         "TIDEPOOL_KEEP_TEST_LOGS": "1",
         "TIDEPOOL_HASKELL_ACTORS_DIR": "$(location //bridge/haskell:facade_embedded_sources)/actors",
         "TIDEPOOL_EFFECTS_SOURCE_ROOT": "$(location //bridge/mcp:effects_generated)",
+        "EXOMONAD_WORKSPACE_GITLINK": "$(location //build/rust:workspace_gitlink)",
     },
     resources = [
         "//bridge/haskell:facade_embedded_sources",
         "//bridge/mcp:effects_generated",
         "//build/package:compiler_deployment",
         "//build/package:tidepool_extract_runtime_libraries",
+        "//build/rust:workspace_gitlink",
     ],
     haskell_worker = True,
     visibility = ["PUBLIC"],
@@ -1846,12 +1848,14 @@ tidepool_rust_test_cases(
         "TIDEPOOL_HASKELL_ACTORS_DIR": "$(location //bridge/haskell:facade_embedded_sources)/actors",
         "TIDEPOOL_EFFECTS_SOURCE_ROOT": "$(location //bridge/mcp:effects_generated)",
         "TIDEPOOL_RECIPE_WORKSPACE": "$(location //exomonad/examples/workspace:facade_test_sources)/.exomonad",
+        "EXOMONAD_WORKSPACE_GITLINK": "$(location //build/rust:workspace_gitlink)",
     },
     resources = [
         "//bridge/haskell:facade_embedded_sources",
         "//bridge/mcp:effects_generated",
         "//build/package:compiler_deployment",
         "//build/package:tidepool_extract_runtime_libraries",
+        "//build/rust:workspace_gitlink",
         "//exomonad/examples/workspace:facade_test_sources",
     ],
     haskell_worker = True,
@@ -2310,6 +2314,12 @@ tidepool_rust_isolated_test(
     visibility = ["PUBLIC"],
 )
 
+export_file(
+    name = "workspace_pinned_check_source",
+    src = "src/exomonad/workspace_pinned_check.hs",
+    visibility = ["PUBLIC"],
+)
+
 filegroup(
     name = "corpus_project_sources",
     srcs = {
@@ -2527,6 +2537,8 @@ filegroup(
         "bridge/facade/src/actor_host/quiet_observation_exact_probe.hs": "src/actor_host/quiet_observation_exact_probe.hs",
         "bridge/facade/src/actor_host/quiet_observation_setup.hs": "src/actor_host/quiet_observation_setup.hs",
         "bridge/facade/src/actor_host/recipe_checks.rs": "src/actor_host/recipe_checks.rs",
+        "bridge/facade/src/actor_host/recipe_checks/prepared_contract_expression.hs": "src/actor_host/recipe_checks/prepared_contract_expression.hs",
+        "bridge/facade/src/actor_host/recipe_checks/prepared_contract_tests.rs": "src/actor_host/recipe_checks/prepared_contract_tests.rs",
         "bridge/facade/src/actor_host/record_actor.hs": "src/actor_host/record_actor.hs",
         "bridge/facade/src/actor_host/record_actor_invalid_shapes.hs": "src/actor_host/record_actor_invalid_shapes.hs",
         "bridge/facade/src/actor_host/record_actor_nested_failure.hs": "src/actor_host/record_actor_nested_failure.hs",
@@ -2591,6 +2603,7 @@ filegroup(
         "bridge/facade/src/exomonad/source/publication_fault_tests.rs": "src/exomonad/source/publication_fault_tests.rs",
         "bridge/facade/src/exomonad/workspace.hs": "src/exomonad/workspace.hs",
         "bridge/facade/src/exomonad/workspace.rs": "src/exomonad/workspace.rs",
+        "bridge/facade/src/exomonad/workspace/source_capture_tests.rs": "src/exomonad/workspace/source_capture_tests.rs",
         "bridge/facade/src/exomonad/workspace_pinned_check.hs": "src/exomonad/workspace_pinned_check.hs",
         "bridge/facade/src/haskell_sources.rs": "src/haskell_sources.rs",
         "bridge/facade/src/lib.rs": "src/lib.rs",

@@ -83,13 +83,22 @@ def _nix_directory_impl(ctx):
         cmd_args([ctx.attrs.cp, "-a", ctx.attrs.store_path + "/.", output.as_output()]),
         category = "nix_directory",
     )
-    return [DefaultInfo(default_output = output)]
+    sub_targets = {}
+    for source in ctx.attrs.projected_sources:
+        if source.startswith("/") or any([part in ["", ".", ".."] for part in source.split("/")]):
+            fail("{} has an invalid source projection: {}".format(ctx.label, source))
+        name = source.replace("/", "_").replace(".", "_").replace("-", "_")
+        if name in sub_targets:
+            fail("{} has duplicate source projection: {}".format(ctx.label, name))
+        sub_targets[name] = [DefaultInfo(default_output = output.project(source))]
+    return [DefaultInfo(default_output = output, sub_targets = sub_targets)]
 
 nix_directory = rule(
     impl = _nix_directory_impl,
     attrs = {
         "cp": attrs.string(),
         "store_path": attrs.string(),
+        "projected_sources": attrs.list(attrs.string(), default = []),
     },
 )
 

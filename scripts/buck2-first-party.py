@@ -1163,7 +1163,13 @@ tidepool_buildscript_run(
 )
 ''')
     if package_name == "tidepool":
-        rules.append('''filegroup(
+        rules.append('''export_file(
+    name = "workspace_pinned_check_source",
+    src = "src/exomonad/workspace_pinned_check.hs",
+    visibility = ["PUBLIC"],
+)
+
+filegroup(
     name = "corpus_project_sources",
     srcs = {
         "Project/Work.hs": "src/actor_host/fixtures/project/Work.hs",

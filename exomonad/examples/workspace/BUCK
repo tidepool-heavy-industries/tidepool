@@ -47,3 +47,12 @@ filegroup(
     srcs = {"exomonad/examples/workspace/" + source: source for source in glob(["BUCK", "flake.nix", ".exomonad/**/*.hs", ".exomonad/**/*.md", ".exomonad/**/*.toml", ".exomonad/**/*.json", ".exomonad/**/*.nix"])},
     visibility = ["PUBLIC"],
 )
+
+# Package-owned projections for Cabal-declared authored modules.
+for source in glob([".exomonad/**/*.hs"]):
+    relative = source[len(".exomonad/"):]
+    export_file(
+        name = "authored_haskell_" + relative.replace("/", "_").replace(".", "_").replace("-", "_"),
+        src = source,
+        visibility = ["PUBLIC"],
+    )

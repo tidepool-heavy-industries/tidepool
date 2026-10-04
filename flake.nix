@@ -522,8 +522,12 @@
         packages.buck-buck2 = buck2Release;
         packages.buck-ghc = ghcEnv;
         packages.buck-test-ghc = ghcTestEnv;
+        packages.buck-jev-sources = pkgs.runCommand "buck-jev-sources" { } ''
+          mkdir -p "$out"
+          cp -a ${jev-dsl}/core "$out/core"
+        '';
         packages.buck-haskell-test-closure = pkgs.closureInfo {
-          rootPaths = [ ghcTestEnv ];
+          rootPaths = [ ghcTestEnv ghcEnv ];
         };
         packages.buck-cc = pkgs.stdenv.cc;
         packages.buck-binutils = pkgs.binutils;

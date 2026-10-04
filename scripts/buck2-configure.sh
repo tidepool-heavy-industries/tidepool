@@ -56,6 +56,7 @@ test_ghc_pkg=
 test_haddock=
 test_ghc_libdir=
 haskell_test_closure=
+jev_sources=
 if [[ $test_toolchain == true ]]; then
   test_ghc_root="$(output_path test-ghc)"
   test_ghc=$test_ghc_root/bin/ghc
@@ -64,6 +65,7 @@ if [[ $test_toolchain == true ]]; then
   test_haddock=$test_ghc_root/bin/haddock
   test_ghc_libdir="$("$test_ghc" --print-libdir)"
   haskell_test_closure="$(output_path haskell-test-closure)"
+  jev_sources="$(output_path jev-sources)"
 fi
 cc="$(output_path cc)"
 binutils="$(output_path binutils)"
@@ -131,6 +133,7 @@ test_ghc_pkg = $test_ghc_pkg
 test_haddock = $test_haddock
 test_ghc_libdir = $test_ghc_libdir
 haskell_test_closure = $haskell_test_closure
+jev_sources = $jev_sources
 cc = $cc/bin/cc
 cxx = $cc/bin/c++
 ar = $binutils/bin/ar
