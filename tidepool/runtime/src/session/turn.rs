@@ -4972,400 +4972,459 @@ mod tests {
         );
     }
 
-    #[test]
-    fn checked_item_retains_fresh_home_type_owners_after_source_removal() {
-        use crate::session::{
-            resident_cell_check_template, resident_workbench_templates, ModuleEnv,
-            PersistentSession, SessionLib,
-        };
-        use tidepool_codegen::scope::ScopeId;
-        use tidepool_repr::SessionId;
-        use tidepool_testing::effect_surface::TestEffectSurface;
-        tidepool_testing::eval_harness::require_extract();
-        let root = tempfile::tempdir().unwrap();
-        let support = root.path().join("CheckedHomeValue.hs");
-        std::fs::write(&support, include_str!("fixtures/checked-home-value.hs")).unwrap();
-        let effects = TestEffectSurface::minimal(&[]).unwrap();
-        let lib = SessionLib::open(
-            SessionId(1005),
-            root.path(),
-            ModuleEnv::standalone_default(),
-        )
-        .unwrap()
-        .with_validation_include(effects.include_paths().to_vec());
-        let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
-        let public = session.mint_scope(ScopeId::ROOT).unwrap();
-        let execution = Arc::new(session.begin_private_execution(public).unwrap());
-        let view = execution.view();
-        let imports = view.turn_imports(&crate::session::SourceImports::from_specs([
-            "qualified CheckedHomeValue",
-        ]));
-        let template = resident_cell_check_template(effects.preamble(), effects.row(), &imports);
-        let templates = resident_workbench_templates(effects.preamble(), effects.row(), &imports);
-        let source = "let home = CheckedHomeValue.homeValue";
-        let specification = CheckedCellSpecification {
-            admission_digest: [0; 32],
-            cell_source: source.into(),
-            template_source: template.clone(),
-            turn_templates: templates
-                .iter()
-                .map(|template| (template.kind.wire_name().into(), template.source.clone()))
-                .collect(),
-            injected_modules: vec![],
-            reserved_declaration_modules: vec![],
-        };
-        let mut roots = effects.include_paths().to_vec();
-        roots.insert(0, root.path().to_owned());
-        let admitted_include = view.include_paths(&roots);
-        let admission = session
-            .admit_cell_for_execution(
-                execution,
-                0,
-                Arc::new(specification.clone()),
-                specification.specification_digest(),
-                [1; 32],
-                admitted_include,
+    #[derive(Clone)]
+    struct CheckedHomeOutput;
+
+    impl crate::session::OutputSink for CheckedHomeOutput {
+        fn drain(&self) -> Vec<String> {
+            Vec::new()
+        }
+
+        fn snapshot(&self) -> Vec<String> {
+            Vec::new()
+        }
+    }
+
+    struct CheckedHomeCell {
+        admission: Arc<crate::session::RuntimeCellAdmission>,
+        checked: CellCheck,
+        templates: Vec<TurnTemplate>,
+    }
+
+    struct CheckedHomeFixture {
+        root: TempDir,
+        effects: tidepool_testing::effect_surface::TestEffectSurface,
+        resident: crate::session::ResidentSession<frunk::HNil, CheckedHomeOutput>,
+        execution: Arc<crate::session::PrivateExecutionAdmission>,
+        home: Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>,
+    }
+
+    impl CheckedHomeFixture {
+        fn new() -> Self {
+            use crate::session::{ModuleEnv, PersistentSession, ResidentSession, SessionLib};
+            use tidepool_codegen::scope::ScopeId;
+            tidepool_testing::eval_harness::require_extract();
+            let root = tempfile::tempdir().unwrap();
+            std::fs::write(
+                root.path().join("CheckedHomeValue.hs"),
+                include_str!("fixtures/checked-home-value.hs"),
             )
             .unwrap();
-        let view = admission.view();
-        let include = admission
-            .include_paths()
-            .iter()
-            .map(PathBuf::as_path)
-            .collect::<Vec<_>>();
-        let checked = check_cell_admitted(
-            CellCheckRequest {
-                exact_context: view.exact_compile_context(),
-                session_id: Some(view.session()),
-                cell_text: source,
-                template: &template,
-                include: &include,
-                session_root: view.session_root(),
-                inject_modules: &[],
-                compile_generation: admission.initial_value_generation().0,
-                compile_view_evidence: "",
-            },
-            admission.clone(),
-            &templates,
-        )
-        .unwrap();
-        let item = checked.checked_item(0).unwrap();
-        let prefix = session
-            .begin_checked_prefix(admission.clone(), item.clone())
+            std::fs::write(
+                root.path().join("CheckedHomeRelay.hs"),
+                include_str!("fixtures/checked-home-relay.hs"),
+            )
             .unwrap();
-        let item_admission = session.admit_checked_item(prefix, item).unwrap();
-        let TurnResult::Bind { compiled, .. } = run_checked_item(
-            TurnRequest {
-                exact_context: view.exact_compile_context(),
-                session_id: Some(view.session()),
-                turn_text: source,
-                templates: &templates,
-                include: &include,
-                session_root: view.session_root(),
-                inject_modules: &[],
-                gen: admission.initial_value_generation().0,
-                verdict: Some(checked.items[0].verdict.clone()),
-                target: None,
-                retained_imports: &[],
-            },
-            item_admission,
-        )
-        .unwrap() else {
-            panic!("the runtime-admitted item must be a bind");
-        };
-        let artifact = compiled
-            .certification
+            let effects =
+                tidepool_testing::effect_surface::TestEffectSurface::minimal(&[]).unwrap();
+            let lib = SessionLib::open(
+                tidepool_repr::SessionId(1005),
+                root.path(),
+                ModuleEnv::standalone_default(),
+            )
             .unwrap()
-            .checked_execution
-            .unwrap()
-            .value_interface_certificate()
-            .unwrap();
-        assert!(artifact
-            .certified_interface()
-            .requirements()
-            .iter()
-            .any(|owner| owner.unit == "main" && owner.module == "CheckedHomeValue"));
-        let rejection_scratch = tempfile::tempdir().unwrap();
-        let rejection_endpoint = extract_cmd().unwrap().bind().unwrap();
-        let initial_value_specification = CheckedCellSpecification {
-            admission_digest: [6; 32],
-            cell_source: "let alias = home".into(),
-            template_source: template.clone(),
-            turn_templates: vec![],
-            injected_modules: vec![artifact.owner().module_name()],
-            reserved_declaration_modules: vec![],
-        };
-        for retained in [Vec::new(), vec![artifact.clone(), artifact.clone()]] {
-            assert!(
-                ModuleCandidateOffer::select_checked_cell(
-                    rejection_endpoint.identity().producer_bytes(),
-                    admission.include_paths(),
-                    rejection_scratch.path(),
-                    None,
-                    initial_value_specification.clone(),
-                    tidepool_toolchain::artifacts::CheckedCellPurpose::Authored,
-                    vec![(artifact.owner(), artifact.bytes_owned().clone())],
-                    &retained,
-                )
-                .is_err(),
-                "checked bytes require exactly one original certificate"
-            );
+            .with_validation_include(effects.include_paths().to_vec());
+            let mut state = PersistentSession::new(Some(lib), 1024 * 1024);
+            let public = state.mint_scope(ScopeId::ROOT).unwrap();
+            let execution = Arc::new(state.begin_private_execution(public).unwrap());
+            let mut resident =
+                ResidentSession::from_persistent_for_test(frunk::HNil, CheckedHomeOutput, state);
+            resident
+                .set_run_context(crate::session::SessionRunContext {
+                    lexical_scope: execution.private_scope(),
+                    ..Default::default()
+                })
+                .unwrap();
+            // Each fresh runtime owns its admission and completed native prefix.
+            // The resulting immutable certificate is reused by every probe here.
+            let cell = Self::check_in(&mut resident, &execution, &effects, root.path(),
+                "let (home, homeNumber) = (CheckedHomeValue.homeValue, CheckedHomeValue.homeNumber)",
+                &["qualified CheckedHomeValue"], None).unwrap();
+            let home = Self::execute_in(&mut resident, cell)
+                .into_iter()
+                .next()
+                .unwrap();
+            assert!(home
+                .certified_interface()
+                .unwrap()
+                .requirements()
+                .iter()
+                .any(|owner| owner.unit == "main" && owner.module == "CheckedHomeValue"));
+            Self {
+                root,
+                effects,
+                resident,
+                execution,
+                home,
+            }
         }
-        let check_original_source = |source: &str,
-                                     template: &str,
-                                     include_paths: &[PathBuf]|
-         -> Result<
-            (
-                TempDir,
-                Arc<tidepool_toolchain::checked_cell::ExactCheckedCell>,
-            ),
-            CompileError,
-        > {
-            let scratch = tempfile::tempdir()?;
-            let endpoint = extract_cmd()?.bind().map_err(map_notfound)?;
-            let specification = CheckedCellSpecification {
-                admission_digest: [6; 32],
-                cell_source: source.into(),
-                template_source: template.into(),
-                turn_templates: vec![],
-                injected_modules: vec![artifact.owner().module_name()],
-                reserved_declaration_modules: vec![],
+
+        fn check_in(
+            resident: &mut crate::session::ResidentSession<frunk::HNil, CheckedHomeOutput>,
+            execution: &Arc<crate::session::PrivateExecutionAdmission>,
+            effects: &tidepool_testing::effect_surface::TestEffectSurface,
+            root: &Path,
+            source: &str,
+            imports: &[&str],
+            first_include: Option<&Path>,
+        ) -> Result<CheckedHomeCell, CompileError> {
+            use crate::session::{
+                resident_cell_check_template, resident_workbench_templates, SourceImports,
             };
-            let offer = ModuleCandidateOffer::select_checked_cell(
-                endpoint.identity().producer_bytes(),
-                include_paths,
-                scratch.path(),
-                None,
-                specification,
-                tidepool_toolchain::artifacts::CheckedCellPurpose::Authored,
-                vec![(artifact.owner(), artifact.bytes_owned().clone())],
-                std::slice::from_ref(&artifact),
-            )?;
-            let source_path = scratch.path().join("cell.txt");
-            let template_path = scratch.path().join("CellCheckTemplate.hs");
-            std::fs::write(&source_path, source)?;
-            std::fs::write(&template_path, template)?;
-            let includes = include_paths
+            let view = resident.compile_view_for_execution(execution).unwrap();
+            let imports = view.turn_imports(&SourceImports::from_specs(imports.iter().copied()));
+            let template =
+                resident_cell_check_template(effects.preamble(), effects.row(), &imports);
+            let templates =
+                resident_workbench_templates(effects.preamble(), effects.row(), &imports);
+            let specification = CheckedCellSpecification {
+                admission_digest: [0; 32],
+                cell_source: source.into(),
+                template_source: template.clone(),
+                turn_templates: templates
+                    .iter()
+                    .map(|template| (template.kind.wire_name().into(), template.source.clone()))
+                    .collect(),
+                injected_modules: view.injected_module_names(),
+                reserved_declaration_modules: Vec::new(),
+            };
+            let mut roots = effects.include_paths().to_vec();
+            roots.insert(0, root.to_owned());
+            if let Some(first) = first_include {
+                roots.insert(0, first.to_owned());
+            }
+            let include_paths = view.include_paths(&roots);
+            let admission = resident
+                .admit_cell_for_execution(
+                    execution.clone(),
+                    0,
+                    Arc::new(specification.clone()),
+                    specification.specification_digest(),
+                    [1; 32],
+                    include_paths,
+                )
+                .unwrap();
+            let view = admission.view();
+            let include = admission
+                .include_paths()
                 .iter()
                 .map(PathBuf::as_path)
                 .collect::<Vec<_>>();
-            let mut command = extract_cmd()?;
-            command
-                .input(&source_path)
-                .cell()
-                .cell_template(&template_path)
-                .cell_out(scratch.path().join("cell.cbor"))
-                .output_dir(scratch.path())
-                .includes(&includes)
-                .inject_vals(&[artifact.owner().module_name()])
-                .session_root(offer.checked_value_root().unwrap());
-            offer.apply_to(&mut command)?;
-            let run = endpoint.execute(&command).map_err(map_notfound)?;
-            crate::diag::decode_extract_result(
-                run.success(),
-                &run.output.stdout,
-                &run.output.stderr,
+            let checked = check_cell_admitted(
+                CellCheckRequest {
+                    exact_context: view.exact_compile_context(),
+                    session_id: Some(view.session()),
+                    cell_text: source,
+                    template: &template,
+                    include: &include,
+                    session_root: view.session_root(),
+                    inject_modules: &specification.injected_modules,
+                    compile_generation: admission.initial_value_generation().0,
+                    compile_view_evidence: "",
+                },
+                admission.clone(),
+                &templates,
             )
-            .map_err(|error| offer.retain_failure(scratch.path(), &run.output.stderr, error))?;
-            let cell = offer
-                .admit_checked_cell(scratch.path())
-                .map_err(|error| offer.retain_failure(scratch.path(), &run.output.stderr, error))?;
-            Ok((scratch, cell))
-        };
-        let (_, current_original) = check_original_source(
-            "let originalAgain = CheckedHomeValue.homeValue",
-            &template,
-            admission.include_paths(),
-        )
-        .expect("current import must select the unchanged exact original source");
+            .map_err(|failure| failure.error)?;
+            Ok(CheckedHomeCell {
+                admission,
+                checked,
+                templates,
+            })
+        }
+
+        fn check(
+            &mut self,
+            source: &str,
+            imports: &[&str],
+            first_include: Option<&Path>,
+        ) -> Result<CheckedHomeCell, CompileError> {
+            Self::check_in(
+                &mut self.resident,
+                &self.execution,
+                &self.effects,
+                self.root.path(),
+                source,
+                imports,
+                first_include,
+            )
+        }
+
+        fn execute_in(
+            resident: &mut crate::session::ResidentSession<frunk::HNil, CheckedHomeOutput>,
+            cell: CheckedHomeCell,
+        ) -> Vec<Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>> {
+            let first = cell.checked.checked_item(0).unwrap();
+            let prefix = resident
+                .begin_checked_prefix(cell.admission.clone(), first)
+                .unwrap();
+            let mut artifacts = Vec::new();
+            for (index, observed) in cell.checked.items.iter().enumerate() {
+                let item = cell.checked.checked_item(index).unwrap();
+                let reservation = resident.admit_checked_item(prefix.clone(), item).unwrap();
+                let snapshot = reservation.snapshot();
+                let view = snapshot.view();
+                let injected = snapshot.compiler_prefix().injected_modules();
+                let include = cell
+                    .admission
+                    .include_paths()
+                    .iter()
+                    .map(PathBuf::as_path)
+                    .collect::<Vec<_>>();
+                let TurnResult::Bind {
+                    bound, compiled, ..
+                } = run_checked_item(
+                    TurnRequest {
+                        exact_context: view.exact_compile_context(),
+                        session_id: Some(view.session()),
+                        turn_text: &observed.source,
+                        templates: &cell.templates,
+                        include: &include,
+                        session_root: view.session_root(),
+                        inject_modules: &injected,
+                        gen: reservation.generation().0,
+                        verdict: Some(observed.verdict.clone()),
+                        target: None,
+                        retained_imports: snapshot.admitted_retained_imports(),
+                    },
+                    reservation.clone(),
+                )
+                .unwrap()
+                else {
+                    panic!("the checked fixture must compile a native bind");
+                };
+                artifacts.push(
+                    compiled
+                        .certification
+                        .as_ref()
+                        .unwrap()
+                        .checked_execution()
+                        .unwrap()
+                        .value_interface_certificate()
+                        .unwrap(),
+                );
+                let outcome = match bound.as_slice() {
+                    [binder] => resident.run_bind_with_sites(
+                        &binder.name,
+                        compiled.code(),
+                        binder,
+                        reservation.generation(),
+                    ),
+                    binders => resident.run_projected_bind_with_sites(
+                        "checkedHome",
+                        compiled.code(),
+                        binders,
+                        reservation.generation(),
+                    ),
+                }
+                .unwrap();
+                assert!(
+                    matches!(
+                        outcome,
+                        crate::session::ResidentOutcome::Completed { .. }
+                            | crate::session::ResidentOutcome::BindingsCommitted { .. }
+                    ),
+                    "native completion: {outcome:?}"
+                );
+                assert_eq!(prefix.snapshot().compiler_prefix().next_item(), index + 1);
+            }
+            assert_eq!(artifacts.len(), cell.checked.items.len());
+            artifacts
+        }
+
+        fn execute(&mut self, cell: CheckedHomeCell) {
+            Self::execute_in(&mut self.resident, cell);
+        }
+
+        fn assert_number(&mut self, name: &str, expected: i64) {
+            let custody = self.resident.retain_binding_custody(name).unwrap().unwrap();
+            assert_eq!(
+                self.resident.render_retained_preview(&custody, 64),
+                Some(expected.to_string())
+            );
+        }
+
+        fn remove_sources(&self) {
+            for name in ["CheckedHomeValue.hs", "CheckedHomeRelay.hs"] {
+                std::fs::remove_file(self.root.path().join(name)).unwrap();
+            }
+        }
+
+        fn assert_retained_original(&mut self) {
+            let cell = self
+                .check("let retainedObserved = homeNumber home", &[], None)
+                .unwrap();
+            self.execute(cell);
+            self.assert_number("retainedObserved", 41);
+        }
+    }
+
+    #[test]
+    fn checked_current_home_import_executes_original_and_refuses_source_drift() {
+        let mut fixture = CheckedHomeFixture::new();
+        let cell = fixture
+            .check(
+                "let originalAgain = CheckedHomeValue.homeValue",
+                &["qualified CheckedHomeValue"],
+                None,
+            )
+            .unwrap();
+        assert_eq!(cell.checked.items.len(), 1);
         assert_eq!(
-            current_original.item(0).unwrap().binders(),
+            cell.checked.checked_item(0).unwrap().binders(),
             &["originalAgain"]
         );
-        let relay = root.path().join("CheckedHomeRelay.hs");
-        std::fs::write(&relay, include_str!("fixtures/checked-home-relay.hs")).unwrap();
-        let relay_template = template.replace(
-            "import qualified CheckedHomeValue",
-            "import qualified CheckedHomeRelay",
-        );
-        let (_, current_relay) = check_original_source(
-            "let relayAgain = CheckedHomeRelay.homeValue",
-            &relay_template,
-            admission.include_paths(),
-        )
-        .expect("fresh helper import must select its unchanged exact original dependency");
-        assert_eq!(current_relay.item(0).unwrap().binders(), &["relayAgain"]);
+        fixture.execute(cell);
+        let observe = fixture
+            .check("let originalObserved = homeNumber originalAgain", &[], None)
+            .unwrap();
+        fixture.execute(observe);
+        fixture.assert_number("originalObserved", 41);
         std::fs::write(
-            &support,
+            fixture.root.path().join("CheckedHomeValue.hs"),
             include_str!("fixtures/checked-home-value.hs").replace("41", "42"),
         )
         .unwrap();
-        let changed_source = check_original_source(
+        let before = fixture
+            .resident
+            .public_visibility_snapshot_in(fixture.execution.private_scope())
+            .unwrap();
+        let Err(error) = fixture.check(
             "let changed = CheckedHomeValue.homeValue",
-            &template,
-            admission.include_paths(),
+            &["qualified CheckedHomeValue"],
+            None,
+        ) else {
+            panic!("an authored current import accepted changed original source");
+        };
+        assert!(matches!(error, CompileError::InputRejected(_)), "{error:?}");
+        assert_eq!(
+            fixture
+                .resident
+                .public_visibility_snapshot_in(fixture.execution.private_scope())
+                .unwrap(),
+            before
         );
-        match changed_source {
-            Err(CompileError::InputRejected(_)) => {}
-            Err(error) => {
-                let diagnostic = format!("{error:?}").chars().take(4096).collect::<String>();
-                panic!("changed original source must return InputRejected; observed {diagnostic}");
-            }
-            Ok(_) => panic!("changed original source was accepted by the checked offer"),
-        }
-        std::fs::write(&support, include_str!("fixtures/checked-home-value.hs")).unwrap();
-        let shadow = root.path().join("shadow");
+        fixture.assert_retained_original();
+    }
+
+    #[test]
+    fn checked_fresh_helper_import_reproves_retained_home_dependency() {
+        let mut fixture = CheckedHomeFixture::new();
+        let cell = fixture
+            .check(
+                "let relayAgain = CheckedHomeRelay.homeValue",
+                &["qualified CheckedHomeRelay"],
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            cell.checked.checked_item(0).unwrap().binders(),
+            &["relayAgain"]
+        );
+        fixture.execute(cell);
+        let observe = fixture
+            .check("let relayObserved = homeNumber relayAgain", &[], None)
+            .unwrap();
+        fixture.execute(observe);
+        fixture.assert_number("relayObserved", 41);
+        std::fs::write(
+            fixture.root.path().join("CheckedHomeValue.hs"),
+            include_str!("fixtures/checked-home-value.hs").replace("41", "42"),
+        )
+        .unwrap();
+        let Err(error) = fixture.check(
+            "let changedRelay = CheckedHomeRelay.homeValue",
+            &["qualified CheckedHomeRelay"],
+            None,
+        ) else {
+            panic!("a fresh helper accepted changed retained source");
+        };
+        assert!(matches!(error, CompileError::InputRejected(_)), "{error:?}");
+        fixture.assert_retained_original();
+    }
+
+    #[test]
+    fn checked_current_home_import_refuses_ordered_path_shadow() {
+        let mut fixture = CheckedHomeFixture::new();
+        let shadow = fixture.root.path().join("shadow");
         std::fs::create_dir(&shadow).unwrap();
         std::fs::write(
             shadow.join("CheckedHomeValue.hs"),
             include_str!("fixtures/checked-home-value.hs"),
         )
         .unwrap();
-        let mut shadow_include = admission.include_paths().to_vec();
-        shadow_include.insert(0, shadow);
-        let shadowed_source = check_original_source(
+        let Err(error) = fixture.check(
             "let shadowed = CheckedHomeValue.homeValue",
-            &template,
-            &shadow_include,
-        );
-        match shadowed_source {
-            Err(CompileError::InputRejected(_)) => {}
-            Err(error) => {
-                let diagnostic = format!("{error:?}").chars().take(4096).collect::<String>();
-                panic!("shadowed original source must return InputRejected; observed {diagnostic}");
-            }
-            Ok(_) => panic!("shadowed original source was accepted by the checked offer"),
-        }
-        std::fs::remove_file(relay).unwrap();
-        std::fs::remove_file(support).unwrap();
+            &["qualified CheckedHomeValue"],
+            Some(&shadow),
+        ) else {
+            panic!("current import accepted identical bytes from another ordered source path");
+        };
+        assert!(matches!(error, CompileError::InputRejected(_)), "{error:?}");
+        assert!(fixture.root.path().join("CheckedHomeValue.hs").is_file());
+        fixture.assert_retained_original();
+    }
+
+    #[test]
+    fn checked_retained_home_value_executes_after_original_source_removal() {
+        let mut fixture = CheckedHomeFixture::new();
+        fixture.remove_sources();
+        fixture.assert_retained_original();
+        assert!(!fixture.root.path().join("CheckedHomeValue.hs").exists());
+    }
+
+    #[test]
+    fn checked_later_item_reuses_retained_home_type_and_native_prefix_without_source() {
+        let mut fixture = CheckedHomeFixture::new();
+        fixture.remove_sources();
+        let cell = fixture
+            .check(
+                "let alias = home\nlet aliasObserved = homeNumber alias",
+                &[],
+                None,
+            )
+            .unwrap();
+        assert_eq!(cell.checked.items.len(), 2);
+        assert!(cell.checked.checked_item(0).unwrap().signatures()[0]
+            .names()
+            .iter()
+            .any(|name| name.unit() == "main"
+                && name.module() == "CheckedHomeValue"
+                && name.occurrence() == "HomeValue"));
+        fixture.execute(cell);
+        fixture.assert_number("aliasObserved", 41);
+        assert!(!fixture.root.path().join("CheckedHomeValue.hs").exists());
+    }
+
+    #[test]
+    fn checked_retained_home_certificate_refuses_substituted_interface() {
+        let fixture = CheckedHomeFixture::new();
         let scratch = tempfile::tempdir().unwrap();
         let endpoint = extract_cmd().unwrap().bind().unwrap();
-        let following = CheckedCellSpecification {
-            admission_digest: [2; 32],
+        let specification = CheckedCellSpecification {
+            admission_digest: [3; 32],
             cell_source: "let alias = home".into(),
-            template_source: template.clone(),
+            template_source: "module Next where".into(),
             turn_templates: vec![],
-            injected_modules: vec![artifact.owner().module_name()],
+            injected_modules: vec![fixture.home.owner().module_name()],
             reserved_declaration_modules: vec![],
         };
-        let offer = ModuleCandidateOffer::select_checked_cell(
+        let error = ModuleCandidateOffer::select_checked_cell(
             endpoint.identity().producer_bytes(),
-            admission.include_paths(),
+            fixture.effects.include_paths(),
             scratch.path(),
             None,
-            following,
+            specification,
             tidepool_toolchain::artifacts::CheckedCellPurpose::Authored,
-            vec![(artifact.owner(), artifact.bytes_owned().clone())],
-            std::slice::from_ref(&artifact),
+            vec![(fixture.home.owner(), Arc::from(&b"changed interface"[..]))],
+            std::slice::from_ref(&fixture.home),
         )
-        .unwrap();
-        assert!(offer.exact_scope_path().unwrap().is_file());
-        // A later checked item starts from the runtime's raw declaration
-        // view, while its cell already owns the exact retained value closure.
-        let selected_import = format!("import {} (home)", artifact.owner().module_name());
-        let next_template = template.replace("import qualified CheckedHomeValue", &selected_import);
-        let next_templates = templates
-            .iter()
-            .map(|template| {
-                (
-                    template.kind.wire_name().to_owned(),
-                    template
-                        .source
-                        .replace("import qualified CheckedHomeValue", &selected_import),
-                )
-            })
-            .collect::<Vec<_>>();
-        let next_specification = CheckedCellSpecification {
-            admission_digest: [4; 32],
-            cell_source: "let alias = home".into(),
-            template_source: next_template.clone(),
-            turn_templates: next_templates.clone(),
-            injected_modules: vec![artifact.owner().module_name()],
-            reserved_declaration_modules: vec![],
-        };
-        let next_scratch = tempfile::tempdir().unwrap();
-        let next_offer = ModuleCandidateOffer::select_checked_cell(
-            endpoint.identity().producer_bytes(),
-            admission.include_paths(),
-            next_scratch.path(),
-            None,
-            next_specification,
-            tidepool_toolchain::artifacts::CheckedCellPurpose::Authored,
-            vec![(artifact.owner(), artifact.bytes_owned().clone())],
-            std::slice::from_ref(&artifact),
-        )
-        .unwrap();
-        let cell_source = next_scratch.path().join("cell.txt");
-        let template_path = next_scratch.path().join("CellCheckTemplate.hs");
-        std::fs::write(&cell_source, "let alias = home").unwrap();
-        std::fs::write(&template_path, next_template).unwrap();
-        let include = admission
-            .include_paths()
-            .iter()
-            .map(PathBuf::as_path)
-            .collect::<Vec<_>>();
-        let mut command = extract_cmd().unwrap();
-        command
-            .input(&cell_source)
-            .cell()
-            .cell_template(&template_path)
-            .cell_out(next_scratch.path().join("cell.cbor"))
-            .output_dir(next_scratch.path())
-            .includes(&include)
-            .inject_vals(&[artifact.owner().module_name()])
-            .session_root(next_offer.checked_value_root().unwrap());
-        for (index, (kind, source)) in next_templates.iter().enumerate() {
-            let path = next_scratch.path().join(format!("template-{index}.hs"));
-            std::fs::write(&path, source).unwrap();
-            command.turn_template(kind, &path);
-        }
-        next_offer.apply_to(&mut command).unwrap();
-        let run = command.bind().unwrap().execute(&command).unwrap();
-        crate::diag::decode_extract_result(run.success(), &run.output.stdout, &run.output.stderr)
-            .unwrap_or_else(|error| {
-                panic!(
-                    "{}",
-                    next_offer.retain_failure(next_scratch.path(), &run.output.stderr, error)
-                )
-            });
-        let cell = next_offer.admit_checked_cell(next_scratch.path()).unwrap();
-        let item = cell.item(0).unwrap();
-        let prefix = item.initial_prefix().unwrap();
-        let item_scratch = tempfile::tempdir().unwrap();
-        ModuleCandidateOffer::select_checked_item(
-            endpoint.identity().producer_bytes(),
-            admission.include_paths(),
-            item_scratch.path(),
-            None,
-            item,
-            prefix,
-            [5; 32],
-            artifact.owner().gen().0 + 1,
-            None,
-            &next_templates,
-            vec![],
-        )
-        .expect("later item must reuse its sealed initial value context");
+        .err()
+        .expect("another interface cannot borrow the retained certificate");
         assert!(
-            ModuleCandidateOffer::select_checked_cell(
-                endpoint.identity().producer_bytes(),
-                admission.include_paths(),
-                scratch.path(),
-                None,
-                CheckedCellSpecification {
-                    admission_digest: [3; 32],
-                    cell_source: "let alias = home".into(),
-                    template_source: "module Next where".into(),
-                    turn_templates: vec![],
-                    injected_modules: vec![artifact.owner().module_name()],
-                    reserved_declaration_modules: vec![]
-                },
-                tidepool_toolchain::artifacts::CheckedCellPurpose::Authored,
-                vec![(artifact.owner(), Arc::from(&b"changed interface"[..]))],
-                std::slice::from_ref(&artifact),
-            )
-            .is_err(),
-            "another interface cannot borrow the retained certificate"
+            matches!(&error, CompileError::ExtractFailed(detail)
+            if detail == "checked cell: retained value certificate differs from selected interface bytes"),
+            "{error:?}"
         );
     }
 
