@@ -13,6 +13,7 @@ pub(super) struct ObservedInstallation {
     pub(super) actor: LocalActorRef,
     pub(super) checkpoint: bool,
     pub(super) context_parent: Option<ActorRef>,
+    pub(super) tools: Vec<exomonad_tool::HostedTool>,
 }
 
 #[derive(Clone)]
@@ -38,6 +39,7 @@ impl HostTestObserver {
                 actor: installation.actor.clone(),
                 checkpoint: installation.checkpoint.is_some(),
                 context_parent: installation.context_parent,
+                tools: installation.policy.tools().to_vec(),
             },
         );
         self.changed.send_modify(|revision| *revision += 1);

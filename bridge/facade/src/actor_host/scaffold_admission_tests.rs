@@ -6,68 +6,88 @@ use super::test_campaign::{
 use exomonad_tool::{ActorEffectKey, HostedTool, ToolImplementation, ToolScheduling};
 use futures_util::FutureExt;
 
-/// Exercise the package and pinned submodule that `exomonad new` delivers,
-/// rather than copying repository examples or installing a fallback spec.
+use super::hosted_test_context::HostedTestRuntime;
+use super::test_campaign::{
+    hosted_script_provider, hosted_test_settings, next_hosted_script_round,
+};
+use std::collections::VecDeque;
+
+fn scaffold(config: &mut super::ActorHostConfig) {
+    crate::exomonad::new(crate::exomonad::NewOptions {
+        path: Some(config.workspace.clone()),
+        lock: Box::new(crate::exomonad::NixLock),
+    })
+    .expect("the shipped project must scaffold successfully");
+    commit_workspace(&config.workspace);
+    config.workspace_inputs = Some(
+        crate::exomonad::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
+            .expect("the freshly scaffolded project's inputs must freeze"),
+    );
+}
+
+/// Provider requests execute the package and pin delivered by `exomonad new`.
 #[tokio::test(flavor = "multi_thread")]
 async fn freshly_scaffolded_agent_spec_installs_notebook_and_workspace_tools() {
-    let mut campaign = TestCampaign::start_with_embedded_host_services(|config| {
-        crate::exomonad::new(crate::exomonad::NewOptions {
-            path: Some(config.workspace.clone()),
-            lock: Box::new(crate::exomonad::NixLock),
-        })
-        .expect("the shipped project must scaffold successfully");
-        commit_workspace(&config.workspace);
-        config.workspace_inputs = Some(
-            crate::exomonad::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
-                .expect("the freshly scaffolded project's inputs must freeze"),
+    let files = tempfile::tempdir().unwrap();
+    let settings = hosted_test_settings(&files, 1);
+    let (provider, mut requests) = hosted_script_provider();
+    let host = HostedTestRuntime::start_configured(&settings, &provider, scaffold)
+        .await
+        .unwrap();
+    let mut pending = VecDeque::new();
+    let root = harness::model::AgentPath("/root".into());
+    let round = next_hosted_script_round(&mut requests, &mut pending, &root).await;
+    round.call("scaffold-reflect", "import qualified Tidepool.Effects.Core as Core\nreflected <- Core.reflect 1\ndisplay (case reflected of { Right _ -> True; _ -> False })");
+    let round = next_hosted_script_round(&mut requests, &mut pending, &root).await;
+    round.assert_value("scaffold-reflect", "True");
+    round.call("scaffold-facts", include_str!("command_tool_facts_gate.hs"));
+    let round = next_hosted_script_round(&mut requests, &mut pending, &root).await;
+    round.assert_value("scaffold-facts", "(True,True,True,True,True)");
+    let stdout = format!("{}stdout-tail\n", "λ".repeat(800));
+    let stderr = format!("{}stderr-tail\n", "μ".repeat(800));
+    // The marker independently checks that recovering the exact emitted pointer
+    // reads the retained process output without executing the shell again.
+    round.function("scaffold-shell", "bash", serde_json::json!({
+        "cmd": format!("printf x >> scaffold-shell-executions; printf '%s' '{}'; printf '%s' '{}' >&2", stdout, stderr),
+        "workdir": null, "environment": null, "memory_mib": null, "tty": null,
+        "stdin": null, "yield_time_ms": 30000, "max_output_bytes": 2048,
+        "intent": "recover the retained streams without rerunning",
+    }));
+    let mut round = next_hosted_script_round(&mut requests, &mut pending, &root).await;
+    let response = round.settled_output("scaffold-shell");
+    assert_eq!(response["status"], "committed", "{response}");
+    let output = response["items"][0]["output"].as_str().unwrap();
+    let snapshot = retained_snapshot(output, stdout.len(), stderr.len()).to_owned();
+    for (section, tail) in [(1, "stdout-tail"), (2, "stderr-tail")] {
+        let source = format!("{snapshot}\nrecovered <- Project.Shell.section snap (Project.Shell.SectionId {section})\ndisplay (show recovered)");
+        let call_id = format!("scaffold-recover-{section}");
+        round.call(&call_id, &source);
+        round = next_hosted_script_round(&mut requests, &mut pending, &root).await;
+        let response = round.settled_output(&call_id);
+        let recovered = committed_display_text(&response);
+        assert!(
+            recovered.starts_with("Right ") && recovered.contains(tail),
+            "{response}"
         );
-    })
-    .await;
-
-    // Reuse this actual pinned installation for command recovery; the embedded
-    // selected-shell tests exercise a separate source owner.
-    let checked = std::panic::AssertUnwindSafe(async {
-        assert_pinned_shell_recovery(&mut campaign).await;
-        let policy = std::sync::Arc::clone(&campaign.root_installation.policy);
-        let store = super::display_output::open_run_store(campaign.session_root.path()).unwrap();
-        let reflected = campaign
-            .drive_actor_output(
-                &store,
-                dispatch_haskell_script(
-                    policy.as_ref(),
-                    "import qualified Tidepool.Effects.Core as Core\nreflected <- Core.reflect 1\ndisplay (show (case reflected of { Left Core.ReflectUnbound -> True; _ -> False }))",
-                ),
-            )
-            .await;
-        assert_eq!(
-            committed_display_text(&reflected),
-            "True",
-            "an installed reader must preserve absence of a bound application: {reflected}"
-        );
-        // No focus and no watchWith: these assertions do not ask Jev or launch
-        // a provider turn, even when the production lazy client is configured.
-        let facts = campaign
-            .drive_actor_output(
-                &store,
-                dispatch_haskell_script(policy.as_ref(), include_str!("command_tool_facts_gate.hs")),
-            )
-            .await;
-        assert_eq!(
-            committed_display_text(&facts),
-            "(True,True,True,True,True)",
-            "the actual pinned Watchdog must judge typed facts independently of presentation: {facts}"
-        );
-    })
-    .catch_unwind()
-    .await;
-
-    // Release the real runtime before checking the installed surface.
-    let tools = campaign.root_installation.policy.tools().to_vec();
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
-    if let Err(panic) = checked {
-        std::panic::resume_unwind(panic);
     }
+    assert_eq!(
+        std::fs::read(
+            host.context
+                .config
+                .workspace
+                .join("scaffold-shell-executions")
+        )
+        .unwrap(),
+        b"x"
+    );
+    let tools = host
+        .context
+        .observer
+        .installation(host.context.actor.identity())
+        .await
+        .tools;
+    round.finish();
+    host.stop().await.unwrap();
 
     for (name, schedule) in [
         ("haskell", ToolScheduling::Async),
@@ -105,6 +125,58 @@ async fn freshly_scaffolded_agent_spec_installs_notebook_and_workspace_tools() {
     }
 }
 
+/// A command-owner fault fixture checks a truncated retained slice. It does not
+/// claim a provider attachment or production host shutdown.
+#[tokio::test(flavor = "multi_thread")]
+async fn pinned_shell_component_refuses_expired_retained_output_without_rerun() {
+    let mut campaign = TestCampaign::start_with_config(
+        exomonad_actor::ResearchPolicy::default(),
+        |admission| admission,
+        scaffold,
+    )
+    .await;
+    let checked = std::panic::AssertUnwindSafe(assert_pinned_shell_recovery(&mut campaign))
+        .catch_unwind()
+        .await;
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+    if let Err(panic) = checked {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+fn retained_snapshot(output: &str, stdout_bytes: usize, stderr_bytes: usize) -> &str {
+    assert!(output.len() <= 2048, "complete UTF-8 envelope: {output}");
+    assert!(output.contains('λ') && output.contains('μ'), "{output}");
+    assert!(
+        !output.contains('\u{fffd}'),
+        "UTF-8 decoding loss: {output}"
+    );
+    assert!(
+        output.contains("stdout-tail") && output.contains("stderr-tail"),
+        "{output}"
+    );
+    assert!(
+        output.contains("omitted stdout bytes ") && output.contains("omitted stderr bytes "),
+        "{output}"
+    );
+    let pointer = output.lines().last().unwrap();
+    let snapshot = pointer
+        .strip_prefix("Recover without rerunning: ")
+        .and_then(|value| value.strip_suffix('.'))
+        .unwrap();
+    assert!(
+        snapshot.starts_with("let snap = Project.Shell.outputSnapshotFor \""),
+        "{pointer}"
+    );
+    assert!(
+        snapshot.ends_with(&format!(" {stdout_bytes} {stderr_bytes}")),
+        "{pointer}"
+    );
+    assert!(!output.contains("{{job_binding}}"), "{output}");
+    snapshot
+}
+
 async fn assert_pinned_shell_recovery(campaign: &mut TestCampaign) {
     let stdout = format!("{}stdout-tail\n", "λ".repeat(800));
     let stderr = format!("{}stderr-tail\n", "μ".repeat(800));
@@ -134,34 +206,7 @@ async fn assert_pinned_shell_recovery(campaign: &mut TestCampaign) {
     let response = invoked.await;
     assert_eq!(response["status"], "committed", "{response}");
     let output = response["items"][0]["output"].as_str().unwrap();
-    assert!(output.len() <= 2048, "complete UTF-8 envelope: {output}");
-    assert!(output.contains('λ') && output.contains('μ'), "{output}");
-    assert!(
-        !output.contains('\u{fffd}'),
-        "UTF-8 decoding loss: {output}"
-    );
-    assert!(
-        output.contains("stdout-tail") && output.contains("stderr-tail"),
-        "both retained stream tails: {output}"
-    );
-    assert!(
-        output.contains("omitted stdout bytes ") && output.contains("omitted stderr bytes "),
-        "both frozen stream omission ranges: {output}"
-    );
-    let pointer = output.lines().last().unwrap();
-    let snapshot = pointer
-        .strip_prefix("Recover without rerunning: ")
-        .and_then(|value| value.strip_suffix('.'))
-        .expect("the complete pinned recovery instruction must fit the envelope");
-    assert!(
-        snapshot.starts_with("let snap = Project.Shell.outputSnapshotFor \""),
-        "the actual pin owns the session-id snapshot route: {pointer}"
-    );
-    assert!(
-        snapshot.ends_with(&format!(" {} {}", stdout.len(), stderr.len())),
-        "recovery must retain both actual frozen byte endpoints: {pointer}"
-    );
-    assert!(!output.contains("{{job_binding}}"), "{output}");
+    let snapshot = retained_snapshot(output, stdout.len(), stderr.len());
 
     // Evaluate the exact pointer emitted by the pinned source, rather than
     // reconstructing a Job or asking the command backend to execute again.

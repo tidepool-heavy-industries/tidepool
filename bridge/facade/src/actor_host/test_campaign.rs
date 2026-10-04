@@ -800,6 +800,34 @@ impl HostedScriptRound {
             .expect("production provider request remains live");
     }
 
+    pub fn function(self, call_id: &str, name: &str, arguments: serde_json::Value) {
+        self.reply
+            .send(harness::transport::ResponsesTurn {
+                response_id: format!("script-{call_id}"),
+                items: vec![harness::item::Item(serde_json::json!({
+                    "type": "function_call", "call_id": call_id, "name": name,
+                    "arguments": serde_json::to_string(&arguments).unwrap(),
+                }))],
+                usage: Default::default(),
+            })
+            .expect("production provider request remains live");
+    }
+
+    pub fn settled_output(&self, call_id: &str) -> serde_json::Value {
+        let output = self
+            .request
+            .input
+            .iter()
+            .find(|item| {
+                matches!(
+                    item.0["type"].as_str(),
+                    Some("custom_tool_call_output" | "function_call_output")
+                ) && item.0["call_id"] == call_id
+            })
+            .unwrap_or_else(|| panic!("{call_id}: actual provider request has no settled output"));
+        serde_json::from_str(output.0["output"].as_str().unwrap()).unwrap()
+    }
+
     pub fn finish(self) {
         self.reply
             .send(harness::transport::ResponsesTurn {
