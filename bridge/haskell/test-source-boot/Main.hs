@@ -138,6 +138,7 @@ import Tidepool.ExactScope
   ( ExactScope(..), ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..)
   , CheckedCellAdmission(..), CheckedCellPurpose(..), CheckedItemAdmission(..), CheckedItemPurpose(..)
   , scopeCheckedCell, scopeCheckedItem, scopeIncludePaths, readExactScope
+  , originalGroupFromCandidate
   , extendExactExecutionSources, extendExactExecutionSourcesWithinBudget, scopeExecutionNativeOwners )
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import ProgressBoundaryTest (progressBoundaryChecks)
@@ -414,8 +415,19 @@ checkedValueImports = withScratch $ \work -> do
       _ -> liftIO (fail "checked value import fixture lacks its consumer")
   putStrLn "checked value imports: HPT parity, delayed injection and wrong-input refusal passed"
 
+writeGenuineEmptyScopeFields :: FilePath -> IO [Term]
+writeGenuineEmptyScopeFields path = do
+  writeGenuineEmptyMetadataScope path
+  _ <- readExactScope path >>= either fail pure
+  bytes <- BS.readFile path
+  either (fail . show) (pure . snd)
+    (deserialiseFromBytes decodeTerm (BSL.fromStrict bytes)) >>= \case
+      TList values | length values == 9 -> pure values
+      _ -> fail "genuine exact scope has another envelope layout"
+
 exactScopeBinders :: IO ()
 exactScopeBinders = withScratch $ \work -> do
+  fields <- writeGenuineEmptyScopeFields (work </> "issued-binder-scope.cbor")
   let path = work </> "binder-scope.cbor"
       text = TString . T.pack
       sha = text (replicate 64 '0')
@@ -423,21 +435,24 @@ exactScopeBinders = withScratch $ \work -> do
       identity value = TList [TString (symbolUnit value), TString (symbolModule value)
         , TString (symbolNamespace value), TString (symbolOccurrence value)
         , maybe TNull TString (symbolRecordParent value)]
-      term groups = TList [text "TPEXACTSCOPE", text "6", sha, sha
-        , TList [TList [text "main", text "BinderFixture", text (work </> "original.hi"), sha
-            , TList [], text (work </> "packages.cbor"), sha]]
-        , TList []
-        , TList [TList [text "main", text "BinderFixture", sha, sha, sha, text (work </> "original.tpmod")
+      -- Malformed native rows belong only to refusal tests. The binder
+      -- decoder rejects their duplicate inventory before owner promotion.
+      term groups = TList [if index == 6 then
+          TList [TList [text "main", text "BinderFixture", sha, sha, sha, text (work </> "original.tpmod")
             , TList [TList [TInt ordinal, TList (map identity values), TList []]
               | (ordinal, values) <- zip [0..] groups]]]
-        , TList [TList [], TList []], TNull]
+        else field | (index,field) <- zip [0::Int ..] fields]
       readGroups groups = do
         BS.writeFile path (toStrictByteString (encodeTerm (term groups)))
         readExactScope path
       accepted groups = do
-        scope <- readGroups groups >>= either fail pure
-        unless (map (map originalBinders . originalGroups) (scopeProducts scope) == [groups]) $
-          fail "exact scope changed accepted binder identities or group order"
+        -- Identity/group conversion is a typed stage, not wire authority.
+        let converted = [originalGroupFromCandidate (CandidateGroup ordinal values [])
+              | (ordinal,values) <- zip [0..] groups]
+        unless (map originalBinders converted == groups
+            && map originalOrdinal converted == take (length groups) [0..]
+            && all (null . originalGlobals) converted) $
+          fail "exact original group conversion changed binder identities or group order"
       refused groups = do
         result <- readGroups groups
         unless (case result of Left reason -> "duplicate exact original binders" `isInfixOf` reason; Right _ -> False) $
@@ -2092,15 +2107,26 @@ hostActivationPurposeTest destination = withScratch $ \work -> do
       && case replaceTemplateMarker previewMarker "opaque" (template ++ previewMarker) of
         Left _ -> True; Right _ -> False) $
     fail "preview replacement rescanned input text or accepted duplicated protected markers"
+  let sourcePath = work </> "HostActivationInput.hs"
+      issuedPath = work </> "issued-host-scope.cbor"
+  inputTemplate <- readFile "test-source-boot/fixtures/HostActivationInput.hs"
+  originalSource <- either fail pure (replaceTemplateMarker "{{CHECKED_TYPE}}" "Int" inputTemplate)
+  writeFile sourcePath originalSource
+  original <- runPipelineSessionSelected CheckedEnvironment Set.empty GeneralCompile Nothing sourcePath [work] Nothing
+  inputType <- maybe (fail "host input fixture has no inferred type") pure (crResultType original)
+  capturedSignature <- captureCheckedSignature (crHscEnv original) "__tidepool_cell_pin_0_sessionInput" inputType
+  signature <- either (fail . show) (pure . snd)
+    (deserialiseFromBytes decodeTerm (BSL.fromStrict (toStrictByteString (encodeCheckedSignature capturedSignature))))
+  issuedFields <- writeGenuineEmptyScopeFields issuedPath
   let sha = TString (T.replicate 64 "a")
       empty = TList []
       text = TString . T.pack
-      signature = TList [text "TPCHECKEDSIGNATURE2",text "__tidepool_cell_pin_0_sessionInput",text "Int",TBytes (BS.singleton 0),empty]
       authorization = [text "host-activation-input1",sha,sha,TInt 0,sha,text "bind"
         ,TList [text "sessionInput"],TList [TList [text "bind",sha]],empty,TList [signature]
         ,TNull,TInt 1,sha,empty,TNull,TNull,empty,empty,TList [text work]]
-      hostManifest auth = TList [text "TPEXACTSCOPE",text "6",sha,sha,empty,empty,empty
-        ,TList [empty,empty],TList auth]
+      -- These stage/purpose syntax checks wrap a genuinely issued immutable
+      -- scope and native GHC signatures; they do not issue execution receipts.
+      hostManifest auth = TList (replace 8 (TList auth) issuedFields)
       path = work </> "host-scope.cbor"
       decodeManifest manifest = BS.writeFile path (toStrictByteString (encodeTerm manifest)) >> readExactScope path
       decode = decodeManifest . hostManifest
@@ -2118,13 +2144,6 @@ hostActivationPurposeTest destination = withScratch $ \work -> do
     unless (case refused of Left _ -> True; Right _ -> False) $
       fail ("invalid host purpose field was admitted: " ++ show index)
   _ <- decode authorization >>= either fail pure
-  let sourcePath = work </> "HostActivationInput.hs"
-  inputTemplate <- readFile "test-source-boot/fixtures/HostActivationInput.hs"
-  originalSource <- either fail pure (replaceTemplateMarker "{{CHECKED_TYPE}}" "Int" inputTemplate)
-  writeFile sourcePath originalSource
-  original <- runPipelineSessionSelected CheckedEnvironment Set.empty GeneralCompile Nothing sourcePath [work] Nothing
-  inputType <- maybe (fail "host input fixture has no inferred type") pure (crResultType original)
-  capturedSignature <- captureCheckedSignature (crHscEnv original) "__tidepool_cell_pin_0_sessionInput" inputType
   replySignature <- captureCheckedSignature (crHscEnv original) "request-reply" inputType
   requestTerm <- either (fail . show) (pure . snd)
     (deserialiseFromBytes decodeTerm (BSL.fromStrict (toStrictByteString
@@ -2136,11 +2155,16 @@ hostActivationPurposeTest destination = withScratch $ \work -> do
         && scopePurpose requestScope == NoCheckedPurpose
         && isNothing (scopeIncludePaths requestScope))
       (fail "native request wrapper lost recipe or granted an inner purpose")
-    graphFree <- decodeManifest (TList [text "TPEXACTSCOPE",text "4",sha,sha,empty,empty,empty
-      ,TList (nativeAuthorization tag TNull)]) >>= either fail pure
+    graphFree <- decodeManifest (TList (replace 7 TNull
+      (replace 8 (TList (nativeAuthorization tag TNull)) issuedFields))) >>= either fail pure
     unless (scopeRequestTypes graphFree == scopeRequestTypes requestScope
-        && isNothing (scopeCheckedItem graphFree))
+        && isNothing (scopeCheckedItem graphFree)
+        && null (scopeExecutionGraphs graphFree) && null (scopeExecutionOwners graphFree))
       (fail "graph-free request wrapper changed native recipe authority")
+    legacy <- decodeManifest (TList [text "TPEXACTSCOPE",text "4",sha,sha,empty,empty,empty
+      ,TList (nativeAuthorization tag TNull)])
+    unless (case legacy of Left reason -> "unsupported exact scope" `isInfixOf` reason; Right _ -> False)
+      (fail "native request wrapper admitted a legacy scope envelope")
     wrappedHost <- decode (nativeAuthorization tag (TList authorization)) >>= either fail pure
     unless (fmap itemPurpose (scopeCheckedItem wrappedHost) == Just HostActivationInput
         && fmap fst (scopeRequestTypes wrappedHost) == Just recipe)
