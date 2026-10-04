@@ -6,7 +6,7 @@ module Tidepool.CertifiedProducts
 import Prelude hiding (product)
 import Codec.CBOR.Encoding
   ( Encoding, encodeBool, encodeListLen, encodeNull, encodeString, encodeWord
-  , encodeWord64, encodePreEncoded )
+  , encodeWord64 )
 import Codec.CBOR.Write (toStrictByteString)
 import Control.Exception (IOException, try)
 import Control.Monad (forM, when)
@@ -73,6 +73,49 @@ data Product = Product
 
 type BinderOwner = (T.Text, T.Text, Maybe T.Text, Word)
 type PackageWitness = (T.Text, T.Text, FilePath, T.Text)
+
+-- An owner has the witnessed binder already carried by its global. Coordinates
+-- remain independent: a source group's owner need not be the binder's module.
+data OwnerCoordinate
+  = SourceCoordinate T.Text T.Text (Maybe T.Text)
+  | PackageCoordinate T.Text T.Text T.Text
+  deriving (Eq, Ord)
+
+data WitnessOwner
+  = SourceOwner T.Text T.Text (Maybe T.Text) Word
+  | RetainedOwner Word64
+  | PackageOwner T.Text T.Text T.Text (Maybe Word64)
+  deriving (Eq, Ord)
+
+type GlobalWitness = (SymbolIdentity, RuntimeRep, Maybe Signature, Bool, WitnessOwner)
+
+ownerCoordinate :: WitnessOwner -> Maybe OwnerCoordinate
+ownerCoordinate (SourceOwner unit name version _) = Just (SourceCoordinate unit name version)
+ownerCoordinate (PackageOwner unit name sha _) = Just (PackageCoordinate unit name sha)
+ownerCoordinate (RetainedOwner _) = Nothing
+
+encodeCoordinate :: OwnerCoordinate -> Encoding
+encodeCoordinate (SourceCoordinate unit name version) = array
+  [encodeString "source", encodeString unit, encodeString name
+  , maybe encodeNull encodeString version]
+encodeCoordinate (PackageCoordinate unit name sha) = array
+  [encodeString "package", encodeString unit, encodeString name, encodeString sha]
+
+encodeWitness :: Map.Map OwnerCoordinate Word -> GlobalWitness -> Encoding
+encodeWitness coordinates (identity, rep, signature, evaluated, owner) = array
+  [encodeIdentity identity, encodeRep rep, maybe encodeNull encodeSignature signature
+  , encodeBool evaluated, encodeCompactOwner coordinates owner]
+
+encodeCompactOwner :: Map.Map OwnerCoordinate Word -> WitnessOwner -> Encoding
+encodeCompactOwner coordinates owner = case owner of
+  SourceOwner unit name version ordinal -> array
+    [encodeString "source", index (SourceCoordinate unit name version), encodeWord ordinal]
+  RetainedOwner generation -> array [encodeString "retained", encodeWord64 generation]
+  PackageOwner unit name sha Nothing -> array
+    [encodeString "package", index (PackageCoordinate unit name sha)]
+  PackageOwner unit name sha (Just generation) -> array
+    [encodeString "retained-package", index (PackageCoordinate unit name sha), encodeWord64 generation]
+  where index coordinate = encodeWord (coordinates Map.! coordinate)
 
 -- The producer's group inventory is only a suggestion. Rust compares every
 -- emitted row with the original sidecar bytes before admitting any product.
@@ -226,7 +269,11 @@ encodeCertifiedProducts env sourceRecipe interfaces finalized cached exact fresh
               (witnessIndices, referenceRows) = mapAccumL
                 (mapAccumL internWitness) Map.empty allWitnessRows
               orderedWitnesses = Map.toAscList witnessIndices
-              globalBytes = map fst orderedWitnesses
+              globalWitnesses = map fst orderedWitnesses
+              coordinates = Set.toAscList (Set.fromList
+                [coordinate | (_, _, _, _, owner) <- globalWitnesses
+                , Just coordinate <- [ownerCoordinate owner]])
+              coordinateIndices = Map.fromList (zip coordinates [0 ..])
               canonicalIndices = Map.fromList
                 [(provisional, fromIntegral index)
                 | (index, (_, provisional)) <- zip [0 :: Int ..] orderedWitnesses]
@@ -251,20 +298,19 @@ encodeCertifiedProducts env sourceRecipe interfaces finalized cached exact fresh
                 | ((unit, name), options) <- Map.toList packages
                 , (path, sha) <- Set.toList options ]
           pure (Right (toStrictByteString (array
-            [encodeString "TPCERT", encodeWord 7
+            [encodeString "TPCERT", encodeWord 8
             , list id encodedModules, list id encodedTargets
-            , list id encodedPackages, list encodePreEncoded globalBytes
-            , encodeFinalizedModuleArtifacts finalized, encodeWorkerExecutionSource sourceRecipe])))
+            , list id encodedPackages, list (encodeWitness coordinateIndices) globalWitnesses
+            , encodeFinalizedModuleArtifacts finalized, encodeWorkerExecutionSource sourceRecipe
+            , list encodeCoordinate coordinates])))
   where
-    internWitness :: Map.Map BS.ByteString Word -> Encoding
-      -> (Map.Map BS.ByteString Word, Word)
-    internWitness indices witness =
-      let bytes = toStrictByteString witness
-      in case Map.lookup bytes indices of
-        Just index -> (indices, index)
-        Nothing ->
-          let index = fromIntegral (Map.size indices)
-          in (Map.insert bytes index indices, index)
+    internWitness :: Map.Map GlobalWitness Word -> GlobalWitness
+      -> (Map.Map GlobalWitness Word, Word)
+    internWitness indices witness = case Map.lookup witness indices of
+      Just index -> (indices, index)
+      Nothing ->
+        let index = fromIntegral (Map.size indices)
+        in (Map.insert witness index indices, index)
     third (_, _, value) = value
 
 -- A locally emitted package value may have no incoming global edge. Its exact
@@ -341,19 +387,15 @@ encodeGlobalWitness
   :: HscEnv -> PackageGlobalResolver -> IORef [PackageWitness] -> Map.Map SymbolIdentity BinderOwner
   -> Set.Set (T.Text, T.Text)
   -> SymbolIdentity -> RuntimeRep -> Maybe Signature -> Bool -> Maybe Word64
-  -> IO (Either String Encoding)
+  -> IO (Either String GlobalWitness)
 encodeGlobalWitness env resolvePackage packageRef binders homeModules identity rep signature evaluated generation = do
   selected <- case generation of
     Just wanted
       | toUnitId (moduleUnit (symbolOwner identity)) `Set.member` hsc_all_home_unit_ids env ->
-          pure (Right (array
-            [encodeString "retained", encodeIdentity identity, encodeWord64 wanted]))
+          pure (Right (RetainedOwner wanted))
       | otherwise -> packageOwner resolvePackage packageRef identity (Just wanted)
     Nothing -> case Map.lookup identity binders of
-      Just (unit, name, version, ordinal) -> pure (Right (array
-        [encodeString "source", encodeString unit, encodeString name
-        , maybe encodeNull encodeString version, encodeWord ordinal
-        , encodeIdentity identity]))
+      Just (unit, name, version, ordinal) -> pure (Right (SourceOwner unit name version ordinal))
       Nothing
         | (symbolUnit identity, symbolModule identity) `Set.member` homeModules
             || toUnitId (moduleUnit (symbolOwner identity)) `Set.member` hsc_all_home_unit_ids env ->
@@ -361,17 +403,14 @@ encodeGlobalWitness env resolvePackage packageRef binders homeModules identity r
         | otherwise -> packageOwner resolvePackage packageRef identity Nothing
   pure $ do
     owner <- selected
-    Right (array
-      [ encodeIdentity identity, encodeRep rep
-      , maybe encodeNull encodeSignature signature
-      , encodeBool evaluated, owner ])
+    Right (identity, rep, signature, evaluated, owner)
 
 symbolOwner :: SymbolIdentity -> Module
 symbolOwner identity = mkModule (stringToUnit (T.unpack (symbolUnit identity)))
   (mkModuleName (T.unpack (symbolModule identity)))
 
 packageOwner :: PackageGlobalResolver -> IORef [PackageWitness] -> SymbolIdentity -> Maybe Word64
-  -> IO (Either String Encoding)
+  -> IO (Either String WitnessOwner)
 packageOwner resolvePackage packageRef identity generation = do
   selected <- resolvePackage identity
   case selected of
@@ -380,11 +419,8 @@ packageOwner resolvePackage packageRef identity generation = do
       let sha = T.pack (packageSha256 witness)
       modifyIORef' packageRef ((symbolUnit identity,
         symbolModule identity, packagePath witness, sha) :)
-      let fields = [encodeString (symbolUnit identity)
-            , encodeString (symbolModule identity), encodeString sha, encodeIdentity identity]
-      pure (Right (array (case generation of
-        Nothing -> encodeString "package" : fields
-        Just wanted -> encodeString "retained-package" : fields ++ [encodeWord64 wanted])))
+      pure (Right (PackageOwner
+        (symbolUnit identity) (symbolModule identity) sha generation))
 
 type PackageGlobalResolver = SymbolIdentity -> IO (Either String (Id, PackageImportRoot))
 

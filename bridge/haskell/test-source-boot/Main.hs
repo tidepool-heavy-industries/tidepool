@@ -1612,17 +1612,41 @@ certificateOwners :: BS.ByteString -> IO [Term]
 certificateOwners bytes = do
   term <- either (fail . show) (pure . snd) (deserialiseFromBytes decodeTerm (BSL.fromStrict bytes))
   case term of
-    TList [TString "TPCERT", TInt 7, _, _, _, TList rows, _, TList [TString "ordinary"]] -> forM rows $ \case
-      TList [_,_,_,_,owner] -> pure owner
-      _ -> fail "original certificate global lacks its exact owner"
+    TList [TString "TPCERT", TInt 8, _, _, _, TList rows, _, TList [TString "ordinary"], TList coordinates] ->
+      forM rows $ \case
+        TList [identity,_,_,_,TList [TString "source", TInt index, ordinal]] -> do
+          coordinate <- coordinateAt coordinates index
+          case coordinate of
+            TList [TString "source",unit,name,version] -> pure
+              (TList [TString "source",unit,name,version,ordinal,identity])
+            _ -> fail "source witness used a package coordinate"
+        TList [identity,_,_,_,TList [TString "retained", generation]] -> pure
+          (TList [TString "retained",identity,generation])
+        TList [identity,_,_,_,TList [TString "package", TInt index]] -> do
+          coordinate <- coordinateAt coordinates index
+          case coordinate of
+            TList [TString "package",unit,name,sha] -> pure
+              (TList [TString "package",unit,name,sha,identity])
+            _ -> fail "package witness used a source coordinate"
+        TList [identity,_,_,_,TList [TString "retained-package", TInt index,generation]] -> do
+          coordinate <- coordinateAt coordinates index
+          case coordinate of
+            TList [TString "package",unit,name,sha] -> pure
+              (TList [TString "retained-package",unit,name,sha,identity,generation])
+            _ -> fail "retained package witness used a source coordinate"
+        _ -> fail "original certificate global lacks its exact owner"
     _ -> fail "original product lacks its canonical ownership certificate"
+  where
+    coordinateAt coordinates index
+      | index >= 0 && index < length coordinates = pure (coordinates !! index)
+      | otherwise = fail "original certificate owner coordinate out of range"
 
 verifyOriginalOnlyPackageRefusal :: FilePath -> PreparedPipelineResult
   -> [(Module, Either ProjectionError [ProjectedGroup])] -> BS.ByteString -> IO ()
 verifyOriginalOnlyPackageRefusal work original outcomes certified = do
   term <- either (fail . show) (pure . snd) (deserialiseFromBytes decodeTerm (BSL.fromStrict certified))
   (unit,name,path) <- case term of
-    TList [_,_,_,TList [],TList (TList [TString unit,TString name,TString path,_]:_),_,_] ->
+    TList [TString "TPCERT",TInt 8,_,TList [],TList (TList [TString unit,TString name,TString path,_]:_),_,_,_,_] ->
       pure (T.unpack unit,T.unpack name,T.unpack path)
     _ -> fail "original-only package requirement did not issue its own positive witness"
   let env = prHscEnv (pprPipelineResult original)
@@ -1679,7 +1703,7 @@ verifyCertifiedGroupingOrder work original = do
   term <- either (fail . show) (pure . snd)
     (deserialiseFromBytes decodeTerm (BSL.fromStrict bytes))
   case term of
-    TList [TString "TPCERT", TInt 7, TList [TList fields], TList [], TList [], TList [], _, TList [TString "ordinary"]]
+    TList [TString "TPCERT", TInt 8, TList [TList fields], TList [], TList [], TList [], _, TList [TString "ordinary"], _]
       | length fields == 10 -> case drop 8 fields of
           [TList groups,TList []] -> unless (map ordinal groups == [91,3]) $
             fail "certified module grouping changed nonmonotone encounter order"
@@ -3778,9 +3802,9 @@ verifyRetainedPackageWitness producer evidence = do
     repeatedTerm <- either (fail . show) (pure . snd)
       (deserialiseFromBytes decodeTerm (BSL.fromStrict first))
     case repeatedTerm of
-      TList [TString "TPCERT", TInt 7, TList [],
+      TList [TString "TPCERT", TInt 8, TList [],
           TList [TList [TString "target", TList references]],
-          TList _, TList globals, _, TList [TString "ordinary"]]
+          TList _, TList globals, _, TList [TString "ordinary"], _]
         | length references == 1001
             && length globals == 2 -> unless (sameRepeatedReferences references globals) $
               fail ("repeated package witnesses lost canonical deduplication or reference indices: "
@@ -3805,13 +3829,7 @@ verifyRetainedPackageWitness producer evidence = do
   verifyChangedPackageInterface producer package evidence program global
   bytes <- encode [global package 0, global home 7] >>= either fail pure
   retainByteOracle "mixed-retained" bytes
-  term <- either (fail . show) (pure . snd) (deserialiseFromBytes decodeTerm (BSL.fromStrict bytes))
-  owners <- case term of
-    TList [TString "TPCERT", TInt 7, _, _, _, TList rows, _, TList [TString "ordinary"]] ->
-      forM rows $ \case
-        TList [_, _, _, _, owner] -> pure owner
-        _ -> fail "certified global row lacks exact owner"
-    _ -> fail "retained package producer used another ownership format"
+  owners <- certificateOwners bytes
   unless (any (\case
       TList [TString "retained-package", TString "ghc-internal", TString "GHC.Internal.Base", TString packageHash, _, TInt 0] -> T.length packageHash == 64
       _ -> False) owners
@@ -3877,8 +3895,8 @@ verifyRetainedPackageWitness producer evidence = do
     forwardTerm <- decode forward
     backwardTerm <- decode backward
     restored <- case backwardTerm of
-      TList [magic, version, modules, TList [TList [name, TList references]], packages, globals] ->
-        pure (TList [magic, version, modules, TList [TList [name, TList (reverse references)]], packages, globals])
+      TList [magic, version, modules, TList [TList [name, TList references]], packages, globals, envelope, recipe, coordinates] ->
+        pure (TList [magic, version, modules, TList [TList [name, TList (reverse references)]], packages, globals, envelope, recipe, coordinates])
       _ -> fail "package catalog fixture lacks its target reference inventory"
     unless (forwardTerm == restored) $
       fail "package lookup order changed canonical witness inventory or reference order"
@@ -3909,13 +3927,13 @@ verifyRetainedPackageWitness producer evidence = do
   retainByteOracle "local-package" localBytes
   local <- decode localBytes
   case local of
-    TList [TString "TPCERT", TInt 7, _, _, TList [TList
-      [TString "ghc-internal", TString "GHC.Internal.Stack.Types", TString _, TString sha]], TList [], _, TList [TString "ordinary"]]
+    TList [TString "TPCERT", TInt 8, _, _, TList [TList
+      [TString "ghc-internal", TString "GHC.Internal.Stack.Types", TString _, TString sha]], TList [], _, TList [TString "ordinary"], _]
       | T.length sha == 64 -> pure ()
     _ -> fail "local package constructor without incoming globals lacks exact interface evidence"
   internal <- encodeProgram (localProgram [synthetic]) >>= either fail decode
   case internal of
-    TList [TString "TPCERT", TInt 7, _, _, TList [], TList [], _, TList [TString "ordinary"]] -> pure ()
+    TList [TString "TPCERT", TInt 8, _, _, TList [], TList [], _, TList [TString "ordinary"], _] -> pure ()
     _ -> fail "noncanonical internal package helper supplied external interface authority"
   encodeProgram ((localProgram [constructor, synthetic])
     { programGlobals = [global synthetic 0] }) >>= \case
@@ -3939,8 +3957,6 @@ verifyRetainedPackageWitness producer evidence = do
           && case (drop 999 rest, witnessOccurrence firstWitness, witnessOccurrence secondWitness) of
             ([TInt secondIndex], Just firstOccurrence, Just secondOccurrence) ->
               secondIndex /= firstIndex
-                && toStrictByteString (encodeTerm firstWitness)
-                  < toStrictByteString (encodeTerm secondWitness)
                 && occurrenceAt firstIndex firstOccurrence secondOccurrence == "map"
                 && occurrenceAt secondIndex firstOccurrence secondOccurrence == "id"
             _ -> False

@@ -66,7 +66,7 @@ data Signature = Signature
   { signatureArguments :: [RuntimeRep]
   , signatureResults :: ResultContract
   }
-  deriving stock (Eq, Show, Generic)
+  deriving stock (Eq, Ord, Show, Generic)
 data FieldLayout = FieldLayout { fieldRep :: RuntimeRep, fieldOffset :: Word32 }
   deriving stock (Eq, Show, Generic)
 data CheckedLayout = CheckedLayout

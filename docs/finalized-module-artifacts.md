@@ -6,12 +6,26 @@ interfaces are provisional and cannot issue this certificate.
 
 ## Worker receipt
 
-`TPCERT7` is exactly eight CBOR fields:
+`TPCERT8` is exactly nine CBOR fields:
 
 ```
-["TPCERT", 7, nativeModules, targets, packages, globalDictionary, envelope, sourceRecipe]
+["TPCERT", 8, nativeModules, targets, packages, globalDictionary, envelope, sourceRecipe, ownerCoordinates]
 envelope = ["tidepool-ghc-finalized-module-v1", homeUnits, finalizedModules]
 ```
+
+Each global dictionary row carries one exact symbol, representation, optional
+entry signature, evaluated requirement and a closed owner reference. Source
+owners use `["source", coordinateIndex, ordinal]`; package owners use
+`["package", coordinateIndex]` or `["retained-package", coordinateIndex, generation]`;
+retained home owners use `["retained", generation]`. The owner's binder is the
+same exact symbol already carried by the global. Source coordinates are
+`["source", unit, module, optionalVersion]`; package coordinates are
+`["package", unit, module, interfaceSHA]`. Source coordinates remain independent
+of the symbol's defining module. Wrong coordinate kinds, invalid indices,
+duplicate rows and unreferenced rows are refused. The wire remains bounded to
+4 MiB, the reconstructed unique full global dictionary to 4 MiB and expanded
+group/target witnesses to 16 MiB and 65,536 references. Earlier receipt versions
+are refused; durable home-owner and prepared artifact formats do not change.
 
 `sourceRecipe` is the closed ordinary/exact-unavailable/exact-available result
 documented in `bridge/haskell/CLAUDE.md`. Exact available receipts bind the

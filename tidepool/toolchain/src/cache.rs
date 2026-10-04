@@ -619,8 +619,8 @@ pub fn invocation_key(inv: &Invocation<'_>) -> Option<InvocationKey> {
         return None;
     }
     let mut hasher = blake3::Hasher::new();
-    // This version deliberately invalidates both former cache layouts.
-    frame(&mut hasher, b"tidepool-compile-recipe-v2");
+    // Product receipt v8 changes the matched worker/frontend ownership wire.
+    frame(&mut hasher, b"tidepool-compile-recipe-v3");
     frame(&mut hasher, inv.source.as_bytes());
     frame(&mut hasher, inv.input_path.file_name()?.as_encoded_bytes());
     let mut args = inv.argv.iter();

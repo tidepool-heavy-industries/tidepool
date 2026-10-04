@@ -374,6 +374,12 @@ pub enum CertificationError {
         found: u64,
         expected: u64,
     },
+    #[error("{format:?} size {actual} exceeds {limit} bytes")]
+    SizeLimit {
+        format: CertificationFormat,
+        actual: usize,
+        limit: usize,
+    },
     #[error("malformed bounded compiler product receipt: {0}")]
     Receipt(&'static str),
     #[error("compiler product certificate disagrees with {0}")]
@@ -645,7 +651,7 @@ fn validate_global_witness(
     Ok(selected.owner.clone())
 }
 
-/// Decode the worker's bounded `TPCERT7` tuple with exact owner rows shared
+/// Decode the worker's bounded `TPCERT8` tuple with exact owner rows shared
 /// through an immutable dictionary. Older ownership formats are refused.
 /// Original groups and executable targets preserve their ordered witnesses.
 pub fn decode_receipt(bytes: &[u8]) -> CertResult<CertifiedReceipt> {
@@ -657,7 +663,11 @@ pub(crate) fn decode_receipt_in(
     output_dir: Option<&Path>,
 ) -> CertResult<CertifiedReceipt> {
     if bytes.len() > RECEIPT_LIMIT {
-        return Err(CertificationError::Receipt("receipt size"));
+        return Err(CertificationError::SizeLimit {
+            format: CertificationFormat::ProductReceipt,
+            actual: bytes.len(),
+            limit: RECEIPT_LIMIT,
+        });
     }
     let mut cursor = std::io::Cursor::new(bytes);
     let value: Value = ciborium::de::from_reader_with_recursion_limit(&mut cursor, 32)
@@ -682,17 +692,18 @@ fn decode_receipt_value_in(
         return Err(CertificationError::Receipt("receipt header"));
     }
     let version = number(&header[1])?;
-    if version != 7 {
+    if version != 8 {
         return Err(CertificationError::UnsupportedVersion {
             format: CertificationFormat::ProductReceipt,
             found: version,
-            expected: 7,
+            expected: 8,
         });
     }
-    if header.len() != 8 {
+    if header.len() != 9 {
         return Err(CertificationError::Receipt("receipt header"));
     }
-    let mut dictionary = GlobalDictionary::decode(&header[5])?;
+    let mut coordinates = OwnerCoordinates::decode(&header[8])?;
+    let mut dictionary = GlobalDictionary::decode(&header[5], &mut coordinates)?;
     let mut read_globals = |value: &Value| {
         let globals = array(value)?;
         if globals.len() > GLOBAL_LIMIT {
@@ -766,6 +777,10 @@ fn decode_receipt_value_in(
             "unreferenced global dictionary row",
         ));
     }
+    if coordinates.used.len() != coordinates.rows.len() {
+        return Err(CertificationError::Receipt("unreferenced owner coordinate"));
+    }
+
     let package_rows = array(&header[4])?;
     if package_rows.len() > PACKAGE_LIMIT {
         return Err(CertificationError::Receipt("package count"));
@@ -841,6 +856,140 @@ fn decode_receipt_value_in(
     })
 }
 
+// Coordinates name an owning source group or package interface; they never
+// substitute for the exact global symbol. Only the binder is shared with it.
+#[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
+enum OwnerCoordinate {
+    Source {
+        unit: String,
+        module: String,
+        module_version: Option<ModuleVersion>,
+    },
+    Package {
+        unit: String,
+        module: String,
+        interface_digest: [u8; 32],
+    },
+}
+
+struct OwnerCoordinates {
+    rows: Vec<OwnerCoordinate>,
+    used: BTreeSet<usize>,
+}
+
+impl OwnerCoordinates {
+    fn decode(value: &Value) -> CertResult<Self> {
+        let values = array(value)?;
+        if values.len() > GLOBAL_LIMIT {
+            return Err(CertificationError::Receipt("owner coordinate count"));
+        }
+        let mut unique = BTreeSet::new();
+        let rows = values
+            .iter()
+            .map(|value| {
+                let row = sized(value, 4)?;
+                let coordinate = match string(&row[0])? {
+                    "source" => OwnerCoordinate::Source {
+                        unit: string(&row[1])?.to_owned(),
+                        module: string(&row[2])?.to_owned(),
+                        module_version: optional_version(&row[3])?,
+                    },
+                    "package" => OwnerCoordinate::Package {
+                        unit: string(&row[1])?.to_owned(),
+                        module: string(&row[2])?.to_owned(),
+                        interface_digest: digest(&row[3])?,
+                    },
+                    _ => return Err(CertificationError::Receipt("owner coordinate kind")),
+                };
+                if !unique.insert(coordinate.clone()) {
+                    return Err(CertificationError::Receipt("duplicate owner coordinate"));
+                }
+                Ok(coordinate)
+            })
+            .collect::<CertResult<_>>()?;
+        Ok(Self {
+            rows,
+            used: BTreeSet::new(),
+        })
+    }
+
+    fn get(&mut self, value: &Value) -> CertResult<&OwnerCoordinate> {
+        let index = usize::try_from(number(value)?)
+            .map_err(|_| CertificationError::Receipt("owner coordinate index"))?;
+        let coordinate = self
+            .rows
+            .get(index)
+            .ok_or(CertificationError::Receipt("owner coordinate index"))?;
+        self.used.insert(index);
+        Ok(coordinate)
+    }
+
+    fn owner(&mut self, value: &Value, binder: &SymbolIdentity) -> CertResult<ReceiptImportOwner> {
+        let row = array(value)?;
+        let tag = row
+            .first()
+            .ok_or(CertificationError::Receipt("empty import owner"))?;
+        match string(tag)? {
+            "source" if row.len() == 3 => {
+                let original_ordinal = u32::try_from(number(&row[2])?)
+                    .map_err(|_| CertificationError::Receipt("source group ordinal"))?;
+                let OwnerCoordinate::Source {
+                    unit,
+                    module,
+                    module_version,
+                } = self.get(&row[1])?
+                else {
+                    return Err(CertificationError::Receipt("owner coordinate kind"));
+                };
+                Ok(ReceiptImportOwner::Source {
+                    unit: unit.clone(),
+                    module: module.clone(),
+                    module_version: module_version.clone(),
+                    original_ordinal,
+                    binder: binder.clone(),
+                })
+            }
+            "retained" if row.len() == 2 => Ok(ReceiptImportOwner::Retained {
+                identity: binder.clone(),
+                generation: number(&row[1])?,
+            }),
+            tag @ ("package" | "retained-package")
+                if row.len() == (if tag == "package" { 2 } else { 3 }) =>
+            {
+                let generation = if tag == "package" {
+                    None
+                } else {
+                    Some(number(&row[2])?)
+                };
+                let OwnerCoordinate::Package {
+                    unit,
+                    module,
+                    interface_digest,
+                } = self.get(&row[1])?
+                else {
+                    return Err(CertificationError::Receipt("owner coordinate kind"));
+                };
+                Ok(match generation {
+                    None => ReceiptImportOwner::Package {
+                        unit: unit.clone(),
+                        module: module.clone(),
+                        interface_digest: *interface_digest,
+                        binder: binder.clone(),
+                    },
+                    Some(generation) => ReceiptImportOwner::RetainedPackage {
+                        unit: unit.clone(),
+                        module: module.clone(),
+                        interface_digest: *interface_digest,
+                        binder: binder.clone(),
+                        generation,
+                    },
+                })
+            }
+            _ => Err(CertificationError::Receipt("import owner tag/arity")),
+        }
+    }
+}
+
 struct GlobalDictionary {
     rows: Vec<(AcceptedGlobal, usize)>,
     used: BTreeSet<usize>,
@@ -849,20 +998,35 @@ struct GlobalDictionary {
 }
 
 impl GlobalDictionary {
-    fn decode(value: &Value) -> CertResult<Self> {
+    fn decode(value: &Value, coordinates: &mut OwnerCoordinates) -> CertResult<Self> {
         let rows = array(value)?;
         if rows.len() > GLOBAL_LIMIT {
             return Err(CertificationError::Receipt("global dictionary count"));
         }
         let mut unique = BTreeSet::new();
+        let mut dictionary_bytes = 0;
         let rows = rows
             .iter()
             .map(|value| {
-                let global = accepted_global(value)?;
+                let row = sized(value, 5)?;
+                let identity = identity(&row[0])?;
+                let global = AcceptedGlobal {
+                    owner: coordinates.owner(&row[4], &identity)?,
+                    identity,
+                    rep: rep(&row[1])?,
+                    entry_signature: signature(&row[2])?,
+                    required_evaluated: boolean(&row[3])?,
+                };
                 let mut canonical = Vec::new();
                 ciborium::ser::into_writer(&value_global(&global), &mut canonical)
                     .map_err(|_| CertificationError::Receipt("global dictionary encoding"))?;
                 let length = canonical.len();
+                if length > RECEIPT_LIMIT - dictionary_bytes {
+                    return Err(CertificationError::Receipt(
+                        "expanded global dictionary bytes",
+                    ));
+                }
+                dictionary_bytes += length;
                 if !unique.insert(canonical) {
                     return Err(CertificationError::Receipt(
                         "duplicate global dictionary row",
@@ -1504,7 +1668,11 @@ fn encode_home_witness(witness: &HomeCertification) -> CertResult<Vec<u8>> {
     ciborium::ser::into_writer(&value, &mut bytes)
         .map_err(|_| CertificationError::Receipt("home witness encoding"))?;
     if bytes.len() > RECEIPT_LIMIT {
-        return Err(CertificationError::Receipt("receipt size"));
+        return Err(CertificationError::SizeLimit {
+            format: CertificationFormat::HomeOwners,
+            actual: bytes.len(),
+            limit: RECEIPT_LIMIT,
+        });
     }
     Ok(bytes)
 }
@@ -1513,7 +1681,11 @@ fn decode_home_witness(bytes: &[u8]) -> CertResult<HomeCertification> {
     #[cfg(test)]
     HOME_CERTIFICATION_DECODES.with(|count| count.set(count.get() + 1));
     if bytes.len() > RECEIPT_LIMIT {
-        return Err(CertificationError::Receipt("receipt size"));
+        return Err(CertificationError::SizeLimit {
+            format: CertificationFormat::HomeOwners,
+            actual: bytes.len(),
+            limit: RECEIPT_LIMIT,
+        });
     }
     let mut cursor = std::io::Cursor::new(bytes);
     let value: Value = ciborium::de::from_reader_with_recursion_limit(&mut cursor, 32)
@@ -7853,7 +8025,7 @@ pub(crate) mod tests {
             Err(CertificationError::UnsupportedVersion {
                 format: CertificationFormat::ProductReceipt,
                 found: 2,
-                expected: 7
+                expected: 8
             })
         ));
         let mut trailing = encoded;
@@ -7908,10 +8080,180 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn certification_size_limits_identify_the_owning_format() {
+        let oversized = vec![0; RECEIPT_LIMIT + 1];
+        assert!(
+            matches!(decode_receipt(&oversized), Err(CertificationError::SizeLimit {
+            format: CertificationFormat::ProductReceipt, actual, limit: RECEIPT_LIMIT,
+        }) if actual == oversized.len())
+        );
+        assert!(
+            matches!(decode_home_witness(&oversized), Err(CertificationError::SizeLimit {
+            format: CertificationFormat::HomeOwners, actual, limit: RECEIPT_LIMIT,
+        }) if actual == oversized.len())
+        );
+        let owner = inherited_owner("Original");
+        let encoded = encode_home_certification(&owner, &[], &BTreeMap::new()).unwrap();
+        let mut witness = decode_home_witness(&encoded).unwrap();
+        witness.owner.module = "large".repeat(RECEIPT_LIMIT / 5 + 1);
+        assert!(
+            matches!(encode_home_witness(&witness), Err(CertificationError::SizeLimit {
+            format: CertificationFormat::HomeOwners, actual, limit: RECEIPT_LIMIT,
+        }) if actual > RECEIPT_LIMIT)
+        );
+    }
+
+    #[test]
+    fn receipt_coordinates_preserve_alias_owners_and_refuse_invalid_references() {
+        let mut source = dictionary_test_global();
+        source.owner = ReceiptImportOwner::Source {
+            unit: "foreign-home".into(),
+            module: "AliasOwner".into(),
+            module_version: Some(ModuleVersion([3; 32])),
+            original_ordinal: 19,
+            binder: source.identity.clone(),
+        };
+        let mut package = source.clone();
+        package.owner = ReceiptImportOwner::Package {
+            unit: package.identity.unit.clone(),
+            module: package.identity.module.clone(),
+            binder: package.identity.clone(),
+            interface_digest: [4; 32],
+        };
+        let mut retained_package = package.clone();
+        retained_package.owner = ReceiptImportOwner::RetainedPackage {
+            unit: package.identity.unit.clone(),
+            module: package.identity.module.clone(),
+            binder: package.identity.clone(),
+            interface_digest: [4; 32],
+            generation: 0,
+        };
+        let expected = vec![source.clone(), package, retained_package, source];
+        let mut legacy = empty_legacy_receipt();
+        legacy.as_array_mut().unwrap()[3] = value_array([value_array([
+            value_text("target"),
+            value_array(expected.iter().map(value_global)),
+        ])]);
+        let compact = dictionary_receipt(&legacy);
+        assert_eq!(
+            decode_receipt(&receipt_bytes(&compact)).unwrap().targets["target"],
+            expected
+        );
+        let header = array(&compact).unwrap();
+        assert_eq!(array(&header[8]).unwrap().len(), 2);
+        let source_index = array(&header[5])
+            .unwrap()
+            .iter()
+            .position(|row| {
+                string(&array(&array(row).unwrap()[4]).unwrap()[0]).unwrap() == "source"
+            })
+            .unwrap();
+        let source_coordinate = number(
+            &array(&array(&array(&header[5]).unwrap()[source_index]).unwrap()[4]).unwrap()[1],
+        )
+        .unwrap();
+        let package_coordinate = 1 - source_coordinate;
+        for reference in [
+            Value::Integer(2.into()),
+            Value::Integer((-1).into()),
+            Value::Null,
+            Value::Integer(package_coordinate.into()),
+        ] {
+            let mut invalid = compact.clone();
+            invalid.as_array_mut().unwrap()[5].as_array_mut().unwrap()[source_index]
+                .as_array_mut()
+                .unwrap()[4]
+                .as_array_mut()
+                .unwrap()[1] = reference;
+            assert!(decode_receipt(&receipt_bytes(&invalid)).is_err());
+        }
+        let mut duplicate = compact.clone();
+        let coordinates = duplicate.as_array_mut().unwrap()[8].as_array_mut().unwrap();
+        coordinates.push(coordinates[0].clone());
+        assert!(matches!(
+            decode_receipt(&receipt_bytes(&duplicate)),
+            Err(CertificationError::Receipt("duplicate owner coordinate"))
+        ));
+        let mut unused = compact.clone();
+        unused.as_array_mut().unwrap()[8]
+            .as_array_mut()
+            .unwrap()
+            .push(value_array([
+                value_text("source"),
+                value_text("unused"),
+                value_text("Unused"),
+                Value::Null,
+            ]));
+        assert!(matches!(
+            decode_receipt(&receipt_bytes(&unused)),
+            Err(CertificationError::Receipt("unreferenced owner coordinate"))
+        ));
+        // Coordinate compression does not authenticate a foreign package or
+        // permit its borrowed binder to disagree with the declaration owner.
+        let mut foreign = compact;
+        let coords = foreign.as_array_mut().unwrap()[8].as_array_mut().unwrap();
+        coords[package_coordinate as usize].as_array_mut().unwrap()[1] =
+            value_text("foreign-package");
+        let foreign = decode_receipt(&receipt_bytes(&foreign)).unwrap();
+        let package = &foreign.targets["target"][1];
+        let declaration = GlobalDecl {
+            identity: package.identity.clone(),
+            rep: package.rep,
+            entry_signature: None,
+            required_evaluated: package.required_evaluated,
+            required_generation: None,
+        };
+        assert!(matches!(
+            validate_global_witness(&declaration, &[], package),
+            Err(CertificationError::Mismatch("global owner"))
+        ));
+    }
+
+    #[test]
+    fn receipt_coordinates_bound_reconstructed_dictionary_bytes() {
+        let mut global = dictionary_test_global();
+        global.identity.occurrence = "large".repeat(32 * 1024);
+        global.owner = ReceiptImportOwner::Retained {
+            identity: global.identity.clone(),
+            generation: 7,
+        };
+        let globals = (0..16)
+            .map(|index| {
+                let mut witness = global.clone();
+                witness.required_evaluated = index % 2 == 0;
+                witness.owner = ReceiptImportOwner::Retained {
+                    identity: witness.identity.clone(),
+                    generation: index,
+                };
+                witness
+            })
+            .collect::<Vec<_>>();
+        let full = value_array([
+            value_text("TPCERT"),
+            Value::Integer(7.into()),
+            value_array([]),
+            value_array([]),
+            value_array([]),
+            value_array(globals.iter().map(value_global)),
+            Value::Null,
+            Value::Null,
+        ]);
+        let compact = compact_receipt_coordinates(&full);
+        let header = array(&compact).unwrap();
+        let mut coordinates = OwnerCoordinates::decode(&header[8]).unwrap();
+        assert!(receipt_bytes(&compact).len() < RECEIPT_LIMIT);
+        assert!(matches!(
+            GlobalDictionary::decode(&header[5], &mut coordinates),
+            Err(CertificationError::Receipt(
+                "expanded global dictionary bytes"
+            ))
+        ));
+    }
+
+    #[test]
     fn receipt_dictionary_bounds_expanded_witnesses() {
         let global = dictionary_test_global();
-        let mut dictionary =
-            GlobalDictionary::decode(&value_array([value_global(&global)])).unwrap();
+        let mut dictionary = test_dictionary(&[global]);
         let indices = vec![Value::Integer(0.into()); GLOBAL_REFERENCE_LIMIT];
         assert_eq!(
             dictionary.resolve(&indices).unwrap().len(),
@@ -7923,8 +8265,11 @@ pub(crate) mod tests {
         ));
         let mut large = global;
         large.identity.occurrence = "large".repeat(32 * 1024);
-        let mut dictionary =
-            GlobalDictionary::decode(&value_array([value_global(&large)])).unwrap();
+        large.owner = ReceiptImportOwner::Retained {
+            identity: large.identity.clone(),
+            generation: 7,
+        };
+        let mut dictionary = test_dictionary(&[large]);
         let row_bytes = dictionary.rows[0].1;
         let indices = vec![Value::Integer(0.into()); EXPANDED_GLOBAL_BYTES_LIMIT / row_bytes + 1];
         assert!(matches!(
@@ -7936,65 +8281,75 @@ pub(crate) mod tests {
     #[test]
     #[ignore = "requires the retained oversized production tools receipt"]
     fn receipt_dictionary_preserves_retained_production_facts() {
-        let path = std::env::var_os("TIDEPOOL_RETAINED_PRODUCT_RECEIPT")
-            .expect("explicit retained production receipt path");
-        let bytes = std::fs::read(path).unwrap();
+        let path = PathBuf::from(
+            std::env::var_os("TIDEPOOL_RETAINED_PRODUCT_RECEIPT")
+                .expect("explicit retained production receipt path"),
+        );
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(bytes.len() > RECEIPT_LIMIT, "actual bounded size refusal");
         assert!(
-            bytes.len() > RECEIPT_LIMIT,
-            "must exercise the actual size refusal"
+            matches!(decode_receipt(&bytes), Err(CertificationError::SizeLimit {
+            format: CertificationFormat::ProductReceipt, actual, limit: RECEIPT_LIMIT,
+        }) if actual == bytes.len())
         );
-        let legacy: Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
-        let compact = dictionary_receipt(&legacy);
+        let full: Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        let header = array(&full).unwrap();
+        assert_eq!(number(&header[1]).unwrap(), 7);
+        let compact = compact_receipt_coordinates(&full);
         let encoded = receipt_bytes(&compact);
-        let admitted = decode_receipt(&encoded).unwrap();
-        let legacy_header = array(&legacy).unwrap();
-        assert_eq!(
-            admitted.modules.len(),
-            array(&legacy_header[2]).unwrap().len()
-        );
-        assert_eq!(
-            admitted.targets.len(),
-            array(&legacy_header[3]).unwrap().len()
-        );
-        for (module, raw) in admitted
-            .modules
+        let admitted = decode_receipt_in(&encoded, path.parent()).unwrap();
+        let full_globals = array(&header[5])
+            .unwrap()
             .iter()
-            .zip(array(&legacy_header[2]).unwrap())
-        {
-            for (group, raw) in module
-                .groups
+            .map(accepted_global)
+            .collect::<CertResult<Vec<_>>>()
+            .unwrap();
+        let compact_header = array(&compact).unwrap();
+        for index in [0, 2, 3, 4, 6, 7] {
+            assert_eq!(
+                header[index], compact_header[index],
+                "untouched receipt facts"
+            );
+        }
+        let mut coordinates = OwnerCoordinates::decode(&compact_header[8]).unwrap();
+        let dictionary = GlobalDictionary::decode(&compact_header[5], &mut coordinates).unwrap();
+        assert_eq!(
+            dictionary
+                .rows
                 .iter()
-                .zip(array(&array(raw).unwrap()[8]).unwrap())
-            {
-                assert_eq!(
-                    group.globals,
-                    array(&array(raw).unwrap()[1])
-                        .unwrap()
-                        .iter()
-                        .map(accepted_global)
-                        .collect::<CertResult<Vec<_>>>()
-                        .unwrap()
-                );
+                .map(|(global, _)| global.clone())
+                .collect::<Vec<_>>(),
+            full_globals
+        );
+        let expand = |refs: &Value| {
+            array(refs)
+                .unwrap()
+                .iter()
+                .map(|index| full_globals[number(index).unwrap() as usize].clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(admitted.modules.len(), array(&header[2]).unwrap().len());
+        for (module, raw) in admitted.modules.iter().zip(array(&header[2]).unwrap()) {
+            let raw = array(raw).unwrap();
+            assert_eq!(module.groups.len(), array(&raw[8]).unwrap().len());
+            for (group, raw) in module.groups.iter().zip(array(&raw[8]).unwrap()) {
+                let raw = array(raw).unwrap();
+                assert_eq!(group.original_ordinal, number(&raw[0]).unwrap() as u32);
+                assert_eq!(group.globals, expand(&raw[1]));
             }
         }
-        for raw in array(&legacy_header[3]).unwrap() {
+        assert_eq!(admitted.targets.len(), array(&header[3]).unwrap().len());
+        for raw in array(&header[3]).unwrap() {
             let raw = array(raw).unwrap();
-            assert_eq!(
-                admitted.targets[string(&raw[0]).unwrap()],
-                array(&raw[1])
-                    .unwrap()
-                    .iter()
-                    .map(accepted_global)
-                    .collect::<CertResult<Vec<_>>>()
-                    .unwrap()
-            );
+            assert_eq!(admitted.targets[string(&raw[0]).unwrap()], expand(&raw[1]));
         }
         assert!(encoded.len() <= RECEIPT_LIMIT);
         eprintln!(
-            "retained-product-receipt legacy_bytes={} dictionary_bytes={} modules={} global_references={}",
-            bytes.len(), encoded.len(), admitted.modules.len(),
-            admitted.modules.iter().flat_map(|module| &module.groups).map(|group| group.globals.len()).sum::<usize>()
-                + admitted.targets.values().map(Vec::len).sum::<usize>()
+            "retained-product-receipt original_bytes={} compact_bytes={} globals={} coordinates={}",
+            bytes.len(),
+            encoded.len(),
+            full_globals.len(),
+            coordinates.rows.len()
         );
     }
 
@@ -8094,6 +8449,110 @@ pub(crate) mod tests {
         ])
     }
 
+    // Test migration of already-issued full facts. Production accepts only v8.
+    fn compact_receipt_coordinates(full: &Value) -> Value {
+        let mut compact = full.clone();
+        let Value::Array(header) = &mut compact else {
+            panic!("receipt tuple")
+        };
+        assert_eq!(header[1], Value::Integer(7.into()));
+        let mut coordinates = BTreeMap::new();
+        for row in array(&header[5]).unwrap() {
+            let row = array(row).unwrap();
+            let owner = array(&row[4]).unwrap();
+            let coordinate = match string(&owner[0]).unwrap() {
+                "source" => {
+                    assert_eq!(row[0], owner[5]);
+                    Some(value_array(owner[..4].iter().cloned()))
+                }
+                "package" | "retained-package" => {
+                    assert_eq!(row[0], owner[4]);
+                    Some(value_array([
+                        value_text("package"),
+                        owner[1].clone(),
+                        owner[2].clone(),
+                        owner[3].clone(),
+                    ]))
+                }
+                "retained" => {
+                    assert_eq!(row[0], owner[1]);
+                    None
+                }
+                _ => panic!("full witness owner"),
+            };
+            if let Some(coordinate) = coordinate {
+                coordinates.insert(receipt_bytes(&coordinate), coordinate);
+            }
+        }
+        let indexed = coordinates
+            .into_iter()
+            .enumerate()
+            .map(|(index, (bytes, coordinate))| (bytes, (index, coordinate)))
+            .collect::<BTreeMap<_, _>>();
+        let index = |coordinate: Value| {
+            Value::Integer((indexed[&receipt_bytes(&coordinate)].0 as u64).into())
+        };
+        let Value::Array(rows) = &mut header[5] else {
+            panic!("global dictionary")
+        };
+        for value in rows {
+            let Value::Array(row) = value else {
+                panic!("global row")
+            };
+            let owner = array(&row[4]).unwrap();
+            row[4] = match string(&owner[0]).unwrap() {
+                "source" => value_array([
+                    value_text("source"),
+                    index(value_array(owner[..4].iter().cloned())),
+                    owner[4].clone(),
+                ]),
+                "package" => value_array([
+                    value_text("package"),
+                    index(value_array([
+                        value_text("package"),
+                        owner[1].clone(),
+                        owner[2].clone(),
+                        owner[3].clone(),
+                    ])),
+                ]),
+                "retained-package" => value_array([
+                    value_text("retained-package"),
+                    index(value_array([
+                        value_text("package"),
+                        owner[1].clone(),
+                        owner[2].clone(),
+                        owner[3].clone(),
+                    ])),
+                    owner[5].clone(),
+                ]),
+                "retained" => value_array([value_text("retained"), owner[2].clone()]),
+                _ => panic!("full witness owner"),
+            };
+        }
+        header[1] = Value::Integer(8.into());
+        header.push(value_array(
+            indexed.into_values().map(|(_, coordinate)| coordinate),
+        ));
+        compact
+    }
+
+    fn test_dictionary(globals: &[AcceptedGlobal]) -> GlobalDictionary {
+        let full = value_array([
+            value_text("TPCERT"),
+            Value::Integer(7.into()),
+            value_array([]),
+            value_array([]),
+            value_array([]),
+            value_array(globals.iter().map(value_global)),
+            Value::Null,
+            Value::Null,
+        ]);
+        let compact = compact_receipt_coordinates(&full);
+        let header = array(&compact).unwrap();
+        let mut coordinates = OwnerCoordinates::decode(&header[8]).unwrap();
+        GlobalDictionary::decode(&header[5], &mut coordinates).unwrap()
+    }
+
     fn dictionary_receipt(legacy: &Value) -> Value {
         let mut compact = legacy.clone();
         let Value::Array(header) = &mut compact else {
@@ -8183,7 +8642,7 @@ pub(crate) mod tests {
             None, &modules,
         )));
         header.push(value_array([value_text("ordinary")]));
-        compact
+        compact_receipt_coordinates(&compact)
     }
 
     #[test]
@@ -8239,7 +8698,7 @@ pub(crate) mod tests {
         encoded.resize(RECEIPT_LIMIT + 1, 0);
         assert!(matches!(
             decode_receipt(&encoded),
-            Err(CertificationError::Receipt("receipt size"))
+            Err(CertificationError::SizeLimit { format: CertificationFormat::ProductReceipt, actual, limit: RECEIPT_LIMIT }) if actual == RECEIPT_LIMIT + 1
         ));
 
         let large_groups = |count: usize| {
@@ -8670,7 +9129,7 @@ pub(crate) mod tests {
 
     #[test]
     fn certificate_versions_refuse_legacy_ownership_without_reinterpretation() {
-        for version in [1, 2, 3, 4, 5, 6] {
+        for version in [1, 2, 3, 4, 5, 6, 7] {
             let mut receipt = dictionary_receipt(&empty_legacy_receipt());
             let Value::Array(rows) = &mut receipt else {
                 unreachable!()
@@ -8680,7 +9139,7 @@ pub(crate) mod tests {
                 decode_receipt(&receipt_bytes(&receipt)),
                 Err(CertificationError::UnsupportedVersion {
                     format: CertificationFormat::ProductReceipt,
-                    expected: 7,
+                    expected: 8,
                     ..
                 })
             ));

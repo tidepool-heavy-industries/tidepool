@@ -187,7 +187,7 @@ compiler-produced artifacts through their owning producers.
 
 ## Compiler-issued execution recipes
 
-`TPCERT` version 7 adds one closed source-recipe result after its finalized-module
+`TPCERT` version 8 retains one closed source-recipe result after its finalized-module
 envelope: `["ordinary"]`, `["exact-unavailable", reason]`, or
 `["exact-available", SHA]`. An available result binds the immutable
 `execution-source.cbor` in the owning compiler output directory. The descriptor
