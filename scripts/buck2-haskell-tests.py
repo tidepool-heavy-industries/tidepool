@@ -19,7 +19,7 @@ def components(text):
     for line in text.splitlines():
         if not line.strip() or line.lstrip().startswith("--"):
             continue
-        heading = re.fullmatch(r"(common|test-suite|executable) ([a-zA-Z0-9_-]+)", line)
+        heading = re.fullmatch(r"(common|library|test-suite|executable) ([a-zA-Z0-9_-]+)", line)
         if heading:
             current = {"kind": heading[1], "name": heading[2], "fields": {}}
             result[heading[2]] = current
@@ -66,7 +66,43 @@ def source(module, roots):
     return path, found[0]
 
 
-def fields_for(component):
+def dependencies_for(component, roster):
+    packages = set()
+    libraries = set()
+    for declaration in " ".join(component["fields"].get("build-depends", [])).split(","):
+        if not declaration.strip():
+            continue
+        package = declaration.strip().split()[0]
+        declared_library = roster.get(package, {}).get("kind") == "library"
+        if package in INTERNAL or declared_library:
+            if not declared_library:
+                raise ValueError(f"missing Cabal internal library {package} required by {component['name']}")
+            if package not in INTERNAL:
+                raise ValueError(f"Cabal internal library {package} needs a native Buck target")
+            libraries.add(package)
+        elif package != "base":
+            packages.add(package)
+    return sorted(packages), sorted(libraries)
+
+
+def installed_link_packages(component, roster, ancestors=()):
+    """Installed packages needed by a binary's complete native library closure.
+
+    Prelude carries project archives through HaskellLinkInfo, but library
+    linker_flags are local to the library's own link action. Installed package
+    roots must therefore be selected again by the final GHC linker invocation.
+    """
+    name = component["name"]
+    if name in ancestors:
+        raise ValueError("cyclic Cabal internal library dependency: " + " -> ".join((*ancestors, name)))
+    packages, libraries = dependencies_for(component, roster)
+    closure = set(packages)
+    for library in libraries:
+        closure.update(installed_link_packages(roster[library], roster, (*ancestors, name)))
+    return sorted(closure)
+
+
+def fields_for(component, roster):
     fields = component["fields"]
     roots = words(fields.get("hs-source-dirs", []))
     main = " ".join(fields.get("main-is", []))
@@ -76,14 +112,8 @@ def fields_for(component):
         raise ValueError(f"component {component['name']} needs one declared main-is: {found}")
     srcs = {"Main.hs": found[0]}
     srcs.update(source(module, roots) for module in words(fields.get("other-modules", [])))
-    packages = []
-    dependencies = []
-    for declaration in " ".join(fields.get("build-depends", [])).split(","):
-        package = declaration.strip().split()[0]
-        if package in INTERNAL:
-            dependencies.append(INTERNAL[package])
-        elif package != "base":
-            packages.append(package)
+    packages, libraries = dependencies_for(component, roster)
+    dependencies = [INTERNAL[library] for library in libraries]
     flags = ["-Wall", "-X" + " ".join(fields.get("default-language", ["GHC2024"]))]
     flags += ["-X" + extension for extension in words(fields.get("default-extensions", []))]
     flags += shlex.split(" ".join(fields.get("ghc-options", [])))
@@ -97,9 +127,10 @@ def render():
              'load("//build/haskell:defs.bzl", "haskell_component_flags", "haskell_component_link_flags")', '',
              'def declare_haskell_test_components():']
     for component in roster.values():
-        if component["kind"] == "common" or component["name"] == "tidepool-extract-bin":
+        if component["kind"] in {"common", "library"} or component["name"] == "tidepool-extract-bin":
             continue
-        roots, srcs, packages, dependencies, flags = fields_for(component)
+        roots, srcs, packages, dependencies, flags = fields_for(component, roster)
+        link_packages = installed_link_packages(component, roster)
         name = component["name"].replace("-", "_")
         suite = component["kind"] == "test-suite"
         binary = name + "_bin" if suite else name
@@ -108,7 +139,7 @@ def render():
                 f"    deps = {literal(dependencies)},", '    link_style = "static_pic",',
                 f'    _haskell_toolchain = "toolchains//:{"haskell" if production else "haskell_tests"}",',
                 f"    compiler_flags = haskell_component_flags({literal(packages)}, {literal(flags)}),",
-                f"    linker_flags = haskell_component_link_flags({literal(packages)}, {literal([flag for flag in flags if flag.startswith(('-rtsopts', '-with-rtsopts'))])}),",
+                f"    linker_flags = haskell_component_link_flags({literal(link_packages)}, {literal([flag for flag in flags if flag.startswith(('-rtsopts', '-with-rtsopts'))])}),",
                 '    visibility = ["PUBLIC"],', ")", ""]
         lines.extend("    " + line if line else "" for line in "\n".join(rule).splitlines())
         if not suite:
