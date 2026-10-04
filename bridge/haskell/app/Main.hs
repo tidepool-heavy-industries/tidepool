@@ -119,7 +119,7 @@ import Tidepool.Introspection (encodeInspectionResults, runInspection)
 import Tidepool.InspectionRunner (isInspectionTypeQuery, runInspectionRequests)
 import Tidepool.ExactScope
   ( ExactCompilation(..), ExactScope(..), ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..)
-  , scopeCheckedCell, scopeCheckedItem, scopeCheckedDisplay, scopeIncludePaths
+  , scopeCheckedCell, scopeCheckedItem, scopeCheckedDisplay, scopeIncludePaths, scopeCanonicalInterfaces
   , originalGroupFromProjected, originalGroupFromCandidate
   , CheckedCellAdmission(..), CheckedCellPurpose(..), CheckedItemAdmission(..), CheckedItemPurpose(..), CheckedDisplayAdmission(..), PlannedCellAdmission(..), PlannedCellSlot(..)
   , ExactInterfaceEvidence(..), validateCandidateCanonicalInterfaceProof, canonicalCertificateSha256
