@@ -25,7 +25,10 @@ use crate::ActorDescriptor;
     Eq,
     tidepool_bridge_derive::FromHaskell,
     tidepool_bridge_derive::ToHaskell,
+    serde::Serialize,
+    serde::Deserialize,
 )]
+#[serde(rename_all = "snake_case")]
 pub enum ForkEffort {
     #[haskell(module = "Tidepool.Effects.Core")]
     Low,

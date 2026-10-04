@@ -24,9 +24,6 @@ camino.workspace = true
 # PRD 19 lane L4: the RepoEvent handler's production observation source adapts
 # `WorktreeMonitor` — the git reasoning lives THERE, not here.
 exomonad-worktree.workspace = true
-# PRD 18 lane 1: the Subagent handler drives the coupled-spawn saga — the
-# saga and backend seam live THERE, not here.
-exomonad-agent.workspace = true
 # Exec's process launcher: host_command::command is the one allowed
 # std::process::Command::new for an arbitrary caller-named command with its
 # own process-group timeout/kill (see handlers/exec.rs).

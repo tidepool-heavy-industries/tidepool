@@ -1,8 +1,7 @@
 //! Exomonad process composition and one-command tmux bootstrap.
 //!
-//! One host process owns every resident Haskell actor. Interactive actors are
-//! ordinary interactive-agent TUIs launched through exact supervisors in tmux panes. Each actor
-//! receives its resident tools through an actor-scoped Unix socket.
+//! One host process owns resident Haskell actors and native Harness conversations.
+//! Tmux displays host and compiler diagnostics.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -10,24 +9,16 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use exomonad_actor::ActorRef;
-use exomonad_agent::{BackendThreadId, InteractiveLaunchMode, ReasoningEffort};
-#[cfg(feature = "codex-compat")]
-use exomonad_agent::{
-    InteractiveAgentInstallation, copy_interactive_binding, read_interactive_binding,
-};
-#[cfg(feature = "codex-compat")]
-use exomonad_node::host_command::{HostCommand, HostCommandSpec, HostExit, HostStdin, HostStream};
+use exomonad_actor::ForkEffort;
+
 use exomonad_node::{TmuxLaunch, TmuxSession};
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
 use tracing::Instrument;
-use tracing_subscriber::Layer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-
-#[cfg(feature = "codex-compat")]
-use crate::actor_host::ACTOR_PROJECT_ROOT;
+use tracing_subscriber::Layer;
 
 pub(crate) const STATUS_VERSION: u32 = 5;
 const PREVIOUS_STATUS_VERSION: u32 = 4;
@@ -43,18 +34,12 @@ pub use launch_preflight::PreflightMode;
 pub use scaffold::{FlakeLock, NewRefusal, NixLock};
 
 const EXOMONAD_CONFIG: &str = ".exomonad/config.toml";
-#[cfg(feature = "codex-compat")]
-const ENV_PACKAGED_CODEX_CLOSURE: &str = "EXOMONAD_CODEX_CLOSURE";
-#[cfg(feature = "codex-compat")]
-const ENV_NIX_STORE_BIN: &str = "EXOMONAD_NIX_STORE_BIN";
+
 /// The `nix` executable that fetches the project's flake inputs when
 /// `[haskell.flake_sources]` pins Haskell source outside the workspace. Set by
 /// the packaged `exomonad` wrapper and the dev shell; otherwise the one on `PATH`.
 const ENV_NIX_BIN: &str = "EXOMONAD_NIX_BIN";
-#[cfg(feature = "codex-compat")]
-const GC_ROOT_TIMEOUT: Duration = Duration::from_secs(30);
-#[cfg(feature = "codex-compat")]
-const GC_ROOT_ERROR_LIMIT: usize = 16 * 1024;
+
 const BOUNDARY_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 const BOUNDARY_PROBE_ERROR_LIMIT: usize = 16 * 1024;
 const COMPILER_DAEMON_START_TIMEOUT: Duration = Duration::from_secs(30);
@@ -94,87 +79,16 @@ pub struct HostOptions {
     pub run_root: PathBuf,
     pub status_path: PathBuf,
     pub root_binding_path: PathBuf,
-    pub backend: HostBackendOptions,
+
     pub resume_root: bool,
     pub agent: ExomonadAgentDefaults,
-}
-
-/// Backend-specific values frozen before the private actor-host launch.
-///
-/// Carrying the installation only in the Codex variant prevents embedded
-/// launches from inventing an executable or version just to satisfy the host
-/// process boundary.
-#[derive(Debug, Clone)]
-pub enum HostBackendOptions {
-    #[cfg(feature = "codex-compat")]
-    Codex(InteractiveAgentInstallation),
-    Embedded,
-}
-
-impl HostBackendOptions {
-    #[must_use]
-    pub fn kind(&self) -> ExomonadBackend {
-        match self {
-            #[cfg(feature = "codex-compat")]
-            Self::Codex(_) => ExomonadBackend::Codex,
-            Self::Embedded => ExomonadBackend::Embedded,
-        }
-    }
-
-    #[cfg(feature = "codex-compat")]
-    #[must_use]
-    pub fn interactive_agent(&self) -> Option<&InteractiveAgentInstallation> {
-        match self {
-            Self::Codex(installation) => Some(installation),
-            Self::Embedded => None,
-        }
-    }
-
-    /// Restore the typed backend options carried over the private host launch.
-    pub fn from_parts(
-        backend: ExomonadBackend,
-        executable: Option<PathBuf>,
-        version: Option<String>,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
-        match backend {
-            ExomonadBackend::Embedded => {
-                if executable.is_some() || version.is_some() {
-                    return Err(runtime_error(
-                        "embedded backend cannot receive an interactive-agent installation",
-                    ));
-                }
-                Ok(Self::Embedded)
-            }
-            ExomonadBackend::Codex => {
-                #[cfg(feature = "codex-compat")]
-                {
-                    let executable = executable.ok_or_else(|| {
-                        runtime_error("Codex backend requires its pinned executable path")
-                    })?;
-                    let version = version.ok_or_else(|| {
-                        runtime_error("Codex backend requires its verified version")
-                    })?;
-                    let installation =
-                        exomonad_agent::native_interactive_agent_from_parts(executable, version)?;
-                    Ok(Self::Codex(installation))
-                }
-                #[cfg(not(feature = "codex-compat"))]
-                {
-                    let _ = (executable, version);
-                    Err(runtime_error(
-                        "this Exomonad build does not include the codex-compat feature",
-                    ))
-                }
-            }
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExomonadBackend {
-    #[default]
     Codex,
+    #[default]
     Embedded,
 }
 
@@ -191,6 +105,11 @@ fn record_run_backend(
     run_id: &str,
     backend: ExomonadBackend,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if backend == ExomonadBackend::Codex {
+        return Err(runtime_error(
+            "the Codex backend is retired; historical runs cannot be resumed",
+        ));
+    }
     let path = run_root.join("backend.json");
     let selected = RunBackendRecord {
         version: 1,
@@ -217,6 +136,11 @@ fn verify_run_backend(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let path = run_root.join("backend.json");
     let existing: RunBackendRecord = serde_json::from_slice(&std::fs::read(&path)?)?;
+    if existing.backend == ExomonadBackend::Codex {
+        return Err(runtime_error(
+            "the Codex backend is retired; historical runs cannot be resumed",
+        ));
+    }
     if existing.version != 1 || existing.run_id != run_id || existing.backend != backend {
         return Err(runtime_error(format!(
             "host backend {backend} does not match the immutable run record at {}",
@@ -261,17 +185,17 @@ pub enum ExomonadEffort {
     High,
 }
 
-impl From<ReasoningEffort> for ExomonadEffort {
-    fn from(value: ReasoningEffort) -> Self {
+impl From<ForkEffort> for ExomonadEffort {
+    fn from(value: ForkEffort) -> Self {
         match value {
-            ReasoningEffort::Low => Self::Low,
-            ReasoningEffort::Medium => Self::Medium,
-            ReasoningEffort::High => Self::High,
+            ForkEffort::Low => Self::Low,
+            ForkEffort::Medium => Self::Medium,
+            ForkEffort::High => Self::High,
         }
     }
 }
 
-impl From<ExomonadEffort> for ReasoningEffort {
+impl From<ExomonadEffort> for ForkEffort {
     fn from(value: ExomonadEffort) -> Self {
         match value {
             ExomonadEffort::Low => Self::Low,
@@ -467,7 +391,8 @@ impl EmbeddedLaunchConfig {
         }
         if let Some(origin) = &self.public_origin {
             harness::server::ServerConfig::new(self.asset_root.clone())
-                .with_public_origin(origin.clone()).map_err(runtime_error)?;
+                .with_public_origin(origin.clone())
+                .map_err(runtime_error)?;
         }
         if !self.listen.ip().is_loopback()
             && !exomonad_node::network::tailnet_address_is_local(self.listen.ip())?
@@ -828,7 +753,7 @@ pub enum RunPhase {
     },
     Ready {
         root_actor: ActorRef,
-        root_thread: BackendThreadId,
+        root_thread: String,
     },
     EmbeddedReady {
         root_actor: ActorRef,
@@ -934,6 +859,11 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
     // no tmux session, no scaffolding.
     let configuration = read_project_config(&workspace)?.0;
     let selected_backend = configuration.launch.backend;
+    if selected_backend == ExomonadBackend::Codex {
+        return Err(runtime_error(
+            "the Codex backend is retired; historical runs cannot be resumed",
+        ));
+    }
     let slice = configuration.launch.systemd_slice;
     let limits = slice.inspect().await?;
     if slice.current_membership().is_err() {
@@ -956,29 +886,8 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
             .into());
     }
     tracing::info!(slice = slice.as_str(), ?limits, "selected swarm budget");
-    let host_backend = match selected_backend {
-        ExomonadBackend::Embedded => HostBackendOptions::Embedded,
-        ExomonadBackend::Codex => {
-            #[cfg(feature = "codex-compat")]
-            {
-                HostBackendOptions::Codex(exomonad_agent::resolve_native_interactive_agent().await?)
-            }
-            #[cfg(not(feature = "codex-compat"))]
-            {
-                return Err(runtime_error(
-                    "this Exomonad build does not include the codex-compat feature",
-                ));
-            }
-        }
-    };
     if options.preflight != PreflightMode::Skip {
-        #[cfg(feature = "codex-compat")]
-        let codex = host_backend
-            .interactive_agent()
-            .map(|agent| Ok((agent.executable().to_owned(), agent.version().to_owned())));
-        #[cfg(not(feature = "codex-compat"))]
-        let codex = None;
-        let observation = launch_preflight::LaunchObservation::observe(&workspace, codex);
+        let observation = launch_preflight::LaunchObservation::observe(&workspace);
         let lines = launch_preflight::assess(&observation, options.preflight);
         for line in &lines {
             println!("{line}");
@@ -995,15 +904,7 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
             )));
         }
     }
-    #[cfg(feature = "codex-compat")]
-    if let Some(interactive_agent) = host_backend.interactive_agent() {
-        retain_packaged_interactive_agent(&workspace).await?;
-        tracing::info!(
-            executable = %interactive_agent.executable().display(),
-            version = interactive_agent.version(),
-            "selected interactive agent"
-        );
-    }
+
     exomonad_worktree::GitCli::new().ensure_exomonad_local_exclude(&workspace)?;
     let agent = resolve_agent_defaults(configuration.defaults, options.model, options.effort)?;
     let session_name = options
@@ -1041,14 +942,6 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
     let selected = workspace::FrozenWorkspace::load(&workspace, &run_root)?;
     crate::actor_host::validate_workspace_program(&selected, &run_root)?;
     if options.recreate {
-        if selected_backend == ExomonadBackend::Codex {
-            #[cfg(feature = "codex-compat")]
-            validate_recreate_continuity(&root_binding_path).await?;
-            #[cfg(not(feature = "codex-compat"))]
-            return Err(runtime_error(
-                "this Exomonad build does not include the codex-compat feature",
-            ));
-        }
         let previous_run = std::fs::read_to_string(session_root.join("run-id")).map_err(|error| {
             runtime_error(format!(
                 "cannot safely replace supervised session {session_name:?} without its recorded run identity: {error}"
@@ -1057,10 +950,7 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
         stop(previous_run.trim(), &session_name).await?;
     }
     crate::actor_host::ensure_actor_workspace_available(&workspace)?;
-    #[cfg(feature = "codex-compat")]
-    if !options.recreate && selected_backend == ExomonadBackend::Codex {
-        clear_fresh_root_binding(&root_binding_path)?;
-    }
+
     tidepool_atomic_write::write_durable(&session_root.join("run-id"), run_id.as_bytes())?;
 
     let status_path = run_root.join("status.json");
@@ -1112,23 +1002,12 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
             deployment_path.display().to_string(),
         ),
     ]);
-    match &host_backend {
-        #[cfg(feature = "codex-compat")]
-        HostBackendOptions::Codex(interactive_agent) => println!(
-            "launch: agent={} version={} model={} effort={} extractor={}",
-            interactive_agent.executable().display(),
-            interactive_agent.version(),
-            agent.model,
-            agent.effort,
-            compiler_bin.display()
-        ),
-        HostBackendOptions::Embedded => println!(
-            "launch: backend=embedded model={} effort={} extractor={}",
-            agent.model,
-            agent.effort,
-            compiler_bin.display()
-        ),
-    }
+    println!(
+        "launch: backend=embedded model={} effort={} extractor={}",
+        agent.model,
+        agent.effort,
+        compiler_bin.display()
+    );
     let compiler_program = compiler_bin
         .to_str()
         .ok_or_else(|| runtime_error("compiler executable path is not UTF-8"))?
@@ -1203,15 +1082,7 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
         "--root-binding-path".into(),
         root_binding_path.display().to_string(),
     ];
-    #[cfg(feature = "codex-compat")]
-    if let HostBackendOptions::Codex(interactive_agent) = &host_backend {
-        args.extend([
-            "--interactive-agent-bin".into(),
-            interactive_agent.executable().display().to_string(),
-            "--interactive-agent-version".into(),
-            interactive_agent.version().to_owned(),
-        ]);
-    }
+
     // Replacing a session resumes its root conversation. A session whose first
     // launch never got as far as a conversation has no binding at all: there is
     // nothing to resume and nothing to lose, so it starts fresh. A binding that
@@ -1228,7 +1099,6 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
     }
     args.extend(["--model".into(), agent.model.clone()]);
     args.extend(["--effort".into(), agent.effort.to_string()]);
-    args.extend(["--backend".into(), selected_backend.to_string()]);
     let mut host_environment = host_environment(&compiler_socket);
     host_environment.extend(selected_environment);
     let host_launch = slice.supervised_service(
@@ -1273,18 +1143,6 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
         "compiler: {} (tmux window Compiler)",
         compiler_socket.display()
     );
-    #[cfg(feature = "codex-compat")]
-    if let HostBackendOptions::Codex(interactive_agent) = &host_backend {
-        println!(
-            "interactive agent: {} (version {}, sha256 {}, package {})",
-            interactive_agent.executable().display(),
-            interactive_agent.version(),
-            interactive_agent.executable_sha256(),
-            interactive_agent
-                .package_root()
-                .map_or_else(|| "unpackaged".into(), |path| path.display().to_string())
-        );
-    }
 
     let interactive = match wait_until_interactive(&tmux, &status_path, &run_id).await {
         Ok(interactive) => interactive,
@@ -1304,7 +1162,7 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
             root_thread,
         } => println!(
             "Exomonad ready in tmux session {session_name:?}: actor {root_actor:?}, thread {}",
-            root_thread.0
+            root_thread
         ),
         RunPhase::EmbeddedReady {
             root_actor,
@@ -1494,99 +1352,6 @@ async fn wait_until_compiler_daemon(
     })?
 }
 
-/// Retain the Nix-packaged private interactive-agent closure without placing
-/// its executable on the user's ordinary PATH. The project-local symlink is a
-/// durable GC root under Exomonad's runtime-owned state directory.
-#[cfg(feature = "codex-compat")]
-async fn retain_packaged_interactive_agent(
-    workspace: &Path,
-) -> Result<(), Box<dyn std::error::Error>> {
-    retain_packaged_interactive_agent_from(
-        workspace,
-        std::env::var_os(ENV_PACKAGED_CODEX_CLOSURE).map(PathBuf::from),
-        std::env::var_os(ENV_NIX_STORE_BIN).map(PathBuf::from),
-    )
-    .await
-}
-
-#[cfg(feature = "codex-compat")]
-async fn retain_packaged_interactive_agent_from(
-    workspace: &Path,
-    target: Option<PathBuf>,
-    nix_store: Option<PathBuf>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let (target, nix_store) = match (target, nix_store) {
-        (None, None) => return Ok(()),
-        (Some(target), Some(nix_store)) => (target, nix_store),
-        _ => {
-            return Err(runtime_error(format!(
-                "{ENV_PACKAGED_CODEX_CLOSURE} and {ENV_NIX_STORE_BIN} must be supplied together"
-            )));
-        }
-    };
-    if !target.is_absolute() || !target.is_dir() {
-        return Err(runtime_error(format!(
-            "{ENV_PACKAGED_CODEX_CLOSURE} is not an absolute package directory: {}",
-            target.display()
-        )));
-    }
-    if !nix_store.is_absolute() || !nix_store.is_file() {
-        return Err(runtime_error(format!(
-            "{ENV_NIX_STORE_BIN} is not an absolute executable file: {}",
-            nix_store.display()
-        )));
-    }
-    let runtime = workspace.join(".exomonad/runtime");
-    std::fs::create_dir_all(&runtime)?;
-    let link = runtime.join("interactive-agent");
-    let argv = [
-        nix_store.to_string_lossy().into_owned(),
-        "--realise".to_string(),
-        target.to_string_lossy().into_owned(),
-        "--add-root".to_string(),
-        link.to_string_lossy().into_owned(),
-    ];
-    let command = HostCommand::spawn(HostCommandSpec {
-        argv: &argv,
-        directory: workspace,
-        environment: &[],
-        stdin: HostStdin::Closed,
-        cgroup: None,
-        boundary: None,
-        bubblewrap: None,
-    })
-    .map_err(|error| {
-        runtime_error(format!(
-            "cannot start {ENV_NIX_STORE_BIN} {}: {error}",
-            nix_store.display()
-        ))
-    })?;
-    let status = tokio::time::timeout(GC_ROOT_TIMEOUT, command.wait())
-        .await
-        .map_err(|_| runtime_error(format!("Nix GC-root creation exceeded {GC_ROOT_TIMEOUT:?}")))?
-        .map_err(|error| {
-            runtime_error(format!(
-                "cannot register Nix GC root {}: {error}",
-                link.display()
-            ))
-        })?;
-    let stderr_available = command.available(HostStream::Stderr);
-    if stderr_available > GC_ROOT_ERROR_LIMIT as u64 {
-        return Err(runtime_error(format!(
-            "Nix GC-root creation diagnostics exceeded {GC_ROOT_ERROR_LIMIT} bytes"
-        )));
-    }
-    if !matches!(status, HostExit::Exited(0)) {
-        let stderr = command.page(HostStream::Stderr, 0, u64::MAX).text;
-        return Err(runtime_error(format!(
-            "cannot register Nix GC root {} ({status:?}): {}",
-            link.display(),
-            stderr.trim()
-        )));
-    }
-    Ok(())
-}
-
 async fn read_bounded_diagnostics(
     reader: impl tokio::io::AsyncRead + Unpin,
     limit: usize,
@@ -1608,7 +1373,11 @@ async fn read_bounded_diagnostics(
 
 pub async fn host(options: HostOptions) -> Result<(), Box<dyn std::error::Error>> {
     ensure_private_run_root(&options.run_root)?;
-    verify_run_backend(&options.run_root, &options.run_id, options.backend.kind())?;
+    verify_run_backend(
+        &options.run_root,
+        &options.run_id,
+        ExomonadBackend::Embedded,
+    )?;
     let host_incarnation = crate::actor_host::HostIncarnationLease::claim(&options.run_root)?;
     let generation = host_incarnation.incarnation().0;
     if generation > 1 {
@@ -1627,41 +1396,11 @@ pub async fn host(options: HostOptions) -> Result<(), Box<dyn std::error::Error>
         write_status(&options.status_path, &status)?;
     }
     let log_path = exomonad_log_path(&options.workspace, &options.run_id);
-    #[cfg(feature = "codex-compat")]
-    if let HostBackendOptions::Codex(interactive_agent) = &options.backend {
-        tracing::info!(
-            run_id = %options.run_id,
-            session = %options.session,
-            workspace = %options.workspace.display(),
-            interactive_agent = %interactive_agent.executable().display(),
-            interactive_agent_version = interactive_agent.version(),
-            interactive_agent_sha256 = interactive_agent.executable_sha256(),
-            interactive_agent_package = %interactive_agent.package_root().map_or_else(|| "unpackaged".into(), |path| path.display().to_string()),
-            model = %options.agent.model,
-            effort = %options.agent.effort,
-            detailed_log = %log_path.display(),
-            host_generation = generation,
-            "starting Exomonad actor host"
-        );
-    } else {
-        tracing::info!(
-            run_id = %options.run_id,
-            session = %options.session,
-            workspace = %options.workspace.display(),
-            backend = ?options.backend.kind(),
-            model = %options.agent.model,
-            effort = %options.agent.effort,
-            detailed_log = %log_path.display(),
-            host_generation = generation,
-            "starting Exomonad actor host"
-        );
-    }
-    #[cfg(not(feature = "codex-compat"))]
+
     tracing::info!(
         run_id = %options.run_id,
         session = %options.session,
         workspace = %options.workspace.display(),
-        backend = ?options.backend.kind(),
         model = %options.agent.model,
         effort = %options.agent.effort,
         detailed_log = %log_path.display(),
@@ -1687,29 +1426,6 @@ async fn run_host(
     if let Some(parent) = options.root_binding_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-
-    #[cfg(feature = "codex-compat")]
-    let recovered_binding = options.run_root.join("root-binding.json");
-    let root_launch_mode = if options.backend.kind() == ExomonadBackend::Codex {
-        #[cfg(feature = "codex-compat")]
-        {
-            root_launch_mode_for_generation(
-                host_generation,
-                options.resume_root,
-                &options.root_binding_path,
-                &recovered_binding,
-            )
-            .await?
-        }
-        #[cfg(not(feature = "codex-compat"))]
-        {
-            return Err(runtime_error(
-                "this Exomonad build does not include the codex-compat feature",
-            ));
-        }
-    } else {
-        InteractiveLaunchMode::Fresh
-    };
 
     let workspace_inputs = workspace::FrozenWorkspace::load(&options.workspace, &options.run_root)?;
     let accepted_source = source::SourceLayer::new(&options.run_root)
@@ -1767,19 +1483,17 @@ async fn run_host(
         );
     }
     let configuration = workspace_inputs.config()?;
-    if configuration.launch.backend != options.backend.kind() {
+    if configuration.launch.backend != ExomonadBackend::Embedded {
         return Err(runtime_error(
             "workspace backend differs from the admitted run backend",
         ));
     }
-    if options.backend.kind() == ExomonadBackend::Embedded {
-        configuration
-            .launch
-            .embedded
-            .as_ref()
-            .ok_or_else(|| runtime_error("embedded backend requires [launch.embedded]"))?
-            .validate()?;
-    }
+    configuration
+        .launch
+        .embedded
+        .as_ref()
+        .ok_or_else(|| runtime_error("native host requires [launch.embedded]"))?
+        .validate()?;
     let slice = configuration.launch.systemd_slice;
     slice.current_membership()?;
     let limits = slice.inspect().await?;
@@ -1841,14 +1555,13 @@ async fn run_host(
             haskell_root,
             run_root: options.run_root.clone(),
             root_binding_path: options.run_root.join("root-binding.json"),
-            backend: options.backend.clone(),
+
             embedded: configuration.launch.embedded,
             tmux_session: options.session.clone(),
             model: options.agent.model.clone(),
             effort: options.agent.effort.into(),
             research_policy,
             workspace_inputs: Some(workspace_inputs),
-            root_launch_mode,
             pane_environment: pane_environment(),
             jev: None,
         },
@@ -1876,57 +1589,6 @@ async fn run_host(
                     ) {
                         tracing::error!(%error, "could not publish root failure; host remains active");
                     }
-                }
-                Some(crate::actor_host::ActorHostReadiness::AwaitingBinding { root }) => {
-                    let status = observe_run_runtime(RunStatus::new(
-                        &options.run_id,
-                        &options.workspace,
-                        &options.session,
-                        options.agent.clone(),
-                        RunPhase::AwaitingBinding { root_actor: root },
-                    ).at_generation(host_generation).with_unavailable_actors(unavailable_actors.clone()),
-                        &command_resources,
-                        &recovered_actors,
-                        &lost_state,
-                    ).await;
-                    if let Err(error) = write_status(&options.status_path, &status) {
-                        tracing::error!(%error, "could not publish pending root status; host remains active");
-                    }
-                    tracing::info!(
-                        run_id = %options.run_id,
-                        actor = ?root,
-                        "Exomonad root application launched; queue-ready session handshake pending"
-                    );
-                }
-                Some(crate::actor_host::ActorHostReadiness::Ready { root, thread }) => {
-                    let thread_id = thread.id().0.clone();
-                    #[cfg(feature = "codex-compat")]
-                    if let Err(error) = copy_interactive_binding(&options.root_binding_path, &thread).await {
-                        tracing::error!(%error, "could not publish root binding; host remains active");
-                    }
-                    let status = observe_run_runtime(RunStatus::new(
-                        &options.run_id,
-                        &options.workspace,
-                        &options.session,
-                        options.agent.clone(),
-                        RunPhase::Ready {
-                            root_actor: root,
-                            root_thread: thread.id().clone(),
-                        },
-                    ).at_generation(host_generation).with_unavailable_actors(unavailable_actors.clone()),
-                        &command_resources,
-                        &recovered_actors,
-                        &lost_state,
-                    ).await;
-                    if let Err(error) = write_status(&options.status_path, &status) {
-                        tracing::error!(%error, "could not publish ready root status; host remains active");
-                    }
-                    tracing::info!(
-                        run_id = %options.run_id,
-                        actor = ?root,
-                        thread = %thread_id,
-                        "root interactive application ready"
-                    );
                 }
                 Some(crate::actor_host::ActorHostReadiness::EmbeddedReady { root, address }) => {
                     let status = observe_run_runtime(RunStatus::new(
@@ -2045,95 +1707,6 @@ fn ensure_private_run_root(path: &Path) -> std::io::Result<()> {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
 }
 
-/// Choose how this host generation launches its root, given whether an
-/// earlier generation of the SAME run ever got a root as far as a queue-ready
-/// binding.
-///
-/// Generation 1 follows the caller's explicit `resume_root` request against
-/// the session-level binding, exactly as before. A later generation (one
-/// systemd restarted after generation `N-1` failed) only has a conversation
-/// worth resuming when `recovered_binding` — this run's own internal
-/// root-binding file, written the moment a root ever reaches queue-readiness
-/// — actually exists. When it does not, no generation of this run ever had a
-/// root to lose, so forcing a resume attempt would manufacture a permanent
-/// "cannot prove a resumable root" failure out of thin air; this starts fresh
-/// instead, same as generation 1 would with no `--resume-root` requested.
-#[cfg(feature = "codex-compat")]
-async fn root_launch_mode_for_generation(
-    host_generation: u64,
-    resume_root: bool,
-    root_binding_path: &Path,
-    recovered_binding: &Path,
-) -> Result<InteractiveLaunchMode, Box<dyn std::error::Error>> {
-    if host_generation <= 1 {
-        return resolve_root_launch_mode(resume_root, root_binding_path).await;
-    }
-    if !recovered_binding.exists() {
-        tracing::warn!(
-            host_generation,
-            "no generation of this run ever bound a root conversation; starting fresh instead of forcing an unresumable recovery"
-        );
-        return Ok(InteractiveLaunchMode::Fresh);
-    }
-    resolve_root_launch_mode(true, recovered_binding)
-        .await
-        .map_err(|error| {
-            runtime_error(format!(
-                "host generation {host_generation} cannot prove a resumable root; actor remains unavailable: {error}"
-            ))
-        })
-}
-
-/// A `--recreate` request validates that the session it is about to replace
-/// can actually be resumed before it stops that (currently healthy) session.
-/// A session whose first launch failed before its root ever bound has no
-/// `root-binding.json` at all — there is nothing to resume and nothing to
-/// validate, so that case shares the plain fresh-start path (no error, no
-/// `--resume-root` passed to the host) instead of failing closed as an
-/// unreadable binding.
-#[cfg(feature = "codex-compat")]
-async fn validate_recreate_continuity(
-    root_binding_path: &Path,
-) -> Result<(), Box<dyn std::error::Error>> {
-    if !root_binding_path.exists() {
-        return Ok(());
-    }
-    resolve_root_launch_mode(true, root_binding_path)
-        .await
-        .map(|_| ())
-}
-
-#[cfg(feature = "codex-compat")]
-async fn resolve_root_launch_mode(
-    resume: bool,
-    binding_path: &Path,
-) -> Result<InteractiveLaunchMode, Box<dyn std::error::Error>> {
-    if !resume {
-        return Ok(InteractiveLaunchMode::Fresh);
-    }
-    read_interactive_binding(binding_path)
-        .await
-        .map(|thread| InteractiveLaunchMode::Resume(thread.id().clone()))
-        .map_err(|error| {
-            runtime_error(format!(
-                "cannot resume the requested root conversation from {}: {error}",
-                binding_path.display()
-            ))
-        })
-}
-
-#[cfg(feature = "codex-compat")]
-fn clear_fresh_root_binding(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    match std::fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(runtime_error(format!(
-            "cannot clear stale root conversation binding {}: {error}",
-            path.display()
-        ))),
-    }
-}
-
 fn settle_host_result(
     result: Result<(), Box<dyn std::error::Error>>,
     options: &HostOptions,
@@ -2180,15 +1753,6 @@ async fn preflight(workspace: &Path) -> Result<(), Box<dyn std::error::Error>> {
             "{error}. Launch through `just exomonad-console` or `just exomonad-init` for the matched local toolchain."
         ))
     })?;
-
-    #[cfg(feature = "codex-compat")]
-    {
-        // Codex keys its interactive trust decision by the path visible inside
-        // its process. Every actor gets an isolated repository mounted at this one
-        // stable slot, so this creates one durable entry rather than one per run.
-        std::fs::create_dir_all(ACTOR_PROJECT_ROOT)?;
-        exomonad_agent::trust_interactive_project(Path::new(ACTOR_PROJECT_ROOT))?;
-    }
 
     #[allow(
         clippy::disallowed_methods,
@@ -2703,46 +2267,17 @@ mod tests {
         let run = directory.path().join("run");
         let selected = super::retain_run_executable(&run, "runner", &source).unwrap();
         std::fs::remove_dir_all(target).unwrap();
-        assert!(
-            std::process::Command::new(selected)
-                .status()
-                .unwrap()
-                .success()
-        );
+        assert!(std::process::Command::new(selected)
+            .status()
+            .unwrap()
+            .success());
         assert!(run.join("bin/runner.blake3").is_file());
     }
 
     use super::*;
 
     #[test]
-    fn embedded_private_launch_accepts_no_codex_installation() {
-        assert!(matches!(
-            HostBackendOptions::from_parts(ExomonadBackend::Embedded, None, None).unwrap(),
-            HostBackendOptions::Embedded
-        ));
-        assert!(
-            HostBackendOptions::from_parts(
-                ExomonadBackend::Embedded,
-                Some(PathBuf::from("/unused/codex")),
-                Some("unused".into()),
-            )
-            .is_err()
-        );
-    }
-
-    #[cfg(not(feature = "codex-compat"))]
     #[test]
-    fn no_compat_build_rejects_codex_private_launch_request() {
-        let error = HostBackendOptions::from_parts(ExomonadBackend::Codex, None, None)
-            .err()
-            .expect("Codex request must be rejected without codex-compat");
-        assert!(
-            error
-                .to_string()
-                .contains("does not include the codex-compat feature")
-        );
-    }
-
     #[test]
     fn launch_host_filesystem_configuration_is_optional_and_validated() {
         let omitted: LaunchConfig = toml::from_str("").unwrap();
@@ -2850,12 +2385,10 @@ mod tests {
         let direct: EmbeddedLaunchConfig =
             toml::from_str(&format!("{config}public_origin_scheme = 'http'\n")).unwrap();
         assert_eq!(direct.public_origin_scheme.as_str(), "http");
-        assert!(
-            toml::from_str::<EmbeddedLaunchConfig>(&format!(
-                "{config}public_origin_scheme = 'ftp'\n"
-            ))
-            .is_err()
-        );
+        assert!(toml::from_str::<EmbeddedLaunchConfig>(&format!(
+            "{config}public_origin_scheme = 'ftp'\n"
+        ))
+        .is_err());
     }
 
     #[test]
@@ -2865,13 +2398,11 @@ mod tests {
                 "listen = '{listen}'\nasset_root = '/tmp/assets'\nsession_secret_file = '/tmp/secret'\ncredential_file = '/tmp/auth'\ncontext_capacity_tokens = 4096\n"
             ))
             .unwrap();
-            assert!(
-                config
-                    .validate()
-                    .unwrap_err()
-                    .to_string()
-                    .contains("tailscale0")
-            );
+            assert!(config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("tailscale0"));
         }
     }
 
@@ -2913,12 +2444,10 @@ mod tests {
             .unwrap();
             assert_eq!(config.defaults.effort, effort);
         }
-        assert!(
-            toml::from_str::<ExomonadConfig>(
-                "[defaults]\nmodel = \"test\"\neffort = \"invalid\"\n"
-            )
-            .is_err()
-        );
+        assert!(toml::from_str::<ExomonadConfig>(
+            "[defaults]\nmodel = \"test\"\neffort = \"invalid\"\n"
+        )
+        .is_err());
     }
 
     /// A lock step that produces what `nix flake lock` would, so scaffolding
@@ -3453,12 +2982,10 @@ mod tests {
             "depth = 3",
         ] {
             std::fs::write(&path, format!("{base}\n[research]\n{invalid}\n")).unwrap();
-            assert!(
-                read_project_config(workspace.path())
-                    .unwrap_err()
-                    .to_string()
-                    .contains("invalid Exomonad configuration")
-            );
+            assert!(read_project_config(workspace.path())
+                .unwrap_err()
+                .to_string()
+                .contains("invalid Exomonad configuration"));
         }
     }
 
@@ -3480,12 +3007,10 @@ mod tests {
             .unwrap();
         };
         write_config("tracked");
-        assert!(
-            read_project_config(repo.path())
-                .unwrap_err()
-                .to_string()
-                .contains("contains tracked source")
-        );
+        assert!(read_project_config(repo.path())
+            .unwrap_err()
+            .to_string()
+            .contains("contains tracked source"));
         write_config("scratch");
         assert_eq!(
             read_project_config(repo.path())
@@ -3766,7 +3291,7 @@ mod tests {
             RunPhase::AwaitingBinding { root_actor },
             RunPhase::Ready {
                 root_actor,
-                root_thread: BackendThreadId("thread".into()),
+                root_thread: "thread".into(),
             },
         ] {
             let status = RunStatus::new(
@@ -3807,12 +3332,10 @@ mod tests {
             "session": "exomonad-work",
             "phase": {"state": "awaiting_input", "root_actor": root_actor},
         });
-        assert!(
-            decode_run_status(&serde_json::to_vec(&old).unwrap())
-                .unwrap_err()
-                .to_string()
-                .contains("unsupported Exomonad run status version 3")
-        );
+        assert!(decode_run_status(&serde_json::to_vec(&old).unwrap())
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported Exomonad run status version 3"));
     }
 
     #[test]
@@ -3996,31 +3519,23 @@ mod tests {
             log_path,
             &configured.compiler,
         );
-        assert!(
-            configured_launch
-                .args
-                .windows(2)
-                .any(|pair| pair == ["--workers", "2"])
-        );
-        assert!(
-            configured_launch
-                .args
-                .windows(2)
-                .any(|pair| pair == ["--rss-ceiling-mb", "10240"])
-        );
+        assert!(configured_launch
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--workers", "2"]));
+        assert!(configured_launch
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--rss-ceiling-mb", "10240"]));
         for setting in ["workers = 0", "rss_ceiling_mb = 0", "unknown = 2"] {
-            assert!(
-                toml::from_str::<ExomonadConfig>(&format!(
-                    "[defaults]\nmodel = \"test\"\n[compiler]\n{setting}\n"
-                ))
-                .is_err()
-            );
+            assert!(toml::from_str::<ExomonadConfig>(&format!(
+                "[defaults]\nmodel = \"test\"\n[compiler]\n{setting}\n"
+            ))
+            .is_err());
         }
-        assert!(
-            !launch
-                .environment
-                .contains_key(tidepool_extract_cmd::DAEMON_SOCKET_ENV)
-        );
+        assert!(!launch
+            .environment
+            .contains_key(tidepool_extract_cmd::DAEMON_SOCKET_ENV));
         assert_eq!(
             host_environment(socket)
                 .get(tidepool_extract_cmd::DAEMON_SOCKET_ENV)
@@ -4040,222 +3555,16 @@ mod tests {
     }
 
     #[test]
-    fn competing_backend_initializers_keep_one_selection() {
+    fn retired_backend_refuses_execution_without_rewriting_history() {
         let root = tempfile::tempdir().unwrap();
-        let barrier = std::sync::Barrier::new(2);
-        let (codex, embedded) = std::thread::scope(|threads| {
-            let codex = threads.spawn(|| {
-                barrier.wait();
-                record_run_backend(root.path(), "run-1", ExomonadBackend::Codex).is_ok()
-            });
-            let embedded = threads.spawn(|| {
-                barrier.wait();
-                record_run_backend(root.path(), "run-1", ExomonadBackend::Embedded).is_ok()
-            });
-            (codex.join().unwrap(), embedded.join().unwrap())
-        });
-        assert_ne!(codex, embedded);
-        let record: RunBackendRecord =
-            serde_json::from_slice(&std::fs::read(root.path().join("backend.json")).unwrap())
-                .unwrap();
-        assert_eq!(record.run_id, "run-1");
-        assert_eq!(
-            record.backend,
-            if codex {
-                ExomonadBackend::Codex
-            } else {
-                ExomonadBackend::Embedded
-            }
-        );
-    }
-
-    #[cfg(feature = "codex-compat")]
-    #[test]
-    fn host_failure_publishes_its_exact_terminal_diagnostic() {
-        let root = tempfile::tempdir().unwrap();
-        let status_path = root.path().join("status.json");
-        let options = HostOptions {
-            workspace: root.path().into(),
-            session: "exomonad-test".into(),
-            run_id: "run-failed".into(),
-            run_root: root.path().join("run"),
-            status_path: status_path.clone(),
-            root_binding_path: root.path().join("binding.json"),
-            backend: HostBackendOptions::Codex(
-                exomonad_agent::native_interactive_agent_from_parts(
-                    std::env::current_exe().unwrap(),
-                    "test installation".into(),
-                )
-                .unwrap(),
-            ),
-            resume_root: false,
-            agent: test_agent_defaults(),
-        };
-        let mut recovering = RunStatus::new(
-            "run-failed",
-            root.path(),
-            "exomonad-test",
-            test_agent_defaults(),
-            RunPhase::Recovering {
-                stage: RecoveryStage::RestoringActors,
-                restored_source: Some("source-revision".into()),
-            },
-        )
-        .at_generation(7);
-        recovering.lost_state = recovery_lost_state(7);
-        recovering.resource_service.healthy = Some(false);
-        recovering.resource_service.detail = Some("resource observation unavailable".into());
-        write_status(&status_path, &recovering).unwrap();
-        let result = settle_host_result(Err(runtime_error("compile exploded")), &options, 7);
-        assert!(result.is_err());
-        let status: RunStatus =
-            serde_json::from_slice(&std::fs::read(status_path).unwrap()).unwrap();
-        assert_eq!(
-            status.phase,
-            RunPhase::Failed {
-                error: "compile exploded".into()
-            }
-        );
-        assert_eq!(status.host_generation, 7);
-        assert_eq!(status.lost_state, recovering.lost_state);
-        assert_eq!(status.resource_service, recovering.resource_service);
-    }
-
-    #[cfg(feature = "codex-compat")]
-    #[tokio::test]
-    async fn requested_resume_fails_closed_without_a_valid_retained_binding() {
-        let root = tempfile::tempdir().unwrap();
-        let missing = root.path().join("missing-binding.json");
-        let error = resolve_root_launch_mode(true, &missing)
-            .await
-            .expect_err("resume must not silently become fresh");
-        assert!(
-            error
-                .to_string()
-                .contains("cannot resume the requested root conversation")
-        );
-        assert_eq!(
-            resolve_root_launch_mode(false, &missing).await.unwrap(),
-            InteractiveLaunchMode::Fresh
-        );
-
-        let legacy = root.path().join("v3-binding.json");
-        tokio::fs::write(
-            &legacy,
-            r#"{"version":3,"thread":"01a05a16-97f5-7722-aa8d-467e01e2e5b4"}"#,
-        )
-        .await
-        .unwrap();
-        let error = resolve_root_launch_mode(true, &legacy)
-            .await
-            .expect_err("v3 cannot certify queue readiness");
-        assert!(error.to_string().contains("start a fresh Exomonad root"));
-    }
-
-    #[cfg(feature = "codex-compat")]
-    #[test]
-    fn fresh_launch_discards_a_previous_runs_conversation_binding() {
-        let root = tempfile::tempdir().unwrap();
-        let binding = root.path().join("root-binding.json");
-        std::fs::write(&binding, "stale").unwrap();
-
-        clear_fresh_root_binding(&binding).unwrap();
-        assert!(!binding.exists());
-        clear_fresh_root_binding(&binding).unwrap();
-    }
-
-    #[cfg(feature = "codex-compat")]
-    #[tokio::test]
-    async fn a_later_generation_with_no_recovered_binding_starts_fresh_instead_of_looping() {
-        // Regression for the observed failure: generation 1 fails before its
-        // root ever reaches queue-readiness, systemd restarts it, and every
-        // later generation used to force a resume against a file that was
-        // never written — a permanent "cannot prove a resumable root" loop.
-        let root = tempfile::tempdir().unwrap();
-        let root_binding_path = root.path().join("session-binding.json");
-        let recovered_binding = root.path().join("run-binding.json");
-        assert!(!recovered_binding.exists());
-
-        let mode = root_launch_mode_for_generation(
-            2,
-            /* resume_root (from the original launch args) */ true,
-            &root_binding_path,
-            &recovered_binding,
-        )
-        .await
-        .expect("a generation with nothing recorded to resume must not fail");
-        assert_eq!(mode, InteractiveLaunchMode::Fresh);
-    }
-
-    #[cfg(feature = "codex-compat")]
-    #[tokio::test]
-    async fn a_later_generation_resumes_the_recovered_binding_when_one_was_written() {
-        let root = tempfile::tempdir().unwrap();
-        let root_binding_path = root.path().join("session-binding.json");
-        let recovered_binding = root.path().join("run-binding.json");
-        let thread = BackendThreadId("019fe92a-1a66-7820-9481-c0a2d108aba1".into());
-        exomonad_agent::accept_interactive_session_binding(
-            &recovered_binding,
-            exomonad_agent::HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION,
-            thread.clone(),
-            None,
-        )
-        .await
-        .unwrap();
-
-        let mode =
-            root_launch_mode_for_generation(3, false, &root_binding_path, &recovered_binding)
-                .await
-                .unwrap();
-        assert_eq!(mode, InteractiveLaunchMode::Resume(thread));
-    }
-
-    #[cfg(feature = "codex-compat")]
-    #[tokio::test]
-    async fn the_first_generation_ignores_the_recovered_binding_and_follows_resume_root() {
-        let root = tempfile::tempdir().unwrap();
-        let root_binding_path = root.path().join("session-binding.json");
-        let recovered_binding = root.path().join("run-binding.json");
-
-        let mode =
-            root_launch_mode_for_generation(1, false, &root_binding_path, &recovered_binding)
-                .await
-                .unwrap();
-        assert_eq!(mode, InteractiveLaunchMode::Fresh);
-    }
-
-    #[cfg(feature = "codex-compat")]
-    #[tokio::test]
-    async fn recreate_on_a_session_that_never_bound_a_root_starts_fresh_instead_of_failing() {
-        // Regression: `exomonad init --recreate` on a session whose first
-        // launch failed before the root ever bound used to unconditionally
-        // validate a resume against a binding file that was never written,
-        // failing with "cannot resume the requested root conversation ...
-        // No such file or directory" instead of starting clean.
-        let root = tempfile::tempdir().unwrap();
-        let root_binding_path = root.path().join("root-binding.json");
-        assert!(!root_binding_path.exists());
-
-        validate_recreate_continuity(&root_binding_path)
-            .await
-            .expect("a session with nothing ever bound must not fail closed");
-    }
-
-    #[cfg(feature = "codex-compat")]
-    #[tokio::test]
-    async fn recreate_on_a_session_with_an_unreadable_binding_still_fails_closed() {
-        let root = tempfile::tempdir().unwrap();
-        let root_binding_path = root.path().join("root-binding.json");
-        std::fs::write(&root_binding_path, "not a valid binding").unwrap();
-
-        let error = validate_recreate_continuity(&root_binding_path)
-            .await
-            .expect_err("a present but corrupt binding must still fail closed");
-        assert!(
-            error
-                .to_string()
-                .contains("cannot resume the requested root conversation")
-        );
+        let path = root.path().join("backend.json");
+        let original = br#"{"version":1,"run_id":"run-1","backend":"codex"}"#;
+        std::fs::write(&path, original).unwrap();
+        let error =
+            verify_run_backend(root.path(), "run-1", ExomonadBackend::Embedded).unwrap_err();
+        assert!(error.to_string().contains("Codex backend is retired"));
+        assert!(record_run_backend(root.path(), "run-1", ExomonadBackend::Embedded).is_err());
+        assert_eq!(std::fs::read(path).unwrap(), original);
     }
 
     #[cfg(unix)]
@@ -4284,37 +3593,5 @@ mod tests {
             let result = stop_host_unit(&executable, "exomonad-host-test.service").await;
             assert_eq!(result.is_ok(), allowed, "{properties}: {result:?}");
         }
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    #[cfg(feature = "codex-compat")]
-    async fn packaged_interactive_agent_gets_a_replaceable_project_gc_root() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let workspace = tempfile::tempdir().unwrap();
-        let first = tempfile::tempdir().unwrap();
-        let second = tempfile::tempdir().unwrap();
-        let fake_nix_store = workspace.path().join("nix-store");
-        std::fs::write(&fake_nix_store, "#!/bin/sh\nln -sfn \"$2\" \"$4\"\n").unwrap();
-        std::fs::set_permissions(&fake_nix_store, std::fs::Permissions::from_mode(0o700)).unwrap();
-        retain_packaged_interactive_agent_from(
-            workspace.path(),
-            Some(first.path().to_path_buf()),
-            Some(fake_nix_store.clone()),
-        )
-        .await
-        .unwrap();
-        let link = workspace.path().join(".exomonad/runtime/interactive-agent");
-        assert_eq!(std::fs::read_link(&link).unwrap(), first.path());
-
-        retain_packaged_interactive_agent_from(
-            workspace.path(),
-            Some(second.path().to_path_buf()),
-            Some(fake_nix_store),
-        )
-        .await
-        .unwrap();
-        assert_eq!(std::fs::read_link(link).unwrap(), second.path());
     }
 }

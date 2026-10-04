@@ -30,7 +30,7 @@
 -- releases its handles — its pending suspensions are discarded as a
 -- mechanism, not as bookkeeping.  Cancelling a terminal thread is a no-op,
 -- not an error.  IN-FLIGHT EXTERNAL work (a running agent turn) is not
--- cancelled here; it settles through the Subagent cycle's own typed terminal
+-- cancelled here; its owner settles its typed terminal
 -- states, and 'cancel' drops the thread that was awaiting it.
 --
 -- == Results cross in-heap

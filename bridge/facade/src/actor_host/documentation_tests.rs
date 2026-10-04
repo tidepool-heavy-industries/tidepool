@@ -2723,7 +2723,6 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     assert_eq!(reviewer.instructions.as_deref(), Some(review_instructions));
     let launched = super::developer_instructions_selected(
         &reviewer.effective_role,
-        &exomonad_agent::InteractiveLaunchMode::Fresh,
         None,
         reviewer.instructions.as_deref(),
     );

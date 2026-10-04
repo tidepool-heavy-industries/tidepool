@@ -16,7 +16,7 @@ async fn notebook_failed_cells_preserve_completed_native_prefix() {
     let campaign = TestCampaign::start_with_config(
         exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
-        |config| config.backend = crate::exomonad::HostBackendOptions::Embedded,
+        |_| {},
     )
     .await;
     let policy = campaign.root_installation.policy.as_ref();

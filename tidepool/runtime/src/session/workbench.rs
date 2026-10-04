@@ -1303,7 +1303,6 @@ pub fn resident_workbench_templates(
                 effect_stack,
                 "{{TURN_STMT}}",
                 "({{BINDERS}})",
-                false,
             ),
         },
         TurnTemplate {
@@ -1315,7 +1314,6 @@ pub fn resident_workbench_templates(
                 effect_stack,
                 "{{TURN_STMT}}",
                 "()",
-                false,
             ),
         },
         TurnTemplate {

@@ -116,7 +116,7 @@ fn configuration(root: &Path) -> ActorHostConfig {
         workspace: root.join("project"),
         run_root: root.join("run"),
         root_binding_path: root.join("root-binding.json"),
-        backend: crate::exomonad::HostBackendOptions::Embedded,
+
         embedded: Some(crate::exomonad::EmbeddedLaunchConfig {
             listen: "127.0.0.1:0".parse().unwrap(),
             public_origin_scheme: crate::exomonad::EmbeddedPublicOriginScheme::Http,
@@ -131,9 +131,9 @@ fn configuration(root: &Path) -> ActorHostConfig {
         }),
         tmux_session: "unused-for-embedded-recovery".into(),
         model: "test-model".into(),
-        effort: ReasoningEffort::Low,
+        effort: ForkEffort::Low,
         research_policy: exomonad_actor::ResearchPolicy::default(),
-        root_launch_mode: InteractiveLaunchMode::Fresh,
+
         pane_environment: BTreeMap::new(),
         jev: Some(exomonad_actor::unconfigured_jev()),
     }

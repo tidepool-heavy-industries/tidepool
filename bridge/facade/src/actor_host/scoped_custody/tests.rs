@@ -5,6 +5,7 @@ use exomonad_node::{
     run_process_supervisor, LaunchReservation, ProcessInvocation, ProcessMountBoundary,
     ProcessSupervisorClient, ProcessSupervisorManifest,
 };
+use exomonad_worktree::WorktreeHandle;
 
 struct Fixture {
     _repo: exomonad_worktree::testing::TestRepo,
@@ -143,7 +144,6 @@ impl Fixture {
         owners.lock().insert(
             self.custody.actor,
             InteractiveApplicationOwner {
-                supervisor: None,
                 creator_workspace: None,
                 cancel: None,
                 native_retirement: Default::default(),
@@ -153,8 +153,6 @@ impl Fixture {
                 scoped_retention: None,
                 hosted: Arc::new(Mutex::new(None)),
                 embedded_policy: None,
-                launch: HostLaunchState::Pending,
-                pending_activations: Vec::new(),
                 embedded: None,
                 terminal: None,
                 retirement: Arc::new(Mutex::new(None)),
@@ -171,7 +169,7 @@ impl Fixture {
             .lock()
             .get_mut(&self.custody.actor)
             .unwrap()
-            .reserve_scope(ActorWorkspaceRequest::Worktree("bound"), actor)
+            .reserve_scoped_process(actor)
     }
 
     fn spawn(&self, owners: &InteractiveOwners) -> Arc<Mutex<ScopedProcessSlot>> {
@@ -636,10 +634,7 @@ fn scoped_custody_concurrent_claim_sibling_timeout_and_legacy_fence() {
         map.lock()
             .get_mut(&second.custody.actor)
             .unwrap()
-            .reserve_scope(
-                ActorWorkspaceRequest::Worktree("bound"),
-                first.custody.actor
-            ),
+            .reserve_scoped_process(first.custody.actor),
         Err(ScopedClaimError::WrongActor)
     ));
     spawn_into(

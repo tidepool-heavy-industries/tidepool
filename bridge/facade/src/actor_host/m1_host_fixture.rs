@@ -194,7 +194,6 @@ impl RunningBrowserHost {
             exomonad_actor::ResearchPolicy::default(),
             |admission| admission,
             |config| {
-                config.backend = crate::exomonad::HostBackendOptions::Embedded;
                 config.embedded = Some(settings.clone());
                 configure(config);
             },
@@ -251,61 +250,19 @@ impl RunningBrowserHost {
         let (shutdown, shutdown_rx) = watch::channel(None);
         let (config_tx, config_rx) = watch::channel(campaign.config.clone());
         let host_graph_forest = Arc::clone(&campaign.forest);
-        #[cfg(feature = "codex-compat")]
-        let tmux = match TmuxSession::new(&campaign.config.tmux_session) {
-            Ok(tmux) => tmux,
-            Err(error) => {
-                let mut errors = vec![format!("prepare embedded host tmux state: {error}")];
-                if let Err(error) = service.shutdown().await {
-                    errors.push(format!("stop embedded service: {error}"));
-                }
-                finish_campaign(&mut campaign, &mut errors).await;
-                return Err(errors.join("; "));
-            }
-        };
-        #[cfg(feature = "codex-compat")]
-        let actor_recovery = match exomonad_actor::ActorRecoveryJournal::open(
-            campaign.config.run_root.join("actor-lifecycle.v2.jsonl"),
-        ) {
-            Ok(journal) => journal,
-            Err(error) => {
-                let mut errors = vec![format!("open actor recovery journal: {error}")];
-                if let Err(error) = service.shutdown().await {
-                    errors.push(format!("stop embedded service: {error}"));
-                }
-                finish_campaign(&mut campaign, &mut errors).await;
-                return Err(errors.join("; "));
-            }
-        };
+
         let fleet = InteractiveFleet {
             provider_forest: Arc::clone(&campaign.forest),
             root: campaign.actor.clone(),
             config: campaign.config.clone(),
             run_root: campaign.config.run_root.clone(),
             output_store: service.runtime.store(),
-            #[cfg(feature = "codex-compat")]
-            tmux,
-            #[cfg(feature = "codex-compat")]
-            backend: HostRuntimeMode::Embedded,
+
             worktrees: campaign.worktrees.clone(),
-            #[cfg(feature = "codex-compat")]
-            bindings: campaign.bindings.clone(),
+
             readiness: readiness_tx,
             worktree_authority: campaign.authority.clone(),
-            #[cfg(feature = "codex-compat")]
-            watch_retention: Arc::new(|_, _| false),
-            #[cfg(feature = "codex-compat")]
-            watch_observation: Arc::new(|_, _, _| false),
-            #[cfg(feature = "codex-compat")]
-            open_request: Arc::new(|_| None),
-            #[cfg(feature = "codex-compat")]
-            source_layers: None,
-            #[cfg(feature = "codex-compat")]
-            actor_recovery,
-            #[cfg(feature = "codex-compat")]
-            recovered_threads: Arc::new(BTreeMap::new()),
-            #[cfg(feature = "codex-compat")]
-            recovered_root_predecessor: None,
+
             host_graph: Arc::new(move || host_graph_forest.inspect_host_graph()),
         };
         let deployments = campaign.take_deployments();

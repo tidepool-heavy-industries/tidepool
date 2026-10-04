@@ -329,13 +329,13 @@ async fn cell_model_policy_matches_admitted_embedded_alias_and_effort() {
         haskell_root: Default::default(),
         run_root: Default::default(),
         root_binding_path: Default::default(),
-        backend: crate::exomonad::HostBackendOptions::Embedded,
+
         embedded: None,
         tmux_session: String::new(),
         model: "default-model".into(),
-        effort: exomonad_agent::ReasoningEffort::Medium,
+        effort: exomonad_actor::ForkEffort::Medium,
         research_policy: Default::default(),
-        root_launch_mode: exomonad_agent::InteractiveLaunchMode::Fresh,
+
         pane_environment: Default::default(),
         jev: None,
     };
@@ -363,14 +363,10 @@ async fn cell_model_policy_matches_admitted_embedded_alias_and_effort() {
     );
     assert!(matches!(
         (
-            super::super::launch_effort(
-                &exomonad_agent::InteractiveLaunchMode::Fresh,
-                config.effort,
-                descriptor.fork_effort()
-            ),
+            descriptor.fork_effort().unwrap_or(config.effort),
             policy.default_effort
         ),
-        (exomonad_agent::ReasoningEffort::Medium, Effort::Medium)
+        (exomonad_actor::ForkEffort::Medium, Effort::Medium)
     ));
     assert_eq!(policy.efforts, [Effort::Medium]);
     let binding = factory.bind(

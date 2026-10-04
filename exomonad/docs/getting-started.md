@@ -11,9 +11,7 @@ tmux. The embedded backend serves the root conversation in a browser and calls
 the selected provider through the harness. The default `codex` provider reads
 an existing Codex credential file; authenticate that account before model
 work. The `chatgpt_plan` provider has its own Exomonad credential setup, shown
-below. The Codex compatibility backend uses the pinned Tidepool fork of the
-client. For Jev, set `TYPESAFE_API_KEY` before launching when the workspace uses
-Jev.
+below.
 
 Agents run shell commands as you. Read
 [what Exomonad does not protect you from](../README.md#what-it-does-not-protect-you-from)
@@ -53,14 +51,9 @@ for setup and coverage details. If the revision has no cached outputs, Nix
 builds the GHC-side and Rust-side inputs from source. Nix reuses outputs for
 identical inputs, while a source edit creates a new input hash and does not
 reuse this checkout's Cabal and Cargo incremental outputs. The wrapper selects
-the matched extractor and client itself; it does not replace `codex` on your
-`PATH`.
+the matched extractor and native Harness runtime. Stock `codex` remains a
+separately installed tool.
 
-For Codex compatibility, the matched package uses its `local` Cargo profile:
-no LTO, no debug information, and unoptimized code with release runtime semantics. This reduces
-compiler memory and build work; runtime throughput may be lower than a release
-build. An optimized distribution build remains available with
-`nix build ./vendor/codex#codex-rs-release`.
 
 ## `exomonad new`: write a workspace
 
@@ -245,8 +238,7 @@ discovers live sessions in both roots and refuses an ambiguous session name.
 The host is a restart-bounded per-run systemd user service. The tmux session has
 a `Host` window following that service and a `Compiler` window running the
 Haskell compile service. Embedded root and child conversations appear in the
-browser; they do not require Codex client processes. With the Codex compatibility
-backend, `exomonad-root` and child windows hold the clients instead.
+browser.
 
 | Option | Effect |
 |---|---|
@@ -303,9 +295,8 @@ Recovery requires version 5 records in `actor-lifecycle.v2.jsonl`, including
 its durable creation marker and atomic root startup intent. Older formats,
 including version 4 raw compiled-program hashes, are refused without rewriting
 their evidence. There is no automatic journal migration; renaming an old
-journal does not make its ownership evidence sufficient. Fresh launches of the
-deprecated Codex backend remain supported, but its recovery is refused because
-it does not record the required startup intent and bootstrap identity.
+journal does not make its ownership evidence sufficient. Historical Codex backend records are read-only diagnostic evidence; launches
+and recovery are refused without rewriting those records.
 Live Haskell values, requests, watches, and bindings are reported lost rather
 than reconstructed. Unresolved tool calls are not replayed automatically.
 

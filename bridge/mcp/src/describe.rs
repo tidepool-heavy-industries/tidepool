@@ -134,7 +134,7 @@ pub fn helper_name(helper: &str) -> Option<String> {
 
 /// Is `helper`'s rendered text tagged substrate — an implementation detail
 /// the extract layer needs (schema-building internals, private suspension
-/// helpers, Green's raw thread primitives, Subagent's raw wire helpers)
+/// helpers, Green's raw thread primitives)
 /// rather than a verb a
 /// model should reach for directly?
 ///
@@ -298,42 +298,15 @@ mod tests {
         assert!(index.contains("ask"), "index must still list ask: {index}");
     }
 
-    /// Green and Subagent are not in `standard_decls()` (neither is part of
-    /// the base stack), so the tests above never exercise them — but they
-    /// are exactly the dup-survey's items 2/4: raw substrate leaking beside
-    /// a safer authored wrapper. Assert the marker mechanism reaches them
-    /// too, without a second hand-maintained allowlist entry.
+    /// Opt-in Green declarations must also hide raw substrate helpers.
     #[test]
-    fn derived_index_excludes_green_and_subagent_raw_helpers() {
+    fn derived_index_excludes_green_raw_helpers() {
         let green = crate::green_decl();
         let green_index = describe_effect(&green);
         for name in ["asyncSpawn", "asyncJoinAny", "asyncStatus", "asyncCancel"] {
             assert!(
                 !green_index.contains(name),
                 "Green index must not advertise raw substrate helper {name}: {green_index}"
-            );
-        }
-
-        let subagent = crate::subagent_decl();
-        let subagent_index = describe_effect(&subagent);
-        for name in [
-            "spawnAgentRaw",
-            "agentBeginRaw",
-            "agentResumeRaw",
-            "agentSpawnAsyncRaw",
-            "agentAwaitRaw",
-            "agentCancelRaw",
-        ] {
-            assert!(
-                !subagent_index.contains(name),
-                "Subagent index must not advertise raw substrate helper {name}: {subagent_index}"
-            );
-        }
-        // The genuinely public pure helpers stay listed.
-        for name in ["spawnSpec", "spawnSpecIn", "renderBackendFailure"] {
-            assert!(
-                subagent_index.contains(name),
-                "Subagent index must still list public helper {name}: {subagent_index}"
             );
         }
     }

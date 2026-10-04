@@ -129,11 +129,10 @@ python3 build/rust/isolated-libtest.py "$FACADE_TEST_BINARY" \
   --expected-count 6 --jobs 1 --timeout 600
 ```
 
-Select these six tests from the native no-Codex test target. The
-historical `actor_host::tests::descendants_list_the_spawn_tree_and_drop_a_retired_leaf`
-is gated by `codex-compat` and is absent from that profile; a zero-match selection
-cannot establish descendant coverage. A fresh live recursive delegation smoke
-is separate from this finite deterministic cohort. Retain its actual descendant
+Select these six tests from the native host test target. The shared
+`actor_host::tests::descendants_list_the_spawn_tree_and_drop_a_retired_leaf`
+also covers creation-tree observation and leaf retirement. A fresh live recursive
+delegation smoke is separate from this finite deterministic cohort. Retain its actual descendant
 relationships, replies and cleanup evidence independently.
 
 Keep each test's actual outcome, nonzero executed count, elapsed boundaries and

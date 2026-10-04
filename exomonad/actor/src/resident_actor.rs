@@ -14513,12 +14513,7 @@ where
             .with_effective_role(role)
             .with_model(durable.model.clone().map(crate::Model::Literal))
             .with_instructions(durable.instructions.clone())
-            .with_fork_effort(durable.effort.as_deref().and_then(|effort| match effort {
-                "low" => Some(crate::ForkEffort::Low),
-                "medium" => Some(crate::ForkEffort::Medium),
-                "high" => Some(crate::ForkEffort::High),
-                _ => None,
-            }))
+            .with_fork_effort(durable.effort)
             .with_source_layer(durable.source_layer.clone());
         if let Some(creator) = durable.creator {
             descriptor = descriptor.with_creator(current(creator));

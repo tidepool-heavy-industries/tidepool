@@ -204,8 +204,6 @@ impl ModelFreeSession {
                 authority.clone(),
                 bindings.clone(),
                 runtime_namespace(session_root.path()),
-                #[cfg(feature = "codex-compat")]
-                None,
             ))),
             exomonad_actor::Incarnation::FIRST,
             Some(worker_launch_resolver(config)),

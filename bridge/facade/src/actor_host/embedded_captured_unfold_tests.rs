@@ -614,32 +614,12 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
         config: campaign.config.clone(),
         run_root: campaign.config.run_root.clone(),
         output_store: service.runtime.store(),
-        #[cfg(feature = "codex-compat")]
-        tmux: TmuxSession::new(&campaign.config.tmux_session).unwrap(),
-        #[cfg(feature = "codex-compat")]
-        backend: HostRuntimeMode::Embedded,
+
         worktrees: campaign.worktrees.clone(),
-        #[cfg(feature = "codex-compat")]
-        bindings: campaign.bindings.clone(),
+
         readiness: readiness_tx,
         worktree_authority: campaign.authority.clone(),
-        #[cfg(feature = "codex-compat")]
-        watch_retention: Arc::new(|_, _| false),
-        #[cfg(feature = "codex-compat")]
-        watch_observation: Arc::new(|_, _, _| false),
-        #[cfg(feature = "codex-compat")]
-        open_request: Arc::new(|_| None),
-        #[cfg(feature = "codex-compat")]
-        source_layers: None,
-        #[cfg(feature = "codex-compat")]
-        actor_recovery: exomonad_actor::ActorRecoveryJournal::open(
-            campaign.config.run_root.join("actor-lifecycle.v2.jsonl"),
-        )
-        .unwrap(),
-        #[cfg(feature = "codex-compat")]
-        recovered_threads: Arc::new(BTreeMap::new()),
-        #[cfg(feature = "codex-compat")]
-        recovered_root_predecessor: None,
+
         host_graph: {
             let forest = campaign.forest.clone();
             Arc::new(move || forest.inspect_host_graph())
@@ -1221,7 +1201,7 @@ async fn admitted_cell_late_type_error_has_no_effect_or_publication_on_retry() {
     let mut campaign = test_campaign::TestCampaign::start_with_config(
         exomonad_actor::ResearchPolicy::default(), |admission| admission,
         |config| {
-            config.backend = crate::exomonad::HostBackendOptions::Embedded;
+
             let authored = config.workspace.join(".exomonad");
             std::fs::create_dir_all(&authored).unwrap();
             std::fs::write(authored.join("AgentSpec.hs"), include_str!("embedded_bad_final_agent_spec.hs")).unwrap();

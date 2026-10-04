@@ -520,7 +520,6 @@ async fn host_cancellation_stops_a_real_running_haskell_cell() {
         exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |config| {
-            config.backend = crate::exomonad::HostBackendOptions::Embedded;
             config.embedded = Some(settings.clone());
         },
     )

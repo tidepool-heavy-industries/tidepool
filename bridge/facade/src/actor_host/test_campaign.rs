@@ -499,13 +499,13 @@ impl TestCampaign {
             workspace: repository.path().to_path_buf(),
             run_root: runtime.path().join("run"),
             root_binding_path: runtime.path().join("root-binding.json"),
-            backend: test_backend_options(),
+
             embedded: None,
             tmux_session: "unused-in-resident-test".into(),
             model: "test-model".into(),
-            effort: ReasoningEffort::Low,
+            effort: ForkEffort::Low,
             research_policy,
-            root_launch_mode: InteractiveLaunchMode::Fresh,
+
             pane_environment: BTreeMap::new(),
             jev: Some(exomonad_actor::unconfigured_jev()),
         };
@@ -514,7 +514,6 @@ impl TestCampaign {
             &root,
             CampaignRoot::EmbeddedHost | CampaignRoot::EmbeddedEngine { .. }
         ) {
-            config.backend = crate::exomonad::HostBackendOptions::Embedded;
             // Select the same lazy HostJev client as production. No configured
             // test backend or fabricated installation flag substitutes for it.
             config.jev = None;
@@ -595,23 +594,6 @@ impl TestCampaign {
             pending: std::collections::VecDeque::new(),
             root_installation,
         }
-    }
-}
-
-fn test_backend_options() -> crate::exomonad::HostBackendOptions {
-    #[cfg(feature = "codex-compat")]
-    {
-        crate::exomonad::HostBackendOptions::Codex(
-            exomonad_agent::native_interactive_agent_from_parts(
-                std::env::current_exe().unwrap(),
-                "test installation".into(),
-            )
-            .unwrap(),
-        )
-    }
-    #[cfg(not(feature = "codex-compat"))]
-    {
-        crate::exomonad::HostBackendOptions::Embedded
     }
 }
 

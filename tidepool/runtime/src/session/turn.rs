@@ -2039,14 +2039,13 @@ pub fn assemble_inspection_module(preamble: &str, imports: &str, expressions: &[
 /// ... }` binding, `stmt`
 /// (already placement-normalized via [`place_turn_stmt`], or a literal
 /// `{{TURN_STMT}}` marker for a caller building a [`TurnTemplate`]), and the
-/// ` ; pure <tail> }` closer — optionally wrapped in `runDelegate( ... )` at
-/// the result position for a delegate-scoped turn.
+/// ` ; pure <tail> }` closer.
 ///
 /// This is the ONE mechanism behind every BIND/BINDDISCARD/MULTIBIND session
 /// wrapper in both `tidepool-repl` (`wrap_bind_source`/
 /// `wrap_bind_discard_source`/`wrap_multi_bind_source`) and `exomonad-harness`
 /// (`template_session_bind`/`session_bind_template`) — those stay as each
-/// crate's own thin, policy-only callers (what `extra`/`tail`/`delegate_wrap`
+/// crate's own thin, policy-only callers (what `extra`/`tail`
 /// to pass), not a second copy of this assembly.
 pub fn assemble_bind_module(
     preamble_with_imports: &str,
@@ -2055,30 +2054,17 @@ pub fn assemble_bind_module(
     effect_stack: &str,
     stmt: &str,
     tail: &str,
-    delegate_wrap: bool,
 ) -> String {
     let mut out = with_resume_import(preamble_with_imports);
     out.push_str("-- [user]\n");
     out.push_str(extra);
-    if delegate_wrap {
-        out.push_str(&format!(
-            "__tidepoolInEffectRow :: Eff {effect_stack} value -> Eff {effect_stack} value\n\
-             __tidepoolInEffectRow = id\n\
-             {target} = __tidepoolInEffectRow (runDelegate (do {{\n"
-        ));
-    } else {
-        out.push_str(&format!("{target} = do {{\n"));
-    }
+    out.push_str(&format!("{target} = do {{\n"));
     out.push_str(stmt);
-    if delegate_wrap {
-        out.push_str(&format!(" ; pure {tail}\n }}))\n"));
-    } else {
-        // Pin only the effect row. Let GHC infer the result type so generated
-        // workbench scaffolding cannot manufacture a partial-signature warning.
-        out.push_str(&format!(
-            " ; _ <- (pure () :: Eff {effect_stack} ())\n ; pure {tail}\n }}\n"
-        ));
-    }
+    // Pin only the effect row. Let GHC infer the result type so generated
+    // workbench scaffolding cannot manufacture a partial-signature warning.
+    out.push_str(&format!(
+        " ; _ <- (pure () :: Eff {effect_stack} ())\n ; pure {tail}\n }}\n"
+    ));
     out.push_str(&prepared_scaffold_binding(target));
     out
 }
@@ -3106,7 +3092,6 @@ pub fn assemble_checked_activation_module(
         effect_stack,
         "{{TURN_STMT}}",
         "({{BINDERS}})",
-        false,
     );
     let scaffold = prepared_scaffold_binding("__result");
     let mut source = source

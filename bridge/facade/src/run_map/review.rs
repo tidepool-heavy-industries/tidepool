@@ -13,16 +13,8 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-/// Twice the input-control deadline: the same recovery grace period the
-/// host's delivery pump (`bridge/facade/src/actor_host.rs`,
-/// `WITHDRAW_WITHOUT_EVIDENCE_AFTER`) waits before it withdraws and re-fences
-/// a front row that native input control cannot confirm. An in-flight row
-/// younger than this is ordinary and renders `open`, matching
-/// `exomonad_actor::InboundDeliveryObservation`'s own status line
-/// (`runtime_observation::delivery_status_line`).
-pub const RECOVERY_GRACE_MS: u64 = exomonad_agent::INPUT_CONTROL_DEADLINE
-    .saturating_mul(2)
-    .as_millis() as u64;
+/// Historical Codex rows used a twenty-second reconciliation deadline.
+pub const RECOVERY_GRACE_MS: u64 = 40_000;
 
 /// Inputs a review reads beyond the run directory.
 #[derive(Debug, Clone)]
@@ -70,7 +62,7 @@ pub struct TreeNode {
     pub depth: usize,
     pub parent: Option<String>,
     pub label: String,
-    pub role: String,
+    pub role: exomonad_actor::ActorRole,
     pub model: Option<String>,
     pub effort: Option<String>,
     /// Whether the actor has its own provider session; inline forks do not.
@@ -501,9 +493,16 @@ fn tree(run: &Path, trace: Option<&TraceEvents>) -> Section<Vec<TreeNode>> {
                 depth: 0,
                 parent,
                 label: admission.label.clone(),
-                role: admission.role.clone(),
+                role: admission.role,
                 model: admission.model.clone(),
-                effort: admission.effort.clone(),
+                effort: admission.effort.map(|effort| {
+                    match effort {
+                        exomonad_actor::ForkEffort::Low => "low",
+                        exomonad_actor::ForkEffort::Medium => "medium",
+                        exomonad_actor::ForkEffort::High => "high",
+                    }
+                    .to_owned()
+                }),
                 own_session: record.application.is_some(),
                 thread: record
                     .application
@@ -881,8 +880,13 @@ fn read_host_inputs(
             id: exomonad_actor::ActorId(node.actor),
             incarnation: exomonad_actor::Incarnation(node.incarnation),
         };
-        let expected = crate::actor_host::input_producer_id(run, actor_ref, &inbox_key)
-            .map_err(|error| error.to_string())?;
+        let expected = format!(
+            "{}\0{}\0{}\0{}",
+            run.to_string_lossy(),
+            inbox_key,
+            actor_ref.id.0,
+            actor_ref.incarnation.0
+        );
         let entry = result.entry(actor).or_default();
         for row in rows {
             let (producer, sequence, state, updated) =
