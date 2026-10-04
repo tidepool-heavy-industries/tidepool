@@ -716,6 +716,19 @@ pub(crate) fn certify_same_offer_planned_declaration(
             "planned original sealed product has a different source digest",
         ));
     }
+    if selected
+        .module_interface()
+        .map(|interface| interface.origin())
+        != Some(
+            crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration {
+                generation: module.gen.0,
+            },
+        )
+    {
+        return Err(contract(
+            "planned original sealed product has a different declaration origin",
+        ));
+    }
     let (_scratch, artifacts, original_imports, source_lexical_imports, joined_interfaces) =
         admit_authored_artifact_closure(
             &products,

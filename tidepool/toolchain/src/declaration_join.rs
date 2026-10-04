@@ -174,6 +174,64 @@ pub struct CertifiedAuthoredDeclaration {
     source_lexical_imports: Vec<ExactLexicalNode>,
 }
 
+/// Reserved declaration source checked by its actual authored admission owner.
+/// Generic source compilation cannot infer this origin from module spelling.
+pub(crate) struct NativeAuthoredDeclarationAdmission {
+    owner: ExactModuleIdentity,
+    generation: u64,
+    source_path: PathBuf,
+    source_sha256: [u8; 32],
+}
+
+impl NativeAuthoredDeclarationAdmission {
+    pub(crate) fn from_planned(
+        module: &SessionModule,
+        source: &crate::declaration_context::ExactSourceAdmission,
+    ) -> Result<Self, CompileError> {
+        let owner = ExactModuleIdentity {
+            unit: "main".into(),
+            module: module.module_name(),
+        };
+        let mut matching = source
+            .evidence
+            .modules
+            .iter()
+            .filter(|row| row.unit == owner.unit && row.module == owner.module && !row.boot);
+        let selected = matching
+            .next()
+            .ok_or_else(|| contract("planned authored origin has no reserved source"))?;
+        if module.kind != SessionModuleKind::Lib
+            || module.gen.0 == 0
+            || matching.next().is_some()
+            || !selected.is_generated_source()
+            || selected.product != ProductAvailability::Ready
+        {
+            return Err(contract(
+                "planned authored origin differs from its reserved source",
+            ));
+        }
+        Ok(Self {
+            owner,
+            generation: module.gen.0,
+            source_path: source.witness.source_path().to_owned(),
+            source_sha256: *source.witness.source_sha256(),
+        })
+    }
+
+    pub(crate) fn owner(&self) -> &ExactModuleIdentity {
+        &self.owner
+    }
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
+    pub(crate) fn source_path(&self) -> &Path {
+        &self.source_path
+    }
+    pub(crate) fn source_sha256(&self) -> [u8; 32] {
+        self.source_sha256
+    }
+}
+
 /// Shared source selection derived from one immutable original certificate.
 /// Session implementations remain dependencies, without selecting their names.
 pub struct OriginalSourceLexicalSurface {
@@ -581,6 +639,15 @@ fn certify_authored_declaration_inner(
         return Err(contract("authored source changed before certification"));
     }
     let module_name = module.module_name();
+    let authored = NativeAuthoredDeclarationAdmission {
+        owner: ExactModuleIdentity {
+            unit: "main".into(),
+            module: module_name.clone(),
+        },
+        generation: module.gen.0,
+        source_path: source_path.to_owned(),
+        source_sha256,
+    };
     let probe = format!(
         "module {} where\nimport {module_name} ()\nauthoredProductProbe = (0 :: Int)\n",
         crate::artifacts::AUTHORED_PRODUCT_PROBE_MODULE,
@@ -591,6 +658,7 @@ fn certify_authored_declaration_inner(
         includes,
         session_root,
         context.clone(),
+        &authored,
     )?;
     if std::fs::read(source_path)? != exact_source.as_bytes() {
         return Err(contract("authored source changed during certification"));
@@ -649,6 +717,17 @@ fn certify_authored_declaration_inner(
         .expect("count checked");
     if selected.source_sha256() != Some(source_sha256) {
         return Err(contract("certified authored source digest differs"));
+    }
+    if selected
+        .module_interface()
+        .map(|interface| interface.origin())
+        != Some(
+            crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration {
+                generation: module.gen.0,
+            },
+        )
+    {
+        return Err(contract("certified authored declaration origin differs"));
     }
 
     let selected_owner = ExactModuleIdentity {
@@ -1946,6 +2025,10 @@ mod authored_tests {
         .unwrap();
         assert_eq!(result.product.owner().module, module.module_name());
         assert_eq!(result.product.source_sha256(), Some(result.source_sha256));
+        assert_eq!(
+            result.product.module_interface().unwrap().origin(),
+            crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration { generation: 1 }
+        );
         assert!(result.lexical_exports().is_empty());
         assert!(result.instances.classes.is_empty());
         assert!(result.instances.families.is_empty());

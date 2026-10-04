@@ -321,7 +321,7 @@ fn encode_scope_manifest(
     execution_scope: Option<Value>,
     authorization: Option<Value>,
 ) -> Result<Vec<u8>, CompileError> {
-    fields[1] = text("8");
+    fields[1] = text("9");
     fields.push(execution_scope.unwrap_or(Value::Null));
     fields.push(authorization.unwrap_or(Value::Null));
     let value = Value::Array(fields);
@@ -1779,6 +1779,16 @@ fn scope_interface_evidence(
         }
         _ => return Err(failure("interface evidence kind differs from payload")),
     };
+    if interface.unit() != entry.descriptor.owner.unit
+        || interface.module() != entry.descriptor.owner.module
+        || interface.producer_sha256() != entry.descriptor.producer_sha256
+        || interface.interface_sha256() != entry.descriptor.interface_sha256
+        || interface.package_imports_sha256() != entry.descriptor.package_imports_sha256
+    {
+        return Err(failure(
+            "module evidence differs from its selected artifact",
+        ));
+    }
     let reference = recovery_artifacts::materialize_module_interface(
         root,
         interface,
@@ -1787,7 +1797,12 @@ fn scope_interface_evidence(
     )
     .map_err(failure)?;
     Ok(Value::Array(vec![
-        text("module"),
+        text(match interface.origin() {
+            crate::certified_products::CanonicalOrigin::SourceOriginal => "module",
+            crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration { .. } => {
+                "native-declaration"
+            }
+        }),
         path_value(&root.join(reference.certificate_path))?,
         text(hex(&reference.certificate_sha256)),
         reference
@@ -3444,6 +3459,33 @@ mod tests {
         forged.descriptor.kind = ArtifactKind::CanonicalModuleInterface;
         assert!(scope_interface_evidence(
             &forged,
+            root.path(),
+            &mut PackageInterfaceValidation::default()
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn source_original_scope_role_is_not_inferred_from_native_module_spelling() {
+        let interface = crate::certified_products::fixture_module_interface(
+            [7; 32],
+            "main",
+            "Tidepool.Session.Lib.G1",
+            BTreeMap::new(),
+        );
+        let entry = ArtifactEntry::canonical(interface);
+        let root = tempfile::tempdir().unwrap();
+        let value = scope_interface_evidence(
+            &entry,
+            root.path(),
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap();
+        assert_eq!(value.as_array().unwrap()[0], text("module"));
+        let mut conflicting = entry;
+        conflicting.descriptor.owner.unit = "other".into();
+        assert!(scope_interface_evidence(
+            &conflicting,
             root.path(),
             &mut PackageInterfaceValidation::default()
         )
@@ -5439,7 +5481,7 @@ mod tests {
         ];
         let manifest = encode_scope_manifest(fields, Some(execution), None).unwrap();
         let decoded: Value = ciborium::de::from_reader(manifest.as_slice()).unwrap();
-        assert_eq!(decoded.as_array().unwrap()[1], text("8"));
+        assert_eq!(decoded.as_array().unwrap()[1], text("9"));
         std::fs::write(root.join("exact-declaration-scope.cbor"), manifest).unwrap();
         let missing = execution_scope_fixture(&entries[..1], &root)
             .unwrap()
@@ -5625,7 +5667,7 @@ mod tests {
         let value: Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
         let fields = value.as_array().unwrap();
         assert_eq!(fields.len(), 9);
-        assert_eq!(fields[1], text("8"));
+        assert_eq!(fields[1], text("9"));
         assert_eq!(fields[8], Value::Null);
         assert_eq!(
             fields[7].as_array().unwrap()[1].as_array().unwrap().len(),
@@ -5682,7 +5724,7 @@ mod tests {
         ]);
         for authorization in [None, Some(authorization)] {
             let mut expected = base.clone();
-            expected[1] = text("8");
+            expected[1] = text("9");
             expected.push(Value::Null);
             expected.push(authorization.clone().unwrap_or(Value::Null));
             let mut legacy = Vec::new();
@@ -5690,7 +5732,7 @@ mod tests {
             assert_eq!(
                 encode_scope_manifest(base.clone(), None, authorization.clone()).unwrap(),
                 legacy,
-                "v8 always retains explicit execution and purpose fields"
+                "v9 always retains explicit execution and purpose fields"
             );
             let overflow = Value::Array(vec![
                 Value::Bytes(vec![0; EXACT_SCOPE_BYTES_LIMIT - 32]),
@@ -5705,7 +5747,7 @@ mod tests {
                     .unwrap();
             let decoded: Value = ciborium::de::from_reader(with_recipe.as_slice()).unwrap();
             let decoded = decoded.as_array().unwrap();
-            assert_eq!(decoded[1], text("8"));
+            assert_eq!(decoded[1], text("9"));
             assert_eq!(decoded[8], authorization.unwrap_or(Value::Null));
         }
     }

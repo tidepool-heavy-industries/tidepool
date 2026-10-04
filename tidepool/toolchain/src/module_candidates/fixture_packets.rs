@@ -89,6 +89,7 @@ fn source_boot_candidate_packet_producer() {
             producer,
             &include,
             None,
+            None,
         )
         .unwrap();
         // Admit the complete interface closure before selecting any native
@@ -192,4 +193,79 @@ fn source_boot_candidate_packet_producer() {
     println!(
         "genuine fixture: Rust certification, full ArtifactView admission and production delivery passed"
     );
+}
+
+#[test]
+#[ignore = "requires a live matched authored-declaration fixture"]
+fn source_boot_authored_declaration_packet_producer() {
+    let packet = PathBuf::from(
+        std::env::var_os("TIDEPOOL_CANDIDATE_FIXTURE_PACKET").expect("authored fixture packet"),
+    );
+    assert!(packet.is_absolute());
+    let request = fs::read(packet.join("request.cbor")).unwrap();
+    assert!(request.len() <= MANIFEST_LIMIT);
+    let request: Value = ciborium::de::from_reader(request.as_slice()).unwrap();
+    let fields = request.as_array().expect("authored fixture request tuple");
+    assert_eq!(fields.len(), 5);
+    assert_eq!(text_field(&fields[0]), "TPSOURCEBOOTAUTHORED1");
+    let generation: u64 = fields[1]
+        .as_integer()
+        .expect("reserved generation")
+        .try_into()
+        .unwrap();
+    assert!(generation > 0);
+    let include = names(&fields[2])
+        .into_iter()
+        .map(PathBuf::from)
+        .collect::<Vec<_>>();
+    assert!(!include.is_empty() && include.iter().all(|path| path.is_absolute()));
+    let source_path = PathBuf::from(text_field(&fields[3]));
+    let destination = PathBuf::from(text_field(&fields[4]));
+    assert!(source_path.is_absolute() && destination.is_absolute());
+    let source = fs::read_to_string(&source_path).unwrap();
+    let module = tidepool_repr::SessionModule::lib(tidepool_repr::Generation(generation));
+    let (endpoint, _) = crate::toolchain::bind_extract_endpoint().unwrap();
+    assert_eq!(
+        std::env::var("TIDEPOOL_COMPILER_PRODUCER").expect("protected matched fixture producer"),
+        endpoint.identity().producer_hex()
+    );
+    let certificate = crate::declaration_join::certify_authored_declaration(
+        module,
+        &source_path,
+        &source,
+        &include,
+        &include[0],
+    )
+    .expect("actual reserved original declaration certification");
+    let context = ExactDeclarationContext::new(&[Arc::new(certificate)], &[], vec![]).unwrap();
+    let owner = ExactModuleIdentity {
+        unit: "main".into(),
+        module: module.module_name(),
+    };
+    let projected = context
+        .artifact_view()
+        .interface_projection(&[owner.clone()])
+        .unwrap();
+    let type_context = ExactDeclarationContext::new(&[], &[], vec![])
+        .unwrap()
+        .extend_interface_artifacts(&projected)
+        .unwrap();
+    assert!(type_context.recovery_products().is_empty());
+    assert!(type_context
+        .module_interfaces()
+        .iter()
+        .any(|interface| interface.unit() == owner.unit
+            && interface.module() == owner.module
+            && interface.origin()
+                == crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration {
+                    generation
+                }));
+    let scope = Arc::new(context)
+        .prepare_compilation(
+            destination.parent().unwrap(),
+            endpoint.identity().producer_bytes(),
+        )
+        .expect("production authored scope delivery with original carrier association");
+    fs::rename(scope.manifest, destination).unwrap();
+    println!("genuine authored fixture: reserved declaration certification, origin-preserving type-only projection and production scope delivery passed");
 }

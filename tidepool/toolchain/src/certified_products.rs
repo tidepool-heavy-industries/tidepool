@@ -14,7 +14,7 @@ use tidepool_repr::execution_schema::{
 };
 
 mod finalized_module;
-pub(crate) use finalized_module::CertifiedModuleInterface;
+pub(crate) use finalized_module::{CanonicalOrigin, CertifiedModuleInterface};
 pub use finalized_module::{
     CapturedArtifactDescriptor, FinalizationEnvelope, FinalizedModuleReceipt,
 };
@@ -3484,6 +3484,7 @@ pub(crate) fn certify_products(
     endpoint_identity: &[u8],
     include: &[PathBuf],
     exact: Option<&crate::declaration_context::ExactProductAdmission<'_>>,
+    authored: Option<&crate::declaration_join::NativeAuthoredDeclarationAdmission>,
 ) -> CertResult<CertifiedProducts> {
     receipt
         .finalization
@@ -3514,6 +3515,50 @@ pub(crate) fn certify_products(
     }
     if !final_evidence.valid(final_target_source) {
         return Err(CertificationError::StaleEvidence);
+    }
+    if let Some(admission) = authored {
+        let owner = admission.owner();
+        let rows = final_evidence
+            .modules
+            .iter()
+            .filter(|row| row.unit == owner.unit && row.module == owner.module && !row.boot)
+            .collect::<Vec<_>>();
+        let [node] = rows.as_slice() else {
+            return Err(CertificationError::Mismatch(
+                "reserved authored source owner",
+            ));
+        };
+        let products = receipt
+            .modules
+            .iter()
+            .filter(|row| row.unit == owner.unit && row.module == owner.module)
+            .collect::<Vec<_>>();
+        let [accepted] = products.as_slice() else {
+            return Err(CertificationError::Mismatch(
+                "reserved authored native owner",
+            ));
+        };
+        let source_matches = if node.is_generated_source() {
+            admission.source_path() == fresh_input_path
+        } else {
+            std::fs::canonicalize(&node.source)
+                .ok()
+                .zip(std::fs::canonicalize(admission.source_path()).ok())
+                .is_some_and(|(actual, expected)| actual == expected)
+        };
+        if !source_matches
+            || ready_source_sha(final_evidence, &owner.unit, &owner.module)?
+                != admission.source_sha256()
+            || accepted.origin != ProductOrigin::Fresh
+            || !receipt
+                .finalization
+                .modules
+                .contains_key(&(owner.unit.clone(), owner.module.clone()))
+        {
+            return Err(CertificationError::Mismatch(
+                "reserved authored source admission",
+            ));
+        }
     }
     crate::timing::record_stage(
         crate::timing::NO_NODE,
@@ -3883,6 +3928,7 @@ pub(crate) fn certify_products(
         producer_sha256,
         final_evidence,
         &inherited_seals,
+        authored,
         &mut validation,
     )?;
     let inherited_module_interfaces = exact
@@ -6811,6 +6857,7 @@ pub(crate) mod tests {
             &producer,
             &include,
             exact.as_ref(),
+            None,
         )
         .unwrap();
         let original_graph = original.recovery_products[0]
@@ -6870,6 +6917,7 @@ pub(crate) mod tests {
                 &producer,
                 &include,
                 None,
+                None,
             )
             .unwrap();
             let product = &fresh.recovery_products[0];
@@ -6893,6 +6941,7 @@ pub(crate) mod tests {
                 source,
                 &producer,
                 &include,
+                None,
                 None,
             )
             .unwrap();
@@ -6918,6 +6967,7 @@ pub(crate) mod tests {
                 source,
                 &producer,
                 &include,
+                None,
                 None,
             )
             .is_err());
@@ -6953,6 +7003,7 @@ pub(crate) mod tests {
             &producer,
             &include,
             exact.as_ref(),
+            None,
         )
         .unwrap();
         let mut stale_cached_receipt = cached_receipt.clone();
@@ -6968,6 +7019,7 @@ pub(crate) mod tests {
             &producer,
             &include,
             exact.as_ref(),
+            None,
         )
         .is_err());
         let restored = &cached.recovery_products[0];
@@ -7090,6 +7142,7 @@ pub(crate) mod tests {
                 &producer,
                 &include,
                 None,
+                None,
             )
             .unwrap();
             let mut offered_only = mixed.clone();
@@ -7107,6 +7160,7 @@ pub(crate) mod tests {
                     source,
                     &producer,
                     &include,
+                    None,
                     None,
                 ),
                 Err(CertificationError::FinalizedInterfaceRequirement {
@@ -7172,6 +7226,7 @@ pub(crate) mod tests {
                 source,
                 &producer,
                 &include,
+                None,
                 None,
             )
             .unwrap();
@@ -7249,6 +7304,7 @@ pub(crate) mod tests {
             source,
             &producer,
             &[directory.path().to_path_buf()],
+            None,
             None,
         )
         .unwrap();
@@ -7395,6 +7451,7 @@ pub(crate) mod tests {
                 b"producer",
                 &[],
                 None,
+                None,
             )
         };
         let certified = certify(&receipt).unwrap();
@@ -7466,6 +7523,7 @@ pub(crate) mod tests {
             b"producer",
             &[],
             None,
+            None,
         )
         .unwrap();
         assert!(certified.groups.is_empty());
@@ -7507,6 +7565,7 @@ pub(crate) mod tests {
                 b"producer",
                 &[],
                 None,
+                None,
             ),
             Err(CertificationError::Mismatch("fresh evidence bytes"))
         ));
@@ -7532,6 +7591,7 @@ pub(crate) mod tests {
                 b"producer",
                 &[],
                 None,
+                None,
             ),
             Err(CertificationError::Mismatch(
                 "product/iface/source/evidence digest"
@@ -7554,6 +7614,7 @@ pub(crate) mod tests {
             source,
             b"producer",
             &[],
+            None,
             None,
         )
         .is_err());

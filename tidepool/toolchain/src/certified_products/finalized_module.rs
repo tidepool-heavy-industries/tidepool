@@ -8,6 +8,46 @@ pub(crate) const FINALIZATION_PROFILE: &str = "tidepool-ghc-finalized-module-v1"
 const CORE_LIMIT: u64 = 32 << 20;
 const FINALIZATION_PAYLOAD_LIMIT: usize = 128 << 20;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CanonicalOrigin {
+    SourceOriginal,
+    NativeAuthoredDeclaration { generation: u64 },
+}
+
+impl CanonicalOrigin {
+    fn encode(self) -> Value {
+        match self {
+            Self::SourceOriginal => value_array([value_text("source-original")]),
+            Self::NativeAuthoredDeclaration { generation } => value_array([
+                value_text("native-authored-declaration"),
+                Value::Integer(generation.into()),
+            ]),
+        }
+    }
+
+    fn decode(value: &Value, owner: &FinalizedModuleReceipt) -> CertResult<Self> {
+        let row = array(value)?;
+        match row {
+            [tag] if string(tag)? == "source-original" => Ok(Self::SourceOriginal),
+            [tag, generation] if string(tag)? == "native-authored-declaration" => {
+                let generation = number(generation)?;
+                if generation == 0
+                    || owner.unit != "main"
+                    || owner.module
+                        != tidepool_repr::SessionModule::lib(tidepool_repr::Generation(generation))
+                            .module_name()
+                {
+                    return Err(CertificationError::Mismatch(
+                        "authored declaration origin identity",
+                    ));
+                }
+                Ok(Self::NativeAuthoredDeclaration { generation })
+            }
+            _ => Err(CertificationError::Receipt("finalized certificate origin")),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CapturedArtifactDescriptor {
     pub relative_path: PathBuf,
@@ -278,6 +318,7 @@ pub(crate) struct CertifiedModuleInterface {
     package_imports: Arc<[u8]>,
     certificate: Arc<[u8]>,
     core: Option<Arc<[u8]>>,
+    origin: CanonicalOrigin,
 }
 
 impl PartialEq for CertifiedModuleInterface {
@@ -294,6 +335,9 @@ impl PartialEq for CertifiedModuleInterface {
 impl Eq for CertifiedModuleInterface {}
 
 impl CertifiedModuleInterface {
+    pub(crate) fn origin(&self) -> CanonicalOrigin {
+        self.origin
+    }
     pub(crate) fn unit(&self) -> &str {
         &self.receipt.unit
     }
@@ -384,11 +428,12 @@ fn canonical_certificate(
     producer: [u8; 32],
     envelope: &FinalizationEnvelope,
     module: &FinalizedModuleReceipt,
+    origin: CanonicalOrigin,
 ) -> CertResult<Vec<u8>> {
     // Scratch paths and descriptor sizes are not durable semantic identity.
     let value = value_array([
         value_text("TPFINALMODULE"),
-        Value::Integer(1.into()),
+        Value::Integer(2.into()),
         value_text(FINALIZATION_PROFILE),
         value_text(hex(&producer)),
         value_array(envelope.home_units.iter().map(value_text)),
@@ -402,6 +447,7 @@ fn canonical_certificate(
             .as_ref()
             .map_or(Value::Null, |core| value_text(hex(&core.sha256))),
         encode_interface_requirements(&module.interface_requirements),
+        origin.encode(),
     ]);
     let mut bytes = Vec::new();
     ciborium::ser::into_writer(&value, &mut bytes)
@@ -418,6 +464,7 @@ pub(super) fn issue_interfaces(
     producer: [u8; 32],
     evidence: &DependencyEvidence,
     inherited: &BTreeMap<(String, String), [u8; 32]>,
+    authored: Option<&crate::declaration_join::NativeAuthoredDeclarationAdmission>,
     validation: &mut PackageInterfaceValidation,
 ) -> CertResult<Vec<CertifiedModuleInterface>> {
     envelope.validate_structure()?;
@@ -493,7 +540,18 @@ pub(super) fn issue_interfaces(
             .as_ref()
             .map(|descriptor| capture(root, descriptor, CORE_LIMIT, validation))
             .transpose()?;
-        let certificate = canonical_certificate(producer, envelope, module)?;
+        let origin = match authored {
+            Some(admission)
+                if admission.owner().unit == module.unit
+                    && admission.owner().module == module.module =>
+            {
+                CanonicalOrigin::NativeAuthoredDeclaration {
+                    generation: admission.generation(),
+                }
+            }
+            _ => CanonicalOrigin::SourceOriginal,
+        };
+        let certificate = canonical_certificate(producer, envelope, module, origin)?;
         issued.push(CertifiedModuleInterface {
             producer_sha256: producer,
             receipt: module.clone(),
@@ -502,6 +560,7 @@ pub(super) fn issue_interfaces(
             package_imports: package_imports.into(),
             certificate: certificate.into(),
             core: core.map(Into::into),
+            origin,
         });
     }
     Ok(issued)
@@ -528,9 +587,9 @@ pub(super) fn recover_interface(
             "finalized certificate trailing bytes",
         ));
     }
-    let row = sized(&value, 12)?;
+    let row = sized(&value, 13)?;
     if string(&row[0])? != "TPFINALMODULE"
-        || number(&row[1])? != 1
+        || number(&row[1])? != 2
         || string(&row[2])? != FINALIZATION_PROFILE
         || digest(&row[3])? != producer
         || producer == [0; 32]
@@ -575,6 +634,7 @@ pub(super) fn recover_interface(
         .into_values()
         .next()
         .ok_or(CertificationError::Receipt("finalized certificate owner"))?;
+    let origin = CanonicalOrigin::decode(&row[12], &receipt)?;
     if sha(&interface) != receipt.interface.sha256
         || sha(&package_imports) != receipt.package_imports.sha256
         || core.as_ref().map(|bytes| sha(bytes)) != receipt.core.as_ref().map(|item| item.sha256)
@@ -597,7 +657,7 @@ pub(super) fn recover_interface(
         home_units: envelope.home_units,
         modules: BTreeMap::new(),
     };
-    if canonical_certificate(producer, &canonical_envelope, &receipt)? != certificate {
+    if canonical_certificate(producer, &canonical_envelope, &receipt, origin)? != certificate {
         return Err(CertificationError::Receipt(
             "noncanonical finalized certificate",
         ));
@@ -610,6 +670,7 @@ pub(super) fn recover_interface(
         package_imports: package_imports.into(),
         certificate: certificate.into(),
         core: core.map(Into::into),
+        origin,
     })
 }
 
@@ -653,7 +714,13 @@ pub(super) fn fixture_interface(
         home_units,
         modules: BTreeMap::new(),
     };
-    let certificate = canonical_certificate(producer, &envelope, &receipt).unwrap();
+    let certificate = canonical_certificate(
+        producer,
+        &envelope,
+        &receipt,
+        CanonicalOrigin::SourceOriginal,
+    )
+    .unwrap();
     recover_interface(
         producer,
         certificate,
@@ -669,14 +736,18 @@ pub(super) fn fixture_interface(
 mod tests {
     use super::*;
 
-    fn interface(core: Option<Vec<u8>>) -> CertifiedModuleInterface {
+    fn interface_for_owner(
+        unit: &str,
+        name: &str,
+        core: Option<Vec<u8>>,
+    ) -> CertifiedModuleInterface {
         let bytes = b"interface".to_vec();
         let packages = value_array([
             value_text("TPPKGROOTS"),
             value_text("2"),
             value_array([
-                value_text("home-a"),
-                value_text("Owner"),
+                value_text(unit),
+                value_text(name),
                 value_text(hex(&sha(&bytes))),
             ]),
             value_array([]),
@@ -686,14 +757,75 @@ mod tests {
         ciborium::ser::into_writer(&packages, &mut package_bytes).unwrap();
         fixture_interface(
             [7; 32],
-            "home-a",
-            "Owner",
+            unit,
+            name,
             [8; 32],
             bytes,
             package_bytes,
             BTreeMap::new(),
             core,
         )
+    }
+
+    fn interface(core: Option<Vec<u8>>) -> CertifiedModuleInterface {
+        interface_for_owner("home-a", "Owner", core)
+    }
+
+    #[test]
+    fn canonical_origin_is_explicit_and_survives_recovery() {
+        let source = interface_for_owner("main", "Tidepool.Session.Lib.G7", None);
+        assert_eq!(source.origin(), CanonicalOrigin::SourceOriginal);
+        let envelope = FinalizationEnvelope {
+            profile: FINALIZATION_PROFILE.into(),
+            home_units: source.home_units().clone(),
+            modules: BTreeMap::new(),
+        };
+        let native = CanonicalOrigin::NativeAuthoredDeclaration { generation: 7 };
+        let certificate =
+            canonical_certificate([7; 32], &envelope, &source.receipt, native).unwrap();
+        let recovered = recover_interface(
+            [7; 32],
+            certificate,
+            source.interface_bytes().to_vec(),
+            source.package_imports_bytes().to_vec(),
+            None,
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap();
+        assert_eq!(recovered.origin(), native);
+        for origin in [
+            CanonicalOrigin::NativeAuthoredDeclaration { generation: 0 },
+            CanonicalOrigin::NativeAuthoredDeclaration { generation: 8 },
+        ] {
+            let certificate =
+                canonical_certificate([7; 32], &envelope, &source.receipt, origin).unwrap();
+            assert!(recover_interface(
+                [7; 32],
+                certificate,
+                source.interface_bytes().to_vec(),
+                source.package_imports_bytes().to_vec(),
+                None,
+                &mut PackageInterfaceValidation::default()
+            )
+            .is_err());
+        }
+        let mut legacy: Value = ciborium::de::from_reader(source.certificate_bytes()).unwrap();
+        let Value::Array(ref mut row) = legacy else {
+            unreachable!()
+        };
+        row[1] = Value::Integer(1.into());
+        row.pop();
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&legacy, &mut bytes).unwrap();
+        assert!(recover_interface(
+            [7; 32],
+            bytes,
+            source.interface_bytes().to_vec(),
+            source.package_imports_bytes().to_vec(),
+            None,
+            &mut PackageInterfaceValidation::default()
+        )
+        .is_err());
     }
 
     #[test]

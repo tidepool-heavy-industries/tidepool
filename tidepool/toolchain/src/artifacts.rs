@@ -744,6 +744,7 @@ impl ModuleCandidateOffer {
             &output.target,
             "__prepared",
             issue_identity.then_some((&table, sites.as_slice())),
+            None,
         )?
         .map(Arc::new);
         Ok((
@@ -1904,9 +1905,20 @@ impl ModuleCandidateOffer {
             )
             .map_err(|error| CompileError::ExtractFailed(error.to_string()))?,
         );
-        let sealed =
-            seal_turn_outputs(self, &directory, &source_path, source, &target, "__result")?
-                .ok_or_else(fail)?;
+        let authored = crate::declaration_join::NativeAuthoredDeclarationAdmission::from_planned(
+            &module, &admission,
+        )?;
+        let sealed = seal_turn_outputs_inner(
+            self,
+            &directory,
+            &source_path,
+            source,
+            &target,
+            "__result",
+            None,
+            Some(&authored),
+        )?
+        .ok_or_else(fail)?;
         let products = sealed
             .recovery_products
             .iter()
@@ -2201,6 +2213,7 @@ pub fn seal_turn_outputs(
         prepared,
         target,
         None,
+        None,
     )
 }
 
@@ -2213,6 +2226,7 @@ fn seal_turn_outputs_inner(
     prepared: &Arc<PreparedProgram>,
     target: &str,
     identity_metadata: Option<(&DataConTable, &[YieldSite])>,
+    authored: Option<&crate::declaration_join::NativeAuthoredDeclarationAdmission>,
 ) -> Result<Option<SealedTurnProducts>, CompileError> {
     if std::fs::read_to_string(source_path)? != source {
         return Err(CompileError::ExtractFailed(
@@ -2306,6 +2320,7 @@ fn seal_turn_outputs_inner(
         &offer.producer,
         &offer.include,
         exact.as_ref(),
+        authored,
     )
     .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
     let target_admission_start = Instant::now();
@@ -2583,7 +2598,7 @@ pub fn compile_invocation(
     inv: &CompileInvocation<'_>,
     mut on_stage: impl FnMut(&str, Duration, u64),
 ) -> Result<CompiledArtifacts, CompileError> {
-    compile_invocation_inner(inv, &mut on_stage, true, None, None, None)
+    compile_invocation_inner(inv, &mut on_stage, true, None, None, None, None)
 }
 
 /// Compile fresh source against immutable declaration owners through the same
@@ -2594,7 +2609,7 @@ pub fn compile_invocation_in_context(
     context: Arc<crate::declaration_join::ExactDeclarationContext>,
     mut on_stage: impl FnMut(&str, Duration, u64),
 ) -> Result<CompiledArtifacts, CompileError> {
-    compile_invocation_inner(inv, &mut on_stage, false, None, Some(context), None)
+    compile_invocation_inner(inv, &mut on_stage, false, None, Some(context), None, None)
 }
 
 /// Compile a declaration probe in full-home-product mode, which produces
@@ -2607,6 +2622,7 @@ pub(crate) fn compile_authored_products(
     include: &[PathBuf],
     session_root: &Path,
     context: Option<Arc<crate::declaration_join::ExactDeclarationContext>>,
+    authored: &crate::declaration_join::NativeAuthoredDeclarationAdmission,
 ) -> Result<CompiledArtifacts, CompileError> {
     let inv = CompileInvocation {
         source,
@@ -2621,6 +2637,7 @@ pub(crate) fn compile_authored_products(
         Some(session_root),
         context,
         None,
+        Some(authored),
     )
 }
 
@@ -2653,6 +2670,7 @@ pub fn build_deployment_module_package(
         None,
         None,
         Some((output_root, &source_root)),
+        None,
     )?;
     Ok(crate::toolchain::DeploymentModulePackage::load(
         &output_root.join("catalog.json"),
@@ -2669,6 +2687,7 @@ fn compile_invocation_inner(
     session_root: Option<&Path>,
     exact_context: Option<Arc<crate::declaration_join::ExactDeclarationContext>>,
     deployment_export: Option<(&Path, &Path)>,
+    authored: Option<&crate::declaration_join::NativeAuthoredDeclarationAdmission>,
 ) -> Result<CompiledArtifacts, CompileError> {
     assert!(
         !inv.targets.is_empty(),
@@ -2882,6 +2901,7 @@ fn compile_invocation_inner(
                 session_root,
                 exact_context,
                 deployment_export,
+                authored,
             );
         }
         Err(error) => {
@@ -2980,6 +3000,7 @@ fn compile_invocation_inner(
                 &producer,
                 inv.include,
                 exact.as_ref(),
+                authored,
             )
             .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
             ensure_ready_module_inventory(&receipt.modules, valid)?;
@@ -3160,6 +3181,7 @@ fn compile_invocation_inner(
                 session_root,
                 exact_context,
                 deployment_export,
+                authored,
             )
         }
         result => result
