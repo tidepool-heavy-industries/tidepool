@@ -14,5 +14,6 @@ m2JoinA <- do
   Right () <- releaseCheckpoint seed
   case result of
     Right (M2Reply 43, M2Reply 43) -> pure (M2JoinA 43)
-    _ -> error "original nominal replies changed during same-root publication"
+    Left failure -> error ("original nominal reply watch failed: " ++ show failure)
+    Right replies -> error ("original nominal replies changed during same-root publication: " ++ show replies)
 display True
