@@ -164,7 +164,8 @@ import Tidepool.CompileInputPolicy (pluginInputIssues)
 import Tidepool.PlannedDeclaration
   ( PlannedDeclarationInventory, transformPlannedDeclarationImports, transformPlannedDeclarationImportsWithCompleted, transformProgramDeclarationImports, hydratePlannedDeclarationInventory )
 import Tidepool.CheckedPrefixImports
-  ( CompletedValueImport(..), CompletedValueImports, hydrateCompletedValueImportsWithVerifiedDependencies, transformCompletedValueImports, selectedImportNames )
+  ( CompletedValueImport(..), CompletedValueImports, hydrateCompletedValueImportsWithVerifiedDependencies
+  , transformCompletedValueImports, refineParsedDeclarationImports, selectedImportNames )
 import Tidepool.FamilyConsistency (validateCompilationFamilies, validateEnvironmentFamilies)
 import Tidepool.TypePolicy (nominalHeadsOfType, stabilizeEffectRows)
 import Tidepool.ExtractUtil (getLibdir, capitalize)
@@ -805,7 +806,9 @@ originalPurpose purpose = purpose
 
 transformFor :: CompilePurpose -> ModuleName -> HscEnv -> ModSummary -> ParsedModule -> IO NativeParsedModule
 transformFor GeneralCompile _ _ _ = pure . unannotatedModule
-transformFor OriginalDeclarationCompile _ _ _ = pure . unannotatedModule
+transformFor OriginalDeclarationCompile target env summary
+  | ms_mod_name summary == target = fmap unannotatedModule . refineParsedDeclarationImports env
+  | otherwise = pure . unannotatedModule
 transformFor CertifyHomeProductsCompile _ _ _ = pure . unannotatedModule
 transformFor LookupTypeCompile target _ summary
   | ms_mod_name summary == target = pure . unannotatedModule . normalizeLookupWildcards
@@ -828,11 +831,12 @@ transformFor (HostActivationInputCompile annotations original values) target env
       typed <- rewriteHostInputType env 2 signature parsed
       thenNativeModule typed (transformFor (CheckedItemCompile annotations original values) target env summary)
   | otherwise = pure . unannotatedModule
-transformFor (ProgramItemCompile _ annotations originals _) target env summary
+transformFor (ProgramItemCompile original annotations originals _) target env summary
   | ms_mod_name summary == target = \parsed -> do
       annotated <- rewriteCheckedAnnotations env annotations parsed
       inventories <- mapM (\(owner,fingerprint) -> hydratePlannedDeclarationInventory owner fingerprint env >>= either fail pure) originals
-      mapNativeModule (transformProgramDeclarationImports inventories Nothing env) annotated
+      selected <- mapNativeModule (transformProgramDeclarationImports inventories Nothing env) annotated
+      if original then mapNativeModule (refineParsedDeclarationImports env) selected else pure selected
   | otherwise = pure . unannotatedModule
 transformFor (PlannedDeclarationCheck inventory _) target env summary
   | ms_mod_name summary == target = fmap unannotatedModule . transformPlannedDeclarationImports inventory env
@@ -863,13 +867,14 @@ transformWithCompletedValues captured purpose target env summary = case purpose 
           Just (owner, fingerprint) -> do
             inventory <- hydratePlannedDeclarationInventory owner fingerprint env >>= either fail pure
             mapNativeModule (transformPlannedDeclarationImportsWithCompleted inventory values env) annotated
-  ProgramItemCompile _ annotations originals requested
+  ProgramItemCompile original annotations originals requested
     | ms_mod_name summary == target -> \parsed -> do
         values <- if null requested then pure Nothing else
           Just <$> maybe (fail "program completed interfaces were not installed") pure captured
         annotated <- rewriteCheckedAnnotations env annotations parsed
         inventories <- mapM (\(owner,fingerprint) -> hydratePlannedDeclarationInventory owner fingerprint env >>= either fail pure) originals
-        mapNativeModule (transformProgramDeclarationImports inventories values env) annotated
+        selected <- mapNativeModule (transformProgramDeclarationImports inventories values env) annotated
+        if original then mapNativeModule (refineParsedDeclarationImports env) selected else pure selected
   _ -> transformFor purpose target env summary
 
 hostInputSignature :: [(String, CheckedSignature)] -> IO CheckedSignature

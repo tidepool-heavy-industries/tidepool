@@ -1,5 +1,7 @@
--- | Refine lexical imports only from the original declaration inventory or
--- completed-prefix value interfaces read and installed in this request.
+{-# LANGUAGE DataKinds #-}
+
+-- | Refine lexical imports from parsed local declarations, original declaration
+-- inventories, or completed-prefix interfaces installed in this request.
 module Tidepool.CheckedPrefixImports
   ( CompletedValueImport(..), CompletedValueImports
   , hydrateCompletedValueImports, hydrateCompletedValueImportsWithDependencies
@@ -7,12 +9,14 @@ module Tidepool.CheckedPrefixImports
   , transformCompletedValueImports
   , refineOriginalDeclarationImports, refineOriginalDeclarationImportsWithCompleted
   , refineProgramDeclarationImports
+  , refineParsedDeclarationImports
   , selectedImportNames
   ) where
 
 import Control.Exception (evaluate)
 import Control.Monad (forM, forM_, unless)
 import Data.List (nub, sort)
+import qualified Data.IntMap.Strict as IntMap
 import qualified Data.Map.Strict as Map
 import Data.Word (Word64)
 import GHC (ParsedModule(..), ModSummary(ms_hspp_opts))
@@ -26,7 +30,7 @@ import GHC.Rename.Names (renameRawPkgQual)
 import GHC.Tc.Utils.Monad (initIfaceCheck)
 import GHC.Types.Avail (AvailInfo, availName, availNames)
 import GHC.Types.Name (Name, nameOccName)
-import GHC.Types.Name.Occurrence (isTcOcc, isDataOcc, occNameString)
+import GHC.Types.Name.Occurrence (OccName, isTcOcc, isDataOcc, occNameString, occNameFS, varToRecFieldOcc)
 import GHC.Types.Name.Reader (mkRdrUnqual, rdrNameOcc)
 import GHC.Types.PkgQual (RawPkgQual(..))
 import GHC.Types.SrcLoc (GenLocated(..), unLoc)
@@ -225,6 +229,50 @@ currentOwner env owner fingerprint = case lookupHpt (hsc_HPT env) (moduleName ow
       && mi_iface_hash (mi_final_exts (hm_iface original)) == fingerprint -> pure original
   _ -> fail "checked import refinement lacks its exact original interface"
 
+-- An original declaration has no certified inventory until after it checks.
+-- Its existing GHC parse supplies local occurrences before renaming; imported
+-- Names still come from their resolved interfaces and retain qualified access.
+refineParsedDeclarationImports :: HscEnv -> ParsedModule -> IO ParsedModule
+refineParsedDeclarationImports env parsed
+  | null locals = pure parsed
+  | otherwise = refineUnqualifiedImports (const False)
+      ((`notElem` locals) . nameOccName) env parsed
+  where
+    locals = nub (concatMap parsedDeclarationOccurrences
+      (hsmodDecls (unLoc (pm_parsed_source parsed))))
+
+parsedDeclarationOccurrences :: LHsDecl GhcPs -> [OccName]
+parsedDeclarationOccurrences (L _ declaration) = case declaration of
+  ValD _ binding -> map rdrNameOcc (collectHsBindBinders CollNoDictBinders binding)
+    ++ case binding of
+      PatSynBind _ PSB {psb_id = name, psb_args = RecCon fields} ->
+        [varToRecFieldOcc (occNameFS (rdrNameOcc (unLoc name)))
+          (rdrNameOcc (unLoc (foLabel (recordPatSynField field)))) | field <- fields]
+      _ -> []
+  TyClD _ declaration' ->
+    let binders = hsLTyClDeclBinders (noLocA declaration')
+     in map (rdrNameOcc . unLoc)
+          (fst (tyDeclMainBinder binders) : map fst (tyDeclATs binders) ++ tyDeclOpSigs binders)
+        ++ parsedConstructorOccurrences (tyDeclConsWithFields binders)
+  InstD _ (DataFamInstD _ declaration') ->
+    parsedConstructorOccurrences (hsDataFamInstBinders declaration')
+  InstD _ (ClsInstD _ declaration') -> concatMap
+    (parsedConstructorOccurrences . hsDataFamInstBinders . unLoc) (cid_datafam_insts declaration')
+  ForD _ declaration' -> map (rdrNameOcc . unLoc)
+    (hsForeignDeclsBinders [noLocA declaration'])
+  _ -> []
+
+-- GHC namespaces every record field by the first constructor of its datatype,
+-- including fields declared by later constructors. Keep that native parent;
+-- a same-spelled field of a different datatype is a different occurrence.
+parsedConstructorOccurrences :: LConsWithFields 'Parsed -> [OccName]
+parsedConstructorOccurrences (LConsWithFields constructors fields) =
+  map (rdrNameOcc . unLoc . fst) constructors ++ case constructors of
+    (first, _) : _ ->
+      [varToRecFieldOcc (occNameFS (rdrNameOcc (unLoc first)))
+        (rdrNameOcc (unLoc (foLabel (unLoc field)))) | field <- IntMap.elems fields]
+    [] -> []
+
 refineImports :: [RefinementOwner] -> [RefinementOwner] -> HscEnv -> ParsedModule -> IO ParsedModule
 refineImports [] [] _ parsed = pure parsed
 refineImports owners protected env parsed = do
@@ -257,19 +305,30 @@ refineImports owners protected env parsed = do
           unless (sort (map exportIdentity selected) == sort (map exportIdentity expected)) $
             fail "completed value import differs from its certified prefix winners"
       _ -> fail "checked import refinement requires one direct original import"
-  let flags = ms_hspp_opts (pm_mod_summary parsed)
-      imports = if xopt ImplicitPrelude flags
-          && not (any ((== mkModuleName "Prelude") . unLoc . ideclName . unLoc) originalImports)
-        then noLocA (simpleImportDecl (mkModuleName "Prelude")) : originalImports
-        else originalImports
-      namespace TypeNamespace = TypeNamespace
+  let namespace TypeNamespace = TypeNamespace
       namespace ConstructorNamespace = ConstructorNamespace
       namespace _ = ValueNamespace
       key identity = (namespace (exportNamespace identity), exportOccurrence identity)
       shadowKeys = map key (concatMap refinementNames owners)
+  refineUnqualifiedImports (\located -> any (`direct` located) (owners ++ protected))
+    ((`notElem` shadowKeys) . key . exportIdentity) env parsed
+
+-- Narrow only the unqualified view. The qualified clone keeps the submitted
+-- alias and import selection, so shadowing cannot widen historical access.
+refineUnqualifiedImports
+  :: (LImportDecl GhcPs -> Bool) -> (Name -> Bool)
+  -> HscEnv -> ParsedModule -> IO ParsedModule
+refineUnqualifiedImports protected retain env parsed = do
+  let syntax = unLoc (pm_parsed_source parsed)
+      originalImports = hsmodImports syntax
+      flags = ms_hspp_opts (pm_mod_summary parsed)
+      imports = if xopt ImplicitPrelude flags
+          && not (any ((== mkModuleName "Prelude") . unLoc . ideclName . unLoc) originalImports)
+        then noLocA (simpleImportDecl (mkModuleName "Prelude")) : originalImports
+        else originalImports
   refined <- fmap concat $ forM imports $ \located -> do
     let declaration = unLoc located
-    if any (`direct` located) (owners ++ protected) || ideclQualified declaration /= NotQualified
+    if protected located || ideclQualified declaration /= NotQualified
       then pure [located]
       else do
         let importedName = unLoc (ideclName declaration)
@@ -284,7 +343,7 @@ refineImports owners protected env parsed = do
           Succeeded found -> pure (mi_exports found)
           Failed _ -> fail "checked import refinement cannot load an original import interface"
         selected <- either fail pure (selectedImportNames available (ideclImportList declaration))
-        let retained = filter ((`notElem` shadowKeys) . key . exportIdentity) selected
+        let retained = filter retain selected
         if length retained == length selected
           then pure [located]
           else do

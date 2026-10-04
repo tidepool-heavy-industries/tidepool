@@ -20,7 +20,8 @@ import GHC.Tc.Types (tcg_rdr_env)
 import GHC.Driver.Env (HscEnv)
 import GHC.Builtin.Types (intTy)
 import GHC.Types.Name (nameModule_maybe)
-import GHC.Types.Name.Occurrence (mkVarOcc)
+import GHC.Types.Name.Occurrence (mkVarOcc, mkTcOcc, mkDataOcc, mkRecFieldOcc)
+import GHC.Data.FastString (mkFastString)
 import GHC.Types.Name.Reader (RdrName(..), mkRdrUnqual, globalRdrEnvElts, greName, greRdrNames)
 import GHC.Unit.Module (moduleName, mkModuleName)
 import GHC.Unit.Module.ModIface (mi_iface_hash, mi_final_exts)
@@ -36,7 +37,7 @@ import Tidepool.DeclarationJoin (InstanceInventory(..), DeclarationExport(..), E
 import Tidepool.GhcPipeline
   ( CompilePurpose(..), PipelineSelection(..), PreparedPipelineResult(..)
   , PipelineResult(..), CheckedEnvironmentResult(..), runPipelineSessionSelected
-  , cellCheckedBinderSignatures )
+  , cellCheckedBinderSignatures, cellGeneratedInstanceRecipe )
 import Tidepool.CheckedPrefixImports
 import Tidepool.ExactHydration (ExactIfaceArtifact(..))
 import Tidepool.Identity (stableVarId)
@@ -180,7 +181,64 @@ main = withScratch $ \work -> do
   fieldCheck <- either fail pure (renderCellCheckSource fieldCheckWrapper (plannedCheckPlan fieldOriginal))
   writeFile checkFile fieldCheck
   _ <- checkImports checkFile fieldEnv fieldInventory Nothing
+  checkOriginalDeclarationShadow work checkWrapper
   putStrLn "planned original declarations: source identity, inventories, import shadowing and declaration/bind/expression check passed"
+
+-- Exercise the original's pre-renamer seam, before its inventory can exist.
+-- The same compiled predecessor supplies both the standalone check and the
+-- ordered-program preparation, including exact qualified historical Names.
+checkOriginalDeclarationShadow :: FilePath -> String -> IO ()
+checkOriginalDeclarationShadow work checkWrapper = do
+  let directory = work </> "original-shadow"
+      previousName = sessionModuleString (SessionModule LibMod (Generation 6))
+      originalName = sessionModuleString (SessionModule LibMod (Generation 10))
+      previousFile = directory </> "Tidepool/Session/Lib/G6.hs"
+      originalFile = directory </> "Tidepool/Session/Lib/G10.hs"
+  createDirectoryIfMissing True (takeDirectory previousFile)
+  previousSource <- readFile "test-planned-declaration/fixtures/shadow-previous.hs"
+  foreignSource <- readFile "test-planned-declaration/fixtures/Foreign.hs"
+  writeFile previousFile previousSource
+  writeFile (directory </> "Foreign.hs") foreignSource
+  previous <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty
+    OriginalDeclarationCompile Nothing previousFile [directory] Nothing
+  previousInventory <- hydratePlannedDeclarationInventory ("main",previousName)
+    (renderPreviousFingerprint previous) (prHscEnv (pprPipelineResult previous)) >>= either fail pure
+  authored <- readFile "test-planned-declaration/fixtures/shadow-cell.hs"
+  wrapper <- readFile "test-planned-declaration/fixtures/shadow-decl-wrapper.hs"
+  plan <- analyzeCell checkWrapper authored >>= either (fail . show) pure
+  original <- either (fail . show) pure (preparePlannedDeclaration originalName wrapper plan)
+  writeFile originalFile (plannedSource original)
+  checked <- runPipelineSessionSelected CheckedEnvironment Set.empty
+    (GeneratedInstanceCheck (cellGeneratedInstanceRecipe plan) OriginalDeclarationCompile)
+    Nothing originalFile [directory,"lib"] Nothing
+  assertShadowNames originalName previousName (crTargetRdrEnv checked)
+  prepared <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty
+    (ProgramItemCompile True [] [(plannedOriginalOwner previousInventory,
+      plannedInterfaceFingerprint previousInventory)] []) Nothing originalFile [directory,"lib"] Nothing
+  _ <- certifyPlannedDeclaration original (prHscEnv (pprPipelineResult prepared)) >>= either fail pure
+  assertShadowNames originalName previousName (prTargetRdrEnv (pprPipelineResult prepared))
+  where
+    renderPreviousFingerprint previous = case Map.lookup
+        (mkModuleName (sessionModuleString (SessionModule LibMod (Generation 6))))
+        (pprProductInterfaces previous) of
+      Just interface -> show (mi_iface_hash (mi_final_exts interface))
+      Nothing -> error "compiled shadow predecessor has no original interface"
+    assertShadowNames originalName previousName reader = do
+      let owners spelling = nub [moduleNameString (moduleName owner)
+            | entry <- globalRdrEnvElts reader, spelling `elem` greRdrNames entry
+            , Just owner <- [nameModule_maybe (greName entry)]]
+          qualified owner occurrence = Qual (mkModuleName owner) occurrence
+      forM_ [mkTcOcc "Input", mkTcOcc "Tagged", mkVarOcc "make", mkVarOcc "project", mkVarOcc "tag"
+        , mkDataOcc "Record", mkTcOcc "ConstructorOnly", mkTcOcc "Maybe", mkTcOcc "Box"] $ \occurrence ->
+          unless (owners (mkRdrUnqual occurrence) == [originalName]) $
+            fail "parsed original declaration did not replace its unqualified imported occurrence"
+      unless (owners (qualified previousName (mkTcOcc "Input")) == [previousName]
+          && owners (qualified previousName (mkVarOcc "project")) == [previousName]
+          && owners (qualified "Selected" (mkTcOcc "Box")) == ["Foreign"]
+          && owners (mkRdrUnqual (mkDataOcc "ConstructorOnly")) == [previousName]
+          && owners (mkRdrUnqual (mkRecFieldOcc (mkFastString "Record") "field")) == [originalName]
+          && owners (mkRdrUnqual (mkRecFieldOcc (mkFastString "OtherRecord") "field")) == [previousName]) $
+        fail "parsed original shadowing changed a qualified owner, namespace, or unrelated record parent"
 
 checkCompletedValueRefinement :: FilePath -> HscEnv -> PlannedDeclarationInventory -> IO ()
 checkCompletedValueRefinement work baseEnv original = do
