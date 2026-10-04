@@ -128,6 +128,13 @@ pub(crate) fn validate_source_selected_originals(
         .filter_map(|product| product.execution_source())
         .map(|graph| (graph.digest(), graph))
         .collect::<BTreeMap<_, _>>();
+    if graphs.len() > OWNER_LIMIT
+        || graphs.values().fold(0usize, |total, graph| {
+            total.saturating_add(graph.bytes().len())
+        }) > GRAPH_BYTES_LIMIT
+    {
+        return Err(refused("original graph inventory exceeds its bound"));
+    }
     let mut decoded = BTreeMap::new();
     let mut selected = BTreeMap::new();
     let mut recipes = BTreeMap::new();
@@ -218,6 +225,7 @@ pub(crate) fn validate_source_selected_originals(
         .collect::<BTreeSet<_>>();
     let mut expected_resolutions = BTreeMap::new();
     let mut pending = Vec::new();
+    let mut causal_recipes = BTreeSet::new();
     for (source, qualifier, imported) in context.roots {
         if let Some((node, _, _)) = recipes.get(imported) {
             if !fresh_modules.contains(source)
@@ -251,7 +259,7 @@ pub(crate) fn validate_source_selected_originals(
             )? {
                 return Err(refused("source root differs from its original recipe"));
             }
-            pending.push((imported.clone(), root_recipe));
+            schedule_causal_recipe(&mut causal_recipes, &mut pending, imported, root_recipe)?;
         }
     }
     let mut reachable = BTreeSet::new();
@@ -424,53 +432,17 @@ pub(crate) fn validate_source_selected_originals(
             }
         }
         let graph = &decoded[digest];
-        let import_keys = node
-            .imports
-            .iter()
-            .map(|edge| {
-                (
-                    String::from(edge.qualifier.clone()),
-                    edge.module.as_str(),
-                    edge.boot,
-                )
-            })
-            .collect::<BTreeSet<_>>();
-        for resolution in graph.evidence.resolutions.iter().filter(|row| {
-            import_keys.contains(&(
-                String::from(row.qualifier.clone()),
-                row.module.as_str(),
-                row.boot,
-            ))
-        }) {
-            let imported = ExactModuleIdentity {
-                unit: key.unit.clone(),
-                module: resolution.module.clone(),
-            };
-            // Original exact-native edges had no source candidate. Their current
-            // positive resolution is independently checked against trusted roots.
-            if original.imports.contains(&imported) && resolution.selected.is_none() {
-                continue;
-            }
-            for candidate in &resolution.candidates {
-                if Some(candidate) != resolution.selected.as_ref() {
-                    validate_absent_source(candidate)?;
-                }
-            }
-        }
+        validate_local_negative_context(graph, key, &original.imports)?;
         for package in &graph.packages {
             package_validation
                 .verify(&package.selected_path, &package.sha256)
                 .map_err(|_| refused("original package interface changed"))?;
         }
     }
-    let mut causal_recipes = BTreeSet::new();
     while let Some((key, causal_digest)) = pending.pop() {
-        if !causal_recipes.insert((key.clone(), causal_digest)) {
-            continue;
-        }
-        if causal_recipes.len() > EDGE_LIMIT {
-            return Err(refused("causal recipe traversal exceeds its bound"));
-        }
+        // Equivalent local recipes retain separate negative-resolution contexts.
+        // Validate every reached context, including those not named by a claim.
+        validate_local_negative_context(&decoded[&causal_digest], &key, &selected[&key].imports)?;
         reachable.insert(key.clone());
         for imported in selected[&key].imports() {
             if selected.contains_key(imported) {
@@ -506,7 +478,12 @@ pub(crate) fn validate_source_selected_originals(
                         "original dependency differs from its authenticated recipe",
                     ));
                 }
-                pending.push((imported.clone(), dependency_recipe));
+                schedule_causal_recipe(
+                    &mut causal_recipes,
+                    &mut pending,
+                    imported,
+                    dependency_recipe,
+                )?;
             } else if !context.independent.contains(imported) && !fresh_modules.contains(imported) {
                 return Err(refused("selected original source closure is incomplete"));
             }
@@ -586,6 +563,11 @@ fn resolve_local_recipe(
 ) -> Result<[u8; 32], CompileError> {
     let mut visited = BTreeSet::new();
     loop {
+        if visited.len() >= EDGE_LIMIT {
+            return Err(failure(
+                "current source selection: original reference traversal exceeds its bound",
+            ));
+        }
         if !visited.insert(digest) {
             return Err(failure(
                 "current source selection: original reference cycle",
@@ -736,7 +718,6 @@ fn same_local_recipe(
                     row.module.clone(),
                     row.boot,
                     row.selected.clone(),
-                    row.candidates.clone(),
                 )
             })
             .collect::<BTreeSet<_>>();
@@ -753,6 +734,69 @@ fn same_local_recipe(
         ))
     };
     Ok(normalize(left)? == normalize(right)?)
+}
+
+// Context identity is the authenticated graph digest, not the set of absent
+// paths. Deduplicate before allocation and bound all queued/settled contexts.
+fn schedule_causal_recipe(
+    seen: &mut BTreeSet<(ExactModuleIdentity, [u8; 32])>,
+    pending: &mut Vec<(ExactModuleIdentity, [u8; 32])>,
+    key: &ExactModuleIdentity,
+    digest: [u8; 32],
+) -> Result<(), CompileError> {
+    if seen.contains(&(key.clone(), digest)) {
+        return Ok(());
+    }
+    if seen.len() >= EDGE_LIMIT {
+        return Err(failure(
+            "current source selection: causal recipe traversal exceeds its bound",
+        ));
+    }
+    seen.insert((key.clone(), digest));
+    pending.push((key.clone(), digest));
+    Ok(())
+}
+
+fn validate_local_negative_context(
+    graph: &GraphWire,
+    key: &ExactModuleIdentity,
+    exact_imports: &[ExactModuleIdentity],
+) -> Result<(), CompileError> {
+    let (node, _, _) = local_source_recipe(graph, key)?;
+    let import_keys = node
+        .imports
+        .iter()
+        .map(|edge| {
+            (
+                String::from(edge.qualifier.clone()),
+                edge.module.as_str(),
+                edge.boot,
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    for resolution in graph.evidence.resolutions.iter().filter(|row| {
+        import_keys.contains(&(
+            String::from(row.qualifier.clone()),
+            row.module.as_str(),
+            row.boot,
+        ))
+    }) {
+        let imported = ExactModuleIdentity {
+            unit: key.unit.clone(),
+            module: resolution.module.clone(),
+        };
+        // Exact-native edges are validated by their original carrier; their
+        // current positive resolution is independently checked against roots.
+        if exact_imports.contains(&imported) && resolution.selected.is_none() {
+            continue;
+        }
+        for candidate in &resolution.candidates {
+            if Some(candidate) != resolution.selected.as_ref() {
+                validate_absent_source(candidate)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_absent_source(path: &Path) -> Result<(), CompileError> {
@@ -958,6 +1002,123 @@ mod tests {
             message,
             format!("original execution source proof: {expected}")
         );
+    }
+
+    #[test]
+    fn equivalent_source_recipes_preserve_each_negative_context() {
+        let root = tempfile::tempdir().unwrap();
+        let (graph, _) = test_graph_with_local_source_dependency(root.path());
+        let mut left = GraphWire::decode(graph.bytes()).unwrap();
+        let mut right = GraphWire::decode(graph.bytes()).unwrap();
+        let first = root.path().join("first/B.hs");
+        let second = root.path().join("second/B.hs");
+        left.evidence.resolutions[0]
+            .candidates
+            .insert(0, first.clone());
+        right.evidence.resolutions[0]
+            .candidates
+            .insert(0, second.clone());
+        let key = ExactModuleIdentity {
+            unit: "main".into(),
+            module: "A".into(),
+        };
+        assert!(same_local_recipe(&left, &right, &key).unwrap());
+        let left = GraphWire::decode(&left.encode().unwrap()).unwrap();
+        let right = GraphWire::decode(&right.encode().unwrap()).unwrap();
+        for appeared in [&first, &second] {
+            validate_local_negative_context(&left, &key, &[]).unwrap();
+            validate_local_negative_context(&right, &key, &[]).unwrap();
+            std::fs::create_dir_all(appeared.parent().unwrap()).unwrap();
+            std::fs::write(appeared, "module B where\n").unwrap();
+            let results = [
+                validate_local_negative_context(&left, &key, &[]),
+                validate_local_negative_context(&right, &key, &[]),
+            ];
+            assert_eq!(results.iter().filter(|result| result.is_err()).count(), 1);
+            std::fs::remove_file(appeared).unwrap();
+        }
+        // Unrelated complete graph inventory is not selected source authority.
+        left.evidence.resolutions.push(ResolutionEvidence {
+            qualifier: ImportQualifier::Unqualified,
+            module: "Unused".into(),
+            boot: false,
+            selected: None,
+            candidates: vec![root.path().join("A.hs")],
+        });
+        validate_local_negative_context(&left, &key, &[]).unwrap();
+        assert!(same_local_recipe(&left, &right, &key).unwrap());
+    }
+
+    #[test]
+    fn source_recipe_equivalence_refuses_positive_and_native_identity_changes() {
+        let root = tempfile::tempdir().unwrap();
+        let (graph, _) = test_graph_with_local_source_dependency(root.path());
+        let original = GraphWire::decode(graph.bytes()).unwrap();
+        let key = ExactModuleIdentity {
+            unit: "main".into(),
+            module: "A".into(),
+        };
+        for component in 0..5 {
+            let mut changed = GraphWire::decode(graph.bytes()).unwrap();
+            match component {
+                0 => {
+                    changed
+                        .evidence
+                        .sources
+                        .iter_mut()
+                        .find(|source| source.path == root.path().join("A.hs"))
+                        .unwrap()
+                        .sha256 = hex(&[9; 32])
+                }
+                1 => {
+                    changed
+                        .evidence
+                        .modules
+                        .iter_mut()
+                        .find(|node| node.module == "A")
+                        .unwrap()
+                        .source = root.path().join("Other.hs")
+                }
+                2 => changed.evidence.resolutions[0].selected = Some(root.path().join("Other.hs")),
+                3 => {
+                    changed
+                        .owners
+                        .iter_mut()
+                        .find(|owner| owner.module == "B")
+                        .unwrap()
+                        .product_sha256 = [9; 32]
+                }
+                _ => {
+                    changed
+                        .owners
+                        .iter_mut()
+                        .find(|owner| owner.module == "B")
+                        .unwrap()
+                        .skinny_iface_sha256 = [9; 32]
+                }
+            }
+            assert!(!same_local_recipe(&original, &changed, &key).unwrap_or(false));
+        }
+    }
+
+    #[test]
+    fn causal_recipe_schedule_bounds_unique_contexts_before_queueing() {
+        let key = ExactModuleIdentity {
+            unit: "main".into(),
+            module: "A".into(),
+        };
+        let mut seen = BTreeSet::new();
+        let mut pending = Vec::new();
+        for index in 0..EDGE_LIMIT {
+            let mut digest = [0; 32];
+            digest[..8].copy_from_slice(&(index as u64).to_le_bytes());
+            schedule_causal_recipe(&mut seen, &mut pending, &key, digest).unwrap();
+        }
+        schedule_causal_recipe(&mut seen, &mut pending, &key, [0; 32]).unwrap();
+        assert_eq!(pending.len(), EDGE_LIMIT);
+        assert!(schedule_causal_recipe(&mut seen, &mut pending, &key, [255; 32]).is_err());
+        assert_eq!(seen.len(), EDGE_LIMIT);
+        assert_eq!(pending.len(), EDGE_LIMIT);
     }
 
     #[test]
