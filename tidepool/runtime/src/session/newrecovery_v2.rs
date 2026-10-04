@@ -3483,7 +3483,10 @@ mod tests {
             .artifact_dependencies
             .push(RecoveryArtifactDependency {
                 source: value_id,
-                target: ArtifactDescriptor::from_recovery_product(&home).id,
+                target: ArtifactDescriptor::from_recovery_module_interface(
+                    home.module_interface.as_ref().unwrap(),
+                )
+                .id,
                 dependency: ArtifactDependency::Interface,
             });
         graph.seal().unwrap();
