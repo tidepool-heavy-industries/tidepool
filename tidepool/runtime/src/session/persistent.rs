@@ -1494,6 +1494,22 @@ impl PersistentSession {
         lib.exact_exports_in(scope, heads)
     }
 
+    pub fn exact_exports_in_namespace(
+        &self,
+        scope: ScopeId,
+        namespace: tidepool_toolchain::declaration_join::ExportNamespace,
+        heads: &[&str],
+    ) -> Result<ExactExportSurface, ExactExportError> {
+        if !self.scopes.is_live(scope) {
+            return Err(ExactExportError::DeadScope(scope));
+        }
+        let lib = self
+            .lib
+            .as_ref()
+            .ok_or(ExactExportError::NoDeclarationPlane)?;
+        lib.exact_exports_in_namespace(scope, namespace, heads)
+    }
+
     /// The persistent declaration environment include directory (where `Lib.G<g>.hs` modules live), for
     /// a later turn's compile search path. `None` when the session has no decl
     /// persistent declaration environment.

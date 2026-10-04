@@ -3453,6 +3453,16 @@ where
         self.state.exact_exports_in(scope, heads)
     }
 
+    pub fn exact_exports_in_namespace(
+        &self,
+        scope: ScopeId,
+        namespace: tidepool_toolchain::declaration_join::ExportNamespace,
+        heads: &[&str],
+    ) -> Result<super::ExactExportSurface, super::ExactExportError> {
+        self.state
+            .exact_exports_in_namespace(scope, namespace, heads)
+    }
+
     /// Exact declaration-head incarnations visible from `scope`.
     ///
     /// Actor sealing pairs this with compiler-produced nominal heads so a

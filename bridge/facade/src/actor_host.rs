@@ -121,6 +121,8 @@ mod workspace_publication;
 use workspace::WorkspaceLayout;
 pub(crate) use workspace::{copy_helper_draft, initialize_helper_draft};
 use workspace::{ActiveWorkspace, PreparedWorkspace};
+#[cfg(test)]
+mod fresh_child_tests;
 mod model_free;
 mod prompt_catalog;
 mod provider_attachment;
