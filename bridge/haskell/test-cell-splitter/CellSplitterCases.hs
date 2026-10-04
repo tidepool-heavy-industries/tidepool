@@ -8,7 +8,7 @@ import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (AsyncException(ThreadKilled), SomeException, bracket, evaluate, finally, fromException, throwIO, try)
 import qualified Data.Map.Strict as Map
 import Control.Monad.IO.Class (liftIO)
-import Data.IORef (newIORef, modifyIORef', readIORef)
+import Data.IORef (newIORef, modifyIORef', readIORef, writeIORef)
 import Data.List (intercalate, isInfixOf, isPrefixOf, isSuffixOf, sort, tails)
 import Data.Char (isDigit)
 import Data.Data (Data, Typeable, cast, gmapQ)
@@ -18,6 +18,11 @@ import Codec.CBOR.Encoding (encodeListLen, encodeString)
 import Codec.CBOR.Write (toStrictByteString)
 import GHC hiding (Target)
 import GHC.Builtin.Types (intTy)
+import GHC.Core.TyCo.Compare (eqType)
+import GHC.Unit.Module.ModGuts (CgGuts)
+import GHC.Stg.Syntax (CgStgTopBinding)
+import GHC.Types.Var.Set (IdSet)
+import System.Mem.StableName (StableName, makeStableName)
 import GHC.Types.Name.Occurrence (mkVarOcc, occNameString)
 import GHC.Types.Name (nameModule_maybe, nameOccName)
 import GHC.Tc.Types (tcg_rn_decls, tcg_mod)
@@ -671,12 +676,7 @@ untrackedCompileTimeCompilation = bracket temporary removeDirectoryRecursive $ \
       -- the deployed stdlib tree.
       qqDir = root </> "Tidepool" </> "QQ"
       qqLabel = qqDir </> "Label.hs"
-      -- The compile TARGET itself is always freshly recompiled every
-      -- request ('validationMemoCompilation' asserts this directly); only
-      -- a *dependency* module's memo entry is ever reused. So each
-      -- quasiquoter case below needs its own dependency module, imported
-      -- by a throwaway target, to actually observe a memo hit or miss on
-      -- the quasiquoter-using module itself.
+      -- Compile through consumers so these modules own dependency products.
       labelDependency = root </> "LabelDependency.hs"
       labelUser = root </> "LabelUser.hs"
       -- GHC's own stage restriction forbids using a quasiquoter in the
@@ -788,23 +788,8 @@ untrackedCompileTimeCompilation = bracket temporary removeDirectoryRecursive $ \
     , "import LocalQuoteDependency (value)"
     , "result = value"
     ]
-  -- Two dependencies standing in for the real workspace shape
-  -- ('Project.Work'/'Project.Review' importing 'label' via the open
-  -- 'Tidepool.Actors.Exomonad' import, which re-exports it from
-  -- 'Tidepool.QQ.Label', alongside several other open imports of modules
-  -- that do not export 'label'):
-  --
-  --  1. 'OpenImportDependency' imports the *defining* module,
-  --     'Tidepool.QQ.Label', with no explicit import list, alongside a
-  --     decoy open import that brings nothing relevant into scope.
-  --     Resolution must pick the one open import whose interface actually
-  --     exports 'label', not bail out as ambiguous just because more than
-  --     one import decl has no explicit list.
-  --  2. 'ReexportDependency' imports 'label' (with an explicit list, so
-  --     import-list resolution alone would already succeed) from a
-  --     *re-exporting* convenience module, 'LabelReexport'. Resolution must
-  --     follow the re-export back to "Tidepool.QQ.Label.label" -- the
-  --     allowlist's key -- not stop at "LabelReexport.label".
+  -- Both open defining imports and reexports must resolve the exact audited
+  -- quoter owner; unrelated open imports do not make that owner ambiguous.
   let decoyModule = root </> "Decoy.hs"
       openImportDependency = root </> "OpenImportDependency.hs"
       openImportUser = root </> "OpenImportUser.hs"
@@ -855,117 +840,90 @@ untrackedCompileTimeCompilation = bracket temporary removeDirectoryRecursive $ \
   assertIncomplete "CPP enabled" cpp
   preprocessed <- runPipelineSelected PreparedStg preprocessedUser [root]
   assertIncomplete "external preprocessor with an untracked input" preprocessed
-  previousTiming <- lookupEnv "TIDEPOOL_TIMING"
-  previousMemoTrace <- lookupEnv "TIDEPOOL_MEMO_TRACE"
-  setEnv "TIDEPOOL_TIMING" "1"
-  setEnv "TIDEPOOL_MEMO_TRACE" "1"
-  (withResidentPipelineSelected [root] $ \compile -> do
-      _ <- compile PreparedStg mempty GeneralCompile Nothing target [] Nothing
-      (_, warmLog) <- captureStderr root "quasiquote-warm" $
-        compile PreparedStg mempty GeneralCompile Nothing target [] Nothing
-      when ("tidepool-memo-miss module=QuasiQuoteDependency" `isInfixOf` warmLog) $
-        fail ("QuasiQuotes with no occurrences missed the memo: " ++ warmLog)
-      assertContains "TemplateHaskell source remains conservatively uncacheable"
-        "tidepool-memo-miss module=TemplateDependency reason=untracked-compile-time-execution"
-        warmLog
-      preprocessedCold <- compile PreparedStg mempty GeneralCompile Nothing preprocessedUser [] Nothing
-      assertIncomplete "external preprocessor, fresh" preprocessedCold
-      (preprocessedWarm, preprocessedWarmLog) <- captureStderr root "preprocessed-warm" $
-        compile PreparedStg mempty GeneralCompile Nothing preprocessedUser [] Nothing
-      assertIncomplete "external preprocessor, repeated" preprocessedWarm
-      assertContains "external preprocessor is never memoized"
-        "tidepool-memo-miss module=PreprocessedDependency reason=untracked-compile-time-execution"
-        preprocessedWarmLog
-      -- A dependency module whose only compile-time execution is an
-      -- allowlisted, pure quasiquoter reuses the memo on the next
-      -- identical compile (the target itself, 'LabelUser', is always
-      -- freshly recompiled -- see 'validationMemoCompilation' -- so it is
-      -- 'LabelDependency', not 'LabelUser', whose memo status this checks).
-      labelCold <- compile PreparedStg mempty GeneralCompile Nothing labelUser [] Nothing
-      assertComplete "allowlisted pure quasiquote, fresh" labelCold
-      (labelWarm, labelWarmLog) <- captureStderr root "label-warm" $
-        compile PreparedStg mempty GeneralCompile Nothing labelUser [] Nothing
-      assertComplete "allowlisted pure quasiquote, memoized" labelWarm
-      when ("tidepool-memo-miss module=LabelDependency" `isInfixOf` labelWarmLog) $
-        fail ("a dependency using only [label|...|] missed the memo: " ++ labelWarmLog)
-      -- Same guarantee, reached through an open (no-explicit-list) import of
-      -- the defining module itself, with an unrelated open import present
-      -- too -- the ambiguity the old import-list-only heuristic could not
-      -- see through (every no-list import "brings everything into scope",
-      -- so it bailed out as soon as more than one was present).
-      openCold <- compile PreparedStg mempty GeneralCompile Nothing openImportUser [] Nothing
-      assertComplete "allowlisted pure quasiquote via open import, fresh" openCold
-      (openWarm, openImportWarmLog) <- captureStderr root "open-import-warm" $
-        compile PreparedStg mempty GeneralCompile Nothing openImportUser [] Nothing
-      assertComplete "allowlisted pure quasiquote via open import, memoized" openWarm
-      when ("tidepool-memo-miss module=OpenImportDependency" `isInfixOf` openImportWarmLog) $
-        fail ("a dependency using [label|...|] via an open import missed the memo: "
-                ++ openImportWarmLog)
-      -- Same guarantee again, reached through a module that re-exports the
-      -- allowlisted quoter rather than defining it -- resolution must
-      -- follow the re-export back to "Tidepool.QQ.Label.label", the
-      -- allowlist's key, not stop at "LabelReexport.label".
-      reexportCold <- compile PreparedStg mempty GeneralCompile Nothing reexportUser [] Nothing
-      assertComplete "allowlisted pure quasiquote via reexport, fresh" reexportCold
-      (reexportWarm, reexportWarmLog) <- captureStderr root "reexport-warm" $
-        compile PreparedStg mempty GeneralCompile Nothing reexportUser [] Nothing
-      assertComplete "allowlisted pure quasiquote via reexport, memoized" reexportWarm
-      when ("tidepool-memo-miss module=ReexportDependency" `isInfixOf` reexportWarmLog) $
-        fail ("a dependency using [label|...|] via a re-export missed the memo: "
-                ++ reexportWarmLog)
-      -- A dependency using a quasiquoter this resolver cannot place on the
-      -- allowlist (here: locally defined, so no import brings it into
-      -- scope) stays conservatively uncacheable, same as raw QuasiQuotes —
-      -- same short TIDEPOOL_TIMING reason — but TIDEPOOL_MEMO_TRACE still
-      -- honestly names the unresolved quoter it actually saw.
-      localCold <- compile PreparedStg mempty GeneralCompile Nothing localQuoteUser [] Nothing
-      assertIncomplete "unlisted quasiquote, fresh" localCold
-      (localWarm, localWarmLog) <- captureStderr root "local-quote-warm" $
-        compile PreparedStg mempty GeneralCompile Nothing localQuoteUser [] Nothing
-      assertIncomplete "unlisted quasiquote, memoized" localWarm
-      assertContains "an unlisted (locally-defined) quasiquoter remains conservatively uncacheable"
-        "tidepool-memo-miss module=LocalQuoteDependency reason=untracked-compile-time-execution"
-        localWarmLog
-      assertContains "the trace honestly reports the unresolved quoter, not a false allowlist hit"
-        "tidepool-memo-trace-miss" localWarmLog
-      assertContains "the trace honestly reports the unresolved quoter, not a false allowlist hit"
-        "quasiquotes=untracked:LocalQuoteQuoter.myqq" localWarmLog
-      let dependent = root </> "quote-input.txt"
-      writeFile dependent "tracked input"
-      -- Use a fresh quoter identity: reusing an already linked TH provider
-      -- would observe its old bytecode rather than this fixture's implementation.
-      writeFile (qqDir </> "Validate.hs") $ unlines
-        [ "module Tidepool.QQ.Validate (uri) where"
-        , "import Language.Haskell.TH (litE, stringL)"
-        , "import Language.Haskell.TH.Syntax (addDependentFile)"
-        , "import Language.Haskell.TH.Quote (QuasiQuoter(..))"
-        , "uri :: QuasiQuoter"
-        , "uri = QuasiQuoter"
-        , "  { quoteExp = \\source -> addDependentFile " ++ show dependent ++ " >> litE (stringL source)"
-        , "  , quotePat = \\_ -> fail \"label is expression-only\""
-        , "  , quoteType = \\_ -> fail \"label is expression-only\""
-        , "  , quoteDec = \\_ -> fail \"label is expression-only\""
-        , "  }"
-        ]
-      let dependentQuote = root </> "DependentQuote.hs"
-          dependentUser = root </> "DependentUser.hs"
-      writeFile dependentQuote $ unlines
-        [ "{-# LANGUAGE QuasiQuotes #-}"
-        , "module DependentQuote where"
-        , "import Tidepool.QQ.Validate (uri)"
-        , "value :: String"
-        , "value = [uri|tracked|]"
-        ]
-      writeFile dependentUser $ unlines
-        [ "module DependentUser where"
-        , "import DependentQuote (value)"
-        , "result = value"
-        ]
-      withDependentFile <- compile PreparedStg mempty GeneralCompile Nothing dependentUser [] Nothing
-      assertIncomplete "allowlisted origin with a dependent file" withDependentFile)
-    `finally` do
-      maybe (unsetEnv "TIDEPOOL_TIMING") (setEnv "TIDEPOOL_TIMING") previousTiming
-      maybe (unsetEnv "TIDEPOOL_MEMO_TRACE") (setEnv "TIDEPOOL_MEMO_TRACE") previousMemoTrace
+  withResidentPipelineSelected [root] $ \compile -> do
+    cold <- compile PreparedStg mempty GeneralCompile Nothing target [] Nothing
+    coldSharing <- compilerProductSharing cold
+    warm <- compile PreparedStg mempty GeneralCompile Nothing target [] Nothing
+    warmSharing <- compilerProductSharing warm
+    assertIncomplete "TemplateHaskell source, repeated" warm
+    assertPreparedEquivalent "conservative compile-time gate preserves native output" cold warm
+    assertCoreSharing "unused QuasiQuotes extension retains its tracked owner" True
+      ["QuasiQuoteDependency"] coldSharing warmSharing
+    assertCoreSharing "TemplateHaskell source is finalized afresh" False
+      ["TemplateDependency"] coldSharing warmSharing
+    preprocessedCold <- compile PreparedStg mempty GeneralCompile Nothing preprocessedUser [] Nothing
+    preprocessedColdSharing <- compilerProductSharing preprocessedCold
+    assertIncomplete "external preprocessor, fresh" preprocessedCold
+    writeFile preprocessorInput "changed outside the Haskell source graph"
+    preprocessedWarm <- compile PreparedStg mempty GeneralCompile Nothing preprocessedUser [] Nothing
+    preprocessedWarmSharing <- compilerProductSharing preprocessedWarm
+    assertIncomplete "external preprocessor, repeated" preprocessedWarm
+    assertPreparedEquivalent "untracked external input with unchanged output" preprocessedCold preprocessedWarm
+    assertCoreSharing "untracked preprocessor input prevents native owner reuse" False
+      ["PreprocessedDependency"] preprocessedColdSharing preprocessedWarmSharing
+    let pureQuote label owner user = do
+          fresh <- compile PreparedStg mempty GeneralCompile Nothing user [] Nothing
+          freshSharing <- compilerProductSharing fresh
+          assertComplete (label ++ ", fresh") fresh
+          repeated <- compile PreparedStg mempty GeneralCompile Nothing user [] Nothing
+          repeatedSharing <- compilerProductSharing repeated
+          assertComplete (label ++ ", repeated") repeated
+          assertPreparedEquivalent (label ++ " preserves output") fresh repeated
+          assertCoreSharing (label ++ " retains canonical owner") True [owner] freshSharing repeatedSharing
+          assertStgSharing (label ++ " retains prepared body") True [owner] freshSharing repeatedSharing
+    pureQuote "allowlisted pure quasiquote" "LabelDependency" labelUser
+    pureQuote "allowlisted pure quasiquote via open import" "OpenImportDependency" openImportUser
+    pureQuote "allowlisted pure quasiquote via reexport" "ReexportDependency" reexportUser
+    localCold <- compile PreparedStg mempty GeneralCompile Nothing localQuoteUser [] Nothing
+    localColdSharing <- compilerProductSharing localCold
+    assertIncomplete "unlisted quasiquote, fresh" localCold
+    localWarm <- compile PreparedStg mempty GeneralCompile Nothing localQuoteUser [] Nothing
+    localWarmSharing <- compilerProductSharing localWarm
+    assertIncomplete "unlisted quasiquote, repeated" localWarm
+    assertPreparedEquivalent "unlisted quasiquote preserves native output" localCold localWarm
+    assertCoreSharing "unlisted quasiquoter prevents owner reuse" False
+      ["LocalQuoteDependency"] localColdSharing localWarmSharing
+    let dependent = root </> "quote-input.txt"
+    writeFile dependent "tracked input"
+    -- Use a fresh quoter identity: reusing an already linked TH provider
+    -- would observe its old bytecode rather than this fixture's implementation.
+    writeFile (qqDir </> "Validate.hs") $ unlines
+      [ "module Tidepool.QQ.Validate (uri) where"
+      , "import Language.Haskell.TH (litE, stringL)"
+      , "import Language.Haskell.TH.Syntax (addDependentFile)"
+      , "import Language.Haskell.TH.Quote (QuasiQuoter(..))"
+      , "uri :: QuasiQuoter"
+      , "uri = QuasiQuoter"
+      , "  { quoteExp = \\source -> addDependentFile " ++ show dependent ++ " >> litE (stringL source)"
+      , "  , quotePat = \\_ -> fail \"label is expression-only\""
+      , "  , quoteType = \\_ -> fail \"label is expression-only\""
+      , "  , quoteDec = \\_ -> fail \"label is expression-only\""
+      , "  }"
+      ]
+    let dependentQuote = root </> "DependentQuote.hs"
+        dependentUser = root </> "DependentUser.hs"
+    writeFile dependentQuote $ unlines
+      [ "{-# LANGUAGE QuasiQuotes #-}"
+      , "module DependentQuote where"
+      , "import Tidepool.QQ.Validate (uri)"
+      , "value :: String"
+      , "value = [uri|tracked|]"
+      ]
+    writeFile dependentUser $ unlines
+      [ "module DependentUser where"
+      , "import DependentQuote (value)"
+      , "result = value"
+      ]
+    withDependentFile <- compile PreparedStg mempty GeneralCompile Nothing dependentUser [] Nothing
+    assertIncomplete "allowlisted origin with a dependent file" withDependentFile
+    dependentSharing <- compilerProductSharing withDependentFile
+    writeFile dependent "changed tracked input"
+    dependentWarm <- compile PreparedStg mempty GeneralCompile Nothing dependentUser [] Nothing
+    dependentWarmSharing <- compilerProductSharing dependentWarm
+    assertIncomplete "allowlisted origin with a changed dependent file" dependentWarm
+    assertPreparedEquivalent "dependent-file recheck preserves native output" withDependentFile dependentWarm
+    assertCoreSharing "addDependentFile defeats pure-origin reuse" False
+      ["DependentQuote"] dependentSharing dependentWarmSharing
   where
     assertComplete label result = do
       let evidence = pprDependencies result
@@ -1114,30 +1072,39 @@ pathInsensitiveWitnessCompilation = bracket temporary removeDirectoryRecursive $
     , "total :: Int"
     , "total = result + 1"
     ]
-  previousTiming <- lookupEnv "TIDEPOOL_TIMING"
-  setEnv "TIDEPOOL_TIMING" "1"
-  (withResidentPipelineSelectedRequests [workDir] $ \runRequest ->
-      runRequest (pure ()) $ \compile -> do
-        (_, coldLog) <- captureStderr root "path-insensitive-cold" $
-          compile PreparedStg mempty GeneralCompile Nothing importer [rootA, sharedRoot] Nothing
-        assertContains "cold compile resolves Dep from rootA"
-          "tidepool-memo-miss module=Dep reason=absent" coldLog
-        assertContains "cold compile resolves Target from rootA"
-          "tidepool-memo-miss module=Target reason=dependency-miss:Dep" coldLog
-        (warm, warmLog) <- captureStderr root "path-insensitive-warm" $
-          compile PreparedStg mempty GeneralCompile Nothing importer [rootB, sharedRoot] Nothing
-        let evidence = pprDependencies warm
-            obsoletePaths = [path | resolution <- dependencyResolutions evidence
-              , path <- dependencyResolutionCandidates resolution, rootA `isPrefixOf` path]
-        unless (null obsoletePaths) $
-          fail ("previous request roots leaked through shared module summary: " ++ show obsoletePaths)
-        unless (dependencyCacheSafe evidence && dependencySelectionComplete evidence) $
-          fail "changed import roots lost complete dependency evidence"
-        when ("tidepool-memo-miss module=Target" `isInfixOf` warmLog) $
-          fail ("byte-identical Target resolved from a different root missed the memo: " ++ warmLog)
-        when ("tidepool-memo-miss module=Dep" `isInfixOf` warmLog) $
-          fail ("byte-identical Dep resolved from a different root missed the memo: " ++ warmLog))
-    `finally` maybe (unsetEnv "TIDEPOOL_TIMING") (setEnv "TIDEPOOL_TIMING") previousTiming
+  withResidentPipelineSelectedRequests [workDir] $ \runRequest ->
+    runRequest (pure ()) $ \compile -> do
+      cold <- compile PreparedStg mempty GeneralCompile Nothing importer [rootA, sharedRoot] Nothing
+      coldSharing <- compilerProductSharing cold
+      warm <- compile PreparedStg mempty GeneralCompile Nothing importer [rootB, sharedRoot] Nothing
+      warmSharing <- compilerProductSharing warm
+      let evidence = pprDependencies warm
+          obsoletePaths = [path | resolution <- dependencyResolutions evidence
+            , path <- dependencyResolutionCandidates resolution, rootA `isPrefixOf` path]
+          selectedPaths = [path | resolution <- dependencyResolutions evidence
+            , Just path <- [dependencyResolutionSelected resolution]]
+      unless (null obsoletePaths) $
+        fail ("previous request roots leaked through shared module summary: " ++ show obsoletePaths)
+      unless (all (`elem` selectedPaths) [rootB </> "Dep.hs", rootB </> "Target.hs"]) $
+        fail "changed import roots did not retain their current source selections"
+      unless (dependencyCacheSafe evidence && dependencySelectionComplete evidence) $
+        fail "changed import roots lost complete dependency evidence"
+      assertPreparedEquivalent "path-insensitive source selection preserves output" cold warm
+      assertCoreSharing "byte-identical dependencies reuse finalized owners across roots" True
+        ["Dep", "Target", "Shared"] coldSharing warmSharing
+      assertStgSharing "byte-identical dependencies reuse prepared bodies across roots" True
+        ["Dep", "Target", "Shared"] coldSharing warmSharing
+      writeFile (rootB </> "Dep.hs") "module Dep where\nvalue :: Int\nvalue = missingValue\n"
+      invalid <- try (compile PreparedStg mempty GeneralCompile Nothing importer [rootB, sharedRoot] Nothing)
+        :: IO (Either DependencyLoadFailure PreparedPipelineResult)
+      case invalid of
+        Left (DependencySourceFailure diagnostics) ->
+          unless (any (\diagnostic -> case dFile diagnostic of
+              Just (path, _, _, _, _) -> path == rootB </> "Dep.hs"
+              Nothing -> False) diagnostics) $
+            fail "changed-root dependency error did not identify the current source"
+        Left DependencyWorkerFailure -> fail "changed-root dependency error became a worker failure"
+        Right _ -> fail "path-insensitive reuse ignored changed source bytes"
   where
     temporary = do
       parent <- getTemporaryDirectory
@@ -1176,53 +1143,43 @@ validationMemoCompilation = bracket temporary removeDirectoryRecursive $ \root -
   writeFile producer "module MemoProducer (value) where\nvalue :: Int\nvalue = 42\n"
   writeFile consumer "module MemoConsumer (result) where\nimport MemoProducer (value)\nresult = value + 1\n"
   writeFile memoTarget "module MemoTarget where\nimport MemoConsumer (result)\nfinal = result\n"
-  previousTiming <- lookupEnv "TIDEPOOL_TIMING"
-  setEnv "TIDEPOOL_TIMING" "1"
-  (withResidentPipelineSelected [root] $ \compile -> do
-      (cold, coldLog) <- captureStderr root "validation-cold" $
-        compile PreparedStg mempty GeneralCompile Nothing target [] Nothing
-      assertContains "chain dependency witnesses are computed once per node"
-        "tidepool-dependency-witness nodes=20 direct_edges=19 digest_computations=20"
-        coldLog
-      (warm, warmLog) <- captureStderr root "validation-warm" $
-        compile PreparedStg mempty GeneralCompile Nothing target [] Nothing
-      let productShape result =
-            (length (pprModules result), length (prBinds (pprPipelineResult result)))
-      assertEqual "validation facts preserve the prepared target product"
-        (productShape cold) (productShape warm)
-      forM_ ["WarmReexport", "WarmChild"] $ \name ->
-        when (("tidepool-memo-miss module=" ++ name) `isInfixOf` warmLog) $
-          fail ("unchanged validation-only module was recompiled: " ++ name)
-      when ("tidepool-memo-miss module=WarmChain" `isInfixOf` warmLog) $
-        fail "unchanged validation-only chain was recompiled"
-      -- The reachable target is checked against the exact prepared interfaces
-      -- its dependencies registered. Its reachability and executable passes
-      -- therefore each compile the front, while optimization and preparation
-      -- run once.
-      assertContains "warm compile prepares only its evicted target"
-        "front_compiles=2 core_compiles=1 prepared_compiles=1" warmLog
-      executableCold <- compile PreparedStg mempty GeneralCompile Nothing memoTarget [] Nothing
-      (executableWarm, executableWarmLog) <- captureStderr root "executable-warm" $
-        compile PreparedStg mempty GeneralCompile Nothing memoTarget [] Nothing
-      assertEqual "complete memo product preserves its prepared output"
-        (productShape executableCold) (productShape executableWarm)
-      when ("tidepool-memo-miss module=MemoProducer" `isInfixOf` executableWarmLog ||
-            "tidepool-memo-miss module=MemoConsumer" `isInfixOf` executableWarmLog) $
-        fail "unchanged producer or consumer executable was recompiled"
-      previousDrop <- lookupEnv "TIDEPOOL_TEST_DROP_MEMO_INTERFACE"
-      (regenerated, forcedLog) <- (do
-          setEnv "TIDEPOOL_TEST_DROP_MEMO_INTERFACE" "MemoProducer"
-          captureStderr root "executable-interface-miss" (
-            compile PreparedStg mempty GeneralCompile Nothing memoTarget [] Nothing))
-        `finally` maybe (unsetEnv "TIDEPOOL_TEST_DROP_MEMO_INTERFACE")
-                        (setEnv "TIDEPOOL_TEST_DROP_MEMO_INTERFACE") previousDrop
-      assertContains "missing producer interface regenerates producer executable"
-        "tidepool-memo-miss module=MemoProducer reason=required-interface-not-retained" forcedLog
-      assertContains "regenerated producer invalidates cached consumer executable"
-        "tidepool-memo-miss module=MemoConsumer reason=dependency-executable-regenerated" forcedLog
-      assertEqual "interface recovery restores the paired prepared body"
-        (productShape executableCold) (productShape regenerated))
-    `finally` maybe (unsetEnv "TIDEPOOL_TIMING") (setEnv "TIDEPOOL_TIMING") previousTiming
+  withResidentPipelineSelected [root] $ \compile -> do
+    cold <- compile PreparedStg mempty GeneralCompile Nothing target [] Nothing
+    coldSharing <- compilerProductSharing cold
+    warm <- compile PreparedStg mempty GeneralCompile Nothing target [] Nothing
+    warmSharing <- compilerProductSharing warm
+    let allOwners = sort (["WarmBase", "WarmReexport", "WarmChild", "WarmTarget"]
+          ++ map chainName [1 .. chainLength])
+        validationOwners = ["WarmReexport", "WarmChild"] ++ map chainName [1 .. chainLength]
+    assertEqual "chain keeps every canonical interface owner" allOwners
+      (sort (map moduleNameString (Map.keys (pprFinalizedModules cold))))
+    assertEqual "reexport chain selects only executable owners" ["WarmBase", "WarmTarget"]
+      (preparedOwnerNames cold)
+    assertPreparedEquivalent "validation-only chain preserves prepared target" cold warm
+    assertCoreSharing "transaction retains canonical validation-only facts" True validationOwners coldSharing warmSharing
+    assertStgSharing "transaction retains reachable dependency body" True ["WarmBase"] coldSharing warmSharing
+    assertStgSharing "request target body is prepared afresh" False ["WarmTarget"] coldSharing warmSharing
+    executableCold <- compile PreparedStg mempty GeneralCompile Nothing memoTarget [] Nothing
+    executableColdSharing <- compilerProductSharing executableCold
+    executableWarm <- compile PreparedStg mempty GeneralCompile Nothing memoTarget [] Nothing
+    executableWarmSharing <- compilerProductSharing executableWarm
+    assertPreparedEquivalent "complete cached product preserves native output" executableCold executableWarm
+    assertCoreSharing "transaction retains executable canonical owners" True
+      ["MemoProducer", "MemoConsumer"] executableColdSharing executableWarmSharing
+    assertStgSharing "transaction retains executable prepared bodies" True
+      ["MemoProducer", "MemoConsumer"] executableColdSharing executableWarmSharing
+    previousDrop <- lookupEnv "TIDEPOOL_TEST_DROP_MEMO_INTERFACE"
+    regenerated <- (do
+        setEnv "TIDEPOOL_TEST_DROP_MEMO_INTERFACE" "MemoProducer"
+        compile PreparedStg mempty GeneralCompile Nothing memoTarget [] Nothing)
+      `finally` maybe (unsetEnv "TIDEPOOL_TEST_DROP_MEMO_INTERFACE")
+                      (setEnv "TIDEPOOL_TEST_DROP_MEMO_INTERFACE") previousDrop
+    regeneratedSharing <- compilerProductSharing regenerated
+    assertPreparedEquivalent "interface recovery restores paired prepared output" executableCold regenerated
+    assertCoreSharing "missing retained interface regenerates its canonical owner" False
+      ["MemoProducer"] executableWarmSharing regeneratedSharing
+    assertStgSharing "producer interface loss regenerates producer and dependent bodies" False
+      ["MemoProducer", "MemoConsumer"] executableWarmSharing regeneratedSharing
   where
     temporary = do
       parent <- getTemporaryDirectory
@@ -1404,12 +1361,9 @@ metadataCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
       createDirectory path
       pure path
 
--- A source-less value interface activates the session pipeline. Its target is
--- the final source consumer, so it must prepare successfully without creating
--- a registration interface solely for itself.
---
--- The ordinary compile retains validation facts within this transaction. The
--- later every-module session compile prepares that body when it needs it.
+-- A source-less value interface activates the session pipeline. Canonical
+-- finalization supplies every original interface/Core pair; the session tier
+-- additionally prepares bodies that ordinary reachability left unselected.
 preparedSessionLeafCompilation :: IO ()
 preparedSessionLeafCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
   let scopeRoot = root </> "session"
@@ -1437,46 +1391,38 @@ preparedSessionLeafCompilation = bracket temporary removeDirectoryRecursive $ \r
     , "import SessionUnreachable ()"
     , "__result = prior + used"
     ]
-  previousTiming <- lookupEnv "TIDEPOOL_TIMING"
-  setEnv "TIDEPOOL_TIMING" "1"
-  (withResidentPipelineSelected [root] $ \compiler -> do
-      (ordinaryPrepared, ordinaryOutput) <- captureStderr root "prepared-session-ordinary" $
-        compiler PreparedStg mempty GeneralCompile Nothing ordinary [root] Nothing
-      unless (all ((/= "SessionUnreachable") . moduleNameString . moduleName . pmModule)
-          (pprModules ordinaryPrepared)) $
-        fail "ordinary request prepared its unreachable import"
-      when ("memo_completion" `isInfixOf` ordinaryOutput) $
-        fail "ordinary request performed speculative memo completion"
-      (prepared, output) <- captureStderr root "prepared-session-leaf" $
-        compiler PreparedStg mempty GeneralCompile (Just scope) target [root] Nothing
-      when (null (pprModules prepared)) $
-        fail "prepared session leaf produced no prepared module"
-      assertContains "prepared session leaf skips its unused registration interface"
-        "tidepool-prepared-interface-elided module=PreparedSessionLeaf reason=no-later-home-importer"
-        output
-      when (any (isInfixOf "module=PreparedSessionLeaf")
-            (filter (isPrefixOf "tidepool-timing-module-detail ") (lines output))) $
-        fail "prepared session leaf constructed an unused target interface"
-      when ("tidepool-memo-miss module=SessionUnused" `isInfixOf` output) $
-        fail ("session tier recompiled a module the preceding compile memoized: " ++ output)
-      when ("tidepool-memo-miss module=SessionConsumer" `isInfixOf` output) $
-        fail ("session tier recompiled a consumer the preceding compile memoized: " ++ output)
-      assertContains "session tier prepares the previously validation-only import"
-        "tidepool-memo-miss module=SessionUnreachable reason=executable-body-not-prepared" output
-      unless (any ((== "SessionUnreachable") . moduleNameString . moduleName . pmModule)
-          (pprModules prepared)) $
-        fail "session tier omitted its required original body"
-      previousDrop <- lookupEnv "TIDEPOOL_TEST_DROP_MEMO_INTERFACE"
-      forcedLog <- (do
-          setEnv "TIDEPOOL_TEST_DROP_MEMO_INTERFACE" "SessionUnused"
-          snd <$> captureStderr root "prepared-session-interface-miss" (compiler PreparedStg mempty GeneralCompile (Just scope) target [root] Nothing))
-        `finally` maybe (unsetEnv "TIDEPOOL_TEST_DROP_MEMO_INTERFACE")
-                        (setEnv "TIDEPOOL_TEST_DROP_MEMO_INTERFACE") previousDrop
-      assertContains "session tier regenerates producer with missing interface"
-        "tidepool-memo-miss module=SessionUnused reason=required-interface-not-retained" forcedLog
-      assertContains "session tier invalidates consumer after producer regeneration"
-        "tidepool-memo-miss module=SessionConsumer reason=dependency-miss:SessionUnused" forcedLog)
-    `finally` maybe (unsetEnv "TIDEPOOL_TIMING") (setEnv "TIDEPOOL_TIMING") previousTiming
+  withResidentPipelineSelected [root] $ \compiler -> do
+    ordinaryPrepared <- compiler PreparedStg mempty GeneralCompile Nothing ordinary [root] Nothing
+    ordinarySharing <- compilerProductSharing ordinaryPrepared
+    unless ("SessionUnreachable" `notElem` preparedOwnerNames ordinaryPrepared
+        && Map.member (mkModuleName "SessionUnreachable") (pprFinalizedModules ordinaryPrepared)) $
+      fail "ordinary request lost validation-only ownership or prepared its unreachable import"
+    prepared <- compiler PreparedStg mempty GeneralCompile (Just scope) target [root] Nothing
+    preparedSharing <- compilerProductSharing prepared
+    assertEqual "session tier prepares every fresh source owner"
+      ["PreparedSessionLeaf", "SessionConsumer", "SessionUnreachable", "SessionUnused"]
+      (preparedOwnerNames prepared)
+    unless (Map.member (mkModuleName "PreparedSessionLeaf") (pprFinalizedModules prepared)) $
+      fail "session leaf lacks its canonical interface/Core owner"
+    assertCoreSharing "session tier retains preceding canonical owners" True
+      ["SessionUnused", "SessionConsumer", "SessionUnreachable"] ordinarySharing preparedSharing
+    assertStgSharing "session tier retains already prepared dependency bodies" True
+      ["SessionUnused", "SessionConsumer"] ordinarySharing preparedSharing
+    case prResultType (pprPipelineResult prepared) of
+      Just inferred -> unless (eqType inferred intTy) (fail "session leaf changed its native result type")
+      Nothing -> fail "session leaf lost its native result type"
+    previousDrop <- lookupEnv "TIDEPOOL_TEST_DROP_MEMO_INTERFACE"
+    regenerated <- (do
+        setEnv "TIDEPOOL_TEST_DROP_MEMO_INTERFACE" "SessionUnused"
+        compiler PreparedStg mempty GeneralCompile (Just scope) target [root] Nothing)
+      `finally` maybe (unsetEnv "TIDEPOOL_TEST_DROP_MEMO_INTERFACE")
+                      (setEnv "TIDEPOOL_TEST_DROP_MEMO_INTERFACE") previousDrop
+    regeneratedSharing <- compilerProductSharing regenerated
+    assertPreparedEquivalent "session interface recovery restores the canonical prepared product" prepared regenerated
+    assertCoreSharing "session tier rebuilds owner with missing retained interface" False
+      ["SessionUnused"] preparedSharing regeneratedSharing
+    assertStgSharing "session tier rebuilds affected producer and consumer bodies" False
+      ["SessionUnused", "SessionConsumer"] preparedSharing regeneratedSharing
   where
     temporary = do
       parent <- getTemporaryDirectory
@@ -1628,6 +1574,52 @@ compilerLifecycleCompilation = bracket temporary removeDirectoryRecursive $ \roo
       createDirectory path
       pure path
 
+-- Object identity observes the transaction cache's immutable Core/STG payloads,
+-- not the result wrappers or compiler session. Interface hashes and selected
+-- owners independently check semantic equivalence.
+data CompilerProductSharing = CompilerProductSharing
+  { sharedCore :: Map.Map ModuleName (StableName CgGuts)
+  , sharedStg :: Map.Map ModuleName (StableName [(CgStgTopBinding, IdSet)])
+  }
+
+compilerProductSharing :: PreparedPipelineResult -> IO CompilerProductSharing
+compilerProductSharing prepared = do
+  cores <- traverse (\owner -> evaluate (finalizedTidyGuts owner) >>= makeStableName)
+    (pprFinalizedModules prepared)
+  stg <- traverse (\owner -> evaluate (pmBindings owner) >>= makeStableName)
+    (Map.fromList [(moduleName (pmModule owner), owner) | owner <- pprModules prepared])
+  pure (CompilerProductSharing cores stg)
+
+assertCoreSharing :: String -> Bool -> [String] -> CompilerProductSharing -> CompilerProductSharing -> IO ()
+assertCoreSharing label expected owners before after = forM_ owners $ \owner -> do
+  let name = mkModuleName owner
+  case (Map.lookup name (sharedCore before), Map.lookup name (sharedCore after)) of
+    (Just left, Just right) -> assertEqual (label ++ ": " ++ owner) expected (left == right)
+    _ -> fail (label ++ ": missing finalized owner " ++ owner)
+
+assertStgSharing :: String -> Bool -> [String] -> CompilerProductSharing -> CompilerProductSharing -> IO ()
+assertStgSharing label expected owners before after = forM_ owners $ \owner -> do
+  let name = mkModuleName owner
+  case (Map.lookup name (sharedStg before), Map.lookup name (sharedStg after)) of
+    (Just left, Just right) -> assertEqual (label ++ ": " ++ owner) expected (left == right)
+    _ -> fail (label ++ ": missing prepared owner " ++ owner)
+
+preparedOwnerNames :: PreparedPipelineResult -> [String]
+preparedOwnerNames = sort . map (moduleNameString . moduleName . pmModule) . pprModules
+
+assertPreparedEquivalent :: String -> PreparedPipelineResult -> PreparedPipelineResult -> IO ()
+assertPreparedEquivalent label before after = do
+  let interfaces = Map.map (mi_iface_hash . mi_final_exts . hm_iface . finalizedHomeModInfo)
+        . pprFinalizedModules
+  assertEqual (label ++ ": canonical interfaces") (interfaces before) (interfaces after)
+  assertEqual (label ++ ": selected prepared owners") (preparedOwnerNames before) (preparedOwnerNames after)
+  assertEqual (label ++ ": merged binding inventory")
+    (length (prBinds (pprPipelineResult before))) (length (prBinds (pprPipelineResult after)))
+  case (prResultType (pprPipelineResult before), prResultType (pprPipelineResult after)) of
+    (Just left, Just right) -> unless (eqType left right) (fail (label ++ ": result type changed"))
+    (Nothing, Nothing) -> pure ()
+    _ -> fail (label ++ ": result type disappeared")
+
 memoLifecycleCompilation :: IO ()
 memoLifecycleCompilation = bracket temporary removeDirectoryRecursive requestMemoLifecycle
   where
@@ -1656,6 +1648,7 @@ requestMemoLifecycle root = do
         , "dependency :: Int"
         , "dependency = missing"
         ]
+      dependencies = ["Tidepool.Session.Lib.G1", "MemoLibrary"]
   createDirectoryIfMissing True dependencyDir
   writeFile dependencyPath validDependency
   writeFile libraryPath "module MemoLibrary (one) where\none :: Int\none = 1\n"
@@ -1667,74 +1660,68 @@ requestMemoLifecycle root = do
     , "result = dependency + one"
     ]
   writeFile otherTargetPath "module MemoOther where\nother :: Int\nother = 2\n"
-  previousTiming <- lookupEnv "TIDEPOOL_TIMING"
-  setEnv "TIDEPOOL_TIMING" "1"
-  (withResidentPipelineSelectedRequests [root] $ \runRequest -> do
-      let compileIn scope purpose compiler = compiler PreparedStg mempty purpose scope targetPath [root] Nothing
-          compile = compileIn Nothing
-          incarnate = Just (SessionScope root [] Nothing (Just "7"))
-          sessionMiss = "tidepool-memo-miss module=Tidepool.Session.Lib.G1"
-          absentSession = sessionMiss ++ " reason=absent"
-          libraryMiss = "tidepool-memo-miss module=MemoLibrary"
-          absentLibrary = libraryMiss ++ " reason=absent"
-          targetMiss = "tidepool-memo-miss module=MemoTarget"
-          shape prepared = do
-            modules <- evaluate (length (pprModules prepared))
-            binds <- evaluate (length (prBinds (pprPipelineResult prepared)))
-            pure (modules, binds)
-      (_, anonymousLog) <- captureStderr root "memo-anonymous" $
-        runRequest (pure ()) $ \compiler -> void (compile GeneralCompile compiler)
-      assertContains "cold request compiles the session dependency" absentSession anonymousLog
-      assertContains "cold request compiles the library dependency" absentLibrary anonymousLog
-      (_, nextRequestLog) <- captureStderr root "memo-next-request" $
-        runRequest (pure ()) $ \compiler -> void (compile GeneralCompile compiler)
-      assertContains "normal request exit releases the session dependency"
-        absentSession nextRequestLog
-      assertContains "normal request exit releases the library dependency" absentLibrary nextRequestLog
-      failedRequest <- try (captureStderr root "memo-exception" $ runRequest (pure ()) $ \compiler -> do
-        _ <- compile GeneralCompile compiler
-        throwIO (userError "request failure after compile"))
-        :: IO (Either SomeException ((), String))
-      case failedRequest of
-        Left _ -> pure ()
-        Right _ -> fail "exception cleanup probe unexpectedly succeeded"
-      (_, afterExceptionLog) <- captureStderr root "memo-after-exception" $
-        runRequest (pure ()) $ \compiler -> void (compile GeneralCompile compiler)
-      assertContains "exceptional request exit releases the session dependency"
-        absentSession afterExceptionLog
-      runRequest (pure ()) $ \compiler -> do
-        (_, coldLog) <- captureStderr root "memo-cold" (compileIn incarnate GeneralCompile compiler)
-        assertContains "fresh transaction compiles the session dependency" absentSession coldLog
-        assertContains "cold compile checks its target" targetMiss coldLog
-        (_, warmLog) <- captureStderr root "memo-warm" (compileIn incarnate LookupTypeCompile compiler)
-        when (sessionMiss `isInfixOf` warmLog || libraryMiss `isInfixOf` warmLog) $
-          fail ("unchanged session dependency was not reused within one worker request: " ++ warmLog)
-        assertContains "internal compile evicts its purpose-sensitive target" targetMiss warmLog
-        writeFile dependencyPath invalidDependency
-        (changed, _) <- captureStderr root "memo-changed"
-          (try (compileIn incarnate GeneralCompile compiler) :: IO (Either DependencyLoadFailure PreparedPipelineResult))
-        case changed of
-          Left (DependencySourceFailure diagnostics) ->
-            unless (any (\diagnostic -> dSeverity diagnostic == DiagError
-                && dFile diagnostic == Just (dependencyPath, 3, 14, 3, 21)) diagnostics) $
-              fail "changed invalid session dependency lost its exact source error"
-          Left DependencyWorkerFailure -> fail "changed dependency became a worker failure"
-          Right _ -> fail "changed invalid session dependency reused a stale memo entry"
-        writeFile dependencyPath validDependency
-        (_, retryLog) <- captureStderr root "memo-source-retry" (compileIn incarnate GeneralCompile compiler)
-        assertContains "source rejection resets graphs before same-request retry" absentSession retryLog
-      (restoredShape, restoredLog) <- captureStderr root "memo-incarnate-restored" $
-        runRequest (pure ()) $ \compiler -> compileIn incarnate GeneralCompile compiler >>= shape
-      assertContains "new transaction starts without the restored dependency" absentSession restoredLog
-      _ <- captureStderr root "memo-anonymous-between" $
-        runRequest (pure ()) $ \compiler ->
-          void (compiler PreparedStg mempty GeneralCompile Nothing otherTargetPath [root] Nothing)
-      (nextShape, nextLog) <- captureStderr root "memo-incarnate-next" $
-        runRequest (pure ()) $ \compiler -> compileIn incarnate GeneralCompile compiler >>= shape
-      assertContains "session incarnation does not retain GHC graphs across requests" absentSession nextLog
-      assertContains "library GHC graphs do not survive requests" absentLibrary nextLog
-      assertEqual "fresh requests preserve complete prepared output" restoredShape nextShape)
-    `finally` maybe (unsetEnv "TIDEPOOL_TIMING") (setEnv "TIDEPOOL_TIMING") previousTiming
+  withResidentPipelineSelectedRequests [root] $ \runRequest -> do
+    let compileIn scope purpose compiler = compiler PreparedStg mempty purpose scope targetPath [root] Nothing
+        compile = compileIn Nothing GeneralCompile
+        incarnate = Just (SessionScope root [] Nothing (Just "7"))
+        fresh = runRequest (pure ()) $ \compiler -> do
+          result <- compile compiler
+          sharing <- compilerProductSharing result
+          pure (result, sharing)
+    (anonymous, anonymousSharing) <- fresh
+    (next, nextSharing) <- fresh
+    assertPreparedEquivalent "normal request cleanup preserves output" anonymous next
+    assertCoreSharing "normal close releases compiler graphs" False dependencies anonymousSharing nextSharing
+    failedGraphs <- newIORef Nothing
+    failedRequest <- try (runRequest (pure ()) $ \compiler -> do
+      result <- compile compiler
+      sharing <- compilerProductSharing result
+      writeIORef failedGraphs (Just sharing)
+      throwIO (userError "request failure after compile"))
+      :: IO (Either SomeException ())
+    case failedRequest of
+      Left _ -> pure ()
+      Right _ -> fail "exception cleanup probe unexpectedly succeeded"
+    (afterException, afterExceptionSharing) <- fresh
+    assertPreparedEquivalent "exceptional cleanup preserves output" next afterException
+    failedSharing <- readIORef failedGraphs >>= maybe (fail "exception probe did not reach compilation") pure
+    assertCoreSharing "exceptional close releases compiler graphs" False dependencies failedSharing afterExceptionSharing
+    runRequest (pure ()) $ \compiler -> do
+      cold <- compileIn incarnate GeneralCompile compiler
+      coldSharing <- compilerProductSharing cold
+      warm <- compileIn incarnate LookupTypeCompile compiler
+      warmSharing <- compilerProductSharing warm
+      assertPreparedEquivalent "purpose change preserves native prepared result" cold warm
+      assertCoreSharing "transaction reuses finalized dependencies" True dependencies coldSharing warmSharing
+      assertStgSharing "transaction reuses prepared dependencies" True dependencies coldSharing warmSharing
+      assertCoreSharing "purpose-sensitive target is fresh" False ["MemoTarget"] coldSharing warmSharing
+      writeFile dependencyPath invalidDependency
+      changed <- try (compileIn incarnate GeneralCompile compiler)
+        :: IO (Either DependencyLoadFailure PreparedPipelineResult)
+      case changed of
+        Left (DependencySourceFailure diagnostics) ->
+          unless (any (\diagnostic -> dSeverity diagnostic == DiagError
+              && dFile diagnostic == Just (dependencyPath, 3, 14, 3, 21)) diagnostics) $
+            fail "changed invalid session dependency lost its exact source error"
+        Left DependencyWorkerFailure -> fail "changed dependency became a worker failure"
+        Right _ -> fail "changed invalid session dependency reused a stale memo entry"
+      writeFile dependencyPath validDependency
+      retry <- compileIn incarnate GeneralCompile compiler
+      retrySharing <- compilerProductSharing retry
+      assertPreparedEquivalent "same-request retry restores output" cold retry
+      assertCoreSharing "source rejection releases graphs before retry" False dependencies coldSharing retrySharing
+    (restored, restoredSharing) <- runRequest (pure ()) $ \compiler -> do
+      result <- compileIn incarnate GeneralCompile compiler
+      sharing <- compilerProductSharing result
+      pure (result, sharing)
+    runRequest (pure ()) $ \compiler ->
+      void (compiler PreparedStg mempty GeneralCompile Nothing otherTargetPath [root] Nothing)
+    (following, followingSharing) <- runRequest (pure ()) $ \compiler -> do
+      result <- compileIn incarnate GeneralCompile compiler
+      sharing <- compilerProductSharing result
+      pure (result, sharing)
+    assertPreparedEquivalent "fresh incarnated requests preserve prepared output" restored following
+    assertCoreSharing "incarnation retains no graphs across requests" False dependencies restoredSharing followingSharing
 
 captureStderr :: FilePath -> String -> IO a -> IO (a, String)
 captureStderr root label action = do
