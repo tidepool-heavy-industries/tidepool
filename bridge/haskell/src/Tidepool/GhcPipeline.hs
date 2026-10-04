@@ -25,7 +25,7 @@ module Tidepool.GhcPipeline
   ) where
 
 import GHC hiding (typeKind)
-import GHC.Driver.Main (hscDesugar, hscDesugar', hscSimplify, hscMaybeWriteIface, batchMsg, hscTidy, hscCompileCoreExpr')
+import GHC.Driver.Main (hscDesugar, hscDesugar', hscSimplify, hscMaybeWriteIface, batchMsg, hscTidy, hscCompileCoreExpr', loadIfaceByteCode)
 import GHC.Driver.Pipeline (compileOne')
 import GHC.Driver.Pipeline.Execute (runPhase)
 import GHC.Driver.Pipeline.Phases (TPhase(..), PhaseHook(..))
@@ -36,7 +36,8 @@ import GHC.Driver.Backend (backendGeneratesCode, backendWritesFiles, backendCanR
 import GHC.Driver.Env (hscUpdateFlags, hscUpdateHPT, hsc_HPT, hsc_home_unit, hscSetFlags, runHsc')
 import GHC.Driver.Env.Types (HscEnv(hsc_mod_graph, hsc_unit_env, hsc_logger, hsc_dflags, hsc_FC, hsc_targets, hsc_hooks, hsc_interp))
 import GHC.Driver.Monad (reflectGhc, reifyGhc, Session(..))
-import GHC.Unit.Home.ModInfo (HomeModInfo(..), HomeModLinkable(..), emptyHomeModInfoLinkable, addToHpt, lookupHpt)
+import GHC.Unit.Home.ModInfo (HomeModInfo(..), HomeModLinkable(..), emptyHomeModInfoLinkable, justBytecode, addToHpt, lookupHpt)
+import GHC.Unit.Module.Location (ModLocation(..))
 import GHC.Unit.Module.ModDetails (ModDetails, md_types, md_insts)
 import GHC.Unit.Module.Status (HscBackendAction(..))
 import GHC.Types.ForeignStubs (ForeignStubs(NoStubs))
@@ -63,7 +64,7 @@ import GHC.Utils.Logger (LogAction)
 import Tidepool.DiagJson (Diag(..), DiagSeverity(..), InputRejection(..), DependencyLoadFailure(..), dependencyDiagnostic, spanOf)
 import GHC.Data.FastString (unpackFS, mkFastString)
 import GHC.Fingerprint.Type (Fingerprint)
-import GHC.Unit.Module.Graph (mgModSummaries', ModuleGraphNode(..), mkNodeKey, nodeDependencies)
+import GHC.Unit.Module.Graph (mgModSummaries', ModuleGraphNode(..), NodeKey, mkNodeKey, nodeDependencies)
 import GHC.Unit.Home (homeUnitId, isHomeUnit)
 import GHC.Unit.Types (unitString)
 import GHC.Data.Graph.Directed (flattenSCCs)
@@ -158,7 +159,7 @@ import Tidepool.CheckedCell (CheckedSignature, captureCheckedSignature, rewriteC
   , NativeParsedModule, unannotatedModule, mapNativeModule, thenNativeModule, typecheckNativeModuleWithDiagnostics)
 import Tidepool.FinalizedModule (FinalizedModule(..))
 import Tidepool.HomeProducts
-  ( hydrateCandidateHomeProductsWithOriginals, materializeCandidateCompilerView
+  ( hydrateCandidateHomeProductsWithOriginals, materializeCandidateCompilerView, admittedCompilerInterface
   , validateCandidateInterfaceRequirements )
 import Tidepool.CompileInputPolicy (pluginInputIssues)
 import Tidepool.PlannedDeclaration
@@ -174,7 +175,7 @@ import Tidepool.Introspection (normalizeLookupWildcards)
 import Tidepool.Session
   ( SessionModule(..), SessionModuleKind(..), SessionScope(..)
   , isSessionScopeActive, injectSessionScope, registerSessionInterfaceLocation, renderSessionModule
-  , scaffoldTargetName, scaffoldOutputBase, evalUserBinder, parseSessionModule )
+  , scaffoldTargetName, scaffoldOutputBase, evalUserBinder, parseSessionModule, isReservedSessionModuleName )
 import Tidepool.Timing
   ( readTimingEnabled, timeSection, timePhase, emitPhase, emitCount
   , timeDetailPhase, ResourceTimingStart, beginResourceTiming, endResourceTiming
@@ -198,7 +199,7 @@ import Tidepool.DependencyEvidence
   , DependencyModule(..), DependencyImport(..), DependencyQualifier(..), ProductAvailability(..)
   , sourceEvidenceWithFingerprint )
 import Tidepool.ExactHydration
-  ( ExactIfaceArtifact(..), freshExactState, hydrateExactScope, serializeOriginalInterface, exactHomeInstancesFor
+  ( ExactIfaceArtifact(..), freshExactState, hydrateExactScope, exactInterfaceSummary, serializeOriginalInterface, exactHomeInstancesFor
   , readVerifiedExactIfaceClosureWithCheckedValues, selectVerifiedExactInterfaces, selectVerifiedValueInterfaces
   , checkedValueImportAuthorityFromVerified
   , GeneratedScaffoldRecipe, generatedScaffoldRecipe, captureGeneratedScaffoldTarget
@@ -209,6 +210,7 @@ import Tidepool.ExactScope
   , writeExactCompilation, scopeExecutionNativeOwners, ExactInterfaceEvidence(..), CanonicalOrigin(..), canonicalOrigin )
 import Tidepool.ExactScope
   ( CanonicalInterfaceProof, CanonicalInterfaceAdmission, scopeCanonicalInterfaces
+  , scopeSourceOriginalInterfaces, admittedInterfaceRequirements
   , validateCandidateCanonicalInterfaceProof
   , canonicalCertificatePath, canonicalCertificateSha256, canonicalCoreArtifact
   , canonicalCorePath, canonicalCoreSha256 )
@@ -706,8 +708,8 @@ data PipelineVariant = PipelineVariant
   , pvDownsweepExcludes :: [ModuleName]
     -- ^ Modules @depanal@ must NOT try to summarise (the session path's
     -- source-less @Val.G\<g\>@ ifaces). Empty on the normal path.
-  , pvPlan :: Bool -> ModuleGraph -> Maybe ExactScope -> Ghc CompilePlan
-    -- ^ @pvPlan timingEnabled downsweepGraph selectedExactScope@.
+  , pvPlan :: FilePath -> Bool -> ModuleGraph -> Maybe ExactScope -> Ghc CompilePlan
+    -- ^ @pvPlan compilerViewDirectory timingEnabled downsweepGraph selectedExactScope@.
   , pvGeneratedInstanceCheck :: Maybe GeneratedInstanceRecipe
   , pvSourceImportIntents :: [ImportIntent]
   , pvTransformParsed :: HscEnv -> ModSummary -> ParsedModule -> IO NativeParsedModule
@@ -893,10 +895,6 @@ withNativeTypecheckRecovery variant target environment summary parsed action
 data CompilePlan = CompilePlan
   { cpLoadGraph :: ModuleGraph
     -- ^ The graph handed to @load'@ (the skeleton applies @unpoison@ itself).
-  , cpLoadTargets :: Maybe [Target]
-    -- ^ Authenticated execution targets, scoped to the load barrier only.
-  , cpExecutionOriginals :: [ExecutionSourceIdentity]
-    -- ^ Exact originals whose source is loaded only for this execution.
   , cpAfterLoad :: Ghc ()
     -- ^ Runs immediately after @load'@ and its @ghc_load@ phase emit, before
     -- summaries are taken, after the shared load barrier. The session path
@@ -947,18 +945,8 @@ data LoadedModule = LoadedModule
   { loadedSummary :: ModSummary
   , loadedFacts :: ModuleFacts
   , loadedOutput :: ModuleOutput
-  , loadedPublication :: LoadedPublication
+  , loadedFinalized :: FinalizedModule
   }
-
--- Retained execution owns a GHC executable, not a new source finalization.
-data LoadedPublication
-  = FreshSourcePublication FinalizedModule
-  | RetainedExecutionPublication ExecutionSourceIdentity FinalizedModule
-
-loadedFinalized :: LoadedModule -> FinalizedModule
-loadedFinalized loaded = case loadedPublication loaded of
-  FreshSourcePublication finalized -> finalized
-  RetainedExecutionPublication _ finalized -> finalized
 
 data CanonicalFrontendFailure
   = CustomLoadPhaseHook
@@ -967,8 +955,6 @@ data CanonicalFrontendFailure
   | CompilerProducerUnavailable
   | CompilerProducerScopeMismatch
   | LoadedFinalizationOwnerMismatch
-  | RetainedExecutionFreshSourceConflict String String
-  | DuplicateRetainedExecutionOwner String String
   | MissingLoadedFrontend
   | MissingLoadedFinalization
   | UnfinishedLoadedFrontend
@@ -1519,13 +1505,11 @@ payloadProduct :: MemoPayload -> Maybe ModuleProduct
 payloadProduct (ValidationOnly _ _ _) = Nothing
 payloadProduct (ExecutableProduct moduleProduct) = Just moduleProduct
 
-payloadLoaded :: (ModSummary -> FinalizedModule -> LoadedPublication)
-  -> ModSummary -> MemoPayload -> LoadedModule
-payloadLoaded publication summary (ValidationOnly facts output finalized) =
-  LoadedModule summary facts output (publication summary finalized)
-payloadLoaded publication summary (ExecutableProduct product') =
-  LoadedModule summary (productFacts product') (productOutput product')
-    (publication summary (productFinalized product'))
+payloadLoaded :: ModSummary -> MemoPayload -> LoadedModule
+payloadLoaded summary (ValidationOnly facts output finalized) =
+  LoadedModule summary facts output finalized
+payloadLoaded summary (ExecutableProduct product') =
+  LoadedModule summary (productFacts product') (productOutput product') (productFinalized product')
 
 requireProduct :: ModuleFacts -> ModuleOutput -> Maybe PreparedModule
   -> FinalizedModule -> Ghc ModuleProduct
@@ -1699,7 +1683,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
     setupT1 <- monotonicTime
     endResourceTiming setupResources "compile" "ghc_setup"
     liftIO (emitPhase timing "ghc_setup" (elapsedMs sessionT0 setupT1))
-    originalPlan <- pvPlan variant timing modGraphRaw selectedExact
+    originalPlan <- pvPlan variant compilerViewDirectory timing modGraphRaw selectedExact
     certifiedEnv <- getSession
     let acceptedNames = Map.keysSet acceptedCandidates
         loadRequired = any ((== CandidateLoadForExecution) . admittedCandidateLoading)
@@ -1722,7 +1706,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
         plan | Set.null acceptedNames = originalPlan
              | otherwise = originalPlan
                  { cpLoadGraph = candidateLoadGraph
-                 , cpAfterLoad = do
+               , cpAfterLoad = do
                      cpAfterLoad originalPlan
                      current <- getSession
                      -- Exact hydration owns the lexical graph; installing
@@ -1800,29 +1784,14 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
     frontendOriginsRef <- liftIO (newIORef Map.empty)
     pendingFinalizationsRef <- liftIO (newIORef Map.empty)
     beforeLoad <- getSession
-    let freshSourceOwners = Set.fromList
-          [(unitString (moduleUnit (ms_mod summary)), moduleNameString (ms_mod_name summary))
-          | ModuleNode _ summary <- mgModSummaries' modGraphRaw
-          , ms_hsc_src summary == HsSrcFile]
-    executionOriginals <- liftIO $ foldM (\known original -> do
-      let key = executionIdentityKey original
-          failure constructor = throwIO (constructor (executionUnit original) (executionModule original))
-      when (key `Map.member` known) (failure DuplicateRetainedExecutionOwner)
-      when (key `Set.member` freshSourceOwners) (failure RetainedExecutionFreshSourceConflict)
-      pure (Map.insert key original known)) Map.empty (cpExecutionOriginals plan)
     let originalPhaseHook = runPhaseHook (hsc_hooks beforeLoad)
-        sourcePublication summary finalized = case Map.lookup
-            (unitString (moduleUnit (ms_mod summary)), moduleNameString (ms_mod_name summary)) executionOriginals of
-          Nothing -> FreshSourcePublication finalized
-          Just original -> RetainedExecutionPublication original finalized
-        publishLoadedFinalization loaded = case loadedPublication loaded of
-          RetainedExecutionPublication _ _ -> pure ()
-          FreshSourcePublication finalized -> do
-            let name = ms_mod_name (loadedSummary loaded)
-            unless (name `Map.member` acceptedCandidates) $ do
-              atomicModifyIORef' finalizedModulesRef (\known -> (Map.insert name finalized known, ()))
-              when captureProducts $ atomicModifyIORef' productInterfacesRef
-                (\known -> (Map.insert name (hm_iface (finalizedHomeModInfo finalized)) known, ()))
+        publishLoadedFinalization loaded = do
+          let name = ms_mod_name (loadedSummary loaded)
+              finalized = loadedFinalized loaded
+          unless (name `Map.member` acceptedCandidates) $ do
+            atomicModifyIORef' finalizedModulesRef (\known -> (Map.insert name finalized known, ()))
+            when captureProducts $ atomicModifyIORef' productInterfacesRef
+              (\known -> (Map.insert name (hm_iface (finalizedHomeModInfo finalized)) known, ()))
         runOriginalPhase :: TPhase a -> IO a
         runOriginalPhase phase = case originalPhaseHook of
           Nothing -> runPhase phase
@@ -1849,7 +1818,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                 (HomeModInfo skinny (pendingDetails pending) emptyHomeModInfoLinkable)
                 (pendingTidyGuts pending)
               loaded = LoadedModule (pendingSummary pending) (pendingFacts pending)
-                (pendingOutput pending) (sourcePublication (pendingSummary pending) finalized)
+                (pendingOutput pending) finalized
               name = ms_mod_name (pendingSummary pending)
           -- A candidate's bytecode may be needed by a splice. Its recompilation
           -- may not supply a different interface to an importer while the old
@@ -1979,7 +1948,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
             { runPhaseHook = Just (PhaseHook captureCanonicalFailure) } }) session)
       (const (reflectGhc (getSession >>= \env -> setSession env
         { hsc_hooks = hsc_hooks beforeLoad }) session))
-      (const (reflectGhc (withLoadTargets (cpLoadTargets plan) $ load' mCache loadHowMuch
+      (const (reflectGhc (load' mCache loadHowMuch
         dependencyDiagnostic (Just batchMsg)
         (scopeRetainedModuleGraph (mapMG canonicalizeLoadSummary loadGraph))) session))
     loadT1 <- monotonicTime
@@ -2208,7 +2177,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                     (_, output, finalized) <- compileBack interfaceUse front
                     facts <- liftIO (frontFacts front)
                     pure (LoadedModule (mfSummary front) facts output
-                      (sourcePublication (mfSummary front) finalized))
+                      finalized)
               rememberFinalized loaded = liftIO (publishLoadedFinalization loaded)
               rememberPreparedSiblings prepared = liftIO $
                 modifyIORef' preparedSiblingsRef (\known -> Map.union (pmSitedSiblings prepared) known)
@@ -2308,7 +2277,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
               cachedInterface modSum entry
                 | dropMemoInterface == Just (moduleNameString (ms_mod_name modSum)) = Nothing
                 | otherwise = Just (finalizedHomeModInfo
-                    (loadedFinalized (payloadLoaded sourcePublication modSum (gmePayload entry))))
+                    (loadedFinalized (payloadLoaded modSum (gmePayload entry))))
               interfaceReady _ modSum entry = isJust (cachedInterface modSum entry)
           -- Under TIDEPOOL_TIMING, name why a memoized module was recompiled.
           let memoMiss modSum reason = when timing $ liftIO $ hPutStrLn stderr $
@@ -2487,7 +2456,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                         recordValidity modSum True
                         recordExecutableValidity modSum True
                         rememberPreparedSiblings (productPrepared moduleProduct)
-                        rememberFinalized (payloadLoaded sourcePublication modSum (gmePayload entry))
+                        rememberFinalized (payloadLoaded modSum (gmePayload entry))
                         when (needsPreparedInterface interfaceUse) $
                           forM_ (cachedInterface modSum entry) (installPreparedInterface mn)
                         pure (CachedObservation modSum entry, Just (productOutput moduleProduct), Just (productPrepared moduleProduct))
@@ -2503,7 +2472,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                           memoMissTrace modSum reason (Just entry)
                         loaded <- case cached of
                           Just entry | interfaceReady interfaceUse modSum entry ->
-                            pure (payloadLoaded sourcePublication modSum (gmePayload entry))
+                            pure (payloadLoaded modSum (gmePayload entry))
                           _ -> finalizeCurrent interfaceUse modSum
                         rememberFinalized loaded
                         let r = loadedOutput loaded
@@ -2536,7 +2505,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                 case cached of
                   Just entry
                     | interfaceReady interfaceUse modSum entry -> do
-                    let loaded = payloadLoaded sourcePublication modSum (gmePayload entry)
+                    let loaded = payloadLoaded modSum (gmePayload entry)
                     recordValidity modSum True
                     rememberFinalized loaded
                     when (needsPreparedInterface interfaceUse) $
@@ -2581,7 +2550,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                     let modSum = observationSummary observation
                     loaded <- case observation of
                       LoadedObservation captured -> pure captured
-                      CachedObservation _ entry -> pure (payloadLoaded sourcePublication modSum (gmePayload entry))
+                      CachedObservation _ entry -> pure (payloadLoaded modSum (gmePayload entry))
                       HydratedObservation _ _ _ -> liftIO (throwIO MissingLoadedFinalization)
                     rememberFinalized loaded
                     let r = loadedOutput loaded
@@ -2593,7 +2562,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                     let modSum = observationSummary observation
                     loaded <- case observation of
                       LoadedObservation value -> pure value
-                      CachedObservation _ entry -> pure (payloadLoaded sourcePublication modSum (gmePayload entry))
+                      CachedObservation _ entry -> pure (payloadLoaded modSum (gmePayload entry))
                       HydratedObservation _ _ _ -> liftIO (throwIO MissingLoadedFinalization)
                     case mMemoRef of
                       Just ref -> liftIO (modifyIORef' ref
@@ -3837,10 +3806,8 @@ normalVariant purpose path = do
    , pvSourceImportIntents = sourceImportIntents purpose
    , pvDownsweepExcludes = []
    , pvTransformParsed = transformFor purpose targetModName'
-   , pvPlan = \_timing modGraphRaw _selectedExact -> pure CompilePlan
+   , pvPlan = \_compilerViewDirectory _timing modGraphRaw _selectedExact -> pure CompilePlan
       { cpLoadGraph = modGraphRaw
-      , cpLoadTargets = Nothing
-      , cpExecutionOriginals = []
       , cpAfterLoad = pure ()
         -- Consume load captures and finalize any deferred source in dependency
         -- order before selecting prepared STG.
@@ -3860,39 +3827,68 @@ normalVariant purpose path = do
       }
   }
 
--- | The SESSION extraction variant (active 'SessionScope' only). The same
--- 'runCompile' skeleton as 'normalVariant' — @depanal@/@load'@ then the
--- dependency-ordered finalization and preparation of each home module, with
--- the session-scope injection seam filled in:
---
---   1. The source-less @Val.G<g>@ modules are EXCLUDED from @depanal@ (no
---      source to summarise) and their thin ifaces are INJECTED into the HPT +
---      finder immediately before each source module that imports them. This
---      preserves the chronological Lib/Val dependency DAG instead of eagerly
---      manufacturing a cycle.
---   2. Every module that (transitively) imports one of those — the turn target
---      included — is excluded from the @load'@ graph (it cannot be compiled
---      before the Val ifaces exist) and compiled instead in the
---      dependency-directed loop, which also registers it back into the HPT
---      ('registerPreparedInterface').
---
--- Its tier is 'OptimizeEveryModule'. Compiling every home module to full -O2
--- guts (rather than extracting only the target and resolving its library
--- calls from HPT ifaces) keeps executable dependencies paired with their
--- registered interfaces. A
--- reference turn imports @Tidepool.Prelude@ via the eval preamble; the
--- @load'@ also keeps those source deps "loaded" (GHC-58427).
--- Recipes grant execution only. The ordinary graph and its lexical admission
--- are checked before discovering any source needed by an original quoter.
+-- A retained compiler module owns a canonical artifact, not a native product
+-- or permission to import it lexically. The graph exists only for GHC linking.
+data RetainedCompilerModule = RetainedCompilerModule
+  { retainedCompilerArtifact :: ExactIfaceArtifact
+  , retainedCompilerAdmission :: CanonicalInterfaceAdmission
+  , retainedCompilerSummary :: ModSummary
+  , retainedCompilerDependencies :: [NodeKey]
+  }
+
+data FinalizedExecutionFailure
+  = FinalizedExecutionOwnerMissing (String, String)
+  | FinalizedExecutionDependencyMismatch (String, String) (String, String)
+  | FinalizedExecutionCycle (String, String)
+  | FinalizedExecutionCoreMissing (String, String)
+  | FinalizedExecutionHomeMissing (String, String)
+  deriving (Eq, Show)
+
+instance Exception FinalizedExecutionFailure
+
 data ExactExecutionPlan = ExactExecutionPlan
   { executionLoadGraph :: ModuleGraph
-  , executionLoadTargets :: Maybe [Target]
-  , executionOriginalNodes :: [ExecutionSourceNode]
+  , executionOriginalModules :: [RetainedCompilerModule]
   , executionFreshProviders :: [ModSummary]
   , executionLinkGraph :: ModuleGraph
-  , executionNegativePaths :: [FilePath]
-  , executionPackageRoots :: [PackageImportRoot]
   }
+
+-- Close only compiler execution demand. Every edge is an already admitted
+-- canonical interface seal; no native reachability, source path or candidate
+-- ordering can manufacture a missing compiler owner.
+retainedCompilerClosure
+  :: FilePath -> HscEnv -> ExactScope -> [(ExactIfaceArtifact, ModIface)]
+  -> [(String, String)] -> Either FinalizedExecutionFailure [RetainedCompilerModule]
+retainedCompilerClosure directory env scope interfaces roots = do
+  (_, modules) <- foldM (visit Set.empty) (Set.empty, []) roots
+  pure (reverse modules)
+  where
+    admissions = scopeSourceOriginalInterfaces scope
+    artifacts = Map.fromList [((exactUnit artifact, exactModule artifact), artifact)
+      | (artifact, _) <- interfaces]
+    visit active state@(completed, _) key
+      | isReservedSessionModuleName (snd key) = Left (FinalizedExecutionOwnerMissing key)
+      | key `Set.member` active = Left (FinalizedExecutionCycle key)
+      | key `Set.member` completed = Right state
+      | otherwise = do
+          admission <- maybe (Left (FinalizedExecutionOwnerMissing key)) Right (Map.lookup key admissions)
+          artifact <- maybe (Left (FinalizedExecutionOwnerMissing key)) Right (Map.lookup key artifacts)
+          let requirements = Map.toAscList (admittedInterfaceRequirements admission)
+          dependencyKeys <- forM requirements $ \(required, seal) -> case Map.lookup required artifacts of
+            Just dependency | exactSha256 dependency == seal ->
+              Right (mkNodeKey (ModuleNode [] (exactInterfaceSummary env dependency)))
+            _ -> Left (FinalizedExecutionDependencyMismatch key required)
+          (closed, dependencies) <- foldM (visit (Set.insert key active)) state (map fst requirements)
+          let index = Set.size closed
+              summary = exactInterfaceSummary env artifact
+              prefix = directory </> ("retained-" ++ show index)
+              location = (ms_location summary)
+                { ml_hi_file = prefix ++ ".hi", ml_dyn_hi_file = prefix ++ ".dyn_hi"
+                , ml_obj_file = prefix ++ ".o", ml_dyn_obj_file = prefix ++ ".dyn_o"
+                , ml_hie_file = prefix ++ ".hie" }
+              selected = RetainedCompilerModule artifact admission (summary {ms_location = location}) dependencyKeys
+          pure (Set.insert key closed, selected : dependencies)
+
 
 -- Linker hooks and diagnostic collectors belong to one cycle. Restore both
 -- even when refusal or cancellation prevents the final environment handoff.
@@ -3911,15 +3907,6 @@ withCompilerViewDirectory action = reifyGhc $ \session -> bracket
   (getTemporaryDirectory >>= \directory -> mkdtemp (directory </> "tidepool-compiler-view.XXXXXX"))
   removeDirectoryRecursive
   (\directory -> reflectGhc (action directory) session)
-
--- GHC's whole-module pipeline consults targets to choose bytecode generation.
--- Restore only this field in the current environment, retaining the load's HPT.
-withLoadTargets :: Maybe [Target] -> Ghc a -> Ghc a
-withLoadTargets Nothing action = action
-withLoadTargets (Just targets) action = reifyGhc $ \session -> bracket
-  (reflectGhc (hsc_targets <$> getSession) session)
-  (\original -> reflectGhc (getSession >>= \env -> setSession env {hsc_targets=original}) session)
-  (const (reflectGhc (setTargets targets >> action) session))
 
 -- A denied original selection is an input refusal, distinct from authored
 -- GHC errors and from optional compile-time execution failures.
@@ -4254,9 +4241,9 @@ validateExactOriginalSources admitted interfaces sourceGraph nodes = do
     (nubOrd (concatMap fst observations)) (Set.toAscList (Set.fromList (concatMap snd observations))))
 
 planExactExecutionLoad
-  :: ExactScope -> [(ExactIfaceArtifact, ModIface)] -> [(ExactIfaceArtifact, ModIface)] -> ModuleName
+  :: FilePath -> ExactScope -> [(ExactIfaceArtifact, ModIface)] -> [(ExactIfaceArtifact, ModIface)] -> ModuleName
   -> ModuleGraph -> ModuleGraph -> Ghc ExactExecutionPlan
-planExactExecutionLoad admitted interfaces checkedInterfaces targetName sourceGraph ordinaryLoad = do
+planExactExecutionLoad directory admitted interfaces checkedInterfaces targetName sourceGraph ordinaryLoad = do
   initial <- getSession
   parsed <- mapM parseModule [summary | ModuleNode _ summary <- mgModSummaries' sourceGraph
     , xopt LangExt.QuasiQuotes (ms_hspp_opts summary)]
@@ -4302,46 +4289,34 @@ planExactExecutionLoad admitted interfaces checkedInterfaces targetName sourceGr
         , Map.member key demandByOwner]
   definers <- concat <$> mapM (\(parsedModule,occurrences) -> concat <$> mapM (defining parsedModule) occurrences) quoted
   let roots = if null quoted then [] else Set.toAscList (Set.fromList (providers ++ definers))
-  if null roots then pure (ExactExecutionPlan ordinaryLoad Nothing [] [] sourceGraph [] []) else withLoadTargets (Just (hsc_targets initial)) $ do
-    forM_ roots $ \key -> unless (isNothing (hscCompileCoreExprHook (hsc_hooks initial))) $
-      liftIO (throwIO (ExecutionSourceUnsupported key))
-    nodes <- either (liftIO . throwIO) pure (executionSourceClosure
-      (scopeExecutionGraphs admitted) (scopeExecutionOwners admitted) (scopeExecutionNativeOwners admitted) roots)
-    validation <- validateExactOriginalSources admitted interfaces sourceGraph nodes
-    let selected = Map.fromList [(executionIdentityKey (executionNodeIdentity node),node) | node <- nodes]
-        executionGraph = validatedOriginalGraph validation
-        extraTargets = validatedOriginalTargets validation
-        selectedNames = Set.fromList [mkModuleName name | (_,name) <- Map.keys selected]
-        excluded = [mkModuleName (exactModule artifact) | (artifact,_,_) <- scopeInterfaces admitted
-          , mkModuleName (exactModule artifact) `Set.notMember` selectedNames]
-          ++ [mkModuleName (exactModule artifact) | artifact <- scopeValueInterfaces admitted]
-    let shadowNames = Set.fromList [mkModuleName name | (_,name) <- Map.keys selected]
-        blockedSeed = Set.fromList (targetName : excluded)
-        deferred names =
-          let grown = names `Set.union` Set.fromList [ms_mod_name summary
-                | ModuleNode _ summary <- mgModSummaries' executionGraph
-                , any ((`Set.member` names) . unLoc . snd) (ms_textual_imps summary)]
-          in if grown == names then names else deferred grown
-        blocked = deferred blockedSeed
-        ordinaryNames = Set.fromList [ms_mod_name summary | ModuleNode _ summary <- mgModSummaries' ordinaryLoad]
-        loadGraph = mkModuleGraph [graphNode | graphNode <- mgModSummaries' executionGraph
-          , case graphNode of ModuleNode _ summary -> ms_mod_name summary `Set.member` Set.union shadowNames ordinaryNames
-                              _ -> True]
-        freshProviders = [summary | ModuleNode _ summary <- flattenSCCs (topSortModuleGraph True sourceGraph Nothing)
-          , ms_mod_name summary `Set.notMember` ordinaryNames
-          , ms_mod_name summary /= targetName
-          , backendGeneratesCode (backend (ms_hspp_opts summary))]
-    forM_ (Set.toList (Set.intersection shadowNames blocked)) $ \name ->
-      liftIO (throwIO (ExecutionSourceUnsupported (unitString home,moduleNameString name)))
-    forM_ freshProviders $ \summary -> unless
-        (ms_mod_name summary `Set.notMember` blocked
-          && null (ms_srcimps summary)
-          && not (any (\case ModuleNode _ boot -> ms_hsc_src boot == HsBootFile && ms_mod boot == ms_mod summary
-                             _ -> False) (mgModSummaries' sourceGraph))
-          && not (xopt LangExt.StaticPointers (ms_hspp_opts summary))) $
-          liftIO (throwIO (ExecutionSourceUnsupported (ownerKey (ms_mod summary))))
-    pure (ExactExecutionPlan loadGraph (Just (hsc_targets initial ++ extraTargets)) nodes freshProviders executionGraph
-      (validatedOriginalNegatives validation) (validatedOriginalPackages validation))
+  modules <- either (liftIO . throwIO) pure
+    (retainedCompilerClosure directory initial admitted interfaces roots)
+  let moduleNodes = [ModuleNode (retainedCompilerDependencies selected)
+          (retainedCompilerSummary selected) | selected <- modules]
+      ordinaryNames = Set.fromList [ms_mod_name summary | ModuleNode _ summary <- mgModSummaries' ordinaryLoad]
+      freshProviders = [summary | not (null roots)
+        , ModuleNode _ summary <- flattenSCCs (topSortModuleGraph True sourceGraph Nothing)
+        , ms_mod_name summary `Set.notMember` ordinaryNames
+        , ms_mod_name summary /= targetName
+        , backendGeneratesCode (backend (ms_hspp_opts summary))]
+      admittedNames = Set.fromList [ms_mod_name (retainedCompilerSummary selected) | selected <- modules]
+      excluded = [mkModuleName (exactModule artifact) | (artifact,_,_) <- scopeInterfaces admitted
+        , mkModuleName (exactModule artifact) `Set.notMember` admittedNames]
+        ++ [mkModuleName (exactModule artifact) | artifact <- scopeValueInterfaces admitted]
+      deferred names =
+        let grown = names `Set.union` Set.fromList [ms_mod_name summary
+              | ModuleNode _ summary <- mgModSummaries' sourceGraph
+              , any ((`Set.member` names) . unLoc . snd) (ms_textual_imps summary)]
+        in if grown == names then names else deferred grown
+      blocked = deferred (Set.fromList (targetName : excluded))
+  forM_ freshProviders $ \summary -> unless
+      (ms_mod_name summary `Set.notMember` blocked
+        && null (ms_srcimps summary)
+        && not (any (\case ModuleNode _ boot -> ms_hsc_src boot == HsBootFile && ms_mod boot == ms_mod summary
+                           _ -> False) (mgModSummaries' sourceGraph))
+        && not (xopt LangExt.StaticPointers (ms_hspp_opts summary))) $
+      liftIO (throwIO (ExecutionSourceUnsupported (ownerKey (ms_mod summary))))
+  pure (ExactExecutionPlan ordinaryLoad modules freshProviders (mkModuleGraph moduleNodes))
 
 sessionVariant :: CompilePurpose -> SessionScope -> FilePath -> IO PipelineVariant
 sessionVariant purpose scope path = do
@@ -4399,7 +4374,7 @@ sessionVariant purpose scope path = do
          Just (recipe, signatures) | ms_mod_name summary == targetModName' ->
            thenNativeModule transformed (rewriteRequestTypes env recipe signatures)
          _ -> pure transformed
-   , pvPlan = \timing modGraphRaw selectedExact -> do
+   , pvPlan = \compilerViewDirectory timing modGraphRaw selectedExact -> do
       let directSummaries = [ ms | ModuleNode _ ms <- mgModSummaries' modGraphRaw ]
           importsOf ms = [ unLoc lmn | (_, lmn) <- ms_textual_imps ms ]
           -- Everything that (directly or transitively) imports an injected
@@ -4442,7 +4417,7 @@ sessionVariant purpose scope path = do
       scaffoldRef <- liftIO (newIORef noGeneratedScaffoldImports)
       injectMsRef <- liftIO (newIORef (0 :: Integer))
       executionPlan <- case selectedExact of
-        Nothing -> pure (ExactExecutionPlan depGraph Nothing [] [] modGraphRaw [] [])
+        Nothing -> pure (ExactExecutionPlan depGraph [] [] modGraphRaw)
         Just admitted -> do
           env <- getSession
           let originals = [iface | (iface,_,_) <- scopeInterfaces admitted]
@@ -4475,10 +4450,10 @@ sessionVariant purpose scope path = do
           preflight <- liftIO (installExactLexicalGraphWithScaffold modGraphRaw lexical checkedValues scaffold hydrated)
           _ <- either (liftIO . ioError . userError) pure preflight
           liftIO (writeIORef verifiedClosureRef (Just closure'))
-          planExactExecutionLoad admitted interfaces checkedInterfaces targetModName' modGraphRaw depGraph
-      let executionNodes = executionOriginalNodes executionPlan
+          planExactExecutionLoad compilerViewDirectory admitted interfaces checkedInterfaces targetModName' modGraphRaw depGraph
+      let executionModules = executionOriginalModules executionPlan
       liftIO $ do
-        emitCount timing "exact_execution_original_load_owners" (toInteger (length executionNodes))
+        emitCount timing "exact_execution_original_load_owners" (toInteger (length executionModules))
         emitCount timing "exact_execution_fresh_provider_compiles" (toInteger (length (executionFreshProviders executionPlan)))
       pure CompilePlan
         -- Compile the turn's home-package SOURCE dependencies
@@ -4487,8 +4462,6 @@ sessionVariant purpose scope path = do
         -- filtered out above) — equivalent to the old @LoadDependenciesOf@
         -- but without compiling the target prematurely.
         { cpLoadGraph = executionLoadGraph executionPlan
-        , cpLoadTargets = executionLoadTargets executionPlan
-        , cpExecutionOriginals = map executionNodeIdentity executionNodes
         , cpAfterLoad = do
             -- Restore the FULL module graph (target included) so the
             -- per-module typecheck can see HPT instances from dep modules:
@@ -4508,28 +4481,27 @@ sessionVariant purpose scope path = do
                      (selectVerifiedExactInterfaces closure' originals)
                    checkedValues <- either (liftIO . ioError . userError) pure
                      (checkedValueImportAuthorityFromVerified closure' values)
-                   when timing $ forM_ (take 128 executionNodes) $ \node -> do
-                     let key@(_,owner) = executionIdentityKey (executionNodeIdentity node)
-                         loaded = lookupHpt (hsc_HPT hscMG) (mkModuleName owner)
-                     liftIO $ hPutStrLn stderr $ "tidepool-exact-execution-load owner=" ++ show key
-                       ++ " allow_object=False bytecode=" ++ show (maybe False (isJust . homeMod_bytecode . hm_linkable) loaded)
-                       ++ " object=" ++ show (maybe False (isJust . homeMod_object . hm_linkable) loaded)
-                   executable <- forM executionNodes $ \node -> do
-                     let original = executionNodeIdentity node
-                         key = executionIdentityKey original
-                         name = mkModuleName (executionModule original)
-                     case lookupHpt (hsc_HPT hscMG) name of
-                       Just hmi | (unitString (moduleUnit (mi_module (hm_iface hmi))),
-                           moduleNameString (moduleName (mi_module (hm_iface hmi)))) == key
-                         , let links = hm_linkable hmi
-                         , isJust (homeMod_bytecode links) || isJust (homeMod_object links)
-                         , not (any usageFile (mi_usages (hm_iface hmi))) -> pure (name,links)
-                       _ -> liftIO (throwIO (ExecutionSourceLinkableMissing key))
                    hydrated <- liftIO (hydrateExactScope hscMG interfaces)
-                   let withExecutables = hscUpdateHPT (\table -> foldr
-                         (\(name,links) result -> case lookupHpt result name of
-                           Just hmi -> addToHpt result name hmi {hm_linkable=links}
-                           Nothing -> result) table executable) hydrated
+                   setSession hydrated
+                   -- Make clears the HPT. Only after it finishes do retained
+                   -- canonical artifacts supply compiler bytecode. This never
+                   -- runs a source frontend or republishes a native product.
+                   forM_ executionModules $ \selectedModule -> do
+                     current <- getSession
+                     let artifact = retainedCompilerArtifact selectedModule
+                         key = (exactUnit artifact, exactModule artifact)
+                         summary = retainedCompilerSummary selectedModule
+                         name = ms_mod_name summary
+                     home <- maybe (liftIO (throwIO (FinalizedExecutionHomeMissing key))) pure
+                       (lookupHpt (hsc_HPT current) name)
+                     attached <- liftIO (admittedCompilerInterface current
+                       (retainedCompilerAdmission selectedModule) (ms_mod summary))
+                     compile <- maybe (liftIO (throwIO (FinalizedExecutionCoreMissing key))) pure
+                       (loadIfaceByteCode current attached (ms_location summary) (md_types (hm_details home)))
+                     bytecode <- timePhase timing "retained_finalized_bytecode" (liftIO compile)
+                     setSession (hscUpdateHPT (\table -> addToHpt table name
+                       home {hm_linkable = justBytecode bytecode}) current)
+                   withExecutables <- getSession
                    let verifiedOwners = Map.fromList
                          [((exactUnit iface, exactModule iface), iface)
                          | (iface, _) <- interfaces]
@@ -4540,14 +4512,10 @@ sessionVariant purpose scope path = do
                    scaffold <- liftIO (readIORef scaffoldRef)
                    graph <- liftIO (installExactLexicalGraphWithScaffold modGraphRaw selected checkedValues scaffold withExecutables)
                    baseline <- either (liftIO . ioError . userError) pure graph
-                   linked <- if null executionNodes then pure baseline else do
-                     forM_ executionNodes $ \node ->
-                       unless (isNothing (hscCompileCoreExprHook (hsc_hooks baseline))) $
-                         liftIO (throwIO (ExecutionSourceUnsupported (executionIdentityKey (executionNodeIdentity node))))
-                     let executionKeys = Set.fromList (map (executionIdentityKey . executionNodeIdentity) executionNodes)
-                         shadows = [node | node@(ModuleNode _ summary) <- mgModSummaries' (executionLinkGraph executionPlan)
-                           , (unitString (moduleUnit (ms_mod summary)),moduleNameString (ms_mod_name summary))
-                             `Set.member` executionKeys]
+                   linked <- if null executionModules then pure baseline else do
+                     unless (isNothing (hscCompileCoreExprHook (hsc_hooks baseline))) $
+                       liftIO (throwIO (ExecutionSourceUnsupported ("", "retained compiler hook")))
+                     let shadows = mgModSummaries' (executionLinkGraph executionPlan)
                          shadowKeys = Set.fromList (map mkNodeKey shadows)
                          link invocation location expression = hscCompileCoreExpr' invocation
                            {hsc_mod_graph=mkModuleGraph
@@ -4658,26 +4626,14 @@ sessionVariant purpose scope path = do
         , cpTier = OptimizeEveryModule
         , cpBeforeMerge =
             do liftIO (readIORef injectMsRef >>= emitPhase timing "inject")
-               forM_ executionNodes $ \node -> do
-                 actual <- liftIO (sourceEvidenceWithFingerprint (dependencyModuleSource (executionNodeModule node)))
-                 unless (dependencySourceSha256 (fst actual) == executionNodeSourceSha256 node) $
-                   liftIO (throwIO (ExecutionSourceChangedDuring (executionIdentityKey (executionNodeIdentity node))
-                     (BeforeMergeSourceBytesChanged (dependencyModuleSource (executionNodeModule node))
-                       (executionNodeSourceSha256 node) (dependencySourceSha256 (fst actual)))))
-               forM_ (executionNegativePaths executionPlan) $ \path' -> do
-                 exists <- liftIO (doesFileExist path')
-                 when exists $ liftIO (throwIO (ExecutionSourceResolutionChanged ("",path')))
-               env <- getSession
-               forM_ (executionPackageRoots executionPlan) $ \root -> do
-                 unchanged <- liftIO (validatePackageImportRoot env root)
-                 either (const (liftIO (throwIO (ExecutionSourceResolutionChanged
-                   (packageUnit root,packageModule root))))) pure unchanged
+               forM_ selectedExact $ \admitted -> do
+                 env <- getSession
+                 verified <- liftIO (revalidateExactScope env admitted)
+                 either (liftIO . fail) pure verified
         , cpFinalEnv = \env -> hscUpdateFlags canonicalizeDFlags env {hsc_hooks=originalHooks}
         }
    }
-  where
-    usageFile UsageFile{} = True
-    usageFile _ = False
+
 -- | Render the exact type held by the typechecked environment before the
 -- executable pipeline can simplify the binding away.
 capturedBindingDisplay :: String -> TcGblEnv -> Maybe String

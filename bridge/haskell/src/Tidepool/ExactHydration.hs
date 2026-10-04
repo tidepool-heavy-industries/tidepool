@@ -7,7 +7,7 @@ module Tidepool.ExactHydration
   , ExactIfaceArtifact(..)
   , freshExactState
   , readExactIfaceArtifacts
-  , hydrateExactScope
+  , hydrateExactScope, exactInterfaceSummary
   , exactHomeInstancesFor, withExactHomeInstances
   , CheckedValueImportAuthority
   , noCheckedValueImports
@@ -742,7 +742,7 @@ installExactLexicalGraphWithScaffold sourceGraph lexical (CheckedValueImportAuth
       forM_ virtualRows $ \(artifact, _) ->
         addHomeModuleToFinder (hsc_FC env) (hsc_home_unit env)
           (GWIB (mkModuleName (exactModule artifact)) NotBoot)
-          (ms_location (virtualSummary env artifact))
+          (ms_location (exactInterfaceSummary env artifact))
       pure (Right env { hsc_mod_graph = mkModuleGraph (sourceNodes ++ virtualNodes) })
   where
     keyOfArtifact artifact = (exactUnit artifact,exactModule artifact)
@@ -811,11 +811,13 @@ installExactLexicalGraphWithScaffold sourceGraph lexical (CheckedValueImportAuth
       other -> other
       | node <- mgModSummaries' sourceGraph]
     virtualNodes =
-      [ ModuleNode (map nodeKey deps) (virtualSummary env artifact)
+      [ ModuleNode (map nodeKey deps) (exactInterfaceSummary env artifact)
       | (artifact, deps) <- virtualRows ]
 
-virtualSummary :: HscEnv -> ExactIfaceArtifact -> ModSummary
-virtualSummary env artifact = ModSummary
+-- This node describes admitted interface dependencies for scope/linker graphs.
+-- It is not a source summary and must never be sent through GHC make.
+exactInterfaceSummary :: HscEnv -> ExactIfaceArtifact -> ModSummary
+exactInterfaceSummary env artifact = ModSummary
   { ms_mod = mkModule (stringToUnit (exactUnit artifact))
       (mkModuleName (exactModule artifact))
   , ms_hsc_src = HsSrcFile

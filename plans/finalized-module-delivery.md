@@ -46,6 +46,41 @@ worker-tree trial. Source-ready candidates are not acceptance evidence.
   through GHC's loader. Immutable interface/Core/bytecode caches remain separate
   from loaded symbols, so reuse cannot execute a previous source version.
 
+## Retained compiler execution repair
+
+Retained exact compilation must use the same finalized interface/Core owner as
+candidate compilation. Native projection reachability is not the compiler's
+executable dependency closure: a source import may have a finalized compiler
+artifact without a prepared native product. Requiring a native original for
+every compiler dependency incorrectly refuses otherwise complete captures.
+
+- Close execution demand over admitted canonical interface dependency seals,
+  preserving complete package witnesses and compiler home-unit classification.
+  Missing canonical/Core evidence refuses execution; source bytes or an
+  equal-looking native product cannot replace it.
+- Generalize the existing authenticated Core attachment in `HomeProducts` for
+  durable and transaction-local canonical admissions. Keep one bounded reader,
+  fingerprint validator and dependency check.
+- Use GHC's `loadIfaceByteCode` for retained exact artifacts. Its input is the
+  authenticated interface with its paired Core attached and the hydrated type
+  environment. Do not make a synthetic source summary pass frontend freshness
+  checks, and never fall back to source compilation.
+- Keep current authored import selection, lexical visibility, instance/family
+  admission and fresh provider compilation independent from loading retained
+  executable code. Loading a historical artifact cannot publish it as a fresh
+  native product or expose hidden declarations.
+- Preserve request-scoped linker/bytecode ownership, cancellation cleanup and
+  restoration of the canonical skinny interface. The exact loader must retain
+  enough dependency graph information for GHC's linker without allowing make
+  to reconstruct historical source.
+
+Qualification must include a retained native root whose compiler dependencies
+have canonical Core but no native products; cold source-less loading; changed
+or absent Core and dependency certificates; conflicting same-name originals;
+no repeated TH side effects; cancellation and next-request recovery; and the
+real retained command-output and concurrent capture/publication tests. An
+interface-only row without authenticated executable Core remains a refusal.
+
 ## Implementation owners
 
 The coordinator owns GHC frontend/finalization and the integration checkout.
