@@ -4842,14 +4842,18 @@ def declare_haskell_test_components():
         "containers",
         "cryptohash-sha256",
         "directory",
+        "errors",
         "filepath",
         "freer-simple",
+        "lens",
         "random",
+        "safe",
         "splitmix",
         "tasty",
         "tasty-hunit",
         "text",
-        "time"
+        "time",
+        "witherable"
     ], [
         "-Wall",
         "-XGHC2024"
@@ -4859,14 +4863,18 @@ def declare_haskell_test_components():
         "containers",
         "cryptohash-sha256",
         "directory",
+        "errors",
         "filepath",
         "freer-simple",
+        "lens",
         "random",
+        "safe",
         "splitmix",
         "tasty",
         "tasty-hunit",
         "text",
-        "time"
+        "time",
+        "witherable"
     ], []),
         visibility = ["PUBLIC"],
     )

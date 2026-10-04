@@ -757,6 +757,6 @@ test-suite model-turn-test
     Tidepool.Worktree
   build-depends:    base >= 4.20 && < 5, freer-simple, containers, text,
                    bytestring, random, splitmix, time, filepath, directory,
-                   cryptohash-sha256
+                   cryptohash-sha256, lens, safe, errors, witherable
   default-language: GHC2024
   ghc-options: -Wall
