@@ -685,6 +685,10 @@ fn certification_sidecar_path(interface_path: &Path) -> PathBuf {
     PathBuf::from(path)
 }
 
+fn certified_owners_path(digest: &[u8; 32]) -> PathBuf {
+    PathBuf::from("artifacts").join(format!("{}.owners", hex(digest)))
+}
+
 fn execution_source_path(digest: &[u8; 32]) -> PathBuf {
     PathBuf::from("artifacts").join(format!("execution-{}.cbor", hex(digest)))
 }
@@ -1685,7 +1689,6 @@ pub(crate) fn materialize_certified_products_with_validation(
         }
         let interface_path = home_interface_path(owner);
         let package_imports_path = package_sidecar_path(&interface_path);
-        let certification_path = certification_sidecar_path(&interface_path);
         let product_path = home_product_path(owner);
         if product.package_imports_bytes.len() as u64 > PACKAGE_IMPORTS_LIMIT {
             return Err(RecoveryArtifactError::InvalidPackageImports(
@@ -1702,9 +1705,13 @@ pub(crate) fn materialize_certified_products_with_validation(
         )?;
         if product.certification_bytes.len() as u64 > CERTIFICATION_LIMIT {
             return Err(RecoveryArtifactError::InvalidCertifiedOwners(
-                certification_path,
+                certification_sidecar_path(&interface_path),
             ));
         }
+        // One native owner can retain multiple authenticated source contexts.
+        // Its ownership certificates therefore have independent byte identity.
+        let certification_sha256: [u8; 32] = validation.digest(&product.certification_bytes);
+        let certification_path = certified_owners_path(&certification_sha256);
         let source_digest =
             crate::certified_products::home_execution_source_digest_with_validation(
                 &product.certification_bytes,
@@ -1724,7 +1731,6 @@ pub(crate) fn materialize_certified_products_with_validation(
             sha256,
         });
         let package_imports_sha256: [u8; 32] = validation.digest(&product.package_imports_bytes);
-        let certification_sha256: [u8; 32] = validation.digest(&product.certification_bytes);
         materialize_copy_with_validation(
             &owned.join(
                 interface_path
@@ -1915,7 +1921,7 @@ pub(crate) fn verify_materialized_ref_with_module_interface(
         || !checked_relative(&reference.certification_path)
         || !checked_relative(&reference.product_path)
         || reference.package_imports_path != package_sidecar_path(&reference.interface_path)
-        || reference.certification_path != certification_sidecar_path(&reference.interface_path)
+        || reference.certification_path != certified_owners_path(&reference.certification_sha256)
     {
         return Err(RecoveryArtifactError::InvalidReference);
     }
@@ -2076,6 +2082,102 @@ mod tests {
     use super::*;
     use ciborium::value::Value;
     use tidepool_repr::execution_schema::ModuleVersion;
+
+    #[test]
+    fn same_native_owner_preserves_distinct_source_context_certificates() {
+        let source = tempfile::tempdir().unwrap();
+        let run = tempfile::tempdir().unwrap();
+        let (first_graph, owners) = crate::execution_source::test_graph(source.path());
+        let second_graph = crate::execution_source::test_graph_with_large_origin(&first_graph, 80);
+        assert_ne!(first_graph.digest(), second_graph.digest());
+        let owner = &owners[0];
+        let packages = package_witness(
+            &owner.unit,
+            &owner.module,
+            &owner.skinny_iface_sha256,
+            vec![],
+        );
+        let canonical = crate::certified_products::fixture_interface_bytes(
+            [7; 32],
+            &owner.unit,
+            &owner.module,
+            b"iface".to_vec(),
+            packages.clone(),
+        );
+        let seal = crate::certified_products::encode_home_certification_with_module(
+            owner,
+            &[],
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            Sha256::digest(canonical.certificate_bytes()).into(),
+        )
+        .unwrap();
+        let products = [first_graph, second_graph].map(|graph| {
+            let certification = crate::certified_products::bind_home_execution_source(
+                &seal,
+                owner,
+                graph.digest(),
+                &mut PackageInterfaceValidation::default(),
+            )
+            .unwrap();
+            CertifiedRecoveryProduct::from_certification(
+                owner.clone(),
+                b"iface".to_vec(),
+                b"product".to_vec(),
+                packages.clone(),
+                certification,
+            )
+            .with_module_interface(canonical.clone())
+            .unwrap()
+            .with_execution_source(graph)
+            .unwrap()
+        });
+        assert_eq!(products[0].owner(), products[1].owner());
+        assert_ne!(
+            products[0].certification_bytes(),
+            products[1].certification_bytes()
+        );
+        let references = products.each_ref().map(|product| {
+            materialize_certified_products(run.path(), [7; 32], std::slice::from_ref(product))
+                .unwrap()
+                .remove(0)
+        });
+        assert_eq!(references[0].interface_path, references[1].interface_path);
+        assert_eq!(references[0].product_path, references[1].product_path);
+        assert_ne!(
+            references[0].certification_path,
+            references[1].certification_path
+        );
+        for (reference, product) in references.iter().zip(&products) {
+            let verified = verify_materialized_ref(run.path(), reference).unwrap();
+            assert_eq!(verified.certification_bytes, product.certification_bytes());
+            assert_eq!(
+                reference.certification_path,
+                certified_owners_path(&Sha256::digest(product.certification_bytes()).into())
+            );
+        }
+        let mut substituted = references[0].clone();
+        substituted.certification_path = references[1].certification_path.clone();
+        substituted.certification_sha256 = references[1].certification_sha256;
+        assert!(matches!(
+            verify_materialized_ref(run.path(), &substituted),
+            Err(RecoveryArtifactError::InvalidCertifiedOwners(_))
+        ));
+        fs::write(
+            run.path().join(&references[0].certification_path),
+            b"corrupt",
+        )
+        .unwrap();
+        assert!(matches!(
+            verify_materialized_ref(run.path(), &references[0]),
+            Err(RecoveryArtifactError::DigestMismatch(_))
+        ));
+        assert!(matches!(
+            materialize_certified_products(run.path(), [7; 32], &products[..1]),
+            Err(RecoveryArtifactError::DigestMismatch(_))
+        ));
+        assert!(verify_materialized_ref(run.path(), &references[1]).is_ok());
+    }
 
     #[test]
     fn execution_source_sidecar_is_shared_and_verified_once() {
@@ -2937,12 +3039,10 @@ mod tests {
         assert_eq!(verified.interface_bytes, b"iface");
         assert!(!verified.package_imports_bytes.is_empty());
         assert!(!verified.certification_bytes.is_empty());
-        assert!(verified
-            .reference
-            .certification_path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.ends_with(".hi.owners")));
+        assert_eq!(
+            verified.reference.certification_path,
+            certified_owners_path(&verified.reference.certification_sha256)
+        );
         assert!(verified
             .reference
             .package_imports_path
@@ -2963,6 +3063,11 @@ mod tests {
         ));
         misplaced = refs[0].clone();
         misplaced.certification_path = PathBuf::from("artifacts/other.hi.owners");
+        assert!(matches!(
+            verify_materialized_ref(run.path(), &misplaced),
+            Err(RecoveryArtifactError::InvalidReference)
+        ));
+        misplaced.certification_path = certification_sidecar_path(&misplaced.interface_path);
         assert!(matches!(
             verify_materialized_ref(run.path(), &misplaced),
             Err(RecoveryArtifactError::InvalidReference)
