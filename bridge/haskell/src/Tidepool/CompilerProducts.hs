@@ -5,7 +5,7 @@
 -- independently admitted candidate/exact evidence remain compiler inputs.
 module Tidepool.CompilerProducts
   ( CertifiedOriginalProducts, certifiedOriginalProducts, certifiedFinalizedArtifacts
-  , certifiedExecutionSource, writeCertifiedProductsKeeping, retainedOriginalInterfaces
+  , certifiedSourceOriginals, certifiedExecutionSource, writeCertifiedProductsKeeping, retainedOriginalInterfaces
   , prepareCompilerProjectionContext, exactProgramProductVersionFromDigest
   ) where
 
@@ -21,6 +21,7 @@ import Data.Set qualified as Set
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Word (Word64)
+import GHC.Tc.Types (tcg_mod)
 import GHC.Unit.Module (Module, ModuleName, moduleName, moduleNameString, moduleUnit, mkModuleName)
 import GHC.Unit.Module.ModIface (ModIface, mi_module)
 import GHC.Unit.Types (unitString)
@@ -35,7 +36,8 @@ import Tidepool.ExactHydration
   ( OriginalInterfaceArtifacts, ExactIfaceArtifact(..), originalInterfaceBytes )
 import Tidepool.ExactScope
   ( ExactScope(..), ExactCompilation(..), ExactProduct(..), scopeValueInterfaces
-  , revalidateExactScope, writeExactCompilation, scopeCanonicalInterfaces )
+  , revalidateExactScope, writeExactCompilation, scopeCanonicalInterfaces
+  , CanonicalInterfaceProof, captureFinalizedSourceOriginals )
 import Tidepool.ExecutionEncode
   ( ModuleProductEncoding, moduleProductInput, moduleProductBytes
   , prepareModuleProductEncoding, encodeModuleProductInventory )
@@ -97,6 +99,7 @@ prepareCompilerProjectionContext prepared retainedGenerations owner target auxil
 
 data CertifiedOriginalProducts = CertifiedOriginalProducts
   { certifiedOriginalProducts :: [ModuleProductEncoding]
+  , certifiedSourceOriginals :: Map.Map (String,String) CanonicalInterfaceProof
   , certifiedFinalizedArtifacts :: FinalizedModuleArtifacts
   , certifiedExecutionSource :: WorkerExecutionSource
   }
@@ -173,7 +176,13 @@ writeCertifiedProductsKeeping includes originalInterfaces outDir prepared produc
           BS.writeFile (outDir </> "certified-products.cbor") BS.empty
           unless (null freshProducts) $ fail ("native product certification failed: " ++ reason)
       pure finalized
-    pure (CertifiedOriginalProducts freshProducts finalized sourceRecipe)
+    sourceOriginals <- case pprExactCompilation prepared of
+      Nothing -> pure Map.empty
+      Just compilation -> do
+        let owner = tcg_mod (prTargetTcGblEnv (pprPipelineResult prepared))
+        captureFinalizedSourceOriginals compilation
+          (unitString (moduleUnit owner),moduleNameString (moduleName owner)) finalized finalDependencies
+    pure (CertifiedOriginalProducts freshProducts sourceOriginals finalized sourceRecipe)
 
 
 -- A failed unrelated group is an explicit product miss, never a newly fatal

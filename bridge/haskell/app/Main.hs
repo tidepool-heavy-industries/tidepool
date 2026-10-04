@@ -60,7 +60,7 @@ import Tidepool.GhcPipeline
   , satisfiesCapturedConstraint, stripMonadHead, generatedScaffoldRecipe, activationPreviewInputType )
 import Tidepool.ExecutionEncode (encodeWireProgram, moduleProductInput, moduleProductBytes)
 import Tidepool.CompilerProducts
-  ( CertifiedOriginalProducts, certifiedOriginalProducts, certifiedFinalizedArtifacts, certifiedExecutionSource
+  ( CertifiedOriginalProducts, certifiedOriginalProducts, certifiedFinalizedArtifacts, certifiedSourceOriginals, certifiedExecutionSource
   , retainedOriginalInterfaces, writeCertifiedProductsKeeping, prepareCompilerProjectionContext
   , exactProgramProductVersionFromDigest )
 import Tidepool.ExecutionProjection (ProjectionContext(..), ProjectionError(..), prepareProjectionWithReachability, projectSelectedWithHostBindings, PreparedModuleProducts, projectOriginalHomeModuleProducts, preparedModuleProductOutcomes, preparedRootIdentity)
@@ -1525,6 +1525,8 @@ retainProgramProducts directory prepared certified target initial = do
       | candidate <- pprAcceptedCandidates prepared]
       ++ Map.keys localInterfaces
     retainInterface scope (key,proof) = do
+      canonical <- maybe (fail "supporting source original lacks complete canonical proof") pure
+        (Map.lookup key (certifiedSourceOriginals certified))
       let row@(interface,_,packagesSha) = localFinalizedInterface proof
           existing = [current | current@(artifact,_,_) <- scopeInterfaces scope
             , (exactUnit artifact,exactModule artifact) == key]
@@ -1533,14 +1535,16 @@ retainProgramProducts directory prepared certified target initial = do
       case existing of
         [] -> pure scope
           { scopeInterfaces = scopeInterfaces scope ++ [row]
-          , scopeInterfaceEvidence = Map.insert key (LocalModuleInterfaceEvidence proof)
+          , scopeInterfaceEvidence = Map.insert key (ModuleInterfaceEvidence canonical)
               (scopeInterfaceEvidence scope)
           , scopeLexical = scopeLexical scope ++ [(key,lexicalRequirements)] }
         [(old,_,oldPackagesSha)]
           | exactSha256 old == exactSha256 interface
           , exactRequirements old == exactRequirements interface
           , oldPackagesSha == packagesSha
-          , lookup key (scopeLexical scope) == Just lexicalRequirements -> pure scope
+          , lookup key (scopeLexical scope) == Just lexicalRequirements
+          , Just (ModuleInterfaceEvidence oldCanonical) <- Map.lookup key (scopeInterfaceEvidence scope)
+          , canonicalCertificateSha256 oldCanonical == canonicalCertificateSha256 canonical -> pure scope
         _ -> fail "fresh finalization conflicts with an admitted original owner"
     retainCached scope (index, candidate) = do
       let unit = candidateUnit candidate

@@ -5,10 +5,10 @@ module Tidepool.ExactScope
   , CheckedCellAdmission(..), CheckedCellPurpose(..), CheckedItemAdmission(..), CheckedItemPurpose(..), CheckedDisplayAdmission(..)
   , PlannedCellAdmission(..), PlannedCellSlot(..)
   , ExactInterfaceEvidence(..), CanonicalOrigin(..), CanonicalInterfaceProof, CanonicalCoreArtifact
-  , CanonicalInterfaceAdmission(..), scopeCanonicalInterfaces, scopeSourceOriginalInterfaces, scopeDurableInterfaces
+  , CanonicalInterfaceAdmission(..), scopeCanonicalInterfaces, scopeSourceOriginalInterfaces, scopeModuleInterfaceProofs
   , admittedInterfaceHomeUnits, admittedInterfaceSourceSha256, resolveShippedHomeModule
   , admittedInterfaceRequirements, admittedInterfaceCore
-  , validateCanonicalInterfaceProof, validateCandidateCanonicalInterfaceProof
+  , captureFinalizedSourceOriginals, validateCanonicalInterfaceProof, validateCandidateCanonicalInterfaceProof
   , canonicalCertificatePath, canonicalCertificateSha256, canonicalCoreArtifact
   , canonicalCorePath, canonicalCoreSha256, canonicalHomeUnits, canonicalSourceSha256
   , canonicalRequirements, canonicalOrigin, canonicalSourceImports, isSourceOriginal
@@ -70,7 +70,7 @@ import Tidepool.LocalNativeDeclaration
 import Tidepool.PackageWitness
   ( revalidatePackageImports )
 import Tidepool.FinalizedModuleArtifacts
-  ( LocalFinalizedAdmission, localFinalizedInterface, localFinalizedHomeUnits
+  ( FinalizedModuleArtifacts, finalizedLocalAdmissions, LocalFinalizedAdmission, localFinalizedInterface, localFinalizedHomeUnits
   , localFinalizedSourceSha256, localFinalizedRequirements, localFinalizedCore
   , revalidateLocalFinalizedAdmission )
 import Tidepool.Timing (readTimingEnabled, timeDetailPhase, emitCount)
@@ -180,7 +180,6 @@ canonicalSourceImports proof = case canonicalOrigin proof of
 
 data ExactInterfaceEvidence
   = ModuleInterfaceEvidence CanonicalInterfaceProof
-  | LocalModuleInterfaceEvidence LocalFinalizedAdmission
   | LocalNativeDeclarationEvidence LocalNativeDeclarationAdmission
   | LexicalJoinEvidence
   | CheckedValueEvidence
@@ -188,24 +187,21 @@ data ExactInterfaceEvidence
 
 data ParsedInterfaceEvidence
   = ParsedModuleEvidence CanonicalInterfaceDescriptor
-  | ParsedLocalModuleEvidence LocalFinalizedAdmission
   | ParsedLocalNativeEvidence LocalNativeDeclarationAdmission
   | ParsedJoinEvidence
   | ParsedValueEvidence
 
--- The consumer sees the same finalized facts whether their owner is this
--- request's capture or a Rust-issued durable certificate. Only durable
--- admissions have certificate paths; local admissions cannot cross the wire.
+-- Source originals share one canonical proof across capture and persistence.
+-- Protected native declarations retain their independent local admission.
 data CanonicalInterfaceAdmission
-  = DurableInterfaceAdmission CanonicalInterfaceProof
+  = ModuleInterfaceAdmission CanonicalInterfaceProof
   | LocalInterfaceAdmission LocalFinalizedAdmission
   deriving (Eq, Show)
 
 scopeCanonicalInterfaces :: ExactScope -> Map.Map (String,String) CanonicalInterfaceAdmission
 scopeCanonicalInterfaces = Map.mapMaybe select . scopeInterfaceEvidence
   where
-    select (ModuleInterfaceEvidence proof) = Just (DurableInterfaceAdmission proof)
-    select (LocalModuleInterfaceEvidence proof) = Just (LocalInterfaceAdmission proof)
+    select (ModuleInterfaceEvidence proof) = Just (ModuleInterfaceAdmission proof)
     select (LocalNativeDeclarationEvidence native) = Just (LocalInterfaceAdmission (localNativeProof native))
     select _ = Nothing
 
@@ -215,22 +211,21 @@ scopeSourceOriginalInterfaces :: ExactScope -> Map.Map (String,String) Canonical
 scopeSourceOriginalInterfaces = Map.mapMaybe select . scopeInterfaceEvidence
   where
     select (ModuleInterfaceEvidence proof)
-      | isSourceOriginal (canonicalOrigin proof) = Just (DurableInterfaceAdmission proof)
-    select (LocalModuleInterfaceEvidence proof) = Just (LocalInterfaceAdmission proof)
+      | isSourceOriginal (canonicalOrigin proof) = Just (ModuleInterfaceAdmission proof)
     select _ = Nothing
 
-scopeDurableInterfaces :: ExactScope -> Map.Map (String,String) CanonicalInterfaceProof
-scopeDurableInterfaces = Map.mapMaybe select . scopeInterfaceEvidence
+scopeModuleInterfaceProofs :: ExactScope -> Map.Map (String,String) CanonicalInterfaceProof
+scopeModuleInterfaceProofs = Map.mapMaybe select . scopeInterfaceEvidence
   where
     select (ModuleInterfaceEvidence proof) = Just proof
     select _ = Nothing
 
 admittedInterfaceHomeUnits :: CanonicalInterfaceAdmission -> Set.Set String
-admittedInterfaceHomeUnits (DurableInterfaceAdmission proof) = canonicalHomeUnits proof
+admittedInterfaceHomeUnits (ModuleInterfaceAdmission proof) = canonicalHomeUnits proof
 admittedInterfaceHomeUnits (LocalInterfaceAdmission proof) = localFinalizedHomeUnits proof
 
 admittedInterfaceSourceSha256 :: CanonicalInterfaceAdmission -> String
-admittedInterfaceSourceSha256 (DurableInterfaceAdmission proof) = canonicalSourceSha256 proof
+admittedInterfaceSourceSha256 (ModuleInterfaceAdmission proof) = canonicalSourceSha256 proof
 admittedInterfaceSourceSha256 (LocalInterfaceAdmission proof) = localFinalizedSourceSha256 proof
 
 -- | Authenticate one selected home owner against shipped source. A virtual
@@ -256,11 +251,11 @@ resolveShippedHomeModule env admitted name expected = do
     _ -> pure Nothing
 
 admittedInterfaceRequirements :: CanonicalInterfaceAdmission -> Map.Map (String,String) String
-admittedInterfaceRequirements (DurableInterfaceAdmission proof) = canonicalRequirements proof
+admittedInterfaceRequirements (ModuleInterfaceAdmission proof) = canonicalRequirements proof
 admittedInterfaceRequirements (LocalInterfaceAdmission proof) = localFinalizedRequirements proof
 
 admittedInterfaceCore :: CanonicalInterfaceAdmission -> Maybe (FilePath,String)
-admittedInterfaceCore (DurableInterfaceAdmission proof) =
+admittedInterfaceCore (ModuleInterfaceAdmission proof) =
   (\core -> (canonicalCorePath core,canonicalCoreSha256 core)) <$> canonicalCoreArtifact proof
 admittedInterfaceCore (LocalInterfaceAdmission proof) = localFinalizedCore proof
 
@@ -594,8 +589,7 @@ validateInterfaceEvidence scope offered = do
   let interfaces = Map.fromList
         [((exactUnit iface,exactModule iface),(iface,packages,packageSha))
         | (iface,packages,packageSha) <- scopeInterfaces scope]
-      locals = Map.fromList ([(key,proof) | (key,ParsedLocalModuleEvidence proof) <- offered]
-        ++ [(key,localNativeProof native) | (key,ParsedLocalNativeEvidence native) <- offered])
+      locals = Map.fromList [(key,localNativeProof native) | (key,ParsedLocalNativeEvidence native) <- offered]
   forM_ [(key,native) | (key,ParsedLocalNativeEvidence native) <- offered] $ \(key,native) ->
     unless (localNativeOwner native == key
         && let (iface,_,_) = localFinalizedInterface (localNativeProof native)
@@ -611,7 +605,6 @@ validateInterfaceEvidence scope offered = do
       (fail "local finalization requirements leave its exact closure")
   let evidence = Map.fromList [(key,case value of
         ParsedModuleEvidence _ -> ModuleInterfaceEvidence (proofs Map.! key)
-        ParsedLocalModuleEvidence proof -> LocalModuleInterfaceEvidence proof
         ParsedLocalNativeEvidence native -> LocalNativeDeclarationEvidence native
         ParsedJoinEvidence -> LexicalJoinEvidence
         ParsedValueEvidence -> CheckedValueEvidence) | (key,value) <- offered]
@@ -624,6 +617,70 @@ validateInterfaceEvidence scope offered = do
     (fail "exact interface evidence is incomplete or lacks native module proof")
   pure evidence
   where firstOfThree (value,_,_) = value
+
+-- A completed same-program capture already has the request's admitted producer.
+-- Cold captures receive their producer from Rust at admission. Both paths use
+-- TPFINALMODULE identity; capture paths are custody, never semantic identity.
+-- The current target is retained by its own checked/native declaration owner.
+captureFinalizedSourceOriginals
+  :: ExactCompilation -> (String,String) -> FinalizedModuleArtifacts
+  -> DependencyEvidence -> IO (Map.Map (String,String) CanonicalInterfaceProof)
+captureFinalizedSourceOriginals compilation target finalized evidence = do
+  let scope = compilationScope compilation
+      admissions = Map.delete target (finalizedLocalAdmissions finalized)
+      rows = map localFinalizedInterface (Map.elems admissions)
+      inherited = scopeInterfaces scope
+      keyOf (artifact,_,_) = (exactUnit artifact,exactModule artifact)
+  interfaces <- foldM (\selected row -> case filter ((== keyOf row) . keyOf) selected of
+      [] -> pure (row:selected)
+      [old] | let (oldIface,_,oldPackage) = old
+                  (iface,_,package) = row
+               in exactSha256 oldIface == exactSha256 iface
+                 && exactRequirements oldIface == exactRequirements iface
+                 && oldPackage == package -> pure selected
+      _ -> fail "captured source original conflicts with an admitted interface") inherited rows
+  descriptors <- forM (Map.toAscList admissions) $ \(key,admission) -> do
+    either fail pure =<< revalidateLocalFinalizedAdmission admission
+    unless (parseSessionModule (snd key) == Nothing)
+      (fail "source original capture uses a reserved native/session owner")
+    node <- case [node | node <- dependencyModules evidence
+        , (dependencyModuleUnit node,dependencyModuleName node) == key
+        , not (dependencyModuleBoot node)] of
+      [node] -> pure node
+      _ -> fail "captured source original lacks its original import receipt"
+    ordinary <- forM (dependencyModuleImports node) $ \edge -> do
+      home <- case dependencyImportSelected edge of
+        Nothing -> pure Nothing
+        Just path -> case [dependencyModuleUnit child | child <- dependencyModules evidence
+            , dependencyModuleName child == dependencyImportName edge
+            , dependencyModuleBoot child == dependencyImportBoot edge
+            , dependencyModuleSource child == path] of
+          [unit] -> pure (Just unit)
+          _ -> fail "captured source import has no unique original home owner"
+      pure (dependencyImportQualifier edge,dependencyImportName edge,dependencyImportBoot edge,home)
+    let exact = [(qualifier,name,boot,Just unit)
+          | ((ownerUnit,ownerName,False),edges) <- compilationImports compilation
+          , (ownerUnit,ownerName) == key
+          , (qualifier,name,boot,unit) <- edges]
+        importKey (qualifier,name,boot,_) = (qualifier,name,boot)
+    imports <- foldM (\selected row -> case Map.lookup (importKey row) selected of
+        Nothing -> pure (Map.insert (importKey row) row selected)
+        Just old | old == row -> pure selected
+        _ -> fail "captured source original has conflicting original import owners")
+      Map.empty (ordinary ++ exact)
+    let (iface,_,packageSha) = localFinalizedInterface admission
+        core = localFinalizedCore admission
+        certificate = CanonicalModuleCertificate
+          (scopeProducerSha256 scope) (Set.toAscList (localFinalizedHomeUnits admission)) key
+          (localFinalizedSourceSha256 admission) (exactSha256 iface) packageSha (snd <$> core)
+          (Map.toAscList (localFinalizedRequirements admission)) (SourceOriginal (Map.elems imports))
+        bytes = toStrictByteString (encodeCanonicalModuleCertificate certificate)
+        seal = digest bytes
+        path = takeDirectory (exactPath iface) </> seal ++ ".finalized.certificate.cbor"
+    BS.writeFile path bytes
+    pure (key,CanonicalInterfaceDescriptor path seal
+      (uncurry CanonicalCoreArtifact <$> core) (ScopeInterface SourceOriginalRole))
+  validateCanonicalInterfaces (scopeProducerSha256 scope) interfaces descriptors
 
 -- Candidate descriptors are optional cache suggestions until this same owner
 -- validates them against the complete selected interface closure.
@@ -834,7 +891,6 @@ revalidateExactScope env scope = do
           ModuleInterfaceEvidence proof -> ParsedModuleEvidence
             (CanonicalInterfaceDescriptor (canonicalCertificatePath proof)
               (canonicalCertificateSha256 proof) (canonicalCoreArtifact proof) (ScopeInterface (originRole (canonicalOrigin proof))))
-          LocalModuleInterfaceEvidence proof -> ParsedLocalModuleEvidence proof
           LocalNativeDeclarationEvidence native -> ParsedLocalNativeEvidence native
           LexicalJoinEvidence -> ParsedJoinEvidence
           CheckedValueEvidence -> ParsedValueEvidence)

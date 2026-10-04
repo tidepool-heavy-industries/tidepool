@@ -39,10 +39,10 @@ exactScopeV9Checks manifest = do
     (fail "genuine v9 context lost its typed interface evidence")
   let sourceOriginals = scopeSourceOriginalInterfaces scope
       expectedSourceOwners = Map.keysSet (Map.filter
-        (isSourceOriginal . canonicalOrigin) (scopeDurableInterfaces scope))
+        (isSourceOriginal . canonicalOrigin) (scopeModuleInterfaceProofs scope))
   unless (Map.keysSet sourceOriginals == expectedSourceOwners)
     (fail "source executable selection admitted native declarations or lost source originals")
-  let proofs = scopeDurableInterfaces scope
+  let proofs = scopeModuleInterfaceProofs scope
       candidates = [(product',proof) | product' <- scopeProducts scope
         , Just proof <- [Map.lookup (originalUnit product',originalModule product') proofs]
         , Just _ <- [canonicalCoreArtifact proof]
@@ -211,7 +211,7 @@ nativeOriginChecks manifest = do
   scope <- readExactScope manifest >>= either fail pure
   unless (any (\proof -> case canonicalOrigin proof of
       NativeAuthoredDeclaration _ -> True
-      SourceOriginal _ -> False) (Map.elems (scopeDurableInterfaces scope)))
+      SourceOriginal _ -> False) (Map.elems (scopeModuleInterfaceProofs scope)))
     (fail "v9 origin fixture lacks a genuine native authored declaration")
   exactScopeV9Checks manifest
 
@@ -219,7 +219,7 @@ nativeOriginChecks manifest = do
 -- relabel a source proof.
 originRoleCases :: FilePath -> ExactScope -> [Term] -> [Term] -> IO ()
 originRoleCases manifest scope fields interfaces = do
-  let proofs = Map.toAscList (scopeDurableInterfaces scope)
+  let proofs = Map.toAscList (scopeModuleInterfaceProofs scope)
   forM_ proofs $ \(key,proof) -> do
     selected <- maybe (fail "origin proof lacks its genuine interface row") pure
       (find (matches key) interfaces)

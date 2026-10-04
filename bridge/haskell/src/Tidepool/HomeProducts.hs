@@ -91,7 +91,7 @@ instance Exception CandidateCoreFailure
 validateCandidateInterfaceRequirements
   :: CanonicalInterfaceProof -> ModIface -> Either CandidateCoreFailure ()
 validateCandidateInterfaceRequirements proof =
-  validateAdmittedInterfaceRequirements (DurableInterfaceAdmission proof)
+  validateAdmittedInterfaceRequirements (ModuleInterfaceAdmission proof)
 
 validateAdmittedInterfaceRequirements
   :: CanonicalInterfaceAdmission -> ModIface -> Either CandidateCoreFailure ()
@@ -119,7 +119,7 @@ materializeCandidateCompilerView
   :: FilePath -> Int -> HscEnv -> CanonicalInterfaceProof -> ModSummary
   -> IO ModSummary
 materializeCandidateCompilerView directory index env proof =
-  materializeAdmittedCompilerView directory index env (DurableInterfaceAdmission proof)
+  materializeAdmittedCompilerView directory index env (ModuleInterfaceAdmission proof)
 
 materializeAdmittedCompilerView
   :: FilePath -> Int -> HscEnv -> CanonicalInterfaceAdmission -> ModSummary

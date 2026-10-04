@@ -165,7 +165,7 @@ finalizedCoreChecks = bracket scratch removeDirectoryRecursive $ \work -> do
           (set_mi_usages (usage : mi_usages (hm_iface home)) (hm_iface home))
             == Left CandidateInterfaceRequirementsMismatch)
           "native home interface usage escaped canonical requirement checks"
-      forM_ [DurableInterfaceAdmission proof, LocalInterfaceAdmission localProof] $ \admission -> do
+      forM_ [ModuleInterfaceAdmission proof, LocalInterfaceAdmission localProof] $ \admission -> do
         assert (validateAdmittedInterfaceRequirements admission (hm_iface home) == Right ())
           "admitted interface lost its original home dependency inventory"
         forM_ [homeUsage,packageUsage] $ \usage ->

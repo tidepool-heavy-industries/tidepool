@@ -215,7 +215,7 @@ import Tidepool.ExactScope
   , scopeSourceOriginalInterfaces, admittedInterfaceRequirements
   , validateCandidateCanonicalInterfaceProof
   , canonicalCertificatePath, canonicalCertificateSha256, canonicalCoreArtifact
-  , canonicalCorePath, canonicalCoreSha256, scopeDurableInterfaces, canonicalSourceSha256, canonicalSourceImports, isSourceOriginal )
+  , canonicalCorePath, canonicalCoreSha256, scopeModuleInterfaceProofs, canonicalSourceSha256, canonicalSourceImports, isSourceOriginal )
 import Tidepool.ExecutionSource
   ( ExecutionSourceGraph(..), ExecutionSourceIdentity(..)
   , ExecutionSourceFailure(..), ExecutionSourceValidationStage(..), ExecutionSourceInterfaceReason(..)
@@ -4017,7 +4017,6 @@ selectCurrentSourceOriginals admitted intents recipe sourceGraph = do
       sourceProvider key = case Map.lookup key (scopeInterfaceEvidence admitted) of
         Nothing -> True -- A fresh provider can introduce an already retained dependency.
         Just (ModuleInterfaceEvidence proof) -> isSourceOriginal (canonicalOrigin proof)
-        Just (LocalModuleInterfaceEvidence _) -> True
         _ -> False
       currentProvider key = Map.member key exactOwners && sourceProvider key
       hiddenImports = [(summary,imported,key) | summary <- sourceSummaries
@@ -4094,7 +4093,7 @@ selectCurrentSourceOriginals admitted intents recipe sourceGraph = do
                   , isNothing (dependencyImportSelected edge)]) }
             selected = SourceSelectedOriginals
               [(key,canonicalCertificateSha256 proof,exactSha256 (exactOwners Map.! key),canonicalSourceSha256 proof)
-              | key <- Set.toAscList selectedKeys, let proof = scopeDurableInterfaces admitted Map.! key] evidence
+              | key <- Set.toAscList selectedKeys, let proof = scopeModuleInterfaceProofs admitted Map.! key] evidence
         setSession initial
         pure (Just selected)
 
@@ -4112,7 +4111,7 @@ validateCurrentCanonicalSources
 validateCurrentCanonicalSources admitted interfaces sourceGraph roots = do
   initial <- getSession
   let ownerKey owner = (unitString (moduleUnit owner),moduleNameString (moduleName owner))
-      proofs = Map.filter (isSourceOriginal . canonicalOrigin) (scopeDurableInterfaces admitted)
+      proofs = Map.filter (isSourceOriginal . canonicalOrigin) (scopeModuleInterfaceProofs admitted)
       originals = Map.fromList [((exactUnit artifact,exactModule artifact),iface) | (artifact,iface) <- interfaces]
       excluded = [mkModuleName (exactModule artifact) | (artifact,_,_) <- scopeInterfaces admitted
         , Map.notMember (exactUnit artifact,exactModule artifact) proofs]

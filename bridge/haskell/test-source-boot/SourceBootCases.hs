@@ -90,8 +90,10 @@ import System.IO.Error (isDoesNotExistError, ioeGetFileName)
 import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 import System.Process (readProcessWithExitCode)
 import System.Timeout (timeout)
+import Tidepool.CompilerProducts
+  ( writeCertifiedProductsKeeping, retainedOriginalInterfaces, certifiedSourceOriginals, certifiedFinalizedArtifacts )
 import Tidepool.CertifiedProducts (encodeCertifiedProducts, resolvePackageGlobal)
-import Tidepool.FinalizedModuleArtifacts (captureFinalizedModuleArtifacts, emptyFinalizedModuleArtifacts)
+import Tidepool.FinalizedModuleArtifacts (captureFinalizedModuleArtifacts, emptyFinalizedModuleArtifacts, finalizedLocalAdmissions, localFinalizedInterface)
 import Tidepool.FinalizedModule (finalizedHomeModInfo, homeInterfaceUsageOwners)
 import Tidepool.ExecutionEncode (encodeModuleProducts)
 
@@ -148,8 +150,10 @@ import Tidepool.ExactScope
   ( ExactScope(..), ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..)
   , CheckedCellAdmission(..), CheckedCellPurpose(..), CheckedItemAdmission(..), CheckedItemPurpose(..)
   , scopeCheckedCell, scopeCheckedItem, scopeIncludePaths, readExactScope
-  , scopeDurableInterfaces, canonicalCoreArtifact, canonicalCorePath
+  , scopeModuleInterfaceProofs, canonicalCoreArtifact, canonicalCorePath, canonicalCoreSha256
   , canonicalCertificatePath, canonicalCertificateSha256, canonicalRequirements
+  , ExactCompilation(..), ExactInterfaceEvidence(..), SourceSelectedOriginals(..)
+  , extendSourceSelectedOriginals, validateCanonicalInterfaceProof, canonicalSourceImports
   , originalGroupFromCandidate
   , extendExactExecutionSources, extendExactExecutionSourcesWithinBudget, scopeExecutionNativeOwners )
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
@@ -534,6 +538,85 @@ canonicalCurrentSource = withTiming $ withScratch $ \work -> do
         unless (length selected == 2 && all (\row -> case row of TList fields -> length fields == 5; _ -> False) selected) $
           fail "canonical source receipt lost transitive source closure or retained a native identity"
       _ -> fail "canonical source receipt is not the strict matched version 3"
+    -- The next authored import must consume this cell's completed original
+    -- capture through the same proof used after Rust persistence.
+    forM_ ["CanonicalLocalSupport.hs","CanonicalLocalConsumer.hs"] $ \name ->
+      copyFile ("test-source-boot/fixtures" </> name) (work </> name)
+    let localTarget = work </> "CanonicalLocalConsumer.hs"
+        localOwner = ("main","CanonicalLocalSupport")
+        localSource = work </> "CanonicalLocalSupport.hs"
+        captureDirectory = work </> "local-original-capture"
+    captured <- compile (PreparedProducts Nothing) Set.empty (CellProgramCompile GeneralCompile admitted)
+      (Just session) localTarget includes Nothing
+    createDirectory captureDirectory
+    originals <- newOriginalInterfaceArtifacts (prHscEnv (pprPipelineResult captured))
+      (pprFinalizedModules captured) (retainedOriginalInterfaces captured) captureDirectory
+    emitted <- writeCertifiedProductsKeeping includes originals captureDirectory captured Nothing []
+    localProof <- maybe (fail "fresh support did not emit a complete source-original proof") pure
+      (Map.lookup localOwner (certifiedSourceOriginals emitted))
+    localCompilation <- maybe (fail "fresh support did not retain exact compilation custody") pure
+      (pprExactCompilation captured)
+    inherited <- either fail pure (extendSourceSelectedOriginals
+      (compilationSourceSelection localCompilation) admitted)
+    -- Fresh rows are in the completed capture rather than its input scope.
+    let capturedRows = finalizedLocalAdmissions (certifiedFinalizedArtifacts emitted)
+    localAdmission <- maybe (fail "fresh support lacks captured interface custody") pure
+      (Map.lookup localOwner capturedRows)
+    unless (maybe False (elem (DependencyUnqualified,"CanonicalDependency",False,Just "main"))
+        (canonicalSourceImports localProof)) $
+      fail "captured original lost its exact retained-home import receipt"
+    let row = localFinalizedInterface localAdmission
+        selectedScope = inherited
+          { scopeInterfaces = scopeInterfaces inherited ++ [row]
+          , scopeInterfaceEvidence = Map.insert localOwner (ModuleInterfaceEvidence localProof)
+              (scopeInterfaceEvidence inherited)
+          , scopeLexical = scopeLexical inherited ++ [(localOwner,[("main","CanonicalDependency")])] }
+    parsedLocal <- analyzeCellWithFlags (hsc_dflags (prHscEnv (pprPipelineResult captured))) ""
+      "import CanonicalLocalSupport\n(1 :: Answer)" >>= either (fail . show) pure
+    let localPurpose = withSourceImportIntents (cellPlanPrologue parsedLocal) GeneralCompile
+        checkLocal scope = compile (PreparedProducts Nothing) Set.empty
+          (CellProgramCompile localPurpose scope) (Just session) localTarget includes Nothing
+        recheckLocal = checkLocal selectedScope
+    selectedLocal <- recheckLocal
+    let selectedRows = maybe [] (maybe [] selectedOriginalRows . compilationSourceSelection)
+          (pprExactCompilation selectedLocal)
+    unless (any (\(key,seal,_,_) -> key == localOwner
+        && seal == canonicalCertificateSha256 localProof) selectedRows) $
+      fail "later authored import did not select the captured canonical identity"
+    let copiedCertificate = work </> "relocated-local-original.certificate.cbor"
+    copyFile (canonicalCertificatePath localProof) copiedCertificate
+    relocated <- validateCanonicalInterfaceProof selectedScope localOwner copiedCertificate
+      (canonicalCertificateSha256 localProof) ((\core -> (canonicalCorePath core,canonicalCoreSha256 core))
+        <$> canonicalCoreArtifact localProof) >>= either fail pure
+    unless (canonicalCertificateSha256 relocated == canonicalCertificateSha256 localProof
+        && canonicalSourceImports relocated == canonicalSourceImports localProof) $
+      fail "canonical source identity depends on its capture/persistence locator"
+    _ <- checkLocal selectedScope {scopeInterfaceEvidence = Map.insert localOwner
+      (ModuleInterfaceEvidence relocated) (scopeInterfaceEvidence selectedScope)}
+    let wrongOwner = ("main","CanonicalWrongOwner")
+        (localIface,_,_) = row
+        wrongOwnerScope = selectedScope {scopeInterfaces =
+          [(if (exactUnit artifact,exactModule artifact) == localOwner
+              then localIface {exactModule=snd wrongOwner} else artifact,packages,seal)
+          | (artifact,packages,seal) <- scopeInterfaces selectedScope]}
+    wrongOwnerProof <- validateCanonicalInterfaceProof wrongOwnerScope wrongOwner
+      copiedCertificate (canonicalCertificateSha256 localProof)
+      ((\core -> (canonicalCorePath core,canonicalCoreSha256 core)) <$> canonicalCoreArtifact localProof)
+    unless (either (const True) (const False) wrongOwnerProof) $
+      fail "captured source original authorized another exact module owner"
+    copyFile "test-source-boot/fixtures/CanonicalDependencyChanged.hs" (work </> "CanonicalDependency.hs")
+    localDependencyDrift <- try (void recheckLocal) :: IO (Either SomeException ())
+    unless (either (const True) (const False) localDependencyDrift) $
+      fail "captured source original accepted changed retained import closure"
+    BS.writeFile (work </> "CanonicalDependency.hs") dependencyBytes
+    _ <- recheckLocal
+    localBytes <- BS.readFile localSource
+    BS.appendFile localSource "\n-- changed original source\n"
+    localDrift <- try (void recheckLocal) :: IO (Either SomeException ())
+    unless (either (const True) (const False) localDrift) $
+      fail "captured source original accepted later source drift"
+    BS.writeFile localSource localBytes
+    _ <- recheckLocal
     copyFile "test-source-boot/fixtures/CanonicalDependencyChanged.hs" (work </> "CanonicalDependency.hs")
     changedDependency <- try (void (check compile purpose)) :: IO (Either SomeException ())
     unless (either (const True) (const False) changedDependency) $
@@ -549,7 +632,7 @@ canonicalCurrentSource = withTiming $ withScratch $ \work -> do
     BS.writeFile owner originalBytes
     _ <- check compile purpose
     pure ()
-  putStrLn "canonical current source: interface-only closure, empty native refs, duplicate imports, admitted dependency drift/missing refusal and recovery"
+  putStrLn "canonical current source: captured and persisted interface-only proofs, exact imports, duplicate imports, dependency/source drift and missing refusal"
 
 -- GHC owns whether an authored import contributes an interface obligation.
 -- Inspect that evidence before projecting custody; import text is never used
@@ -581,9 +664,9 @@ canonicalSourceObligations = withTiming $ withScratch $ \work -> do
   writeGenuineMetadataScope scopePath work owner includes retained original
   base <- readExactScope scopePath >>= either fail pure
   ownerProof <- maybe (fail "unused import fixture lacks canonical custody") pure
-    (Map.lookup ("main","CanonicalUnusedSource") (scopeDurableInterfaces base))
+    (Map.lookup ("main","CanonicalUnusedSource") (scopeModuleInterfaceProofs base))
   unless (Map.keys (canonicalRequirements ownerProof) == usageOwners
-      && Map.member dependencyKey (scopeDurableInterfaces base) == required
+      && Map.member dependencyKey (scopeModuleInterfaceProofs base) == required
       && null (scopeProducts base) && null (scopeExecutionGraphs base)) $
     fail "unused import scope invented an interface or native obligation"
   parsed <- analyzeCellWithFlags (hsc_dflags environment) ""
@@ -812,7 +895,7 @@ captureRetainedCompilerFixtureWith witnessFixture includes work = do
     Nothing source includes Nothing
   writeGenuineExecutionScope [snd helper] [snd helper] work source includes scopePath original
   exact <- readExactScope scopePath >>= either fail pure
-  let proofs = scopeDurableInterfaces exact
+  let proofs = scopeModuleInterfaceProofs exact
   unless (map originalModule (scopeProducts exact) == [snd helper]
       && Map.member witness proofs
       && isJust (Map.lookup witness proofs >>= canonicalCoreArtifact)
@@ -826,7 +909,7 @@ retainedExecutionThCounter = withTiming $ withScratch $ \work -> do
   ((_, session, exact), initialDiagnostics) <- captureDiagnostics $
     captureRetainedCompilerFixtureWith "MetadataRetainedAuditedWitness.hs" [work,library] work
   let target = work </> "MetadataQuotedTarget.hs"
-      proofs = scopeDurableInterfaces exact
+      proofs = scopeModuleInterfaceProofs exact
       witness = ("main", "MetadataRetainedWitness")
       retained = Map.keys proofs
       freshNames = Set.fromList (map mkModuleName ["MetadataQuoter", "MetadataQuotedTarget"])
@@ -997,7 +1080,7 @@ exactRetainedQuoter = withTiming $ withScratch $ \work -> do
       cancelMarker = work </> "cancel-marker"
       helperKey = ("main", "MetadataQuoteSupport")
       witnessKey = ("main", "MetadataRetainedWitness")
-      proofs = scopeDurableInterfaces exact
+      proofs = scopeModuleInterfaceProofs exact
   helperProof <- maybe (fail "captured helper lacks its canonical proof") pure (Map.lookup helperKey proofs)
   witnessProof <- maybe (fail "captured compiler dependency lacks its canonical proof") pure (Map.lookup witnessKey proofs)
   core <- maybe (fail "captured helper lacks its executable Core") pure (canonicalCoreArtifact helperProof)
