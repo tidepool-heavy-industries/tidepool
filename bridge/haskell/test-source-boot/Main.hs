@@ -146,6 +146,7 @@ import Tidepool.ExecutionSource
   ( ExecutionSourceIdentity(..), ExecutionSourceOwner(..), ExecutionSourceRef(..), ExecutionSourceGraph(..), ExecutionSourceNode(..)
   , executionSourceClosure, executionSourceOriginalNode, executionSourceOriginalClosure, executionIdentityKey
   , ExecutionSourceFailure(..), ExecutionSourceRecipe(..), issueExecutionSourceRecipe, executionSourceProspectiveReferences
+  , executionNodeOriginalResolutions
   , decodeExecutionSourceGraph
   , executionSourceGraphBytesLimit )
 
@@ -2290,6 +2291,47 @@ freshExecutionRecipeTest = withScratch $ \work -> do
   let reference = ExecutionSourceRef support (executionGraphSha256 graph)
   selected <- either (fail . show) pure (executionSourceProspectiveReferences [graph] [] [reference])
   unless (selected == [reference]) $ fail "fresh supported recipe did not issue exact original"
+  -- These owner-level packets exercise contextual search witnesses without
+  -- issuing a native certificate or compiling another immutable fixture.
+  let firstAbsent = work </> "first-request" </> "Prelude.hs"
+      secondAbsent = work </> "second-request" </> "Prelude.hs"
+      contextual path = recipe {recipeIncludes=[takeDirectory path,work],recipeEvidence=evidence {
+        dependencyModules=[if dependencyModuleName node == "Support"
+          then node {dependencyModuleImports=[DependencyImport DependencyUnqualified "Prelude" False Nothing]}
+          else node | node <- dependencyModules evidence],
+        dependencyResolutions=[DependencyResolution DependencyUnqualified "Prelude" False Nothing [path]]}}
+  firstContext <- issue (contextual firstAbsent)
+  secondContext <- issue (contextual secondAbsent)
+  let contexts = [firstContext,secondContext]
+      contextRefs = [reference {executionRefGraph=executionGraphSha256 context} | context <- contexts]
+  sharedContexts <- either (fail . show) pure (executionSourceOriginalClosure contexts contextRefs)
+  sharedSupport <- case sharedContexts of
+    [value] -> pure value
+    _ -> fail "equivalent request contexts did not share one original source owner"
+  retainedResolutions <- either (fail . show) pure (executionNodeOriginalResolutions contexts sharedSupport)
+  unless (executionNodeOriginalGraphs sharedSupport == Set.fromList (map executionGraphSha256 contexts)
+      && Set.fromList (concatMap dependencyResolutionCandidates retainedResolutions)
+          == Set.fromList [firstAbsent,secondAbsent]) $
+    fail "shared original source lost a request's negative-resolution witnesses"
+  unless (case executionNodeOriginalResolutions [firstContext] sharedSupport of
+      Left (ExecutionSourceMissing _) -> True; _ -> False) $
+    fail "shared original source accepted a missing retained witness context"
+  let changedSource = secondContext {executionGraphEvidence=(executionGraphEvidence secondContext) {
+        dependencySources=[if dependencySourcePath row == supportPath
+          then row {dependencySourceSha256=replicate 64 'f'} else row
+          | row <- dependencySources (executionGraphEvidence secondContext)]}}
+      changedNative = secondContext {executionGraphOwners=[if executionOwnerIdentity owner' == support
+        then owner' {executionOwnerIdentity=support {executionNativeSha256=replicate 64 'f'}} else owner'
+        | owner' <- executionGraphOwners secondContext]}
+      changedResolution = secondContext {executionGraphEvidence=(executionGraphEvidence secondContext) {
+        dependencyResolutions=[row {dependencyResolutionSelected=Just secondAbsent}
+          | row <- dependencyResolutions (executionGraphEvidence secondContext)]}}
+  forM_ [(changedSource,last contextRefs),(changedNative,(last contextRefs) {
+        executionRefIdentity=support {executionNativeSha256=replicate 64 'f'}})
+      ,(changedResolution,last contextRefs)] $ \(changed,changedRef) ->
+    unless (case executionSourceOriginalClosure [firstContext,changed] [head contextRefs,changedRef] of
+        Left (ExecutionSourceConflicting _) -> True; _ -> False) $
+      fail "context sharing accepted a different source/native/selected-resolution identity"
   unless (refused recipe {recipeProducer=replicate 64 '0'}
       && refused recipe {recipeOwners=[ExecutionSourceOwner support True Nothing]}
       && refused recipe {recipeExactImports=[(("main","Absent"),[])]}
@@ -2330,7 +2372,7 @@ freshExecutionRecipeTest = withScratch $ \work -> do
   unless (case extendExactExecutionSourcesWithinBudget [oversized]
       [reference {executionRefGraph=replicate 64 'b'}] scope of Left _ -> True; _ -> False) $
     fail "aggregate budget withholding hid corrupt advertised graph"
-  putStrLn "fresh execution recipe: issuer, original lineage and strict/optional budget controls passed"
+  putStrLn "fresh execution recipe: issuer, original lineage, shared negative contexts and strict/optional budget controls passed"
 
 candidateExecutionSourcesTest :: IO ()
 candidateExecutionSourcesTest = withTiming $ withScratch $ \work -> do
@@ -2576,10 +2618,18 @@ candidateExecutionSourcesTest = withTiming $ withScratch $ \work -> do
             else row | row <- dependencyResolutions originalEvidence]}}
   unless (any applies (dependencyResolutions originalEvidence)) $
     fail "shared-recipe fixture lacks applicable negative-resolution witnesses"
-  case executionSourceOriginalClosure (alternateGraph:mixedGraphs)
-      [quoterRef,quoterRef {executionRefGraph=executionGraphSha256 alternateGraph}] of
-    Left _ -> pure ()
-    Right _ -> fail "shared source dedup discarded another recipe's negative-resolution constraints"
+  contextualNodes <- either (fail . show) pure (executionSourceOriginalClosure (alternateGraph:mixedGraphs)
+    [quoterRef,quoterRef {executionRefGraph=executionGraphSha256 alternateGraph}])
+  contextualQuoter <- case [node | node <- contextualNodes
+      , executionNodeIdentity node == executionRefIdentity quoterRef] of
+    [node] -> pure node
+    _ -> fail "shared source recipe lost its exact quoter owner"
+  contextualResolutions <- either (fail . show) pure
+    (executionNodeOriginalResolutions (alternateGraph:mixedGraphs) contextualQuoter)
+  unless (Set.fromList [executionGraphSha256 originalGraph,executionGraphSha256 alternateGraph]
+        `Set.isSubsetOf` executionNodeOriginalGraphs contextualQuoter
+      && work </> "unproven-shadow.hs" `elem` concatMap dependencyResolutionCandidates contextualResolutions) $
+    fail "shared source dedup discarded another recipe's negative-resolution constraints"
   -- Each level shares both later levels. Revalidating settled recipes per
   -- incoming path expands this bounded source inventory exponentially.
   let dagNames = ["SharedRecipe" ++ show index | index <- [0::Int ..35]]

@@ -213,7 +213,7 @@ import Tidepool.ExactScope
 import Tidepool.ExecutionSource
   ( ExecutionSourceGraph(..), ExecutionSourceNode(..), ExecutionSourceIdentity(..)
   , ExecutionSourceFailure(..), ExecutionSourceRef(..), executionSourceClosure, executionIdentityKey
-  , executionSourceGraphsFit )
+  , executionSourceGraphsFit, executionNodeOriginalResolutions )
 import Tidepool.PackageWitness
   ( PackageImportRoot(..), PackageImportEvidence(..), CompilerProvidedImport(..), emptyPackageImports, packageImportRoot, readPackageImports
   , validatePackageImportRoot )
@@ -3988,6 +3988,7 @@ validateExactOriginalSources admitted interfaces sourceGraph nodes = do
       originalByOwner = Map.fromList [((exactUnit artifact,exactModule artifact),iface)
         | (artifact,iface) <- interfaces]
   let selected = Map.fromList [(executionIdentityKey (executionNodeIdentity node),node) | node <- nodes]
+      originalResolutionsFor = executionNodeOriginalResolutions (scopeExecutionGraphs admitted)
       selectedNames = Set.fromList [mkModuleName name | (_,name) <- Map.keys selected]
       excluded = [mkModuleName (exactModule artifact) | (artifact,_,_) <- scopeInterfaces admitted
         , mkModuleName (exactModule artifact) `Set.notMember` selectedNames]
@@ -4093,14 +4094,14 @@ validateExactOriginalSources admitted interfaces sourceGraph nodes = do
         applicable resolution = (dependencyResolutionQualifier resolution,dependencyResolutionModule resolution,
           dependencyResolutionBoot resolution) `Set.member` imports
         currentResolutions = filter applicable (dependencyResolutions current)
-        originalResolutions = filter applicable (dependencyResolutions
-          (executionGraphEvidence (executionNodeGraph node)))
         negative resolution = case dependencyResolutionSelected resolution of
           Nothing -> dependencyResolutionCandidates resolution
           Just path' -> takeWhile (/= path') (dependencyResolutionCandidates resolution)
         originalNegative resolution
           | (fst key,dependencyResolutionModule resolution) `Set.member` originalNames = []
           | otherwise = negative resolution
+    originalResolutions <- either (liftIO . throwIO) pure
+      (originalResolutionsFor node)
     let negativePaths = nubOrd (concatMap negative currentResolutions ++ concatMap originalNegative originalResolutions)
     present <- liftIO (filterM doesFileExist negativePaths)
     unless (null present) $ liftIO (throwIO (ExecutionSourceSearchChanged key present))

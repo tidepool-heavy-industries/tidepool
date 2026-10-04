@@ -8,6 +8,7 @@ module Tidepool.ExecutionSource
   , ExecutionSourceNode(..), ExecutionSourceFailure(..), executionSourceClosure, executionSourceOriginalNode, executionSourceOriginalClosure
   , ExecutionSourceRecipe(..), issueExecutionSourceRecipe
   , executionSourceProspectiveReferences
+  , executionNodeOriginalResolutions
   , decodeExecutionSourceDescriptors, readExecutionSourceGraphs, executionSourceGraphsFit
   , executionSourceGraphBytesLimit
   ) where
@@ -191,7 +192,26 @@ data ExecutionSourceNode = ExecutionSourceNode
   , executionNodeModule :: DependencyModule
   , executionNodeSourceSha256 :: String
   , executionNodeRequirements :: [(String, String)]
+  -- Graph IDs refer to the request's authenticated inventory. Identical local
+  -- recipes still retain every context's original negative search witnesses.
+  , executionNodeOriginalGraphs :: Set.Set String
   }
+
+executionNodeOriginalResolutions
+  :: [ExecutionSourceGraph] -> ExecutionSourceNode
+  -> Either ExecutionSourceFailure [DependencyResolution]
+executionNodeOriginalResolutions graphs = \node ->
+  let imports = Set.fromList [(dependencyImportQualifier edge,dependencyImportName edge,dependencyImportBoot edge)
+        | edge <- dependencyModuleImports (executionNodeModule node)]
+      context sha = do
+        graph <- maybe (Left (ExecutionSourceMissing (executionIdentityKey (executionNodeIdentity node)))) Right
+          (Map.lookup sha inventory)
+        pure [row | row <- dependencyResolutions (executionGraphEvidence graph)
+          , (dependencyResolutionQualifier row,dependencyResolutionModule row,dependencyResolutionBoot row)
+              `Set.member` imports]
+  in concat <$> mapM context (Set.toAscList (executionNodeOriginalGraphs node))
+  where
+    inventory = Map.fromList [(executionGraphSha256 graph,graph) | graph <- graphs]
 
 data ExecutionSourceFailure
   = ExecutionSourceMissing (String, String)
@@ -271,6 +291,10 @@ walkExecutionSources graphs selection pending = Map.elems . fst <$>
           recipe = (original,executionGraphSha256 (executionNodeGraph node))
       when (recipe `Set.member` active) (Left (ExecutionSourceConflicting key))
       if recipe `Set.member` completed then visit selected completed active rest else do
+        -- Pending and completed pairs are disjoint. Reserve the next context
+        -- before descending or growing any per-node witness union.
+        when (Set.size completed + Set.size active >= executionSourceContextLinksLimit)
+          (Left (ExecutionSourceIncomplete key))
         case Map.lookup key selected of
           Just existing -> do
             -- Authenticate both local recipes and their dependencies before
@@ -289,7 +313,16 @@ walkExecutionSources graphs selection pending = Map.elems . fst <$>
             unless equivalent (Left (ExecutionSourceConflicting key))
           Nothing -> pure ()
         forMSelected node dependencies
-        let shared = Map.insertWith (\_ existing -> existing) key node dependencies
+        shared <- case Map.lookup key dependencies of
+          Nothing -> Right (Map.insert key node dependencies)
+          Just existing -> do
+            let contexts = executionNodeOriginalGraphs existing
+                offered = executionNodeOriginalGraphs node
+                newContexts = length [context | context <- Set.toList offered
+                  , context `Set.notMember` contexts]
+            when (Set.size contexts + newContexts > executionSourceGraphsLimit)
+              (Left (ExecutionSourceIncomplete key))
+            Right (Map.insert key (existing {executionNodeOriginalGraphs=Set.union contexts offered}) dependencies)
         visit shared (Set.insert recipe completedDependencies) active rest
     sameLocalRecipe left right = do
       leftObligations <- obligations left
@@ -311,7 +344,7 @@ walkExecutionSources graphs selection pending = Map.elems . fst <$>
       (executionNodeRequirements node)
     resolutionRecipe node = sort
       [(dependencyResolutionQualifier row,dependencyResolutionModule row,
-        dependencyResolutionBoot row,dependencyResolutionSelected row,dependencyResolutionCandidates row)
+        dependencyResolutionBoot row,dependencyResolutionSelected row)
       | row <- dependencyResolutions (executionGraphEvidence (executionNodeGraph node))
       , any (\edge -> dependencyImportQualifier edge == dependencyResolutionQualifier row
           && dependencyImportName edge == dependencyResolutionModule row
@@ -392,7 +425,8 @@ executionSourceOriginalNodeWith prospective graphs = originalNode prospective Se
                     | edge <- dependencyModuleImports node, dependencyImportSelected edge /= Nothing]
                   exact = concat [imports | (ownerKey,imports) <- executionGraphExactImports graph, ownerKey == key]
                   requirements = Set.toAscList (Set.fromList (selected ++ exact))
-              pure (ExecutionSourceNode original graph node (dependencySourceSha256 source) requirements)
+              pure (ExecutionSourceNode original graph node (dependencySourceSha256 source) requirements
+                (Set.singleton (executionGraphSha256 graph)))
       where key = executionIdentityKey original
     one key values = case values of
       [value] -> Right value
@@ -400,6 +434,11 @@ executionSourceOriginalNodeWith prospective graphs = originalNode prospective Se
 
 executionSourceGraphsLimit :: Int
 executionSourceGraphsLimit = 4096
+
+-- One request can select the same immutable owner through several original
+-- graphs. Bound those links separately from the authenticated graph inventory.
+executionSourceContextLinksLimit :: Int
+executionSourceContextLinksLimit = 65536
 
 -- These retained graph bounds are independent of the metadata envelope.
 executionSourceGraphsFit :: [ExecutionSourceGraph] -> Bool
