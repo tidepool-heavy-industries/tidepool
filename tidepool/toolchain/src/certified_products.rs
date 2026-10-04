@@ -4684,6 +4684,9 @@ pub(crate) fn certify_target_owners_with_validation(
 }
 
 #[cfg(test)]
+mod resume_issuer_tests;
+
+#[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use crate::cache::{ModuleEvidence, SourceEvidence};
