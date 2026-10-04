@@ -4709,6 +4709,7 @@ where
             ));
         }
         let admission_execution = execution.clone();
+        let pure_host_carrier = host.is_some();
         let snapshot_source = self.access.source.clone();
 
         let request_scope = self.request_scope.clone();
@@ -4731,23 +4732,22 @@ where
                             CellSnapshotAdmission::PrivateExecution(execution.admission.as_ref())
                         }),
                 )?;
-                let prepared =
-                    source.prepare_effectful(&snapshot.view, &context.haskell_effects_alias)?;
+                // Fixed host carriers describe native payloads without invoking
+                // actor effects, independently of the selected tool's dispatcher.
+                let effects = if pure_host_carrier {
+                    "'[]"
+                } else {
+                    &context.haskell_effects_alias
+                };
+                let prepared = source.prepare_effectful(&snapshot.view, effects)?;
                 let preamble = cell_module_preamble(
                     &prepared.preamble,
                     &snapshot.candidate_module.module_name(),
                 )?;
-                let template = resident_cell_check_template(
-                    &preamble,
-                    &context.haskell_effects_alias,
-                    &prepared.imports,
-                );
+                let template = resident_cell_check_template(&preamble, effects, &prepared.imports);
                 let evidence = cell_check_evidence(&snapshot.view, &template, &prepared);
-                let templates = resident_workbench_templates(
-                    &prepared.preamble,
-                    &context.haskell_effects_alias,
-                    &prepared.imports,
-                );
+                let templates =
+                    resident_workbench_templates(&prepared.preamble, effects, &prepared.imports);
                 let cell = tidepool_toolchain::checked_cell::CheckedCellSpecification {
                     admission_digest: [0; 32],
                     cell_source: snapshot_cell_source,
@@ -11691,8 +11691,18 @@ mod request_tests {
             .admit_private_cell_for_test(public.clone())
             .await
             .unwrap();
+        let mut dispatcher_context = context.clone();
+        dispatcher_context.haskell_effects_alias = format!(
+            "(Tidepool.Effects.Core.AgentTools ': Tidepool.Effects.Core.ContextReadWrite ': {})",
+            context.haskell_effects_alias
+        );
+        assert!(!workbench
+            .access
+            .source
+            .preamble
+            .contains("import qualified Tidepool.Effects.Core"));
         let first = workbench
-            .bind_command_job(context.clone(), "job one".into())
+            .bind_command_job(dispatcher_context.clone(), "job one".into())
             .await
             .expect("first checked Job binding")
             .accept()
@@ -11702,7 +11712,7 @@ mod request_tests {
             .await;
         let before_repeat = tidepool_extract_cmd::extract_spawn_count();
         let repeated = workbench
-            .bind_command_job(context.clone(), "job one".into())
+            .bind_command_job(dispatcher_context.clone(), "job one".into())
             .await
             .expect("unchanged Job reuses its accepted original binder")
             .accept()
@@ -11735,7 +11745,14 @@ mod request_tests {
             .await
             .unwrap();
         let (carrier, dependencies) = workbench
-            .prepare_host_input(context.clone(), HostCarrierKind::Job, None)
+            .prepare_host_input(
+                crate::ActorSessionContext {
+                    haskell_effects_alias: dispatcher_context.haskell_effects_alias.clone(),
+                    ..context.clone()
+                },
+                HostCarrierKind::Job,
+                None,
+            )
             .await
             .expect("retained context still admits the original checked Job type");
         let (_, binder) = carrier.checked_binding().unwrap();
