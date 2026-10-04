@@ -61,7 +61,7 @@ import GHC.Unit.Module (Module, moduleName, moduleNameString, moduleUnit)
 import GHC.Unit.Types (unitString, unitIdString)
 import GHC.Utils.Outputable (ppr, renderWithContext, defaultSDocContext)
 import Tidepool.ExactHydration
-  ( ExactIfaceArtifact, freshExactState, hydrateExactScope )
+  ( ExactIfaceArtifact, freshExactState, hydrateExactScope, withExactHomeInstances )
 import Tidepool.CompileInputPolicy (pluginInputIssues)
 import Tidepool.FamilyConsistency (validateEnvironmentFamilies)
 import Tidepool.RetainedUnfoldings (scopeRetainedHscEnv, scopeRetainedModuleGraph)
@@ -272,7 +272,7 @@ hydrateCandidateHomeProductsWithOriginals initial loadGraph interfaces originals
           unless (ms_hsc_src summary == HsBootFile) $
             liftIO (ioError (userError "cached home boot input is not a boot summary"))
           parsed <- parseModule summary
-          typed <- typecheckModule parsed
+          typed <- withExactHomeInstances summary (typecheckModule parsed)
           let bootEnvironment = fst (tm_internals_ typed)
           dependentFiles <- liftIO (readIORef (tcg_dependent_files bootEnvironment))
           unless (null dependentFiles) $

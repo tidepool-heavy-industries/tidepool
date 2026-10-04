@@ -198,7 +198,7 @@ import Tidepool.DependencyEvidence
   , DependencyModule(..), DependencyImport(..), DependencyQualifier(..), ProductAvailability(..)
   , sourceEvidenceWithFingerprint )
 import Tidepool.ExactHydration
-  ( ExactIfaceArtifact(..), freshExactState, hydrateExactScope, serializeOriginalInterface
+  ( ExactIfaceArtifact(..), freshExactState, hydrateExactScope, serializeOriginalInterface, exactHomeInstancesFor
   , readVerifiedExactIfaceClosureWithCheckedValues, selectVerifiedExactInterfaces, selectVerifiedValueInterfaces
   , checkedValueImportAuthorityFromVerified
   , GeneratedScaffoldRecipe, generatedScaffoldRecipe, captureGeneratedScaffoldTarget
@@ -1893,6 +1893,8 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                   when (ms_mod_name summary == targetName) $
                     writeIORef targetInstanceFailure (Just (failure :: GeneratedInstanceRejection))
                   throwIO failure
+        canonicalLoadPhase (T_Hsc phaseEnv summary) =
+          runPhase (T_Hsc (exactHomeInstancesFor summary phaseEnv) summary)
         canonicalLoadPhase (T_HscPostTc phaseEnv summary (FrontendTypecheck tcg) tcWarnings oldHash)
           | ms_hsc_src summary == HsSrcFile = do
               (origins, env) <- atomicModifyIORef' frontendOriginsRef (\known ->
@@ -4548,7 +4550,7 @@ sessionVariant purpose scope path = do
                    -- supply bytecode, never an orphan instance or family rule.
                    forM_ (executionFreshProviders executionPlan) $ \summary -> do
                      current <- getSession
-                     hmi <- liftIO (compileOne' (Just batchMsg) current
+                     hmi <- liftIO (compileOne' (Just batchMsg) (exactHomeInstancesFor summary current)
                        summary {ms_hspp_opts=canonicalizeRepresentationFlags (ms_hspp_opts summary)}
                        1 1 Nothing emptyHomeModInfoLinkable)
                      unless (mi_module (hm_iface hmi) == ms_mod summary

@@ -21,8 +21,10 @@ import Tidepool.ExactScope
 import GHC
 import GHC.Builtin.Types (doubleTy)
 import GHC.Core.InstEnv (instEnvElts, is_dfun_name, is_tys)
+import GHC.Core.FamInstEnv (fi_axiom)
+import GHC.Core.Coercion.Axiom (coAxiomName)
 import GHC.Core.TyCo.Compare (eqType)
-import GHC.Driver.Env (hsc_HPT, hscUpdateHPT, hscEPS)
+import GHC.Driver.Env (hsc_HPT, hscUpdateHPT, hscEPS, hptInstancesBelow)
 import GHC.Driver.Env.Types (hsc_mod_graph)
 import GHC.Driver.Pipeline (compileOne)
 import GHC.Iface.Syntax (IfaceClsInst(..), IfaceFamInst(..))
@@ -30,7 +32,10 @@ import GHC.Types.SourceError (SourceError)
 import GHC.Unit.External (ExternalPackageState(..))
 import GHC.Unit.Home.ModInfo
 import GHC.Unit.Module.ModDetails (ModDetails(..))
-import GHC.Unit.Types (stringToUnit)
+import GHC.Unit.Types (stringToUnit, GenWithIsBoot(..))
+import GHC.Unit.Home (homeUnitId)
+import GHC.Driver.Env (hsc_home_unit)
+import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
 import Numeric (showHex)
 import System.Directory
 import System.Environment (getArgs, getExecutablePath)
@@ -239,12 +244,10 @@ recoveredConsumer root = do
     configure root
     initial <- getSession
     fresh <- liftIO (freshExactState initial)
-    artifacts <- liftIO (mapM (artifact root) ["Common", "Old", "Public", "Joined"])
+    artifacts <- liftIO (mapM (artifact root) ["Common", "Old", "Public", "Joined", "PartialJoined", "JoinedAgain"])
     loaded <- liftIO (readExactIfaceArtifacts fresh artifacts >>= either fail pure)
     hydrated <- liftIO (hydrateExactScope fresh loaded)
-    joinedArtifact <- case [a | a <- artifacts, exactModule a == "Joined"] of
-      a : _ -> pure a
-      [] -> liftIO (fail "missing persisted Join artifact")
+    let joinedArtifacts = [a | a <- artifacts, exactModule a `elem` ["Joined", "PartialJoined", "JoinedAgain"]]
     setSession hydrated
     -- Depanal excludes the synthetic interface and every implementation module.
     -- The same explicit virtual node is installed for each ordinary consumer.
@@ -255,27 +258,49 @@ recoveredConsumer root = do
           setTargets [target]
           graph <- depanal (map (mkModuleName . exactModule) artifacts) False
           env <- getSession
-          installed <- liftIO (installExactLexicalGraph graph [(joinedArtifact, [])] noCheckedValueImports env)
+          installed <- liftIO (installExactLexicalGraph graph [(joinedArtifact, []) | joinedArtifact <- joinedArtifacts] noCheckedValueImports env)
           lexical <- either (liftIO . fail) pure installed
           setSession lexical
           summary <- getModSummary (if file == "Consumer" then mkModuleName "Main" else mkModuleName file)
           pure summary
     summary <- check "Consumer"
     env <- getSession
-    consumer <- liftIO (compileOne env summary 1 1 Nothing emptyHomeModInfoLinkable)
+    let scoped = exactHomeInstancesFor summary env
+        names environment = map is_dfun_name (instEnvElts (fst (hptInstancesBelow environment
+          (homeUnitId (hsc_home_unit environment)) (GWIB (moduleName (ms_mod summary)) NotBoot))))
+        originalNames = names env
+        scopedNames = names scoped
+        familyNames environment = map (coAxiomName . fi_axiom) (snd (hptInstancesBelow environment
+          (homeUnitId (hsc_home_unit environment)) (GWIB (moduleName (ms_mod summary)) NotBoot)))
+        originalFamilies = familyNames env
+        scopedFamilies = familyNames scoped
+    liftIO $ unless (length originalNames > Set.size (Set.fromList originalNames)
+        && Set.fromList scopedNames == Set.fromList originalNames
+        && length scopedNames == Set.size (Set.fromList scopedNames))
+      (fail "reachable joined views did not preserve each exact original dfun once")
+    liftIO $ unless (length originalFamilies > Set.size (Set.fromList originalFamilies)
+        && Set.fromList scopedFamilies == Set.fromList originalFamilies
+        && length scopedFamilies == Set.size (Set.fromList scopedFamilies))
+      (fail "reachable joined views did not preserve each exact original family axiom once")
+    consumer <- withExactHomeInstances summary $ do
+      temporary <- getSession
+      liftIO (compileOne temporary summary 1 1 Nothing emptyHomeModInfoLinkable)
+    restored <- getSession
+    liftIO $ unless (names restored == originalNames && familyNames restored == originalFamilies)
+      (fail "target typecheck changed the retained instance environment")
     liftIO $ writeFile (root </> "consumer-object.txt") (ml_obj_file (ms_location summary))
     setSession (hscUpdateHPT (addHomeModInfoToHpt consumer) env)
     forM_ ["BadClass", "BadFamily", "BadAssociated", "BadFD"] $ \name -> do
       bad <- check name
       badEnv <- getSession
-      result <- liftIO $ try (compileOne badEnv bad 1 1 Nothing emptyHomeModInfoLinkable)
+      result <- liftIO $ try (compileOne (exactHomeInstancesFor bad badEnv) bad 1 1 Nothing emptyHomeModInfoLinkable)
         :: Ghc (Either SourceError HomeModInfo)
       liftIO $ case result of
         Left _ -> pure ()
         Right _ -> fail (name ++ " unexpectedly acquired hidden typing evidence")
     nextSummary <- check "Next"
     nextEnv <- getSession
-    next <- liftIO (compileOne nextEnv nextSummary 1 1 Nothing emptyHomeModInfoLinkable)
+    next <- liftIO (compileOne (exactHomeInstancesFor nextSummary nextEnv) nextSummary 1 1 Nothing emptyHomeModInfoLinkable)
     setSession (hscUpdateHPT (addHomeModInfoToHpt next) nextEnv)
     liftIO $ writeFile (root </> "next-object.txt") (ml_obj_file (ms_location nextSummary))
     final <- getSession

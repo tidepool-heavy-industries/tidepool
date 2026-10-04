@@ -20,7 +20,8 @@ import Codec.CBOR.Write (toStrictByteString)
 import Control.Monad.State.Strict (StateT, evalStateT, get, put, lift)
 import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
-import Tidepool.ExactHydration (OriginalInterfaceArtifacts, originalInterfaceSha256)
+import Tidepool.ExactHydration (OriginalInterfaceArtifacts, originalInterfaceSha256
+  , exactHomeInstancesFor, withExactHomeInstances)
 import Data.Maybe (catMaybes)
 import Numeric (showHex)
 import Control.Monad (forM, forM_, unless, replicateM)
@@ -228,7 +229,8 @@ thenNativeModule first transform = do
 
 typecheckNativeModule :: NativeParsedModule -> Ghc TypecheckedModule
 typecheckNativeModule annotated = do
-  typed <- typecheckModule (nativeParsedModule annotated)
+  typed <- withExactHomeInstances (pm_mod_summary (nativeParsedModule annotated))
+    (typecheckModule (nativeParsedModule annotated))
   let (environment, details) = tm_internals_ typed
   pure typed { tm_internals_ = (addNativeTypeUses annotated environment, details) }
 
@@ -240,7 +242,7 @@ typecheckNativeModuleWithDiagnostics
 typecheckNativeModuleWithDiagnostics env annotated = do
   let parsed = nativeParsedModule annotated
       summary = pm_mod_summary parsed
-      local = hscSetFlags (ms_hspp_opts summary) env
+      local = exactHomeInstancesFor summary (hscSetFlags (ms_hspp_opts summary) env)
       source = HsParsedModule
         { hpm_module = pm_parsed_source parsed
         , hpm_src_files = pm_extra_src_files parsed

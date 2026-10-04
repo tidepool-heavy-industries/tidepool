@@ -8,6 +8,7 @@ module Tidepool.ExactHydration
   , freshExactState
   , readExactIfaceArtifacts
   , hydrateExactScope
+  , exactHomeInstancesFor, withExactHomeInstances
   , CheckedValueImportAuthority
   , noCheckedValueImports
   , readCheckedValueImportAuthority
@@ -27,6 +28,7 @@ module Tidepool.ExactHydration
 import Tidepool.Timing (readTimingEnabled, emitCount, timeDetailPhase)
 import Tidepool.Session (SessionModule(..), SessionModuleKind(..), parseSessionModule, sessionModuleString)
 import Control.Monad (forM, forM_, unless)
+import Data.List (mapAccumL)
 import Control.Exception
   ( Exception, IOException, SomeException, SomeAsyncException, bracket, try, fromException, throwIO )
 import Data.Char (isHexDigit, toLower)
@@ -34,7 +36,7 @@ import Data.Maybe (isJust, isNothing)
 import qualified Data.ByteString as BS
 import qualified Crypto.Hash.SHA256 as SHA256
 import GHC.Driver.Env
-  ( HscEnv(..), hscUpdateHPT_lazy, hsc_home_unit, hsc_HPT, hscEPS, discardIC, hsc_all_home_unit_ids )
+  ( HscEnv(..), hscUpdateHPT_lazy, hptSomeThingsBelowUs, hsc_home_unit, hsc_HPT, hscEPS, discardIC, hsc_all_home_unit_ids )
 import qualified GHC.Linker.Loader as Linker
 import GHC.Unit.Env (UnitEnv(..), HomeUnitEnv(..))
 import GHC.Unit.External (initExternalUnitCache, ExternalPackageState(eps_PIT))
@@ -69,7 +71,12 @@ import Tidepool.ExecutionSource (ExecutionSourceIdentity(..))
 import Tidepool.DependencyEvidence (sourceEvidenceWithFingerprint, dependencySourceSha256)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
-import GHC (ParsedModule(..))
+import GHC (Ghc, ParsedModule(..), getSession, setSession)
+import GHC.Driver.Monad (reifyGhc, reflectGhc)
+import GHC.Unit.Module.ModDetails (ModDetails(..))
+import GHC.Core.InstEnv (instEnvElts, is_dfun_name, mkInstEnv)
+import GHC.Core.FamInstEnv (fi_axiom)
+import GHC.Core.Coercion.Axiom (coAxiomName)
 import GHC.Parser.Annotation (getLocA)
 import Language.Haskell.Syntax (HsModule(..))
 import GHC.Hs (ImportDecl(..), ImportDeclQualifiedStyle(..))
@@ -586,6 +593,43 @@ hydrateExactScope env loaded = do
       in (iface, detail) : zipDetails rest tailDetails
     splitDetails (detail : rest) = (detail, rest)
     splitDetails [] = error "exact hydration detail arity mismatch"
+
+-- A source-less interface borrows original dfun/axiom Names. GHC unions
+-- reachable HMI tables, so two lexical views can otherwise insert the same
+-- original instance twice. Select each identity once in this target's temporary
+-- environment, never in the retained interfaces or the complete consistency
+-- closure. Authenticated joins copy these records from their original owners;
+-- equal Names therefore carry the same original instance metadata.
+exactHomeInstancesFor :: ModSummary -> HscEnv -> HscEnv
+exactHomeInstancesFor summary env = hscUpdateHPT_lazy install env
+  where
+    reachable = hptSomeThingsBelowUs (\hmi -> [hmi]) True env
+      (homeUnitId (hsc_home_unit env))
+      (GWIB (moduleName (ms_mod summary)) (if ms_hsc_src summary == HsBootFile then IsBoot else NotBoot))
+    active = filter ((== homeUnitAsUnit (hsc_home_unit env)) . moduleUnit . mi_module . hm_iface) reachable
+    (_, projected) = mapAccumL project (Set.empty, Set.empty) active
+    project (classes, families) hmi =
+      let details = hm_details hmi
+          (classes', instances) = unique is_dfun_name classes (instEnvElts (md_insts details))
+          (families', equations) = unique (coAxiomName . fi_axiom) families (md_fam_insts details)
+       in ((classes', families'), hmi { hm_details = details
+            { md_insts = mkInstEnv instances, md_fam_insts = equations } })
+    install table = foldr (\hmi hpt -> addToHpt hpt (moduleName (mi_module (hm_iface hmi))) hmi) table projected
+    unique key seen values =
+      let step retained value
+            | key value `Set.member` retained = (retained, Nothing)
+            | otherwise = (Set.insert (key value) retained, Just value)
+          (final, chosen) = mapAccumL step seen values
+       in (final, [value | Just value <- chosen])
+
+-- The facade typecheck path restores its exact HPT on both SourceError and
+-- asynchronous cancellation; the diagnostics path borrows the same projection
+-- directly without changing its caller's Session.
+withExactHomeInstances :: ModSummary -> Ghc a -> Ghc a
+withExactHomeInstances summary action = reifyGhc $ \session -> bracket
+  (reflectGhc getSession session)
+  (\original -> reflectGhc (getSession >>= setSession . hscUpdateHPT_lazy (const (hsc_HPT original))) session)
+  (\original -> reflectGhc (setSession (exactHomeInstancesFor summary original) >> action) session)
 
 -- A lexical interface contributes its chosen instance/family environment to
 -- GHC's graph traversal. Implementation-only HMIs remain installed but never
