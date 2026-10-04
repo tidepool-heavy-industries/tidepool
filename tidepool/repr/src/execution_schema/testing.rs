@@ -11,6 +11,9 @@ use super::{
     SCHEMA_VERSION,
 };
 
+mod encode;
+pub use encode::{encode_projected_group, encode_wire_program};
+
 /// A stable identity for authored execution-schema fixtures.
 pub fn identity(module: &str, occurrence: &str) -> SymbolIdentity {
     SymbolIdentity {
