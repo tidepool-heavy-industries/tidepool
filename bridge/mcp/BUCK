@@ -48,7 +48,6 @@ rust_filegroup(
         "src/lib.rs": "bridge/mcp/src/lib.rs",
         "src/lib_isolate.rs": "bridge/mcp/src/lib_isolate.rs",
         "src/preamble.rs": "bridge/mcp/src/preamble.rs",
-        "src/validate.rs": "bridge/mcp/src/validate.rs",
     },
 )
 

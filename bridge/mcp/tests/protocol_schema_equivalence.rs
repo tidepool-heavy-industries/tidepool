@@ -341,6 +341,22 @@ fn lookup_decl_matches_the_schema_exactly() {
     );
 }
 
+#[test]
+fn model_call_decl_matches_the_schema_exactly() {
+    assert_decl_matches_schema(
+        &tidepool_mcp::model_call_decl(),
+        &tidepool_protocol::effects::model::model(),
+    );
+}
+
+#[test]
+fn context_read_write_decl_matches_the_schema_exactly() {
+    assert_decl_matches_schema(
+        &tidepool_mcp::context_read_write_decl(),
+        &tidepool_protocol::effects::context_read_write::context_read_write(),
+    );
+}
+
 /// Every effect the schema claims to own must actually be wired into
 /// `tidepool-mcp` — a schema entry with no live decl would prove nothing while
 /// looking like coverage.
@@ -379,6 +395,8 @@ fn every_schema_effect_is_reachable() {
             "AgentSession",
             "Reflect",
             "Source",
+            "ModelCall",
+            "ContextReadWrite",
             "BoundWorktree",
             "WorktreeRegistry",
             "WorktreeAllocation",
