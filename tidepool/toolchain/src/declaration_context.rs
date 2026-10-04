@@ -2117,6 +2117,38 @@ impl ExactDeclarationContext {
             .collect()
     }
 
+    /// Select the original native owner from its compiler-issued origin. A
+    /// lexical projection may have a different owner and grants no native root.
+    pub fn authored_native_root(
+        &self,
+        generation: u64,
+    ) -> Result<crate::artifact_inventory::ArtifactId, CompileError> {
+        use crate::certified_products::CanonicalOrigin;
+        let entries = self.inventory.entries();
+        let roots = entries
+            .iter()
+            .filter(|entry| match &entry.payload {
+                ArtifactPayload::Original(product) if generation != 0 => {
+                    product
+                        .module_interface()
+                        .map(|interface| interface.origin())
+                        == Some(CanonicalOrigin::NativeAuthoredDeclaration { generation })
+                }
+                _ => false,
+            })
+            .map(|entry| entry.descriptor.id)
+            .collect::<Vec<_>>();
+        match roots.as_slice() {
+            [root] => Ok(*root),
+            _ => Err(admission_failure(
+                ArtifactInventoryFailure::AuthoredNativeRoot {
+                    generation,
+                    found: roots.len(),
+                },
+            )),
+        }
+    }
+
     pub fn recovery_products(&self) -> Vec<CertifiedRecoveryProduct> {
         self.inventory
             .entries()
@@ -4299,6 +4331,27 @@ mod tests {
         fields[7] = text(serde_json::to_string(&fresh).unwrap());
         write_receipt(&receipt, &equivalent);
         request.validate_receipt(&receipt, None, &context).unwrap();
+    }
+
+    #[test]
+    fn authored_native_root_rejects_source_original_with_authored_module_spelling() {
+        let context = ExactDeclarationContext::new(&[], &[], vec![])
+            .unwrap()
+            .extend_checked_original_products(
+                [2; 32],
+                &[support_product_in_unit("main", "Tidepool.Session.Lib.G1")],
+            )
+            .unwrap();
+        for generation in [0, 1] {
+            assert!(matches!(
+                context.authored_native_root(generation),
+                Err(CompileError::ArtifactInventory(error))
+                    if matches!(error.failure,
+                        ArtifactInventoryFailure::AuthoredNativeRoot {
+                            generation: actual, found: 0
+                        } if actual == generation)
+            ));
+        }
     }
 
     #[test]

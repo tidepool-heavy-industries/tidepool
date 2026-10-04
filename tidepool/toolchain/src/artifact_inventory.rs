@@ -80,6 +80,8 @@ pub enum ArtifactInventoryFailure {
     OwnerConflict { owner: ExactModuleIdentity },
     #[error("owner {owner:?} selects multiple native implementations")]
     NativeOwnerAmbiguity { owner: ExactModuleIdentity },
+    #[error("authored generation {generation} requires one certified native root; found {found}")]
+    AuthoredNativeRoot { generation: u64, found: usize },
     #[error("{dependent:?} requires another exact interface seal for {required:?}")]
     InterfaceSealMismatch {
         dependent: ExactModuleIdentity,

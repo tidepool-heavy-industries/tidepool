@@ -423,32 +423,35 @@ pub(super) fn validate_recovery_native_markers(
     node: &recovery::RecoveryNode,
     context: &tidepool_toolchain::declaration_join::ExactDeclarationContext,
 ) -> Result<(), String> {
-    let owners = match node.kind {
-        recovery::RecoveryNodeKind::Authored => {
-            node.lexical_roots.iter().cloned().collect::<BTreeSet<_>>()
+    let roots = match node.kind {
+        recovery::RecoveryNodeKind::Authored => vec![context
+            .authored_native_root(node.id.0)
+            .map_err(|error| error.to_string())?],
+        recovery::RecoveryNodeKind::Join => {
+            let owners = node
+                .exports
+                .iter()
+                .flat_map(|export| std::iter::once(&export.identity).chain(export.children.iter()))
+                .map(
+                    |identity| tidepool_toolchain::declaration_join::ExactModuleIdentity {
+                        unit: identity.unit.clone(),
+                        module: identity.module.clone(),
+                    },
+                )
+                .collect::<BTreeSet<_>>();
+            context
+                .artifact_view()
+                .descriptors()
+                .into_iter()
+                .filter(|descriptor| {
+                    descriptor.kind
+                        == tidepool_toolchain::artifact_inventory::ArtifactKind::OriginalModule
+                        && owners.contains(&descriptor.owner)
+                })
+                .map(|descriptor| descriptor.id)
+                .collect::<Vec<_>>()
         }
-        recovery::RecoveryNodeKind::Join => node
-            .exports
-            .iter()
-            .flat_map(|export| std::iter::once(&export.identity).chain(export.children.iter()))
-            .map(
-                |identity| tidepool_toolchain::declaration_join::ExactModuleIdentity {
-                    unit: identity.unit.clone(),
-                    module: identity.module.clone(),
-                },
-            )
-            .collect(),
     };
-    let roots = context
-        .artifact_view()
-        .descriptors()
-        .into_iter()
-        .filter(|descriptor| {
-            descriptor.kind == tidepool_toolchain::artifact_inventory::ArtifactKind::OriginalModule
-                && owners.contains(&descriptor.owner)
-        })
-        .map(|descriptor| descriptor.id)
-        .collect::<Vec<_>>();
     let expected =
         certified_native_dependencies(context, &roots).map_err(|error| error.to_string())?;
     let expected = expected.into_iter().collect::<BTreeSet<_>>();
