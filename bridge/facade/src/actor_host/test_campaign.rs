@@ -3,6 +3,10 @@
 use super::*;
 use exomonad_tool::{ToolArguments, ToolInvocation, ToolInvocationContext};
 
+// Semantic acceptance includes cold whole-cell compilation, validation and
+// native attachment in a debug build. Performance gates keep their own budgets.
+pub(super) const COLD_DEBUG_CELL_SETTLEMENT_BUDGET: Duration = Duration::from_secs(300);
+
 /// Commit everything a campaign's workspace carries before the run selects it.
 ///
 /// Two mechanisms read the tree rather than the directory: `nix` resolves a

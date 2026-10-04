@@ -1,3 +1,4 @@
+use super::test_campaign::COLD_DEBUG_CELL_SETTLEMENT_BUDGET;
 use super::*;
 use async_trait::async_trait;
 use harness::{
@@ -13,9 +14,6 @@ use tokio::sync::Notify;
 const PENDING_CALL: &str = "captured-unfold-and-await";
 const REUSE_CALL: &str = "reuse-failed-cell-capture";
 
-// Semantic acceptance includes cold whole-cell compilation, validation and
-// native attachment in a debug build. Performance gates keep their own budgets.
-const COLD_DEBUG_CELL_SETTLEMENT_BUDGET: Duration = Duration::from_secs(300);
 const TYPED_CHILD_REPLY_SETTLEMENT_BUDGET: Duration = Duration::from_secs(90);
 
 #[derive(Clone, Copy, PartialEq, Eq)]

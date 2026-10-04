@@ -59,6 +59,7 @@ impl ModelFreeSession {
             transform,
             conversation,
             model_factory,
+            ROOT_POLICY_INSTALL_TIMEOUT,
             |forest, _, _| Ok(forest),
         )
         .await
@@ -78,6 +79,7 @@ impl ModelFreeSession {
             transform,
             conversation,
             model_factory,
+            ROOT_POLICY_INSTALL_TIMEOUT,
             |forest, program, _| Ok(forest.with_child_bootstrap_program(program)),
         )
         .await
@@ -90,17 +92,25 @@ impl ModelFreeSession {
         config: &ActorHostConfig,
         transform: impl FnOnce(Arc<dyn ForkWorkspaceAdmission>) -> Arc<dyn ForkWorkspaceAdmission>,
     ) -> Result<Self> {
-        Self::start_configured(config, transform, None, None, |forest, _, run_root| {
-            let recovery = exomonad_actor::ActorRecoveryJournal::open(
-                run_root.join("actor-lifecycle.v2.jsonl"),
-            )?;
-            let store = super::display_output::open_run_store(run_root).map_err(runtime_error)?;
-            let conversation =
-                super::embedded_reflect::run_conversation_reader(store, Arc::clone(&recovery));
-            Ok(forest
-                .with_recovery_journal(recovery)
-                .with_conversation_reader(conversation))
-        })
+        Self::start_configured(
+            config,
+            transform,
+            None,
+            None,
+            super::test_campaign::COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+            |forest, _, run_root| {
+                let recovery = exomonad_actor::ActorRecoveryJournal::open(
+                    run_root.join("actor-lifecycle.v2.jsonl"),
+                )?;
+                let store =
+                    super::display_output::open_run_store(run_root).map_err(runtime_error)?;
+                let conversation =
+                    super::embedded_reflect::run_conversation_reader(store, Arc::clone(&recovery));
+                Ok(forest
+                    .with_recovery_journal(recovery)
+                    .with_conversation_reader(conversation))
+            },
+        )
         .await
     }
 
@@ -109,6 +119,7 @@ impl ModelFreeSession {
         transform: impl FnOnce(Arc<dyn ForkWorkspaceAdmission>) -> Arc<dyn ForkWorkspaceAdmission>,
         conversation: Option<exomonad_actor::ConversationReader>,
         model_factory: Option<Arc<dyn exomonad_actor::CellModelFactory>>,
+        root_policy_install_timeout: std::time::Duration,
         configure_forest: impl FnOnce(
             ResidentForest<ExomonadHandlerStack, CapturedOutput>,
             Arc<tidepool_runtime::session::CompiledTurn>,
@@ -209,7 +220,7 @@ impl ModelFreeSession {
             layers.bind_run(actor.identity().into());
         }
         let root_installation = match tokio::time::timeout(
-            ROOT_POLICY_INSTALL_TIMEOUT,
+            root_policy_install_timeout,
             deployments.recv(),
         )
         .await
@@ -265,7 +276,7 @@ impl ModelFreeSession {
                     forest,
                     hosted,
                     format!(
-                        "timed out after {ROOT_POLICY_INSTALL_TIMEOUT:?} waiting for root policy installation"
+                        "timed out after {root_policy_install_timeout:?} waiting for root policy installation"
                     ),
                 )
                 .await);
