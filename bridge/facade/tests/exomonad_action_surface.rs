@@ -59,6 +59,40 @@ fn node_mailboxes_compile_with_opaque_ids() {
 }
 
 #[test]
+fn reusable_event_and_async_helpers_compile_with_narrow_rows() {
+    eval_harness::require_extract();
+    let effects = tidepool_mcp::ensure_effects_module(&[
+        tidepool_mcp::event_decl(),
+        tidepool_mcp::green_decl(),
+    ])
+    .expect("materialize reusable helper vocabulary");
+    let mut include =
+        vec![tidepool_mcp::ensure_selected_effects_shim("'[]")
+            .expect("materialize empty selected row")];
+    include.extend_from_slice(effects.include_paths());
+    include.push(eval_harness::prelude_path());
+    let refs = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+
+    compile_haskell(
+        include_str!("exomonad_action_surface/reusable_helper_rows.hs"),
+        "result",
+        &refs,
+    )
+    .expect("one checked source supports Green-only, RepoEvent-only and empty rows");
+
+    let error = compile_haskell(
+        include_str!("exomonad_action_surface/async_without_green.hs"),
+        "result",
+        &refs,
+    )
+    .expect_err("calling async requires Green even when its module imports successfully");
+    assert_eq!(
+        tidepool_runtime::classify_compile(&error).class,
+        tidepool_runtime::FailureClass::UserHaskell
+    );
+}
+
+#[test]
 fn resident_deliberation_module_is_not_available() {
     eval_harness::require_extract();
     let include = exomonad_include_paths();

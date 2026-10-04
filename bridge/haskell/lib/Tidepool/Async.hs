@@ -1,4 +1,4 @@
-{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE FlexibleContexts, ScopedTypeVariables #-}
 
 -- | Green threads with the authored surface of @Control.Concurrent.Async@.
 --
@@ -57,8 +57,8 @@
 -- That is the whole list.  Every other name here means exactly what the
 -- package means it to mean.
 --
--- This module is reachable only in rows containing @Green@, and is
--- auto-imported whenever @Green@ is in the row.  It has nothing to do with
+-- Its effectful helpers require @Green@; the module is auto-imported
+-- whenever @Green@ is in the row. It has nothing to do with
 -- "Tidepool.Answerer.Fork", which is the answerer's unrelated fanout-to-sub-answerers
 -- surface — though the two COMPOSE: @'async' (fork \@T brief)@ parks the
 -- fork in a thread of its own, so several forks can be outstanding before
@@ -94,12 +94,13 @@ module Tidepool.Async
   ) where
 
 import Prelude
+import Control.Monad.Freer (Eff, Member)
 
 import Tidepool.Async.Internal (Async (..))
 import Tidepool.Async.Types (AsyncCancelled (..), asyncThreadId)
-import Tidepool.Effects
+import Tidepool.Effects.Authored
   ( AsyncStatus (..)
-  , M
+  , Green
   , asyncCancel
   , asyncJoinAny
   , asyncSpawn
@@ -110,7 +111,7 @@ import Tidepool.Internal.ExitCell (fillExitCell, newExitCell, readExitCell)
 -- | Fork a green thread.  Returns as soon as the thread is registered; the
 -- thread runs until it performs an effect and then parks, independently of
 -- this caller.
-async :: M a -> M (Async a)
+async :: Member Green effs => Eff effs a -> Eff effs (Async a)
 {-# NOINLINE async #-}
 async body = do
   let cell = newExitCell body
@@ -123,7 +124,7 @@ async body = do
 
 -- | Wait for a thread and return its value.  Fails loudly if the thread was
 -- cancelled — 'waitCatch' is the total form.
-wait :: Async a -> M a
+wait :: Member Green effs => Async a -> Eff effs a
 wait h = do
   r <- waitCatch h
   case r of
@@ -137,7 +138,7 @@ wait h = do
 -- parks until the thread reaches a TERMINAL state, and only then is its state
 -- read.  A cancel landing while this caller is parked is therefore observed,
 -- not missed.
-waitCatch :: Async a -> M (Either AsyncCancelled a)
+waitCatch :: Member Green effs => Async a -> Eff effs (Either AsyncCancelled a)
 waitCatch (Async t cell) = do
   _ <- asyncJoinAny [t]
   st <- asyncStatus t
@@ -150,7 +151,7 @@ waitCatch (Async t cell) = do
     AsyncRunning -> error "Tidepool.Async.wait: join returned a running thread"
 
 -- | Has this thread finished?  Never parks and never advances anything.
-poll :: Async a -> M (Maybe a)
+poll :: Member Green effs => Async a -> Eff effs (Maybe a)
 poll (Async t cell) = do
   st <- asyncStatus t
   case st of
@@ -162,12 +163,12 @@ poll (Async t cell) = do
 
 -- | Cancel a thread, discarding its pending suspensions.  Idempotent; a no-op
 -- on a thread that already reached a terminal state.
-cancel :: Async a -> M ()
+cancel :: Member Green effs => Async a -> Eff effs ()
 cancel (Async t _) = asyncCancel t
 
 -- | Wait for the first of two threads to finish.  The loser keeps running —
 -- 'cancel' it yourself if you want it stopped ('race' does).
-waitEither :: Async a -> Async b -> M (Either a b)
+waitEither :: Member Green effs => Async a -> Async b -> Eff effs (Either a b)
 waitEither ha hb = do
   w <- asyncJoinAny [asyncThreadId ha, asyncThreadId hb]
   if w == asyncThreadId ha
@@ -177,7 +178,7 @@ waitEither ha hb = do
 -- | Wait for both threads.  They run concurrently regardless of the order
 -- these two waits are written in — each is already parked on its own
 -- continuation.
-waitBoth :: Async a -> Async b -> M (a, b)
+waitBoth :: Member Green effs => Async a -> Async b -> Eff effs (a, b)
 waitBoth ha hb = do
   a <- wait ha
   b <- wait hb
@@ -185,7 +186,7 @@ waitBoth ha hb = do
 
 -- | Wait for the first of these threads to finish, returning it and its
 -- value.  The others keep running.
-waitAny :: [Async a] -> M (Async a, a)
+waitAny :: Member Green effs => [Async a] -> Eff effs (Async a, a)
 waitAny [] = error "Tidepool.Async.waitAny: empty thread list"
 waitAny hs = do
   w <- asyncJoinAny (map asyncThreadId hs)
@@ -197,7 +198,7 @@ waitAny hs = do
 
 -- | Run two computations concurrently and return the first to finish,
 -- cancelling the loser.
-race :: M a -> M b -> M (Either a b)
+race :: Member Green effs => Eff effs a -> Eff effs b -> Eff effs (Either a b)
 race l r = do
   ha <- async l
   hb <- async r
@@ -207,7 +208,7 @@ race l r = do
   pure out
 
 -- | Run two computations concurrently and return both values.
-concurrently :: M a -> M b -> M (a, b)
+concurrently :: Member Green effs => Eff effs a -> Eff effs b -> Eff effs (a, b)
 concurrently l r = do
   ha <- async l
   hb <- async r
@@ -217,11 +218,11 @@ concurrently l r = do
 -- the ORIGINAL list order.  Completion order is never an input — that is PRD
 -- 20's order-insensitivity contract, and it is why this collects by walking
 -- the handles rather than by whoever finishes first.
-mapConcurrently :: (a -> M b) -> [a] -> M [b]
+mapConcurrently :: Member Green effs => (a -> Eff effs b) -> [a] -> Eff effs [b]
 mapConcurrently f xs = do
   hs <- mapM (async . f) xs
   mapM wait hs
 
 -- | 'mapConcurrently' with the arguments flipped — @forConcurrently xs f@.
-forConcurrently :: [a] -> (a -> M b) -> M [b]
+forConcurrently :: Member Green effs => [a] -> (a -> Eff effs b) -> Eff effs [b]
 forConcurrently xs f = mapConcurrently f xs

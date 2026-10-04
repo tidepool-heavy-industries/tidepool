@@ -14,7 +14,7 @@
 --   spawnAgent \@WorkerResult (spawnSpecIn (worktreeId parentTree) "parent" task)
 -- @
 --
--- The handler closure runs in the SAME @M effs@ environment as the code around
+-- The handler closure runs in the SAME @Eff effs@ environment as the code around
 -- it.  It may spawn a reviewer, ask the operator, write a file, or record a
 -- receipt — whatever its effect row permits.  Nothing about it is a restricted
 -- callback context.
@@ -171,13 +171,12 @@ import Control.Monad.Freer (Member)
 -- a definition in this module rather than spliced text in that one.
 import Control.Monad.Freer.Internal (Eff (..), qApp, tsingleton)
 import Tidepool.Async.Types (Async, asyncThreadId)
-import Tidepool.Effects
+import Tidepool.Effects.Authored
   ( CommitReceipt (..)
   , EventError
   , EventId
   , HeadChangeKind (..)
   , HeadChangeReceipt (..)
-  , M
   , RepoEvent (RepoEventDrain, RepoEventSubscribe, RepoEventUnsubscribe)
   , RepositoryEvent (..)
   , SubscriptionId
@@ -280,10 +279,10 @@ drainSubscription ev handler sub = do
 -- already observed, and unregisters. Registration does not block, and
 -- the subscription NEVER replays events older than itself.
 --
--- The handler runs in the surrounding `M` row: it may send a typed
+-- The handler runs in the surrounding effect row: it may send a typed
 -- message, spawn a reviewer, ask the operator, or record a receipt,
 -- and it may itself suspend. Its failure fails this scope.
-withHandler :: Event a -> (a -> M ()) -> M b -> M b
+withHandler :: Member RepoEvent effs => Event a -> (a -> Eff effs ()) -> Eff effs b -> Eff effs b
 withHandler ev handler body = do
   sub <- subscribe ev
   r <- pumpEff (drainSubscription ev handler sub) body
@@ -294,7 +293,7 @@ withHandler ev handler body = do
 -- | Like 'withHandler', but returns a subscription failure and delivers later
 -- drain or unsubscribe failures to the handler as 'Left' values. The body
 -- result remains available as @Right@ so the caller chooses the policy.
-withHandlerTry :: Event a -> (Either EventError a -> M ()) -> M b -> M (Either EventError b)
+withHandlerTry :: Member RepoEvent effs => Event a -> (Either EventError a -> Eff effs ()) -> Eff effs b -> Eff effs (Either EventError b)
 withHandlerTry ev handler body = do
   subscribed <- send (RepoEventSubscribe ev.eventWatches)
   case subscribed of
@@ -308,7 +307,7 @@ withHandlerTry ev handler body = do
         Right () -> pure ()
       pure (Right r)
 
-drainSubscriptionTry :: Event a -> (Either EventError a -> M ()) -> SubscriptionId -> M ()
+drainSubscriptionTry :: Member RepoEvent effs => Event a -> (Either EventError a -> Eff effs ()) -> SubscriptionId -> Eff effs ()
 drainSubscriptionTry ev handler sub = do
   batch <- send (RepoEventDrain sub)
   case batch of
@@ -340,7 +339,7 @@ firstMatch ev (o:os) = case ev.eventProject o of
 -- a merged, multi-source Event happens to carry no entry `ev` itself
 -- projects, which is not spin-polling — each iteration is still one
 -- genuine blocking round trip.
-nextEvent :: Event a -> M (Observed a)
+nextEvent :: Member RepoEvent effs => Event a -> Eff effs (Observed a)
 nextEvent ev = do
   sub <- send (RepoEventSubscribe ev.eventWatches) >>= liftEither
   r <- awaitFirst ev sub
@@ -349,7 +348,7 @@ nextEvent ev = do
 
 -- | Like 'nextEvent', but returns subscription, await, or unsubscription
 -- failures as data instead of throwing them.
-nextEventTry :: Event a -> M (Either EventError (Observed a))
+nextEventTry :: Member RepoEvent effs => Event a -> Eff effs (Either EventError (Observed a))
 nextEventTry ev = do
   subscribed <- send (RepoEventSubscribe ev.eventWatches)
   case subscribed of
@@ -363,7 +362,7 @@ nextEventTry ev = do
           Left err -> pure (Left err)
           Right () -> pure (Right observed)
 
-awaitFirstTry :: Event a -> SubscriptionId -> M (Either EventError (Observed a))
+awaitFirstTry :: Member RepoEvent effs => Event a -> SubscriptionId -> Eff effs (Either EventError (Observed a))
 awaitFirstTry ev sub = do
   batch <- awaitSubscriptionRaw sub (-1)
   case batch of
@@ -372,7 +371,7 @@ awaitFirstTry ev sub = do
       Just observed -> pure (Right observed)
       Nothing -> awaitFirstTry ev sub
 
-awaitFirst :: Event a -> SubscriptionId -> M (Observed a)
+awaitFirst :: Member RepoEvent effs => Event a -> SubscriptionId -> Eff effs (Observed a)
 awaitFirst ev sub = do
   batch <- awaitSubscriptionRaw sub (-1) >>= liftEither
   case firstMatch ev batch of
@@ -385,7 +384,7 @@ awaitFirst ev sub = do
 -- it fires exactly one Tick through the SAME subscription registry as
 -- repository watches, so `nextEvent (someEvent <|> after ms)` reads as
 -- an ordinary select with a timeout branch.
-after :: Int -> M (Event Tick)
+after :: Int -> Eff effs (Event Tick)
 after ms = pure (Event [WatchDeadline ms] projectTick)
 
 projectTick :: RepositoryEvent -> Maybe Tick
