@@ -778,18 +778,19 @@ fn fresh_host_binders_preserve_prior_request_input_for_captured_closures() {
     mount(&mut notebook, serde_json::json!({"request": "B"}));
     assert_eq!(notebook.session.val_gen(), Generation(notebook.generation));
 
-    let TurnResult::Expr { compiled, .. } = notebook.compile_in_current_value_view("fromA ()")
-    else {
+    let TurnResult::Expr { compiled, .. } = notebook.compile_in_current_value_view(
+        "if fromA () == (11 :: Int) then () else error \"captured request-A payload changed\"",
+    ) else {
         panic!("request-A closure invocation must compile as an expression");
     };
     let outcome = notebook
         .session
         .run_with_sites("request_a_snapshot", compiled.into_code())
         .expect("request-A closure remains runnable after request-B mount");
-    let ResidentOutcome::Completed { result, .. } = outcome else {
-        panic!("request-A closure invocation did not complete: {outcome:?}");
-    };
-    assert_eq!(result.to_json(), serde_json::json!([11, "11"]));
+    assert!(
+        matches!(outcome, ResidentOutcome::Completed { .. }),
+        "request-A payload assertion did not complete: {outcome:?}"
+    );
 }
 
 #[test]
@@ -1133,14 +1134,18 @@ fn host_carrier_mounts_json_text_and_job_payloads_from_one_compile_each() {
     // constructors (the `GHC.Magic.lazy`-wrapped stub body must not earn a
     // bottoming strictness signature that would collapse these cases; see
     // `HostCarrier::stub_source`'s doc comment for the failure this guards
-    // against).
+    // against). The case and if force every payload predicate before unit
+    // can complete; the workbench's opaque result token is not the assertion.
     let TurnResult::Expr { compiled, .. } = compile_extra(
         &mut notebook,
         "case (carriedA, carriedB, carriedText, carriedJob) of \
          { (Aeson.Object a, Aeson.Object b, TidepoolHostTextInternal.Text _ _ _, TidepoolHostJob.Job jobText) -> \
-         (Map.lookup \"tag\" a, Map.lookup \"tag\" b, \
-          carriedText == TidepoolHostText.pack \"hello-carrier-text\", \
-          jobText == TidepoolHostText.pack \"job-command\") }",
+         if Map.lookup \"tag\" a == Just (Aeson.String \"A\") \
+            && Map.lookup \"tag\" b == Just (Aeson.String \"B\") \
+            && carriedText == TidepoolHostText.pack \"hello-carrier-text\" \
+            && jobText == TidepoolHostText.pack \"job-command\" \
+         then () else error \"carrier payload mismatch\"; \
+         _ -> error \"carrier constructor mismatch\" }",
     ) else {
         panic!("reading all four carried values must compile as an expression");
     };
@@ -1148,17 +1153,9 @@ fn host_carrier_mounts_json_text_and_job_payloads_from_one_compile_each() {
         .session
         .run_with_sites("read_all_carried", compiled.into_code())
         .expect("read all carried values");
-    let ResidentOutcome::Completed { result, .. } = outcome else {
-        panic!("reading carried values did not complete: {outcome:?}");
-    };
-    assert_eq!(
-        result.to_json(),
-        serde_json::json!([
-            ["A", "B", true, true],
-            "(Just (String \"A\"),Just (String \"B\"),True,True)"
-        ]),
-        "expected all four carrier-mounted payloads to read back correctly \
-         through their stub modules, including constructor pattern matches"
+    assert!(
+        matches!(outcome, ResidentOutcome::Completed { .. }),
+        "all four payload and constructor assertions must complete: {outcome:?}"
     );
 }
 
@@ -1585,7 +1582,10 @@ fn different_incarnations_sharing_one_root_do_not_cross_read_same_named_generati
     );
 
     let TurnResult::Expr { compiled, .. } = second.compile_in_current_value_view(
-        "case carried of { Aeson.Object o -> Map.lookup \"who\" o }",
+        "case carried of { Aeson.Object o -> \
+         if Map.lookup \"who\" o == Just (Aeson.String \"second\") \
+         then () else error \"cross-incarnation payload mismatch\"; \
+         _ -> error \"cross-incarnation constructor mismatch\" }",
     ) else {
         panic!("reading the carried value must compile as an expression");
     };
@@ -1593,15 +1593,9 @@ fn different_incarnations_sharing_one_root_do_not_cross_read_same_named_generati
         .session
         .run_with_sites("read_second_incarnation", compiled.into_code())
         .expect("read second incarnation's carried value");
-    let ResidentOutcome::Completed { result, .. } = outcome else {
-        panic!("reading the carried value did not complete: {outcome:?}");
-    };
-    assert_eq!(
-        result.to_json(),
-        serde_json::json!(["second", "Just String \"second\""]),
-        "the second incarnation must read back its OWN value for a same-named generation, \
-         never the first incarnation's -- a stale cross-incarnation GutsMemo hit would silently \
-         resolve to the first incarnation's compiled guts instead"
+    assert!(
+        matches!(outcome, ResidentOutcome::Completed { .. }),
+        "the second incarnation's own payload assertion must complete: {outcome:?}"
     );
 }
 
@@ -1632,11 +1626,12 @@ fn fifty_accumulated_session_stubs_read_back_correctly_across_repeat_compiles() 
     }
 
     let read_back_expr = format!(
-        "[ v | Aeson.Object o <- [{}], Just v <- [Map.lookup \"tag\" o] ]",
-        names.join(", ")
+        "if [ v | Aeson.Object o <- [{}], Just v <- [Map.lookup \"tag\" o] ] \
+         == map toJSON ([0..{}] :: [Int]) \
+         then () else error \"accumulated carrier payload order mismatch\"",
+        names.join(", "),
+        COUNT - 1
     );
-
-    let expected: Vec<serde_json::Value> = (0..COUNT).map(|i| serde_json::json!(i)).collect();
 
     for attempt in 0..2 {
         let TurnResult::Expr { compiled, .. } =
@@ -1648,21 +1643,9 @@ fn fifty_accumulated_session_stubs_read_back_correctly_across_repeat_compiles() 
             .session
             .run_with_sites("read_fifty_carried", compiled.into_code())
             .unwrap_or_else(|error| panic!("attempt {attempt}: read all 50 values: {error}"));
-        let ResidentOutcome::Completed { result, .. } = outcome else {
-            panic!("attempt {attempt}: reading carried values did not complete: {outcome:?}");
-        };
-        let show_string = format!(
-            "[{}]",
-            expected
-                .iter()
-                .map(|tag| format!("Number {tag}"))
-                .collect::<Vec<_>>()
-                .join(",")
-        );
-        assert_eq!(
-            result.to_json(),
-            serde_json::json!([serde_json::Value::Array(expected.clone()), show_string]),
-            "attempt {attempt}: all 50 accumulated stubs must read back their own tag in order"
+        assert!(
+            matches!(outcome, ResidentOutcome::Completed { .. }),
+            "attempt {attempt}: all 50 ordered payload assertions must complete: {outcome:?}"
         );
     }
 }
