@@ -1103,12 +1103,34 @@ fn resident_parcel_preserves_original_authenticated_request_across_sessions() {
     assert!(Arc::ptr_eq(&input.custody.provenance, &parked));
     assert!(destination.discard_custody(imported));
     assert!(destination.discard_custody(repeated));
-    destination
-        .abort(
+    let mut remaining_holes = destination
+        .parked_holes()
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(remaining_holes.remove(activation.cont_id()));
+    let parked_count = destination.parked_count();
+    assert!(matches!(
+        destination.abort(
             activation.cont_id(),
             "transfer qualification complete".into(),
-        )
-        .unwrap();
+        ),
+        Err(ResidentError::Run(RuntimeError::Jit(EffectError::Handler(reason))))
+            if reason == "ask aborted by caller: transfer qualification complete"
+    ));
+    assert_eq!(
+        destination
+            .parked_holes()
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<std::collections::BTreeSet<_>>(),
+        remaining_holes
+    );
+    assert_eq!(destination.parked_count(), parked_count - 1);
+    assert!(destination.parked_program_provenance(&activation).is_none());
+    drop(input);
+    drop(receiver);
+    assert_eq!(destination.outstanding_custody(), 0);
 }
 
 #[test]
