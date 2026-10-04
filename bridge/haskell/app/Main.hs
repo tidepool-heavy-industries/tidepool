@@ -64,10 +64,12 @@ import Tidepool.GhcPipeline
 import Tidepool.ExecutionEncode
   ( encodeWireProgram, ModuleProductEncoding, prepareModuleProductEncoding
   , moduleProductInput, moduleProductBytes, encodeModuleProductInventory )
-import Tidepool.ExecutionProjection (ProjectionContext(..), ProjectionError(..), OriginalGroupOmission(..), prepareProjectionWithReachability, projectSelected, PreparedModuleProducts, projectOriginalHomeModuleProducts, preparedModuleProductOutcomes, preparedModuleProductOmissions, preparedRootIdentity, resolveTextPackageUnit)
+import Tidepool.ExecutionProjection (ProjectionContext(..), ProjectionError(..), OriginalGroupOmission(..), prepareProjectionWithReachability, projectSelectedWithHostBindings, PreparedModuleProducts, projectOriginalHomeModuleProducts, preparedModuleProductOutcomes, preparedModuleProductOmissions, preparedRootIdentity, resolveTextPackageUnit)
 import Tidepool.PreparedFormatting (resolveFormattingAuthority)
 import Tidepool.PreparedTime (resolveTimeAuthority)
-import Tidepool.PreparedJson (resolveJsonAuthority)
+import Tidepool.PreparedJson (resolveJsonAuthorityWithCanonicalInterfaces)
+import Tidepool.HostBindingAuthority
+  ( HostBindingRepresentation, hostBindingRepresentationJsonAuthority )
 import Tidepool.ExecutionSchema
   ( Architecture(..), Endianness(..), SymbolIdentity(..), TargetDescriptor(..)
   , WireProgram(..), SiteRow(..) )
@@ -139,7 +141,7 @@ import Tidepool.FatIface
   ( FatIfaceCache, newFatIfaceCache, evictFatIfaceMatching, readExactInterface
   , OwnerInterfaceCache, newOwnerInterfaceCache, evictOwnerInterfaceMatching )
 import Tidepool.SessionArtifacts
-  ( mkBoundBinders, parseValModule )
+  ( prepareSessionBindings, sessionBindingRepresentations, writeSessionBindings, parseValModule )
 import Tidepool.Metadata
   ( collectDataCons, dcToMeta, mergeMetaPreserving, targetBindingHasIO
   , wiredInDataCons )
@@ -408,7 +410,7 @@ processFile compiler caches timing args path = do
           [] -> maybe [] pure mTarget
     originalInterfaces <- newOriginalInterfaceArtifacts hscEnv (pprFinalizedModules prepared) (retainedOriginalInterfaces prepared) outDir
     (preparedArtifacts, productContext) <- prepareArtifacts originalInterfaces caches path hscEnv (pprProductInterfaces prepared) (pprModules prepared) preparedTargets
-      (standardAuxiliaryRoots binds) (requestRetainedGenerations args) (pprAcceptedCandidates prepared) (compilationScope <$> pprExactCompilation prepared)
+      (standardAuxiliaryRoots binds) (requestRetainedGenerations args) (pprAcceptedCandidates prepared) (compilationScope <$> pprExactCompilation prepared) []
     if null preparedArtifacts
       then ioError (userError "prepared extraction requires --target or --targets")
       else timePhase timing "prepared_sidecars" $ writePreparedSidecars SeparateYieldSites outDir binds tycons mCapturedTy warnTexts preparedArtifacts
@@ -517,13 +519,18 @@ data PreparedArtifact = PreparedArtifact
 prepareArtifacts :: OriginalInterfaceArtifacts -> RecoveryCaches -> FilePath -> HscEnv -> Map.Map ModuleName ModIface
   -> [PreparedModule] -> [String] -> [String]
   -> Map.Map SymbolIdentity Word64 -> [ModuleCandidate] -> Maybe ExactScope
+  -> [HostBindingRepresentation]
   -> IO ([PreparedArtifact], Maybe PreparedModuleProducts)
-prepareArtifacts _ _ _ _ _ _ [] _ _ _ _ = pure ([], Nothing)
-prepareArtifacts originalInterfaces caches input hscEnv interfaces modules targets@(firstTarget : _) auxiliaryRoots retainedGenerations candidates exactScope = do
+prepareArtifacts _ _ _ _ _ _ [] _ _ _ _ _ = pure ([], Nothing)
+prepareArtifacts originalInterfaces caches input hscEnv interfaces modules targets@(firstTarget : _) auxiliaryRoots retainedGenerations candidates exactScope hostBindings = do
   timing <- readTimingEnabled
   formattingAuthority <- timePhase timing "formatting_authority" $ resolveFormattingAuthority hscEnv
   timeAuthority <- timePhase timing "time_authority" $ resolveTimeAuthority hscEnv
-  jsonAuthority <- timePhase timing "json_authority" $ resolveJsonAuthority hscEnv
+  jsonAuthority <- timePhase timing "json_authority" $
+    case mapMaybe hostBindingRepresentationJsonAuthority hostBindings of
+      authority : _ -> pure (Just authority)
+      [] -> resolveJsonAuthorityWithCanonicalInterfaces hscEnv
+        (maybe Map.empty scopeCanonicalInterfaces exactScope)
   textAuthority <- timePhase timing "text_authority" $ resolveTextPackageUnit hscEnv
   source <- readFile input
   let targetModule = fromMaybe (capitalize (takeBaseName input)) (extractModuleName source)
@@ -586,7 +593,7 @@ prepareArtifacts originalInterfaces caches input hscEnv interfaces modules targe
           selected <- timePhase timing "prepared_project" $
             requireProjection (prepareProjectionWithReachability finalContext
               (closureModules recovered) (closureReachability recovered))
-          (program, constructors) <- requireProjection (projectSelected selected)
+          (program, constructors) <- requireProjection (projectSelectedWithHostBindings hostBindings selected)
           required <- either (ioError . userError) pure
             (originalPackageGlobals (programGlobals program))
           let nextRoots = Set.toAscList (Set.fromList (roots ++ required))
@@ -1083,10 +1090,16 @@ compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb binde
         warnTexts   = map T.pack (prWarnings result)
     -- Projection remains outside compileVariants. Its entry is the settled
     -- scaffold, and its constructors join the shared metadata before write.
+    let boundNames = case selector of
+          SBind -> sbBinders sb
+          SExpr -> maybe [] pure (admitted >>= itemObservationName)
+          _ -> []
+    sessionBindings <- prepareSessionBindings boundNames result
     originalInterfaces <- newOriginalInterfaceArtifacts hscEnv (pprFinalizedModules prepared) (retainedOriginalInterfaces prepared) outDir
     (preparedArtifacts, productContext) <- prepareArtifacts originalInterfaces caches compiledPath hscEnv (pprProductInterfaces prepared) preparedModules
       [preparedScaffoldTargetName] (standardAuxiliaryRoots binds)
       (requestRetainedGenerations args) (pprAcceptedCandidates prepared) (compilationScope <$> pprExactCompilation prepared)
+      (sessionBindingRepresentations sessionBindings)
     when (maybe False ((== HostActivationInput) . itemPurpose) admitted) $ do
       input <- either fail pure (activationPreviewInputType (prTargetTcGblEnv result))
       witness <- captureCheckedTypeWitness hscEnv input
@@ -1112,14 +1125,14 @@ compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb binde
       SBind -> do
         g    <- requireArg "--bind-gen"     (requestBindGen args)
         root <- requireArg "--session-root" (requestSessionRoot args)
-        bbs  <- mkBoundBinders (sbBinders sb) g root result
+        bbs  <- writeSessionBindings g root sessionBindings
         return (TBind (map T.pack (sbBinders sb)) variant bbs asksSites wrapped)
       SBindDiscard -> return (TBind [] variant [] asksSites wrapped)
       SExpr -> case admitted >>= itemObservationName of
         Just observation -> do
           generation <- requireArg "--bind-gen" (requestBindGen args)
           root <- requireArg "--session-root" (requestSessionRoot args)
-          bound <- mkBoundBinders [observation] generation root result
+          bound <- writeSessionBindings generation root sessionBindings
           return (TBind [T.pack observation] variant bound asksSites wrapped)
         Nothing -> return (TExpr variant asksSites wrapped)
       SDecl -> error ("--turn: unexpected verdict kind: " ++ templateSelectorWireName selector)
@@ -1600,7 +1613,7 @@ prepareOriginalCellDeclaration compiler caches args template outDir scope exact 
   originalInterfaces <- newOriginalInterfaceArtifacts environment (pprFinalizedModules prepared) (retainedOriginalInterfaces prepared) directory
   (artifacts, productContext) <- prepareArtifacts originalInterfaces caches sourcePath environment (pprProductInterfaces prepared) (pprModules prepared)
     ["__result"] [] (requestRetainedGenerations args) (pprAcceptedCandidates prepared)
-    (compilationScope <$> pprExactCompilation prepared)
+    (compilationScope <$> pprExactCompilation prepared) []
   writePreparedSidecars SeparateYieldSites directory binds (prTyCons result)
     Nothing (map T.pack (prWarnings result)) artifacts
   writePreparedArtifacts directory artifacts

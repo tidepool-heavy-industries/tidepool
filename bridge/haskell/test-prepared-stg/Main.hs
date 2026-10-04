@@ -3,6 +3,7 @@ module Main (main) where
 import Control.Exception (SomeException, bracket, evaluate, try)
 import Control.Monad (unless)
 import Data.ByteString qualified as BS
+import Data.Foldable (toList)
 import Data.List (isInfixOf, nub, sort)
 import Data.String (fromString)
 import Data.Set qualified as Set
@@ -18,7 +19,7 @@ import GHC.Core.Type (mkTyConApp)
 import GHC.Builtin.Types.Prim (wordPrimTy)
 import GHC.Core.FVs (exprSomeFreeVarsList)
 import GHC.Core.TyCo.Rep (Scaled(..), Type(TyConApp))
-import GHC.Types.Id (idName)
+import GHC.Types.Id (idName, idType)
 import GHC.Types.Name (nameOccName, setNameUnique)
 import GHC.Types.Unique (mkUnique)
 import GHC.Types.Name.Occurrence (occNameString)
@@ -54,6 +55,10 @@ import ModuleProductRoundtripTest
   ( verifyModuleProductInterfaceRoundtrip, verifyOriginalProductCatalogue )
 import TypeEvidenceChecks (runTypeEvidenceChecks)
 import Tidepool.PreparedJson (JsonAuthority, resolveJsonAuthority)
+import Tidepool.HostBindingAuthority
+  ( HostBindingAuthority(..), resolveHostBindingAuthorities
+  , hostBindingRepresentationForType, hostBindingRepresentationAuthority
+  , hostBindingRepresentationConstructors )
 
 assert :: Bool -> String -> IO ()
 assert ok message = unless ok (ioError (userError message))
@@ -237,6 +242,46 @@ verifyJsonLayoutDemand authority result = do
       (pprModules result) of
     [value] -> pure value
     _ -> ioError (userError "JSON demand fixture lacks its prepared owner")
+  -- Reuse the same compiled owner, but project an unrelated Int entry. Its
+  -- executable closure cannot accidentally supply the host representation.
+  let bindingType occurrence = case
+        [idType binder | (binding, _) <- pmBindings prepared
+          , binder <- Projection.topBinders binding
+          , occNameString (nameOccName (idName binder)) == occurrence] of
+        [ty] -> pure ty
+        _ -> ioError (userError ("missing unique host representation type: " ++ occurrence))
+      pipeline = pprPipelineResult result
+  jsonType <- bindingType "hostValue"
+  textType <- bindingType "result"
+  authorities <- resolveHostBindingAuthorities [jsonType, textType] (prHscEnv pipeline)
+    (prCanonicalInterfaceAdmissions pipeline)
+  jsonRepresentation <- maybe (ioError (userError "Value lacks a complete host representation")) pure
+    (hostBindingRepresentationForType authorities jsonType)
+  textRepresentation <- maybe (ioError (userError "Text lacks a complete host representation")) pure
+    (hostBindingRepresentationForType authorities textType)
+  assert (hostBindingRepresentationAuthority jsonRepresentation == JsonValueAuthority
+      && hostBindingRepresentationAuthority textRepresentation == TextAuthority)
+    "host representation lost its authenticated root authority"
+  selected <- require "unrelated prepared selection"
+    (Projection.prepareProjection plain (pprModules result))
+  (jsonCarrier, jsonConstructors) <- require "bound JSON representation"
+    (Projection.projectSelectedWithHostBindings [jsonRepresentation] selected)
+  case Schema.programJsonLayout jsonCarrier of
+    Just layout -> assert (length (toList layout) == 18 && all
+        (\(Schema.ConstructorId index) -> fromIntegral index < length (Schema.programConstructors jsonCarrier))
+        (toList layout)) "bound JSON representation lacks a complete constructor table"
+    Nothing -> ioError (userError "bound JSON representation omitted its authenticated layout")
+  assert (not (any isJsonOperation (Schema.programOperations jsonCarrier)))
+    "bound JSON representation unexpectedly depends on executable JSON operations"
+  (textCarrier, textConstructors) <- require "bound Text representation"
+    (Projection.projectSelectedWithHostBindings [textRepresentation] selected)
+  let retains representation admitted = all
+        (\expected -> any ((== dataConName expected) . dataConName) admitted)
+        (hostBindingRepresentationConstructors representation)
+  assert (retains jsonRepresentation jsonConstructors
+      && retains textRepresentation textConstructors
+      && Schema.programJsonLayout textCarrier == Nothing)
+    "bound host constructors were omitted or Text acquired JSON roles"
   let selectionFor owner occurrences = Just (Set.fromList [ fromIntegral ordinal
         | (ordinal, (binding, _)) <- zip [0 :: Int ..] (pmBindings owner)
         , any ((`elem` occurrences) . occNameString . nameOccName . idName)

@@ -14,6 +14,7 @@ module Tidepool.ExecutionProjection
   , prepareProjection
   , prepareProjectionWithReachability
   , projectSelected
+  , projectSelectedWithHostBindings
   , preparedTopIdentities
   , preparedTargetReferences
   , ReferenceFact(..)
@@ -108,6 +109,9 @@ import Tidepool.TypePolicy qualified as TypePolicy
 import Tidepool.PreparedFormatting
   (FormattingAuthority, FormattingSpec(..), FormattingIntrinsic(..), classifyFormatting)
 import Tidepool.PreparedTime (TimeAuthority, TimeSpec(..), classifyTime)
+import Tidepool.HostBindingAuthority
+  ( HostBindingRepresentation, hostBindingRepresentationConstructors
+  , hostBindingRepresentationJsonAuthority )
 import Tidepool.PreparedJson
   ( JsonAuthority, JsonSpec(..), classifyJson, jsonAuthorityLayout, jsonValueLayoutForType )
 
@@ -418,7 +422,7 @@ projectPreparedModuleGroupOutcomesFor purpose context prepared selection =
             (projectionJsonAuthority context) (projectionTextUnit context) outside purpose
       evidence <- selectPreparedEvidence evidenceIndex (topBinders binding)
       ((groups, types, sites, verbSites, jsonLayout), final) <- runStateT
-        (do validatePreparedEvidence context [onlyGroup] [evidence]
+        (do validatePreparedEvidence context [onlyGroup] [evidence] []
             preallocate [onlyGroup]
             groups <- projectModule onlyGroup
             (types, sites, verbSites) <- lowerPreparedEvidence context [onlyGroup] [evidence]
@@ -461,7 +465,16 @@ preparedTopIdentities modules = traverse identityOf
 
 projectPreparedWithTopSymbols :: ProjectionContext -> [PreparedModule]
   -> VarEnv SymbolIdentity -> Either ProjectionError (WireProgram, [DataCon])
-projectPreparedWithTopSymbols context modules topIdentityMap = do
+projectPreparedWithTopSymbols = projectPreparedWithHostBindings []
+
+-- Only the executable target retains bound host representations. Ordinary
+-- original module products keep their own executable constructor inventory.
+projectPreparedWithHostBindings :: [HostBindingRepresentation] -> ProjectionContext
+  -> [PreparedModule] -> VarEnv SymbolIdentity
+  -> Either ProjectionError (WireProgram, [DataCon])
+projectPreparedWithHostBindings hostBindings context modules topIdentityMap = do
+  boundJsonAuthority <- foldM admitJsonAuthority (projectionJsonAuthority context)
+    (mapMaybe hostBindingRepresentationJsonAuthority hostBindings)
   let initial = PState 0 0 emptyVarEnv emptyVarEnv emptyVarEnv topIdentityMap Map.empty [] Map.empty
         0 0 0 0 emptyVarEnv Seq.empty Seq.empty Seq.empty Map.empty Map.empty Seq.empty Seq.empty Map.empty (projectionTarget context)
         (projectionRetainedGenerations context) (Set.fromList
@@ -469,7 +482,7 @@ projectPreparedWithTopSymbols context modules topIdentityMap = do
              Text.pack (moduleNameString (moduleName (pmModule prepared))))
           | prepared <- modules, pmCoverage prepared == CompleteSourceModule ])
         (projectionFormattingAuthority context) (projectionTimeAuthority context)
-        (projectionJsonAuthority context)
+        boundJsonAuthority
         (projectionTextUnit context)
         Set.empty ExecutableTarget
       -- An executable import's own top-level definition is never walked:
@@ -480,10 +493,14 @@ projectPreparedWithTopSymbols context modules topIdentityMap = do
   ((bindingGroups, programTypes, programSites, programVerbSites, programJsonLayout), final) <- runStateT
     (do evidence <- lift (traverse preparedEvidence projectable)
         validatePreparedEvidence context projectable evidence
+          (concatMap hostBindingRepresentationConstructors hostBindings)
         preallocate projectable
         groups <- concat <$> mapM projectModule projectable
         (types, sites, verbSites) <- lowerPreparedEvidence context projectable evidence
-        jsonLayout <- lowerJsonLayout projectable
+        hostJsonLayout <- lowerHostBindings hostBindings
+        jsonLayout <- case hostJsonLayout of
+          Just layout -> pure (Just layout)
+          Nothing -> lowerJsonLayout projectable
         pure (groups, types, sites, verbSites, jsonLayout)) initial
   entryTop <- maybe (Left (MissingPreparedEntry (projectionEntry context)))
     pure (findTop bindingGroups)
@@ -512,6 +529,10 @@ projectPreparedWithTopSymbols context modules topIdentityMap = do
         }
   pure (program, map fst (toList (constructors final)))
   where
+    admitJsonAuthority Nothing authority = pure (Just authority)
+    admitJsonAuthority (Just selected) authority
+      | selected == authority = pure (Just selected)
+      | otherwise = Left (InvalidPreparedRepresentation "bound JSON authority differs from target projection")
     topValue (TopBinding _ binding) = heapBindingId binding
     findTop = foldr findGroup Nothing
     findGroup group found = case filter
@@ -521,6 +542,22 @@ projectPreparedWithTopSymbols context modules topIdentityMap = do
     groupItems (NonRecursive top) = [top]
     groupItems (Recursive tops) = tops
     topSymbol (TopBinding symbol _) = symbol
+
+-- Complete host representations do not depend on executable constructor
+-- reachability. JSON roles come directly from that same admitted authority.
+lowerHostBindings :: [HostBindingRepresentation] -> P (Maybe (JsonLayout ConstructorId))
+lowerHostBindings = foldM lower Nothing
+ where
+  lower prior representation = case hostBindingRepresentationJsonAuthority representation of
+    Just authority -> do
+      layout <- traverse internConstructor (jsonAuthorityLayout authority)
+      case prior of
+        Just selected | selected /= layout ->
+          failShape "bound JSON representations have conflicting constructor roles"
+        _ -> pure (Just layout)
+    Nothing -> do
+      mapM_ internConstructor (hostBindingRepresentationConstructors representation)
+      pure prior
 
 -- JSON operations, structural answers and host mounts consume authenticated
 -- roles. A host carrier can have a Value root without constructing a Value or
@@ -615,8 +652,14 @@ finishProjection context modules identities selected =
        [] -> Right (PreparedProjection context selected identities)
 
 projectSelected :: PreparedProjection -> Either ProjectionError (WireProgram, [DataCon])
-projectSelected (PreparedProjection context selected identities) =
-  projectPreparedWithTopSymbols context selected identities
+projectSelected = projectSelectedWithHostBindings []
+
+-- The opaque representations were admitted from the same stabilized binding
+-- types used to publish the session interface and host-authority tags.
+projectSelectedWithHostBindings :: [HostBindingRepresentation] -> PreparedProjection
+  -> Either ProjectionError (WireProgram, [DataCon])
+projectSelectedWithHostBindings bindings (PreparedProjection context selected identities) =
+  projectPreparedWithHostBindings bindings context selected identities
 
 -- | The per-module, round-invariant part of 'preparedTargetReferences'.
 --
@@ -1131,13 +1174,13 @@ lowerPreparedEvidence context modules evidence = do
 -- state back; a conflict in that graph must still reject the complete program
 -- in either encounter order. Publication remains owned by 'internConstructor'.
 validatePreparedEvidence :: ProjectionContext -> [PreparedModule]
-  -> [SelectedPreparedEvidence] -> P ()
-validatePreparedEvidence context modules evidence = do
+  -> [SelectedPreparedEvidence] -> [DataCon] -> P ()
+validatePreparedEvidence context modules evidence hostConstructors = do
   let moduleEvidence = concatMap
         (constructorsForSelectedTypeGraph . selectedEvidenceGraph) evidence
   (auxiliaryNodes, auxiliaryRoots) <- auxiliaryRootTypeGraph context modules
   auxiliaryEvidence <- lift (constructorsForTypeGraph auxiliaryNodes auxiliaryRoots)
-  validateConstructorEvidence (moduleEvidence <> auxiliaryEvidence)
+  validateConstructorEvidence (moduleEvidence <> auxiliaryEvidence <> hostConstructors)
 
 -- | Force-intern type evidence for every admitted auxiliary root's own
 -- answer type, the same way a declared site's answer type is interned

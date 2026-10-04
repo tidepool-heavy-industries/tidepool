@@ -1,5 +1,9 @@
 module Tidepool.SessionArtifacts
   ( mkBoundBinders
+  , PreparedSessionBindings
+  , prepareSessionBindings
+  , sessionBindingRepresentations
+  , writeSessionBindings
   , parseValModule
   ) where
 
@@ -19,7 +23,7 @@ import qualified Data.ByteString as BS
 import qualified Data.Text as T
 import Codec.CBOR.Encoding (encodeListLen, encodeString)
 import Codec.CBOR.Write (toStrictByteString)
-import GHC.Core.Type (tyConsOfType)
+import GHC.Core.Type (Type, tyConsOfType)
 import GHC.Builtin.Names (gHC_PRIM)
 import GHC.Core.TyCon (tyConName)
 import GHC.Types.Unique.Set (nonDetEltsUniqSet)
@@ -38,7 +42,8 @@ import Tidepool.GhcPipeline
   , splitTupleType )
 import Tidepool.Identity (stableVarId)
 import Tidepool.HostBindingAuthority
-  ( classifyHostBindingAuthority, resolveHostBindingAuthorities )
+  ( HostBindingRepresentation, hostBindingRepresentationForType
+  , hostBindingRepresentationAuthority, resolveHostBindingAuthorities )
 import Tidepool.Session
   ( Generation(..), SessionModule(..), SessionModuleKind(..)
   , mkThinSessionIfaceWithFixities, parseSessionModule, sessionBinderName
@@ -51,17 +56,18 @@ import qualified Crypto.Hash.SHA256 as SHA256
 import Numeric (showHex)
 import Tidepool.TypePolicy (rootNominalHeadOfType, stabilizeEffectRows)
 
--- | Describe and publish the values materialized by one session bind. The
--- captured result type is split for multi-binds, checked for cross-compilation
--- safety, and written as the thin interface later turns import.
-mkBoundBinders :: [String] -> Word64 -> FilePath -> PipelineResult -> IO [BoundBinder]
-mkBoundBinders bindNames generation root result = do
+-- The captured GHC types and their authority are resolved once, before native
+-- projection, and retained unchanged for the later session interface write.
+data PreparedSessionBindings = PreparedSessionBindings PipelineResult
+  [(String, Type, Type, Maybe HostBindingRepresentation)]
+
+prepareSessionBindings :: [String] -> PipelineResult -> IO PreparedSessionBindings
+prepareSessionBindings [] result = pure (PreparedSessionBindings result [])
+prepareSessionBindings bindNames result = do
   resultType <- case prResultType result of
     Just ty -> pure ty
     Nothing -> error "session bind has no captured result type"
-  let hsc = prHscEnv result
-      sessionModule = SessionModule ValMod (Generation generation)
-      valueType = stripMonadHead resultType
+  let valueType = stripMonadHead resultType
   componentTypes <- case bindNames of
     [_] -> pure [valueType]
     _ -> case splitTupleType valueType of
@@ -71,9 +77,30 @@ mkBoundBinders bindNames generation root result = do
         | otherwise -> error $ "multi-bind has " ++ show (length bindNames)
             ++ " names but its result has " ++ show (length types) ++ " fields"
   let persistedTypes = map stabilizeEffectRows componentTypes
-  authorities <- resolveHostBindingAuthorities persistedTypes hsc
+  authorities <- resolveHostBindingAuthorities persistedTypes (prHscEnv result)
     (prCanonicalInterfaceAdmissions result)
-  let build name ty persistedType =
+  pure (PreparedSessionBindings result
+    (zipWith3 (\name ty persisted -> (name, ty, persisted,
+      hostBindingRepresentationForType authorities persisted))
+      bindNames componentTypes persistedTypes))
+
+sessionBindingRepresentations :: PreparedSessionBindings -> [HostBindingRepresentation]
+sessionBindingRepresentations (PreparedSessionBindings _ bindings) =
+  [representation | (_, _, _, Just representation) <- bindings]
+
+-- | Describe and publish the values materialized by one session bind.
+mkBoundBinders :: [String] -> Word64 -> FilePath -> PipelineResult -> IO [BoundBinder]
+mkBoundBinders names generation root result = do
+  prepared <- prepareSessionBindings names result
+  writeSessionBindings generation root prepared
+
+writeSessionBindings :: Word64 -> FilePath -> PreparedSessionBindings -> IO [BoundBinder]
+writeSessionBindings generation root (PreparedSessionBindings result bindings) = do
+  let hsc = prHscEnv result
+      sessionModule = SessionModule ValMod (Generation generation)
+      bindNames = [name | (name, _, _, _) <- bindings]
+      persistedTypes = [persisted | (_, _, persisted, _) <- bindings]
+      build (name, ty, persistedType, representation) =
         let
             occurrence = mkVarOcc name
             varId = stableVarId (sessionBinderName hsc sessionModule occurrence)
@@ -81,9 +108,9 @@ mkBoundBinders bindNames generation root result = do
             tier = if isClosureType persistedType then RetainOpaque else ForceData
             displayType = renderType ty
             rootHead = rootNominalHeadOfType persistedType
-            hostAuthority = classifyHostBindingAuthority authorities persistedType
+            hostAuthority = hostBindingRepresentationAuthority <$> representation
         in (BoundBinder name varId moduleName tier displayType rootHead hostAuthority, occurrence, persistedType)
-      built = zipWith3 build bindNames componentTypes persistedTypes
+      built = map build bindings
       binders = [binder | (binder, _, _) <- built]
   fixities <- boundBinderFixities bindNames (prTargetTcGblEnv result)
   iface <- mkThinSessionIfaceWithFixities hsc sessionModule [(occ, ty) | (_, occ, ty) <- built] fixities

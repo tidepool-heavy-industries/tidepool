@@ -7,14 +7,19 @@ module Tidepool.HostBindingAuthority
   ( HostBindingAuthority(..)
   , HostBindingAuthorities
   , resolveHostBindingAuthorities
-  , classifyHostBindingAuthority
+  , HostBindingRepresentation
+  , hostBindingRepresentationForType
+  , hostBindingRepresentationAuthority
+  , hostBindingRepresentationConstructors
+  , hostBindingRepresentationJsonAuthority
   ) where
 
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
+import Data.Foldable (toList)
 import Data.Map.Strict qualified as Map
 import GHC.Core.DataCon
-  ( StrictnessMark(MarkedStrict), dataConName, dataConOrigArgTys, dataConRepStrictness )
+  ( DataCon, StrictnessMark(MarkedStrict), dataConName, dataConOrigArgTys, dataConRepStrictness )
 import GHC.Core.TyCo.Rep (Scaled(..), Type(CastTy))
 import GHC.Core.Type (coreView, splitTyConApp_maybe)
 import GHC.Core.TyCon (TyCon, tyConDataCons, tyConName)
@@ -34,7 +39,7 @@ import Language.Haskell.TH.Syntax (addDependentFile, lift, loc_filename, locatio
 import System.FilePath (takeDirectory, (</>))
 import Tidepool.ExactScope (CanonicalInterfaceAdmission, resolveShippedHomeModule)
 import Tidepool.PreparedJson
-  ( JsonAuthority, jsonValueLayoutForType, resolveJsonAuthorityWithCanonicalInterfaces )
+  ( JsonAuthority, jsonAuthorityLayout, jsonValueLayoutForType, resolveJsonAuthorityWithCanonicalInterfaces )
 
 data HostBindingAuthority
   = JsonValueAuthority
@@ -86,17 +91,46 @@ resolveCommandJobModule :: HscEnv
 resolveCommandJobModule env admitted =
   resolveShippedHomeModule env admitted "Tidepool.Command.Types" shippedCommandTypesSource
 
--- | Classify only the exact outer TyCon. This neither reads a rendered type
--- nor descends into arguments, so @Job Text@ cannot borrow Text authority.
-classifyHostBindingAuthority :: HostBindingAuthorities -> Type -> Maybe HostBindingAuthority
-classifyHostBindingAuthority authorities ty = do
+-- The representation and authority are issued together. An authority tag
+-- cannot survive native projection without its exact compiler constructors.
+data HostBindingRepresentation
+  = JsonValueRepresentation JsonAuthority
+  | TextRepresentation DataCon
+  | CommandJobRepresentation DataCon DataCon
+
+hostBindingRepresentationAuthority :: HostBindingRepresentation -> HostBindingAuthority
+hostBindingRepresentationAuthority representation = case representation of
+  JsonValueRepresentation _ -> JsonValueAuthority
+  TextRepresentation _ -> TextAuthority
+  CommandJobRepresentation _ _ -> CommandJobAuthority
+
+hostBindingRepresentationConstructors :: HostBindingRepresentation -> [DataCon]
+hostBindingRepresentationConstructors representation = case representation of
+  JsonValueRepresentation authority -> toList (jsonAuthorityLayout authority)
+  TextRepresentation constructor -> [constructor]
+  CommandJobRepresentation job text -> [job, text]
+
+hostBindingRepresentationJsonAuthority :: HostBindingRepresentation -> Maybe JsonAuthority
+hostBindingRepresentationJsonAuthority representation = case representation of
+  JsonValueRepresentation authority -> Just authority
+  _ -> Nothing
+
+-- | Admit only the exact outer TyCon and its complete representation. This
+-- neither reads a rendered type nor lends authority to its arguments.
+hostBindingRepresentationForType :: HostBindingAuthorities -> Type -> Maybe HostBindingRepresentation
+hostBindingRepresentationForType authorities ty =
   case jsonValueAuthority authorities of
-    Just authority | Just _ <- jsonValueLayoutForType authority ty -> Just JsonValueAuthority
+    Just authority | Just _ <- jsonValueLayoutForType authority ty ->
+      Just (JsonValueRepresentation authority)
     _ -> case textModule authorities of
-      Just text | isExactRoot text "Data.Text.Internal" "Text" ty -> Just TextAuthority
+      Just text | Just constructor <- exactTextConstructor text ty ->
+        Just (TextRepresentation constructor)
       _ -> case (commandJobModule authorities, textModule authorities) of
-        (Just job, Just text) | isExactJob job text ty -> Just CommandJobAuthority
+        (Just job, Just text) -> do
+          (jobConstructor, textConstructor) <- exactJobConstructors job text ty
+          pure (CommandJobRepresentation jobConstructor textConstructor)
         _ -> Nothing
+
 rootTyCon :: Type -> Maybe TyCon
 rootTyCon ty = go body
   where
@@ -126,15 +160,24 @@ isExactRoot expected expectedModule expectedName ty = case rootTyCon ty of
     Nothing -> False
   Nothing -> False
 
-isExactJob :: Module -> Module -> Type -> Bool
-isExactJob jobModule textModule ty = case rootTyCon ty of
-  Just jobTyCon
-    | isExactRoot jobModule "Tidepool.Command.Types" "Job" ty ->
-        case tyConDataCons jobTyCon of
-          [constructor]
-            | occNameString (nameOccName (dataConName constructor)) == "Job"
-            , dataConRepStrictness constructor == [MarkedStrict]
-            , [Scaled _ field] <- dataConOrigArgTys constructor ->
-                isExactRoot textModule "Data.Text.Internal" "Text" field
-          _ -> False
-  _ -> False
+exactTextConstructor :: Module -> Type -> Maybe DataCon
+exactTextConstructor owner ty = do
+  textTyCon <- rootTyCon ty
+  case tyConDataCons textTyCon of
+    [text]
+      | isExactRoot owner "Data.Text.Internal" "Text" ty
+      , occNameString (nameOccName (dataConName text)) == "Text" -> Just text
+    _ -> Nothing
+
+exactJobConstructors :: Module -> Module -> Type -> Maybe (DataCon, DataCon)
+exactJobConstructors jobModule textModule ty = do
+  jobTyCon <- rootTyCon ty
+  case tyConDataCons jobTyCon of
+    [constructor]
+      | isExactRoot jobModule "Tidepool.Command.Types" "Job" ty
+      , occNameString (nameOccName (dataConName constructor)) == "Job"
+      , dataConRepStrictness constructor == [MarkedStrict]
+      , [Scaled _ field] <- dataConOrigArgTys constructor -> do
+          text <- exactTextConstructor textModule field
+          pure (constructor, text)
+    _ -> Nothing
