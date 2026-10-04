@@ -9,6 +9,10 @@ extra-source-files:
   lib/Tidepool/Data/Time.hs
   lib/Tidepool/Double.hs
   test-prepared-stg/site-fixtures/*.hs
+  test-prepared-stg/BuiltinIdentityContract.hs
+  test-prepared-stg/builtin-identity/Data/Text/Internal.hs
+  test-prepared-stg/builtin-identity/GHC/Num/Integer.hs
+  test-prepared-stg/builtin-identity/GHC/Num/Natural.hs
   test-prepared-stg/RepPoly.hs
   test-prepared-stg/RepPolyImport.hs
   test-prepared-stg/ModuleProductA.hs

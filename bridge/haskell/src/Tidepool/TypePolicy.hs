@@ -24,6 +24,7 @@ import qualified Data.List as List
 import Data.Maybe (mapMaybe, maybeToList)
 import qualified Data.Text as T
 import Data.Word (Word32)
+import GHC.Builtin.Names (integerTyConKey, naturalTyConKey)
 import GHC.Core.DataCon
   ( DataCon, dataConInstOrigArgTys, dataConUnivTyVars, isVanillaDataCon )
 import GHC.Core.Map.Type (TypeMap, emptyTypeMap, extendTypeMap, lookupTypeMap)
@@ -33,7 +34,7 @@ import GHC.Core.TyCo.Rep (Scaled(..), Type(..))
 import GHC.Core.TyCo.Subst (substTyWith)
 import GHC.Core.TyCon
   ( TyCon, isAlgTyCon, isFamilyTyCon, isNewTyCon, isPrimTyCon
-  , isTypeSynonymTyCon, newTyConEtadRhs, tyConDataCons, tyConName )
+  , isTypeSynonymTyCon, newTyConEtadRhs, tyConDataCons, tyConName, tyConUnique )
 import GHC.Core.Type (coreView, expandTypeSynonyms, mkAppTys, splitTyConApp_maybe)
 import GHC.Tc.Utils.TcType (tcSplitSigmaTy)
 import GHC.Types.RepType (PrimRep(..), typePrimRep_maybe)
@@ -60,6 +61,8 @@ newtype TypeNodeId = TypeNodeId Word32
 -- refusal; equality authority comes from the graph edges, never its rendering.
 data TypeNodeG
   = DataG Type TyCon [TypeNodeId] [(DataCon, [TypeNodeId])]
+  -- A spelling-selected candidate; projection authenticates its retained
+  -- GHC owner against the selected text package before issuing TypeText.
   | TextG Type [DataCon]
   | IntegerG Type [DataCon]
   | NaturalG Type [DataCon]
@@ -126,9 +129,9 @@ classifyType depth ty
         | isNewTyCon tc -> pure (unsupported "recursive newtype")
         | isSpecial "Data.Text.Internal" "Text" tc ->
             pure (TextG ty (tyConDataCons tc))
-        | isSpecial "GHC.Num.Integer" "Integer" tc ->
+        | tyConUnique tc == integerTyConKey ->
             pure (IntegerG ty (tyConDataCons tc))
-        | isSpecial "GHC.Num.Natural" "Natural" tc ->
+        | tyConUnique tc == naturalTyConKey ->
             pure (NaturalG ty (tyConDataCons tc))
         | isForbidden tc -> pure (unsupported "unsupported container")
         | isPrimTyCon tc -> case typePrimRep_maybe ty of

@@ -47,6 +47,7 @@ import Tidepool.PreparedTime
 
 projectProjectionContract :: [PreparedModule] -> IO WireProgram
 projectProjectionContract modules = do
+  verifyBuiltinTypeIdentity
   verifyPreparedFormatting
   verifyPreparedTime
   verifyTagToEnumProjection
@@ -742,6 +743,49 @@ verifyCStringLengthProjection = do
       pure ()
     other -> ioError (userError
       ("wrong-signature strlen was not rejected: " <> show other))
+
+-- Real package and home TyCons share module/occurrence spelling. The graph
+-- must preserve GHC identity before issuing a builtin structural leaf.
+verifyBuiltinTypeIdentity :: IO ()
+verifyBuiltinTypeIdentity = do
+  prepared <- runPipelineSelected PreparedStg
+    "test-prepared-stg/BuiltinIdentityContract.hs"
+    ["test-prepared-stg/builtin-identity", "test-prepared-stg"]
+  authority <- resolveTextPackageUnit (prHscEnv (pprPipelineResult prepared))
+  unless (case authority of Just _ -> True; Nothing -> False)
+    (ioError (userError "builtin identity fixture needs the selected text package"))
+  let identity entry = SymbolIdentity "main" "BuiltinIdentityContract" "value" entry Nothing
+      context text entry = ProjectionContext
+        { projectionProfile = "ghc-9.12-prepared-stg"
+        , projectionToolchain = "ghc-9.12.2"
+        , projectionTarget = TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []
+        , projectionRetainedGenerations = mempty
+        , projectionEntry = identity entry
+        , projectionAuxiliaryRoots = [identity entry]
+        , projectionFormattingAuthority = Nothing
+        , projectionTimeAuthority = Nothing
+        , projectionJsonAuthority = Nothing
+        , projectionTextUnit = text
+        }
+      project text entry = case projectPreparedTarget (context text entry) (pprModules prepared) of
+        Left failure -> ioError (userError ("builtin identity projection failed: " <> show failure))
+        Right program -> pure (programTypes program)
+      require condition message = unless condition (ioError (userError message))
+  forM_ [("realText", TypeText), ("realInteger", TypeInteger), ("realNatural", TypeNatural)] $ \(entry, expected) -> do
+    nodes <- project authority entry
+    require (expected `elem` nodes) ("canonical builtin lost its graph evidence: " <> Text.unpack entry)
+  forM_ [("foreignInteger", "GHC.Num.Integer", "Integer", TypeInteger),
+         ("foreignNatural", "GHC.Num.Natural", "Natural", TypeNatural)] $ \(entry, owner, name, builtin) -> do
+    nodes <- project authority entry
+    require (builtin `notElem` nodes) "foreign nominal type acquired builtin evidence"
+    require (any (\node -> case node of
+        TypeData family _ _ -> family == SymbolIdentity "main" owner "type" name Nothing
+        _ -> False) nodes) "foreign numeric family lost its nominal graph identity"
+  forM_ [(authority, "foreignText"), (Nothing, "realText")] $ \(text, entry) ->
+    case projectPreparedTarget (context text entry) (pprModules prepared) of
+      Left (InvalidPreparedIdentity _) -> pure ()
+      other -> ioError (userError
+        ("unadmitted Text owner reached the wire graph: " <> show other))
 
 verifyTextMemchrProjection :: IO ()
 verifyTextMemchrProjection = do

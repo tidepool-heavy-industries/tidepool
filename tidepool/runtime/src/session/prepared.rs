@@ -1130,13 +1130,16 @@ impl ProgramFacts {
             .is_some_and(|layout| host_id == layout.cons || host_id == layout.nil)
     }
 
-    /// The bridge id of a declared constructor, by qualified identity.
+    /// A builtin leaf requires one unambiguous full constructor identity.
+    /// The spelling index selects candidates; differing units or bridge ids
+    /// cannot acquire authority by their order in the declaration table.
     fn constructor_named(&self, module: &str, occurrence: &str) -> Option<DataConId> {
-        self.by_identity
-            .get(module)
-            .and_then(|module| module.get(occurrence))
-            .and_then(|indices| indices.last())
-            .map(|index| self.constructors[*index].1)
+        let indices = self.by_identity.get(module)?.get(occurrence)?;
+        let selected = self.constructors.get(*indices.first()?)?;
+        indices
+            .iter()
+            .all(|index| self.constructors.get(*index) == Some(selected))
+            .then_some(selected.1)
     }
 
     /// The declared row for `host_id` among `node`'s rows, when `node` is a
@@ -5949,13 +5952,21 @@ pub(super) mod tests {
     }
 
     fn settled_test_facts(declarations: &[(&str, &str, DataConId)]) -> ProgramFacts {
+        constructor_test_facts("Tidepool.Internal.Resume", "Settled", declarations)
+    }
+
+    fn constructor_test_facts(
+        module: &str,
+        family: &str,
+        declarations: &[(&str, &str, DataConId)],
+    ) -> ProgramFacts {
         let constructors = declarations
             .iter()
             .map(|(unit, occurrence, host_id)| {
-                let mut identity = testing::identity("Tidepool.Internal.Resume", occurrence);
+                let mut identity = testing::identity(module, occurrence);
                 identity.unit = (*unit).into();
                 identity.namespace = "constructor".into();
-                let mut family = testing::identity("Tidepool.Internal.Resume", "Settled");
+                let mut family = testing::identity(module, family);
                 family.unit = (*unit).into();
                 family.namespace = "type".into();
                 (identity, *host_id, family)
@@ -5982,6 +5993,32 @@ pub(super) mod tests {
             }),
             None,
         )
+    }
+
+    #[test]
+    fn builtin_constructor_lookup_rejects_same_spelling_from_different_units() {
+        for (module, family, occurrence) in [
+            (TEXT_MODULE, "Text", "Text"),
+            (INTEGER_MODULE, "Integer", "IS"),
+            (NATURAL_MODULE, "Natural", "NS"),
+        ] {
+            let canonical = ("selected-package", occurrence, DataConId(1));
+            let original = constructor_test_facts(module, family, &[canonical]);
+            assert_eq!(
+                original.constructor_named(module, occurrence),
+                Some(DataConId(1))
+            );
+            for shadow in [
+                ("foreign-unit", occurrence, DataConId(2)),
+                ("foreign-unit", occurrence, DataConId(1)),
+                ("selected-package", occurrence, DataConId(2)),
+            ] {
+                for declarations in [[canonical, shadow], [shadow, canonical]] {
+                    let mixed = constructor_test_facts(module, family, &declarations);
+                    assert_eq!(mixed.constructor_named(module, occurrence), None);
+                }
+            }
+        }
     }
 
     #[test]

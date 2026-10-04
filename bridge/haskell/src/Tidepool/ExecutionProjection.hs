@@ -1313,7 +1313,14 @@ lowerTypeNode nodes rebase (TypePolicy.TypeNodeId raw) = case IntMap.lookup (fro
         Left (InvalidPreparedLayout _) -> pure (refused "layout" ty)
         Left (InvalidPreparedRepresentation _) -> pure (refused "representation" ty)
         Left failure -> lift (Left failure)
-    TypePolicy.TextG ty constructors -> lowerLeaf ty TypeText constructors
+    TypePolicy.TextG ty constructors -> do
+      authority <- gets textUnit
+      case (authority, splitTyConApp_maybe ty) of
+        (Just (TextUnitAuthority expected), Just (constructor, []))
+          | Just owner <- nameModule_maybe (GHC.tyConName constructor)
+          , moduleUnit owner == expected -> lowerLeaf ty TypeText constructors
+        _ -> lift (Left (InvalidPreparedIdentity
+          "Text graph candidate lacks its selected compiler package identity"))
     TypePolicy.IntegerG ty constructors -> lowerLeaf ty TypeInteger constructors
     TypePolicy.NaturalG ty constructors -> lowerLeaf ty TypeNatural constructors
     TypePolicy.ScalarG _ rep -> TypeScalar <$> projectRep rep
