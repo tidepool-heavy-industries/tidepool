@@ -99,7 +99,7 @@ pub use kernel::{
     ActorAdmissionLease, ActorWorkbenchInvocation, CallAncestry, KernelCallFailure,
     KernelCallReply, KernelInvocationFailure, KernelInvocationReply, KernelMessage, KernelResume,
     KernelWorkbenchFailure, KernelWorkbenchReply, LocalActorRef, NativeProviderAdmission,
-    NativeProviderTurnLease, WorkbenchStepKey,
+    NativeProviderStartError, NativeProviderTurnLease, WorkbenchStepKey,
 };
 pub use lineage::{
     ActorLineageRegistry, ActorPathReservation, CheckpointLease, CheckpointRefusal,
