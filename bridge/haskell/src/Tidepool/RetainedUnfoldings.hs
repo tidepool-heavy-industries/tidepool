@@ -72,7 +72,7 @@ module Tidepool.RetainedUnfoldings
   ( RetainedContext, retainedContext, emptyRetainedContext
   , installRetainedUnfoldingsPlugin
   , scopeRetainedModuleGraph
-  , scopeRetainedHscEnv, retainedDefinedBy
+  , scopeRetainedHscEnv, scopeRetainedSummaryHscEnv, retainedDefinedBy
   , withholdRetainedUnfoldings
   ) where
 
@@ -89,6 +89,7 @@ import GHC.Core
 import GHC.Core.Opt.Pipeline.Types (CoreToDo(..), bindsOnlyPass)
 import GHC.Data.FastString (unpackFS)
 import GHC.Driver.Session (DynFlags(..))
+import GHC.Driver.Env (hscSetFlags)
 import GHC.Driver.Env.Types (HscEnv(..))
 import GHC.Driver.Plugins
   ( Plugin(..), PluginWithArgs(..), Plugins(..), StaticPlugin(..)
@@ -172,6 +173,12 @@ tag m flags = flags
 -- interface construction, using the same module key as the load graph.
 scopeRetainedHscEnv :: Module -> HscEnv -> HscEnv
 scopeRetainedHscEnv m env = scopeToModule env { hsc_dflags = tag m (hsc_dflags env) }
+
+-- | Interface production and validation use the summary's complete per-file
+-- flags and the same module scope for the retained unfolding plugin.
+scopeRetainedSummaryHscEnv :: ModSummary -> HscEnv -> HscEnv
+scopeRetainedSummaryHscEnv summary =
+  scopeRetainedHscEnv (ms_mod summary) . hscSetFlags (ms_hspp_opts summary)
 
 -- | The retained identities a module defines: the only part of the retained
 -- set that can change the module's own compilation (see VALIDITY above).

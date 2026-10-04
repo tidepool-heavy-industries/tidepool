@@ -191,7 +191,7 @@ import Tidepool.ExecutionSchema (SymbolIdentity)
 import Tidepool.RetainedUnfoldings
   ( RetainedContext, retainedContext, emptyRetainedContext
   , installRetainedUnfoldingsPlugin, retainedDefinedBy
-  , scopeRetainedModuleGraph, scopeRetainedHscEnv )
+  , scopeRetainedModuleGraph, scopeRetainedHscEnv, scopeRetainedSummaryHscEnv )
 import Tidepool.TurnSource (extractModuleName)
 import Tidepool.DependencyEvidence
   ( DependencyEvidence(..), DependencySource(..), DependencyResolution(..)
@@ -1829,8 +1829,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
           Just (PhaseHook hook) -> hook phase
         canonicalSummary summary = summary
           { ms_hspp_opts = canonicalizeDFlags (ms_hspp_opts summary) }
-        canonicalEnvironment env summary = scopeRetainedHscEnv (ms_mod summary)
-          (hscSetFlags (ms_hspp_opts (canonicalSummary summary)) env)
+        canonicalEnvironment env summary = scopeRetainedSummaryHscEnv (canonicalSummary summary) env
         validateCandidateInterface env name iface =
           forM_ (Map.lookup name acceptedCandidates) $ \candidate -> do
             directory <- getTemporaryDirectory
@@ -4240,8 +4239,9 @@ validateExactOriginalSources admitted interfaces sourceGraph nodes = do
     let key = executionIdentityKey (executionNodeIdentity node)
     summary <- maybe (liftIO (throwIO (ExecutionSourceIncomplete key))) pure (Map.lookup key summaries)
     iface <- maybe (liftIO (throwIO (ExecutionSourceIncomplete key))) pure (Map.lookup key originalByOwner)
-    decision <- liftIO (checkOldIface (scopeRetainedHscEnv (ms_mod summary) nativeEnv)
-      summary {ms_hspp_opts=canonicalizeDFlags (ms_hspp_opts summary)} (Just iface))
+    let canonical = summary {ms_hspp_opts=canonicalizeDFlags (ms_hspp_opts summary)}
+    decision <- liftIO (checkOldIface (scopeRetainedSummaryHscEnv canonical nativeEnv)
+      canonical (Just iface))
     case decision of
       UpToDateItem _ -> pure ()
       OutOfDateItem reason _ -> liftIO (throwIO (ExecutionSourceChangedDuring key

@@ -64,7 +64,7 @@ import Tidepool.ExactHydration
   ( ExactIfaceArtifact, freshExactState, hydrateExactScope, withExactHomeInstances )
 import Tidepool.CompileInputPolicy (pluginInputIssues)
 import Tidepool.FamilyConsistency (validateEnvironmentFamilies)
-import Tidepool.RetainedUnfoldings (scopeRetainedHscEnv, scopeRetainedModuleGraph)
+import Tidepool.RetainedUnfoldings (scopeRetainedSummaryHscEnv, scopeRetainedModuleGraph)
 import Tidepool.Timing (emitCount, readTimingEnabled, timeDetailPhase)
 import Tidepool.ExactScope
   ( CanonicalInterfaceProof, canonicalCoreArtifact, canonicalCorePath
@@ -342,7 +342,7 @@ validateHomeInterface environment summary iface = do
   unless (mi_module iface == ms_mod summary) $
     ioError (userError "cached interface has another module owner")
   decision <- checkOldIface
-    (scopeRetainedHscEnv (ms_mod summary) environment) summary (Just iface)
+    (scopeRetainedSummaryHscEnv summary environment) summary (Just iface)
   case decision of
     UpToDateItem _ -> pure ()
     OutOfDateItem reason _ -> ioError (userError

@@ -58,7 +58,8 @@ import GHC.Unit.Module.Deps (imp_mods, Usage(..))
 import GHC.Unit.Module.Graph (ModuleGraphNode(..), mgModSummaries', mkModuleGraph)
 import GHC.Types.SourceFile (HscSource(..))
 import Control.Monad.IO.Class (liftIO)
-import GHC.Driver.Session (targetProfile, wopt_set, WarningFlag(Opt_WarnMissingSignatures))
+import GHC.Driver.Session (targetProfile, wopt_set, xopt, WarningFlag(Opt_WarnMissingSignatures))
+import GHC.LanguageExtensions.Type qualified as LangExt
 import GHC.Types.Error (isEmptyMessages)
 import GHC.Types.Name.Set (nameSetElemsStable)
 import GHC.Driver.Hooks (hscCompileCoreExprHook)
@@ -940,8 +941,9 @@ generatedScaffoldRetained manifestPath sealPath = withTiming $ withScratch $ \wo
 
 retainedExecutionPublication :: IO ()
 retainedExecutionPublication = withTiming $ withScratch $ \work -> do
-  forM_ ["MetadataQuoteSupport.hs", "MetadataQuoter.hs", "MetadataQuotedTarget.hs"] $ \name ->
+  forM_ ["MetadataQuoter.hs", "MetadataQuotedTarget.hs"] $ \name ->
     copyFile ("test-source-boot/fixtures" </> name) (work </> name)
+  copyFile "test-source-boot/fixtures/MetadataQuoteSupportModuleFlags.hs" (work </> "MetadataQuoteSupport.hs")
   let helper = mkModuleName "MetadataQuoteSupport"
       provider = mkModuleName "MetadataQuoter"
       target = mkModuleName "MetadataQuotedTarget"
@@ -953,6 +955,14 @@ retainedExecutionPublication = withTiming $ withScratch $ \work -> do
   -- The request target is generated-source evidence, not an original recipe.
   -- Capture the helper as real source support of the quoter producer.
   original <- runPipelineSelected (PreparedProducts Nothing) providerPath [work]
+  let originalEnvironment = prHscEnv (pprPipelineResult original)
+      helperFlags = [ms_hspp_opts summary | ModuleNode _ summary <-
+        mgModSummaries' (hsc_mod_graph originalEnvironment), ms_mod_name summary == helper]
+  unless (case helperFlags of
+      [flags] -> xopt LangExt.TypeFamilies flags
+        && not (xopt LangExt.TypeFamilies (hsc_dflags originalEnvironment))
+      _ -> False) $
+    fail "retained support must require module flags absent from the session defaults"
   writeGenuineOriginalExecutionScope ["MetadataQuoteSupport"] work providerPath [work] scopePath original
   exact <- readExactScope scopePath >>= either fail pure
   originalBytes <- BS.readFile scopePath
