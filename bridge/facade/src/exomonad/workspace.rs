@@ -1624,3 +1624,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod source_capture_tests;

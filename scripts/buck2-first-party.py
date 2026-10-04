@@ -558,6 +558,9 @@ def test_runtime_inputs(package_name, target_name, unit=False):
         package_name in {"tidepool-toolchain", "tidepool-runtime", "tidepool-testing", "tidepool-handlers", "exomonad-actor"}
         or (package_name == "tidepool-extract-cmd" and not unit
             and target_name in {"daemon_integration", "transaction_integration"})
+        or (package_name == "tidepool" and target_name in {
+            "facade_prepared_recipe_contract_test", "facade_recipe_source_capture_test",
+        })
     ):
         worker = True
         env.update({
@@ -573,6 +576,15 @@ def test_runtime_inputs(package_name, target_name, unit=False):
     if package_name == "tidepool-extract-cmd" and target_name == "daemon_integration":
         env["TIDEPOOL_RETAINED_IMPORT_FIXTURE_DIR"] = "$(location //bridge/haskell:retained_import_test_sources)"
         resources.append("//bridge/haskell:retained_import_test_sources")
+    if package_name == "tidepool" and target_name in {
+        "facade_prepared_recipe_contract_test", "facade_recipe_source_capture_test",
+    }:
+        env["TIDEPOOL_HASKELL_ACTORS_DIR"] = "$(location //bridge/haskell:facade_embedded_sources)/actors"
+        env["TIDEPOOL_EFFECTS_SOURCE_ROOT"] = "$(location //bridge/mcp:effects_generated)"
+        resources.append("//bridge/mcp:effects_generated")
+        if target_name == "facade_recipe_source_capture_test":
+            env["TIDEPOOL_RECIPE_WORKSPACE"] = "$(location //exomonad/examples/workspace:facade_test_sources)/.exomonad"
+            resources.append("//exomonad/examples/workspace:facade_test_sources")
     if package_name == "tidepool-toolchain" and target_name == "prepared_fixture":
         env["TIDEPOOL_PREPARED_FIXTURE_COMPILER"] = "$(exe //tidepool/toolchain:prepared-fixture)"
         resources.append("//tidepool/toolchain:prepared-fixture")
@@ -886,6 +898,8 @@ def facade_test_cases(binary):
         "toolchains//:browser_test_closure",
         "toolchains//:playwright_browsers",
     ]
+    prepared_recipe_env, prepared_recipe_resources, _ = test_runtime_inputs("tidepool", "facade_prepared_recipe_contract_test")
+    capture_recipe_env, capture_recipe_resources, _ = test_runtime_inputs("tidepool", "facade_recipe_source_capture_test")
     prefix = "actor_host::m1_host_tests::"
     groups = [
         ("facade_process_tests", [prefix + "browser_process::tests::" + name for name in (
@@ -905,6 +919,12 @@ def facade_test_cases(binary):
             "committed_input_before_wake_refuses_idle_retirement_and_runs_after_release",
             "idle_claim_before_input_refuses_store_mutation_and_confirms_cleanup",
         )], host_env, host_resources, True, False, 600),
+        ("facade_prepared_recipe_contract_test", [
+            "actor_host::recipe_checks::prepared_contract_tests::prepared_recipe_receipts_and_assertions_execute_all_eight_cases",
+        ], prepared_recipe_env, prepared_recipe_resources, True, False, 600),
+        ("facade_recipe_source_capture_test", [
+            "exomonad::workspace::source_capture_tests::background_command_recipe_capture_records_seven_cells_without_validating_assertions",
+        ], capture_recipe_env, capture_recipe_resources, True, False, 600),
         ("facade_host_raw_test", [prefix +
             "production_host_retains_http_haskell_commands_and_reconnects_without_replay"],
          host_env, host_resources, True, False, 600),

@@ -744,3 +744,6 @@ mod tests {
         assert!(error.to_string().contains("Project.Checks.workbench"));
     }
 }
+
+#[cfg(test)]
+mod prepared_contract_tests;
