@@ -105,6 +105,27 @@ def pin_nix_closure(root: Path, tools: Path, selected: list[Path]) -> tuple[dict
     return nix_metadata(tools, roots), pinned
 
 
+def declared_haskell_sources(source: Path, bundle: Path) -> dict:
+    tracked = subprocess.check_output([
+        "git", "-C", str(source), "ls-files", "-z", "--",
+        "bridge/haskell/lib", "bridge/haskell/actors",
+    ]).decode().split("\0")
+    evidence = {}
+    for relative, packaged in (("bridge/haskell/lib", "stdlib"), ("bridge/haskell/actors", "actors")):
+        expected = {
+            Path(path).relative_to(relative).as_posix(): sha256(source / path)
+            for path in tracked if path.startswith(relative + "/") and path.endswith(".hs")
+            and "/Prelude_cbor/" not in path
+        }
+        actual_root = bundle / "share/exomonad" / packaged
+        actual = {path.relative_to(actual_root).as_posix(): sha256(path)
+                  for path in actual_root.rglob("*") if path.is_file()}
+        if not expected or actual != expected:
+            raise ValueError(f"bundle {packaged} does not contain exactly the tracked declared Haskell source bytes")
+        evidence[packaged] = expected
+    return evidence
+
+
 def native_environment(root: Path) -> dict:
     ghc = (root / "share/exomonad/ghc-libdir.txt").read_text().strip()
     tools = (root / "share/exomonad/runtime-tools").resolve(strict=True)
@@ -226,6 +247,7 @@ def freeze(args) -> Path:
     contract = json.loads((args.bundle / "share/exomonad/native-build-contract.json").read_text())
     if contract["feature_profile"] != "embedded-native" or contract["stdlib_mode"] != "source-backed":
         raise ValueError("qualification requires the native source-backed bundle")
+    haskell_sources = declared_haskell_sources(source, args.bundle)
     lock = tomllib.loads((source / "Cargo.lock").read_text())
     harness = [row for row in lock["package"] if row["name"] == "harness"]
     if len(harness) != 1:
@@ -279,6 +301,7 @@ def freeze(args) -> Path:
         "schema": 1, "kind": "native-runtime-qualification", "bundle_root": str(root),
         "source_oid": oid, "harness_revision": revision, **contract,
         "source_submodules": submodules,
+        "declared_haskell_sources": haskell_sources,
         "source_inputs": {name: sha256(source / name) for name in ("Cargo.toml", "Cargo.lock", "flake.nix", "flake.lock", "scripts/native-profile.toml")},
         "build": {"commands": commands, "log": str(copied_log), "log_sha256": sha256(copied_log)},
         "environment": environment, "external_inputs": external, "elf_runtime": evidence,

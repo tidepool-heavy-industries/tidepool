@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import subprocess
 import unittest
 from unittest.mock import patch
 
@@ -14,6 +15,26 @@ SPEC.loader.exec_module(qualification)
 
 
 class NativeQualificationTests(unittest.TestCase):
+    def test_untracked_haskell_cannot_enter_a_bundle_with_clean_tracked_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, bundle = root / 'source', root / 'bundle'
+            source.mkdir()
+            subprocess.run(['git', 'init', '-q', str(source)], check=True)
+            for folder, packaged in (('lib', 'stdlib'), ('actors', 'actors')):
+                declared = source / 'bridge/haskell' / folder / 'Declared.hs'
+                declared.parent.mkdir(parents=True)
+                declared.write_text('module Declared where\n')
+                copied = bundle / 'share/exomonad' / packaged / 'Declared.hs'
+                copied.parent.mkdir(parents=True)
+                copied.write_bytes(declared.read_bytes())
+            subprocess.run(['git', '-C', str(source), 'add', 'bridge'], check=True)
+            qualification.declared_haskell_sources(source, bundle)
+            (source / 'bridge/haskell/lib/Undeclared.hs').write_text('module Undeclared where\n')
+            (bundle / 'share/exomonad/stdlib/Undeclared.hs').write_text('module Undeclared where\n')
+            with self.assertRaisesRegex(ValueError, 'tracked declared Haskell source bytes'):
+                qualification.declared_haskell_sources(source, bundle)
+
     def test_runtime_environment_rejects_ambient_catalog_and_daemon_selection(self):
         with patch.dict(os.environ, {
             'TIDEPOOL_EXTRACT_DAEMON_SOCKET': '/tmp/unqualified.sock',
