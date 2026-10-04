@@ -675,6 +675,73 @@ fn codec_decodes_constructor_static_reply_without_sites() {
 }
 
 #[test]
+fn codec_admits_zero_at_site_with_valid_carrier_and_reply_graph() {
+    let mut program = scalar_program(Cbor::Array(vec![int(4), int(64)]));
+    let Cbor::Array(fields) = &mut program else {
+        unreachable!()
+    };
+    let symbol = |occurrence: &str| {
+        Cbor::Array(vec![
+            Cbor::Text("fixture".into()),
+            Cbor::Text("Effects".into()),
+            Cbor::Text("value".into()),
+            Cbor::Text(occurrence.into()),
+            Cbor::Array(vec![int(0)]),
+        ])
+    };
+    let carrier = Cbor::Array(vec![int(4), int(64)]);
+    fields[8] = Cbor::Array(vec![Cbor::Array(vec![
+        symbol("Request"),
+        symbol("Effect"),
+        Cbor::Array(vec![carrier.clone()]),
+        Cbor::Array(vec![Cbor::Bool(true)]),
+        Cbor::Array(vec![
+            Cbor::Array(vec![Cbor::Array(vec![carrier, int(0)])]),
+            int(8),
+            int(8),
+            Cbor::Array(vec![Cbor::Bool(false)]),
+        ]),
+        Cbor::Array(vec![int(1)]),
+        int(1),
+        int(1),
+        int(9001),
+    ])]);
+    fields[13] = Cbor::Array(vec![Cbor::Array(vec![int(1)])]);
+    fields[14] = Cbor::Array(vec![Cbor::Array(vec![
+        int(0),
+        Cbor::Text("Effects.request".into()),
+        int(0),
+        int(0),
+        int(0),
+        Cbor::Array(vec![]),
+    ])]);
+    fields[15] = Cbor::Array(vec![Cbor::Array(vec![int(0), Cbor::Array(vec![int(1)])])]);
+    let prepared =
+        parse_program(&bytes(&program), &requirements(), DecodeLimits::default()).unwrap();
+    assert_eq!(
+        prepared.constructor_replies(),
+        &[(ConstructorId(0), ConstructorReply::AtSite)]
+    );
+    let row = prepared
+        .site(0)
+        .expect("zero is an ordinary declared site ID");
+    assert_eq!(row.delivery, SiteDelivery::HostAnswer);
+    assert_eq!(prepared.type_node(row.wire), Some(&TypeNode::Text));
+
+    let Cbor::Array(fields) = &mut program else {
+        unreachable!()
+    };
+    let Cbor::Array(rows) = &mut fields[14] else {
+        unreachable!()
+    };
+    rows.push(rows[0].clone());
+    assert_eq!(
+        parse_program(&bytes(&program), &requirements(), DecodeLimits::default()),
+        Err(ParseError::DuplicateDefinition("site".into()))
+    );
+}
+
+#[test]
 fn public_parse_rejects_wrong_declared_result_representation() {
     let program = scalar_program(Cbor::Array(vec![int(1)]));
     assert!(matches!(

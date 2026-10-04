@@ -1802,9 +1802,6 @@ impl<'a> Validator<'a> {
                 .ok_or(ParseError::LimitExceeded("work"))?;
             self.bump_work(work)?;
             let site = &self.wire.sites[index];
-            if site.site == 0 {
-                return Err(ParseError::InvalidReference("site 0".into()));
-            }
             if !ids.insert(site.site) {
                 return Err(ParseError::DuplicateDefinition("site".into()));
             }
@@ -3125,7 +3122,7 @@ mod tests {
     }
 
     #[test]
-    fn site_rows_require_unique_nonzero_ids_and_valid_type_roots() {
+    fn site_rows_require_unique_ids_and_valid_type_roots() {
         let mut program = valid_program();
         program.types = vec![TypeNode::Text];
         let site = SiteRow {
@@ -3146,10 +3143,7 @@ mod tests {
         );
         program.sites.truncate(1);
         program.sites[0].site = 0;
-        assert!(matches!(
-            validate_program(&program, &requirements(), DecodeLimits::default()),
-            Err(ParseError::InvalidReference(_))
-        ));
+        validate_program(&program, &requirements(), DecodeLimits::default()).unwrap();
         program.sites[0].site = 7;
         program.sites[0].wire = TypeNodeId(1);
         assert!(matches!(
