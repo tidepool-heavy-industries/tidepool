@@ -4098,7 +4098,8 @@ validateExactOriginalSources admitted interfaces sourceGraph nodes = do
           Nothing -> dependencyResolutionCandidates resolution
           Just path' -> takeWhile (/= path') (dependencyResolutionCandidates resolution)
         originalNegative resolution
-          | (fst key,dependencyResolutionModule resolution) `Set.member` originalNames = []
+          | dependencyResolutionSelected resolution == Nothing
+              && (fst key,dependencyResolutionModule resolution) `Set.member` originalNames = []
           | otherwise = negative resolution
     originalResolutions <- either (liftIO . throwIO) pure
       (originalResolutionsFor node)

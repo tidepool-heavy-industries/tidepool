@@ -2318,6 +2318,13 @@ freshExecutionRecipeTest = withScratch $ \work -> do
   unless (case executionNodeOriginalResolutions [firstContext] sharedSupport of
       Left (ExecutionSourceMissing _) -> True; _ -> False) $
     fail "shared original source accepted a missing retained witness context"
+  unless (fmap (map dependencyResolutionCandidates)
+        (executionNodeOriginalResolutions (firstContext:contexts) sharedSupport)
+        == Right (map dependencyResolutionCandidates retainedResolutions)
+      && case executionNodeOriginalResolutions [firstContext,secondContext {
+          executionGraphSha256=executionGraphSha256 firstContext}] sharedSupport of
+        Left (ExecutionSourceConflicting _) -> True; _ -> False) $
+    fail "original witness inventory did not deduplicate identical graphs or refuse conflicting graph bytes"
   let changedSource = secondContext {executionGraphEvidence=(executionGraphEvidence secondContext) {
         dependencySources=[if dependencySourcePath row == supportPath
           then row {dependencySourceSha256=replicate 64 'f'} else row

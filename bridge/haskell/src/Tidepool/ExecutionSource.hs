@@ -17,7 +17,7 @@ import Codec.CBOR.Decoding
 import Codec.CBOR.Read (deserialiseFromBytes)
 import Codec.CBOR.Encoding
 import Codec.CBOR.Write (toLazyByteString)
-import Control.Monad (replicateM, unless, when, forM)
+import Control.Monad (replicateM, unless, when, forM, foldM)
 import Control.Exception (Exception)
 import qualified Crypto.Hash.SHA256 as SHA
 import qualified Data.ByteString as BS
@@ -200,18 +200,23 @@ data ExecutionSourceNode = ExecutionSourceNode
 executionNodeOriginalResolutions
   :: [ExecutionSourceGraph] -> ExecutionSourceNode
   -> Either ExecutionSourceFailure [DependencyResolution]
-executionNodeOriginalResolutions graphs = \node ->
+executionNodeOriginalResolutions graphs = \node -> do
+  graphMap <- inventory
   let imports = Set.fromList [(dependencyImportQualifier edge,dependencyImportName edge,dependencyImportBoot edge)
         | edge <- dependencyModuleImports (executionNodeModule node)]
       context sha = do
         graph <- maybe (Left (ExecutionSourceMissing (executionIdentityKey (executionNodeIdentity node)))) Right
-          (Map.lookup sha inventory)
+          (Map.lookup sha graphMap)
         pure [row | row <- dependencyResolutions (executionGraphEvidence graph)
           , (dependencyResolutionQualifier row,dependencyResolutionModule row,dependencyResolutionBoot row)
               `Set.member` imports]
-  in concat <$> mapM context (Set.toAscList (executionNodeOriginalGraphs node))
+  concat <$> mapM context (Set.toAscList (executionNodeOriginalGraphs node))
   where
-    inventory = Map.fromList [(executionGraphSha256 graph,graph) | graph <- graphs]
+    inventory = foldM insertGraph Map.empty graphs
+    insertGraph selected graph = case Map.lookup (executionGraphSha256 graph) selected of
+      Nothing -> Right (Map.insert (executionGraphSha256 graph) graph selected)
+      Just previous | executionGraphBytes previous == executionGraphBytes graph -> Right selected
+      _ -> Left (ExecutionSourceConflicting ("",executionGraphSha256 graph))
 
 data ExecutionSourceFailure
   = ExecutionSourceMissing (String, String)
