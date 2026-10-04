@@ -24,6 +24,10 @@ output branch, then updates all Tidepool dependency and asset pins together.
 - Rust browser projections own generated schemas, TypeScript types and runtime
   validators. Truly opaque tool/provider data remains explicitly opaque.
 - One matched release bundle owns compiler/runtime/assets/schema identities.
+- Lexical/interface closure, compile-time executable closure, runtime body
+  demand and runtime resource custody are distinct. Preserve original typed
+  identities and owner-issued facts; never reconstruct a complete view from a
+  narrower one.
 - Negative codec and historical rejection fixtures remain valid, but every
   semantic refusal case first establishes a valid control.
 
@@ -35,6 +39,10 @@ output branch, then updates all Tidepool dependency and asset pins together.
    owners. Historical backend records refuse execution; do not convert them.
    Replace formatted actor roles with typed serialization and ModelCall control
    JSON with schema-owned variants; preserve callback values through hooks.
+   Specialize required production EmbeddedService and always-present
+   EmbeddedApplicationState. Preserve legitimate ModelFree compilation and
+   independent lifecycle options. Complete bounded local cleanup now; a broader
+   configuration split may follow the first delivery gate.
 2. Schema-owned external references carry Haskell identity, Rust wire binding
    and leaf Core import. Add native protocol generator/library targets and
    explicit output roots. Generated consumers depend on generated artifacts.
@@ -47,6 +55,11 @@ output branch, then updates all Tidepool dependency and asset pins together.
 4. Use existing test-data/testing/corpus owners. Add a typed prepared encoder;
    remove fake cross-crate certified products and `test-support`. Keep cheap
    structural tests cheap; actual recovery success requires actual compilation.
+   Share the existing internal compiler emission over the full
+   PreparedPipelineResult/CertifiedOriginalProducts and remove capturePacket's
+   duplicate implementation. Rust remains the certifier; tests select scenarios
+   and negative mutations. Interface-only scenarios use the canonical interface
+   path; native candidate scenarios demand real compiled bodies.
 5. Migrate 19 Cabal suites plus model-turn self-test to named Tasty trees with
    common discovery/filter/default-all and nonzero execution. Split child helper
    modes and benchmarks. Register compiler tests normally in a GHC tier. Keep
@@ -63,10 +76,14 @@ output branch, then updates all Tidepool dependency and asset pins together.
 8. Make just a thin declared-build frontend; remove parallel runner/selection
    policy and ambient build fallbacks. Update owning contributor/operator guides.
    Retire completed plans after carrying current invariants into owning docs.
+   Inventory every remaining legacy entrypoint and derive source, resource and
+   execution manifests from existing Buck owners, without another registry.
 
 ## Implementation coordination
 
-Root owns integration and production host/M2. Component owners use separate
+The delivery execution owner owns integration, the admitted build lane and
+production host/M2 gates; root provides architectural review while discussing
+direction with the user. Component owners use separate
 source worktrees. Agree shared interfaces before crossing ownership boundaries.
 One admitted expensive build lane initially; other workers prepare changes and
 request root validation. No Buck in unprovisioned source worktrees. Builds use
