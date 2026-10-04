@@ -29,6 +29,8 @@ use crate::{
     timing, CompileError,
 };
 
+mod failure_sources;
+
 // ---------------------------------------------------------------------------
 // Typed yield sites (`asks.json` on disk)
 // ---------------------------------------------------------------------------
@@ -3269,19 +3271,23 @@ fn retain_failed_compiler_artifacts(
     .join("compiler-failures");
     std::fs::create_dir_all(&retained_root)?;
     let retained = TempDir::new_in(&retained_root)?;
+    let mut source_retention_issues = Vec::new();
     if let Some(offer) = offer {
         if let Some(exact) = &offer.exact {
             if let Err(failure) = exact.retain_input_diagnostics(retained.path()) {
                 tracing::warn!(%failure, "could not retain original exact request diagnostics");
+                source_retention_issues.push(format!("exact request diagnostics: {failure}"));
             }
         }
         if let Some(selected) = &offer.selected {
             if let Err(failure) = selected.retain_evidence_diagnostics(retained.path()) {
                 tracing::warn!(%failure, "could not retain original selected candidate evidence");
+                source_retention_issues.push(format!("selected candidate diagnostics: {failure}"));
             }
         }
         if let Err(failure) = offer.retain_checked_inputs(retained.path()) {
             tracing::warn!(%failure, "could not retain selected checked input diagnostics");
+            source_retention_issues.push(format!("checked input diagnostics: {failure}"));
         }
     }
     for entry in std::fs::read_dir(directory)? {
@@ -3307,27 +3313,15 @@ fn retain_failed_compiler_artifacts(
     ] {
         if let Err(failure) = retain_exact_compile_receipts(&source, &destination) {
             tracing::warn!(%failure, "could not retain exact compilation receipts");
+            source_retention_issues.push(format!("exact compilation receipts: {failure}"));
         }
     }
     if let Err(failure) = retain_program_compile_diagnostics(directory, retained.path()) {
         tracing::warn!(%failure, "could not retain complete program diagnostics");
+        source_retention_issues.push(format!("program diagnostics: {failure}"));
     }
-    if let Ok(bytes) = std::fs::read(directory.join("dependencies.json")) {
-        if let Ok(evidence) = serde_json::from_slice::<cache::DependencyEvidence>(&bytes) {
-            let sources = retained.path().join("consumed-sources");
-            std::fs::create_dir(&sources)?;
-            let mut captured = Vec::new();
-            for (ordinal, source) in evidence.sources.iter().enumerate() {
-                let path = PathBuf::from(format!("consumed-sources/{ordinal}.hs"));
-                if std::fs::copy(&source.path, retained.path().join(&path)).is_ok() {
-                    captured.push((source, path));
-                }
-            }
-            std::fs::write(
-                retained.path().join("consumed-sources.json"),
-                serde_json::to_vec(&captured).map_err(std::io::Error::other)?,
-            )?;
-        }
+    if let Err(failure) = failure_sources::retain(retained.path(), source_retention_issues) {
+        tracing::warn!(%failure, "could not retain declared compiler sources");
     }
     if let Some(command) = command {
         std::fs::write(

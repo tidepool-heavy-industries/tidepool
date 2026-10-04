@@ -10,6 +10,20 @@ impl CandidateSet {
         let mut bytes = 0usize;
         let mut owners = Vec::new();
         for bundle in self.by_owner.values() {
+            if let Some(original) = &bundle.original_execution {
+                let graph = &original.graph;
+                if saved.insert(format!("execution-{}.cbor", hex(&graph.digest()))) {
+                    bytes = bytes
+                        .checked_add(graph.bytes().len())
+                        .filter(|bytes| *bytes <= PAYLOAD_LIMIT)
+                        .ok_or_else(|| {
+                            std::io::Error::other(
+                                "selected candidate diagnostics exceed aggregate bound",
+                            )
+                        })?;
+                    graph.capture_descriptor(&root)?;
+                }
+            }
             let evidence = serde_json::to_vec(&bundle.evidence)?;
             let evidence_sha = sha(&evidence);
             let target_sha = sha(bundle.target_source.as_bytes());

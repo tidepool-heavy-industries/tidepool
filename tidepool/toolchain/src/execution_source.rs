@@ -1853,6 +1853,22 @@ struct GraphWire {
     packages: Vec<PackageWire>,
 }
 
+/// Read source declarations for failure diagnostics without issuing a graph
+/// capability. Physical bytes must still match each declaration before capture.
+pub(crate) fn diagnostic_source_inventory(
+    bytes: &[u8],
+) -> Result<Vec<SourceEvidence>, CompileError> {
+    if bytes.len() > GRAPH_BYTES_LIMIT {
+        return Err(failure("diagnostic graph exceeds its byte bound"));
+    }
+    let wire = GraphWire::decode(bytes)?;
+    wire.validate()?;
+    if wire.encode()? != bytes {
+        return Err(failure("noncanonical diagnostic graph encoding"));
+    }
+    Ok(wire.evidence.sources)
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct OwnerWire {
