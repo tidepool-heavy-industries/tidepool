@@ -974,6 +974,52 @@ mod tests {
         assert_eq!(finished["receipt"]["outcome"]["kind"], "text");
     }
     #[test]
+    fn after_tool_control_preserves_the_actual_semantic_callback_value() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let service = service(
+            &runtime,
+            vec![vec![callback(), final_turn()]],
+            Limits::default(),
+        );
+        let caller = PrincipalId::new(1, 2);
+        let first = service.start(caller, request(true)).unwrap();
+        let token = first["invocation"].as_str().unwrap();
+        let semantic = json!({"answer":42,"error":"ordinary authored output","status":"refused"});
+        let hook = service
+            .resume(
+                caller,
+                token,
+                first["call_id"].as_str().unwrap(),
+                callback_reply(semantic.clone()),
+            )
+            .unwrap();
+        let control: ModelControlStep = serde_json::from_value(hook.clone()).unwrap();
+        let ModelControlStep::ModelHook { value, output, .. } = control else {
+            panic!("expected after-tool continuation")
+        };
+        assert_eq!(value, semantic);
+        assert_eq!(serde_json::from_str::<Value>(&output).unwrap(), semantic);
+        let retained = retained_model_result(&service.store, hook["handle"].as_str().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(retained.0["output"].as_str().unwrap()).unwrap(),
+            semantic
+        );
+        let mut missing = hook.clone();
+        missing.as_object_mut().unwrap().remove("value");
+        assert!(serde_json::from_value::<ModelControlStep>(missing).is_err());
+        let final_step = service
+            .annotate(
+                caller,
+                token,
+                hook["operation"].as_str().unwrap(),
+                serde_json::to_value(ModelAnnotationEnvelope::ModelNoAnnotation).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(final_step["receipt"]["outcome"]["kind"], "text");
+    }
+    #[test]
     fn pruning_requires_the_exact_retained_handle() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let service = service(
