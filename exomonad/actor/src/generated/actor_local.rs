@@ -27,5 +27,6 @@ pub enum ActorLocalReq {
     ActorLocalAttachCommandSourceWith(((i64, i64), String), tidepool_bridge::HaskellValue),
     ActorLocalAttachLifecycleSourceWith(((i64, i64), (i64, i64)), tidepool_bridge::HaskellValue),
     ActorReceiveWith(i64, tidepool_bridge::HaskellValue),
+    ActorReceiveStatefulWith(i64, tidepool_bridge::HaskellValue),
     ActorCheckpointWith(i64, tidepool_bridge::HaskellValue),
 }

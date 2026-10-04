@@ -13,7 +13,8 @@ pub fn actor_local_decl() -> crate::EffectDecl {
             "ActorLocalAttachSettlementSourceWith :: ((Int, Int), Int) -> (Int -> Eff sourceEffs ()) -> ActorLocal api (Either Text ())",
             "ActorLocalAttachCommandSourceWith :: ((Int, Int), Text) -> (Int -> Eff sourceEffs ()) -> ActorLocal api (Either Text ())",
             "ActorLocalAttachLifecycleSourceWith :: ((Int, Int), (Int, Int)) -> (Int -> Eff sourceEffs ()) -> ActorLocal api (Either Text ())",
-            "ActorReceiveWith :: Int -> (forall result. api result -> Eff handlerEffs ()) -> ActorLocal api next",
+            "ActorReceiveWith :: RequestSite '[] next -> (forall result. api result -> Eff handlerEffs ()) -> ActorLocal api next",
+            "ActorReceiveStatefulWith :: Int -> (forall result. api result -> Eff handlerEffs ()) -> ActorLocal api (Maybe state)",
             "ActorCheckpointWith :: Int -> state -> ActorLocal api ()",
         ],
         type_defs: &[
@@ -21,6 +22,7 @@ pub fn actor_local_decl() -> crate::EffectDecl {
         ],
         extra_imports: &[
             "import Tidepool.Actor",
+            "import Tidepool.Internal.RequestSite (RequestSite)",
         ],
         helpers: &[],
         type_params: &[

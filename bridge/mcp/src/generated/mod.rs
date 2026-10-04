@@ -14,8 +14,6 @@ pub mod bound_worktree;
 pub mod commands;
 pub mod context_read_write;
 pub mod exec;
-pub mod finalize;
-pub mod fork;
 pub mod forks;
 pub mod green;
 pub mod introspection;
@@ -28,7 +26,6 @@ pub mod read_state;
 pub mod recipe_check;
 pub mod reflect;
 pub mod repo_event;
-pub mod run_l_l_m_turn;
 pub mod sleep;
 pub mod source;
 pub mod worktree;
@@ -50,8 +47,6 @@ pub use bound_worktree::*;
 pub use commands::*;
 pub use context_read_write::*;
 pub use exec::*;
-pub use finalize::*;
-pub use fork::*;
 pub use forks::*;
 pub use green::*;
 pub use introspection::*;
@@ -64,7 +59,6 @@ pub use read_state::*;
 pub use recipe_check::*;
 pub use reflect::*;
 pub use repo_event::*;
-pub use run_l_l_m_turn::*;
 pub use sleep::*;
 pub use source::*;
 pub use worktree::*;
@@ -82,9 +76,6 @@ pub(crate) fn schema_decls() -> Vec<crate::EffectDecl> {
         askuser_decl(),
         readstate_decl(),
         recipe_check_decl(),
-        runllmturn_decl(),
-        fork_decl(),
-        finalize_decl(),
         green_decl(),
         actor_decl(),
         actor_context_decl(),
@@ -202,6 +193,7 @@ pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[
             "ActorLocalAttachCommandSourceWith",
             "ActorLocalAttachLifecycleSourceWith",
             "ActorReceiveWith",
+            "ActorReceiveStatefulWith",
             "ActorCheckpointWith",
         ],
     ),
