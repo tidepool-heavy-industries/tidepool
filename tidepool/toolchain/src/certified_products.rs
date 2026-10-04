@@ -386,6 +386,8 @@ pub enum CertificationError {
     Receipt(&'static str),
     #[error("compiler product certificate disagrees with {0}")]
     Mismatch(&'static str),
+    #[error("finalized module payload capture failed: {0}")]
+    CapturedModulePayload(#[source] crate::recovery_artifacts::RecoveryArtifactError),
     #[error("finalized interface {unit}:{module} requires {required_unit}:{required_module} seal {expected_sha256}; selected seal {selected_sha256:?}")]
     FinalizedInterfaceRequirement {
         unit: String,
@@ -3764,12 +3766,15 @@ fn validate_exact_cached_closure(
 /// Recheck original/fresh sidecars and dependency bytes against a worker
 /// receipt. A candidate is never admitted merely because its name or hash
 /// appears in the receipt: every original global and source edge is checked.
+/// The compiler output owner supplies the captured payload root independently
+/// of the source path used to authenticate dependency and source evidence.
 pub(crate) fn certify_products(
     candidates: Option<&CandidateSet>,
     receipt: &CertifiedReceipt,
     fresh_products: &ParsedModuleProducts<'_>,
     fresh_evidence_bytes: &[u8],
     fresh_input_path: &Path,
+    captured_payload_root: &Path,
     final_evidence: &DependencyEvidence,
     final_target_source: &str,
     endpoint_identity: &[u8],
@@ -4230,9 +4235,7 @@ pub(crate) fn certify_products(
     }
     let module_interfaces = finalized_module::issue_interfaces(
         &receipt.finalization,
-        fresh_input_path
-            .parent()
-            .ok_or(CertificationError::StaleEvidence)?,
+        captured_payload_root,
         producer_sha256,
         final_evidence,
         &inherited_seals,
@@ -7192,6 +7195,7 @@ pub(crate) mod tests {
                     &parsed,
                     &evidence_bytes,
                     &input,
+                    input.parent().unwrap(),
                     &admitted,
                     source,
                     &producer,
@@ -7248,6 +7252,7 @@ pub(crate) mod tests {
             &parsed,
             &evidence_bytes,
             &input,
+            input.parent().unwrap(),
             &admitted,
             source,
             &producer,
@@ -7308,6 +7313,7 @@ pub(crate) mod tests {
                 &parsed,
                 &new_evidence_bytes,
                 &new_input,
+                new_input.parent().unwrap(),
                 &admitted,
                 source,
                 &producer,
@@ -7333,6 +7339,7 @@ pub(crate) mod tests {
                 &parsed,
                 &incomplete_bytes,
                 &new_input,
+                new_input.parent().unwrap(),
                 &incomplete,
                 source,
                 &producer,
@@ -7359,6 +7366,7 @@ pub(crate) mod tests {
                 &parsed,
                 &incomplete_bytes,
                 &new_input,
+                new_input.parent().unwrap(),
                 &incomplete,
                 source,
                 &producer,
@@ -7399,6 +7407,7 @@ pub(crate) mod tests {
             &empty,
             &evidence_bytes,
             &input,
+            input.parent().unwrap(),
             &admitted,
             source,
             &producer,
@@ -7415,6 +7424,7 @@ pub(crate) mod tests {
             &empty,
             &evidence_bytes,
             &input,
+            input.parent().unwrap(),
             &admitted,
             source,
             &producer,
@@ -7539,6 +7549,7 @@ pub(crate) mod tests {
                 &parsed,
                 &current_bytes,
                 &input,
+                input.parent().unwrap(),
                 &current,
                 source,
                 &producer,
@@ -7558,6 +7569,7 @@ pub(crate) mod tests {
                     &parsed,
                     &current_bytes,
                     &input,
+                    input.parent().unwrap(),
                     &current,
                     source,
                     &producer,
@@ -7624,6 +7636,7 @@ pub(crate) mod tests {
                 &parsed,
                 &current_bytes,
                 &input,
+                input.parent().unwrap(),
                 &current,
                 source,
                 &producer,
@@ -7659,7 +7672,8 @@ pub(crate) mod tests {
         let directory = tempfile::tempdir().unwrap();
         let source = "module Target where";
         let support_source = "module Fresh where";
-        let input = directory.path().join("Target.hs");
+        let source_directory = tempfile::tempdir().unwrap();
+        let input = source_directory.path().join("Target.hs");
         let support = directory.path().join("Fresh.hs");
         std::fs::write(&input, source).unwrap();
         std::fs::write(&support, support_source).unwrap();
@@ -7703,6 +7717,7 @@ pub(crate) mod tests {
             &parsed,
             &raw_evidence,
             &input,
+            directory.path(),
             &admitted,
             source,
             &producer,
@@ -7849,6 +7864,7 @@ pub(crate) mod tests {
                 &parsed,
                 &raw_evidence,
                 &input,
+                input.parent().unwrap(),
                 &evidence,
                 source,
                 b"producer",
@@ -7922,6 +7938,7 @@ pub(crate) mod tests {
             &parsed,
             &raw_evidence,
             &input,
+            input.parent().unwrap(),
             &evidence,
             source,
             b"producer",
@@ -7965,6 +7982,7 @@ pub(crate) mod tests {
                 &parsed,
                 &raw_evidence,
                 &input,
+                input.parent().unwrap(),
                 &substituted,
                 source,
                 b"producer",
@@ -7992,6 +8010,7 @@ pub(crate) mod tests {
                 &parsed,
                 &raw_evidence,
                 &input,
+                input.parent().unwrap(),
                 &evidence,
                 source,
                 b"producer",
@@ -8017,6 +8036,7 @@ pub(crate) mod tests {
             &parsed,
             &raw_evidence,
             &input,
+            input.parent().unwrap(),
             &evidence,
             source,
             b"producer",

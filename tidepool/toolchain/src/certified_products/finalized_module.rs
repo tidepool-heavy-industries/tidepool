@@ -517,7 +517,7 @@ fn capture(
         limit,
         validation,
     )
-    .map_err(|_| CertificationError::Mismatch("captured module payload"))
+    .map_err(CertificationError::CapturedModulePayload)
 }
 
 fn canonical_certificate(
@@ -1001,6 +1001,37 @@ mod tests {
             edge
         ])
         .is_err());
+    }
+
+    #[test]
+    fn captured_payload_errors_preserve_missing_and_modified_artifact_causes() {
+        use crate::recovery_artifacts::RecoveryArtifactError;
+
+        let root = tempfile::tempdir().unwrap();
+        let fixture = interface(None);
+        let descriptor = &fixture.receipt.interface;
+        let path = root.path().join(&descriptor.relative_path);
+        let mut validation = PackageInterfaceValidation::default();
+        assert!(matches!(
+            capture(root.path(), descriptor, 1024, &mut validation),
+            Err(CertificationError::CapturedModulePayload(
+                RecoveryArtifactError::Unavailable(missing)
+            )) if missing == path
+        ));
+        let mut modified = fixture.interface_bytes().to_vec();
+        modified[0] ^= 1;
+        std::fs::write(&path, modified).unwrap();
+        assert!(matches!(
+            capture(root.path(), descriptor, 1024, &mut validation),
+            Err(CertificationError::CapturedModulePayload(
+                RecoveryArtifactError::DigestMismatch(changed)
+            )) if changed == path
+        ));
+        std::fs::write(&path, fixture.interface_bytes()).unwrap();
+        assert_eq!(
+            capture(root.path(), descriptor, 1024, &mut validation).unwrap(),
+            fixture.interface_bytes()
+        );
     }
 
     #[test]

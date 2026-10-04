@@ -92,6 +92,7 @@ fn source_boot_candidate_packet_producer() {
             &parsed,
             &evidence_bytes,
             &source_path,
+            source_path.parent().expect("original Haskell capture root"),
             &evidence,
             &source,
             producer,
