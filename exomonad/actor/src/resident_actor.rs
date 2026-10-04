@@ -12751,7 +12751,7 @@ where
                 request,
                 installed_tools,
                 admitted_source,
-                compilation_authority: _compilation_authority,
+                compilation_authority,
                 public_owner: _public_owner,
                 current_builtin,
                 capture,
@@ -12762,6 +12762,18 @@ where
                 WorkbenchPreflight::Retained(reply) => return reply.map(KernelStep::Continue),
                 WorkbenchPreflight::Admitted(admitted) => admitted,
             };
+            let admitted_workbench = compilation_authority.and_then(|authority| {
+                self.active_workbench().map(|workbench| {
+                    workbench
+                        .with_compilation_authority(authority)
+                        .with_json_input(
+                            request
+                                .input
+                                .as_ref()
+                                .map(tidepool_runtime::session::normalize_workbench_input),
+                        )
+                })
+            });
             let execution = request.execution_id().cloned();
             let retained_request = execution.as_ref().map(|_| request.clone());
             let public_visibility = if current_builtin {
@@ -12861,7 +12873,11 @@ where
                 );
             }
             let result = call_scope
-                .run(self.execute_workbench(kernel, &mut execution_state, None))
+                .run(self.execute_workbench(
+                    kernel,
+                    &mut execution_state,
+                    admitted_workbench.as_ref(),
+                ))
                 .await
                 .map(|advance| match advance {
                     WorkbenchRunAdvance::Complete(step) => step,

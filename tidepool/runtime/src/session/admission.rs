@@ -19,6 +19,12 @@ pub enum NativeSetupAdmissionFailure {
         first: Option<tidepool_toolchain::cell_plan::ParsedCellPlanKind>,
         binders: usize,
     },
+    #[error("host carrier differs from its single original binder recipe: items={items}, first={first:?}, binders={binders}")]
+    HostCarrierShape {
+        items: usize,
+        first: Option<tidepool_toolchain::cell_plan::ParsedCellPlanKind>,
+        binders: usize,
+    },
     #[error("specification digest differs: planned={planned:?}, admitted={admitted:?}")]
     SpecificationDigest {
         planned: [u8; 32],
@@ -226,10 +232,14 @@ pub struct RuntimeCellAdmission {
     digest: [u8; 32],
 }
 
-/// Runtime-issued purpose for one parser-certified binderless setup action.
-/// It never authorizes authored private writes or declarations.
+/// Runtime-issued purpose for a native setup action or host payload mount.
+/// These purposes never authorize authored private writes or declarations.
 enum NativeCellPurpose {
     Setup,
+    HostCarrier {
+        binding: String,
+        expected: super::resident::HostBindingType,
+    },
     HostActivation {
         input_commitment: [u8; 32],
         input_type_witness: Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>,
@@ -240,6 +250,11 @@ impl NativeCellPurpose {
     fn frame_authorization(&self, frame: &mut impl FnMut(&[u8])) {
         match self {
             Self::Setup => frame(b"TidepoolNativeSetupAdmission1"),
+            Self::HostCarrier { binding, expected } => {
+                frame(b"TidepoolHostCarrierAdmission1");
+                frame(binding.as_bytes());
+                expected.frame_authorization(frame);
+            }
             Self::HostActivation {
                 input_commitment,
                 input_type_witness,
@@ -751,6 +766,7 @@ impl RuntimeCheckedPrefix {
     ) -> Result<Arc<CheckedTurnCompletion>, SessionError> {
         let mut state = self.state.lock();
         if self.admission.is_host_activation()
+            || self.admission.host_carrier().is_some()
             || !self.admission.belongs_to(session)
             || self.admission.visibility.scope != scope
             || state.in_flight.is_some()
@@ -1135,6 +1151,14 @@ impl RuntimeCellAdmission {
     pub(super) fn is_native_setup(&self) -> bool {
         matches!(self.native_purpose, Some(NativeCellPurpose::Setup))
     }
+    pub(super) fn host_carrier(&self) -> Option<(&str, super::resident::HostBindingType)> {
+        match &self.native_purpose {
+            Some(NativeCellPurpose::HostCarrier { binding, expected }) => {
+                Some((binding, *expected))
+            }
+            _ => None,
+        }
+    }
     pub(super) fn is_host_activation(&self) -> bool {
         matches!(
             self.native_purpose,
@@ -1214,6 +1238,44 @@ impl PersistentSession {
             })
             .collect()
     }
+    pub(super) fn consume_host_carrier_reservation(
+        &self,
+        admission: &Arc<RuntimeCheckedItemAdmission>,
+        execution: &Arc<tidepool_toolchain::checked_cell::ExactCompiledItem>,
+        binding: &str,
+        expected: super::resident::HostBindingType,
+    ) -> Result<(), SessionError> {
+        let prefix = admission.prefix();
+        let mut state = prefix.state.lock();
+        let scope = prefix.admission.visibility.scope;
+        if prefix.admission.host_carrier() != Some((binding, expected))
+            || !prefix.admission.belongs_to(self)
+            || !Arc::ptr_eq(&state.snapshot, admission.snapshot())
+            || state.in_flight.is_some()
+            || state.reservation.as_ref().is_none_or(|reservation| {
+                reservation.item != *execution.item()
+                    || reservation.generation.0 != execution.generation()
+                    || reservation.digest != admission.digest()
+            })
+            || prefix.program.as_ref().is_none_or(|program| {
+                program.items().len() != 1
+                    || program.items()[0]
+                        .native()
+                        .is_none_or(|original| !Arc::ptr_eq(original, execution))
+            })
+            || self.public_visibility_snapshot_in(scope).as_ref()
+                != Some(&state.snapshot.visibility)
+            || self.compile_view_digest_in(scope) != Some(state.snapshot.view_digest)
+        {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
+        execution.validate_runtime_admission(admission.digest(), prefix.admission.digest())?;
+        execution.validate_settled_native_bindings(state.snapshot.settled_native_bindings())?;
+        // Mounting a host payload never executes or completes the placeholder.
+        state.reservation = None;
+        Ok(())
+    }
+
     pub(super) fn consume_host_activation_reservation(
         &self,
         admission: &Arc<RuntimeCheckedItemAdmission>,
@@ -1939,6 +2001,45 @@ impl PersistentSession {
             None,
             Some(NativeCellPurpose::Setup),
             request_evidence,
+        )
+    }
+
+    pub(super) fn admit_host_carrier_cell_in(
+        &mut self,
+        scope: ScopeId,
+        plan: Arc<tidepool_toolchain::cell_plan::ParsedCellPlan>,
+        specification: Arc<dyn Any + Send + Sync>,
+        specification_digest: [u8; 32],
+        authority_digest: [u8; 32],
+        include_paths: Vec<PathBuf>,
+        binding: String,
+        expected: super::resident::HostBindingType,
+    ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
+        use tidepool_toolchain::cell_plan::ParsedCellPlanKind as Kind;
+        if plan.items().len() != 1
+            || plan.items()[0].kind() != Kind::Bind
+            || plan.items()[0].binders() != [binding.as_str()]
+        {
+            return Err(self.native_setup_refusal(
+                scope,
+                NativeSetupAdmissionFailure::HostCarrierShape {
+                    items: plan.items().len(),
+                    first: plan.items().first().map(|item| item.kind()),
+                    binders: plan.items().first().map_or(0, |item| item.binders().len()),
+                },
+            ));
+        }
+        self.admit_cell_with_plan(
+            scope,
+            0,
+            specification,
+            specification_digest,
+            authority_digest,
+            include_paths,
+            Some(plan),
+            None,
+            Some(NativeCellPurpose::HostCarrier { binding, expected }),
+            None,
         )
     }
 

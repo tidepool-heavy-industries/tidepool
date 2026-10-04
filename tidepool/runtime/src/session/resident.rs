@@ -160,6 +160,10 @@ pub struct HostBindingType {
 }
 
 impl HostBindingType {
+    pub(super) fn frame_authorization(self, frame: &mut impl FnMut(&[u8])) {
+        frame(self.module.as_bytes());
+        frame(self.name.as_bytes());
+    }
     pub const JSON_VALUE: Self = Self {
         authority: HostBindingAuthority::JsonValue,
         module: "Tidepool.Aeson.Value",
@@ -2467,6 +2471,31 @@ where
         })
     }
 
+    /// Admit one compiler-issued binder reserved for a native host payload.
+    pub fn admit_host_carrier_cell_in(
+        &mut self,
+        scope: ScopeId,
+        plan: Arc<tidepool_toolchain::cell_plan::ParsedCellPlan>,
+        specification: Arc<dyn std::any::Any + Send + Sync>,
+        specification_digest: [u8; 32],
+        authority_digest: [u8; 32],
+        include_paths: Vec<PathBuf>,
+        binding: String,
+        expected: HostBindingType,
+    ) -> Result<Arc<super::RuntimeCellAdmission>, SessionError> {
+        self.settle_dropped_custody();
+        self.state.admit_host_carrier_cell_in(
+            scope,
+            plan,
+            specification,
+            specification_digest,
+            authority_digest,
+            include_paths,
+            binding,
+            expected,
+        )
+    }
+
     pub fn admit_activation_input_item(
         &mut self,
         owner: &RuntimeActivationInputAdmission,
@@ -4023,6 +4052,92 @@ where
         })
     }
 
+    /// Fill the sole original checked host binder without entering its placeholder.
+    pub fn mount_checked_host_input(
+        &mut self,
+        admission: Arc<super::RuntimeCheckedItemAdmission>,
+        binder: &BoundBinder,
+        code: TurnCode<'_>,
+        payload: HostPayload<'_>,
+    ) -> Result<(), ResidentError> {
+        self.settle_dropped_custody();
+        let scope = admission.prefix().admission().visibility().scope;
+        let generation = admission.generation();
+        let expected = match &payload {
+            HostPayload::Json(_) => HostBindingType::JSON_VALUE,
+            HostPayload::Text(_) => HostBindingType::TEXT,
+            HostPayload::Job(_) => HostBindingType::COMMAND_JOB,
+        };
+        if admission.prefix().admission().host_carrier() != Some((binder.name.as_str(), expected))
+            || self.run_context.lexical_scope != scope
+        {
+            return Err(ResidentError::UnsupportedCheckedTurn);
+        }
+        let certification = code
+            .certification
+            .as_ref()
+            .as_ref()
+            .ok_or(ResidentError::UnsupportedCheckedTurn)?;
+        let execution = certification
+            .checked_execution()
+            .ok_or(ResidentError::UnsupportedCheckedTurn)?;
+        if certification
+            .checked_prefix()
+            .is_none_or(|prefix| !Arc::ptr_eq(prefix, admission.prefix()))
+            || execution.item() != admission.item()
+            || !code.sites.is_empty()
+        {
+            return Err(ResidentError::UnsupportedCheckedTurn);
+        }
+        certification
+            .validate_checked_table(&code.table)
+            .map_err(SessionError::Compile)?;
+        certification
+            .validate_checked_bind(&code.prepared, generation.0, std::slice::from_ref(binder))
+            .map_err(SessionError::Compile)?;
+        let interface = execution
+            .value_interface_certificate()
+            .ok_or(ResidentError::UnsupportedCheckedTurn)?;
+        if interface.owner() != SessionModule::val(generation) {
+            return Err(ResidentError::UnsupportedCheckedTurn);
+        }
+        self.validate_compiled_mount_target(scope, binder, generation, &code, expected)?;
+        let layout = match &payload {
+            HostPayload::Json(_) => Some(json_runtime_layout(&code.prepared)?),
+            HostPayload::Text(_) => {
+                self.validate_text_runtime_constructor(&code)?;
+                None
+            }
+            HostPayload::Job(_) => None,
+        };
+        let session_root = admission.snapshot().view().session_root().to_path_buf();
+        self.state.consume_host_carrier_reservation(
+            &admission,
+            execution,
+            &binder.name,
+            expected,
+        )?;
+        self.mount_host_value_with_interface_in(
+            scope,
+            binder,
+            generation,
+            code,
+            ValueInterfaceSource::Checked,
+            move |engine, realm, table| match payload {
+                HostPayload::Json(value) => {
+                    engine.build_host_json(realm, value, &layout.expect("JSON layout validated"))
+                }
+                HostPayload::Text(value) => engine.build_host_text(realm, value, table),
+                HostPayload::Job(value) => engine.build_host_value(realm, value, table),
+            },
+        )?;
+        if let Err(error) = self.state.retain_checked_value_interface(interface) {
+            self.retire_host_binding_owner(&session_root, binder);
+            return Err(error.into());
+        }
+        Ok(())
+    }
+
     /// Mount `payload` under a freshly minted `name`/`gen` binder through a
     /// [`HostCarrier`] built once from a real compiled turn, with NO GHC
     /// compile for this mount: the binder's `var_id` is minted directly
@@ -4438,6 +4553,29 @@ where
         ) -> Result<PreparedHandle, PreparedRuntimeError>,
     ) -> Result<(), ResidentError> {
         refuse_checked_turn(&code)?;
+        self.mount_host_value_with_interface_in(
+            scope,
+            binder,
+            gen,
+            code,
+            ValueInterfaceSource::LegacyDisk,
+            build,
+        )
+    }
+
+    fn mount_host_value_with_interface_in(
+        &mut self,
+        scope: ScopeId,
+        binder: &BoundBinder,
+        gen: Generation,
+        code: TurnCode<'_>,
+        interface_source: ValueInterfaceSource,
+        build: impl FnOnce(
+            &mut super::prepared::PreparedEngine,
+            RealmId,
+            &DataConTable,
+        ) -> Result<PreparedHandle, PreparedRuntimeError>,
+    ) -> Result<(), ResidentError> {
         self.state
             .validate_new_binding_ids([SessionVarId::from_extract(binder.var_id)])?;
         let table = code
@@ -4479,7 +4617,7 @@ where
                 let engine = self.state.require_prepared()?;
                 build(engine, realm, &table)?
             };
-            self.mount_host_handle_prepared(scope, binder, gen, handle)
+            self.mount_host_handle_prepared(scope, binder, gen, handle, interface_source)
         })();
         if let Some(engine) = self.state.prepared_mut() {
             engine.unpin(program);
@@ -4499,6 +4637,7 @@ where
         binder: &BoundBinder,
         gen: Generation,
         handle: PreparedHandle,
+        interface_source: ValueInterfaceSource,
     ) -> Result<(), ResidentError> {
         let engine = self.state.require_prepared()?;
         let Some(program) = engine.hosting_program(handle) else {
@@ -4513,7 +4652,7 @@ where
             gen,
             &[(binder, handle)],
             None,
-            ValueInterfaceSource::LegacyDisk,
+            interface_source,
         )?;
         self.binding_provenance
             .insert(binder.var_id, Arc::new(ProgramProvenance::default()));
@@ -8605,7 +8744,7 @@ mod authored_publication_tests {
                 target: None,
                 retained_imports: &[],
             },
-            item_admission,
+            item_admission.clone(),
         )
         .unwrap()
         else {
@@ -8628,6 +8767,16 @@ mod authored_publication_tests {
             .admission_digest();
         let before_table = session.state.session_table().clone();
         let before_prefix = prefix.snapshot();
+
+        assert!(matches!(
+            session.mount_checked_host_input(
+                item_admission,
+                page,
+                code.clone(),
+                HostPayload::Json(&serde_json::Value::Null)
+            ),
+            Err(ResidentError::UnsupportedCheckedTurn)
+        ));
 
         assert!(matches!(
             session.mount_json_binding_in(
