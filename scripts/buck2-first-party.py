@@ -686,6 +686,78 @@ def runtime_test_cases(binary):
         '        "//build/package:compiler_deployment",',
         "    ],", '    visibility = ["PUBLIC"],', ")", "",
     ]))
+    recovery_prefix = "session::recovery::newrecovery_v2::tests::"
+    recovery_graph_tests = [recovery_prefix + name for name in (
+        "structural_graph_records_do_not_grant_recovery_authority",
+        "persistent_snapshots_share_history_payloads_across_publication_candidates",
+        "wire_admission_preserves_original_revision_and_refuses_duplicate_rows",
+        "noncanonical_value_requirements_preserve_graph_admission_and_candidates",
+        "producer_mismatch_tombstones_the_original_without_resurrection",
+        "interface_recovery_retains_native_requirements_and_selected_evidence",
+        "v6_manifest_refuses_persisted_native_relation_rows",
+        "binding_only_publication_is_durable_and_restarts_as_a_winner_tombstone",
+        "same_session_actor_surfaces_keep_independent_winners_and_epochs",
+        "sibling_actors_project_their_own_declaration_roots",
+        "duplicate_or_invalid_actor_surfaces_are_refused",
+        "old_recovery_formats_are_refused_without_rewriting_bytes",
+        "native_recovery_requires_the_exact_canonical_companion_and_selection",
+        "all_recovery_witness_paths_are_confined_before_hydration",
+        "canonical_witness_losses_keep_the_exact_component_and_relative_path",
+        "canonical_interface_identity_ignores_all_materialization_paths",
+        "artifact_ids_ignore_materialization_paths",
+        "value_interface_artifact_id_and_exact_requirements_are_validated",
+        "future_recovery_format_is_distinctly_refused_without_rewriting_bytes",
+        "family_only_inventory_retains_hidden_consistency_evidence",
+        "selected_family_and_associated_axioms_require_exact_inventory_membership",
+        "lexical_graph_requires_closed_reachable_artifact_owned_identities",
+        "v6_checksum_covers_lexical_roots_and_edges",
+        "checksum_covers_the_graph_and_projection_preserves_lost_winner_tombstones",
+        "checksum_matches_the_canonical_unsigned_graph_encoding",
+        "artifact_paths_must_stay_relative_to_the_recovery_root",
+        "reservations_advance_exactly_one_generation_without_publishing_a_node",
+        "staged_high_water_is_invisible_until_publish_and_survives_readback",
+        "pre_rename_failure_keeps_target_unpublished",
+        "missing_replacement_tombstone_retracts_old_original_identity",
+        "workbench_imports_fold_in_lexical_order_and_keep_exact_specs",
+    )]
+    recovery_compiler_tests = [recovery_prefix + name for name in (
+        "private_only_exact_nodes_survive_restart_without_lexical_visibility",
+        "private_recovery_refuses_live_marker_not_in_verified_native_inventory",
+        "private_recovery_validates_authentic_native_markers_and_later_tamper",
+        "published_exact_root_requires_its_run_owner_on_restart",
+        "private_recovery_attach_refuses_corrupt_owned_artifact",
+        "canonical_interface_closure_recovers_without_a_native_product",
+        "artifact_validation_shares_real_package_bytes_and_rechecks_each_read",
+        "staged_publication_work_counts_actual_checksum_hash_and_write_bytes",
+        "artifact_bytes_are_checked_against_the_manifest_digests",
+        "a_missing_winning_artifact_becomes_a_tombstone_without_resurrection",
+        "restart_read_keeps_missing_winning_artifact_as_tombstone",
+    )]
+    for name, tests, compiler in (
+        ("runtime_recovery_graph_tests", recovery_graph_tests, False),
+        ("runtime_recovery_compiler_tests", recovery_compiler_tests, True),
+    ):
+        lines = [
+            "tidepool_rust_test_cases(", f"    name = {json.dumps(name)},",
+            f"    binary = {json.dumps(':' + binary)},",
+            "    exact_tests = [", render_strings(tests, 8), "    ],",
+            f"    expected_count = {len(tests)},", "    jobs = 1,",
+            f"    timeout = {600 if compiler else 30},",
+            f"    test_rule_timeout_ms = {660000 if compiler else 150000},",
+        ]
+        if compiler:
+            lines.extend([
+                "    env = {",
+                '        "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_deployment)",',
+                '        "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",',
+                '        "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",',
+                '        "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",',
+                '        "TIDEPOOL_KEEP_TEST_LOGS": "1",',
+                "    },", "    haskell_worker = True,",
+                '    resources = ["//bridge/haskell:facade_embedded_sources", "//build/package:compiler_deployment"],',
+            ])
+        lines.extend(['    visibility = ["PUBLIC"],', ")", ""])
+        rules.append("\n".join(lines))
     return "\n".join(rules)
 
 
