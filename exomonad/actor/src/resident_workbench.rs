@@ -16680,10 +16680,12 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                 .unwrap(),
         );
         let view = session.compile_view_for_execution(&execution).unwrap();
+        let mut private_context = context.clone();
+        private_context.placement.lexical_scope = execution.private_scope();
         let prepared = source
             .prepare_effectful(
-                &context.compile_view(view.clone()).unwrap(),
-                &context.haskell_effects_alias,
+                &private_context.compile_view(view.clone()).unwrap(),
+                &private_context.haskell_effects_alias,
             )
             .unwrap();
         let template = resident_cell_check_template(
