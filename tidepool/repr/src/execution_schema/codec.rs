@@ -4,11 +4,11 @@ use ciborium::value::Value;
 
 use super::{
     Alternative, AlternativePattern, Architecture, Atom, CaseKind, CheckedLayout, ConstructorDecl,
-    ConstructorId, CtorRow, DecodeLimits, Endianness, Expr, ExprFrame, FieldLayout, GlobalDecl,
-    GlobalId, Group, HeapBinding, HeapRhs, JoinBinding, JoinId, OperationDecl, OperationId,
-    ParseError, ProgramDefinitions, ProgramEnvelope, RuntimeRep, ScalarLiteral, Signature,
-    SignatureId, SiteDelivery, SiteRow, SymbolIdentity, TargetDescriptor, TopBinding, TypeNode,
-    TypeNodeId, UpdatePolicy, ValueId, ValueRef, WireProgram,
+    ConstructorId, ConstructorReply, CtorRow, DecodeLimits, Endianness, Expr, ExprFrame,
+    FieldLayout, GlobalDecl, GlobalId, Group, HeapBinding, HeapRhs, JoinBinding, JoinId,
+    OperationDecl, OperationId, ParseError, ProgramDefinitions, ProgramEnvelope, RuntimeRep,
+    ScalarLiteral, Signature, SignatureId, SiteDelivery, SiteRow, SymbolIdentity, TargetDescriptor,
+    TopBinding, TypeNode, TypeNodeId, UpdatePolicy, ValueId, ValueRef, WireProgram,
 };
 
 // Flat schema records have bounded container nesting regardless of program
@@ -284,7 +284,7 @@ impl Decoder {
         let bindings = self.list(fields[10], true, |this, value| this.top_group(value))?;
         let types = self.type_nodes(fields[11])?;
         let sites = self.sites(fields[12])?;
-        let verb_sites = self.verb_sites(fields[13])?;
+        let constructor_replies = self.constructor_replies(fields[13])?;
         let json_layout = self.optional_json_layout(fields[14])?;
         Ok(ProgramDefinitions {
             envelope: ProgramEnvelope {
@@ -302,7 +302,7 @@ impl Decoder {
             bindings,
             types,
             sites,
-            verb_sites,
+            constructor_replies,
             json_layout,
         })
     }
@@ -327,18 +327,35 @@ impl Decoder {
         self.list(value, false, |this, value| this.site_row(value))
     }
 
-    fn verb_sites(&mut self, value: &Value) -> Result<Vec<(ConstructorId, u64)>, ParseError> {
+    fn constructor_replies(
+        &mut self,
+        value: &Value,
+    ) -> Result<Vec<(ConstructorId, ConstructorReply)>, ParseError> {
         let Value::Array(values) = value else {
-            return Err(malformed("verb site table", "array"));
+            return Err(malformed("constructor reply table", "array"));
         };
         if values.len() > self.limits.max_sites {
-            return Err(ParseError::LimitExceeded("verb sites"));
+            return Err(ParseError::LimitExceeded("constructor replies"));
         }
         self.list(value, false, |_, value| {
-            let fields = array(value, 2, "verb site")?;
+            let fields = array(value, 2, "constructor reply")?;
+            let Value::Array(reply) = &fields[1] else {
+                return Err(malformed("constructor reply evidence", "array"));
+            };
+            let evidence = match reply.as_slice() {
+                [tag, node] if unsigned(tag, "constructor reply tag")? == 0 => {
+                    ConstructorReply::Static(TypeNodeId(u32_value(node, "reply type node ID")?))
+                }
+                [tag] if unsigned(tag, "constructor reply tag")? == 1 => ConstructorReply::AtSite,
+                _ => {
+                    return Err(ParseError::Malformed(
+                        "invalid constructor reply evidence".into(),
+                    ))
+                }
+            };
             Ok((
-                ConstructorId(u32_value(&fields[0], "verb site constructor ID")?),
-                unsigned(&fields[1], "verb site ID")?,
+                ConstructorId(u32_value(&fields[0], "reply constructor ID")?),
+                evidence,
             ))
         })
     }

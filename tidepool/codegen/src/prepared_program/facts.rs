@@ -2,8 +2,8 @@
 
 use std::collections::BTreeMap;
 use tidepool_repr::execution_schema::{
-    DefinitionsView, Group, HeapRhs, JsonLayout, Signature, SiteRow, SymbolIdentity, TypeNode,
-    ValueId,
+    ConstructorReply, DefinitionsView, Group, HeapRhs, JsonLayout, Signature, SiteRow,
+    SymbolIdentity, TypeNode, ValueId,
 };
 use tidepool_repr::DataConId;
 
@@ -13,8 +13,8 @@ pub struct DefinitionFacts {
     pub tops: BTreeMap<ValueId, (SymbolIdentity, Option<Signature>)>,
     pub sites: Vec<SiteRow>,
     pub types: Vec<TypeNode>,
-    /// Bridge request constructor IDs paired with indexes into `sites`.
-    pub verb_sites: Vec<(DataConId, usize)>,
+    /// Exact bridge request constructor IDs paired with reply evidence.
+    pub constructor_replies: Vec<(DataConId, ConstructorReply)>,
     /// Identity, bridge ID and family, indexed by the local `ConstructorId`.
     pub constructors: Vec<(SymbolIdentity, DataConId, SymbolIdentity)>,
     pub json_layout: Option<JsonLayout<DataConId>>,
@@ -68,22 +68,17 @@ impl DefinitionFacts {
             .json_layout()
             .map(|layout| (*layout).map(|constructor| constructors[constructor.0 as usize].1));
         let sites = prepared.sites().to_vec();
-        // Validation guarantees every entry names a declared constructor and
-        // an admitted row.
-        let verb_sites = prepared
-            .verb_sites()
+        // Validation guarantees exact constructor and type-node references.
+        let constructor_replies = prepared
+            .constructor_replies()
             .iter()
-            .filter_map(|(constructor, site)| {
-                let (_, host_id, _) = constructors.get(constructor.0 as usize)?;
-                let row = sites.iter().position(|row| row.site == *site)?;
-                Some((*host_id, row))
-            })
+            .map(|(constructor, reply)| (constructors[constructor.0 as usize].1, *reply))
             .collect();
         Self {
             tops,
             sites,
             types: prepared.types().to_vec(),
-            verb_sites,
+            constructor_replies,
             constructors,
             json_layout,
             by_identity,

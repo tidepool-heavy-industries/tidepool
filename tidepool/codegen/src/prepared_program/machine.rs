@@ -1782,7 +1782,7 @@ impl<'code> PreparedMachine<'code> {
         for (root, evidence) in self.handles.frame_roots() {
             work.push(unsafe { root.read() } as usize);
             if let Some(evidence) = evidence {
-                mark_program(evidence.owner, &mut live, &mut program_work);
+                mark_program(evidence.reply.owner(), &mut live, &mut program_work);
                 mark_program(evidence.runner, &mut live, &mut program_work);
             }
         }
@@ -8838,8 +8838,10 @@ mod tests {
             collect_before_observation: true,
         };
         let evidence = PreparedFrameEvidence {
-            owner: program,
-            site: 7,
+            reply: crate::resource_ledger::PreparedReplyEvidence::AtSite {
+                owner: program,
+                row: 0,
+            },
             runner: program,
             resume_entry: ValueId(0),
             continuation_rep: RuntimeRep::LiftedRef,
@@ -10259,8 +10261,10 @@ mod tests {
         let bytes_before = machine.old_space.prepared_bytes_used();
 
         let evidence = PreparedFrameEvidence {
-            owner: program_a,
-            site: 1,
+            reply: crate::resource_ledger::PreparedReplyEvidence::AtSite {
+                owner: program_a,
+                row: 0,
+            },
             runner: program_b,
             resume_entry: ValueId(0),
             continuation_rep: RuntimeRep::LiftedRef,
@@ -10388,9 +10392,11 @@ mod tests {
                     effect_policy: EffectRunPolicy::SuspendAll,
                     live_payload: LivePayloadPolicy::None,
                     evidence: PreparedFrameEvidence {
-                        owner: consumers[0],
+                        reply: crate::resource_ledger::PreparedReplyEvidence::AtSite {
+                            owner: consumers[0],
+                            row: 0,
+                        },
                         runner: consumers[1],
-                        site: 7,
                         resume_entry: ValueId(0),
                         continuation_rep: RuntimeRep::LiftedRef,
                     },

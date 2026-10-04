@@ -14,7 +14,7 @@ use std::sync::Arc;
 use crate::old_space::RootSlot;
 use crate::prepared_program::ProgramId;
 use crate::suspension::{ContinuationId, RealmId, ValueHandle};
-use tidepool_repr::execution_schema::{RuntimeRep, ValueId};
+use tidepool_repr::execution_schema::{RuntimeRep, TypeNodeId, ValueId};
 
 pub(crate) type FrameCell = RootSlot;
 
@@ -24,16 +24,35 @@ pub(crate) type FrameCell = RootSlot;
 /// turn declared, while the turn that invoked it owns the resume entry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PreparedFrameEvidence {
-    /// The installed program whose site and type tables describe `site`.
-    pub owner: ProgramId,
-    /// The typed site the suspended request named.
-    pub site: u64,
+    pub reply: PreparedReplyEvidence,
     /// The program whose admitted resume entry re-enters the continuation.
     pub runner: ProgramId,
     /// `runner`'s `__resume` top: `\q x -> settle (resumeLifted q x)`.
     pub resume_entry: ValueId,
     /// The representation the continuation was retained with.
     pub continuation_rep: RuntimeRep,
+}
+
+/// Immutable evidence retained independently of the runner's resume entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PreparedReplyEvidence {
+    Static {
+        owner: ProgramId,
+        constructor: tidepool_repr::DataConId,
+        node: TypeNodeId,
+    },
+    AtSite {
+        owner: ProgramId,
+        row: usize,
+    },
+}
+
+impl PreparedReplyEvidence {
+    pub fn owner(self) -> ProgramId {
+        match self {
+            Self::Static { owner, .. } | Self::AtSite { owner, .. } => owner,
+        }
+    }
 }
 
 pub(crate) type FrameEvidence = PreparedFrameEvidence;

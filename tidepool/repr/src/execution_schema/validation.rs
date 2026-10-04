@@ -2,10 +2,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
     Alternative, AlternativePattern, Atom, CaseKind, CheckedLayout, ConstructorDecl, ConstructorId,
-    DecodeLimits, DefinitionsView, Expr, ExprFrame, GlobalId, Group, HeapBinding, HeapRhs,
-    JoinBinding, JoinId, OperationId, ParseError, ProgramDefinitions, ProgramRequirements,
+    ConstructorReply, DecodeLimits, DefinitionsView, Expr, ExprFrame, GlobalId, Group, HeapBinding,
+    HeapRhs, JoinBinding, JoinId, OperationId, ParseError, ProgramDefinitions, ProgramRequirements,
     ResultContract, RuntimeRep, ScalarLiteral, SignatureId, SymbolIdentity, TypeNode, TypeNodeId,
-    ValueId, ValueRef, WireProgram, EXECUTION_ABI_VERSION, SCHEMA_VERSION, SYNTHETIC_SITE_BIT,
+    ValueId, ValueRef, WireProgram, EXECUTION_ABI_VERSION, SCHEMA_VERSION,
 };
 use recursion::{try_expand_and_collapse, MappableFrame, PartiallyApplied};
 use std::{cell::RefCell, rc::Rc};
@@ -1323,8 +1323,8 @@ impl<'a> Validator<'a> {
         if self.wire.sites.len() > self.limits.max_sites {
             return Err(ParseError::LimitExceeded("sites"));
         }
-        if self.wire.verb_sites.len() > self.limits.max_sites {
-            return Err(ParseError::LimitExceeded("verb sites"));
+        if self.wire.constructor_replies.len() > self.limits.max_sites {
+            return Err(ParseError::LimitExceeded("constructor replies"));
         }
 
         for signature in self.wire.signatures {
@@ -1426,11 +1426,9 @@ impl<'a> Validator<'a> {
             self.check_json_layout(layout)?;
         }
 
-        self.check_type_nodes(&family_sizes)?;
-        {
-            let site_ids = self.check_sites()?;
-            self.check_verb_sites(&site_ids)?;
-        }
+        self.check_type_nodes()?;
+        self.check_sites()?;
+        self.check_constructor_replies()?;
 
         let mut operation_contracts = BTreeSet::new();
         for operation in self.wire.operations {
@@ -1694,10 +1692,7 @@ impl<'a> Validator<'a> {
         Ok(())
     }
 
-    fn check_type_nodes(
-        &mut self,
-        family_sizes: &BTreeMap<SymbolIdentity, u32>,
-    ) -> Result<(), ParseError> {
+    fn check_type_nodes(&mut self) -> Result<(), ParseError> {
         for index in 0..self.wire.types.len() {
             let work = match &self.wire.types[index] {
                 TypeNode::Data {
@@ -1734,32 +1729,15 @@ impl<'a> Validator<'a> {
                     for argument in arguments {
                         self.type_node(*argument)?;
                     }
-                    if rows.is_empty() {
-                        if family_sizes.contains_key(family) {
-                            return Err(ParseError::InvalidLayout(
-                                "type node constructor family size".into(),
-                            ));
-                        }
-                        continue;
-                    }
-                    let family_size = self.constructor(rows[0].constructor)?.family_size;
-                    if rows.len() != family_size as usize {
-                        return Err(ParseError::InvalidLayout(
-                            "type node constructor family size".into(),
-                        ));
-                    }
-                    for (row_index, row) in rows.iter().enumerate() {
+                    let mut previous_tag = 0;
+                    for row in rows {
                         let constructor = self.constructor(row.constructor)?;
-                        let expected_tag = u32::try_from(row_index + 1)
-                            .map_err(|_| ParseError::LimitExceeded("type nodes"))?;
-                        if &constructor.family != family
-                            || constructor.family_size != family_size
-                            || constructor.tag != expected_tag
-                        {
+                        if &constructor.family != family || constructor.tag <= previous_tag {
                             return Err(ParseError::InvalidLayout(
-                                "type node constructor family".into(),
+                                "type node constructor family or order".into(),
                             ));
                         }
+                        previous_tag = constructor.tag;
                         if constructor.result_rep != RuntimeRep::LiftedRef {
                             return Err(ParseError::InvalidLayout(
                                 "type node constructor representation".into(),
@@ -1839,46 +1817,36 @@ impl<'a> Validator<'a> {
         Ok(ids)
     }
 
-    /// Each verb-site entry names a declared constructor (at most once) and
-    /// an admitted synthetic row; every synthetic row is named by one. With
-    /// dynamic ids never carrying [`SYNTHETIC_SITE_BIT`], the two site ranges
-    /// cannot collide.
-    fn check_verb_sites(&mut self, site_ids: &BTreeSet<u64>) -> Result<(), ParseError> {
+    fn check_constructor_replies(&mut self) -> Result<(), ParseError> {
         let mut constructors = BTreeSet::new();
-        let mut named = BTreeSet::new();
-        for index in 0..self.wire.verb_sites.len() {
+        for index in 0..self.wire.constructor_replies.len() {
             self.bump_work(1)?;
-            let (constructor, site) = self.wire.verb_sites[index];
-            if constructor.0 as usize >= self.wire.constructors.len() {
-                return Err(ParseError::InvalidReference(format!(
-                    "verb site constructor {constructor:?}"
-                )));
-            }
+            let (constructor, reply) = self.wire.constructor_replies[index];
+            let declaration = self
+                .wire
+                .constructors
+                .get(constructor.0 as usize)
+                .ok_or_else(|| {
+                    ParseError::InvalidReference(format!("reply constructor {constructor:?}"))
+                })?;
             if !constructors.insert(constructor) {
-                return Err(ParseError::DuplicateDefinition("verb site".into()));
+                return Err(ParseError::DuplicateDefinition("constructor reply".into()));
             }
-            if site & SYNTHETIC_SITE_BIT == 0 {
-                return Err(ParseError::InvalidReference(format!(
-                    "verb site {site} is not in the synthetic range"
-                )));
+            match reply {
+                ConstructorReply::Static(node) => {
+                    self.type_node(node)?;
+                }
+                ConstructorReply::AtSite => {
+                    if !matches!(
+                        declaration.field_reps.first(),
+                        Some(RuntimeRep::LiftedRef) | Some(RuntimeRep::Int(64))
+                    ) {
+                        return Err(ParseError::InvalidLayout(
+                            "AtSite request requires a first erased Int carrier field".into(),
+                        ));
+                    }
+                }
             }
-            if !site_ids.contains(&site) {
-                return Err(ParseError::InvalidReference(format!(
-                    "verb site {site} names no site row"
-                )));
-            }
-            named.insert(site);
-        }
-        if let Some(row) = self
-            .wire
-            .sites
-            .iter()
-            .find(|row| row.site & SYNTHETIC_SITE_BIT != 0 && !named.contains(&row.site))
-        {
-            return Err(ParseError::InvalidReference(format!(
-                "synthetic site {} is named by no verb site",
-                row.site
-            )));
         }
         Ok(())
     }
@@ -2619,7 +2587,7 @@ mod tests {
             entry: ValueId(0),
             types: vec![],
             sites: vec![],
-            verb_sites: vec![],
+            constructor_replies: vec![],
             json_layout: None,
         }
     }
@@ -3191,111 +3159,57 @@ mod tests {
     }
 
     #[test]
-    fn verb_sites_name_declared_constructors_and_synthetic_rows() {
+    fn constructor_replies_require_exact_constructors_nodes_and_carrier_layouts() {
         let mut program = valid_program();
-        program.types = vec![TypeNode::Text];
-        program.constructors = vec![empty_constructor("Print", 1, 1)];
-        let synthetic = SYNTHETIC_SITE_BIT | 41;
-        program.sites = vec![SiteRow {
-            site: synthetic,
-            origin: "Fixture.Print".into(),
-            ordinal: 0,
-            delivery: SiteDelivery::HostAnswer,
-            wire: TypeNodeId(0),
-            inputs: vec![],
+        program.types = vec![TypeNode::Unconstructible {
+            reason: "polymorphic".into(),
+            rendered: "a".into(),
         }];
-        program.verb_sites = vec![(ConstructorId(0), synthetic)];
+        program.constructors = vec![empty_constructor("Request", 1, 1)];
+        program.constructor_replies =
+            vec![(ConstructorId(0), ConstructorReply::Static(TypeNodeId(0)))];
         validate_program(&program, &requirements(), DecodeLimits::default()).unwrap();
-
-        // A synthetic row nobody names, and a verb site naming no row.
-        program.verb_sites.clear();
+        program.constructor_replies[0].1 = ConstructorReply::Static(TypeNodeId(1));
         assert!(matches!(
             validate_program(&program, &requirements(), DecodeLimits::default()),
-            Err(ParseError::InvalidReference(detail)) if detail.contains("named by no verb site")
+            Err(ParseError::InvalidReference(_))
         ));
-        program.verb_sites = vec![(ConstructorId(0), SYNTHETIC_SITE_BIT | 42)];
+        program.constructor_replies[0].1 = ConstructorReply::AtSite;
         assert!(matches!(
             validate_program(&program, &requirements(), DecodeLimits::default()),
-            Err(ParseError::InvalidReference(detail)) if detail.contains("names no site row")
+            Err(ParseError::InvalidLayout(_))
         ));
-        // A dynamic id is never a verb site.
-        program.sites[0].site = 41;
-        program.verb_sites = vec![(ConstructorId(0), 41)];
+        program.constructor_replies[0] =
+            (ConstructorId(1), ConstructorReply::Static(TypeNodeId(0)));
         assert!(matches!(
             validate_program(&program, &requirements(), DecodeLimits::default()),
-            Err(ParseError::InvalidReference(detail)) if detail.contains("synthetic range")
+            Err(ParseError::InvalidReference(_))
         ));
-        program.sites[0].site = synthetic;
-        program.verb_sites = vec![(ConstructorId(1), synthetic)];
-        assert!(matches!(
-            validate_program(&program, &requirements(), DecodeLimits::default()),
-            Err(ParseError::InvalidReference(detail)) if detail.contains("constructor")
-        ));
-        program.verb_sites = vec![(ConstructorId(0), synthetic), (ConstructorId(0), synthetic)];
+        program.constructor_replies =
+            vec![(ConstructorId(0), ConstructorReply::Static(TypeNodeId(0))); 2];
         assert_eq!(
             validate_program(&program, &requirements(), DecodeLimits::default()),
-            Err(ParseError::DuplicateDefinition("verb site".into()))
+            Err(ParseError::DuplicateDefinition("constructor reply".into()))
         );
     }
 
     #[test]
-    fn large_verb_site_membership_reuses_validated_ids_and_preserves_work_bound() {
-        const SITES: usize = 4096;
+    fn constructor_reply_validation_retains_work_bound() {
         let mut program = valid_program();
         program.types = vec![TypeNode::Text];
-        program.constructors = (0..SITES)
-            .map(|index| empty_constructor(&format!("Verb{index}"), index as u32 + 1, SITES as u32))
-            .collect();
-        program.sites = (0..SITES)
-            .map(|index| SiteRow {
-                site: SYNTHETIC_SITE_BIT | (index as u64 + 1),
-                origin: format!("Fixture.Verb{index}"),
-                ordinal: index as u64,
-                delivery: SiteDelivery::HostAnswer,
-                wire: TypeNodeId(0),
-                inputs: vec![],
-            })
-            .collect();
-        program.verb_sites = (0..SITES)
-            .rev()
-            .map(|index| {
-                (
-                    ConstructorId(index as u32),
-                    SYNTHETIC_SITE_BIT | (index as u64 + 1),
-                )
-            })
-            .collect();
-        validate_program(&program, &requirements(), DecodeLimits::default()).unwrap();
-
+        program.constructors = vec![empty_constructor("Request", 1, 1)];
+        program.constructor_replies =
+            vec![(ConstructorId(0), ConstructorReply::Static(TypeNodeId(0)))];
         let mut validator = Validator::new(&program, DecodeLimits::default());
-        let ids = validator.check_sites().unwrap();
-        assert_eq!(ids.len(), SITES);
-        let site_work = validator.work;
-        validator.limits.max_work = site_work + SITES;
-        validator.check_verb_sites(&ids).unwrap();
-        assert_eq!(validator.work, site_work + SITES);
-        let mut validator = Validator::new(
-            &program,
-            DecodeLimits {
-                max_work: site_work + SITES - 1,
-                ..DecodeLimits::default()
-            },
-        );
-        let ids = validator.check_sites().unwrap();
+        validator.limits.max_work = 0;
         assert_eq!(
-            validator.check_verb_sites(&ids),
+            validator.check_constructor_replies(),
             Err(ParseError::LimitExceeded("work"))
         );
-
-        program.sites[SITES - 1].site = program.sites[0].site;
-        assert_eq!(
-            validate_program(&program, &requirements(), DecodeLimits::default()),
-            Err(ParseError::DuplicateDefinition("site".into()))
-        );
     }
 
     #[test]
-    fn data_type_rows_cover_the_family_in_tag_order() {
+    fn data_type_rows_admit_partial_families_in_tag_order() {
         let mut program = valid_program();
         program.constructors = vec![
             empty_constructor("First", 1, 2),
@@ -3340,18 +3254,12 @@ mod tests {
             }
             _ => unreachable!(),
         }
-        assert!(matches!(
-            validate_program(&program, &requirements(), DecodeLimits::default()),
-            Err(ParseError::InvalidLayout(_))
-        ));
+        validate_program(&program, &requirements(), DecodeLimits::default()).unwrap();
         match &mut program.types[0] {
             TypeNode::Data { rows, .. } => rows.clear(),
             _ => unreachable!(),
         }
-        assert!(matches!(
-            validate_program(&program, &requirements(), DecodeLimits::default()),
-            Err(ParseError::InvalidLayout(_))
-        ));
+        validate_program(&program, &requirements(), DecodeLimits::default()).unwrap();
     }
 
     #[test]
@@ -3409,7 +3317,7 @@ mod tests {
     }
 
     #[test]
-    fn many_empty_data_nodes_use_the_constructor_family_index() {
+    fn many_empty_data_nodes_validate_with_bounded_work() {
         let mut program = valid_program();
         for index in 0..4096_u32 {
             let mut constructor = empty_constructor(&format!("Constructor{index}"), 1, 1);

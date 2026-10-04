@@ -1,8 +1,8 @@
 use ciborium::value::Value as Cbor;
 use tidepool_repr::execution_schema::{
-    parse_program, Architecture, ConstructorId, DecodeLimits, Endianness, ParseError,
-    ProgramRequirements, SiteDelivery, TargetDescriptor, TypeNode, TypeNodeId,
-    EXECUTION_ABI_VERSION, SCHEMA_VERSION, SYNTHETIC_SITE_BIT,
+    parse_program, Architecture, ConstructorId, ConstructorReply, DecodeLimits, Endianness,
+    ParseError, ProgramRequirements, SiteDelivery, TargetDescriptor, TypeNode, TypeNodeId,
+    EXECUTION_ABI_VERSION, SCHEMA_VERSION,
 };
 
 fn int(value: u64) -> Cbor {
@@ -606,7 +606,7 @@ fn codec_decodes_type_graph_and_site_rows() {
 }
 
 #[test]
-fn codec_decodes_verb_sites_beside_synthetic_rows() {
+fn codec_decodes_constructor_static_reply_without_sites() {
     let mut program = scalar_program(Cbor::Array(vec![int(4), int(64)]));
     let Cbor::Array(fields) = &mut program else {
         unreachable!()
@@ -637,23 +637,17 @@ fn codec_decodes_verb_sites_beside_synthetic_rows() {
         int(9001),
     ])]);
     fields[13] = Cbor::Array(vec![Cbor::Array(vec![int(1)])]);
-    let synthetic = SYNTHETIC_SITE_BIT | 7;
-    fields[14] = Cbor::Array(vec![Cbor::Array(vec![
-        int(synthetic),
-        Cbor::Text("Effects.Print".into()),
+    fields[15] = Cbor::Array(vec![Cbor::Array(vec![
         int(0),
-        int(0),
-        int(0),
-        Cbor::Array(vec![]),
+        Cbor::Array(vec![int(0), int(0)]),
     ])]);
-    fields[15] = Cbor::Array(vec![Cbor::Array(vec![int(0), int(synthetic)])]);
-
     let prepared =
         parse_program(&bytes(&program), &requirements(), DecodeLimits::default()).unwrap();
-    assert_eq!(prepared.verb_sites(), &[(ConstructorId(0), synthetic)]);
-    let row = prepared.site(synthetic).unwrap();
-    assert_eq!(row.delivery, SiteDelivery::HostAnswer);
-    assert!(row.inputs.is_empty());
+    assert_eq!(
+        prepared.constructor_replies(),
+        &[(ConstructorId(0), ConstructorReply::Static(TypeNodeId(0)))]
+    );
+    assert!(prepared.sites().is_empty());
 
     // The table is bounded by the site limit and its entries are pairs.
     let limits = DecodeLimits {
@@ -669,15 +663,14 @@ fn codec_decodes_verb_sites_beside_synthetic_rows() {
         parse_program(&bytes(&program), &requirements(), DecodeLimits::default()),
         Err(ParseError::Malformed(_))
     ));
-    // A synthetic id names only a synthetic row: a dynamic id is refused.
+    // The retired integer-only routing entry is not the new evidence grammar.
     let Cbor::Array(fields) = &mut program else {
         unreachable!()
     };
-    fields[14] = Cbor::Array(vec![]);
     fields[15] = Cbor::Array(vec![Cbor::Array(vec![int(0), int(7)])]);
     assert!(matches!(
         parse_program(&bytes(&program), &requirements(), DecodeLimits::default()),
-        Err(ParseError::InvalidReference(detail)) if detail.contains("synthetic range")
+        Err(ParseError::Malformed(_))
     ));
 }
 

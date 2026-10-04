@@ -336,7 +336,7 @@ fn wire_program_with_bindings(
         uint(u64::from(entry)),
         array([]),
         array([]),
-        // `verb_sites`: none in a synthetic program.
+        // `constructor_replies`: none in this native fixture.
         array([]),
         array([uint(0)]),
     ])
@@ -655,7 +655,7 @@ fn mixed_result_wire(binding_count: u8) -> Vec<u8> {
         uint(0),
         array([]),
         array([]),
-        // `verb_sites`: none in a synthetic program.
+        // `constructor_replies`: none in this native fixture.
         array([]),
         array([uint(0)]),
     ])

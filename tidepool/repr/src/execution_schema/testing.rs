@@ -77,7 +77,7 @@ pub fn wire_program() -> WireProgram {
         entry: ValueId(0),
         types: vec![],
         sites: vec![],
-        verb_sites: vec![],
+        constructor_replies: vec![],
         json_layout: None,
     }
 }
@@ -130,7 +130,7 @@ pub fn projected_group(
         bindings: wire.bindings,
         types: wire.types,
         sites: wire.sites,
-        verb_sites: wire.verb_sites,
+        constructor_replies: wire.constructor_replies,
         json_layout: wire.json_layout,
     };
     super::validation::validate_group(&definitions, &requirements, DecodeLimits::default())?;

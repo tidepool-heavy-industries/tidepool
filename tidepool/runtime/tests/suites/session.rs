@@ -7,8 +7,6 @@
 mod checked_quoter_program;
 #[path = "../prepared_execution.rs"]
 mod prepared_execution;
-#[path = "../prepared_reply_types.rs"]
-mod prepared_reply_types;
 #[path = "../prepared_residency.rs"]
 mod prepared_residency;
 #[path = "../prepared_resident_composite.rs"]

@@ -20,10 +20,10 @@ use tidepool_codegen::prepared_program::{
     DemandError, DemandedImage, ExecutionError, ImageRegistry, ImportBindings,
     InheritedSourceDemand, ManagedBuilder, ManagedField, ManagedNode, PackageLiteral, Parcel,
     ParkRequest, PreparedCallOptions, PreparedFrameEvidence, PreparedHandle, PreparedInput,
-    PreparedMachine, PreparedMachineOptions, PreparedOuter as CodegenPreparedOuter, PreparedResult,
-    PreparedResultBatch, ProgramId, RunOptions, ScopedCertifiedGroup, ScopedDemandedImage,
-    ScopedSourceBinder, SourceBinder, SourceInstanceAttachment, SourceInstanceDomain,
-    SourceInstanceLease, MAX_ANSWER_DEPTH,
+    PreparedMachine, PreparedMachineOptions, PreparedOuter as CodegenPreparedOuter,
+    PreparedReplyEvidence, PreparedResult, PreparedResultBatch, ProgramId, RunOptions,
+    ScopedCertifiedGroup, ScopedDemandedImage, ScopedSourceBinder, SourceBinder,
+    SourceInstanceAttachment, SourceInstanceDomain, SourceInstanceLease, MAX_ANSWER_DEPTH,
 };
 // Re-exported: callers of this module's resource-scope cancellation API
 // (`open_realm`/`cancel_handle`/`close_realm`) need both types without a
@@ -33,10 +33,10 @@ pub use tidepool_codegen::machine::MachineDisposition;
 use tidepool_codegen::suspension::ContinuationId;
 pub use tidepool_codegen::suspension::{RealmId, ValueHandle};
 use tidepool_repr::execution_schema::{
-    link_program, CachedHomeOwner, CertifiedGroup, CtorRow, DefinitionsView, GlobalId, Group,
-    HeapRhs, ImportOwner, ImportedValue, JsonLayout, LinkError, MachineImports, ParseError,
-    PreparedProgram, RuntimeRep, Signature, SiteDelivery, SiteRow, SymbolIdentity, TypeNode,
-    TypeNodeId, ValueId,
+    link_program, CachedHomeOwner, CertifiedGroup, ConstructorReply, CtorRow, DefinitionsView,
+    GlobalId, Group, HeapRhs, ImportOwner, ImportedValue, JsonLayout, LinkError, MachineImports,
+    ParseError, PreparedProgram, RuntimeRep, Signature, SiteDelivery, SiteRow, SymbolIdentity,
+    TypeNode, TypeNodeId, ValueId,
 };
 use tidepool_repr::{DataConId, DataConTable, Literal, PrincipalId, SessionVarId};
 
@@ -274,12 +274,21 @@ pub enum PreparedRuntimeError {
     /// verb. The request and continuation were released; nothing was parked.
     #[error("the suspended request {constructor} names no typed site or verb")]
     UntypedRequest { constructor: String },
-    /// A host-built answer with fields was offered to a frame parked for an
-    /// open-reply request ([`UNSITED`]): there is no wire evidence to build
-    /// it against, so the frame re-enters only by handle or with a
-    /// field-less constructor. The frame stays parked.
-    #[error("the parked request has an open reply type and accepts only handle or field-less constructor delivery")]
-    UnsitedAnswer,
+    #[error("request constructor {constructor:?} has no compiler-issued reply evidence")]
+    MissingReplyEvidence { constructor: DataConId },
+    #[error("request constructor {constructor:?} has a malformed first RequestSite carrier")]
+    MalformedRequestSite { constructor: DataConId },
+    #[error(
+        "reply evidence for constructor {constructor:?} conflicts with installed program {owner:?}"
+    )]
+    ConstructorReplyConflict {
+        constructor: DataConId,
+        owner: ProgramId,
+    },
+    #[error("duplicate reply evidence for constructor {constructor:?}")]
+    DuplicateConstructorReply { constructor: DataConId },
+    #[error("program {owner:?} has no reply site row {row}")]
+    MissingReplySiteRow { owner: ProgramId, row: usize },
     /// The turn suspended under `HandleOrError`. The prepared route parks
     /// nothing under that policy: handled effects are answered from the
     /// parked frame ([`crate::session::ResidentSession`] offers every parked
@@ -311,22 +320,28 @@ pub enum PreparedRuntimeError {
     /// The answer names a constructor outside the site's declared family
     /// closure (the wrong family, or a constructor the type's rows do not
     /// admit). The frame stays parked.
-    #[error("typed site {site} does not admit constructor {host_id:?} in its answer")]
-    AnswerConstructor { site: u64, host_id: DataConId },
+    #[error("reply {site} does not admit constructor {host_id:?} in its answer")]
+    AnswerConstructor {
+        site: ReplyTarget,
+        host_id: DataConId,
+    },
     /// The answer's shape does not match the site's type evidence (a literal
     /// where a constructor is required, a field count or scalar width
     /// mismatch, a byte array, or excessive nesting). The frame stays parked.
-    #[error("typed site {site} rejects the answer: {detail}")]
-    AnswerShape { site: u64, detail: &'static str },
+    #[error("reply {site} rejects the answer: {detail}")]
+    AnswerShape {
+        site: ReplyTarget,
+        detail: &'static str,
+    },
     /// The answer reaches a type the host cannot construct. The frame stays
     /// parked.
-    #[error("typed site {site} has an unconstructible answer type: {reason}")]
-    AnswerUnconstructible { site: u64, reason: String },
+    #[error("reply {site} has an unconstructible answer type: {reason}")]
+    AnswerUnconstructible { site: ReplyTarget, reason: String },
     /// Structural conversion failed at the dispatch/resume boundary. The
     /// frame stays parked and no answer root is published.
-    #[error("typed site {site} rejects its structural answer: {source}")]
+    #[error("reply {site} rejects its structural answer: {source}")]
     AnswerRejected {
-        site: u64,
+        site: ReplyTarget,
         #[source]
         source: tidepool_bridge::BridgeError,
     },
@@ -388,7 +403,9 @@ impl PreparedRuntimeError {
             | Self::AmbiguousSourceGroup { .. }
             | Self::InvalidCertifiedSourceOwner(_)
             | Self::DuplicateSite { .. }
-            | Self::SiteConflict { .. } => PreparedFailureStage::Install,
+            | Self::SiteConflict { .. }
+            | Self::ConstructorReplyConflict { .. }
+            | Self::DuplicateConstructorReply { .. } => PreparedFailureStage::Install,
             Self::Cancelled
             | Self::Run(_)
             | Self::UnknownBinding(_)
@@ -398,7 +415,9 @@ impl PreparedRuntimeError {
             | Self::ProjectionShape { .. }
             | Self::UnknownSite { .. }
             | Self::UntypedRequest { .. }
-            | Self::UnsitedAnswer
+            | Self::MissingReplyEvidence { .. }
+            | Self::MalformedRequestSite { .. }
+            | Self::MissingReplySiteRow { .. }
             | Self::UnhandledRequest
             | Self::DeferredRequiresAsyncHost
             | Self::Handler { .. }
@@ -438,9 +457,13 @@ impl PreparedRuntimeError {
             | Self::DuplicateSite { .. }
             | Self::ProjectionShape { .. }
             | Self::SiteConflict { .. }
+            | Self::ConstructorReplyConflict { .. }
+            | Self::DuplicateConstructorReply { .. }
             | Self::UnknownSite { .. }
             | Self::UntypedRequest { .. }
-            | Self::UnsitedAnswer
+            | Self::MissingReplyEvidence { .. }
+            | Self::MalformedRequestSite { .. }
+            | Self::MissingReplySiteRow { .. }
             | Self::UnhandledRequest
             | Self::DeferredRequiresAsyncHost
             | Self::NoResumeEntry { .. }
@@ -538,7 +561,7 @@ impl std::ops::Deref for ProgramFacts {
 /// What installing one program adds to the machine-owned evidence indexes.
 struct EvidencePlan {
     sites: Vec<(u64, usize)>,
-    verb_sites: Vec<(DataConId, usize)>,
+    constructor_replies: Vec<(DataConId, usize)>,
 }
 
 /// Everything [`PreparedEngine::snapshot_install`] produces under a machine
@@ -1319,8 +1342,24 @@ struct StructuralFrame {
     counts_depth: bool,
 }
 
+/// Reply origin used by structural refusal diagnostics; static replies have no site ID.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReplyTarget {
+    Static(DataConId),
+    AtSite(u64),
+}
+
+impl std::fmt::Display for ReplyTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Static(constructor) => write!(f, "constructor {constructor:?}"),
+            Self::AtSite(site) => write!(f, "site {site}"),
+        }
+    }
+}
+
 struct StructuralAnswerVisitor<'facts, 'builder, 'machine, 'code> {
-    site: u64,
+    site: ReplyTarget,
     root: TypeNodeId,
     facts: &'facts ProgramFacts,
     builder: &'builder mut ManagedBuilder<'machine, 'code>,
@@ -1716,57 +1755,10 @@ impl HaskellVisitor for StructuralAnswerVisitor<'_, '_, '_, '_> {
     }
 }
 
-/// The constructor `response` visits as exactly one field-less constructor,
-/// or `None` for any other shape (fields, literals, byte arrays, nesting).
-fn nullary_constructor_of(
-    response: &dyn tidepool_bridge::ToHaskell,
-    table: &DataConTable,
-) -> Option<DataConId> {
-    #[derive(Default)]
-    struct Nullary {
-        id: Option<DataConId>,
-        open: bool,
-    }
-    impl Nullary {
-        fn reject(got: &str) -> BridgeError {
-            BridgeError::TypeMismatch {
-                expected: "one field-less constructor".into(),
-                got: got.into(),
-            }
-        }
-    }
-    impl HaskellVisitor for Nullary {
-        fn begin_constructor(&mut self, id: DataConId, fields: usize) -> Result<(), BridgeError> {
-            if fields != 0 || self.id.is_some() {
-                return Err(Self::reject("a constructor with fields"));
-            }
-            self.id = Some(id);
-            self.open = true;
-            Ok(())
-        }
-        fn end_constructor(&mut self) -> Result<(), BridgeError> {
-            if !self.open {
-                return Err(Self::reject("an unmatched constructor end"));
-            }
-            self.open = false;
-            Ok(())
-        }
-        fn literal(&mut self, _: Literal) -> Result<(), BridgeError> {
-            Err(Self::reject("a literal"))
-        }
-        fn byte_array(&mut self, _: Vec<u8>) -> Result<(), BridgeError> {
-            Err(Self::reject("a byte array"))
-        }
-    }
-    let mut visitor = Nullary::default();
-    response.visit(table, &mut visitor).ok()?;
-    (!visitor.open).then_some(visitor.id).flatten()
-}
-
 fn build_structural_node(
     response: &dyn tidepool_bridge::ToHaskell,
     table: &DataConTable,
-    site: u64,
+    site: ReplyTarget,
     root: TypeNodeId,
     facts: &ProgramFacts,
     builder: &mut ManagedBuilder<'_, '_>,
@@ -1815,7 +1807,7 @@ fn build_framed_structural_node(
     constructor: DataConId,
     field_nodes: &[TypeNodeId],
     table: &DataConTable,
-    site: u64,
+    site: ReplyTarget,
     root: TypeNodeId,
     facts: &ProgramFacts,
     builder: &mut ManagedBuilder<'_, '_>,
@@ -2016,6 +2008,21 @@ impl HaskellVisitor for ManagedMountVisitor<'_, '_, '_> {
 /// by family and constructor identity with ordered arguments, never by local
 /// node or constructor numbers. Cycles (recursive types) are compared
 /// coinductively: a node pair already under comparison is taken as equal.
+fn constructor_replies_equivalent(
+    a: &ProgramFacts,
+    x: ConstructorReply,
+    b: &ProgramFacts,
+    y: ConstructorReply,
+) -> bool {
+    match (x, y) {
+        (ConstructorReply::AtSite, ConstructorReply::AtSite) => true,
+        (ConstructorReply::Static(x), ConstructorReply::Static(y)) => {
+            type_nodes_equivalent(a, x, b, y, &mut BTreeSet::new())
+        }
+        _ => false,
+    }
+}
+
 fn sites_equivalent(a: &ProgramFacts, a_row: &SiteRow, b: &ProgramFacts, b_row: &SiteRow) -> bool {
     if a_row.delivery != b_row.delivery || a_row.inputs.len() != b_row.inputs.len() {
         return false;
@@ -2086,16 +2093,14 @@ fn type_nodes_equivalent<A: TypeGraph, B: TypeGraph>(
     }
 }
 
-/// The site a frame parks under when its request has an open reply type.
-/// Zero is never a declared site (`check_sites` refuses it).
-const UNSITED: u64 = 0;
-
 /// A boxed or unboxed non-negative `Int` field: the leading site argument of
 /// an extractor-sited kernel request.
 fn site_field(field: &HaskellValue, table: &DataConTable) -> Option<u64> {
     match field {
         HaskellValue::Lit(Literal::LitInt(n)) => u64::try_from(*n).ok(),
-        HaskellValue::Con(id, inner) if table.name_of(*id) == Some("I#") => {
+        HaskellValue::Con(id, inner)
+            if table.get_by_qualified_name("GHC.Types.I#") == Some(*id) =>
+        {
             match inner.as_slice() {
                 [HaskellValue::Lit(Literal::LitInt(n))] => u64::try_from(*n).ok(),
                 _ => None,
@@ -2103,78 +2108,6 @@ fn site_field(field: &HaskellValue, table: &DataConTable) -> Option<u64> {
         }
         _ => None,
     }
-}
-
-/// The typed site a suspended request names, read from the request's
-/// rendered payload: the protocol's sited helpers place the site id under the
-/// `typedSite` key of the request's JSON payload object
-/// (`tidepool-protocol`'s `ObjectValue::Site`), the same field the harness
-/// uses to classify a suspension. `None` for a request that carries no such
-/// field: an ordinary handled effect.
-fn typed_site_of(request: &HaskellValue, table: &DataConTable) -> Option<u64> {
-    /// The `Text`/string-literal content of an aeson `Key`/`HaskellValue` leaf.
-    fn value_text(value: &HaskellValue, table: &DataConTable) -> Option<String> {
-        match value {
-            HaskellValue::Lit(Literal::LitString(bytes)) => {
-                std::str::from_utf8(bytes).ok().map(str::to_owned)
-            }
-            HaskellValue::Con(id, fields) if table.name_of(*id) == Some("Text") => {
-                tidepool_bridge::shapes::text_bytes_clamped(fields, table)
-                    .and_then(|bytes| String::from_utf8(bytes).ok())
-            }
-            _ => None,
-        }
-    }
-    /// The numeric content of a `typedSite` leaf: an unboxed or boxed
-    /// integral literal, or an aeson `Number` wrapping one. This is the one
-    /// leaf this walk ever renders through the snapshot JSON renderer — never
-    /// the whole request.
-    fn value_u64(value: &HaskellValue, table: &DataConTable) -> Option<u64> {
-        match value {
-            HaskellValue::Lit(Literal::LitInt(n)) => u64::try_from(*n).ok(),
-            HaskellValue::Lit(Literal::LitWord(n)) => Some(*n),
-            HaskellValue::Con(_, _) => match crate::render::value_to_json(value, table, 0) {
-                serde_json::Value::Number(n) => n.as_u64(),
-                _ => None,
-            },
-            _ => None,
-        }
-    }
-    /// Walk the request's `HaskellValue` tree directly (never its JSON rendering)
-    /// looking for an aeson `Object` layer with a `typedSite` entry, the same
-    /// depth bound (4) the JSON walk used.
-    fn search(value: &HaskellValue, table: &DataConTable, depth: usize) -> Option<u64> {
-        if depth > 4 {
-            return None;
-        }
-        let HaskellValue::Con(id, fields) = value else {
-            return None;
-        };
-        if table.name_of(*id) == Some("Object") {
-            if let [map_val] = fields.as_slice() {
-                let mut found = None;
-                tidepool_bridge::shapes::walk_map_entries(
-                    map_val,
-                    table,
-                    0,
-                    MAX_ANSWER_DEPTH,
-                    &mut |key, val, _| {
-                        if found.is_none() && value_text(key, table).as_deref() == Some("typedSite")
-                        {
-                            found = value_u64(val, table);
-                        }
-                    },
-                );
-                if found.is_some() {
-                    return found;
-                }
-            }
-        }
-        fields
-            .iter()
-            .find_map(|field| search(field, table, depth + 1))
-    }
-    search(request, table, 0)
 }
 
 // ---------------------------------------------------------------------------
@@ -2199,11 +2132,10 @@ pub struct PreparedEngine {
     /// transaction before any code is compiled; a conflicting duplicate
     /// refuses the install (see [`Self::install`]).
     sites: BTreeMap<u64, SiteWitness>,
-    /// The machine-owned verb index: which installed program's synthetic
-    /// site row answers an ordinary effect request, by the request's outer
-    /// constructor. Extended in the same install transaction as `sites`,
-    /// under the same structural-equivalence rule.
-    verb_sites: BTreeMap<DataConId, SiteWitness>,
+    /// Canonical evidence for exact request constructors. Each witness indexes
+    /// the owner's immutable constructor reply table; static replies never
+    /// manufacture a site row.
+    constructor_replies: BTreeMap<DataConId, SiteWitness>,
     /// Prepared old-space bytes as of the last successful
     /// [`Self::quiesce_and_collect`] (the compacted figure
     /// `RetirementReceipt::old_bytes` reports); `0` before any collection
@@ -2933,7 +2865,7 @@ impl PreparedEngine {
             machine,
             programs: BTreeMap::new(),
             sites: BTreeMap::new(),
-            verb_sites: BTreeMap::new(),
+            constructor_replies: BTreeMap::new(),
             old_bytes: 0,
             installs_since_major: 0,
             old_bytes_at_last_major: 0,
@@ -2993,40 +2925,40 @@ impl PreparedEngine {
         Ok(planned)
     }
 
-    /// The verb-index entries of `facts` that installing it would make
-    /// canonical, under [`Self::plan_sites`]'s rule keyed by request
-    /// constructor: a constructor already indexed (or earlier in `facts`)
-    /// must be answered by a structurally equivalent row, and keeps its
-    /// existing owner; otherwise the install is refused.
-    fn plan_verb_sites(
+    fn plan_constructor_replies(
         &self,
         facts: &ProgramFacts,
     ) -> Result<Vec<(DataConId, usize)>, PreparedRuntimeError> {
         let mut planned: Vec<(DataConId, usize)> = Vec::new();
-        for &(host_id, row) in &facts.verb_sites {
-            let site = &facts.sites[row];
-            let (owner, owner_facts, owner_row) =
-                if let Some(witness) = self.verb_sites.get(&host_id) {
+        for (row, &(host_id, reply)) in facts.constructor_replies.iter().enumerate() {
+            let (owner, owner_facts, owner_reply) =
+                if let Some(witness) = self.constructor_replies.get(&host_id) {
                     let owner =
                         self.programs
                             .get(&witness.owner)
                             .ok_or(PreparedRuntimeError::Install(
                                 ExecutionError::UnknownProgram(witness.owner),
                             ))?;
-                    (Some(witness.owner), owner, &owner.sites[witness.row])
+                    (
+                        Some(witness.owner),
+                        owner,
+                        owner.constructor_replies[witness.row].1,
+                    )
                 } else if let Some((_, earlier)) = planned.iter().find(|(id, _)| *id == host_id) {
-                    (None, facts, &facts.sites[*earlier])
+                    (None, facts, facts.constructor_replies[*earlier].1)
                 } else {
                     planned.push((host_id, row));
                     continue;
                 };
-            if !sites_equivalent(owner_facts, owner_row, facts, site) {
+            if !constructor_replies_equivalent(owner_facts, owner_reply, facts, reply) {
                 return Err(match owner {
-                    Some(owner) => PreparedRuntimeError::SiteConflict {
-                        site: site.site,
+                    Some(owner) => PreparedRuntimeError::ConstructorReplyConflict {
+                        constructor: host_id,
                         owner,
                     },
-                    None => PreparedRuntimeError::DuplicateSite { site: site.site },
+                    None => PreparedRuntimeError::DuplicateConstructorReply {
+                        constructor: host_id,
+                    },
                 });
             }
         }
@@ -3038,7 +2970,7 @@ impl PreparedEngine {
     fn plan_evidence(&self, facts: &ProgramFacts) -> Result<EvidencePlan, PreparedRuntimeError> {
         Ok(EvidencePlan {
             sites: self.plan_sites(facts)?,
-            verb_sites: self.plan_verb_sites(facts)?,
+            constructor_replies: self.plan_constructor_replies(facts)?,
         })
     }
 
@@ -3071,16 +3003,16 @@ impl PreparedEngine {
             }
             plan.sites = accepted_sites;
             let mut accepted_verbs = Vec::new();
-            for (host_id, row) in plan.verb_sites.drain(..) {
+            for (host_id, row) in plan.constructor_replies.drain(..) {
                 if let Some(&(prior_group, prior_row)) = verbs.get(&host_id) {
-                    if !sites_equivalent(
+                    if !constructor_replies_equivalent(
                         &facts[prior_group],
-                        &facts[prior_group].sites[prior_row],
+                        facts[prior_group].constructor_replies[prior_row].1,
                         group_facts,
-                        &group_facts.sites[row],
+                        group_facts.constructor_replies[row].1,
                     ) {
-                        return Err(PreparedRuntimeError::DuplicateSite {
-                            site: group_facts.sites[row].site,
+                        return Err(PreparedRuntimeError::DuplicateConstructorReply {
+                            constructor: host_id,
                         });
                     }
                 } else {
@@ -3088,7 +3020,7 @@ impl PreparedEngine {
                     accepted_verbs.push((host_id, row));
                 }
             }
-            plan.verb_sites = accepted_verbs;
+            plan.constructor_replies = accepted_verbs;
             plans.push(plan);
         }
         Ok(plans)
@@ -3282,8 +3214,7 @@ impl PreparedEngine {
         self.code_exports.len()
     }
 
-    /// Make `program` the canonical owner of the planned rows and verb
-    /// entries.
+    /// Publish canonical site and constructor reply ownership together.
     fn publish_evidence(&mut self, program: ProgramId, plan: EvidencePlan) {
         let witness = |row| SiteWitness {
             owner: program,
@@ -3294,8 +3225,8 @@ impl PreparedEngine {
                 .into_iter()
                 .map(|(site, row)| (site, witness(row))),
         );
-        self.verb_sites.extend(
-            plan.verb_sites
+        self.constructor_replies.extend(
+            plan.constructor_replies
                 .into_iter()
                 .map(|(host_id, row)| (host_id, witness(row))),
         );
@@ -4678,35 +4609,93 @@ impl PreparedEngine {
         Ok((program, settlement))
     }
 
-    /// Park a suspension `program`'s settled layer produced under `realm`:
-    /// read the `Union` layer of `request`, observe its payload through the
-    /// machine observe path (the request the host reports), read
-    /// the typed site it names, resolve that site through the machine-owned
-    /// index to its evidence owner, and park `continuation` with that
-    /// evidence and `program`'s admitted resume entry. Every refusal releases
-    /// both handles and parks nothing: a runner without a resume entry, a
-    /// suspension under `HandleOrError` (nothing is handled on this route
-    /// yet), a request without a typed site (an ordinary handled effect, not
-    /// yet answered on this route), or a site no installed program declares.
-    ///
-    /// `pub`, not `pub(crate)`: this method is self-contained on `Self` —
-    /// every input it reads (`self.sites`/`self.verb_sites`/`self.programs`,
-    /// all populated by [`Self::bootstrap`]/[`Self::install`]) and mutates
-    /// (the machine's own park registry) belongs to the engine itself, with
-    /// no session, actor, or lexical-scope bookkeeping folded in. The rest of
-    /// the parked-continuation cycle this feeds — [`Self::resume_with_structural_answer`],
-    /// [`Self::parked_count`], [`Self::stowed_roots_count`],
-    /// [`Self::parked_ids`], [`Self::parked_realm`], [`Self::close_realm`],
-    /// [`Self::abort_parked`] — was already `pub`; this was the one private
-    /// step in an otherwise-public cycle.
-    ///
-    /// Per `docs/continuation-parking-contract.md`'s "Consumer obligations":
-    /// the returned [`PreparedParked::id`] is the caller's to retain — this
-    /// engine enforces no capacity limit (e.g. "one outstanding turn") and no
-    /// actor-local grant or principal check; those remain the caller's, same
-    /// as on `PreparedEngine`. A parked frame is a registered GC root until
-    /// resumed or its resource scope closes; an unresumed park that the caller drops
-    /// on the floor leaks a root until [`Self::close_realm`].
+    fn classify_reply(
+        &self,
+        request: &HaskellValue,
+        table: &DataConTable,
+    ) -> Result<PreparedReplyEvidence, PreparedRuntimeError> {
+        let HaskellValue::Con(constructor, fields) = request else {
+            return Err(PreparedRuntimeError::UntypedRequest {
+                constructor: "a non-constructor value".into(),
+            });
+        };
+        let witness = self.constructor_replies.get(constructor).ok_or(
+            PreparedRuntimeError::MissingReplyEvidence {
+                constructor: *constructor,
+            },
+        )?;
+        let facts = self
+            .programs
+            .get(&witness.owner)
+            .ok_or(PreparedRuntimeError::Run(ExecutionError::UnknownProgram(
+                witness.owner,
+            )))?;
+        match facts.constructor_replies[witness.row].1 {
+            ConstructorReply::Static(node) => Ok(PreparedReplyEvidence::Static {
+                owner: witness.owner,
+                constructor: *constructor,
+                node,
+            }),
+            ConstructorReply::AtSite => {
+                let site = fields
+                    .first()
+                    .and_then(|field| site_field(field, table))
+                    .ok_or(PreparedRuntimeError::MalformedRequestSite {
+                        constructor: *constructor,
+                    })?;
+                let witness = self
+                    .sites
+                    .get(&site)
+                    .ok_or(PreparedRuntimeError::UnknownSite { site })?;
+                Ok(PreparedReplyEvidence::AtSite {
+                    owner: witness.owner,
+                    row: witness.row,
+                })
+            }
+        }
+    }
+
+    fn structural_reply(
+        &self,
+        reply: PreparedReplyEvidence,
+    ) -> Result<(ProgramId, TypeNodeId, ReplyTarget), PreparedRuntimeError> {
+        let owner = reply.owner();
+        let facts = self.programs.get(&owner).ok_or(PreparedRuntimeError::Run(
+            ExecutionError::UnknownProgram(owner),
+        ))?;
+        match reply {
+            PreparedReplyEvidence::Static {
+                constructor, node, ..
+            } => Ok((owner, node, ReplyTarget::Static(constructor))),
+            PreparedReplyEvidence::AtSite { row, .. } => {
+                let row = facts
+                    .sites
+                    .get(row)
+                    .ok_or(PreparedRuntimeError::MissingReplySiteRow { owner, row })?;
+                if row.delivery != SiteDelivery::HostAnswer {
+                    return Err(PreparedRuntimeError::AnswerDelivery {
+                        site: row.site,
+                        delivery: row.delivery,
+                    });
+                }
+                Ok((owner, row.wire, ReplyTarget::AtSite(row.site)))
+            }
+        }
+    }
+
+    /// Dynamic request site, if this frame carries compiler-attested AtSite evidence.
+    pub fn parked_site(&self, id: ContinuationId) -> Option<u64> {
+        let (_, evidence) = self.machine.parked(id)?;
+        let PreparedReplyEvidence::AtSite { owner, row } = evidence.reply else {
+            return None;
+        };
+        Some(self.programs.get(&owner)?.sites.get(row)?.site)
+    }
+
+    /// Observe and classify a suspension by its exact request constructor.
+    /// Only AtSite evidence admits the first erased RequestSite field. Every
+    /// refusal releases both handles before parking; a successful frame roots
+    /// the reply evidence owner independently of the runner and continuation.
     pub fn park_suspension(
         &mut self,
         program: ProgramId,
@@ -4786,92 +4775,9 @@ impl PreparedEngine {
                 return Err(PreparedRuntimeError::Run(error));
             }
         };
-        // A request carrying a dynamic site names it; an ordinary effect
-        // request is classified by its outer constructor through the verb
-        // index, which names the synthetic row answering it.
-        let classified = match typed_site_of(&request, table) {
-            Some(site) => self
-                .sites
-                .get(&site)
-                .map(|witness| (site, witness.owner))
-                .ok_or(PreparedRuntimeError::UnknownSite { site }),
-            None => match &request {
-                HaskellValue::Con(host_id, fields) => Ok(self
-                    .verb_sites
-                    .get(host_id)
-                    .and_then(|witness| {
-                        let row = self.programs.get(&witness.owner)?.sites.get(witness.row)?;
-                        Some((row.site, *witness))
-                    })
-                    .or_else(|| {
-                        // Kernel requests of an extractor-sited verb
-                        // (`receiveSited`, `serveSited`) carry the site id as
-                        // their first `Int` field; the reply index is open,
-                        // so they have no synthetic row.
-                        let site = fields.first().and_then(|field| site_field(field, table))?;
-                        self.sites.get(&site).map(|witness| (site, *witness))
-                    })
-                    // A request without structural reply evidence parks
-                    // unsited. Absence alone does not classify its reply type.
-                    .map_or_else(
-                        || {
-                            if tracing::enabled!(
-                                target: "tidepool_runtime::session::prepared_reply",
-                                tracing::Level::DEBUG
-                            ) {
-                                let indexed_witness = self.verb_sites.get(host_id);
-                                let indexed_owner = indexed_witness
-                                    .and_then(|witness| self.programs.get(&witness.owner));
-                                let indexed_owner_live = indexed_witness.map(|_| indexed_owner.is_some());
-                                let indexed_row_live = indexed_witness.zip(indexed_owner)
-                                    .map(|(witness, facts)| facts.sites.get(witness.row).is_some());
-                                let matching_owners: Vec<_> = self
-                                    .programs
-                                    .iter()
-                                    .filter_map(|(owner, facts)| {
-                                        facts.constructors.iter().find_map(
-                                            |(identity, constructor, _)| {
-                                                (*constructor == *host_id).then_some((
-                                                    *owner,
-                                                    identity,
-                                                    facts.sites.len(),
-                                                    facts.verb_sites.len(),
-                                                ))
-                                            },
-                                        )
-                                    })
-                                    .take(16)
-                                    .collect();
-                                tracing::debug!(
-                                    target: "tidepool_runtime::session::prepared_reply",
-                                    ?program,
-                                    ?host_id,
-                                    ?indexed_witness,
-                                    ?indexed_owner_live,
-                                    ?indexed_row_live,
-                                    ?matching_owners,
-                                    matching_owner_limit = 16,
-                                    installed_programs = self.programs.len(),
-                                    installed_verb_sites = self.verb_sites.len(),
-                                    dynamic_site_candidate = ?fields
-                                        .first()
-                                        .and_then(|field| site_field(field, table)),
-                                    reply_evidence = "absent",
-                                    reply_type = "unattested",
-                                    "parked request has no usable static or dynamic reply row; absence does not prove an open type"
-                                );
-                            }
-                            (UNSITED, program)
-                        },
-                        |(site, witness)| (site, witness.owner),
-                    )),
-                _ => Err(PreparedRuntimeError::UntypedRequest {
-                    constructor: "a non-constructor value".to_owned(),
-                }),
-            },
-        };
-        let (site, owner) = match classified {
-            Ok(classified) => classified,
+        let classified = self.classify_reply(&request, table);
+        let reply = match classified {
+            Ok(reply) => reply,
             Err(error) => {
                 self.machine.release(payload);
                 self.machine.release(continuation);
@@ -4895,8 +4801,7 @@ impl PreparedEngine {
             };
         self.machine.release(payload);
         let evidence = PreparedFrameEvidence {
-            owner,
-            site,
+            reply,
             runner: program,
             resume_entry,
             continuation_rep: continuation.rep(),
@@ -5167,33 +5072,18 @@ impl PreparedEngine {
             ExecutionError::UnknownContinuation(id),
         ))?;
         let evidence = *evidence;
-        let site = evidence.site;
-        if site == UNSITED {
-            return Err(PreparedRuntimeError::UnsitedAnswer);
-        }
+        let (owner_id, wire, site) = self.structural_reply(evidence.reply)?;
         let (programs, machine) = (&self.programs, &mut self.machine);
-        let owner = programs
-            .get(&evidence.owner)
-            .ok_or(PreparedRuntimeError::Run(ExecutionError::UnknownProgram(
-                evidence.owner,
-            )))?;
-        let row = owner
-            .sites
-            .iter()
-            .find(|row| row.site == site)
-            .ok_or(PreparedRuntimeError::UnknownSite { site })?;
-        if row.delivery != SiteDelivery::HostAnswer {
-            return Err(PreparedRuntimeError::AnswerDelivery {
-                site,
-                delivery: row.delivery,
-            });
-        }
-        let ctor_row = owner.row_for(row.wire, constructor).ok_or(
-            PreparedRuntimeError::AnswerConstructor {
-                site,
-                host_id: constructor,
-            },
-        )?;
+        let owner = programs.get(&owner_id).ok_or(PreparedRuntimeError::Run(
+            ExecutionError::UnknownProgram(owner_id),
+        ))?;
+        let ctor_row =
+            owner
+                .row_for(wire, constructor)
+                .ok_or(PreparedRuntimeError::AnswerConstructor {
+                    site,
+                    host_id: constructor,
+                })?;
         if ctor_row.fields.len() != prefix.len() + 1 {
             return Err(PreparedRuntimeError::AnswerShape {
                 site,
@@ -5213,7 +5103,7 @@ impl PreparedEngine {
             &ctor_row.fields,
             table,
             site,
-            row.wire,
+            wire,
             owner,
             &mut builder,
         )?;
@@ -5259,66 +5149,18 @@ impl PreparedEngine {
             ExecutionError::UnknownContinuation(id),
         ))?;
         let evidence = *evidence;
-        if evidence.site == UNSITED {
-            return self.resume_unsited_with_nullary(id, realm, response, table);
-        }
         if self.cancellation_requested(realm) {
             return Err(PreparedRuntimeError::Cancelled);
         }
-        let site = evidence.site;
+        let (owner_id, wire, site) = self.structural_reply(evidence.reply)?;
         let (programs, machine) = (&self.programs, &mut self.machine);
-        let owner = programs
-            .get(&evidence.owner)
-            .ok_or(PreparedRuntimeError::Run(ExecutionError::UnknownProgram(
-                evidence.owner,
-            )))?;
-        let row = owner
-            .sites
-            .iter()
-            .find(|row| row.site == site)
-            .ok_or(PreparedRuntimeError::UnknownSite { site })?;
-        if row.delivery != SiteDelivery::HostAnswer {
-            return Err(PreparedRuntimeError::AnswerDelivery {
-                site,
-                delivery: row.delivery,
-            });
-        }
+        let owner = programs.get(&owner_id).ok_or(PreparedRuntimeError::Run(
+            ExecutionError::UnknownProgram(owner_id),
+        ))?;
         let mut builder = machine
             .managed_builder()
             .map_err(PreparedRuntimeError::Run)?;
-        let root = build_structural_node(response, table, site, row.wire, owner, &mut builder)?;
-        let answer = builder
-            .finish(realm, root)
-            .map_err(PreparedRuntimeError::Run)?;
-        self.resume_parked(id, answer)
-    }
-
-    /// The one host-built answer an open-reply frame ([`UNSITED`]) accepts:
-    /// a field-less constructor. The frame carries no wire evidence, so the
-    /// constructor is built from the machine's authenticated descriptors
-    /// alone; anything with a field is [`PreparedRuntimeError::UnsitedAnswer`]
-    /// and the frame stays parked. `Tidepool.Actor.statefulLoop` parks its
-    /// receive this way on purpose (its reply type `Maybe state` is open
-    /// until the handler runs) and a drain resumes it with `Nothing`.
-    fn resume_unsited_with_nullary(
-        &mut self,
-        id: ContinuationId,
-        realm: RealmId,
-        response: &dyn tidepool_bridge::ToHaskell,
-        table: &DataConTable,
-    ) -> Result<PreparedResumed, PreparedRuntimeError> {
-        let host_id =
-            nullary_constructor_of(response, table).ok_or(PreparedRuntimeError::UnsitedAnswer)?;
-        if self.cancellation_requested(realm) {
-            return Err(PreparedRuntimeError::Cancelled);
-        }
-        let mut builder = self
-            .machine
-            .managed_builder()
-            .map_err(PreparedRuntimeError::Run)?;
-        let root = builder
-            .constructor(host_id, &[])
-            .map_err(PreparedRuntimeError::Run)?;
+        let root = build_structural_node(response, table, site, wire, owner, &mut builder)?;
         let answer = builder
             .finish(realm, root)
             .map_err(PreparedRuntimeError::Run)?;
@@ -5779,11 +5621,8 @@ impl PreparedEngine {
         self.old_bytes
     }
 
-    /// Site and verb witnesses `retired` canonically owned: each moves to a
-    /// still-installed program that declares a structurally equivalent row
-    /// for the same site id (or request constructor) ([`sites_equivalent`]),
-    /// or is dropped if none remains -- a later install can re-claim it
-    /// fresh.
+    /// Move canonical site and constructor witnesses to equivalent live
+    /// declarations, or remove them when their final owner retires.
     fn retire_site_witnesses(&mut self, retired: ProgramId, facts: &ProgramFacts) {
         let owned: Vec<u64> = self
             .sites
@@ -5819,14 +5658,14 @@ impl PreparedEngine {
             }
         }
         let owned: Vec<(DataConId, usize)> = self
-            .verb_sites
+            .constructor_replies
             .iter()
             .filter(|(_, witness)| witness.owner == retired)
             .map(|(host_id, witness)| (*host_id, witness.row))
             .collect();
         for (host_id, row) in owned {
-            let Some(row) = facts.sites.get(row) else {
-                self.verb_sites.remove(&host_id);
+            let Some((_, reply)) = facts.constructor_replies.get(row) else {
+                self.constructor_replies.remove(&host_id);
                 continue;
             };
             let successor = self
@@ -5834,28 +5673,29 @@ impl PreparedEngine {
                 .iter()
                 .find_map(|(candidate, candidate_facts)| {
                     candidate_facts
-                        .verb_sites
+                        .constructor_replies
                         .iter()
-                        .find(|(candidate_host, candidate_row)| {
+                        .enumerate()
+                        .find(|(_, (candidate_host, candidate_reply))| {
                             *candidate_host == host_id
-                                && sites_equivalent(
+                                && constructor_replies_equivalent(
                                     facts,
-                                    row,
+                                    *reply,
                                     candidate_facts,
-                                    &candidate_facts.sites[*candidate_row],
+                                    *candidate_reply,
                                 )
                         })
-                        .map(|(_, candidate_row)| SiteWitness {
+                        .map(|(row, _)| SiteWitness {
                             owner: *candidate,
-                            row: *candidate_row,
+                            row,
                         })
                 });
             match successor {
                 Some(witness) => {
-                    self.verb_sites.insert(host_id, witness);
+                    self.constructor_replies.insert(host_id, witness);
                 }
                 None => {
-                    self.verb_sites.remove(&host_id);
+                    self.constructor_replies.remove(&host_id);
                 }
             }
         }
@@ -6287,7 +6127,7 @@ pub(super) mod tests {
                 tops: BTreeMap::new(),
                 sites: Vec::new(),
                 types: Vec::new(),
-                verb_sites: Vec::new(),
+                constructor_replies: Vec::new(),
                 constructors,
                 json_layout: None,
                 by_identity,
@@ -6635,7 +6475,7 @@ pub(super) mod tests {
             engine.code_export_count(),
             engine.programs.len(),
             engine.sites.len(),
-            engine.verb_sites.len(),
+            engine.constructor_replies.len(),
         );
         let mut aborted = engine
             .install_certified_turn(
@@ -6674,7 +6514,7 @@ pub(super) mod tests {
                 engine.code_export_count(),
                 engine.programs.len(),
                 engine.sites.len(),
-                engine.verb_sites.len(),
+                engine.constructor_replies.len(),
             ),
             before_abort,
         );
@@ -9085,6 +8925,16 @@ pub(super) mod tests {
     }
 
     fn json_mount_program_with_verb(include_verb: bool) -> PreparedProgram {
+        json_mount_program_with_replies(if include_verb {
+            vec![(ConstructorId(0), ConstructorReply::Static(TypeNodeId(0)))]
+        } else {
+            vec![]
+        })
+    }
+
+    fn json_mount_program_with_replies(
+        replies: Vec<(ConstructorId, ConstructorReply)>,
+    ) -> PreparedProgram {
         let mut wire = testing::wire_program();
         wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
         wire.constructors = vec![
@@ -9414,13 +9264,7 @@ pub(super) mod tests {
             text: ConstructorId(16),
             int: ConstructorId(15),
         });
-        if include_verb {
-            let mut verb = wire.sites[0].clone();
-            verb.site = tidepool_repr::execution_schema::SYNTHETIC_SITE_BIT | 7;
-            verb.ordinal = 2;
-            wire.verb_sites.push((ConstructorId(0), verb.site));
-            wire.sites.push(verb);
-        }
+        wire.constructor_replies = replies;
         testing::prepare(wire).expect("JSON mount fixture")
     }
 
@@ -9457,6 +9301,105 @@ pub(super) mod tests {
                 .unwrap();
         }
         table
+    }
+
+    fn park_json_fixture_request(
+        reply: Option<ConstructorReply>,
+        first_field: i64,
+        payload: serde_json::Value,
+    ) -> (
+        PreparedEngine,
+        ProgramId,
+        Result<PreparedParked, PreparedRuntimeError>,
+    ) {
+        let prepared = json_mount_program_with_replies(
+            reply
+                .map(|reply| (ConstructorId(22), reply))
+                .into_iter()
+                .collect(),
+        );
+        let layout = prepared
+            .json_layout()
+            .unwrap()
+            .try_map(|constructor| {
+                prepared
+                    .constructors()
+                    .get(constructor.0 as usize)
+                    .map(|declaration| declaration.host_id)
+                    .ok_or(())
+            })
+            .unwrap();
+        let table = json_mount_table().with_json_layout(Some(layout));
+        let (mut engine, program) = PreparedEngine::bootstrap(prepared).unwrap();
+        let payload = payload.to_value(&table).unwrap();
+        let request = HaskellValue::Con(
+            DataConId(901),
+            vec![HaskellValue::Con(
+                DataConId(903),
+                vec![HaskellValue::Lit(Literal::LitInt(first_field)), payload],
+            )],
+        );
+        let request = engine
+            .build_host_value(RealmId::ROOT, &request, &table)
+            .unwrap();
+        let continuation = engine
+            .build_host_value(
+                RealmId::ROOT,
+                &HaskellValue::Con(DataConId(105), vec![]),
+                &table,
+            )
+            .unwrap();
+        let parked = engine.park_suspension(
+            program,
+            RealmId::ROOT,
+            ParkPolicy {
+                principal: PrincipalId::SYSTEM,
+                effect_policy: EffectRunPolicy::SuspendAll,
+                live_payload: LivePayloadPolicy::None,
+            },
+            request,
+            continuation,
+            &table,
+        );
+        (engine, program, parked)
+    }
+
+    #[test]
+    fn nested_user_typed_site_cannot_override_static_reply_evidence() {
+        let (mut engine, owner, parked) = park_json_fixture_request(
+            Some(ConstructorReply::Static(TypeNodeId(0))),
+            8,
+            serde_json::json!({"user": {"typedSite": 8}}),
+        );
+        let parked = parked.unwrap();
+        let (realm, evidence) = engine.parked(parked.id).unwrap();
+        assert_eq!(realm, RealmId::ROOT);
+        assert_eq!(
+            evidence.reply,
+            PreparedReplyEvidence::Static {
+                owner,
+                constructor: DataConId(903),
+                node: TypeNodeId(0)
+            }
+        );
+        assert_eq!(engine.parked_site(parked.id), None);
+        engine.abort_parked(parked.id).unwrap();
+        assert_eq!(engine.parked_count(), 0);
+        assert_eq!(engine.handle_count(), 0);
+    }
+
+    #[test]
+    fn unattested_request_refuses_unrelated_int_without_parking_or_leaking_roots() {
+        let (engine, _, parked) = park_json_fixture_request(None, 8, serde_json::Value::Null);
+        assert!(matches!(
+            parked,
+            Err(PreparedRuntimeError::MissingReplyEvidence {
+                constructor: DataConId(903)
+            })
+        ));
+        assert_eq!(engine.parked_count(), 0);
+        assert_eq!(engine.handle_count(), 0);
+        assert_eq!(engine.stowed_roots_count(), 0);
     }
 
     #[test]
@@ -9552,8 +9495,10 @@ pub(super) mod tests {
                             effect_policy: EffectRunPolicy::SuspendAll,
                             live_payload: LivePayloadPolicy::None,
                             evidence: PreparedFrameEvidence {
-                                owner: program,
-                                site: 7,
+                                reply: PreparedReplyEvidence::AtSite {
+                                    owner: program,
+                                    row: 0,
+                                },
                                 runner: program,
                                 resume_entry: ValueId(1),
                                 continuation_rep: RuntimeRep::LiftedRef,
@@ -9629,8 +9574,10 @@ pub(super) mod tests {
                     effect_policy: EffectRunPolicy::SuspendAll,
                     live_payload: LivePayloadPolicy::None,
                     evidence: PreparedFrameEvidence {
-                        owner: program,
-                        site: 7,
+                        reply: PreparedReplyEvidence::AtSite {
+                            owner: program,
+                            row: 0,
+                        },
                         runner: program,
                         resume_entry: ValueId(1),
                         continuation_rep: RuntimeRep::LiftedRef,
@@ -9681,8 +9628,14 @@ pub(super) mod tests {
                         effect_policy: EffectRunPolicy::SuspendAll,
                         live_payload: LivePayloadPolicy::None,
                         evidence: PreparedFrameEvidence {
-                            owner,
-                            site,
+                            reply: PreparedReplyEvidence::AtSite {
+                                owner,
+                                row: engine.programs[&owner]
+                                    .sites
+                                    .iter()
+                                    .position(|row| row.site == site)
+                                    .expect("declared reply site"),
+                            },
                             runner: owner,
                             resume_entry: ValueId(1),
                             continuation_rep: RuntimeRep::LiftedRef,
@@ -9791,7 +9744,10 @@ pub(super) mod tests {
         assert_ne!(first_owner, second_owner);
         assert_eq!(receiver.residency().programs, before + 2);
         assert_eq!(receiver.sites[&7].owner, first_owner);
-        assert_eq!(receiver.verb_sites[&DataConId(1)].owner, first_owner);
+        assert_eq!(
+            receiver.constructor_replies[&DataConId(1)].owner,
+            first_owner
+        );
         assert_eq!(receiver.installs_since_major(), before_installs + 2);
         answer_json(&mut receiver, first_owner);
         assert!(receiver.discard_handle(first_root));
@@ -9802,24 +9758,12 @@ pub(super) mod tests {
         assert!(!receiver.programs.contains_key(&first_owner));
         assert!(receiver.programs.contains_key(&second_owner));
         assert_eq!(receiver.sites[&7].owner, second_owner);
-        assert_eq!(receiver.verb_sites[&DataConId(1)].owner, second_owner);
+        assert_eq!(
+            receiver.constructor_replies[&DataConId(1)].owner,
+            second_owner
+        );
         answer_json(&mut receiver, second_owner);
 
-        let unsited = park_json_reply(&mut receiver, second_owner, UNSITED);
-        assert!(matches!(
-            receiver.resume_with_structural_answer(
-                unsited,
-                &serde_json::json!({"worked": [true]}),
-                &json_mount_table(),
-            ),
-            Err(PreparedRuntimeError::UnsitedAnswer)
-        ));
-        assert_eq!(
-            receiver.parked_count(),
-            1,
-            "untyped refusal retains the frame"
-        );
-        receiver.abort_parked(unsited).expect("abort unsited frame");
         assert!(receiver.discard_handle(second_root));
 
         let entry = first.programs[&first_program].entry;
@@ -9897,8 +9841,10 @@ pub(super) mod tests {
                     effect_policy: EffectRunPolicy::SuspendAll,
                     live_payload: LivePayloadPolicy::None,
                     evidence: PreparedFrameEvidence {
-                        owner: program,
-                        site: 8,
+                        reply: PreparedReplyEvidence::AtSite {
+                            owner: program,
+                            row: 1,
+                        },
                         runner: program,
                         resume_entry: ValueId(1),
                         continuation_rep: RuntimeRep::LiftedRef,
@@ -9957,10 +9903,9 @@ pub(super) mod tests {
         assert_eq!(engine.parked_count(), 0);
     }
 
-    /// A program that constructs nothing but declares an effect request
-    /// constructor (bridge id 77) answered at synthetic site `site` whose
-    /// reply evidence is `reply`.
-    fn verb_program(site: u64, reply: TypeNode) -> PreparedProgram {
+    /// An effect constructor with immutable static reply evidence. `revision`
+    /// distinguishes native fixture images without manufacturing reply sites.
+    fn verb_program(revision: u64, reply: TypeNode) -> PreparedProgram {
         let mut wire = testing::wire_program();
         wire.constructors = vec![ConstructorDecl {
             identity: testing::identity("Fixture.Effects", "Print"),
@@ -9979,15 +9924,11 @@ pub(super) mod tests {
             host_id: DataConId(77),
         }];
         wire.types = vec![reply];
-        wire.sites = vec![SiteRow {
-            site,
-            origin: "Fixture.Effects.Print".into(),
-            ordinal: 0,
-            delivery: SiteDelivery::HostAnswer,
-            wire: TypeNodeId(0),
-            inputs: vec![],
-        }];
-        wire.verb_sites = vec![(ConstructorId(0), site)];
+        if let Group::NonRecursive(top) = &mut wire.bindings[0] {
+            top.identity.occurrence = format!("entry_{revision}");
+        }
+        wire.constructor_replies =
+            vec![(ConstructorId(0), ConstructorReply::Static(TypeNodeId(0)))];
         testing::prepare(wire).expect("verb fixture validates")
     }
 
@@ -10120,10 +10061,261 @@ pub(super) mod tests {
         assert!(!wrong.request_scope_types_match(&evidence, 43));
     }
 
+    fn attested_request_program(reply: ConstructorReply) -> PreparedProgram {
+        let mut wire = testing::wire_program();
+        wire.constructors = vec![mount_constructor(
+            "Fixture",
+            "Request",
+            "Fixture",
+            "Effect",
+            77,
+            1,
+            1,
+            vec![RuntimeRep::Int(64)],
+        )];
+        wire.types = vec![TypeNode::Unconstructible {
+            reason: "polymorphic".into(),
+            rendered: "a".into(),
+        }];
+        wire.constructor_replies = vec![(ConstructorId(0), reply)];
+        wire.sites = vec![SiteRow {
+            site: 41,
+            origin: "Fixture.site".into(),
+            ordinal: 0,
+            delivery: SiteDelivery::LiveReentry,
+            wire: TypeNodeId(0),
+            inputs: vec![],
+        }];
+        testing::prepare(wire).unwrap()
+    }
+
+    fn park_attested_fixture(
+        engine: &mut PreparedEngine,
+        program: ProgramId,
+        reply: PreparedReplyEvidence,
+    ) -> ContinuationId {
+        let continuation = engine.machine.retain_top(program, ValueId(0)).unwrap();
+        engine
+            .machine
+            .park(
+                continuation,
+                RealmId::ROOT,
+                None,
+                ParkRequest {
+                    principal: PrincipalId::SYSTEM,
+                    effect_policy: EffectRunPolicy::SuspendAll,
+                    live_payload: LivePayloadPolicy::None,
+                    evidence: PreparedFrameEvidence {
+                        reply,
+                        runner: program,
+                        resume_entry: ValueId(0),
+                        continuation_rep: RuntimeRep::LiftedRef,
+                    },
+                },
+            )
+            .unwrap()
+    }
+
     #[test]
-    fn programs_declaring_the_same_effect_constructor_share_one_verb_witness() {
-        use tidepool_repr::execution_schema::SYNTHETIC_SITE_BIT;
-        let site = SYNTHETIC_SITE_BIT | 5;
+    fn static_reply_ignores_leading_int_and_nested_typed_site_payload() {
+        let (engine, owner) = PreparedEngine::bootstrap(attested_request_program(
+            ConstructorReply::Static(TypeNodeId(0)),
+        ))
+        .unwrap();
+        let table = json_mount_table();
+        let nested = serde_json::json!({"payload": {"typedSite": 41}})
+            .to_value(&table)
+            .unwrap();
+        for fields in [vec![HaskellValue::Lit(Literal::LitInt(41))], vec![nested]] {
+            assert_eq!(
+                engine
+                    .classify_reply(&HaskellValue::Con(DataConId(77), fields), &table)
+                    .unwrap(),
+                PreparedReplyEvidence::Static {
+                    owner,
+                    constructor: DataConId(77),
+                    node: TypeNodeId(0)
+                }
+            );
+        }
+        assert!(matches!(
+            engine.classify_reply(
+                &HaskellValue::Con(DataConId(999), vec![HaskellValue::Lit(Literal::LitInt(41))]),
+                &table
+            ),
+            Err(PreparedRuntimeError::MissingReplyEvidence {
+                constructor: DataConId(999)
+            })
+        ));
+    }
+
+    #[test]
+    fn at_site_requires_exact_first_carrier_and_checks_delivery() {
+        let (mut engine, owner) =
+            PreparedEngine::bootstrap(attested_request_program(ConstructorReply::AtSite)).unwrap();
+        let table = json_mount_table();
+        for fields in [
+            vec![],
+            vec![HaskellValue::Lit(Literal::LitInt(-1))],
+            vec![HaskellValue::Lit(Literal::LitWord(41))],
+            vec![serde_json::json!({"typedSite": 41})
+                .to_value(&table)
+                .unwrap()],
+        ] {
+            assert!(matches!(
+                engine.classify_reply(&HaskellValue::Con(DataConId(77), fields), &table),
+                Err(PreparedRuntimeError::MalformedRequestSite { .. })
+            ));
+        }
+        assert!(matches!(
+            engine.classify_reply(
+                &HaskellValue::Con(DataConId(77), vec![HaskellValue::Lit(Literal::LitInt(42))]),
+                &table
+            ),
+            Err(PreparedRuntimeError::UnknownSite { site: 42 })
+        ));
+        let reply = engine
+            .classify_reply(
+                &HaskellValue::Con(DataConId(77), vec![HaskellValue::Lit(Literal::LitInt(41))]),
+                &table,
+            )
+            .unwrap();
+        let id = park_attested_fixture(&mut engine, owner, reply);
+        assert_eq!(engine.parked_site(id), Some(41));
+        assert!(matches!(
+            engine.resume_with_structural_answer(
+                id,
+                &HaskellValue::Con(DataConId(105), vec![]),
+                &table
+            ),
+            Err(PreparedRuntimeError::AnswerDelivery {
+                site: 41,
+                delivery: SiteDelivery::LiveReentry
+            })
+        ));
+        assert_eq!(engine.parked_count(), 1);
+        engine.abort_parked(id).unwrap();
+    }
+
+    #[test]
+    fn unconstructible_static_reply_rejects_nullary_and_structural_values_without_consuming_frame()
+    {
+        let (mut engine, owner) = PreparedEngine::bootstrap(attested_request_program(
+            ConstructorReply::Static(TypeNodeId(0)),
+        ))
+        .unwrap();
+        let reply = PreparedReplyEvidence::Static {
+            owner,
+            constructor: DataConId(77),
+            node: TypeNodeId(0),
+        };
+        let id = park_attested_fixture(&mut engine, owner, reply);
+        let roots = engine.persistent_roots_count();
+        let table = json_mount_table();
+        for value in [
+            HaskellValue::Con(DataConId(105), vec![]),
+            HaskellValue::Con(
+                DataConId(103),
+                vec![HaskellValue::Con(DataConId(130), vec![])],
+            ),
+            HaskellValue::Lit(Literal::LitInt(41)),
+        ] {
+            assert!(engine
+                .resume_with_structural_answer(id, &value, &table)
+                .is_err());
+            assert_eq!(engine.parked_count(), 1);
+            assert_eq!(engine.persistent_roots_count(), roots);
+        }
+        engine.abort_parked(id).unwrap();
+    }
+
+    #[test]
+    fn partial_static_maybe_graph_accepts_nothing_only() {
+        let mut wire = testing::wire_program();
+        wire.constructors = vec![
+            mount_constructor("Fixture", "Request", "Fixture", "Effect", 77, 1, 1, vec![]),
+            mount_constructor(
+                "GHC.Maybe",
+                "Nothing",
+                "GHC.Maybe",
+                "Maybe",
+                78,
+                1,
+                2,
+                vec![],
+            ),
+            mount_constructor(
+                "GHC.Maybe",
+                "Just",
+                "GHC.Maybe",
+                "Maybe",
+                79,
+                2,
+                2,
+                vec![RuntimeRep::LiftedRef],
+            ),
+        ];
+        wire.types = vec![
+            TypeNode::Data {
+                family: wire.constructors[1].family.clone(),
+                arguments: vec![TypeNodeId(1)],
+                rows: vec![tidepool_repr::execution_schema::CtorRow {
+                    constructor: ConstructorId(1),
+                    fields: vec![],
+                }],
+            },
+            TypeNode::Unconstructible {
+                reason: "polymorphic".into(),
+                rendered: "state".into(),
+            },
+        ];
+        wire.constructor_replies =
+            vec![(ConstructorId(0), ConstructorReply::Static(TypeNodeId(0)))];
+        let (mut engine, owner) =
+            PreparedEngine::bootstrap(testing::prepare(wire).unwrap()).unwrap();
+        let mut table = DataConTable::new();
+        table.insert(mount_table_row(78, "Nothing", 0, Some("GHC.Maybe.Nothing")));
+        table.insert(mount_table_row(79, "Just", 1, Some("GHC.Maybe.Just")));
+        let reply = PreparedReplyEvidence::Static {
+            owner,
+            constructor: DataConId(77),
+            node: TypeNodeId(0),
+        };
+        let id = park_attested_fixture(&mut engine, owner, reply);
+        assert!(matches!(
+            engine.resume_with_structural_answer(
+                id,
+                &HaskellValue::Con(
+                    DataConId(79),
+                    vec![HaskellValue::Con(DataConId(78), vec![])]
+                ),
+                &table
+            ),
+            Err(PreparedRuntimeError::AnswerConstructor {
+                host_id: DataConId(79),
+                ..
+            })
+        ));
+        assert_eq!(engine.parked_count(), 1);
+        let (programs, machine) = (&engine.programs, &mut engine.machine);
+        let mut builder = machine.managed_builder().unwrap();
+        let node = build_structural_node(
+            &HaskellValue::Con(DataConId(78), vec![]),
+            &table,
+            ReplyTarget::Static(DataConId(77)),
+            TypeNodeId(0),
+            &programs[&owner],
+            &mut builder,
+        )
+        .unwrap();
+        let value = builder.finish(RealmId::ROOT, node).unwrap();
+        assert!(engine.release(value));
+        engine.abort_parked(id).unwrap();
+    }
+
+    #[test]
+    fn programs_declaring_the_same_effect_constructor_share_one_constructor_reply_witness() {
+        let site = 5;
         let (mut engine, first) =
             PreparedEngine::bootstrap(verb_program(site, TypeNode::Text)).expect("bootstrap");
         let bindings = BindingTable::new();
@@ -10132,31 +10324,23 @@ pub(super) mod tests {
             .install(verb_program(site, TypeNode::Text), &bindings, &index)
             .expect("an equivalent duplicate is not a SiteConflict");
         assert_ne!(first, second);
-        let witness = engine.verb_sites[&DataConId(77)];
+        let witness = engine.constructor_replies[&DataConId(77)];
         assert_eq!(witness.owner, first, "the existing owner stays canonical");
-        assert_eq!(engine.sites[&site].owner, first);
 
-        // The same constructor answered by different evidence under another
-        // synthetic id is refused by the verb index, and installs nothing.
+        // Different static type evidence refuses before any native mutation.
         let error = engine
-            .install(
-                verb_program(SYNTHETIC_SITE_BIT | 6, TypeNode::Integer),
-                &bindings,
-                &index,
-            )
+            .install(verb_program(6, TypeNode::Integer), &bindings, &index)
             .expect_err("a conflicting verb reply refuses the install");
         assert!(
-            matches!(error, PreparedRuntimeError::SiteConflict { owner, .. } if owner == first),
+            matches!(error, PreparedRuntimeError::ConstructorReplyConflict { owner, .. } if owner == first),
             "expected SiteConflict, got {error:?}"
         );
         assert_eq!(engine.programs.len(), 2);
-        assert!(!engine.sites.contains_key(&(SYNTHETIC_SITE_BIT | 6)));
     }
 
     #[test]
     fn alpha_stable_polymorphic_reply_evidence_installs_without_weakening_conflicts() {
-        use tidepool_repr::execution_schema::SYNTHETIC_SITE_BIT;
-        let site = SYNTHETIC_SITE_BIT | 7;
+        let site = 7;
         let stable = TypeNode::Unconstructible {
             reason: "polymorphic".into(),
             rendered: "a".into(),
@@ -10178,7 +10362,7 @@ pub(super) mod tests {
             .install(verb_program(site, different), &bindings, &index)
             .expect_err("different type evidence must remain a conflict");
         assert!(
-            matches!(error, PreparedRuntimeError::SiteConflict { owner, .. } if owner == first),
+            matches!(error, PreparedRuntimeError::ConstructorReplyConflict { owner, .. } if owner == first),
             "expected SiteConflict, got {error:?}"
         );
         assert_eq!(engine.programs.len(), 2);
@@ -10186,15 +10370,13 @@ pub(super) mod tests {
 
     #[test]
     fn off_checkout_install_reuses_code_already_installed_on_the_machine() {
-        use tidepool_repr::execution_schema::SYNTHETIC_SITE_BIT;
         let registry = Arc::new(ImageRegistry::new());
         let (mut engine, _) =
-            PreparedEngine::bootstrap(verb_program(SYNTHETIC_SITE_BIT | 40, TypeNode::Text))
-                .expect("bootstrap");
+            PreparedEngine::bootstrap(verb_program(40, TypeNode::Text)).expect("bootstrap");
         engine.set_image_registry(Arc::clone(&registry));
         let bindings = BindingTable::new();
         let index = BindingIndex::new();
-        let prepared = verb_program(SYNTHETIC_SITE_BIT | 41, TypeNode::Text);
+        let prepared = verb_program(41, TypeNode::Text);
         let mut snapshot = engine
             .snapshot_install(prepared.clone(), &bindings, &index)
             .expect("capture installation");
@@ -10226,11 +10408,10 @@ pub(super) mod tests {
 
     #[test]
     fn off_checkout_install_rejects_intervening_evidence_conflict() {
-        use tidepool_repr::execution_schema::SYNTHETIC_SITE_BIT;
         let mut engine = PreparedEngine::empty_certified(64 * 1024, None).unwrap();
         let bindings = BindingTable::new();
         let index = BindingIndex::new();
-        let site = SYNTHETIC_SITE_BIT | 42;
+        let site = 42;
         let mut snapshot = engine
             .snapshot_install(verb_program(site, TypeNode::Text), &bindings, &index)
             .unwrap();
@@ -10241,19 +10422,17 @@ pub(super) mod tests {
         let before = engine.residency();
         assert!(matches!(
             engine.revalidate_and_install(snapshot, compiled, &bindings, &index),
-            Err(PreparedRuntimeError::SiteConflict { site: rejected, owner: actual })
-                if rejected == site && actual == owner
+            Err(PreparedRuntimeError::ConstructorReplyConflict { constructor: rejected, owner: actual })
+                if rejected == DataConId(77) && actual == owner
         ));
         assert_eq!(engine.residency(), before);
         assert_eq!(engine.programs.len(), 1);
-        assert_eq!(engine.sites[&site].owner, owner);
-        assert_eq!(engine.verb_sites[&DataConId(77)].owner, owner);
+        assert_eq!(engine.constructor_replies[&DataConId(77)].owner, owner);
     }
 
     #[test]
     fn off_checkout_install_restores_retired_evidence_ownership() {
-        use tidepool_repr::execution_schema::SYNTHETIC_SITE_BIT;
-        let site = SYNTHETIC_SITE_BIT | 43;
+        let site = 43;
         let prepared = verb_program(site, TypeNode::Text);
         let (mut engine, owner) = PreparedEngine::bootstrap(prepared.clone()).unwrap();
         let bindings = BindingTable::new();
@@ -10268,21 +10447,18 @@ pub(super) mod tests {
         }
         engine.quiesce_and_collect_now().unwrap();
         assert!(!engine.programs.contains_key(&owner));
-        assert!(!engine.sites.contains_key(&site));
-        assert!(!engine.verb_sites.contains_key(&DataConId(77)));
+        assert!(!engine.constructor_replies.contains_key(&DataConId(77)));
         let installed = engine
             .revalidate_and_install(snapshot, compiled, &bindings, &index)
             .unwrap()
             .unwrap();
-        assert_eq!(engine.sites[&site].owner, installed);
-        assert_eq!(engine.verb_sites[&DataConId(77)].owner, installed);
+        assert_eq!(engine.constructor_replies[&DataConId(77)].owner, installed);
     }
 
     #[test]
     fn two_engines_sharing_one_registry_the_second_install_is_a_registry_hit() {
-        use tidepool_repr::execution_schema::SYNTHETIC_SITE_BIT;
         let registry = Arc::new(ImageRegistry::new());
-        let bootstrap_site = SYNTHETIC_SITE_BIT | 30;
+        let bootstrap_site = 30;
         let (mut engine_a, _) =
             PreparedEngine::bootstrap(verb_program(bootstrap_site, TypeNode::Text))
                 .expect("engine a bootstraps");
@@ -10294,7 +10470,7 @@ pub(super) mod tests {
 
         let bindings = BindingTable::new();
         let index = BindingIndex::new();
-        let shared_site = SYNTHETIC_SITE_BIT | 31;
+        let shared_site = 31;
 
         engine_a
             .install(verb_program(shared_site, TypeNode::Text), &bindings, &index)

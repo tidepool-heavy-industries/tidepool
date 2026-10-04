@@ -12,8 +12,8 @@ use shared_content::SharedContent;
 
 use crate::session_ids::SessionVarId;
 
-pub const SCHEMA_VERSION: u64 = 14;
-pub const EXECUTION_ABI_VERSION: u64 = 8;
+pub const SCHEMA_VERSION: u64 = 15;
+pub const EXECUTION_ABI_VERSION: u64 = 9;
 
 macro_rules! dense_id {
     ($name:ident) => {
@@ -359,11 +359,13 @@ pub enum SiteDelivery {
     TerminalCapture,
 }
 
-/// The bit that marks a synthetic reply site: the site an ordinary effect
-/// request is answered at, named by its request constructor in
-/// [`WireProgram::verb_sites`] rather than carried by the request. Dynamic
-/// site ids never set it, so the two ranges are disjoint.
-pub const SYNTHETIC_SITE_BIT: u64 = 1 << 63;
+/// Compiler-attested reply interpretation for an exact request constructor.
+/// `AtSite` alone authorizes the first field as an erased `RequestSite reply`.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ConstructorReply {
+    Static(TypeNodeId),
+    AtSite,
+}
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct SiteRow {
@@ -867,9 +869,8 @@ pub struct WireProgram {
     pub entry: ValueId,
     pub types: Vec<TypeNode>,
     pub sites: Vec<SiteRow>,
-    /// Request constructors paired with the synthetic site row
-    /// ([`SYNTHETIC_SITE_BIT`]) that answers them.
-    pub verb_sites: Vec<(ConstructorId, u64)>,
+    /// Exact request constructors paired with compiler-issued reply evidence.
+    pub constructor_replies: Vec<(ConstructorId, ConstructorReply)>,
     /// Compiler-issued JSON constructor evidence.  It is carried even when a
     /// program only mounts or answers JSON and has no JSON intrinsic call.
     pub json_layout: Option<JsonLayout>,
@@ -889,7 +890,7 @@ pub struct ProgramDefinitions {
     pub bindings: Vec<Group<TopBinding>>,
     pub types: Vec<TypeNode>,
     pub sites: Vec<SiteRow>,
-    pub verb_sites: Vec<(ConstructorId, u64)>,
+    pub constructor_replies: Vec<(ConstructorId, ConstructorReply)>,
     pub json_layout: Option<JsonLayout>,
 }
 
@@ -906,7 +907,7 @@ impl ProgramDefinitions {
             entry,
             types: self.types,
             sites: self.sites,
-            verb_sites: self.verb_sites,
+            constructor_replies: self.constructor_replies,
             json_layout: self.json_layout,
         }
     }
@@ -926,7 +927,7 @@ pub struct DefinitionsView<'a> {
     bindings: &'a Vec<Group<TopBinding>>,
     types: &'a Vec<TypeNode>,
     sites: &'a Vec<SiteRow>,
-    verb_sites: &'a Vec<(ConstructorId, u64)>,
+    constructor_replies: &'a Vec<(ConstructorId, ConstructorReply)>,
     json_layout: &'a Option<JsonLayout>,
 }
 
@@ -958,8 +959,8 @@ impl<'a> DefinitionsView<'a> {
     pub fn sites(self) -> &'a [SiteRow] {
         self.sites
     }
-    pub fn verb_sites(self) -> &'a [(ConstructorId, u64)] {
-        self.verb_sites
+    pub fn constructor_replies(self) -> &'a [(ConstructorId, ConstructorReply)] {
+        self.constructor_replies
     }
     pub fn json_layout(self) -> Option<&'a JsonLayout> {
         self.json_layout.as_ref()
@@ -978,7 +979,7 @@ macro_rules! definitions_view {
             bindings: &$value.bindings,
             types: &$value.types,
             sites: &$value.sites,
-            verb_sites: &$value.verb_sites,
+            constructor_replies: &$value.constructor_replies,
             json_layout: &$value.json_layout,
         }
     };
@@ -1038,8 +1039,8 @@ impl PreparedProgram {
     pub fn sites(&self) -> &[SiteRow] {
         &self.wire.sites
     }
-    pub fn verb_sites(&self) -> &[(ConstructorId, u64)] {
-        &self.wire.verb_sites
+    pub fn constructor_replies(&self) -> &[(ConstructorId, ConstructorReply)] {
+        &self.wire.constructor_replies
     }
     pub fn json_layout(&self) -> Option<&JsonLayout> {
         self.wire.json_layout.as_ref()
