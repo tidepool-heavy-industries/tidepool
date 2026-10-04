@@ -162,6 +162,7 @@ pub(crate) fn effects_core_module_source_for(vocab_effects: &[EffectDecl]) -> St
     // This module imports no effects, so the generated vocabulary can name
     // `ExitRef exit` without creating a Core -> Actor facade -> Core cycle.
     out.push_str("import Tidepool.Internal.ActorRef (ExitRef)\n");
+    out.push_str("import Tidepool.Internal.RequestSite (RequestSite)\n");
     out.push_str("import qualified Tidepool.Data.Text as T\n");
     out.push_str("import qualified Data.Map.Strict as Map\n");
     out.push_str("import qualified Tidepool.Aeson.KeyMap as KM\n");
