@@ -870,11 +870,7 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
     } else {
         3
     };
-    assert_eq!(
-        transport.children.lock().len(),
-        expected_children,
-        "refused branches must not launch children"
-    );
+    assert_eq!(transport.children.lock().len(), expected_children);
     transport.finish_parent.notify_one();
     shutdown_tx.send_replace(Some(NativeRetirement::Terminate));
     let result = tokio::time::timeout(Duration::from_secs(30), host)
