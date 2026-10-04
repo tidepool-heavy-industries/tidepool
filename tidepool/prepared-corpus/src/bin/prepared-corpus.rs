@@ -1515,11 +1515,24 @@ mod tests {
         let parent = manifest.parent().unwrap();
         let artifact = parent.join(&artifact_name);
         let invalid = parent.join(&invalid_name);
+        let mut wire = tidepool_repr::execution_schema::testing::wire_program();
+        wire.signatures
+            .push(tidepool_repr::execution_schema::Signature {
+                arguments: vec![tidepool_repr::execution_schema::RuntimeRep::Float(64)],
+                results: tidepool_repr::execution_schema::ResultContract::Returns(vec![
+                    tidepool_repr::execution_schema::RuntimeRep::Int(64),
+                ]),
+            });
+        wire.operations
+            .push(tidepool_repr::execution_schema::OperationDecl {
+                identity: tidepool_repr::execution_schema::OperationIdentity::PrimOp(
+                    "double2Int#".into(),
+                ),
+                signature: tidepool_repr::execution_schema::SignatureId(1),
+            });
         fs::write(
             &artifact,
-            tidepool_test_data::prepared_encode::encode_wire_program(
-                &tidepool_repr::execution_schema::testing::wire_program(),
-            ),
+            tidepool_test_data::prepared_encode::encode_wire_program(&wire),
         )
         .unwrap();
         fs::write(&invalid, b"not cbor").unwrap();
@@ -1569,7 +1582,7 @@ mod tests {
         let double_to_int = operations
             .iter()
             .find(|operation| operation["identity"] == "PrimOp(\"double2Int#\")")
-            .expect("the current cross-language fixture retains double2Int#");
+            .expect("the typed audit control declares double2Int#");
         assert_eq!(
             double_to_int["signature"],
             "Signature { arguments: [Float(64)], results: Returns([Int(64)]) }"
