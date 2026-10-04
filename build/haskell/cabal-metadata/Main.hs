@@ -53,7 +53,7 @@ strings :: [String] -> Json
 strings = JsonArray . map JsonString
 
 libraryName :: LibraryName -> Json
-libraryName LMainLib = JsonNull
+libraryName LMainLibName = JsonNull
 libraryName (LSubLibName name) = JsonString (prettyShow name)
 
 dependencyJson :: Dependency -> Json
@@ -151,7 +151,7 @@ componentsJson phase description = do
       unless (null (reexportedModules component) && null (signatures component)) $
         die (prettyShow (libName component) ++ ": module reexports/signatures need native Backpack support")
       let name = case libName component of
-            LMainLib -> prettyShow (pkgName (package description))
+            LMainLibName -> prettyShow (pkgName (package description))
             LSubLibName value -> prettyShow value
       componentJson phase "library" name Nothing (map prettyShow (exposedModules component)) (libBuildInfo component)
     executableJson component = componentJson phase "executable" (prettyShow (exeName component))
