@@ -1537,3 +1537,96 @@ fn native_input_generation_retains_original_type_owner_after_source_readers_drop
         "the final native/value/request reader releases the original graph"
     );
 }
+
+#[test]
+fn checked_binding_survives_export_and_executes_in_later_cell() {
+    tidepool_testing::eval_harness::require_extract();
+    let effects = TestEffectSurface::minimal(&[]).unwrap();
+    let recipe = InputRecipe {
+        preamble: effects.preamble().to_owned(),
+        row: effects.row().to_owned(),
+        include: effects.include_paths().to_vec(),
+    };
+    let root = tempfile::tempdir().unwrap();
+    let library = SessionLib::open(
+        SessionId(1721),
+        root.path(),
+        ModuleEnv::standalone_default(),
+    )
+    .unwrap()
+    .with_validation_include(recipe.include.clone());
+    let mut resident = TestSession::unbootstrapped(
+        frunk::HNil,
+        EmptyOutput,
+        crate::DEFAULT_NURSERY_SIZE,
+        Some(library),
+    );
+    let execution = Arc::new(resident.begin_private_execution(ScopeId::ROOT).unwrap());
+    resident
+        .set_run_context(SessionRunContext {
+            lexical_scope: execution.private_scope(),
+            ..SessionRunContext::ROOT
+        })
+        .unwrap();
+    let (bound, compiled, reservation) = compile_checked_binding(
+        &mut resident,
+        &recipe,
+        "held <- pure (999999 :: Int)",
+        execution.clone(),
+    );
+    let [binder] = bound.as_slice() else {
+        panic!("held must retain one original checked binder");
+    };
+    let interface = compiled
+        .certification
+        .as_ref()
+        .unwrap()
+        .checked_execution()
+        .unwrap()
+        .value_interface_certificate()
+        .unwrap();
+    assert_eq!(
+        interface.owner(),
+        tidepool_repr::SessionModule::val(reservation.generation())
+    );
+    let outcome = resident
+        .run_bind_with_sites("held", compiled.code(), binder, reservation.generation())
+        .unwrap();
+    assert!(matches!(outcome, ResidentOutcome::Completed { .. }));
+    publish_checked_fixture(&mut resident, &execution, 1);
+    resident.set_run_context(SessionRunContext::ROOT).unwrap();
+    let private_scope = execution.private_scope();
+    drop(compiled);
+    drop(reservation);
+    drop(execution);
+    resident.retire_scope(private_scope);
+    assert!(Arc::ptr_eq(
+        resident
+            .state
+            .retained_checked_value_artifact(interface.owner())
+            .unwrap(),
+        &interface
+    ));
+    let original = resident.current_binding_in(ScopeId::ROOT, "held").unwrap();
+    assert_eq!(original.0, SessionVarId::from_extract(binder.var_id));
+    let custody = resident.retain_binding_custody("held").unwrap().unwrap();
+    let handles_before_export = resident.value_handle_count();
+    let parcel = resident.export_custody(custody).unwrap();
+    assert_eq!(resident.value_handle_count(), handles_before_export - 1);
+
+    original_value_probe(&mut resident, &recipe, "held + 1", 1_000_000);
+    assert_eq!(
+        resident.current_binding_in(ScopeId::ROOT, "held"),
+        Some(original)
+    );
+    assert!(Arc::ptr_eq(
+        resident
+            .state
+            .retained_checked_value_artifact(interface.owner())
+            .unwrap(),
+        &interface
+    ));
+    drop(parcel);
+    drop(interface);
+    drop(resident);
+}

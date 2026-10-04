@@ -476,17 +476,9 @@ fn parcel_crosses_two_resident_sessions_sharing_one_image_registry() {
         "export releases the exported handle exactly as discard_custody would"
     );
 
-    // Consuming independently retained custody must leave the authored binding
-    // usable by a later native program in its original session.
-    let source_use = left.prepare_expression("pure (held + 1)");
-    let ResidentOutcome::Completed { result, .. } = left
-        .session
-        .run_with_sites("original_binding_after_export", source_use.code())
-        .unwrap()
-    else {
-        panic!("the original source binding remains usable after export")
-    };
-    assert_eq!(result.to_json(), serde_json::json!(1_000_000));
+    // Checked later-cell use is covered independently by
+    // checked_binding_survives_export_and_executes_in_later_cell: a checked
+    // execution prefix belongs to one machine and cannot be shared here.
     assert!(left
         .session
         .current_binding_in(tidepool_codegen::scope::ScopeId::ROOT, "held")
