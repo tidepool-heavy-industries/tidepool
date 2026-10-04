@@ -37,7 +37,7 @@ import Tidepool.DeclarationJoin (InstanceInventory(..), DeclarationExport(..), E
 import Tidepool.GhcPipeline
   ( CompilePurpose(..), PipelineSelection(..), PreparedPipelineResult(..)
   , PipelineResult(..), CheckedEnvironmentResult(..), runPipelineSessionSelected
-  , cellCheckedBinderSignatures, cellGeneratedInstanceRecipe, withResidentPipelineSelected )
+  , cellCheckedBinderSignatures, cellGeneratedInstanceRecipe )
 import Tidepool.CheckedPrefixImports
 import Tidepool.ExactHydration (ExactIfaceArtifact(..))
 import Tidepool.Identity (stableVarId)
@@ -185,9 +185,9 @@ main = withScratch $ \work -> do
   putStrLn "planned original declarations: source identity, inventories, import shadowing and declaration/bind/expression check passed"
 
 -- Exercise the original's pre-renamer seam, before its inventory can exist.
--- One compiler transaction retains the original predecessor for both the
--- checking and ordered-program stages, including its exact interface identity
--- and qualified historical Names.
+-- Both target hooks resolve an ordinary source predecessor. Exact retained
+-- inventory refinement is exercised separately by checkImports; this fixture
+-- checks parser-owned shadowing and qualified Names before that inventory exists.
 checkOriginalDeclarationShadow :: FilePath -> String -> IO ()
 checkOriginalDeclarationShadow work checkWrapper = do
   let directory = work </> "original-shadow"
@@ -200,46 +200,26 @@ checkOriginalDeclarationShadow work checkWrapper = do
   foreignSource <- readFile "test-planned-declaration/fixtures/Foreign.hs"
   writeFile previousFile previousSource
   writeFile (directory </> "Foreign.hs") foreignSource
-  withResidentPipelineSelected [directory,"lib"] $ \compile -> do
-    previous <- compile (PreparedProducts Nothing) Set.empty
-      OriginalDeclarationCompile Nothing previousFile [] Nothing
-    previousInventory <- hydratePlannedDeclarationInventory ("main",previousName)
-      (renderPreviousFingerprint previous) (prHscEnv (pprPipelineResult previous)) >>= either fail pure
-    authored <- readFile "test-planned-declaration/fixtures/shadow-cell.hs"
-    wrapper <- readFile "test-planned-declaration/fixtures/shadow-decl-wrapper.hs"
-    plan <- analyzeCell checkWrapper authored >>= either (fail . show) pure
-    original <- either (fail . show) pure (preparePlannedDeclaration originalName wrapper plan)
-    unless (not (null (cellPlanGenericDeclarations plan))
-        && not (null (cellPlanStructuralDisplayTargets plan))
-        && "import qualified Tidepool.Inspection.Display as " `isInfixOf` plannedSource original
-        && ".Generic" `isInfixOf` plannedSource original
-        && ".Display" `isInfixOf` plannedSource original) $
-      fail "original shadow fixture lost genuine generated Generic or Display companions"
-    writeFile originalFile (plannedSource original)
-    checked <- compile CheckedEnvironment Set.empty
-      (GeneratedInstanceCheck (cellGeneratedInstanceRecipe plan) OriginalDeclarationCompile)
-      Nothing originalFile [] Nothing
-    assertPreviousOwner previousInventory (crHscEnv checked)
-    assertShadowNames originalName previousName (crTargetRdrEnv checked)
-    prepared <- compile (PreparedProducts Nothing) Set.empty
-      (ProgramItemCompile True [] [(plannedOriginalOwner previousInventory,
-        plannedInterfaceFingerprint previousInventory)] []) Nothing originalFile [] Nothing
-    assertPreviousOwner previousInventory (prHscEnv (pprPipelineResult prepared))
-    _ <- certifyPlannedDeclaration original (prHscEnv (pprPipelineResult prepared)) >>= either fail pure
-    assertShadowNames originalName previousName (prTargetRdrEnv (pprPipelineResult prepared))
+  authored <- readFile "test-planned-declaration/fixtures/shadow-cell.hs"
+  wrapper <- readFile "test-planned-declaration/fixtures/shadow-decl-wrapper.hs"
+  plan <- analyzeCell checkWrapper authored >>= either (fail . show) pure
+  original <- either (fail . show) pure (preparePlannedDeclaration originalName wrapper plan)
+  unless (not (null (cellPlanGenericDeclarations plan))
+      && not (null (cellPlanStructuralDisplayTargets plan))
+      && "import qualified Tidepool.Inspection.Display as " `isInfixOf` plannedSource original
+      && ".Generic" `isInfixOf` plannedSource original
+      && ".Display" `isInfixOf` plannedSource original) $
+    fail "original shadow fixture lost genuine generated Generic or Display companions"
+  writeFile originalFile (plannedSource original)
+  checked <- runPipelineSessionSelected CheckedEnvironment Set.empty
+    (GeneratedInstanceCheck (cellGeneratedInstanceRecipe plan) OriginalDeclarationCompile)
+    Nothing originalFile [directory,"lib"] Nothing
+  assertShadowNames originalName previousName (crTargetRdrEnv checked)
+  prepared <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty
+    (ProgramItemCompile True [] [] []) Nothing originalFile [directory,"lib"] Nothing
+  _ <- certifyPlannedDeclaration original (prHscEnv (pprPipelineResult prepared)) >>= either fail pure
+  assertShadowNames originalName previousName (prTargetRdrEnv (pprPipelineResult prepared))
   where
-    assertPreviousOwner expected env = do
-      retained <- hydratePlannedDeclarationInventory (plannedOriginalOwner expected)
-        (plannedInterfaceFingerprint expected) env >>= either fail pure
-      unless (plannedExports retained == plannedExports expected
-          && plannedInstances retained == plannedInstances expected
-          && all (`elem` plannedFamilyClosure retained) (plannedFamilyClosure expected)) $
-        fail "shadow compilation changed its retained predecessor inventory"
-    renderPreviousFingerprint previous = case Map.lookup
-        (mkModuleName (sessionModuleString (SessionModule LibMod (Generation 6))))
-        (pprProductInterfaces previous) of
-      Just interface -> show (mi_iface_hash (mi_final_exts interface))
-      Nothing -> error "compiled shadow predecessor has no original interface"
     assertShadowNames originalName previousName reader = do
       let owners spelling = nub [moduleNameString (moduleName owner)
             | entry <- globalRdrEnvElts reader, spelling `elem` greRdrNames entry
