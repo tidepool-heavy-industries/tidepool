@@ -14,6 +14,7 @@ module Tidepool.DependencyEvidence
   , sourceEvidence
   , sourceEvidenceWithFingerprint
   , revalidateDependencyEvidence
+  , validateDependencyEvidence, writeDependencyEvidence
   , renderDependencyEvidence
   , selectedHomeRequirements
   ) where
@@ -21,8 +22,9 @@ module Tidepool.DependencyEvidence
 import qualified Crypto.Hash.SHA256 as SHA256
 import qualified Data.ByteString as BS
 import Data.List (intercalate, nub, sort, stripPrefix)
-import Control.Monad (forM)
+import Control.Monad (forM, unless)
 import Numeric (showHex)
+import System.FilePath ((</>))
 import GHC.Fingerprint.Type (Fingerprint)
 import GHC.Utils.Fingerprint (fingerprintByteString)
 
@@ -144,6 +146,17 @@ revalidateDependencyEvidence :: DependencyEvidence -> IO Bool
 revalidateDependencyEvidence evidence = and <$> forM (dependencySources evidence) (\expected -> do
   actual <- sourceEvidence (dependencySourcePath expected)
   pure (dependencySourceSha256 actual == dependencySourceSha256 expected))
+
+-- Publication keeps the consumed source receipts paired with these artifacts.
+validateDependencyEvidence :: DependencyEvidence -> IO ()
+validateDependencyEvidence evidence = do
+  unchanged <- revalidateDependencyEvidence evidence
+  unless unchanged (ioError (userError "source changed while compiler artifacts were being published"))
+
+writeDependencyEvidence :: FilePath -> DependencyEvidence -> IO ()
+writeDependencyEvidence outDir evidence = do
+  validateDependencyEvidence evidence
+  writeFile (outDir </> "dependencies.json") (renderDependencyEvidence evidence)
 
 renderDependencyEvidence :: DependencyEvidence -> String
 renderDependencyEvidence evidence =

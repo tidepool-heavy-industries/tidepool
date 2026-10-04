@@ -49,6 +49,7 @@ _EXTRACTOR_SRCS = {
     "Tidepool/OriginalProductRoots.hs": "src/Tidepool/OriginalProductRoots.hs",
     "Tidepool/HomeProducts.hs": "src/Tidepool/HomeProducts.hs",
     "Tidepool/CertifiedProducts.hs": "src/Tidepool/CertifiedProducts.hs",
+    "Tidepool/CompilerProducts.hs": "src/Tidepool/CompilerProducts.hs",
     "Tidepool/CheckedCell.hs": "src/Tidepool/CheckedCell.hs",
     "Tidepool/CheckedAdmission.hs": "src/Tidepool/CheckedAdmission.hs",
     "Tidepool/CheckedRecipe.hs": "src/Tidepool/CheckedRecipe.hs",

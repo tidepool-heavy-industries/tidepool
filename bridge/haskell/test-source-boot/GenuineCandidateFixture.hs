@@ -11,34 +11,22 @@ module GenuineCandidateFixture
 import Codec.CBOR.Encoding
 import Codec.CBOR.Write (toStrictByteString)
 import Control.Exception (bracket)
-import Control.Monad (forM, unless)
-import Crypto.Hash.SHA256 qualified as SHA
+import Control.Monad (unless, void)
 import Data.ByteString qualified as BS
-import Data.ByteString.Char8 qualified as BSC
 import Data.Map.Strict qualified as Map
 import Data.Text qualified as T
-import GHC.Unit.Module (moduleName, moduleNameString, moduleUnit)
-import GHC.Unit.Types (unitString)
-import Numeric (showHex)
+import GHC.Tc.Types (tcg_mod)
 import System.Directory (createDirectory, removeFile)
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode(..))
 import System.FilePath ((</>), takeDirectory)
 import System.IO (hClose, openTempFile)
 import System.Process (readProcessWithExitCode)
-import Tidepool.ExecutionSource (WorkerExecutionSource(OrdinaryExecutionSource))
-import Tidepool.CertifiedProducts (encodeCertifiedProducts)
-import Tidepool.DependencyEvidence
-import Tidepool.ExactHydration (ExactIfaceArtifact(..), newOriginalInterfaceArtifacts, originalInterfaceBytes)
-import Tidepool.ExecutionEncode (encodeModuleProducts)
-import Tidepool.ExecutionProjection
-import Tidepool.ExecutionSchema
-import Tidepool.FinalizedModuleArtifacts (captureFinalizedModuleArtifacts)
+import Tidepool.ExactHydration (newOriginalInterfaceArtifacts)
+import Tidepool.ExecutionProjection (projectOriginalHomeModuleProducts)
 import Tidepool.GhcPipeline (PreparedPipelineResult(..), PipelineResult(..))
-import Tidepool.PackageWitness (encodePackageImports)
-import Tidepool.PreparedFormatting (resolveFormattingAuthority)
-import Tidepool.PreparedJson (resolveJsonAuthority)
-import Tidepool.PreparedTime (resolveTimeAuthority)
+import Tidepool.CompilerProducts
+  ( prepareCompilerProjectionContext, retainedOriginalInterfaces, writeCertifiedProductsKeeping )
 import Tidepool.Session (Generation(..), SessionModule(..), SessionModuleKind(..))
 
 writeGenuineCandidateManifestFor
@@ -75,9 +63,9 @@ writeGenuineExecutionScope nativeOwners lexicalRoots work source includes destin
 -- Candidate delivery and lexical selection share this one immutable capture;
 -- neither requests native execution products in the delivered scope.
 writeGenuineCandidateLexicalScope
-  :: [String] -> FilePath -> FilePath -> [FilePath] -> FilePath -> PreparedPipelineResult -> IO ()
-writeGenuineCandidateLexicalScope owners work source includes destination prepared =
-  writePacket work (Just (source, includes, prepared)) owners owners [] owners (Just destination)
+  :: [String] -> [String] -> FilePath -> FilePath -> [FilePath] -> FilePath -> PreparedPipelineResult -> IO ()
+writeGenuineCandidateLexicalScope candidates lexicalOwners work source includes destination prepared =
+  writePacket work (Just (source, includes, prepared)) candidates lexicalOwners [] lexicalOwners (Just destination)
 
 -- This packet invokes the existing protected authored producer once. It does
 -- not relabel an ordinary finalized module as a native declaration.
@@ -124,7 +112,7 @@ writePacket work input candidates exactOwners nativeOwners lexicalOwners destina
   createDirectory packet
   case input of
     Nothing -> pure ()
-    Just (source, _, prepared) -> capturePacket source packet prepared
+    Just (_, includes, prepared) -> capturePacket includes packet prepared
   let text = encodeString . T.pack
       names values = encodeListLen (fromIntegral (length values)) <> foldMap text values
       optional = maybe encodeNull text
@@ -144,59 +132,16 @@ writePacket work input candidates exactOwners nativeOwners lexicalOwners destina
         fail ("genuine Rust fixture issuance failed\n" ++ output ++ errors)
       putStr output
 
-capturePacket :: FilePath -> FilePath -> PreparedPipelineResult -> IO ()
-capturePacket source packet prepared = do
-  -- Finalization receipt paths belong to the actual compiler input directory.
-  -- Fixture workspaces may contain nested module source paths.
-  let captureRoot = takeDirectory source
-      env = prHscEnv (pprPipelineResult prepared)
-  formatting <- resolveFormattingAuthority env
-  time <- resolveTimeAuthority env
-  json <- resolveJsonAuthority env
-  text <- resolveTextPackageUnit env
-  let context = ProjectionContext "ghc-9.12-prepared-stg" "ghc-9.12.2"
-        (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) Map.empty
-        (SymbolIdentity "main" "Fixture" "value" "__result" Nothing)
-        [] formatting time json text
-      outcomes = preparedModuleProductOutcomes (projectOriginalHomeModuleProducts
-        env (pprProductInterfaces prepared) context (pprModules prepared))
-      availability = Map.fromList
-        [((unitString (moduleUnit owner), moduleNameString (moduleName owner)),
-          either (const ProductProjectionRejected) (const ProductReady) outcome)
-        | (owner, outcome) <- outcomes]
-      evidence = (pprDependencies prepared) { dependencyModules =
-        [node { dependencyModuleProduct = if dependencyModuleBoot node then ProductBoot
-          else Map.findWithDefault (dependencyModuleProduct node)
-            (dependencyModuleUnit node, dependencyModuleName node) availability }
-        | node <- dependencyModules (pprDependencies prepared)] }
-  originals <- newOriginalInterfaceArtifacts env (pprFinalizedModules prepared) [] captureRoot
-  rows <- forM [(owner, groups) | (owner, Right groups) <- outcomes] $ \(owner, groups) -> do
-    bytes <- originalInterfaceBytes originals owner
-      >>= maybe (fail "genuine fixture lost its finalized original interface") pure
-    roots <- maybe (fail "genuine fixture lost its actual package selections") pure
-      (Map.lookup (moduleName owner) (pprPackageImports prepared))
-    let unit = T.pack (unitString (moduleUnit owner))
-        name = T.pack (moduleNameString (moduleName owner))
-        -- encodeCertifiedProducts validates this package sidecar against the
-        -- same original interface bytes used in the native product below.
-        artifact = ExactIfaceArtifact (T.unpack unit) (T.unpack name) "" (shaHex bytes) []
-    pure ((unit, name, bytes, groups), encodePackageImports artifact roots)
-  let fresh = map fst rows
-      products = encodeModuleProducts fresh
-      dependencies = BSC.pack (renderDependencyEvidence evidence)
-  finalized <- captureFinalizedModuleArtifacts originals env (pprFinalizedModules prepared)
-    (pprPackageImports prepared) evidence captureRoot
-  receipt <- encodeCertifiedProducts env OrdinaryExecutionSource (pprProductInterfaces prepared) finalized [] Nothing
-    fresh [] evidence products dependencies >>= either fail pure
-  BS.writeFile (packet </> "module-products.cbor") products
-  BS.writeFile (packet </> "certified-products.cbor") receipt
-  BS.writeFile (packet </> "dependencies.json") dependencies
-  BS.writeFile (packet </> "module-package-imports.cbor") (toStrictByteString
-    (encodeListLen 3 <> encodeString "TPPKGBUNDLES" <> encodeWord 1
-      <> encodeListLen (fromIntegral (length rows))
-      <> foldMap (\((unit, name, _, _), packages) -> encodeListLen 3
-        <> encodeString unit <> encodeString name <> encodeBytes packages) rows))
-
-shaHex :: BS.ByteString -> String
-shaHex = concatMap (\byte -> let rendered = showHex byte ""
-  in replicate (2 - length rendered) '0' ++ rendered) . BS.unpack . SHA.hash
+-- Select the actual checked root; projection policy and all emission belong to
+-- the same internal compiler owner used by the production worker.
+capturePacket :: [FilePath] -> FilePath -> PreparedPipelineResult -> IO ()
+capturePacket includes packet prepared = do
+  let result = pprPipelineResult prepared
+      environment = prHscEnv result
+      owner = tcg_mod (prTargetTcGblEnv result)
+  context <- prepareCompilerProjectionContext prepared Map.empty owner "__result" [] Nothing
+  let products = projectOriginalHomeModuleProducts environment
+        (pprProductInterfaces prepared) context (pprModules prepared)
+  originals <- newOriginalInterfaceArtifacts environment (pprFinalizedModules prepared)
+    (retainedOriginalInterfaces prepared) packet
+  void (writeCertifiedProductsKeeping includes originals packet prepared (Just products) [])

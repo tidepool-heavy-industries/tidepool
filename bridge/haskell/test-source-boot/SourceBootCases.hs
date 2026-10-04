@@ -444,7 +444,7 @@ checkedValueTypeClosure effects = withScratch $ \work -> do
   unless (("main","Tidepool.Command.Types") `elem` requirements) $
     fail "checked Command fixture lacks its real home type dependency"
   let ownerNames = map moduleNameString (Map.keys (pprProductInterfaces prepared))
-  writeGenuineCandidateLexicalScope ownerNames work producerPath [work,"lib",effects] scopePath prepared
+  writeGenuineCandidateLexicalScope [] ownerNames work producerPath [work,"lib",effects] scopePath prepared
   base <- readExactScope scopePath >>= either fail pure
   let originals = scopeInterfaces base
       value = ExactIfaceArtifact "main" "Tidepool.Session.Val.G7" valuePath (digest valueBytes) requirements
@@ -1805,7 +1805,7 @@ candidateSitedSiblingsAt work = do
     Nothing owner [work] Nothing
   originals <- newOriginalInterfaceArtifacts (prHscEnv (pprPipelineResult original))
     (pprFinalizedModules original) [] work
-  writeGenuineCandidateLexicalScope owners work owner [work] capturedPath original
+  writeGenuineCandidateLexicalScope owners owners work owner [work] capturedPath original
   writeGenuineEmptyMetadataScope scopePath
   -- A fresh compiler admits the source/interface candidates without preparing
   -- their bodies. This must not accidentally rely on a previous worker memo.
@@ -2806,7 +2806,7 @@ hydratedSiteSiblings = withScratch $ \work -> do
   warmSite <- evidence warm
   unless (warmSite == originalSite) (fail "native-candidate hydration changed exact child-site identity")
   let env = prHscEnv (pprPipelineResult cold)
-  writeGenuineCandidateLexicalScope names work target [work] scopePath cold
+  writeGenuineCandidateLexicalScope names names work target [work] scopePath cold
   exact <- compile (PreparedProducts Nothing) (Just scope)
   unless (all (`notElem` preparedNames exact) names) $
     fail "hydrated sibling regression recompiled an exact defining owner"

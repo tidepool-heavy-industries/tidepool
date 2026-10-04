@@ -80,6 +80,7 @@ library tidepool-extract-internal
     Tidepool.PlannedDeclaration
     Tidepool.PackageWitness
     Tidepool.CertifiedProducts
+    Tidepool.CompilerProducts
     Tidepool.CompileInput
     Tidepool.PrimOps
     Tidepool.PreparedStg
