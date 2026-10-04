@@ -85,69 +85,6 @@ impl ModelFreeSession {
         .await
     }
 
-    /// Install the production embedded host interpreters before root admission.
-    /// No application is bound here, so Reflect preserves its Unbound outcome.
-    #[cfg(test)]
-    pub(super) async fn start_with_embedded_host_services(
-        config: &ActorHostConfig,
-        transform: impl FnOnce(Arc<dyn ForkWorkspaceAdmission>) -> Arc<dyn ForkWorkspaceAdmission>,
-    ) -> Result<Self> {
-        Self::start_configured(
-            config,
-            transform,
-            None,
-            None,
-            super::test_campaign::COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
-            |forest, _, run_root| {
-                let recovery = exomonad_actor::ActorRecoveryJournal::open(
-                    run_root.join("actor-lifecycle.v2.jsonl"),
-                )?;
-                let store =
-                    super::display_output::open_run_store(run_root).map_err(runtime_error)?;
-                let conversation =
-                    super::embedded_reflect::run_conversation_reader(store, Arc::clone(&recovery));
-                Ok(forest
-                    .with_recovery_journal(recovery)
-                    .with_conversation_reader(conversation))
-            },
-        )
-        .await
-    }
-
-    /// Compose the same model and conversation owners as the embedded host before admission.
-    pub(super) async fn start_with_embedded_service(
-        config: &ActorHostConfig,
-        transform: impl FnOnce(Arc<dyn ForkWorkspaceAdmission>) -> Arc<dyn ForkWorkspaceAdmission>,
-        service: &super::embedded_service::EmbeddedService,
-    ) -> Result<Self> {
-        let settings = config.embedded.as_ref().expect("embedded launch settings");
-        service
-            .runtime
-            .configure_context_models(config)
-            .map_err(runtime_error)?;
-        let store = service.runtime.store();
-        let recovery = exomonad_actor::ActorRecoveryJournal::open(
-            config.run_root.join("actor-lifecycle.v2.jsonl"),
-        )?;
-        Self::start_configured(
-            config,
-            transform,
-            None,
-            Some(super::cell_model::admitted_factory(
-                service, settings, config,
-            )),
-            super::test_campaign::COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
-            |forest, _, _| {
-                Ok(forest
-                    .with_recovery_journal(Arc::clone(&recovery))
-                    .with_conversation_reader(super::embedded_reflect::run_conversation_reader(
-                        store, recovery,
-                    )))
-            },
-        )
-        .await
-    }
-
     async fn start_configured(
         config: &ActorHostConfig,
         transform: impl FnOnce(Arc<dyn ForkWorkspaceAdmission>) -> Arc<dyn ForkWorkspaceAdmission>,

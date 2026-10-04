@@ -321,7 +321,10 @@ async fn engine_component_carries_raw_and_typed_pending_calls_through_compaction
         context_capacity_tokens: 200_000,
         concurrent_jobs: 2,
     };
-    let mut service = campaign.prepare_embedded_service(&settings).await.unwrap();
+    let mut service = campaign
+        .prepare_engine_component_service(&settings)
+        .await
+        .unwrap();
     let embedded = attach_actor(
         &service,
         campaign.session_root.path(),
@@ -549,7 +552,10 @@ async fn engine_component_compaction_failure_continues_once_then_cleans_pending_
         context_capacity_tokens: 200_000,
         concurrent_jobs: 2,
     };
-    let mut service = campaign.prepare_embedded_service(&settings).await.unwrap();
+    let mut service = campaign
+        .prepare_engine_component_service(&settings)
+        .await
+        .unwrap();
     let embedded = attach_actor(
         &service,
         campaign.session_root.path(),
