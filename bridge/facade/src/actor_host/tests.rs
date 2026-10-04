@@ -553,16 +553,59 @@ async fn selected_context_child_gets_its_own_machine_and_is_torn_down_on_retirem
         .map(|artifact| serde_json::from_value(artifact["reference"].clone()).unwrap())
         .collect();
     assert!(
-        authored["lexical"].as_array().unwrap().iter().any(|node| {
-            node["owner"]["module"] == identity["identity"]["module"]
-                && node["imports"].as_array().unwrap().iter().any(|import| {
-                    projections.iter().any(|projection| {
-                        import["unit"] == projection.unit && import["module"] == projection.module
-                    })
+        authored["lexical_roots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|root| {
+                projections.iter().any(|projection| {
+                    root["unit"] == projection.unit && root["module"] == projection.module
                 })
-        }),
-        "the child declaration must import the issued selected interface: {child_manifest}"
+            }),
+        "the public lexical root must be an issued interface: {child_manifest}"
     );
+    let native: tidepool_toolchain::recovery_artifacts::RecoveryArtifactRef =
+        serde_json::from_value(
+            child_manifest["artifacts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|artifact| {
+                    artifact["kind"] == "home"
+                        && artifact["reference"]["unit"] == identity["identity"]["unit"]
+                        && artifact["reference"]["module"] == identity["identity"]["module"]
+                })
+                .unwrap()["reference"]
+                .clone(),
+        )
+        .unwrap();
+    tidepool_toolchain::recovery_artifacts::verify_materialized_ref(&child_root, &native).unwrap();
+    use tidepool_toolchain::artifact_inventory::{ArtifactDescriptor, ArtifactId};
+    let mut reached = std::collections::BTreeSet::new();
+    let mut pending =
+        std::collections::VecDeque::from([ArtifactDescriptor::from_recovery_product(&native).id]);
+    let dependencies: Vec<(ArtifactId, ArtifactId)> = child_manifest["artifact_dependencies"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|edge| {
+            (
+                serde_json::from_value(edge["source"].clone()).unwrap(),
+                serde_json::from_value(edge["target"].clone()).unwrap(),
+            )
+        })
+        .collect();
+    while let Some(source) = pending.pop_front() {
+        if reached.insert(source) {
+            pending.extend(
+                dependencies
+                    .iter()
+                    .filter_map(|(owner, dependency)| (*owner == source).then_some(*dependency)),
+            );
+        }
+    }
+    assert!(projections.iter().any(|projection| reached.contains(&ArtifactDescriptor::from_recovery_join(projection).id)),
+        "original native declaration must retain its selected interface dependency: {child_manifest}");
     for projection in &projections {
         tidepool_toolchain::recovery_artifacts::verify_materialized_join(&child_root, projection)
             .unwrap();
