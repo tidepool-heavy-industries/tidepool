@@ -103,7 +103,7 @@ import GHC.Core.Type
 import GHC.Core.TyCo.Compare (eqType)
 import GHC.Core.TyCo.FVs (scopedSort, tyConsOfType)
 import GHC.Core.TyCon (isTupleTyCon, tyConDataCons_maybe, unwrapNewTyCon_maybe, tyConUnique, tyConName)
-import GHC.Types.SrcLoc (mkRealSrcSpan, mkRealSrcLoc, noLoc)
+import GHC.Types.SrcLoc (mkRealSrcSpan, mkRealSrcLoc)
 import GHC.Core.Class (className)
 import GHC.Core.InstEnv (is_cls, is_tys, instEnvElts)
 import GHC.Core.FamInstEnv (fi_fam, fi_tys)
