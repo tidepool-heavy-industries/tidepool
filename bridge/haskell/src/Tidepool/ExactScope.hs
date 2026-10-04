@@ -585,7 +585,7 @@ validateInterfaceEvidence scope offered = do
     unless (Map.lookup key interfaces == Just (localFinalizedInterface proof))
       (fail "local finalization differs from its captured interface")
     let requirements = Map.map (exactSha256 . firstOfThree) interfaces
-    unless (all (\(owner,sha) -> Map.lookup owner requirements == Just sha)
+    unless (all (\(requiredOwner,sha) -> Map.lookup requiredOwner requirements == Just sha)
         (Map.toAscList (localFinalizedRequirements proof)))
       (fail "local finalization requirements leave its exact closure")
   let evidence = Map.fromList [(key,case value of
@@ -737,8 +737,8 @@ decodeCanonicalModuleCertificate = do
     ("source-original",1) -> pure SourceOriginal
     ("native-authored-declaration",2) -> do
       generation <- decodeWord64
-      let owner = SessionModule LibMod (Generation generation)
-      unless (generation > 0 && key == ("main",sessionModuleString owner))
+      let nativeOwner = SessionModule LibMod (Generation generation)
+      unless (generation > 0 && key == ("main",sessionModuleString nativeOwner))
         (fail "native canonical origin differs from its reserved identity")
       pure (NativeAuthoredDeclaration (Generation generation))
     _ -> fail "unsupported canonical module origin"
