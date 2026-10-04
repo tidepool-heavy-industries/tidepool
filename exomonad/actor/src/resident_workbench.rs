@@ -1491,6 +1491,14 @@ pub struct RequestWorkbenchScope {
 }
 
 impl ActorWorkbenchSource {
+    fn for_activation(mut self, context: &crate::ActorSessionContext) -> Self {
+        // Host activation checks and previews consume native input; authored
+        // reply helpers belong to subsequent request workbench cells.
+        self.request_helper_recipe =
+            tidepool_toolchain::declaration_join::RequestHelperRecipe::None;
+        self.for_workbench(context, None)
+    }
+
     fn for_workbench(
         mut self,
         context: &crate::ActorSessionContext,
@@ -4244,11 +4252,7 @@ where
                 declaration_worth_showing(module, &self.access.source.workspace_modules)
             })
         });
-        let source = self
-            .access
-            .source
-            .clone()
-            .for_workbench(&context, self.request_scope.as_ref());
+        let source = self.access.source.clone().for_activation(&context);
 
         let authority = self.compilation_authority.clone().ok_or_else(|| {
             ResidentActorWorkbenchError::ActorProtocol(
