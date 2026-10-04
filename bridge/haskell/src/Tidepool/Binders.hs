@@ -623,8 +623,9 @@ analyzeCellWithGrouping ordered dflags template source = do
         bodySource = blankBeforeLine firstBodyLine source
     body <- splitCellWithFlags effective bodySource
     classified <- traverse (uncurry (classify effective)) (zip [length headerItems..] body)
-    let genericAlias = freshAlias "TidepoolCompilerGeneric" source
-        displayAlias = freshAlias "TidepoolCompilerDisplay" source
+    -- Retained declaration imports are part of the next cell's namespace.
+    let genericAlias = freshAlias "TidepoolCompilerGeneric" (template ++ source)
+        displayAlias = freshAlias "TidepoolCompilerDisplay" (template ++ source)
         generated = automaticGenericDeclarations effective genericAlias classified
         grouped = groupDeclarations headerItems classified ""
         targets = filter ((`elem` map genericDeclarationTarget generated) . structuralDisplayTargetName)

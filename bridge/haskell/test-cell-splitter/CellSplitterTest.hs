@@ -434,6 +434,20 @@ orderedInferenceSegments = do
       assertEqual "authored type owns its generated display" ["Imported"]
         (map structuralDisplayTargetName (cellPlanStructuralDisplayTargets declaration))
     _ -> fail "import and type declaration share a segment"
+  let retainedTemplate = unlines
+        [ if line == "module CellCheck where"
+            then unlines [line
+              , "import qualified GHC.Generics as TidepoolCompilerGeneric"
+              , "import qualified Tidepool.Inspection as TidepoolCompilerDisplay"]
+            else line
+        | line <- lines template ]
+  retainedPlan <- analyzeOrderedCell retainedTemplate "data Retained = Retained"
+    >>= either (fail . renderCellSplitError) pure
+  assertEqual "generated Generic alias avoids retained template imports" True
+    ("import qualified GHC.Generics as TidepoolCompilerGenericX" `elem`
+      map locatedImportSource (prologueImports (cellPlanPrologue retainedPlan)))
+  assertEqual "generated Display alias avoids retained template imports"
+    "TidepoolCompilerDisplayX" (cellPlanStructuralDisplayAlias retainedPlan)
   where
     source = unlines
       [ "first <- pure (0 :: Int)"
