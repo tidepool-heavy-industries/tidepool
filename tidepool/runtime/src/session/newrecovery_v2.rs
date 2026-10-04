@@ -2203,7 +2203,6 @@ mod tests {
 
     #[test]
     fn persistent_snapshots_share_history_payloads_across_publication_candidates() {
-        let root = tempfile::tempdir().unwrap();
         let mut wire = fixture();
         let RecoveryArtifactClosure::Home(home) = home_artifact(&wire) else {
             unreachable!()

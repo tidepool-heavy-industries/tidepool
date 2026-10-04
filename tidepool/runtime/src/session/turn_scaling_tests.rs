@@ -1678,7 +1678,7 @@ fn checked_cell_retained_imports_preserve_value_callable_and_generation() {
     assert_authentic_retained_link_rejects_wrong_generation(&targets);
 
     let retained = resident.prepared_retained();
-    for owner in [value_owner, callable_owner] {
+    for owner in [&value_owner, &callable_owner] {
         assert!(retained.iter().any(|(identity, generation)| identity.module
             == owner.1.module_name()
             && *generation == owner.1.gen().0));
