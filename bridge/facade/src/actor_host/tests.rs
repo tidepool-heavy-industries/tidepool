@@ -562,19 +562,6 @@ async fn released_checkpoint_keeps_an_admitted_childs_hosted_context() {
         .await;
     let root = campaign.root_installation.policy.clone();
     let output_store = display_output::open_run_store(campaign.session_root.path()).unwrap();
-    let assert_display_true = |result: &serde_json::Value| {
-        let display = result["items"]
-            .as_array()
-            .unwrap()
-            .last()
-            .unwrap()["operations"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find_map(|operation| operation.get("display"))
-            .expect("explicit checkpoint observation");
-        assert_eq!(display["text"], "True", "{result:?}");
-    };
     let root_for_setup = root.clone();
     let setup = tokio::spawn(async move {
         dispatch_haskell_script(
@@ -688,7 +675,11 @@ async fn released_checkpoint_keeps_an_admitted_childs_hosted_context() {
         )
         .await;
     assert_eq!(release["status"], "committed", "{release:?}");
-    assert_display_true(&release);
+    assert_eq!(
+        test_campaign::committed_display_text(&release),
+        "True",
+        "{release:?}"
+    );
     let refused = campaign
         .drive_actor_output(
             &output_store,
@@ -699,7 +690,11 @@ async fn released_checkpoint_keeps_an_admitted_childs_hosted_context() {
         )
         .await;
     assert_eq!(refused["status"], "committed", "{refused:?}");
-    assert_display_true(&refused);
+    assert_eq!(
+        test_campaign::committed_display_text(&refused),
+        "True",
+        "{refused:?}"
+    );
 
     let inherited = campaign
         .drive_actor_output(
@@ -708,7 +703,11 @@ async fn released_checkpoint_keeps_an_admitted_childs_hosted_context() {
         )
         .await;
     assert_eq!(inherited["status"], "committed", "{inherited:?}");
-    assert_display_true(&inherited);
+    assert_eq!(
+        test_campaign::committed_display_text(&inherited),
+        "True",
+        "{inherited:?}"
+    );
 
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
