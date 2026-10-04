@@ -90,6 +90,7 @@ nix_tool(name = "browser_npm", executable = read_root_config("nix", "browser_npm
 nix_tool(name = "git", executable = read_root_config("nix", "git"), visibility = ["PUBLIC"])
 nix_tool(name = "python", executable = read_root_config("nix", "python"), visibility = ["PUBLIC"])
 nix_tool(name = "bash", executable = read_root_config("nix", "bash"), visibility = ["PUBLIC"])
+nix_tool(name = "rustfmt", executable = read_root_config("nix", "rustfmt"), visibility = ["PUBLIC"])
 nix_tool(name = "ghc", executable = read_root_config("nix", "ghc"), visibility = ["PUBLIC"])
 nix_tool(name = "coreutils", executable = read_root_config("nix", "coreutils"), visibility = ["PUBLIC"])
 nix_tool(name = "sleep", executable = read_root_config("nix", "sleep"), visibility = ["PUBLIC"])

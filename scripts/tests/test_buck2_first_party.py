@@ -39,11 +39,8 @@ class FirstPartySources(unittest.TestCase):
         cargo.chmod(0o755)
         self.write("tidepool/repr/Cargo.toml", "[package]\nname = 'tidepool-repr'\n")
         self.write("bridge/atomic-write/Cargo.toml", "[package]\nname = 'tidepool-atomic-write'\n")
-        self.write("bridge/haskell/test-prepared-stg/fixtures/m3-vertical.cbor", "m3")
-        self.write("bridge/haskell/test-execution-schema-encode/fixtures/schema6-intrinsic.cbor", "schema6")
         self.write("bridge/atomic-write/tests/fixtures/directory_fault.c", "fixture")
-        self.write("tidepool/repr/src/lib.rs",
-                   'const M3: &[u8] = include_bytes!("../../../bridge/haskell/test-prepared-stg/fixtures/m3-vertical.cbor");\n')
+        self.write("tidepool/repr/src/lib.rs", "pub fn structural() {}\n")
         self.write("tidepool/repr/tests/suites/repr.rs", "\n".join(
             f'#[path = "../{name}.rs"] mod {name};'
             for name in ("execution_schema_contract", "execution_schema_codec",
@@ -53,7 +50,6 @@ class FirstPartySources(unittest.TestCase):
                        "metadata_strictness", "strict_jsonl_directory"):
             self.write(f"tidepool/repr/tests/{module}.rs", "")
         self.write("tidepool/repr/tests/execution_schema_contract.rs",
-                   'const SCHEMA: &[u8] = include_bytes!("../../../bridge/haskell/test-execution-schema-encode/fixtures/schema6-intrinsic.cbor");\n'
                    'const FAULT: &str = include_str!("../../../bridge/atomic-write/tests/fixtures/directory_fault.c");\n')
         self.write("bridge/atomic-write/src/lib.rs", "pub fn write() {}\n")
         self.write("tidepool/heap/Cargo.toml", "[package]\nname = 'tidepool-heap'\n")
@@ -218,6 +214,15 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         buck, _groups = self.groups("tidepool/heap")
         self.assertIn('tidepool_rust_isolated_test(\n    name = "gc_unit",', buck)
         self.assertIn('tidepool_rust_isolated_test(\n    name = "raw_scan_validation",', buck)
+
+    def test_checked_in_prepared_program_cannot_reenter_compile_time_inputs(self):
+        control = self.generate()
+        self.assertEqual(control.returncode, 0, control.stderr)
+        self.write("bridge/haskell/test-prepared-stg/fixtures/future.cbor", "immutable program")
+        self.write("tidepool/repr/src/lib.rs", 'const PROGRAM: &[u8] = include_bytes!("../../../bridge/haskell/test-prepared-stg/fixtures/future.cbor");\n')
+        result = self.generate()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("prepared program bytes must be declared runtime resources", result.stderr)
 
     def test_extract_frontend_binary_is_generated_from_its_cargo_target(self):
         result = self.generate()
@@ -597,13 +602,8 @@ source = "git+https://example.invalid/tokio-tungstenite?rev=aaaaaaaaaaaaaaaaaaaa
         lib = groups["tidepool_repr_sources"]
         unit = groups["tidepool_repr_unit_tests_sources"]
         integration = groups["repr_sources"]
-        m3 = "bridge/haskell/test-prepared-stg/fixtures/m3-vertical.cbor"
-        schema = "bridge/haskell/test-execution-schema-encode/fixtures/schema6-intrinsic.cbor"
         fault = "bridge/atomic-write/tests/fixtures/directory_fault.c"
         self.assertEqual(lib["src/lib.rs"], "tidepool/repr/src/lib.rs")
-        self.assertEqual(lib["//bridge/haskell:m3_vertical_fixture"], m3)
-        self.assertEqual(unit["//bridge/haskell:m3_vertical_fixture"], m3)
-        self.assertEqual(integration["//bridge/haskell:schema6_intrinsic_fixture"], schema)
         self.assertEqual(integration["//bridge/atomic-write:directory_fault_fixture"], fault)
         self.assertNotIn("src/lib.rs", integration)
         self.assertNotIn("tests/execution_schema_contract.rs", lib)
@@ -634,7 +634,6 @@ source = "git+https://example.invalid/tokio-tungstenite?rev=aaaaaaaaaaaaaaaaaaaa
             "Cargo.toml", "tests/suites/repr.rs", "tests/execution_schema_codec.rs",
             "tests/execution_schema_contract.rs", "tests/extend_checked_equivalence.rs",
             "tests/metadata_strictness.rs", "tests/strict_jsonl_directory.rs",
-            "//bridge/haskell:schema6_intrinsic_fixture",
             "//bridge/atomic-write:directory_fault_fixture",
         })
         # A new #[path] sibling belongs only to the root that imports it.

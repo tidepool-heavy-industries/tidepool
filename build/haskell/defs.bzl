@@ -89,3 +89,11 @@ def encoder_test_link_flags():
 
 def worker_response_test_link_flags():
     return ["-dynamic"] + _package_flags(WORKER_RESPONSE_TEST_PACKAGES)
+
+
+def haskell_component_flags(packages, flags = []):
+    return _component_flags(packages, flags)
+
+
+def haskell_component_link_flags(packages, flags = []):
+    return ["-dynamic"] + _package_flags(packages) + flags

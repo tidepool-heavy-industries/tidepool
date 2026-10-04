@@ -118,6 +118,7 @@ cat > "$tmp_config" <<EOF
 [nix]
 rustc = $rust/bin/rustc
 rustdoc = $rust/bin/rustdoc
+rustfmt = $rust/bin/rustfmt
 clippy = $rust/bin/clippy-driver
 ghc = $ghc/bin/ghc
 ghc_bin = $ghc/bin
