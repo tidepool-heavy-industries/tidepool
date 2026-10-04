@@ -71,6 +71,11 @@ async fn opted_in_selected_context_child_owns_and_retires_its_machine() {
                 {
                     Ok(activation)
                 }
+                LocalResidentDeployment::Retired { actor, terminal }
+                    if actor == installation.actor.identity() =>
+                {
+                    panic!("fresh child retired before typed activation: {terminal:?}");
+                }
                 other => Err(other),
             },
         )
