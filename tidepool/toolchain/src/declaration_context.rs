@@ -5531,14 +5531,19 @@ mod tests {
         )
         .expect("actual compiler issues the original support proof");
         let owner = identity("main", "PrefixSelectedSupport");
+        // This consumer prepares executable code. Retain the genuine original
+        // native owner and its canonical proof, not an interface-only projection.
+        let products = certificate
+            .recovery_products()
+            .into_iter()
+            .filter(|product| {
+                product.owner().unit == owner.unit && product.owner().module == owner.module
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(products.len(), 1);
         let persisted = ExactDeclarationContext::new(&[], &[], vec![])
             .unwrap()
-            .extend_interface_artifacts(
-                &certificate
-                    .artifact_view()
-                    .interface_projection(std::slice::from_ref(&owner))
-                    .unwrap(),
-            )
+            .extend_checked_original_products(certificate.toolchain_identity_sha256(), &products)
             .unwrap();
         assert!(persisted.authored_native_root(1).is_err());
         let empty = ExactDeclarationContext::new(&[], &[], vec![]).unwrap();
