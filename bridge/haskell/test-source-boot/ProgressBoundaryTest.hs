@@ -138,7 +138,8 @@ watchReplyEvidenceChecks effects work = do
           either (Left . show) (Right . map (\group -> (projectedOriginalOrdinal group,
             projectedBinders group, projectedVerbSites (projectedBody group)))) outcome)
           | (owner, outcome) <- outcomes]
-      , "original omissions: " ++ show (preparedModuleProductOmissions products)])
+      , "original omissions: " ++ show [(moduleNameString (moduleName owner), omissions)
+          | (owner, omissions) <- preparedModuleProductOmissions products]])
     forM_ outcomes $ \(owner, outcome) -> case outcome of
       Left failure -> fail ("watch original projection failed: " ++ show failure)
       Right groups -> forM_ groups $ \group -> BS.writeFile

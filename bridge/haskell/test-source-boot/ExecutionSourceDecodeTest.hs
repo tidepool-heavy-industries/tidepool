@@ -182,7 +182,7 @@ executionSourceResolutionBudgetChecks = do
       atLimit = rows (replicate 16 4096)
       overLimit = rows (replicate 16 4096 ++ [1])
       malformedAfterLimit = case atLimit of
-        TList firstRows -> TList (firstRows ++ [resolution 16 [TBool False]])
+        TList firstRows -> TList (firstRows ++ [resolution (16 :: Int) [TBool False]])
         _ -> error "resolution fixture inventory is not a list"
       recipe evidence = ExecutionSourceRecipe (executionGraphProducer graph)
         (executionGraphSemantic graph) (executionGraphIncludes graph)
