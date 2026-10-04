@@ -180,7 +180,7 @@ writeCertifiedProductsKeeping includes originalInterfaces outDir prepared produc
       Nothing -> pure Map.empty
       Just compilation -> do
         let owner = tcg_mod (prTargetTcGblEnv (pprPipelineResult prepared))
-        captureFinalizedSourceOriginals compilation
+        captureFinalizedSourceOriginals compilation (pprAcceptedCandidates prepared)
           (unitString (moduleUnit owner),moduleNameString (moduleName owner)) finalized finalDependencies
     pure (CertifiedOriginalProducts freshProducts sourceOriginals finalized sourceRecipe)
 

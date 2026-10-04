@@ -623,12 +623,16 @@ validateInterfaceEvidence scope offered = do
 -- TPFINALMODULE identity; capture paths are custody, never semantic identity.
 -- The current target is retained by its own checked/native declaration owner.
 captureFinalizedSourceOriginals
-  :: ExactCompilation -> (String,String) -> FinalizedModuleArtifacts
+  :: ExactCompilation -> [ModuleCandidate] -> (String,String) -> FinalizedModuleArtifacts
   -> DependencyEvidence -> IO (Map.Map (String,String) CanonicalInterfaceProof)
-captureFinalizedSourceOriginals compilation target finalized evidence = do
+captureFinalizedSourceOriginals compilation accepted target finalized evidence = do
   let scope = compilationScope compilation
       admissions = Map.delete target (finalizedLocalAdmissions finalized)
       rows = map localFinalizedInterface (Map.elems admissions)
+        ++ [(ExactIfaceArtifact (candidateUnit candidate) (candidateModule candidate)
+              (candidateInterface candidate) (candidateInterfaceSha256 candidate)
+              (candidateInterfaceRequirements candidate),candidatePackageImports candidate,
+              candidatePackageImportsSha256 candidate) | candidate <- accepted]
       inherited = scopeInterfaces scope
       keyOf (artifact,_,_) = (exactUnit artifact,exactModule artifact)
   interfaces <- foldM (\selected row -> case filter ((== keyOf row) . keyOf) selected of
