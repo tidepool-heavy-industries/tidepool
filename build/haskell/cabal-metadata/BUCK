@@ -1,0 +1,12 @@
+load("@prelude//:rules.bzl", "haskell_binary")
+
+# Bootstrap independently of every generated first-party component declaration.
+haskell_binary(
+    name = "metadata",
+    srcs = {"Main.hs": "Main.hs"},
+    _haskell_toolchain = "toolchains//cabal-metadata:haskell",
+    link_style = "static_pic",
+    compiler_flags = ["-Wall", "-XGHC2024", "-package", "Cabal", "-package", "Cabal-syntax", "-package", "bytestring"],
+    linker_flags = ["-dynamic", "-package", "Cabal", "-package", "Cabal-syntax", "-package", "bytestring"],
+    visibility = ["PUBLIC"],
+)

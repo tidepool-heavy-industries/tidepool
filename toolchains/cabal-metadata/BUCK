@@ -1,0 +1,11 @@
+load("@toolchains//:tidepool.bzl", "nix_haskell_toolchain")
+
+# This package must not load the generated component file, even indirectly.
+# It uses the production compiler pin without project or test package inputs.
+nix_haskell_toolchain(
+    name = "haskell",
+    ghc = read_root_config("nix", "ghc"),
+    ghc_pkg = read_root_config("nix", "ghc_pkg"),
+    haddock = read_root_config("nix", "haddock"),
+    visibility = ["PUBLIC"],
+)
