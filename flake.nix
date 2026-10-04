@@ -570,8 +570,9 @@
             pkgs.git
           ];
         };
-        packages.buck-exomonad-runtime-tools = pkgs.symlinkJoin {
+        packages.buck-exomonad-runtime-tools = pkgs.buildEnv {
           name = "exomonad-runtime-tools";
+          pathsToLink = [ "/bin" ];
           paths = [
             pkgs.bash
             pkgs.coreutils
