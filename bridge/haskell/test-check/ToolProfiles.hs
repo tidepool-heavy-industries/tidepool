@@ -1,15 +1,20 @@
 {-# LANGUAGE DataKinds, DeriveGeneric, GADTs, OverloadedStrings, ScopedTypeVariables, TypeApplications, TypeOperators #-}
-module Main where
+module Main (main, tests) where
 
 import Control.Monad (unless)
 import Control.Monad.Freer (Eff, interpret, reinterpret, run, send)
 import Control.Monad.Freer.State (State, get, modify, runState)
+import Data.List (isInfixOf)
 import Data.Text (Text)
 import GHC.Generics (Generic)
+import System.Directory (createDirectoryIfMissing)
+import System.Exit (ExitCode (..))
+import System.Process (readProcessWithExitCode)
 import Tidepool.Agent.Contract
 import Tidepool.Aeson.Value (Value (..), ToJSON (toJSON), object, (.=))
 import qualified Tidepool.Aeson.KeyMap as KM
 import Tidepool.Effects.Core (AgentTools (..), Commands, ContextReadWrite (..))
+import Tidepool.Test.Runner
 
 data Tools mode = Tools
   { ordinary :: mode :- Call Text Text
@@ -82,8 +87,8 @@ actorRuntime AgentToolsInputWith = error "actor requested an ordinary hosted too
 actorRuntime (AgentToolsReplyWith value) = modify (\harness -> harness {actorReplies = actorReplies harness <> [value]})
 actorRuntime _ = error "unexpected actor tool operation"
 
-main :: IO ()
-main = do
+installedToolContracts :: IO ()
+installedToolContracts = do
   let missing = compileInstalledTools
         (Unpresented (tool "Echo" pure) :: Unpresented (AsServerT (Eff '[])))
       missingRaw = compileInstalledTools
@@ -156,3 +161,47 @@ main = do
   where
     field name (Object values) = KM.lookup (KM.fromText name) values
     field _ _ = Nothing
+
+data CompileExpectation = Accepted | Rejected [String]
+
+compileProfile :: String -> CompileExpectation -> IO ()
+compileProfile fixture expectation = do
+  support <- requiredInput "TIDEPOOL_TEST_EFFECTS_DIR"
+  let output = "profile-fixture-objects/" ++ fixture
+  createDirectoryIfMissing True output
+  (status, out, err) <- readProcessWithExitCode "ghc"
+    [ "-fno-code", "-fforce-recomp", "-i" ++ support
+    , "-ilib", "-iactors"
+    , "-outputdir", output, "test-check/tool-profiles/" ++ fixture ++ ".hs"
+    ] ""
+  writeFile (output ++ "/compile.log") (out ++ err)
+  case expectation of
+    Accepted -> require (fixture ++ " compiles\n" ++ out ++ err) (status == ExitSuccess)
+    Rejected fragments -> require (fixture ++ " rejects at its intended type boundary\n" ++ out ++ err)
+      (status /= ExitSuccess && all (`isInfixOf` (out ++ err)) fragments)
+
+tests :: TestTree
+tests = testGroup "tool profile contract"
+  [ testCase "compiled installation dispatch scheduling presentation and actor profiles" installedToolContracts
+  , testCase "ordinary compiled model program can be raised into sync context" $
+      compileProfile "RaisedModelTurn" Accepted
+  , testCase "sync context admits explicit effort changes" $
+      compileProfile "ContextEffort" Accepted
+  , testCase "async row cannot change next model" $
+      compileProfile "AsyncContext" (Rejected ["is not a member of the type-level list"])
+  , testCase "async row cannot change next effort" $
+      compileProfile "AsyncContextEffort" (Rejected ["is not a member of the type-level list"])
+  , testCase "async profile cannot declare a sync context effect" $
+      compileProfile "AsyncProfile" (Rejected ["cannot be used by an asynchronous tool"])
+  , testCase "notebook profile cannot borrow unsupported command authority" $
+      compileProfile "UnsupportedProfile" (Rejected ["No instance for", "Contains Commands"])
+  , testCase "concrete sync handler cannot masquerade as empty async profile" $
+      compileProfile "ConcreteSyncHandler" (Rejected ["LiftTool"])
+  , testCase "concrete native notebook cannot borrow another actor command row" $
+      compileProfile "ConcreteNativeProfile" (Rejected ["Commands"])
+  , testCase "model hook cannot borrow caller sync context authority" $
+      compileProfile "ModelContext" (Rejected ["cannot be used by an asynchronous tool"])
+  ]
+
+main :: IO ()
+main = runTests tests

@@ -155,6 +155,19 @@ executable standalone
         self.assertEqual(paths, sorted("core/" + module.replace(".", "/") + ".hs"
                                        for module in modules if GENERATOR.is_jev_core(module)))
 
+    def test_compiler_profile_fixtures_are_runtime_inputs_without_host_module_edges(self):
+        roster = self.roster()
+        component = roster["tool-profiles-contract"]
+        _, srcs, _, _, _ = GENERATOR.fields_for(component, roster)
+        fixtures = sorted((GENERATOR.PACKAGE / "test-check/tool-profiles").glob("*.hs"))
+        self.assertEqual(len(fixtures), 9)
+        rendered = GENERATOR.render()
+        resources = rendered.split('name = "tool_profiles_contract_resources",', 1)[1].split(")", 1)[0]
+        for fixture in fixtures:
+            relative = fixture.relative_to(GENERATOR.PACKAGE).as_posix()
+            self.assertNotIn(relative, srcs.values())
+            self.assertIn(relative, resources)
+
     def test_unowned_external_source_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "Unowned.hs"

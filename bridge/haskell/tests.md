@@ -60,9 +60,11 @@ The narrow helper contracts are independently selectable native suites:
 | `pinned_source_contract` | 1 | Actual facade pinned assertion with external `Ext.Tiny` |
 | `automation_helper_contract` | 2 | Eight planning assertions and 26 generated Commands interpreter assertions |
 | `browser_scenario_contract` | 3 | Original workflow matrix, protocol isolation, helper refusals and command specification |
+| `command_tools_contract` | 15 | Command receipt facts, UTF-8 bounds, output recovery and route selection |
+| `tool_profiles_contract` | 10 | Installation/dispatch matrix, two accepted compiler profiles and seven type-boundary refusals |
 
 Assertion matrices are checks inside named cases; they do not inflate the
-runner's executed-case count. These four suites expose 23 cases. The separate
+runner's executed-case count. These six suites expose 48 cases. The separate
 facade `facade_prepared_recipe_contract_test` executes eight prepared-runtime
 cases in one counted test. `facade_recipe_source_capture_test` records seven
 cells and four assertion labels in one diagnostic test; recording those labels
@@ -75,3 +77,8 @@ while its mutable assertion cell sees the runtime fixture `Ext.Tiny`. Local
 Cabal compatibility supplies the same graph outputs under `generated/jev`
 and `generated/pinned`, alongside the Effects and protocol outputs above.
 Missing generated sources fail compilation.
+
+The tool-profile compilation cases consume their declared source fixtures at
+runtime. Invalid profiles are compiler refusal controls, so they are not
+modules of the host test binary. Each case retains its compiler output in its
+private fixture directory until the owning runner removes that directory.

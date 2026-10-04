@@ -4,7 +4,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeOperators #-}
 
-module Main (main) where
+module Main (main, tests) where
 
 import Control.Monad (unless)
 import Control.Monad.Freer (Eff, interpret, run)
@@ -20,6 +20,7 @@ import qualified Tidepool.Command as Cmd
 import qualified Tidepool.Command.Tools as Tools
 import qualified Tidepool.Effects.Core as Core
 import Tidepool.Effects.Core (Commands (..))
+import Tidepool.Test.Runner
 
 data Event
   = Presented
@@ -90,8 +91,8 @@ executeInput :: Maybe Int -> Maybe Bool -> Tools.Execute
 executeInput wait background =
   Tools.Execute "printf λ" Nothing Nothing Nothing Nothing Nothing wait (Just 1024) Nothing Nothing background
 
-main :: IO ()
-main = do
+tests :: TestTree
+tests =
   let (results, events) = runCommands $ do
         immediate <- Tools.execute (executeInput Nothing Nothing)
         yielded <- Tools.execute (executeInput (Just 0) Nothing)
@@ -161,22 +162,38 @@ main = do
           not ("[payload clipped" `T.isInfixOf` Tools.presentation uncroppedPrefix)
             && "stream=\"Stdout\", offset=9000" `T.isInfixOf` Tools.presentation uncroppedPrefix
         _ -> False
-  check "named command routes never request host presentation" noPresented
-  check "immediate command blocks through status-only wait, without capturing output" immediateUsesStatusOnlyWait
-  check "timed observation preserves its requested wait" yieldedKeepsTimedWait
-  check "new command receipts introduce their session and binding" initialReferences
-  check "later observation omits repeated session introduction" repeatedOmitsIntro
-  check "all returned text fits max_output_bytes in UTF-8 bytes" boundedUnicode
-  check "accepted input with unconfirmed EOF remains acknowledged" exactInputReceipt
-  check "closed facts round-trip without the presentation payload" (receiptWire && resultWireOmitsPresentation && schemaMatches)
-  check "finished partial read is distinct from complete stream EOF" (pageFacts && pageTextHasState && completePageFacts)
-  check "accepted cancellation survives a failed follow-up await" acceptedCancelDespiteAwaitError
-  check "a long output-read failure retains its bounded recovery pointer" readErrorKeepsRecovery
-  check "a long observation failure retains its bounded recovery pointer" observeErrorKeepsRecovery
-  check ("capped output from a larger finished stream remains incomplete with recovery: " <> T.unpack (Tools.presentation immediate)) largeResultIncomplete
-  check "a fetched prefix that fits the display budget is still incomplete" uncroppedPrefixIncomplete
-  check "yield route detaches a still-running job" (Detached "job-immediate" `elem` events)
-  putStrLn "passed: command tool receipt behavior (15 checks)"
+  in testGroup "command tool receipt contract"
+    [ testCase "named command routes never request host presentation" $
+        check "named command routes never request host presentation" noPresented
+    , testCase "immediate command blocks through status-only wait without capturing output" $
+        check "immediate command blocks through status-only wait without capturing output" immediateUsesStatusOnlyWait
+    , testCase "timed observation preserves its requested wait" $
+        check "timed observation preserves its requested wait" yieldedKeepsTimedWait
+    , testCase "new command receipts introduce their session and binding" $
+        check "new command receipts introduce their session and binding" initialReferences
+    , testCase "later observation omits repeated session introduction" $
+        check "later observation omits repeated session introduction" repeatedOmitsIntro
+    , testCase "all returned text fits max_output_bytes in UTF-8 bytes" $
+        check "all returned text fits max_output_bytes in UTF-8 bytes" boundedUnicode
+    , testCase "accepted input with unconfirmed EOF remains acknowledged" $
+        check "accepted input with unconfirmed EOF remains acknowledged" exactInputReceipt
+    , testCase "closed facts round-trip without the presentation payload" $
+        check "closed facts round-trip without the presentation payload" (receiptWire && resultWireOmitsPresentation && schemaMatches)
+    , testCase "finished partial read is distinct from complete stream EOF" $
+        check "finished partial read is distinct from complete stream EOF" (pageFacts && pageTextHasState && completePageFacts)
+    , testCase "accepted cancellation survives a failed follow-up await" $
+        check "accepted cancellation survives a failed follow-up await" acceptedCancelDespiteAwaitError
+    , testCase "long output-read failure retains its bounded recovery pointer" $
+        check "long output-read failure retains its bounded recovery pointer" readErrorKeepsRecovery
+    , testCase "long observation failure retains its bounded recovery pointer" $
+        check "long observation failure retains its bounded recovery pointer" observeErrorKeepsRecovery
+    , testCase "capped output from a larger finished stream remains incomplete with recovery" $
+        check ("capped output from a larger finished stream remains incomplete with recovery: " <> T.unpack (Tools.presentation immediate)) largeResultIncomplete
+    , testCase "fetched prefix within the display budget remains incomplete" $
+        check "fetched prefix within the display budget remains incomplete" uncroppedPrefixIncomplete
+    , testCase "yield route detaches a still-running job" $
+        check "yield route detaches a still-running job" (Detached "job-immediate" `elem` events)
+    ]
   where
     isPresentation Presented = True
     isPresentation _ = False
@@ -194,3 +211,6 @@ utf8Bytes = T.foldl' (\bytes character -> bytes + width character) 0
       | ord character < 0x800 = 2
       | ord character < 0x10000 = 3
       | otherwise = 4
+
+main :: IO ()
+main = runTests tests

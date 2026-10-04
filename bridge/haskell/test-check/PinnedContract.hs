@@ -52,7 +52,7 @@ pinnedContract = do
   Text.writeFile path moduleSource
   (compiled, out, err) <- readProcessWithExitCode "ghc"
     [ "-O0", "-i" ++ support, "-i" ++ scratch
-    , "-ibridge/haskell/lib", "-ibridge/haskell/actors"
+    , "-ilib", "-iactors"
     , "-outputdir", scratch ++ "/cell-objects", "-o", binary, path
     ] ""
   writeFile (scratch ++ "/cell-build.log") (out ++ err)

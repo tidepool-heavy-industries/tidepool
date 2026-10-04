@@ -52,7 +52,7 @@ runCell support scratch source = do
   Text.writeFile path moduleSource
   (compiled, buildOut, buildErr) <- readProcessWithExitCode "ghc"
     [ "-O0", "-fforce-recomp", "-i" ++ support
-    , "-ibridge/haskell/lib", "-ibridge/haskell/actors"
+    , "-ilib", "-iactors"
     , "-outputdir", scratch, "-o", binary, path
     ] ""
   writeFile (scratch ++ "/build.log") (buildOut ++ buildErr)
