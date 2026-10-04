@@ -1,349 +1,88 @@
-module CandidateExecutionSourcesTest (candidateExecutionSourcesTest) where
+module CandidateExecutionSourcesTest (candidateExecutionSourcesTest, executionScopeDescriptorChecks) where
 
-import ExecutionSourceDecodeTest (executionSourceDecodeChecks, executionSourceDecodeBenchmark, executionSourceDecodeSnapshots, executionSourceResolutionBudgetChecks)
-import ExactScopeV9Test (exactScopeV9Checks, nativeOriginChecks, candidateCanonicalChecks)
-import CandidateGraphDescriptorTest (candidateGraphDescriptorChecks)
-import GenuineCandidateFixture
-  ( writeGenuineCandidateManifestFor, writeGenuineMetadataScope, writeGenuineEmptyMetadataScope
-  , writeGenuineCandidateNativeScope, writeGenuineCandidateLexicalScope, writeGenuineAuthoredDeclarationScope
-  , writeGenuineOriginalExecutionScope, writeGenuineExecutionScope )
-
-import Codec.CBOR.Encoding (encodeBool, encodeListLen, encodeString)
-import Codec.CBOR.Write (toStrictByteString)
 import Codec.CBOR.Read (deserialiseFromBytes)
 import Codec.CBOR.Term (Term(..), decodeTerm, encodeTerm)
-import Data.ByteString.Lazy qualified as BSL
-import Control.Exception (SomeException, IOException, AsyncException(ThreadKilled), bracket, evaluate, finally, try, fromException)
-import Control.Concurrent (MVar, forkIO, killThread, myThreadId, throwTo, threadDelay, newEmptyMVar, putMVar, takeMVar)
-import Control.Monad (foldM, forM, forM_, unless, void, when)
-import GHC.Clock (getMonotonicTimeNSec)
-import Data.Word (Word32, Word64)
-import Data.IORef (newIORef, readIORef, writeIORef, modifyIORef')
-import Crypto.Hash.SHA256 qualified as SHA
+import Codec.CBOR.Write (toStrictByteString)
+import Control.Exception (bracket, evaluate, finally)
+import Control.Monad (forM_, unless)
 import Data.ByteString qualified as BS
-import Data.ByteString.Char8 qualified as BSC
-import Data.List (isInfixOf, isPrefixOf, sort, sortOn, stripPrefix)
-import Data.Maybe (catMaybes, isJust, isNothing, maybeToList)
-import Data.Map.Strict qualified as Map
+import Data.ByteString.Lazy qualified as BSL
 import Data.Set qualified as Set
 import Data.Text qualified as T
-import Data.Text.Encoding qualified as TE
-import GHC (runGhc, getSession, setSession, SafeHaskellMode(Sf_None), ms_mod_name, ms_hsc_src, ms_hspp_buf, ms_hspp_file, ms_hspp_opts, parseModule, typecheckModule, TypecheckedModule(..), ParsedModule(..), Target(..))
-import GHC.Core qualified as Core
-import GHC.Builtin.Types (boolTy, intTy, charTy, stringTy, intDataCon)
-import GHC.Core.Type (mkVisFunTyMany, mkTyVarTy, mkForAllTy)
-import GHC.Core.TyCo.Compare (eqType)
-import GHC.Builtin.Types (liftedTypeKind)
-import GHC.Types.Var (mkTyVar, VarBndr(..))
-import GHC.Types.Name.Occurrence (mkTyVarOcc, mkVarOcc)
-import GHC.Types.SrcLoc (noSrcSpan)
-import Language.Haskell.Syntax.Specificity (ForAllTyFlag(..), Specificity(..))
-import GHC.Types.Id (idName, idType, setIdName)
-import GHC.Types.Literal (Literal(..), LitNumType(..))
-import GHC.Types.Name (getOccString, nameOccName, nameSrcSpan, mkExternalName, mkInternalName)
-import GHC.Types.Avail (availNames)
-import GHC.Types.TypeEnv (typeEnvIds)
-import GHC.Types.Unique.Supply (mkSplitUniqSupply, takeUniqFromSupply)
-import GHC.Utils.Outputable (ppr, showSDocUnsafe)
-import GHC.Driver.Env (HscEnv(..), hsc_HPT, hscUpdateHPT)
-import GHC.Unit.Home.ModInfo (HomeModInfo(..), HomeModLinkable(..), lookupHpt, addToHpt)
-import GHC.Utils.Logger (Logger, popLogHook)
-import GHC.Unit.Finder (initFinderCache, addModuleToFinder)
-import GHC.Unit.Finder.Types (FinderCache(..))
-import GHC.Unit.Module.Location (ml_hi_file)
-import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
-import GHC.Builtin.Names (gHC_PRIM)
-import GHC.Tc.Types (tcg_imports, tcg_type_env, tcg_mod)
-import GHC.Unit.Module.Deps (imp_mods, Usage(..))
-import GHC.Unit.Module.Graph (ModuleGraphNode(..), mgModSummaries', mkModuleGraph)
-import GHC.Types.SourceFile (HscSource(..))
-import Control.Monad.IO.Class (liftIO)
-import GHC.Driver.Session (importPaths, targetProfile, wopt_set, xopt, WarningFlag(Opt_WarnMissingSignatures))
-import GHC.LanguageExtensions.Type qualified as LangExt
-import GHC.Types.Error (isEmptyMessages)
-import GHC.Types.Name.Set (nameSetElemsStable)
-import GHC.Driver.Hooks (hscCompileCoreExprHook, runMetaHook)
-import GHC.Iface.Make (mkIfaceTc)
-import GHC.Iface.Recomp (MaybeValidated(..), checkOldIface)
-import GHC.Iface.Tidy (mkBootModDetailsTc)
-import GHC.Iface.Binary (CompressionIFace(..), TraceBinIFace(..), writeBinIface)
-import GHC.Unit.Module.ModIface (set_mi_module, mi_module, mi_exports, mi_usages, mi_decls)
-import GHC.Iface.Syntax (ifaceDeclImplicitBndrs)
-import GHC.Unit.Module.ModDetails (md_types)
-import GHC.Unit.Module.ModGuts (cg_binds)
-import GHC.Unit.Module (Module, mkModule, mkModuleName, moduleName, moduleNameString, moduleUnit)
-import GHC.Unit.Types (unitString, unitIdString, stringToUnit, GenWithIsBoot(..))
-import Numeric (showHex)
-import System.Directory
-  ( copyFile, createDirectory, createDirectoryIfMissing, getTemporaryDirectory, removeDirectoryRecursive
-  , removeFile, renameFile, listDirectory, doesFileExist, getPermissions, setPermissions, executable
-  , getModificationTime, setModificationTime, withCurrentDirectory, getCurrentDirectory, canonicalizePath )
-import System.Environment (getArgs, getExecutablePath, setEnv, lookupEnv, unsetEnv)
-import System.Exit (ExitCode(..))
-import System.FilePath ((</>), takeDirectory, normalise, replaceExtension, addTrailingPathSeparator)
-import System.IO (hClose, hFlush, hPutStrLn, hSeek, hSetFileSize, withBinaryFile, IOMode(WriteMode), SeekMode(AbsoluteSeek), openTempFile, stderr)
-import System.IO.Error (isDoesNotExistError, ioeGetFileName)
-import GHC.IO.Handle (hDuplicate, hDuplicateTo)
-import System.Process (readProcessWithExitCode)
+import System.Directory (copyFile, removeFile)
+import System.FilePath ((</>), takeDirectory)
+import System.IO (IOMode(WriteMode), hSetFileSize, withBinaryFile, openTempFile, hClose)
 import System.Timeout (timeout)
-import Tidepool.CertifiedProducts (encodeCertifiedProducts, resolvePackageGlobal)
-import Tidepool.FinalizedModuleArtifacts (captureFinalizedModuleArtifacts, emptyFinalizedModuleArtifacts)
-import Tidepool.FinalizedModule (finalizedHomeModInfo, homeInterfaceUsageOwners)
-import Tidepool.ExecutionEncode (encodeModuleProducts)
-
-import Tidepool.ExecutionProjection
-  ( ProjectionContext(..), ProjectionError(..), projectPreparedModuleGroups
-  , projectPreparedModuleProducts, projectOriginalHomeModuleProducts, preparedModuleProductOutcomes, closeUnavailableOriginalGroups, topBinders
-  , ReferenceFact(..), preparedModuleReferenceFacts, preparedRootIdentity, projectPrepared )
-import Tidepool.ExecutionProjection (resolveTextPackageUnit)
-import Tidepool.PreparedFormatting (resolveFormattingAuthority)
-import Tidepool.PreparedTime (resolveTimeAuthority)
-import Tidepool.PreparedJson (resolveJsonAuthority)
-import Tidepool.PreparedSites (SiteRejection(..), resolvePreparedInterfaceSiblings, lookupPreparedVerb)
-import Tidepool.SiteClassifier (SiteFailure(..), classifySiteOccurrence)
-import Tidepool.EffectSchema (YieldSite(..), SiteType(..))
-import GHC.Driver.Env (hsc_home_unit)
-import GHC.Unit.Home (isHomeUnit)
-import GHC.Core.DataCon (dataConWorkId, dataConTyCon)
-import GHC.Core.TyCon (tyConDataCons)
-import Tidepool.PreparedFacts (PreparedFacts(..), extractPreparedFacts)
-import GHC.Types.Name (nameModule_maybe)
-import GHC.Types.Var (varName)
-import Tidepool.CompileInput (writeCompileInputProof)
-import Tidepool.DiagJson (InputRejection(..))
-import Tidepool.ExecutionSchema
 import Tidepool.DependencyEvidence
-  ( DependencyEvidence(..), DependencyModule(..), DependencyImport(..)
-  , DependencyResolution(..), ProductAvailability(..), DependencySource(..), sourceEvidence
-  , DependencyQualifier(..), renderDependencyQualifier
-  , selectedHomeRequirements, renderDependencyEvidence )
-import Tidepool.ExactHydration
-  ( CheckedTemplateInterface(..), newOriginalInterfaceArtifacts, originalInterfaceBytes, ExactIfaceArtifact(..), freshExactState, noCheckedValueImports, installExactLexicalGraph
-  , readCheckedValueImportAuthority, readExactIfaceArtifacts, hydrateExactScope
-  , readVerifiedExactIfaceClosure, readVerifiedExactIfaceClosureWithCheckedValues
-  , selectVerifiedExactInterfaces, selectVerifiedValueInterfaces, checkedValueImportAuthorityFromVerified )
-import Tidepool.ExtractUtil (getLibdir)
-import Tidepool.HomeProducts (hydrateCandidateHomeProducts, CandidateCoreFailure(..))
-import Tidepool.GhcPipeline
-  ( PipelineSelection(..), PreparedPipelineResult(..), PipelineResult(..), CheckedEnvironmentResult(..)
-  , finalizedTidyGuts
-  , renderType, generatedScaffoldRecipe, activationPreviewInputType, withSourceImportIntents
-  , CompilePurpose(..), runPipelineSelected, runPipelineSessionSelected, withResidentPipelineSelected
-  , withResidentPipelineSelectedRequests )
-import Tidepool.ModuleCandidates (ModuleCandidate(..), CandidateGroup(..), CandidateGlobal(..)
-  , readModuleCandidates, readModuleCandidatesWithGraphs, candidateExecutionSources, candidateOriginalIdentity
-  , candidateCoreDescriptor)
-import Tidepool.PackageWitness (PackageImportEvidence(..), PackageImportRoot(..), encodePackageImports, emptyPackageImports, readPackageImports, revalidatePackageImports)
-import Tidepool.PreparedStg (PreparedModule(..), PreparedCoverage(..))
-import Tidepool.FatIface (readExactInterface)
-import Tidepool.Session (SessionScope(..), emptySessionScope)
-import Tidepool.RetainedUnfoldings (scopeRetainedSummaryHscEnv)
-import Tidepool.SessionArtifacts (mkBoundBinders, parseValModule)
-import Tidepool.Session (sessionHiPath, Generation(..), SessionModule(..), SessionModuleKind(..))
 import Tidepool.ExactScope
-  ( ExactScope(..), ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..)
-  , CheckedCellAdmission(..), CheckedCellPurpose(..), CheckedItemAdmission(..), CheckedItemPurpose(..)
-  , scopeCheckedCell, scopeCheckedItem, scopeIncludePaths, readExactScope
-  , scopeDurableInterfaces, canonicalCoreArtifact, canonicalCorePath
-  , canonicalCertificatePath, canonicalCertificateSha256, canonicalRequirements
-  , originalGroupFromCandidate
-  , extendExactExecutionSources, extendExactExecutionSourcesWithinBudget, scopeExecutionNativeOwners )
-import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
-import ProgressBoundaryTest (progressBoundaryChecks, watchReplyEvidenceChecks, watchReplyWarmAuthorityChecks)
-import FinalizedCoreTest (finalizedCoreChecks)
-import Tidepool.CheckedCell (CheckedSignature(..), RequestTypeSignatures(..), RequestHelperRecipe(..), captureCheckedSignature, encodeCheckedSignature, encodeRequestTypeSignatures
-  , captureCheckedTypeWitness, sealCheckedTypeWitness, encodeCheckedTypeWitness, rewriteCheckedAnnotations, rewriteHostInputType, rewriteRequestTypes, NativeParsedModule(..), thenNativeModule, typecheckNativeModule, typecheckNativeModuleWithDiagnostics)
-import Tidepool.TurnSource (replaceTemplateMarker, spliceTemplate)
-import Tidepool.Binders (BoundBinder(..), analyzeCellWithFlags, CellSourcePlan(..))
 import Tidepool.ExecutionSource
-  ( WorkerExecutionSource(OrdinaryExecutionSource)
-  , ExecutionSourceIdentity(..), ExecutionSourceOwner(..), ExecutionSourceRef(..), ExecutionSourceGraph(..), ExecutionSourceNode(..)
-  , executionSourceClosure, executionSourceOriginalNode, executionSourceOriginalClosure, executionIdentityKey
-  , ExecutionSourceFailure(..), ExecutionSourceRecipe(..), issueExecutionSourceRecipe, executionSourceProspectiveReferences
-  , executionNodeOriginalResolutions
-  , decodeExecutionSourceGraph
-  , executionSourceGraphBytesLimit )
-
+import Tidepool.GhcPipeline
+  ( PipelineSelection(..), PreparedPipelineResult(..), PipelineResult(..)
+  , CompilePurpose(..), runPipelineSessionSelected )
+import Tidepool.ModuleCandidates
+import Tidepool.Session (emptySessionScope, SessionScope(..))
+import GenuineCandidateFixture (writeGenuineExecutionScope)
 import SourceBootFixtureSupport
+  ( withTiming, withScratch, writeExecutionScope, writeManifestFor
+  , manifest, preparedNames, hasIntResultLiteral )
 
 candidateExecutionSourcesTest :: IO ()
 candidateExecutionSourcesTest = withTiming $ withScratch $ \work -> do
   forM_ ["MetadataQuoteSupport.hs","MetadataQuoter.hs","ExecutionReexportFacade.hs","ExecutionReexportTarget.hs"] $ \name ->
     copyFile ("test-source-boot/fixtures" </> name) (work </> name)
-  original <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
-    Nothing (work </> "ExecutionReexportFacade.hs") [work] Nothing
-  let sourceScopePath = work </> "original-scope.cbor"
+  let source = work </> "ExecutionReexportFacade.hs"
+      owners = ["MetadataQuoteSupport","MetadataQuoter"]
+      sourceScopePath = work </> "original-scope.cbor"
       candidatePath = manifest work
-  writeExecutionScope sourceScopePath work original ["ExecutionReexportFacade"]
-  originalScope <- readExactScope sourceScopePath >>= either fail pure
-  originalTerm <- readTerm sourceScopePath
-  parcel <- case originalTerm of
-    TList [_,_,_,_,_,_,_,TList [_,references],_] -> pure (TList
-      [TList [TList [TString (T.pack (executionGraphSha256 graph)),TBytes (executionGraphBytes graph)]
-        | graph <- scopeExecutionGraphs originalScope],references])
-    _ -> fail "candidate fixture lacks original execution parcel"
-  let owners = ["MetadataQuoteSupport","MetadataQuoter"]
-  writeManifestFor owners work original
-  descriptors <- readTerm candidatePath >>= \case
-    TList [_,_,_,_,TList rows,_] -> pure rows
-    _ -> fail "candidate fixture lacks source descriptors"
-  rows <- forM descriptors $ \case
-    TList fields@(TString _:TString name:_) -> do
-      product' <- case [value | value <- scopeProducts originalScope, originalModule value == T.unpack name] of
-        [value] -> pure value
-        _ -> fail "candidate fixture lacks actual original product"
-      prepared <- case [value | value <- pprModules original, moduleName (pmModule value) == mkModuleName (T.unpack name)] of
-        [value] -> pure value
-        _ -> fail "candidate fixture lacks paired prepared body"
-      let context = ProjectionContext "test" "matched"
-            (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) Map.empty
-            (SymbolIdentity "main" name "value" "answerValue" Nothing) [] Nothing Nothing Nothing Nothing
-      groups <- either (fail . show) pure (projectPreparedModuleGroups context prepared)
-      pure (TList [case index of
-        6 -> TString (T.pack (originalVersion product'))
-        7 -> TString (T.pack (originalProductSha256 product'))
-        10 -> TList (map candidateGroupTerm groups)
-        13 -> TString (T.pack (originalProductPath product'))
-        _ -> field | (index,field) <- zip [0::Int ..] fields])
-    _ -> fail "candidate fixture has malformed descriptor"
-  (symbols,globals,compactRows) <- either fail pure (compactInventoryRows rows)
-  let filteredParcel = case parcel of
-        TList [graphs,TList refs] -> TList [graphs,TList [reference | reference@(TList (_:TString name:_)) <- refs
-          , T.unpack name `elem` owners]]
-        _ -> parcel
-      envelope value = TList [TString "TPMCAN",TString "8",symbols,globals,TList compactRows,value]
-      writeTerm path value = BS.writeFile path (toStrictByteString (encodeTerm value))
-  writeTerm candidatePath (envelope filteredParcel)
-  offered <- readModuleCandidates candidatePath >>= either fail pure
-  unless (length offered == 2 && all (isJust . candidateExecutionSources) offered) $
-    fail "candidate reader lost original execution provenance"
-  accepted <- runPipelineSessionSelected (PreparedProducts (Just candidatePath)) Set.empty CertifyHomeProductsCompile
-    Nothing (work </> "ExecutionReexportFacade.hs") [work] Nothing
-  unless (Set.fromList (map candidateModule (pprAcceptedCandidates accepted)) == Set.fromList owners) $
-    fail "real GHC admission did not accept the proven source-selected originals"
-  -- Keep the dependency as an exact original while offering its importer.
-  -- Root replacement remains forbidden even though its tuple is identical.
-  let crossoverScopePath = work </> "candidate-original-scope.cbor"
-      crossoverScope = emptySessionScope {ssRoot=work,ssExactScope=Just crossoverScopePath}
       helperName = "MetadataQuoteSupport"
-      helperRows rows' = [row | row@(TList (_:TString name:_)) <- rows', name == helperName]
-      crossoverTerm lexical = case originalTerm of
-        TList fields -> TList [case (index,field) of
-          (4,TList rows') -> TList (helperRows rows')
-          (5,_) -> TList [TList [TList [TString "main",TString helperName],TList []] | lexical]
-          (6,TList rows') -> TList (helperRows rows')
-          (7,TList [graphs,TList refs]) -> TList [graphs,TList (helperRows refs)]
-          (8,_) -> TList [TString "cell-check2",TString (T.replicate 64 "0")
-            ,TString (T.replicate 64 "0"),TString (T.replicate 64 "0")
-            ,TList [],TList [],TList [],TList [],TList [TString (T.pack work)]]
-          _ -> field | (index,field) <- zip [0::Int ..] fields]
-        _ -> originalTerm
+      helperSource = work </> helperName ++ ".hs"
+      crossoverScopePath = work </> "candidate-original-scope.cbor"
+      crossoverScope = emptySessionScope {ssRoot=work,ssExactScope=Just crossoverScopePath}
       crossover = runPipelineSessionSelected (PreparedProducts (Just candidatePath)) Set.empty
-        CertifyHomeProductsCompile (Just crossoverScope)
-        (work </> "ExecutionReexportFacade.hs") [work] Nothing
+        CertifyHomeProductsCompile (Just crossoverScope) source [work] Nothing
       requireImporter result = unless
         (map candidateModule (pprAcceptedCandidates result) == ["MetadataQuoter"]
-          && "MetadataQuoteSupport" `notElem` preparedNames result) $
+          && helperName `notElem` preparedNames result) $
         fail "exact dependency reuse rejected its importer or replaced the protected original"
-  writeTerm crossoverScopePath (crossoverTerm True)
-  crossoverAccepted <- crossover
-  requireImporter crossoverAccepted
-  let helperSource = work </> "MetadataQuoteSupport.hs"
-  bracket (BS.readFile helperSource <* removeFile helperSource) (BS.writeFile helperSource) $ \_ -> do
-    sourceFreeOriginal <- crossover
-    requireImporter sourceFreeOriginal
-  let sharedGraphParcel = case filteredParcel of
-        TList [_,references] -> TList [TList [],references]
-        other -> other
-  writeTerm candidatePath (envelope sharedGraphParcel)
-  readModuleCandidates candidatePath >>= \case
-    Left _ -> pure ()
-    Right _ -> fail "candidate manifest borrowed an unavailable original graph"
-  sharedCandidates <- readModuleCandidatesWithGraphs (scopeExecutionGraphs originalScope) candidatePath
-    >>= either fail pure
-  unless (length sharedCandidates == 2) $ fail "combined exact graph inventory lost candidate recipes"
-  sharedGraphAccepted <- crossover
-  requireImporter sharedGraphAccepted
-  writeTerm candidatePath (envelope filteredParcel)
-  -- Exact-produced evidence keeps its authenticated home edge in the graph,
-  -- outside the ordinary import rows. Preserve the real GHC source/body pair.
-  let exactRows = [case row of
-        TList fields@(_:TString "MetadataQuoter":_) -> TList [case (index,field) of
-          (9,TList imports) -> TList [edge | edge@(TList (_:TString name:_)) <- imports, name /= helperName]
-          _ -> field | (index,field) <- zip [0::Int ..] fields]
-        other -> other | row <- compactRows]
-  exactParcel <- case filteredParcel of
-    TList [TList [TList [_,TBytes graphBytes]],TList refs] -> do
-      graph <- either (fail . show) (pure . snd) (deserialiseFromBytes decodeTerm (BSL.fromStrict graphBytes))
-      let removeOriginal node = case node of
-            TList fields@(_:TString "MetadataQuoter":_) -> TList [case (index,field) of
-              (4,TList imports) -> TList [edge | edge@(TList (_:TString name:_)) <- imports, name /= helperName]
-              _ -> field | (index,field) <- zip [0::Int ..] fields]
-            other -> other
-          exactGraph = case graph of
-            TList fields -> TList [case (index,field) of
-              (7,TList evidence) -> TList [if column == 4 then case value of
-                TList modules -> TList (map removeOriginal modules)
-                other -> other else value | (column,value) <- zip [0::Int ..] evidence]
-              (9,_) -> TList [TList [TString "main",TString "MetadataQuoter"
-                ,TList [TList [TString "main",TString helperName]]]]
-              _ -> field | (index,field) <- zip [0::Int ..] fields]
-            other -> other
-          exactBytes = toStrictByteString (encodeTerm exactGraph)
-          exactSha = TString (T.pack (digest exactBytes))
-          references = [TList [if index == 5 then exactSha else field
-            | (index,field) <- zip [0::Int ..] fields] | TList fields <- refs]
-      pure (TList [TList [TList [exactSha,TBytes exactBytes]],TList references])
-    _ -> fail "candidate fixture lacks one authenticated graph"
-  writeTerm candidatePath (TList [TString "TPMCAN",TString "8",symbols,globals,TList exactRows,exactParcel])
-  graphOriginalAccepted <- crossover
-  requireImporter graphOriginalAccepted
-  writeTerm candidatePath (envelope filteredParcel)
-  let reservedScope = case crossoverTerm True of
-        TList fields -> TList [case (index,field) of
-          (8,TList auth) -> TList [if column == 6 then TList [TString "MetadataQuoter"] else entry
-            | (column,entry) <- zip [0::Int ..] auth]
-          _ -> field | (index,field) <- zip [0::Int ..] fields]
-        other -> other
-  writeTerm crossoverScopePath reservedScope
-  reserved <- crossover
-  unless (null (pprAcceptedCandidates reserved) && "MetadataQuoter" `elem` preparedNames reserved) $
-    fail "reserved source owner was admitted as a cached replacement root"
-  -- Actual source selection, rather than inventory membership, authorizes
-  -- the same dependency when it was initially hidden from lexical imports.
-  writeTerm crossoverScopePath (crossoverTerm False)
-  crossoverSelected <- crossover
-  requireImporter crossoverSelected
-  let unsealedScope = case crossoverTerm False of
-        TList fields -> TList [if index == 8 then TNull else field
-          | (index,field) <- zip [0::Int ..] fields]
-        other -> other
-  writeTerm crossoverScopePath unsealedScope
-  hidden <- try crossover :: IO (Either SomeException PreparedPipelineResult)
-  unless (case hidden of
-      Left reason -> "OriginalSourceSelectionRejected" `isInfixOf` show reason
-      Right _ -> False) $
-    fail "hidden inventory original became visible without current source-selection authority"
-  writeTerm crossoverScopePath (crossoverTerm False)
-  -- Without the importer's authenticated recipe, raw path normalization is
-  -- forbidden and source compilation remains the safe fallback.
-  writeTerm candidatePath (envelope (TList [TList [],TList []]))
-  unproven <- crossover
-  unless (null (pprAcceptedCandidates unproven) && "MetadataQuoter" `elem` preparedNames unproven) $
-    fail "exact dependency without a recipe bypassed current compilation"
-  writeTerm candidatePath (envelope filteredParcel)
-  copyFile "test-source-boot/fixtures/MetadataQuoteSupportChanged.hs" (work </> "MetadataQuoteSupport.hs")
+  original <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
+    Nothing source [work] Nothing
+  writeExecutionScope sourceScopePath work original ["ExecutionReexportFacade"]
+  originalScope <- readExactScope sourceScopePath >>= either fail pure
+  executionScopeDescriptorChecks sourceScopePath
+  writeManifestFor owners work original
+  offered <- readModuleCandidates candidatePath >>= either fail pure
+  unless (Set.fromList (map candidateModule offered) == Set.fromList owners
+      && all (maybe False (not . null . fst) . candidateExecutionSources) offered) $
+    fail "current production candidate issuer lost original execution provenance"
+  offerBytes <- BS.readFile candidatePath
+  offerTerm <- readTerm candidatePath
+  accepted <- runPipelineSessionSelected (PreparedProducts (Just candidatePath)) Set.empty CertifyHomeProductsCompile
+    Nothing source [work] Nothing
+  unless (Set.fromList (map candidateModule (pprAcceptedCandidates accepted)) == Set.fromList owners) $
+    fail "real GHC admission did not accept the proven source-selected originals"
+  -- The same production-issued compilation supplies interface closure, native
+  -- owner selection and lexical adjacency; no checked-purpose grant is forged.
+  writeGenuineExecutionScope [helperName] [helperName] work source [work] crossoverScopePath original
+  crossover >>= requireImporter
+  bracket (BS.readFile helperSource <* removeFile helperSource) (BS.writeFile helperSource) $ \_ ->
+    crossover >>= requireImporter
+  protectedRoot <- runPipelineSessionSelected (PreparedProducts (Just candidatePath)) Set.empty
+    CertifyHomeProductsCompile Nothing (work </> "MetadataQuoter.hs") [work] Nothing
+  unless ("MetadataQuoter" `notElem` map candidateModule (pprAcceptedCandidates protectedRoot)
+      && "MetadataQuoter" `elem` preparedNames protectedRoot) $
+    fail "fresh compilation target was admitted as a cached replacement root"
+  copyFile "test-source-boot/fixtures/MetadataQuoteSupportChanged.hs" helperSource
   differentOriginal <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
-    Nothing (work </> "MetadataQuoteSupport.hs") [work] Nothing
-  writeExecutionScope crossoverScopePath work differentOriginal [T.unpack helperName]
+    Nothing helperSource [work] Nothing
+  writeExecutionScope crossoverScopePath work differentOriginal [helperName]
   mismatched <- crossover
   unless (null (pprAcceptedCandidates mismatched) && "MetadataQuoter" `elem` preparedNames mismatched) $
     fail "cached importer admitted a different current exact dependency tuple"
   changed <- runPipelineSessionSelected (PreparedProducts (Just candidatePath)) Set.empty CertifyHomeProductsCompile
-    Nothing (work </> "ExecutionReexportFacade.hs") [work] Nothing
+    Nothing source [work] Nothing
   unless (null (pprAcceptedCandidates changed)) $
     fail "candidate execution provenance bypassed current source validation"
-  copyFile "test-source-boot/fixtures/MetadataQuoteSupport.hs" (work </> "MetadataQuoteSupport.hs")
+  copyFile "test-source-boot/fixtures/MetadataQuoteSupport.hs" helperSource
   let emptyExecution = originalScope {scopeExecutionGraphs=[],scopeExecutionOwners=[]}
       parcels = [value | candidate <- pprAcceptedCandidates accepted, Just value <- [candidateExecutionSources candidate]]
   promoted <- either (fail . show) pure
@@ -465,63 +204,102 @@ candidateExecutionSourcesTest = withTiming $ withScratch $ \work -> do
   unless (case extendExactExecutionSources (concatMap fst parcels) (map snd parcels)
       emptyExecution {scopeProducerSha256=replicate 64 'f'} of Left _ -> True; _ -> False) $
     fail "candidate recipe promoted another compiler producer"
-  -- Re-emitting the admitted parcel exercises the actual source-free load:
-  -- target sees only the thin reexport facade, not the hidden defining owner.
-  let admittedPath = work </> "promoted-scope.cbor"
-      admittedTerm = case originalTerm of
-        TList fields -> TList [case (index,field,filteredParcel) of
-          (7,TList [graphDescriptors,_],TList [_,references]) -> TList [graphDescriptors,references]
-          _ -> field | (index,field) <- zip [0::Int ..] fields]
-        _ -> originalTerm
-  writeTerm admittedPath admittedTerm
+  -- Execute the retained production scope through its thin reexport facade.
+  -- The typed promotion controls above prove that candidate recipes add no
+  -- lexical/interface authority; executable delivery remains the Rust owner's.
   result <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty GeneralCompile
-    (Just emptySessionScope {ssRoot=work,ssExactScope=Just admittedPath})
+    (Just emptySessionScope {ssRoot=work,ssExactScope=Just sourceScopePath})
     (work </> "ExecutionReexportTarget.hs") [work] Nothing
   unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult result))) $
-    fail "promoted cached original recipes did not execute through the thin facade"
-  let corrupt = case filteredParcel of
+    fail "retained original recipes did not execute through the thin facade"
+  -- Negative wire controls mutate a current genuine offer and preserve its
+  -- canonical owner evidence. Promised graphs cannot be borrowed from a cache.
+  originalTerm <- readTerm sourceScopePath
+  parcel <- case offerTerm of
+    TList [_,_,_,_,_,value,_] -> pure value
+    _ -> fail "production candidate offer has another current envelope"
+  allOriginals <- case originalTerm of
+    TList [_,_,_,_,_,_,_,value,_] -> pure value
+    _ -> fail "production original scope has another current envelope"
+  let envelope value = case offerTerm of
+        TList fields -> TList (take 5 fields ++ [value] ++ drop 6 fields)
+        _ -> offerTerm
+      corrupt = case parcel of
         TList [graphs,TList (TList fields:refs)] ->
           TList [graphs,TList (TList [if index == 2 then TString (T.replicate 64 "f") else field
             | (index,field) <- zip [0::Int ..] fields]:refs)]
-        _ -> filteredParcel
-  let wrongDigest = case filteredParcel of
-        TList [TList (TList [_,bytes]:graphs),refs] ->
-          TList [TList (TList [TString (T.replicate 64 "f"),bytes]:graphs),refs]
-        _ -> filteredParcel
-      duplicateRef = case filteredParcel of
+        _ -> parcel
+      wrongDigest = case parcel of
+        TList [TList (TList [_,path]:graphs),refs] ->
+          TList [TList (TList [TString (T.replicate 64 "f"),path]:graphs),refs]
+        _ -> parcel
+      duplicateRef = case parcel of
         TList [graphs,TList (first:refs)] -> TList [graphs,TList (first:first:refs)]
-        _ -> filteredParcel
+        _ -> parcel
+      missingGraph = case parcel of
+        TList [_,refs] -> TList [TList [],refs]
+        _ -> parcel
   forM_ [("wrong original version",corrupt),("graph digest",wrongDigest)
-      ,("duplicate owner",duplicateRef),("unoffered original owner",parcel)] $ \(label,invalid) -> do
+      ,("duplicate owner",duplicateRef),("unoffered original owner",allOriginals)
+      ,("missing promised graph",missingGraph)] $ \(label,invalid) -> do
     writeTerm candidatePath (envelope invalid)
-    readModuleCandidates candidatePath >>= \case
-      Left _ -> pure ()
-      Right _ -> fail ("candidate execution manifest accepted " ++ label)
-  putStrLn "candidate execution sources: actual native/source and matching exact dependency admission, protected roots, selected-source authority, missing/mismatched proof and source drift refusals, accepted-only promotion, no lexical widening, thin reexport execution and identity/digest/duplicate/producer refusals passed"
+    forM_ [readModuleCandidates candidatePath,
+        readModuleCandidatesWithGraphs (scopeExecutionGraphs originalScope) candidatePath] $ \readOffer ->
+      readOffer >>= \case
+        Left _ -> pure ()
+        Right _ -> fail ("candidate execution manifest accepted " ++ label)
+  BS.writeFile candidatePath offerBytes
+  restored <- readModuleCandidates candidatePath >>= either fail pure
+  unless (restored == offered) $ fail "restored production offer changed its original execution custody"
+  putStrLn "candidate execution sources: current production admission, exact dependency reuse, protected target, source drift refusals, typed promotion and shared-recipe controls, thin reexport execution and current-wire refusals passed"
   where
     readTerm path = do
       bytes <- BS.readFile path
       either (fail . show) (pure . snd) (deserialiseFromBytes decodeTerm (BSL.fromStrict bytes))
-    candidateGroupTerm group = TList [TInt (fromIntegral (projectedOriginalOrdinal group))
-      ,TList (map symbolTerm (projectedBinders group)),TList [TList
-        [symbolTerm (globalIdentity global),repTerm (globalRep global)
-        ,maybe TNull signatureTerm (globalEntrySignature global >>= \(SignatureId index) ->
-          atIndex (projectedSignatures (projectedBody group)) (fromIntegral index))
-        ,TBool (globalRequiredEvaluated global),maybe TNull (TInt . fromIntegral) (globalRequiredGeneration global)]
-        | global <- projectedGlobals (projectedBody group)]]
-    symbolTerm value = TList [TString (symbolUnit value),TString (symbolModule value),TString (symbolNamespace value)
-      ,TString (symbolOccurrence value),maybe TNull TString (symbolRecordParent value)]
-    repTerm value = TList $ case value of
-      VoidRep -> [TString "void",TInt 0]
-      LiftedRefRep -> [TString "lifted",TInt 0]
-      UnliftedRefRep -> [TString "unlifted",TInt 0]
-      AddressRep -> [TString "address",TInt 0]
-      IntRep width -> [TString "int",TInt (fromIntegral width)]
-      WordRep width -> [TString "word",TInt (fromIntegral width)]
-      FloatRep width -> [TString "float",TInt (fromIntegral width)]
-    signatureTerm value = TList [TList (map repTerm (signatureArguments value)),case signatureResults value of
-      Returns reps -> TList [TString "returns",TList (map repTerm reps)]
-      NoSuccess -> TList [TString "no_success",TList []]
-      CallerResult -> TList [TString "caller_result",TList []]]
-    atIndex values index = case drop index values of value:_ -> Just value; [] -> Nothing
+    writeTerm path value = BS.writeFile path (toStrictByteString (encodeTerm value))
 
+-- These are decoder refusals around an unchanged producer-issued scope, not
+-- new executable authority. Candidate and exact scopes own separate readers.
+executionScopeDescriptorChecks :: FilePath -> IO ()
+executionScopeDescriptorChecks path = do
+  bytes <- BS.readFile path
+  fields <- decode bytes >>= \case
+    TList values | length values == 9 -> pure values
+    _ -> fail "genuine exact scope has another current envelope"
+  parcel <- case fields !! 7 of
+    TList [TList descriptors,refs] -> pure (descriptors,refs)
+    _ -> fail "genuine exact scope has no execution descriptors"
+  (sha,graphPath) <- case fst parcel of
+    TList [TString sha,TString file]:_ -> pure (sha,T.unpack file)
+    _ -> fail "genuine exact scope has no promised graph"
+  graphBytes <- BS.readFile graphPath
+  let refuse label = readExactScope path >>= \case
+        Left _ -> pure ()
+        Right _ -> fail ("exact execution descriptor accepted " ++ label)
+      withGraph label change = (change >> refuse label)
+        `finally` BS.writeFile graphPath graphBytes
+      withParcel label value = (BS.writeFile path
+          (toStrictByteString (encodeTerm (TList (take 7 fields ++ [value] ++ drop 8 fields))))
+          >> refuse label) `finally` BS.writeFile path bytes
+      descriptor value = TList [TString sha,value]
+      replaceFirst value = TList [TList (value:drop 1 (fst parcel)),snd parcel]
+  withGraph "missing graph" (removeFile graphPath)
+  withGraph "truncated graph" (BS.writeFile graphPath (BS.take (BS.length graphBytes - 1) graphBytes))
+  withGraph "corrupt graph" (BS.writeFile graphPath (BS.singleton 0 <> BS.drop 1 graphBytes))
+  withGraph "graph above aggregate bound" $ withBinaryFile graphPath WriteMode $ \handle ->
+    hSetFileSize handle (fromIntegral executionSourceGraphBytesLimit + 1)
+  withParcel "inline graph bytes" (replaceFirst (descriptor (TBytes graphBytes)))
+  withParcel "missing promised graph" (TList [TList [],snd parcel])
+  withParcel "duplicate graph" (TList [TList (fst parcel ++ fst parcel),snd parcel])
+  bracket (openTempFile (takeDirectory (takeDirectory path)) "outside-exact-graph")
+    (\(outside,handle) -> hClose handle >> removeFile outside) $ \(outside,_) -> do
+      BS.writeFile outside graphBytes
+      withParcel "graph outside request directory" (replaceFirst (descriptor (TString (T.pack outside))))
+  restored <- readExactScope path >>= either fail pure
+  unless (not (null (scopeExecutionGraphs restored)) && not (null (scopeExecutionOwners restored))) $
+    fail "restored exact scope lost original execution custody"
+  unchanged <- BS.readFile path
+  unless (unchanged == bytes) $ fail "exact execution descriptor checks changed producer scope"
+  where
+    decode bytes = either (fail . show) (pure . snd)
+      (deserialiseFromBytes decodeTerm (BSL.fromStrict bytes))
