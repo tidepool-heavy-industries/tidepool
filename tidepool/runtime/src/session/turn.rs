@@ -8687,7 +8687,11 @@ mod compiler_packet_replay {
             certificate.owner(),
             tidepool_repr::SessionModule::val(view.next_value_generation())
         );
-        assert!(item.native_products().unwrap().checked.is_some());
+        assert_eq!(native.item(), item.checked_item());
+        assert_eq!(native.generation(), view.next_value_generation().0);
+        native
+            .validate_runtime_admission(item.checked_item().admission_digest(), admission.digest())
+            .unwrap();
         assert!(!item.native_products().unwrap().recovery_products.is_empty());
         assert!(!certificate.bytes_owned().is_empty());
         assert!(session.current_binding_in(ScopeId::ROOT, "job1").is_none());
