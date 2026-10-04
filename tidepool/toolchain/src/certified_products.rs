@@ -6446,7 +6446,7 @@ pub(crate) mod tests {
             crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![]).unwrap();
         let overlapping = empty
             .clone()
-            .extend_checked_original_products([3; 32], &[a], &BTreeMap::new())
+            .extend_checked_original_products([3; 32], &[a])
             .unwrap();
         assert!(overlapping.recovery_products()[0].product_bytes().len() > 0);
         assert!(matches!(
@@ -6463,7 +6463,7 @@ pub(crate) mod tests {
         ));
         let inherited = empty
             .clone()
-            .extend_checked_original_products([3; 32], &[b], &BTreeMap::new())
+            .extend_checked_original_products([3; 32], &[b])
             .unwrap();
         receipt.modules.pop();
         assert!(matches!(
@@ -6568,7 +6568,7 @@ pub(crate) mod tests {
         .unwrap();
         let context = crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![])
             .unwrap()
-            .extend_checked_original_products([3; 32], &[b.clone()], &BTreeMap::new())
+            .extend_checked_original_products([3; 32], &[b.clone()])
             .unwrap();
         assert!(context.lexical_graph().is_empty());
         let accepted_b = receipt.modules.pop().unwrap();
@@ -6786,7 +6786,6 @@ pub(crate) mod tests {
                     )
                     .sha256(),
                     &[],
-                    &BTreeMap::new(),
                 )
                 .unwrap(),
         );
@@ -7277,7 +7276,7 @@ pub(crate) mod tests {
         let baseline = Arc::new(
             ExactDeclarationContext::new(&[], &[], vec![])
                 .unwrap()
-                .extend_checked_original_products(canonical_producer, &[], &BTreeMap::new())
+                .extend_checked_original_products(canonical_producer, &[])
                 .unwrap(),
         );
         let request = baseline
@@ -7329,7 +7328,6 @@ pub(crate) mod tests {
                 .extend_checked_original_products(
                     request.producer_sha256,
                     &certified.recovery_products,
-                    &BTreeMap::new(),
                 )
                 .unwrap(),
         );
