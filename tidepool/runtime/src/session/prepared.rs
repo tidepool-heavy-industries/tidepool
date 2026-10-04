@@ -10423,6 +10423,59 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn retained_callable_and_parked_frame_preserve_static_evidence_across_collection() {
+        let (mut engine, first) =
+            PreparedEngine::bootstrap(verb_program(5, TypeNode::Text)).unwrap();
+        let function = engine.machine.retain_top(first, ValueId(0)).unwrap();
+        let second = engine
+            .install(
+                verb_program(6, TypeNode::Text),
+                &BindingTable::new(),
+                &BindingIndex::new(),
+            )
+            .unwrap();
+        assert!(engine.unpin(first));
+        assert!(engine.unpin(second));
+        for export in std::mem::take(&mut engine.code_exports).into_values() {
+            assert!(engine.release(export.handle));
+        }
+        engine.quiesce_and_collect_now().unwrap();
+        assert!(
+            engine.programs.contains_key(&first),
+            "the retained callable keeps its immutable facts alive"
+        );
+        assert!(!engine.programs.contains_key(&second));
+        let reply = engine
+            .classify_reply(
+                &HaskellValue::Con(DataConId(77), vec![]),
+                &DataConTable::new(),
+            )
+            .unwrap();
+        assert_eq!(
+            reply,
+            PreparedReplyEvidence::Static {
+                owner: first,
+                constructor: DataConId(77),
+                node: TypeNodeId(0)
+            }
+        );
+        let id = park_attested_fixture(&mut engine, first, reply);
+        assert!(engine.release(function));
+        engine.quiesce_and_collect_now().unwrap();
+        assert!(
+            engine.programs.contains_key(&first),
+            "the parked frame retains its evidence owner separately"
+        );
+        assert_eq!(engine.parked(id).unwrap().1.reply, reply);
+        engine.close_realm(RealmId::ROOT);
+        assert_eq!(engine.parked_count(), 0);
+        assert_eq!(engine.stowed_roots_count(), 0);
+        engine.quiesce_and_collect_now().unwrap();
+        assert!(!engine.programs.contains_key(&first));
+        assert!(!engine.constructor_replies.contains_key(&DataConId(77)));
+    }
+
+    #[test]
     fn alpha_stable_polymorphic_reply_evidence_installs_without_weakening_conflicts() {
         let site = 7;
         let stable = TypeNode::Unconstructible {
