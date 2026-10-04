@@ -26,6 +26,18 @@ class FirstPartySources(unittest.TestCase):
         self.base = Path(temporary.name)
         self.root = self.base / "repo"
         (self.root / "scripts").mkdir(parents=True)
+        subprocess.run(["git", "init", "--quiet", str(self.root)], check=True)
+        workspace = self.root / ".exomonad/workspace"
+        workspace.mkdir(parents=True)
+        subprocess.run(["git", "init", "--quiet", str(workspace)], check=True)
+        subprocess.run(["git", "-C", str(workspace), "-c", "user.name=fixture",
+                        "-c", "user.email=fixture@invalid", "commit", "--quiet",
+                        "--allow-empty", "-m", "workspace fixture"], check=True)
+        self.workspace_revision = subprocess.check_output(
+            ["git", "-C", str(workspace), "rev-parse", "HEAD"], text=True).strip()
+        subprocess.run(["git", "-C", str(self.root), "update-index", "--add",
+                        "--cacheinfo", "160000", self.workspace_revision,
+                        ".exomonad/workspace"], check=True)
         shutil.copyfile(GENERATOR, self.root / "scripts/buck2-first-party.py")
         shutil.copyfile(FEATURES, self.root / "scripts/buck2_cargo_features.py")
         shutil.copyfile(PROFILE, self.root / "scripts/native-profile.toml")
@@ -179,46 +191,82 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
                                "--package", "tidepool-toolchain",
                                *args], cwd=self.root, env=env, capture_output=True, text=True)
 
+    def arguments(self, expression):
+        """Read emitted literal arguments; preserve configured expressions as AST."""
+        if isinstance(expression, ast.Dict):
+            return {self.arguments(key): self.arguments(value)
+                    for key, value in zip(expression.keys, expression.values)}
+        if isinstance(expression, (ast.List, ast.Tuple)):
+            return [self.arguments(value) for value in expression.elts]
+        if isinstance(expression, ast.Constant):
+            return expression.value
+        return expression
+
+    def rules(self, path):
+        tree = ast.parse((self.root / path / "BUCK").read_text())
+        rules = {}
+        for statement in tree.body:
+            self.assertIsInstance(statement, ast.Expr)
+            self.assertIsInstance(statement.value, ast.Call)
+            call = statement.value
+            self.assertIsInstance(call.func, ast.Name)
+            if call.func.id == "load":
+                continue
+            arguments = {keyword.arg: self.arguments(keyword.value) for keyword in call.keywords}
+            # A no-argument owning macro (for example tidepool_codegen_md5)
+            # emits its fixed targets internally rather than declaring a name.
+            if "name" not in arguments:
+                self.assertFalse(call.args or call.keywords)
+            name = arguments.get("name", call.func.id)
+            self.assertNotIn(name, rules, "duplicate named Buck rule")
+            rules[name] = (call.func.id, arguments)
+        self.assertTrue(rules)
+        return rules
+
+    def rule(self, path, name, kind=None):
+        rules = self.rules(path)
+        self.assertIn(name, rules)
+        actual_kind, arguments = rules[name]
+        if kind is not None:
+            self.assertEqual(actual_kind, kind)
+        return arguments
+
     def groups(self, path):
-        buck = (self.root / path / "BUCK").read_text()
-        matches = re.findall(r'rust_filegroup\(\n    name = "([^"]+)",\n    mapped_srcs = (\{.*?\}),\n\)', buck, re.S)
-        self.assertTrue(matches, buck)
-        return buck, {name: ast.literal_eval(mapping) for name, mapping in matches}
+        rules = self.rules(path)
+        groups = {name: arguments["mapped_srcs"] for name, (kind, arguments) in rules.items()
+                  if kind == "rust_filegroup"}
+        self.assertTrue(groups)
+        return rules, groups
 
     def test_original_source_proof_control_has_counted_worker_execution_owner(self):
         result = self.generate()
         self.assertEqual(result.returncode, 0, result.stderr)
-        buck = (self.root / "tidepool/toolchain/BUCK").read_text()
-        group = re.search(
-            r'tidepool_rust_test_cases\(\n    name = "toolchain_source_proof_pairing_test",.*?\n\)',
-            buck, re.S,
-        )
-        self.assertIsNotNone(group, buck)
-        group = group.group()
-        self.assertIn('binary = ":tidepool_toolchain_unit_tests_binary"', group)
-        leaves = re.search(r'exact_tests = (\[.*?\]),', group, re.S)
-        self.assertEqual(ast.literal_eval(leaves[1]), [
+        group = self.rule("tidepool/toolchain", "toolchain_source_proof_pairing_test",
+                          "tidepool_rust_test_cases")
+        self.assertEqual(group["binary"], ":tidepool_toolchain_unit_tests_binary")
+        self.assertEqual(group["exact_tests"], [
             "declaration_context::tests::source_selected_receipt_pairs_prior_program_support_with_actual_original_proof",
         ])
-        for field in ("expected_count = 1", "ignored = True", "haskell_worker = True"):
-            self.assertIn(field, group)
+        self.assertEqual(group["expected_count"], 1)
+        self.assertIs(group["ignored"], True)
+        self.assertIs(group["haskell_worker"], True)
         for resource in (
             "//build/package:compiler_deployment",
             "//bridge/haskell:facade_embedded_sources",
             "//build/package:tidepool_extract_runtime_libraries",
         ):
-            self.assertIn(resource, group)
+            self.assertIn(resource, group["resources"])
         for variable in ("TIDEPOOL_COMPILER_DEPLOYMENT", "TIDEPOOL_EXTRACT",
                          "TIDEPOOL_EXTRACT_WORKER", "TIDEPOOL_PRELUDE_DIR"):
-            self.assertIn(variable, group)
+            self.assertIn(variable, group["env"])
 
     def test_codegen_emits_native_units_and_all_registered_integration_tests(self):
         result = self.generate()
         self.assertEqual(result.returncode, 0, result.stderr)
         buck, groups = self.groups("tidepool/codegen")
-        self.assertIn('name = "native_md5_link"', buck)
-        self.assertIn('crate_root = "tidepool/codegen/tests/native_md5_link.rs"', buck)
-        self.assertIn('deps = [\n        ":tidepool_codegen",', buck)
+        binary = self.rule("tidepool/codegen", "native_md5_link", "tidepool_rust_isolated_test")
+        self.assertEqual(binary["crate_root"], "tidepool/codegen/tests/native_md5_link.rs")
+        self.assertIn(":tidepool_codegen", binary["deps"])
         self.assertIn("tests/native_md5_link.rs", groups["native_md5_link_sources"])
         self.assertIn("prepared_control", buck)
         self.assertIn("tidepool_codegen_unit_tests", buck)
@@ -239,8 +287,10 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         result = self.generate()
         self.assertEqual(result.returncode, 0, result.stderr)
         buck, _groups = self.groups("tidepool/heap")
-        self.assertIn('tidepool_rust_isolated_test(\n    name = "gc_unit",', buck)
-        self.assertIn('tidepool_rust_isolated_test(\n    name = "raw_scan_validation",', buck)
+        for name in ("gc_unit", "raw_scan_validation"):
+            wrapper = self.rule("tidepool/heap", name, "tidepool_rust_isolated_test")
+            self.assertEqual(wrapper["crate_root"], "tidepool/heap/tests/" + name + ".rs")
+            self.assertEqual(wrapper["srcs_filegroup"], ":" + name + "_sources")
 
     def test_checked_in_prepared_program_cannot_reenter_compile_time_inputs(self):
         control = self.generate()
@@ -255,8 +305,8 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         result = self.generate()
         self.assertEqual(result.returncode, 0, result.stderr)
         buck, groups = self.groups("tidepool/extract-cmd")
-        self.assertIn('name = "tidepool-extract"', buck)
-        self.assertIn('crate_root = "tidepool/extract-cmd/src/main.rs"', buck)
+        binary = self.rule("tidepool/extract-cmd", "tidepool-extract", "tidepool_rust_binary")
+        self.assertEqual(binary["crate_root"], "tidepool/extract-cmd/src/main.rs")
         self.assertEqual(
             groups["tidepool-extract_sources"]["src/main.rs"],
             "tidepool/extract-cmd/src/main.rs",
@@ -307,14 +357,54 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         _, groups = self.groups("bridge/facade")
         for path in ("src/actor_host/m1_cancel_performance.rs", "src/actor_host/m1_cancel_cell.hs"):
             self.assertIn(path, groups["tidepool_unit_tests_sources"])
-            for name, sources in groups.items():
-                if name != "tidepool_unit_tests_sources":
-                    self.assertNotIn(path, sources, name)
+            # Each real test target may own test-only inputs; no production
+            # consumer may carry the measurement fixture into its source map.
+            for name, (kind, arguments) in self.rules("bridge/facade").items():
+                if "srcs_filegroup" not in arguments:
+                    continue
+                is_test = kind in ("tidepool_rust_test", "tidepool_rust_isolated_test") or "--test" in arguments.get("rustc_flags", [])
+                if not is_test:
+                    self.assertNotIn(path, groups[arguments["srcs_filegroup"].removeprefix(":")], name)
 
     def test_retired_agent_is_not_a_native_root(self):
         result = self.generate("--package", "exomonad-agent")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("unsupported: exomonad-agent", result.stderr)
+
+    def test_facade_refuses_missing_or_malformed_gitlink_before_publication(self):
+        control = self.generate("--package", "tidepool")
+        self.assertEqual(control.returncode, 0, control.stderr)
+        descriptor = self.root / "build/native-workspace-gitlink.json"
+        self.assertEqual(json.loads(descriptor.read_text()), {
+            "schema": 1, "path": ".exomonad/workspace", "mode": "160000",
+            "revision": self.workspace_revision,
+        })
+        previous = {path: path.read_bytes() for path in self.root.rglob("BUCK")}
+        previous[descriptor] = descriptor.read_bytes()
+        blob = subprocess.check_output(["git", "hash-object", "-w", "--stdin"],
+                                       cwd=self.root, input="regular file", text=True).strip()
+        for case in ("missing", "regular_file", "unmerged"):
+            with self.subTest(case=case):
+                subprocess.run(["git", "update-index", "--force-remove", ".exomonad/workspace"],
+                               cwd=self.root, check=True)
+                if case == "regular_file":
+                    subprocess.run(["git", "update-index", "--add", "--cacheinfo", "100644",
+                                    blob, ".exomonad/workspace"], cwd=self.root, check=True)
+                elif case == "unmerged":
+                    subprocess.run(["git", "update-index", "--index-info"], cwd=self.root, check=True,
+                                   input=f"160000 {self.workspace_revision} 1\t.exomonad/workspace\n", text=True)
+                refused = self.generate("--package", "tidepool")
+                self.assertNotEqual(refused.returncode, 0)
+                self.assertIn("native facade needs one recorded .exomonad/workspace gitlink" if case == "missing"
+                              else "native facade needs an unambiguous stage-0 workspace gitlink", refused.stderr)
+                for path, contents in previous.items():
+                    self.assertEqual(path.read_bytes(), contents, path)
+        subprocess.run(["git", "update-index", "--force-remove", ".exomonad/workspace"],
+                       cwd=self.root, check=True)
+        subprocess.run(["git", "update-index", "--add", "--cacheinfo", "160000",
+                        self.workspace_revision, ".exomonad/workspace"], cwd=self.root, check=True)
+        recovered = self.generate("--package", "tidepool", "--check")
+        self.assertEqual(recovered.returncode, 0, recovered.stderr)
 
     def test_binary_sources_preserve_module_layouts_and_their_includes(self):
         metadata = json.loads(self.metadata.read_text())
@@ -383,22 +473,26 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         result = self.generate("--package", "tidepool", "--no-default-features", "tidepool")
         self.assertEqual(result.returncode, 0, result.stderr)
         buck, groups = self.groups("bridge/facade")
-        self.assertIn('name = "facade_cargo_manifest"', buck)
-        self.assertIn('src = "Cargo.toml"', buck)
-        self.assertIn('name = "tidepool_build_script"', buck)
-        build_rule = buck.split('name = "tidepool_build_script",', 1)[1].split('\n)\n', 1)[0]
-        self.assertIn("//tidepool/toolchain:tidepool_toolchain", build_rule)
-        library_rule = buck.split('tidepool_rust_library(\n    name = "tidepool",', 1)[1].split('\n)\n', 1)[0]
-        self.assertNotIn("//tidepool/toolchain:tidepool_toolchain", library_rule)
-        self.assertIn('crate_root = "bridge/facade/build.rs"', build_rule)
+        manifest = self.rule("bridge/facade", "facade_cargo_manifest", "export_file")
+        self.assertEqual(manifest["src"], "Cargo.toml")
+        build_rule = self.rule("bridge/facade", "tidepool_build_script", "tidepool_rust_binary")
+        self.assertIn("//tidepool/toolchain:tidepool_toolchain", build_rule["deps"])
+        library_rule = self.rule("bridge/facade", "tidepool", "tidepool_rust_library")
+        self.assertNotIn("//tidepool/toolchain:tidepool_toolchain", library_rule.get("deps", []))
+        self.assertEqual(build_rule["crate_root"], "bridge/facade/build.rs")
         self.assertEqual(groups["tidepool_build_script_sources"]["build.rs"], "bridge/facade/build.rs")
-        self.assertIn('name = "tidepool_build_script_run"', buck)
-        self.assertIn('"TIDEPOOL_EMBED_HASKELL": "1"', buck)
-        self.assertIn('"TIDEPOOL_BUILD_SOURCE_ROOT": "."', buck)
-        self.assertIn('haskell_sources = "//bridge/haskell:facade_embedded_sources"', buck)
-        self.assertIn('workspace_sources = "//exomonad/examples/workspace:facade_scaffold_sources"', buck)
-        self.assertEqual(buck.count('"OUT_DIR": "$(location :tidepool_build_script_run[out_dir])"'), 6)
-        self.assertNotIn("codex-shoal-protocol", buck)
+        run = self.rule("bridge/facade", "tidepool_build_script_run", "tidepool_buildscript_run")
+        self.assertEqual(run["env"]["TIDEPOOL_EMBED_HASKELL"], "1")
+        self.assertEqual(run["env"]["TIDEPOOL_BUILD_SOURCE_ROOT"], ".")
+        inputs = self.rule("bridge/facade", "tidepool_build_source_tree", "tidepool_facade_build_inputs")
+        self.assertEqual(inputs["haskell_sources"], "//bridge/haskell:facade_embedded_sources")
+        self.assertEqual(inputs["workspace_sources"], "//exomonad/examples/workspace:facade_scaffold_sources")
+        self.assertEqual(sum(arguments.get("env", {}).get("OUT_DIR") ==
+                             "$(location :tidepool_build_script_run[out_dir])"
+                             for _, arguments in buck.values()), 6)
+        self.assertFalse(any("codex-shoal-protocol" in dependency
+                             for _, arguments in buck.values()
+                             for dependency in arguments.get("deps", []) + list(arguments.get("named_deps", {}).values())))
         self.assertIn("src/lib.rs", groups["tidepool_sources"])
 
     def test_facade_unit_root_uses_embedded_profile_support_and_browser_resources(self):
@@ -433,75 +527,77 @@ const REVIEW_PROMPT: &str = include_str!("../../../exomonad/examples/workspace/.
 
         self.assertEqual(result.returncode, 0, result.stderr)
         facade_buck, groups = self.groups("bridge/facade")
-        self.assertIn('name = "tidepool_unit_tests_sources"', facade_buck)
-        unit_rule = facade_buck.split('tidepool_rust_binary(\n    name = "tidepool_unit_tests",', 1)[1].split("\n)\n", 1)[0]
+        unit_rule = self.rule("bridge/facade", "tidepool_unit_tests", "tidepool_rust_binary")
         for source in (
             "src/actor_host/m1_host_tests.rs", "src/actor_host/m1_browser_runner.rs",
             "src/actor_host/test_campaign.rs", "src/exomonad.rs",
         ):
             self.assertIn(source, groups["tidepool_unit_tests_sources"])
-        self.assertIn("//bridge/testing:tidepool_testing", unit_rule)
-        self.assertIn('rustc_flags = ["--test"]', unit_rule)
-        for runtime_only in ("TIDEPOOL_EXTRACT", "TIDEPOOL_BROWSER", "//web:dist", "resources ="):
-            self.assertNotIn(runtime_only, unit_rule)
+        self.assertIn("//bridge/testing:tidepool_testing", unit_rule["deps"])
+        self.assertEqual(unit_rule["rustc_flags"], ["--test"])
+        self.assertNotIn("resources", unit_rule)
+        for runtime_only in ("TIDEPOOL_EXTRACT", "TIDEPOOL_BROWSER"):
+            self.assertNotIn(runtime_only, unit_rule.get("env", {}))
+        self.assertNotIn("//web:dist", unit_rule["deps"])
         cases = {}
         for name in ("facade_process_tests", "facade_host_tests", "facade_host_raw_test",
                      "facade_late_output_test", "facade_browser_test", "tidepool_unit_tests_all"):
-            cases[name] = facade_buck.split(
-                'tidepool_rust_test_cases(\n    name = "' + name + '",', 1
-            )[1].split("\n)\n", 1)[0]
-            self.assertIn('binary = ":tidepool_unit_tests"', cases[name])
-            self.assertIn("jobs = 1", cases[name])
+            cases[name] = self.rule("bridge/facade", name, "tidepool_rust_test_cases")
+            self.assertEqual(cases[name]["binary"], ":tidepool_unit_tests")
+            self.assertEqual(cases[name]["jobs"], 1)
         process = cases["facade_process_tests"]
-        self.assertIn("expected_count = 6", process)
-        self.assertIn('"TIDEPOOL_TEST_BASH": "$(exe toolchains//:bash)"', process)
-        self.assertIn('"TIDEPOOL_TEST_SLEEP": "$(exe toolchains//:sleep)"', process)
-        for heavyweight in ("TIDEPOOL_EXTRACT", "TIDEPOOL_BROWSER", "//web:dist", "playwright"):
-            self.assertNotIn(heavyweight, process)
+        self.assertEqual(process["expected_count"], 6)
+        self.assertEqual(process["env"]["TIDEPOOL_TEST_BASH"], "$(exe toolchains//:bash)")
+        self.assertEqual(process["env"]["TIDEPOOL_TEST_SLEEP"], "$(exe toolchains//:sleep)")
+        for heavyweight in ("TIDEPOOL_EXTRACT", "TIDEPOOL_BROWSER", "PLAYWRIGHT_BROWSERS_PATH"):
+            self.assertNotIn(heavyweight, process["env"])
+        for browser_resource in ("//web:dist", "toolchains//:playwright_browsers",
+                                 "//build/testing/browser:driver_bundle"):
+            self.assertNotIn(browser_resource, process["resources"])
         host = cases["facade_host_tests"]
-        self.assertIn("expected_count = 3", host)
-        self.assertIn("haskell_worker = True", host)
-        self.assertIn('"TIDEPOOL_EXTRACT_WORKER"', host)
-        self.assertIn('"TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib"', host)
-        self.assertNotIn("TIDEPOOL_BROWSER_DRIVER", host)
-        self.assertNotIn("playwright", host)
+        self.assertEqual(host["expected_count"], 3)
+        self.assertIs(host["haskell_worker"], True)
+        self.assertIn("TIDEPOOL_EXTRACT_WORKER", host["env"])
+        self.assertEqual(host["env"]["TIDEPOOL_PRELUDE_DIR"], "$(location //bridge/haskell:facade_embedded_sources)/lib")
+        for browser_variable in ("TIDEPOOL_BROWSER_DRIVER", "PLAYWRIGHT_BROWSERS_PATH"):
+            self.assertNotIn(browser_variable, host["env"])
+        for browser_resource in ("toolchains//:playwright_browsers", "//build/testing/browser:driver_bundle"):
+            self.assertNotIn(browser_resource, host["resources"])
         raw_host = cases["facade_host_raw_test"]
-        self.assertIn(
-            '"actor_host::m1_host_tests::production_host_retains_http_haskell_commands_and_reconnects_without_replay"',
-            raw_host,
-        )
-        self.assertIn("expected_count = 1", raw_host)
-        self.assertIn('"TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)"', raw_host)
-        self.assertIn('"EXOMONAD_EMBEDDED_ASSET_ROOT": "$(location //web:dist)/web"', raw_host)
-        self.assertIn('"//bridge/haskell:facade_embedded_sources"', raw_host)
-        self.assertIn('"//web:dist"', raw_host)
-        self.assertIn('"toolchains//:test_tools_closure"', raw_host)
-        self.assertNotIn("TIDEPOOL_BROWSER_DRIVER", raw_host)
-        self.assertIn("expected_count = 1", cases["facade_late_output_test"])
+        self.assertEqual(raw_host["exact_tests"], [
+            "actor_host::m1_host_tests::production_host_retains_http_haskell_commands_and_reconnects_without_replay",
+        ])
+        self.assertEqual(raw_host["expected_count"], 1)
+        self.assertEqual(raw_host["env"]["TIDEPOOL_EXTRACT_WORKER"], "$(exe //bridge/haskell:tidepool_extract_bin)")
+        self.assertEqual(raw_host["env"]["EXOMONAD_EMBEDDED_ASSET_ROOT"], "$(location //web:dist)/web")
+        for resource in ("//bridge/haskell:facade_embedded_sources", "//web:dist", "toolchains//:test_tools_closure"):
+            self.assertIn(resource, raw_host["resources"])
+        self.assertNotIn("TIDEPOOL_BROWSER_DRIVER", raw_host["env"])
+        self.assertEqual(cases["facade_late_output_test"]["expected_count"], 1)
         browser = cases["facade_browser_test"]
-        self.assertIn("expected_count = 1", browser)
-        self.assertIn("ignored = True", browser)
-        self.assertIn('"EXOMONAD_EMBEDDED_ASSET_ROOT": "$(location //web:dist)/web"', browser)
-        self.assertIn('"TIDEPOOL_BROWSER_DRIVER": "$(location //build/testing/browser:driver_bundle)/driver.mjs"', browser)
-        self.assertIn('"TIDEPOOL_BROWSER_NODE": "$(exe toolchains//:browser_node)"', browser)
-        self.assertIn('"PLAYWRIGHT_BROWSERS_PATH": "$(location toolchains//:playwright_browsers)"', browser)
-        self.assertIn('"toolchains//:browser_test_closure"', browser)
-        self.assertNotIn("codex-shoal-protocol", facade_buck)
+        self.assertEqual(browser["expected_count"], 1)
+        self.assertIs(browser["ignored"], True)
+        self.assertEqual(browser["env"]["EXOMONAD_EMBEDDED_ASSET_ROOT"], "$(location //web:dist)/web")
+        self.assertEqual(browser["env"]["TIDEPOOL_BROWSER_DRIVER"], "$(location //build/testing/browser:driver_bundle)/driver.mjs")
+        self.assertEqual(browser["env"]["TIDEPOOL_BROWSER_NODE"], "$(exe toolchains//:browser_node)")
+        self.assertEqual(browser["env"]["PLAYWRIGHT_BROWSERS_PATH"], "$(location toolchains//:playwright_browsers)")
+        self.assertIn("toolchains//:browser_test_closure", browser["resources"])
+        self.assertFalse(any("codex-shoal-protocol" in dependency
+                             for _, arguments in facade_buck.values()
+                             for dependency in arguments.get("deps", []) + list(arguments.get("named_deps", {}).values())))
         support_buck, support_groups = self.groups("bridge/testing")
-        self.assertIn('name = "tidepool_testing"', support_buck)
+        self.rule("bridge/testing", "tidepool_testing", "tidepool_rust_library")
         self.assertIn("src/lib.rs", support_groups["tidepool_testing_sources"])
         self.assertIn(
             "//:facade_test_jev_operators",
             groups["tidepool_unit_tests_sources"],
         )
-        self.assertIn(
-            "//exomonad/examples/workspace:facade_agent_spec",
-            groups["tidepool_unit_tests_sources"],
-        )
-        self.assertIn(
-            "//exomonad/examples/workspace:facade_review_prompt",
-            groups["tidepool_unit_tests_sources"],
-        )
+        # Workspace fixtures arrive as one declared directory, preserving both
+        # AgentSpec and prompt paths for their include_str relative layout.
+        self.assertEqual(groups["tidepool_unit_tests_sources"]["//exomonad/examples/workspace:facade_test_sources"],
+                         "exomonad/examples/workspace")
+        for relative in (".exomonad/AgentSpec.hs", ".exomonad/prompts/review.md"):
+            self.assertTrue((self.root / "exomonad/examples/workspace" / relative).is_file())
 
     def test_transitive_reindeer_target_uses_unique_locked_source_identity(self):
         metadata = json.loads(self.metadata.read_text())
@@ -538,7 +634,7 @@ checksum = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         result = self.generate()
         self.assertEqual(result.returncode, 0, result.stderr)
         runtime_buck, _ = self.groups("tidepool/runtime")
-        self.assertIn("//third-party/rust:tokio-tungstenite-0.29", runtime_buck)
+        self.assertIn("//third-party/rust:tokio-tungstenite-0.29", self.rule("tidepool/runtime", "tidepool_runtime")["deps"])
 
         lock = self.root / "Cargo.lock"
         lock.write_text(lock.read_text() + """
@@ -559,10 +655,10 @@ source = "git+https://example.invalid/tokio-tungstenite?rev=aaaaaaaaaaaaaaaaaaaa
         result = self.generate()
         self.assertEqual(result.returncode, 0, result.stderr)
         buck, _ = self.groups("tidepool/runtime")
-        contract = buck.split(f'rust_compile_fail(\n    name = "compile_fail_{stem}",', 1)[1].split("\n)\n", 1)[0]
-        self.assertIn('"tidepool_runtime": ":tidepool_runtime"', contract)
-        self.assertIn('control = "tests/compile_pass/machine_lease_double_borrow.rs"', contract)
-        self.assertNotIn("trybuild", contract)
+        contract = self.rule("tidepool/runtime", f"compile_fail_{stem}", "rust_compile_fail")
+        self.assertEqual(contract["dependencies"]["tidepool_runtime"], ":tidepool_runtime")
+        self.assertEqual(contract["control"], "tests/compile_pass/machine_lease_double_borrow.rs")
+        self.assertFalse(any("trybuild" in value for value in contract["dependencies"].values()))
         (self.root / f"tidepool/runtime/tests/compile_pass/{stem}.rs").unlink()
         refused = self.generate()
         self.assertNotEqual(refused.returncode, 0)
@@ -572,31 +668,31 @@ source = "git+https://example.invalid/tokio-tungstenite?rev=aaaaaaaaaaaaaaaaaaaa
         result = self.generate()
         self.assertEqual(result.returncode, 0, result.stderr)
         runtime, groups = self.groups("tidepool/runtime")
-        self.assertIn('name = "tidepool_runtime"', runtime)
+        self.rule("tidepool/runtime", "tidepool_runtime", "tidepool_rust_library")
         self.assertNotIn("bridge/haskell/src/Tidepool/Session.hs", groups["tidepool_runtime_sources"].values())
         self.assertEqual(
             groups["tidepool_runtime_unit_tests_sources"]["//bridge/haskell:session_source"],
             "bridge/haskell/src/Tidepool/Session.hs",
         )
-        self.assertIn('tidepool_rust_binary(\n    name = "tidepool_runtime_unit_tests",', runtime)
-        self.assertIn('binary = ":tidepool_runtime_unit_tests"', runtime)
-        self.assertIn("expected_count = 3", runtime)
-        admission = runtime.split('name = "runtime_admission_tests",', 1)[1].split("\n)\n", 1)[0]
-        for heavyweight in ("haskell_worker", "TIDEPOOL_EXTRACT", "trybuild", "//web:"):
-            self.assertNotIn(heavyweight, admission)
+        self.rule("tidepool/runtime", "tidepool_runtime_unit_tests", "tidepool_rust_binary")
+        admission = self.rule("tidepool/runtime", "runtime_admission_tests", "tidepool_rust_test_cases")
+        self.assertEqual(admission["binary"], ":tidepool_runtime_unit_tests")
+        self.assertEqual(admission["expected_count"], 3)
+        self.assertNotIn("haskell_worker", admission)
+        self.assertNotIn("TIDEPOOL_EXTRACT", admission.get("env", {}))
+        self.assertFalse(any(label.startswith("//web:") for label in admission.get("resources", [])))
         for name in ("runtime_checked_cache_test", "runtime_checked_original_test"):
-            checked = runtime.split(f'name = "{name}",', 1)[1].split("\n)\n", 1)[0]
-            self.assertIn("expected_count = 1", checked)
-            self.assertIn("haskell_worker = True", checked)
-            self.assertIn('"TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_deployment)"', checked)
-            self.assertIn('"TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib"', checked)
-        fixture = runtime.split('name = "runtime_compiled_cell_fixture_test",', 1)[1].split("\n)\n", 1)[0]
-        self.assertIn("expected_count = 8", fixture)
-        self.assertIn('"TIDEPOOL_CELL_TEST_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)"', fixture)
-        self.assertIn('"TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_deployment)"', fixture)
-        self.assertIn('"//build/package:compiler_deployment"', fixture)
-        derive, _ = self.groups("tidepool/bridge-derive")
-        self.assertIn("proc_macro = True", derive)
+            checked = self.rule("tidepool/runtime", name, "tidepool_rust_test_cases")
+            self.assertEqual(checked["expected_count"], 1)
+            self.assertIs(checked["haskell_worker"], True)
+            self.assertEqual(checked["env"]["TIDEPOOL_COMPILER_DEPLOYMENT"], "$(location //build/package:compiler_deployment)")
+            self.assertEqual(checked["env"]["TIDEPOOL_PRELUDE_DIR"], "$(location //bridge/haskell:facade_embedded_sources)/lib")
+        fixture = self.rule("tidepool/runtime", "runtime_compiled_cell_fixture_test", "tidepool_rust_test_cases")
+        self.assertEqual(fixture["expected_count"], 8)
+        self.assertEqual(fixture["env"]["TIDEPOOL_CELL_TEST_EXTRACT"], "$(exe //tidepool/extract-cmd:tidepool-extract)")
+        self.assertEqual(fixture["env"]["TIDEPOOL_COMPILER_DEPLOYMENT"], "$(location //build/package:compiler_deployment)")
+        self.assertIn("//build/package:compiler_deployment", fixture["resources"])
+        self.assertIs(self.rule("tidepool/bridge-derive", "tidepool_bridge_derive")["proc_macro"], True)
 
     def test_toolchain_unit_target_declares_legacy_and_v3_join_fixtures(self):
         result = self.generate()
@@ -623,9 +719,10 @@ source = "git+https://example.invalid/tokio-tungstenite?rev=aaaaaaaaaaaaaaaaaaaa
         result = self.generate()
         self.assertEqual(result.returncode, 0, result.stderr)
         buck, groups = self.groups("tidepool/repr")
-        self.assertIn('crate_root = "tidepool/repr/src/lib.rs"', buck)
-        self.assertIn('crate_root = "tidepool/repr/tests/suites/repr.rs"', buck)
-        self.assertIn('srcs_filegroup = ":repr_sources"', buck)
+        self.assertEqual(self.rule("tidepool/repr", "tidepool_repr")["crate_root"], "tidepool/repr/src/lib.rs")
+        integration_rule = self.rule("tidepool/repr", "repr", "tidepool_rust_isolated_test")
+        self.assertEqual(integration_rule["crate_root"], "tidepool/repr/tests/suites/repr.rs")
+        self.assertEqual(integration_rule["srcs_filegroup"], ":repr_sources")
         lib = groups["tidepool_repr_sources"]
         unit = groups["tidepool_repr_unit_tests_sources"]
         integration = groups["repr_sources"]
@@ -674,7 +771,8 @@ source = "git+https://example.invalid/tokio-tungstenite?rev=aaaaaaaaaaaaaaaaaaaa
         (self.root / "tidepool/repr/tests/metadata_strictness.rs").unlink()
         result = self.generate()
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("unresolved integration modules", result.stderr)
+        self.assertIn("native source ownership refused", result.stderr)
+        self.assertIn("tidepool-repr: cannot resolve every module for target repr", result.stderr)
 
     def test_rejects_missing_and_outside_repository_inputs(self):
         source = self.root / "tidepool/repr/src/lib.rs"
@@ -748,7 +846,7 @@ source = "git+https://example.invalid/tokio-tungstenite?rev=aaaaaaaaaaaaaaaaaaaa
         result = self.generate()
         self.assertEqual(result.returncode, 0, result.stderr)
         buck = (self.root / "tidepool/repr/BUCK").read_text()
-        self.assertNotIn('"test-support"', buck)
+        self.assertNotIn("test-support", self.rule("tidepool/repr", "tidepool_repr")["features"])
 
     def test_registry_dependency_labels_follow_resolved_package_versions(self):
         metadata = json.loads(self.metadata.read_text())
@@ -776,9 +874,10 @@ source = "git+https://example.invalid/tokio-tungstenite?rev=aaaaaaaaaaaaaaaaaaaa
         result = self.generate()
         self.assertEqual(result.returncode, 0, result.stderr)
         buck, _ = self.groups("tidepool/repr")
-        self.assertIn("//third-party/rust:sha2-0_10_9", buck)
-        self.assertIn("//third-party/rust:sha2-0_11_0", buck)
-        self.assertNotIn('"//third-party/rust:sha2"', buck)
+        deps = self.rule("tidepool/repr", "tidepool_repr")["deps"]
+        self.assertIn("//third-party/rust:sha2-0_10_9", deps)
+        self.assertEqual(self.rule("tidepool/repr", "tidepool_repr")["named_deps"]["sha2_new"], "//third-party/rust:sha2-0_11_0")
+        self.assertNotIn("//third-party/rust:sha2", deps)
 
     def test_workspace_default_can_be_suppressed_without_emitting_that_package(self):
         result = self.generate("--no-default-features", "tidepool")
