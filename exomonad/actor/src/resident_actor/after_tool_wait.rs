@@ -23,48 +23,36 @@ pub(super) fn result_payload(
 }
 
 pub(super) struct AfterToolFrame {
-    tools: crate::InstalledToolLease,
-    dispatch: Arc<RootCustody>,
+    handler: crate::resident_workbench::InstalledToolHandler,
     call: WorkbenchToolCall,
     output: String,
     value: Option<serde_json::Value>,
     ordinal: u64,
     handle: String,
-    provenance: String,
-    revision: String,
     entered: tokio::time::Instant,
     deadline: tokio::time::Instant,
     remaining_display_budget: usize,
 }
 
-/// The actor reserves this slot ordinal and selects its original tool lease
+/// The actor reserves this slot ordinal and selects its original handler
 /// before capture. The frame is moved through successor tasks, never recaptured.
 pub(super) fn capture(
-    tools: crate::InstalledToolLease,
-    dispatch: Arc<RootCustody>,
+    handler: crate::resident_workbench::InstalledToolHandler,
     call: WorkbenchToolCall,
     output: String,
     value: Option<serde_json::Value>,
     ordinal: u64,
     remaining: usize,
 ) -> AfterToolFrame {
-    let retained = tools
-        .tools()
-        .expect("after-tool capture requires the original installed dispatcher");
-    let provenance = retained.provenance();
-    let revision = retained.revision.clone().unwrap_or_else(|| "(run)".into());
     let entered = tokio::time::Instant::now();
     let deadline = entered + crate::after_tool::wait();
     AfterToolFrame {
-        tools,
-        dispatch,
+        handler,
         call,
         output,
         value,
         ordinal,
         handle: format!("toolResult{ordinal}"),
-        provenance,
-        revision,
         entered,
         deadline,
         remaining_display_budget: remaining,
@@ -72,12 +60,12 @@ pub(super) fn capture(
 }
 
 impl AfterToolFrame {
-    pub(super) fn tools(&self) -> &crate::InstalledToolLease {
-        &self.tools
+    pub(super) fn actor(&self) -> crate::ActorRef {
+        self.handler.actor()
     }
 
     pub(super) fn dispatch(&self) -> &Arc<RootCustody> {
-        &self.dispatch
+        &self.handler.tools().dispatch
     }
 
     pub(super) fn call(&self) -> &WorkbenchToolCall {
@@ -96,12 +84,12 @@ impl AfterToolFrame {
         &self.handle
     }
 
-    pub(super) fn provenance(&self) -> &str {
-        &self.provenance
+    pub(super) fn provenance(&self) -> String {
+        self.handler.tools().provenance()
     }
 
     pub(super) fn revision(&self) -> &str {
-        &self.revision
+        self.handler.tools().revision.as_deref().unwrap_or("(run)")
     }
 
     pub(super) fn entered(&self) -> tokio::time::Instant {
@@ -164,17 +152,9 @@ where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
-    if frame.tools.actor() != context.actor {
+    if frame.actor() != context.actor {
         Err(ResidentActorWorkbenchError::ActorProtocol(
             "after-tool lease belongs to another actor incarnation".into(),
-        ))
-    } else if !frame
-        .tools
-        .tools()
-        .is_some_and(|tools| Arc::ptr_eq(&tools.dispatch, &frame.dispatch))
-    {
-        Err(ResidentActorWorkbenchError::ActorProtocol(
-            "after-tool dispatcher differs from its retained installation".into(),
         ))
     } else {
         workbench

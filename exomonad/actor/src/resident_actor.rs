@@ -9843,7 +9843,6 @@ where
         execution_state: &mut WorkbenchEffectState,
         workbench: &crate::ResidentActorWorkbench<H, O>,
         tools: &crate::resident_workbench::ResidentWorkbenchTools,
-        dispatch: Arc<RootCustody>,
         call: &tidepool_runtime::session::workbench::WorkbenchToolCall,
         output: String,
         value: Option<serde_json::Value>,
@@ -9896,7 +9895,7 @@ where
                         context,
                         execution_state,
                         workbench,
-                        dispatch,
+                        Arc::clone(&tools.dispatch),
                         call.name.clone(),
                         payload,
                     ),
@@ -10725,23 +10724,20 @@ where
                         // block its own repair.
                         let hosted_call = request
                             .tool_call()
-                            .cloned()
-                            .zip(cursor.tool_dispatch.clone());
+                            .filter(|_| cursor.tool_dispatch.is_some())
+                            .cloned();
                         let cell_call = if hosted_call.is_none() && cursor.cell_check.is_some() {
                             installed_tools
                                 .as_ref()
                                 .and_then(crate::InstalledToolLease::tools)
-                                .map(|tools| {
-                                    (
-                                        tidepool_runtime::session::workbench::WorkbenchToolCall {
-                                            name: crate::HASKELL_TOOL.to_string(),
-                                            arguments: serde_json::Value::String(
-                                                request.items[cursor.index].clone(),
-                                            ),
-                                        },
-                                        Arc::clone(&tools.dispatch),
-                                    )
-                                })
+                                .map(
+                                    |_| tidepool_runtime::session::workbench::WorkbenchToolCall {
+                                        name: crate::HASKELL_TOOL.to_string(),
+                                        arguments: serde_json::Value::String(
+                                            request.items[cursor.index].clone(),
+                                        ),
+                                    },
+                                )
                         } else {
                             None
                         };
@@ -10761,19 +10757,21 @@ where
                             terminal_transfer: None,
                             failure_layer: None,
                         };
-                        if let Some((call, dispatch)) = call {
-                            if let Some(lease) = installed_tools.as_ref().filter(|lease| {
-                                lease.tools().is_some_and(|tools| {
-                                    tools
+                        if let Some(call) = call {
+                            if let Some(handler) = installed_tools
+                                .as_ref()
+                                .and_then(crate::InstalledToolLease::handler)
+                                .filter(|handler| {
+                                    handler
+                                        .tools()
                                         .slots
                                         .iter()
                                         .any(|slot| slot == crate::after_tool::AFTER_TOOL_SLOT)
                                 })
-                            }) {
+                            {
                                 if effects.park_effects {
                                     let frame = after_tool_wait::capture(
-                                        lease.clone(),
-                                        dispatch,
+                                        handler,
                                         call,
                                         std::mem::take(&mut receipt.output),
                                         receipt.value.clone(),
@@ -10803,8 +10801,7 @@ where
                                         context,
                                         effects,
                                         workbench,
-                                        lease.tools().expect("selected after-tool installation"),
-                                        dispatch,
+                                        handler.tools(),
                                         &call,
                                         receipt.output,
                                         receipt.value.clone(),

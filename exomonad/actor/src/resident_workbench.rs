@@ -521,6 +521,23 @@ pub struct InstalledToolLease {
     tools: Option<Arc<ResidentWorkbenchTools>>,
 }
 
+/// One original installed handler, retaining its actor and source authority.
+pub(crate) struct InstalledToolHandler {
+    actor: crate::ActorRef,
+    _source: crate::CheckpointSourceLayer,
+    tools: Arc<ResidentWorkbenchTools>,
+}
+
+impl InstalledToolHandler {
+    pub(crate) fn actor(&self) -> crate::ActorRef {
+        self.actor
+    }
+
+    pub(crate) fn tools(&self) -> &ResidentWorkbenchTools {
+        &self.tools
+    }
+}
+
 impl InstalledToolLease {
     pub(crate) fn new(
         actor: crate::ActorRef,
@@ -548,6 +565,14 @@ impl InstalledToolLease {
 
     pub(crate) fn tools_arc(&self) -> Option<Arc<ResidentWorkbenchTools>> {
         self.tools.clone()
+    }
+
+    pub(crate) fn handler(&self) -> Option<InstalledToolHandler> {
+        Some(InstalledToolHandler {
+            actor: self.actor,
+            _source: self.source.clone(),
+            tools: self.tools.clone()?,
+        })
     }
 
     pub(crate) fn with_source(&self, source: crate::CheckpointSourceLayer) -> Self {

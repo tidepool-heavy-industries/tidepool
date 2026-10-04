@@ -1433,14 +1433,14 @@ where
             },
         };
         let elapsed = frame.entered().elapsed();
-        tracing::info!(actor = %frame.tools().actor(), tool = %frame.call().name,
+        tracing::info!(actor = %frame.actor(), tool = %frame.call().name,
             ordinal = frame.ordinal(), elapsed_ms = elapsed.as_millis(),
             disposition = ?disposition, detail = %detail, "after-tool slot invoked");
         self.after_tool.record(Invocation {
             ordinal: frame.ordinal(),
             tool: frame.call().name.clone(),
             elapsed,
-            provenance: frame.provenance().into(),
+            provenance: frame.provenance(),
             disposition,
         });
         delivered
