@@ -12,6 +12,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 
 
 DEFAULT_TIMEOUT = 300
@@ -89,19 +90,82 @@ def _kill_and_reap(process):
         return '', ''
 
 
-def execute(args, timeout):
+# Only declared runtime selections and user-service coordinates cross this
+# boundary. Provider credentials remain in the user's own authentication owner.
+DELEGATED_ENVIRONMENT = (
+    'PATH', 'HOME', 'USER', 'LOGNAME', 'XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS',
+    'LD_LIBRARY_PATH', 'TMPDIR', 'TMP', 'TEMP', 'TEMPDIR',
+    'TIDEPOOL_EXTRACT', 'TIDEPOOL_EXTRACT_WORKER', 'TIDEPOOL_COMPILER_DEPLOYMENT',
+    'TIDEPOOL_PRELUDE_DIR', 'TIDEPOOL_GHC_LIBDIR', 'GHC_LIBDIR',
+    'TIDEPOOL_EXTRACT_RUNTIME_LIBRARIES', 'TIDEPOOL_EXTRACT_DAEMON_SOCKET',
+    'TIDEPOOL_EXTRACT_DAEMON_LOG', 'TIDEPOOL_KEEP_TEST_LOGS',
+    'TIDEPOOL_TEST_BASH', 'TIDEPOOL_TEST_SLEEP', 'TIDEPOOL_BROWSER_NODE',
+    'TIDEPOOL_BROWSER_DRIVER', 'EXOMONAD_EMBEDDED_ASSET_ROOT',
+    'PLAYWRIGHT_BROWSERS_PATH', 'TIDEPOOL_M3_FIXTURE_DIR',
+    'TIDEPOOL_FREER_RESUME_FIXTURE_DIR', 'TIDEPOOL_FREER_RETENTION_FIXTURE_DIR',
+)
+
+
+def delegated_command(args, timeout, service_slice, record):
+    unit = 'tidepool-libtest-' + uuid.uuid4().hex + '.service'
+    environment = [key for key in DELEGATED_ENVIRONMENT if key in os.environ]
+    command = [
+        'systemd-run', '--user', '--pipe', '--wait', '--collect',
+        '--service-type=exec', '--property=Delegate=yes',
+        '--property=KillMode=control-group', '--property=TimeoutStopSec=5s',
+        f'--property=RuntimeMaxSec={timeout:g}s', '--slice=' + service_slice,
+        '--unit=' + unit, '--working-directory=' + os.getcwd(),
+    ]
+    command.extend('--setenv=' + key + '=' + os.environ[key] for key in environment)
+    command.extend(['--', *args])
+    record.update(unit=unit, service_slice=service_slice,
+                  environment_names=environment, cleanup_confirmed=False)
+    return command, unit
+
+
+def stop_delegated_service(unit, record):
+    """Stop only this launch's service, including descendants outside client PGID."""
+    base = ['systemctl', '--user']
+    try:
+        try:
+            stopped = subprocess.run([*base, 'stop', unit], capture_output=True,
+                                     text=True, timeout=10, check=False)
+        except subprocess.TimeoutExpired:
+            subprocess.run([*base, 'kill', '--kill-whom=all', '--signal=KILL', unit],
+                           capture_output=True, text=True, timeout=5, check=False)
+            stopped = subprocess.run([*base, 'stop', unit], capture_output=True,
+                                     text=True, timeout=10, check=False)
+        observed = subprocess.run([
+            *base, 'show', '--property=LoadState', '--property=ActiveState', unit,
+        ], capture_output=True, text=True, timeout=5, check=False)
+        state = dict(line.split('=', 1) for line in observed.stdout.splitlines() if '=' in line)
+        record.update(stop_exit_code=stopped.returncode,
+                      observation_exit_code=observed.returncode, state=state,
+                      cleanup_confirmed=(state.get('LoadState') == 'not-found'
+                          or (stopped.returncode == 0 and observed.returncode == 0
+                              and state.get('ActiveState') == 'inactive')))
+        if not record['cleanup_confirmed']:
+            record['cleanup_error'] = 'exact delegated service is not confirmed stopped'
+    except (OSError, subprocess.SubprocessError) as error:
+        record.update(cleanup_confirmed=False, cleanup_error=str(error))
+
+
+def execute(args, timeout, service_slice=None, service_record=None):
     """Run a command in its own process group, reaping it even after timeout."""
     if INTERRUPT_SIGNAL is not None:
         raise RunnerInterrupted(INTERRUPT_SIGNAL)
+    command, unit = args, None
+    if service_slice is not None:
+        command, unit = delegated_command(args, timeout, service_slice, service_record)
     process = subprocess.Popen(
-        args,
+        command,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
         start_new_session=True,
     )
-    _register_process(process)
     try:
+        _register_process(process)
         stdout, stderr = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired as error:
         stdout, stderr = _kill_and_reap(process)
@@ -113,6 +177,8 @@ def execute(args, timeout):
         raise
     finally:
         _unregister_process(process)
+        if unit is not None:
+            stop_delegated_service(unit, service_record)
     # Test leaders sometimes leave a detached same-group child after a passing
     # result. The process group remains the cleanup owner through this point.
     _kill_group(process.pid)
@@ -158,9 +224,19 @@ def parse_args(argv):
         '--jobs', type=int,
         help='maximum concurrent test processes (focused selection defaults to 1)',
     )
+    parser.add_argument('--delegated-service', action='store_true',
+                        help='run each test alone in a fresh delegated user service')
+    parser.add_argument('--service-slice',
+                        help='delegated user service slice (default: app.slice)')
     parser.add_argument('--output-dir', type=Path,
                         help='retain bounded stdout/stderr and outcome records for every test')
     options = parser.parse_args(argv)
+    if options.service_slice is not None and not options.delegated_service:
+        parser.error('--service-slice requires --delegated-service')
+    if options.delegated_service:
+        options.service_slice = options.service_slice or 'app.slice'
+        if not re.fullmatch(r'[A-Za-z0-9_.@:-]+\.slice', options.service_slice):
+            parser.error('--service-slice must name one systemd slice')
     if options.timeout <= 0:
         parser.error('--timeout must be positive')
     if options.jobs is not None and options.jobs <= 0:
@@ -203,7 +279,7 @@ def select_tests(all_names, ignored_names, options):
     return selected
 
 
-def run_one(binary, name, ignored, timeout, record=None):
+def run_one(binary, name, ignored, timeout, record=None, service_slice=None):
     args = [binary, '--exact', name, '--nocapture']
     if ignored:
         args.append('--ignored')
@@ -212,11 +288,15 @@ def run_one(binary, name, ignored, timeout, record=None):
         record.update(command=args, started_ns=started, exit_code=None,
                       executed_test_count=None, passed_test_count=None,
                       failed_test_count=None, process_execution_count=0)
+    service_record = {} if service_slice is not None else None
+    if record is not None and service_record is not None:
+        record['delegated_service'] = service_record
     try:
-        result = execute(args, timeout)
+        result = (execute(args, timeout, service_slice, service_record)
+                  if service_slice is not None else execute(args, timeout))
     except subprocess.TimeoutExpired as error:
         if record is not None:
-            record.update(status='timeout', process_execution_count=1,
+            record.update(status='timeout', process_execution_count=(None if service_record is not None else 1),
                           elapsed_ns=time.monotonic_ns() - started)
         detail = f'timed out after {timeout:g}s'
         if error.output:
@@ -227,7 +307,7 @@ def run_one(binary, name, ignored, timeout, record=None):
             record.update(status='spawn_failed', elapsed_ns=time.monotonic_ns() - started)
         return False, f'could not start test process: {error}', ''
     if record is not None:
-        record.update(status='finished', process_execution_count=1,
+        record.update(status='finished', process_execution_count=(None if service_record is not None else 1),
                       exit_code=result.returncode, elapsed_ns=time.monotonic_ns() - started)
         actual = list(EXECUTION_RESULT.finditer(result.stdout))
         if actual:
@@ -235,14 +315,20 @@ def run_one(binary, name, ignored, timeout, record=None):
             record.update(executed_test_count=passed_count + failed_count,
                           passed_test_count=passed_count, failed_test_count=failed_count,
                           ignored_test_count=ignored_count)
+            if service_record is not None and passed_count + failed_count > 0:
+                record['process_execution_count'] = 1
     summaries = list(RESULT.finditer(result.stdout))
     summary = summaries[-1] if summaries else None
     passed = (
         result.returncode == 0
         and summary is not None
         and summary.groups() == ('1', '0', '0')
+        and (service_record is None or service_record.get('cleanup_confirmed') is True)
     )
-    return passed, result.stdout, result.stderr
+    stderr = result.stderr
+    if service_record is not None and not service_record.get('cleanup_confirmed'):
+        stderr += '\n' + service_record.get('cleanup_error', 'delegated cleanup is unconfirmed')
+    return passed, result.stdout, stderr
 
 
 
@@ -308,7 +394,8 @@ def main(argv=None):
                 raise RunnerInterrupted(INTERRUPT_SIGNAL)
             record = {}
             outcome = run_one(
-                options.binary, name, name in ignored_names, options.timeout, record
+                options.binary, name, name in ignored_names, options.timeout, record,
+                options.service_slice if options.delegated_service else None,
             )
             return name, outcome, record
 

@@ -39,6 +39,122 @@ class IsolatedLibtestTests(unittest.TestCase):
                 execute.assert_not_called()
                 self.assertIn(name, errors.getvalue())
 
+    def test_delegated_command_exports_declared_inputs_and_only_test_process(self):
+        record = {}
+        with patch.dict(os.environ, {'TIDEPOOL_EXTRACT': '/qualified/compiler',
+                                     'OPENAI_API_KEY': 'never-forward',
+                                     'UNRELATED_VARIABLE': 'never-forward'}):
+            command, unit = runner.delegated_command(
+                ['/declared/libtest', '--exact', 'suite::works'], 12, 'app.slice', record)
+        split = command.index('--')
+        self.assertEqual(command[split + 1:], ['/declared/libtest', '--exact', 'suite::works'])
+        self.assertIn('--property=Delegate=yes', command)
+        self.assertIn('--property=KillMode=control-group', command)
+        self.assertIn('--setenv=TIDEPOOL_EXTRACT=/qualified/compiler', command)
+        self.assertFalse(any('never-forward' in word for word in command))
+        self.assertIn('--unit=' + unit, command)
+        self.assertFalse(record['cleanup_confirmed'])
+
+    def test_delegated_cleanup_failure_refuses_pass_without_erasing_actual_count(self):
+        def result(args, timeout, service_slice, service_record):
+            self.assertEqual(service_slice, 'app.slice')
+            service_record.update(cleanup_confirmed=False, cleanup_error='service still active')
+            return subprocess.CompletedProcess(args, 0,
+                'test result: ok. 1 passed; 0 failed; 0 ignored;\n', '')
+        record = {}
+        with patch.object(runner, 'execute', side_effect=result):
+            passed, _, errors = runner.run_one(str(self.binary), 'suite::works', False,
+                                               12, record, 'app.slice')
+        self.assertFalse(passed)
+        self.assertEqual(record['exit_code'], 0)
+        self.assertEqual(record['executed_test_count'], 1)
+        self.assertEqual(record['process_execution_count'], 1)
+        self.assertIn('service still active', errors)
+
+    def test_delegated_launch_failure_keeps_test_execution_unknown(self):
+        def refused(args, timeout, service_slice, service_record):
+            service_record.update(cleanup_confirmed=True)
+            return subprocess.CompletedProcess(args, 1, '', 'service admission refused')
+        record = {}
+        with patch.object(runner, 'execute', side_effect=refused):
+            passed, _, _ = runner.run_one(str(self.binary), 'suite::works', False,
+                                          12, record, 'app.slice')
+        self.assertFalse(passed)
+        self.assertIsNone(record['executed_test_count'])
+        self.assertIsNone(record['process_execution_count'])
+        self.assertEqual(record['exit_code'], 1)
+
+    def test_delegated_registration_signal_and_timeout_stop_exact_service(self):
+        class Process:
+            pid = 781235
+            stdout = None
+            stderr = None
+            returncode = -9
+            def communicate(self, timeout=None):
+                return '', ''
+        def spawn(*_args, **_kwargs):
+            runner._signal_active_processes(signal.SIGTERM, None)
+            return Process()
+        runner.INTERRUPT_SIGNAL = None
+        with patch.object(runner.subprocess, 'Popen', side_effect=spawn), \
+             patch.object(runner.os, 'killpg'), \
+             patch.object(runner, 'stop_delegated_service') as stop, \
+             self.assertRaises(runner.RunnerInterrupted):
+            runner.execute(['fake-test'], 1, 'app.slice', {})
+        self.assertEqual(stop.call_count, 1)
+        self.assertRegex(stop.call_args.args[0], r'^tidepool-libtest-[a-f0-9]{32}\.service$')
+        runner.INTERRUPT_SIGNAL = None
+        process = Process()
+        with patch.object(runner.subprocess, 'Popen', return_value=process), \
+             patch.object(process, 'communicate', side_effect=[
+                 subprocess.TimeoutExpired(['fake-test'], 1), ('', '')]), \
+             patch.object(runner.os, 'killpg'), \
+             patch.object(runner, 'stop_delegated_service') as stop, \
+             self.assertRaises(subprocess.TimeoutExpired):
+            runner.execute(['fake-test'], 1, 'app.slice', {})
+        self.assertEqual(stop.call_count, 1)
+        self.assertEqual(runner.ACTIVE_PROCESSES, {})
+
+    def test_delegated_stop_escalates_only_exact_service_and_verifies_end_state(self):
+        unit = 'tidepool-libtest-exact.service'
+        calls = []
+        def control(args, **_kwargs):
+            calls.append(args)
+            if len(calls) == 1:
+                raise subprocess.TimeoutExpired(args, 10)
+            output = 'LoadState=loaded\nActiveState=inactive\n' if 'show' in args else ''
+            return subprocess.CompletedProcess(args, 0, output, '')
+        record = {}
+        with patch.object(runner.subprocess, 'run', side_effect=control):
+            runner.stop_delegated_service(unit, record)
+        self.assertTrue(record['cleanup_confirmed'])
+        self.assertEqual([args[2] for args in calls], ['stop', 'kill', 'stop', 'show'])
+        self.assertTrue(all(args[-1] == unit for args in calls))
+        with patch.object(runner.subprocess, 'run', return_value=subprocess.CompletedProcess(
+                [], 0, 'LoadState=loaded\nActiveState=active\n', '')):
+            runner.stop_delegated_service(unit, record)
+        self.assertFalse(record['cleanup_confirmed'])
+
+    def test_delegated_options_do_not_apply_to_discovery(self):
+        calls = []
+        def run(args, timeout, service_slice=None, service_record=None):
+            calls.append((args, service_slice))
+            discovered = self.discover(args)
+            if discovered is not None:
+                return discovered
+            service_record.update(cleanup_confirmed=True)
+            return subprocess.CompletedProcess(args, 0,
+                'test result: ok. 1 passed; 0 failed; 0 ignored;\n', '')
+        result, _, _ = self.invoke(['--exact', 'suite::works', '--expected-count', '1',
+                                  '--delegated-service'], run)
+        self.assertEqual(result, 0)
+        self.assertTrue(all(service is None for args, service in calls if '--list' in args))
+        self.assertEqual([service for args, service in calls if '--list' not in args], ['app.slice'])
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            runner.parse_args([str(self.binary), '--service-slice', 'app.slice'])
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            runner.parse_args([str(self.binary), '--delegated-service', '--service-slice', '../unsafe'])
+
     def test_actual_failed_execution_count_is_retained_without_changing_pass_rule(self):
         record = {}
         result = subprocess.CompletedProcess([], 101,
