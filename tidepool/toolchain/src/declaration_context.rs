@@ -4168,7 +4168,13 @@ mod tests {
         PathBuf,
     ) {
         let inventory = ArtifactInventory::default();
-        let entries = owners
+        // The graph's generated Input target is not an admitted original and
+        // deliberately has no source replay capability. Retain only A and B.
+        let originals = &owners[..2];
+        assert!(originals
+            .iter()
+            .all(|owner| graph.eligible_source_replay_root(owner)));
+        let entries = originals
             .iter()
             .map(|owner| {
                 let entry = execution_entry(owner.clone(), Arc::clone(&graph));
@@ -4210,7 +4216,7 @@ mod tests {
         let selected_interfaces = context
             .artifact_view()
             .entries_for_owners(
-                owners
+                originals
                     .iter()
                     .map(|owner| identity(&owner.unit, &owner.module)),
             )
