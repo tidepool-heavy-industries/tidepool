@@ -11603,89 +11603,228 @@ mod request_tests {
 
     #[tokio::test]
     async fn command_job_mounts_retain_original_checked_interfaces_and_reuse_exact_job() {
-        let (machines, context, source, _root) = actor_registry_fixture();
-        let workbench = ResidentActorWorkbench::new(machines, source, None, None)
-            .with_compilation_authority(
-                crate::resident_actor::WorkbenchCompilationAuthority::for_test(context.clone()),
-            );
+        use tidepool_runtime::session::turn::HostBindingAuthority;
+        let (machines, public, source, _root) = actor_registry_fixture();
+        let (workbench, context) = ResidentActorWorkbench::new(machines, source, None, None)
+            .admit_private_cell_for_test(public.clone())
+            .await
+            .unwrap();
         let first = workbench
             .bind_command_job(context.clone(), "job one".into())
             .await
             .expect("first checked Job binding")
             .accept()
             .unwrap();
-        let second = workbench
-            .bind_command_job(context.clone(), "job two".into())
-            .await
-            .expect("second checked Job binding")
-            .accept()
-            .unwrap();
-        assert_ne!(first, second);
+        let original = workbench
+            .host_binding_identity_for_test(context.clone(), &first)
+            .await;
         let before_repeat = tidepool_extract_cmd::extract_spawn_count();
         let repeated = workbench
             .bind_command_job(context.clone(), "job one".into())
             .await
-            .expect("same job retains its original binder")
+            .expect("unchanged Job reuses its accepted original binder")
             .accept()
             .unwrap();
         assert_eq!(repeated, first);
         assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before_repeat);
         workbench
-            .access
-            .with_machine(context, move |session, context, _| {
-                let scope = context.placement.lexical_scope;
-                assert_eq!(session.host_text_binding_in(scope, "job one"), Some(first));
-                assert_eq!(session.host_text_binding_in(scope, "job two"), Some(second));
-                let view = session
-                    .compile_view_in(scope)
-                    .expect("mounted scope is live");
-                let inputs = session
-                    .capture_inspection_inputs(&view)
-                    .expect("both Job interfaces are authenticated");
-                assert_eq!(inputs.view().reachable_values().len(), 2);
-                Ok(())
-            })
+            .execute_cell_for_test(
+                context.clone(),
+                &format!(include_str!("fixtures/host-job-first.hs"), first = first),
+            )
             .await
-            .expect("original Job bindings remain protected compilation inputs");
+            .unwrap();
+        workbench
+            .publish_completed_cell_for_test(context)
+            .await
+            .unwrap();
+        let (workbench, context) = workbench
+            .admit_private_cell_for_test(public.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            workbench
+                .host_binding_identity_for_test(context.clone(), &first)
+                .await,
+            original
+        );
+        workbench
+            .execute_cell_for_test(context.clone(), "data Job = SourceJob Bool")
+            .await
+            .unwrap();
+        let (reservation, binder, compiled, dependencies) = workbench
+            .prepare_host_input(context.clone(), HostCarrierKind::Job, None)
+            .await
+            .expect("retained context still admits the original checked Job type");
+        assert_eq!(
+            binder.host_authority,
+            Some(HostBindingAuthority::CommandJob)
+        );
+        assert_ne!(
+            tidepool_repr::SessionVarId::from_extract(binder.var_id),
+            original.0
+        );
+        let compiled = workbench
+            .refuse_host_payload_for_test(context.clone(), &reservation, &binder, compiled)
+            .await;
+        let mounted = workbench
+            .mount_prepared_host_input(
+                context.clone(),
+                reservation,
+                binder,
+                compiled,
+                OwnedHostPayload::Job(HostCommandJob::Job("job two".into())),
+                false,
+            )
+            .await
+            .unwrap();
+        let second = RetainedHostBinding {
+            name: mounted.mounted_input().name.clone(),
+            mounted: Some(mounted),
+        }
+        .accept()
+        .unwrap();
+        drop(dependencies);
+        assert_ne!(first, second);
+        workbench
+            .execute_cell_for_test(
+                context.clone(),
+                &format!(
+                    include_str!("fixtures/host-job-retained.hs"),
+                    first = first,
+                    second = second
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            workbench
+                .host_binding_identity_for_test(context.clone(), &first)
+                .await,
+            original
+        );
+        let before_repeat = tidepool_extract_cmd::extract_spawn_count();
+        assert_eq!(
+            workbench
+                .bind_command_job(context.clone(), "job two".into())
+                .await
+                .unwrap()
+                .accept()
+                .unwrap(),
+            second
+        );
+        assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before_repeat);
+        workbench
+            .publish_completed_cell_for_test(context)
+            .await
+            .unwrap();
+        assert_eq!(
+            workbench
+                .host_binding_identity_for_test(public, &first)
+                .await,
+            original
+        );
     }
 
     #[tokio::test]
     async fn tool_result_mounts_retain_original_checked_interfaces() {
-        let (machines, context, source, _root) = actor_registry_fixture();
-        let workbench = ResidentActorWorkbench::new(machines, source, None, None)
-            .with_compilation_authority(
-                crate::resident_actor::WorkbenchCompilationAuthority::for_test(context.clone()),
-            );
+        use tidepool_runtime::session::turn::HostBindingAuthority;
+        let (machines, public, source, _root) = actor_registry_fixture();
+        let (workbench, context) = ResidentActorWorkbench::new(machines, source, None, None)
+            .admit_private_cell_for_test(public.clone())
+            .await
+            .unwrap();
         workbench
             .bind_tool_result(context.clone(), "tool_one".into(), "output one".into())
             .await
             .expect("first checked Text binding")
             .accept()
             .unwrap();
+        let original = workbench
+            .host_binding_identity_for_test(context.clone(), "tool_one")
+            .await;
         workbench
-            .bind_tool_result(context.clone(), "tool_two".into(), "output two".into())
+            .execute_cell_for_test(context.clone(), include_str!("fixtures/host-text-first.hs"))
             .await
-            .expect("second checked Text binding")
-            .accept()
             .unwrap();
         workbench
-            .access
-            .with_machine(context, |session, context, _| {
-                let scope = context.placement.lexical_scope;
-                let names = session.binding_names_in(scope);
-                assert!(names.contains(&"tool_one".into()));
-                assert!(names.contains(&"tool_two".into()));
-                let view = session
-                    .compile_view_in(scope)
-                    .expect("mounted scope is live");
-                let inputs = session
-                    .capture_inspection_inputs(&view)
-                    .expect("both Text interfaces are authenticated");
-                assert_eq!(inputs.view().reachable_values().len(), 2);
-                Ok(())
-            })
+            .publish_completed_cell_for_test(context)
             .await
-            .expect("original Text bindings remain protected compilation inputs");
+            .unwrap();
+        let (workbench, context) = workbench
+            .admit_private_cell_for_test(public.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            workbench
+                .host_binding_identity_for_test(context.clone(), "tool_one")
+                .await,
+            original
+        );
+        workbench
+            .execute_cell_for_test(context.clone(), "data Text = SourceText Bool")
+            .await
+            .unwrap();
+        let (reservation, binder, compiled, dependencies) = workbench
+            .prepare_host_input(
+                context.clone(),
+                HostCarrierKind::Text,
+                Some("tool_two".into()),
+            )
+            .await
+            .expect("retained context still admits the original checked Text type");
+        assert_eq!(binder.host_authority, Some(HostBindingAuthority::Text));
+        assert_ne!(
+            tidepool_repr::SessionVarId::from_extract(binder.var_id),
+            original.0
+        );
+        let compiled = workbench
+            .refuse_host_payload_for_test(context.clone(), &reservation, &binder, compiled)
+            .await;
+        let mounted = workbench
+            .mount_prepared_host_input(
+                context.clone(),
+                reservation,
+                binder,
+                compiled,
+                OwnedHostPayload::Text("output two".into()),
+                false,
+            )
+            .await
+            .unwrap();
+        RetainedHostBinding {
+            name: mounted.mounted_input().name.clone(),
+            mounted: Some(mounted),
+        }
+        .accept()
+        .unwrap();
+        drop(dependencies);
+        workbench
+            .execute_cell_for_test(
+                context.clone(),
+                include_str!("fixtures/host-text-retained.hs"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            workbench
+                .host_binding_identity_for_test(context.clone(), "tool_one")
+                .await,
+            original
+        );
+        workbench
+            .host_binding_identity_for_test(context.clone(), "tool_two")
+            .await;
+        workbench
+            .publish_completed_cell_for_test(context)
+            .await
+            .unwrap();
+        assert_eq!(
+            workbench
+                .host_binding_identity_for_test(public, "tool_one")
+                .await,
+            original
+        );
     }
 
     #[tokio::test]
@@ -12535,6 +12674,111 @@ mod request_tests {
     }
 
     impl ResidentActorWorkbench<frunk::HNil, tidepool_mcp::CapturedOutput> {
+        async fn host_binding_identity_for_test(
+            &self,
+            context: crate::ActorSessionContext,
+            name: &str,
+        ) -> (tidepool_repr::SessionVarId, tidepool_repr::SessionModule) {
+            let name = name.to_owned();
+            self.access
+                .with_machine(context, move |session, context, _| {
+                    let scope = context.placement.lexical_scope;
+                    let binding = session
+                        .current_binding_in(scope, &name)
+                        .expect("original host binding remains visible");
+                    let view = session.compile_view_in(scope).unwrap();
+                    let inputs = session
+                        .capture_inspection_inputs(&view)
+                        .expect("original checked interface remains authenticated");
+                    assert!(inputs.view().reachable_values().contains(&binding.1));
+                    Ok((binding.0, binding.1))
+                })
+                .await
+                .unwrap()
+        }
+
+        async fn wait_for_host_input_retirement_for_test(
+            &self,
+            context: crate::ActorSessionContext,
+            name: String,
+        ) {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    let name = name.clone();
+                    if self
+                        .access
+                        .with_machine(context.clone(), move |session, context, _| {
+                            Ok(session
+                                .current_binding_in(context.placement.lexical_scope, &name)
+                                .is_none())
+                        })
+                        .await
+                        .unwrap()
+                    {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("ephemeral host input retires after its dependencies release");
+        }
+
+        async fn refuse_host_payload_for_test(
+            &self,
+            context: crate::ActorSessionContext,
+            reservation: &Arc<tidepool_runtime::session::RuntimeCheckedItemAdmission>,
+            binder: &BoundBinder,
+            compiled: CompiledTurn,
+        ) -> CompiledTurn {
+            use tidepool_runtime::session::turn::HostBindingAuthority;
+            let reservation = Arc::clone(reservation);
+            let binder = binder.clone();
+            self.access
+                .with_machine(context, move |session, context, _| {
+                    let before = reservation.prefix().snapshot();
+                    let residency = session.residency();
+                    let wrong_json = serde_json::Value::Null;
+                    let wrong = match binder
+                        .host_authority
+                        .expect("a genuine checked host binder")
+                    {
+                        HostBindingAuthority::JsonValue => {
+                            HostPayload::Text("wrong nominal payload")
+                        }
+                        HostBindingAuthority::Text | HostBindingAuthority::CommandJob => {
+                            HostPayload::Json(&wrong_json)
+                        }
+                    };
+                    assert!(matches!(
+                        session.mount_checked_host_input(
+                            reservation.clone(),
+                            &binder,
+                            compiled.code(),
+                            wrong
+                        ),
+                        Err(ResidentError::UnsupportedCheckedTurn)
+                    ));
+                    assert!(session
+                        .run_bind_with_sites(
+                            "host placeholder must never execute",
+                            compiled.code(),
+                            &binder,
+                            reservation.generation()
+                        )
+                        .is_err());
+                    assert!(Arc::ptr_eq(&before, &reservation.prefix().snapshot()));
+                    assert_eq!(before.compiler_prefix().next_item(), 0);
+                    assert_eq!(session.residency(), residency);
+                    assert!(session
+                        .current_binding_in(context.placement.lexical_scope, &binder.name)
+                        .is_none());
+                    Ok(compiled)
+                })
+                .await
+                .unwrap()
+        }
+
         async fn execute_cell_for_test(
             &self,
             context: crate::ActorSessionContext,
@@ -15771,17 +16015,21 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
     /// later items can refer to the exact binding produced by an earlier item.
     #[tokio::test]
     async fn planned_cell_keeps_request_json_input_owned_across_native_preparation() {
-        let (machines, context, source, _root) = actor_registry_fixture();
+        let (machines, public, source, _root) = actor_registry_fixture();
         let workbench = ResidentActorWorkbench::new(machines, source, None, None)
             .with_json_input(Some(serde_json::json!({"greeting": "hi"})));
         let (workbench, context) = workbench
-            .admit_private_cell_for_test(context)
+            .admit_private_cell_for_test(public.clone())
             .await
             .unwrap();
         let (reservation, binder, compiled, host_dependencies) = workbench
             .prepare_host_input(context.clone(), HostCarrierKind::Json, None)
             .await
             .expect("host JSON has its original checked interface");
+        assert_eq!(
+            binder.host_authority,
+            Some(tidepool_runtime::session::turn::HostBindingAuthority::JsonValue)
+        );
         let probe_reservation = reservation.clone();
         let probe_binder = binder.clone();
         let probe_code = compiled;
@@ -15956,6 +16204,131 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         })
         .await
         .expect("the input owner retires while completed JSON values remain bound");
+        let workbench = workbench.with_json_input(None);
+        let original = workbench
+            .host_binding_identity_for_test(context.clone(), "seen")
+            .await;
+        let original_echo = workbench
+            .host_binding_identity_for_test(context.clone(), "echoed")
+            .await;
+        workbench
+            .execute_cell_for_test(context.clone(), include_str!("fixtures/host-json-first.hs"))
+            .await
+            .unwrap();
+        workbench
+            .publish_completed_cell_for_test(context)
+            .await
+            .unwrap();
+        let (workbench, context) = workbench
+            .admit_private_cell_for_test(public.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            workbench
+                .host_binding_identity_for_test(context.clone(), "seen")
+                .await,
+            original
+        );
+        assert_eq!(
+            workbench
+                .host_binding_identity_for_test(context.clone(), "echoed")
+                .await,
+            original_echo
+        );
+        workbench
+            .execute_cell_for_test(context.clone(), "data Value = SourceValue Bool")
+            .await
+            .unwrap();
+        let (reservation, binder, compiled, host_dependencies) = workbench
+            .prepare_host_input(context.clone(), HostCarrierKind::Json, None)
+            .await
+            .expect("second JSON mount authenticates retained Value and Scientific owners");
+        assert_eq!(
+            binder.host_authority,
+            Some(tidepool_runtime::session::turn::HostBindingAuthority::JsonValue)
+        );
+        let second_input_name = binder.name.clone();
+        let compiled = workbench
+            .refuse_host_payload_for_test(context.clone(), &reservation, &binder, compiled)
+            .await;
+        let input = workbench
+            .mount_prepared_json_input(
+                context.clone(),
+                reservation,
+                binder,
+                compiled,
+                serde_json::json!({"greeting": "again", "count": 42}),
+            )
+            .await
+            .unwrap();
+        drop(host_dependencies);
+        let source = include_str!("fixtures/host-json-retained.hs");
+        let (checked, prepared) = workbench
+            .prepare_checked_cell(
+                context.clone(),
+                source.into(),
+                workbench.compilation_authority.clone().unwrap(),
+                workbench.private_execution.clone(),
+                Some(input),
+            )
+            .await
+            .expect("second native program uses its new input and the original JSON values");
+        let PreparedCell {
+            items,
+            dependencies,
+        } = prepared;
+        assert_eq!(items.len(), 2);
+        for (index, (observed, item)) in checked.items.iter().zip(items).enumerate() {
+            let step = workbench
+                .begin_prepared_cell_item(
+                    context.clone(),
+                    ParsedBlock {
+                        ordinal: index + 1,
+                        total: checked.items.len(),
+                        source: observed.source.clone(),
+                    },
+                    item,
+                )
+                .await
+                .unwrap();
+            let settled = match step {
+                ResidentWorkbenchStep::Running { fragment, outcome } => workbench
+                    .settle_item(context.clone(), *fragment, *outcome)
+                    .await
+                    .unwrap(),
+                other => other,
+            };
+            assert!(matches!(settled, ResidentWorkbenchStep::Committed { .. }));
+        }
+        drop(dependencies);
+        workbench
+            .wait_for_host_input_retirement_for_test(context.clone(), second_input_name)
+            .await;
+        assert_eq!(
+            workbench
+                .host_binding_identity_for_test(context.clone(), "seen")
+                .await,
+            original
+        );
+        assert_eq!(
+            workbench
+                .host_binding_identity_for_test(context.clone(), "echoed")
+                .await,
+            original_echo
+        );
+        workbench
+            .host_binding_identity_for_test(context.clone(), "secondSeen")
+            .await;
+        workbench
+            .publish_completed_cell_for_test(context)
+            .await
+            .unwrap();
+        assert_eq!(
+            workbench
+                .host_binding_identity_for_test(public, "seen")
+                .await,
+            original
+        );
     }
 
     #[tokio::test]
