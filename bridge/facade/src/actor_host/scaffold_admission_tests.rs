@@ -182,14 +182,12 @@ async fn assert_pinned_shell_recovery(campaign: &mut TestCampaign) {
 
     commands.shorten_slice_read(3);
     let source = format!(
-        "{snapshot}\nexpired <- Project.Shell.sectionPage snap (Project.Shell.SectionId 1)\ndisplay (show expired)"
+        "import qualified Tidepool.Command as Cmd\n{snapshot}\n{}",
+        include_str!("scaffold_expired_output.hs")
     );
     let expired = campaign
         .drive_actor_output(&store, dispatch_haskell_script(policy.as_ref(), &source))
         .await;
-    assert!(
-        committed_display_text(&expired).starts_with("Left (SnapshotExpired Stdout "),
-        "{expired}"
-    );
+    assert_eq!(committed_display_text(&expired), "True", "{expired}");
     assert_eq!(commands.executions(), 1, "refused recovery must not rerun");
 }
