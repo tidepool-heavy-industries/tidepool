@@ -858,7 +858,7 @@ tidepool_rust_isolated_test(
         "harness": "//third-party/rust:harness",
     },
 
-    env = {"OUT_DIR": "$(location :tidepool_build_script_run[out_dir])"},
+    compile_env = {"OUT_DIR": "$(location :tidepool_build_script_run[out_dir])"},
     visibility = ["PUBLIC"],
 )
 
@@ -1002,7 +1002,7 @@ tidepool_rust_isolated_test(
         "harness": "//third-party/rust:harness",
     },
 
-    env = {"OUT_DIR": "$(location :tidepool_build_script_run[out_dir])"},
+    compile_env = {"OUT_DIR": "$(location :tidepool_build_script_run[out_dir])"},
     visibility = ["PUBLIC"],
 )
 
@@ -1146,7 +1146,7 @@ tidepool_rust_isolated_test(
         "harness": "//third-party/rust:harness",
     },
 
-    env = {"OUT_DIR": "$(location :tidepool_build_script_run[out_dir])"},
+    compile_env = {"OUT_DIR": "$(location :tidepool_build_script_run[out_dir])"},
     visibility = ["PUBLIC"],
 )
 
@@ -1290,7 +1290,7 @@ tidepool_rust_isolated_test(
         "harness": "//third-party/rust:harness",
     },
 
-    env = {"OUT_DIR": "$(location :tidepool_build_script_run[out_dir])"},
+    compile_env = {"OUT_DIR": "$(location :tidepool_build_script_run[out_dir])"},
     visibility = ["PUBLIC"],
 )
 

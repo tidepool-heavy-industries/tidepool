@@ -95,6 +95,7 @@ def tidepool_rust_isolated_test(
         package_dir,
         version,
         env = {},
+        compile_env = {},
         rustc_flags = [],
         haskell_worker = False,
         exact_tests = [],
@@ -106,12 +107,13 @@ def tidepool_rust_isolated_test(
         run_env = {},
         test_rule_timeout_ms = None,
         **kwargs):
-    # This compatibility macro owns one test binary; focused consumers can share
-    # a binary by invoking tidepool_rust_test_cases directly.
-    compiler_env, flags = _common(name, package_name, package_dir, version, env, rustc_flags)
+    # Runtime resources stay out of the compile action: changing a prepared
+    # fixture rebuilds its producer and test execution without relinking Rust.
+    compiler_env, flags = _common(name, package_name, package_dir, version, compile_env, rustc_flags)
+    runtime_env, _flags = _common(name, package_name, package_dir, version, env, rustc_flags)
     rust_binary(
         name = name + "_binary",
-        env = _test_environment(compiler_env, haskell_worker),
+        env = compiler_env,
         rustc_flags = flags + ["--test"],
         **kwargs
     )
@@ -123,7 +125,7 @@ def tidepool_rust_isolated_test(
         ignored = ignored,
         timeout = timeout,
         jobs = jobs,
-        env = compiler_env,
+        env = runtime_env,
         resources = resources,
         haskell_worker = haskell_worker,
         run_env = run_env,
