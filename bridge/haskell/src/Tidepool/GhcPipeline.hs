@@ -29,7 +29,7 @@ import GHC.Driver.Main (hscDesugar, hscDesugar', hscSimplify, hscMaybeWriteIface
 import GHC.Driver.Pipeline (compileOne')
 import GHC.Driver.Pipeline.Execute (runPhase)
 import GHC.Driver.Pipeline.Phases (TPhase(..), PhaseHook(..))
-import GHC.Driver.Hooks (hscCompileCoreExprHook, hscFrontendHook, runPhaseHook)
+import GHC.Driver.Hooks (hscCompileCoreExprHook, hscFrontendHook, runPhaseHook, runMetaHook)
 import GHC.Data.StringBuffer (stringToStringBuffer)
 import qualified GHC.Data.Maybe as MaybeErr
 import GHC.Driver.Backend (backendGeneratesCode, backendWritesFiles, backendCanReuseLoadedCode)
@@ -114,14 +114,15 @@ import GHC.Core.DataCon (dataConOrigArgTys)
 import GHC.Data.Bag (listToBag)
 import GHC.Tc.Solver (tcCheckGivens, tcCheckWanteds)
 import GHC.Tc.Solver.InertSet (emptyInert)
-import GHC.Tc.Utils.Monad (initTcWithGbl, initIfaceCheck)
+import GHC.Tc.Utils.Monad (initTcWithGbl, initIfaceCheck, getGblEnv)
+import GHC.Tc.Gen.Splice (defaultRunMeta)
 import GHC.Tc.Utils.TcMType (newEvVars)
 import GHC.Core.TyCo.Rep (Scaled(..), Type(..))
 import GHC.Types.Unique.Set (UniqSet, emptyUniqSet, addOneToUniqSet, elementOfUniqSet)
 import GHC.Tc.Utils.TcType (tcSplitSigmaTy)
 import GHC.Types.TypeEnv (typeEnvIds, typeEnvTyCons)
 import GHC.LanguageExtensions.Type qualified as LangExt
-import GHC.Tc.Types (FrontendResult(..), TcGblEnv, tcg_th_coreplugins, tcg_import_decls, tcg_dependent_files, tcg_binds, tcg_rdr_env, tcg_type_env, tcg_imports, tcg_keep)
+import GHC.Tc.Types (FrontendResult(..), TcGblEnv, tcg_mod, tcg_th_coreplugins, tcg_import_decls, tcg_dependent_files, tcg_binds, tcg_rdr_env, tcg_type_env, tcg_imports, tcg_keep)
 import GHC.Types.Name.Set (extendNameSetList)
 import GHC.Types.Name.Reader (GlobalRdrEnv, rdrNameOcc)
 import GHC.Types.Name.Ppr (mkNamePprCtx)
@@ -1588,6 +1589,23 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
       current <- getSession
       fresh <- liftIO (freshExactState current)
       setSession fresh
+    -- Observe the actual splice evaluator, including audited quasiquoters,
+    -- without adding an authored effect that would change cacheability.
+    -- withCycleHooks restores the delegate on every exit from this request.
+    when timing $ do
+      current <- getSession
+      let delegate = fromMaybe defaultRunMeta (runMetaHook (hsc_hooks current))
+          observe request expression = do
+            owner <- tcg_mod <$> getGblEnv
+            let unit = unitString (moduleUnit owner)
+                name = moduleNameString (moduleName owner)
+                ownerSha = hexBytes (SHA256.hash (TextEncoding.encodeUtf8 (Text.pack (show (unit,name)))))
+            liftIO $ hPutStrLn stderr ("tidepool-meta-execution request=" ++ show requestIdentity
+              ++ " owner_sha256=" ++ ownerSha
+              ++ " unit=" ++ show (take 128 unit) ++ " module=" ++ show (take 128 name)
+              ++ " owner_truncated=" ++ show (length unit > 128 || length name > 128))
+            delegate request expression
+      setSession current {hsc_hooks=(hsc_hooks current) {runMetaHook=Just observe}}
     unless exactCycle $ do
       current <- getSession
       -- Make unloads home executables only for LinkInMemory. Extraction uses
