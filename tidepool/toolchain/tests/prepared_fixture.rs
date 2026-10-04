@@ -15,6 +15,7 @@ fn configured(name: &str) -> std::ffi::OsString {
 )]
 fn compiler(source: &Path, output: &Path, targets: &[&str], roots: &[PathBuf]) -> Command {
     let mut command = Command::new(configured("TIDEPOOL_PREPARED_FIXTURE_COMPILER"));
+    command.current_dir(source.parent().unwrap());
     command.args([
         "--frontend",
         configured("TIDEPOOL_EXTRACT").to_str().unwrap(),
@@ -75,6 +76,8 @@ fn build_fixture_exports_complete_target_set_without_inherited_runtime_authority
     let output = root.path().join("prepared");
     let mut command = compiler(&source, &output, &["first", "second"], &[]);
     command
+        .env("TMPDIR", root.path().join("absent-ambient-scratch"))
+        .env("GHCRTS", "invalid inherited runtime options")
         .env("XDG_CACHE_HOME", &cache)
         .env("TIDEPOOL_COMPILE_CACHE_DIR", &cache)
         .env("TIDEPOOL_BUILD_PRODUCTS_DIR", &cache)

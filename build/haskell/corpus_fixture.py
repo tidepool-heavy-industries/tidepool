@@ -23,7 +23,7 @@ def main():
         parser.error("output directory must be absent")
     if not args.ghc_libdir.startswith("/nix/store/"):
         parser.error("compiler package must be pinned in the Nix store")
-    with tempfile.TemporaryDirectory(prefix="prepared-corpus-action-") as scratch:
+    with tempfile.TemporaryDirectory(prefix="prepared-corpus-action-", dir=Path.cwd()) as scratch:
         environment = {
             "PATH": os.environ["PATH"], "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8",
             "GHC_ENVIRONMENT": "-", "TIDEPOOL_GHC_LIBDIR": args.ghc_libdir,

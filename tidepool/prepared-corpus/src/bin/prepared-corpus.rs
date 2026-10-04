@@ -382,65 +382,7 @@ fn verify_cohort(
         }
         let execution = &program.stages.get(Stage::Execution).outcome;
         let comparison = &program.stages.get(Stage::Comparison).outcome;
-        let accepted = if oracle.source_tops.is_none() {
-            matches!(execution, Outcome::Passed) && matches!(comparison, Outcome::Passed)
-        } else {
-            match execution {
-                Outcome::Passed => match comparison {
-                    Outcome::Passed => true,
-                    Outcome::NoOracle => {
-                        OracleScope::of(row.expectation_key.as_deref(), &oracle)
-                            == OracleScope::CompilerIntroduced
-                    }
-                    Outcome::MissingExpectation => {
-                        row.expectation_key.as_ref().is_some_and(|key| {
-                            matches!(
-                                oracle.refusals.get(key).map(|refusal| &refusal.class),
-                                Some(tidepool_prepared_corpus::SourceRefusal::Unrepresentable)
-                            )
-                        })
-                    }
-                    _ => false,
-                },
-                Outcome::Classified {
-                    class: Classification::NotClosed,
-                    ..
-                } => {
-                    matches!(comparison, Outcome::NotReached)
-                        && (OracleScope::of(row.expectation_key.as_deref(), &oracle)
-                            == OracleScope::CompilerIntroduced
-                            || row.expectation_key.as_ref().is_some_and(|key| {
-                                matches!(
-                                    oracle.refusals.get(key).map(|refusal| &refusal.class),
-                                    Some(tidepool_prepared_corpus::SourceRefusal::NotClosed)
-                                )
-                            }))
-                }
-                Outcome::Classified {
-                    class: Classification::NoFiniteObservation,
-                    ..
-                } => {
-                    matches!(comparison, Outcome::NotReached)
-                        && (OracleScope::of(row.expectation_key.as_deref(), &oracle)
-                            == OracleScope::CompilerIntroduced
-                            || matches!(
-                                expected_for(row, &oracle),
-                                Some(
-                                    Expectation::NoFiniteObservation
-                                        | Expectation::CyclicObservation
-                                )
-                            ))
-                }
-                // Compiler-introduced tops have no source oracle, but every
-                // emitted row still has to pass projection through compilation.
-                Outcome::Classified { .. } => {
-                    OracleScope::of(row.expectation_key.as_deref(), &oracle)
-                        == OracleScope::CompilerIntroduced
-                        && matches!(comparison, Outcome::NotReached)
-                }
-                _ => false,
-            }
-        };
+        let accepted = cohort_execution_accepted(row, &oracle, execution, comparison);
         if !accepted {
             return Err(invalid_manifest(format!(
                 "{} has unaccepted execution/comparison: {execution:?}; {comparison:?}",
@@ -450,6 +392,80 @@ fn verify_cohort(
     }
     println!("prepared corpus: {} programs verified", programs.len());
     Ok(())
+}
+
+fn cohort_execution_accepted(
+    row: &tidepool_prepared_corpus::ProjectionRecord,
+    oracle: &Expectations,
+    execution: &Outcome,
+    comparison: &Outcome,
+) -> bool {
+    if oracle.source_tops.is_none() {
+        matches!(execution, Outcome::Passed) && matches!(comparison, Outcome::Passed)
+    } else {
+        match execution {
+            Outcome::Passed => match comparison {
+                Outcome::Passed => true,
+                Outcome::NoOracle => {
+                    OracleScope::of(row.expectation_key.as_deref(), oracle)
+                        == OracleScope::CompilerIntroduced
+                }
+                Outcome::MissingExpectation => row.expectation_key.as_ref().is_some_and(|key| {
+                    matches!(
+                        oracle.refusals.get(key).map(|refusal| &refusal.class),
+                        Some(tidepool_prepared_corpus::SourceRefusal::Unrepresentable)
+                    )
+                }),
+                _ => false,
+            },
+            Outcome::Classified {
+                class: Classification::NotClosed,
+                ..
+            } => {
+                matches!(comparison, Outcome::NotReached)
+                    && (OracleScope::of(row.expectation_key.as_deref(), oracle)
+                        == OracleScope::CompilerIntroduced
+                        || row.expectation_key.as_ref().is_some_and(|key| {
+                            matches!(
+                                oracle.refusals.get(key).map(|refusal| &refusal.class),
+                                Some(tidepool_prepared_corpus::SourceRefusal::NotClosed)
+                            )
+                        }))
+            }
+            Outcome::Classified {
+                class: Classification::NoFiniteObservation,
+                ..
+            } => {
+                matches!(comparison, Outcome::NotReached)
+                    && (OracleScope::of(row.expectation_key.as_deref(), oracle)
+                        == OracleScope::CompilerIntroduced
+                        || matches!(
+                            expected_for(row, oracle),
+                            Some(Expectation::NoFiniteObservation | Expectation::CyclicObservation)
+                        ))
+            }
+            Outcome::Classified {
+                class: Classification::FunctionValued,
+                ..
+            } if row.expectation_key.as_ref().is_some_and(|key| {
+                matches!(
+                    oracle.refusals.get(key).map(|refusal| &refusal.class),
+                    Some(tidepool_prepared_corpus::SourceRefusal::Unrepresentable)
+                )
+            }) =>
+            {
+                matches!(comparison, Outcome::NotReached)
+            }
+            // Compiler-introduced tops have no source oracle, but every
+            // emitted row still has to pass projection through compilation.
+            Outcome::Classified { .. } => {
+                OracleScope::of(row.expectation_key.as_deref(), oracle)
+                    == OracleScope::CompilerIntroduced
+                    && matches!(comparison, Outcome::NotReached)
+            }
+            _ => false,
+        }
+    }
 }
 
 fn audit_operations(manifest_path: PathBuf, output: PathBuf) -> Result<(), Box<dyn Error>> {
@@ -905,6 +921,23 @@ fn validate_oracle_domain(
             )));
         }
     }
+    for (key, refusal) in &expectations.refusals {
+        if !source_tops.contains(key)
+            || expectations.expectations.contains_key(key)
+            || refusal.reason.trim().is_empty()
+        {
+            return Err(invalid_manifest(format!(
+                "oracle refusal {key:?} must exclusively classify a source top with a reason"
+            )));
+        }
+    }
+    if let Some(top) = source_tops.iter().find(|top| {
+        !expectations.expectations.contains_key(*top) && !expectations.refusals.contains_key(*top)
+    }) {
+        return Err(invalid_manifest(format!(
+            "oracle source top {top:?} has neither an expectation nor a typed refusal"
+        )));
+    }
     Ok(())
 }
 
@@ -1226,6 +1259,117 @@ mod tests {
             &oracle(&["t_swap"], vec![("gone", Expectation::CyclicObservation)])
         )
         .is_err());
+    }
+
+    #[test]
+    fn oracle_domain_refuses_missing_contradictory_and_ambient_source_refusals() {
+        let manifest: ProjectionManifest = serde_json::from_str(
+            r#"{"version":2,"source_targets":[],"programs":[{"name":"u:M:value:x","expectation_key":"x","status":"projected","artifact":"x","identity":{"unit":"u","module":"M","namespace":"value","occurrence":"x"}}]}"#,
+        )
+        .unwrap();
+        let mut oracle = Expectations {
+            refusals: Default::default(),
+            source_revision: "test".into(),
+            source_tops: Some(["x".into()].into_iter().collect()),
+            expectations: Default::default(),
+        };
+        assert!(validate_oracle_domain(&manifest, &oracle).is_err());
+        oracle.refusals.insert(
+            "x".into(),
+            tidepool_prepared_corpus::OracleRefusal {
+                class: tidepool_prepared_corpus::SourceRefusal::NotClosed,
+                reason: "native GHC reports required arguments".into(),
+            },
+        );
+        assert!(validate_oracle_domain(&manifest, &oracle).is_ok());
+        oracle.expectations.insert("x".into(), Expectation::Int(1));
+        assert!(validate_oracle_domain(&manifest, &oracle).is_err());
+        oracle.expectations.clear();
+        oracle.refusals.get_mut("x").unwrap().reason.clear();
+        assert!(validate_oracle_domain(&manifest, &oracle).is_err());
+        let refusal = oracle.refusals.remove("x").unwrap();
+        oracle.refusals.insert("ambient".into(), refusal);
+        assert!(validate_oracle_domain(&manifest, &oracle).is_err());
+    }
+
+    #[test]
+    fn source_refusals_require_matching_execution_evidence_and_never_excuse_crashes() {
+        let row: tidepool_prepared_corpus::ProjectionRecord = serde_json::from_str(
+            r#"{"name":"u:M:value:x","expectation_key":"x","status":"rejected","reason":"not run"}"#,
+        )
+        .unwrap();
+        let mut oracle = Expectations {
+            refusals: [(
+                "x".into(),
+                tidepool_prepared_corpus::OracleRefusal {
+                    class: tidepool_prepared_corpus::SourceRefusal::NotClosed,
+                    reason: "native GHC reports required arguments".into(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            source_revision: "test".into(),
+            source_tops: Some(["x".into()].into_iter().collect()),
+            expectations: Default::default(),
+        };
+        let classified = |class| Outcome::Classified {
+            class,
+            reason: "production execution".into(),
+        };
+        assert!(cohort_execution_accepted(
+            &row,
+            &oracle,
+            &classified(Classification::NotClosed),
+            &Outcome::NotReached
+        ));
+        for execution in [
+            classified(Classification::FunctionValued),
+            classified(Classification::NoFiniteObservation),
+            Outcome::Passed,
+            Outcome::Failed {
+                reason: "child exited abnormally: signal 6".into(),
+            },
+        ] {
+            assert!(!cohort_execution_accepted(
+                &row,
+                &oracle,
+                &execution,
+                &Outcome::NotReached
+            ));
+        }
+        oracle.refusals.get_mut("x").unwrap().class =
+            tidepool_prepared_corpus::SourceRefusal::Unrepresentable;
+        assert!(cohort_execution_accepted(
+            &row,
+            &oracle,
+            &classified(Classification::FunctionValued),
+            &Outcome::NotReached
+        ));
+        assert!(cohort_execution_accepted(
+            &row,
+            &oracle,
+            &Outcome::Passed,
+            &Outcome::MissingExpectation
+        ));
+        assert!(!cohort_execution_accepted(
+            &row,
+            &oracle,
+            &classified(Classification::NotClosed),
+            &Outcome::NotReached
+        ));
+        oracle.source_tops = None;
+        assert!(!cohort_execution_accepted(
+            &row,
+            &oracle,
+            &classified(Classification::FunctionValued),
+            &Outcome::NotReached
+        ));
+        assert!(cohort_execution_accepted(
+            &row,
+            &oracle,
+            &Outcome::Passed,
+            &Outcome::Passed
+        ));
     }
 
     #[test]
