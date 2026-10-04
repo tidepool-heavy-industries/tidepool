@@ -3380,13 +3380,17 @@ where
         if let Some(provenance) = provenance {
             self.binding_provenance.insert(id.raw(), provenance);
         }
+        self.prune_binding_provenance();
+        Ok(committed)
+    }
+
+    fn prune_binding_provenance(&mut self) {
         self.binding_provenance.retain(|id, _| {
             self.state
                 .bindings()
                 .get(SessionVarId::from_extract(*id))
                 .is_some()
         });
-        Ok(committed)
     }
 
     /// Reserve identities for compiled cell values before releasing exclusive
@@ -5162,6 +5166,7 @@ where
     /// scope is a no-op returning an all-zero receipt.
     pub fn retire_scope(&mut self, scope: ScopeId) -> ScopeRetirement {
         let retirement = self.state.retire_scope(scope);
+        self.prune_binding_provenance();
         self.advance_public_visibility(scope);
         self.host_text_bindings
             .retain(|id, _| self.state.bindings().get(*id).is_some());
@@ -6207,12 +6212,7 @@ where
         if let Some(scope) = scope {
             self.advance_public_visibility(scope);
         }
-        self.binding_provenance.retain(|id, _| {
-            self.state
-                .bindings()
-                .get(SessionVarId::from_extract(*id))
-                .is_some()
-        });
+        self.prune_binding_provenance();
     }
 
     /// Run one GHC-classified pattern bind and materialize every projected
@@ -7259,8 +7259,19 @@ mod custody_release_tests {
     #[test]
     fn exclusive_binding_custody_survives_source_scope_retirement() {
         let mut session = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, None);
+        let other_scope = session.mint_scope(ScopeId::ROOT).unwrap();
+        let other_id = bind_fixture(&mut session, other_scope, 43);
+        let other_provenance = Arc::new(ProgramProvenance::default());
+        session
+            .binding_provenance
+            .insert(other_id.raw(), Arc::clone(&other_provenance));
         let scope = session.mint_scope(ScopeId::ROOT).unwrap();
         let id = bind_fixture(&mut session, scope, 42);
+        let provenance = Arc::new(ProgramProvenance::default());
+        let weak = Arc::downgrade(&provenance);
+        session
+            .binding_provenance
+            .insert(id.raw(), Arc::clone(&provenance));
         session
             .set_run_context(SessionRunContext {
                 lexical_scope: scope,
@@ -7271,21 +7282,38 @@ mod custody_release_tests {
             .retain_binding_custody_in(scope, "x", id)
             .unwrap()
             .unwrap();
+        assert!(Arc::ptr_eq(&custody.provenance, &provenance));
+        drop(provenance);
         let retained = custody.handle.unwrap();
         session.set_run_context(SessionRunContext::ROOT).unwrap();
         session.retire_scope(scope);
+        assert!(!session.binding_provenance.contains_key(&id.raw()));
+        assert!(Arc::ptr_eq(
+            &session.binding_provenance[&other_id.raw()],
+            &other_provenance
+        ));
+        assert!(
+            Arc::ptr_eq(&weak.upgrade().unwrap(), &custody.provenance),
+            "retained value keeps its original compiler metadata independently"
+        );
         major_collect(&mut session);
-        assert!(session
-            .state
-            .prepared_mut()
-            .unwrap()
-            .inspect_retained(retained)
-            .is_ok());
+        assert!(
+            matches!(session.state.prepared_mut().unwrap().inspect_retained(retained).unwrap(),
+            PreparedOuter::Constructor { fields, .. } if matches!(fields.as_slice(),
+                [PreparedResult::Scalar(99)]))
+        );
+        assert_live_binding(&mut session, other_scope, other_id);
         assert!(matches!(
             session.retain_binding_custody_in(scope, "x", id),
             Err(ResidentError::Session(SessionError::DeadScope(_)))
         ));
         assert!(session.discard_custody(custody));
+        assert!(
+            weak.upgrade().is_none(),
+            "last metadata share retires with actual custody"
+        );
+        session.retire_scope(other_scope);
+        assert!(!session.binding_provenance.contains_key(&other_id.raw()));
         major_collect(&mut session);
         assert_eq!(session.value_handle_count(), 0);
     }
