@@ -52,10 +52,112 @@ struct ChildRounds {
     round: usize,
 }
 
+struct FrozenProviderPrefix {
+    transcript: Vec<harness::item::Item>,
+    inherited_effort: harness::model::Effort,
+    configuration_positions: Vec<usize>,
+}
+
+impl FrozenProviderPrefix {
+    fn capture(request: &ResponsesRequest) -> Self {
+        let configuration_positions = request
+            .input
+            .iter()
+            .enumerate()
+            .filter_map(|(position, item)| item.is_configuration_update().then_some(position))
+            .collect::<Vec<_>>();
+        let inherited_effort = request
+            .input
+            .iter()
+            .rev()
+            .find_map(harness::item::Item::configuration_effort)
+            .expect("original provider request retains its effective effort pin");
+        Self {
+            transcript: request
+                .input
+                .iter()
+                .filter(|item| !item.is_configuration_update())
+                .cloned()
+                .collect(),
+            inherited_effort,
+            configuration_positions,
+        }
+    }
+
+    fn assert_inherited(&self, request: &ResponsesRequest) {
+        // BeforeCall copies every ordinary item unchanged and re-roots the
+        // latest effort pin after that transcript. Configuration positions are
+        // branch-local; neither configuration nor transcript may be lost.
+        let transcript = request
+            .input
+            .iter()
+            .filter(|item| !item.is_configuration_update())
+            .cloned()
+            .collect::<Vec<_>>();
+        let difference = self
+            .transcript
+            .iter()
+            .zip(&transcript)
+            .position(|(expected, actual)| expected != actual)
+            .unwrap_or_else(|| self.transcript.len().min(transcript.len()));
+        assert!(
+            transcript.starts_with(&self.transcript),
+            "child {} changed its exact inherited provider transcript: first_difference={}, frozen_items={}, child_items={}, frozen_configuration_positions={:?}, frozen_item={}, child_item={}",
+            request.session_id,
+            difference,
+            self.transcript.len(),
+            transcript.len(),
+            self.configuration_positions,
+            provider_item_diagnostic(self.transcript.get(difference)),
+            provider_item_diagnostic(transcript.get(difference)),
+        );
+        let inherited_effort = request
+            .input
+            .iter()
+            .find_map(harness::item::Item::configuration_effort);
+        assert_eq!(
+            inherited_effort,
+            Some(self.inherited_effort),
+            "child {} must retain the checkpoint's inherited effort pin",
+            request.session_id,
+        );
+        assert_eq!(
+            request.pinned_effort, self.inherited_effort,
+            "child {} request effort must mirror its inherited positional pin",
+            request.session_id,
+        );
+        let configuration_positions = request
+            .input
+            .iter()
+            .enumerate()
+            .filter_map(|(position, item)| item.is_configuration_update().then_some(position))
+            .collect::<Vec<_>>();
+        eprintln!(
+            "[captured-engine] child {} preserves {} exact inherited provider items and {:?} effort; frozen configuration positions {:?}, child configuration positions {:?}",
+            request.session_id,
+            self.transcript.len(),
+            self.inherited_effort,
+            self.configuration_positions,
+            configuration_positions,
+        );
+    }
+}
+
+fn provider_item_diagnostic(item: Option<&harness::item::Item>) -> String {
+    match item {
+        Some(item) => serde_json::to_string(item)
+            .expect("normalized provider item serializes")
+            .chars()
+            .take(2048)
+            .collect(),
+        None => "<missing>".into(),
+    }
+}
+
 struct CapturedHostTransport {
     runtime: Arc<embedded_harness::EmbeddedHarnessRuntime>,
     setup_settlements: Mutex<Option<tokio::sync::broadcast::Receiver<OperationId>>>,
-    parent_prefix: Mutex<Option<Vec<harness::item::Item>>>,
+    parent_prefix: Mutex<Option<FrozenProviderPrefix>>,
     provider_outputs: Mutex<HashMap<OperationId, Vec<harness::item::Item>>>,
     provider_changed: watch::Sender<u64>,
     scenario: CapturedScenario,
@@ -136,7 +238,7 @@ impl CapturedHostTransport {
                     }
                 }))],
                 2 => {
-                    *self.parent_prefix.lock() = Some(request.input.clone());
+                    *self.parent_prefix.lock() = Some(FrozenProviderPrefix::capture(&request));
                     self.setup_requested.notify_one();
                     self.setup_ready.notified().await;
                     vec![haskell_call(
@@ -821,15 +923,12 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
         .await
         .expect("captured children did not start while the parent call was pending")
         .unwrap();
-        let frozen = transport
+        transport
             .parent_prefix
             .lock()
-            .clone()
-            .expect("original request prefix captured");
-        assert!(
-            request.input.starts_with(&frozen),
-            "child history must preserve the exact frozen provider prefix"
-        );
+            .as_ref()
+            .expect("original request prefix captured")
+            .assert_inherited(&request);
         assert!(request
             .input
             .iter()
@@ -1234,11 +1333,12 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
             let third_request = requests_rx
                 .try_recv()
                 .expect("third child provider request");
-            let frozen = transport.parent_prefix.lock().clone().unwrap();
-            assert!(
-                third_request.input.starts_with(&frozen),
-                "transferred capture preserves its exact original provider prefix"
-            );
+            transport
+                .parent_prefix
+                .lock()
+                .as_ref()
+                .expect("original request prefix survives parent failure")
+                .assert_inherited(&third_request);
             let (prefix, incarnation) = third_request.session_id.rsplit_once(':').unwrap();
             let (run, path) = prefix.rsplit_once(':').unwrap();
             let origin = ConversationIdentity::Embedded {
