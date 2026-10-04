@@ -216,7 +216,7 @@ class ExtractHelpers(unittest.TestCase):
             TIDEPOOL_KEEP_TEST_LOGS="1")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual((self.root / "cargo-calls").read_text().splitlines(),
-                         ["build -p tidepool --bin exomonad --bin exomonad-view-helper"])
+                         ["build -p tidepool --no-default-features --bin exomonad --bin exomonad-view-helper"])
         self.assertIn("starting per-run resident compile daemon", result.stderr)
         self.assertIn("check --recipe Project.Checks.run", (self.root / "exomonad-call").read_text())
         self.assertIn("extract.sock", (self.root / "exomonad-call").read_text())
@@ -231,7 +231,7 @@ class ExtractHelpers(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual((self.root / "cargo-calls").read_text().splitlines(),
                          ["build -p tidepool-extract-cmd --bin tidepool-extract --message-format=json-render-diagnostics",
-                          "build -p tidepool --bin exomonad --bin exomonad-view-helper"])
+                          "build -p tidepool --no-default-features --bin exomonad --bin exomonad-view-helper"])
         (self.root / "cargo-calls").unlink()
         partial = self.run_exomonad_script("exomonad-build.sh", TIDEPOOL_EXTRACT=str(frontend))
         self.assertNotEqual(partial.returncode, 0)
@@ -259,7 +259,7 @@ class ExtractHelpers(unittest.TestCase):
             TIDEPOOL_EXTRACT_WORKER=str(worker), TIDEPOOL_ALLOW_STALE_EXTRACT="1")
         self.assertEqual(allowed.returncode, 0, allowed.stdout + allowed.stderr)
         self.assertEqual((self.root / "cargo-calls").read_text().splitlines(),
-                         ["build -p tidepool --bin exomonad --bin exomonad-view-helper"])
+                         ["build -p tidepool --no-default-features --bin exomonad --bin exomonad-view-helper"])
 
     def exomonad_script_fixtures(self):
         scripts = self.root / "exomonad/scripts"
@@ -281,7 +281,7 @@ class ExtractHelpers(unittest.TestCase):
         exomonad.chmod(0o755)
         self.executable("cargo", '''#!/bin/sh
 printf "%s\\n" "$*" >> "$TEST_ROOT/cargo-calls"
-if [ "$*" = "build -p tidepool --bin exomonad --bin exomonad-view-helper" ]; then exit 0; fi
+if [ "$*" = "build -p tidepool --no-default-features --bin exomonad --bin exomonad-view-helper" ]; then exit 0; fi
 if [ "$*" = "build -p tidepool-extract-cmd --bin tidepool-extract --message-format=json-render-diagnostics" ]; then
   printf '{"reason":"compiler-artifact","target":{"name":"tidepool-extract"},"executable":"%s/target/debug/tidepool-extract","fresh":true}\\n' "$TEST_ROOT"
   exit 0
