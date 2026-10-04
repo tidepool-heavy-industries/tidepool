@@ -5046,7 +5046,6 @@ mod tests {
                 .unwrap();
             assert!(home
                 .certified_interface()
-                .unwrap()
                 .requirements()
                 .iter()
                 .any(|owner| owner.unit == "main" && owner.module == "CheckedHomeValue"));
