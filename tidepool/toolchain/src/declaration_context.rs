@@ -5517,6 +5517,7 @@ mod tests {
         support: &str,
         request: ExactCompilationRequest,
         endpoint: tidepool_extract_cmd::CompilerEndpoint,
+        offer: &crate::artifacts::ModuleCandidateOffer,
     ) {
         let original_path = root.join(module.relative_hs_path());
         let support_path = root.join("PrefixSelectedSupport.hs");
@@ -5524,22 +5525,32 @@ mod tests {
         let owner = identity("main", "PrefixSelectedSupport");
         let persisted = Arc::clone(&request.context);
         let empty = ExactDeclarationContext::new(&[], &[], vec![]).unwrap();
-        let source_path = root.join("Consumer.hs");
-        std::fs::write(&source_path,
-            "module Consumer where\nimport PrefixSelectedSupport\nresult :: Int\nresult = selected\n").unwrap();
         let output = root.join("consumer-output");
+        std::fs::create_dir(&output).unwrap();
+        let source_path = output.join("Consumer.hs");
+        std::fs::write(&source_path,
+            "module Consumer where\nimport PrefixSelectedSupport\nresult :: Int\nresult = selected\n__tidepool_inspect_0 = result\n").unwrap();
+        let inspection_output = output.join("inspection.cbor");
         let mut command = tidepool_extract_cmd::ExtractCmd::new().unwrap();
         command
             .input(&source_path)
             .includes(&includes)
-            .target("result")
+            .inspect_type("result")
+            .inspect_out(&inspection_output)
+            .inspection_strict()
             .output_dir(&output);
-        request.apply_to(&mut command).unwrap();
+        offer.apply_to(&mut command).unwrap();
+        let request_bytes = command.request_bytes();
+        let decoded = tidepool_extract_cmd::ExtractRequest::decode(&request_bytes).unwrap();
+        assert!(decoded.target_names().is_empty());
+        assert!(decoded.retained_generations().is_empty());
+        std::fs::write(root.join("worker-request.cbor"), request_bytes).unwrap();
         let run = endpoint.execute(&command).unwrap();
         std::fs::write(root.join("consumer.stdout"), &run.output.stdout).unwrap();
         std::fs::write(root.join("consumer.stderr"), &run.output.stderr).unwrap();
         crate::diag::decode_extract_result(run.success(), &run.output.stdout, &run.output.stderr)
-            .expect("actual current-source consumer compiles");
+            .expect("actual current-source inspection compiles");
+        assert!(std::fs::metadata(&inspection_output).unwrap().len() > 0);
         let persisted_admissions = request.validate_outputs(&output).unwrap();
         assert_eq!(persisted_admissions.len(), 1);
         assert!(persisted_admissions[0]

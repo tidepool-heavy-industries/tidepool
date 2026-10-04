@@ -5528,8 +5528,8 @@ mod source_proof_pairing_tests {
                 unit: "main".into(),
                 module: "PrefixSelectedSupport".into(),
             };
-            // This consumer prepares executable code. Retain the genuine original
-            // native owner and its canonical proof, not an interface-only projection.
+            // Retain the prior compiler's original native/canonical support custody
+            // for the persisted-versus-local source-selection receipt comparison.
             let products = certificate
                 .recovery_products()
                 .into_iter()
@@ -5557,9 +5557,13 @@ mod source_proof_pairing_tests {
                 &[],
             )
             .expect("inspection owns the checked purpose and current source roots");
-            let request = offer.exact.expect("inspection supplies its exact request");
+            let request = offer
+                .exact
+                .as_ref()
+                .expect("inspection supplies its exact request")
+                .clone();
             crate::declaration_context::assert_source_selected_receipt_pairing(
-                root, module, original, support, request, endpoint,
+                root, module, original, support, request, endpoint, &offer,
             );
         }));
         if let Err(panic) = result {
