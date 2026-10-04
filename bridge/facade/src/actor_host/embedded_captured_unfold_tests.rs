@@ -153,19 +153,22 @@ impl CapturedHostTransport {
                 )
                 .expect("returned Haskell receipt is valid JSON");
                 assert_eq!(receipt["status"], "replied", "{receipt}");
-                assert_eq!(
-                    receipt["items"].as_array().map(Vec::len),
-                    Some(1),
-                    "{receipt}"
-                );
-                assert_eq!(receipt["items"][0]["status"], "committed", "{receipt}");
+                let expected_items =
+                    if self.scenario == CapturedScenario::FailureAfterReplies && ordinal >= 2 {
+                        3
+                    } else {
+                        1
+                    };
+                let committed = receipt["items"].as_array().expect("child item receipts");
+                assert_eq!(committed.len(), expected_items, "{receipt}");
+                for item in committed {
+                    assert_eq!(item["status"], "committed", "{receipt}");
+                }
                 assert_eq!(receipt["publication"]["status"], "published", "{receipt}");
-                assert_eq!(
-                    receipt["items"][0]["terminalTransfer"], "replyAccepted",
-                    "{receipt}"
-                );
+                let reply = committed.last().expect("child reply receipt");
+                assert_eq!(reply["terminalTransfer"], "replyAccepted", "{receipt}");
                 assert!(
-                    receipt["items"][0]["operations"]
+                    reply["operations"]
                         .as_array()
                         .is_some_and(|operations| operations.iter().any(|operation| {
                             operation["effect"] == "reply"
@@ -234,6 +237,7 @@ impl CapturedHostTransport {
                         "type":"custom_tool_call", "call_id":format!("captured-child-{path}"),
                         "name":"haskell", "input":match self.scenario {
                             CapturedScenario::ConcurrentNominalJoin => "respond (m2MakeReply sessionInput)",
+                            CapturedScenario::FailureAfterReplies if ordinal >= 2 => include_str!("embedded_captured_child_reuse_nominal.hs"),
                             _ => "respond capturedGetter",
                         }
                     }))]
