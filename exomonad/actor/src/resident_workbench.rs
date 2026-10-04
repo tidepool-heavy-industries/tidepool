@@ -1577,7 +1577,10 @@ pub(crate) struct ExecutionPrivateScope {
 }
 
 pub(crate) enum PrivateExecutionPublication {
-    Manifest(tidepool_runtime::session::PublicManifestCommit),
+    Manifest {
+        commit: tidepool_runtime::session::PublicManifestCommit,
+        native_bindings: Vec<String>,
+    },
     Rejected {
         reason: tidepool_toolchain::declaration_join::JoinRejection,
         diagnostic: String,
@@ -6615,6 +6618,7 @@ where
             })
             .await
             .map_err(|error| publication_error(PrivatePublicationPhase::Freeze, error))?;
+        let native_bindings = intent.native_binding_names();
         let cancellation = tidepool_runtime::CompilerTransactionCancellation::new();
         let mut cancel_on_drop = CancelCompilerTransactionOnDrop(Some(cancellation.clone()));
         loop {
@@ -6623,9 +6627,10 @@ where
                 tidepool_runtime::session::PublicationPhase::CancellationRequested
                     | tidepool_runtime::session::PublicationPhase::Terminated
             ) {
-                return Ok(PrivateExecutionPublication::Manifest(
-                    tidepool_runtime::session::PublicManifestCommit::Cancelled,
-                ));
+                return Ok(PrivateExecutionPublication::Manifest {
+                    commit: tidepool_runtime::session::PublicManifestCommit::Cancelled,
+                    native_bindings,
+                });
             }
             let owner = execution.owner.clone();
             let intent = intent.clone();
@@ -6690,7 +6695,10 @@ where
                         continue;
                     }
                     cancel_on_drop.0 = None;
-                    return Ok(PrivateExecutionPublication::Manifest(outcome));
+                    return Ok(PrivateExecutionPublication::Manifest {
+                        commit: outcome,
+                        native_bindings,
+                    });
                 }
                 PreparedExecutionPublication::Rejected(rejected) => {
                     let outcome = self
@@ -12278,9 +12286,9 @@ mod request_tests {
                 .await?;
             assert!(matches!(
                 published,
-                PrivateExecutionPublication::Manifest(
-                    tidepool_runtime::session::PublicManifestCommit::Ephemeral
-                )
+                PrivateExecutionPublication::Manifest {
+                    commit: tidepool_runtime::session::PublicManifestCommit::Ephemeral, ..
+                }
             ));
             let public_scope = execution.public_scope;
             self.access
@@ -15439,7 +15447,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             .unwrap();
         assert!(matches!(
             published,
-            PrivateExecutionPublication::Manifest(_)
+            PrivateExecutionPublication::Manifest { .. }
         ));
         workbench
             .access

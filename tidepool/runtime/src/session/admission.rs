@@ -103,6 +103,78 @@ impl CertifiedPrivateValueWrite {
     }
 }
 
+/// An original checked host mount awaiting acceptance by its effect owner.
+/// This proves a native write, not completion of the surrounding Haskell item.
+/// Dropping it does not accept publication; the caller retains the mount's
+/// ordinary abandonment guard until accepting this receipt.
+pub struct PendingHostValueWrite {
+    owner: Arc<RuntimeAdmissionOwner>,
+    owner_epoch: u64,
+    scope: ScopeId,
+    id: tidepool_repr::SessionVarId,
+    write: CertifiedPrivateValueWrite,
+}
+
+impl PendingHostValueWrite {
+    pub(super) fn mounted(
+        session: &PersistentSession,
+        scope: ScopeId,
+        binder: &super::BoundBinder,
+        execution: Arc<tidepool_toolchain::checked_cell::ExactCompiledItem>,
+    ) -> Result<Self, SessionError> {
+        let id = tidepool_repr::SessionVarId::from_extract(binder.var_id);
+        let entry = session
+            .resolve_in(scope, &binder.name)
+            .filter(|entry| {
+                entry.id == id && entry.scope == scope
+                    && entry.module.gen.0 == execution.generation()
+            })
+            .ok_or(SessionError::StaleStagedDeclaration)?;
+        Ok(Self {
+            owner: session.admission_owner().clone(),
+            owner_epoch: session.admission_owner().epoch(),
+            scope,
+            id,
+            write: CertifiedPrivateValueWrite {
+                name: entry.name.0.clone(),
+                identity: entry.value.identity.clone(),
+                generation: entry.module.gen,
+                root_id: entry.value.handle.raw().0,
+                execution,
+            },
+        })
+    }
+
+    /// Transfer an accepted effect's exact write to its existing private owner.
+    /// Final publication revalidates the native identity under machine checkout.
+    pub fn accept(self, admission: &PrivateExecutionAdmission) -> Result<(), SessionError> {
+        if !Arc::ptr_eq(&self.owner, &admission.owner)
+            || self.owner_epoch != admission.owner_epoch
+            || self.owner_epoch != self.owner.epoch()
+            || self.scope != admission.private_scope
+        {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
+        let mut completed = admission.completed_values.lock();
+        if admission.final_intent.get().is_some() {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
+        if let Some(prior) = completed.get(&self.id) {
+            if prior.name != self.write.name
+                || prior.identity != self.write.identity
+                || prior.generation != self.write.generation
+                || prior.root_id != self.write.root_id
+                || !Arc::ptr_eq(&prior.execution, &self.write.execution)
+            {
+                return Err(SessionError::StaleStagedDeclaration);
+            }
+        } else {
+            completed.insert(self.id, self.write);
+        }
+        Ok(())
+    }
+}
+
 impl PrivateExecutionAdmission {
     pub fn admitted_public(&self) -> &PublicVisibilitySnapshot {
         &self.admitted
@@ -118,6 +190,12 @@ impl PrivateExecutionAdmission {
     }
     pub fn durable_owner(&self) -> Option<&super::RecoveryPublicOwner> {
         self.durable_owner.as_ref()
+    }
+
+    /// Whether this execution has accepted any independently completed native
+    /// writes. Receipt strings and an unfinished item's status are irrelevant.
+    pub fn has_completed_native_writes(&self) -> bool {
+        !self.completed_values.lock().is_empty()
     }
 }
 

@@ -409,6 +409,14 @@ fn merge_instances(
 }
 
 impl FinalExecutionIntent {
+    /// Names observed from the exact native identities selected for publication.
+    pub fn native_binding_names(&self) -> Vec<String> {
+        self.private.bindings.iter()
+            .filter(|(_, id)| self.write_ids.contains(id))
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
     #[cfg(test)]
     pub(super) fn native_write_ids(&self) -> &[SessionVarId] {
         &self.write_ids
@@ -456,6 +464,9 @@ impl PersistentSession {
         {
             return Err(SessionError::StaleStagedDeclaration);
         }
+        // Effect acceptance uses this same owner lock, so no write can enter
+        // between freezing the selected proof set and sealing the final intent.
+        let completed_values = admission.completed_values.lock();
         if let Some(intent) = admission.final_intent.get() {
             if self
                 .public_visibility_snapshot_in(admission.private_scope())
@@ -508,7 +519,7 @@ impl PersistentSession {
             source_keys,
             Some(admission.scope_lease.clone()),
             admission.durable_owner.clone(),
-            &admission.completed_values.lock(),
+            &completed_values,
             publication,
         )?;
         assert!(

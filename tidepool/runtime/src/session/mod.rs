@@ -60,7 +60,7 @@ pub use persistent::{
 };
 
 pub use admission::{
-    NativeSetupAdmissionFailure, NativeSetupInputInventory, PrivateExecutionAdmission,
+    NativeSetupAdmissionFailure, NativeSetupInputInventory, PendingHostValueWrite, PrivateExecutionAdmission,
     RuntimeCellAdmission, RuntimeCheckedItemAdmission, RuntimeCheckedPrefix,
     RuntimeCheckedPrefixSnapshot, RuntimeLexicalScopeLease,
 };

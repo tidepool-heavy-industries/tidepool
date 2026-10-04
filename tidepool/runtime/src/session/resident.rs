@@ -2630,16 +2630,20 @@ where
             .state
             .public_visibility_snapshot_in(scope)
             .ok_or(SessionError::DeadScope(scope))?;
+        let completed = admission.completed_values.lock();
         let writes = snapshot
             .bindings
             .iter()
             .filter_map(|(_, id)| {
                 self.state.bindings().get(*id).and_then(|entry| {
-                    (entry.scope == scope && !self.hidden_host_bindings.contains_key(id))
+                    (entry.scope == scope && !self.hidden_host_bindings.contains_key(id)
+                        && (publication == super::ExecutionPublicationIntent::CompletedCell
+                            || completed.get(id).is_some_and(|proof| proof.matches(entry))))
                         .then_some(*id)
                 })
             })
             .collect();
+        drop(completed);
         self.state.freeze_execution_intent_for(
             admission,
             writes,

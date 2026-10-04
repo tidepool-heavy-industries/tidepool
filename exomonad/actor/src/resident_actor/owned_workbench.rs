@@ -2076,7 +2076,9 @@ where
         if let Some(publication) = owned
             .private
             .as_ref()
-            .and_then(|_| private_publication_intent(&result))
+            .and_then(|private| private_publication_intent(
+                &result, private.admission.has_completed_native_writes(),
+            ))
         {
             return Ok(WorkbenchAdvance::Park(Self::publish_owned_execution_task(
                 owned,
@@ -2150,23 +2152,26 @@ where
                 use crate::resident_workbench::PrivateExecutionPublication;
                 use tidepool_runtime::session::PublicManifestCommit;
                 match published {
-                    Ok(PrivateExecutionPublication::Manifest(
-                        PublicManifestCommit::Durable | PublicManifestCommit::Ephemeral,
-                    )) => Self::settle_owned_execution(
+                    Ok(PrivateExecutionPublication::Manifest {
+                        commit: PublicManifestCommit::Durable | PublicManifestCommit::Ephemeral,
+                        native_bindings,
+                    }) => Self::settle_owned_execution(
                         behavior,
                         &kernel,
                         owned,
-                        mark_private_publication(result),
+                        mark_private_publication(result, &native_bindings),
                     ),
-                    Ok(PrivateExecutionPublication::Manifest(
-                        PublicManifestCommit::PublishedDurabilityUnconfirmed { detail },
-                    )) => Ok(WorkbenchAdvance::Park(
+                    Ok(PrivateExecutionPublication::Manifest {
+                        commit: PublicManifestCommit::PublishedDurabilityUnconfirmed { detail },
+                        native_bindings,
+                    }) => Ok(WorkbenchAdvance::Park(
                         Self::confirm_owned_publication_task(
                             owned,
                             environment,
                             kernel,
                             result,
                             detail,
+                            native_bindings,
                         ),
                     )),
                     failure => {
@@ -2177,7 +2182,7 @@ where
                                     "private publication rejected: {reason:?}: {diagnostic}"
                                 ))
                             }
-                            Ok(PrivateExecutionPublication::Manifest(commit)) => {
+                            Ok(PrivateExecutionPublication::Manifest { commit, .. }) => {
                                 ResidentActorWorkbenchError::ActorProtocol(format!(
                                     "private publication did not commit: {commit:?}"
                                 ))
@@ -2212,6 +2217,7 @@ where
         kernel: KernelContext,
         result: Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
         detail: String,
+        native_bindings: Vec<String>,
     ) -> OwnedWorkbenchTask<Self> {
         Self::owned_step_task(
             owned,
@@ -2233,9 +2239,9 @@ where
             },
             move |behavior, kernel, owned, confirmed| {
                 let result = match confirmed {
-                    Ok(()) => mark_private_publication(result),
+                    Ok(()) => mark_private_publication(result, &native_bindings),
                     Err(error) => {
-                        let unconfirmed = private_publication_bindings(&result);
+                        let unconfirmed = private_publication_bindings(&result, &native_bindings);
                         let failure_detail = format!(
                             "published write durability remains unconfirmed: {detail}; {error}"
                         );
@@ -2322,14 +2328,15 @@ where
 
 fn private_publication_intent(
     result: &Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
+    completed_native_writes: bool,
 ) -> Option<ExecutionPublicationIntent> {
     let completed_prefix = |receipts: &[WorkbenchItemReceipt]| {
-        receipts
+        (completed_native_writes || receipts
             .iter()
             .any(|receipt| {
                 receipt.status == WorkbenchItemStatus::Committed
                     && receipt.kind != Some(WorkbenchCellItemKind::Declaration)
-            })
+            }))
             .then_some(ExecutionPublicationIntent::CommittedNativePrefix)
     };
     let response = match result {
@@ -2348,6 +2355,7 @@ fn private_publication_intent(
 
 fn private_publication_bindings(
     result: &Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
+    native_bindings: &[String],
 ) -> Vec<String> {
     let receipts = match result {
         Ok(KernelStep::Continue(response) | KernelStep::ContinueLater(response))
@@ -2356,7 +2364,10 @@ fn private_publication_bindings(
         }) => &response.items,
         Err(failure) => &failure.receipts,
     };
-    let publication = private_publication_intent(result);
+    let publication = private_publication_intent(result, !native_bindings.is_empty());
+    if publication == Some(ExecutionPublicationIntent::CommittedNativePrefix) {
+        return native_bindings.to_vec();
+    }
     receipts
         .iter()
         .filter(|receipt| {
@@ -2371,8 +2382,9 @@ fn private_publication_bindings(
 
 fn mark_private_publication(
     mut result: Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
+    native_bindings: &[String],
 ) -> Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure> {
-    let bindings = private_publication_bindings(&result);
+    let bindings = private_publication_bindings(&result, native_bindings);
     let publication = WorkbenchPublicationOutcome::Published { bindings };
     match &mut result {
         Ok(KernelStep::Continue(response) | KernelStep::ContinueLater(response))
