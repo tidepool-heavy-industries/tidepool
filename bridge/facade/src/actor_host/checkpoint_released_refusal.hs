@@ -6,5 +6,5 @@ result <- attemptUnfold (batch campaign releasedGroup)
   (child (withContext (fromCheckpoint seed)
     (researching @Text projectHead (assignment releasedLabel ("inspect" :: Text)))))
 case result of
-  Left (UnfoldCheckpointRefused ReleasedCheckpoint) -> pure True
-  _ -> pure False
+  Left (UnfoldCheckpointRefused ReleasedCheckpoint) -> display True
+  _ -> display False

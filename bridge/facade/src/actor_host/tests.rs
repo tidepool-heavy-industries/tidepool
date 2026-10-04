@@ -561,6 +561,20 @@ async fn released_checkpoint_keeps_an_admitted_childs_hosted_context() {
         })
         .await;
     let root = campaign.root_installation.policy.clone();
+    let output_store = display_output::open_run_store(campaign.session_root.path()).unwrap();
+    let assert_display_true = |result: &serde_json::Value| {
+        let display = result["items"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find_map(|operation| operation.get("display"))
+            .expect("explicit checkpoint observation");
+        assert_eq!(display["text"], "True", "{result:?}");
+    };
     let root_for_setup = root.clone();
     let setup = tokio::spawn(async move {
         dispatch_haskell_script(
@@ -667,27 +681,34 @@ async fn released_checkpoint_keeps_an_admitted_childs_hosted_context() {
         assert_eq!(branch.await.unwrap()["status"], "committed");
     }
 
-    let release =
-        dispatch_haskell_script(root.as_ref(), include_str!("checkpoint_release_twice.hs")).await;
+    let release = campaign
+        .drive_actor_output(
+            &output_store,
+            dispatch_haskell_script(root.as_ref(), include_str!("checkpoint_release_twice.hs")),
+        )
+        .await;
     assert_eq!(release["status"], "committed", "{release:?}");
-    assert_eq!(
-        release["items"].as_array().unwrap().last().unwrap()["output"],
-        "True"
-    );
-    let refused = dispatch_haskell_script(
-        root.as_ref(),
-        include_str!("checkpoint_released_refusal.hs"),
-    )
-    .await;
+    assert_display_true(&release);
+    let refused = campaign
+        .drive_actor_output(
+            &output_store,
+            dispatch_haskell_script(
+                root.as_ref(),
+                include_str!("checkpoint_released_refusal.hs"),
+            ),
+        )
+        .await;
     assert_eq!(refused["status"], "committed", "{refused:?}");
-    assert_eq!(
-        refused["items"].as_array().unwrap().last().unwrap()["output"],
-        "True"
-    );
+    assert_display_true(&refused);
 
-    let inherited = dispatch_haskell_script(observer.policy.as_ref(), "(x, getX)").await;
+    let inherited = campaign
+        .drive_actor_output(
+            &output_store,
+            dispatch_haskell_script(observer.policy.as_ref(), "display (x == 41 && getX == 42)"),
+        )
+        .await;
     assert_eq!(inherited["status"], "committed", "{inherited:?}");
-    assert_eq!(inherited["items"][0]["output"], "(41, 42)", "{inherited:?}");
+    assert_display_true(&inherited);
 
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
