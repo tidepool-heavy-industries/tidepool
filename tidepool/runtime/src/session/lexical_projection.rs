@@ -184,8 +184,15 @@ pub(super) fn issue_projection(
         export.children.sort();
     }
     exports.sort_by(|left, right| left.head.cmp(&right.head));
-    let encoded = serde_json::to_vec(&(context.semantic_sha256(), &exports, instances, families))
-        .expect("projection identities contain only serializable scalar fields");
+    let encoded = serde_json::to_vec(&(
+        context.semantic_sha256(),
+        &surface.roots,
+        &surface.lexical,
+        &exports,
+        instances,
+        families,
+    ))
+    .expect("projection identities contain only serializable scalar fields");
     let mut hash = blake3::Hasher::new();
     hash.update(b"tidepool-certified-declaration-projection-v1\0");
     hash.update(&encoded);

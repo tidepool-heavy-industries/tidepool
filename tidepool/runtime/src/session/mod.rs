@@ -1316,6 +1316,78 @@ impl SessionLib {
         }
     }
 
+    /// Fence imported declaration identities before a fresh child admits any
+    /// local declaration. The inherited identities remain unavailable allocator
+    /// holes; they are not declaration nodes or lexical roots.
+    pub fn initialize_captured_declaration_high_water(
+        &mut self,
+        high_water: Generation,
+    ) -> Result<(), SessionError> {
+        let state = self
+            .durable_graph
+            .as_ref()
+            .ok_or_else(|| SessionError::RecoveryManifest {
+                path: self.root.clone(),
+                detail: "exact recovery graph is not attached".into(),
+            })?;
+        if state.unconfirmed.is_some()
+            || self.log.generation() != Generation(0)
+            || state.graph.high_water() != Generation(0)
+        {
+            return Err(SessionError::RecoveryManifest {
+                path: state.path.clone(),
+                detail: "captured declaration identities require a fresh confirmed allocator"
+                    .into(),
+            });
+        }
+        if high_water == Generation(0) {
+            return Ok(());
+        }
+        let mut initialized_log = self.log.clone();
+        if !initialized_log.restore_high_water(high_water) {
+            return Err(SessionError::RecoveryManifest {
+                path: state.path.clone(),
+                detail: "captured declaration allocator is not fresh".into(),
+            });
+        }
+        let staged = recovery::stage_high_water_range_v2(&state.path, &state.graph, high_water.0)
+            .map_err(|error| SessionError::RecoveryManifest {
+            path: state.path.clone(),
+            detail: error.to_string(),
+        })?;
+        let outcome = self.publish_recovery_manifest(staged);
+        let state = self
+            .durable_graph
+            .as_mut()
+            .expect("attached graph preflighted");
+        match outcome {
+            recovery::RecoveryPublishOutcome::BeforeRename { detail, .. } => {
+                Err(SessionError::RecoveryManifest {
+                    path: state.path.clone(),
+                    detail,
+                })
+            }
+            recovery::RecoveryPublishOutcome::Durable { graph, .. } => {
+                state.graph = graph;
+                self.log = initialized_log;
+                Ok(())
+            }
+            recovery::RecoveryPublishOutcome::PublishedDurabilityUnconfirmed {
+                graph,
+                publication,
+                detail,
+            } => {
+                state.graph = graph;
+                self.log = initialized_log;
+                state.unconfirmed = Some(publication);
+                Err(SessionError::RecoveryManifest {
+                    path: state.path.clone(),
+                    detail,
+                })
+            }
+        }
+    }
+
     /// Reserve a Join through the same durable allocator used by authored
     /// declarations. A Join consumes its reserved slot only after publication.
     pub fn reserve_join_generation_durable(&mut self) -> Result<Generation, SessionError> {
@@ -1473,8 +1545,8 @@ impl SessionLib {
         imports
     }
 
-    /// The `import Tidepool.Session.Lib.G<g>` line a turn should prepend to see
-    /// the accumulated declarations, or `None` if the session is empty.
+    /// The import a turn should prepend to see its accumulated declarations.
+    /// Certified authored tips import their cumulative lexical projection.
     /// `import_line() == import_line_in(ScopeId::ROOT)`.
     #[must_use]
     pub fn import_line(&self) -> Option<String> {
@@ -1484,8 +1556,12 @@ impl SessionLib {
     /// [`Self::import_line`], but for `scope`'s own tip.
     #[must_use]
     pub fn import_line_in(&self, scope: ScopeId) -> Option<String> {
-        self.current_module_in(scope)
-            .map(|m| format!("import {}", m.module_name()))
+        self.current_declaration_projection_in(scope)
+            .map(|projection| format!("import {}", projection.module_name()))
+            .or_else(|| {
+                self.current_module_in(scope)
+                    .map(|module| format!("import {}", module.module_name()))
+            })
     }
 
     /// The replayable decl half of a `:program` notebook repaint: turn source
@@ -3042,19 +3118,6 @@ mod tests {
             .context()
             .authored_native_root(1)
             .unwrap();
-        let original_entry = exact_evidence
-            .projection
-            .context()
-            .artifact_view()
-            .entries()
-            .iter()
-            .find(|entry| {
-                matches!(&entry.payload,
-                tidepool_toolchain::artifact_inventory::ArtifactPayload::Original(product)
-                    if product.owner() == exact_evidence.evidence.product().owner())
-            })
-            .unwrap();
-        assert_eq!(original_root, original_entry.descriptor.id);
         let committed_copy = staged.clone();
         assert_eq!(
             lib.reserve_join_generation_durable().unwrap(),
@@ -3148,6 +3211,81 @@ mod tests {
         assert!(lib.retract("DirectFlag").is_err());
         assert_eq!(lib.scope_tip(ScopeId::ROOT), Generation(1));
         assert_eq!(lib.generation(), Generation(1));
+    }
+
+    #[test]
+    fn captured_declaration_high_water_is_sparse_durable_and_not_lexical() {
+        let root = tempfile::tempdir().unwrap();
+        let manifest = root.path().join("declarations.json");
+        let open = || {
+            SessionLib::open(SessionId(996), root.path(), ModuleEnv::standalone_default()).unwrap()
+        };
+        let mut lib = open();
+        lib.attach_recovery_graph_v2(&manifest).unwrap();
+        let captured = Generation(1 << 40);
+        lib.initialize_captured_declaration_high_water(captured)
+            .unwrap();
+        assert_eq!(lib.generation(), captured);
+        assert_eq!(lib.scope_tip(ScopeId::ROOT), Generation(0));
+        assert!(lib.import_line().is_none());
+        assert!(!lib.log.is_reserved(Generation(1)));
+        assert!(!lib.log.is_reserved(captured));
+        assert!(lib.log.turn(captured).is_none());
+        let graph = recovery::read_v2(&manifest, root.path())
+            .unwrap()
+            .unwrap()
+            .graph;
+        assert_eq!(graph.high_water(), captured);
+        assert!(graph.nodes().next().is_none());
+        assert!(graph.public_surfaces().next().is_none());
+        assert!(lib
+            .initialize_captured_declaration_high_water(captured)
+            .is_err());
+        drop(lib);
+        let mut restarted = open();
+        restarted.attach_recovery_graph_v2(&manifest).unwrap();
+        assert_eq!(restarted.scope_tip(ScopeId::ROOT), Generation(0));
+        assert_eq!(
+            restarted.reserve_declaration_generation_durable().unwrap(),
+            Generation(captured.0 + 1)
+        );
+    }
+
+    #[test]
+    fn captured_declaration_high_water_failure_preserves_durability_fence() {
+        let root = tempfile::tempdir().unwrap();
+        let manifest = root.path().join("declarations.json");
+        let mut lib =
+            SessionLib::open(SessionId(997), root.path(), ModuleEnv::standalone_default()).unwrap();
+        assert!(lib
+            .initialize_captured_declaration_high_water(Generation(7))
+            .is_err());
+        lib.attach_recovery_graph_v2(&manifest).unwrap();
+        std::fs::create_dir(&manifest).unwrap();
+        let revision = lib.log.publication_revision();
+        assert!(lib
+            .initialize_captured_declaration_high_water(Generation(7))
+            .is_err());
+        assert_eq!(lib.generation(), Generation(0));
+        assert_eq!(lib.log.publication_revision(), revision);
+        std::fs::remove_dir(&manifest).unwrap();
+        lib.fail_recovery_durability_once = true;
+        assert!(lib
+            .initialize_captured_declaration_high_water(Generation(7))
+            .is_err());
+        assert_eq!(lib.generation(), Generation(7));
+        assert_eq!(lib.scope_tip(ScopeId::ROOT), Generation(0));
+        assert!(!lib.log.is_reserved(Generation(7)));
+        assert!(lib.durable_graph.as_ref().unwrap().unconfirmed.is_some());
+        assert!(lib.reserve_declaration_generation_durable().is_err());
+        assert!(lib
+            .initialize_captured_declaration_high_water(Generation(0))
+            .is_err());
+        lib.confirm_recovery_durability().unwrap();
+        assert_eq!(
+            lib.reserve_declaration_generation_durable().unwrap(),
+            Generation(8)
+        );
     }
 
     #[test]

@@ -2129,10 +2129,23 @@ mod authored_tests {
             }],
         )
         .unwrap();
+        let original_root = context.authored_native_root(1).unwrap();
+        let original_entry = context
+            .artifact_view()
+            .entries()
+            .into_iter()
+            .find(|entry| {
+                matches!(&entry.payload,
+                crate::artifact_inventory::ArtifactPayload::Original(product)
+                    if product.owner() == certificate.product().owner())
+            })
+            .unwrap();
+        assert_eq!(original_root, original_entry.descriptor.id);
         let worker_root = tempfile::tempdir().unwrap();
         let unselected =
             ExactDeclarationContext::new(&[certificate.clone()], &[], Vec::new()).unwrap();
         assert_ne!(context.semantic_sha256(), unselected.semantic_sha256());
+        assert_eq!(unselected.authored_native_root(1).unwrap(), original_root);
         let materialized = context.materialize(worker_root.path()).unwrap();
         let original = materialized
             .artifacts
@@ -2228,12 +2241,16 @@ mod authored_tests {
         )
         .unwrap();
         assert_eq!(recovered.toolchain_identity_sha256(), expected_producer);
+        assert_eq!(recovered.authored_native_root(1).unwrap(), original_root);
+        assert!(recovered.authored_native_root(2).is_err());
         let recovered_identity = recovered.semantic_sha256();
         let selected_instances = certificate.instances().clone();
         let extended = recovered
             .extend(&[certificate], &[Arc::new(accepted)], lexical)
             .unwrap();
         assert_eq!(extended.semantic_sha256(), recovered_identity);
+        assert_eq!(extended.authored_native_root(1).unwrap(), original_root);
+        assert!(extended.authored_native_root(2).is_err());
         let extended = Arc::new(extended);
         let fresh_root = tempfile::tempdir().unwrap();
         let fresh_module = SessionModule::lib(Generation(3));
