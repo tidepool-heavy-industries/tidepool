@@ -38,7 +38,8 @@ import GHC.Core.TyCo.Tidy (tidyOpenType)
 import GHC.Core.Type (getTyVar_maybe, splitTyConApp_maybe, substTy)
 import GHC.Tc.Solver (tcCheckWanteds)
 import GHC.Tc.Solver.InertSet (emptyInert)
-import GHC.Tc.Types (TcGblEnv, tcg_mod, tcg_type_env)
+import GHC.Tc.Types (TcGblEnv, tcg_mod, tcg_type_env, tcg_exports)
+import GHC.Types.Avail (availNames)
 import GHC.Tc.Utils.Monad (initTcWithGbl)
 import GHC.Types.SrcLoc (mkRealSrcSpan, mkRealSrcLoc)
 import GHC.Data.FastString (mkFastString)
@@ -782,9 +783,14 @@ inspectModule :: (GhcMonad m) => AvailabilityContext -> String -> Bool -> m Insp
 inspectModule context requested expanded = handleSourceError
   (\_ -> pure (InspectionModuleNotFound requested))
   $ do
-    mdl <- findModule (mkModuleName requested) Nothing
-    resolvedInfo <- getModuleInfo mdl
-    let names = maybe [] modInfoExports resolvedInfo
+    let checked = availabilityTcGblEnv context
+        localOwner = tcg_mod checked
+    (mdl, names) <- if moduleName localOwner == mkModuleName requested
+      then pure (localOwner, concatMap availNames (tcg_exports checked))
+      else do
+        owner <- findModule (mkModuleName requested) Nothing
+        resolvedInfo <- getModuleInfo owner
+        pure (owner, maybe [] modInfoExports resolvedInfo)
     rawEntries <- browseEntries context expanded names
     let entries = nubBy sameDisplay (sortOn entryKey rawEntries)
     pure (InspectionBrowse (moduleNameString (moduleName mdl)) expanded entries)
@@ -854,7 +860,13 @@ entriesFor context visible names = fmap concat $ forM names $ \name -> do
 browseEntries :: (GhcMonad m) => AvailabilityContext -> Bool -> [Name] -> m [InfoEntry]
 browseEntries context expanded names = do
   found <- fmap catMaybes $ forM names $ \name -> do
-    thing <- lookupName name
+    let checked = availabilityTcGblEnv context
+        local
+          | nameIsLocalOrFrom (tcg_mod checked) name = lookupTypeEnv (tcg_type_env checked) name
+          | otherwise = Nothing
+    thing <- case local of
+      Just value -> pure (Just value)
+      Nothing -> lookupName name
     pure (fmap (\value -> (name, value)) thing)
   let exportedNames = map fst found
       visible =

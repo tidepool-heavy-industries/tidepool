@@ -20,7 +20,7 @@ import GHC hiding (Target)
 import GHC.Builtin.Types (intTy)
 import GHC.Types.Name.Occurrence (mkVarOcc, occNameString)
 import GHC.Types.Name (nameModule_maybe, nameOccName)
-import GHC.Tc.Types (tcg_rn_decls)
+import GHC.Tc.Types (tcg_rn_decls, tcg_mod)
 import GHC.Types.SourceText (il_value)
 import GHC.Types.PkgQual (RawPkgQual(..))
 import GHC.Types.Fixity (Fixity(..))
@@ -1342,45 +1342,59 @@ metadataCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
     , "__tidepool_inspect_0 = value"
     ]
   recoveryClears <- newIORef (0 :: Int)
-  previousTiming <- lookupEnv "TIDEPOOL_TIMING"
-  setEnv "TIDEPOOL_TIMING" "1"
-  (withResidentPipelineSelectedRequests [root] $ \runRequest -> do
-      (_, output) <- captureStderr root "metadata-check" $
-        runRequest (modifyIORef' recoveryClears (+ 1)) $ \compiler -> do
-          checked <- compiler CheckedEnvironment mempty GeneralCompile Nothing target [root] Nothing
-          inspected <- runInspection
-            (crHscEnv checked)
-            (crTargetTcGblEnv checked)
-            (crTargetRdrEnv checked)
-            (crInspectionProbes checked)
-            [InspectTypeOf "value", InspectModule "MetadataTarget" False]
-          case inspected of
-            [InspectionType "value" rendered _, InspectionBrowse "MetadataTarget" False entries] -> do
-              assertContains "inspection resolves a local probe without a target HPT interface"
-                "Box Int" rendered
-              unless (any ((== "__tidepool_inspect_0") . infoName) entries) $
-                fail "metadata inspection could not browse the checked target module"
-            _ -> fail ("metadata inspection returned an unexpected result: " ++ show inspected)
-      assertEqual "exactly one checked target" 1
-        (length (filter (isInfixOf "tidepool-checked module=MetadataTarget target=True") (lines output)))
-      assertContains "metadata leaf skips its unused HPT interface"
-        "tidepool-checked-interface-elided module=MetadataTarget reason=no-later-home-importer"
-        output
-      when (any (isInfixOf "module=MetadataTarget")
-            (filter (isPrefixOf "tidepool-timing-module-detail ") (lines output))) $
+  withResidentPipelineSelectedRequests [root] $ \runRequest -> do
+    runRequest (modifyIORef' recoveryClears (+ 1)) $ \compiler -> do
+      checked <- compiler CheckedEnvironment mempty GeneralCompile Nothing target [root] Nothing
+      assertEqual "checked target keeps its original owner" (mkModuleName "MetadataTarget")
+        (moduleName (tcg_mod (crTargetTcGblEnv checked)))
+      unless (Map.member "__tidepool_inspect_0" (crInspectionProbes checked)) $
+        fail "checked target lost its typed inspection probe"
+      unless (case lookupHpt (hsc_HPT (crHscEnv checked)) (mkModuleName "MetadataTarget") of
+          Nothing -> True
+          Just _ -> False) $
         fail "metadata leaf constructed an unused target interface"
-      unless (not ("tidepool-target phase=desugar" `isInfixOf` output || "phase=lowering " `isInfixOf` output)) $
-        fail "metadata target entered the executable pipeline"
-      writeFile dependency "module MetadataDependency where\nvalue = missingDependencyName\n"
-      rejected <- try (runRequest (modifyIORef' recoveryClears (+ 1)) $ \compiler -> do
-        _ <- compiler CheckedEnvironment mempty GeneralCompile Nothing target [root] Nothing
-        pure ()) :: IO (Either SomeException ())
-      case rejected of
-        Left _ -> pure ()
-        Right _ -> fail "metadata reused an invalid dependency"
-      cleared <- readIORef recoveryClears
-      assertEqual "successful close, failed attempt and rejected close clear recovery graphs" 3 cleared)
-    `finally` maybe (unsetEnv "TIDEPOOL_TIMING") (setEnv "TIDEPOOL_TIMING") previousTiming
+      inspected <- runInspection
+        (crHscEnv checked)
+        (crTargetTcGblEnv checked)
+        (crTargetRdrEnv checked)
+        (crInspectionProbes checked)
+        [InspectTypeOf "value", InspectModule "MetadataTarget" False,
+          InspectModule "MetadataDependency" False, InspectModule "MissingMetadataModule" False]
+      case inspected of
+        [InspectionType "value" rendered _, InspectionBrowse "MetadataTarget" False entries,
+            InspectionBrowse "MetadataDependency" False dependencies, InspectionModuleNotFound "MissingMetadataModule"] -> do
+          assertContains "inspection resolves the checked local probe" "Box Int" rendered
+          assertEqual "checked target browsing uses its own exports"
+            ["__tidepool_inspect_0"] (map infoName entries)
+          unless (any ((== "value") . infoName) dependencies) $
+            fail "metadata browsing lost its imported module interface"
+        _ -> fail ("metadata inspection returned an unexpected result: " ++ show inspected)
+      writeFile target $ unlines
+        [ "module MetadataTarget (visible) where"
+        , "import MetadataDependency"
+        , "visible = value"
+        , "hidden = value"
+        ]
+      restricted <- compiler CheckedEnvironment mempty GeneralCompile Nothing target [root] Nothing
+      exported <- runInspection (crHscEnv restricted) (crTargetTcGblEnv restricted)
+        (crTargetRdrEnv restricted) (crInspectionProbes restricted) [InspectModule "MetadataTarget" True]
+      case exported of
+        [InspectionBrowse "MetadataTarget" True entries] ->
+          assertEqual "checked target explicit exports omit private and imported names"
+            ["visible"] (map infoName entries)
+        _ -> fail ("explicit export browse returned an unexpected result: " ++ show exported)
+    writeFile dependency "module MetadataDependency where\nvalue = missingDependencyName\n"
+    rejected <- try (runRequest (modifyIORef' recoveryClears (+ 1)) $ \compiler -> do
+      _ <- compiler CheckedEnvironment mempty GeneralCompile Nothing target [root] Nothing
+      pure ()) :: IO (Either DependencyLoadFailure ())
+    case rejected of
+      Left (DependencySourceFailure diagnostics) ->
+        unless (any ((== DiagError) . dSeverity) diagnostics) $
+          fail "metadata dependency rejection lost its source diagnostic"
+      Left DependencyWorkerFailure -> fail "metadata dependency rejection became a worker failure"
+      Right _ -> fail "metadata reused an invalid dependency"
+    cleared <- readIORef recoveryClears
+    assertEqual "successful close, failed attempt and rejected close clear recovery graphs" 3 cleared
   where
     temporary = do
       parent <- getTemporaryDirectory
