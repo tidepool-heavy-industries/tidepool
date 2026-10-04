@@ -351,8 +351,7 @@ fn admit_authored_artifact_closure_inner(
         merge_admitted_source_imports(&mut original_imports, &source_imports, &available_owners)?;
         let mut implementations = context
             .into_iter()
-            .flat_map(|context| context.artifact_view().descriptors())
-            .map(|descriptor| (descriptor.owner, descriptor.kind))
+            .flat_map(|context| context.artifact_view().source_implementation_roles())
             .collect::<BTreeMap<_, _>>();
         for product in products {
             let owner = ExactModuleIdentity {

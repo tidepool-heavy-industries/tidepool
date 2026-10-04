@@ -426,12 +426,7 @@ impl CertifiedAuthoredDeclaration {
             .original_home_imports()
             .map(|(owner, imports)| (owner.clone(), imports.to_vec()))
             .collect();
-        let implementations = self
-            .artifacts
-            .descriptors()
-            .into_iter()
-            .map(|descriptor| (descriptor.owner, descriptor.kind))
-            .collect();
+        let implementations = self.artifacts.source_implementation_roles();
         let mut inherited_by_owner = std::collections::BTreeMap::new();
         for node in inherited.iter().chain(&self.source_lexical_imports) {
             if inherited_by_owner

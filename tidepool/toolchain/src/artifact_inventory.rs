@@ -1139,6 +1139,18 @@ impl ArtifactView {
             .map(|e| e.descriptor.clone())
             .collect()
     }
+
+    /// Canonical interfaces authorize types alongside their implementations;
+    /// they cannot replace or grant a selected source implementation role.
+    pub(crate) fn source_implementation_roles(
+        &self,
+    ) -> BTreeMap<ExactModuleIdentity, ArtifactKind> {
+        self.descriptors()
+            .into_iter()
+            .filter(|descriptor| descriptor.kind != ArtifactKind::CanonicalModuleInterface)
+            .map(|descriptor| (descriptor.owner, descriptor.kind))
+            .collect()
+    }
     pub fn dependencies(&self) -> Vec<(ArtifactId, ArtifactId, ArtifactDependency)> {
         let state = self.0.inventory.0.lock().expect("inventory lock");
         let ids = closure(&state, self.roots().into_iter());
@@ -1691,6 +1703,11 @@ mod tests {
         let execution_cap = inventory.admit(&type_cap, vec![native]).unwrap();
         assert_eq!(type_cap.artifact_ids(), vec![canonical_id]);
         assert!(type_cap.entries().iter().all(|entry| !entry.is_native()));
+        assert!(type_cap.source_implementation_roles().is_empty());
+        assert_eq!(
+            execution_cap.source_implementation_roles(),
+            BTreeMap::from([(module("Owner"), ArtifactKind::OriginalModule)])
+        );
         assert!(execution_cap.artifact_ids().contains(&native_id));
         assert!(execution_cap.dependencies().contains(&(
             native_id,
@@ -1701,6 +1718,7 @@ mod tests {
             .interface_projection(&[module("Owner")])
             .unwrap();
         assert_eq!(projected.artifact_ids(), vec![canonical_id]);
+        assert!(projected.source_implementation_roles().is_empty());
         drop(execution_cap);
         assert_eq!(inventory.node_count(), 1);
         assert_eq!(type_cap.artifact_ids(), vec![canonical_id]);

@@ -1239,12 +1239,7 @@ impl ExactCompilationRequest {
             // their adjacency comes from the validated current-source receipt.
             .chain(selected_originals.keys().cloned())
             .collect::<Vec<_>>();
-        let implementations = context
-            .artifact_view()
-            .descriptors()
-            .into_iter()
-            .map(|descriptor| (descriptor.owner, descriptor.kind))
-            .collect();
+        let implementations = context.artifact_view().source_implementation_roles();
         self.program_source_lexical = crate::declaration_join::source_lexical_surface(
             &roots,
             &imports,
@@ -2209,12 +2204,7 @@ impl ExactDeclarationContext {
             .filter(|owner| retained.contains(*owner))
             .cloned()
             .collect::<Vec<_>>();
-        let implementations = self
-            .artifact_view()
-            .descriptors()
-            .into_iter()
-            .map(|descriptor| (descriptor.owner, descriptor.kind))
-            .collect();
+        let implementations = self.artifact_view().source_implementation_roles();
         let lexical = crate::declaration_join::source_lexical_surface(
             &roots,
             &selected,
