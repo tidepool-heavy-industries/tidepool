@@ -4903,33 +4903,6 @@ pub(crate) mod tests {
         )>(&serde_json::to_vec(&(original, value)).unwrap())
         .unwrap();
         let canonical = original.module_interface.clone().unwrap();
-        if let Some(output) = std::env::var_os("TIDEPOOL_RECOVERY_NATIVE_PACKET_OUTPUT") {
-            let mut paths = vec![
-                &original.interface_path,
-                &original.package_imports_path,
-                &original.certification_path,
-                &original.product_path,
-                &value.interface.interface_path,
-                &value.interface.package_imports_path,
-            ];
-            paths.extend([
-                &canonical.interface.interface_path,
-                &canonical.interface.package_imports_path,
-                &canonical.certificate_path,
-            ]);
-            if let Some(core) = &canonical.core {
-                paths.push(&core.path);
-            }
-            let files = paths
-                .into_iter()
-                .map(|path| (path.clone(), std::fs::read(root.path().join(path)).unwrap()))
-                .collect::<std::collections::BTreeMap<_, _>>();
-            std::fs::write(
-                output,
-                serde_json::to_vec(&(original.clone(), value.clone(), files)).unwrap(),
-            )
-            .unwrap();
-        }
         let descriptors = [
             ArtifactDescriptor::from_recovery_product(&original),
             ArtifactDescriptor::from_recovery_value_interface(&value),
