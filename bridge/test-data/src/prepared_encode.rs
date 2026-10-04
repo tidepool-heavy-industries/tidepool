@@ -877,8 +877,13 @@ mod tests {
             execution_abi_version: EXECUTION_ABI_VERSION,
             target: wire.envelope.target.clone(),
         };
-        // Covering the complete grammar never makes inconsistent data executable.
-        assert!(parse_program(&encoded, &requirements, DecodeLimits::default()).is_err());
+        // Decode must traverse the complete grammar and reach the same semantic
+        // refusal as the typed owner. A malformed encoding cannot satisfy this.
+        let expected = testing::prepare(wire).unwrap_err();
+        assert_eq!(
+            parse_program(&encoded, &requirements, DecodeLimits::default()).unwrap_err(),
+            expected
+        );
     }
 
     #[test]
