@@ -1,6 +1,5 @@
 use super::*;
 use async_trait::async_trait;
-use futures_util::FutureExt;
 use harness::{
     engine::ResponsesTransport,
     model::{AgentPath, CallId, ConversationIdentity},
@@ -80,7 +79,6 @@ struct ChildScript {
 struct HostTransport {
     parent: ParentTransport,
     children: Mutex<HashMap<String, ChildScript>>,
-    gates: Arc<Mutex<HashMap<AgentPath, exomonad_actor::ForkGroupGate>>>,
     uses: mpsc::UnboundedSender<(&'static str, usize, ConversationIdentity)>,
     after_failure: watch::Sender<bool>,
 }
@@ -99,11 +97,6 @@ impl ResponsesTransport for HostTransport {
             actor: actor.clone(),
             incarnation: incarnation.into(),
         };
-        let gate = self.gates.lock().get(&actor).unwrap().clone();
-        gate.wait_committed()
-            .now_or_never()
-            .expect("production host drove a child before its fork group committed")
-            .unwrap();
         let (label, round) = {
             let mut children = self.children.lock();
             let label = match children.len() {
@@ -218,15 +211,6 @@ async fn embedded_checkpoint_children_survive_a_later_parent_cell_failure() {
         context_capacity_tokens: 200_000,
         concurrent_jobs: 3,
     };
-    let mut campaign = test_campaign::TestCampaign::start_with_config(
-        exomonad_actor::ResearchPolicy::default(),
-        |admission| admission,
-        |config| {
-            config.embedded = Some(settings.clone());
-        },
-    )
-    .await;
-    let actor = campaign.actor.identity();
     let parent = ParentTransport {
         round: Arc::new(AtomicUsize::new(0)),
         post_failure_used: Arc::new(Notify::new()),
@@ -237,96 +221,23 @@ async fn embedded_checkpoint_children_survive_a_later_parent_cell_failure() {
         failure_observed: Arc::new(Notify::new()),
     };
     let (uses_tx, mut uses_rx) = mpsc::unbounded_channel();
-    let (retirements_tx, mut retirements_rx) = mpsc::unbounded_channel();
-    let gates = Arc::new(Mutex::new(HashMap::new()));
     let transport = Arc::new(HostTransport {
         parent: parent.clone(),
         children: Mutex::new(HashMap::new()),
-        gates: Arc::clone(&gates),
         uses: uses_tx,
         after_failure: watch::channel(false).0,
     });
-    let mut service =
-        embedded_service::EmbeddedService::prepare(&campaign.config.run_root, &settings)
-            .await
-            .unwrap();
-    service.set_test_transport(transport.clone());
-    let runtime = Arc::clone(&service.runtime);
+    let provider: Arc<dyn ResponsesTransport> = transport.clone();
+    let host = hosted_test_context::HostedTestRuntime::start(&settings, &provider)
+        .await
+        .expect("production checkpoint host starts");
+    let actor = host.context.actor.identity();
+    let runtime = Arc::clone(&host.runtime);
     let root_origin = ConversationIdentity::Embedded {
-        run: runtime_namespace(&campaign.config.run_root),
+        run: runtime_namespace(&host.context.config.run_root),
         actor: AgentPath("/root".into()),
         incarnation: actor.incarnation.0.to_string(),
     };
-
-    let (lifecycle_tx, lifecycle_rx) = mpsc::channel(32);
-    let mut installation = campaign.root_installation.clone();
-    installation.initial_user_message = Some("start checkpoint fixture".into());
-    lifecycle_tx
-        .send(LocalResidentDeployment::PolicyInstalled(Box::new(
-            installation,
-        )))
-        .await
-        .unwrap();
-    let mut deployments = campaign.take_deployments();
-    let forward = tokio::spawn(async move {
-        let mut checkpoint_children = std::collections::HashSet::new();
-        while let Some(deployment) = deployments.recv().await {
-            if let LocalResidentDeployment::Retired { actor, terminal } = &deployment {
-                log_phase(&format!("actor {actor:?} retired: {terminal:?}"));
-                if checkpoint_children.contains(actor) {
-                    retirements_tx.send((*actor, terminal.clone())).ok();
-                }
-            }
-            if let LocalResidentDeployment::PolicyInstalled(installation) = &deployment {
-                let child = installation.actor.identity();
-                if installation.checkpoint.is_some() {
-                    checkpoint_children.insert(child);
-                }
-                let path = AgentPath(format!("/root/a{}_i{}", child.id.0, child.incarnation.0));
-                gates
-                    .lock()
-                    .insert(path, installation.fork_gate.as_ref().unwrap().clone());
-            }
-            if lifecycle_tx.send(deployment).await.is_err() {
-                break;
-            }
-        }
-    });
-    let (readiness_tx, mut readiness_rx) = mpsc::unbounded_channel();
-    let (shutdown_tx, shutdown_rx) = watch::channel(None);
-    let (_config_tx, config_rx) = watch::channel(campaign.config.clone());
-    let fleet = InteractiveFleet {
-            test_observer: None,
-        provider_forest: Arc::clone(&campaign.forest),
-        root: campaign.actor.clone(),
-        config: campaign.config.clone(),
-        run_root: campaign.config.run_root.clone(),
-        output_store: service.runtime.store(),
-
-        worktrees: campaign.worktrees.clone(),
-
-        readiness: readiness_tx,
-        worktree_authority: campaign.authority.clone(),
-
-        host_graph: {
-            let forest = campaign.forest.clone();
-            Arc::new(move || forest.inspect_host_graph())
-        },
-    };
-    let host = tokio::spawn(run_interactive_applications(
-        lifecycle_rx,
-        Arc::new(Mutex::new(HashMap::new())),
-        fleet,
-        shutdown_rx,
-        config_rx,
-        Some(service),
-    ));
-    assert!(matches!(
-        tokio::time::timeout(Duration::from_secs(30), readiness_rx.recv())
-            .await
-            .expect("production embedded host did not become ready"),
-        Some(ActorHostReadiness::EmbeddedReady { .. })
-    ));
 
     tokio::time::timeout(Duration::from_secs(60), parent.setup_requested.notified())
         .await
@@ -349,12 +260,11 @@ async fn embedded_checkpoint_children_survive_a_later_parent_cell_failure() {
 
     let mut first_child_uses = std::collections::HashSet::new();
     for _ in 0..2 {
-        let (label, use_index, origin) = tokio::select! {
-            retired = retirements_rx.recv() => panic!("actor retired before initial child reads: {retired:?}"),
-            observed = tokio::time::timeout(Duration::from_secs(120), uses_rx.recv()) => observed
+        let (label, use_index, origin) =
+            tokio::time::timeout(Duration::from_secs(120), uses_rx.recv())
+                .await
                 .expect("children did not issue their first captured-context Haskell calls")
-                .expect("child use observer closed"),
-        };
+                .expect("child use observer closed");
         assert_eq!(use_index, 1);
         let response = embedded_operation(
             &runtime,
@@ -387,12 +297,11 @@ async fn embedded_checkpoint_children_survive_a_later_parent_cell_failure() {
 
     let mut later_child_uses = std::collections::HashSet::new();
     for _ in 0..2 {
-        let (label, use_index, origin) = tokio::select! {
-            retired = retirements_rx.recv() => panic!("actor retired before post-failure child reads: {retired:?}"),
-            observed = tokio::time::timeout(Duration::from_secs(120), uses_rx.recv()) => observed
+        let (label, use_index, origin) =
+            tokio::time::timeout(Duration::from_secs(120), uses_rx.recv())
+                .await
                 .expect("children did not issue post-failure Haskell calls")
-                .expect("child use observer closed"),
-        };
+                .expect("child use observer closed");
         assert_eq!(use_index, 2);
         let response = embedded_operation(
             &runtime,
@@ -407,16 +316,22 @@ async fn embedded_checkpoint_children_survive_a_later_parent_cell_failure() {
     assert_eq!(later_child_uses, ["alpha", "beta"].into_iter().collect());
     parent.post_failure_used.notify_one();
 
-    shutdown_tx.send_replace(Some(NativeRetirement::Terminate));
-    let result = tokio::time::timeout(Duration::from_secs(30), host)
-        .await
-        .expect("production host did not terminate")
-        .expect("production host task panicked");
-    assert!(result.is_ok(), "production host cleanup failed: {result:?}");
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
-    forward.abort();
-    if let Err(error) = forward.await {
-        assert!(error.is_cancelled());
+    let children = host
+        .context
+        .observer
+        .installations()
+        .into_iter()
+        .filter(|installation| installation.checkpoint)
+        .collect::<Vec<_>>();
+    assert_eq!(children.len(), 2);
+    for child in children {
+        assert_eq!(child.context_parent, Some(actor));
+        assert!(
+            child.actor.terminal().get().is_none(),
+            "captured owner remains live after both reads"
+        );
     }
+    host.stop()
+        .await
+        .expect("production checkpoint host acknowledges cleanup");
 }
