@@ -713,17 +713,22 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
         case result of
           Left reason -> do
             let detail = show reason
-            unless (label /= "same target under general purpose" ||
-                "source graph imports unadmitted home implementation" `isInfixOf` detail) $
-              fail ("baseline scaffold fixture did not reproduce the actual graph refusal: " ++ detail)
             putStrLn ("scaffold refused " ++ label ++ ": " ++ take 512 detail)
           Right _ -> fail ("scaffold authority accepted " ++ label)
   withResidentPipelineSelected includes $ \compile -> do
-    requireRejected "same target under general purpose" $
-      compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just hidden) target [] Nothing
     admitted <- compile (PreparedProducts Nothing) Set.empty purpose (Just hidden) target [] Nothing
     unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult admitted))) $
       fail "generated scaffold lost its actual settled result"
+    -- Native custody alone does not admit this authored import. Only the
+    -- protected scaffold occurrence above may use the hidden Resume owner.
+    general <- try (void (compile (PreparedProducts Nothing) Set.empty GeneralCompile
+      (Just hidden) target [] Nothing)) :: IO (Either InputRejection ())
+    case general of
+      Left (OriginalSourceSelectionRejected
+          (ExecutionSourceUnavailable ("main", "Tidepool.Internal.Resume"))) ->
+        putStrLn "scaffold general-purpose import refused missing current-source authority"
+      Left reason -> fail ("scaffold general-purpose import had another input refusal: " ++ show reason)
+      Right () -> fail "scaffold general-purpose import acquired hidden source authority"
     let extra = unlines (take 5 (lines protected) ++ ["import Tidepool.Internal.Resume"] ++ drop 5 (lines protected))
     writeFile target extra
     duplicate <- generatedScaffoldRecipe [] protected extra target "Expr" >>= either fail pure
