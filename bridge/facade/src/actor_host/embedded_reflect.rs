@@ -13,6 +13,19 @@ use harness::{
     store::Store,
 };
 
+pub(super) fn run_conversation_reader(
+    store: Arc<Store>,
+    recovery: Arc<exomonad_actor::ActorRecoveryJournal>,
+) -> ConversationReader {
+    conversation_reader(
+        store,
+        Arc::new(move |actor| {
+            let conversation = recovery.active_application_conversation(actor)?;
+            super::embedded_recovery::identity_from_conversation(&conversation).ok()
+        }),
+    )
+}
+
 pub(super) fn conversation_reader(
     store: Arc<Store>,
     identity_for: Arc<dyn Fn(ActorRef) -> Option<HostIdentity> + Send + Sync>,

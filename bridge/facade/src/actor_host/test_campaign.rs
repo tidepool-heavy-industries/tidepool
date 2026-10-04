@@ -127,9 +127,13 @@ pub(super) struct TestCampaign {
     pub root_installation: exomonad_actor::LocalResidentInstallation,
 }
 
-enum ChildMachinePolicy {
-    Shared,
+enum CampaignRoot {
+    Shared {
+        conversation: Option<exomonad_actor::ConversationReader>,
+        model_factory: Option<Arc<dyn exomonad_actor::CellModelFactory>>,
+    },
     Dedicated,
+    EmbeddedHost,
 }
 
 impl TestCampaign {
@@ -340,9 +344,7 @@ impl TestCampaign {
             exomonad_actor::ResearchPolicy::default(),
             |admission| admission,
             |_| {},
-            None,
-            None,
-            ChildMachinePolicy::Dedicated,
+            CampaignRoot::Dedicated,
         )
         .await
     }
@@ -377,6 +379,19 @@ impl TestCampaign {
         Self::start_with_conversation(research_policy, transform, configure, None).await
     }
 
+    /// Use the real embedded run interpreters without launching a provider turn.
+    pub async fn start_with_embedded_host_services(
+        configure: impl FnOnce(&mut ActorHostConfig),
+    ) -> Self {
+        Self::start_configured(
+            exomonad_actor::ResearchPolicy::default(),
+            |admission| admission,
+            configure,
+            CampaignRoot::EmbeddedHost,
+        )
+        .await
+    }
+
     /// A campaign whose root can read its own conversation, so `reflect`
     /// returns the supplied turns instead of reporting the context unbound.
     pub async fn start_with_conversation(
@@ -400,9 +415,10 @@ impl TestCampaign {
             research_policy,
             transform,
             configure,
-            conversation,
-            model_factory,
-            ChildMachinePolicy::Shared,
+            CampaignRoot::Shared {
+                conversation,
+                model_factory,
+            },
         )
         .await
     }
@@ -411,9 +427,7 @@ impl TestCampaign {
         research_policy: exomonad_actor::ResearchPolicy,
         transform: impl FnOnce(Arc<dyn ForkWorkspaceAdmission>) -> Arc<dyn ForkWorkspaceAdmission>,
         configure: impl FnOnce(&mut ActorHostConfig),
-        conversation: Option<exomonad_actor::ConversationReader>,
-        model_factory: Option<Arc<dyn exomonad_actor::CellModelFactory>>,
-        child_machine_policy: ChildMachinePolicy,
+        root: CampaignRoot,
     ) -> Self {
         tidepool_testing::eval_harness::require_extract();
         install_trace_file();
@@ -445,6 +459,12 @@ impl TestCampaign {
             jev: Some(exomonad_actor::unconfigured_jev()),
         };
         configure(&mut config);
+        if matches!(&root, CampaignRoot::EmbeddedHost) {
+            config.backend = crate::exomonad::HostBackendOptions::Embedded;
+            // Select the same lazy HostJev client as production. No configured
+            // test backend or fabricated installation flag substitutes for it.
+            config.jev = None;
+        }
         let super::model_free::ModelFreeSession {
             session_root,
             host_incarnation,
@@ -458,8 +478,11 @@ impl TestCampaign {
             hosted,
             deployments,
             root_installation,
-        } = match child_machine_policy {
-            ChildMachinePolicy::Shared => {
+        } = match root {
+            CampaignRoot::Shared {
+                conversation,
+                model_factory,
+            } => {
                 super::model_free::ModelFreeSession::start_with_model_factory(
                     &config,
                     transform,
@@ -468,12 +491,15 @@ impl TestCampaign {
                 )
                 .await
             }
-            ChildMachinePolicy::Dedicated => {
+            CampaignRoot::Dedicated => {
                 super::model_free::ModelFreeSession::start_with_child_sessions(
-                    &config,
-                    transform,
-                    conversation,
-                    model_factory,
+                    &config, transform, None, None,
+                )
+                .await
+            }
+            CampaignRoot::EmbeddedHost => {
+                super::model_free::ModelFreeSession::start_with_embedded_host_services(
+                    &config, transform,
                 )
                 .await
             }

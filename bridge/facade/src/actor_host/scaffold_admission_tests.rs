@@ -10,25 +10,18 @@ use futures_util::FutureExt;
 /// rather than copying repository examples or installing a fallback spec.
 #[tokio::test(flavor = "multi_thread")]
 async fn freshly_scaffolded_agent_spec_installs_notebook_and_workspace_tools() {
-    let mut campaign = TestCampaign::start_with_config(
-        exomonad_actor::ResearchPolicy::default(),
-        |admission| admission,
-        |config| {
-            crate::exomonad::new(crate::exomonad::NewOptions {
-                path: Some(config.workspace.clone()),
-                lock: Box::new(crate::exomonad::NixLock),
-            })
-            .expect("the shipped project must scaffold successfully");
-            commit_workspace(&config.workspace);
-            config.workspace_inputs = Some(
-                crate::exomonad::workspace::FrozenWorkspace::load(
-                    &config.workspace,
-                    &config.run_root,
-                )
+    let mut campaign = TestCampaign::start_with_embedded_host_services(|config| {
+        crate::exomonad::new(crate::exomonad::NewOptions {
+            path: Some(config.workspace.clone()),
+            lock: Box::new(crate::exomonad::NixLock),
+        })
+        .expect("the shipped project must scaffold successfully");
+        commit_workspace(&config.workspace);
+        config.workspace_inputs = Some(
+            crate::exomonad::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
                 .expect("the freshly scaffolded project's inputs must freeze"),
-            );
-        },
-    )
+        );
+    })
     .await;
 
     // Reuse this actual pinned installation for command recovery; the embedded
@@ -37,6 +30,22 @@ async fn freshly_scaffolded_agent_spec_installs_notebook_and_workspace_tools() {
         assert_pinned_shell_recovery(&mut campaign).await;
         let policy = std::sync::Arc::clone(&campaign.root_installation.policy);
         let store = super::display_output::open_run_store(campaign.session_root.path()).unwrap();
+        let reflected = campaign
+            .drive_actor_output(
+                &store,
+                dispatch_haskell_script(
+                    policy.as_ref(),
+                    "import qualified Tidepool.Effects.Core as Core\nreflected <- Core.reflect 1\ndisplay (show (case reflected of { Left Core.ReflectUnbound -> True; _ -> False }))",
+                ),
+            )
+            .await;
+        assert_eq!(
+            committed_display_text(&reflected),
+            "True",
+            "an installed reader must preserve absence of a bound application: {reflected}"
+        );
+        // No focus and no watchWith: these assertions do not ask Jev or launch
+        // a provider turn, even when the production lazy client is configured.
         let facts = campaign
             .drive_actor_output(
                 &store,

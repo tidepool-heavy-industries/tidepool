@@ -3016,13 +3016,9 @@ async fn run_owned(
         ));
     }
     if let Some(service) = &embedded_service {
-        let recovery = actor_recovery.clone();
-        forest = forest.with_conversation_reader(embedded_reflect::conversation_reader(
+        forest = forest.with_conversation_reader(embedded_reflect::run_conversation_reader(
             service.runtime.store(),
-            Arc::new(move |actor| {
-                let conversation = recovery.active_application_conversation(actor)?;
-                embedded_recovery::identity_from_conversation(&conversation).ok()
-            }),
+            actor_recovery.clone(),
         ));
     }
     // No child bootstrap program: every launch stays on its launching

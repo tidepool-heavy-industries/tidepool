@@ -59,7 +59,7 @@ impl ModelFreeSession {
             transform,
             conversation,
             model_factory,
-            |forest, _| forest,
+            |forest, _, _| Ok(forest),
         )
         .await
     }
@@ -78,8 +78,29 @@ impl ModelFreeSession {
             transform,
             conversation,
             model_factory,
-            |forest, program| forest.with_child_bootstrap_program(program),
+            |forest, program, _| Ok(forest.with_child_bootstrap_program(program)),
         )
+        .await
+    }
+
+    /// Install the production embedded host interpreters before root admission.
+    /// No application is bound here, so Reflect preserves its Unbound outcome.
+    #[cfg(test)]
+    pub(super) async fn start_with_embedded_host_services(
+        config: &ActorHostConfig,
+        transform: impl FnOnce(Arc<dyn ForkWorkspaceAdmission>) -> Arc<dyn ForkWorkspaceAdmission>,
+    ) -> Result<Self> {
+        Self::start_configured(config, transform, None, None, |forest, _, run_root| {
+            let recovery = exomonad_actor::ActorRecoveryJournal::open(
+                run_root.join("actor-lifecycle.v2.jsonl"),
+            )?;
+            let store = super::display_output::open_run_store(run_root).map_err(runtime_error)?;
+            let conversation =
+                super::embedded_reflect::run_conversation_reader(store, Arc::clone(&recovery));
+            Ok(forest
+                .with_recovery_journal(recovery)
+                .with_conversation_reader(conversation))
+        })
         .await
     }
 
@@ -91,7 +112,9 @@ impl ModelFreeSession {
         configure_forest: impl FnOnce(
             ResidentForest<ExomonadHandlerStack, CapturedOutput>,
             Arc<tidepool_runtime::session::CompiledTurn>,
-        ) -> ResidentForest<ExomonadHandlerStack, CapturedOutput>,
+            &Path,
+        )
+            -> Result<ResidentForest<ExomonadHandlerStack, CapturedOutput>>,
     ) -> Result<Self> {
         let session_root = Arc::new(tempfile::tempdir()?);
         let host_incarnation = Arc::new(HostIncarnationLease::claim(session_root.path())?);
@@ -152,9 +175,9 @@ impl ModelFreeSession {
                 tidepool_mcp::InstalledEffectSupport::installed_effect_support,
             )
             .with_image_registry(image_registry);
-        // The default configuration matches the run host. Optional factory
-        // qualification installs its bootstrap before any actor is admitted.
-        forest = configure_forest(forest, Arc::clone(&program));
+        // Bootstrap and optional host services are installed before admission,
+        // so the actor derives its available effects from the actual instances.
+        forest = configure_forest(forest, Arc::clone(&program), session_root.path())?;
         forest.set_jev_backend(super::jev_backend(config));
         if let Some(layers) = &source_layers {
             forest.set_source_layers(layers.clone());
