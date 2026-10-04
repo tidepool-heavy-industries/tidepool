@@ -405,7 +405,7 @@ async fn drive_browser(
     let identity = browser_target(&fixture.context);
     let ready = json!({
         "type":"ready", "version":1, "base_url":format!("http://{}", fixture.address),
-        "session_secret":secret, "actor":{"name":identity.actor.0,"incarnation":identity.incarnation},
+        "session_secret":secret, "actor":{"run":identity.run,"name":identity.actor.0,"incarnation":identity.incarnation},
         "scenario":{"steps":[
             {"action":"input", "text":RAW_INPUT,"retry_unresolved":true,"wait_for_receipt":false,"provider_barriers":[
                 {"phase":"raw_input","expected_request_text":RAW_INPUT},

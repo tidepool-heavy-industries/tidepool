@@ -72,10 +72,9 @@ function decodeWsFrame(payload) {
 }
 
 function hostActor(snapshot, actor) {
-  const path = actor.path ?? actor.name ?? actor.actor;
-  return snapshot?.actors?.find((candidate) => candidate.identity?.actor === path
+  return snapshot?.actors?.find((candidate) => candidate.identity?.actor === actor.name
     && candidate.identity?.incarnation === actor.incarnation
-    && (actor.run === undefined || candidate.identity?.run === actor.run));
+    && candidate.identity?.run === actor.run);
 }
 
 async function releaseBarrier(spec, defaultExpectedInput) {
@@ -117,25 +116,34 @@ async function signIn(page, secret) {
   await page.getByLabel('Session secret').fill(secret.value);
   await page.getByRole('button', { name: 'Sign in' }).click();
   await page.getByRole('status').filter({ hasText: /^Session authenticated(?: · .+)?$/ }).waitFor({ timeout: 30_000 });
-  await page.getByRole('heading', { name: 'Active worker' }).waitFor({ timeout: 30_000 });
+  await page.getByRole('heading', { name: 'Active workers', exact: true }).waitFor({ timeout: 30_000 });
 }
 
-async function selectHostActor(page, actor) {
-  await page.getByRole('link', { name: 'Host', exact: true }).click();
-  const target = page.getByLabel('Target actor');
-  await target.waitFor({ timeout: 15_000 });
-  const options = await target.locator('option').evaluateAll((items) => items.map((item) => ({ value: item.value, text: item.textContent ?? '' })));
-  const match = options.find((option) => option.value && (
-    option.value === actor.id ||
-    ((actor.name || actor.actor) && option.text.includes(actor.name ?? actor.actor) && option.text.includes(actor.incarnation))
-  ));
-  if (!match) throw new Error('root actor was not present in the authoritative host projection');
-  await target.selectOption(match.value);
+async function selectActorChat(page, actor) {
+  await page.getByRole('navigation', { name: 'Views' }).getByRole('link', { name: 'Chat', exact: true }).click();
+  await page.getByRole('heading', { name: 'Chat', level: 1, exact: true }).waitFor({ timeout: 30_000 });
+  const links = page.getByRole('complementary', { name: 'Workers' })
+    .getByRole('link', { name: actor.name, exact: true });
+  await links.first().waitFor({ timeout: 30_000 });
+  const path = `/chat/${actor.name.replace(/^\//, '').split('/').map(encodeURIComponent).join('/')}`;
+  const matchesActor = (url) => url.pathname === path
+    && url.searchParams.get('run') === actor.run
+    && url.searchParams.get('incarnation') === actor.incarnation;
+  const destinations = await links.evaluateAll((items) => items.map((link) => link.href));
+  const index = destinations.findIndex((destination) => matchesActor(new URL(destination)));
+  if (index < 0) throw new Error('root actor was not present among the exact worker Chat links');
+  await links.nth(index).click();
+  await page.waitForURL(matchesActor, { timeout: 30_000 });
+  const chat = page.getByRole('region', { name: 'Selected worker Chat' });
+  await chat.getByRole('heading', { name: actor.name, level: 2, exact: true }).waitFor({ timeout: 30_000 });
+  await chat.getByText(`run ${actor.run} · incarnation ${actor.incarnation}`, { exact: true })
+    .waitFor({ timeout: 30_000 });
 }
 
-async function sendHostInput(page, text) {
-  await page.getByLabel('Message to selected actor').fill(text);
-  await page.getByRole('button', { name: 'Send input' }).click();
+async function sendActorInput(page, text) {
+  const chat = page.getByRole('region', { name: 'Selected worker Chat' });
+  await chat.getByLabel('Message to selected actor').fill(text);
+  await chat.getByRole('button', { name: 'Send input', exact: true }).click();
 }
 
 async function waitForHostActorState(getSnapshot, actor, state, timeoutMs) {
@@ -179,6 +187,7 @@ async function runJourney(ready) {
   const sessionSecret = requireString(ready.session_secret, 'session_secret');
   const actor = ready.actor;
   if (!actor || typeof actor !== 'object') throw new Error('ready frame is missing actor identity');
+  requireString(actor.run, 'actor.run');
   requireString(actor.name, 'actor.name');
   requireString(actor.incarnation, 'actor.incarnation');
   const scenario = ready.scenario;
@@ -364,8 +373,14 @@ async function runJourney(ready) {
     const inspectRequestHistory = async (expectedText, conversationId, requestId) => {
       requireString(requestId, 'provider barrier request_id');
       const request = await waitForCompletedRequest(conversationId, requestId);
-      await page.getByRole('button', { name: 'Timeline', exact: true }).click();
-      const row = page.getByRole('row').filter({ hasText: request.id });
+      await page.getByRole('region', { name: 'Selected worker Chat' })
+        .getByRole('region', { name: 'Conversation messages' })
+        .getByRole('group', { name: 'Retained conversation items' })
+        .getByText(expectedText, { exact: false }).waitFor({ timeout: 30_000 });
+      await page.getByRole('navigation', { name: 'Views' }).getByRole('link', { name: 'Timeline', exact: true }).click();
+      const row = page.getByRole('table', { name: 'Conversation activity timeline' })
+        .getByRole('row').filter({ hasText: request.id })
+        .filter({ has: page.getByRole('button', { name: 'Inspect history', exact: true }) });
       await row.waitFor({ timeout: 30_000 });
       const historyResponsePromise = page.waitForResponse((response) =>
         new URL(response.url()).pathname === `/api/history/${encodeURIComponent(request.id)}`, { timeout: 30_000 });
@@ -378,7 +393,7 @@ async function runJourney(ready) {
       await history.getByRole('list', { name: 'Retained request items' }).getByText(expectedText, { exact: false })
         .waitFor({ timeout: 30_000 });
       await page.getByRole('button', { name: 'Close history', exact: true }).click();
-      await selectHostActor(page, actor);
+      await selectActorChat(page, actor);
     };
     let lastOperation;
       await signIn(page, { baseUrl, value: sessionSecret });
@@ -389,7 +404,7 @@ async function runJourney(ready) {
       assert.equal(sessionCookie.sameSite, 'Strict', 'session cookie must be SameSite=Strict');
       assert.equal(sessionCookie.secure, false, 'loopback HTTP milestone must issue a non-Secure cookie');
       assert.match(await page.locator('.brand').innerText(), /Harness\s*\/ operator/);
-      await selectHostActor(page, actor);
+      await selectActorChat(page, actor);
 
       for (const step of scenario.steps) {
         if (step.action === 'input') {
@@ -404,7 +419,7 @@ async function runJourney(ready) {
             }
           }
           const sentBeforeInput = hostOperations.length;
-          await sendHostInput(page, text);
+          await sendActorInput(page, text);
           const retained = await retainedOperations(page);
           lastOperation = [...retained].reverse().find((record) => record?.submission?.command?.action === 'input' && record.submission.command.text === text)?.submission;
           if (!lastOperation || typeof lastOperation.operation_id !== 'string') {
@@ -523,7 +538,7 @@ async function runJourney(ready) {
             record.submission?.operation_id === lastOperation.operation_id), lastOperation);
           await page.reload({ waitUntil: 'domcontentloaded' });
           await page.getByRole('status').filter({ hasText: /^Session authenticated · ready$/ }).waitFor({ timeout: 30_000 });
-          await selectHostActor(page, actor);
+          await selectActorChat(page, actor);
           await page.locator(`[data-operation-id="${lastOperation.operation_id}"]`)
             .getByText(/^input\s*·\s*input_admitted$/).waitFor({ timeout: 30_000 });
           assertAdmittedOperation((await retainedOperations(page)).find((record) =>
