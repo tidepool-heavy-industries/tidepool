@@ -158,6 +158,7 @@ fn try_spawn_daemon(
         ready: false,
     };
     let deadline = Instant::now() + Duration::from_secs(30);
+    let mut last_preflight = "listener has not answered preflight".to_owned();
     loop {
         match daemon.child.try_wait() {
             Ok(Some(status)) => {
@@ -177,7 +178,7 @@ fn try_spawn_daemon(
         if Instant::now() >= deadline {
             return Err(startup_diagnostics(
                 &daemon.logs,
-                "daemon protocol readiness timed out after 30s",
+                &format!("daemon protocol readiness timed out after 30s; last preflight: {last_preflight}"),
             ));
         }
         if socket.exists() {
@@ -194,7 +195,8 @@ fn try_spawn_daemon(
                     daemon.ready = true;
                     return Ok(daemon);
                 }
-                Ok(Err(_)) => {
+                Ok(Err(error)) => {
+                    last_preflight = error.to_string();
                     preflight
                         .join()
                         .expect("daemon preflight observer panicked");
