@@ -64,3 +64,17 @@ sh_test(
     resources = [":script_test_resources", "toolchains//:python", "toolchains//:test_tools_closure"],
     visibility = ["PUBLIC"],
 )
+
+sh_test(
+    name = "cabal_metadata_tests",
+    test = "run-unittests.sh",
+    args = ["scripts.tests.test_cabal_metadata"],
+    env = {
+        "TIDEPOOL_TEST_PYTHON": "$(exe toolchains//:python)",
+        "TIDEPOOL_SCRIPT_TEST_ROOT": "$(location :script_test_resources)",
+        "TIDEPOOL_CABAL_METADATA": "$(exe //build/haskell/cabal-metadata:metadata)",
+        "PATH": read_root_config("nix", "action_path"),
+    },
+    resources = [":script_test_resources", "//build/haskell/cabal-metadata:metadata", "toolchains//:python", "toolchains//:test_tools_closure"],
+    visibility = ["PUBLIC"],
+)
