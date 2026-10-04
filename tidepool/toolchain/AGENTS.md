@@ -24,6 +24,8 @@ It sits below `tidepool-runtime` and must not depend on runtime/session errors.
   still reuse immutable support modules; this module memo is distinct from the
   Rust artifact cache. Use the matched measurement tests as evidence for cost
   and savings, not projected estimates.
-- Register embedded prepared artifacts with their real producers and schema
-  contracts. Regenerate payloads through those producers; never patch version
-  headers by hand.
+- `build_prepared_fixture` is the build-action mode of that same front door.
+  It requires action-owned current-directory scratch and declared source roots,
+  uses the configured direct compiler, and has no runtime cache authority.
+  Export portable prepared programs and metadata only; source-bound compiler
+  certificates never move into fixture resources or get restamped.

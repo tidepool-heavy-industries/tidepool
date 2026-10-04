@@ -1,3 +1,4 @@
+load("//build/haskell:prepared_fixture.bzl", "tidepool_prepared_fixture")
 load("@prelude//:rules.bzl", "export_file", "filegroup", "haskell_binary", "haskell_library", "sh_test")
 load(
     "//build/haskell:defs.bzl",
@@ -426,5 +427,28 @@ filegroup(
         ["lib/**/*.hs", "actors/**/*.hs"],
         exclude = ["lib/**/Prelude_cbor/**"],
     )},
+    visibility = ["PUBLIC"],
+)
+
+# Source modules compile once per requested target set. Test binaries consume
+# these directories at runtime, independently of their Rust compilation.
+tidepool_prepared_fixture(
+    name = "m3_vertical_prepared",
+    source = "test-prepared-stg/M3Vertical.hs",
+    targets = ["result"],
+    visibility = ["PUBLIC"],
+)
+
+tidepool_prepared_fixture(
+    name = "freer_resume_prepared",
+    source = "test-prepared-stg/FreerResume.hs",
+    targets = ["program", "resumeInt", "freerResumeEntries", "askArgument", "valResult"],
+    visibility = ["PUBLIC"],
+)
+
+tidepool_prepared_fixture(
+    name = "freer_retention_prepared",
+    source = "test-prepared-stg/FreerRetention.hs",
+    targets = ["freerRequest"],
     visibility = ["PUBLIC"],
 )

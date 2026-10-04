@@ -2619,7 +2619,15 @@ pub fn compile_invocation(
     inv: &CompileInvocation<'_>,
     mut on_stage: impl FnMut(&str, Duration, u64),
 ) -> Result<CompiledArtifacts, CompileError> {
-    compile_invocation_inner(inv, &mut on_stage, true, None, None, None, None)
+    compile_invocation_inner(
+        inv,
+        &mut on_stage,
+        CompilationPolicy::Runtime,
+        None,
+        None,
+        None,
+        None,
+    )
 }
 
 /// Compile fresh source against immutable declaration owners through the same
@@ -2630,7 +2638,15 @@ pub fn compile_invocation_in_context(
     context: Arc<crate::declaration_join::ExactDeclarationContext>,
     mut on_stage: impl FnMut(&str, Duration, u64),
 ) -> Result<CompiledArtifacts, CompileError> {
-    compile_invocation_inner(inv, &mut on_stage, false, None, Some(context), None, None)
+    compile_invocation_inner(
+        inv,
+        &mut on_stage,
+        CompilationPolicy::FreshRuntime,
+        None,
+        Some(context),
+        None,
+        None,
+    )
 }
 
 /// Compile a declaration probe in full-home-product mode, which produces
@@ -2654,7 +2670,7 @@ pub(crate) fn compile_authored_products(
     compile_invocation_inner(
         &inv,
         &mut |_, _, _| {},
-        false,
+        CompilationPolicy::FreshRuntime,
         Some(session_root),
         context,
         None,
@@ -2687,7 +2703,7 @@ pub fn build_deployment_module_package(
     compile_invocation_inner(
         &invocation,
         &mut |_, _, _| {},
-        false,
+        CompilationPolicy::FreshRuntime,
         None,
         None,
         Some((output_root, &source_root)),
@@ -2699,12 +2715,123 @@ pub fn build_deployment_module_package(
     )?)
 }
 
+/// Authority selected by the compilation owner, independently of cache hints.
+#[derive(Clone, Copy)]
+enum CompilationPolicy<'a> {
+    Runtime,
+    FreshRuntime,
+    BuildAction {
+        source_path: &'a Path,
+        scratch: &'a Path,
+        output: &'a Path,
+    },
+}
+
+/// Compile one declared module and target set for an immutable build action.
+/// The action owns its current-directory scratch and an absent output directory.
+/// This policy uses a
+/// direct configured compiler and cannot read or publish runtime memo entries,
+/// module candidates, deployment catalogs or mutable runtime build products.
+/// Only portable code and metadata are exported; source-bound authority stays
+/// in its original compiler transaction and is never relocated or restamped.
+pub fn build_prepared_fixture(
+    source_path: &Path,
+    targets: &[&str],
+    include: &[PathBuf],
+    scratch: &Path,
+    output: &Path,
+) -> Result<(), CompileError> {
+    if targets.is_empty()
+        || targets.iter().any(|target| {
+            target.is_empty()
+                || target.contains([',', '/', '\\'])
+                || *target == "."
+                || *target == ".."
+        })
+        || targets
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            != targets.len()
+    {
+        return Err(CompileError::ExtractFailed(
+            "invalid prepared fixture target set".into(),
+        ));
+    }
+    if !scratch.is_dir()
+        || output.exists()
+        || !source_path.is_file()
+        || include.iter().any(|root| !root.is_dir())
+        || std::fs::canonicalize(std::env::current_dir()?)? != std::fs::canonicalize(scratch)?
+    {
+        return Err(CompileError::ExtractFailed("prepared fixture requires a declared source, include roots, private scratch and absent output".into()));
+    }
+    let source = std::fs::read_to_string(source_path)?;
+    let fallback = source_path
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| CompileError::ExtractFailed("fixture module filename".into()))?;
+    let invocation = CompileInvocation {
+        source: &source,
+        targets,
+        include,
+        fallback_module_name: fallback,
+    };
+    compile_invocation_inner(
+        &invocation,
+        &mut |_, _, _| {},
+        CompilationPolicy::BuildAction {
+            source_path,
+            scratch,
+            output,
+        },
+        None,
+        None,
+        None,
+        None,
+    )
+    .map(|_| ())
+}
+
 pub(crate) const AUTHORED_PRODUCT_PROBE_MODULE: &str = "TidepoolAuthoredProductProbe";
+
+fn validate_build_action_source_closure(
+    evidence_bytes: &[u8],
+    source: &Path,
+    include: &[PathBuf],
+) -> Result<(), CompileError> {
+    let evidence: cache::DependencyEvidence =
+        serde_json::from_slice(evidence_bytes).map_err(|error| {
+            CompileError::ExtractFailed(format!("build-action dependency evidence: {error}"))
+        })?;
+    if !evidence.cache_safe || !evidence.selection_complete {
+        return Err(CompileError::ExtractFailed(
+            "build-action source evidence is incomplete".into(),
+        ));
+    }
+    let mut declared = std::collections::BTreeSet::from([std::fs::canonicalize(source)?]);
+    for root in include {
+        let manifest = cache::source_root_manifest(root)
+            .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+        for (relative, _) in manifest.files() {
+            declared.insert(std::fs::canonicalize(root.join(relative))?);
+        }
+    }
+    for consumed in evidence.sources {
+        if !declared.contains(&std::fs::canonicalize(&consumed.path)?) {
+            return Err(CompileError::ExtractFailed(format!(
+                "build action consumed an undeclared source: {}",
+                consumed.path.display()
+            )));
+        }
+    }
+    Ok(())
+}
 
 fn compile_invocation_inner(
     inv: &CompileInvocation<'_>,
     mut on_stage: &mut impl FnMut(&str, Duration, u64),
-    allow_candidates: bool,
+    policy: CompilationPolicy<'_>,
     session_root: Option<&Path>,
     exact_context: Option<Arc<crate::declaration_join::ExactDeclarationContext>>,
     deployment_export: Option<(&Path, &Path)>,
@@ -2716,14 +2843,24 @@ fn compile_invocation_inner(
     );
     let multi = inv.targets.len() > 1;
 
-    let temp_dir = TempDir::new()?;
+    let allow_candidates = matches!(policy, CompilationPolicy::Runtime);
+    let temp_dir = match policy {
+        CompilationPolicy::BuildAction { scratch, .. } => TempDir::new_in(scratch)?,
+        _ => TempDir::new()?,
+    };
     // GHC derives the module name from the filename (capitalize(basename));
     // see `CompileInvocation::fallback_module_name`'s doc for why this
     // differs per lane.
     let module =
         extract_module_name(inv.source).unwrap_or_else(|| inv.fallback_module_name.to_string());
-    let input_path = temp_dir.path().join(format!("{module}.hs"));
-    std::fs::write(&input_path, inv.source)?;
+    let input_path = match policy {
+        CompilationPolicy::BuildAction { source_path, .. } => source_path.to_owned(),
+        _ => {
+            let path = temp_dir.path().join(format!("{module}.hs"));
+            std::fs::write(&path, inv.source)?;
+            path
+        }
+    };
 
     let mut cmd = ExtractCmd::new().map_err(|e| CompileError::Io(e.into()))?;
     cmd.input(&input_path)
@@ -2770,10 +2907,19 @@ fn compile_invocation_inner(
     let attempt = retry_bounded(
         || {
             let mut cmd = base_cmd.clone();
-            let endpoint = cmd.bind().map_err(CompileAttemptError::Endpoint)?;
+            let endpoint = match policy {
+                CompilationPolicy::BuildAction { .. } => cmd.bind_direct(),
+                _ => cmd.bind(),
+            }
+            .map_err(CompileAttemptError::Endpoint)?;
             let deployment = crate::toolchain::admit_bound_endpoint(&endpoint)
                 .map_err(CompileAttemptError::Deployment)?;
-            crate::paths::apply_build_products_dir(&mut cmd, &endpoint);
+            match policy {
+                CompilationPolicy::BuildAction { .. } => {
+                    cmd.build_products_dir(temp_dir.path().join("build-products"));
+                }
+                _ => crate::paths::apply_build_products_dir(&mut cmd, &endpoint),
+            }
 
             let candidate_set = if allow_candidates {
                 module_candidates::select_configured(
@@ -2786,7 +2932,7 @@ fn compile_invocation_inner(
                 None
             };
 
-            let inv_key = {
+            let inv_key = if allow_candidates {
                 let argv = cmd.argv();
                 let key = cache::invocation_key(&cache::Invocation {
                     source: inv.source,
@@ -2835,6 +2981,8 @@ fn compile_invocation_inner(
                     }
                 }
                 key
+            } else {
+                None
             };
 
             if let Some(selected) = &candidate_set {
@@ -2918,7 +3066,7 @@ fn compile_invocation_inner(
             return compile_invocation_inner(
                 inv,
                 on_stage,
-                false,
+                CompilationPolicy::FreshRuntime,
                 session_root,
                 exact_context,
                 deployment_export,
@@ -2926,11 +3074,10 @@ fn compile_invocation_inner(
             );
         }
         Err(error) => {
-            return Err(retain_compiler_failure(
-                temp_dir.path(),
-                &compiler_stderr,
-                error,
-            ));
+            return Err(match policy {
+                CompilationPolicy::BuildAction { .. } => error,
+                _ => retain_compiler_failure(temp_dir.path(), &compiler_stderr, error),
+            });
         }
     };
 
@@ -2941,6 +3088,9 @@ fn compile_invocation_inner(
         let evidence_bytes = std::fs::read(temp_dir.path().join("dependencies.json"))?;
         let package_bundle_bytes =
             std::fs::read(temp_dir.path().join("module-package-imports.cbor"))?;
+        if matches!(policy, CompilationPolicy::BuildAction { .. }) {
+            validate_build_action_source_closure(&evidence_bytes, &input_path, inv.include)?;
+        }
         let exact_source = exact_request
             .as_ref()
             .map(|request| request.admit_source(&input_path, inv.source, &evidence_bytes))
@@ -3061,30 +3211,33 @@ fn compile_invocation_inner(
             })
             .collect::<Result<_, _>>()?;
         let fresh_count = fresh_products.products().len();
-        let (fresh_products, publication) = if (exact_request.is_none()
-            || deployment_export.is_some())
-            && evidence.is_some()
-        {
-            let (products, publication) = module_candidates::prepare_publication(
-                &producer,
-                inv.include,
-                evidence.as_ref().ok_or_else(|| {
-                    CompileError::ExtractFailed("candidate publication evidence unavailable".into())
-                })?,
-                fresh_products,
-                inv.source,
-                exact.as_ref().map_or(
-                    module_candidates::CandidateVersionOrigin::Ordinary,
-                    |admission| module_candidates::CandidateVersionOrigin::Exact {
-                        semantic_sha256: admission.request.semantic_sha256,
-                    },
-                ),
-                &certified.recovery_products,
-            );
-            (products, Some(publication))
-        } else {
-            (fresh_products.into_products(), None)
-        };
+        let (fresh_products, publication) =
+            if !matches!(policy, CompilationPolicy::BuildAction { .. })
+                && (exact_request.is_none() || deployment_export.is_some())
+                && evidence.is_some()
+            {
+                let (products, publication) = module_candidates::prepare_publication(
+                    &producer,
+                    inv.include,
+                    evidence.as_ref().ok_or_else(|| {
+                        CompileError::ExtractFailed(
+                            "candidate publication evidence unavailable".into(),
+                        )
+                    })?,
+                    fresh_products,
+                    inv.source,
+                    exact.as_ref().map_or(
+                        module_candidates::CandidateVersionOrigin::Ordinary,
+                        |admission| module_candidates::CandidateVersionOrigin::Exact {
+                            semantic_sha256: admission.request.semantic_sha256,
+                        },
+                    ),
+                    &certified.recovery_products,
+                );
+                (products, Some(publication))
+            } else {
+                (fresh_products.into_products(), None)
+            };
         let mut artifacts = assemble_with_products(
             &meta_bytes,
             &raw,
@@ -3172,7 +3325,11 @@ fn compile_invocation_inner(
         }
         // A memo hit has no certified source group owner mapping. The module
         // store owns reuse for invocations with home products.
-        if exact_request.is_none() && cached_receipts.is_empty() && fresh_count == 0 {
+        if allow_candidates
+            && exact_request.is_none()
+            && cached_receipts.is_empty()
+            && fresh_count == 0
+        {
             if let (Some(key), Some(evidence)) = (&inv_key, evidence.as_ref()) {
                 store_memo(
                     key,
@@ -3198,15 +3355,36 @@ fn compile_invocation_inner(
             compile_invocation_inner(
                 inv,
                 on_stage,
-                false,
+                CompilationPolicy::FreshRuntime,
                 session_root,
                 exact_context,
                 deployment_export,
                 authored,
             )
         }
-        result => result
-            .map_err(|error| retain_compiler_failure(temp_dir.path(), &compiler_stderr, error)),
+        result => {
+            let artifacts = result.map_err(|error| match policy {
+                CompilationPolicy::BuildAction { .. } => error,
+                _ => retain_compiler_failure(temp_dir.path(), &compiler_stderr, error),
+            })?;
+            if let CompilationPolicy::BuildAction { output, .. } = policy {
+                std::fs::create_dir(output)?;
+                // Portable code has no authority to hydrate the source-bound
+                // native products or certificates from this transaction.
+                std::fs::write(output.join("meta.cbor"), &meta_bytes)?;
+                for target in &raw {
+                    std::fs::write(
+                        output.join(prepared_artifact_name(&target.target)),
+                        target.prepared_bytes.as_slice(),
+                    )?;
+                    std::fs::write(
+                        output.join(format!("{}.asks.json", target.target)),
+                        &target.asks_bytes,
+                    )?;
+                }
+            }
+            Ok(artifacts)
+        }
     }
 }
 
@@ -4590,6 +4768,32 @@ mod module_product_tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn build_action_source_closure_accepts_declared_links_and_refuses_ambient_sources() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("Main.hs");
+        let dependency = root.path().join("Dependency.hs");
+        let inputs = root.path().join("inputs");
+        std::fs::write(&source, "module Main where\nresult = 42\n").unwrap();
+        std::fs::write(&dependency, "module Dependency where\nvalue = 1\n").unwrap();
+        std::fs::create_dir(&inputs).unwrap();
+        std::os::unix::fs::symlink(&dependency, inputs.join("Dependency.hs")).unwrap();
+        let mut evidence = assembly_evidence(&["Main", "Dependency"]);
+        evidence.sources = [source.clone(), dependency.clone()]
+            .into_iter()
+            .map(|path| cache::SourceEvidence {
+                path,
+                sha256: "unused-by-closure-validator".into(),
+            })
+            .collect();
+        let encode = |evidence: &cache::DependencyEvidence| serde_json::to_vec(evidence).unwrap();
+        validate_build_action_source_closure(&encode(&evidence), &source, &[inputs]).unwrap();
+        assert!(validate_build_action_source_closure(&encode(&evidence), &source, &[]).is_err());
+        evidence.sources.pop();
+        evidence.selection_complete = false;
+        assert!(validate_build_action_source_closure(&encode(&evidence), &source, &[]).is_err());
     }
 
     fn product_metadata() -> Vec<u8> {
