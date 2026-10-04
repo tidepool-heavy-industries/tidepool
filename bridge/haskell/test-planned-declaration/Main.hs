@@ -227,7 +227,7 @@ checkOriginalDeclarationShadow work = do
           qualified owner occurrence = Qual (mkModuleName owner) occurrence
       forM_ [mkTcOcc "Input", mkTcOcc "Tagged", mkVarOcc "make", mkVarOcc "project", mkVarOcc "tag"
         , mkDataOcc "Record", mkTcOcc "ConstructorOnly", mkTcOcc "Maybe", mkTcOcc "Box"
-        , mkTcOcc "Text", mkTcOcc "Double"] $ \occurrence ->
+        , mkTcOcc "Text", mkTcOcc "Double", mkTcOcc "Int"] $ \occurrence ->
           unless (owners (mkRdrUnqual occurrence) == [originalName]) $
             fail "parsed original declaration did not replace its unqualified imported occurrence"
       unless (owners (qualified previousName (mkTcOcc "Input")) == [previousName]

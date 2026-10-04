@@ -1959,7 +1959,7 @@ originalDeclarationWrapper template = do
   when (T.null remaining) (fail "original declaration requires canonical whole-cell recipe")
   let stripped = T.replace "{{CELL_PRAGMAS}}" "" prefix
   when ("{{" `T.isInfixOf` T.replace "{{CELL_IMPORTS}}" "" stripped) (fail "original declaration wrapper has an unknown placeholder")
-  pure (T.unpack stripped ++ "\n{{TURN}}\n__result :: Int\n__result = (0 :: Int)\n")
+  pure (T.unpack stripped ++ "\n{{TURN}}\n__result :: ()\n__result = ()\n")
 
 -- | Parse one raw @--turn-verdict kind[:name,name…]@ argument into the same
 -- 'StmtBinders' shape 'classifyWithFlags' would have produced, so the rest of

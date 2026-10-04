@@ -16,6 +16,7 @@ data Maybe = LocalMaybe
 data Box = LocalBox
 data Text = LocalText Bool
 data Double = LocalDouble
+data Int = LocalInt
 
 historical :: Tidepool.Session.Lib.G6.Input -> Bool
 historical = Tidepool.Session.Lib.G6.project

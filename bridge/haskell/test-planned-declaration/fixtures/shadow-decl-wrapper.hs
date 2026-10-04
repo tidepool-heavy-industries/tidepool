@@ -9,5 +9,5 @@ import Foreign as Selected (Box(..))
 -- tidepool-preamble-imports-v1
 default (Int, Double, Text)
 {{TURN}}
-__result :: IO ()
-__result = pure ()
+__result :: ()
+__result = ()
