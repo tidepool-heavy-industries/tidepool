@@ -891,10 +891,18 @@ fn append_workbench_publication(
     publication: Option<&tidepool_runtime::session::WorkbenchPublicationOutcome>,
 ) {
     if let Some(publication) = publication {
+        let value = serde_json::to_value(publication).unwrap_or_default();
+        let mut summary = serde_json::json!({"status": value["status"]});
+        if let Some(reason) = value.get("reason") {
+            summary["reason"] = reason.clone();
+        }
+        if !publication.public_bindings().is_empty() {
+            summary["visibleBindings"] = serde_json::json!(publication.public_bindings().len());
+        }
         text.push_str("publication ");
         let remaining = MODEL_OUTPUT_LIMIT.saturating_sub(text.len() + 1);
         text.push_str(&exomonad_actor::bound_workbench_display(
-            &serialize(serde_json::to_value(publication).unwrap_or_default()),
+            &serialize(summary),
             remaining,
         ));
         text.push('\n');
@@ -2516,6 +2524,15 @@ pub(crate) mod tests {
             detail: "journal acknowledgement unavailable".into(),
         });
         assert!(workbench_transcript(&response).contains("bound privateValue"));
+        let mut text = "x".repeat(MODEL_OUTPUT_LIMIT - 128);
+        let large_publication = WorkbenchPublicationOutcome::DurabilityUnconfirmed {
+            bindings: (0..4096).map(|index| format!("visible{index}")).collect(),
+            detail: "large retained publication".repeat(1024),
+        };
+        append_workbench_publication(&mut text, Some(&large_publication));
+        assert!(text.contains("\"status\":\"durabilityUnconfirmed\""));
+        assert!(text.contains("\"visibleBindings\":4096"));
+        assert!(text.len() <= MODEL_OUTPUT_LIMIT);
     }
 
     #[test]
