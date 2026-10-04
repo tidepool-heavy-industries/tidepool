@@ -444,10 +444,8 @@ fn parked_site(resident: &mut TestSession, hole: &ResidentHole) -> u64 {
         .state
         .prepared_mut()
         .unwrap()
-        .parked(id)
-        .unwrap()
-        .1
-        .site
+        .parked_site(id)
+        .expect("activation fixture parks at a typed request site")
 }
 
 fn suspended(outcome: ResidentOutcome) -> ResidentHole {
