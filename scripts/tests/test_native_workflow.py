@@ -2,6 +2,10 @@
 import importlib.util
 import contextlib
 import io
+import os
+import shutil
+import subprocess
+import tempfile
 import sys
 import types
 from pathlib import Path
@@ -64,10 +68,31 @@ class NativeWorkflowTests(unittest.TestCase):
             def test_control(self):
                 self.assertEqual(2 + 2, 4)
         control.Control = Control
-        with patch.dict(sys.modules, native_control=control, native_empty=empty), contextlib.redirect_stderr(io.StringIO()):
+        with patch.dict(os.environ, TIDEPOOL_SCRIPT_TEST_ROOT=str(Path(__file__).parents[2])), patch.dict(sys.modules, native_control=control, native_empty=empty), contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(adapter.main(["native_control"]), 0)
             with self.assertRaises(ValueError):
                 adapter.main(["native_empty"])
+
+    def test_standard_unittest_imports_declared_package_from_resource_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "scripts/tests").mkdir(parents=True)
+            shutil.copyfile(Path(__file__).parents[1] / "unittest-main.py", root / "scripts/unittest-main.py")
+            (root / "scripts/tests/import_control.py").write_text(
+                "import unittest\nclass DeclaredControl(unittest.TestCase):\n"
+                "    def test_declared_control(self):\n        self.assertTrue(True)\n")
+            environment = dict(os.environ, TIDEPOOL_SCRIPT_TEST_ROOT=str(root), PYTHONPATH="")
+            result = subprocess.run([sys.executable, str(root / "scripts/unittest-main.py"),
+                                     "scripts.tests.import_control"], cwd=root,
+                                    env=environment, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Ran 1 test", result.stderr)
+            environment.pop("TIDEPOOL_SCRIPT_TEST_ROOT")
+            refused = subprocess.run([sys.executable, str(root / "scripts/unittest-main.py"),
+                                      "scripts.tests.import_control"], cwd=root,
+                                     env=environment, capture_output=True, text=True)
+            self.assertEqual(refused.returncode, 2, refused.stderr)
+            self.assertIn("declare TIDEPOOL_SCRIPT_TEST_ROOT", refused.stderr)
 
     def test_buck_run_separates_runner_arguments_from_buck_options(self):
         with patch.object(workflow.subprocess, "call", return_value=0) as call:
