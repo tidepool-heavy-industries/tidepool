@@ -306,12 +306,26 @@ impl JoinedInterfaceRole {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub(crate) enum ArtifactPayload {
     Original(CertifiedRecoveryProduct),
     Canonical(crate::certified_products::CertifiedModuleInterface),
     Interface(CertifiedJoinedInterface, JoinedInterfaceRole),
 }
+
+impl PartialEq for ArtifactPayload {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Original(left), Self::Original(right)) => left.same_durable_artifact(right),
+            (Self::Canonical(left), Self::Canonical(right)) => left == right,
+            (Self::Interface(left, left_role), Self::Interface(right, right_role)) => {
+                left_role == right_role && left == right
+            }
+            _ => false,
+        }
+    }
+}
+impl Eq for ArtifactPayload {}
 
 impl ArtifactPayload {
     pub(crate) fn artifact_kind(&self) -> ArtifactKind {
@@ -444,8 +458,10 @@ impl ArtifactEntry {
     pub(crate) fn interface(
         interface: CertifiedJoinedInterface,
         role: JoinedInterfaceRole,
-        requirements: Vec<ExactModuleIdentity>,
+        mut requirements: Vec<ExactModuleIdentity>,
     ) -> Self {
+        requirements.sort();
+        requirements.dedup();
         let descriptor = descriptor(
             role.artifact_kind(),
             ExactModuleIdentity {
@@ -1576,6 +1592,119 @@ mod tests {
             );
         }
         entry
+    }
+
+    #[test]
+    fn native_inventory_reuse_preserves_each_owners_source_admission_witness() {
+        let cold = native_entry("Original", &[]);
+        let mut fresh = cold.clone();
+        let ArtifactPayload::Original(product) = &cold.payload else {
+            unreachable!()
+        };
+        fresh.payload = ArtifactPayload::Original(product.clone().with_source_sha256([1; 32]));
+        let ArtifactPayload::Original(fresh_product) = &fresh.payload else {
+            unreachable!()
+        };
+        assert_ne!(product, fresh_product);
+        assert_eq!(cold, fresh);
+
+        let cold_inventory = ArtifactInventory::default();
+        let cold_view = cold_inventory
+            .admit(&cold_inventory.empty_view(), vec![cold.clone()])
+            .unwrap();
+        let fresh_inventory = ArtifactInventory::default();
+        let fresh_view = fresh_inventory
+            .admit(&fresh_inventory.empty_view(), vec![fresh.clone()])
+            .unwrap();
+        for (retained, incoming, expected_source) in [
+            (&cold_view, &fresh_view, None),
+            (&fresh_view, &cold_view, Some([1; 32])),
+        ] {
+            let merged = retained.merge(incoming).unwrap();
+            let selected = merged
+                .entries()
+                .into_iter()
+                .find(|entry| entry.descriptor.id == cold.descriptor.id)
+                .unwrap();
+            let ArtifactPayload::Original(product) = &selected.payload else {
+                unreachable!()
+            };
+            assert_eq!(product.source_sha256(), expected_source);
+        }
+
+        let altered = CertifiedRecoveryProduct::from_certification(
+            product.owner().clone(),
+            product.interface_bytes().to_vec(),
+            b"changed original payload".to_vec(),
+            product.package_imports_bytes().to_vec(),
+            product.certification_bytes().to_vec(),
+        )
+        .with_module_interface(product.module_interface().unwrap().clone())
+        .unwrap();
+        let mut conflicting_bytes = cold.clone();
+        conflicting_bytes.payload = ArtifactPayload::Original(altered);
+        let mut conflicting_edges = cold.clone();
+        conflicting_edges.native_requirements.push((
+            module("Original"),
+            ArtifactDependency::NativeGroup {
+                dependent_ordinal: 0,
+                required_ordinal: 0,
+            },
+        ));
+        for incoming in [conflicting_bytes, conflicting_edges] {
+            assert!(matches!(
+                cold_inventory.admit(&cold_view, vec![incoming]),
+                Err(CompileError::ArtifactInventory(error))
+                    if matches!(error.failure, ArtifactInventoryFailure::MetadataConflict { artifact }
+                        if artifact == cold.descriptor.id)
+            ));
+        }
+        assert_eq!(cold_view.artifact_ids(), fresh_view.artifact_ids());
+    }
+
+    #[test]
+    fn joined_interface_requirements_are_sets_without_discarding_changed_edges() {
+        let canonical = crate::certified_products::fixture_module_interface(
+            [2; 32],
+            "unit",
+            "Joined",
+            BTreeMap::new(),
+        );
+        let interface = CertifiedJoinedInterface::from_certification(
+            [2; 32],
+            "unit".into(),
+            "Joined".into(),
+            canonical.interface_bytes().to_vec(),
+            canonical.package_imports_bytes().to_vec(),
+        )
+        .unwrap();
+        let joined = |requirements| {
+            ArtifactEntry::interface(
+                interface.clone(),
+                JoinedInterfaceRole::LexicalJoin,
+                requirements,
+            )
+        };
+        let first = joined(vec![module("B"), module("A"), module("B")]);
+        let second = joined(vec![module("A"), module("B")]);
+        assert_eq!(first, second);
+        let inventory = ArtifactInventory::default();
+        let view = inventory
+            .admit(
+                &inventory.empty_view(),
+                vec![entry("A", &[]), entry("B", &[]), first.clone()],
+            )
+            .unwrap();
+        assert_eq!(
+            inventory.admit(&view, vec![second]).unwrap().artifact_ids(),
+            view.artifact_ids()
+        );
+        assert!(matches!(
+            inventory.admit(&view, vec![joined(vec![module("A")])]),
+            Err(CompileError::ArtifactInventory(error))
+                if matches!(error.failure, ArtifactInventoryFailure::MetadataConflict { artifact }
+                    if artifact == first.descriptor.id)
+        ));
     }
 
     fn native_variant(entry: &ArtifactEntry, version: u8) -> ArtifactEntry {

@@ -2216,6 +2216,12 @@ mod authored_tests {
         assert_eq!(accepted.expected_public_version(), "paired-public-version");
         assert_eq!(accepted.toolchain_identity_sha256(), expected_producer);
         assert!(!accepted.package_imports_bytes().is_empty());
+        let descriptors = context
+            .clone()
+            .extend(&[], &[Arc::new(accepted.clone())], Vec::new())
+            .unwrap()
+            .artifact_view()
+            .descriptors();
         drop(worker_root);
         drop(source_root);
         let durable = tempfile::tempdir().unwrap();
@@ -2231,16 +2237,29 @@ mod authored_tests {
             },
             imports: Vec::new(),
         }];
-        let recovered = ExactDeclarationContext::capture_recovery(
+        let mut joins = stored.anchors.clone();
+        joins.push(stored.join.clone());
+        let recovered = ExactDeclarationContext::capture_recovery_with_inventory(
             durable.path(),
             &stored.products,
             &stored.module_interfaces,
-            &[stored.join],
+            &joins,
+            &stored.value_interfaces,
+            &descriptors,
+            &stored.artifact_dependencies,
             lexical.clone(),
         )
         .unwrap();
         assert_eq!(recovered.toolchain_identity_sha256(), expected_producer);
         assert_eq!(recovered.authored_native_root(1).unwrap(), original_root);
+        assert!(certificate.product().source_sha256().is_some());
+        assert!(recovered
+            .recovery_products()
+            .iter()
+            .find(|product| product.owner() == certificate.product().owner())
+            .unwrap()
+            .source_sha256()
+            .is_none());
         assert!(recovered.authored_native_root(2).is_err());
         let recovered_join = certify_recovered_declaration_tip_in_context(
             Arc::new(recovered.clone()),
@@ -2263,6 +2282,13 @@ mod authored_tests {
             .unwrap();
         assert_eq!(extended.semantic_sha256(), recovered_identity);
         assert_eq!(extended.authored_native_root(1).unwrap(), original_root);
+        assert!(extended
+            .recovery_products()
+            .iter()
+            .find(|product| product.owner().module == module.module_name())
+            .unwrap()
+            .source_sha256()
+            .is_none());
         assert!(extended.authored_native_root(2).is_err());
         let extended = Arc::new(extended);
         let fresh_root = tempfile::tempdir().unwrap();

@@ -108,8 +108,17 @@ pub struct CertifiedRecoveryProduct {
 // The native witness is a derived immutable fact, not another product identity.
 impl PartialEq for CertifiedRecoveryProduct {
     fn eq(&self, other: &Self) -> bool {
+        self.source_sha256 == other.source_sha256 && self.same_durable_artifact(other)
+    }
+}
+impl Eq for CertifiedRecoveryProduct {}
+
+impl CertifiedRecoveryProduct {
+    /// Inventory identity compares durable seals and payloads. The fresh source
+    /// witness remains separate admission authority and is never recovered or
+    /// promoted by reusing an already retained inventory entry.
+    pub(crate) fn same_durable_artifact(&self, other: &Self) -> bool {
         self.owner == other.owner
-            && self.source_sha256 == other.source_sha256
             && self.interface_bytes == other.interface_bytes
             && self.product_bytes == other.product_bytes
             && self.package_imports_bytes == other.package_imports_bytes
@@ -117,10 +126,7 @@ impl PartialEq for CertifiedRecoveryProduct {
             && self.execution_source == other.execution_source
             && self.module_interface == other.module_interface
     }
-}
-impl Eq for CertifiedRecoveryProduct {}
 
-impl CertifiedRecoveryProduct {
     pub(crate) fn from_certification(
         owner: CachedHomeOwner,
         interface_bytes: Vec<u8>,
