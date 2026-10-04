@@ -1,46 +1,8 @@
-//! B1: the real prepared engine driven through `SessionRegistry` (via its
-//! keyed by one session id), proving rungs 2-5 of the acceptance ladder work
-//! TOGETHER through the real session/registry substrate rather than each in
-//! isolation the way `prepared_execution.rs`'s own tests pin them one at a
-//! time:
-//!
-//! - rung 2 (bind/import/cross-program call): S6's own producer/consumer
-//!   setup (`retained_import_end_to_end_links_consumer_against_bound_producer_tops`),
-//!   run inside a checkout instead of directly on a bare machine.
-//! - rung 3 (park/resume out of order across a collection): C0's own
-//!   pattern (`c0_two_installed_programs_park_and_resume_out_of_order_with_a_collection_between`),
-//!   but with the machine actually leaving and re-entering the registry
-//!   between every park and every resume.
-//! - rung 4/5 (realm-scoped cancellation, actor-shaped independence): C1's
-//!   own pattern (`two_realms_share_one_machine_cancel_reset_close_independently_of_each_other`),
-//!   with each realm standing in for one actor incarnation's own resource
-//!   scope — retiring one via `close_realm` must never disturb the other's
-//!   still-live state.
-//!
-//! `SessionRegistry<M, H>`'s own checkout/settle protocol is already tested
-//! generically in `tidepool/runtime/src/session/registry.rs` against a
-//! `FakeMachine`; this file's whole point is proving the REAL production
-//! machine type (`tidepool_codegen::prepared_program::PreparedMachine`, the
-//! engine owned by `PreparedEngine`) survives that protocol under
-//! Send-correctness and simulated park/resume across a "moved to another
-//! thread and back"
-//! cycle.
-//!
-//! `H` here is a plain `(RealmId, PreparedHandle)` tuple: this test never
-//! calls `PreparedMachine::park` (that mechanism belongs to a suspended
-//! *effect* continuation, not to a retained Send value moving across a
-//! checkout boundary) — the "hole" carried by the registry across a turn is
-//! just a Send-safe handle correlated with the realm it is live under, which
-//! a `Copy` tuple already satisfies (`SessionRegistry`'s own bound is `H:
-//! Clone + PartialEq + Debug`).
-//!
-//! Helpers below duplicate small pieces of `prepared_execution.rs`
-//! (`requirements`, `top_named`, `take_managed`, the freer-resume resume
-//! loop, ...): Rust integration test files are separate crates, so nothing
-//! private (or even public but un-re-exported test-local) can be `use`d
-//! across them.
+//! The production prepared machine survives registry checkout, out-of-order
+//! parked continuations, realm cancellation and retirement. Compiler-produced
+//! Freer resources supply the actual suspended programs. Retained import
+//! publication is checked through the resident checked-cell owner separately.
 
-use tidepool_bridge::HaskellValue;
 use tidepool_codegen::host_fns::RuntimeError;
 use tidepool_codegen::machine::MachineDisposition;
 use tidepool_codegen::prepared_program::{
@@ -50,9 +12,9 @@ use tidepool_codegen::prepared_program::{
 };
 use tidepool_codegen::suspension::RealmId;
 use tidepool_repr::execution_schema::{
-    link_program, parse_program, Architecture, DecodeLimits, Endianness, Group, HeapRhs,
-    ImportedValue, MachineImports, PreparedProgram, ProgramRequirements, RuntimeRep,
-    SymbolIdentity, TargetDescriptor, TopBinding, EXECUTION_ABI_VERSION, SCHEMA_VERSION,
+    link_program, parse_program, Architecture, DecodeLimits, Endianness, Group, MachineImports,
+    PreparedProgram, ProgramRequirements, TargetDescriptor, TopBinding, EXECUTION_ABI_VERSION,
+    SCHEMA_VERSION,
 };
 use tidepool_repr::freer_names::{
     find_declared, E_DEFINING_MODULE, UNION_DEFINING_MODULE, VAL_DEFINING_MODULE,
@@ -62,18 +24,6 @@ use tidepool_runtime::session::registry::SessionRegistry;
 
 // ---- fixtures -------------------------------------------------------------
 
-const IMPORT_PRODUCER_ARTIFACT: &[u8] =
-    include_bytes!("../../../bridge/haskell/test-prepared-stg/fixtures/import-producer.cbor");
-const IMPORT_CONSUMER_ARTIFACT: &[u8] =
-    include_bytes!("../../../bridge/haskell/test-prepared-stg/fixtures/import-consumer.cbor");
-/// `consumerValueAt 0#`'s GHC-computed value. See `prepared_execution.rs`'s
-/// own `IMPORT_CONSUMER_EXPECTATIONS` doc: `import-consumer.cbor`'s pinned
-/// entries are `consumerValueAt`/`consumerEntries`, never `consumerResult`/
-/// `consumerResultAt` (a direct call to an import is not yet admitted, per
-/// `s6_direct_global_call_is_not_yet_admitted` there) -- this test only ever
-/// drives `consumerValueAt`.
-const IMPORT_CONSUMER_EXPECTATIONS: &str =
-    include_str!("../../../bridge/haskell/test-prepared-stg/ImportConsumerExpectations.json");
 fn freer_resume_artifact() -> &'static [u8] {
     static BYTES: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
     BYTES.get_or_init(|| {
@@ -135,88 +85,6 @@ fn tops(prepared: &PreparedProgram) -> Vec<TopBinding> {
             Group::Recursive(tops) => tops.clone(),
         })
         .collect()
-}
-
-fn top_named(prepared: &PreparedProgram, module: &str, occurrence: &str) -> TopBinding {
-    tops(prepared)
-        .into_iter()
-        .find(|top| top.identity.module == module && top.identity.occurrence == occurrence)
-        .unwrap_or_else(|| panic!("artifact has no top {module}.{occurrence}"))
-}
-
-/// The first of `occurrences` present as a top of `module`: GHC's
-/// worker/wrapper split may leave only the `$w`-prefixed worker as a top.
-fn top_named_any(prepared: &PreparedProgram, module: &str, occurrences: &[&str]) -> TopBinding {
-    occurrences
-        .iter()
-        .find_map(|occurrence| {
-            tops(prepared)
-                .into_iter()
-                .find(|top| top.identity.module == module && top.identity.occurrence == *occurrence)
-        })
-        .unwrap_or_else(|| panic!("artifact has no top {module}.{occurrences:?}"))
-}
-
-/// How many physical arguments a function top's projected signature takes.
-fn top_arity(prepared: &PreparedProgram, top: &TopBinding) -> usize {
-    match &top.binding.rhs {
-        HeapRhs::Function { signature, .. } => prepared.signatures()[signature.0 as usize]
-            .arguments
-            .iter()
-            .filter(|rep| !matches!(rep, RuntimeRep::Void))
-            .count(),
-        _ => 0,
-    }
-}
-
-fn producer_identity(occurrence: &str) -> SymbolIdentity {
-    SymbolIdentity {
-        unit: "main".to_owned(),
-        module: "ImportProducer".to_owned(),
-        namespace: "value".to_owned(),
-        occurrence: occurrence.to_owned(),
-        record_parent: None,
-    }
-}
-
-fn expected_consumer_value() -> Vec<i64> {
-    let parsed: serde_json::Value = serde_json::from_str(IMPORT_CONSUMER_EXPECTATIONS)
-        .expect("ImportConsumerExpectations.json parses as JSON");
-    parsed["expectations"]["consumerValueAt"]["value"]
-        .as_array()
-        .expect("consumerValue expectation is a list")
-        .iter()
-        .map(|element| {
-            element
-                .as_i64()
-                .expect("consumerValue elements are integers")
-        })
-        .collect()
-}
-
-/// Flatten an observed `[Int]`: a cons cell is `Con(_, [head, tail])`, nil
-/// is `Con(_, [])`, and each head is a bare literal or an `I#` box around one.
-fn observed_int_list(value: &HaskellValue) -> Vec<i64> {
-    let mut out = Vec::new();
-    let mut cursor = value;
-    loop {
-        match cursor {
-            HaskellValue::Con(_, fields) if fields.is_empty() => return out,
-            HaskellValue::Con(_, fields) if fields.len() == 2 => {
-                let head = match &fields[0] {
-                    HaskellValue::Lit(tidepool_repr::Literal::LitInt(n)) => *n,
-                    HaskellValue::Con(_, boxed) => match boxed.as_slice() {
-                        [HaskellValue::Lit(tidepool_repr::Literal::LitInt(n))] => *n,
-                        other => panic!("unexpected boxed list head {other:?}"),
-                    },
-                    other => panic!("unexpected list head {other:?}"),
-                };
-                out.push(head);
-                cursor = &fields[1];
-            }
-            other => panic!("unexpected list shape {other:?}"),
-        }
-    }
 }
 
 fn freer_resume_top(prepared: &PreparedProgram, occurrence: &str) -> TopBinding {
@@ -297,37 +165,6 @@ fn take_scalar(fields: &[PreparedResult], index: usize) -> u64 {
 /// globals plus a by-identity handle map. `entry_signature` and `generation`
 /// come from each consumer declaration, while `evaluated` is read live from
 /// the machine that owns the handle.
-fn import_bindings_for(
-    consumer: &PreparedProgram,
-    machine: &PreparedMachine<'static>,
-    handles: &[(SymbolIdentity, PreparedHandle)],
-) -> Result<MachineImports, ExecutionError> {
-    let mut imports = MachineImports::default();
-    for declaration in consumer.globals() {
-        let Some((_, handle)) = handles.iter().find(|(id, _)| *id == declaration.identity) else {
-            continue;
-        };
-        let entry_signature = declaration
-            .entry_signature
-            .map(|signature| consumer.signatures()[signature.0 as usize].clone());
-        let imported = ImportedValue {
-            identity: declaration.identity.clone(),
-            rep: handle.rep(),
-            entry_signature,
-            evaluated: machine.handle_is_evaluated(*handle)?,
-            generation: declaration.required_generation.unwrap_or(0),
-        };
-        imports
-            .values
-            .insert(declaration.identity.clone(), imported);
-    }
-    Ok(imports)
-}
-
-/// `prepared_execution.rs`'s own `drive_freer_program_to_val_in`, but
-/// parameterized on `realm` instead of hardcoding `RealmId::ROOT`: this
-/// composite test drives freer-resume continuations under two different
-/// non-root realms (one per "incarnation").
 fn drive_to_val_in(
     machine: &mut PreparedMachine<'static>,
     program: ProgramId,
@@ -425,105 +262,20 @@ fn drive_to_val_in(
 /// (RealmId, PreparedHandle)>` -- the composite proof no single-rung test
 /// above attempts.
 #[test]
-fn session_registry_drives_prepared_runtime_through_bind_import_park_resume_cancel_and_retire() {
-    // ---- setup: parse both S6 artifacts and locate their tops BEFORE
-    // either program is moved into the machine (mirrors S6's own ordering:
-    // `top_named` needs `&PreparedProgram` before installing consumes it).
-    let producer_prepared = parse_program(
-        IMPORT_PRODUCER_ARTIFACT,
-        &requirements(),
-        DecodeLimits::default(),
-    )
-    .expect("import-producer artifact parses");
-    let producer_value_top = top_named(&producer_prepared, "ImportProducer", "producerValue");
-    let producer_fn_top = top_named(&producer_prepared, "ImportProducer", "producerFn");
-
-    let consumer_prepared = parse_program(
-        IMPORT_CONSUMER_ARTIFACT,
-        &requirements(),
-        DecodeLimits::default(),
-    )
-    .expect("import-consumer artifact parses");
-    let value_identity = producer_identity("producerValue");
-    let fn_identity = producer_identity("producerFn");
-    let consumer_value_top = top_named_any(
-        &consumer_prepared,
-        "ImportConsumer",
-        &["consumerValueAt", "$wconsumerValueAt"],
-    );
-    let scalar_args = vec![0_u64; top_arity(&consumer_prepared, &consumer_value_top)];
-
+fn session_registry_drives_prepared_runtime_through_park_resume_cancel_and_retire() {
     let fixture = FreerResumeFixture::load();
-
-    let producer_linked = link_program(producer_prepared, &MachineImports::default())
-        .expect("producer has no imports of its own, so linking against an empty snapshot closes");
-    let producer_compiled = CompiledProgram::compile(&producer_linked).expect("producer compiles");
-    let (machine, producer_program) =
-        PreparedMachine::new(producer_compiled, machine_options()).expect("producer installs");
-
-    // `SessionId` has no `fresh()` constructor (it is a bare `pub struct
-    // SessionId(pub u64)`, per `tidepool-repr::session_ids`) -- every other
-    // integration test in this crate that needs one just picks a literal.
+    let prepared = tidepool_repr::execution_schema::testing::prepare(
+        tidepool_repr::execution_schema::testing::wire_program(),
+    )
+    .unwrap();
+    let linked = link_program(prepared, &MachineImports::default()).unwrap();
+    let compiled = CompiledProgram::compile(&linked).unwrap();
+    let (machine, _) = PreparedMachine::new(compiled, machine_options()).unwrap();
     let session_id = SessionId(910_001);
     let slot: SessionRegistry<PreparedMachine<'static>, (RealmId, PreparedHandle)> =
         SessionRegistry::new();
     slot.insert_idle(session_id, Box::new(machine));
-
-    // ==== Turn 1 -- incarnation A: bind + import + cross-program call =====
-    // Everything this turn leases (the two S6 imports) is scoped to
-    // `realm_a`, the resource scope standing in for incarnation A's own
-    // actor-shaped lifetime.
-    let checkout = slot
-        .checkout_run(session_id)
-        .expect("the freshly installed session is Idle");
-    let (mut machine, receipt) = checkout.into_parts();
-
     let realm_a = RealmId::fresh();
-
-    let bound_value = machine
-        .retain_top(producer_program, producer_value_top.binding.id)
-        .expect("producerValue retains as a session-level (ROOT-realm) handle");
-    let bound_fn = machine
-        .retain_top(producer_program, producer_fn_top.binding.id)
-        .expect("producerFn retains as a session-level (ROOT-realm) handle");
-
-    let handles = [
-        (value_identity.clone(), bound_value),
-        (fn_identity.clone(), bound_fn),
-    ];
-    let imports = import_bindings_for(&consumer_prepared, &machine, &handles)
-        .expect("both imports resolve their evaluatedness against the live machine");
-    let consumer_linked =
-        link_program(consumer_prepared, &imports).expect("consumer links against both bindings");
-    let consumer_compiled = machine
-        .compile_for_install(&consumer_linked)
-        .expect("consumer compiles against the machine's shared descriptor interner");
-    let mut bindings = tidepool_codegen::prepared_program::ImportBindings::new();
-    bindings.insert(value_identity.clone(), bound_value);
-    bindings.insert(fn_identity.clone(), bound_fn);
-    let consumer_program = machine
-        .install_program(consumer_compiled, bindings)
-        .expect("consumer installs under realm_a's own leases");
-
-    let expected = expected_consumer_value();
-    let observed = machine
-        .run_entry(
-            consumer_program,
-            consumer_value_top.binding.id,
-            &scalar_args,
-            call_options(true),
-            realm_a,
-        )
-        .expect("consumerValueAt reads producerValue through its import slot");
-    assert_eq!(observed.values.len(), 1);
-    assert_eq!(observed_int_list(&observed.values[0]), expected);
-
-    slot.settle_suspended(receipt, machine, Vec::new());
-    assert_eq!(
-        slot.kind(session_id),
-        Some(tidepool_runtime::session::registry::SlotKind::Idle),
-        "turn 1 parked nothing, so the slot settles back to Idle"
-    );
 
     // ==== Turn 2 -- incarnation A parks a continuation ====================
     // A second, independent program (freer-resume, no imports) installed on
@@ -731,10 +483,6 @@ fn session_registry_drives_prepared_runtime_through_bind_import_park_resume_canc
         frames_a, 0,
         "the prepared engine never parks a continuation as a frame in this test (no `park` call)"
     );
-    // Imported handles are session-level (`RealmId::ROOT`) roots from
-    // `retain_top`; closing `realm_a` does not affect them. The prepared
-    // machine has no lease-count bookkeeping for this path.
-
     let (frames_b, handles_b) = machine.close_realm(realm_b);
     assert_eq!(
         handles_b, 0,
@@ -742,22 +490,10 @@ fn session_registry_drives_prepared_runtime_through_bind_import_park_resume_canc
     );
     assert_eq!(frames_b, 0);
 
-    // The two incarnations' retirements did not disturb each other: both
-    // calls above are independent of order (realm_a closed first here, but
-    // neither touches the other's state).
-    assert!(
-        machine.release(bound_value),
-        "bound_value is still a live session-level handle after both realms closed"
-    );
-    assert!(
-        machine.release(bound_fn),
-        "bound_fn is still a live session-level handle after both realms closed"
-    );
-
     assert_eq!(
         machine.handle_count(),
         0,
-        "every value either incarnation produced, plus both session-level bindings, is released"
+        "every value either incarnation produced is released"
     );
     assert_eq!(machine.disposition(), MachineDisposition::Reusable);
 

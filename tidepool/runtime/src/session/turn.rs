@@ -48,7 +48,7 @@ use super::render::ExportItem;
 
 #[cfg(test)]
 #[path = "turn_scaling_tests.rs"]
-mod scaling_tests;
+pub(in crate::session) mod scaling_tests;
 
 /// Strict-force tier of a bound value (mirrors the extract's `BoundBinder.tier`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
