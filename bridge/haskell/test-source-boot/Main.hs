@@ -251,7 +251,7 @@ main = getArgs >>= \case
   ["--exact-loaded-metadata"] -> exactLoadedMetadata
   ["--quasiquote-codegen-transition"] -> quasiQuoteCodegenTransition
   ["--exact-bash-metadata", effects] -> exactBashMetadata effects
-  ["--package-inputs"] -> packageInputs
+  ["--package-inputs"] -> withTiming packageInputs
   ["--home-instance-edges"] -> selectedHomeInstanceEdges
   ["--fresh", work] -> reuseFresh work >>= requireReused "fresh worker"
   ["--mixed-fresh", work, count] -> reuseFresh work >>= requireMixed (read count)
@@ -3447,7 +3447,8 @@ packageInputs = withScratch $ \work -> do
       fail "cold input fixture did not leave its unused support validation-only"
     warmer <- compile (PreparedProducts Nothing) Set.empty GeneralCompile Nothing
       (work </> "OptionalWarmer.hs") [] Nothing
-    writeManifestFor ["OptionalAnchor"] work warmer
+    writeGenuineCandidateManifestFor ["OptionalAnchor"] work
+      (work </> "OptionalWarmer.hs") [work] warmer
     warm <- root (PreparedProducts (Just (manifest work)))
     unless (map candidateModule (pprAcceptedCandidates warm) == ["OptionalAnchor"]) $
       fail "warm input fixture did not admit its authenticated anchor candidate"
@@ -3469,7 +3470,8 @@ packageInputs = withScratch $ \work -> do
     putStrLn ("package-input-products cold=" ++ show (preparedNames cold)
       ++ " candidate=" ++ show (preparedNames warm)
       ++ " checked=" ++ show (length (dependencyModules (pprDependencies cold))))
-    writeManifestFor ["OptionalAnchor", "OptionalSupport"] work warm
+    writeGenuineCandidateManifestFor ["OptionalAnchor", "OptionalSupport"] work
+      (work </> "OptionalRoot.hs") [work] warm
     reused <- root (PreparedProducts (Just (manifest work)))
     unless (map candidateModule (pprAcceptedCandidates reused) == ["OptionalAnchor", "OptionalSupport"]) $
       fail "input fixture did not exercise authenticated candidate hydration"
@@ -3501,8 +3503,13 @@ packageInputs = withScratch $ \work -> do
             | node <- dependencyModules (pprDependencies wired)]
           ++ " resolved-imports=" ++ show [(unitString (moduleUnit owner),
               moduleNameString (moduleName owner), owner == gHC_PRIM) | owner <- imported])
-    writeManifestFor ["OptionalWiredSupport"] work wired
-    verifyPackageSidecar work (prHscEnv (pprPipelineResult wired))
+    writeGenuineCandidateManifestFor ["OptionalWiredSupport"] work
+      (work </> "OptionalWiredRoot.hs") [work] wired
+    wiredCandidates <- readModuleCandidates (manifest work) >>= either fail pure
+    wiredCandidate <- case filter ((== "OptionalWiredSupport") . candidateModule) wiredCandidates of
+      [candidate] -> pure candidate
+      _ -> fail "wired input fixture lacks one genuinely issued support candidate"
+    verifyPackageSidecar wiredCandidate (prHscEnv (pprPipelineResult wired))
     wiredReused <- wiredRoot (PreparedProducts (Just (manifest work))) GeneralCompile
     unless (map candidateModule (pprAcceptedCandidates wiredReused) == ["OptionalWiredSupport"]) $
       fail "wired input fixture did not exercise authenticated candidate hydration"
@@ -3694,13 +3701,15 @@ verifyCollectivePackageProof work prepared = withTiming $ do
 
 -- Mutated fixtures retain their bytes; only the owning sidecar reader decides
 -- whether old, cross-owner or unknown compiler facts can be admitted.
-verifyPackageSidecar :: FilePath -> HscEnv -> IO ()
-verifyPackageSidecar work environment = do
-  let path = work </> "OptionalWiredSupport.candidate.hi"
-      packages = path ++ ".packages"
-  ifaceBytes <- BS.readFile path
+verifyPackageSidecar :: ModuleCandidate -> HscEnv -> IO ()
+verifyPackageSidecar candidate environment = do
+  let path = candidateInterface candidate
+      packages = candidatePackageImports candidate
+      artifact = ExactIfaceArtifact (candidateUnit candidate) (candidateModule candidate)
+        path (candidateInterfaceSha256 candidate) (candidateInterfaceRequirements candidate)
   original <- BS.readFile packages
-  let artifact = ExactIfaceArtifact "main" "OptionalWiredSupport" path (digest ifaceBytes) []
+  unless (digest original == candidatePackageImportsSha256 candidate) $
+    fail "wired candidate package sidecar changed after issuance"
   term <- either (fail . show) (pure . snd)
     (deserialiseFromBytes decodeTerm (BSL.fromStrict original))
   case term of

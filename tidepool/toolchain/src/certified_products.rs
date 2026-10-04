@@ -678,11 +678,6 @@ pub(crate) fn decode_receipt_in(
     decode_receipt_value_in(&value, output_dir)
 }
 
-#[cfg(test)]
-fn decode_receipt_value(value: &Value) -> CertResult<CertifiedReceipt> {
-    decode_receipt_value_in(value, None)
-}
-
 fn decode_receipt_value_in(
     value: &Value,
     output_dir: Option<&Path>,
