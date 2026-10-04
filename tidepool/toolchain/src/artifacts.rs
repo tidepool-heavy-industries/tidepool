@@ -1915,8 +1915,9 @@ impl ModuleCandidateOffer {
         let [original] = products.as_slice() else {
             return Err(fail());
         };
-        let iface = crate::checked_cell::read(directory.join("original.hi"), 32 * 1024 * 1024)?;
-        let digest = crate::checked_cell::hash(&iface);
+        let interface = original.module_interface().ok_or_else(fail)?;
+        let iface = interface.interface_bytes();
+        let digest = crate::checked_cell::hash(iface);
         if string(&fields[5])? != digest || original.interface_bytes() != iface {
             return Err(fail());
         }
@@ -1942,9 +1943,7 @@ impl ModuleCandidateOffer {
             .and_then(serde_json::Value::as_str)
             .ok_or_else(fail)?
             .to_owned();
-        if std::fs::read(&receipt_path)? != bytes
-            || std::fs::read(directory.join("original.hi"))? != iface
-        {
+        if std::fs::read(&receipt_path)? != bytes {
             return Err(fail());
         }
         Ok(Some(crate::checked_cell::PlannedCheckedDeclaration {
