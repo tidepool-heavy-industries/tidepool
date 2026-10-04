@@ -185,6 +185,33 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         self.assertTrue(matches, buck)
         return buck, {name: ast.literal_eval(mapping) for name, mapping in matches}
 
+    def test_original_source_proof_control_has_counted_worker_execution_owner(self):
+        result = self.generate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        buck = (self.root / "tidepool/toolchain/BUCK").read_text()
+        group = re.search(
+            r'tidepool_rust_test_cases\(\n    name = "toolchain_source_proof_pairing_test",.*?\n\)',
+            buck, re.S,
+        )
+        self.assertIsNotNone(group, buck)
+        group = group.group()
+        self.assertIn('binary = ":tidepool_toolchain_unit_tests_binary"', group)
+        leaves = re.search(r'exact_tests = (\[.*?\]),', group, re.S)
+        self.assertEqual(ast.literal_eval(leaves[1]), [
+            "declaration_context::tests::source_selected_receipt_pairs_prior_program_support_with_actual_original_proof",
+        ])
+        for field in ("expected_count = 1", "ignored = True", "haskell_worker = True"):
+            self.assertIn(field, group)
+        for resource in (
+            "//build/package:compiler_deployment",
+            "//bridge/haskell:facade_embedded_sources",
+            "//build/package:tidepool_extract_runtime_libraries",
+        ):
+            self.assertIn(resource, group)
+        for variable in ("TIDEPOOL_COMPILER_DEPLOYMENT", "TIDEPOOL_EXTRACT",
+                         "TIDEPOOL_EXTRACT_WORKER", "TIDEPOOL_PRELUDE_DIR"):
+            self.assertIn(variable, group)
+
     def test_codegen_emits_native_units_and_all_registered_integration_tests(self):
         result = self.generate()
         self.assertEqual(result.returncode, 0, result.stderr)

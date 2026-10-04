@@ -985,6 +985,7 @@ for package_name, package in local.items():
         rules.append('load("//build/rust:defs.bzl", "tidepool_rust_test_cases")\n')
     if package_name == "tidepool-toolchain":
         rules.append('load("//build/rust:executable_resource.bzl", "runtime_executable")\n')
+        rules.append('load("//build/rust:defs.bzl", "tidepool_rust_test_cases")\n')
     if package_name == "tidepool-runtime":
         rules.append('load("//build/rust:defs.bzl", "tidepool_rust_test_cases")\n')
         rules.append('load("//build/rust:compile_fail.bzl", "rust_compile_fail")\n')
@@ -1114,6 +1115,18 @@ tidepool_buildscript_run(
             rules.append("\n".join(["tidepool_rust_test_cases(", f"    name = {json.dumps(unit_target['name'] + '_all')},", f"    binary = {json.dumps(':' + unit_target['name'])},", "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 14400000,", runtime_arguments(env, resources, worker), '    visibility = ["PUBLIC"],', ")", ""]))
         NATIVE_TARGETS[package_name]["libraries"][library["name"]].update({"test_build": "//" + CURRENT_DIR + ":" + unit_target["name"] + ("" if shared else "_binary"), "test": "//" + CURRENT_DIR + ":" + unit_target["name"] + ("_all" if shared else "")})
         if package_name == "tidepool-toolchain":
+            env, resources, worker = test_runtime_inputs(package_name, "toolchain_source_proof_pairing_test", unit=True)
+            rules.append("\n".join([
+                "tidepool_rust_test_cases(",
+                '    name = "toolchain_source_proof_pairing_test",',
+                f"    binary = {json.dumps(':' + unit_target['name'] + '_binary')},",
+                "    exact_tests = [",
+                '        "declaration_context::tests::source_selected_receipt_pairs_prior_program_support_with_actual_original_proof",',
+                "    ],", "    expected_count = 1,", "    ignored = True,",
+                "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 660000,",
+                runtime_arguments(env, resources, worker),
+                '    visibility = ["PUBLIC"],', ")", "",
+            ]))
             rules.append('''runtime_executable(
     name = "candidate_fixture_issuer",
     executable = ":tidepool_toolchain_unit_tests_binary",

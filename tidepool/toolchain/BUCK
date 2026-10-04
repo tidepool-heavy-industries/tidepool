@@ -7,6 +7,8 @@ load("//build/rust:defs.bzl", "tidepool_rust_isolated_test")
 
 load("//build/rust:executable_resource.bzl", "runtime_executable")
 
+load("//build/rust:defs.bzl", "tidepool_rust_test_cases")
+
 rust_filegroup(
     name = "tidepool_toolchain_sources",
     mapped_srcs = {
@@ -555,6 +557,35 @@ tidepool_rust_isolated_test(
         "//tidepool/extract-report:tidepool_extract_report",
         "//tidepool/repr:tidepool_repr",
     ],
+    env = {
+        "LD_LIBRARY_PATH": "$(location //build/package:tidepool_extract_runtime_libraries)",
+        "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_deployment)",
+        "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
+        "TIDEPOOL_EXTRACT_RUNTIME_LIBRARIES": "$(location //build/package:tidepool_extract_runtime_libraries)",
+        "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
+        "TIDEPOOL_KEEP_TEST_LOGS": "1",
+        "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
+    },
+    resources = [
+        "//bridge/haskell:facade_embedded_sources",
+        "//build/package:compiler_deployment",
+        "//build/package:tidepool_extract_runtime_libraries",
+    ],
+    haskell_worker = True,
+    visibility = ["PUBLIC"],
+)
+
+tidepool_rust_test_cases(
+    name = "toolchain_source_proof_pairing_test",
+    binary = ":tidepool_toolchain_unit_tests_binary",
+    exact_tests = [
+        "declaration_context::tests::source_selected_receipt_pairs_prior_program_support_with_actual_original_proof",
+    ],
+    expected_count = 1,
+    ignored = True,
+    jobs = 1,
+    timeout = 600,
+    test_rule_timeout_ms = 660000,
     env = {
         "LD_LIBRARY_PATH": "$(location //build/package:tidepool_extract_runtime_libraries)",
         "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_deployment)",
