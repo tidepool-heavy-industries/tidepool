@@ -11,6 +11,7 @@ module Tidepool.ExecutionSource
   , executionNodeOriginalResolutions
   , decodeExecutionSourceDescriptors, readExecutionSourceGraphs, executionSourceGraphsFit
   , executionSourceGraphBytesLimit
+  , WorkerExecutionSource(..), SourceRecipeUnavailable(..), encodeWorkerExecutionSource
   ) where
 
 import Codec.CBOR.Decoding
@@ -80,6 +81,32 @@ data ExecutionSourceGraph = ExecutionSourceGraph
 -- A successful compiler transaction supplies the same original recipe fields
 -- consumed by the wire decoder. Native/interface identities are the already
 -- retained products; this record grants no lexical imports.
+-- Exact compilation issues one immutable recipe for both later worker passes
+-- and frontend admission. Ordinary compilation has no worker recipe consumer.
+data WorkerExecutionSource
+  = OrdinaryExecutionSource
+  | ExactExecutionSourceUnavailable SourceRecipeUnavailable
+  | ExactExecutionSourceAvailable ExecutionSourceGraph
+
+data SourceRecipeUnavailable
+  = NoFreshOriginals
+  | IncompleteSourceEvidence
+  | UnsupportedSourceRecipe
+  | UnavailableSourceRoot
+
+encodeWorkerExecutionSource :: WorkerExecutionSource -> Encoding
+encodeWorkerExecutionSource OrdinaryExecutionSource =
+  encodeListLen 1 <> encodeString "ordinary"
+encodeWorkerExecutionSource (ExactExecutionSourceAvailable graph) =
+  encodeListLen 2 <> encodeString "exact-available"
+    <> encodeString (T.pack (executionGraphSha256 graph))
+encodeWorkerExecutionSource (ExactExecutionSourceUnavailable reason) =
+  encodeListLen 2 <> encodeString "exact-unavailable" <> encodeString (case reason of
+    NoFreshOriginals -> "no-fresh-originals"
+    IncompleteSourceEvidence -> "incomplete-source-evidence"
+    UnsupportedSourceRecipe -> "unsupported-source-recipe"
+    UnavailableSourceRoot -> "unavailable-source-root")
+
 data ExecutionSourceRecipe = ExecutionSourceRecipe
   { recipeProducer :: String
   , recipeSemantic :: Maybe String

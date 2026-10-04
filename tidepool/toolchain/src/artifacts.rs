@@ -2290,7 +2290,7 @@ fn seal_turn_outputs_inner(
         return Ok(None);
     }
     let receipt_decode_start = Instant::now();
-    let receipt = certified_products::decode_receipt(&receipt_bytes)
+    let receipt = certified_products::decode_receipt_in(&receipt_bytes, Some(output_dir))
         .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
     timing::record_stage(
         timing::NO_NODE,
@@ -2980,7 +2980,7 @@ fn compile_invocation_inner(
             ensure_no_uncertified_globals(&artifacts)?;
             return Ok(artifacts);
         }
-        let receipt = certified_products::decode_receipt(&receipt_bytes)
+        let receipt = certified_products::decode_receipt_in(&receipt_bytes, Some(temp_dir.path()))
             .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
         let fresh_products =
             certified_products::ParsedModuleProducts::decode(&product_bytes, &package_bundle_bytes)

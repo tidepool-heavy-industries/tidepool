@@ -149,7 +149,8 @@ import Tidepool.CheckedCell (CheckedSignature(..), RequestTypeSignatures(..), Re
 import Tidepool.TurnSource (replaceTemplateMarker, spliceTemplate)
 import Tidepool.Binders (BoundBinder(..))
 import Tidepool.ExecutionSource
-  ( ExecutionSourceIdentity(..), ExecutionSourceOwner(..), ExecutionSourceRef(..), ExecutionSourceGraph(..), ExecutionSourceNode(..)
+  ( WorkerExecutionSource(OrdinaryExecutionSource)
+  , ExecutionSourceIdentity(..), ExecutionSourceOwner(..), ExecutionSourceRef(..), ExecutionSourceGraph(..), ExecutionSourceNode(..)
   , executionSourceClosure, executionSourceOriginalNode, executionSourceOriginalClosure, executionIdentityKey
   , ExecutionSourceFailure(..), ExecutionSourceRecipe(..), issueExecutionSourceRecipe, executionSourceProspectiveReferences
   , executionNodeOriginalResolutions
@@ -1540,14 +1541,14 @@ certifyProjectedProducts work label original outcomes targets env = do
   originals <- newOriginalInterfaceArtifacts env (pprFinalizedModules original) [] work
   finalized <- captureFinalizedModuleArtifacts originals env (pprFinalizedModules original)
     (pprPackageImports original) evidence work
-  encodeCertifiedProducts env (pprProductInterfaces original) finalized [] Nothing fresh targets evidence bytes
+  encodeCertifiedProducts env OrdinaryExecutionSource (pprProductInterfaces original) finalized [] Nothing fresh targets evidence bytes
     (BSC.pack (renderDependencyEvidence evidence))
 
 certificateOwners :: BS.ByteString -> IO [Term]
 certificateOwners bytes = do
   term <- either (fail . show) (pure . snd) (deserialiseFromBytes decodeTerm (BSL.fromStrict bytes))
   case term of
-    TList [TString "TPCERT", TInt 6, _, _, _, TList rows, _] -> forM rows $ \case
+    TList [TString "TPCERT", TInt 7, _, _, _, TList rows, _, TList [TString "ordinary"]] -> forM rows $ \case
       TList [_,_,_,_,owner] -> pure owner
       _ -> fail "original certificate global lacks its exact owner"
     _ -> fail "original product lacks its canonical ownership certificate"
@@ -1609,19 +1610,19 @@ verifyCertifiedGroupingOrder work original = do
         , candidateProductPath = path ++ ".product.cbor"
         , candidateExecutionSource = Nothing
         }
-  bytes <- encodeCertifiedProducts env (pprProductInterfaces original) (emptyFinalizedModuleArtifacts env) [candidate] Nothing
+  bytes <- encodeCertifiedProducts env OrdinaryExecutionSource (pprProductInterfaces original) (emptyFinalizedModuleArtifacts env) [candidate] Nothing
     [] [] emptyEvidence BS.empty BS.empty >>= either fail pure
   term <- either (fail . show) (pure . snd)
     (deserialiseFromBytes decodeTerm (BSL.fromStrict bytes))
   case term of
-    TList [TString "TPCERT", TInt 6, TList [TList fields], TList [], TList [], TList [], _]
+    TList [TString "TPCERT", TInt 7, TList [TList fields], TList [], TList [], TList [], _, TList [TString "ordinary"]]
       | length fields == 10 -> case drop 8 fields of
           [TList groups,TList []] -> unless (map ordinal groups == [91,3]) $
             fail "certified module grouping changed nonmonotone encounter order"
           _ -> fail "certified module grouping omitted its exact group or interface inventory"
     _ -> fail "certified module grouping produced an unexpected certificate envelope"
   let absent = candidate {candidateModule="MissingOriginalInterface"}
-  encodeCertifiedProducts env Map.empty (emptyFinalizedModuleArtifacts env) [absent] Nothing [] [] emptyEvidence BS.empty BS.empty >>= \case
+  encodeCertifiedProducts env OrdinaryExecutionSource Map.empty (emptyFinalizedModuleArtifacts env) [absent] Nothing [] [] emptyEvidence BS.empty BS.empty >>= \case
     Left _ -> pure ()
     Right _ -> fail "cached original without its exact interface acquired a certificate"
   where
@@ -3689,7 +3690,7 @@ verifyRetainedPackageWitness producer evidence = do
         , programSignatures = [], programGlobals = globals, programConstructors = []
         , programOperations = [], programBindings = [], programEntry = ValueId 0
         , programTypes = [], programSites = [], programVerbSites = [], programJsonLayout = Nothing }
-      encode globals = encodeCertifiedProducts producer Map.empty (emptyFinalizedModuleArtifacts producer) [] Nothing []
+      encode globals = encodeCertifiedProducts producer OrdinaryExecutionSource Map.empty (emptyFinalizedModuleArtifacts producer) [] Nothing []
         [("target", program globals)] evidence "" ""
   withTiming $ do
     let repeated = replicate 1000 (global package 0)
@@ -3713,9 +3714,9 @@ verifyRetainedPackageWitness producer evidence = do
     repeatedTerm <- either (fail . show) (pure . snd)
       (deserialiseFromBytes decodeTerm (BSL.fromStrict first))
     case repeatedTerm of
-      TList [TString "TPCERT", TInt 6, TList [],
+      TList [TString "TPCERT", TInt 7, TList [],
           TList [TList [TString "target", TList references]],
-          TList _, TList globals, _]
+          TList _, TList globals, _, TList [TString "ordinary"]]
         | length references == 1001
             && length globals == 2 -> unless (sameRepeatedReferences references globals) $
               fail ("repeated package witnesses lost canonical deduplication or reference indices: "
@@ -3742,7 +3743,7 @@ verifyRetainedPackageWitness producer evidence = do
   retainByteOracle "mixed-retained" bytes
   term <- either (fail . show) (pure . snd) (deserialiseFromBytes decodeTerm (BSL.fromStrict bytes))
   owners <- case term of
-    TList [TString "TPCERT", TInt 6, _, _, _, TList rows, _] ->
+    TList [TString "TPCERT", TInt 7, _, _, _, TList rows, _, TList [TString "ordinary"]] ->
       forM rows $ \case
         TList [_, _, _, _, owner] -> pure owner
         _ -> fail "certified global row lacks exact owner"
@@ -3765,7 +3766,7 @@ verifyRetainedPackageWitness producer evidence = do
         , programBindings = [NonRecursive (TopBinding identity
             (HeapBinding (ValueId (fromIntegral index)) (Constructor (ConstructorId 0) [])))
             | (index, identity) <- zip [0 :: Int ..] identities] }
-      encodeProgram target = encodeCertifiedProducts producer Map.empty (emptyFinalizedModuleArtifacts producer) [] Nothing []
+      encodeProgram target = encodeCertifiedProducts producer OrdinaryExecutionSource Map.empty (emptyFinalizedModuleArtifacts producer) [] Nothing []
         [("target", target)] evidence "" ""
       decode bytes' = either (fail . show) (pure . snd)
         (deserialiseFromBytes decodeTerm (BSL.fromStrict bytes'))
@@ -3844,13 +3845,13 @@ verifyRetainedPackageWitness producer evidence = do
   retainByteOracle "local-package" localBytes
   local <- decode localBytes
   case local of
-    TList [TString "TPCERT", TInt 6, _, _, TList [TList
-      [TString "ghc-internal", TString "GHC.Internal.Stack.Types", TString _, TString sha]], TList [], _]
+    TList [TString "TPCERT", TInt 7, _, _, TList [TList
+      [TString "ghc-internal", TString "GHC.Internal.Stack.Types", TString _, TString sha]], TList [], _, TList [TString "ordinary"]]
       | T.length sha == 64 -> pure ()
     _ -> fail "local package constructor without incoming globals lacks exact interface evidence"
   internal <- encodeProgram (localProgram [synthetic]) >>= either fail decode
   case internal of
-    TList [TString "TPCERT", TInt 6, _, _, TList [], TList [], _] -> pure ()
+    TList [TString "TPCERT", TInt 7, _, _, TList [], TList [], _, TList [TString "ordinary"]] -> pure ()
     _ -> fail "noncanonical internal package helper supplied external interface authority"
   encodeProgram ((localProgram [constructor, synthetic])
     { programGlobals = [global synthetic 0] }) >>= \case
@@ -3901,7 +3902,7 @@ verifyChangedPackageInterface producer identity evidence program global = withSc
   finder <- initFinderCache
   addModuleToFinder finder (GWIB owner NotBoot) (location { ml_hi_file = path })
   let environment = producer { hsc_FC = finder }
-      encode = encodeCertifiedProducts environment Map.empty (emptyFinalizedModuleArtifacts environment) [] Nothing []
+      encode = encodeCertifiedProducts environment OrdinaryExecutionSource Map.empty (emptyFinalizedModuleArtifacts environment) [] Nothing []
         [("target", program [global identity 0, global identity 0])] evidence "" ""
   first <- encode >>= either fail pure
   (firstId, _) <- resolvePackageGlobal environment identity >>= either fail pure

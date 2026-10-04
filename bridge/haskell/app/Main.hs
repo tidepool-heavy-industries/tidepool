@@ -92,6 +92,7 @@ import Tidepool.PackageWitness (PackageImportEvidence(..), PackageImportRoot(..)
 import Tidepool.ExecutionSource
   ( ExecutionSourceRecipe(..), ExecutionSourceGraph(..), ExecutionSourceIdentity(..)
   , ExecutionSourceOwner(..), ExecutionSourceRef(..), ExecutionSourceFailure(..)
+  , WorkerExecutionSource(..), SourceRecipeUnavailable(..)
   , issueExecutionSourceRecipe, executionIdentityKey, executionSourceProspectiveReferences )
 import Numeric (readHex)
 import Tidepool.DeclarationJoin
@@ -414,20 +415,20 @@ processFile compiler caches timing args path = do
 
     timePhase timing "prepared_write" $ writePreparedArtifacts outDir preparedArtifacts
     timePhase timing "module_products" $
-      writeCertifiedProducts originalInterfaces outDir hscEnv prepared productContext preparedArtifacts
+      writeCertifiedProducts (requestIncludes args) originalInterfaces outDir hscEnv prepared productContext preparedArtifacts
 
   reportDiags res
 
 writeCertifiedProducts
-  :: OriginalInterfaceArtifacts -> FilePath -> HscEnv -> PreparedPipelineResult -> Maybe PreparedModuleProducts
+  :: [FilePath] -> OriginalInterfaceArtifacts -> FilePath -> HscEnv -> PreparedPipelineResult -> Maybe PreparedModuleProducts
   -> [PreparedArtifact] -> IO ()
-writeCertifiedProducts originalInterfaces outDir hscEnv prepared productContext preparedArtifacts =
-  void (writeCertifiedProductsKeeping originalInterfaces outDir hscEnv prepared productContext preparedArtifacts)
+writeCertifiedProducts includes originalInterfaces outDir hscEnv prepared productContext preparedArtifacts =
+  void (writeCertifiedProductsKeeping includes originalInterfaces outDir hscEnv prepared productContext preparedArtifacts)
 
 data CertifiedOriginalProducts = CertifiedOriginalProducts
-  { certifiedOriginalDependencies :: DependencyEvidence
-  , certifiedOriginalProducts :: [ModuleProductEncoding]
+  { certifiedOriginalProducts :: [ModuleProductEncoding]
   , certifiedFinalizedArtifacts :: FinalizedModuleArtifacts
+  , certifiedExecutionSource :: WorkerExecutionSource
   }
 
 -- Captures come from the exact scope, including its admitted checked values,
@@ -446,9 +447,9 @@ retainedOriginalInterfaces prepared =
      | candidate <- pprAcceptedCandidates prepared]
 
 writeCertifiedProductsKeeping
-  :: OriginalInterfaceArtifacts -> FilePath -> HscEnv -> PreparedPipelineResult -> Maybe PreparedModuleProducts
+  :: [FilePath] -> OriginalInterfaceArtifacts -> FilePath -> HscEnv -> PreparedPipelineResult -> Maybe PreparedModuleProducts
   -> [PreparedArtifact] -> IO CertifiedOriginalProducts
-writeCertifiedProductsKeeping originalInterfaces outDir hscEnv prepared productContext preparedArtifacts = do
+writeCertifiedProductsKeeping includes originalInterfaces outDir hscEnv prepared productContext preparedArtifacts = do
     timing <- readTimingEnabled
     (availability, freshProducts) <- timeDetailPhase timing "module_products" "write_products" $
       writeModuleProducts originalInterfaces outDir productContext
@@ -479,10 +480,18 @@ writeCertifiedProductsKeeping originalInterfaces outDir hscEnv prepared productC
       productBytes <- BS.readFile (outDir </> "module-products.cbor")
       evidenceBytes <- BS.readFile (outDir </> "dependencies.json")
       pure (productBytes, evidenceBytes)
+    sourceRecipe <- case pprExactCompilation prepared of
+      Nothing -> pure OrdinaryExecutionSource
+      Just compilation -> issueFreshExecutionSource includes prepared freshDependencies freshProducts
+        (compilationScope compilation)
+    case sourceRecipe of
+      ExactExecutionSourceAvailable graph ->
+        BS.writeFile (outDir </> "execution-source.cbor") (executionGraphBytes graph)
+      _ -> pure ()
     finalized <- timeDetailPhase timing "module_products" "certify" $ do
       finalized <- captureFinalizedModuleArtifacts originalInterfaces hscEnv
         (pprFinalizedModules prepared) (pprPackageImports prepared) finalDependencies outDir
-      certified <- encodeCertifiedProducts hscEnv (pprProductInterfaces prepared) finalized (pprAcceptedCandidates prepared)
+      certified <- encodeCertifiedProducts hscEnv sourceRecipe (pprProductInterfaces prepared) finalized (pprAcceptedCandidates prepared)
         (compilationScope <$> pprExactCompilation prepared)
         (map moduleProductInput freshProducts) [(paTarget artifact, paProgram artifact) | artifact <- preparedArtifacts]
         finalDependencies productBytes evidenceBytes
@@ -493,7 +502,7 @@ writeCertifiedProductsKeeping originalInterfaces outDir hscEnv prepared productC
           BS.writeFile (outDir </> "certified-products.cbor") BS.empty
           unless (null freshProducts) $ fail ("native product certification failed: " ++ reason)
       pure finalized
-    pure (CertifiedOriginalProducts freshDependencies freshProducts finalized)
+    pure (CertifiedOriginalProducts freshProducts finalized sourceRecipe)
 
 data PreparedArtifact = PreparedArtifact
   { paTarget :: String
@@ -1090,7 +1099,7 @@ compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb binde
     timePhase timing "prepared_sidecars" $ writePreparedSidecars InlineYieldSites outDir binds (prTyCons result) mCapturedTy warnTexts preparedArtifacts
     timePhase timing "prepared_write" $ writePreparedArtifacts outDir preparedArtifacts
     originalProducts <- timePhase timing "module_products" $
-      writeCertifiedProductsKeeping originalInterfaces outDir hscEnv prepared productContext preparedArtifacts
+      writeCertifiedProductsKeeping (requestIncludes args) originalInterfaces outDir hscEnv prepared productContext preparedArtifacts
     when (not (requestCell args) && not (requestActivationPreview args)
         && null (requestInjectVals args) && not (isJust (requestSessionArtifacts args))
         && Map.null (requestRetainedGenerations args)) $
@@ -1413,7 +1422,7 @@ runCellProgramMode compiler caches args cellPath exact planned = do
       lastAttempt <- newIORef Nothing
       output <- timePhase timing "cell_program_native" $ compileClassifiedTurnKeeping scoped caches localArgs timing directory
         source verdict (intercalate ", " (sbBinders verdict)) (Just itemAdmission) Nothing lastAttempt (priorProgramImports state) (PlannedTurnParse parserFlags (programPrologue state))
-      extended <- retainProgramProducts (requestIncludes args) directory (compiledPipeline output)
+      extended <- retainProgramProducts directory (compiledPipeline output)
         (compiledOriginalProducts output) (compiledModule output) scope
       let turn = compiledTurn output
           retainedState = state { programExact = extended }
@@ -1450,7 +1459,7 @@ runCellProgramMode compiler caches args cellPath exact planned = do
       lastAttempt <- newIORef Nothing
       output <- timePhase timing "cell_program_display" $ compileClassifiedTurnKeeping scoped caches localArgs timing directory
         "" verdict (intercalate ", " (sbBinders verdict)) Nothing (Just display) lastAttempt (priorProgramImports state) (StandaloneTurnParse parserFlags)
-      extended <- retainProgramProducts (requestIncludes args) directory (compiledPipeline output)
+      extended <- retainProgramProducts directory (compiledPipeline output)
         (compiledOriginalProducts output) (compiledModule output) scope
       let turn = compiledTurn output
       BS.writeFile (directory </> "turn.cbor") (encodeTurnOut turn)
@@ -1595,9 +1604,9 @@ prepareOriginalCellDeclaration compiler caches args template outDir scope exact 
   writePreparedSidecars SeparateYieldSites directory binds (prTyCons result)
     Nothing (map T.pack (prWarnings result)) artifacts
   writePreparedArtifacts directory artifacts
-  certified <- writeCertifiedProductsKeeping originalInterfaces directory environment prepared productContext artifacts
+  certified <- writeCertifiedProductsKeeping (requestIncludes args) originalInterfaces directory environment prepared productContext artifacts
   let products = certifiedOriginalProducts certified
-  supportScope <- retainProgramProducts (requestIncludes args) directory prepared certified reserved exact
+  supportScope <- retainProgramProducts directory prepared certified reserved exact
   originalProductEncoding <- case
       [product' | product' <- products
         , let (_, name, _, _) = moduleProductInput product', T.unpack name == reserved] of
@@ -1649,9 +1658,9 @@ prepareOriginalCellDeclaration compiler caches args template outDir scope exact 
 -- products keep their producer's bytes and version; fresh products use the
 -- validated source witness. Neither path replaces an admitted hidden owner.
 retainProgramProducts
-  :: [FilePath] -> FilePath -> PreparedPipelineResult
+  :: FilePath -> PreparedPipelineResult
   -> CertifiedOriginalProducts -> String -> ExactScope -> IO ExactScope
-retainProgramProducts includes directory prepared certified target initial = do
+retainProgramProducts directory prepared certified target initial = do
   selected <- either fail pure (extendSourceSelectedOriginals
     (pprExactCompilation prepared >>= compilationSourceSelection) initial)
   finalized <- foldM retainInterface selected (Map.toAscList localInterfaces)
@@ -1660,7 +1669,18 @@ retainProgramProducts includes directory prepared certified target initial = do
   let parcels = mapMaybe candidateExecutionSources (pprAcceptedCandidates prepared)
   inherited <- either throwIO pure
     (extendExactExecutionSources (concatMap fst parcels) (map snd parcels) promoted)
-  retainFreshExecutionSources includes prepared certified target inherited
+  case certifiedExecutionSource certified of
+    ExactExecutionSourceAvailable graph -> do
+      let prospective = [ExecutionSourceRef (executionOwnerIdentity owner) (executionGraphSha256 graph)
+            | owner <- executionGraphOwners graph, executionOwnerFresh owner
+            , executionModule (executionOwnerIdentity owner) /= target]
+      references <- either throwIO pure (executionSourceProspectiveReferences
+        (graph : scopeExecutionGraphs inherited) (scopeExecutionOwners inherited) prospective)
+      extended <- either throwIO pure
+        (extendExactExecutionSourcesWithinBudget [graph] references inherited)
+      pure (fromMaybe inherited extended)
+    ExactExecutionSourceUnavailable _ -> pure inherited
+    OrdinaryExecutionSource -> fail "exact program products lack exact source recipe outcome"
   where
     localInterfaces = Map.filterWithKey (\(_,owner) _ -> owner /= target)
       (finalizedLocalAdmissions (certifiedFinalizedArtifacts certified))
@@ -1795,42 +1815,51 @@ retainProgramProducts includes directory prepared certified target initial = do
 -- A later item can execute a quoter defined by an original retained here.
 -- Keep its consumed source recipe at the same boundary as its native product,
 -- rather than waiting for the frontend's postworker item certification.
-retainFreshExecutionSources
-  :: [FilePath] -> PreparedPipelineResult -> CertifiedOriginalProducts -> String
-  -> ExactScope -> IO ExactScope
-retainFreshExecutionSources includes prepared certified target scope
-  | null supporting = pure scope
-  | not (dependencyCacheSafe evidence && dependencySelectionComplete evidence) = pure scope
+issueFreshExecutionSource
+  :: [FilePath] -> PreparedPipelineResult -> DependencyEvidence -> [ModuleProductEncoding]
+  -> ExactScope -> IO WorkerExecutionSource
+issueFreshExecutionSource includes prepared evidence fullProducts scope
+  | null fullProducts = pure (ExactExecutionSourceUnavailable NoFreshOriginals)
+  | not (dependencyCacheSafe evidence && dependencySelectionComplete evidence) =
+      pure (ExactExecutionSourceUnavailable IncompleteSourceEvidence)
   | otherwise = do
       compilation <- maybe (fail "fresh supporting original has no compiler transaction") pure
         (pprExactCompilation prepared)
       let exactRows = compilationImports compilation
       if any (\((_,_,boot),edges) -> boot || any (\(_,_,isBoot,_) -> isBoot) edges) exactRows
-        then pure scope
+        then pure (ExactExecutionSourceUnavailable UnsupportedSourceRecipe)
         else do
           origin <- normalise <$> makeAbsolute (compilationSource compilation)
           sourceBytes <- BS.readFile origin
           case [source | source <- dependencySources evidence, dependencySourcePath source == origin] of
             [source] | dependencySourceSha256 source == shaHex sourceBytes -> pure ()
-            _ -> throwIO (ExecutionSourceChanged ("",target))
+            _ -> throwIO (ExecutionSourceChanged ("","compiler source recipe"))
           validateDependencyEvidence evidence
-          source <- either (const (throwIO (ExecutionSourceUnsupported ("",target))))
+          source <- either (const (throwIO (ExecutionSourceUnsupported ("","compiler source recipe"))))
             (pure . T.unpack) (TE.decodeUtf8' sourceBytes)
           allRootsPresent <- and <$> mapM doesPathExist includes
           roots <- if allRootsPresent then mapM canonicalizePath includes else pure []
           fresh <- mapM freshIdentity fullProducts
-          packages <- foldM retainPackage Map.empty
-            (concatMap packageInterfaces (Map.elems (pprPackageImports prepared)))
+          sourcePackages <- forM fullProducts $ \product' -> do
+            let (_,owner,_,_) = moduleProductInput product'
+            maybe (fail "fresh execution original lacks package witness") pure
+              (Map.lookup (mkModuleName (T.unpack owner)) (pprPackageImports prepared))
+          packages <- foldM retainPackage Map.empty (concatMap packageInterfaces sourcePackages)
           let freshKeys = Set.fromList (map executionIdentityKey fresh)
               prior = Map.fromList
-                [(executionIdentityKey (executionRefIdentity ref),ref) | ref <- scopeExecutionOwners scope]
+                [(executionIdentityKey (executionRefIdentity ref),ref)
+                | ref <- scopeExecutionOwners scope ++ map snd (mapMaybe candidateExecutionSources
+                    (pprAcceptedCandidates prepared))]
               originalIdentity product' = ExecutionSourceIdentity
                 (originalUnit product') (originalModule product') (originalVersion product')
                 (originalIfaceSha256 product') (originalProductSha256 product')
+              retained = map originalIdentity (scopeProducts scope)
+                ++ [ExecutionSourceIdentity (candidateUnit candidate) (candidateModule candidate)
+                    (candidateModuleVersion candidate) (candidateInterfaceSha256 candidate)
+                    (candidateProductSha256 candidate) | candidate <- pprAcceptedCandidates prepared]
               inherited = [ExecutionSourceOwner original False
                   (executionRefGraph <$> Map.lookup (executionIdentityKey original) prior)
-                | product' <- scopeProducts scope, let original = originalIdentity product'
-                , executionIdentityKey original `Set.notMember` freshKeys]
+                | original <- retained, executionIdentityKey original `Set.notMember` freshKeys]
               normalized = evidence
                 { dependencySources = [row {dependencySourcePath = marker (dependencySourcePath row)}
                     | row <- dependencySources evidence]
@@ -1854,23 +1883,11 @@ retainFreshExecutionSources includes prepared certified target scope
                   | root <- Map.elems packages]
           issued <- if allRootsPresent then either throwIO pure (issueExecutionSourceRecipe recipe)
             else pure Nothing
-          case issued of
-            Nothing -> pure scope
-            Just graph -> do
-              let availableGraphs = graph : scopeExecutionGraphs scope
-                  prospective = [ExecutionSourceRef original (executionGraphSha256 graph)
-                    | original <- fresh, executionModule original /= target]
-              references <- either throwIO pure (executionSourceProspectiveReferences
-                availableGraphs (scopeExecutionOwners scope) prospective)
-              if null references then pure scope else do
-                extended <- either throwIO pure
-                  (extendExactExecutionSourcesWithinBudget [graph] references scope)
-                pure (fromMaybe scope extended)
+          pure $ case issued of
+            Just graph -> ExactExecutionSourceAvailable graph
+            Nothing -> ExactExecutionSourceUnavailable
+              (if allRootsPresent then UnsupportedSourceRecipe else UnavailableSourceRoot)
   where
-    evidence = certifiedOriginalDependencies certified
-    fullProducts = certifiedOriginalProducts certified
-    supporting = [product' | product' <- fullProducts
-      , let (_,owner,_,_) = moduleProductInput product', T.unpack owner /= target]
     freshIdentity product' = do
       let (unitText,ownerText,interfaceBytes,_) = moduleProductInput product'
           unit = T.unpack unitText
@@ -1895,7 +1912,7 @@ retainFreshExecutionSources includes prepared certified target scope
             | original <- scopeProducts scope
             , (originalUnit original,originalModule original) == (unit,owner)] of
         [original] | original == expected -> pure original
-        [] | owner == target -> pure expected
+        [] -> pure expected
         _ -> throwIO (ExecutionSourceConflicting (unit,owner))
     retainPackage selected root =
       let key = (packageUnit root,packageModule root)

@@ -131,6 +131,24 @@ pub struct CertifiedReceipt {
     pub targets: BTreeMap<String, Vec<AcceptedGlobal>>,
     pub packages: BTreeMap<(String, String), PackageInterfaceWitness>,
     pub finalization: FinalizationEnvelope,
+    pub source_recipe: WorkerExecutionSource,
+}
+
+/// Untrusted worker result until the original product admission authenticates
+/// its complete source domain. A recipe never grants native package authority.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum WorkerExecutionSource {
+    Ordinary,
+    ExactUnavailable(SourceRecipeUnavailable),
+    ExactAvailable { digest: [u8; 32], bytes: Arc<[u8]> },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SourceRecipeUnavailable {
+    NoFreshOriginals,
+    IncompleteSourceEvidence,
+    UnsupportedSourceRecipe,
+    UnavailableSourceRoot,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -627,10 +645,17 @@ fn validate_global_witness(
     Ok(selected.owner.clone())
 }
 
-/// Decode the worker's bounded `TPCERT6` tuple with exact owner rows shared
+/// Decode the worker's bounded `TPCERT7` tuple with exact owner rows shared
 /// through an immutable dictionary. Older ownership formats are refused.
 /// Original groups and executable targets preserve their ordered witnesses.
 pub fn decode_receipt(bytes: &[u8]) -> CertResult<CertifiedReceipt> {
+    decode_receipt_in(bytes, None)
+}
+
+pub(crate) fn decode_receipt_in(
+    bytes: &[u8],
+    output_dir: Option<&Path>,
+) -> CertResult<CertifiedReceipt> {
     if bytes.len() > RECEIPT_LIMIT {
         return Err(CertificationError::Receipt("receipt size"));
     }
@@ -640,23 +665,31 @@ pub fn decode_receipt(bytes: &[u8]) -> CertResult<CertifiedReceipt> {
     if cursor.position() != bytes.len() as u64 {
         return Err(CertificationError::Receipt("trailing bytes"));
     }
-    decode_receipt_value(&value)
+    decode_receipt_value_in(&value, output_dir)
 }
 
+#[cfg(test)]
 fn decode_receipt_value(value: &Value) -> CertResult<CertifiedReceipt> {
+    decode_receipt_value_in(value, None)
+}
+
+fn decode_receipt_value_in(
+    value: &Value,
+    output_dir: Option<&Path>,
+) -> CertResult<CertifiedReceipt> {
     let header = array(value)?;
     if header.len() < 2 || string(&header[0])? != "TPCERT" {
         return Err(CertificationError::Receipt("receipt header"));
     }
     let version = number(&header[1])?;
-    if version != 6 {
+    if version != 7 {
         return Err(CertificationError::UnsupportedVersion {
             format: CertificationFormat::ProductReceipt,
             found: version,
-            expected: 6,
+            expected: 7,
         });
     }
-    if header.len() != 7 {
+    if header.len() != 8 {
         return Err(CertificationError::Receipt("receipt header"));
     }
     let mut dictionary = GlobalDictionary::decode(&header[5])?;
@@ -759,6 +792,44 @@ fn decode_receipt_value(value: &Value) -> CertResult<CertifiedReceipt> {
             return Err(CertificationError::Receipt("duplicate package witness"));
         }
     }
+    let recipe = array(&header[7])?;
+    let source_recipe = match recipe.first().map(string).transpose()? {
+        Some("ordinary") if recipe.len() == 1 => WorkerExecutionSource::Ordinary,
+        Some("exact-unavailable") if recipe.len() == 2 => {
+            let reason = match string(&recipe[1])? {
+                "no-fresh-originals" => SourceRecipeUnavailable::NoFreshOriginals,
+                "incomplete-source-evidence" => SourceRecipeUnavailable::IncompleteSourceEvidence,
+                "unsupported-source-recipe" => SourceRecipeUnavailable::UnsupportedSourceRecipe,
+                "unavailable-source-root" => SourceRecipeUnavailable::UnavailableSourceRoot,
+                _ => {
+                    return Err(CertificationError::Receipt(
+                        "source recipe unavailable reason",
+                    ))
+                }
+            };
+            WorkerExecutionSource::ExactUnavailable(reason)
+        }
+        Some("exact-available") if recipe.len() == 2 => {
+            use std::io::Read;
+            let directory =
+                output_dir.ok_or(CertificationError::Receipt("source recipe output owner"))?;
+            let expected = digest(&recipe[1])?;
+            let file = std::fs::File::open(directory.join("execution-source.cbor"))
+                .map_err(|_| CertificationError::Receipt("source recipe unavailable"))?;
+            let mut bytes = Vec::new();
+            file.take((crate::execution_source::GRAPH_BYTES_LIMIT + 1) as u64)
+                .read_to_end(&mut bytes)
+                .map_err(|_| CertificationError::Receipt("source recipe read"))?;
+            if bytes.len() > crate::execution_source::GRAPH_BYTES_LIMIT || sha(&bytes) != expected {
+                return Err(CertificationError::Receipt("source recipe digest or bound"));
+            }
+            WorkerExecutionSource::ExactAvailable {
+                digest: expected,
+                bytes: bytes.into(),
+            }
+        }
+        _ => return Err(CertificationError::Receipt("source recipe result")),
+    };
     let finalization = finalized_module::decode_envelope(&header[6])?;
     finalization.validate_owners(&modules, &packages)?;
     Ok(CertifiedReceipt {
@@ -766,6 +837,7 @@ fn decode_receipt_value(value: &Value) -> CertResult<CertifiedReceipt> {
         targets,
         packages,
         finalization,
+        source_recipe,
     })
 }
 
@@ -3602,21 +3674,38 @@ pub(crate) fn certify_products(
         .package_imports
         .as_ref()
         .ok_or(CertificationError::Mismatch("fresh package import framing"))?;
+    let mut source_packages = BTreeMap::new();
     for product in parsed_fresh {
         let key = (product.unit.clone(), product.module.clone());
         let sidecar = fresh_package_imports
             .get(&key)
             .ok_or(CertificationError::Mismatch("fresh package imports"))?;
         let iface_sha: [u8; 32] = sha(&product.interface);
-        crate::recovery_artifacts::validate_package_imports_with_validation(
-            sidecar,
-            &product.unit,
-            &product.module,
-            &iface_sha,
-            Path::new("module-package-imports.cbor"),
-            &mut validation,
-        )
-        .map_err(|_| CertificationError::Mismatch("fresh package import witness"))?;
+        let imported_packages =
+            crate::recovery_artifacts::validate_package_imports_with_validation(
+                sidecar,
+                &product.unit,
+                &product.module,
+                &iface_sha,
+                Path::new("module-package-imports.cbor"),
+                &mut validation,
+            )
+            .map_err(|_| CertificationError::Mismatch("fresh package import witness"))?;
+        for (owner, (selected_path, sha256)) in imported_packages {
+            let witness = PackageInterfaceWitness {
+                selected_path,
+                sha256: crate::execution_source::parse_digest(&sha256)
+                    .map_err(|error| CertificationError::ExecutionSource(Box::new(error)))?,
+            };
+            if source_packages
+                .insert(owner, witness.clone())
+                .is_some_and(|old| old != witness)
+            {
+                return Err(CertificationError::Mismatch(
+                    "source package import conflict",
+                ));
+            }
+        }
     }
     let mut seen_modules = BTreeSet::new();
     let mut origin_counts = [[0_u64; 3]; 2];
@@ -4021,7 +4110,31 @@ pub(crate) fn certify_products(
         })
         .collect();
     let execution_source_start = std::time::Instant::now();
-    let execution_graph = if final_evidence.cache_safe && final_evidence.selection_complete {
+    enum SourceRecipeAdmission<'a> {
+        Ordinary,
+        Issued {
+            digest: [u8; 32],
+            bytes: &'a Arc<[u8]>,
+        },
+    }
+    let source_recipe = match (&receipt.source_recipe, exact) {
+        (WorkerExecutionSource::Ordinary, None) => Some(SourceRecipeAdmission::Ordinary),
+        (WorkerExecutionSource::ExactUnavailable(_), Some(_)) => None,
+        (WorkerExecutionSource::ExactAvailable { digest, bytes }, Some(_)) => {
+            Some(SourceRecipeAdmission::Issued {
+                digest: *digest,
+                bytes,
+            })
+        }
+        _ => {
+            return Err(CertificationError::Mismatch(
+                "source recipe compilation route",
+            ))
+        }
+    };
+    let execution_graph = if let Some(recipe) =
+        source_recipe.filter(|_| final_evidence.cache_safe && final_evidence.selection_complete)
+    {
         let mut owners = BTreeMap::new();
         let mut unambiguous = true;
         let inherited_products = exact
@@ -4079,23 +4192,38 @@ pub(crate) fn certify_products(
             Ok(raw_producer) if unambiguous && raw_producer != [0; 32] => {
                 let empty_imports = BTreeMap::new();
                 let owners: Vec<_> = owners.into_values().collect();
-                match crate::execution_source::CertifiedExecutionSourceGraph::admit(
-                    crate::execution_source::ExecutionSourceGraphInput {
-                        producer: crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(&raw_producer),
-                        semantic_sha256: exact.map(|admission| admission.request.semantic_sha256),
-                        include,
-                        source_path: fresh_input_path,
-                        source: final_target_source,
-                        evidence: final_evidence,
-                        exact_imports: exact
-                            .map_or(&empty_imports, |admission| &admission.source.exact_imports),
-                        owners: &owners,
-                        fresh_owners: &fresh_execution_owners,
-                        retained_sources: &retained_sources,
-                        packages: &receipt.packages,
-                    },
-                )
-                .map_err(|error| CertificationError::ExecutionSource(Box::new(error)))?
+                let input = crate::execution_source::ExecutionSourceGraphInput {
+                    producer:
+                        crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
+                            &raw_producer,
+                        ),
+                    semantic_sha256: exact.map(|admission| admission.request.semantic_sha256),
+                    include,
+                    source_path: fresh_input_path,
+                    source: final_target_source,
+                    evidence: final_evidence,
+                    exact_imports: exact
+                        .map_or(&empty_imports, |admission| &admission.source.exact_imports),
+                    owners: &owners,
+                    fresh_owners: &fresh_execution_owners,
+                    retained_sources: &retained_sources,
+                    packages: &source_packages,
+                };
+                let admitted = match recipe {
+                    SourceRecipeAdmission::Ordinary => {
+                        crate::execution_source::CertifiedExecutionSourceGraph::admit(input)
+                    }
+                    SourceRecipeAdmission::Issued { digest, bytes } => {
+                        crate::execution_source::CertifiedExecutionSourceGraph::admit_issued(
+                            Arc::clone(bytes),
+                            digest,
+                            input,
+                        )
+                        .map(crate::execution_source::ExecutionSourceAdmission::Available)
+                    }
+                };
+                match admitted
+                    .map_err(|error| CertificationError::ExecutionSource(Box::new(error)))?
                 {
                     crate::execution_source::ExecutionSourceAdmission::Available(graph) => {
                         Some(graph)
@@ -4109,8 +4237,24 @@ pub(crate) fn certify_products(
                     }
                 }
             }
+            _ if matches!(
+                receipt.source_recipe,
+                WorkerExecutionSource::ExactAvailable { .. }
+            ) =>
+            {
+                return Err(CertificationError::Mismatch(
+                    "issued source recipe owner or producer",
+                ))
+            }
             _ => None,
         }
+    } else if matches!(
+        receipt.source_recipe,
+        WorkerExecutionSource::ExactAvailable { .. }
+    ) {
+        return Err(CertificationError::Mismatch(
+            "issued source recipe lacks complete evidence",
+        ));
     } else {
         None
     };
@@ -6360,6 +6504,7 @@ pub(crate) mod tests {
                 ]),
             },
             CertifiedReceipt {
+                source_recipe: WorkerExecutionSource::Ordinary,
                 finalization: fixture_finalization(
                     None,
                     &vec![accepted_a.clone(), accepted_b.clone()],
@@ -6772,6 +6917,7 @@ pub(crate) mod tests {
         let mut accepted = receipt(&bytes, &admitted, support_source);
         accepted.dependency_witness_sha256 = sha(&evidence_bytes);
         let mut fresh_receipt = CertifiedReceipt {
+            source_recipe: WorkerExecutionSource::Ordinary,
             finalization: fixture_finalization(Some(root.path()), &vec![accepted.clone()]),
             modules: vec![accepted.clone()],
             targets: BTreeMap::new(),
@@ -6842,6 +6988,64 @@ pub(crate) mod tests {
                 }
             });
         let parsed = ParsedModuleProducts::decode(&bytes, &packages).unwrap();
+        if let Some(exact) = exact.as_ref() {
+            assert!(matches!(
+                certify_products(
+                    None,
+                    &fresh_receipt,
+                    &parsed,
+                    &evidence_bytes,
+                    &input,
+                    &admitted,
+                    source,
+                    &producer,
+                    &include,
+                    Some(exact),
+                    None
+                ),
+                Err(CertificationError::Mismatch(
+                    "source recipe compilation route"
+                ))
+            ));
+            let product = &parsed.products()[0];
+            let native = &parsed.sidecars[0];
+            let packages =
+                &parsed.package_imports.as_ref().unwrap()[&("main".into(), "Fresh".into())];
+            let owner = CachedHomeOwner {
+                unit: product.unit.clone(),
+                module: product.module.clone(),
+                module_version: crate::module_candidates::exact_module_version_for_product(
+                    &producer,
+                    &request.semantic_sha256,
+                    &product.unit,
+                    &product.module,
+                    &accepted.source_sha256,
+                    &product.interface,
+                    native,
+                    packages,
+                ),
+                skinny_iface_sha256: sha(&product.interface),
+                product_sha256: sha(native),
+            };
+            let owners = [owner];
+            let fresh = BTreeSet::from([crate::declaration_join::ExactModuleIdentity {
+                unit: "main".into(),
+                module: "Fresh".into(),
+            }]);
+            let crate::execution_source::ExecutionSourceAdmission::Available(graph) =
+                crate::execution_source::CertifiedExecutionSourceGraph::admit(
+                    crate::execution_source::ExecutionSourceGraphInput {
+                        producer: crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(&producer),
+                        semantic_sha256: Some(request.semantic_sha256), include: &include,
+                        source_path: &input, source, evidence: &admitted,
+                        exact_imports: &exact.source.exact_imports, owners: &owners,
+                        fresh_owners: &fresh, retained_sources: &BTreeMap::new(), packages: &BTreeMap::new(),
+                    }).unwrap() else { panic!("complete fixture source recipe") };
+            fresh_receipt.source_recipe = WorkerExecutionSource::ExactAvailable {
+                digest: graph.digest(),
+                bytes: graph.bytes().into(),
+            };
+        }
         let original = certify_products(
             None,
             &fresh_receipt,
@@ -6973,6 +7177,11 @@ pub(crate) mod tests {
         accepted.product_sha256 = bundle.owner.product_sha256;
         accepted.dependency_witness_sha256 = sha(&serde_json::to_vec(&bundle.evidence).unwrap());
         let cached_receipt = CertifiedReceipt {
+            source_recipe: if exact_mode {
+                WorkerExecutionSource::ExactUnavailable(SourceRecipeUnavailable::NoFreshOriginals)
+            } else {
+                WorkerExecutionSource::Ordinary
+            },
             finalization: fixture_finalization(Some(root.path()), &vec![accepted.clone()]),
             modules: vec![accepted],
             targets: BTreeMap::new(),
@@ -7119,6 +7328,7 @@ pub(crate) mod tests {
                 bundle.original_module_interface.interface_sha256(),
             );
             let mixed = CertifiedReceipt {
+                source_recipe: WorkerExecutionSource::Ordinary,
                 finalization: fixture_finalization(
                     Some(root.path()),
                     &vec![cached_receipt.modules[0].clone(), quoter_receipt.clone()],
@@ -7288,6 +7498,7 @@ pub(crate) mod tests {
         let certified = certify_products(
             None,
             &CertifiedReceipt {
+                source_recipe: WorkerExecutionSource::Ordinary,
                 finalization: fixture_finalization(Some(directory.path()), &vec![accepted.clone()]),
                 modules: vec![accepted],
                 targets: BTreeMap::new(),
@@ -7422,6 +7633,7 @@ pub(crate) mod tests {
         let mut types = receipt(&bytes, &evidence, types_source);
         types.module = "Types".into();
         let mut receipt = CertifiedReceipt {
+            source_recipe: WorkerExecutionSource::Ordinary,
             finalization: fixture_finalization(Some(directory.path()), &[accepted.clone(), types]),
             modules: vec![accepted],
             targets: BTreeMap::new(),
@@ -7505,6 +7717,7 @@ pub(crate) mod tests {
         let certified = certify_products(
             None,
             &CertifiedReceipt {
+                source_recipe: WorkerExecutionSource::Ordinary,
                 finalization: fixture_finalization(Some(directory.path()), &vec![accepted.clone()]),
                 modules: vec![accepted.clone()],
                 targets: BTreeMap::new(),
@@ -7544,6 +7757,7 @@ pub(crate) mod tests {
             certify_products(
                 None,
                 &CertifiedReceipt {
+                    source_recipe: WorkerExecutionSource::Ordinary,
                     finalization: fixture_finalization(
                         Some(directory.path()),
                         &vec![accepted.clone()]
@@ -7570,6 +7784,7 @@ pub(crate) mod tests {
             certify_products(
                 None,
                 &CertifiedReceipt {
+                    source_recipe: WorkerExecutionSource::Ordinary,
                     finalization: fixture_finalization(
                         Some(directory.path()),
                         &vec![changed.clone()]
@@ -7597,6 +7812,7 @@ pub(crate) mod tests {
         assert!(certify_products(
             None,
             &CertifiedReceipt {
+                source_recipe: WorkerExecutionSource::Ordinary,
                 finalization: fixture_finalization(Some(directory.path()), &vec![changed.clone()]),
                 modules: vec![changed],
                 targets: BTreeMap::new(),
@@ -7637,7 +7853,7 @@ pub(crate) mod tests {
             Err(CertificationError::UnsupportedVersion {
                 format: CertificationFormat::ProductReceipt,
                 found: 2,
-                expected: 5
+                expected: 7
             })
         ));
         let mut trailing = encoded;
@@ -7782,6 +7998,44 @@ pub(crate) mod tests {
         );
     }
 
+    #[test]
+    fn exact_recipe_receipt_requires_owning_sidecar_and_preserves_issued_bytes() {
+        let root = tempfile::tempdir().unwrap();
+        let (graph, _) = crate::execution_source::test_graph(root.path());
+        let mut value = dictionary_receipt(&empty_legacy_receipt());
+        let Value::Array(header) = &mut value else {
+            panic!("fixture receipt")
+        };
+        header[7] = value_array([
+            value_text("exact-available"),
+            value_text(hex(&graph.digest())),
+        ]);
+        let encoded = receipt_bytes(&value);
+        assert!(
+            decode_receipt(&encoded).is_err(),
+            "no ambient output directory"
+        );
+        assert!(
+            decode_receipt_in(&encoded, Some(root.path())).is_err(),
+            "missing advertised capsule"
+        );
+        let path = root.path().join("execution-source.cbor");
+        std::fs::write(&path, graph.bytes()).unwrap();
+        let receipt = decode_receipt_in(&encoded, Some(root.path())).unwrap();
+        let WorkerExecutionSource::ExactAvailable { digest, bytes } = receipt.source_recipe else {
+            panic!("available receipt must preserve its route")
+        };
+        assert_eq!(digest, graph.digest());
+        assert_eq!(bytes.as_ref(), graph.bytes());
+        std::fs::write(&path, b"changed source recipe").unwrap();
+        assert!(decode_receipt_in(&encoded, Some(root.path())).is_err());
+        let Value::Array(header) = &mut value else {
+            panic!("fixture receipt")
+        };
+        header[7] = value_array([value_text("exact-unavailable"), value_text("unknown")]);
+        assert!(decode_receipt_in(&receipt_bytes(&value), Some(root.path())).is_err());
+    }
+
     fn empty_legacy_receipt() -> Value {
         value_array([
             value_text("TPCERT"),
@@ -7923,11 +8177,12 @@ pub(crate) mod tests {
                 }
             })
             .collect::<Vec<_>>();
-        header[1] = Value::Integer(6.into());
+        header[1] = Value::Integer(7.into());
         header.push(value_array(indexed.into_values().map(|(_, row)| row)));
         header.push(fixture_envelope_value(&fixture_finalization(
             None, &modules,
         )));
+        header.push(value_array([value_text("ordinary")]));
         compact
     }
 
@@ -7968,6 +8223,7 @@ pub(crate) mod tests {
         assert_eq!(
             decode_receipt(&encoded).unwrap(),
             CertifiedReceipt {
+                source_recipe: WorkerExecutionSource::Ordinary,
                 finalization: fixture_finalization(None, &vec![accepted.clone()]),
                 modules: vec![accepted],
                 targets: BTreeMap::from([("target".into(), vec![])]),
@@ -8414,7 +8670,7 @@ pub(crate) mod tests {
 
     #[test]
     fn certificate_versions_refuse_legacy_ownership_without_reinterpretation() {
-        for version in [1, 2, 3, 4] {
+        for version in [1, 2, 3, 4, 5, 6] {
             let mut receipt = dictionary_receipt(&empty_legacy_receipt());
             let Value::Array(rows) = &mut receipt else {
                 unreachable!()
@@ -8424,7 +8680,7 @@ pub(crate) mod tests {
                 decode_receipt(&receipt_bytes(&receipt)),
                 Err(CertificationError::UnsupportedVersion {
                     format: CertificationFormat::ProductReceipt,
-                    expected: 5,
+                    expected: 7,
                     ..
                 })
             ));

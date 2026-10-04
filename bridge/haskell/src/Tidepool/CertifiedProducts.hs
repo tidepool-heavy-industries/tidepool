@@ -36,6 +36,7 @@ import GHC.Types.TyThing (TyThing(..), implicitTyThings)
 import GHC.Data.Maybe (MaybeErr(..))
 import Numeric (showHex)
 
+import Tidepool.ExecutionSource (WorkerExecutionSource, encodeWorkerExecutionSource)
 import Tidepool.DependencyEvidence
   ( DependencyEvidence(..), DependencyModule(..), DependencySource(..)
   , ProductAvailability(..) )
@@ -76,12 +77,12 @@ type PackageWitness = (T.Text, T.Text, FilePath, T.Text)
 -- The producer's group inventory is only a suggestion. Rust compares every
 -- emitted row with the original sidecar bytes before admitting any product.
 encodeCertifiedProducts
-  :: HscEnv -> Map.Map ModuleName ModIface -> FinalizedModuleArtifacts -> [ModuleCandidate] -> Maybe ExactScope
+  :: HscEnv -> WorkerExecutionSource -> Map.Map ModuleName ModIface -> FinalizedModuleArtifacts -> [ModuleCandidate] -> Maybe ExactScope
   -> [(T.Text, T.Text, BS.ByteString, [ProjectedGroup])]
   -> [(String, WireProgram)]
   -> DependencyEvidence -> BS.ByteString -> BS.ByteString
   -> IO (Either String BS.ByteString)
-encodeCertifiedProducts env interfaces finalized cached exact fresh targets evidence productBytes evidenceBytes = do
+encodeCertifiedProducts env sourceRecipe interfaces finalized cached exact fresh targets evidence productBytes evidenceBytes = do
   packageRef <- newIORef []
   timing <- readTimingEnabled
   (resolvePackage, resolutionCounts) <- newPackageGlobalResolver timing env
@@ -250,10 +251,10 @@ encodeCertifiedProducts env interfaces finalized cached exact fresh targets evid
                 | ((unit, name), options) <- Map.toList packages
                 , (path, sha) <- Set.toList options ]
           pure (Right (toStrictByteString (array
-            [encodeString "TPCERT", encodeWord 6
+            [encodeString "TPCERT", encodeWord 7
             , list id encodedModules, list id encodedTargets
             , list id encodedPackages, list encodePreEncoded globalBytes
-            , encodeFinalizedModuleArtifacts finalized])))
+            , encodeFinalizedModuleArtifacts finalized, encodeWorkerExecutionSource sourceRecipe])))
   where
     internWitness :: Map.Map BS.ByteString Word -> Encoding
       -> (Map.Map BS.ByteString Word, Word)

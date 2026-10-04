@@ -185,9 +185,35 @@ This is a strict internal migration. Old three-field printed signatures are
 rejected. Deploy the Rust consumer and Haskell worker together and regenerate
 compiler-produced artifacts through their owning producers.
 
+## Compiler-issued execution recipes
+
+`TPCERT` version 7 adds one closed source-recipe result after its finalized-module
+envelope: `["ordinary"]`, `["exact-unavailable", reason]`, or
+`["exact-available", SHA]`. An available result binds the immutable
+`execution-source.cbor` in the owning compiler output directory. The descriptor
+contains no worker-selected path. Metadata keeps its four MiB bound and the
+existing graph keeps its independent 64 MiB bound.
+
+The exact compiler issues this graph once. The same object supplies later worker
+passes and the receipt sidecar. Frontend admission authenticates its original
+source, producer, semantic request, complete native owner inventory, exact
+imports and per-original source-import package closure before retaining its
+original bytes. Native-global package witnesses are separate evidence and cannot
+replace the source-import closure. An advertised missing, corrupt or mismatched
+graph is a refusal; exact requests never fall back to ordinary graph issuance.
+Ordinary requests have no intra-request graph consumer and retain their existing
+single frontend issuer. Unavailable reasons are `no-fresh-originals`,
+`incomplete-source-evidence`, `unsupported-source-recipe` and
+`unavailable-source-root`.
+
+This is a strict matched worker/frontend migration. Earlier `TPCERT` versions
+are rejected. Regenerate actual source-boot candidate receipts through their
+Haskell producers and run the structural prepared corpus; existing prepared
+wire artifacts and execution-graph versions do not change.
+
 ## Original interface requirements
 
-`TPCERT` version 5 records each original module's interface-only dependencies as
+`TPCERT` records each original module's interface-only dependencies as
 sorted exact unit/module/SHA-256 rows. Both GHC home usage forms contribute;
 self usages are excluded. Every seal must match a fresh same-transaction
 interface or the admitted exact interface closure. Authored import adjacency

@@ -25,6 +25,7 @@ import System.Exit (ExitCode(..))
 import System.FilePath ((</>), takeDirectory)
 import System.IO (hClose, openTempFile)
 import System.Process (readProcessWithExitCode)
+import Tidepool.ExecutionSource (WorkerExecutionSource(OrdinaryExecutionSource))
 import Tidepool.CertifiedProducts (encodeCertifiedProducts)
 import Tidepool.DependencyEvidence
 import Tidepool.ExactHydration (ExactIfaceArtifact(..), newOriginalInterfaceArtifacts, originalInterfaceBytes)
@@ -181,7 +182,7 @@ capturePacket work packet prepared = do
       dependencies = BSC.pack (renderDependencyEvidence evidence)
   finalized <- captureFinalizedModuleArtifacts originals env (pprFinalizedModules prepared)
     (pprPackageImports prepared) evidence work
-  receipt <- encodeCertifiedProducts env (pprProductInterfaces prepared) finalized [] Nothing
+  receipt <- encodeCertifiedProducts env OrdinaryExecutionSource (pprProductInterfaces prepared) finalized [] Nothing
     fresh [] evidence products dependencies >>= either fail pure
   BS.writeFile (packet </> "module-products.cbor") products
   BS.writeFile (packet </> "certified-products.cbor") receipt

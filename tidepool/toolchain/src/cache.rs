@@ -225,7 +225,7 @@ fn is_haskell_dependency_source(path: &Path) -> bool {
 
 /// The worker's consumed source and import-resolution evidence. Completeness
 /// for cache reuse is independent from completeness for test selection.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DependencyEvidence {
     pub version: u32,
@@ -237,7 +237,7 @@ pub struct DependencyEvidence {
     pub modules: Vec<ModuleEvidence>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModuleEvidence {
     pub unit: String,
@@ -258,7 +258,7 @@ pub enum ProductAvailability {
     ProjectionRejected,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModuleImportEvidence {
     pub qualifier: ImportQualifier,
@@ -267,14 +267,14 @@ pub struct ModuleImportEvidence {
     pub selected: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SourceEvidence {
     pub path: PathBuf,
     pub sha256: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResolutionEvidence {
     pub qualifier: ImportQualifier,

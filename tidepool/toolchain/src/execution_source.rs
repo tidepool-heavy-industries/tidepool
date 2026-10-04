@@ -574,9 +574,14 @@ fn resolve_local_recipe(
             ));
         }
         if !decoded.contains_key(&digest) {
-            let graph = graphs
-                .get(&digest)
-                .ok_or_else(|| failure("current source selection: original graph unavailable"))?;
+            let graph = graphs.get(&digest).ok_or_else(|| {
+                failure(&format!(
+                    "current source selection: original graph {} unavailable for {}:{}",
+                    hex(&digest),
+                    owner.unit,
+                    owner.module
+                ))
+            })?;
             if graph.producer_sha256() != producer {
                 return Err(failure(
                     "current source selection: another original producer",
@@ -985,6 +990,129 @@ pub(crate) fn test_graph(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn issued_recipe_preserves_source_package_closure_and_rejects_native_projection_or_tampering() {
+        let root = tempfile::tempdir().unwrap();
+        let (base, owners) = test_graph(root.path());
+        let package = root.path().join("SourceOnly.hi");
+        std::fs::write(&package, b"source import package interface").unwrap();
+        let issued = test_graph_with_package_witness(&base, &package);
+        let wire = GraphWire::decode(issued.bytes()).unwrap();
+        let source_packages = BTreeMap::from([(
+            ("package-unit".into(), "Package.Module".into()),
+            PackageInterfaceWitness {
+                selected_path: package,
+                sha256: wire.packages[0].sha256,
+            },
+        )]);
+        let native_packages = BTreeMap::new();
+        let imports = wire
+            .exact_imports
+            .iter()
+            .map(|row| (row.owner.clone(), row.imports.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let fresh = owners
+            .iter()
+            .map(|owner| ExactModuleIdentity {
+                unit: owner.unit.clone(),
+                module: owner.module.clone(),
+            })
+            .collect();
+        let retained = BTreeMap::new();
+        let input = || ExecutionSourceGraphInput {
+            producer: crate::artifact_inventory::CanonicalProducerIdentity::from_test_sha256(
+                wire.producer_sha256,
+            ),
+            semantic_sha256: wire.semantic_sha256,
+            include: &wire.include,
+            source_path: &wire.source_path,
+            source: &wire.source,
+            evidence: &wire.evidence,
+            exact_imports: &imports,
+            owners: &owners,
+            fresh_owners: &fresh,
+            retained_sources: &retained,
+            packages: &source_packages,
+        };
+        let bytes = Arc::clone(&issued.bytes);
+        let admitted = CertifiedExecutionSourceGraph::admit_issued(
+            Arc::clone(&bytes),
+            issued.digest(),
+            input(),
+        )
+        .unwrap();
+        assert_eq!(admitted.digest(), issued.digest());
+        assert!(
+            Arc::ptr_eq(&admitted.bytes, &bytes),
+            "retain the actual issued capsule"
+        );
+        assert!(CertifiedExecutionSourceGraph::admit_issued(
+            Arc::clone(&bytes),
+            issued.digest(),
+            ExecutionSourceGraphInput {
+                packages: &native_packages,
+                ..input()
+            }
+        )
+        .is_err());
+        assert!(
+            CertifiedExecutionSourceGraph::admit_issued(Arc::clone(&bytes), [0; 32], input())
+                .is_err()
+        );
+        let inherited_owner = ExactModuleIdentity {
+            unit: wire.owners[1].unit.clone(),
+            module: wire.owners[1].module.clone(),
+        };
+        let mut selected_fresh = fresh.clone();
+        selected_fresh.remove(&inherited_owner);
+        let retained_recipe = BTreeMap::from([(inherited_owner, base.digest())]);
+        let inherited_input = || ExecutionSourceGraphInput {
+            fresh_owners: &selected_fresh,
+            retained_sources: &retained_recipe,
+            ..input()
+        };
+        let mut withheld = GraphWire::decode(&bytes).unwrap();
+        withheld.owners[1].fresh = false;
+        let encoded = withheld.encode().unwrap();
+        let digest = Sha256::digest(&encoded).into();
+        CertifiedExecutionSourceGraph::admit_issued(encoded.into(), digest, inherited_input())
+            .unwrap();
+        withheld.owners[1].original_graph_sha256 = Some(base.digest());
+        let encoded = withheld.encode().unwrap();
+        let digest = Sha256::digest(&encoded).into();
+        CertifiedExecutionSourceGraph::admit_issued(encoded.into(), digest, inherited_input())
+            .unwrap();
+        withheld.owners[1].original_graph_sha256 = Some([99; 32]);
+        let encoded = withheld.encode().unwrap();
+        let digest = Sha256::digest(&encoded).into();
+        assert!(CertifiedExecutionSourceGraph::admit_issued(
+            encoded.into(),
+            digest,
+            inherited_input()
+        )
+        .is_err());
+        let mut altered = GraphWire::decode(&bytes).unwrap();
+        altered.owners[0].product_sha256[0] ^= 1;
+        let altered = altered.encode().unwrap();
+        let altered_digest = Sha256::digest(&altered).into();
+        assert!(CertifiedExecutionSourceGraph::admit_issued(
+            altered.into(),
+            altered_digest,
+            input()
+        )
+        .is_err());
+        let mut altered = GraphWire::decode(&bytes).unwrap();
+        altered.packages.clear();
+        let altered = altered.encode().unwrap();
+        let altered_digest = Sha256::digest(&altered).into();
+        assert!(CertifiedExecutionSourceGraph::admit_issued(
+            altered.into(),
+            altered_digest,
+            input()
+        )
+        .is_err());
+    }
 
     fn valid_wire() -> GraphWire {
         let root = tempfile::tempdir().unwrap();
@@ -2314,6 +2442,94 @@ impl CertifiedExecutionSourceGraph {
         )))
     }
 
+    /// Authenticate the one worker-issued exact recipe against the admitted
+    /// transaction. Its canonical bytes remain the identity consumed by later
+    /// passes; native-global package witnesses are a separate proof domain.
+    pub(crate) fn admit_issued(
+        bytes: Arc<[u8]>,
+        digest: [u8; 32],
+        input: ExecutionSourceGraphInput<'_>,
+    ) -> Result<Arc<Self>, CompileError> {
+        if bytes.len() > GRAPH_BYTES_LIMIT || <[u8; 32]>::from(Sha256::digest(&bytes)) != digest {
+            return Err(failure("issued recipe digest or byte bound differs"));
+        }
+        let wire = GraphWire::decode(&bytes)?;
+        wire.validate()?;
+        if wire.encode()?.as_slice() != bytes.as_ref() {
+            return Err(failure("noncanonical issued recipe"));
+        }
+        if !input.evidence.valid(input.source)
+            || !input.evidence.cache_safe
+            || !input.evidence.selection_complete
+            || wire.producer_sha256 != input.producer.sha256()
+            || wire.semantic_sha256 != input.semantic_sha256
+            || wire.source_path != input.source_path
+            || wire.source != input.source
+            || crate::module_candidates::context_paths(input.include).as_ref()
+                != Some(&wire.include)
+            || &wire.evidence != input.evidence
+        {
+            return Err(failure("issued recipe source transaction differs"));
+        }
+        let owners = input
+            .owners
+            .iter()
+            .map(|owner| ((owner.unit.as_str(), owner.module.as_str()), owner))
+            .collect::<BTreeMap<_, _>>();
+        if owners.len() != input.owners.len() || wire.owners.len() != owners.len() {
+            return Err(failure("issued recipe original inventory differs"));
+        }
+        for row in &wire.owners {
+            let identity = ExactModuleIdentity {
+                unit: row.unit.clone(),
+                module: row.module.clone(),
+            };
+            let fresh = input.fresh_owners.contains(&identity);
+            let retained = if fresh {
+                None
+            } else {
+                input.retained_sources.get(&identity).copied()
+            };
+            if owners
+                .get(&(row.unit.as_str(), row.module.as_str()))
+                .copied()
+                != Some(&row.owner())
+                || row.fresh != fresh
+                || (row.original_graph_sha256.is_some()
+                    && (fresh || row.original_graph_sha256 != retained))
+            {
+                return Err(failure("issued recipe original owner differs"));
+            }
+        }
+        // The selected worker scope may withhold an optional inherited recipe.
+        // Every advertised reference still needs the exact retained native owner.
+        let imports = wire
+            .exact_imports
+            .iter()
+            .map(|row| (row.owner.clone(), row.imports.clone()))
+            .collect::<BTreeMap<_, _>>();
+        if imports.len() != wire.exact_imports.len() || &imports != input.exact_imports {
+            return Err(failure("issued recipe exact import closure differs"));
+        }
+        let packages = wire
+            .packages
+            .iter()
+            .map(|row| {
+                (
+                    (row.unit.clone(), row.module.clone()),
+                    PackageInterfaceWitness {
+                        selected_path: row.selected_path.clone(),
+                        sha256: row.sha256,
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        if packages.len() != wire.packages.len() || &packages != input.packages {
+            return Err(failure("issued recipe source package closure differs"));
+        }
+        Ok(Arc::new(Self::from_wire(bytes, &wire, Some(digest))))
+    }
+
     #[cfg(test)]
     pub(crate) fn recover(bytes: Vec<u8>) -> Result<Arc<Self>, CompileError> {
         if bytes.len() > GRAPH_BYTES_LIMIT {
@@ -2342,12 +2558,17 @@ impl CertifiedExecutionSourceGraph {
         Ok(Arc::new(Self::from_wire(bytes, &wire, Some(digest))))
     }
 
-    fn from_wire(bytes: Vec<u8>, wire: &GraphWire, verified_digest: Option<[u8; 32]>) -> Self {
+    fn from_wire(
+        bytes: impl Into<Arc<[u8]>>,
+        wire: &GraphWire,
+        verified_digest: Option<[u8; 32]>,
+    ) -> Self {
+        let bytes: Arc<[u8]> = bytes.into();
         Self {
             digest: verified_digest.unwrap_or_else(|| Sha256::digest(&bytes).into()),
             producer_sha256: wire.producer_sha256,
             semantic_sha256: wire.semantic_sha256,
-            bytes: bytes.into(),
+            bytes,
             owners: wire
                 .owners
                 .iter()

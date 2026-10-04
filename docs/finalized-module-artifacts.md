@@ -6,12 +6,17 @@ interfaces are provisional and cannot issue this certificate.
 
 ## Worker receipt
 
-`TPCERT6` is exactly seven CBOR fields:
+`TPCERT7` is exactly eight CBOR fields:
 
 ```
-["TPCERT", 6, nativeModules, targets, packages, globalDictionary, envelope]
+["TPCERT", 7, nativeModules, targets, packages, globalDictionary, envelope, sourceRecipe]
 envelope = ["tidepool-ghc-finalized-module-v1", homeUnits, finalizedModules]
 ```
+
+`sourceRecipe` is the closed ordinary/exact-unavailable/exact-available result
+documented in `bridge/haskell/CLAUDE.md`. Exact available receipts bind the
+fixed owning-output `execution-source.cbor`; source-import package evidence is
+separate from the native-global `packages` field.
 
 `homeUnits` is the complete sorted unique GHC home-unit inventory from the
 finalizing compiler environment. Rust never infers home status from `main` or
