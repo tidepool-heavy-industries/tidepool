@@ -443,11 +443,23 @@ orderedInferenceSegments = do
         | line <- lines template ]
   retainedPlan <- analyzeOrderedCell retainedTemplate "data Retained = Retained"
     >>= either (fail . renderCellSplitError) pure
+  let imports = map locatedImportSource (prologueImports (cellPlanPrologue retainedPlan))
+      displayAlias = cellPlanStructuralDisplayAlias retainedPlan
+      declarations = concatMap (concatMap cellAnalysisSource . cellPlanItems)
+        (cellInferenceSegments retainedPlan)
+  [genericAlias] <- pure
+    [alias | imported <- imports
+      , ["import", "qualified", "GHC.Generics", "as", alias] <- [words imported]]
   assertEqual "generated Generic alias avoids retained template imports" True
-    ("import qualified GHC.Generics as TidepoolCompilerGenericX" `elem`
-      map locatedImportSource (prologueImports (cellPlanPrologue retainedPlan)))
-  assertEqual "generated Display alias avoids retained template imports"
-    "TidepoolCompilerDisplayX" (cellPlanStructuralDisplayAlias retainedPlan)
+    (genericAlias /= "TidepoolCompilerGeneric")
+  assertEqual "generated Generic uses its selected import alias" True
+    ((genericAlias ++ ".Generic") `isInfixOf` declarations)
+  assertEqual "generated Display alias avoids retained template imports" True
+    (displayAlias /= "TidepoolCompilerDisplay")
+  assertEqual "generated Display imports its selected alias" True
+    (("import qualified Tidepool.Inspection as " ++ displayAlias) `elem` imports)
+  assertEqual "generated Display uses its selected import alias" True
+    ((displayAlias ++ ".Display") `isInfixOf` declarations)
   where
     source = unlines
       [ "first <- pure (0 :: Int)"
