@@ -1139,28 +1139,21 @@ impl ProgramFacts {
     }
 
     fn from_definitions(definitions: Arc<DefinitionFacts>, entry: Option<ValueId>) -> Self {
-        let entry_module = entry
+        let entry_identity = entry
             .as_ref()
             .and_then(|entry| definitions.tops.get(entry))
-            .map(|(identity, _)| identity.module.as_str());
-        let resume = entry_module.and_then(|module| {
-            definitions.tops.iter().find_map(|(id, (identity, _))| {
-                (identity.module == module && identity.occurrence == PREPARED_RESUME_TARGET)
-                    .then_some(*id)
-            })
-        });
-        let apply_entry = entry_module.and_then(|module| {
-            definitions.tops.iter().find_map(|(id, (identity, _))| {
-                (identity.module == module && identity.occurrence == PREPARED_APPLY_ENTRY_TARGET)
-                    .then_some(*id)
-            })
-        });
-        let apply_value = entry_module.and_then(|module| {
-            definitions.tops.iter().find_map(|(id, (identity, _))| {
-                (identity.module == module && identity.occurrence == PREPARED_APPLY_VALUE_TARGET)
-                    .then_some(*id)
-            })
-        });
+            .map(|(identity, _)| identity);
+        let helper = |occurrence: &str| {
+            let mut expected = entry_identity?.clone();
+            expected.occurrence = occurrence.into();
+            definitions
+                .tops
+                .iter()
+                .find_map(|(id, (identity, _))| (identity == &expected).then_some(*id))
+        };
+        let resume = helper(PREPARED_RESUME_TARGET);
+        let apply_entry = helper(PREPARED_APPLY_ENTRY_TARGET);
+        let apply_value = helper(PREPARED_APPLY_VALUE_TARGET);
         let mut facts = Self {
             entry,
             settled: None,
@@ -6158,6 +6151,48 @@ pub(super) mod tests {
         assert!(exportable_code_tops(target.prepared())
             .iter()
             .all(|(identity, _, _)| identity.unit != "fixture-package"));
+    }
+
+    #[test]
+    fn prepared_helpers_require_the_entry_symbol_owner() {
+        for include_owned in [false, true] {
+            for owned_first in [false, true] {
+                let mut wire = testing::wire_program();
+                let template = wire.bindings[0].clone();
+                let mut expected = Vec::new();
+                for occurrence in [
+                    PREPARED_RESUME_TARGET,
+                    PREPARED_APPLY_ENTRY_TARGET,
+                    PREPARED_APPLY_VALUE_TARGET,
+                ] {
+                    let mut owned_id = None;
+                    for owned in [owned_first, !owned_first] {
+                        if owned && !include_owned {
+                            continue;
+                        }
+                        let Group::NonRecursive(mut top) = template.clone() else {
+                            unreachable!()
+                        };
+                        top.identity.occurrence = occurrence.into();
+                        if !owned {
+                            top.identity.unit = "foreign-unit".into();
+                        }
+                        top.binding.id = ValueId(wire.bindings.len() as u32);
+                        if owned {
+                            owned_id = Some(top.binding.id);
+                        }
+                        wire.bindings.push(Group::NonRecursive(top));
+                    }
+                    expected.push(owned_id);
+                }
+                let prepared = testing::prepare(wire).unwrap();
+                let facts = ProgramFacts::of(&prepared);
+                assert_eq!(
+                    [facts.resume, facts.apply_entry, facts.apply_value],
+                    expected.as_slice(),
+                );
+            }
+        }
     }
 
     fn settled_test_facts(declarations: &[(&str, &str, DataConId)]) -> ProgramFacts {
