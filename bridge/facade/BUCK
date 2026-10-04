@@ -23,6 +23,7 @@ rust_filegroup(
         "//bridge/protocol:generated[bridge_facade_src_generated_mod_rs]": "bridge/facade/src/generated/mod.rs",
         "//bridge/protocol:generated[bridge_facade_src_generated_recipe_check_rs]": "bridge/facade/src/generated/recipe_check.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_binary(
@@ -128,6 +129,7 @@ rust_filegroup(
         "//exomonad/prompts:scaffolding_agent_prompt": "exomonad/prompts/scaffolding-agent.md",
         "//exomonad/prompts:worktree_agent_prompt": "exomonad/prompts/worktree-agent.md",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_library(
@@ -260,6 +262,7 @@ rust_filegroup(
         "//exomonad/prompts:scaffolding_agent_prompt": "exomonad/prompts/scaffolding-agent.md",
         "//exomonad/prompts:worktree_agent_prompt": "exomonad/prompts/worktree-agent.md",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_binary(
@@ -393,6 +396,7 @@ rust_filegroup(
         "//exomonad/prompts:scaffolding_agent_prompt": "exomonad/prompts/scaffolding-agent.md",
         "//exomonad/prompts:worktree_agent_prompt": "exomonad/prompts/worktree-agent.md",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_binary(
@@ -526,6 +530,7 @@ rust_filegroup(
         "//exomonad/prompts:scaffolding_agent_prompt": "exomonad/prompts/scaffolding-agent.md",
         "//exomonad/prompts:worktree_agent_prompt": "exomonad/prompts/worktree-agent.md",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_binary(
@@ -659,6 +664,7 @@ rust_filegroup(
         "//exomonad/prompts:scaffolding_agent_prompt": "exomonad/prompts/scaffolding-agent.md",
         "//exomonad/prompts:worktree_agent_prompt": "exomonad/prompts/worktree-agent.md",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_binary(
@@ -800,6 +806,7 @@ rust_filegroup(
         "//exomonad/prompts:scaffolding_agent_prompt": "exomonad/prompts/scaffolding-agent.md",
         "//exomonad/prompts:worktree_agent_prompt": "exomonad/prompts/worktree-agent.md",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(
@@ -949,6 +956,7 @@ rust_filegroup(
         "//exomonad/prompts:scaffolding_agent_prompt": "exomonad/prompts/scaffolding-agent.md",
         "//exomonad/prompts:worktree_agent_prompt": "exomonad/prompts/worktree-agent.md",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(
@@ -1098,6 +1106,7 @@ rust_filegroup(
         "//exomonad/prompts:scaffolding_agent_prompt": "exomonad/prompts/scaffolding-agent.md",
         "//exomonad/prompts:worktree_agent_prompt": "exomonad/prompts/worktree-agent.md",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(
@@ -1247,6 +1256,7 @@ rust_filegroup(
         "//exomonad/prompts:scaffolding_agent_prompt": "exomonad/prompts/scaffolding-agent.md",
         "//exomonad/prompts:worktree_agent_prompt": "exomonad/prompts/worktree-agent.md",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(
@@ -1633,6 +1643,7 @@ rust_filegroup(
         "//exomonad/prompts:scaffolding_agent_prompt": "exomonad/prompts/scaffolding-agent.md",
         "//exomonad/prompts:worktree_agent_prompt": "exomonad/prompts/worktree-agent.md",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_binary(
@@ -2011,6 +2022,7 @@ rust_filegroup(
         "tests/bridge_decl_guard.rs": "bridge/facade/tests/bridge_decl_guard.rs",
         "//bridge/handlers:handler_library_source": "bridge/handlers/src/lib.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(
@@ -2100,6 +2112,7 @@ rust_filegroup(
         "tests/exomonad_action_surface/reusable_helper_rows.hs": "bridge/facade/tests/exomonad_action_surface/reusable_helper_rows.hs",
         "tests/exomonad_action_surface/skill_promised_names.hs": "bridge/facade/tests/exomonad_action_surface/skill_promised_names.hs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(
@@ -2174,6 +2187,7 @@ rust_filegroup(
         "//bridge/protocol:generated[bridge_facade_src_generated_recipe_check_rs]": "bridge/facade/src/generated/recipe_check.rs",
         "tests/exomonad_namespace_entry.rs": "bridge/facade/tests/exomonad_namespace_entry.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(
@@ -2248,6 +2262,7 @@ rust_filegroup(
         "//bridge/protocol:generated[bridge_facade_src_generated_recipe_check_rs]": "bridge/facade/src/generated/recipe_check.rs",
         "tests/exomonad_workspace_check.rs": "bridge/facade/tests/exomonad_workspace_check.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(

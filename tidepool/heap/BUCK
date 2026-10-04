@@ -21,6 +21,7 @@ rust_filegroup(
         "src/managed_reference.rs": "tidepool/heap/src/managed_reference.rs",
         "src/static_region.rs": "tidepool/heap/src/static_region.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_library(
@@ -55,6 +56,7 @@ rust_filegroup(
         "src/managed_reference.rs": "tidepool/heap/src/managed_reference.rs",
         "src/static_region.rs": "tidepool/heap/src/static_region.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(
@@ -78,6 +80,7 @@ rust_filegroup(
         "Cargo.toml": "tidepool/heap/Cargo.toml",
         "tests/gc_unit.rs": "tidepool/heap/tests/gc_unit.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(
@@ -102,6 +105,7 @@ rust_filegroup(
         "Cargo.toml": "tidepool/heap/Cargo.toml",
         "tests/raw_scan_validation.rs": "tidepool/heap/tests/raw_scan_validation.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(

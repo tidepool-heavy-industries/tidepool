@@ -21,6 +21,7 @@ rust_filegroup(
         "src/transport.rs": "exomonad/jev-integration/src/transport.rs",
         "src/worlds.rs": "exomonad/jev-integration/src/worlds.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_binary(
@@ -58,6 +59,7 @@ rust_filegroup(
         "src/transport.rs": "exomonad/jev-integration/src/transport.rs",
         "src/worlds.rs": "exomonad/jev-integration/src/worlds.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(

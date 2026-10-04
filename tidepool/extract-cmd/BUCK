@@ -20,6 +20,7 @@ rust_filegroup(
         "src/request.rs": "tidepool/extract-cmd/src/request.rs",
         "src/test_fixtures/control_ack_worker.rs": "tidepool/extract-cmd/src/test_fixtures/control_ack_worker.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_library(
@@ -57,6 +58,7 @@ rust_filegroup(
         "src/request.rs": "tidepool/extract-cmd/src/request.rs",
         "src/test_fixtures/control_ack_worker.rs": "tidepool/extract-cmd/src/test_fixtures/control_ack_worker.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_binary(
@@ -99,6 +101,7 @@ rust_filegroup(
         "src/request.rs": "tidepool/extract-cmd/src/request.rs",
         "src/test_fixtures/control_ack_worker.rs": "tidepool/extract-cmd/src/test_fixtures/control_ack_worker.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(
@@ -143,6 +146,7 @@ rust_filegroup(
         "src/request.rs": "tidepool/extract-cmd/src/request.rs",
         "src/test_fixtures/control_ack_worker.rs": "tidepool/extract-cmd/src/test_fixtures/control_ack_worker.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(
@@ -172,6 +176,7 @@ rust_filegroup(
         "src/fixtures/build_products_worker.rs": "tidepool/extract-cmd/src/fixtures/build_products_worker.rs",
         "tests/build_products_frontend.rs": "tidepool/extract-cmd/tests/build_products_frontend.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(
@@ -201,6 +206,7 @@ rust_filegroup(
         "Cargo.toml": "tidepool/extract-cmd/Cargo.toml",
         "tests/build_products_ownership.rs": "tidepool/extract-cmd/tests/build_products_ownership.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(
@@ -235,6 +241,7 @@ rust_filegroup(
         "tests/daemon_integration/shim_ref_b.hs": "tidepool/extract-cmd/tests/daemon_integration/shim_ref_b.hs",
         "tests/support/compiler_inputs.rs": "tidepool/extract-cmd/tests/support/compiler_inputs.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(
@@ -281,6 +288,7 @@ rust_filegroup(
         "Cargo.toml": "tidepool/extract-cmd/Cargo.toml",
         "tests/no_open_coded_extract_spawns.rs": "tidepool/extract-cmd/tests/no_open_coded_extract_spawns.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(
@@ -311,6 +319,7 @@ rust_filegroup(
         "tests/response_cleanup.rs": "tidepool/extract-cmd/tests/response_cleanup.rs",
         "tests/response_cleanup/oversized_worker.rs": "tidepool/extract-cmd/tests/response_cleanup/oversized_worker.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(
@@ -340,6 +349,7 @@ rust_filegroup(
         "Cargo.toml": "tidepool/extract-cmd/Cargo.toml",
         "tests/retained_fingerprint.rs": "tidepool/extract-cmd/tests/retained_fingerprint.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(
@@ -364,41 +374,13 @@ tidepool_rust_isolated_test(
 )
 
 rust_filegroup(
-    name = "test_suite_manifest_is_complete_sources",
-    mapped_srcs = {
-        "Cargo.toml": "tidepool/extract-cmd/Cargo.toml",
-        "tests/test_suite_manifest_is_complete.rs": "tidepool/extract-cmd/tests/test_suite_manifest_is_complete.rs",
-    },
-)
-
-tidepool_rust_isolated_test(
-    name = "test_suite_manifest_is_complete",
-    package_name = "tidepool-extract-cmd",
-    package_dir = "tidepool/extract-cmd",
-    version = "0.1.0",
-    crate_root = "tidepool/extract-cmd/tests/test_suite_manifest_is_complete.rs",
-    edition = "2021",
-    srcs_filegroup = ":test_suite_manifest_is_complete_sources",
-    deps = [
-        "//bridge/atomic-write:tidepool_atomic_write",
-        "//third-party/rust:blake3",
-        "//third-party/rust:serde_json",
-        "//third-party/rust:tempfile",
-        "//third-party/rust:tracing",
-        "//third-party/rust:tracing-appender",
-        "//third-party/rust:tracing-subscriber",
-        ":tidepool_extract_cmd",
-    ],
-    visibility = ["PUBLIC"],
-)
-
-rust_filegroup(
     name = "transaction_integration_sources",
     mapped_srcs = {
         "Cargo.toml": "tidepool/extract-cmd/Cargo.toml",
         "tests/support/compiler_inputs.rs": "tidepool/extract-cmd/tests/support/compiler_inputs.rs",
         "tests/transaction_integration.rs": "tidepool/extract-cmd/tests/transaction_integration.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(
@@ -466,7 +448,6 @@ filegroup(
         "tidepool/extract-cmd/tests/response_cleanup/oversized_worker.rs": "tests/response_cleanup/oversized_worker.rs",
         "tidepool/extract-cmd/tests/retained_fingerprint.rs": "tests/retained_fingerprint.rs",
         "tidepool/extract-cmd/tests/support/compiler_inputs.rs": "tests/support/compiler_inputs.rs",
-        "tidepool/extract-cmd/tests/test_suite_manifest_is_complete.rs": "tests/test_suite_manifest_is_complete.rs",
         "tidepool/extract-cmd/tests/transaction_integration.rs": "tests/transaction_integration.rs",
     },
     visibility = ["PUBLIC"],

@@ -2837,7 +2837,7 @@ mod tests {
     /// project marker — regression coverage for `exomonad init` silently
     /// resolving to an unrelated ancestor (often `$HOME`, via its
     /// `~/.tidepool` legacy config dir) instead of the intended cwd. Mutates
-    /// the process cwd, which is safe only because nextest gives each test
+    /// the process cwd, which is safe only because the native runner gives each test
     /// its own process.
     #[test]
     fn resolve_workspace_auto_detection_uses_the_exomonad_marker_not_tidepool() {

@@ -1,4 +1,5 @@
-load("@prelude//:rules.bzl", "filegroup", "export_file")
+load("//build/rust:source_snapshot.bzl", "native_source_snapshot")
+load("@prelude//:rules.bzl", "filegroup", "export_file", "sh_test")
 
 filegroup(
     name = "qualification_inputs",
@@ -7,3 +8,46 @@ filegroup(
 )
 
 export_file(name = "embedded_web_provenance_script", src = "embedded_web_provenance.py", visibility = ["PUBLIC"])
+
+export_file(name = "probe_opacity_checker", src = "probe-opacity-check.py", visibility = ["PUBLIC"])
+
+filegroup(
+    name = "script_test_sources",
+    srcs = {"scripts/" + source: source for source in glob(["*.py", "*.sh", "*.toml", "tests/*.py"])},
+)
+
+native_source_snapshot(
+    name = "script_test_resources",
+    trees = [
+        (":script_test_sources", ""),
+        ("//:operator_test_sources", ""),
+        ("//bridge/haskell:main_acceptance_script_tree", ""),
+        ("//build/rust:qualification_inputs", ""),
+    ],
+)
+
+sh_test(
+    name = "toolchain_script_tests",
+    test = "run-unittests.sh",
+    args = ["scripts.tests.test_lib_extract", "scripts.tests.test_native_operator_frontends"],
+    env = {
+        "TIDEPOOL_TEST_PYTHON": "$(exe toolchains//:python)",
+        "TIDEPOOL_SCRIPT_TEST_ROOT": "$(location :script_test_resources)",
+        "PATH": read_root_config("nix", "action_path"),
+    },
+    resources = [":script_test_resources", "toolchains//:python", "toolchains//:test_tools_closure"],
+    visibility = ["PUBLIC"],
+)
+
+sh_test(
+    name = "native_workflow_tests",
+    test = "run-unittests.sh",
+    args = ["scripts.tests.test_native_workflow", "scripts.tests.test_test_discovery", "scripts.tests.test_native_checks"],
+    env = {
+        "TIDEPOOL_TEST_PYTHON": "$(exe toolchains//:python)",
+        "TIDEPOOL_SCRIPT_TEST_ROOT": "$(location :script_test_resources)",
+        "PATH": read_root_config("nix", "action_path"),
+    },
+    resources = [":script_test_resources", "toolchains//:python", "toolchains//:test_tools_closure"],
+    visibility = ["PUBLIC"],
+)

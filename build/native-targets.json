@@ -321,10 +321,6 @@
           "test": "//tidepool/extract-cmd:retained_fingerprint",
           "test_build": "//tidepool/extract-cmd:retained_fingerprint_binary"
         },
-        "test_suite_manifest_is_complete": {
-          "test": "//tidepool/extract-cmd:test_suite_manifest_is_complete",
-          "test_build": "//tidepool/extract-cmd:test_suite_manifest_is_complete_binary"
-        },
         "transaction_integration": {
           "test": "//tidepool/extract-cmd:transaction_integration",
           "test_build": "//tidepool/extract-cmd:transaction_integration_binary"

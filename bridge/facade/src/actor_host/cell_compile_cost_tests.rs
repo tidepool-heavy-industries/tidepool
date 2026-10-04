@@ -16,11 +16,11 @@
 //! this test at it.
 //!
 //! ```text
-//! tidepool-extract --daemon --persistent --socket /tmp/p/extract.sock \
-//!   --log-path /tmp/p/compiler.log &
-//! TIDEPOOL_TIMING=1 TIDEPOOL_EXTRACT_DAEMON_SOCKET=/tmp/p/extract.sock \
-//!   scripts/battery.sh -p tidepool --lib --run-ignored all --no-capture \
-//!   -E 'test(cell_compile_cost_measurement)'
+//! TIDEPOOL_TIMING=1 just daemon-start BUNDLE DESCRIPTOR
+//! TIDEPOOL_EXTRACT_DAEMON_SOCKET=SOCKET \
+//!   just test-lib tidepool --ignored \
+//!   --exact actor_host::cell_compile_cost_tests::cell_compile_cost_measurement \
+//!   --expected-count 1 --output-dir PRIVATE_REPORT_DIRECTORY
 //! ```
 //!
 //! `compiler.log` then carries one `tidepool-timing phase=… ms=…` line per

@@ -614,8 +614,7 @@ fn foreign_excess_can_continue_in_a_third_program() {
 
 /// Manual cost observation. Measures the pinned freer-resume fixture, or the
 /// artifact named by `TIDEPOOL_COST_ARTIFACT` (e.g. a large
-/// `target/prepared-corpus/*/N.prepared.cbor` produced by
-/// `scripts/prepared-corpus.sh`) so dispatcher cost can be recorded on
+/// an immutable `<index>.prepared.cbor` from a declared corpus producer) so dispatcher cost can be recorded on
 /// realistic programs, not only a small fixture.
 /// Applying an object some installed program owns but that is not callable
 /// (a constructor) exhausts every probe and reports the typed reusable miss;

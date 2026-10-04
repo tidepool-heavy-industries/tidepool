@@ -13,6 +13,7 @@ rust_filegroup(
         "src/lib.rs": "tidepool/prepared-corpus/src/lib.rs",
         "src/watchdog.rs": "tidepool/prepared-corpus/src/watchdog.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_library(
@@ -45,6 +46,7 @@ rust_filegroup(
         "src/lib.rs": "tidepool/prepared-corpus/src/lib.rs",
         "src/watchdog.rs": "tidepool/prepared-corpus/src/watchdog.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_binary(
@@ -78,6 +80,7 @@ rust_filegroup(
         "src/lib.rs": "tidepool/prepared-corpus/src/lib.rs",
         "src/watchdog.rs": "tidepool/prepared-corpus/src/watchdog.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(
@@ -112,6 +115,7 @@ rust_filegroup(
         "src/lib.rs": "tidepool/prepared-corpus/src/lib.rs",
         "src/watchdog.rs": "tidepool/prepared-corpus/src/watchdog.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(

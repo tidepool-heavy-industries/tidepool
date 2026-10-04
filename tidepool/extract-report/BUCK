@@ -12,6 +12,7 @@ rust_filegroup(
         "src/artifact_manifest.rs": "tidepool/extract-report/src/artifact_manifest.rs",
         "src/lib.rs": "tidepool/extract-report/src/lib.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_library(
@@ -39,6 +40,7 @@ rust_filegroup(
         "src/artifact_manifest.rs": "tidepool/extract-report/src/artifact_manifest.rs",
         "src/lib.rs": "tidepool/extract-report/src/lib.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(

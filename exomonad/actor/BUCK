@@ -149,6 +149,7 @@ rust_filegroup(
         "//tidepool/runtime:activation_input_function_fixture": "tidepool/runtime/src/session/fixtures/activation-input-function.hs",
         "//tidepool/runtime:activation_input_receiver_fixture": "tidepool/runtime/src/session/fixtures/activation-input-receiver.hs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_library(
@@ -338,6 +339,7 @@ rust_filegroup(
         "//tidepool/runtime:activation_input_function_fixture": "tidepool/runtime/src/session/fixtures/activation-input-function.hs",
         "//tidepool/runtime:activation_input_receiver_fixture": "tidepool/runtime/src/session/fixtures/activation-input-receiver.hs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_binary(
@@ -493,6 +495,7 @@ rust_filegroup(
         "tests/suites/actor.rs": "exomonad/actor/tests/suites/actor.rs",
         "tests/support/mod.rs": "exomonad/actor/tests/support/mod.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(

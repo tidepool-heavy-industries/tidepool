@@ -47,6 +47,7 @@ rust_filegroup(
         "tests/fixtures/checked-prefix-publication/PrefixUnrelatedSupport.hs": "tidepool/toolchain/tests/fixtures/checked-prefix-publication/PrefixUnrelatedSupport.hs",
         "tests/fixtures/deployment-module-package/PreludePackage.hs": "tidepool/toolchain/tests/fixtures/deployment-module-package/PreludePackage.hs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_library(
@@ -128,6 +129,7 @@ rust_filegroup(
         "tests/fixtures/checked-prefix-publication/PrefixUnrelatedSupport.hs": "tidepool/toolchain/tests/fixtures/checked-prefix-publication/PrefixUnrelatedSupport.hs",
         "tests/fixtures/deployment-module-package/PreludePackage.hs": "tidepool/toolchain/tests/fixtures/deployment-module-package/PreludePackage.hs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_binary(
@@ -210,6 +212,7 @@ rust_filegroup(
         "tests/fixtures/checked-prefix-publication/PrefixUnrelatedSupport.hs": "tidepool/toolchain/tests/fixtures/checked-prefix-publication/PrefixUnrelatedSupport.hs",
         "tests/fixtures/deployment-module-package/PreludePackage.hs": "tidepool/toolchain/tests/fixtures/deployment-module-package/PreludePackage.hs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_binary(
@@ -302,6 +305,7 @@ rust_filegroup(
         "tests/fixtures/resume-issuer/ResumeCapture.hs": "tidepool/toolchain/tests/fixtures/resume-issuer/ResumeCapture.hs",
         "tests/fixtures/typeable-tuple/G1.hs": "tidepool/toolchain/tests/fixtures/typeable-tuple/G1.hs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(
@@ -411,6 +415,7 @@ rust_filegroup(
         "tests/fixtures/resume-issuer/ResumeCapture.hs": "tidepool/toolchain/tests/fixtures/resume-issuer/ResumeCapture.hs",
         "tests/fixtures/typeable-tuple/G1.hs": "tidepool/toolchain/tests/fixtures/typeable-tuple/G1.hs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(
@@ -519,6 +524,7 @@ rust_filegroup(
         "tests/fixtures/resume-issuer/ResumeCapture.hs": "tidepool/toolchain/tests/fixtures/resume-issuer/ResumeCapture.hs",
         "tests/fixtures/typeable-tuple/G1.hs": "tidepool/toolchain/tests/fixtures/typeable-tuple/G1.hs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(
@@ -582,6 +588,7 @@ rust_filegroup(
         "tests/fixtures/check-source/CheckDependency.hs": "tidepool/toolchain/tests/fixtures/check-source/CheckDependency.hs",
         "tests/fixtures/check-source/CheckMiddle.hs": "tidepool/toolchain/tests/fixtures/check-source/CheckMiddle.hs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(
@@ -650,6 +657,7 @@ rust_filegroup(
         "Cargo.toml": "tidepool/toolchain/Cargo.toml",
         "tests/declaration_join_worker.rs": "tidepool/toolchain/tests/declaration_join_worker.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(
@@ -705,6 +713,7 @@ rust_filegroup(
         "Cargo.toml": "tidepool/toolchain/Cargo.toml",
         "tests/prepared_fixture.rs": "tidepool/toolchain/tests/prepared_fixture.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(

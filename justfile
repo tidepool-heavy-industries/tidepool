@@ -1,177 +1,110 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
-nix := "bash scripts/dev-shell.sh"
-exomonad_nix := "bash scripts/dev-shell.sh --exomonad"
 
-# Show the supported development workflow.
+# Buck actions use configured, materialized Nix tools; resource admission is external.
 default:
     @just --list
 
-# Extractor-free engine unit tests; does not build or start GHC.
+[positional-arguments]
+build *targets:
+    bash scripts/buck2-run.sh build --local-only -c remote.enabled=false "$@"
+
+# Native libtest runners own discovery, nonzero counts, isolation, and evidence.
+[positional-arguments]
+test-lib package *args:
+    python3 scripts/native-workflow.py test-lib "$@"
+
+[positional-arguments]
+test-target package target *args:
+    python3 scripts/native-workflow.py test-target "$@"
+
+[positional-arguments]
+test-bin package binary *args:
+    python3 scripts/native-workflow.py test-bin "$@"
+
+[positional-arguments]
+test-list package kind target="":
+    python3 scripts/native-workflow.py test-list "$1" "$2" ${3:+"$3"}
+
+# Run a named native Rust/Tasty target, forwarding its owning runner's arguments.
+[positional-arguments]
+test-native target *args:
+    bash scripts/buck2-run.sh run --local-only -c remote.enabled=false "$1" -- "${@:2}"
+
+[positional-arguments]
+suite package:
+    python3 scripts/native-workflow.py suite "$1"
+
+[positional-arguments]
+suite-plan package:
+    python3 scripts/native-workflow.py suite-plan "$1"
+
 quick:
-    {{ nix }} scripts/quick.sh
+    python3 scripts/native-workflow.py quick
 
-# Formatting check and strict clippy over every target, reporting all errors.
-lint:
-    {{ nix }} scripts/lint.sh
-
-# Lint and the default-filter test tier as independent steps; both always run.
+# Link all registered native consumers. This compiles harnesses without executing them.
 check:
-    {{ nix }} scripts/check.sh
+    python3 scripts/native-workflow.py check
 
-# Run one GHC-heavy crate, optionally restricted by a nextest filter expression.
-[positional-arguments]
-test crate filter="":
-    #!/usr/bin/env bash
-    args=(-p "$1")
-    if [[ -n "$2" ]]; then
-      args+=(-E "$2")
-    fi
-    {{ nix }} scripts/battery.sh "${args[@]}"
+lint:
+    python3 scripts/native-workflow.py lint
 
-# Build and run only one integration suite (test files remain separate modules).
-[positional-arguments]
-test-target crate target filter="":
-    #!/usr/bin/env bash
-    args=(-p "$1" --test "$2")
-    if [[ -n "$3" ]]; then args+=(-E "$3"); fi
-    {{ nix }} scripts/battery.sh "${args[@]}"
-
-# Build and run only a crate's unit-test target.
-[positional-arguments]
-test-lib crate filter="":
-    #!/usr/bin/env bash
-    args=(-p "$1" --lib)
-    if [[ -n "$2" ]]; then args+=(-E "$2"); fi
-    {{ nix }} scripts/battery.sh "${args[@]}"
-
-# Build and run only one binary's unit-test target.
-[positional-arguments]
-test-bin crate binary filter="":
-    #!/usr/bin/env bash
-    args=(-p "$1" --bin "$2")
-    if [[ -n "$3" ]]; then args+=(-E "$3"); fi
-    {{ nix }} scripts/battery.sh "${args[@]}"
-
-# Test shared extractor resolution and daemon lifecycle without compiler builds.
-test-toolchain-scripts:
-    {{ nix }} python3 scripts/tests/test_lib_extract.py -v
-
-# Regression check: dev-shell.sh must not leak nix's own /tmp dirs.
-test-dev-shell:
-    python3 scripts/tests/test_dev_shell.py -v
-
-# Start (or reuse) the persistent compile daemon; battery/suite/check reuse it automatically.
-daemon-start:
-    {{ nix }} bash -c 'set -euo pipefail; source scripts/lib-extract.sh && resolve_tidepool_extract && daemon_start_persistent'
-
-# Stop the persistent compile daemon started by `just daemon-start`.
-daemon-stop:
-    {{ nix }} bash -c 'set -euo pipefail; source scripts/lib-extract.sh && daemon_stop_persistent'
-
-# Run a crate's Cargo integration suites in one bounded nextest invocation.
-[positional-arguments]
-suite crate:
-    {{ nix }} scripts/test-suite.sh "$1"
-
-# Print the exact just command that runs a test function (NAME substring), without building.
-[positional-arguments]
-test-find name:
-    {{ nix }} python3 scripts/test-find.py "$1"
-
-# Show a crate's registered integration targets without running tests.
-[positional-arguments]
-suite-plan crate:
-    {{ nix }} scripts/test-suite.sh "$1" --list
-
-# Check that Cargo suites register every integration test file exactly once.
-suite-check:
-    {{ nix }} scripts/test-suite-check.sh
-
-# Exercise command admission, OOM, cancellation, and descendant cleanup in an
-# isolated delegated user service. This does not touch active Exomonad services.
-test-command-resources-delegated:
-    {{ nix }} exomonad/scripts/test-command-resources-delegated.sh
-
-# Exercise the embedded host's real resident command process under delegated cgroups.
-test-embedded-command-delegated:
-    exomonad/scripts/test-embedded-command-delegated.sh
-
-# Run an inner-loop test selection derived from files changed since BASE.
-[positional-arguments]
-changed base="HEAD":
-    {{ nix }} scripts/test-changed.sh "$1"
-
-# Preview affected targets without compiling or running them.
-[positional-arguments]
-changed-plan base="HEAD":
-    {{ nix }} scripts/test-changed.sh "$1" --list
-
-# Check that committed Haskell CBOR fixtures match current extractor output.
 [positional-arguments]
 fixtures-check *cohorts:
-    {{ nix }} scripts/fixtures.sh check "$@"
+    python3 scripts/native-workflow.py fixtures-check "$@"
 
-# Regenerate the committed Haskell CBOR fixture corpus.
-fixtures-update:
-    {{ nix }} scripts/fixtures.sh update
-
-# Check that the pure-eval cohort probes still exercise the mechanism their
-# cohort claims, per bridge/haskell/test-prepared-stg/probe-opacity-manifest.json.
-# Also runs as part of scripts/prepared-corpus.sh (reached by fixtures-check).
 probe-opacity-check:
-    {{ nix }} scripts/probe-opacity-check.sh
+    bash scripts/buck2-run.sh build --local-only -c remote.enabled=false //bridge/haskell:probe_opacity
 
-# Inspect the extractor frontend, worker, compiler, and developer tools.
-doctor:
-    {{ nix }} scripts/toolchain-doctor.sh
-
-# Reuse local Cabal/Cargo outputs to build Exomonad and its matched compiler tools.
-exomonad-build:
-    {{ exomonad_nix }} bash exomonad/scripts/exomonad-build.sh
-
-# Pass Exomonad init flags after `--`, for example:
-#   just exomonad-init -- --session exomonad-tidepool-fresh --no-attach
-# Build the matched local tools incrementally, then start an actor run.
-[positional-arguments]
-exomonad-init *args:
-    {{ exomonad_nix }} exomonad/scripts/exomonad-init.sh "$@"
-
-# Run any Exomonad subcommand with this checkout's matched tools, for example:
-#   just exomonad-run -- new ~/dev/some-repo
-#   just exomonad-run -- check --workspace ~/dev/some-repo
-[positional-arguments]
-exomonad-run *args:
-    {{ exomonad_nix }} exomonad/scripts/exomonad-run.sh "$@"
-
-# Run a workspace's configured recipe checks in parallel through one warm
-# compile daemon (`exomonad check --recipes` runs them one after another).
-exomonad-check-recipes workspace parallelism="1":
-    {{ exomonad_nix }} exomonad/scripts/exomonad-check-recipes.sh "{{ workspace }}" "{{ parallelism }}"
-
-# Build Exomonad from this checkout and run it against the independent console
-# repository. Extra arguments are forwarded to `exomonad init`.
-[positional-arguments]
-exomonad-console *args:
-    test -d "$HOME/dev/exomonad-console/.git" || { echo "missing $HOME/dev/exomonad-console; initialize it first" >&2; exit 1; }
-    {{ exomonad_nix }} exomonad/scripts/exomonad-init.sh "$@" --workspace "$HOME/dev/exomonad-console"
-
-# Build this Exomonad checkout and launch development in the fresh exomonad-repl project.
-[positional-arguments]
-exomonad-repl *args:
-    test -e "$HOME/dev/exomonad-repl/.git" || { echo "missing $HOME/dev/exomonad-repl; run exomonad new ~/dev/exomonad-repl first" >&2; exit 1; }
-    {{ exomonad_nix }} exomonad/scripts/exomonad-init.sh "$@" --workspace "$HOME/dev/exomonad-repl" --model gpt-6-astra --effort medium
-
-# Build this Exomonad checkout and run it against the model-harness repository
-# (a build wave outside this repository). Extra arguments go to `exomonad init`.
-[positional-arguments]
-exomonad-harness *args:
-    test -e "$HOME/dev/exomonad-harness/.exomonad/config.toml" || { echo "missing $HOME/dev/exomonad-harness/.exomonad; run exomonad new ~/dev/exomonad-harness first" >&2; exit 1; }
-    {{ exomonad_nix }} exomonad/scripts/exomonad-init.sh "$@" --workspace "$HOME/dev/exomonad-harness"
-
-# Pre-review gate: check, suite registration, fixtures; all run, all failures reported.
-# Build the deployable extractor package exactly as redeploy will.
-deploy-check:
-    nix build .#tidepool-extract --no-link
-
+# Broad integration gate; use focused targets during ordinary development.
 verify:
-    {{ nix }} scripts/verify.sh
+    python3 scripts/native-workflow.py verify
+
+test-toolchain-scripts:
+    bash scripts/buck2-run.sh test --local-only -c remote.enabled=false //scripts:toolchain_script_tests
+
+test-workflow-scripts:
+    bash scripts/buck2-run.sh test --local-only -c remote.enabled=false //scripts:native_workflow_tests
+
+# A raw build is frozen/qualified explicitly before it can own a run.
+exomonad-build:
+    bash scripts/buck2-run.sh build --local-only -c remote.enabled=false //build/package:native_runtime_bundle
+
+[positional-arguments]
+exomonad-freeze *args:
+    python3 build/package/qualification.py freeze "$@"
+
+[positional-arguments]
+exomonad-run bundle descriptor report *args:
+    python3 "$1/share/exomonad/qualification.py" exec --report "$3" "$2" -- "${@:4}"
+
+[positional-arguments]
+exomonad-init bundle descriptor report *args:
+    python3 "$1/share/exomonad/qualification.py" exec --report "$3" "$2" -- init "${@:4}"
+
+[positional-arguments]
+exomonad-check-recipes bundle descriptor reports workspace parallelism="1":
+    bash exomonad/scripts/exomonad-check-recipes.sh "$@"
+
+[positional-arguments]
+doctor bundle descriptor:
+    bash scripts/toolchain-doctor.sh "$@"
+
+[positional-arguments]
+daemon-start bundle descriptor:
+    bash -c 'source scripts/lib-extract.sh; select_native_bundle "$1" "$2"; daemon_start_persistent' native-daemon "$@"
+
+daemon-stop:
+    bash -c 'source scripts/lib-extract.sh; daemon_stop_persistent'
+
+# Only the actual test child enters the delegated service; Buck stays outside it.
+[positional-arguments]
+test-command-resources-delegated output:
+    bash exomonad/scripts/test-command-resources-delegated.sh "$1"
+
+[positional-arguments]
+test-embedded-command-delegated bundle descriptor output:
+    bash exomonad/scripts/test-embedded-command-delegated.sh "$@"
+
+[positional-arguments]
+test-m1 bundle descriptor output:
+    bash build/testing/run-m1-acceptance.sh "$@"

@@ -88,6 +88,7 @@ rust_filegroup(
         "src/stack_map.rs": "tidepool/codegen/src/stack_map.rs",
         "src/suspension.rs": "tidepool/codegen/src/suspension.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_library(
@@ -225,6 +226,7 @@ rust_filegroup(
         "src/stack_map.rs": "tidepool/codegen/src/stack_map.rs",
         "src/suspension.rs": "tidepool/codegen/src/suspension.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(
@@ -277,6 +279,7 @@ rust_filegroup(
         "Cargo.toml": "tidepool/codegen/Cargo.toml",
         "tests/native_md5_link.rs": "tidepool/codegen/tests/native_md5_link.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(
@@ -323,6 +326,7 @@ rust_filegroup(
         "src/prepared_control.rs": "tidepool/codegen/src/prepared_control.rs",
         "tests/prepared_control.rs": "tidepool/codegen/tests/prepared_control.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(

@@ -54,6 +54,7 @@ rust_filegroup(
         "src/session/workbench.rs": "tidepool/runtime/src/session/workbench.rs",
         "src/span_blocking.rs": "tidepool/runtime/src/span_blocking.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_library(
@@ -183,6 +184,7 @@ rust_filegroup(
         "src/session/workbench.rs": "tidepool/runtime/src/session/workbench.rs",
         "src/span_blocking.rs": "tidepool/runtime/src/span_blocking.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_binary(
@@ -477,6 +479,7 @@ rust_filegroup(
         "tests/prepared_unit_codegen_cost.rs": "tidepool/runtime/tests/prepared_unit_codegen_cost.rs",
         "tests/suites/session.rs": "tidepool/runtime/tests/suites/session.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(

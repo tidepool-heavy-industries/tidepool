@@ -99,6 +99,17 @@ else:
         self.assertIn("test_ghc_libdir = /nix/store/checked-test-ghc/lib\n", configured)
         self.assertIn("test_ghc = " + str(self.test_ghc / "ghc"), configured)
         self.assertIn("haskell_test_closure = /nix/store/checked-buck-haskell-test-closure", configured)
+        self.assertIn("jev_sources = /nix/store/checked-buck-jev-sources", configured)
+
+    def test_runtime_tools_are_pinned_without_project_catalog_capture(self):
+        result = self.run_configure()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        configured = (self.root / ".buckconfig.local").read_text()
+        self.assertIn("exomonad_runtime_tools = /nix/store/checked-buck-exomonad-runtime-tools", configured)
+        self.assertIn("runtime_stdlib_products = \n", configured)
+        calls = [json.loads(line) for line in self.log.read_text().splitlines()]
+        self.assertTrue(any(call[-1].endswith("buck-exomonad-runtime-tools.outPath") for call in calls))
+        self.assertFalse(any(call[0] == "flake" for call in calls))
 
     def test_reduced_toolchain_capture_refuses_project_resource_selection(self):
         result = self.run_configure("--runtime-stdlib")

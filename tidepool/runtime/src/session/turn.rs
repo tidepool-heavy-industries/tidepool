@@ -7183,7 +7183,7 @@ mod tests {
 
     /// Force tests that replace `TIDEPOOL_EXTRACT` to exercise that process
     /// boundary even when the surrounding test runner owns a compile daemon.
-    /// Each nextest case has its own process, but it still inherits the
+    /// Each native libtest case has its own process, but it still inherits the
     /// runner's daemon socket.
     struct TestEnvGuard {
         key: &'static str,

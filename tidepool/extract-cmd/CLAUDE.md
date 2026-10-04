@@ -98,8 +98,7 @@ the same `MemAvailable` figure. The daemon logs its derived sizing
 `warm_worker_mb`) once at startup, and a worker replaced by RSS rotation
 after serving only a few requests logs as memo loss, not ordinary rotation.
 See `daemon::DEFAULT_WORKER_COUNT`, `daemon::WARM_WORKER_MB`, and
-`daemon::default_memory_budget_mb`'s doc comments for the exact sizing and
-the matching `.config/nextest.toml` `[test-groups.ghc-heavy] max-threads`.
+`daemon::default_memory_budget_mb`'s doc comments for the exact sizing and the native test runner's declared process concurrency.
 
 Mutable GHC interface/object products are private to a daemon epoch and worker
 slot below the requested logical build-products root. Successive requests and

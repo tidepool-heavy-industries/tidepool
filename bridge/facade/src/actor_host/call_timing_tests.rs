@@ -158,7 +158,7 @@ async fn second_cell_install_compiles_off_checkout() {
     // (this file's other tests use it) does not reach. This test needs a
     // process-wide default instead; set it before `TestCampaign::start()`
     // so it wins over that helper's own best-effort `try_init()`. Safe
-    // because nextest runs each test in its own process (no other test's
+    // because the native runner runs each test in its own process (no other test's
     // global default to collide with).
     let log = CapturedLog(Arc::new(std::sync::Mutex::new(Vec::new())));
     let subscriber = tracing_subscriber::fmt()

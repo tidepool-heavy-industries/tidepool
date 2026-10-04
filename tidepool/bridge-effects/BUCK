@@ -20,6 +20,7 @@ rust_filegroup(
         "src/lib.rs": "tidepool/bridge-effects/src/lib.rs",
         "src/model_control_tests.rs": "tidepool/bridge-effects/src/model_control_tests.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_library(
@@ -58,6 +59,7 @@ rust_filegroup(
         "src/lib.rs": "tidepool/bridge-effects/src/lib.rs",
         "src/model_control_tests.rs": "tidepool/bridge-effects/src/model_control_tests.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(

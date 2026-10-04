@@ -31,6 +31,7 @@ rust_filegroup(
         "src/types.rs": "tidepool/repr/src/types.rs",
         "src/version_ladder.rs": "tidepool/repr/src/version_ladder.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_library(
@@ -78,6 +79,7 @@ rust_filegroup(
         "src/types.rs": "tidepool/repr/src/types.rs",
         "src/version_ladder.rs": "tidepool/repr/src/version_ladder.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(
@@ -113,6 +115,7 @@ rust_filegroup(
         "tests/strict_jsonl_directory.rs": "tidepool/repr/tests/strict_jsonl_directory.rs",
         "tests/suites/repr.rs": "tidepool/repr/tests/suites/repr.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(

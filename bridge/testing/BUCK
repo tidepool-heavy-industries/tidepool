@@ -13,6 +13,7 @@ rust_filegroup(
         "src/eval_harness.rs": "bridge/testing/src/eval_harness.rs",
         "src/lib.rs": "bridge/testing/src/lib.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_library(
@@ -47,6 +48,7 @@ rust_filegroup(
         "src/eval_harness.rs": "bridge/testing/src/eval_harness.rs",
         "src/lib.rs": "bridge/testing/src/lib.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(

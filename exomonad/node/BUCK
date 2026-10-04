@@ -39,6 +39,7 @@ rust_filegroup(
         "src/view_command.rs": "exomonad/node/src/view_command.rs",
         "tests/fixtures/overlay_worker.sh": "exomonad/node/tests/fixtures/overlay_worker.sh",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_library(
@@ -101,6 +102,7 @@ rust_filegroup(
         "src/view_command.rs": "exomonad/node/src/view_command.rs",
         "tests/fixtures/overlay_worker.sh": "exomonad/node/tests/fixtures/overlay_worker.sh",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(
@@ -135,6 +137,7 @@ rust_filegroup(
         "Cargo.toml": "exomonad/node/Cargo.toml",
         "tests/command_resources.rs": "exomonad/node/tests/command_resources.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(
@@ -172,6 +175,7 @@ rust_filegroup(
         "tests/fixtures/view_command_contract.sh": "exomonad/node/tests/fixtures/view_command_contract.sh",
         "tests/overlay_rotation.rs": "exomonad/node/tests/overlay_rotation.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(
@@ -207,6 +211,7 @@ rust_filegroup(
         "Cargo.toml": "exomonad/node/Cargo.toml",
         "tests/process_boundary.rs": "exomonad/node/tests/process_boundary.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(

@@ -1,3 +1,4 @@
+load("@root//build/rust:native_check_targets.bzl", "NATIVE_LINT_ALLOW", "NATIVE_LINT_WARN", "NATIVE_LINT_DENY", "NATIVE_LINT_FORBID")
 load("@prelude//:rules.bzl", "filegroup")
 load("@prelude//toolchains:cxx.bzl", "system_cxx_toolchain")
 load("@prelude//toolchains:genrule.bzl", "system_genrule_toolchain")
@@ -12,6 +13,11 @@ nix_rust_toolchain(
     rustc = read_root_config("nix", "rustc"),
     rustdoc = read_root_config("nix", "rustdoc"),
     clippy = read_root_config("nix", "clippy"),
+    clippy_toml = "root//:workspace_clippy",
+    clippy_flags = (["-A" + lint for lint in NATIVE_LINT_ALLOW] +
+                    ["-W" + lint for lint in NATIVE_LINT_WARN] +
+                    ["-D" + lint for lint in NATIVE_LINT_DENY] +
+                    ["-F" + lint for lint in NATIVE_LINT_FORBID]),
     linker = read_root_config("nix", "cc"),
     visibility = ["PUBLIC"],
 )

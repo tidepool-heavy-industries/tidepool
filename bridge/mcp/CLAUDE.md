@@ -105,10 +105,11 @@ patterns and invalid candidate syntax are typed failures, not silent misses.
 Primary checks:
 
 ```bash
-cargo nextest run -p tidepool-mcp
-cargo test -p tidepool-mcp --test protocol_goldens
+just test-lib tidepool-mcp --exact FULL_TEST_NAME --expected-count 1
+just test-target tidepool-mcp protocol_goldens
 ```
 
-Set `TIDEPOOL_REGEN_PROTOCOL_GOLDENS=1` only when intentionally changing the
-public generated surface. A migration must first pass against existing goldens;
-regenerating early destroys the compatibility proof.
+Intentional golden replacement is a separate writer step. Native acceptance
+rejects generation mutation flags and compares the current public surface
+against declared goldens. Protocol/effect modules come from their native
+generator artifacts; generated consumers do not refresh source files.

@@ -94,10 +94,8 @@ const EARLY_REPLACEMENT_SERVED_THRESHOLD: u64 = 8;
 /// pinning, request deadline, peer-disconnect kill, and served/RSS rotation.
 /// A single accept thread hands each accepted connection to a free slot
 /// (`serve_workers`'s bounded channel — never an unbounded per-connection
-/// thread); with N slots, up to N ghc-heavy nextest processes stop queuing
-/// behind one compiler worker. `.config/nextest.toml`'s
-/// `[test-groups.ghc-heavy] max-threads` is sized at `DEFAULT_WORKER_COUNT + 1`
-/// to match.
+/// thread); with N slots, up to N compiler-backed test processes stop queuing
+/// behind one compiler worker. Native runners declare process concurrency.
 ///
 /// Ordinary (non-`--persistent`) daemon mode ignores `--workers` and always
 /// runs one worker: it retires the whole endpoint (not just a slot) the
@@ -133,13 +131,13 @@ const WARM_WORKER_MB: u64 = 7 * 1024;
 /// The figure itself comes from measurement on a 31 GiB box that runs
 /// nothing else: at the default `DEFAULT_WORKER_COUNT` (3) this is
 /// `WARM_WORKER_MB` (7 GiB) per worker, leaving roughly 10 GiB for the
-/// concurrent cargo/nextest build issuing those `ghc-heavy` requests
+/// concurrent native build issuing those `ghc-heavy` requests
 /// alongside the pool. A shared box sizes its worker count down on its own
 /// (see `worker_count_from_budget`); passing `--workers 2` remains available
 /// for a caller that wants to pin it.
 const DEFAULT_MEMORY_BUDGET_MB: u64 = 21 * 1024;
 /// Memory reserved out of what's available at daemon start, never claimed by
-/// the default worker budget — for the concurrent cargo/nextest build (or
+/// the default worker budget — for the concurrent native build (or
 /// whatever else the caller is doing) and for `/proc/meminfo`'s own
 /// estimation slop. Matches the roughly 10 GiB the historical fixed budget
 /// already left over on its reference 31 GiB box.

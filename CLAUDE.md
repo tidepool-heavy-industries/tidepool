@@ -54,65 +54,31 @@ Small support crates have short local charters describing their exact scope.
 
 ## Build and test
 
+The `justfile` forwards to declared native Buck actions using configured,
+materialized Nix tools. See `docs/swarm-builds.md` for server admission and
+`AGENTS.md` for ownership and evidence rules.
+
 ```bash
 just quick
-just check
-just test-target tidepool-runtime session 'test(<name>)'
-just test-lib tidepool-runtime 'test(<name>)'
-just suite tidepool-runtime
-just changed
-just verify
+just check                          # compile-only, no test execution
+just test-target PACKAGE TARGET --exact FULL_NAME --expected-count 1
+just test-lib PACKAGE --exact FULL_NAME --expected-count 1
+just suite PACKAGE
+just fixtures-check containers-contract
 ```
 
-`just daemon-start` keeps one compile daemon warm across test runs; battery,
-suite, and check runs reuse it automatically while its producer matches the
-current extractor and worker; after a rebuild they start their own daemon
-instead, so a restart only restores warmth. Other agents and test runs share
-the persistent daemon: restart it once, at a quiet point, never per parcel.
-`just daemon-stop` lets an in-flight compile finish before the daemon exits.
-Test recipes in any checkout, linked worktrees included, reuse the persistent
-daemon and its extractor whenever the checkout's extractor sources match the
-fingerprint it recorded at start (`scripts/lib-extract.sh`,
-`tidepool_extract_producer_sources`), without building an extractor of their
-own. A checkout whose extractor sources differ starts its own daemon capped
-at one GHC worker beside the warm one.
-Leave the host cargo config's incremental compilation on (no
-`CARGO_INCREMENTAL=0`) and cap jobs to fit beside the daemon's GHC workers —
-sized from memory actually available at daemon start (up to three 7 GiB
-workers on a quiet box; less next to another warm compile daemon), not a
-fixed figure.
+Native Rust runners discover actual libtest names, reject empty selections,
+check counts and isolate each case. Haskell suites use their shared Tasty
+runner. Compile-only binaries and ignored command adapters do not establish
+passing test evidence. Generated immutable fixtures are runtime resources;
+rebuild their owning source actions instead of updating checked-in blobs.
 
-Large integration suites use small entry points in `tests/suites/` that import
-separate test files as modules. Cargo's `autotests = false` prevents linking a
-runtime copy for every file; `just suite-check` checks suite registration and
-coverage of every top-level test file. Add new tests to the appropriate
-suite entry point. Nextest still runs each test in its own process.
-
-`just test-find NAME` prints the exact command for a test function without
-building. Use `just test-target CRATE SUITE 'test(module::name)'` to restrict
-compilation as well as execution. `just test CRATE FILTER` selects tests across all targets
-and may compile more than needed. `just suite CRATE` builds each declared suite
-as it reaches it. Routine dev/test builds omit debug information while retaining
-symbols and GC-required frame pointers. To opt into debugger information, set
-`CARGO_PROFILE_DEV_DEBUG=2 CARGO_PROFILE_DEV_STRIP=none` (use `TEST` for tests).
-
-The Justfile is the development entry point and enters the Nix shell itself.
-`just --list` describes every supported workflow. `just quick` runs workspace
-library tests under nextest process isolation. `just check` adds formatting,
-strict clippy, and nextest's broader default-filter tier; macro expansion may
-still invoke the extractor on a fresh build.
-
-`just test` accepts an ordinary nextest filter expression. `just suite` runs
-Cargo integration targets sequentially with one shared compile daemon. `just changed` is a conservative inner-loop selection, not the
-pre-review gate; `just verify` is the gate.
-
-Do not add a separate extractor compile when an existing family bundle can
-carry another assertion. Expensive and known-bug ignored tests remain explicit
-opt-ins rather than part of `just verify`.
-
-After changing extractor translation or serialization, run
-`just fixtures-check` or `just fixtures-update`. Follow `bridge/haskell/CLAUDE.md`
-for deployment of the extractor and standard library.
+`just verify` is the broad native integration gate, reserved for integration
+boundaries. Target availability and successful source generation are not
+migration acceptance. Exact frozen bundle build/source/profile/compiler/asset
+identity and production acceptance belong to `build/package/qualification.py`;
+see `build/package/README.md`. Run/init frontends require explicit bundle,
+descriptor and report paths.
 
 ## Architectural invariants
 

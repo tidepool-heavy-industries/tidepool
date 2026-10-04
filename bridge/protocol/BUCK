@@ -55,6 +55,7 @@ rust_filegroup(
         "src/schema.rs": "bridge/protocol/src/schema.rs",
         "src/types.rs": "bridge/protocol/src/types.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_library(
@@ -117,6 +118,7 @@ rust_filegroup(
         "src/schema.rs": "bridge/protocol/src/schema.rs",
         "src/types.rs": "bridge/protocol/src/types.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_binary(
@@ -182,6 +184,7 @@ rust_filegroup(
         "src/schema.rs": "bridge/protocol/src/schema.rs",
         "src/types.rs": "bridge/protocol/src/types.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(
@@ -340,6 +343,7 @@ rust_filegroup(
         "src/schema.rs": "bridge/protocol/src/schema.rs",
         "src/types.rs": "bridge/protocol/src/types.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(
@@ -378,6 +382,7 @@ rust_filegroup(
         "tests/worktree_haskell_contract.rs": "bridge/protocol/tests/worktree_haskell_contract.rs",
         "tests/worktree_wire_rust.rs": "bridge/protocol/tests/worktree_wire_rust.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(

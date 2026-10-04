@@ -28,6 +28,7 @@ rust_filegroup(
         "src/testing.rs": "exomonad/worktree/src/testing.rs",
         "src/view.rs": "exomonad/worktree/src/view.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_library(
@@ -79,6 +80,7 @@ rust_filegroup(
         "src/testing.rs": "exomonad/worktree/src/testing.rs",
         "src/view.rs": "exomonad/worktree/src/view.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(
@@ -127,6 +129,7 @@ rust_filegroup(
         "tests/worktree_core.rs": "exomonad/worktree/tests/worktree_core.rs",
         "tests/worktree_head.rs": "exomonad/worktree/tests/worktree_head.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(

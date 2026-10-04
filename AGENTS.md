@@ -11,26 +11,28 @@ providers, scheduling, resources, persistence, and argument parsing.
    system is for.
 2. Before editing a subsystem, read the nearest nested `AGENTS.md` or
    `CLAUDE.md`. They state that crate's boundaries and invariants.
-3. Build and test through the `justfile`, which enters the Nix shell itself.
-   `just exomonad-build` incrementally builds the matched local extractor,
-   Haskell worker, and Exomonad binary without starting a run. Cabal and Cargo
-   reuse this checkout's build outputs on later calls.
-   `just test-lib <crate> 'test(<name>)'` runs one test and compiles only what it
-   needs. `just verify` is the full gate and takes about two hours; do not run
-   it as a routine check.
+3. Build and test through the `justfile`, a thin frontend to declared Buck targets.
+   Materialize this revision's pinned Nix tools, then configure Buck with
+   `scripts/buck2-configure.sh --tests`. See `docs/swarm-builds.md` for the
+   source outputs, bind mount and resource admission requirements.
+   `just test-lib PACKAGE --exact FULL_NAME --expected-count 1` runs one unit
+   test through its native counted runner. Compile-only target builds do not
+   establish execution evidence. `just verify` is a broad integration gate;
+   do not run it as a routine spot check.
 4. To run it, follow `exomonad/docs/getting-started.md`: `exomonad new` creates a
    project workspace with a pinned shared-source submodule, while `exomonad init`
-   starts a run. In this repository `just exomonad-init` builds incrementally
-   and then starts a run. To see the system from the model's side, read
+   starts a run. In this repository `just exomonad-init BUNDLE DESCRIPTOR REPORT`
+   uses an explicitly frozen, qualified native bundle. To see the system from the model's side, read
    `exomonad/prompts/base.md` and the skills under
    `exomonad/examples/workspace/.exomonad/skills/`, and drive a session from a
    terminal with `exomonad proxy` (`exomonad/docs/operator-http.md`).
 
-For Tidepool development, use `just exomonad-build` after source edits or
-`just exomonad-init` when you also want a run. Both use the current checkout
-and the same local Cabal/Cargo outputs. `nix build .#exomonad` makes an isolated
-distribution build; Nix can reuse an identical input hash, but changed source
-starts a new build without reusing the checkout's incremental compilation.
+`just exomonad-build` builds the native runtime bundle without starting a run.
+Freeze and qualify that exact bundle through `build/package/qualification.py`;
+see `build/package/README.md`. Run with explicit bundle, descriptor and report
+paths. The bundle owns the host, libtest, compiler, stdlib, assets and build
+source/profile contract. Independently supplied compiler or libtest paths do
+not establish matched release evidence.
 
 Most changes touch one of three layers, and it helps to know which:
 
@@ -183,60 +185,49 @@ Keep detailed design references out of always-loaded instructions.
 
 ## Verification
 
-- Use the smallest check that proves the changed behavior and compile every
-  changed build or test target. Include important failure and cleanup paths.
-- Independent builds and focused tests may run concurrently in separate worktrees
-  with isolated outputs and bounded resources. Do not run broad batteries as routine
-  spot checks. Follow `scripts/codex-worktree-guidance.md` and report exactly what
-  ran, what only compiled, and what remains unverified.
-- The `justfile` enters the Nix environment. Prefer `just quick`,
-  `just test-lib <crate> 'test(<name>)'` or
-  `just test-target <crate> <target> 'test(<name>)'`, and the owning crate's
-  documented focused command. Haskell/extractor-backed tests must use the repository's Nix/toolchain
-  setup rather than assuming ambient `cargo` is sufficient.
-- `just changed BASE` shares one compiler daemon across its selected targets.
-  A successful full `just fixtures-check` writes a compiler-derived dependency
-  index under `target/prepared-corpus/`. Ordinary Haskell library edits use that
-  index to select fixture cohorts; absent, stale or incomplete evidence keeps
-  full coverage. Compiler/schema changes always select the structural corpus.
-- `just fixtures-check [COHORT...]` batches the selected cohorts through one
-  resident compiler process. Omit cohorts for integration and metadata checks;
-  for example, `just fixtures-check containers-contract` checks that cohort.
-  Each cohort retains its own outputs and each request its own cleanup. A
-  partial run never replaces the complete dependency index.
-- Reuse compiled immutable fixtures across repeated installations in one test.
-  Keep real binding injection/generation cases and fresh mutable machines;
-  nextest still isolates tests in separate processes.
-- `just quick` runs the explicit extractor-free engine unit-test packages and
-  does not build or start the compiler worker. `just changed-plan BASE` previews
-  affected targets; `just changed BASE` runs each selected target once and
-  compile-checks downstream consumers of production changes. Normal/build
-  dependencies propagate; development dependencies check their direct consumer
-  without propagating through its production users. Cargo-only and Cabal-only
-  build selections do not start a compiler daemon. Shared build inputs
-  require an explicit integration check instead of silently launching one.
-- `just test-lib PACKAGE 'test(=NAME)'` selects a unit test;
-  `just test-target PACKAGE TARGET 'test(=NAME)'` selects an integration test.
-  Use `just suite PACKAGE` for its full integration suites and `just verify`
-  at major integration boundaries. Nextest filters select execution, not Cargo
-  compilation: choose the package and target as well as the test name.
-- Use `tidepool-test-data` for repr-only fixtures, `tidepool-testing` for
-  evaluation and `TestEffectSurface`, and `tidepool-prepared-corpus` for corpus
-  execution. Keep heavy support out of low-level dev dependencies.
-- Share compilation of fixed Haskell fixtures across named test scenarios.
-  Keep fresh machines for mutable state, and preserve process isolation for
-  signal, crash, and global-state tests. Lightweight fixture data belongs below
-  evaluation and corpus support in the dependency graph.
-- Set `TIDEPOOL_KEEP_TEST_LOGS=1` to retain successful battery diagnostics
-  (five runs, at most 4 MiB per log). Failures retain their evidence separately.
-- Spot checks are appropriate during ordinary work. Run the relevant broad
-  boundary check at major integration or release points, not after every edit.
-- After extractor translation or serialization changes, run
-  `just fixtures-check`; use `just fixtures-update` only when the corpus should
-  intentionally change. The fixture commands also validate registered embedded
-  prepared artifacts; their producers are listed in
-  `bridge/haskell/test-prepared-stg/embedded-fixtures.json`. A schema migration must
-  regenerate those artifacts through their producers, not edit version bytes.
-- Always run formatting appropriate to changed languages and
-  `git diff --check`. Review the final diff for stale callers, duplicated
-  policy, unused surface, magic-string control flow, and obsolete comments.
+- Compile every changed or directly affected target and run the smallest tests
+  that prove its behavior, including meaningful refusal and cleanup controls.
+  Coordinate one expensive build/test lane on the shared server. Preserve
+  source-only parcels until the execution owner admits their qualification.
+- `just test-lib PACKAGE --exact FULL_NAME --expected-count N` selects unit
+  cases; `just test-target PACKAGE TARGET ...` selects an integration target.
+  `just test-bin PACKAGE BINARY ...` selects binary tests. `just test-list`
+  lists the owning libtest executable; listing and linking are not test passes.
+- `just test-native LABEL --pattern PATTERN` forwards arguments to a named
+  Haskell Tasty target. Native runners reject empty selection and preserve
+  declared compiler, source and runtime resources. Rust cases run in separate
+  bounded processes; Tasty selection runs only selected leaves, serially.
+- `build/native-targets.json` is generated from Cargo targets and the reviewed
+  module ownership walk. Cargo metadata owns package/target discovery;
+  `scripts/buck2-first-party.py` enforces integration registration. The source
+  walk establishes ownership, not a proof that a harness contains zero tests.
+  Actual libtest discovery owns execution counts. Empty harnesses remain
+  compile-only and cannot be accepted as executed suites.
+- `just suite PACKAGE` runs its registered integration targets. `just check`
+  compiles native consumers without executing tests. `just quick` selects the
+  explicit engine unit packages; fixed fixture build actions may need GHC on
+  a cold build. `just lint` uses declared formatting/Clippy inputs.
+- After compiler translation or serialization changes, run
+  `just fixtures-check`. Optional cohort names select existing native corpus
+  targets. Prepared fixture/corpus producers emit immutable runtime resources
+  from declared compiler, source, ordered-root, target and package inputs.
+  Corpus validation checks nonzero programs and typed outcomes against the
+  independent oracle. Generated prepared artifacts are not checked in;
+  change their owning sources/targets and let Buck rebuild their producers.
+- Use `tidepool-test-data` for representation-only fixtures, `tidepool-testing`
+  for evaluation, and `tidepool-prepared-corpus` for corpus execution. Test-only
+  dependency edges do not become production features or certificate issuers.
+  No local development feature union or `test-support` authority factory is
+  supported. Reuse immutable compiled fixtures with fresh mutable machines.
+- Keep GHC API and package dependencies in their owning native actions. The
+  production worker retains its production package closure; Tasty dependencies
+  belong to the separate host test toolchain. Tests must fail on missing or
+  broken required compiler inputs, rather than return a passing skip.
+- Retain the source OID, actual artifact/hash, command, selected/executed counts,
+  exit status and log/report. Report compilation, execution and unqualified
+  work separately. Frozen release acceptance must use one bundle-owned source,
+  profile, compiler and asset contract through the central qualification owner.
+- Run language-appropriate formatting and `git diff --check`. Review the final
+  diff for stale callers, duplicated policy, unused surface, rendered-string
+  control flow and obsolete comments. Keep the open migration obligations in
+  `plans/typed-build-and-test-delivery.md`; qualification requires actual runs.

@@ -24,6 +24,7 @@ export_file(name = "facade_doc__exomonad_workspace_skills_exomonad_jev_SKILL_md"
 export_file(name = "facade_doc__exomonad_workspace_skills_exomonad_jev_references_recent_changes_md", src = ".exomonad/workspace/skills/exomonad-jev/references/recent-changes.md", visibility = ["PUBLIC"])
 export_file(name = "facade_doc__exomonad_workspace_skills_exomonad_workbench_SKILL_md", src = ".exomonad/workspace/skills/exomonad-workbench/SKILL.md", visibility = ["PUBLIC"])
 
+export_file(name = "workspace_clippy", src = ".clippy.toml", visibility = ["PUBLIC"])
 filegroup(
     name = "qualification_inputs",
     srcs = {source: source for source in glob([
@@ -35,3 +36,9 @@ filegroup(
 )
 
 export_file(name = "workspace_gitlink", src = "build/native-workspace-gitlink.json", visibility = ["PUBLIC"])
+
+filegroup(
+    name = "operator_test_sources",
+    srcs = {source: source for source in glob(["exomonad/scripts/*.sh"])},
+    visibility = ["PUBLIC"],
+)

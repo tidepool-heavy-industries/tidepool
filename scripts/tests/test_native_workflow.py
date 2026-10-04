@@ -1,0 +1,79 @@
+"""Selection contracts for thin native frontends, without invoking Buck."""
+import importlib.util
+import contextlib
+import io
+import sys
+import types
+from pathlib import Path
+import unittest
+from unittest.mock import patch
+
+spec = importlib.util.spec_from_file_location("native_workflow", Path(__file__).parents[1] / "native-workflow.py")
+workflow = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(workflow)
+
+ROSTER = {"example": {"libraries": {"example": {"build": "//pkg:example", "test_build": "//pkg:unit", "test": "//pkg:unit_all"}},
+                      "binaries": {}, "integration": {"scenario": {"test_build": "//pkg:scenario_binary", "test": "//pkg:scenario"}}}}
+
+
+class NativeWorkflowTests(unittest.TestCase):
+    def invoke(self, arguments, result=0):
+        with patch.object(workflow, "roster", return_value=ROSTER), patch.object(workflow, "buck", return_value=result) as buck:
+            status = workflow.main(arguments)
+            return status, buck.call_args_list
+
+    def test_focused_execution_uses_declared_runinfo_and_retains_exact_count(self):
+        status, calls = self.invoke(["test-target", "example", "scenario", "--", "--exact", "scenario::valid", "--expected-count", "1"])
+        self.assertEqual(status, 0)
+        self.assertEqual(calls[0].args, ("run", ["//pkg:scenario"], ["--exact", "scenario::valid", "--expected-count", "1"]))
+
+    def test_default_library_runs_counted_wrapper(self):
+        status, calls = self.invoke(["test-lib", "example"])
+        self.assertEqual(calls[0].args, ("test", ["//pkg:unit_all"], []))
+
+    def test_unknown_target_and_retired_expression_refuse_before_buck(self):
+        for arguments in (["test-target", "example", "unknown"], ["test-lib", "example", "test(valid)"]):
+            with self.subTest(arguments=arguments), patch.object(workflow, "roster", return_value=ROSTER), patch.object(workflow, "buck") as buck:
+                with self.assertRaises(ValueError):
+                    workflow.main(arguments)
+                buck.assert_not_called()
+
+    def test_compile_check_does_not_execute_harnesses(self):
+        _, calls = self.invoke(["check"])
+        self.assertEqual(calls[0].args, ("build", ["//pkg:example", "//pkg:scenario_binary", "//pkg:unit"]))
+
+    def test_fixture_action_failure_preserved_and_cohort_still_attempted(self):
+        with patch.object(workflow, "roster", return_value=ROSTER), patch.object(workflow, "buck", side_effect=[7, 0]) as buck:
+            self.assertEqual(workflow.main(["fixtures-check", "containers-contract"]), 7)
+            self.assertEqual(buck.call_args_list[1].args, ("test", ["//bridge/haskell:corpus_containers_contract_test"]))
+
+    def test_duplicate_cohorts_and_missing_suite_refuse_without_fallback(self):
+        for arguments in (["fixtures-check", "suite", "suite"], ["suite", "missing"]):
+            with self.subTest(arguments=arguments), patch.object(workflow, "roster", return_value=ROSTER), patch.object(workflow, "buck") as buck:
+                with self.assertRaises(ValueError):
+                    workflow.main(arguments)
+                buck.assert_not_called()
+
+    def test_standard_unittest_adapter_executes_control_and_refuses_zero(self):
+        adapter_spec = importlib.util.spec_from_file_location("native_unittest", Path(__file__).parents[1] / "unittest-main.py")
+        adapter = importlib.util.module_from_spec(adapter_spec)
+        adapter_spec.loader.exec_module(adapter)
+        control = types.ModuleType("native_control")
+        empty = types.ModuleType("native_empty")
+        class Control(unittest.TestCase):
+            def test_control(self):
+                self.assertEqual(2 + 2, 4)
+        control.Control = Control
+        with patch.dict(sys.modules, native_control=control, native_empty=empty), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(adapter.main(["native_control"]), 0)
+            with self.assertRaises(ValueError):
+                adapter.main(["native_empty"])
+
+    def test_buck_run_separates_runner_arguments_from_buck_options(self):
+        with patch.object(workflow.subprocess, "call", return_value=0) as call:
+            workflow.buck("run", ["//pkg:scenario"], ["--exact", "scenario::valid"])
+        self.assertEqual(call.call_args.args[0][-4:], ["//pkg:scenario", "--", "--exact", "scenario::valid"])
+
+
+if __name__ == "__main__":
+    unittest.main()

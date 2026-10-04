@@ -43,6 +43,7 @@ rust_filegroup(
         "src/lib.rs": "bridge/handlers/src/lib.rs",
         "src/test_support.rs": "bridge/handlers/src/test_support.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_library(
@@ -126,6 +127,7 @@ rust_filegroup(
         "src/lib.rs": "bridge/handlers/src/lib.rs",
         "src/test_support.rs": "bridge/handlers/src/test_support.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(
@@ -207,6 +209,7 @@ rust_filegroup(
         "//bridge/protocol:generated[bridge_handlers_src_generated_worktree_registry_rs]": "bridge/handlers/src/generated/worktree_registry.rs",
         "tests/bridged_records.rs": "bridge/handlers/tests/bridged_records.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(

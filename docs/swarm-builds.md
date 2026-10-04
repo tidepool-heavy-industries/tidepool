@@ -78,31 +78,35 @@ configured `matched_harness_source` must still equal the existing Nix producer's
 output for those bytes. This override leaves canonical dependency URLs and the
 default Git-fetch generation unchanged; it does not publish the reviewed commit.
 
-The initial accepted native test slice covers `tidepool-atomic-write`,
-`tidepool-repr`, and `tidepool-heap`:
+The native first-party graph covers the packages in
+`scripts/buck2_cargo_features.py`. Local development/backend/test-support
+features are retired: unsupported local features fail with package/root/edge
+diagnostics rather than entering a global feature union. Dev-only support
+remains on dev dependency edges. Source-only generation and target availability
+are distinct from accepted execution evidence.
 
-- `//bridge/atomic-write:tidepool_atomic_write_unit_tests`
-- `//bridge/atomic-write:strict_directory`
-- `//tidepool/repr:tidepool_repr_unit_tests`
-- `//tidepool/repr:repr`
-- `//tidepool/heap:tidepool_heap_unit_tests`
-- `//tidepool/heap:gc_unit`
-- `//tidepool/heap:raw_scan_validation`
+`build/native-targets.json` is generated from Cargo metadata and the reviewed
+module ownership walk. Registered native wrappers own libtest discovery,
+nonzero counts, bounded isolated execution and reports. Haskell target/module
+rosters come from Cabal through `scripts/buck2-haskell-tests.py` and execute
+shared Tasty trees. Test GHC packages are separate from the production worker's
+package environment. Materialize `.#buck-test-ghc`,
+`.#buck-haskell-test-closure` and `.#buck-jev-sources`, then configure `--tests`
+for host tests. The test runtime closure retains both host and production GHC;
+production worker compilation still uses its production toolchain alone.
 
-These are native Rust rules with crate/test sources and compile-time fixtures
-mapped to repository-relative paths through `rust_filegroup`. Fixture owners
-export individual files. Fault-injection shared libraries are separate native C
-actions supplied through the test environment, without becoming Rust link inputs.
-A Buck test result is evidence only for its selected target; all
-other packages retain their existing `just` checks until migrated and accepted.
+Generated protocol/effect/fixture/corpus outputs are native provider artifacts.
+Fixed prepared fixtures and the twelve corpus cohorts are runtime directories,
+rather than Rust embedded blobs. Compile-fail controls are native positive/
+negative compiler actions. `just fixtures-check [COHORT...]` selects the
+existing cohort targets and their independent native GHC oracle; no updater,
+ambient Cargo/Cabal runner or checked-in prepared inventory remains.
 
-Runtime recovery unit tests use the toolchain's nondefault `test-support`
-feature through a Cargo dev-dependency. Cargo/`just` is authoritative for this
-test closure. The Buck generator does not represent separate dev-feature
-dependency variants, so the runtime unit-test Buck target is unsupported for
-this closure. Production Buck targets keep `test-support` disabled. Do not
-regenerate them from Cargo's globally unified feature list; generator `--check`
-cannot establish this test closure's feature correctness.
+Native formatter/Clippy and optimizer-probe actions preserve the corresponding
+source obligations. `just check` links native consumers without running tests;
+`just verify` is broad integration, reserved for integration boundaries.
+Empty Cargo harnesses remain compile-only and cannot count as passing tests.
+See `bridge/haskell/tests.md` for current suite/resource interfaces.
 
 Additional focused execution targets include:
 
@@ -153,48 +157,34 @@ its own Buck action key and reuse remains at the current crate/component action
 boundaries. The pinned Nix compilers and third-party Rust optimization remain
 unchanged.
 
-For a matched native production runtime, select the profile on the bundle
-invocation:
+For a native production runtime, build
+`//build/package:native_runtime_bundle`. It owns the same-profile host/libtest,
+frontend, worker, source stdlib, actors, assets and pinned runtime commands.
+The build action records artifact hashes and a source contract from declared
+package-owned inputs. `//build/rust:native_qualification_sources` materializes
+those raw inputs at full repository-relative paths; generated products retain
+their own producer relation. It does not claim a caller-supplied source OID.
 
-```sh
-bash scripts/buck2-run.sh build --local-only -c remote.enabled=false \
-  -c tidepool.profile=production \
-  //build/package:native_runtime_bundle --show-output
-```
+Freeze through `build/package/qualification.py` after copying to the final
+absolute path. The owner verifies the declared source contract against clean
+tracked Git and recorded submodules, checks the derived workspace Gitlink,
+and creates final-path compiler deployment authority. Its explicit descriptor
+supplies all acceptance/run inputs; no arbitrary libtest/compiler paths or
+independent Nix catalog substitution are accepted. See
+`build/package/README.md` for exact freeze/run/exec commands.
 
-Unknown profile names fail during target analysis. The setting can also be
-stored in a local Buck config, but the exact command should be retained with
-performance evidence so the action profile is clear.
+`just exomonad-run BUNDLE DESCRIPTOR REPORT COMMAND...` and
+`just exomonad-init BUNDLE DESCRIPTOR REPORT FLAGS...` use that frozen owner.
+An unqualified raw bundle build, `--help`, or a catalog self-consistency check
+does not establish the six production M2 gates or M1 browser acceptance.
+Source declarations and their actual executed qualification remain separate
+in the delivery evidence ledger.
 
-`//build/package:native_runtime_bundle` packages the Buck-built `exomonad`,
-`exomonad-view-helper`, `tidepool-extract`, and `tidepool-extract-bin` as sibling
-executables, together with the matched browser assets and Haskell library
-sources. Copy the complete output into a unique retained run directory before
-starting acceptance or a live run. The worker must link project libraries
-statically so that retaining its executable also retains all mutable project
-code; shared libraries from the pinned Nix closure remain external inputs.
-
-Generate deployment authority **after copying**, using the selected absolute
-bundle path and the pinned GHC directory recorded in that bundle:
-
-```sh
-# Set BUNDLE to the absolute path of the complete retained bundle.
-export TIDEPOOL_EXTRACT="$BUNDLE/bin/tidepool-extract"
-export TIDEPOOL_EXTRACT_WORKER="$BUNDLE/bin/tidepool-extract-bin"
-export TIDEPOOL_GHC_LIBDIR="$(cat "$BUNDLE/share/exomonad/ghc-libdir.txt")"
-export TIDEPOOL_COMPILER_DEPLOYMENT="$BUNDLE/share/exomonad/compiler-deployment.json"
-export TIDEPOOL_PRELUDE_DIR="$BUNDLE/share/exomonad/stdlib"
-export EXOMONAD_EMBEDDED_ASSET_ROOT="$BUNDLE/share/exomonad/web"
-unset TIDEPOOL_COMPILER_MODULES TIDEPOOL_EXTRACT_DAEMON_SOCKET
-"$TIDEPOOL_EXTRACT" --compiler-deployment-manifest "$TIDEPOOL_COMPILER_DEPLOYMENT"
-"$BUNDLE/bin/exomonad" init
-```
-
-This native bundle uses the source library and its own compiler. The separate
-`matched_runtime_bundle` below owns the Nix compiler and certified stdlib
-products. Keep the pinned Nix closures materialized and supply the normal
-admitted runtime tools, including the separately installed Codex package, on
-`PATH`. Neither bundle builds Codex.
+The optional `matched_runtime_bundle` owns separate Nix catalog products.
+Native source-backed configuration selects `.#buck-exomonad-runtime-tools`
+independently of `--runtime-stdlib`; materialize that pinned closure before
+bundle actions. Both modes preserve separately installed stock Codex and its
+credential owner; neither builds or packages credentials.
 
 The matched runtime bundle includes `share/exomonad/compiler-deployment.json`,
 generated from that bundle's frontend, worker, and pinned GHC library directory
@@ -273,10 +263,9 @@ SHA-256 `04bf88781d70b603d4ca7679d11efb72c8b35fab965c82103f0f5186559e2f27`).
 Per-module Haskell cache granularity is therefore still open. Model import,
 Template Haskell and boot/SCC dependencies explicitly before replacing that
 boundary; splitting target names alone does not establish independent caching.
-Generated worker artifacts, test fixtures, embedded browser assets, and web
-`dist` outputs must remain separate declared actions with explicit source,
-resource, and toolchain inputs before those surfaces move from their existing
-Cabal/Nix workflows. Remote execution remains disabled until its independent
+Generated worker artifacts, test fixtures, browser assets, and web `dist`
+outputs are separate declared actions with explicit source, resource and
+toolchain inputs. Remote execution remains disabled until its independent
 closure, isolation, reuse, and cancellation checks pass.
 
 ## Daemon lifetime and cache reuse

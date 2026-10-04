@@ -11,6 +11,7 @@ rust_filegroup(
         "Cargo.toml": "exomonad/model/Cargo.toml",
         "src/lib.rs": "exomonad/model/src/lib.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_library(
@@ -37,6 +38,7 @@ rust_filegroup(
         "Cargo.toml": "exomonad/model/Cargo.toml",
         "src/lib.rs": "exomonad/model/src/lib.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(

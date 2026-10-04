@@ -53,6 +53,7 @@ rust_filegroup(
         "src/lib_isolate.rs": "bridge/mcp/src/lib_isolate.rs",
         "src/preamble.rs": "bridge/mcp/src/preamble.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_library(
@@ -123,6 +124,7 @@ rust_filegroup(
         "src/lib_isolate.rs": "bridge/mcp/src/lib_isolate.rs",
         "src/preamble.rs": "bridge/mcp/src/preamble.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_binary(
@@ -194,6 +196,7 @@ rust_filegroup(
         "src/lib_isolate.rs": "bridge/mcp/src/lib_isolate.rs",
         "src/preamble.rs": "bridge/mcp/src/preamble.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(
@@ -282,6 +285,7 @@ rust_filegroup(
         "src/lib_isolate.rs": "bridge/mcp/src/lib_isolate.rs",
         "src/preamble.rs": "bridge/mcp/src/preamble.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(
@@ -359,6 +363,7 @@ rust_filegroup(
         "tests/selected_effects.rs": "bridge/mcp/tests/selected_effects.rs",
         "tests/suites/mcp.rs": "bridge/mcp/tests/suites/mcp.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(

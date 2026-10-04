@@ -14,6 +14,7 @@ rust_filegroup(
         "src/parse.rs": "tidepool/bridge-derive/src/parse.rs",
         "src/record_codegen.rs": "tidepool/bridge-derive/src/record_codegen.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_library(
@@ -43,6 +44,7 @@ rust_filegroup(
         "src/parse.rs": "tidepool/bridge-derive/src/parse.rs",
         "src/record_codegen.rs": "tidepool/bridge-derive/src/record_codegen.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(
@@ -70,6 +72,7 @@ rust_filegroup(
         "Cargo.toml": "tidepool/bridge-derive/Cargo.toml",
         "tests/arity_disambiguation.rs": "tidepool/bridge-derive/tests/arity_disambiguation.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(
@@ -98,6 +101,7 @@ rust_filegroup(
         "Cargo.toml": "tidepool/bridge-derive/Cargo.toml",
         "tests/derive_tests.rs": "tidepool/bridge-derive/tests/derive_tests.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(
@@ -126,6 +130,7 @@ rust_filegroup(
         "Cargo.toml": "tidepool/bridge-derive/Cargo.toml",
         "tests/module_qualification.rs": "tidepool/bridge-derive/tests/module_qualification.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(
@@ -154,6 +159,7 @@ rust_filegroup(
         "Cargo.toml": "tidepool/bridge-derive/Cargo.toml",
         "tests/phantom_data.rs": "tidepool/bridge-derive/tests/phantom_data.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(

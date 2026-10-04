@@ -693,7 +693,7 @@ pub fn locate_stdlib(fallbacks: &StdlibFallbacks) -> Result<StdlibLocation, Tool
 
     // 2. In-repo development: walk up from CWD, git-style. Walking (rather than
     //    probing CWD alone) is what makes this independent of which directory
-    //    cargo/nextest/the MCP client happened to launch from — a test running
+    //    the native runner/the MCP client happened to launch from — a test running
     //    with CWD=<repo>/tidepool-runtime finds the same stdlib as a server
     //    launched from the repo root.
     if let Ok(cwd) = std::env::current_dir() {

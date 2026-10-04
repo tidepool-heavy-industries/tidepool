@@ -285,7 +285,6 @@
             # one doing the caching. Every agent worktree on this box shares
             # one sccache server; a second client version reaching it is at
             # best redundant.
-            pkgs.cargo-nextest
           ];
 
           shellHook = ''

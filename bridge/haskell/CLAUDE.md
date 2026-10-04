@@ -8,30 +8,20 @@ in `tidepool-toolchain`; CBOR decoding lives in `tidepool-repr`.
 
 ## Build the compiler worker
 
-From `bridge/haskell/`:
+From the repository root, after materializing and configuring pinned tools:
 
 ```bash
-cabal build tidepool-extract-bin
-cabal list-bin tidepool-extract-bin
+just build //bridge/haskell:tidepool-extract-bin
+just test-native //bridge/haskell:source_boot_product_reuse_test --list-tests
 ```
 
 The executable is an internal compiler worker, not a user-facing CLI. It accepts
 only the versioned request protocol emitted by `tidepool-extract-cmd`, or
-`--worker-loop-v2` when run behind the resident daemon. A plain `cabal build`
-builds the worker; `cabal build --enable-tests` also builds the extractor test
-components.
-
-For local Rust tests, use the Rust frontend and point it at the worktree worker:
-
-```bash
-TIDEPOOL_EXTRACT=../target/debug/tidepool-extract \
-TIDEPOOL_EXTRACT_WORKER=$(cabal list-bin tidepool-extract-bin) \
-  PATH=<ghc-with-packages>/bin:$PATH \
-  cargo nextest run --ignore-default-filter -p tidepool-runtime
-```
-
-Do not share `dist-newstyle` between worktrees. Nix already shares the compiler
-and dependencies; `dist-newstyle` is mutable Cabal state.
+`--worker-loop-v2` behind the resident daemon. Native Rust/Haskell test targets
+carry matched frontend, worker, deployment, GHC and source resources. The
+production worker uses its production toolchain; host Tasty compilation uses
+`toolchains//:haskell_tests`. Cabal declarations own component module/package
+rosters, from which `scripts/buck2-haskell-tests.py` generates native targets.
 
 ## Toolchain resolution and deployment
 
@@ -268,23 +258,19 @@ regenerate retained compiler artifacts through their producers. Request
 authority consumers must additionally require original-site native signatures;
 decoding an observation alone does not grant that authority.
 
-## Regenerate fixtures
+## Generated fixtures
 
-After changing translation or serialization, regenerate through the canonical
-development entry point:
+After changing translation or serialization, run `just fixtures-check`.
+Each native corpus producer compiles its declared module/targets and emits
+constructor metadata and prepared programs from that same graph. The native
+validator checks all requested programs against an independently compiled
+GHC oracle. Fixed prepared fixtures and generated effects are declared output
+resources consumed at runtime, rather than committed prepared blobs.
 
-```bash
-just fixtures-check
-just fixtures-update
-```
-
-The prepared corpus projection compiles Suite once and writes its compact
-constructor metadata from that same graph. The check compares this metadata
-with the committed fixture, verifies the source fingerprint, and executes the
-corpus. The update replaces the metadata before the same semantic checks.
-Successful corpus runs retain a summary and remove generated scratch; failures
-retain their executables, provenance, and full reports. Prepared program artifacts
-are generated into temporary run directories and are not committed.
+Change the owning source or target roster to change a fixture. Buck rebuilds
+immutable outputs from complete declared inputs; no source refresh/updater,
+ambient compiler cache, or committed metadata fingerprint is the acceptance
+owner. Retain actual execution counts and reports separately from compilation.
 
 ## Extractor diagnostics
 

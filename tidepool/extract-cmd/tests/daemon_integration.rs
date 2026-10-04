@@ -333,7 +333,7 @@ fn env_socket(socket: &Path) -> (&'static str, OsString) {
 /// here rather than leaving the var set across unrelated calls.
 fn run_via_env_socket(cmd: &ExtractCmd, socket: &Path) -> std::process::Output {
     let (k, v) = env_socket(socket);
-    // This whole binary is ONE nextest test process (root CLAUDE.md) with no
+    // This whole binary is one isolated native test process (root CLAUDE.md) with no
     // concurrent test in this same process to race against — every call in
     // this file is sequential, so mutating the process env here is safe.
     std::env::set_var(k, &v);
@@ -1307,7 +1307,7 @@ fn bound_identity(bin: &Path, socket: &Path) -> tidepool_extract_cmd::CompilerId
 /// Two daemons booted independently (each with its own random boot epoch —
 /// `daemon.rs`'s `boot_epoch()`) from the SAME extract binary must still
 /// report the SAME producer identity. This is the actual scenario
-/// `scripts/battery.sh` exercises by starting a fresh daemon per run: the
+/// independent process owners exercise with fresh daemon launches: the
 /// compile memo (`tidepool-toolchain`'s `cache::invocation_key`) and the
 /// `-fwrite-interface` build-products directory
 /// (`tidepool-toolchain`'s `paths::build_products_dir`) key off

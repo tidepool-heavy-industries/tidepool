@@ -1,3 +1,5 @@
+load(":checks.bzl", "native_rust_checks")
+load(":native_check_targets.bzl", "NATIVE_CHECK_SOURCES", "NATIVE_CHECK_TARGETS")
 load(":source_snapshot.bzl", "native_source_snapshot")
 load(":native_qualification_sources.bzl", "NATIVE_QUALIFICATION_TREES")
 load("@prelude//:rules.bzl", "export_file", "filegroup", "python_bootstrap_binary")
@@ -32,5 +34,14 @@ native_source_snapshot(
 filegroup(
     name = "qualification_inputs",
     srcs = {"build/rust/" + source: source for source in glob(["BUCK", "*.bzl", "*.py"])},
+    visibility = ["PUBLIC"],
+)
+
+export_file(name = "native_checks_driver", src = "checks.py", visibility = ["PUBLIC"])
+
+native_rust_checks(
+    name = "native_checks",
+    sources = NATIVE_CHECK_SOURCES,
+    targets = NATIVE_CHECK_TARGETS,
     visibility = ["PUBLIC"],
 )

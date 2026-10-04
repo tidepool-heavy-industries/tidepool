@@ -1,171 +1,85 @@
 # Shared worktree-agent contract
 
-The parcel prompt defines the task. This file defines how to execute and
-report it. Follow both; the narrower parcel constraint wins when they differ.
+The parcel defines the task. Follow this file and the nearest contributor
+rules; a narrower parcel constraint wins. Preserve unrelated work and WIP.
+Do not switch another active checkout, stash/reset edits, clear shared caches,
+or restart shared services. Coordinate one expensive build/test lane on the
+shared server. Source-only work does not grant permission to start Buck, Nix
+builds, compilers or runtime tests.
 
-## Stay inside the parcel
+Before adding an abstraction, find its production callers and extend the
+owning mechanism. A test-only caller is not evidence for new public surface.
+Review unexpected complexity as a finding, then repair it within scope.
 
-- Rebase onto the requested local dependency commits before editing.
-- Read the repository and crate guidance named by the parcel prompt.
-- Preserve unrelated work. Do not commit `prompt.md.tmp`.
-- If a focused test exposes a real defect in the owning mechanism, fix that
-  mechanism narrowly. Do not grow a second implementation around it.
+## Focused verification
 
-Before adding an API or abstraction, search its intended production callers.
-A helper used only by its new test is not evidence that the abstraction belongs
-in production. Prefer one owning mechanism whose public entry point enforces
-its invariants; callers should not need to remember a separate pre-check.
+1. Map every changed file and direct consumer to its declared target. A shared
+   type, serialization shape, generated schema or command can affect more than
+   the defining crate. Cargo metadata and the reviewed source/module walk own
+   Rust target registration; Cabal component declarations own Haskell rosters.
+2. Compile every changed/directly affected target in the admitted checkout.
+   Linking a Rust test executable is compile-only evidence. Actual libtest
+   discovery, not source regexes, decides whether a harness is an executed
+   suite. Empty harnesses cannot be accepted as tests.
+3. Run the smallest exact cases that prove each important success, refusal,
+   recovery and cleanup path. Use the declared runner's runtime resources;
+   missing required compiler inputs must fail, rather than silently skip.
+4. Reuse exact-source checks unless changes invalidate them. After a repair,
+   rerun the failing case and affected consumers, rather than every prior gate.
+5. Run appropriate formatting/source checks and `git diff --check`. Review for
+   stale callers, duplicate owners, unused public surface and string-driven
+   control flow. Report unqualified targets explicitly.
 
-## Focused verification is still complete verification
+Each Buck checkout needs its own provisioned `buck-out` bind mount on
+`/srv/build`. Materialize its pinned Nix outputs and configure that checkout;
+see `docs/swarm-builds.md`. Keep remote execution disabled until its closure,
+isolation, reuse and cancellation gates are accepted. The first Buck query
+also starts a daemon, so it belongs inside the admitted build slice.
 
-Use one Cargo target directory per canonical checkout. `dev-shell.sh` preserves
-targets inside that checkout and namespaces an external build base by checkout
-identity; it refuses a target inside another Git checkout and reports the
-resolved directory. Share compiler caches such as sccache separately, never a
-mutable Cargo target tree. Sequential use of one target by different checkouts
-can reuse stale dependency metadata because Cargo freshness uses source mtimes.
-The supported `dev-shell.sh env NAME=value ... COMMAND` prefix resolves target
-assignments too. Put env options that change directories or split commands
-before `dev-shell.sh`; the entrypoint rejects those options in its command prefix.
-
-For acceptance, build the exact candidate in its own target, then retain the
-source OID (and content hashes of any dirty inputs), command, toolchain and flags,
-actual artifact path and SHA-256, executed test count and result. A source OID
-and test log alone do not bind a reused binary to that candidate's dependencies.
-
-The ban on broad batteries is a resource constraint, not permission to leave a
-changed target uncompiled.
-
-Before committing:
-
-1. List every changed file and map it to its owning build or test target. If a
-   public type, serialized shape, generated contract, or shared command changes,
-   search the whole workspace for consumers and fixtures; the defining crate is
-   not the complete target map.
-2. Compile every changed or directly affected build/test target, even when
-   executing it would be too expensive. For Rust integration tests, use the
-   owning compile-only recipe when execution is excluded. In the Codex fork,
-   `cargo nextest list -p PACKAGE --test TARGET` builds/enumerates without running;
-   its `just test` wrapper adds `--no-fail-fast`, which conflicts with `--no-run`. Compile one named downstream target rather than
-   substituting an unrelated workspace-wide check.
-3. Run the smallest exact tests that exercise each changed behavior and each
-   important failure/recovery branch. A unit test in a neighboring target does
-   not prove that a modified integration target compiles.
-4. For extractor-backed behavior, first discover the repository's current
-   toolchain environment and run one targeted test when resource limits permit.
-   Do not silently treat a missing ambient variable as proof that the test is
-   unavailable.
-5. Reuse existing exact-source checks unless source changes invalidate them.
-   Integrated revisions need checks of the changed joins, not automatic replay of
-   every child check. Investigate failures with the smallest reproducer; after a
-   repair rerun that case and affected consumers rather than the whole suite.
-6. Run formatting or the narrow crate check needed for warnings, plus
-   `git diff --check`.
-
-Do not run a prohibited workspace battery or broad suite. Independent builds and
-focused tests may run concurrently, including alongside other development jobs,
-using separate worktrees, isolated outputs and bounded resource limits. Reuse
-compatible outputs within each worker's validation rather than sharing mutable
-build directories between independent workers. Keep existing daemon ownership;
-do not restart shared daemons or clear shared caches to obtain capacity.
-If a necessary focused command unexpectedly fans out or exhausts its admitted
-resources, stop it and report the exact unverified target.
-
-Use precise result words:
-
-- **passed**: the named test executed and passed;
-- **compiled, not executed**: the target built via `--no-run` or equivalent;
-- **skipped**: name the concrete blocker and the command that remains;
-- **not tested**: only when no meaningful focused check exists, with a reason.
-
-Never summarize a neighboring target's success as though it covered all files
-you changed.
-
-For diagnostic output from a passing focused test, use the existing nextest
-setting rather than changing the test to panic:
+## Selection and evidence
 
 ```sh
-NEXTEST_SUCCESS_OUTPUT=immediate just test-target PACKAGE TARGET 'test(NAME)'
+just test-lib PACKAGE --exact FULL_TEST_NAME --expected-count 1
+just test-target PACKAGE TARGET --exact FULL_TEST_NAME --expected-count 1
+just test-native //bridge/haskell:SUITE --pattern PATTERN
+just build //path:TARGET                 # compile-only
 ```
 
-This preserves output capture/isolation and the test's actual pass/fail result.
-A baseline regression that executes and fails as expected is **executed, failed
-as expected**, not passed, compiled-only, skipped, or blocked. Report observed
-outcome separately from whether it matches the baseline expectation.
+`just` selects declared labels and forwards to the owning runner. Native
+Rust runners preserve runtime resources, discover real names, reject zero or
+wrong counts and run each case in a bounded process. Use `--output-dir` to
+retain runner evidence. Haskell suites use their shared Tasty runner. Ignored
+compiler packet command adapters expose producer-only RunInfo; invoking them
+is not independent test acceptance. Standard Python regression targets also
+reject zero selected cases.
 
-## Review before delivery
+For delegated cgroup tests, keep Buck and the Python runner outside the
+service; only the actual test executable enters its delegated service. The
+runner records exact service admission and cleanup. Do not count an unknown
+launch or an absent unobserved unit as confirmed cleanup.
 
-- Read the final diff as a reviewer, not merely as its author.
-- Search for stale callers, duplicated policy, unused public surface, rendered
-  string control flow, and comments that describe the old morphology.
-- Check the negative path and recovery/cleanup behavior, not only the happy
-  path.
-- Confirm the worktree is clean after committing and report the commit hash,
-  exact commands, and exact results.
+Retain source OID, actual artifact path/hash, exact command, toolchain/profile,
+selected and executed counts, exit status, elapsed boundaries and logs. Name
+what **passed**, what **compiled without execution**, and what remains
+**unqualified**. A failed baseline control is **executed, failed as expected**;
+keep observation separate from expectation. Listings, source generation,
+unknown counts and zero-test exits do not close behavior obligations.
 
-## Focused recipes and retained evidence
+Do not infer cold/warm speedups from unrelated timings or clear shared caches
+to manufacture a cold run. Distinguish environment/tool fetching, compilation,
+producer actions, actual execution and cleanup. Never summarize a neighboring
+target's success as proof for all changed files.
 
-Select the owning target and exact nextest test name, not only a substring:
+## Release identity
 
-```sh
-just test-lib exomonad-agent 'test(=backend::codex::input_control_tests::lost_submit_acknowledgment_is_queried_without_resubmission)'
-# For an integration test, substitute the actual package, file target and full name:
-just test-target PACKAGE TARGET 'test(=FULL_TEST_NAME)'
-```
+Build the native runtime bundle, then freeze it with the central owner in
+`build/package/qualification.py`; see its README. A frozen bundle owns the
+same-profile host/libtest, compiler pair, deployment, stdlib, assets and a
+build-side source/artifact contract verified against clean tracked Git and
+recorded submodules. Run/init/acceptance require the explicit descriptor.
+Do not provide an arbitrary libtest/compiler path or infer a bundle from raw
+Buck output. Preserve the same frozen files across acceptance and live runs.
 
-These recipes enter the repository Nix environment and call `scripts/battery.sh`.
-Even a Rust-only selection resolves extractor infrastructure and may start a
-compile daemon; do not count total wall time as test-body time. The wrapper owns
-signal handling and daemon teardown. Do not introduce an alternative launcher.
-For the shell helper's mocked process boundary alone, a single existing test is:
-
-```sh
-bash scripts/dev-shell.sh python3 scripts/tests/test_lib_extract.py ExtractHelpers.test_owned_daemon_keeps_endpoint_through_worker_rotation -v
-```
-
-This executes a fixture frontend, not real GHC extraction or mounted service
-acceptance. Use `bash scripts/dev-shell.sh COMMAND...` for direct tools. It selects committed
-flake inputs while commands stay in the current checkout. Never use `nix develop
-path:.` on a mounted workspace: that imports the warm build tree into the Nix store.
-`IN_NIX_SHELL` alone does not identify the correct compiler environment. Commit
-intentional toolchain changes or select a revision-pinned `TIDEPOOL_DEV_FLAKE`. A missing inherited extractor variable is not proof that the real
-extractor is unavailable: the owning resolver discovers/builds it.
-
-Retain the command, source revision, resolved executable paths (prefer hashes),
-selected/executed/skipped counts, and observed result independently of expected
-result. Check nonzero execution; compilation, a listing, unknown counts or a
-zero-selection exit cannot close a behavior obligation. `battery.sh` retains
-failure artifacts under `target/tidepool-test-runs` (override with
-`TIDEPOOL_TEST_ARTIFACT_ROOT`) but deletes its artifacts after success unless `TIDEPOOL_KEEP_TEST_LOGS=1`
-retains them (last five successful runs, at most 4 MiB per log). Capture
-additional successful output separately if needed; when piping through
-`tee`, enable `pipefail` so capture cannot mask failure.
-
-For timing, name measured boundaries: environment/build/daemon startup, test
-execution (including fixtures if inseparable), and cleanup. Record unknown
-portions instead of subtracting an unrelated command. State process reuse and
-cache conditions; a second invocation does not establish a controlled warm-cache
-benchmark. Do not clear shared caches to manufacture a cold run. No inference
-about serial-versus-tree cost follows from a focused recipe measurement.
-
-Reuse the same Cargo target directory for compatible validation commands; do not
-create a fresh target per test or diagnostic attempt. Retire obsolete validation
-caches after recording results. Selected launch binaries and recovery records
-belong to the run directory, not disposable build output.
-
-When a release check runs alongside further builds, freeze its executable in a
-unique validation directory first (`cp --reflink=auto` on Linux), and record its
-source and hash. Do not replace that copy while the check runs. A live process
-can keep executing an unlinked Cargo binary while `current_exe()` reports a
-deleted path, invalidating fixtures that verify or relaunch the executable.
-
-Cgroup-admission fixtures need a dedicated delegated scope. Run those directly,
-without a shared compiler daemon in the scope's parent cgroup: unrelated live
-processes prevent enabling subtree controllers and cause `EBUSY` before the
-behavior under test starts. Size OOM probes against the command's RAM plus
-allowed swap, keeping them within the enclosing test scope's safety budget.
-
-Cross-repository acceptance uses each repository's pinned toolchain. Run native
-Codex builds/tests from its checkout with its `rust-toolchain.toml`; entering
-Tidepool's Nix shell can select a different Rust version. Keep Tidepool's
-extractor-backed checks in the Tidepool environment.
+Keep open qualification/migration obligations in the approved plan. Remove
+completed handoff prose after its current invariants live in owning docs;
+Git retains checkpoint history.

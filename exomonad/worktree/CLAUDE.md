@@ -96,8 +96,8 @@ standing in for a coding agent). Never a mock of git. A mock proves the mock
 agrees with your model of git, which is exactly the thing in doubt.
 
 ```bash
-cargo nextest run -p exomonad-worktree      # pure Rust, no GHC — the fast tier
+just test-lib exomonad-worktree --exact FULL_TEST_NAME --expected-count 1
 ```
 
-This crate is GHC-free by construction, so it stays in the fast default tier
-and needs no `TIDEPOOL_EXTRACT`.
+This crate is GHC-free by construction. Native targets declare real Git
+resources and do not need compiler worker inputs.

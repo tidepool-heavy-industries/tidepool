@@ -5,6 +5,7 @@ export_file(name = "suite_oracle_driver", src = "suite_oracle.py", visibility = 
 
 export_file(name = "corpus_test", src = "corpus_test.sh", visibility = ["PUBLIC"])
 
+export_file(name = "probe_opacity_driver", src = "probe_opacity.py", visibility = ["PUBLIC"])
 filegroup(
     name = "qualification_inputs",
     srcs = {"build/haskell/" + source: source for source in glob(["BUCK", "*.bzl", "*.py", "*.sh"])},

@@ -11,7 +11,7 @@
 //! the item's name before processing each item — BIND the returned [`Guard`]
 //! (`let _guard = begin(name);`) so it stays alive for exactly as long as
 //! that item (or, for a multi-stage test, the whole test) is being watched.
-//! Under nextest (process-per-test) this is cosmetic; it matters for the
+//! Under native libtest isolation (process-per-test) this is cosmetic; it matters for the
 //! documented `cargo test -- --test-threads=1` fallback, where multiple
 //! `#[test]`s share one process and the watchdog thread lives for the whole
 //! run: without a disarm signal, the epoch going stale after the LAST armed

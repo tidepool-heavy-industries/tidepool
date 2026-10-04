@@ -20,6 +20,7 @@ rust_filegroup(
         "src/traits.rs": "tidepool/bridge/src/traits.rs",
         "src/value.rs": "tidepool/bridge/src/value.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_library(
@@ -56,6 +57,7 @@ rust_filegroup(
         "src/traits.rs": "tidepool/bridge/src/traits.rs",
         "src/value.rs": "tidepool/bridge/src/value.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(
@@ -91,6 +93,7 @@ rust_filegroup(
         "tests/suites/bridge.rs": "tidepool/bridge/tests/suites/bridge.rs",
         "tests/support/mod.rs": "tidepool/bridge/tests/support/mod.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(

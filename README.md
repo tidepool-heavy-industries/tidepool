@@ -380,7 +380,7 @@ See [AGENTS.md](AGENTS.md) for contributor guidance.
 | Haskell library and extractor | [`bridge/haskell/`](bridge/haskell/) |
 | Prepared execution and resident state | [`tidepool/codegen/`](tidepool/codegen/), [`tidepool/runtime/`](tidepool/runtime/) |
 | Actors and workbench | [`exomonad/actor/`](exomonad/actor/) |
-| Coding-agent backend and managed worktrees | [`exomonad/agent/`](exomonad/agent/), [`exomonad/worktree/`](exomonad/worktree/) |
+| Managed worktrees | [`exomonad/worktree/`](exomonad/worktree/) |
 | Public facade and Exomonad host | [`bridge/facade/`](bridge/facade/), [`tidepool/`](tidepool/) |
 
 Use focused checks while developing:
@@ -388,7 +388,7 @@ Use focused checks while developing:
 ```bash
 nix develop
 just --list
-just test-lib tidepool-runtime 'test(<name>)'
+just test-lib tidepool-runtime --exact FULL_NAME --expected-count 1
 ```
 
 ## License

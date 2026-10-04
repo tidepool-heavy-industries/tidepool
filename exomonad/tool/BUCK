@@ -13,6 +13,7 @@ rust_filegroup(
         "src/lib.rs": "exomonad/tool/src/lib.rs",
         "src/surface.rs": "exomonad/tool/src/surface.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_library(
@@ -39,6 +40,7 @@ rust_filegroup(
         "src/lib.rs": "exomonad/tool/src/lib.rs",
         "src/surface.rs": "exomonad/tool/src/surface.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(

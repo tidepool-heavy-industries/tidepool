@@ -16,6 +16,7 @@ rust_filegroup(
         "src/pause.rs": "tidepool/effect/src/pause.rs",
         "src/policy.rs": "tidepool/effect/src/policy.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_library(
@@ -48,6 +49,7 @@ rust_filegroup(
         "src/pause.rs": "tidepool/effect/src/pause.rs",
         "src/policy.rs": "tidepool/effect/src/policy.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(
@@ -75,6 +77,7 @@ rust_filegroup(
         "Cargo.toml": "tidepool/effect/Cargo.toml",
         "tests/proptest_effect.rs": "tidepool/effect/tests/proptest_effect.rs",
     },
+    visibility = ["PUBLIC"],
 )
 
 tidepool_rust_isolated_test(

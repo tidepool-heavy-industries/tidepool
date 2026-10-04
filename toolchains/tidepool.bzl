@@ -7,12 +7,13 @@ def _nix_rust_toolchain_impl(ctx):
         RustToolchainInfo(
             compiler = RunInfo(args = [ctx.attrs.rustc]),
             rustdoc = RunInfo(args = [ctx.attrs.rustdoc]),
-            clippy_driver = RunInfo(args = [ctx.attrs.clippy]),
+            clippy_driver = RunInfo(args = [ctx.attrs.clippy] + ctx.attrs.clippy_flags),
             default_edition = "2021",
             panic_runtime = PanicRuntime("unwind"),
             rustc_target_triple = "x86_64-unknown-linux-gnu",
             rustc_flags = ["-Cforce-frame-pointers=yes", "-Copt-level=2", "-Clinker=" + ctx.attrs.linker],
             nightly_features = False,
+            clippy_toml = ctx.attrs.clippy_toml,
         ),
     ]
 
@@ -23,6 +24,8 @@ nix_rust_toolchain = rule(
         "rustdoc": attrs.string(),
         "clippy": attrs.string(),
         "linker": attrs.string(),
+        "clippy_toml": attrs.source(),
+        "clippy_flags": attrs.list(attrs.string(), default = []),
     },
     is_toolchain_rule = True,
 )

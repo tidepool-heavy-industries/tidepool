@@ -113,18 +113,13 @@ pub fn extract_available() -> bool {
     extract_env()
 }
 
-/// Panic loudly if the GHC-tier toolchain isn't reachable, instead of the
-/// caller silently `return`ing (which nextest reports as a PASS). This is the
-/// standard guard for a GHC-heavy integration test: such tests are excluded
-/// from the default nextest filter, so this only ever fires on a direct
-/// `--ignore-default-filter` invocation missing the environment — a caller
-/// error, not a legitimate skip.
+/// Refuse a compiler-backed test when its required toolchain is unavailable.
+/// Native targets carry matched compiler resources; missing inputs are errors.
 pub fn require_extract() {
     if !extract_available() {
         panic!(
             "TIDEPOOL_EXTRACT not set and no working tidepool-extract toolchain found — \
-             this GHC-tier test cannot run vacuously. Set TIDEPOOL_EXTRACT (or run inside \
-             `nix develop`) or run via scripts/battery.sh, which derives it."
+             this compiler-backed test requires its native target's declared matched compiler resources."
         );
     }
 }
