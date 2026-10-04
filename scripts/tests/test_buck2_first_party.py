@@ -102,6 +102,7 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         self.write("tidepool/toolchain/src/lib.rs", includes + "\n")
         for name in fixtures:
             self.write(f"bridge/haskell/test-cell-splitter/fixtures/declaration-join/{name}", name)
+        self.write("build/protocol/outputs.txt", "tidepool/runtime/src/generated/mod.rs\n")
         self.write("bridge/facade/Cargo.toml", "[package]\nname = 'tidepool'\n")
         self.write("bridge/testing/Cargo.toml", "[package]\nname = 'tidepool-testing'\n")
         self.packages = [self.package("tidepool-repr", "tidepool/repr", [
@@ -199,6 +200,24 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         self.assertIn("prepared_control", buck)
         self.assertIn("tidepool_codegen_unit_tests", buck)
         self.assertIn("tidepool_codegen_unit_tests_sources", groups)
+
+    def test_protocol_roster_owns_generated_module_inputs_even_without_source_copies(self):
+        self.write("tidepool/runtime/src/generated/mod.rs", "// stale source copy\n")
+        result = self.generate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        _buck, groups = self.groups("tidepool/runtime")
+        for name in ("tidepool_runtime_sources", "tidepool_runtime_unit_tests_sources"):
+            mapping = groups[name]
+            self.assertNotIn("src/generated/mod.rs", mapping)
+            self.assertEqual(mapping["//bridge/protocol:generated[tidepool_runtime_src_generated_mod_rs]"],
+                             "tidepool/runtime/src/generated/mod.rs")
+
+    def test_all_integration_suites_use_existing_counted_isolated_runner(self):
+        result = self.generate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        buck, _groups = self.groups("tidepool/heap")
+        self.assertIn('tidepool_rust_isolated_test(\n    name = "gc_unit",', buck)
+        self.assertIn('tidepool_rust_isolated_test(\n    name = "raw_scan_validation",', buck)
 
     def test_extract_frontend_binary_is_generated_from_its_cargo_target(self):
         result = self.generate()
