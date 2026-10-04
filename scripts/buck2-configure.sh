@@ -87,7 +87,8 @@ bubblewrap="$(output_path bubblewrap)"
 runtime_stdlib_sources=
 runtime_stdlib_products=
 runtime_stdlib_extract=
-exomonad_runtime_tools=
+# Runtime commands are pinned tool inputs, independently of catalog products.
+exomonad_runtime_tools="$(output_path exomonad-runtime-tools)"
 if [[ $runtime_stdlib == true ]]; then
   # The default shell can use a reduced toolchain-only tree. Project resources
   # require a full committed capture, independently of mounted build outputs.
@@ -107,7 +108,6 @@ if [[ $runtime_stdlib == true ]]; then
   runtime_stdlib_sources="$(nix eval --raw "${package_flake_source}#packages.${system}.runtime-stdlib-sources.outPath")"
   runtime_stdlib_products="$(nix eval --raw "${package_flake_source}#packages.${system}.runtime-stdlib-products.outPath")"
   runtime_stdlib_extract="$(nix eval --raw "${package_flake_source}#packages.${system}.tidepool-extract.outPath")"
-  exomonad_runtime_tools="$(nix eval --raw "${package_flake_source}#packages.${system}.buck-exomonad-runtime-tools.outPath")"
 fi
 cmake="$(output_path cmake)"
 perl="$(output_path perl)"
