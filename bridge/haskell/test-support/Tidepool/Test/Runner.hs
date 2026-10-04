@@ -24,8 +24,8 @@ runTests tree = defaultMainWithIngredients
   -- process state; Buck provides concurrency by isolating independent suites.
   (localOption (NumThreads 1) tree)
   where
-    nonemptySelection = TestManager [] $ \options tree ->
-      if null (testsNames options tree)
+    nonemptySelection = TestManager [] $ \options selectedTree ->
+      if null (testsNames options selectedTree)
         then Just (hPutStrLn stderr "error: Haskell test selection matched zero cases" >> pure False)
         else Nothing
 

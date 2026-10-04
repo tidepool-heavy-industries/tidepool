@@ -52,10 +52,10 @@ tests = testGroup "source-boot"
   , testCase "watch reply evidence" $ withEffects $ \effects -> withScratch (watchReplyEvidenceChecks effects)
   , testCase "watch reply warm authority" $ withEffects $ \effects -> withScratch (watchReplyWarmAuthorityChecks effects)
   , testCase "exact bash metadata" $ withEffects exactBashMetadata
-  , testCase "mixed independent 1" (mixedGraph False 1)
-  , testCase "mixed independent 10" (mixedGraph False 10)
-  , testCase "mixed independent 100" (mixedGraph False 100)
-  , testCase "mixed required independent 10" (mixedGraph True 10)
+  , testCase "mixed independent 1" (withTiming (mixedGraph False 1))
+  , testCase "mixed independent 10" (withTiming (mixedGraph False 10))
+  , testCase "mixed independent 100" (withTiming (mixedGraph False 100))
+  , testCase "mixed required independent 10" (withTiming (mixedGraph True 10))
   ]
 
 withEffects :: (FilePath -> IO a) -> IO a
