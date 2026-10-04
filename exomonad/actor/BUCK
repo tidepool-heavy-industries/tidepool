@@ -383,6 +383,30 @@ tidepool_rust_binary(
 )
 
 tidepool_rust_test_cases(
+    name = "exomonad_actor_unit_tests_all",
+    binary = ":exomonad_actor_unit_tests",
+    jobs = 1,
+    timeout = 600,
+    test_rule_timeout_ms = 14400000,
+    env = {
+        "LD_LIBRARY_PATH": "$(location //build/package:tidepool_extract_runtime_libraries)",
+        "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_deployment)",
+        "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
+        "TIDEPOOL_EXTRACT_RUNTIME_LIBRARIES": "$(location //build/package:tidepool_extract_runtime_libraries)",
+        "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
+        "TIDEPOOL_KEEP_TEST_LOGS": "1",
+        "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
+    },
+    resources = [
+        "//bridge/haskell:facade_embedded_sources",
+        "//build/package:compiler_deployment",
+        "//build/package:tidepool_extract_runtime_libraries",
+    ],
+    haskell_worker = True,
+    visibility = ["PUBLIC"],
+)
+
+tidepool_rust_test_cases(
     name = "actor_runtime_observation_lease_tests",
     binary = ":exomonad_actor_unit_tests",
     exact_tests = [

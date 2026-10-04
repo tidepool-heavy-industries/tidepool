@@ -1,0 +1,551 @@
+{
+  "packages": {
+    "exomonad-actor": {
+      "binaries": {},
+      "directory": "exomonad/actor",
+      "integration": {
+        "actor": {
+          "test": "//exomonad/actor:actor",
+          "test_build": "//exomonad/actor:actor_binary"
+        }
+      },
+      "libraries": {
+        "exomonad_actor": {
+          "build": "//exomonad/actor:exomonad_actor",
+          "test": "//exomonad/actor:exomonad_actor_unit_tests_all",
+          "test_build": "//exomonad/actor:exomonad_actor_unit_tests"
+        }
+      }
+    },
+    "exomonad-model": {
+      "binaries": {},
+      "directory": "exomonad/model",
+      "integration": {},
+      "libraries": {
+        "exomonad_model": {
+          "build": "//exomonad/model:exomonad_model",
+          "test": "//exomonad/model:exomonad_model_unit_tests",
+          "test_build": "//exomonad/model:exomonad_model_unit_tests_binary"
+        }
+      }
+    },
+    "exomonad-model-output": {
+      "binaries": {},
+      "directory": "exomonad/model-output",
+      "integration": {},
+      "libraries": {
+        "exomonad_model_output": {
+          "build": "//exomonad/model-output:exomonad_model_output",
+          "test": "//exomonad/model-output:exomonad_model_output_unit_tests",
+          "test_build": "//exomonad/model-output:exomonad_model_output_unit_tests_binary"
+        }
+      }
+    },
+    "exomonad-node": {
+      "binaries": {},
+      "directory": "exomonad/node",
+      "integration": {
+        "command_resources": {
+          "test": "//exomonad/node:command_resources",
+          "test_build": "//exomonad/node:command_resources_binary"
+        },
+        "overlay_rotation": {
+          "test": "//exomonad/node:overlay_rotation",
+          "test_build": "//exomonad/node:overlay_rotation_binary"
+        },
+        "process_boundary": {
+          "test": "//exomonad/node:process_boundary",
+          "test_build": "//exomonad/node:process_boundary_binary"
+        }
+      },
+      "libraries": {
+        "exomonad_node": {
+          "build": "//exomonad/node:exomonad_node",
+          "test": "//exomonad/node:exomonad_node_unit_tests",
+          "test_build": "//exomonad/node:exomonad_node_unit_tests_binary"
+        }
+      }
+    },
+    "exomonad-tool": {
+      "binaries": {},
+      "directory": "exomonad/tool",
+      "integration": {},
+      "libraries": {
+        "exomonad_tool": {
+          "build": "//exomonad/tool:exomonad_tool",
+          "test": "//exomonad/tool:exomonad_tool_unit_tests",
+          "test_build": "//exomonad/tool:exomonad_tool_unit_tests_binary"
+        }
+      }
+    },
+    "exomonad-worktree": {
+      "binaries": {},
+      "directory": "exomonad/worktree",
+      "integration": {
+        "worktree": {
+          "test": "//exomonad/worktree:worktree",
+          "test_build": "//exomonad/worktree:worktree_binary"
+        }
+      },
+      "libraries": {
+        "exomonad_worktree": {
+          "build": "//exomonad/worktree:exomonad_worktree",
+          "test": "//exomonad/worktree:exomonad_worktree_unit_tests",
+          "test_build": "//exomonad/worktree:exomonad_worktree_unit_tests_binary"
+        }
+      }
+    },
+    "jev-integration": {
+      "binaries": {
+        "jev-integration": {
+          "build": "//exomonad/jev-integration:jev-integration",
+          "test": "//exomonad/jev-integration:jev-integration_unit_tests",
+          "test_build": "//exomonad/jev-integration:jev-integration_unit_tests_binary"
+        }
+      },
+      "directory": "exomonad/jev-integration",
+      "integration": {},
+      "libraries": {}
+    },
+    "tidepool": {
+      "binaries": {
+        "exomonad": {
+          "build": "//bridge/facade:exomonad",
+          "test": "//bridge/facade:exomonad_unit_tests",
+          "test_build": "//bridge/facade:exomonad_unit_tests_binary"
+        },
+        "exomonad-view-helper": {
+          "build": "//bridge/facade:exomonad-view-helper",
+          "test": "//bridge/facade:exomonad-view-helper_unit_tests",
+          "test_build": "//bridge/facade:exomonad-view-helper_unit_tests_binary"
+        },
+        "tidepool": {
+          "build": "//bridge/facade:tidepool_bin",
+          "test": "//bridge/facade:tidepool_bin_unit_tests",
+          "test_build": "//bridge/facade:tidepool_bin_unit_tests_binary"
+        },
+        "tidepool-compile-report": {
+          "build": "//bridge/facade:tidepool-compile-report",
+          "test": "//bridge/facade:tidepool-compile-report_unit_tests",
+          "test_build": "//bridge/facade:tidepool-compile-report_unit_tests_binary"
+        }
+      },
+      "directory": "bridge/facade",
+      "integration": {
+        "bridge_decl_guard": {
+          "test": "//bridge/facade:bridge_decl_guard",
+          "test_build": "//bridge/facade:bridge_decl_guard_binary"
+        },
+        "exomonad_action_surface": {
+          "test": "//bridge/facade:exomonad_action_surface",
+          "test_build": "//bridge/facade:exomonad_action_surface_binary"
+        },
+        "exomonad_namespace_entry": {
+          "test": "//bridge/facade:exomonad_namespace_entry",
+          "test_build": "//bridge/facade:exomonad_namespace_entry_binary"
+        },
+        "exomonad_workspace_check": {
+          "test": "//bridge/facade:exomonad_workspace_check",
+          "test_build": "//bridge/facade:exomonad_workspace_check_binary"
+        }
+      },
+      "libraries": {
+        "tidepool": {
+          "build": "//bridge/facade:tidepool",
+          "test": "//bridge/facade:tidepool_unit_tests_all",
+          "test_build": "//bridge/facade:tidepool_unit_tests"
+        }
+      }
+    },
+    "tidepool-atomic-write": {
+      "binaries": {},
+      "directory": "bridge/atomic-write",
+      "integration": {
+        "strict_directory": {
+          "test": "//bridge/atomic-write:strict_directory",
+          "test_build": "//bridge/atomic-write:strict_directory_binary"
+        }
+      },
+      "libraries": {
+        "tidepool_atomic_write": {
+          "build": "//bridge/atomic-write:tidepool_atomic_write",
+          "test": "//bridge/atomic-write:tidepool_atomic_write_unit_tests",
+          "test_build": "//bridge/atomic-write:tidepool_atomic_write_unit_tests_binary"
+        }
+      }
+    },
+    "tidepool-bignum": {
+      "binaries": {},
+      "directory": "tidepool/bignum",
+      "integration": {
+        "show_double_oracle": {
+          "test": "//tidepool/bignum:show_double_oracle",
+          "test_build": "//tidepool/bignum:show_double_oracle_binary"
+        }
+      },
+      "libraries": {
+        "tidepool_bignum": {
+          "build": "//tidepool/bignum:tidepool_bignum",
+          "test": "//tidepool/bignum:tidepool_bignum_unit_tests",
+          "test_build": "//tidepool/bignum:tidepool_bignum_unit_tests_binary"
+        }
+      }
+    },
+    "tidepool-bridge": {
+      "binaries": {},
+      "directory": "tidepool/bridge",
+      "integration": {
+        "bridge": {
+          "test": "//tidepool/bridge:bridge",
+          "test_build": "//tidepool/bridge:bridge_binary"
+        }
+      },
+      "libraries": {
+        "tidepool_bridge": {
+          "build": "//tidepool/bridge:tidepool_bridge",
+          "test": "//tidepool/bridge:tidepool_bridge_unit_tests",
+          "test_build": "//tidepool/bridge:tidepool_bridge_unit_tests_binary"
+        }
+      }
+    },
+    "tidepool-bridge-derive": {
+      "binaries": {},
+      "directory": "tidepool/bridge-derive",
+      "integration": {
+        "arity_disambiguation": {
+          "test": "//tidepool/bridge-derive:arity_disambiguation",
+          "test_build": "//tidepool/bridge-derive:arity_disambiguation_binary"
+        },
+        "derive_tests": {
+          "test": "//tidepool/bridge-derive:derive_tests",
+          "test_build": "//tidepool/bridge-derive:derive_tests_binary"
+        },
+        "module_qualification": {
+          "test": "//tidepool/bridge-derive:module_qualification",
+          "test_build": "//tidepool/bridge-derive:module_qualification_binary"
+        },
+        "phantom_data": {
+          "test": "//tidepool/bridge-derive:phantom_data",
+          "test_build": "//tidepool/bridge-derive:phantom_data_binary"
+        }
+      },
+      "libraries": {
+        "tidepool_bridge_derive": {
+          "build": "//tidepool/bridge-derive:tidepool_bridge_derive",
+          "test": "//tidepool/bridge-derive:tidepool_bridge_derive_unit_tests",
+          "test_build": "//tidepool/bridge-derive:tidepool_bridge_derive_unit_tests_binary"
+        }
+      }
+    },
+    "tidepool-bridge-effects": {
+      "binaries": {},
+      "directory": "tidepool/bridge-effects",
+      "integration": {},
+      "libraries": {
+        "tidepool_bridge_effects": {
+          "build": "//tidepool/bridge-effects:tidepool_bridge_effects",
+          "test": "//tidepool/bridge-effects:tidepool_bridge_effects_unit_tests",
+          "test_build": "//tidepool/bridge-effects:tidepool_bridge_effects_unit_tests_binary"
+        }
+      }
+    },
+    "tidepool-codegen": {
+      "binaries": {},
+      "directory": "tidepool/codegen",
+      "integration": {
+        "native_md5_link": {
+          "test": "//tidepool/codegen:native_md5_link",
+          "test_build": "//tidepool/codegen:native_md5_link_binary"
+        },
+        "prepared_control": {
+          "test": "//tidepool/codegen:prepared_control",
+          "test_build": "//tidepool/codegen:prepared_control_binary"
+        }
+      },
+      "libraries": {
+        "tidepool_codegen": {
+          "build": "//tidepool/codegen:tidepool_codegen",
+          "test": "//tidepool/codegen:tidepool_codegen_unit_tests",
+          "test_build": "//tidepool/codegen:tidepool_codegen_unit_tests_binary"
+        }
+      }
+    },
+    "tidepool-effect": {
+      "binaries": {},
+      "directory": "tidepool/effect",
+      "integration": {
+        "proptest_effect": {
+          "test": "//tidepool/effect:proptest_effect",
+          "test_build": "//tidepool/effect:proptest_effect_binary"
+        }
+      },
+      "libraries": {
+        "tidepool_effect": {
+          "build": "//tidepool/effect:tidepool_effect",
+          "test": "//tidepool/effect:tidepool_effect_unit_tests",
+          "test_build": "//tidepool/effect:tidepool_effect_unit_tests_binary"
+        }
+      }
+    },
+    "tidepool-extract-cmd": {
+      "binaries": {
+        "tidepool-extract": {
+          "build": "//tidepool/extract-cmd:tidepool-extract",
+          "test": "//tidepool/extract-cmd:tidepool-extract_unit_tests",
+          "test_build": "//tidepool/extract-cmd:tidepool-extract_unit_tests_binary"
+        }
+      },
+      "directory": "tidepool/extract-cmd",
+      "integration": {
+        "build_products_frontend": {
+          "test": "//tidepool/extract-cmd:build_products_frontend",
+          "test_build": "//tidepool/extract-cmd:build_products_frontend_binary"
+        },
+        "build_products_ownership": {
+          "test": "//tidepool/extract-cmd:build_products_ownership",
+          "test_build": "//tidepool/extract-cmd:build_products_ownership_binary"
+        },
+        "daemon_integration": {
+          "test": "//tidepool/extract-cmd:daemon_integration",
+          "test_build": "//tidepool/extract-cmd:daemon_integration_binary"
+        },
+        "no_open_coded_extract_spawns": {
+          "test": "//tidepool/extract-cmd:no_open_coded_extract_spawns",
+          "test_build": "//tidepool/extract-cmd:no_open_coded_extract_spawns_binary"
+        },
+        "response_cleanup": {
+          "test": "//tidepool/extract-cmd:response_cleanup",
+          "test_build": "//tidepool/extract-cmd:response_cleanup_binary"
+        },
+        "retained_fingerprint": {
+          "test": "//tidepool/extract-cmd:retained_fingerprint",
+          "test_build": "//tidepool/extract-cmd:retained_fingerprint_binary"
+        },
+        "test_suite_manifest_is_complete": {
+          "test": "//tidepool/extract-cmd:test_suite_manifest_is_complete",
+          "test_build": "//tidepool/extract-cmd:test_suite_manifest_is_complete_binary"
+        },
+        "transaction_integration": {
+          "test": "//tidepool/extract-cmd:transaction_integration",
+          "test_build": "//tidepool/extract-cmd:transaction_integration_binary"
+        }
+      },
+      "libraries": {
+        "tidepool_extract_cmd": {
+          "build": "//tidepool/extract-cmd:tidepool_extract_cmd",
+          "test": "//tidepool/extract-cmd:tidepool_extract_cmd_unit_tests",
+          "test_build": "//tidepool/extract-cmd:tidepool_extract_cmd_unit_tests_binary"
+        }
+      }
+    },
+    "tidepool-extract-report": {
+      "binaries": {},
+      "directory": "tidepool/extract-report",
+      "integration": {},
+      "libraries": {
+        "tidepool_extract_report": {
+          "build": "//tidepool/extract-report:tidepool_extract_report",
+          "test": "//tidepool/extract-report:tidepool_extract_report_unit_tests",
+          "test_build": "//tidepool/extract-report:tidepool_extract_report_unit_tests_binary"
+        }
+      }
+    },
+    "tidepool-handlers": {
+      "binaries": {},
+      "directory": "bridge/handlers",
+      "integration": {
+        "bridged_records": {
+          "test": "//bridge/handlers:bridged_records",
+          "test_build": "//bridge/handlers:bridged_records_binary"
+        }
+      },
+      "libraries": {
+        "tidepool_handlers": {
+          "build": "//bridge/handlers:tidepool_handlers",
+          "test": "//bridge/handlers:tidepool_handlers_unit_tests",
+          "test_build": "//bridge/handlers:tidepool_handlers_unit_tests_binary"
+        }
+      }
+    },
+    "tidepool-heap": {
+      "binaries": {},
+      "directory": "tidepool/heap",
+      "integration": {
+        "gc_unit": {
+          "test": "//tidepool/heap:gc_unit",
+          "test_build": "//tidepool/heap:gc_unit_binary"
+        },
+        "raw_scan_validation": {
+          "test": "//tidepool/heap:raw_scan_validation",
+          "test_build": "//tidepool/heap:raw_scan_validation_binary"
+        }
+      },
+      "libraries": {
+        "tidepool_heap": {
+          "build": "//tidepool/heap:tidepool_heap",
+          "test": "//tidepool/heap:tidepool_heap_unit_tests",
+          "test_build": "//tidepool/heap:tidepool_heap_unit_tests_binary"
+        }
+      }
+    },
+    "tidepool-mcp": {
+      "binaries": {
+        "tidepool-effects-gen": {
+          "build": "//bridge/mcp:tidepool_effects_gen",
+          "test": "//bridge/mcp:tidepool_effects_gen_unit_tests",
+          "test_build": "//bridge/mcp:tidepool_effects_gen_unit_tests_binary"
+        }
+      },
+      "directory": "bridge/mcp",
+      "integration": {
+        "mcp": {
+          "test": "//bridge/mcp:mcp",
+          "test_build": "//bridge/mcp:mcp_binary"
+        }
+      },
+      "libraries": {
+        "tidepool_mcp": {
+          "build": "//bridge/mcp:tidepool_mcp",
+          "test": "//bridge/mcp:tidepool_mcp_unit_tests",
+          "test_build": "//bridge/mcp:tidepool_mcp_unit_tests_binary"
+        }
+      }
+    },
+    "tidepool-prepared-corpus": {
+      "binaries": {
+        "prepared-corpus": {
+          "build": "//tidepool/prepared-corpus:prepared-corpus",
+          "test": "//tidepool/prepared-corpus:prepared-corpus_unit_tests",
+          "test_build": "//tidepool/prepared-corpus:prepared-corpus_unit_tests_binary"
+        }
+      },
+      "directory": "tidepool/prepared-corpus",
+      "integration": {},
+      "libraries": {
+        "tidepool_prepared_corpus": {
+          "build": "//tidepool/prepared-corpus:tidepool_prepared_corpus",
+          "test": "//tidepool/prepared-corpus:tidepool_prepared_corpus_unit_tests",
+          "test_build": "//tidepool/prepared-corpus:tidepool_prepared_corpus_unit_tests_binary"
+        }
+      }
+    },
+    "tidepool-protocol": {
+      "binaries": {
+        "tidepool-protocol-gen": {
+          "build": "//bridge/protocol:tidepool_protocol_gen",
+          "test": "//bridge/protocol:tidepool_protocol_gen_unit_tests",
+          "test_build": "//bridge/protocol:tidepool_protocol_gen_unit_tests_binary"
+        }
+      },
+      "directory": "bridge/protocol",
+      "integration": {
+        "protocol": {
+          "test": "//bridge/protocol:protocol",
+          "test_build": "//bridge/protocol:protocol_binary"
+        }
+      },
+      "libraries": {
+        "tidepool_protocol": {
+          "build": "//bridge/protocol:tidepool_protocol",
+          "test": "//bridge/protocol:tidepool_protocol_unit_tests",
+          "test_build": "//bridge/protocol:tidepool_protocol_unit_tests_binary"
+        }
+      }
+    },
+    "tidepool-repr": {
+      "binaries": {},
+      "directory": "tidepool/repr",
+      "integration": {
+        "repr": {
+          "test": "//tidepool/repr:repr",
+          "test_build": "//tidepool/repr:repr_binary"
+        }
+      },
+      "libraries": {
+        "tidepool_repr": {
+          "build": "//tidepool/repr:tidepool_repr",
+          "test": "//tidepool/repr:tidepool_repr_unit_tests",
+          "test_build": "//tidepool/repr:tidepool_repr_unit_tests_binary"
+        }
+      }
+    },
+    "tidepool-runtime": {
+      "binaries": {},
+      "directory": "tidepool/runtime",
+      "integration": {
+        "session": {
+          "test": "//tidepool/runtime:session",
+          "test_build": "//tidepool/runtime:session_binary"
+        }
+      },
+      "libraries": {
+        "tidepool_runtime": {
+          "build": "//tidepool/runtime:tidepool_runtime",
+          "test": "//tidepool/runtime:tidepool_runtime_unit_tests_all",
+          "test_build": "//tidepool/runtime:tidepool_runtime_unit_tests"
+        }
+      }
+    },
+    "tidepool-test-data": {
+      "binaries": {},
+      "directory": "bridge/test-data",
+      "integration": {},
+      "libraries": {
+        "tidepool_test_data": {
+          "build": "//bridge/test-data:tidepool_test_data",
+          "test": "//bridge/test-data:tidepool_test_data_unit_tests",
+          "test_build": "//bridge/test-data:tidepool_test_data_unit_tests_binary"
+        }
+      }
+    },
+    "tidepool-testing": {
+      "binaries": {},
+      "directory": "bridge/testing",
+      "integration": {},
+      "libraries": {
+        "tidepool_testing": {
+          "build": "//bridge/testing:tidepool_testing",
+          "test": "//bridge/testing:tidepool_testing_unit_tests",
+          "test_build": "//bridge/testing:tidepool_testing_unit_tests_binary"
+        }
+      }
+    },
+    "tidepool-toolchain": {
+      "binaries": {
+        "prepared-fixture": {
+          "build": "//tidepool/toolchain:prepared-fixture",
+          "test": "//tidepool/toolchain:prepared-fixture_unit_tests",
+          "test_build": "//tidepool/toolchain:prepared-fixture_unit_tests_binary"
+        },
+        "tidepool-module-package": {
+          "build": "//tidepool/toolchain:tidepool-module-package",
+          "test": "//tidepool/toolchain:tidepool-module-package_unit_tests",
+          "test_build": "//tidepool/toolchain:tidepool-module-package_unit_tests_binary"
+        }
+      },
+      "directory": "tidepool/toolchain",
+      "integration": {
+        "check_source_worker": {
+          "test": "//tidepool/toolchain:check_source_worker",
+          "test_build": "//tidepool/toolchain:check_source_worker_binary"
+        },
+        "declaration_join_worker": {
+          "test": "//tidepool/toolchain:declaration_join_worker",
+          "test_build": "//tidepool/toolchain:declaration_join_worker_binary"
+        },
+        "prepared_fixture": {
+          "test": "//tidepool/toolchain:prepared_fixture",
+          "test_build": "//tidepool/toolchain:prepared_fixture_binary"
+        }
+      },
+      "libraries": {
+        "tidepool_toolchain": {
+          "build": "//tidepool/toolchain:tidepool_toolchain",
+          "test": "//tidepool/toolchain:tidepool_toolchain_unit_tests",
+          "test_build": "//tidepool/toolchain:tidepool_toolchain_unit_tests_binary"
+        }
+      }
+    }
+  },
+  "schema": 1
+}

@@ -928,6 +928,7 @@ load("@prelude//rust:sources.bzl", "rust_filegroup")
 '''
 
 outputs = {}
+NATIVE_TARGETS = {}
 for package_name, package in local.items():
     if package_name not in selected:
         continue
@@ -1018,6 +1019,7 @@ tidepool_buildscript_run(
     },
 )
 ''')
+    NATIVE_TARGETS[package_name] = {"directory": CURRENT_DIR, "libraries": {}, "binaries": {}, "integration": {}}
     libraries = [target for target in targets if "lib" in target["kind"] or "proc-macro" in target["kind"]]
     binaries = [target for target in targets if "bin" in target["kind"]]
     tests = [target for target in targets if "test" in target["kind"]]
@@ -1027,6 +1029,7 @@ tidepool_buildscript_run(
             extra = '    env = {"OUT_DIR": "$(location :tidepool_build_script_run[out_dir])"},'
         rule = render_rule("tidepool_rust_library", target["name"], target, package, normal_deps, normal_named, extra, features=package_features)
         rules.append(rule)
+        NATIVE_TARGETS[package_name]["libraries"][target["name"]] = {"build": "//" + CURRENT_DIR + ":" + target["name"]}
     if package_name == "tidepool-codegen":
         rules.append("tidepool_codegen_md5()\n")
     for target in binaries:
@@ -1036,6 +1039,7 @@ tidepool_buildscript_run(
         if package_name == "tidepool":
             extra = '    env = {"OUT_DIR": "$(location :tidepool_build_script_run[out_dir])"},'
         rules.append(render_rule("tidepool_rust_binary", binary_name, target, package, deps, normal_named, extra, features=package_features))
+        NATIVE_TARGETS[package_name]["binaries"][target["name"]] = {"build": "//" + CURRENT_DIR + ":" + binary_name}
     for target in binaries:
         if not target.get("test", True):
             continue
@@ -1044,8 +1048,9 @@ tidepool_buildscript_run(
         env, resources, worker = test_runtime_inputs(package_name, target["name"])
         extra = runtime_arguments(env, resources, worker)
         if package_name == "tidepool":
-            extra += '\n    env = {"OUT_DIR": "$(location :tidepool_build_script_run[out_dir])"},'
+            extra += '\n    compile_env = {"OUT_DIR": "$(location :tidepool_build_script_run[out_dir])"},'
         rules.append(render_rule("tidepool_rust_isolated_test", binary_name + "_unit_tests", target, package, deps, dev_named, extra, features=package_features, test_target=True))
+        NATIVE_TARGETS[package_name]["binaries"][target["name"]].update({"test_build": "//" + CURRENT_DIR + ":" + binary_name + "_unit_tests_binary", "test": "//" + CURRENT_DIR + ":" + binary_name + "_unit_tests"})
     rules.append(generated_producer_rules(package_name))
     if libraries and libraries[0].get("test", True):
         library = libraries[0]
@@ -1063,6 +1068,13 @@ tidepool_buildscript_run(
             unit_rule = "tidepool_rust_binary"
             unit_extra = '    rustc_flags = ["--test"],'
         rules.append(render_rule(unit_rule, unit_target["name"], unit_target, package, unit_deps, unit_named, unit_extra, features=package_features, test_target=True))
+        shared = package_name in {"tidepool", "tidepool-runtime", "exomonad-actor"}
+        if package_name in {"tidepool-runtime", "exomonad-actor"}:
+            env, resources, worker = test_runtime_inputs(package_name, unit_target["name"], unit=True)
+            if package_name == "tidepool-runtime":
+                env["TIDEPOOL_CELL_TEST_EXTRACT"] = "$(exe //tidepool/extract-cmd:tidepool-extract)"
+            rules.append("\n".join(["tidepool_rust_test_cases(", f"    name = {json.dumps(unit_target['name'] + '_all')},", f"    binary = {json.dumps(':' + unit_target['name'])},", "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 14400000,", runtime_arguments(env, resources, worker), '    visibility = ["PUBLIC"],', ")", ""]))
+        NATIVE_TARGETS[package_name]["libraries"][library["name"]].update({"test_build": "//" + CURRENT_DIR + ":" + unit_target["name"] + ("" if shared else "_binary"), "test": "//" + CURRENT_DIR + ":" + unit_target["name"] + ("_all" if shared else "")})
         if package_name == "tidepool-toolchain":
             rules.append('''runtime_executable(
     name = "candidate_fixture_issuer",
@@ -1101,6 +1113,7 @@ tidepool_buildscript_run(
                 package_features,
             )
         )
+        NATIVE_TARGETS[package_name]["integration"][target["name"]] = {"test_build": "//" + CURRENT_DIR + ":" + target["name"] + "_binary", "test": "//" + CURRENT_DIR + ":" + target["name"]}
     if package_name == "tidepool-handlers":
         rules.append('''export_file(
     name = "handler_library_source",
@@ -1154,13 +1167,24 @@ cxx_library(
     output_path = ROOT / CURRENT_DIR / "BUCK"
     outputs[output_path] = output
 
-if HASKELL_RUST_INPUTS:
+if selected == set(SUPPORTED_PACKAGES):
+    outputs[ROOT / "build/native-targets.json"] = json.dumps({"schema": 1, "packages": dict(sorted(NATIVE_TARGETS.items()))}, indent=2, sort_keys=True) + "\n"
+if selected == set(SUPPORTED_PACKAGES):
     lines = ['# @generated by scripts/buck2-first-party.py from exact Rust include inputs.',
              'load("@prelude//:rules.bzl", "export_file")', '', 'def declare_rust_test_inputs():']
     for relative in sorted(HASKELL_RUST_INPUTS):
         name = "rust_input_" + relative.replace("/", "_").replace(".", "_").replace("-", "_")
         lines.append(f"    export_file(name = {json.dumps(name)}, src = {json.dumps(relative)}, visibility = [\"PUBLIC\"])")
+    if not HASKELL_RUST_INPUTS:
+        lines.append("    pass")
     outputs[ROOT / "bridge/haskell/rust_inputs.bzl"] = "\n".join(lines) + "\n"
+elif HASKELL_RUST_INPUTS:
+    retained = ROOT / "bridge/haskell/rust_inputs.bzl"
+    content = retained.read_text() if retained.is_file() else ""
+    for relative in HASKELL_RUST_INPUTS:
+        name = "rust_input_" + relative.replace("/", "_").replace(".", "_").replace("-", "_")
+        if f"name = {json.dumps(name)}, src = {json.dumps(relative)}," not in content:
+            raise SystemExit(f"new cross-package input {relative} needs complete native graph regeneration")
 
 if options.check:
     stale = False
