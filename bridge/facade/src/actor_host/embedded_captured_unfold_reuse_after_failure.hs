@@ -9,6 +9,11 @@ do
   result <- awaitWatch replies
   firstRelease <- releaseCheckpoint seed
   secondRelease <- releaseCheckpoint seed
-  case (result, firstRelease, secondRelease) of
-    (Right 42, Right (), Right ()) -> display True
+  refused <- attemptUnfold (batch "embedded-captured" "reuse-after-release")
+    (child (withContext (fromCheckpoint seed)
+      (researching @Int projectHead
+        (assignment [label|reuse-released-must-not-launch|] ("released capture" :: Text)))))
+  cleaned <- planCleanupFor again >>= executeCleanup
+  case (result, firstRelease, secondRelease, refused, cleanupReceiptComplete cleaned) of
+    (Right 42, Right (), Right (), Left (UnfoldCheckpointRefused ReleasedCheckpoint), True) -> display True
     _ -> error "retained failed-cell capture contract failed" >> display True

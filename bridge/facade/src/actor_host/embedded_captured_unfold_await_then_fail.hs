@@ -29,6 +29,8 @@ do
       <*> child (withLifetime ActorOwned (withContext (fromCheckpoint seed)
         (researching @Int projectHead
           (assignment [label|captured-beta|] ("reply with the captured getter" :: Text))))))
+  Just group <- pure (forkGroupHandle alpha)
+  R.send (storeGroup (R.client groupStore)) group
   R.send (storeSeed (R.client seedStore)) seed
   replies <- watch "same-cell-captured-replies" ((,) <$> awaitValue alpha <*> awaitValue beta)
   result <- awaitWatch replies
@@ -36,4 +38,5 @@ do
     (Left (UnfoldUncapturedContext _), Left (UnfoldDeferredInvocationOwned _), Right (42, 42)) ->
       error "intentional captured parent Haskell execution failure" >> pure True
     _ -> error "captured same-cell reply contract failed" >> pure True
+capturedSuffix <- pure (99 :: Int)
 capturedSuffix <- pure (99 :: Int)

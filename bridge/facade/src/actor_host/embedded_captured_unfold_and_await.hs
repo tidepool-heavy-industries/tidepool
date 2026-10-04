@@ -27,6 +27,8 @@ do
       <*> child (withContext (fromCheckpoint seed)
         (researching @Int projectHead
           (assignment [label|captured-beta|] ("reply with the captured getter" :: Text)))))
+  Just group <- pure (forkGroupHandle alpha)
+  R.send (storeGroup (R.client groupStore)) group
   firstRelease <- releaseCheckpoint seed
   secondRelease <- releaseCheckpoint seed
   releasedRefusal <- attemptUnfold (batch ("embedded-captured" :: CampaignLabel)

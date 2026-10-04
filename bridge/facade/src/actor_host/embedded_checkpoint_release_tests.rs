@@ -16,29 +16,44 @@ async fn released_checkpoint_keeps_an_admitted_childs_hosted_context() {
     let root = campaign.root_installation.policy.clone();
     let output_store = display_output::open_run_store(campaign.session_root.path()).unwrap();
     let root_for_setup = root.clone();
-    let setup = tokio::spawn(async move {
+    let mut setup = tokio::spawn(async move {
         dispatch_haskell_script(
             root_for_setup.as_ref(),
             include_str!("checkpoint_issuer_setup.hs"),
         )
         .await
     });
-    let issuer = campaign
-        .next_deployment(
-            "checkpoint issuer",
-            Duration::from_secs(120),
+    let mut setup_finished = false;
+    let issuer = tokio::select! {
+        result = &mut setup => {
+            let result = result.expect("checkpoint setup task");
+            assert_eq!(result["status"], "committed", "checkpoint issuer setup failed: {result:?}");
+            setup_finished = true;
+            campaign.next_deployment(
+                "issuer admitted by completed checkpoint setup", Duration::from_secs(5),
+                |event| match event {
+                    LocalResidentDeployment::PolicyInstalled(installation) => Ok(installation),
+                    other => Err(other),
+                },
+            ).await
+        },
+        issuer = campaign.next_deployment(
+            "checkpoint issuer", Duration::from_secs(120),
             |event| match event {
                 LocalResidentDeployment::PolicyInstalled(installation) => Ok(installation),
                 other => Err(other),
             },
-        )
-        .await;
+        ) => issuer,
+    };
     campaign.authority.install_grant(
         issuer.actor.identity().into(),
         worktree_grant(issuer.effective_role.role()),
     );
     issuer.fork_gate.as_ref().unwrap().mark_ready().unwrap();
-    assert_eq!(setup.await.unwrap()["status"], "committed");
+    if !setup_finished {
+        let result = setup.await.unwrap();
+        assert_eq!(result["status"], "committed", "{result:?}");
+    }
 
     let capture_call_id = uuid::Uuid::new_v4().simple().to_string();
     let capture = issuer
@@ -74,6 +89,14 @@ async fn released_checkpoint_keeps_an_admitted_childs_hosted_context() {
         })
         .await
         .unwrap();
+
+    let issuer_cleanup = issuer
+        .actor
+        .terminal()
+        .cleanup()
+        .expect("issuer cleanup evidence");
+    assert_eq!(issuer_cleanup.actor(), issuer.actor.identity());
+    assert!(issuer_cleanup.is_confirmed(), "{issuer_cleanup:?}");
 
     let root_for_branch = root.clone();
     let mut branch = tokio::spawn(async move {
@@ -161,6 +184,29 @@ async fn released_checkpoint_keeps_an_admitted_childs_hosted_context() {
         "True",
         "{inherited:?}"
     );
+
+    let cleaned = campaign
+        .drive_actor_output(
+            &output_store,
+            dispatch_haskell_script(
+                root.as_ref(),
+                "planCleanupFor observer >>= executeCleanup >>= display . cleanupReceiptComplete",
+            ),
+        )
+        .await;
+    assert_eq!(cleaned["status"], "committed", "{cleaned:?}");
+    assert_eq!(
+        test_campaign::committed_display_text(&cleaned),
+        "True",
+        "{cleaned:?}"
+    );
+    let observer_cleanup = observer
+        .actor
+        .terminal()
+        .cleanup()
+        .expect("observer cleanup evidence");
+    assert_eq!(observer_cleanup.actor(), observer.actor.identity());
+    assert!(observer_cleanup.is_confirmed(), "{observer_cleanup:?}");
 
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();

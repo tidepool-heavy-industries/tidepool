@@ -9,6 +9,8 @@ m2JoinA <- do
       <*> child (withLifetime ActorOwned (withContext (fromCheckpoint seed)
         (researching @M2Reply projectHead
           (m2OriginalAssignment [label|original-beta|])))))
+  Just group <- pure (forkGroupHandle alpha)
+  R.send (storeGroup (R.client groupStore)) group
   replies <- watch "original-nominal-replies" ((,) <$> awaitValue alpha <*> awaitValue beta)
   result <- awaitWatch replies
   Right () <- releaseCheckpoint seed

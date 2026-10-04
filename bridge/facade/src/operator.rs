@@ -546,7 +546,9 @@ fn invocation_error(failure: KernelInvocationFailure) -> Response {
         message: failure.to_string(),
         receipt: Some(Receipt {
             display: exomonad_actor::bound_workbench_display(&failure.to_string(), 2048),
-            structured: Some(serde_json::json!({"items": receipts})),
+            structured: Some(
+                serde_json::json!({"items": receipts, "publication": failure.publication()}),
+            ),
         }),
     };
     let bytes = match serde_json::to_vec(&response) {
@@ -810,6 +812,9 @@ mod artifact_tests {
             actor: failure.actor,
             detail: "cleanup remains unconfirmed".into(),
             receipts: cleanup_receipts,
+            publication: Some(WorkbenchPublicationOutcome::NotPublished {
+                reason: tidepool_runtime::session::WorkbenchNotPublishedReason::Failed,
+            }),
         });
         assert_eq!(cleanup.status(), StatusCode::SERVICE_UNAVAILABLE);
         let body = axum::body::to_bytes(cleanup.into_body(), MAX_RESPONSE_BYTES)
@@ -818,6 +823,8 @@ mod artifact_tests {
         let error: ApiError = serde_json::from_slice(&body).unwrap();
         assert_eq!(error.code, "unavailable");
         let frozen = error.receipt.unwrap().structured.unwrap();
+        assert_eq!(frozen["publication"]["status"], "notPublished");
+        assert_eq!(frozen["publication"]["reason"], "failed");
         let operation = &frozen["items"][0]["operations"][0];
         assert_eq!(operation["displayPublication"]["status"], "published");
         assert_eq!(operation["display"]["output"]["sequence"], 17);

@@ -841,6 +841,7 @@ impl CallResponse {
                 let mut text = exomonad_actor::bound_workbench_display(&failure.to_string(), 2048);
                 text.push('\n');
                 append_workbench_receipts(&mut text, failure.receipts());
+                append_workbench_publication(&mut text, failure.publication());
                 text
             }
             _ => exomonad_actor::bound_workbench_display(&error.to_string(), MODEL_OUTPUT_LIMIT),
@@ -881,7 +882,23 @@ fn workbench_failure_transcript(failure: &exomonad_actor::KernelWorkbenchFailure
         ),
     };
     append_workbench_receipts(&mut text, &failure.receipts);
+    append_workbench_publication(&mut text, failure.publication.as_ref());
     text
+}
+
+fn append_workbench_publication(
+    text: &mut String,
+    publication: Option<&tidepool_runtime::session::WorkbenchPublicationOutcome>,
+) {
+    if let Some(publication) = publication {
+        text.push_str("publication ");
+        let remaining = MODEL_OUTPUT_LIMIT.saturating_sub(text.len() + 1);
+        text.push_str(&exomonad_actor::bound_workbench_display(
+            &serialize(serde_json::to_value(publication).unwrap_or_default()),
+            remaining,
+        ));
+        text.push('\n');
+    }
 }
 
 fn append_workbench_receipts(
@@ -1054,8 +1071,19 @@ fn workbench_transcript(response: &tidepool_runtime::session::WorkbenchResponse)
                 }
             }
         }
-        if !item.installed_bindings.is_empty() {
-            effects.push(format!("bound {}", item.installed_bindings.join(", ")));
+        let public_bindings = response
+            .publication
+            .as_ref()
+            .map(tidepool_runtime::session::WorkbenchPublicationOutcome::public_bindings)
+            .unwrap_or_default();
+        let installed = item
+            .installed_bindings
+            .iter()
+            .filter(|name| public_bindings.contains(name))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !installed.is_empty() {
+            effects.push(format!("bound {}", installed.join(", ")));
         }
         if !effects.is_empty() {
             unit_effects.push((item.index, effects.join(" and ")));
@@ -2472,6 +2500,25 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn workbench_binding_summary_requires_public_visibility() {
+        use tidepool_runtime::session::{
+            WorkbenchItemStatus, WorkbenchNotPublishedReason, WorkbenchPublicationOutcome,
+        };
+        let mut item = workbench_item(0, WorkbenchItemStatus::Committed, "");
+        item.installed_bindings = vec!["privateValue".into()];
+        let mut response = workbench_response(WorkbenchRunStatus::Rejected, 0, 2, vec![item]);
+        response.publication = Some(WorkbenchPublicationOutcome::NotPublished {
+            reason: WorkbenchNotPublishedReason::Failed,
+        });
+        assert!(!workbench_transcript(&response).contains("bound privateValue"));
+        response.publication = Some(WorkbenchPublicationOutcome::DurabilityUnconfirmed {
+            bindings: vec!["privateValue".into()],
+            detail: "journal acknowledgement unavailable".into(),
+        });
+        assert!(workbench_transcript(&response).contains("bound privateValue"));
+    }
+
+    #[test]
     fn workbench_failure_preserves_command_output_before_large_diagnostics() {
         use tidepool_runtime::session::{
             WorkbenchExecutionId, WorkbenchItemReceipt, WorkbenchItemStatus,
@@ -2597,12 +2644,19 @@ pub(crate) mod tests {
                     actor: uncertain.actor,
                     detail: "cleanup remains unconfirmed".into(),
                     receipts: uncertain.receipts,
+                    publication: Some(
+                        tidepool_runtime::session::WorkbenchPublicationOutcome::NotPublished {
+                            reason: tidepool_runtime::session::WorkbenchNotPublishedReason::Failed,
+                        },
+                    ),
                 },
             )));
         let CallContent::InputText { text: cleanup_text } = &cleanup_response.content_items[0];
         assert!(!cleanup_response.success);
         assert!(cleanup_text.contains("display 3:5:7 page 11 unconfirmed (acknowledgement lost)"));
         assert!(cleanup_text.contains(&output));
+        assert!(cleanup_text.contains("\"status\":\"notPublished\""));
+        assert!(cleanup_text.contains("\"reason\":\"failed\""));
         assert!(cleanup_text.len() <= MODEL_OUTPUT_LIMIT);
         let response =
             CallResponse::failure(&HostToolFailure::Dispatch(ResidentToolError::Invocation(
