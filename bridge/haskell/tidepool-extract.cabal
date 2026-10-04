@@ -747,6 +747,7 @@ test-suite model-turn-test
     Tidepool.Internal.ModelControl
     Tidepool.Internal.RequestSite
     Tidepool.Model
+    Tidepool.Patch
     Tidepool.Prelude
     Tidepool.QQ.Fmt.Runtime
     Tidepool.Records

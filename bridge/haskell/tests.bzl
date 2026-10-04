@@ -4825,6 +4825,7 @@ def declare_haskell_test_components():
         "Tidepool/Internal/ModelControl.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Internal_ModelControl_hs]",
         "Tidepool/Internal/RequestSite.hs": "lib/Tidepool/Internal/RequestSite.hs",
         "Tidepool/Model.hs": "lib/Tidepool/Model.hs",
+        "Tidepool/Patch.hs": "lib/Tidepool/Patch.hs",
         "Tidepool/Prelude.hs": "lib/Tidepool/Prelude.hs",
         "Tidepool/QQ/Fmt/Runtime.hs": "lib/Tidepool/QQ/Fmt/Runtime.hs",
         "Tidepool/Records.hs": "lib/Tidepool/Records.hs",

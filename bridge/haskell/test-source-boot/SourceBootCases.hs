@@ -787,6 +787,39 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
       fail "generated cold source scaffold failed ordinary support admission"
   putStrLn "generated scaffold: exact hidden support, settled result, ordinary/cold scope, bind/display CellProgram; duplicate/helper/source-drift/native/export/hidden-orphan/family/metadata refusals passed"
 
+-- Native and lexical roots share one immutable compiler capture. The witness
+-- is retained only as canonical interface/Core custody in the emitted scope.
+captureRetainedCompilerFixture
+  :: FilePath -> IO (PreparedPipelineResult, SessionScope, ExactScope)
+captureRetainedCompilerFixture work =
+  captureRetainedCompilerFixtureWith "MetadataRetainedWitness.hs" [work] work
+
+captureRetainedCompilerFixtureWith
+  :: FilePath -> [FilePath] -> FilePath -> IO (PreparedPipelineResult, SessionScope, ExactScope)
+captureRetainedCompilerFixtureWith witnessFixture includes work = do
+  forM_ ["MetadataQuoter.hs", "MetadataQuotedTarget.hs"
+    , "MetadataCurrentSourceTarget.hs"] $ \name ->
+    copyFile ("test-source-boot/fixtures" </> name) (work </> name)
+  copyFile ("test-source-boot/fixtures" </> witnessFixture) (work </> "MetadataRetainedWitness.hs")
+  copyFile "test-source-boot/fixtures/MetadataQuoteSupportRetainedCore.hs"
+    (work </> "MetadataQuoteSupport.hs")
+  let source = work </> "MetadataQuoter.hs"
+      scopePath = work </> "original-execution.cbor"
+      session = emptySessionScope {ssRoot=work,ssExactScope=Just scopePath}
+      helper = ("main", "MetadataQuoteSupport")
+      witness = ("main", "MetadataRetainedWitness")
+  original <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
+    Nothing source includes Nothing
+  writeGenuineExecutionScope [snd helper] [snd helper] work source includes scopePath original
+  exact <- readExactScope scopePath >>= either fail pure
+  let proofs = scopeDurableInterfaces exact
+  unless (map originalModule (scopeProducts exact) == [snd helper]
+      && Map.member witness proofs
+      && isJust (Map.lookup witness proofs >>= canonicalCoreArtifact)
+      && maybe False (Map.member witness . canonicalRequirements) (Map.lookup helper proofs)) $
+    fail "retained fixture lost its interface/Core-only compiler dependency or acquired its native product"
+  pure (original, session, exact)
+
 retainedExecutionThCounter :: IO ()
 retainedExecutionThCounter = withTiming $ withScratch $ \work -> do
   library <- canonicalizePath "lib"
