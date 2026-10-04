@@ -8253,7 +8253,7 @@ pub(crate) mod tests {
     #[test]
     fn receipt_dictionary_bounds_expanded_witnesses() {
         let global = dictionary_test_global();
-        let mut dictionary = test_dictionary(&[global]);
+        let mut dictionary = test_dictionary(std::slice::from_ref(&global));
         let indices = vec![Value::Integer(0.into()); GLOBAL_REFERENCE_LIMIT];
         assert_eq!(
             dictionary.resolve(&indices).unwrap().len(),
