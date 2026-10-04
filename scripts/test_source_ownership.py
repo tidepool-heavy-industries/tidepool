@@ -92,6 +92,7 @@ TEST_ONLY_SOURCES = {
         'tidepool/runtime/src/session/fixtures/retained-import-consumer.hs',
         'tidepool/runtime/src/session/fixtures/retained-import-producer.hs',
         'tidepool/runtime/src/session/fixtures/retained-import-replacement.hs',
+        'tidepool/runtime/src/session/fixtures/recovery-control.hs',
         'tidepool/runtime/src/session/fixtures/recovery-dependent.hs',
         'tidepool/runtime/src/session/fixtures/recovery-native-packet.json',
         'tidepool/runtime/src/session/fixtures/recovery-original.hs',

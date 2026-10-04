@@ -37,7 +37,6 @@ rpds = "=1.2.1"
 
 [dev-dependencies]
 tidepool-test-data.workspace = true
-tidepool-toolchain = { workspace = true, features = ["test-support"] }
 sha2 = "0.10"
 trybuild.workspace = true
 tidepool-testing.workspace = true
