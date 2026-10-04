@@ -2698,17 +2698,35 @@ impl ExactDeclarationContext {
             .iter()
             .map(|node| &node.owner)
             .collect::<BTreeSet<_>>();
-        if lexical_owners.len() != self.lexical.len()
-            || self.lexical.iter().any(|node| {
-                !owners.contains(&node.owner)
-                    || node
-                        .imports
-                        .iter()
-                        .any(|owner| !lexical_owners.contains(owner))
-                    || node.imports.iter().collect::<BTreeSet<_>>().len() != node.imports.len()
-            })
-        {
-            return Err(failure("invalid selected lexical graph"));
+        let mut seen = BTreeSet::new();
+        for node in &self.lexical {
+            if !seen.insert(&node.owner) {
+                return Err(failure(format!(
+                    "duplicate selected lexical owner {}:{}",
+                    node.owner.unit, node.owner.module
+                )));
+            }
+            if !owners.contains(&node.owner) {
+                return Err(failure(format!(
+                    "selected lexical owner lacks its interface {}:{}",
+                    node.owner.unit, node.owner.module
+                )));
+            }
+            let mut imports = BTreeSet::new();
+            for imported in &node.imports {
+                if !imports.insert(imported) {
+                    return Err(failure(format!(
+                        "duplicate selected lexical import {}:{} -> {}:{}",
+                        node.owner.unit, node.owner.module, imported.unit, imported.module
+                    )));
+                }
+                if !lexical_owners.contains(imported) {
+                    return Err(failure(format!(
+                        "selected lexical edge leaves its graph {}:{} -> {}:{}",
+                        node.owner.unit, node.owner.module, imported.unit, imported.module
+                    )));
+                }
+            }
         }
         Ok(())
     }
@@ -3660,6 +3678,46 @@ mod tests {
         };
         context.clone().normalize().unwrap();
         (Arc::new(context), producer)
+    }
+
+    #[test]
+    fn retained_projection_shared_lexical_rows_preserve_custody_and_reject_conflicts() {
+        let (initial, _) = metadata_fixture();
+        let shared = initial
+            .lexical_graph()
+            .iter()
+            .find(|node| node.owner == identity("fixture", "Alpha"))
+            .unwrap()
+            .clone();
+        let merged = initial
+            .as_ref()
+            .clone()
+            .extend_lexical_joins(&[], &[shared.clone(), shared.clone()])
+            .unwrap();
+        assert_eq!(merged.semantic_sha256(), initial.semantic_sha256());
+        assert_eq!(merged.artifact_view(), initial.artifact_view());
+        assert_eq!(merged.recovery_products(), initial.recovery_products());
+        assert_eq!(merged.lexical_graph().len(), initial.lexical_graph().len());
+        assert!(!merged
+            .lexical_graph()
+            .iter()
+            .any(|node| node.owner == identity("fixture", "Beta")));
+
+        let mut conflicting = shared.clone();
+        conflicting.imports.push(identity("fixture", "Joined"));
+        let error = merged
+            .extend_lexical_joins(&[], &[conflicting])
+            .unwrap_err();
+        assert!(matches!(error, CompileError::ExtractFailed(detail)
+            if detail == "exact declaration context: conflicting selected lexical imports for fixture:Alpha"));
+
+        // A constructor still requires one row per owner; only explicit
+        // composition may combine equal selections from independent receipts.
+        let mut malformed = initial.as_ref().clone();
+        malformed.lexical.push(shared);
+        let error = malformed.normalize().unwrap_err();
+        assert!(matches!(error, CompileError::ExtractFailed(detail)
+            if detail == "exact declaration context: duplicate selected lexical owner fixture:Alpha"));
     }
 
     #[test]

@@ -2062,11 +2062,13 @@ impl ExactCompiledPrefix {
         );
         let mut joins = vec![projection];
         joins.extend_from_slice(retained_projections);
-        let context = Arc::new(crate::declaration_context::ExactDeclarationContext::new(
-            &[],
-            &joins,
-            lexical,
-        )?);
+        // The new projection and retained actor membranes can share source
+        // dependencies. Compose their selections through the context owner:
+        // equal rows are one authority, while conflicting edges remain invalid.
+        let context = Arc::new(
+            crate::declaration_context::ExactDeclarationContext::new(&[], &[], Vec::new())?
+                .extend_lexical_joins(&joins, &lexical)?,
+        );
         let mut next = self.clone();
         next.completed.push(CompletedCheckedItem::Declaration(item));
         next.declaration_projection = PrefixDeclarationProjection::Certified(context);
