@@ -68,9 +68,10 @@ just fixtures-check containers-contract
 ```
 
 Native Rust runners discover actual libtest names, reject empty selections,
-check counts and isolate each case. Haskell suites use their shared Tasty
-runner. Compile-only binaries and ignored command adapters do not establish
-passing test evidence. Generated immutable fixtures are runtime resources;
+check counts and isolate each case. The 26 Cabal-declared Haskell suites use
+one shared Tasty runner and a native component graph projected by the pinned
+Cabal metadata producer. Compile-only binaries and ignored command adapters
+do not establish passing test evidence. Generated immutable fixtures are runtime resources;
 rebuild their owning source actions instead of updating checked-in blobs.
 
 `just verify` is the broad native integration gate, reserved for integration

@@ -20,33 +20,35 @@ only the versioned request protocol emitted by `tidepool-extract-cmd`, or
 `--worker-loop-v2` behind the resident daemon. Native Rust/Haskell test targets
 carry matched frontend, worker, deployment, GHC and source resources. The
 production worker uses its production toolchain; host Tasty compilation uses
-`toolchains//:haskell_tests`. Cabal declarations own component module/package
-rosters, from which `scripts/buck2-haskell-components.py` generates native targets.
+`toolchains//:haskell_tests`. The Cabal package owns production components and
+26 Tasty suites. The pinned Cabal metadata producer finalizes their source,
+package and compiler-option declarations; `scripts/buck2-haskell-components.py`
+projects them into the single `components.bzl` native graph. Listing a suite
+is discovery, not test execution.
 
 ## Toolchain resolution and deployment
 
-`tidepool/toolchain/src/toolchain.rs` owns resolution and the startup
-fingerprint check.
+`tidepool/toolchain/src/toolchain.rs` owns compiler resolution, deployment
+identity and source selection. Native compiler and test actions declare the
+frontend, worker, GHC, stdlib sources and generated effects they consume.
+Test-only packages stay in the host test toolchain.
 
-Frontend precedence:
+For a hosted run, build `//build/package:native_runtime_bundle`, freeze its
+products at the final deployment path, and use its qualification descriptor.
+`build/package/qualification.py` supplies that bundle's compiler deployment
+manifest, stdlib, runtime libraries and browser assets to both acceptance and
+actual execution. The first native delivery uses source-backed stdlib inputs
+through the normal compiler; canonical catalog and durable module-cache
+acceptance remain separate obligations. See
+[the package guide](../../build/package/README.md) for freeze and qualification.
 
-1. `$TIDEPOOL_EXTRACT`; a set but invalid value is an error.
-2. `tidepool-extract` on `PATH`.
-
-Standard-library precedence:
-
-1. `$TIDEPOOL_PRELUDE_DIR`; it must contain `Tidepool/Prelude.hs`.
-2. A repository `bridge/haskell/lib` or `lib` found by walking upward from CWD.
-3. The library beside a worktree-built extractor's `dist-newstyle`.
-4. The library embedded in the server binary (release builds only, when built
-   with `TIDEPOOL_EMBED_HASKELL=1`; a dev build embeds nothing and resolves
-   from the checkout at step 2 instead).
-5. The source tree from which the binary was built.
-
-Use `scripts/redeploy.sh` to deploy the extractor, Rust servers, embedded
-library, cache state, and toolchain stamp as one operation. For deliberate
-mixed local testing, set `TIDEPOOL_TOOLCHAIN_HANDSHAKE=warn`; do not weaken the
-default handshake.
+`just exomonad-run BUNDLE DESCRIPTOR REPORT ...` and
+`just exomonad-init BUNDLE DESCRIPTOR REPORT ...` select that verified artifact
+environment. `just doctor BUNDLE DESCRIPTOR` verifies and prints the selection.
+`scripts/redeploy.sh` delegates to the same freeze owner and preserves existing
+installations and live hosts. Standalone toolchain APIs retain their resolution
+contract in `tidepool/toolchain/src/toolchain.rs`; they do not issue deployment
+qualification.
 
 ## Exact-scope transport
 

@@ -28,42 +28,72 @@ workspace config names a different slice.
 
 ## Build
 
-For Tidepool development, clone the source and use the local recipes. They enter
-the Nix shell for dependencies and compile local source into
-`bridge/haskell/dist-newstyle/` and `target/`, which Cabal and Cargo reuse on
-later builds:
+Source development uses declared native Buck actions. Nix supplies the pinned
+compiler and runtime tool closures; `just` forwards to the owning Buck targets.
+Use a real Git checkout with initialized submodules and a provisioned per-checkout
+`buck-out` bind mount. On swarm-01, run configure and build commands through
+`swarm-build` as `inanna`; the [server build guide](../../docs/swarm-builds.md)
+describes admission and output provisioning.
 
 ```bash
 git clone --recurse-submodules https://github.com/tidepool-heavy-industries/tidepool.git
 cd tidepool
-just exomonad-build          # incremental build only
-just exomonad-init           # incremental build, then start a run here
+# After provisioning this checkout's buck-out mount:
+bash scripts/buck2-configure.sh --tests
+just exomonad-build
+just build //build/testing/browser:driver_bundle
 ```
 
-Pass `exomonad init` flags through the second recipe, for example
-`just exomonad-init -- --no-attach`. To start a run in another project with the
-locally built tools, use `just exomonad-init -- --workspace /path/to/project`.
+`just exomonad-build` builds `//build/package:native_runtime_bundle` without
+starting a run. The bundle owns the host, libtest, extractor frontend, resident
+worker, stdlib sources, runtime libraries and browser assets under one native
+source/profile contract. Configure materializes and roots its selected Nix
+outputs before publishing `.buckconfig.local`; ambient Cargo, Cabal or compiler
+outputs do not select these artifacts.
 
-For an isolated distribution build, run `nix build .#exomonad` and use
-`./result/bin/exomonad`. The flake configures the public Cachix binary cache;
-available artifacts depend on the revision. See the [binary cache guide](binary-cache.md)
-for setup and coverage details. If the revision has no cached outputs, Nix
-builds the GHC-side and Rust-side inputs from source. Nix reuses outputs for
-identical inputs, while a source edit creates a new input hash and does not
-reuse this checkout's Cabal and Cargo incremental outputs. The wrapper selects
-the matched extractor and native Harness runtime. Stock `codex` remains a
-separately installed tool.
+Follow [the package guide](../../build/package/README.md) to retain the actual
+build command and log, freeze the outputs at a new final path, and run its six
+M2 cases and M1 browser gate against one descriptor. Linking the bundle or
+running a help command does not qualify it. Keep the existing host until the
+same frozen binary succeeds in the recursive live scenario.
 
+For the source workflow below, `FINAL_BUNDLE` is that canonical frozen path,
+and `DESCRIPTOR` is its `share/exomonad/qualification.json`. Each operation
+also receives an absolute report path. From the Tidepool checkout, the existing
+frontends pass ordinary Exomonad arguments to the verified bundle:
+
+```bash
+DESCRIPTOR="$FINAL_BUNDLE/share/exomonad/qualification.json"
+just exomonad-run "$FINAL_BUNDLE" "$DESCRIPTOR" "$NEW_REPORT" \
+  new /path/to/your/project
+just exomonad-init "$FINAL_BUNDLE" "$DESCRIPTOR" "$INIT_REPORT" \
+  --workspace /path/to/your/project --no-attach
+```
+
+Use `just exomonad-run BUNDLE DESCRIPTOR REPORT COMMAND ...` for the other
+Exomonad operations described on this page. It records actual process execution;
+the report alone does not prove a live scenario's replies or cleanup.
+
+Nix also owns an isolated distribution: `nix build .#exomonad` produces
+`./result/bin/exomonad` with its matched compiler/runtime wrapper. The flake
+configures the public Cachix binary cache; availability depends on the revision.
+See the [binary cache guide](binary-cache.md) for setup and coverage details.
+Nix reuses identical inputs and builds missing outputs from source. This
+separate distribution has its own package checks; the native M1/M2 qualification
+uses the frozen Buck bundle above. Stock `codex` remains separately installed,
+with the user's authentication kept outside project and deployment artifacts.
 
 ## `exomonad new`: write a workspace
 
+For the frozen native bundle, from the Tidepool checkout:
+
 ```bash
-cd /path/to/your/project
-/path/to/tidepool/result/bin/exomonad new
+just exomonad-run "$FINAL_BUNDLE" "$DESCRIPTOR" "$NEW_REPORT" \
+  new /path/to/your/project
 ```
 
-With a local development build, use `/path/to/tidepool/target/debug/exomonad
-new` instead.
+The Nix distribution exposes the same workspace command as
+`/path/to/tidepool/result/bin/exomonad new /path/to/your/project`.
 
 `exomonad new` takes an empty directory, which it makes a Git repository, or an
 existing repository that has no `.exomonad/config.toml`. It refuses, and changes
@@ -129,7 +159,8 @@ remain raw. Run `exomonad check` before reloading the agent spec.
 ## `exomonad check`: typecheck the workspace without starting anything
 
 ```bash
-exomonad check --workspace /path/to/your/project
+just exomonad-run "$FINAL_BUNDLE" "$DESCRIPTOR" "$CHECK_REPORT" \
+  check --workspace /path/to/your/project
 ```
 
 This resolves the pinned sources and typechecks every module the config names.
@@ -148,7 +179,8 @@ backend = "embedded"
 For native ChatGPT plan authentication, sign in with a separate Exomonad record:
 
 ```bash
-exomonad auth login --credential-file /absolute/private/path/chatgpt.json
+just exomonad-run "$FINAL_BUNDLE" "$DESCRIPTOR" "$AUTH_REPORT" \
+  auth login --credential-file /absolute/private/path/chatgpt.json
 ```
 
 Open the displayed authorization URL in a browser on the same host. The callback
@@ -205,8 +237,8 @@ workspace's `[models]` aliases. Backend selection is a config setting; `init`
 has no `--backend` flag.
 
 ```bash
-cd /path/to/your/project
-exomonad init
+just exomonad-init "$FINAL_BUNDLE" "$DESCRIPTOR" "$INIT_REPORT" \
+  --workspace /path/to/your/project
 ```
 
 The first live run is operator-driven: start it when ready, open the browser

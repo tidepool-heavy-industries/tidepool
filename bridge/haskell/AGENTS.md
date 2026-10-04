@@ -2,7 +2,9 @@
 
 For this directory's ownership boundaries and invariants, see [CLAUDE.md](CLAUDE.md).
 
-Use the repository Nix/toolchain environment to verify changed Haskell
-consumers. After translation or serialization changes, run
-`just fixtures-check`; never edit prepared artifacts by hand. Do not share
-`dist-newstyle` between worktrees.
+Configure the pinned native toolchains with
+`bash scripts/buck2-configure.sh --tests` in a provisioned checkout, then use
+`just build` and `just test-native` for the owning targets. See
+[the server build guide](../../docs/swarm-builds.md) for resource admission.
+After translation or serialization changes, run `just fixtures-check`;
+prepared products are declared Buck outputs, not files to update by hand.

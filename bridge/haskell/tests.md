@@ -1,8 +1,9 @@
 # Haskell test components
 
-Buck owns test registration, generated inputs and runtime tools. The Cabal
-test components describe the same source programs for local compatibility;
-they are not an independent fixture or acceptance registry. Use the owning
+`tidepool-extract.cabal` declares 26 test suites. The pinned Cabal metadata
+producer finalizes these components, and `scripts/buck2-haskell-components.py`
+projects their sources, package edges and options into `components.bzl`.
+Buck owns their generated inputs, runtime tools and execution. Use the owning
 repository frontend documented in `docs/swarm-builds.md` to select targets.
 
 Each counted component exports `tests :: TestTree` and calls the shared

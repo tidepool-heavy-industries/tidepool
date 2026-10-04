@@ -12,19 +12,19 @@ The checkout must be a provisioned Git checkout with `buck-out` bind-mounted to
 its own directory on `/srv/build`. Ask the infrastructure owner to provision a
 new mount for a new checkout; do not create a mount helper or replace an active
 output. Before any Buck invocation, run `findmnt --mountpoint "$PWD/buck-out"`
-and stop if it is not a mount. Run large work only in an admitted `build.slice`
-unit; an administrator launches the approved job as the unprivileged `swarm`
-user. The first Buck command, including metadata queries, must run inside that
-unit so the Buck daemon shares its admission boundary.
+and stop if it is not a mount. Develop and build as `inanna`. Use `swarm-build`
+for the admitted `build.slice` scope; it enters the scope and runs the command
+as `inanna`. The first Buck command, including metadata queries, must run
+inside that scope so the Buck daemon shares its admission boundary.
 
 Prepare the selected pinned outputs and configure inside the admitted build
 environment. Configure realizes every selected output and registers a durable
 Nix GC root before publishing `.buckconfig.local`:
 
 ```sh
-bash scripts/buck2-configure.sh
-export PATH="$(awk -F ' = ' '$1 == "action_path" {print $2}' .buckconfig.local):/run/current-system/sw/bin"
-buck2 build --local-only -c remote.enabled=false //tidepool/repr:tidepool_repr
+swarm-build bash scripts/buck2-configure.sh --tests
+swarm-build bash scripts/buck2-run.sh build --local-only -c remote.enabled=false \
+  //tidepool/repr:tidepool_repr
 ```
 
 Then retain the unit journal, exact command, source OID, selected and executed
@@ -52,7 +52,7 @@ that source and requesting the Rust and Haskell libraries reused all four
 required actions from cache. This is historical evidence for those focused
 targets and revisions only.
 
-The Buck graph is being introduced alongside the existing `just` workflows.
+The `justfile` is a thin frontend to the declared native Buck graph.
 Cargo metadata and `Cargo.lock` remain authoritative for Rust package versions
 and dependency edges. `scripts/buck2-first-party.py --package NAME` generates a
 bounded set of native Rust targets; `scripts/buck2-reindeer.sh` generates the
@@ -290,19 +290,16 @@ closure, isolation, reuse, and cancellation checks pass.
 ## Daemon lifetime and cache reuse
 
 Keep this checkout's Buck daemon inside the admitted `build.slice`. The first
-metadata query starts it, so launch that query from the same admitted service
-that owns the checkout's builds. An administrator can use this shape for an
-approved build unit; substitute the assigned unit name and checkout:
+metadata query starts it, so launch that query from an admitted scope
+that owns the checkout's builds. From the provisioned checkout, use the
+current admission launcher:
 
 ```sh
-sudo systemd-run --unit=tidepool-buck-daemon --collect \
-  --uid=swarm --gid=swarm --slice=build.slice \
-  --working-directory="$PWD" --setenv=HOME=/srv/swarm/home \
-  /run/current-system/sw/bin/bash -lc \
-  'bash scripts/buck2-run.sh targets -c remote.enabled=false //bridge/atomic-write:'
+swarm-build bash scripts/buck2-run.sh targets -c remote.enabled=false \
+  //bridge/atomic-write:
 ```
 
-Inspect the service cgroup and daemon PID before builds. Run build and test
+Inspect the scope cgroup and daemon PID before builds. Run build and test
 clients in the same admitted slice so they can reuse the daemon. Do not restart
 a daemon with active work; coordinate any restart of an idle daemon owned by
 this checkout. Local execution remains required while the NativeLink project
