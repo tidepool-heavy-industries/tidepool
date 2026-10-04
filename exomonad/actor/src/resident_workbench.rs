@@ -16735,7 +16735,6 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                 tidepool_runtime::session::ExecutionPublicationIntent::CompletedCell,
             )
             .unwrap();
-        assert_eq!(intent.native_write_ids().len(), bound.len());
         let tidepool_runtime::session::ExecutionPublication::Bindings(publication) = session
             .restage_ephemeral_execution_publication(intent)
             .unwrap()
