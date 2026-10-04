@@ -36,11 +36,10 @@ fn work_module(answer: u32) -> String {
 fn write_workspace(workspace: &Path, answer: u32) {
     let authored = workspace.join(".exomonad");
     std::fs::create_dir_all(authored.join("Project")).unwrap();
-    std::fs::write(
-        authored.join("config.toml"),
-        "[defaults]\nmodel = 'gpt-6-sol'\n[haskell]\nsource_roots = ['.']\nmodules = ['Project.Work']\n",
-    )
-    .unwrap();
+    crate::exomonad::write_fixture_project_config(&authored, "gpt-6-sol", |project| {
+        project.haskell.source_roots = vec![".".into()];
+        project.haskell.modules = vec!["Project.Work".into()];
+    });
     std::fs::write(authored.join("Project/Work.hs"), work_module(answer)).unwrap();
 }
 
@@ -399,15 +398,17 @@ async fn a_reloaded_module_reaches_later_cells_and_leaves_bindings_alone() {
         |config| {
             let authored = config.workspace.join(".exomonad");
             std::fs::create_dir_all(authored.join("Project")).unwrap();
-            std::fs::write(
-                authored.join("config.toml"),
-                "[defaults]\nmodel = 'gpt-6-sol'\n[haskell]\nsource_roots = ['.']\nmodules = ['Project.Work']\n",
-            )
-            .unwrap();
+            crate::exomonad::write_fixture_project_config(&authored, "gpt-6-sol", |project| {
+                project.haskell.source_roots = vec![".".into()];
+                project.haskell.modules = vec!["Project.Work".into()];
+            });
             std::fs::write(authored.join("Project/Work.hs"), work_module(1)).unwrap();
             config.workspace_inputs = Some(
-                crate::exomonad::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
-                    .unwrap(),
+                crate::exomonad::workspace::FrozenWorkspace::load(
+                    &config.workspace,
+                    &config.run_root,
+                )
+                .unwrap(),
             );
         },
     )
@@ -518,15 +519,17 @@ async fn a_rejected_reload_is_a_value_and_leaves_the_notebook_running() {
         |config| {
             let authored = config.workspace.join(".exomonad");
             std::fs::create_dir_all(authored.join("Project")).unwrap();
-            std::fs::write(
-                authored.join("config.toml"),
-                "[defaults]\nmodel = 'gpt-6-sol'\n[haskell]\nsource_roots = ['.']\nmodules = ['Project.Work']\n",
-            )
-            .unwrap();
+            crate::exomonad::write_fixture_project_config(&authored, "gpt-6-sol", |project| {
+                project.haskell.source_roots = vec![".".into()];
+                project.haskell.modules = vec!["Project.Work".into()];
+            });
             std::fs::write(authored.join("Project/Work.hs"), work_module(1)).unwrap();
             config.workspace_inputs = Some(
-                crate::exomonad::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
-                    .unwrap(),
+                crate::exomonad::workspace::FrozenWorkspace::load(
+                    &config.workspace,
+                    &config.run_root,
+                )
+                .unwrap(),
             );
         },
     )

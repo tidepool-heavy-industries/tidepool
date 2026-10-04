@@ -560,15 +560,23 @@ pub(super) async fn production_browser_journey() {
     let fixture = HostedTestRuntime::start_configured(&settings, &host_transport, |config| {
         let authored = config.workspace.join(".exomonad");
         std::fs::create_dir_all(&authored).unwrap();
-        std::fs::write(authored.join("AgentSpec.hs"), include_str!("fixtures/browser_agent_spec.hs")).unwrap();
-        std::fs::write(authored.join("config.toml"), "[defaults]\nmodel='test-model'\n[haskell]\nsource_roots=['.']\nspec='AgentSpec.agentSpec'\n").unwrap();
-        test_campaign::commit_workspace(&config.workspace);
-        config.workspace_inputs = Some(crate::exomonad::workspace::FrozenWorkspace::load(
-            &config.workspace, &config.run_root,
-        ).unwrap());
-    })
-        .await
+        std::fs::write(
+            authored.join("AgentSpec.hs"),
+            include_str!("fixtures/browser_agent_spec.hs"),
+        )
         .unwrap();
+        crate::exomonad::write_fixture_project_config(&authored, "test-model", |project| {
+            project.haskell.source_roots = vec![".".into()];
+            project.haskell.spec = Some("AgentSpec.agentSpec".into());
+        });
+        test_campaign::commit_workspace(&config.workspace);
+        config.workspace_inputs = Some(
+            crate::exomonad::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
+                .unwrap(),
+        );
+    })
+    .await
+    .unwrap();
     eprintln!(
         "browser gate host_startup elapsed={:?}",
         host_started.elapsed()

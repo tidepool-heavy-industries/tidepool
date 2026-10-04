@@ -215,7 +215,7 @@ impl std::fmt::Display for ExomonadEffort {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ExomonadConfig {
     #[serde(default)]
@@ -230,13 +230,57 @@ pub(crate) struct ExomonadConfig {
     #[serde(default)]
     pub(crate) models: std::collections::BTreeMap<String, String>,
     #[serde(default)]
-    haskell: workspace::HaskellConfig,
+    pub(crate) haskell: workspace::HaskellConfig,
     #[serde(default)]
-    prompts: workspace::PromptConfig,
+    pub(crate) prompts: workspace::PromptConfig,
+}
+
+/// Valid fixture configurations use the production schema and its defaults.
+#[cfg(test)]
+pub(crate) fn write_fixture_project_config(
+    authored: &Path,
+    model: &str,
+    configure: impl FnOnce(&mut ExomonadConfig),
+) {
+    let mut config = ExomonadConfig {
+        launch: LaunchConfig::default(),
+        compiler: CompilerConfig::default(),
+        resources: exomonad_node::command_resources::CommandResourcePolicy::default(),
+        defaults: ExomonadAgentDefaults {
+            model: model.into(),
+            effort: ExomonadEffort::default(),
+        },
+        research: exomonad_actor::ResearchPolicy::default(),
+        models: std::collections::BTreeMap::new(),
+        haskell: workspace::HaskellConfig::default(),
+        prompts: workspace::PromptConfig::default(),
+    };
+    configure(&mut config);
+    write_fixture_config(authored, &config);
+}
+
+#[cfg(test)]
+pub(crate) fn edit_fixture_project_config(
+    authored: &Path,
+    configure: impl FnOnce(&mut ExomonadConfig),
+) {
+    let text = std::fs::read_to_string(authored.join("config.toml"))
+        .expect("read existing project configuration");
+    let mut config: ExomonadConfig = toml::from_str(&text).expect("parse project configuration");
+    configure(&mut config);
+    write_fixture_config(authored, &config);
+}
+
+#[cfg(test)]
+fn write_fixture_config(authored: &Path, config: &ExomonadConfig) {
+    let text = toml::to_string_pretty(&config).expect("serialize production project configuration");
+    let _: ExomonadConfig = toml::from_str(&text).expect("read serialized project configuration");
+    std::fs::create_dir_all(authored).expect("create authored workspace directory");
+    std::fs::write(authored.join("config.toml"), text).expect("write project configuration");
 }
 
 /// Per-worker rotation is separate from the enclosing systemd memory bound.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 struct CompilerConfig {
     workers: std::num::NonZeroUsize,
@@ -252,7 +296,7 @@ impl Default for CompilerConfig {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct LaunchConfig {
     pub(crate) systemd_slice: exomonad_node::systemd_slice::SystemdSlice,
@@ -263,7 +307,7 @@ pub(crate) struct LaunchConfig {
     pub(crate) embedded: Option<EmbeddedLaunchConfig>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct EmbeddedLaunchConfig {
     pub(crate) listen: std::net::SocketAddr,
@@ -284,7 +328,7 @@ pub struct EmbeddedLaunchConfig {
     pub(crate) concurrent_jobs: usize,
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum EmbeddedModelProvider {
     #[default]
@@ -293,7 +337,7 @@ pub(crate) enum EmbeddedModelProvider {
     ChatGptPlan,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(tag = "mode", rename_all = "lowercase", deny_unknown_fields)]
 pub(crate) enum EmbeddedBrowserAuth {
     #[default]
@@ -346,7 +390,7 @@ impl EmbeddedBrowserAuth {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum EmbeddedPublicOriginScheme {
     Http,
@@ -439,7 +483,7 @@ impl EmbeddedLaunchConfig {
 
 /// Disk admission for a private source import. Values are conservative
 /// operational defaults, not measurements of a particular filesystem.
-#[derive(Clone, Copy, Debug, Deserialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SourceImportPolicy {
     pub max_import_bytes: u64,

@@ -12,7 +12,7 @@ pub struct SystemdSlice(String);
 
 /// Optional filesystem hiding for a single supervised host service.
 /// Paths are validated before they become systemd's whitespace-separated list.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(try_from = "HostFilesystemPaths")]
 pub struct HostFilesystemPolicy {
     inaccessible_paths: Vec<PathBuf>,

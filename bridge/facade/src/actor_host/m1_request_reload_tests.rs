@@ -265,11 +265,17 @@ async fn real_host_pins_typed_handler_across_reload_and_pending_compaction() {
         let authored = config.workspace.join(".exomonad");
         std::fs::create_dir_all(&authored).unwrap();
         std::fs::write(authored.join("AgentSpec.hs"), SPEC).unwrap();
-        std::fs::write(authored.join("config.toml"),
-            "[defaults]\nmodel='test-model'\n[haskell]\nsource_roots=['.']\nspec='AgentSpec.agentSpec'\n").unwrap();
-        config.workspace_inputs = Some(crate::exomonad::workspace::FrozenWorkspace::load(
-            &config.workspace, &config.run_root).unwrap());
-    }).await.unwrap();
+        crate::exomonad::write_fixture_project_config(&authored, "test-model", |project| {
+            project.haskell.source_roots = vec![".".into()];
+            project.haskell.spec = Some("AgentSpec.agentSpec".into());
+        });
+        config.workspace_inputs = Some(
+            crate::exomonad::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
+                .unwrap(),
+        );
+    })
+    .await
+    .unwrap();
     let client = reqwest::Client::new();
     let origin = format!("https://{}", host.address);
     let login = client

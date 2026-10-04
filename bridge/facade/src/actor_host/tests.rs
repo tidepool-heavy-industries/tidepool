@@ -110,11 +110,11 @@ fn driver_sources_use_run_captured_libraries() {
     let project = tempfile::tempdir().unwrap();
     let run = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(project.path().join(".exomonad")).unwrap();
-    std::fs::write(
-        project.path().join(".exomonad/config.toml"),
-        "[defaults]\nmodel = 'gpt-6-sol'\n",
-    )
-    .unwrap();
+    crate::exomonad::write_fixture_project_config(
+        &project.path().join(".exomonad"),
+        "gpt-6-sol",
+        |_| {},
+    );
     let selected =
         crate::exomonad::workspace::FrozenWorkspace::load(project.path(), run.path()).unwrap();
     let sources = driver_sources(
@@ -638,11 +638,14 @@ fn actor_recovery_records_the_published_source_revision() {
     let run = tempfile::tempdir().unwrap();
     let authored = project.path().join(".exomonad/Project");
     std::fs::create_dir_all(&authored).unwrap();
-    std::fs::write(
-        project.path().join(".exomonad/config.toml"),
-        "[defaults]\nmodel = 'gpt-6-sol'\n[haskell]\nsource_roots = ['.']\nmodules = ['Project.Work']\n",
-    )
-    .unwrap();
+    crate::exomonad::write_fixture_project_config(
+        &project.path().join(".exomonad"),
+        "gpt-6-sol",
+        |project| {
+            project.haskell.source_roots = vec![".".into()];
+            project.haskell.modules = vec!["Project.Work".into()];
+        },
+    );
     std::fs::write(
         authored.join("Work.hs"),
         "module Project.Work where\nwork :: Int\nwork = 1\n",

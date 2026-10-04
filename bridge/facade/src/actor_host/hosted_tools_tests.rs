@@ -6,17 +6,37 @@ use exomonad_tool::{HostedTool, ToolArguments, ToolInvocation};
 #[tokio::test]
 async fn frozen_tools_dispatch_raw_and_structured_inputs_without_workbench_bindings() {
     let mut campaign = TestCampaign::start_with_config(
-        exomonad_actor::ResearchPolicy::default(), |admission| admission,
+        exomonad_actor::ResearchPolicy::default(),
+        |admission| admission,
         |config| {
             let directory = config.workspace.join(".exomonad");
             std::fs::create_dir_all(directory.join("Project")).unwrap();
-            std::fs::write(directory.join("Project/Tools.hs"), include_str!("hosted_tools_fixture.hs")).unwrap();
-            std::fs::write(directory.join("ToolDispatchFixture.hs"), include_str!("fixtures/tool_dispatch_fixture.hs")).unwrap();
-            std::fs::write(directory.join("config.toml"),
-                "[defaults]\nmodel='gpt-6-sol'\n[haskell]\nsource_roots=['.']\nmodules=['Project.Tools','ToolDispatchFixture']\nspec='Project.Tools.agentSpec'\n").unwrap();
-            config.workspace_inputs = Some(crate::exomonad::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root).unwrap());
+            std::fs::write(
+                directory.join("Project/Tools.hs"),
+                include_str!("hosted_tools_fixture.hs"),
+            )
+            .unwrap();
+            std::fs::write(
+                directory.join("ToolDispatchFixture.hs"),
+                include_str!("fixtures/tool_dispatch_fixture.hs"),
+            )
+            .unwrap();
+            crate::exomonad::write_fixture_project_config(&directory, "gpt-6-sol", |project| {
+                project.haskell.source_roots = vec![".".into()];
+                project.haskell.modules =
+                    vec!["Project.Tools".into(), "ToolDispatchFixture".into()];
+                project.haskell.spec = Some("Project.Tools.agentSpec".into());
+            });
+            config.workspace_inputs = Some(
+                crate::exomonad::workspace::FrozenWorkspace::load(
+                    &config.workspace,
+                    &config.run_root,
+                )
+                .unwrap(),
+            );
         },
-    ).await;
+    )
+    .await;
     let policy = campaign.root_installation.policy.clone();
     let typed =
         dispatch_haskell_script(policy.as_ref(), "ToolDispatchFixture.dispatchChecks").await;

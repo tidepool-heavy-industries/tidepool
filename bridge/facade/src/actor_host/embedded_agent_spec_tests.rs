@@ -30,13 +30,16 @@ async fn issued_tool_snapshot_keeps_old_handler_after_spec_reload() {
         exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |config| {
-
             write_spec(&config.workspace, "old-handler", "old slot");
-            std::fs::write(
-                config.workspace.join(".exomonad/config.toml"),
-                "[defaults]\nmodel='test-model'\n[haskell]\nsource_roots=['.']\nmodules=['Project.Tools', 'AgentSpec']\nspec='AgentSpec.agentSpec'\n",
-            )
-            .unwrap();
+            crate::exomonad::write_fixture_project_config(
+                &config.workspace.join(".exomonad"),
+                "test-model",
+                |project| {
+                    project.haskell.source_roots = vec![".".into()];
+                    project.haskell.modules = vec!["Project.Tools".into(), "AgentSpec".into()];
+                    project.haskell.spec = Some("AgentSpec.agentSpec".into());
+                },
+            );
             commit_workspace(&config.workspace);
             config.workspace_inputs = Some(
                 crate::exomonad::workspace::FrozenWorkspace::load(

@@ -87,11 +87,10 @@ fn configure(config: &mut ActorHostConfig) {
         include_str!("../fixtures/cell_model.hs"),
     )
     .unwrap();
-    std::fs::write(
-        authored.join("config.toml"),
-        "[defaults]\nmodel='test-model'\n[haskell]\nsource_roots=['.']\nmodules=['ModelFixture']\n",
-    )
-    .unwrap();
+    crate::exomonad::write_fixture_project_config(&authored, "test-model", |project| {
+        project.haskell.source_roots = vec![".".into()];
+        project.haskell.modules = vec!["ModelFixture".into()];
+    });
     commit_workspace(&config.workspace);
     config.workspace_inputs = Some(
         crate::exomonad::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)

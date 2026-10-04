@@ -169,22 +169,22 @@ const SLEEPS_THEN_ANNOTATES: &str =
 /// bring it back round on itself.
 const REENTERS: &str = "Annotated . (T.pack \"the slot ran the tool body and got: \" <>) <$> Tools.probeBody (Tools.Probe (T.pack \"again\"))";
 
-const CONFIG: &str = "[defaults]\nmodel = 'gpt-6-sol'\n\
-                      [haskell]\nsource_roots = ['.']\nmodules = ['Project.Tools']\n\
-                      spec = 'Project.Tools.agentSpec'\n";
-
-/// The same workspace with rule two answering: `[haskell] spec` names the
-/// module, so the ROOT installs the spec and its slot without needing a
-/// checkout of its own.
-const SPEC_CONFIG: &str = "[defaults]\nmodel = 'gpt-6-sol'\n\
-                           [haskell]\nsource_roots = ['.']\n\
-                           modules = ['Project.Tools', 'AgentSpec']\n\
-                           spec = 'AgentSpec.agentSpec'\n";
+fn write_spec_config(authored: &Path, modules: &[&str], spec: Option<&str>) {
+    crate::exomonad::write_fixture_project_config(authored, "gpt-6-sol", |project| {
+        project.haskell.source_roots = vec![".".into()];
+        project.haskell.modules = modules.iter().map(|module| (*module).into()).collect();
+        project.haskell.spec = spec.map(str::to_owned);
+    });
+}
 
 fn write_workspace(workspace: &Path, description: &str, answer: &str) {
     let authored = workspace.join(".exomonad");
     std::fs::create_dir_all(authored.join("Project")).unwrap();
-    std::fs::write(authored.join("config.toml"), CONFIG).unwrap();
+    write_spec_config(
+        &authored,
+        &["Project.Tools"],
+        Some("Project.Tools.agentSpec"),
+    );
     std::fs::write(
         authored.join("Project/Tools.hs"),
         tools_module(description, answer),
@@ -223,7 +223,11 @@ async fn start_with_slot(answer: &str, slot: &str) -> TestCampaign {
         move |config| {
             write_workspace(&config.workspace, DESCRIPTION, &answer);
             let authored = config.workspace.join(".exomonad");
-            std::fs::write(authored.join("config.toml"), SPEC_CONFIG).unwrap();
+            write_spec_config(
+                &authored,
+                &["Project.Tools", "AgentSpec"],
+                Some("AgentSpec.agentSpec"),
+            );
             std::fs::write(authored.join("AgentSpec.hs"), spec_module(&slot)).unwrap();
             config.workspace_inputs = Some(
                 crate::exomonad::workspace::FrozenWorkspace::load(
@@ -247,7 +251,11 @@ async fn start_with_cell_slot(slot: &str) -> TestCampaign {
         move |config| {
             write_workspace(&config.workspace, DESCRIPTION, "keptwhole");
             let authored = config.workspace.join(".exomonad");
-            std::fs::write(authored.join("config.toml"), SPEC_CONFIG).unwrap();
+            write_spec_config(
+                &authored,
+                &["Project.Tools", "AgentSpec"],
+                Some("AgentSpec.agentSpec"),
+            );
             std::fs::write(
                 authored.join("AgentSpec.hs"),
                 spec_module_for_haskell_cell(&slot),
@@ -276,7 +284,11 @@ async fn start_with_sleeping_slot(answer: &str, slot: &str) -> TestCampaign {
         move |config| {
             write_workspace(&config.workspace, DESCRIPTION, &answer);
             let authored = config.workspace.join(".exomonad");
-            std::fs::write(authored.join("config.toml"), SPEC_CONFIG).unwrap();
+            write_spec_config(
+                &authored,
+                &["Project.Tools", "AgentSpec"],
+                Some("AgentSpec.agentSpec"),
+            );
             std::fs::write(authored.join("AgentSpec.hs"), spec_module_with_sleep(&slot)).unwrap();
             config.workspace_inputs = Some(
                 crate::exomonad::workspace::FrozenWorkspace::load(
@@ -443,11 +455,46 @@ async fn removing_only_the_slot_keeps_transitive_tool_implementation_linkable() 
                     &authored.join("workspace").join(directory),
                 );
             }
-            std::fs::write(
-                authored.join("config.toml"),
-                include_str!("fixtures/spec_reload_config.toml"),
-            )
-            .unwrap();
+            crate::exomonad::write_fixture_project_config(&authored, "gpt-6-sol", |project| {
+                project.haskell.source_roots = vec![".".into(), "workspace".into()];
+                project.haskell.modules = vec![
+                    "Exomonad.Contrib.Types".into(),
+                    "Exomonad.Contrib.Actors".into(),
+                    "Project.Work".into(),
+                    "Exomonad.Contrib.Routing".into(),
+                    "Project.Observe".into(),
+                    "Project.Shell".into(),
+                    "Project.Sift".into(),
+                    "Project.Lookup".into(),
+                    "Project.Reflex".into(),
+                    "Project.Evidence".into(),
+                    "Project.Investigate".into(),
+                    "Exomonad.Contrib.Merge".into(),
+                    "Project.ReviewPolicy".into(),
+                    "Project.Search".into(),
+                    "Project.History".into(),
+                    "Project.Service".into(),
+                    "Project.Repository".into(),
+                    "Exomonad.Contrib.CheckResults".into(),
+                    "Exomonad.Contrib.PrepareContinue".into(),
+                    "Exomonad.Contrib.RetainedEvidence".into(),
+                    "Project.AssumptionWatch".into(),
+                    "Project.ParallelInvestigate".into(),
+                    "Project.SlowCommandWatch".into(),
+                    "Project.Interview".into(),
+                    "Exomonad.Contrib.CheckPlan".into(),
+                    "Project.WorkflowExamples".into(),
+                    "Exomonad.Contrib.ReviewFlow".into(),
+                    "Project.BaselineIncorporation".into(),
+                    "Project.WorkflowReminders".into(),
+                    "Project.WorkflowReminderExamples".into(),
+                ];
+                project.haskell.spec = Some("AgentSpec.agentSpec".into());
+                project
+                    .haskell
+                    .flake_sources
+                    .insert("jev-dsl".into(), vec!["core".into()]);
+            });
             std::fs::write(
                 authored.join("AgentSpec.hs"),
                 include_str!("fixtures/spec_reload_with_slot.hs"),
@@ -566,11 +613,14 @@ async fn a_workspace_without_a_spec_installs_the_empty_default() {
         |admission| admission,
         |config| {
             write_workspace(&config.workspace, DESCRIPTION, "one");
-            std::fs::write(
-                config.workspace.join(".exomonad/config.toml"),
-                "[defaults]\nmodel='gpt-6-sol'\n[haskell]\nsource_roots=['.']\nmodules=['Project.Tools']\n",
-            )
-            .unwrap();
+            crate::exomonad::write_fixture_project_config(
+                &config.workspace.join(".exomonad"),
+                "gpt-6-sol",
+                |project| {
+                    project.haskell.source_roots = vec![".".into()];
+                    project.haskell.modules = vec!["Project.Tools".into()];
+                },
+            );
             config.workspace_inputs = Some(
                 crate::exomonad::workspace::FrozenWorkspace::load(
                     &config.workspace,
@@ -981,11 +1031,11 @@ async fn the_root_finds_its_spec_by_convention_with_no_key_naming_it() {
         |config| {
             write_workspace(&config.workspace, DESCRIPTION, "keptwhole");
             // Remove the configured spec so convention alone selects AgentSpec.
-            std::fs::write(
-                config.workspace.join(".exomonad/config.toml"),
-                CONFIG.replace("spec = 'Project.Tools.agentSpec'\n", ""),
-            )
-            .unwrap();
+            write_spec_config(
+                &config.workspace.join(".exomonad"),
+                &["Project.Tools"],
+                None,
+            );
             std::fs::write(
                 config.workspace.join(".exomonad/AgentSpec.hs"),
                 spec_module(ANNOTATES),
@@ -1240,7 +1290,11 @@ async fn start_nested() -> TestCampaign {
         |config| {
             let authored = config.workspace.join(".exomonad");
             std::fs::create_dir_all(authored.join("Project")).unwrap();
-            std::fs::write(authored.join("config.toml"), CONFIG).unwrap();
+            write_spec_config(
+                &authored,
+                &["Project.Tools"],
+                Some("Project.Tools.agentSpec"),
+            );
             std::fs::write(authored.join("Project/Tools.hs"), NESTED_TOOLS_MODULE).unwrap();
             config.workspace_inputs = Some(
                 crate::exomonad::workspace::FrozenWorkspace::load(

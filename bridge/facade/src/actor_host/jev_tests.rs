@@ -273,10 +273,15 @@ fn lookup_enrichment_workspace(config: &mut ActorHostConfig) {
     ] {
         std::fs::copy(package.join(".exomonad").join(path), authored.join(path)).unwrap();
     }
-    std::fs::write(authored.join("config.toml"), format!(
-        "[defaults]\nmodel = 'test-model'\n\n[haskell]\nsource_roots = ['.', '{}']\nmodules = ['LookupFixture', 'Project.Lookup']\nspec = 'AgentSpec.agentSpec'\n\n[haskell.flake_sources]\njev-dsl = ['core']\n",
-        package.join(".exomonad").display()
-    )).unwrap();
+    crate::exomonad::write_fixture_project_config(&authored, "test-model", |project| {
+        project.haskell.source_roots = vec![".".into(), package.join(".exomonad")];
+        project.haskell.modules = vec!["LookupFixture".into(), "Project.Lookup".into()];
+        project.haskell.spec = Some("AgentSpec.agentSpec".into());
+        project
+            .haskell
+            .flake_sources
+            .insert("jev-dsl".into(), vec!["core".into()]);
+    });
     for name in ["flake.nix", "flake.lock"] {
         std::fs::copy(package.join(name), config.workspace.join(name)).unwrap();
     }
@@ -506,18 +511,15 @@ pub(super) fn selected_shell_workspace(config: &mut ActorHostConfig) {
         .expect("the shipped workspace template");
     let authored = config.workspace.join(".exomonad");
     std::fs::create_dir_all(&authored).unwrap();
-    std::fs::write(
-        authored.join("config.toml"),
-        format!(
-            "[defaults]\nmodel = 'test-model'\n\n\
-             [haskell]\nsource_roots = ['{}']\n\
-             modules = ['Project.Shell', 'Project.Sift']\n\
-             spec = 'AgentSpec.agentSpec'\n\n\
-             [haskell.flake_sources]\njev-dsl = ['core']\n",
-            package.join(".exomonad").display()
-        ),
-    )
-    .unwrap();
+    crate::exomonad::write_fixture_project_config(&authored, "test-model", |project| {
+        project.haskell.source_roots = vec![package.join(".exomonad")];
+        project.haskell.modules = vec!["Project.Shell".into(), "Project.Sift".into()];
+        project.haskell.spec = Some("AgentSpec.agentSpec".into());
+        project
+            .haskell
+            .flake_sources
+            .insert("jev-dsl".into(), vec!["core".into()]);
+    });
     for name in ["flake.nix", "flake.lock"] {
         std::fs::copy(package.join(name), config.workspace.join(name)).unwrap();
     }
@@ -1345,18 +1347,15 @@ fn pinned_jev_agent_spec_workspace(config: &mut ActorHostConfig) {
         .expect("the Exomonad workspace package this repository ships");
     let authored = config.workspace.join(".exomonad");
     std::fs::create_dir_all(authored.join("Project")).unwrap();
-    std::fs::write(
-        authored.join("config.toml"),
-        format!(
-            "[defaults]\nmodel = 'test-model'\n\n\
-             [haskell]\nsource_roots = ['.', '{}']\n\
-             modules = ['Project.Tools', 'AgentSpec']\n\
-             spec = 'AgentSpec.agentSpec'\n\n\
-             [haskell.flake_sources]\njev-dsl = ['core']\n",
-            package.join(".exomonad").display()
-        ),
-    )
-    .unwrap();
+    crate::exomonad::write_fixture_project_config(&authored, "test-model", |project| {
+        project.haskell.source_roots = vec![".".into(), package.join(".exomonad")];
+        project.haskell.modules = vec!["Project.Tools".into(), "AgentSpec".into()];
+        project.haskell.spec = Some("AgentSpec.agentSpec".into());
+        project
+            .haskell
+            .flake_sources
+            .insert("jev-dsl".into(), vec!["core".into()]);
+    });
     std::fs::write(
         authored.join("Project/Tools.hs"),
         AGENT_SPEC_JEV_TOOLS_MODULE,
@@ -1594,18 +1593,15 @@ fn pinned_watchdog_workspace(config: &mut ActorHostConfig) {
         .expect("the Exomonad workspace package this repository ships");
     let authored = config.workspace.join(".exomonad");
     std::fs::create_dir_all(authored.join("Project")).unwrap();
-    std::fs::write(
-        authored.join("config.toml"),
-        format!(
-            "[defaults]\nmodel = 'test-model'\n\n\
-             [haskell]\nsource_roots = ['.', '{}']\n\
-             modules = ['Project.Tools', 'AgentSpec']\n\
-             spec = 'AgentSpec.agentSpec'\n\n\
-             [haskell.flake_sources]\njev-dsl = ['core']\n",
-            package.join(".exomonad").display()
-        ),
-    )
-    .unwrap();
+    crate::exomonad::write_fixture_project_config(&authored, "test-model", |project| {
+        project.haskell.source_roots = vec![".".into(), package.join(".exomonad")];
+        project.haskell.modules = vec!["Project.Tools".into(), "AgentSpec".into()];
+        project.haskell.spec = Some("AgentSpec.agentSpec".into());
+        project
+            .haskell
+            .flake_sources
+            .insert("jev-dsl".into(), vec!["core".into()]);
+    });
     std::fs::write(authored.join("Project/Tools.hs"), WATCHDOG_TOOLS_MODULE).unwrap();
     std::fs::write(authored.join("AgentSpec.hs"), WATCHDOG_SPEC_MODULE).unwrap();
     for name in ["flake.nix", "flake.lock"] {

@@ -403,8 +403,6 @@ async fn start_with_spec_and_model(
         let authored = config.workspace.join(".exomonad");
         std::fs::create_dir_all(&authored).unwrap();
         config.model = initial_model.into();
-        let mut configuration =
-            format!("[defaults]\nmodel='{initial_model}'\n[models]\nexecutor='gpt-6.1-sol'\n");
         if let Some(spec) = spec {
             let package = Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../../exomonad/examples/workspace")
@@ -425,12 +423,20 @@ async fn start_with_spec_and_model(
             for name in ["flake.nix", "flake.lock"] {
                 std::fs::copy(package.join(name), config.workspace.join(name)).unwrap();
             }
-            configuration.push_str(
-                "[haskell]\nsource_roots=['.']\nspec='AgentSpec.agentSpec'\n\
-                 \n[haskell.flake_sources]\njev-dsl=['core']\n",
-            );
         }
-        std::fs::write(authored.join("config.toml"), configuration).unwrap();
+        crate::exomonad::write_fixture_project_config(&authored, initial_model, |project| {
+            project
+                .models
+                .insert("executor".into(), "gpt-6.1-sol".into());
+            if spec.is_some() {
+                project.haskell.source_roots = vec![".".into()];
+                project.haskell.spec = Some("AgentSpec.agentSpec".into());
+                project
+                    .haskell
+                    .flake_sources
+                    .insert("jev-dsl".into(), vec!["core".into()]);
+            }
+        });
         test_campaign::commit_workspace(&config.workspace);
         config.workspace_inputs = Some(
             crate::exomonad::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)

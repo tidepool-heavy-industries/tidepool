@@ -746,23 +746,26 @@ async fn record_actor_unfold_publishes_and_routes_child_reply() {
         |config| {
             let authored = config.workspace.join(".exomonad");
             std::fs::create_dir_all(&authored).unwrap();
-            std::fs::write(
-                authored.join("config.toml"),
-                "[defaults]\nmodel = 'gpt-6-sol'\n[haskell]\nsource_roots = ['.']\nmodules = ['LaunchFixture']\n",
-            ).unwrap();
+            crate::exomonad::write_fixture_project_config(&authored, "gpt-6-sol", |project| {
+                project.haskell.source_roots = vec![".".into()];
+                project.haskell.modules = vec!["LaunchFixture".into()];
+            });
             std::fs::write(
                 authored.join("LaunchFixture.hs"),
                 include_str!("record_actor_unfold.hs"),
-            ).unwrap();
+            )
+            .unwrap();
             super::test_campaign::commit_workspace(&config.workspace);
             config.workspace_inputs = Some(
                 crate::exomonad::workspace::FrozenWorkspace::load(
                     &config.workspace,
                     &config.run_root,
-                ).unwrap(),
+                )
+                .unwrap(),
             );
         },
-    ).await;
+    )
+    .await;
     let root = campaign.root_installation.policy.clone();
     committed(
         root.as_ref(),
@@ -2179,16 +2182,36 @@ async fn routes_forward_without_model_relay_and_retain_callback_failure() {
 #[tokio::test]
 async fn configured_modules_are_available_to_resident_declarations_from_frozen_sources() {
     let mut campaign = TestCampaign::start_with_config(
-        exomonad_actor::ResearchPolicy::default(), |admission| admission, |config| {
+        exomonad_actor::ResearchPolicy::default(),
+        |admission| admission,
+        |config| {
             let authored = config.workspace.join(".exomonad");
             std::fs::create_dir_all(authored.join("Project")).unwrap();
-            std::fs::write(authored.join("config.toml"), "[defaults]\nmodel = 'gpt-6-sol'\n[haskell]\nsource_roots = ['.']\nmodules = ['Project.Types', 'Project.Work']\n").unwrap();
-            std::fs::write(authored.join("Project/Types.hs"), include_str!("fixtures/project/Types.hs")).unwrap();
-            std::fs::write(authored.join("Project/Work.hs"), include_str!("fixtures/project/Work.hs")).unwrap();
-            config.workspace_inputs = Some(crate::exomonad::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root).unwrap());
+            crate::exomonad::write_fixture_project_config(&authored, "gpt-6-sol", |project| {
+                project.haskell.source_roots = vec![".".into()];
+                project.haskell.modules = vec!["Project.Types".into(), "Project.Work".into()];
+            });
+            std::fs::write(
+                authored.join("Project/Types.hs"),
+                include_str!("fixtures/project/Types.hs"),
+            )
+            .unwrap();
+            std::fs::write(
+                authored.join("Project/Work.hs"),
+                include_str!("fixtures/project/Work.hs"),
+            )
+            .unwrap();
+            config.workspace_inputs = Some(
+                crate::exomonad::workspace::FrozenWorkspace::load(
+                    &config.workspace,
+                    &config.run_root,
+                )
+                .unwrap(),
+            );
             std::fs::write(authored.join("Project/Work.hs"), "invalid edited source").unwrap();
         },
-    ).await;
+    )
+    .await;
     let policy = campaign.root_installation.policy.clone();
     let result = displayed(
         &mut campaign,
@@ -3265,10 +3288,12 @@ async fn route_reply_case(cancel: bool) {
 #[tokio::test]
 async fn frozen_prompt_bytes_round_trip_through_haskell() {
     let mut campaign = workspace_campaign_with(|authored| {
-        let config = authored.join("config.toml");
-        let mut text = std::fs::read_to_string(&config).unwrap();
-        text.push_str("literal = \"prompts/literal.md\"\n");
-        std::fs::write(config, text).unwrap();
+        crate::exomonad::edit_fixture_project_config(authored, |project| {
+            project
+                .prompts
+                .files
+                .insert("literal".into(), "prompts/literal.md".into());
+        });
         std::fs::write(
             authored.join("prompts/literal.md"),
             "\u{1}f\0".to_owned() + "9\n\"\\\tλ\u{7f}",
@@ -3319,16 +3344,12 @@ fn recipe_workspace(checks: Option<&[&str]>) -> tempfile::TempDir {
     )
     .unwrap();
     if let Some(checks) = checks {
-        let path = repository.path().join(".exomonad/config.toml");
-        let mut config: toml::Value =
-            toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        config["haskell"]["checks"] = toml::Value::Array(
-            checks
-                .iter()
-                .map(|entry| toml::Value::String((*entry).into()))
-                .collect(),
+        crate::exomonad::edit_fixture_project_config(
+            &repository.path().join(".exomonad"),
+            |project| {
+                project.haskell.checks = checks.iter().map(|entry| (*entry).into()).collect();
+            },
         );
-        std::fs::write(path, toml::to_string(&config).unwrap()).unwrap();
     }
     super::test_campaign::commit_workspace(repository.path());
     repository

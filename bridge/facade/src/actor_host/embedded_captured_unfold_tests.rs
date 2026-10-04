@@ -1539,13 +1539,26 @@ async fn admitted_cell_late_type_error_has_no_effect_or_publication_on_retry() {
     let host = super::hosted_test_context::HostedTestRuntime::start_with_factory(
         &settings,
         |config| {
-
             let authored = config.workspace.join(".exomonad");
             std::fs::create_dir_all(&authored).unwrap();
-            std::fs::write(authored.join("AgentSpec.hs"), include_str!("embedded_bad_final_agent_spec.hs")).unwrap();
-            std::fs::write(authored.join("config.toml"), "[haskell]\nsource_roots = ['.']\nmodules = ['AgentSpec']\nspec = 'AgentSpec.agentSpec'\n").unwrap();
+            std::fs::write(
+                authored.join("AgentSpec.hs"),
+                include_str!("embedded_bad_final_agent_spec.hs"),
+            )
+            .unwrap();
+            crate::exomonad::write_fixture_project_config(&authored, "test-model", |project| {
+                project.haskell.source_roots = vec![".".into()];
+                project.haskell.modules = vec!["AgentSpec".into()];
+                project.haskell.spec = Some("AgentSpec.agentSpec".into());
+            });
             test_campaign::commit_workspace(&config.workspace);
-            config.workspace_inputs = Some(crate::exomonad::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root).unwrap());
+            config.workspace_inputs = Some(
+                crate::exomonad::workspace::FrozenWorkspace::load(
+                    &config.workspace,
+                    &config.run_root,
+                )
+                .unwrap(),
+            );
         },
         move |runtime, config| {
             let (sender, steps) = mpsc::unbounded_channel();
@@ -1556,14 +1569,18 @@ async fn admitted_cell_late_type_error_has_no_effect_or_publication_on_retry() {
                     actor: AgentPath("/root".into()),
                     incarnation: exomonad_actor::Incarnation::FIRST.0.to_string(),
                 },
-                steps: tokio::sync::Mutex::new(steps), sender,
+                steps: tokio::sync::Mutex::new(steps),
+                sender,
                 operations: Mutex::new(HashMap::new()),
-                requests: Mutex::new(Vec::new()), changed: watch::channel(0).0,
+                requests: Mutex::new(Vec::new()),
+                changed: watch::channel(0).0,
             });
             *prepared.lock() = Some(transport.clone());
             transport
         },
-    ).await.expect("production hosted preflight starts");
+    )
+    .await
+    .expect("production hosted preflight starts");
     host.input("Exercise whole-cell preflight admission.")
         .await
         .unwrap();

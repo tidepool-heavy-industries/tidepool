@@ -53,7 +53,7 @@ pub fn render_child_budget(maximum_active_children: Option<u16>) -> String {
 }
 
 /// Host-configured ceiling on research subtrees, additionally bounded by the parent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ResearchPolicy {
     pub default_depth: u16,

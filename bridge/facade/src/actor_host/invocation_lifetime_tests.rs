@@ -102,11 +102,11 @@ async fn after_tool_deadline_retires_exact_invocation_worker_and_retains_host_un
                 include_str!("invocation_deadline_spec.hs"),
             )
             .unwrap();
-            std::fs::write(
-                authored.join("config.toml"),
-                "[defaults]\nmodel = 'gpt-6-sol'\n[haskell]\nsource_roots = ['.']\nmodules = ['AgentSpec']\nspec = 'AgentSpec.agentSpec'\n",
-            )
-            .unwrap();
+            crate::exomonad::write_fixture_project_config(&authored, "gpt-6-sol", |project| {
+                project.haskell.source_roots = vec![".".into()];
+                project.haskell.modules = vec!["AgentSpec".into()];
+                project.haskell.spec = Some("AgentSpec.agentSpec".into());
+            });
             config.workspace_inputs = Some(
                 crate::exomonad::workspace::FrozenWorkspace::load(
                     &config.workspace,

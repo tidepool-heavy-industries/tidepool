@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 #[derive(Clone, Debug, Default, Serialize)]
-pub(super) struct HaskellConfig {
+pub(crate) struct HaskellConfig {
     pub source_roots: Vec<PathBuf>,
     /// Haskell source directories inside the project's flake inputs, keyed by
     /// the input name `flake.nix` declares. Each directory is relative to the
@@ -60,7 +60,7 @@ impl<'de> Deserialize<'de> for HaskellConfig {
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
-pub(super) struct PromptConfig {
+pub(crate) struct PromptConfig {
     pub core: Option<PathBuf>,
     pub root: Option<PathBuf>,
     pub research: Option<PathBuf>,
