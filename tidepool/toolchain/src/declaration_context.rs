@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::artifact_inventory::{
-    admission_failure, ArtifactEntry, ArtifactInventory, ArtifactInventoryFailure, ArtifactKind,
+    admission_failure, ArtifactEntry, ArtifactInventory, ArtifactInventoryFailure,
     ArtifactMetadataSnapshot, ArtifactPayload, ArtifactView, JoinedInterfaceRole,
 };
 use crate::certified_products::{
@@ -1109,7 +1109,7 @@ impl ExactCompilationRequest {
                     "checked recipe original differs from its admitted certificate",
                 ));
             }
-            let protected_templates = templates.map(str::to_owned).collect::<Vec<_>>();
+            let protected_templates = templates.into_iter().map(str::to_owned).collect::<Vec<_>>();
             self.generated_scaffold_imports
                 .push(GeneratedScaffoldImportAuthority {
                     role: GeneratedScaffoldRole::PlannedDeclaration(certificate.clone()),
@@ -3125,6 +3125,7 @@ fn sha256(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::artifact_inventory::ArtifactKind;
 
     #[test]
     fn certified_demand_tags_preserve_full_identity_and_refuse_generation_conflicts() {
