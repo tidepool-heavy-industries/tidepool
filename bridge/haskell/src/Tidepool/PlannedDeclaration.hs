@@ -37,7 +37,7 @@ import Tidepool.CheckedPrefixImports
   , refineOriginalDeclarationImportsWithCompleted, refineProgramDeclarationImports )
 import Tidepool.Binders
   ( CellSourcePlan(..), CellAnalysisItem(..), CellAnalysisSourceItem(..), CellSourceSpan(..)
-  , StmtBinders(..), TurnKind(..), ExportItem(..), LocatedImport(..)
+  , StmtBinders(..), TurnKind(..), ExportItem(..), LocatedImport(..), ImportIntent(..)
   , SourcePrologue(..), DeclarationSource(..), renderDeclarationForTemplate )
 import Tidepool.DeclarationJoin
   ( DeclarationExport(..), DeclarationKind(..), ExportIdentity(..), exportIdentity
@@ -135,7 +135,7 @@ preparePlannedDeclaration reserved wrapper plan = do
         { cellPlanItems = map cleared (cellPlanItems plan)
         , cellPlanPrologue = prologue
             { prologueImports = prologueImports prologue ++
-                [LocatedImport (CellSourceSpan 1 1 1 1) ("import " ++ reserved)] }
+                [LocatedImport (CellSourceSpan 1 1 1 1) ("import " ++ reserved) RetainedGeneratedImport] }
         , cellPlanDeclarationBase = ""
         , cellPlanGenericDeclarations = []
         , cellPlanStructuralDisplayDeclarations = ""

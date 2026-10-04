@@ -46,7 +46,7 @@ import Tidepool.Binders
   , classifyWithFlags, classifyBlock, exportItemName, defaultParserDynFlags
   , analyzeCell, analyzeOrderedCell, cellInferenceSegments, renderCellCheckSource, CellSourceSpan(..)
   , CellSourcePlan(..), CellAnalysisItem(..), CellExpressionPlan(..), BoundBinder(..),
-    SourcePrologue(..), LocatedPragma(..), LocatedImport(..), ExpressionLiftPlan(..), ExpressionPresentation(..)
+    SourcePrologue(..), LocatedPragma(..), LocatedImport(..), ImportIntent(..), ExpressionLiftPlan(..), ExpressionPresentation(..)
   , declarationSourceWithTemplateFlags, renderDeclarationForTemplate
   , TurnKind(..), parseTurnKind
   , TemplateSelector(..), templateSelectorForVerdict, templateSelectorWireName
@@ -54,7 +54,7 @@ import Tidepool.Binders
   )
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedPipelineResult(..), CheckedEnvironmentResult(..)
-  , CompilePurpose(..), PipelineResult(..)
+  , CompilePurpose(..), withSourceImportIntents, PipelineResult(..)
   , withResidentPipelineSelectedRequests, withExactInterfaceTransaction
   , captureCompilerProducerIdentity, runPipelineSessionSelectedWithProducer
   , checkCellInstances, cellGeneratedInstanceRecipe
@@ -896,7 +896,7 @@ compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb binde
           unless (any (\(kind,file) -> file == path
               && lookup kind expected == Just (shaHex (TE.encodeUtf8 (T.pack captured)))) templates)
             (fail "generated scaffold template differs from its protected offer")
-        basePurpose = case (display, admitted) of
+        basePurpose = maybe id withSourceImportIntents prologue $ case (display, admitted) of
           (Just authority, Nothing) -> CheckedItemCompile [] (displayPlannedDeclaration authority) (displayCompletedValues authority)
           (Nothing, Just authority) -> checkedItemCompilePurpose authority
           _ -> GeneralCompile
@@ -1209,7 +1209,8 @@ runLegacyCellMode compiler caches args cellPath = do
       -- writing a provisional result before every successful check attempt.
       writeIORef provisionalOutput (Just (out, plan, rendered))
       compiler checkedSelection Set.empty
-        (GeneratedInstanceCheck (cellGeneratedInstanceRecipe effective) checkPurpose)
+        (withSourceImportIntents (cellPlanPrologue effective)
+          (GeneratedInstanceCheck (cellGeneratedInstanceRecipe effective) checkPurpose))
         scope modulePath (requestIncludes args) (requestBuildProductsDir args))
         (maybe initialPlan (\(plan,_,_,_) -> plan) preparedDeclaration)
     checkedSource <- either fail pure (renderCellCheckSource checkingTemplate (checkPlan analyzed))
@@ -1343,8 +1344,9 @@ runCellProgramMode compiler caches args cellPath exact planned = do
                 let globalSource = globalProgramKeys offset (length (cellPlanItems plan)) rendered
                 writeFile checkPath globalSource
                 scoped (maybe CheckedEnvironment CheckedEnvironmentProducts (requestModuleCandidates localArgs)) Set.empty
-                  (GeneratedInstanceCheck (cellGeneratedInstanceRecipe plan)
-                    (CheckedItemCompile [] (programOriginal state) prefix))
+                  (withSourceImportIntents (cellPlanPrologue plan)
+                    (GeneratedInstanceCheck (cellGeneratedInstanceRecipe plan)
+                      (CheckedItemCompile [] (programOriginal state) prefix)))
                   (Just (scopeFromWorkerRequest localArgs)) checkPath (requestIncludes args) (requestBuildProductsDir args)
           (checked,compiled) <- timePhase timing "cell_program_segment_check" (checkCellInstances check withPrefix)
           signatures <- cellCheckedBinderSignatures compiled
@@ -1448,6 +1450,7 @@ runCellProgramMode compiler caches args cellPath exact planned = do
 
 programPurpose :: ProgramCellState -> CompilePurpose -> CompilePurpose
 programPurpose state purpose = case purpose of
+  ParsedImportSelection intents inner -> ParsedImportSelection intents (programPurpose state inner)
   GeneratedScaffoldCompile recipe inner -> GeneratedScaffoldCompile recipe (programPurpose state inner)
   GeneratedInstanceCheck recipe inner -> GeneratedInstanceCheck recipe (programPurpose state inner)
   OriginalDeclarationCompile -> ProgramItemCompile True [] (programOriginals state) (selectedProgramValues (programValues state))
@@ -1476,10 +1479,10 @@ installProgramImports values original plan = plan { cellPlanPrologue = prologue
   { prologueImports = prologueImports prologue ++ imports } }
   where
     prologue = cellPlanPrologue plan
-    imports = [LocatedImport (CellSourceSpan 1 1 1 1) ("import " ++ owner)
+    imports = [LocatedImport (CellSourceSpan 1 1 1 1) ("import " ++ owner) RetainedGeneratedImport
       | ((_,owner),_) <- original]
       ++ [LocatedImport (CellSourceSpan 1 1 1 1) ("import " ++ completedValueModule value
-        ++ " (" ++ intercalate ", " (map (renderImportBinder . fst) (completedValueBinders value)) ++ ")") | value <- values]
+        ++ " (" ++ intercalate ", " (map (renderImportBinder . fst) (completedValueBinders value)) ++ ")") RetainedGeneratedImport | value <- values]
 
 globalProgramKeys :: Int -> Int -> String -> String
 globalProgramKeys offset count source = T.unpack $ T.replace "__tidepool_program_" "__tidepool_cell_"
@@ -1553,13 +1556,15 @@ prepareOriginalCellDeclaration compiler caches args template outDir scope exact 
       checkOriginal plan = do
         _ <- writeOriginal plan
         compiler (maybe CheckedEnvironment CheckedEnvironmentProducts (requestModuleCandidates args)) Set.empty
-          (GeneratedInstanceCheck (cellGeneratedInstanceRecipe plan) OriginalDeclarationCompile) scope sourcePath
+          (withSourceImportIntents (cellPlanPrologue plan)
+            (GeneratedInstanceCheck (cellGeneratedInstanceRecipe plan) OriginalDeclarationCompile)) scope sourcePath
           (requestIncludes args) (requestBuildProductsDir args)
   createDirectoryIfMissing True directory
   (finalized, _) <- checkCellInstances checkOriginal initial
   original <- writeOriginal finalized
   prepared <- compiler (PreparedProducts (requestModuleCandidates args)) (Map.keysSet (requestRetainedGenerations args))
-    OriginalDeclarationCompile scope sourcePath (requestIncludes args) (requestBuildProductsDir args)
+    (withSourceImportIntents (cellPlanPrologue finalized) OriginalDeclarationCompile)
+    scope sourcePath (requestIncludes args) (requestBuildProductsDir args)
   let result = pprPipelineResult prepared
       environment = prHscEnv result
       binds = prBinds result

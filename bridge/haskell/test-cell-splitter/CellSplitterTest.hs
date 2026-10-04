@@ -22,6 +22,7 @@ import GHC.Types.Name.Occurrence (mkVarOcc, occNameString)
 import GHC.Types.Name (nameModule_maybe, nameOccName)
 import GHC.Tc.Types (tcg_rn_decls)
 import GHC.Types.SourceText (il_value)
+import GHC.Types.PkgQual (RawPkgQual(..))
 import GHC.Types.Fixity (Fixity(..))
 import GHC.Driver.Session (parseDynamicFilePragma)
 import GHC.Driver.Env (hsc_HPT)
@@ -1991,6 +1992,9 @@ automaticGenericPlans flags = do
     Right plan -> case cellPlanItems plan of
       declaration : _ -> do
         let rendered = cellAnalysisSource declaration
+        assertEqual "generated helper imports retain exact intent"
+          [RetainedGeneratedImport | _ <- prologueImports (cellPlanPrologue plan)]
+          (map locatedImportIntent (prologueImports (cellPlanPrologue plan)))
         assertContains "parameterized data instance" "deriving instance TidepoolCompilerGeneric.Generic (Packet a)" rendered
         assertContains "parameterized newtype instance" "deriving instance TidepoolCompilerGeneric.Generic (Wrapper a)" rendered
         assertEqual "generated instances are not receipt items" [0..7]
@@ -2092,6 +2096,9 @@ prologuePlans flags = do
         (map (cellStartLine . locatedImportSpan) (prologueImports prologue))
       assertEqual "normalized import" ["import qualified Data.Map.Strict as Map"]
         (map locatedImportSource (prologueImports prologue))
+      assertEqual "authored alias preserves parsed owner and qualifier"
+        [AuthoredSourceImport (mkModuleName "Data.Map.Strict") NoRawPkgQual]
+        (map locatedImportIntent (prologueImports prologue))
       case cellPlanItems plan of
         declaration : _ -> do
           assertEqual "prologue plus a declaration is not prologue-only" False
@@ -2107,6 +2114,22 @@ prologuePlans flags = do
       checked <- either fail pure (renderCellCheckSource checkTemplate plan)
       assertContains "rendered cell pragma" "{-# LANGUAGE NoLambdaCase #-}" checked
       assertContains "rendered cell import" "import qualified Data.Map.Strict as Map" checked
+  captured <- analyzeCellWithFlags flags checkTemplate "let alias = retainedValue\n"
+  case captured of
+    Right plan -> assertEqual "template imports do not become authored demands" []
+      (map locatedImportIntent (prologueImports (cellPlanPrologue plan)))
+    Left failure -> fail (renderCellSplitError failure)
+  packaged <- analyzeCellWithFlags flags checkTemplate (unlines
+    [ "{-# LANGUAGE PackageImports #-}"
+    , "import qualified \"containers\" Data.Map.Strict as Map"
+    , "let answer = Map.empty"
+    ])
+  case packaged of
+    Right plan -> case map locatedImportIntent (prologueImports (cellPlanPrologue plan)) of
+      [AuthoredSourceImport owner (RawPkgQual _)] ->
+        assertEqual "package qualifier retains parsed module" (mkModuleName "Data.Map.Strict") owner
+      other -> fail ("package-qualified authored import lost its intent: " ++ show other)
+    Left failure -> fail (renderCellSplitError failure)
   importOnly <- analyzeCellWithFlags flags checkTemplate "import Data.List\n"
   case importOnly of
     Right (CellSourcePlan { cellPlanItems = [item] }) -> do

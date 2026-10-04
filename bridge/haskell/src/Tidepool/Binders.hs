@@ -26,7 +26,7 @@ module Tidepool.Binders
   , renderCellSplitError
   , PragmaKind(..)
   , LocatedPragma(..)
-  , LocatedImport(..)
+  , LocatedImport(..), ImportIntent(..)
   , SourcePrologue(..)
   , DeclarationSource(..)
   , CellSourcePlan(..)
@@ -79,6 +79,7 @@ import GHC.Parser.Lexer
 import GHC.Driver.Config.Parser (initParserOpts)
 import GHC.Data.StringBuffer (stringToStringBuffer)
 import GHC.Data.FastString (mkFastString, unpackFS)
+import GHC.Types.PkgQual (RawPkgQual(..))
 import GHC.Types.SrcLoc (mkRealSrcLoc)
 import GHC.Types.Name.Reader (rdrNameOcc)
 import GHC.Types.Name.Occurrence (occNameString, isSymOcc)
@@ -287,9 +288,32 @@ data LocatedPragma = LocatedPragma
   , locatedPragmaSource :: String
   } deriving (Eq, Show)
 
+-- Only an import parsed from the submitted prologue demands current source.
+-- Imports installed by checking/program scaffolds retain their exact owners.
+data ImportIntent
+  = AuthoredSourceImport ModuleName RawPkgQual
+  | RetainedGeneratedImport
+
+instance Eq ImportIntent where
+  AuthoredSourceImport leftOwner leftQualifier == AuthoredSourceImport rightOwner rightQualifier =
+    leftOwner == rightOwner && sameQualifier leftQualifier rightQualifier
+    where
+      sameQualifier NoRawPkgQual NoRawPkgQual = True
+      sameQualifier (RawPkgQual left) (RawPkgQual right) = left == right
+      sameQualifier _ _ = False
+  RetainedGeneratedImport == RetainedGeneratedImport = True
+  _ == _ = False
+
+instance Show ImportIntent where
+  show (AuthoredSourceImport owner qualifier) =
+    "AuthoredSourceImport " ++ moduleNameString owner ++ " "
+      ++ showSDocOneLine defaultSDocContext (ppr qualifier)
+  show RetainedGeneratedImport = "RetainedGeneratedImport"
+
 data LocatedImport = LocatedImport
   { locatedImportSpan :: CellSourceSpan
   , locatedImportSource :: String
+  , locatedImportIntent :: ImportIntent
   } deriving (Eq, Show)
 
 data SourcePrologue = SourcePrologue
@@ -486,6 +510,8 @@ collectPrologue flags = go emptyPrologue [] False
               let imported = LocatedImport
                     (spanToCellSpan (getLocA parsed))
                     (showSDocOneLine defaultSDocContext (ppr (unLoc parsed)))
+                    (AuthoredSourceImport (unLoc (ideclName (unLoc parsed)))
+                      (ideclPkgQual (unLoc parsed)))
                in go prologue { prologueImports = prologueImports prologue ++ [imported] }
                     (headerItem item (length headers) : headers) True rest
         _ -> finish prologue headers items
@@ -604,9 +630,9 @@ analyzeCellWithGrouping ordered dflags template source = do
         targets = filter ((`elem` map genericDeclarationTarget generated) . structuralDisplayTargetName)
           (structuralDisplayTargets effective classified)
         generatedImports =
-          [ LocatedImport (CellSourceSpan 1 1 1 1) ("import qualified GHC.Generics as " ++ genericAlias)
+          [ LocatedImport (CellSourceSpan 1 1 1 1) ("import qualified GHC.Generics as " ++ genericAlias) RetainedGeneratedImport
           | not (null generated) ] ++
-          [ LocatedImport (CellSourceSpan 1 1 1 1) ("import qualified Tidepool.Inspection as " ++ displayAlias)
+          [ LocatedImport (CellSourceSpan 1 1 1 1) ("import qualified Tidepool.Inspection as " ++ displayAlias) RetainedGeneratedImport
           | not (null targets) ]
         plan = CellSourcePlan
           { cellPlanPrologue = prologue { prologueImports = prologueImports prologue ++ generatedImports }

@@ -126,6 +126,15 @@ source-import graph. Retained artifact requirements alone grant no lexical
 selection. Session implementation anchors use their existing independent
 checked-value and lexical authorities, never ordinary source-selection rows.
 
+An explicit import in a submitted cell prologue requests current source
+selection. The original GHC parser carries its module and package qualifier
+through checking and prepared compilation; aliases and import lists do not
+change that demand. Compiler-generated template/program imports retain their
+existing exact owners. Using an already captured lexical name, qualified or
+unqualified, retains that original identity even if its old source changes or
+is absent. This demand check runs before frontend compilation; it is not a
+general guarantee about arbitrary Template Haskell or plugin execution.
+
 ## Matched cell observation migration
 
 Cell observations use `TPCELLOBSERVATIONS` version 2: the five-section payload

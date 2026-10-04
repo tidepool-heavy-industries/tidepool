@@ -183,8 +183,11 @@ encodeLocatedPragma (LocatedPragma kind sourceSpan source) =
   <> encodeString (T.pack source)
 
 encodeLocatedImport :: LocatedImport -> Encoding
-encodeLocatedImport (LocatedImport sourceSpan source) =
-  encodeListLen 2 <> encodeCellSpan sourceSpan <> encodeString (T.pack source)
+-- Observations project presentation only. Import demand is retained by the
+-- original parser plan during compilation, never decoded from this projection.
+encodeLocatedImport imported =
+  encodeListLen 2 <> encodeCellSpan (locatedImportSpan imported)
+    <> encodeString (T.pack (locatedImportSource imported))
 
 encodeCellSpan :: CellSourceSpan -> Encoding
 encodeCellSpan (CellSourceSpan startLine startColumn endLine endColumn) =
