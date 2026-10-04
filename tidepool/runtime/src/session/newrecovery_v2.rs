@@ -1915,11 +1915,6 @@ mod tests {
         RecoveryPublicOwner::new(&tidepool_repr::ActorPath::parse(path).unwrap(), 1).unwrap()
     }
 
-    const IFACE_SHA: [u8; 32] = [
-        0xc7, 0x96, 0xd3, 0x7c, 0x6d, 0x49, 0x1e, 0x8f, 0x0c, 0x6e, 0x9b, 0x83, 0xee, 0xd3, 0x4c,
-        0x15, 0xc0, 0xf3, 0x77, 0xf9, 0xf0, 0xf3, 0xcb, 0xb3, 0x21, 0x6f, 0xbb, 0xf7, 0x76, 0xda,
-        0x63, 0x25,
-    ];
     fn identity(occurrence: &str) -> RecoverySymbolIdentity {
         RecoverySymbolIdentity {
             unit: "main".into(),
@@ -2305,6 +2300,7 @@ mod tests {
             RecoveryArtifactClosure::ValueInterface(other),
             RecoveryArtifactClosure::ValueInterface(value.clone()),
         ]);
+        install_fixture_canonical_interfaces(&mut wire);
         wire.seal().unwrap();
         let stored = wire
             .artifacts
@@ -2788,8 +2784,8 @@ mod tests {
     #[test]
     fn v6_manifest_refuses_persisted_native_relation_rows() {
         let root = tempfile::tempdir().unwrap();
-        let mut graph = fixture(root.path());
-        let original = home_artifact(&graph).artifact_id();
+        let baseline = fixture(root.path());
+        let original = home_artifact(&baseline).artifact_id();
         for dependency in [
             ArtifactDependency::NativeGroup {
                 dependent_ordinal: 1,
@@ -2803,16 +2799,18 @@ mod tests {
                 record_parent: None,
             },
         ] {
-            graph.artifact_dependencies = vec![RecoveryArtifactDependency {
-                source: original,
-                target: original,
-                dependency,
-            }];
-            assert!(graph
-                .seal()
-                .unwrap_err()
-                .detail
-                .contains("native recovery edges must derive"));
+            let mut graph = baseline.clone();
+            graph
+                .artifact_dependencies
+                .push(RecoveryArtifactDependency {
+                    source: original,
+                    target: original,
+                    dependency,
+                });
+            assert_eq!(
+                graph.seal().unwrap_err().detail,
+                "native recovery edges must derive from original certification"
+            );
         }
     }
 
@@ -3717,9 +3715,26 @@ mod tests {
 
     #[test]
     fn staged_publication_work_counts_actual_checksum_hash_and_write_bytes() {
+        use tidepool_toolchain::recovery_artifacts::with_recovery_artifact_verification;
+
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("graph.json");
         let baseline = snapshot(&fixture(dir.path()));
+        let home = baseline
+            .artifacts()
+            .find_map(|artifact| match artifact {
+                RecoveryArtifactClosure::Home(home) => Some(home),
+                _ => None,
+            })
+            .unwrap();
+        // SHA work includes the owner's independent native/canonical checks;
+        // shared component paths do not imply that each payload is hashed once.
+        let mut expected_validation = RecoveryArtifactWork::default();
+        with_recovery_artifact_verification(dir.path(), &mut expected_validation, |verification| {
+            verification.verify_home(home)?;
+            verification.verify_module_interface(home.module_interface.as_ref().unwrap())
+        })
+        .unwrap();
         let staged = stage_public_visibility_v2(
             &path,
             dir.path(),
@@ -3737,14 +3752,7 @@ mod tests {
         })
         .unwrap();
         let encoded = serde_json::to_vec(&staged.graph).unwrap();
-        let expected_hash_bytes = staged
-            .graph
-            .artifacts()
-            .flat_map(|artifact| artifact.component_paths().into_iter().map(|(_, path)| path))
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .map(|relative| fs::metadata(dir.path().join(relative)).unwrap().len())
-            .sum::<u64>();
+        let expected_hash_bytes = expected_validation.hash_bytes;
         assert_eq!(staged.work.checksum_encode_bytes, unsigned.len() as u64);
         assert_eq!(
             staged.work.recovery_validation_hash_bytes,
