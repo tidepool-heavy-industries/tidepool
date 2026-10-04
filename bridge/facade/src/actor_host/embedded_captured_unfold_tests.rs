@@ -741,6 +741,8 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
     let actor = campaign.actor.identity();
     let runtime = Arc::clone(&host.runtime);
     let address = host.address;
+    let api = format!("http://{address}/api");
+    let origin = format!("https://{address}");
     let root_origin = transport.root_origin.clone();
     assert_eq!(
         root_origin,

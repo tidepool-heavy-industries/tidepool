@@ -4,6 +4,7 @@
 use super::embedded_harness::EmbeddedAdmissionTestHooks;
 use super::hosted_test_context::{HostedActorContext, HostedTestRuntime};
 use super::*;
+use crate::exomonad::EmbeddedLaunchConfig;
 use async_trait::async_trait;
 use futures_util::FutureExt;
 use harness::{
