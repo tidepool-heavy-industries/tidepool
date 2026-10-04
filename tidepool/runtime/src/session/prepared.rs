@@ -350,6 +350,8 @@ pub enum PreparedRuntimeError {
     /// frame stays parked.
     #[error("resume delivered a handle that is not live in this engine's ledger")]
     UnknownHandle,
+    #[error("resume requires a lifted answer, received {actual:?}")]
+    AnswerRepresentation { actual: RuntimeRep },
     /// A host value could not be streamed into the authenticated managed
     /// builder. No binding root is published on this path.
     #[error("host value mount rejected: {detail}")]
@@ -428,6 +430,7 @@ impl PreparedRuntimeError {
             | Self::AnswerUnconstructible { .. }
             | Self::AnswerRejected { .. }
             | Self::UnknownHandle
+            | Self::AnswerRepresentation { .. }
             | Self::HostMount { .. }
             | Self::NoHostingProgram
             | Self::NoApplyEntryEntry { .. }
@@ -473,6 +476,7 @@ impl PreparedRuntimeError {
             | Self::AnswerUnconstructible { .. }
             | Self::AnswerRejected { .. }
             | Self::UnknownHandle
+            | Self::AnswerRepresentation { .. }
             | Self::HostMount { .. }
             | Self::NoHostingProgram
             | Self::NoApplyEntryEntry { .. }
@@ -4984,6 +4988,11 @@ impl PreparedEngine {
         let (realm, _) = self.machine.parked(id).ok_or(PreparedRuntimeError::Run(
             ExecutionError::UnknownContinuation(id),
         ))?;
+        if answer.rep() != RuntimeRep::LiftedRef {
+            return Err(PreparedRuntimeError::AnswerRepresentation {
+                actual: answer.rep(),
+            });
+        }
         if self.cancellation_requested(realm) {
             return Err(PreparedRuntimeError::Cancelled);
         }
@@ -5015,10 +5024,9 @@ impl PreparedEngine {
     /// Re-enter the frame parked under `id` by delivering an
     /// already-retained value verbatim — no materialization, closures
     /// included, the same shape borrowed-handle delivery accepts. `raw`
-    /// must be live in this engine's ledger; the only check possible on this
-    /// route is its `RuntimeRep` (every handle this engine mints is
-    /// `LiftedRef`), so no deeper type check is available on this path. The
-    /// handle's root is a BORROW: this call does not release it.
+    /// must be live in this engine's ledger and carry a lifted representation.
+    /// This trusted delivery operation does not prove Haskell type equality.
+    /// The handle's root is borrowed and stays retained after this call.
     pub fn resume_with_handle(
         &mut self,
         id: ContinuationId,
@@ -5123,6 +5131,11 @@ impl PreparedEngine {
         let (realm, _) = self.machine.parked(id).ok_or(PreparedRuntimeError::Run(
             ExecutionError::UnknownContinuation(id),
         ))?;
+        if answer.rep() != RuntimeRep::LiftedRef {
+            return Err(PreparedRuntimeError::AnswerRepresentation {
+                actual: answer.rep(),
+            });
+        }
         if self.machine.handle_realm(answer) != Some(realm) {
             return Err(PreparedRuntimeError::CrossRealmArgument { realm });
         }
@@ -10194,6 +10207,77 @@ pub(super) mod tests {
             })
         ));
         assert_eq!(engine.parked_count(), 1);
+        engine.abort_parked(id).unwrap();
+    }
+
+    #[test]
+    fn retained_handle_resume_rejects_unlifted_representation_before_consuming_frame() {
+        let (mut engine, owner) = PreparedEngine::bootstrap(attested_request_program(
+            ConstructorReply::Static(TypeNodeId(0)),
+        ))
+        .unwrap();
+        let reply = PreparedReplyEvidence::Static {
+            owner,
+            constructor: DataConId(77),
+            node: TypeNodeId(0),
+        };
+        let id = park_attested_fixture(&mut engine, owner, reply);
+        let mut wire = testing::wire_program();
+        let mut constructor = mount_constructor(
+            "Fixture",
+            "Unlifted",
+            "Fixture",
+            "Unlifted",
+            80,
+            1,
+            1,
+            vec![],
+        );
+        constructor.result_rep = RuntimeRep::UnliftedRef;
+        wire.constructors = vec![constructor];
+        wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::UnliftedRef]);
+        wire.expressions.nodes[0] = ExprFrame::Construct {
+            constructor: ConstructorId(0),
+            fields: vec![],
+        };
+        let producer = engine
+            .install(
+                testing::prepare(wire).unwrap(),
+                &BindingTable::new(),
+                &BindingIndex::new(),
+            )
+            .unwrap();
+        let batch = engine
+            .machine
+            .run_entry_retained(producer, ValueId(0), &[], SETTLE_CALL, RealmId::ROOT)
+            .unwrap();
+        let [PreparedResult::Managed(answer)] = batch.values.as_slice() else {
+            panic!("unlifted constructor returns one managed value")
+        };
+        let answer = *answer;
+        assert_eq!(answer.rep(), RuntimeRep::UnliftedRef);
+        assert!(matches!(
+            engine.resume_with_handle(id, answer.raw()),
+            Err(PreparedRuntimeError::AnswerRepresentation {
+                actual: RuntimeRep::UnliftedRef
+            })
+        ));
+        assert_eq!(engine.parked_count(), 1);
+        assert!(
+            engine.prepared_handle_of(answer.raw()).is_some(),
+            "borrowed refusal keeps the caller's root"
+        );
+        assert!(matches!(
+            engine.resume_parked(id, answer),
+            Err(PreparedRuntimeError::AnswerRepresentation {
+                actual: RuntimeRep::UnliftedRef
+            })
+        ));
+        assert_eq!(engine.parked_count(), 1);
+        assert!(
+            engine.prepared_handle_of(answer.raw()).is_none(),
+            "owned refusal releases the supplied answer"
+        );
         engine.abort_parked(id).unwrap();
     }
 
