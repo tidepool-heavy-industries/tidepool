@@ -4988,6 +4988,7 @@ mod tests {
     struct CheckedHomeCell {
         admission: Arc<crate::session::RuntimeCellAdmission>,
         checked: CellCheck,
+        program: Arc<tidepool_toolchain::checked_cell::CellProgram>,
         templates: Vec<TurnTemplate>,
     }
 
@@ -5093,14 +5094,19 @@ mod tests {
                 roots.insert(0, first.to_owned());
             }
             let include_paths = view.include_paths(&roots);
+            let plan = tidepool_toolchain::artifacts::parse_cell_plan(
+                Arc::new(specification.clone()),
+                &include_paths,
+            )?;
             let admission = resident
-                .admit_cell_for_execution(
+                .admit_planned_cell_for_execution(
                     execution.clone(),
-                    0,
+                    plan,
                     Arc::new(specification.clone()),
                     specification.specification_digest(),
                     [1; 32],
                     include_paths,
+                    None,
                 )
                 .unwrap();
             let view = admission.view();
@@ -5109,7 +5115,7 @@ mod tests {
                 .iter()
                 .map(PathBuf::as_path)
                 .collect::<Vec<_>>();
-            let checked = check_cell_admitted(
+            let (checked, program) = compile_cell_program_admitted(
                 CellCheckRequest {
                     exact_context: view.exact_compile_context(),
                     session_id: Some(view.session()),
@@ -5128,6 +5134,7 @@ mod tests {
             Ok(CheckedHomeCell {
                 admission,
                 checked,
+                program,
                 templates,
             })
         }
@@ -5153,14 +5160,21 @@ mod tests {
             resident: &mut crate::session::ResidentSession<frunk::HNil, CheckedHomeOutput>,
             cell: CheckedHomeCell,
         ) -> Vec<Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>> {
-            let first = cell.checked.checked_item(0).unwrap();
             let prefix = resident
-                .begin_checked_prefix(cell.admission.clone(), first)
-                .unwrap();
+                .begin_cell_program(cell.admission.clone(), cell.program)
+                .unwrap()
+                .expect("fixture must execute a nonempty checked program");
             let mut artifacts = Vec::new();
             for (index, observed) in cell.checked.items.iter().enumerate() {
                 let item = cell.checked.checked_item(index).unwrap();
+                let declaration =
+                    item.kind() == tidepool_toolchain::checked_cell::CheckedItemKind::Declaration;
                 let reservation = resident.admit_checked_item(prefix.clone(), item).unwrap();
+                if declaration {
+                    resident.adopt_checked_declaration(reservation).unwrap();
+                    assert_eq!(prefix.snapshot().compiler_prefix().next_item(), index + 1);
+                    continue;
+                }
                 let snapshot = reservation.snapshot();
                 let view = snapshot.view();
                 let injected = snapshot.compiler_prefix().injected_modules();
@@ -5227,7 +5241,14 @@ mod tests {
                 );
                 assert_eq!(prefix.snapshot().compiler_prefix().next_item(), index + 1);
             }
-            assert_eq!(artifacts.len(), cell.checked.items.len());
+            assert_eq!(
+                artifacts.len(),
+                cell.checked
+                    .items
+                    .iter()
+                    .filter(|item| item.verdict.kind == TurnKind::Bind)
+                    .count()
+            );
             artifacts
         }
 
@@ -5259,18 +5280,19 @@ mod tests {
     }
 
     #[test]
-    fn checked_current_home_import_executes_original_and_refuses_source_drift() {
+    fn checked_explicit_home_import_executes_original_and_refuses_source_drift() {
         let mut fixture = CheckedHomeFixture::new();
         let cell = fixture
             .check(
-                "let originalAgain = CheckedHomeValue.homeValue",
-                &["qualified CheckedHomeValue"],
+                "import qualified CheckedHomeValue\nlet originalAgain = CheckedHomeValue.homeValue",
+                &[],
                 None,
             )
             .unwrap();
-        assert_eq!(cell.checked.items.len(), 1);
+        assert_eq!(cell.checked.items.len(), 2);
+        assert!(cell.checked.items[0].prologue_only);
         assert_eq!(
-            cell.checked.checked_item(0).unwrap().binders(),
+            cell.checked.checked_item(1).unwrap().binders(),
             &["originalAgain"]
         );
         fixture.execute(cell);
@@ -5289,8 +5311,8 @@ mod tests {
             .public_visibility_snapshot_in(fixture.execution.private_scope())
             .unwrap();
         let Err(error) = fixture.check(
-            "let changed = CheckedHomeValue.homeValue",
-            &["qualified CheckedHomeValue"],
+            "import qualified CheckedHomeValue\nlet changed = CheckedHomeValue.homeValue",
+            &[],
             None,
         ) else {
             panic!("an authored current import accepted changed original source");
@@ -5307,17 +5329,19 @@ mod tests {
     }
 
     #[test]
-    fn checked_fresh_helper_import_reproves_retained_home_dependency() {
+    fn checked_explicit_helper_import_reproves_retained_home_dependency() {
         let mut fixture = CheckedHomeFixture::new();
         let cell = fixture
             .check(
-                "let relayAgain = CheckedHomeRelay.homeValue",
-                &["qualified CheckedHomeRelay"],
+                "import qualified CheckedHomeRelay\nlet relayAgain = CheckedHomeRelay.homeValue",
+                &[],
                 None,
             )
             .unwrap();
+        assert_eq!(cell.checked.items.len(), 2);
+        assert!(cell.checked.items[0].prologue_only);
         assert_eq!(
-            cell.checked.checked_item(0).unwrap().binders(),
+            cell.checked.checked_item(1).unwrap().binders(),
             &["relayAgain"]
         );
         fixture.execute(cell);
@@ -5331,19 +5355,30 @@ mod tests {
             include_str!("fixtures/checked-home-value.hs").replace("41", "42"),
         )
         .unwrap();
+        let before = fixture
+            .resident
+            .public_visibility_snapshot_in(fixture.execution.private_scope())
+            .unwrap();
         let Err(error) = fixture.check(
-            "let changedRelay = CheckedHomeRelay.homeValue",
-            &["qualified CheckedHomeRelay"],
+            "import qualified CheckedHomeRelay\nlet changedRelay = CheckedHomeRelay.homeValue",
+            &[],
             None,
         ) else {
             panic!("a fresh helper accepted changed retained source");
         };
         assert!(matches!(error, CompileError::InputRejected(_)), "{error:?}");
+        assert_eq!(
+            fixture
+                .resident
+                .public_visibility_snapshot_in(fixture.execution.private_scope())
+                .unwrap(),
+            before
+        );
         fixture.assert_retained_original();
     }
 
     #[test]
-    fn checked_current_home_import_refuses_ordered_path_shadow() {
+    fn checked_explicit_home_import_refuses_ordered_path_shadow() {
         let mut fixture = CheckedHomeFixture::new();
         let shadow = fixture.root.path().join("shadow");
         std::fs::create_dir(&shadow).unwrap();
@@ -5352,15 +5387,56 @@ mod tests {
             include_str!("fixtures/checked-home-value.hs"),
         )
         .unwrap();
+        let before = fixture
+            .resident
+            .public_visibility_snapshot_in(fixture.execution.private_scope())
+            .unwrap();
         let Err(error) = fixture.check(
-            "let shadowed = CheckedHomeValue.homeValue",
-            &["qualified CheckedHomeValue"],
+            "import qualified CheckedHomeValue\nlet shadowed = CheckedHomeValue.homeValue",
+            &[],
             Some(&shadow),
         ) else {
             panic!("current import accepted identical bytes from another ordered source path");
         };
         assert!(matches!(error, CompileError::InputRejected(_)), "{error:?}");
+        assert_eq!(
+            fixture
+                .resident
+                .public_visibility_snapshot_in(fixture.execution.private_scope())
+                .unwrap(),
+            before
+        );
         assert!(fixture.root.path().join("CheckedHomeValue.hs").is_file());
+        fixture.assert_retained_original();
+    }
+
+    #[test]
+    fn checked_captured_home_references_execute_original_after_source_drift() {
+        let mut fixture = CheckedHomeFixture::new();
+        std::fs::write(
+            fixture.root.path().join("CheckedHomeValue.hs"),
+            include_str!("fixtures/checked-home-value.hs").replace("41", "42"),
+        )
+        .unwrap();
+        // Generated template imports expose captured Names; only an import
+        // in the submitted source prologue requests current source selection.
+        for (source, imports, value) in [
+            (
+                "let capturedQualified = homeNumber CheckedHomeValue.homeValue",
+                "qualified CheckedHomeValue",
+                "capturedQualified",
+            ),
+            (
+                "let capturedUnqualified = homeNumber homeValue",
+                "CheckedHomeValue (homeValue)",
+                "capturedUnqualified",
+            ),
+        ] {
+            let cell = fixture.check(source, &[imports], None).unwrap();
+            assert_eq!(cell.checked.items.len(), 1);
+            fixture.execute(cell);
+            fixture.assert_number(value, 41);
+        }
         fixture.assert_retained_original();
     }
 
