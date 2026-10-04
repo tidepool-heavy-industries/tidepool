@@ -6178,13 +6178,19 @@ mod tests {
         let execution = Arc::new(session.begin_private_execution(public).unwrap());
         let view = execution.view();
         let imports = view.turn_imports(&crate::session::SourceImports::new());
+        let expected_declaration = session.next_lib_module().unwrap();
+        let declaration_header = format!("module {} where", expected_declaration.module_name());
         let declaration_preamble = effects
             .preamble()
-            .replace("module Expr where", "module Tidepool.Session.Lib.G1 where");
-        assert!(declaration_preamble.contains("module Tidepool.Session.Lib.G1 where"));
+            .replace("module Expr where", &declaration_header);
+        assert!(declaration_preamble.contains(&declaration_header));
         let template = resident_cell_check_template(&declaration_preamble, effects.row(), &imports);
         let templates = resident_workbench_templates(effects.preamble(), effects.row(), &imports);
-        let source = include_str!("fixtures/checked-local-declaration.hs");
+        let source = include_str!("fixtures/checked-local-declaration.hs").replace(
+            "{{DECLARATION_MODULE}}",
+            &expected_declaration.module_name(),
+        );
+        let source = source.as_str();
         let specification = CheckedCellSpecification {
             admission_digest: [0; 32],
             cell_source: source.into(),
@@ -6207,6 +6213,10 @@ mod tests {
                 admitted_include,
             )
             .unwrap();
+        assert_eq!(
+            admission.reserved_generations(),
+            &[expected_declaration.gen()]
+        );
         let view = admission.view();
         let include = view.include_paths(effects.include_paths());
         let include = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();

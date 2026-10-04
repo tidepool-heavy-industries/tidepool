@@ -322,7 +322,7 @@ fn execution_scope_value(
                 })
                 || required.owner() != &owner
                 || required_graph.digest() != digest
-                || !required_graph.eligible_execution_root(&owner)
+                || !required_graph.eligible_source_replay_root(&owner)
             {
                 closed = false;
                 break;

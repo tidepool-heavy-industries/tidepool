@@ -33,7 +33,7 @@ import System.Directory (getFileSize)
 import System.FilePath (isAbsolute, takeDirectory)
 import System.IO (IOMode(ReadMode), withBinaryFile)
 import Tidepool.DependencyEvidence
-import Tidepool.Session (parseSessionModule)
+import Tidepool.Session (isReservedSessionModuleName)
 import Tidepool.Timing (emitCount, readTimingEnabled)
 
 -- Match the certified graph inventory bound in tidepool-toolchain. Metadata
@@ -446,7 +446,7 @@ executionSourceOriginalNodeWith prospective graphs = originalNode prospective Se
               node <- one key [node | node <- dependencyModules (executionGraphEvidence graph)
                 , (dependencyModuleUnit node,dependencyModuleName node) == key
                 , not (dependencyModuleBoot node)]
-              unless (parseSessionModule (snd key) == Nothing
+              unless (not (isReservedSessionModuleName (snd key))
                   && dependencyModuleProduct node == ProductReady
                   && isAbsolute (dependencyModuleSource node)
                   && not (any dependencyImportBoot (dependencyModuleImports node)))

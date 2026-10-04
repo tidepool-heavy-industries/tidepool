@@ -1298,7 +1298,7 @@ fn validate_original_execution(
             )
             .sha256()
         || graph.semantic_sha256() != semantic
-        || !graph.eligible_execution_root(&owner)
+        || !graph.eligible_source_replay_root(&owner)
         || crate::certified_products::candidate_execution_source_digest_with_validation(
             &record.original_certification,
             &owner,

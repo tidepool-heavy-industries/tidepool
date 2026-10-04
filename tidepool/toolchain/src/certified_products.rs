@@ -4304,7 +4304,7 @@ pub(crate) fn certify_products(
                 let execution_source = match origin {
                     ProductOrigin::Fresh => execution_graph
                         .as_ref()
-                        .filter(|graph| graph.eligible_execution_root(&owner)),
+                        .filter(|graph| graph.eligible_source_replay_root(&owner)),
                     ProductOrigin::Cached => candidates
                         .and_then(|set| {
                             set.by_owner
@@ -7384,7 +7384,7 @@ pub(crate) mod tests {
                 recipe.required_original_graphs(quoter.owner()),
                 vec![(bundle.owner.clone(), original_graph.digest())]
             );
-            assert!(recipe.eligible_execution_root(quoter.owner()));
+            assert!(recipe.eligible_source_replay_root(quoter.owner()));
             if let Some(output) = std::env::var_os("TIDEPOOL_CANDIDATE_PROVENANCE_OUTPUT") {
                 let output = PathBuf::from(output);
                 std::fs::create_dir_all(&output).unwrap();
@@ -7518,7 +7518,7 @@ pub(crate) mod tests {
         let original = &certified.recovery_products[0];
         let graph = original.execution_source().unwrap();
         assert_eq!(graph.producer_sha256(), request.producer_sha256);
-        assert!(graph.eligible_execution_root(original.owner()));
+        assert!(graph.eligible_source_replay_root(original.owner()));
         assert!(original
             .original_native()
             .unwrap()

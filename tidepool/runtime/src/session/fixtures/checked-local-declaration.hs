@@ -17,4 +17,4 @@ historical :: Int
 historical = 40
 let historical = 41
 let local = (makeLocal historical :: LocalBox)
-(localValue local, Tidepool.Session.Lib.G1.historical, local == LocalBox historical, P.show local)
+(localValue local, {{DECLARATION_MODULE}}.historical, local == LocalBox historical, P.show local)

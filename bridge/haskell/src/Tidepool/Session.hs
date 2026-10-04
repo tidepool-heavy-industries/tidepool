@@ -53,6 +53,7 @@ module Tidepool.Session
   , renderSessionModule
   , sessionModuleString
   , parseSessionModule
+  , isReservedSessionModuleName
   , isSessionValModule
   , sessionHiPath
     -- * Injected session scope
@@ -170,13 +171,26 @@ parseSessionModule s = do
   (kind, rest') <- parseKind rest
   genStr <- stripPrefix ".G" rest'
   if not (null genStr) && all isDigit genStr
-    then Just (SessionModule kind (Generation (read genStr)))
+    then do
+      generation <- foldM decimalDigit 0 genStr
+      Just (SessionModule kind (Generation generation))
     else Nothing
   where
+    decimalDigit :: Word64 -> Char -> Maybe Word64
+    decimalDigit accumulated digit =
+      let value = fromIntegral (fromEnum digit - fromEnum '0')
+      in if accumulated <= (maxBound - value) `div` 10
+          then Just (accumulated * 10 + value)
+          else Nothing
     parseKind rest
       | Just rest' <- stripPrefix (sessionKindString ValMod) rest = Just (ValMod, rest')
       | Just rest' <- stripPrefix (sessionKindString LibMod) rest = Just (LibMod, rest')
       | otherwise = Nothing
+
+-- | Reserved namespace, including malformed identities. This only refuses
+-- source reconstruction; it never proves a session module's identity.
+isReservedSessionModuleName :: String -> Bool
+isReservedSessionModuleName = isPrefixOf "Tidepool.Session."
 
 -- | True when a module name belongs to the Val session-kind — i.e.
 -- @Tidepool.Session.Val.G<g>@ for any generation @g@. The one predicate every

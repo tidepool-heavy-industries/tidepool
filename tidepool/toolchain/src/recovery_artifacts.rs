@@ -255,7 +255,7 @@ impl CertifiedRecoveryProduct {
         graph: Arc<crate::execution_source::CertifiedExecutionSourceGraph>,
         validation: &mut PackageInterfaceValidation,
     ) -> Result<Self, RecoveryArtifactError> {
-        if !graph.eligible_execution_root(&self.owner) {
+        if !graph.eligible_source_replay_root(&self.owner) {
             return Err(RecoveryArtifactError::InvalidReference);
         }
         let sealed = crate::certified_products::original_execution_source_digest_with_validation(
@@ -749,7 +749,7 @@ fn verify_execution_source(
             actual: graph.producer_sha256(),
         });
     }
-    if !graph.eligible_execution_root(owner) {
+    if !graph.eligible_source_replay_root(owner) {
         return Err(RecoveryArtifactError::InvalidReference);
     }
     Ok(graph)
@@ -1655,7 +1655,7 @@ pub(crate) fn materialize_certified_products_with_validation(
                     actual: graph.producer_sha256(),
                 });
             }
-            if !graph.eligible_execution_root(product.owner()) {
+            if !graph.eligible_source_replay_root(product.owner()) {
                 return Err(RecoveryArtifactError::InvalidReference);
             }
             if let Some(previous) = source_graphs.insert(graph.digest(), graph.clone()) {

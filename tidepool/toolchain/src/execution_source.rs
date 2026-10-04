@@ -11,6 +11,7 @@ use serde::de::{SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tidepool_repr::execution_schema::{CachedHomeOwner, ModuleVersion};
+use tidepool_repr::SessionModule;
 
 use crate::cache::{
     DependencyEvidence, ImportQualifier, ModuleEvidence, ModuleImportEvidence, ProductAvailability,
@@ -146,7 +147,7 @@ pub(crate) fn validate_source_selected_originals(
         };
         if key.unit.is_empty()
             || key.module.is_empty()
-            || key.module.starts_with("Tidepool.Session.")
+            || SessionModule::is_reserved_name(&key.module)
             || selected.contains_key(&key)
         {
             return Err(refused("duplicate or unsupported selected owner"));
@@ -1317,13 +1318,67 @@ mod tests {
     }
 
     #[test]
+    fn session_native_owners_remain_in_graph_without_source_replay_capability() {
+        let root = tempfile::tempdir().unwrap();
+        let (graph, owners) = test_graph_with_local_source_dependency(root.path());
+        for name in [
+            "Tidepool.Session.Lib.G1",
+            "Tidepool.Session.Val.G1",
+            "Tidepool.Session.Lib.G18446744073709551616",
+            "Tidepool.Session.Lib.Gbad",
+        ] {
+            let mut wire = GraphWire::decode(graph.bytes()).unwrap();
+            let mut native_owner = owners[1].clone();
+            native_owner.module = name.into();
+            wire.owners
+                .iter_mut()
+                .find(|owner| owner.module == "B")
+                .unwrap()
+                .module = name.into();
+            wire.owners.sort_by(|left, right| {
+                (&left.unit, &left.module).cmp(&(&right.unit, &right.module))
+            });
+            for module in &mut wire.evidence.modules {
+                if module.module == "B" {
+                    module.module = name.into();
+                }
+                for imported in &mut module.imports {
+                    if imported.module == "B" {
+                        imported.module = name.into();
+                    }
+                }
+            }
+            for resolution in &mut wire.evidence.resolutions {
+                if resolution.module == "B" {
+                    resolution.module = name.into();
+                }
+            }
+            let bytes = wire.encode().unwrap();
+            let retained = CertifiedExecutionSourceGraph::recover(bytes.clone()).unwrap();
+            assert_eq!(retained.bytes(), bytes);
+            assert!(retained.matches_owner(&native_owner));
+            assert_eq!(
+                retained.direct_source_owners(&owners[0]).unwrap(),
+                vec![&native_owner]
+            );
+            assert!(!retained.eligible_source_replay_root(&native_owner));
+            assert!(
+                !retained.eligible_source_replay_root(&owners[0]),
+                "replaying a support module must not reconstruct a session dependency"
+            );
+        }
+        assert!(graph.eligible_source_replay_root(&owners[0]));
+        assert!(graph.eligible_source_replay_root(&owners[1]));
+    }
+
+    #[test]
     fn source_graph_roundtrip_scopes_eligibility_to_original_root() {
         let root = tempfile::tempdir().unwrap();
         let (graph, owners) = test_graph(root.path());
-        assert!(graph.eligible_execution_root(&owners[0]));
-        assert!(graph.eligible_execution_root(&owners[1]));
+        assert!(graph.eligible_source_replay_root(&owners[0]));
+        assert!(graph.eligible_source_replay_root(&owners[1]));
         assert!(
-            !graph.eligible_execution_root(&owners[2]),
+            !graph.eligible_source_replay_root(&owners[2]),
             "unrelated generated/Val target is ineligible"
         );
         let recovered = CertifiedExecutionSourceGraph::recover(graph.bytes().to_vec()).unwrap();
@@ -1336,7 +1391,7 @@ mod tests {
         );
         let mut other = owners[0].clone();
         other.module_version = ModuleVersion([99; 32]);
-        assert!(!graph.eligible_execution_root(&other));
+        assert!(!graph.eligible_source_replay_root(&other));
     }
 
     #[test]
@@ -1382,7 +1437,7 @@ mod tests {
         });
         let recovered = CertifiedExecutionSourceGraph::recover(wire.encode().unwrap()).unwrap();
         assert!(
-            !recovered.eligible_execution_root(&owners[0]),
+            !recovered.eligible_source_replay_root(&owners[0]),
             "fresh exact dependencies require their full closure"
         );
         wire.exact_imports.pop();
@@ -1393,7 +1448,7 @@ mod tests {
             .fresh = false;
         let recovered = CertifiedExecutionSourceGraph::recover(wire.encode().unwrap()).unwrap();
         assert!(
-            !recovered.eligible_execution_root(&owners[0]),
+            !recovered.eligible_source_replay_root(&owners[0]),
             "cached owners cannot receive a consumer source recipe"
         );
         wire.owners
@@ -1403,11 +1458,11 @@ mod tests {
             .original_graph_sha256 = Some([91; 32]);
         let recovered = CertifiedExecutionSourceGraph::recover(wire.encode().unwrap()).unwrap();
         assert!(
-            recovered.eligible_execution_root(&owners[0]),
+            recovered.eligible_source_replay_root(&owners[0]),
             "retained graph demand is resolved through selected original artifacts"
         );
         assert!(
-            !recovered.eligible_execution_root(&owners[1]),
+            !recovered.eligible_source_replay_root(&owners[1]),
             "the inherited owner uses its own graph"
         );
     }
@@ -1622,11 +1677,11 @@ mod tests {
             });
         let recovered = CertifiedExecutionSourceGraph::recover(wire.encode().unwrap()).unwrap();
         assert!(
-            !recovered.eligible_execution_root(&owners[0]),
+            !recovered.eligible_source_replay_root(&owners[0]),
             "SOURCE imports have no first-slice execution recipe"
         );
         assert!(
-            recovered.eligible_execution_root(&owners[1]),
+            recovered.eligible_source_replay_root(&owners[1]),
             "unrelated boot evidence preserves regular originals"
         );
         assert!(
@@ -1668,13 +1723,13 @@ mod tests {
             .product = ProductAvailability::InterfaceOnly;
         let recovered = CertifiedExecutionSourceGraph::recover(wire.encode().unwrap()).unwrap();
         assert!(
-            !recovered.eligible_execution_root(&owners[0]),
+            !recovered.eligible_source_replay_root(&owners[0]),
             "a selected interface-only dependency cannot grant execution"
         );
         wire.owners.retain(|owner| owner.module != "B");
         let recovered = CertifiedExecutionSourceGraph::recover(wire.encode().unwrap()).unwrap();
         assert!(
-            !recovered.eligible_execution_root(&owners[0]),
+            !recovered.eligible_source_replay_root(&owners[0]),
             "selected source without a retained native original cannot grant execution"
         );
     }
@@ -1777,7 +1832,7 @@ pub(crate) struct CertifiedExecutionSourceGraph {
     producer_sha256: [u8; 32],
     semantic_sha256: Option<[u8; 32]>,
     owners: BTreeMap<(String, String), CachedHomeOwner>,
-    executable_roots: BTreeSet<(String, String)>,
+    source_replay_roots: BTreeSet<(String, String)>,
     source_imports: BTreeMap<(String, String), BTreeSet<(String, String)>>,
     retained_graphs: BTreeMap<(String, String), (CachedHomeOwner, [u8; 32])>,
 }
@@ -2574,7 +2629,7 @@ impl CertifiedExecutionSourceGraph {
                 .iter()
                 .map(|owner| ((owner.unit.clone(), owner.module.clone()), owner.owner()))
                 .collect(),
-            executable_roots: wire.executable_roots(),
+            source_replay_roots: wire.source_replay_roots(),
             source_imports: wire.source_imports(),
             retained_graphs: wire
                 .owners
@@ -2644,12 +2699,13 @@ impl CertifiedExecutionSourceGraph {
     pub(crate) fn matches_owner(&self, owner: &CachedHomeOwner) -> bool {
         self.owners.get(&(owner.unit.clone(), owner.module.clone())) == Some(owner)
     }
-    /// Local recipe eligibility; current execution still verifies every demanded
-    /// retained original graph, source selection, interface, and package witness.
-    pub(crate) fn eligible_execution_root(&self, owner: &CachedHomeOwner) -> bool {
+    /// Source replay capability only. Native products and interfaces have
+    /// independent authority. Replay still verifies every demanded retained
+    /// original graph, source selection, interface, and package witness.
+    pub(crate) fn eligible_source_replay_root(&self, owner: &CachedHomeOwner) -> bool {
         self.matches_owner(owner)
             && self
-                .executable_roots
+                .source_replay_roots
                 .contains(&(owner.unit.clone(), owner.module.clone()))
     }
 
@@ -2885,7 +2941,7 @@ impl GraphWire {
         Ok(())
     }
 
-    fn executable_roots(&self) -> BTreeSet<(String, String)> {
+    fn source_replay_roots(&self) -> BTreeSet<(String, String)> {
         let modules = self
             .evidence
             .modules
@@ -2902,10 +2958,13 @@ impl GraphWire {
             .iter()
             .map(|owner| ((owner.unit.as_str(), owner.module.as_str()), owner))
             .collect::<BTreeMap<_, _>>();
-        let executable_originals = self
+        let replay_originals = self
             .owners
             .iter()
-            .filter(|owner| owner.fresh || owner.original_graph_sha256.is_some())
+            .filter(|owner| {
+                !SessionModule::is_reserved_name(&owner.module)
+                    && (owner.fresh || owner.original_graph_sha256.is_some())
+            })
             .map(|owner| (owner.unit.as_str(), owner.module.as_str()))
             .collect::<BTreeSet<_>>();
         let sources = self
@@ -2941,6 +3000,11 @@ impl GraphWire {
                     if !seen.insert(key) {
                         continue;
                     }
+                    // Native session products remain executable, but their
+                    // source cannot reconstruct the retained session authority.
+                    if SessionModule::is_reserved_name(key.1) {
+                        return None;
+                    }
                     if !key.2 {
                         if let Some(original) = originals.get(&(key.0, key.1)) {
                             if !original.fresh {
@@ -2962,7 +3026,7 @@ impl GraphWire {
                     }
                     if let Some(required) = exact.get(&(key.0, key.1)) {
                         if required.iter().any(|owner| {
-                            !executable_originals
+                            !replay_originals
                                 .contains(&(owner.unit.as_str(), owner.module.as_str()))
                         }) {
                             return None;

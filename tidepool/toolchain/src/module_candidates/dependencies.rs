@@ -278,7 +278,7 @@ impl CandidateDependencyInventory {
             if graph.producer_sha256() != producer {
                 return Err(DependencyRefusal::DifferentProducer);
             }
-            if !graph.eligible_execution_root(&owner) {
+            if !graph.eligible_source_replay_root(&owner) {
                 return Err(DependencyRefusal::InvalidRoot((owner.unit, owner.module)));
             }
             for required in graph.required_source_owners(&owner) {

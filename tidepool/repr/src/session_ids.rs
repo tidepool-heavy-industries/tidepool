@@ -103,6 +103,32 @@ pub struct SessionModule {
 }
 
 impl SessionModule {
+    /// Parse a session module without overflowing its generation. Leading zeros
+    /// are accepted and normalized by `module_name`, matching the Haskell owner.
+    #[must_use]
+    pub fn from_module_name(name: &str) -> Option<Self> {
+        let rest = name.strip_prefix("Tidepool.Session.")?;
+        let (kind, generation) = if let Some(generation) = rest.strip_prefix("Lib.G") {
+            (SessionModuleKind::Lib, generation)
+        } else {
+            (SessionModuleKind::Val, rest.strip_prefix("Val.G")?)
+        };
+        if generation.is_empty() || !generation.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        Some(Self {
+            kind,
+            gen: Generation(generation.parse().ok()?),
+        })
+    }
+
+    /// Reserved session namespace, including malformed or unsupported identities.
+    /// This is a refusal boundary; membership never grants session authority.
+    #[must_use]
+    pub fn is_reserved_name(name: &str) -> bool {
+        name.starts_with("Tidepool.Session.")
+    }
+
     /// A `Tidepool.Session.Lib.G<g>` declaration module.
     #[must_use]
     pub fn lib(gen: Generation) -> SessionModule {
@@ -247,6 +273,42 @@ mod tests {
             SessionModule::val(Generation(0)).module_name(),
             "Tidepool.Session.Val.G0"
         );
+    }
+
+    #[test]
+    fn session_module_parser_is_bounded_and_normalizes_leading_zeros() {
+        for kind in [SessionModuleKind::Lib, SessionModuleKind::Val] {
+            for gen in [0, 1, u64::MAX] {
+                let module = SessionModule {
+                    kind,
+                    gen: Generation(gen),
+                };
+                assert_eq!(
+                    SessionModule::from_module_name(&module.module_name()),
+                    Some(module)
+                );
+            }
+        }
+        assert_eq!(
+            SessionModule::from_module_name("Tidepool.Session.Lib.G0001"),
+            Some(SessionModule::lib(Generation(1)))
+        );
+        for name in [
+            "Tidepool.Session.Lib.G",
+            "Tidepool.Session.Lib.G-1",
+            "Tidepool.Session.Lib.G+1",
+            "Tidepool.Session.Lib.G1.tail",
+            "Tidepool.Session.Lib.G18446744073709551616",
+            "Tidepool.Session.Lib.G١",
+            "Tidepool.Session.Other.G1",
+        ] {
+            assert_eq!(SessionModule::from_module_name(name), None, "{name}");
+            assert!(SessionModule::is_reserved_name(name));
+        }
+        for name in ["Other.Lib.G1", "Tidepool.Sessionish.Lib.G1"] {
+            assert_eq!(SessionModule::from_module_name(name), None);
+            assert!(!SessionModule::is_reserved_name(name));
+        }
     }
 
     #[test]

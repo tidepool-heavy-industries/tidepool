@@ -297,7 +297,7 @@ fn source_lexical_surface_inner(
         edges
             .iter()
             .filter_map(|owner| {
-                if !owner.module.starts_with("Tidepool.Session.") {
+                if !SessionModule::is_reserved_name(&owner.module) {
                     // Compiler-issued lexical projections are implementation
                     // interfaces even when their owner is content-addressed.
                     // Their retained artifacts do not grant historical source imports.
@@ -305,27 +305,21 @@ fn source_lexical_surface_inner(
                         != Some(&crate::artifact_inventory::ArtifactKind::LexicalJoin))
                     .then(|| Ok(owner.clone()));
                 }
-                let module = match implementations.get(owner) {
-                    Some(crate::artifact_inventory::ArtifactKind::ValueInterface) => owner
-                        .module
-                        .strip_prefix("Tidepool.Session.Val.G")
-                        .and_then(|generation| generation.parse::<u64>().ok())
-                        .map(|generation| {
-                            SessionModule::val(tidepool_repr::Generation(generation))
-                        }),
-                    Some(
-                        crate::artifact_inventory::ArtifactKind::OriginalModule
-                        | crate::artifact_inventory::ArtifactKind::LexicalJoin,
-                    ) => owner
-                        .module
-                        .strip_prefix("Tidepool.Session.Lib.G")
-                        .and_then(|generation| generation.parse::<u64>().ok())
-                        .map(|generation| {
-                            SessionModule::lib(tidepool_repr::Generation(generation))
-                        }),
-                    Some(crate::artifact_inventory::ArtifactKind::CanonicalModuleInterface)
-                    | None => None,
-                };
+                let module = SessionModule::from_module_name(&owner.module).filter(|module| {
+                    matches!(
+                        (implementations.get(owner), module.kind),
+                        (
+                            Some(crate::artifact_inventory::ArtifactKind::ValueInterface),
+                            SessionModuleKind::Val
+                        ) | (
+                            Some(
+                                crate::artifact_inventory::ArtifactKind::OriginalModule
+                                    | crate::artifact_inventory::ArtifactKind::LexicalJoin
+                            ),
+                            SessionModuleKind::Lib
+                        )
+                    )
+                });
                 if owner.unit == "main"
                     && module.is_some_and(|module| module.module_name() == owner.module)
                 {
@@ -2141,6 +2135,11 @@ mod authored_tests {
             })
             .unwrap();
         assert_eq!(original_root, original_entry.descriptor.id);
+        assert!(
+            certificate.product().execution_source().is_none(),
+            "native authored originals must not advertise source replay"
+        );
+        assert!(!certificate.product().product_bytes().is_empty());
         let worker_root = tempfile::tempdir().unwrap();
         let unselected =
             ExactDeclarationContext::new(&[certificate.clone()], &[], Vec::new()).unwrap();

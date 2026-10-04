@@ -45,10 +45,12 @@ import Tidepool.PlannedDeclaration
 import Tidepool.ExtractUtil (getLibdir)
 import Tidepool.Session
   ( Generation(..), SessionModule(..), SessionModuleKind(..), sessionModuleString
+  , parseSessionModule, isReservedSessionModuleName
   , mkThinSessionIface, writeSessionIface, injectSessionIface, sessionHiPath, sessionBinderName, registerSessionInterfaceLocation )
 
 main :: IO ()
 main = withScratch $ \work -> do
+  checkSessionModuleNames
   authored <- readFile "test-planned-declaration/fixtures/cell.hs"
   wrapper <- readFile "test-planned-declaration/fixtures/decl-wrapper.hs"
   checkWrapper <- readFile "test-planned-declaration/fixtures/check-wrapper.hs"
@@ -372,3 +374,24 @@ withScratch action = bracket
       createDirectory path
       pure path)
   removeDirectoryRecursive action
+
+-- Keep the generation boundary matched with the runtime identifier owner.
+checkSessionModuleNames :: IO ()
+checkSessionModuleNames = do
+  forM_ [LibMod, ValMod] $ \kind ->
+    forM_ [0, 1, maxBound] $ \generation -> do
+      let owner = SessionModule kind (Generation generation)
+      unless (parseSessionModule (sessionModuleString owner) == Just owner) $
+        fail "session module identity did not roundtrip"
+  unless (parseSessionModule "Tidepool.Session.Lib.G0001"
+      == Just (SessionModule LibMod (Generation 1))) $
+    fail "leading-zero generation did not normalize"
+  forM_ ["Tidepool.Session.Lib.G", "Tidepool.Session.Lib.G-1"
+    , "Tidepool.Session.Lib.G+1", "Tidepool.Session.Lib.G1.tail"
+    , "Tidepool.Session.Lib.G18446744073709551616", "Tidepool.Session.Lib.G١"
+    , "Tidepool.Session.Other.G1"] $ \name ->
+      unless (parseSessionModule name == Nothing && isReservedSessionModuleName name) $
+        fail "invalid reserved module acquired a session identity or escaped the namespace"
+  forM_ ["Other.Lib.G1", "Tidepool.Sessionish.Lib.G1"] $ \name ->
+    unless (parseSessionModule name == Nothing && not (isReservedSessionModuleName name)) $
+      fail "ordinary module was classified as a session module"
