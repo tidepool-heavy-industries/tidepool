@@ -3934,8 +3934,8 @@ mod tests {
                 .root_entries()
                 .iter()
                 .map(|entry| entry.descriptor.owner.clone())
-                .collect::<Vec<_>>(),
-            vec![identity("main", "A"), identity("main", "B")]
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([identity("main", "A"), identity("main", "B")])
         );
         request
             .validate_receipt(&receipt, None, &effective)
