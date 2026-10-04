@@ -3,6 +3,7 @@ module SessionDecls where
 import Prelude hiding (id)
 import Foreign (Remaining(Keep), ForeignRecord(ForeignRecord, untouched))
 import qualified Foreign (Box(..), Remaining(..), ForeignRecord(..), (<+>))
+{{CELL_IMPORTS}}
 {{TURN}}
 __result :: IO ()
 __result = pure ()

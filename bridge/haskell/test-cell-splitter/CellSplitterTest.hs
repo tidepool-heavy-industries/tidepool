@@ -31,6 +31,10 @@ import GHC.Unit.Module.ModIface (mi_iface_hash)
 import GHC.Parser.Header (getOptions)
 import GHC.Driver.Config.Parser (initParserOpts)
 import GHC.Data.StringBuffer (stringToStringBuffer)
+import qualified GHC.Parser as Parser
+import GHC.Parser.Lexer (ParseResult(..), initParserState, unP)
+import GHC.Data.FastString (mkFastString)
+import GHC.Types.SrcLoc (mkRealSrcLoc)
 import GHC.Types.SourceError (SourceError)
 import Tidepool.Agent.Assignment.Internal (NameError (..), renderNameError)
 import Tidepool.Binders
@@ -402,6 +406,35 @@ compilerDefaultRecipeChecks = do
     , "module Malformed where\n" ++ preambleImportMarker ++ preambleDefaultDeclaration] $ \malformed ->
       unless (case captureCompilerDefaultRecipe flags malformed of Left _ -> True; Right _ -> False) $
         fail "malformed compiler default recipe silently became an authored default"
+  let declarationTemplate = "{-# LANGUAGE StandaloneDeriving, DeriveGeneric #-}\nmodule DeclarationDefaults where\nimport Prelude\n"
+        ++ preambleDefaultDeclaration ++ "{{TURN}}\n__result = ()\n"
+  declarationPlan <- analyzeOrderedCellWithFlags flags declarationTemplate
+    "import Data.List (sort)\ndata Shadow = Shadow\n" >>= either (fail . show) pure
+  unless (any ((== RetainedGeneratedImport) . locatedImportIntent)
+      (prologueImports (cellPlanPrologue declarationPlan))) $
+    fail "declaration default regression lacks its generated imports"
+  let declarationSource = DeclarationSource (cellPlanPrologue declarationPlan) (cellPlanDeclarationBase declarationPlan)
+  declaration <- either fail pure (renderDeclarationForTemplate declarationTemplate declarationSource)
+  let noDefaultTemplate = "module DeclarationImports where\nimport Prelude\n{{CELL_IMPORTS}}\n__before = ()\n{{TURN}}\n"
+      noDefaultSource = declarationSource
+        { declarationPrologue = (declarationPrologue declarationSource)
+            { prologueCompilerDefault = plain } }
+  withoutDefault <- either fail pure (renderDeclarationForTemplate noDefaultTemplate noDefaultSource)
+  forM_ [declaration, withoutDefault] $ \renderedDeclaration -> do
+    declarationFlags <- templateParserFlags flags renderedDeclaration >>= either (fail . show) pure
+    case unP Parser.parseModule (initParserState (initParserOpts declarationFlags)
+        (stringToStringBuffer renderedDeclaration)
+        (mkRealSrcLoc (mkFastString "<declaration-defaults>") 1 1)) of
+      PFailed _ -> fail "declaration header placed authored/generated imports after declarations"
+      POk _ parsed -> assertEqual "declaration header retains parsed prologue imports" True
+        (mkModuleName "Data.List" `elem` map (unLoc . ideclName . unLoc) (hsmodImports (unLoc parsed)))
+  case renderDeclarationForTemplate "module MissingImports where\n__before = ()\n{{TURN}}\n" noDefaultSource of
+    Left failure | "lacks {{CELL_IMPORTS}}" `isInfixOf` failure -> pure ()
+    _ -> fail "declaration template without an import slot accepted nonempty imports"
+  let noImports = noDefaultSource
+        { declarationPrologue = (declarationPrologue noDefaultSource) { prologueImports = [] } }
+  _ <- either fail pure (renderDeclarationForTemplate "module NoImports where\n{{TURN}}\n" noImports)
+  pure ()
 
 orderedInferenceSegments :: IO ()
 orderedInferenceSegments = do

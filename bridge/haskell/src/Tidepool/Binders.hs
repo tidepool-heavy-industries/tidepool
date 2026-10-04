@@ -101,7 +101,8 @@ import Tidepool.Json (jsonString)
 import Tidepool.Timing (timeSection, emitPhase)
 import Tidepool.TurnSource
   ( spliceTemplate, CompilerDefaultRecipe, emptyCompilerDefaultRecipe
-  , captureCompilerDefaultRecipe, qualifyCompilerDefault, importQualifierNamespaces )
+  , captureCompilerDefaultRecipe, qualifyCompilerDefault, importQualifierNamespaces
+  , prepareDeclarationTemplate, renderPreparedDeclaration )
 
 -- | A binder a declaration introduces.
 --
@@ -863,21 +864,10 @@ renderDeclarationForTemplate template source = do
           imports = concatMap ((++ "\n") . locatedImportSource)
             (prologueImports (declarationPrologue source))
           withPragmas = unlines beforeModule ++ pragmas ++ unlines afterModule
-       in if "{{CELL_IMPORTS}}" `isInfixOf` withPragmas
-            then case T.breakOn "{{CELL_IMPORTS}}" (T.pack withPragmas) of
-              (before, remaining) ->
-                let after = T.drop (length ("{{CELL_IMPORTS}}" :: String)) remaining
-                in if "{{CELL_IMPORTS}}" `T.isInfixOf` after
-                  then Left "declaration template has duplicate import placeholders"
-                  else do
-                    prepared <- qualifyCompilerDefault (prologueCompilerDefault (declarationPrologue source))
-                      (concatMap locatedImportNamespaces (prologueImports (declarationPrologue source)))
-                      (T.unpack before ++ imports ++ T.unpack after)
-                    Right (spliceTemplate prepared (declarationBody source) "")
-            else do
-              prepared <- qualifyCompilerDefault (prologueCompilerDefault (declarationPrologue source))
-                (concatMap locatedImportNamespaces (prologueImports (declarationPrologue source))) withPragmas
-              Right (spliceTemplate prepared (imports ++ declarationBody source) "")
+       in do
+          prepared <- prepareDeclarationTemplate (prologueCompilerDefault (declarationPrologue source))
+            (concatMap locatedImportNamespaces (prologueImports (declarationPrologue source))) imports withPragmas
+          Right (renderPreparedDeclaration prepared (declarationBody source))
   where
     moduleHeader line = "module " `isPrefixOf` dropWhile isSpace line
 

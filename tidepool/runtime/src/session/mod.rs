@@ -1764,7 +1764,7 @@ impl SessionLib {
         let decl_template = TurnTemplate {
             kind: TemplateSelector::Decl,
             source: format!(
-                "{}\nmodule SessionDecls where\n{{{{TURN}}}}\n",
+                "{}\nmodule SessionDecls where\n{{{{CELL_IMPORTS}}}}\n{{{{TURN}}}}\n",
                 self.env.pragmas
             ),
         };

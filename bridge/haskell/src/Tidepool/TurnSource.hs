@@ -15,6 +15,7 @@ module Tidepool.TurnSource
   , renameScaffoldModuleHeader
   , CompilerDefaultRecipe, emptyCompilerDefaultRecipe, captureCompilerDefaultRecipe
   , qualifyCompilerDefault, preambleDefaultDeclaration, preambleImportMarker, importQualifierNamespaces
+  , PreparedDeclarationTemplate, prepareDeclarationTemplate, renderPreparedDeclaration
   ) where
 
 import GHC (GhcPs, ImportDecl(..), ModuleName, hsmodImports, hsmodName, unLoc, moduleNameString, mkModuleName)
@@ -106,6 +107,30 @@ qualifyCompilerDefault (PrimitiveCompilerDefault templateNamespaces) importedNam
         ++ ", " ++ moduleNameString textAlias ++ ".Text)\n"
   prepared <- replaceTemplateMarker preambleDefaultDeclaration replacement template
   pure ("{-# LANGUAGE PackageImports #-}\n" ++ prepared)
+
+-- The header transition owns both import placement and default qualification.
+-- Body rendering cannot qualify the default again or move imports past it.
+newtype PreparedDeclarationTemplate = PreparedDeclarationTemplate String
+
+prepareDeclarationTemplate
+  :: CompilerDefaultRecipe -> [ModuleName] -> String -> String
+  -> Either String PreparedDeclarationTemplate
+prepareDeclarationTemplate recipe namespaces imports template
+  | T.pack "{{CELL_IMPORTS}}" `T.isInfixOf` T.pack template = do
+      withImports <- replaceTemplateMarker "{{CELL_IMPORTS}}" imports template
+      PreparedDeclarationTemplate <$> qualifyCompilerDefault recipe namespaces withImports
+  | otherwise = case recipe of
+      PrimitiveCompilerDefault _ -> do
+        withImports <- replaceTemplateMarker preambleImportMarker
+          (imports ++ preambleImportMarker) template
+        PreparedDeclarationTemplate <$> qualifyCompilerDefault recipe namespaces withImports
+      NoCompilerDefault
+        | null imports -> Right (PreparedDeclarationTemplate template)
+        | otherwise -> Left "declaration template with imports lacks {{CELL_IMPORTS}} or a protected preamble import marker"
+
+renderPreparedDeclaration :: PreparedDeclarationTemplate -> String -> String
+renderPreparedDeclaration (PreparedDeclarationTemplate template) body =
+  spliceTemplate template body ""
 
 -- | Give generated turn scaffolds a stable owner name. The length-prefixed
 -- UTF-8 fields make the identity independent of concatenation boundaries and
