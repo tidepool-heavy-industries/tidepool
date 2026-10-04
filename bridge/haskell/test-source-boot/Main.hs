@@ -1157,7 +1157,10 @@ exactRetainedQuoter = withTiming $ withScratch $ \work -> do
               [head role,TString (T.pack (canonicalCertificatePath witnessProof))
               ,TString (T.pack (canonicalCertificateSha256 witnessProof)),role !! 3,role !! 4]])
         wrongOwner row = row
-    originalTerm <- term scopePath
+    originalTerm <- case deserialiseFromBytes decodeTerm (BSL.fromStrict originalBytes) of
+      Right (remaining, decoded) | BSL.null remaining -> pure decoded
+      Right _ -> fail "genuine retained scope has trailing CBOR bytes"
+      Left failure -> fail (show failure)
     wrongOwnerTerm <- case originalTerm of
       TList fields | length fields == 9 -> case fields !! 4 of
         TList rows -> pure (TList [if index == 4 then TList (map wrongOwner rows) else field
