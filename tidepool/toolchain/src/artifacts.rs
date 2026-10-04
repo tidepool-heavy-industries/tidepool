@@ -1104,7 +1104,7 @@ impl ModuleCandidateOffer {
         purpose: crate::checked_cell::CheckedItemPurpose,
     ) -> Result<Self, CompileError> {
         let compile_context = context;
-        let context = prefix.with_initial_value_context(checked_offer_context(
+        let context = prefix.with_value_context(checked_offer_context(
             compile_context
                 .as_ref()
                 .map(|context| context.declarations().clone()),
@@ -1211,7 +1211,7 @@ impl ModuleCandidateOffer {
         )>,
     ) -> Result<Self, CompileError> {
         let compile_context = context;
-        let context = prefix.with_initial_value_context(checked_offer_context(
+        let context = prefix.with_value_context(checked_offer_context(
             compile_context
                 .as_ref()
                 .map(|context| context.declarations().clone()),

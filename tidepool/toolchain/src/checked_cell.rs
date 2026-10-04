@@ -1829,15 +1829,36 @@ impl ExactCompiledItem {
 }
 
 impl ExactCompiledPrefix {
-    pub(crate) fn with_initial_value_context(
+    // Compiler-visible values carry their original certification and selected closure.
+    // Native binding selection remains checked independently against settlement.
+    pub(crate) fn with_value_context(
         &self,
         current: Arc<crate::declaration_context::ExactDeclarationContext>,
     ) -> Result<Arc<crate::declaration_context::ExactDeclarationContext>, CompileError> {
         Ok(Arc::new(
             (*current)
                 .clone()
-                .extend_retained_value_artifacts(&self.cell.value_inputs.certified_artifacts())?,
+                .extend_retained_value_artifacts(&self.certified_value_artifacts())?,
         ))
+    }
+
+    fn certified_value_artifacts(&self) -> Vec<Arc<CheckedValueArtifact>> {
+        self.cell
+            .value_inputs
+            .certified_artifacts()
+            .into_iter()
+            .chain(
+                self.completed
+                    .iter()
+                    .filter_map(CompletedCheckedItem::native)
+                    .filter_map(|item| item.value_interface_certificate()),
+            )
+            .chain(
+                self.displays
+                    .iter()
+                    .map(|display| display.value_interface_certificate()),
+            )
+            .collect()
     }
 
     fn planned_authorization(&self) -> Value {
@@ -1853,12 +1874,18 @@ impl ExactCompiledPrefix {
     }
     fn revalidate_context(&self, producer: &[u8], context: &[u8; 32]) -> Result<(), CompileError> {
         self.cell.revalidate(producer, &self.cell.context)?;
+        let expected = self.with_value_context(self.declaration_context()?)?;
+        if &expected.semantic_sha256() != context {
+            return Err(failure("completed prefix has another declaration context"));
+        }
+        Ok(())
+    }
+
+    fn declaration_context(
+        &self,
+    ) -> Result<Arc<crate::declaration_context::ExactDeclarationContext>, CompileError> {
         let Some(item) = self.completed_declaration(0) else {
-            return if context == &self.cell.context {
-                Ok(())
-            } else {
-                Err(failure("completed prefix has another declaration context"))
-            };
+            return Ok(self.cell.declaration_context.clone());
         };
         let certificate = item
             .planned_declaration()
@@ -1904,12 +1931,7 @@ impl ExactCompiledPrefix {
                 )
                 .collect(),
         )?;
-        if &expected.semantic_sha256() != context {
-            return Err(failure(
-                "completed declaration context differs from its same original certificate",
-            ));
-        }
-        Ok(())
+        Ok(Arc::new(expected))
     }
     pub fn append_display(&self, display: Arc<ExactCompiledDisplay>) -> Result<Self, CompileError> {
         if self

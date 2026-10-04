@@ -762,10 +762,37 @@ fn publish_fixture_declaration(
     let checked = check_fixture_cell(resident, recipe, source, execution.clone(), 1);
     let owner = checked.adopt_declaration(resident);
     assert_eq!(checked.checked.items.len(), native_writes + 1);
-    let mut retained = Vec::new();
+    let mut retained: Vec<(
+        BoundBinder,
+        Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>,
+    )> = Vec::new();
     for index in 1..checked.checked.items.len() {
         let (bound, compiled, reservation) = checked.compile_binding(resident, index);
         assert_eq!(bound.len(), 1);
+        let selected = compiled
+            .certification
+            .as_ref()
+            .unwrap()
+            .artifact_view
+            .descriptors();
+        for (_, prior) in &retained {
+            use sha2::Digest;
+            let original = prior.certified_interface();
+            let interface = original.interface();
+            let selected = selected
+                .iter()
+                .find(|descriptor| descriptor.id == original.artifact_id())
+                .expect("next checked binding retains the actual completed value certificate");
+            let interface_sha256: [u8; 32] =
+                sha2::Sha256::digest(interface.interface_bytes()).into();
+            assert_eq!(selected.owner.unit, interface.unit());
+            assert_eq!(selected.owner.module, interface.module());
+            assert_eq!(
+                selected.producer_sha256,
+                interface.toolchain_identity_sha256()
+            );
+            assert_eq!(selected.interface_sha256, interface_sha256);
+        }
         let certificate = compiled
             .certification
             .as_ref()
