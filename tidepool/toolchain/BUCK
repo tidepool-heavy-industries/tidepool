@@ -579,7 +579,7 @@ tidepool_rust_test_cases(
     name = "toolchain_source_proof_pairing_test",
     binary = ":tidepool_toolchain_unit_tests_binary",
     exact_tests = [
-        "declaration_context::tests::source_selected_receipt_pairs_prior_program_support_with_actual_original_proof",
+        "artifacts::source_proof_pairing_tests::source_selected_receipt_pairs_prior_program_support_with_actual_original_proof",
     ],
     expected_count = 1,
     ignored = True,

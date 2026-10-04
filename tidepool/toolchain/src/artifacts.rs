@@ -5494,3 +5494,81 @@ mod dependency_cache_tests {
         assert!(compile(), "removing the selected module invalidates");
     }
 }
+
+#[cfg(test)]
+mod source_proof_pairing_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires the matched Haskell worker and frontend"]
+    fn source_selected_receipt_pairs_prior_program_support_with_actual_original_proof() {
+        let directory = tempfile::tempdir().unwrap();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let root = directory.path();
+            let module = tidepool_repr::SessionModule::lib(tidepool_repr::Generation(1));
+            let original = include_str!("../tests/fixtures/checked-prefix-publication/G1.hs");
+            let support = include_str!(
+                "../tests/fixtures/checked-prefix-publication/PrefixSelectedSupport.hs"
+            );
+            let original_path = root.join(module.relative_hs_path());
+            std::fs::create_dir_all(original_path.parent().unwrap()).unwrap();
+            std::fs::write(&original_path, original).unwrap();
+            let support_path = root.join("PrefixSelectedSupport.hs");
+            std::fs::write(&support_path, support).unwrap();
+            let includes = vec![root.to_path_buf()];
+            let certificate = crate::declaration_join::certify_authored_declaration(
+                module,
+                &original_path,
+                original,
+                &includes,
+                root,
+            )
+            .expect("actual compiler issues the original support proof");
+            let owner = crate::declaration_join::ExactModuleIdentity {
+                unit: "main".into(),
+                module: "PrefixSelectedSupport".into(),
+            };
+            // This consumer prepares executable code. Retain the genuine original
+            // native owner and its canonical proof, not an interface-only projection.
+            let products = certificate
+                .recovery_products()
+                .into_iter()
+                .filter(|product| {
+                    product.owner().unit == owner.unit && product.owner().module == owner.module
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(products.len(), 1);
+            let persisted =
+                crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![])
+                    .unwrap()
+                    .extend_checked_original_products(
+                        certificate.toolchain_identity_sha256(),
+                        &products,
+                    )
+                    .unwrap();
+            assert!(persisted.authored_native_root(1).is_err());
+            let (endpoint, _) = crate::toolchain::bind_extract_endpoint().unwrap();
+            let offer = ModuleCandidateOffer::select_inspection(
+                endpoint.identity().producer_bytes(),
+                &includes,
+                &root.join("scope"),
+                Some(Arc::new(persisted)),
+                Vec::new(),
+                &[],
+            )
+            .expect("inspection owns the checked purpose and current source roots");
+            let request = offer.exact.expect("inspection supplies its exact request");
+            crate::declaration_context::assert_source_selected_receipt_pairing(
+                root, module, original, support, request, endpoint,
+            );
+        }));
+        if let Err(panic) = result {
+            let retained = directory.keep();
+            eprintln!(
+                "source-proof pairing inputs retained at {}",
+                retained.display()
+            );
+            std::panic::resume_unwind(panic);
+        }
+    }
+}

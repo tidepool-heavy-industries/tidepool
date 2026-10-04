@@ -245,7 +245,7 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
                           "tidepool_rust_test_cases")
         self.assertEqual(group["binary"], ":tidepool_toolchain_unit_tests_binary")
         self.assertEqual(group["exact_tests"], [
-            "declaration_context::tests::source_selected_receipt_pairs_prior_program_support_with_actual_original_proof",
+            "artifacts::source_proof_pairing_tests::source_selected_receipt_pairs_prior_program_support_with_actual_original_proof",
         ])
         self.assertEqual(group["expected_count"], 1)
         self.assertIs(group["ignored"], True)

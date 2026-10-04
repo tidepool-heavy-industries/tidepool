@@ -3340,6 +3340,9 @@ fn compose_lexical_nodes<'a>(
 }
 
 #[cfg(test)]
+pub(crate) use tests::assert_source_selected_receipt_pairing;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::artifact_inventory::ArtifactKind;
@@ -5507,51 +5510,20 @@ mod tests {
         assert!(request.validate_receipt(&receipt, None, &context).is_err());
     }
 
-    #[test]
-    #[ignore = "requires the matched Haskell worker and frontend"]
-    fn source_selected_receipt_pairs_prior_program_support_with_actual_original_proof() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path();
-        let module = tidepool_repr::SessionModule::lib(tidepool_repr::Generation(1));
-        let original = include_str!("../tests/fixtures/checked-prefix-publication/G1.hs");
-        let support =
-            include_str!("../tests/fixtures/checked-prefix-publication/PrefixSelectedSupport.hs");
+    pub(crate) fn assert_source_selected_receipt_pairing(
+        root: &Path,
+        module: tidepool_repr::SessionModule,
+        original: &str,
+        support: &str,
+        request: ExactCompilationRequest,
+        endpoint: tidepool_extract_cmd::CompilerEndpoint,
+    ) {
         let original_path = root.join(module.relative_hs_path());
-        std::fs::create_dir_all(original_path.parent().unwrap()).unwrap();
-        std::fs::write(&original_path, original).unwrap();
         let support_path = root.join("PrefixSelectedSupport.hs");
-        std::fs::write(&support_path, support).unwrap();
         let includes = vec![root.to_path_buf()];
-        let certificate = crate::declaration_join::certify_authored_declaration(
-            module,
-            &original_path,
-            original,
-            &includes,
-            root,
-        )
-        .expect("actual compiler issues the original support proof");
         let owner = identity("main", "PrefixSelectedSupport");
-        // This consumer prepares executable code. Retain the genuine original
-        // native owner and its canonical proof, not an interface-only projection.
-        let products = certificate
-            .recovery_products()
-            .into_iter()
-            .filter(|product| {
-                product.owner().unit == owner.unit && product.owner().module == owner.module
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(products.len(), 1);
-        let persisted = ExactDeclarationContext::new(&[], &[], vec![])
-            .unwrap()
-            .extend_checked_original_products(certificate.toolchain_identity_sha256(), &products)
-            .unwrap();
-        assert!(persisted.authored_native_root(1).is_err());
+        let persisted = Arc::clone(&request.context);
         let empty = ExactDeclarationContext::new(&[], &[], vec![]).unwrap();
-        let (endpoint, _) = crate::toolchain::bind_extract_endpoint().unwrap();
-        let request = Arc::new(persisted.clone())
-            .prepare_compilation(&root.join("scope"), endpoint.identity().producer_bytes())
-            .unwrap()
-            .with_source_search_context(&includes);
         let source_path = root.join("Consumer.hs");
         std::fs::write(&source_path,
             "module Consumer where\nimport PrefixSelectedSupport\nresult :: Int\nresult = selected\n").unwrap();
@@ -5564,6 +5536,8 @@ mod tests {
             .output_dir(&output);
         request.apply_to(&mut command).unwrap();
         let run = endpoint.execute(&command).unwrap();
+        std::fs::write(root.join("consumer.stdout"), &run.output.stdout).unwrap();
+        std::fs::write(root.join("consumer.stderr"), &run.output.stderr).unwrap();
         crate::diag::decode_extract_result(run.success(), &run.output.stdout, &run.output.stderr)
             .expect("actual current-source consumer compiles");
         let persisted_admissions = request.validate_outputs(&output).unwrap();

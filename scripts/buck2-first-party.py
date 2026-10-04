@@ -1121,7 +1121,7 @@ tidepool_buildscript_run(
                 '    name = "toolchain_source_proof_pairing_test",',
                 f"    binary = {json.dumps(':' + unit_target['name'] + '_binary')},",
                 "    exact_tests = [",
-                '        "declaration_context::tests::source_selected_receipt_pairs_prior_program_support_with_actual_original_proof",',
+                '        "artifacts::source_proof_pairing_tests::source_selected_receipt_pairs_prior_program_support_with_actual_original_proof",',
                 "    ],", "    expected_count = 1,", "    ignored = True,",
                 "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 660000,",
                 runtime_arguments(env, resources, worker),
