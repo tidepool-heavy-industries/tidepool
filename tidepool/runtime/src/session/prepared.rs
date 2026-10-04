@@ -4811,10 +4811,60 @@ impl PreparedEngine {
                         let site = fields.first().and_then(|field| site_field(field, table))?;
                         self.sites.get(&site).map(|witness| (site, *witness))
                     })
-                    // An open-reply request (an actor `call`'s `result`)
-                    // has no wire evidence to build an answer against; it
-                    // parks unsited and re-enters only by handle.
-                    .map_or((UNSITED, program), |(site, witness)| (site, witness.owner))),
+                    // A request without structural reply evidence parks
+                    // unsited. Absence alone does not classify its reply type.
+                    .map_or_else(
+                        || {
+                            if tracing::enabled!(
+                                target: "tidepool_runtime::session::prepared_reply",
+                                tracing::Level::DEBUG
+                            ) {
+                                let indexed_witness = self.verb_sites.get(host_id);
+                                let indexed_owner = indexed_witness
+                                    .and_then(|witness| self.programs.get(&witness.owner));
+                                let indexed_owner_live = indexed_witness.map(|_| indexed_owner.is_some());
+                                let indexed_row_live = indexed_witness.zip(indexed_owner)
+                                    .map(|(witness, facts)| facts.sites.get(witness.row).is_some());
+                                let matching_owners: Vec<_> = self
+                                    .programs
+                                    .iter()
+                                    .filter_map(|(owner, facts)| {
+                                        facts.constructors.iter().find_map(
+                                            |(identity, constructor, _)| {
+                                                (*constructor == *host_id).then_some((
+                                                    *owner,
+                                                    identity,
+                                                    facts.sites.len(),
+                                                    facts.verb_sites.len(),
+                                                ))
+                                            },
+                                        )
+                                    })
+                                    .take(16)
+                                    .collect();
+                                tracing::debug!(
+                                    target: "tidepool_runtime::session::prepared_reply",
+                                    ?program,
+                                    ?host_id,
+                                    ?indexed_witness,
+                                    ?indexed_owner_live,
+                                    ?indexed_row_live,
+                                    ?matching_owners,
+                                    matching_owner_limit = 16,
+                                    installed_programs = self.programs.len(),
+                                    installed_verb_sites = self.verb_sites.len(),
+                                    dynamic_site_candidate = ?fields
+                                        .first()
+                                        .and_then(|field| site_field(field, table)),
+                                    reply_evidence = "absent",
+                                    reply_type = "unattested",
+                                    "parked request has no usable static or dynamic reply row; absence does not prove an open type"
+                                );
+                            }
+                            (UNSITED, program)
+                        },
+                        |(site, witness)| (site, witness.owner),
+                    )),
                 _ => Err(PreparedRuntimeError::UntypedRequest {
                     constructor: "a non-constructor value".to_owned(),
                 }),
