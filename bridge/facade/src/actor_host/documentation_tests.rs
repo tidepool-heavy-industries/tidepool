@@ -64,6 +64,20 @@ async fn assert_deferred_original_owner(source: &str, checkpoint: bool) {
         )
     });
     committed(root.as_ref(), "data DeferredInput = LaterInput Bool deriving Show\ndata DeferredReply = LaterReply Bool deriving Show").await;
+    let staged_children: Vec<_> = campaign
+        .forest
+        .inspect_host_graph()
+        .into_iter()
+        .filter(|node| node.creator == Some(campaign.actor.identity()))
+        .collect();
+    let [staged_child] = staged_children.as_slice() else {
+        panic!("deferred call must retain exactly one staged child: {staged_children:?}");
+    };
+    // Installation is recorded before its deployment event, so this checks
+    // the lifecycle owner rather than only a buffered observer channel.
+    assert!(!staged_child.model_actor, "{staged_child:?}");
+    assert!(staged_child.terminal.is_none(), "{staged_child:?}");
+    let staged_identity = staged_child.actor;
     root.complete_boxed(tidepool_runtime::session::WorkbenchForkBoundary::external(
         "original-owner-test".into(),
         call_id.clone(),
@@ -86,6 +100,7 @@ async fn assert_deferred_original_owner(source: &str, checkpoint: bool) {
         .await;
     assert_eq!(child.checkpoint.is_some(), checkpoint);
     let child_id = child.actor.identity();
+    assert_eq!(child_id, staged_identity);
     campaign
         .next_deployment(
             "original typed child input",
@@ -181,6 +196,26 @@ async fn failed_deferred_capture_does_not_release_child_tools() {
     ))
     .await
     .unwrap();
+    let aborted_children: Vec<_> = campaign
+        .forest
+        .inspect_host_graph()
+        .into_iter()
+        .filter(|node| node.creator == Some(campaign.actor.identity()))
+        .collect();
+    let [aborted_child] = aborted_children.as_slice() else {
+        panic!("failed deferred call must retain its staged child: {aborted_children:?}");
+    };
+    // Failed completion awaits group abort and child shutdown. Retirement
+    // keeps the installation flag, making a premature launch observable.
+    assert!(!aborted_child.model_actor, "{aborted_child:?}");
+    assert_eq!(
+        aborted_child
+            .terminal
+            .as_ref()
+            .map(|terminal| terminal.kind),
+        Some(exomonad_actor::ActorExitKind::Cancelled),
+        "{aborted_child:?}"
+    );
     campaign.assert_no_deployment("failed deferred group released a child", |event| {
         matches!(
             event,
