@@ -315,12 +315,6 @@ fn attach_native_provider(
     let identity = conversation.identity().clone();
     actor
         .attach_native_provider(observation, move || {
-            if !store
-                .embedded_binding_matches(&identity)
-                .map_err(|error| error.to_string())?
-            {
-                return Ok(false);
-            }
             let frontier = store
                 .embedded_round_frontier(&identity)
                 .map_err(|error| error.to_string())?;
