@@ -14,7 +14,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use tidepool_extract_cmd::{ExtractCmd, ResolvedExtractBin, SymbolIdentity};
+use tidepool_extract_cmd::{
+    preflight_compiler_daemon, CompilerIdentity, ExtractCmd, ResolvedExtractBin, SymbolIdentity,
+};
 #[path = "support/compiler_inputs.rs"]
 mod compiler_inputs;
 
@@ -342,6 +344,28 @@ fn run_via_env_socket(cmd: &ExtractCmd, socket: &Path) -> std::process::Output {
         .output
 }
 
+/// Require the observed resident endpoint; direct fallback cannot prove recovery.
+fn run_via_pinned_daemon(
+    cmd: &ExtractCmd,
+    socket: &Path,
+    expected: &CompilerIdentity,
+) -> std::process::Output {
+    let (key, value) = env_socket(socket);
+    std::env::set_var(key, value);
+    let endpoint = cmd.bind();
+    std::env::remove_var(key);
+    let endpoint = endpoint.expect("resident endpoint bind failed");
+    assert_eq!(
+        endpoint.identity(),
+        expected,
+        "request rebound away from daemon"
+    );
+    endpoint
+        .execute(cmd)
+        .expect("pinned resident execution failed")
+        .output
+}
+
 fn run_direct(cmd: &ExtractCmd) -> std::process::Output {
     let endpoint = cmd.bind().expect("direct bind failed");
     endpoint
@@ -381,7 +405,8 @@ fn daemon_integration() {
     check_g_shim_dependent_module_warm_second_request(&bin, &dir, &lib, &socket);
     check_h_request_build_products_dir(&bin, &dir, &lib, &socket);
     check_j_retained_generation_transitions_through_warm_daemon(&bin, &dir, &socket);
-    check_a_byte_identical_transport(&bin, &dir, &lib, &socket);
+    let recovered_endpoint = check_k_parse_failure_preserves_endpoint(&bin, &dir, &lib, &socket);
+    check_a_byte_identical_transport(&bin, &dir, &lib, &socket, &recovered_endpoint);
 
     drop(daemon);
     // best-effort: test cleanup of a temp path.
@@ -431,14 +456,24 @@ fn check_h_request_build_products_dir(bin: &Path, dir: &Path, lib: &Path, socket
 /// actual risk. If this fails, it names a real coverage gap in that pass,
 /// not flakiness — the fix is never to weaken this to a semantic-equality
 /// check or retry.
-fn check_a_byte_identical_transport(bin: &Path, dir: &Path, lib: &Path, socket: &Path) {
+fn check_a_byte_identical_transport(
+    bin: &Path,
+    dir: &Path,
+    lib: &Path,
+    socket: &Path,
+    expected: &CompilerIdentity,
+) {
     write_fixture(
         dir,
         "Expr.hs",
         "module Expr where\nimport Tidepool.Prelude\nresult :: Int\nresult = 1 + 2\n",
     );
 
-    let daemon_out = run_via_env_socket(&cmd_for(bin, dir, "out-a-daemon", "Expr.hs", lib), socket);
+    let daemon_out = run_via_pinned_daemon(
+        &cmd_for(bin, dir, "out-a-daemon", "Expr.hs", lib),
+        socket,
+        expected,
+    );
     let direct_out = run_direct(&cmd_for(bin, dir, "out-a-direct", "Expr.hs", lib));
 
     assert!(daemon_out.status.success(), "daemon compile should succeed");
@@ -458,6 +493,57 @@ fn check_a_byte_identical_transport(bin: &Path, dir: &Path, lib: &Path, socket: 
     let daemon_meta = fs::read(dir.join("out-a-daemon/meta.cbor")).unwrap();
     let direct_meta = fs::read(dir.join("out-a-direct/meta.cbor")).unwrap();
     assert_eq!(daemon_meta, direct_meta, "meta.cbor must be byte-identical");
+}
+
+/// (k) A real parse failure preserves the resident endpoint. The immediately
+/// following (a) request must succeed through this same endpoint and emit the
+/// same prepared program and metadata as a direct worker.
+fn check_k_parse_failure_preserves_endpoint(
+    bin: &Path,
+    dir: &Path,
+    lib: &Path,
+    socket: &Path,
+) -> CompilerIdentity {
+    let expected =
+        preflight_compiler_daemon(socket).expect("resident preflight before parse error");
+    write_fixture(
+        dir,
+        "Malformed.hs",
+        "module Malformed where\nimport Tidepool.Prelude\nresult :: Int\nresult = )\n",
+    );
+    let daemon_out = run_via_pinned_daemon(
+        &cmd_for(bin, dir, "out-k-daemon", "Malformed.hs", lib),
+        socket,
+        &expected,
+    );
+    let direct_out = run_direct(&cmd_for(bin, dir, "out-k-direct", "Malformed.hs", lib));
+    assert!(
+        !daemon_out.status.success(),
+        "resident parse error succeeded"
+    );
+    assert!(!direct_out.status.success(), "direct parse error succeeded");
+    assert_eq!(daemon_out.status.code(), direct_out.status.code());
+    assert_eq!(
+        daemon_out.stdout, direct_out.stdout,
+        "parse diagnostics differ"
+    );
+    let diagnostics = String::from_utf8_lossy(&daemon_out.stdout);
+    assert!(
+        diagnostics.contains("parse error"),
+        "not a compiler parse refusal: {diagnostics}"
+    );
+    for output in ["out-k-daemon", "out-k-direct"] {
+        assert!(
+            !dir.join(output).join("result.prepared.cbor").exists(),
+            "failed parse emitted a prepared program"
+        );
+    }
+    assert_eq!(
+        preflight_compiler_daemon(socket).expect("resident preflight after parse error"),
+        expected,
+        "parse failure replaced the resident endpoint"
+    );
+    expected
 }
 
 /// (b) A failing program produces the same diagnostics over both transports.

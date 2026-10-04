@@ -1136,7 +1136,6 @@ def declare_haskell_test_components():
         "test/Suite.hs": "test/Suite.hs",
         "test/TextSuite.hs": "test/TextSuite.hs",
         "test/invalid.cbor": "test/invalid.cbor",
-        "test/prepared-stg/MakeResidentIface.hs": "test/prepared-stg/MakeResidentIface.hs",
         "test/prepared-stg/MalformedPreparedSite.hs": "test/prepared-stg/MalformedPreparedSite.hs",
         "test/prepared-stg/PreparedStgProbe.hs": "test/prepared-stg/PreparedStgProbe.hs",
         "test/prepared-stg/ProbeDependency.hs": "test/prepared-stg/ProbeDependency.hs",
