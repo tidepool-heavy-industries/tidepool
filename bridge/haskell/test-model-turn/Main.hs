@@ -20,6 +20,7 @@ import GHC.Generics (Generic)
 import Tidepool.Aeson
 import Tidepool.Agent.Contract
 import Tidepool.Model
+import Tidepool.Internal.ModelControl qualified as Control
 import Tidepool.Effects.Core (ModelCall (..))
 
 data Tools mode = Tools { echo :: mode :- Call Text Text } deriving Generic
@@ -33,18 +34,17 @@ program = invokeModel (typedTurn @Reply (defaultSpec
   }) "Return a typed result after echoing") "hello"
 
 handleModel :: ModelCall a -> Eff '[State [Text]] a
-handleModel (ModelStartWith _) = pure (Right (object
-  ["kind" .= ("callback" :: Text), "invocation" .= ("i" :: Text), "call_id" .= ("c" :: Text), "name" .= ("echo" :: Text), "arguments" .= ("called" :: Text)]))
+handleModel (ModelStartWith _) = pure (Right (toJSON
+  (Control.ModelCallback "i" "c" "echo" (String "called"))))
 handleModel (ModelResumeWith token call answer)
-  | token == "i" && call == "c" && answer == toolDispatchReply (Right (ToolDispatchSuccess (String "called") "model-visible")) = pure (Right (object
-      ["kind" .= ("hook" :: Text), "invocation" .= token, "operation" .= ("op" :: Text), "name" .= ("echo" :: Text), "arguments" .= ("called" :: Text), "handle" .= ("retained:1" :: Text), "ordinal" .= (1 :: Int), "value" .= ("called" :: Text), "output" .= ("called" :: Text)]))
+  | token == "i" && call == "c" && answer == toolDispatchReply (Right (ToolDispatchSuccess (String "called") "model-visible")) = pure (Right (toJSON
+      (Control.ModelHook token "op" "echo" (String "called") "retained:1" 1 (String "called") "called")))
   | otherwise = error "callback identity/output changed"
 handleModel (ModelAnnotateWith token op annotation)
-  | token == "i" && op == "op" && annotation == annotationToJson (Annotated "checked") = pure (Right (object
-      ["kind" .= ("finished" :: Text), "receipt" .= object
-        ["invocation_id" .= token, "parent_cell" .= ("cell" :: Text), "requests" .= (["request"] :: [Text])
-        ,"counts" .= object ["requests" .= (2 :: Int), "tools" .= (1 :: Int), "reported_tokens" .= (42 :: Int), "unknown_usage_requests" .= (0 :: Int)]
-        ,"outcome" .= object ["kind" .= ("typed" :: Text), "value" .= toJSON (Reply 3 Nothing)]]]))
+  | token == "i" && op == "op" && annotation == annotationToJson (Annotated "checked") = pure (Right (toJSON
+      (Control.ModelFinished (Control.ModelReceiptEnvelope token "cell" ["request"]
+        (Control.ModelUsageEnvelope 2 1 42 0) (Control.ModelUsageEnvelope 2 1 42 0)
+        (Control.ModelTypedOutcome (toJSON (Reply 3 Nothing)))))))
   | otherwise = error "hook identity/annotation changed"
 handleModel (ModelCloseWith _) = modify (<> (["closed"] :: [Text])) >> pure (Right ())
 

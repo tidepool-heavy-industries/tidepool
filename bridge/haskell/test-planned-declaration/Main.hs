@@ -55,11 +55,12 @@ main = runTests tests
 
 tests :: TestTree
 tests = testGroup "test-planned-declaration"
-  [testCase "certified original declaration lifecycle" scenario]
+  [ testCase "reserved session module identity" checkSessionModuleNames
+  , testCase "certified original declaration lifecycle" scenario
+  ]
 
 scenario :: IO ()
 scenario = withScratch $ \work -> do
-  checkSessionModuleNames
   authored <- readFile "test-planned-declaration/fixtures/cell.hs"
   wrapper <- readFile "test-planned-declaration/fixtures/decl-wrapper.hs"
   checkWrapper <- readFile "test-planned-declaration/fixtures/check-wrapper.hs"

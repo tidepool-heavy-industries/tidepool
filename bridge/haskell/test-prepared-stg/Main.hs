@@ -1,4 +1,6 @@
-module Main (main) where
+module Main (main, tests) where
+
+import Tidepool.Test.Runner (TestTree, runTests, testCase, testGroup)
 
 import Control.Exception (SomeException, bracket, evaluate, try)
 import Control.Monad (unless)
@@ -30,9 +32,9 @@ import Tidepool.SiteClassifier
   ( SiteFailure(..), classifySiteOccurrence, isNospecVar, stripNospecSpine )
 import GHC.Unit.Types (moduleName)
 import System.Directory
-  ( createDirectoryIfMissing, getTemporaryDirectory, removePathForcibly )
+  ( createDirectory, createDirectoryIfMissing, getTemporaryDirectory, removeFile, removePathForcibly )
+import System.IO (openTempFile, hClose)
 import System.FilePath ((</>))
-import System.Environment (getArgs)
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedPipelineResult(..), CompilePurpose(..)
   , PipelineResult(..), runPipelineSelected, withResidentPipelineSelected )
@@ -433,8 +435,8 @@ verifyPreparedPrivateImports = do
     assert (preparedShape cold == preparedShape warm)
       "warm private TH dependency changed prepared module shape"
 
-verifyProjectionInterning :: FilePath -> FilePath -> IO ()
-verifyProjectionInterning dir output = do
+verifyProjectionInterning :: FilePath -> IO ()
+verifyProjectionInterning dir = do
   vertical <- runPipelineSelected PreparedStg "test-prepared-stg/M3Vertical.hs"
     ["test-prepared-stg"]
   let context = Projection.ProjectionContext
@@ -457,7 +459,9 @@ verifyProjectionInterning dir output = do
     && length (Schema.programConstructors program) > 1
     && length (Schema.programOperations program) > 1)
     "interning fixture does not exercise distinct table insertions"
-  BS.writeFile output (encodeWireProgram program)
+  repeated <- either (ioError . userError . show) pure project
+  assert (encodeWireProgram program == encodeWireProgram repeated)
+    "projection encoding was not deterministic"
   putStrLn ("interned table sizes (signatures/globals/constructors/operations): "
     ++ show (length (Schema.programSignatures program), length (Schema.programGlobals program),
       length (Schema.programConstructors program), length (Schema.programOperations program)))
@@ -750,46 +754,29 @@ expectFailureContaining label needle action = do
     Right _ -> ioError (userError (label ++ ": expected compiler failure"))
 
 main :: IO ()
-main = do
-  args <- getArgs
-  case args of
-    ["--json-authority"] -> do
+main = runTests tests
+
+tests :: TestTree
+tests = testGroup "prepared-stg-pipeline"
+  [ testCase "original prepared pipeline and compiler authority" fullMain
+  , testCase "projection interning and constructor conflicts" $
+      withCaseScratch "projection-interning" verifyProjectionInterning
+  , testCase "module product interface roundtrip" $
+      withCaseScratch "module-product-roundtrip" verifyModuleProductInterfaceRoundtrip
+  , testCase "original product catalogue" $
+      withCaseScratch "original-product-catalogue" verifyOriginalProductCatalogue
+  ]
+
+withCaseScratch :: String -> (FilePath -> IO a) -> IO a
+withCaseScratch name action = bracket temporary removePathForcibly action
+  where
+    temporary = do
       tmp <- getTemporaryDirectory
-      let work = tmp </> "tidepool-json-authority-test"
-      bracket
-        (removePathForcibly work >> createDirectoryIfMissing True work >> pure work)
-        removePathForcibly
-        verifyJsonDependencyAuthority
-    ["--retained-scope"] -> do
-      tmp <- getTemporaryDirectory
-      let work = tmp </> "tidepool-retained-scope-test"
-      bracket
-        (removePathForcibly work >> createDirectoryIfMissing True work >> pure work)
-        removePathForcibly
-        $ \dir -> verifyCompilerReuse dir >> verifyPreparedScope dir
-    ["--projection-interning", output] -> do
-      tmp <- getTemporaryDirectory
-      let work = tmp </> "tidepool-projection-interning-test"
-      bracket
-        (removePathForcibly work >> createDirectoryIfMissing True work >> pure work)
-        removePathForcibly
-        (\dir -> verifyProjectionInterning dir output)
-    ["--module-product-roundtrip"] -> do
-      tmp <- getTemporaryDirectory
-      let work = tmp </> "tidepool-module-product-roundtrip-test"
-      bracket
-        (removePathForcibly work >> createDirectoryIfMissing True work >> pure work)
-        removePathForcibly
-        verifyModuleProductInterfaceRoundtrip
-    ["--original-product-catalogue"] -> do
-      tmp <- getTemporaryDirectory
-      let work = tmp </> "tidepool-original-product-catalogue-test"
-      bracket
-        (removePathForcibly work >> createDirectoryIfMissing True work >> pure work)
-        removePathForcibly
-        verifyOriginalProductCatalogue
-    [] -> fullMain
-    _ -> ioError (userError ("unknown test arguments: " ++ show args))
+      (work, handle) <- openTempFile tmp ("tidepool-" ++ name)
+      hClose handle
+      removeFile work
+      createDirectory work
+      pure work
 
 fullMain :: IO ()
 fullMain = do
@@ -812,12 +799,7 @@ fullMain = do
   assert (case normalized of
     (Var _, [Type ty]) -> eqType ty boolTy
     _ -> False) "nospec normalization discarded a remaining type argument"
-  tmp <- getTemporaryDirectory
-  let work = tmp </> "tidepool-prepared-stg-pipeline-test"
-  bracket
-    (removePathForcibly work >> createDirectoryIfMissing True work >> pure work)
-    removePathForcibly
-    $ \dir -> do
+  withCaseScratch "prepared-stg-pipeline" $ \dir -> do
       verifyCompilerReuse dir
       verifyPreparedScope dir
       let dep = dir </> "Dep.hs"

@@ -122,3 +122,6 @@ __pycache__/
 # Buck uses a mounted per-checkout XFS output directory.
 /buck-out
 /.buckconfig.local
+
+# Local Cabal links to Buck-generated Haskell artifacts.
+/bridge/haskell/generated/

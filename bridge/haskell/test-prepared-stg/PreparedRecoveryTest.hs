@@ -64,12 +64,13 @@ main = runTests tests
 
 tests :: TestTree
 tests = testGroup "test-prepared-stg"
-  [testCase "prepared recovery closure and group merging" scenario]
+  [ testCase "overlapping structural groups retain every sibling" assertOverlapMerge
+  , testCase "subset lookup preserves authoritative full group" assertSubsetPreservesFullGroup
+  , testCase "compiled original recovery and reachability closure" scenario
+  ]
 
 scenario :: IO ()
 scenario = do
-  assertOverlapMerge
-  assertSubsetPreservesFullGroup
   root <- getCurrentDirectory
   let source = root </> "test-prepared-stg" </> "RecoveryCaller.hs"
       hiddenSource = root </> "test-prepared-stg" </> "RecoveryHiddenText.hs"
@@ -144,39 +145,6 @@ scenario = do
     liftIO $ retainedProjectionBoundary hsc context modules
     liftIO $ putStrLn "prepared recovery closure: ok"
   where
-    assertOverlapMerge = do
-      let a = mkVanillaGlobal (mkSystemName (mkUnique 'b' 991001) (mkVarOcc "a")) intTy
-          b = mkVanillaGlobal (mkSystemName (mkUnique 'b' 991002) (mkVarOcc "b")) intTy
-          c = mkVanillaGlobal (mkSystemName (mkUnique 'b' 991003) (mkVarOcc "c")) intTy
-          d = mkVanillaGlobal (mkSystemName (mkUnique 'b' 991004) (mkVarOcc "d")) intTy
-          e = mkVanillaGlobal (mkSystemName (mkUnique 'b' 991005) (mkVarOcc "e")) intTy
-          previous = [ Rec [(a, Var b), (b, Var a)]
-                     , Rec [(c, Var d), (d, Var c)] ]
-          incoming = Rec [(a, Var c), (c, Var a), (e, Var e)]
-          merged = insertGroup incoming previous
-      case merged of
-        [Rec pairs] -> assert (all (`elem` map (occNameString . nameOccName . varName . fst) pairs)
-          ["a", "b", "c", "d", "e"])
-          ("overlapping merge dropped a sibling: " ++ show (map (occNameString . nameOccName . varName . fst) pairs))
-        other -> ioError (userError ("overlapping groups were not merged: " ++ show (length other)))
-
-    assertSubsetPreservesFullGroup = do
-      let a = mkVanillaGlobal (mkSystemName (mkUnique 'b' 992001) (mkVarOcc "a")) intTy
-          b = mkVanillaGlobal (mkSystemName (mkUnique 'b' 992002) (mkVarOcc "b")) intTy
-          c = mkVanillaGlobal (mkSystemName (mkUnique 'b' 992003) (mkVarOcc "c")) intTy
-          existing = [Rec [(a, Var b), (b, Var a)]]
-          incoming = NonRec a (Var c)
-      case insertGroup incoming existing of
-        [Rec pairs] -> do
-          assert (map (occNameString . nameOccName . varName . fst) pairs == ["a", "b"])
-            "subset lookup dropped a sibling from the full Rec group"
-          case [rhs | (binder, rhs) <- pairs, varName binder == varName a] of
-            [Var reference] -> assert (varName reference == varName b)
-              "subset lookup replaced the authoritative full-group body"
-            _ -> ioError (userError "subset lookup did not retain an a body")
-        other -> ioError (userError
-          ("subset lookup changed the full Rec group shape: " ++ show (length other)))
-
     projectionResult projection = fmap fst (projection >>= projectSelected)
 
     assertProjectionEquivalent context closure = do
@@ -573,3 +541,38 @@ scenario = do
 
     bindingBinders (Stg.StgNonRec binder _) = [binder]
     bindingBinders (Stg.StgRec pairs) = map fst pairs
+
+assertOverlapMerge :: IO ()
+assertOverlapMerge = do
+  let a = mkVanillaGlobal (mkSystemName (mkUnique 'b' 991001) (mkVarOcc "a")) intTy
+      b = mkVanillaGlobal (mkSystemName (mkUnique 'b' 991002) (mkVarOcc "b")) intTy
+      c = mkVanillaGlobal (mkSystemName (mkUnique 'b' 991003) (mkVarOcc "c")) intTy
+      d = mkVanillaGlobal (mkSystemName (mkUnique 'b' 991004) (mkVarOcc "d")) intTy
+      e = mkVanillaGlobal (mkSystemName (mkUnique 'b' 991005) (mkVarOcc "e")) intTy
+      previous = [ Rec [(a, Var b), (b, Var a)]
+                 , Rec [(c, Var d), (d, Var c)] ]
+      incoming = Rec [(a, Var c), (c, Var a), (e, Var e)]
+      merged = insertGroup incoming previous
+  case merged of
+    [Rec pairs] -> assert (all (`elem` map (occNameString . nameOccName . varName . fst) pairs)
+      ["a", "b", "c", "d", "e"])
+      ("overlapping merge dropped a sibling: " ++ show (map (occNameString . nameOccName . varName . fst) pairs))
+    other -> ioError (userError ("overlapping groups were not merged: " ++ show (length other)))
+
+assertSubsetPreservesFullGroup :: IO ()
+assertSubsetPreservesFullGroup = do
+  let a = mkVanillaGlobal (mkSystemName (mkUnique 'b' 992001) (mkVarOcc "a")) intTy
+      b = mkVanillaGlobal (mkSystemName (mkUnique 'b' 992002) (mkVarOcc "b")) intTy
+      c = mkVanillaGlobal (mkSystemName (mkUnique 'b' 992003) (mkVarOcc "c")) intTy
+      existing = [Rec [(a, Var b), (b, Var a)]]
+      incoming = NonRec a (Var c)
+  case insertGroup incoming existing of
+    [Rec pairs] -> do
+      assert (map (occNameString . nameOccName . varName . fst) pairs == ["a", "b"])
+        "subset lookup dropped a sibling from the full Rec group"
+      case [rhs | (binder, rhs) <- pairs, varName binder == varName a] of
+        [Var reference] -> assert (varName reference == varName b)
+          "subset lookup replaced the authoritative full-group body"
+        _ -> ioError (userError "subset lookup did not retain an a body")
+    other -> ioError (userError
+      ("subset lookup changed the full Rec group shape: " ++ show (length other)))

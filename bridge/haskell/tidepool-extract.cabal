@@ -145,6 +145,16 @@ library assignment-internal
   default-extensions: OverloadedStrings
   ghc-options:      -Wall
 
+flag test-tools
+  description: Build child-process helpers and the corpus compiler action for local test compatibility
+  default: False
+  manual: False
+
+flag benchmarks
+  description: Build standalone compiler benchmarks and snapshot tools
+  default: False
+  manual: True
+
 common tasty-tests
   hs-source-dirs:   test-support
   other-modules:    Tidepool.Test.Runner
@@ -155,14 +165,14 @@ test-suite cell-splitter-test
   type:             exitcode-stdio-1.0
   main-is:          CellSplitterTest.hs
   hs-source-dirs:   test-cell-splitter
-  other-modules:    UnreachableCompileTimeTest
+  other-modules:    CellSplitterCases
+                    UnreachableCompileTimeTest
                     CellProgramStateTest
                     CheckedAdmissionTest
                     HarnessSourceTest
                     InspectionRunnerTest
                     WorkerDiagnosticsTest
                     QuasiQuoteOccurrencesTest
-                    QuasiQuoteOccurrencesBenchmark
   build-depends:
     base >= 4.20 && < 5,
     ghc >= 9.12 && < 9.13,
@@ -185,6 +195,8 @@ test-suite declaration-join-test
   type:             exitcode-stdio-1.0
   main-is:          DeclarationJoinTest.hs
   hs-source-dirs:   test-cell-splitter
+  other-modules:    DeclarationJoinCases
+  build-tool-depends: tidepool-extract:declaration-join-consumer
   build-depends:
     base >= 4.20 && < 5,
     cborg,
@@ -327,7 +339,8 @@ test-suite execution-corpus-projection
   type:             exitcode-stdio-1.0
   main-is:          ExecutionCorpusProbe.hs
   hs-source-dirs:   test-execution-corpus
-  other-modules:    ExecutionCorpusInventory
+  other-modules:    ExecutionCorpusCases
+                    ExecutionCorpusInventory
   build-depends:
     base >= 4.20 && < 5,
     bytestring,
@@ -364,7 +377,8 @@ test-suite source-boot-product-reuse-test
   type:             exitcode-stdio-1.0
   main-is:          Main.hs
   hs-source-dirs:   test-source-boot
-  other-modules:    ExecutionSourceDecodeTest
+  other-modules:    SourceBootCases
+                    ExecutionSourceDecodeTest
                     GenuineCandidateFixture
                     ProgressBoundaryTest
                     FinalizedCoreTest
@@ -372,6 +386,7 @@ test-suite source-boot-product-reuse-test
                     CandidateGraphDescriptorTest
                     CandidateExecutionSourcesTest
                     SourceBootFixtureSupport
+  build-tool-depends: tidepool-extract:source-boot-child
   build-depends:
     base >= 4.20 && < 5,
     ghc >= 9.12 && < 9.13,
@@ -508,14 +523,14 @@ test-suite prepared-recovery-test
   default-language: GHC2024
   ghc-options:      -Wall
 
--- Original GHC axioms are compiled once, then shared by semantic cases and
--- optional pure-validation measurements: cabal run family-consistency-test
--- -- --benchmark +RTS -T. Compiler startup/loading is outside the measurement.
+-- Original GHC axioms are compiled once per isolated test or benchmark.
+-- Benchmarks run through family-consistency-benchmark with the benchmarks flag.
 test-suite family-consistency-test
   import:           tasty-tests
   type:             exitcode-stdio-1.0
   main-is:          Main.hs
   hs-source-dirs:   test-family-consistency
+  other-modules:    FamilyConsistencyCases
   build-depends:
     base >= 4.20 && < 5,
     directory,
@@ -532,6 +547,8 @@ test-suite worker-response-test
   type:             exitcode-stdio-1.0
   main-is:          WorkerResponseTest.hs
   hs-source-dirs:   test-worker-response
+  other-modules:    WorkerResponseCases
+  build-tool-depends: tidepool-extract:worker-response-child
   build-depends:
     base >= 4.20 && < 5,
     bytestring,
@@ -542,3 +559,203 @@ test-suite worker-response-test
   default-language: GHC2024
   default-extensions: OverloadedStrings
   ghc-options:      -Wall
+
+executable declaration-join-consumer
+  main-is:          DeclarationJoinConsumerMain.hs
+  hs-source-dirs:   test-cell-splitter
+  other-modules:    DeclarationJoinCases
+  build-depends:
+    base >= 4.20 && < 5,
+    cborg,
+    containers,
+    bytestring,
+    cryptohash-sha256,
+    directory,
+    filepath,
+    ghc >= 9.12 && < 9.13,
+    process,
+    tidepool-extract-internal
+  default-language: GHC2024
+  ghc-options:      -Wall
+  if !flag(test-tools)
+    buildable: False
+
+executable source-boot-child
+  main-is:          SourceBootChildMain.hs
+  hs-source-dirs:   test-source-boot
+  other-modules:    SourceBootCases
+                    ExecutionSourceDecodeTest
+                    GenuineCandidateFixture
+                    ProgressBoundaryTest
+                    FinalizedCoreTest
+                    ExactScopeV9Test
+                    CandidateGraphDescriptorTest
+                    CandidateExecutionSourcesTest
+                    SourceBootFixtureSupport
+  build-depends:
+    base >= 4.20 && < 5,
+    ghc >= 9.12 && < 9.13,
+    ghc-boot >= 9.12 && < 9.13,
+    containers,
+    bytestring,
+    cborg,
+    cryptohash-sha256,
+    text,
+    directory,
+    filepath,
+    process,
+    tidepool-extract-internal
+  default-language: GHC2024
+  default-extensions: OverloadedStrings
+  ghc-options: -Wall -rtsopts
+  if !flag(test-tools)
+    buildable: False
+
+executable worker-response-child
+  main-is:          WorkerResponseChildMain.hs
+  hs-source-dirs:   test-worker-response
+  other-modules:    WorkerResponseCases
+  build-depends:
+    base >= 4.20 && < 5,
+    bytestring,
+    directory,
+    process,
+    tidepool-extract-internal,
+    unix
+  default-language: GHC2024
+  default-extensions: OverloadedStrings
+  ghc-options:      -Wall
+  if !flag(test-tools)
+    buildable: False
+
+executable execution-corpus-producer
+  main-is:          ExecutionCorpusProducerMain.hs
+  hs-source-dirs:   test-execution-corpus
+  other-modules:    ExecutionCorpusCases
+                    ExecutionCorpusInventory
+  build-depends:
+    base >= 4.20 && < 5,
+    bytestring,
+    containers,
+    directory,
+    filepath,
+    ghc >= 9.12 && < 9.13,
+    text,
+    tidepool-extract-internal
+  default-language: GHC2024
+  default-extensions: OverloadedStrings
+  ghc-options:      -Wall
+  if !flag(test-tools)
+    buildable: False
+
+executable family-consistency-benchmark
+  main-is:          FamilyConsistencyBenchmarkMain.hs
+  hs-source-dirs:   test-family-consistency
+  other-modules:    FamilyConsistencyCases
+  build-depends:
+    base >= 4.20 && < 5,
+    directory,
+    filepath,
+    process,
+    ghc >= 9.12 && < 9.13,
+    tidepool-extract-internal
+  default-language: GHC2024
+  ghc-options:      -Wall -rtsopts -with-rtsopts=-T
+  if !flag(benchmarks)
+    buildable: False
+
+executable quasiquote-occurrences-benchmark
+  main-is:          QuasiQuoteBenchmarkMain.hs
+  hs-source-dirs:   test-cell-splitter
+  other-modules:    QuasiQuoteOccurrencesBenchmark
+                   QuasiQuoteOccurrencesTest
+  build-depends:    base, ghc, bytestring, cborg, cryptohash-sha256,
+                   containers, directory, filepath, text, process,
+                   tidepool-extract-internal
+  default-language: GHC2024
+  ghc-options: -Wall -rtsopts
+  if !flag(benchmarks)
+    buildable: False
+
+executable execution-source-decode-benchmark
+  main-is:          ExecutionSourceBenchmarkMain.hs
+  hs-source-dirs:   test-source-boot
+  other-modules:    ExecutionSourceDecodeTest
+  build-depends:    base, bytestring, cborg, cryptohash-sha256, containers,
+                   directory, filepath, text, tidepool-extract-internal
+  default-language: GHC2024
+  default-extensions: OverloadedStrings
+  ghc-options: -Wall -rtsopts
+  if !flag(benchmarks)
+    buildable: False
+
+executable execution-source-snapshots
+  main-is:          ExecutionSourceSnapshotsMain.hs
+  hs-source-dirs:   test-source-boot
+  other-modules:    ExecutionSourceDecodeTest
+  build-depends:    base, bytestring, cborg, cryptohash-sha256, containers,
+                   directory, filepath, text, tidepool-extract-internal
+  default-language: GHC2024
+  default-extensions: OverloadedStrings
+  ghc-options: -Wall -rtsopts
+  if !flag(benchmarks)
+    buildable: False
+
+test-suite model-turn-test
+  import:           tasty-tests
+  type:             exitcode-stdio-1.0
+  main-is:          Main.hs
+  -- Buck compiles against the generated artifact providers. Local Cabal
+  -- compatibility requires these explicit directories from the same outputs;
+  -- missing generated modules are errors, never a skipped suite.
+  hs-source-dirs:   test-model-turn generated/effects generated/protocol lib
+  other-modules:
+    Tidepool.Actor.Internal
+    Tidepool.Actor.Source
+    Tidepool.Aeson
+    Tidepool.Aeson.FromJSON
+    Tidepool.Aeson.Lens
+    Tidepool.Aeson.KeyMap
+    Tidepool.Aeson.Schema
+    Tidepool.Aeson.Scientific
+    Tidepool.Aeson.Value
+    Tidepool.Agent.Assignment
+    Tidepool.Agent.Assignment.Internal
+    Tidepool.Agent.Contract
+    Tidepool.Agent.Launch
+    Tidepool.Agent.Ref
+    Tidepool.Agent.Reply
+    Tidepool.Agent.Reply.Internal
+    Tidepool.Agent.ToolEffects
+    Tidepool.Agent.Watch
+    Tidepool.Agent.Watch.Internal
+    Tidepool.Command.Types
+    Tidepool.Data.Text
+    Tidepool.Data.Time
+    Tidepool.Double
+    Tidepool.Duration
+    Tidepool.Effects
+    Tidepool.Effects.Authored
+    Tidepool.Effects.Core
+    Tidepool.Effects.Row
+    Tidepool.FilePath
+    Tidepool.Inspection
+    Tidepool.Inspection.Display
+    Tidepool.Inspection.Tree
+    Tidepool.Internal.ActorRef
+    Tidepool.Internal.ExitCell
+    Tidepool.Internal.ModelControl
+    Tidepool.Internal.RequestSite
+    Tidepool.Model
+    Tidepool.Prelude
+    Tidepool.QQ.Fmt.Runtime
+    Tidepool.Records
+    Tidepool.Records.Bridged
+    Tidepool.Records.Stable
+    Tidepool.Render
+    Tidepool.Worktree
+  build-depends:    base >= 4.20 && < 5, freer-simple, containers, text,
+                   bytestring, random, splitmix, time, filepath, directory,
+                   cryptohash-sha256
+  default-language: GHC2024
+  ghc-options: -Wall
