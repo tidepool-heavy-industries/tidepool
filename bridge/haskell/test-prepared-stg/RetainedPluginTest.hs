@@ -7,15 +7,14 @@ import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text qualified as Text
 import GHC
-import GHC.Driver.Env (hsc_HPT, hsc_home_unit)
+import GHC.Driver.Env (hsc_HPT)
 import GHC.Driver.Env.Types (HscEnv(..))
 import GHC.Driver.Make (load', newIfaceCache)
 import GHC.Driver.Plugins
 import GHC.Driver.Session (updOptLevel)
 import GHC.Core.Opt.Pipeline.Types (CoreToDo(..))
-import GHC.Unit.Home (homeUnitAsUnit)
 import GHC.Unit.Home.ModInfo (HomeModInfo(..), lookupHpt)
-import GHC.Unit.Module (mkModule)
+import GHC.Unit.Module.Graph (ModuleGraphNode(..), mgModSummaries')
 import GHC.Unit.Module.ModIface (mi_final_exts, mi_plugin_hash)
 import GHC.Types.Error (mkUnknownDiagnostic)
 import GHC.Unit.Module.ModGuts (ModGuts(..))
@@ -25,7 +24,7 @@ import Tidepool.ExecutionSchema (SymbolIdentity(..))
 import Tidepool.ExtractUtil (getLibdir)
 import Tidepool.RetainedUnfoldings
   ( installRetainedUnfoldingsPlugin, scopeRetainedModuleGraph
-  , scopeRetainedHscEnv, retainedContext, emptyRetainedContext )
+  , scopeRetainedSummaryHscEnv, retainedContext, emptyRetainedContext )
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedPipelineResult(..), CompilePurpose(..)
   , PipelineResult(..), withResidentPipelineSelected )
@@ -131,7 +130,7 @@ verifyPreparedScope dir = do
         writeFile replacementFile contents
         renameFile replacementFile producerFile
   replaceProducer producerSource
-  withResidentPipelineSelected [dir] $ \compile -> do
+  producerSummary <- withResidentPipelineSelected [dir] $ \compile -> do
     base <- compile PreparedStg (Set.singleton relevant) GeneralCompile Nothing target [] Nothing
     warm <- compile PreparedStg (Set.insert relevant unrelated) GeneralCompile Nothing target [] Nothing
     replaceProducer (producerSource ++ "\n-- force fresh prepared interface\n")
@@ -147,6 +146,11 @@ verifyPreparedScope dir = do
         && preparedPluginHash crowded == preparedPluginHash recovered
         && preparedPluginHash base /= preparedPluginHash changed)
       (ioError (userError "prepared interface used an unscoped retained fingerprint"))
+    case [summary | ModuleNode _ summary <- mgModSummaries'
+            (hsc_mod_graph (prHscEnv (pprPipelineResult base)))
+          , ms_mod_name summary == mkModuleName "ImportProducerExposed"] of
+      [summary] -> pure summary
+      _ -> ioError (userError "prepared producer omitted its actual module summary")
   libdir <- getLibdir
   contextRef <- newIORef emptyRetainedContext
   runGhc (Just libdir) $ do
@@ -154,14 +158,12 @@ verifyPreparedScope dir = do
     _ <- setSessionDynFlags flags
     env <- getSession
     let installed = installRetainedUnfoldingsPlugin contextRef env
-        moduleId = mkModule (homeUnitAsUnit (hsc_home_unit installed))
-          (mkModuleName "ImportProducerExposed")
         pluginFor scoped = case staticPlugins (hsc_plugins scoped) of
           plugin : _ -> spPlugin plugin
           [] -> error "retained plugin was not installed"
         fingerprint retained = do
           liftIO (writeIORef contextRef (retainedContext retained))
-          let plugin = pluginFor (scopeRetainedHscEnv moduleId installed)
+          let plugin = pluginFor (scopeRetainedSummaryHscEnv producerSummary installed)
           result <- liftIO (pluginRecompile (paPlugin plugin) (paArguments plugin))
           case result of
             MaybeRecompile hash -> pure hash
@@ -178,7 +180,7 @@ verifyPreparedScope dir = do
         installedPlugins = hsc_plugins installed
         withOther = installed { hsc_plugins = installedPlugins
           { staticPlugins = other : staticPlugins installedPlugins } }
-        scopedOthers = staticPlugins (hsc_plugins (scopeRetainedHscEnv moduleId withOther))
+        scopedOthers = staticPlugins (hsc_plugins (scopeRetainedSummaryHscEnv producerSummary withOther))
     liftIO $ case scopedOthers of
       first : _ | paArguments (spPlugin first) == ["other-plugin", "argument"]
                   && spInitialised first -> pure ()

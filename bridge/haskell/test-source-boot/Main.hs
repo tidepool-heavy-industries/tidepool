@@ -64,6 +64,7 @@ import GHC.Types.Error (isEmptyMessages)
 import GHC.Types.Name.Set (nameSetElemsStable)
 import GHC.Driver.Hooks (hscCompileCoreExprHook)
 import GHC.Iface.Make (mkIfaceTc)
+import GHC.Iface.Recomp (MaybeValidated(..), checkOldIface)
 import GHC.Iface.Tidy (mkBootModDetailsTc)
 import GHC.Iface.Binary (CompressionIFace(..), TraceBinIFace(..), writeBinIface)
 import GHC.Unit.Module.ModIface (set_mi_module, mi_module, mi_exports, mi_usages, mi_decls)
@@ -134,6 +135,7 @@ import Tidepool.PackageWitness (PackageImportEvidence(..), PackageImportRoot(..)
 import Tidepool.PreparedStg (PreparedModule(..), PreparedCoverage(..))
 import Tidepool.FatIface (readExactInterface)
 import Tidepool.Session (SessionScope(..), emptySessionScope)
+import Tidepool.RetainedUnfoldings (scopeRetainedSummaryHscEnv)
 import Tidepool.SessionArtifacts (mkBoundBinders, parseValModule)
 import Tidepool.Session (sessionHiPath, Generation(..), SessionModule(..), SessionModuleKind(..))
 import Tidepool.ExactScope
@@ -966,6 +968,7 @@ retainedExecutionPublication = withTiming $ withScratch $ \work -> do
   writeGenuineOriginalExecutionScope ["MetadataQuoteSupport"] work providerPath [work] scopePath original
   exact <- readExactScope scopePath >>= either fail pure
   originalBytes <- BS.readFile scopePath
+  deferredOriginalModuleFlags work session
   withResidentPipelineSelected [work] $ \compile -> do
     (prepared, diagnostics) <- captureDiagnostics $ compile (PreparedProducts Nothing) Set.empty GeneralCompile
       (Just session) targetPath [work] Nothing
@@ -999,6 +1002,57 @@ retainedExecutionPublication = withTiming $ withScratch $ \work -> do
     unless (case changed of Left failure -> "ExecutionSourceChanged" `isInfixOf` show failure; _ -> False) $
       fail "retained execution accepted the refreshed source under its old admission"
   putStrLn "retained execution publication: bytecode retained, only fresh providers captured, source refresh separate"
+
+-- The exact helper makes both its fresh importer and that importer's consumer
+-- deferred. Retain the actual finalized interface across request cleanup, then
+-- ask GHC to validate it against the next request's source summary and HPT.
+-- This checks GHC interface freshness, without issuing a new execution recipe.
+deferredOriginalModuleFlags :: FilePath -> SessionScope -> IO ()
+deferredOriginalModuleFlags work session = do
+  forM_ ["MetadataDeferredModuleFlags.hs", "MetadataDeferredFlagsSibling.hs"] $ \name ->
+    copyFile ("test-source-boot/fixtures" </> name) (work </> name)
+  let owner = mkModuleName "MetadataDeferredModuleFlags"
+      sibling = mkModuleName "MetadataDeferredFlagsSibling"
+      target = work </> "MetadataDeferredFlagsSibling.hs"
+      moduleSummary environment name = case [summary | ModuleNode _ summary <-
+          mgModSummaries' (hsc_mod_graph environment), ms_mod_name summary == name] of
+        [summary] -> pure summary
+        _ -> fail "deferred flags fixture lacks its current source summary"
+      checkFlags environment = do
+        summary <- moduleSummary environment owner
+        siblingSummary <- moduleSummary environment sibling
+        unless (xopt LangExt.TypeFamilies (ms_hspp_opts summary)
+            && not (xopt LangExt.TypeFamilies (ms_hspp_opts siblingSummary))
+            && not (xopt LangExt.TypeFamilies (hsc_dflags environment))) $
+          fail "deferred module flags escaped into its sibling or ambient session"
+        pure summary
+  withResidentPipelineSelectedRequests [work] $ \runRequest -> do
+    original <- runRequest (pure ()) $ \compile -> do
+      (checked, checkedDiagnostics) <- captureDiagnostics $
+        compile CheckedEnvironment Set.empty GeneralCompile (Just session) target [work] Nothing
+      _ <- checkFlags (crHscEnv checked)
+      unless ("tidepool-checked-interface-retained module=MetadataDeferredModuleFlags consumer=MetadataDeferredFlagsSibling"
+          `elem` lines checkedDiagnostics) $
+        fail "module flags fixture did not retain a deferred checking interface for its sibling"
+      (prepared, preparedDiagnostics) <- captureDiagnostics $
+        compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just session) target [work] Nothing
+      _ <- checkFlags (prHscEnv (pprPipelineResult prepared))
+      unless (Map.member owner (pprFinalizedModules prepared)
+          && not ("tidepool-canonical-frontend module=MetadataDeferredModuleFlags"
+            `elem` lines preparedDiagnostics)) $
+        fail "module flags fixture did not finalize its original through the deferred frontend"
+      maybe (fail "deferred original omitted its finalized interface") pure
+        (Map.lookup owner (pprProductInterfaces prepared))
+    runRequest (pure ()) $ \compile -> do
+      checked <- compile CheckedEnvironment Set.empty GeneralCompile (Just session) target [work] Nothing
+      let environment = crHscEnv checked
+      summary <- checkFlags environment
+      decision <- checkOldIface (scopeRetainedSummaryHscEnv summary environment) summary (Just original)
+      case decision of
+        UpToDateItem _ -> pure ()
+        OutOfDateItem reason _ -> fail
+          ("next request rejected the deferred original interface: " ++ showSDocUnsafe (ppr reason))
+  putStrLn "deferred module flags: checking sibling and ambient flags isolated, finalized original fresh in next request"
 
 exactRetainedQuoter :: IO ()
 exactRetainedQuoter = withTiming $ withScratch $ \work -> do

@@ -191,7 +191,7 @@ import Tidepool.ExecutionSchema (SymbolIdentity)
 import Tidepool.RetainedUnfoldings
   ( RetainedContext, retainedContext, emptyRetainedContext
   , installRetainedUnfoldingsPlugin, retainedDefinedBy
-  , scopeRetainedModuleGraph, scopeRetainedHscEnv, scopeRetainedSummaryHscEnv )
+  , scopeRetainedModuleGraph, scopeRetainedSummaryHscEnv )
 import Tidepool.TurnSource (extractModuleName)
 import Tidepool.DependencyEvidence
   ( DependencyEvidence(..), DependencySource(..), DependencyResolution(..)
@@ -2070,7 +2070,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
               -- captures are consumed directly and never enter this frontend.
               compileFront modSum0 = do
                 liftIO (modifyIORef' frontCountRef (+ 1))
-                let modSum = modSum0 { ms_hspp_opts = canonicalizeDFlags (ms_hspp_opts modSum0) }
+                let modSum = canonicalSummary modSum0
                 -- Classification needs the session's HPT as it stands right
                 -- before this module's own typecheck (to resolve import
                 -- origins -- see 'classifyQuasiQuoteOrigins'); dependency
@@ -2093,8 +2093,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                   liftIO (writeIORef targetEnvironmentRef (Just tcGblEnv))
                 liftIO (modifyIORef' tcMsRef (+ tcMs))
                 hscEnv0 <- getSession
-                let hscEnv   = scopeRetainedHscEnv (ms_mod modSum)
-                                 (hscUpdateFlags canonicalizeDFlags hscEnv0)
+                let hscEnv   = scopeRetainedSummaryHscEnv modSum hscEnv0
                     -- Capture the inferred type of the eval's top expression NOW,
                     -- before optimization can inline/rename @__user@ away. Types
                     -- live on the Id in the typechecked type env; the prepared wire program erases
@@ -2157,7 +2156,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                           (Map.insertWith (+) (moduleNameString (ms_mod_name (mfSummary mf))) coreMs))
                 let interfaceReuse = if isJust mMemoRef then MemoMiss else MemoDisabled
                 (interfaceMs, registration) <- registerPreparedInterface timing requestIdentity interfaceReuse
-                  interfaceUse (mfSummary mf) (mfTcGblEnv mf) (mfHscEnv mf) simplified
+                  interfaceUse mf simplified
                 liftIO $ recordInterface (mfSummary mf) (Just interfaceMs)
                 let externalized = externalizeInternalTops simplified
                 pure
@@ -2176,9 +2175,8 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                 PrepareStg -> do
                   liftIO (modifyIORef' preparedCountRef (+ 1))
                   current <- getSession
-                  let summary = loadedSummary loaded
-                      env = scopeRetainedHscEnv (ms_mod summary)
-                        (hscUpdateFlags canonicalizeDFlags current)
+                  let summary = canonicalSummary (loadedSummary loaded)
+                      env = scopeRetainedSummaryHscEnv summary current
                       cgGuts = finalizedTidyGuts (loadedFinalized loaded)
                       ownedSiblings = resolvePreparedSiblings (cg_binds cgGuts)
                       importedSiblings = resolvePreparedInterfaceSiblings env
@@ -2830,15 +2828,17 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                         -- without importing it from source. SOURCE imports keep using
                         -- the boot iface installed by GHC's load phase, and no returned
                         -- metadata consumer reads the target back through HPT.
-                        env <- scopeRetainedHscEnv (ms_mod summary) <$> getSession
+                        ambient <- getSession
+                        let canonical = canonicalSummary summary
+                            env = scopeRetainedSummaryHscEnv canonical ambient
                         details <- liftIO (mkBootModDetailsTc (hsc_logger env) tcg)
                         (iface, _ifaceMs) <- liftIO $ measureModuleInterface timing requestIdentity
                           (moduleNameString (ms_mod_name summary)) CheckedEnvironmentInterface HptMiss $
-                            mkIfaceTc env Sf_None details summary Nothing tcg
+                            mkIfaceTc env Sf_None details canonical Nothing tcg
                         let linkable = maybe emptyHomeModInfoLinkable hm_linkable
                               (lookupHpt (hsc_HPT env) (ms_mod_name summary))
                             hmi = HomeModInfo (set_mi_extra_decls Nothing iface) details linkable
-                        setSession (hscUpdateHPT (\hpt -> addToHpt hpt (ms_mod_name summary) hmi) env)
+                        setSession (hscUpdateHPT (\hpt -> addToHpt hpt (ms_mod_name summary) hmi) ambient)
                         when timing $ liftIO $ hPutStrLn stderr $
                           "tidepool-checked-interface-retained module="
                             ++ moduleNameString (ms_mod_name summary) ++ reason
@@ -3789,9 +3789,12 @@ needsPreparedInterface HomeInterfaceLeaf = False
 needsPreparedInterface _ = True
 
 registerPreparedInterface :: Bool -> Word64 -> InterfaceReuse -> HomeInterfaceUse
-  -> ModSummary -> TcGblEnv -> HscEnv -> ModGuts
+  -> ModuleFront -> ModGuts
   -> Ghc (Integer, FinalizedModule)
-registerPreparedInterface timing requestId interfaceReuse interfaceUse modSum tcGblEnv hscEnv simplified = do
+registerPreparedInterface timing requestId interfaceReuse interfaceUse front simplified = do
+  let modSum = mfSummary front
+      tcGblEnv = mfTcGblEnv front
+      hscEnv = mfHscEnv front
   ((cgGuts, modDetails), tidyMs) <- timeSection $ liftIO $ hscTidy hscEnv simplified
   liftIO $ emitModuleInterfaceTiming timing (moduleNameString (ms_mod_name modSum))
     "module_interface" "tidy" tidyMs

@@ -53,7 +53,7 @@ import Tidepool.GhcPipeline
   ( PipelineResult(..), PipelineSelection(..), PreparedPipelineResult(..), runPipelineSelected )
 import Tidepool.PreparedSites (SiteRejection(..))
 import Tidepool.PreparedStg (PreparedModule(..))
-import Tidepool.RetainedUnfoldings (scopeRetainedHscEnv)
+import Tidepool.RetainedUnfoldings (scopeRetainedSummaryHscEnv)
 import Tidepool.DependencyEvidence (DependencySource(..), sourceEvidence)
 import Tidepool.ModuleCandidates
   ( CandidateGroup(..), CandidateGlobal(..), ModuleCandidate(..), readModuleCandidates )
@@ -144,12 +144,13 @@ verifyModuleProductInterfaceRoundtrip work = do
     [summary] -> do
       unless ("Prelude" `elem` map (moduleNameString . unLoc . snd) (ms_textual_imps summary)) $
         ioError (userError "GHC summary omitted implicit Prelude import")
-      flagHash <- fingerprintDynFlags producer (ms_mod summary) putNameLiterally
-      optHash <- fingerprintOptFlags (hsc_dflags producer) putNameLiterally
+      let moduleEnvironment = scopeRetainedSummaryHscEnv summary producer
+      flagHash <- fingerprintDynFlags moduleEnvironment (ms_mod summary) putNameLiterally
+      optHash <- fingerprintOptFlags (hsc_dflags moduleEnvironment) putNameLiterally
       unless (flagHash == mi_flag_hash (mi_final_exts iface)
         && optHash == mi_opt_hash (mi_final_exts iface)) $
         ioError (userError "stored interface options differ from producing GHC flags")
-      checked <- checkOldIface (scopeRetainedHscEnv (ms_mod summary) producer) summary (Just iface)
+      checked <- checkOldIface moduleEnvironment summary (Just iface)
       unless (case checked of UpToDateItem _ -> True; OutOfDateItem _ _ -> False) $
         ioError (userError "scoped recompilation rejected freshly produced interface")
     _ -> ioError (userError "source summary absent for interface flag probe")

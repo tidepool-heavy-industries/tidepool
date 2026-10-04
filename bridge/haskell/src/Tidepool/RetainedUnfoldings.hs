@@ -72,7 +72,7 @@ module Tidepool.RetainedUnfoldings
   ( RetainedContext, retainedContext, emptyRetainedContext
   , installRetainedUnfoldingsPlugin
   , scopeRetainedModuleGraph
-  , scopeRetainedHscEnv, scopeRetainedSummaryHscEnv, retainedDefinedBy
+  , scopeRetainedSummaryHscEnv, retainedDefinedBy
   , withholdRetainedUnfoldings
   ) where
 
