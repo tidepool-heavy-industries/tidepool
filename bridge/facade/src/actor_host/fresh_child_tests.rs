@@ -1,5 +1,5 @@
 use super::display_output;
-use super::test_campaign::{dispatch_haskell_script, TestCampaign};
+use super::test_campaign::{committed_display_text, dispatch_haskell_script, TestCampaign};
 use exomonad_actor::{ActorExitKind, ActorTerminal, LocalResidentDeployment};
 use std::time::Duration;
 
@@ -85,15 +85,7 @@ async fn opted_in_selected_context_child_owns_and_retires_its_machine() {
         installation.policy.as_ref(),
         "data FreshChildNominal = FreshChildNominal FreshParentInput\nfreshChildValue <- pure (FreshChildNominal sessionInput)\ndisplay (case freshChildValue of FreshChildNominal (FreshParentInput n) -> n + 1)",
     )).await;
-    assert_eq!(reply["status"], "committed", "{reply}");
-    let display = reply["items"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .flat_map(|item| item["operations"].as_array().unwrap())
-        .find_map(|operation| operation.get("display"))
-        .unwrap();
-    assert_eq!(display["text"], "42", "{reply}");
+    assert_eq!(committed_display_text(&reply), "42", "{reply}");
     let child_root = campaign
         .session_root
         .path()
