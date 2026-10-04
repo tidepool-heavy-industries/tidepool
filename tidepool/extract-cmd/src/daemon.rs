@@ -3249,6 +3249,9 @@ tidepool-timing-detail parent=prepared_recover phase=lookup ms=5\n\
 tidepool-timing-module module=Execute ms=17 interface_ms=4\n\
 tidepool-timing-module-detail module=Execute parent=module_interface phase=make_iface ms=4\n\
 tidepool-count name=prepared_recover_rounds count=2\n\
+tidepool-meta-execution request=7 unit=\"main\" module=\"Original\"\n\
+tidepool-canonical-frontend module=Original\n\
+tidepool-canonical-finalization module=Original\n\
 tidepool-checked module=Inspect target=False\n\
 tidepool-target phase=desugar module=Execute\n",
             );
@@ -3276,6 +3279,9 @@ tidepool-target phase=desugar module=Execute\n",
                 "tidepool-timing-module module=Execute ms=17 interface_ms=4",
                 "tidepool-timing-module-detail module=Execute parent=module_interface phase=make_iface ms=4",
                 "tidepool-count name=prepared_recover_rounds count=2",
+                "tidepool-meta-execution request=7 unit=\"main\" module=\"Original\"",
+                "tidepool-canonical-frontend module=Original",
+                "tidepool-canonical-finalization module=Original",
                 "tidepool-checked module=Inspect target=False",
                 "tidepool-target phase=desugar module=Execute",
             ]
@@ -3284,7 +3290,7 @@ tidepool-target phase=desugar module=Execute\n",
 
     #[test]
     fn machine_stderr_is_kept_in_daemon_log_but_removed_from_diagnostics() {
-        let stderr = b"ghc: panic!\ntidepool-timing phase=load ms=12\n  tidepool-checked module=Foo target=True\ntidepool-dependency-witness nodes=3\nuseful detail\n";
+        let stderr = b"ghc: panic!\ntidepool-timing phase=load ms=12\n  tidepool-meta-execution request=7 unit=\"main\" module=\"Original\"\n  tidepool-checked module=Foo target=True\ntidepool-dependency-witness nodes=3\nuseful detail\n";
         let diagnostic = String::from_utf8(diagnostic_stderr(stderr)).unwrap();
         assert_eq!(diagnostic, "ghc: panic!\nuseful detail");
         let filtered = String::from_utf8_lossy(stderr);

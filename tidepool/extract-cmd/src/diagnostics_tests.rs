@@ -1,4 +1,4 @@
-use super::MACHINE_STDERR_PREFIXES;
+use super::{is_machine_stderr_line, MACHINE_STDERR_PREFIXES};
 use std::collections::BTreeSet;
 
 /// Scans a Haskell source file for every `"tidepool-<word> "` literal —
@@ -49,4 +49,25 @@ fn machine_stderr_prefixes_match_the_emitters() {
         "MACHINE_STDERR_PREFIXES has drifted from the tidepool-* literals \
          emitted by Timing.hs/GhcPipeline.hs/daemon.rs"
     );
+}
+
+#[test]
+fn meta_execution_lines_are_measurements_only_at_the_prefix_boundary() {
+    for (line, machine) in [
+        (
+            "tidepool-meta-execution request=7 unit=\"main\" module=\"Original\"",
+            true,
+        ),
+        (
+            "  tidepool-meta-execution request=7 unit=\"main\" module=\"Original\"",
+            true,
+        ),
+        ("tidepool-meta-execution-error: splice failed", false),
+        (
+            "Original.hs:1: error: tidepool-meta-execution is not in scope",
+            false,
+        ),
+    ] {
+        assert_eq!(is_machine_stderr_line(line), machine);
+    }
 }
