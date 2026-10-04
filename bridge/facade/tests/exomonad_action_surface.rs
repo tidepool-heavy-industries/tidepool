@@ -69,7 +69,7 @@ fn reusable_event_and_async_helpers_compile_with_narrow_rows() {
     let mut include =
         vec![tidepool_mcp::ensure_selected_effects_shim("'[]")
             .expect("materialize empty selected row")];
-    include.extend_from_slice(effects.include_paths());
+    include.extend_from_slice(&effects.include_paths());
     include.push(eval_harness::prelude_path());
     let refs = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
 
