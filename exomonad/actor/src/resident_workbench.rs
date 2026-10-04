@@ -34,7 +34,6 @@ use tidepool_effect::dispatch::{request_constructor, DispatchEffect};
 use tidepool_repr::execution_schema::SymbolIdentity;
 use tidepool_repr::DataConTable;
 use tidepool_runtime::session::registry::{CheckoutError, SessionRegistry};
-#[cfg(test)]
 use tidepool_runtime::session::HostCarrier;
 use tidepool_runtime::session::{
     hide_preamble_exports, insert_preamble_imports, render_turn_compile_rejection,
@@ -1291,16 +1290,10 @@ pub struct ResidentActorWorkbench<H, O> {
     private_execution: Option<Arc<ExecutionPrivateScope>>,
 }
 
-#[derive(tidepool_bridge_derive::ToHaskell)]
-enum HostCommandJob {
-    #[haskell(module = "Tidepool.Command.Types", name = "Job")]
-    Job(String),
-}
-
 enum OwnedHostPayload {
     Json(serde_json::Value),
     Text(String),
-    Job(HostCommandJob),
+    Job(String),
 }
 
 /// Live execution state for one workbench item that suspended on an actor
@@ -4216,18 +4209,11 @@ where
         binding: String,
         result: String,
     ) -> Result<RetainedHostBinding, ResidentActorWorkbenchError> {
-        let (reservation, binder, compiled, dependencies) = self
+        let (carrier, dependencies) = self
             .prepare_host_input(context.clone(), HostCarrierKind::Text, Some(binding))
             .await?;
         let mounted = self
-            .mount_prepared_host_input(
-                context,
-                reservation,
-                binder,
-                compiled,
-                OwnedHostPayload::Text(result),
-                false,
-            )
+            .mount_prepared_host_input(context, carrier, OwnedHostPayload::Text(result), false)
             .await?;
         let name = mounted.mounted_input().name.clone();
         drop(dependencies);
@@ -4387,17 +4373,11 @@ where
         let Some(input) = &self.json_input else {
             return Ok(None);
         };
-        let (reservation, binder, compiled, dependencies) = self
+        let (carrier, dependencies) = self
             .prepare_host_input(context.clone(), HostCarrierKind::Json, None)
             .await?;
         let input = self
-            .mount_prepared_json_input(
-                context.clone(),
-                reservation,
-                binder,
-                compiled,
-                input.clone(),
-            )
+            .mount_prepared_json_input(context.clone(), carrier, input.clone())
             .await?;
         drop(dependencies);
         Ok(Some(input))
@@ -4406,28 +4386,17 @@ where
     async fn mount_prepared_json_input(
         &self,
         context: crate::ActorSessionContext,
-        reservation: Arc<tidepool_runtime::session::RuntimeCheckedItemAdmission>,
-        binder: BoundBinder,
-        compiled: CompiledTurn,
+        carrier: HostCarrier,
         mount_input: serde_json::Value,
     ) -> Result<HostInputRetirement, ResidentActorWorkbenchError> {
-        self.mount_prepared_host_input(
-            context,
-            reservation,
-            binder,
-            compiled,
-            OwnedHostPayload::Json(mount_input),
-            true,
-        )
-        .await
+        self.mount_prepared_host_input(context, carrier, OwnedHostPayload::Json(mount_input), true)
+            .await
     }
 
     async fn mount_prepared_host_input(
         &self,
         context: crate::ActorSessionContext,
-        reservation: Arc<tidepool_runtime::session::RuntimeCheckedItemAdmission>,
-        binder: BoundBinder,
-        compiled: CompiledTurn,
+        carrier: HostCarrier,
         payload: OwnedHostPayload,
         hidden: bool,
     ) -> Result<HostInputRetirement, ResidentActorWorkbenchError> {
@@ -4439,12 +4408,14 @@ where
             .map(|scope| scope.admission.clone());
         self.access
             .with_machine(context.clone(), move |session, context, _| {
+                let (reservation, original_binder) = carrier
+                    .checked_binding()
+                    .map_err(ResidentActorWorkbenchError::Resident)?;
+                let binder = original_binder.clone();
                 let session_root = reservation.snapshot().view().session_root().to_path_buf();
                 let write = session
                     .mount_checked_host_input(
-                        reservation,
-                        &binder,
-                        compiled.into_code(),
+                        &carrier,
                         match &payload {
                             OwnedHostPayload::Json(value) => HostPayload::Json(value),
                             OwnedHostPayload::Text(value) => HostPayload::Text(value),
@@ -4454,7 +4425,7 @@ where
                     .map_err(ResidentActorWorkbenchError::Resident)?;
                 let scope = context.placement.lexical_scope;
                 let presentation = match &payload {
-                    OwnedHostPayload::Job(HostCommandJob::Job(job)) => {
+                    OwnedHostPayload::Job(job) => {
                         session.tag_host_text_binding_in(scope, &binder, job.clone())
                     }
                     _ if hidden => session.hide_host_binding_in(scope, &binder),
@@ -4487,15 +4458,7 @@ where
         context: crate::ActorSessionContext,
         kind: HostCarrierKind,
         binding: Option<String>,
-    ) -> Result<
-        (
-            Arc<tidepool_runtime::session::RuntimeCheckedItemAdmission>,
-            BoundBinder,
-            CompiledTurn,
-            CellPreparationLease,
-        ),
-        ResidentActorWorkbenchError,
-    > {
+    ) -> Result<(HostCarrier, CellPreparationLease), ResidentActorWorkbenchError> {
         let authority = self.compilation_authority.clone().ok_or_else(|| {
             ResidentActorWorkbenchError::ActorProtocol(
                 "host input requires its admitted source authority".into(),
@@ -4575,7 +4538,14 @@ where
                 "host input has another compiler binder".into(),
             ));
         }
-        Ok((reservation, binder.clone(), compiled, dependencies))
+        let carrier = HostCarrier::from_checked(
+            reservation,
+            binder.clone(),
+            compiled.into_code(),
+            kind.host_binding_type(),
+        )
+        .map_err(ResidentActorWorkbenchError::Resident)?;
+        Ok((carrier, dependencies))
     }
 
     /// Retain the admitted source and input owners while one compiler
@@ -5170,19 +5140,12 @@ where
                 mounted: None,
             });
         }
-        let (reservation, binder, compiled, dependencies) = self
+        let (carrier, dependencies) = self
             .prepare_host_input(context.clone(), HostCarrierKind::Job, None)
             .await
             .map_err(|error| command_job_carrier_failure(&job, error))?;
         let mounted = self
-            .mount_prepared_host_input(
-                context,
-                reservation,
-                binder,
-                compiled,
-                OwnedHostPayload::Job(HostCommandJob::Job(job.clone())),
-                false,
-            )
+            .mount_prepared_host_input(context, carrier, OwnedHostPayload::Job(job.clone()), false)
             .await
             .map_err(|error| command_job_carrier_failure(&job, error))?;
         let binding = mounted.mounted_input().name.clone();
@@ -11671,10 +11634,11 @@ mod request_tests {
             .execute_cell_for_test(context.clone(), "data Job = SourceJob Bool")
             .await
             .unwrap();
-        let (reservation, binder, compiled, dependencies) = workbench
+        let (carrier, dependencies) = workbench
             .prepare_host_input(context.clone(), HostCarrierKind::Job, None)
             .await
             .expect("retained context still admits the original checked Job type");
+        let (_, binder) = carrier.checked_binding().unwrap();
         assert_eq!(
             binder.host_authority,
             Some(HostBindingAuthority::CommandJob)
@@ -11683,16 +11647,14 @@ mod request_tests {
             tidepool_repr::SessionVarId::from_extract(binder.var_id),
             original.0
         );
-        let compiled = workbench
-            .refuse_host_payload_for_test(context.clone(), &reservation, &binder, compiled)
+        let carrier = workbench
+            .refuse_host_payload_for_test(context.clone(), carrier)
             .await;
         let mounted = workbench
             .mount_prepared_host_input(
                 context.clone(),
-                reservation,
-                binder,
-                compiled,
-                OwnedHostPayload::Job(HostCommandJob::Job("job two".into())),
+                carrier,
+                OwnedHostPayload::Job("job two".into()),
                 false,
             )
             .await
@@ -11784,7 +11746,7 @@ mod request_tests {
             .execute_cell_for_test(context.clone(), "data Text = SourceText Bool")
             .await
             .unwrap();
-        let (reservation, binder, compiled, dependencies) = workbench
+        let (carrier, dependencies) = workbench
             .prepare_host_input(
                 context.clone(),
                 HostCarrierKind::Text,
@@ -11792,20 +11754,19 @@ mod request_tests {
             )
             .await
             .expect("retained context still admits the original checked Text type");
+        let (_, binder) = carrier.checked_binding().unwrap();
         assert_eq!(binder.host_authority, Some(HostBindingAuthority::Text));
         assert_ne!(
             tidepool_repr::SessionVarId::from_extract(binder.var_id),
             original.0
         );
-        let compiled = workbench
-            .refuse_host_payload_for_test(context.clone(), &reservation, &binder, compiled)
+        let carrier = workbench
+            .refuse_host_payload_for_test(context.clone(), carrier)
             .await;
         let mounted = workbench
             .mount_prepared_host_input(
                 context.clone(),
-                reservation,
-                binder,
-                compiled,
+                carrier,
                 OwnedHostPayload::Text("output two".into()),
                 false,
             )
@@ -12742,16 +12703,40 @@ mod request_tests {
         async fn refuse_host_payload_for_test(
             &self,
             context: crate::ActorSessionContext,
-            reservation: &Arc<tidepool_runtime::session::RuntimeCheckedItemAdmission>,
-            binder: &BoundBinder,
-            compiled: CompiledTurn,
-        ) -> CompiledTurn {
+            carrier: HostCarrier,
+        ) -> HostCarrier {
             use tidepool_runtime::session::turn::HostBindingAuthority;
-            let reservation = Arc::clone(reservation);
-            let binder = binder.clone();
             self.access
                 .with_machine(context, move |session, context, _| {
+                    let (reservation, binder) = carrier.checked_binding().unwrap();
                     let before = reservation.prefix().snapshot();
+                    let expected = match binder.host_authority.unwrap() {
+                        HostBindingAuthority::JsonValue => HostBindingType::JSON_VALUE,
+                        HostBindingAuthority::Text => HostBindingType::TEXT,
+                        HostBindingAuthority::CommandJob => HostBindingType::COMMAND_JOB,
+                    };
+                    let mut missing = carrier.code();
+                    missing.certification = std::borrow::Cow::Owned(None);
+                    assert!(matches!(
+                        HostCarrier::from_checked(
+                            reservation.clone(),
+                            binder.clone(),
+                            missing,
+                            expected
+                        ),
+                        Err(ResidentError::UnsupportedCheckedTurn)
+                    ));
+                    let mut changed = binder.clone();
+                    changed.name.push_str("Changed");
+                    assert!(matches!(
+                        HostCarrier::from_checked(
+                            reservation.clone(),
+                            changed,
+                            carrier.code(),
+                            expected
+                        ),
+                        Err(ResidentError::UnsupportedCheckedTurn)
+                    ));
                     let residency = session.residency();
                     let wrong_json = serde_json::Value::Null;
                     let wrong = match binder
@@ -12766,19 +12751,14 @@ mod request_tests {
                         }
                     };
                     assert!(matches!(
-                        session.mount_checked_host_input(
-                            reservation.clone(),
-                            &binder,
-                            compiled.code(),
-                            wrong
-                        ),
+                        session.mount_checked_host_input(&carrier, wrong),
                         Err(ResidentError::UnsupportedCheckedTurn)
                     ));
                     assert!(session
                         .run_bind_with_sites(
                             "host placeholder must never execute",
-                            compiled.code(),
-                            &binder,
+                            carrier.code(),
+                            binder,
                             reservation.generation()
                         )
                         .is_err());
@@ -12788,7 +12768,7 @@ mod request_tests {
                     assert!(session
                         .current_binding_in(context.placement.lexical_scope, &binder.name)
                         .is_none());
-                    Ok(compiled)
+                    Ok(carrier)
                 })
                 .await
                 .unwrap()
@@ -16028,79 +16008,21 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             .admit_private_cell_for_test(public.clone())
             .await
             .unwrap();
-        let (reservation, binder, compiled, host_dependencies) = workbench
+        let (carrier, host_dependencies) = workbench
             .prepare_host_input(context.clone(), HostCarrierKind::Json, None)
             .await
             .expect("host JSON has its original checked interface");
         assert_eq!(
-            binder.host_authority,
+            carrier.checked_binding().unwrap().1.host_authority,
             Some(tidepool_runtime::session::turn::HostBindingAuthority::JsonValue)
         );
-        let probe_reservation = reservation.clone();
-        let probe_binder = binder.clone();
-        let probe_code = compiled;
-        let compiled = workbench
-            .access
-            .with_machine(context.clone(), move |session, _, _| {
-                let before = probe_reservation.prefix().snapshot();
-                let mut changed = probe_binder.clone();
-                changed.name.push_str("Changed");
-                let code = probe_code.code();
-                let mut missing = code.clone();
-                missing.certification = std::borrow::Cow::Owned(None);
-                assert!(matches!(
-                    session.mount_checked_host_input(
-                        probe_reservation.clone(),
-                        &probe_binder,
-                        missing,
-                        HostPayload::Json(&serde_json::Value::Null)
-                    ),
-                    Err(ResidentError::UnsupportedCheckedTurn)
-                ));
-                assert!(matches!(
-                    session.mount_checked_host_input(
-                        probe_reservation.clone(),
-                        &changed,
-                        code.clone(),
-                        HostPayload::Json(&serde_json::Value::Null)
-                    ),
-                    Err(ResidentError::UnsupportedCheckedTurn)
-                ));
-                assert!(matches!(
-                    session.mount_checked_host_input(
-                        probe_reservation.clone(),
-                        &probe_binder,
-                        code.clone(),
-                        HostPayload::Text("wrong nominal payload")
-                    ),
-                    Err(ResidentError::UnsupportedCheckedTurn)
-                ));
-                assert!(session
-                    .run_bind_with_sites(
-                        "host placeholder",
-                        code,
-                        &probe_binder,
-                        probe_reservation.generation()
-                    )
-                    .is_err());
-                assert!(Arc::ptr_eq(&before, &probe_reservation.prefix().snapshot()));
-                assert_eq!(before.compiler_prefix().next_item(), 0);
-                assert!(session
-                    .current_binding_in(
-                        probe_reservation.prefix().admission().visibility().scope,
-                        &probe_binder.name
-                    )
-                    .is_none());
-                Ok(probe_code)
-            })
-            .await
-            .unwrap();
+        let carrier = workbench
+            .refuse_host_payload_for_test(context.clone(), carrier)
+            .await;
         let host_owner = workbench
             .mount_prepared_json_input(
                 context.clone(),
-                reservation,
-                binder,
-                compiled,
+                carrier,
                 serde_json::json!({"greeting": "hi"}),
             )
             .await
@@ -16245,24 +16167,23 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             .execute_cell_for_test(context.clone(), "data Value = SourceValue Bool")
             .await
             .unwrap();
-        let (reservation, binder, compiled, host_dependencies) = workbench
+        let (carrier, host_dependencies) = workbench
             .prepare_host_input(context.clone(), HostCarrierKind::Json, None)
             .await
             .expect("second JSON mount authenticates retained Value and Scientific owners");
+        let (_, binder) = carrier.checked_binding().unwrap();
         assert_eq!(
             binder.host_authority,
             Some(tidepool_runtime::session::turn::HostBindingAuthority::JsonValue)
         );
         let second_input_name = binder.name.clone();
-        let compiled = workbench
-            .refuse_host_payload_for_test(context.clone(), &reservation, &binder, compiled)
+        let carrier = workbench
+            .refuse_host_payload_for_test(context.clone(), carrier)
             .await;
         let input = workbench
             .mount_prepared_json_input(
                 context.clone(),
-                reservation,
-                binder,
-                compiled,
+                carrier,
                 serde_json::json!({"greeting": "again", "count": 42}),
             )
             .await

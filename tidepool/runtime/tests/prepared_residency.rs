@@ -888,12 +888,6 @@ fn host_carrier_mounts_json_text_and_job_payloads_from_one_compile_each() {
     use tidepool_codegen::scope::ScopeId;
     use tidepool_runtime::session::{HostBindingType, HostCarrier, HostPayload};
 
-    #[derive(tidepool_bridge_derive::ToHaskell)]
-    enum TestCommandJob {
-        #[haskell(module = "Tidepool.Command.Types", name = "Job")]
-        Job(String),
-    }
-
     let mut notebook = Notebook::new();
     // Host-carrier stub modules are hand-written source, found by GHC's
     // ordinary downsweep on the session root -- unlike a real bind's `.hi`
@@ -961,12 +955,40 @@ fn host_carrier_mounts_json_text_and_job_payloads_from_one_compile_each() {
     let [json_anchor_binder] = bound.as_slice() else {
         panic!("json anchor must produce exactly one binder");
     };
+    let mut missing_root = json_anchor_binder.clone();
+    missing_root.root_head = None;
+    assert!(HostCarrier::from_compiled(
+        &missing_root,
+        compiled.code(),
+        HostBindingType::JSON_VALUE
+    )
+    .is_err());
+    let mut wrong_root = json_anchor_binder.clone();
+    wrong_root
+        .root_head
+        .as_mut()
+        .unwrap()
+        .unit
+        .push_str("-foreign");
+    assert!(
+        HostCarrier::from_compiled(&wrong_root, compiled.code(), HostBindingType::JSON_VALUE)
+            .is_err()
+    );
+    let mut missing_table = compiled.code();
+    missing_table.table = std::borrow::Cow::Owned(tidepool_repr::DataConTable::new());
+    assert!(HostCarrier::from_compiled(
+        json_anchor_binder,
+        missing_table,
+        HostBindingType::JSON_VALUE
+    )
+    .is_err());
     assert!(compiled.certification.is_some());
     let json_carrier = HostCarrier::from_compiled(
         json_anchor_binder,
         compiled.code(),
         HostBindingType::JSON_VALUE,
-    );
+    )
+    .expect("compiler issued a complete reusable host representation");
 
     let TurnResult::Bind {
         bound, compiled, ..
@@ -984,7 +1006,8 @@ fn host_carrier_mounts_json_text_and_job_payloads_from_one_compile_each() {
     };
     assert!(compiled.certification.is_some());
     let text_carrier =
-        HostCarrier::from_compiled(text_anchor_binder, compiled.code(), HostBindingType::TEXT);
+        HostCarrier::from_compiled(text_anchor_binder, compiled.code(), HostBindingType::TEXT)
+            .expect("compiler issued a complete reusable host representation");
 
     let TurnResult::Bind {
         bound, compiled, ..
@@ -1004,7 +1027,8 @@ fn host_carrier_mounts_json_text_and_job_payloads_from_one_compile_each() {
         job_anchor_binder,
         compiled.code(),
         HostBindingType::COMMAND_JOB,
-    );
+    )
+    .expect("compiler issued a complete reusable host representation");
 
     // --- mount TWO json payloads through the SAME carrier, plus one text
     // and one job payload, all with NO further GHC compile -------------
@@ -1063,7 +1087,7 @@ fn host_carrier_mounts_json_text_and_job_payloads_from_one_compile_each() {
             "carriedJob",
             gen_job,
             &job_carrier,
-            HostPayload::Job(&TestCommandJob::Job("job-command".to_string())),
+            HostPayload::Job("job-command"),
         )
         .expect("mount job carrier payload");
     notebook.injected.push(binder_job.module.clone());
@@ -1140,7 +1164,8 @@ fn retired_carrier_binding_captured_by_declaration_fails_to_compile_not_hang() {
         panic!("anchor must produce exactly one binder");
     };
     let carrier =
-        HostCarrier::from_compiled(anchor_binder, compiled.code(), HostBindingType::JSON_VALUE);
+        HostCarrier::from_compiled(anchor_binder, compiled.code(), HostBindingType::JSON_VALUE)
+            .expect("compiler issued a complete reusable host representation");
 
     notebook.generation += 1;
     let gen = Generation(notebook.generation);
@@ -1214,34 +1239,11 @@ fn retired_carrier_binding_captured_by_declaration_fails_to_compile_not_hang() {
     }
 }
 
-/// MEDIUM regression: `mount_carrier_in` writes its stub source before
-/// mounting the host value. A payload that does not match the carrier's own
-/// compiled type fails inside the mount step, AFTER the stub is already on
-/// disk -- the write, mark, and mount must be one transaction, so a failed
-/// mount leaves no stub behind for a later turn to stumble over.
+/// A wrong payload cannot mutate a reusable carrier's session or write a stub.
 #[test]
 fn failed_carrier_mount_leaves_no_stub_source() {
-    use tidepool_bridge::{BridgeError, HaskellVisitor, ToHaskell};
     use tidepool_codegen::scope::ScopeId;
-    use tidepool_repr::DataConTable;
-    use tidepool_runtime::session::{HostBindingType, HostCarrier, HostPayload};
-
-    /// A payload whose `ToHaskell::visit` always fails -- forces
-    /// `mount_host_value_in` to fail deep inside the build step, AFTER
-    /// `mount_carrier_in` has already written the stub source to disk.
-    struct AlwaysFailsToHaskell;
-    impl tidepool_bridge::sealed::ToHaskellSealed for AlwaysFailsToHaskell {}
-    impl ToHaskell for AlwaysFailsToHaskell {
-        fn visit(
-            &self,
-            _table: &DataConTable,
-            _visitor: &mut dyn HaskellVisitor,
-        ) -> Result<(), BridgeError> {
-            Err(BridgeError::UnknownDataConName(
-                "deliberately unresolvable".into(),
-            ))
-        }
-    }
+    use tidepool_runtime::session::{HostBindingType, HostCarrier, HostPayload, ResidentError};
 
     let mut notebook = Notebook::with_shared_root(&[]);
 
@@ -1257,10 +1259,16 @@ fn failed_carrier_mount_leaves_no_stub_source() {
         panic!("anchor must produce exactly one binder");
     };
     let carrier =
-        HostCarrier::from_compiled(anchor_binder, compiled.code(), HostBindingType::JSON_VALUE);
+        HostCarrier::from_compiled(anchor_binder, compiled.code(), HostBindingType::JSON_VALUE)
+            .expect("compiler issued a complete reusable host representation");
 
     notebook.generation += 1;
     let gen = Generation(notebook.generation);
+    let residency = notebook.session.residency();
+    let before = notebook
+        .session
+        .public_visibility_snapshot_in(ScopeId::ROOT)
+        .unwrap();
     let error = notebook
         .session
         .mount_carrier_in(
@@ -1269,9 +1277,23 @@ fn failed_carrier_mount_leaves_no_stub_source() {
             "unmountable",
             gen,
             &carrier,
-            HostPayload::Job(&AlwaysFailsToHaskell),
+            HostPayload::Job("wrong nominal payload"),
         )
-        .expect_err("a payload that fails to visit must fail to mount");
+        .expect_err("a wrong payload kind must refuse before mutation");
+    assert!(matches!(error, ResidentError::UnsupportedCheckedTurn));
+
+    assert_eq!(notebook.session.residency(), residency);
+    assert_eq!(
+        notebook
+            .session
+            .public_visibility_snapshot_in(ScopeId::ROOT)
+            .unwrap(),
+        before
+    );
+    assert!(notebook
+        .session
+        .current_binding_in(ScopeId::ROOT, "unmountable")
+        .is_none());
 
     let stub_path = notebook
         .root
@@ -1442,6 +1464,7 @@ impl Incarnation {
             panic!("json anchor must produce exactly one binder");
         };
         HostCarrier::from_compiled(anchor_binder, compiled.code(), HostBindingType::JSON_VALUE)
+            .expect("compiler issued a complete reusable host representation")
     }
 }
 

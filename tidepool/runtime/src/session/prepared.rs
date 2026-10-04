@@ -2513,6 +2513,33 @@ fn resolve_prepared_import<'a>(
     bindings.get(id)
 }
 
+fn build_host_text_node(
+    builder: &mut ManagedBuilder<'_, '_>,
+    text: &str,
+    text_id: DataConId,
+) -> Result<ManagedNode, PreparedRuntimeError> {
+    let length = i64::try_from(text.len()).map_err(|_| PreparedRuntimeError::HostMount {
+        detail: "host Text exceeds the worker Int length range".into(),
+    })?;
+    let bytes = builder
+        .bytes(text.as_bytes())
+        .map_err(PreparedRuntimeError::Run)?;
+    let mut zero = [0_u8; 16];
+    zero[..8].copy_from_slice(&0_i64.to_ne_bytes());
+    let mut len = [0_u8; 16];
+    len[..8].copy_from_slice(&length.to_ne_bytes());
+    builder
+        .constructor(
+            text_id,
+            &[
+                ManagedField::Consume(bytes),
+                ManagedField::Scalar(zero),
+                ManagedField::Scalar(len),
+            ],
+        )
+        .map_err(PreparedRuntimeError::Run)
+}
+
 impl PreparedEngine {
     /// Capture the request site's compiler-authenticated graph before its
     /// input travels to another actor's machine session.
@@ -2621,45 +2648,37 @@ impl PreparedEngine {
             .map_err(PreparedRuntimeError::Run)
     }
 
-    /// Stream host UTF-8 text into the worker `Text` representation. A
-    /// qualified constructor identity is required when it is present, so a
-    /// same-named user constructor cannot silently become host text.
-    pub fn build_host_text(
+    /// Build Text with the physical constructor already admitted by HostCarrier.
+    pub(super) fn build_host_text_exact(
         &mut self,
         realm: RealmId,
         text: &str,
-        table: &DataConTable,
+        text_id: DataConId,
     ) -> Result<PreparedHandle, PreparedRuntimeError> {
-        let text_id = table
-            .get_by_qualified_name("Data.Text.Internal.Text")
-            .or_else(|| table.get_by_qualified_name("Data.Text.Text"))
-            .filter(|id| table.get(*id).is_some_and(|con| con.rep_arity == 3))
-            .ok_or_else(|| PreparedRuntimeError::HostMount {
-                detail: "the compiler table does not declare Data.Text.Internal.Text".into(),
-            })?;
-        let length = i64::try_from(text.len()).map_err(|_| PreparedRuntimeError::HostMount {
-            detail: "host Text exceeds the worker Int length range".into(),
-        })?;
         let mut builder = self
             .machine
             .managed_builder()
             .map_err(PreparedRuntimeError::Run)?;
-        let bytes = builder
-            .bytes(text.as_bytes())
+        let root = build_host_text_node(&mut builder, text, text_id)?;
+        builder
+            .finish(realm, root)
+            .map_err(PreparedRuntimeError::Run)
+    }
+
+    pub(super) fn build_host_job_exact(
+        &mut self,
+        realm: RealmId,
+        text: &str,
+        job_id: DataConId,
+        text_id: DataConId,
+    ) -> Result<PreparedHandle, PreparedRuntimeError> {
+        let mut builder = self
+            .machine
+            .managed_builder()
             .map_err(PreparedRuntimeError::Run)?;
-        let mut zero = [0_u8; 16];
-        zero[..8].copy_from_slice(&0_i64.to_ne_bytes());
-        let mut len = [0_u8; 16];
-        len[..8].copy_from_slice(&length.to_ne_bytes());
+        let text = build_host_text_node(&mut builder, text, text_id)?;
         let root = builder
-            .constructor(
-                text_id,
-                &[
-                    ManagedField::Consume(bytes),
-                    ManagedField::Scalar(zero),
-                    ManagedField::Scalar(len),
-                ],
-            )
+            .constructor(job_id, &[ManagedField::Consume(text)])
             .map_err(PreparedRuntimeError::Run)?;
         builder
             .finish(realm, root)
@@ -9139,19 +9158,29 @@ pub(super) mod tests {
         assert_eq!(observed_shape, expected_shape);
         assert!(engine.release(json));
 
-        let mut wrong_text = DataConTable::new();
-        wrong_text
-            .insert_checked(mount_table_row(900, "Text", 3, None))
-            .unwrap();
-        let error = engine
-            .build_host_text(RealmId::ROOT, "must not publish", &wrong_text)
-            .expect_err("wrong Text descriptor is rejected after byte construction");
-        assert!(matches!(error, PreparedRuntimeError::HostMount { .. }));
+        struct FailsAfterBytes;
+        impl tidepool_bridge::sealed::ToHaskellSealed for FailsAfterBytes {}
+        impl tidepool_bridge::ToHaskell for FailsAfterBytes {
+            fn visit(
+                &self,
+                _table: &DataConTable,
+                visitor: &mut dyn tidepool_bridge::HaskellVisitor,
+            ) -> Result<(), tidepool_bridge::BridgeError> {
+                visitor.literal(Literal::LitByteArray(vec![1; 256]))?;
+                Err(tidepool_bridge::BridgeError::UnknownDataConName(
+                    "unresolved".into(),
+                ))
+            }
+        }
+        assert!(matches!(
+            engine.build_host_value(RealmId::ROOT, &FailsAfterBytes, &table),
+            Err(PreparedRuntimeError::HostMount { .. })
+        ));
         assert_eq!(engine.handle_count(), initial_handles);
         assert_eq!(engine.persistent_roots_count(), initial_roots);
 
         let text = engine
-            .build_host_text(RealmId::ROOT, "reusable after rejection", &table)
+            .build_host_text_exact(RealmId::ROOT, "reusable after rejection", DataConId(160))
             .expect("a later Text mount succeeds");
         assert!(matches!(
             engine.observe(program, text).expect("observe mounted Text"),

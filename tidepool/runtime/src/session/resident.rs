@@ -19,7 +19,7 @@ use tidepool_codegen::prepared_program::{
     PreparedOuter, PreparedResult, ProgramId, SourceBinder,
 };
 use tidepool_repr::execution_schema::{
-    CachedHomeOwner, ImportOwner, JsonLayout, PreparedProgram, SymbolIdentity,
+    CachedHomeOwner, ImportOwner, JsonLayout, PreparedProgram, RuntimeRep, SymbolIdentity,
 };
 
 use super::admission::CheckedTurnCompletion;
@@ -156,7 +156,6 @@ pub struct HostBindingType {
     authority: HostBindingAuthority,
     module: &'static str,
     name: &'static str,
-    constructors: &'static [&'static str],
 }
 
 impl HostBindingType {
@@ -168,84 +167,180 @@ impl HostBindingType {
         authority: HostBindingAuthority::JsonValue,
         module: "Tidepool.Aeson.Value",
         name: "Value",
-        constructors: &[],
     };
     pub const TEXT: Self = Self {
         authority: HostBindingAuthority::Text,
         module: "Data.Text.Internal",
         name: "Text",
-        constructors: &["Data.Text.Text"],
     };
     pub const COMMAND_JOB: Self = Self {
         authority: HostBindingAuthority::CommandJob,
         module: "Tidepool.Command.Types",
         name: "Job",
-        constructors: &["Tidepool.Command.Types.Job"],
     };
 }
 
-/// The generation-independent facts a compiled host-binder shape carries,
-/// reused verbatim by every [`HostCarrier`] mount rather than re-derived
-/// from a fresh compile.
-#[derive(Clone, Debug)]
+/// Complete representation evidence needed by one fixed host builder.
+#[derive(Clone, Copy, Debug)]
+enum HostRepresentation {
+    Json(JsonLayout<DataConId>),
+    Text { text: DataConId },
+    Job { job: DataConId, text: DataConId },
+}
+
+impl HostRepresentation {
+    fn host_type(self) -> HostBindingType {
+        match self {
+            Self::Json(_) => HostBindingType::JSON_VALUE,
+            Self::Text { .. } => HostBindingType::TEXT,
+            Self::Job { .. } => HostBindingType::COMMAND_JOB,
+        }
+    }
+
+    fn matches_payload(self, payload: &HostPayload<'_>) -> bool {
+        matches!(
+            (self, payload),
+            (Self::Json(_), HostPayload::Json(_))
+                | (Self::Text { .. }, HostPayload::Text(_))
+                | (Self::Job { .. }, HostPayload::Job(_))
+        )
+    }
+
+    fn build(
+        self,
+        engine: &mut super::prepared::PreparedEngine,
+        realm: RealmId,
+        payload: HostPayload<'_>,
+    ) -> Result<PreparedHandle, PreparedRuntimeError> {
+        match (self, payload) {
+            (Self::Json(layout), HostPayload::Json(value)) => {
+                engine.build_host_json(realm, value, &layout)
+            }
+            (Self::Text { text }, HostPayload::Text(value)) => {
+                engine.build_host_text_exact(realm, value, text)
+            }
+            (Self::Job { job, text }, HostPayload::Job(value)) => {
+                engine.build_host_job_exact(realm, value, job, text)
+            }
+            _ => Err(PreparedRuntimeError::HostMount {
+                detail: "host payload differs from its authenticated carrier".into(),
+            }),
+        }
+    }
+}
+
+#[derive(Debug)]
 struct HostCarrierShape {
     tier: ValueTier,
     type_display: String,
-    root_head: Option<NominalHead>,
-    host_authority: Option<HostBindingAuthority>,
+    root: NominalHead,
 }
 
-/// A compiled host-binder program, built once from a real `(BoundBinder,
-/// CompiledTurn)` and mounted under as many fresh names/generations as the
-/// caller needs with no further GHC compile.
-///
-/// A compiled binder's `table`/`prepared` carry no generation-specific fact
-/// (see [`Self::from_compiled`]); only the binder's `name`, `module`
-/// (`Val.G<gen>`), and `var_id` are per-mount. [`ResidentSession::mount_carrier_in`]
-/// mints those three from `name`/`gen` with
-/// [`tidepool_codegen::prepared_program::session_var_id`] instead of asking
-/// GHC to mint a fresh binder.
+enum HostCarrierOrigin {
+    Reusable(HostCarrierShape),
+    Checked {
+        admission: Arc<super::RuntimeCheckedItemAdmission>,
+        binder: BoundBinder,
+    },
+}
+
+/// Complete representation for one fixed host builder. Checked carriers retain
+/// their sealed compiler reservation and binder. Reusable carriers structurally
+/// validate generic embedding code supplied by their Rust caller.
 pub struct HostCarrier {
-    table: DataConTable,
-    prepared: PreparedProgram,
-    shape: HostCarrierShape,
-    host_type: HostBindingType,
-    checked: bool,
+    code: TurnCode<'static>,
+    representation: HostRepresentation,
+    origin: HostCarrierOrigin,
 }
 
 impl HostCarrier {
-    /// Build a carrier from one real compiled `(BoundBinder, CompiledTurn)`
-    /// (any generation — its own module/var_id are discarded; only the
-    /// binder's shape and the turn's table/program are kept). `host_type`
-    /// is the authenticated host surface this binder was compiled against
-    /// ([`Self::mount_carrier_in`]'s validation target).
-    #[must_use]
+    /// Validate a reusable representation from the generic embedding caller's
+    /// code. This supplies no checked authority: a checked compilation cannot
+    /// be converted into a fresh-name mount or stripped of its reservation.
     pub fn from_compiled(
         binder: &BoundBinder,
         code: TurnCode<'_>,
         host_type: HostBindingType,
-    ) -> Self {
-        let checked = is_checked_turn(&code);
-        HostCarrier {
-            table: code.table.into_owned(),
-            prepared: code.prepared.into_owned(),
-            shape: HostCarrierShape {
+    ) -> Result<Self, ResidentError> {
+        refuse_checked_turn(&code)?;
+        let (root, representation) = host_representation(binder, &code, host_type)?;
+        Ok(Self {
+            code: own_host_code(code),
+            representation,
+            origin: HostCarrierOrigin::Reusable(HostCarrierShape {
                 tier: binder.tier,
                 type_display: binder.type_display.clone(),
-                root_head: binder.root_head.clone(),
-                host_authority: binder.host_authority,
-            },
-            host_type,
-            checked,
+                root,
+            }),
+        })
+    }
+
+    /// Bind complete representation evidence to the original checked item.
+    pub fn from_checked(
+        admission: Arc<super::RuntimeCheckedItemAdmission>,
+        binder: BoundBinder,
+        code: TurnCode<'_>,
+        expected: HostBindingType,
+    ) -> Result<Self, ResidentError> {
+        let generation = admission.generation();
+        if admission.prefix().admission().host_carrier() != Some((binder.name.as_str(), expected))
+            || binder.module != SessionModule::val(generation).module_name()
+            || !code.sites.is_empty()
+        {
+            return Err(ResidentError::UnsupportedCheckedTurn);
+        }
+        let certification = code
+            .certification
+            .as_ref()
+            .as_ref()
+            .ok_or(ResidentError::UnsupportedCheckedTurn)?;
+        let execution = certification
+            .checked_execution()
+            .ok_or(ResidentError::UnsupportedCheckedTurn)?;
+        if certification
+            .checked_prefix()
+            .is_none_or(|prefix| !Arc::ptr_eq(prefix, admission.prefix()))
+            || execution.item() != admission.item()
+        {
+            return Err(ResidentError::UnsupportedCheckedTurn);
+        }
+        certification
+            .validate_checked_table(&code.table)
+            .map_err(SessionError::Compile)?;
+        certification
+            .validate_checked_bind(&code.prepared, generation.0, std::slice::from_ref(&binder))
+            .map_err(SessionError::Compile)?;
+        let interface = execution
+            .value_interface_certificate()
+            .ok_or(ResidentError::UnsupportedCheckedTurn)?;
+        if interface.owner() != SessionModule::val(generation) {
+            return Err(ResidentError::UnsupportedCheckedTurn);
+        }
+        let (_, representation) = host_representation(&binder, &code, expected)?;
+        Ok(Self {
+            code: own_host_code(code),
+            representation,
+            origin: HostCarrierOrigin::Checked { admission, binder },
+        })
+    }
+
+    /// Original checked ownership; no caller can substitute another binder.
+    pub fn checked_binding(
+        &self,
+    ) -> Result<(&Arc<super::RuntimeCheckedItemAdmission>, &BoundBinder), ResidentError> {
+        match &self.origin {
+            HostCarrierOrigin::Checked { admission, binder } => Ok((admission, binder)),
+            HostCarrierOrigin::Reusable(_) => Err(ResidentError::UnsupportedCheckedTurn),
         }
     }
 
-    fn code(&self) -> TurnCode<'_> {
+    /// Borrow the immutable compiler proof without changing carrier ownership.
+    pub fn code(&self) -> TurnCode<'_> {
         TurnCode {
-            table: std::borrow::Cow::Borrowed(&self.table),
-            sites: std::borrow::Cow::Borrowed(&[]),
-            prepared: std::borrow::Cow::Borrowed(&self.prepared),
-            certification: std::borrow::Cow::Owned(None),
+            table: std::borrow::Cow::Borrowed(self.code.table.as_ref()),
+            sites: std::borrow::Cow::Borrowed(self.code.sites.as_ref()),
+            prepared: std::borrow::Cow::Borrowed(self.code.prepared.as_ref()),
+            certification: std::borrow::Cow::Borrowed(self.code.certification.as_ref()),
         }
     }
 
@@ -285,20 +380,18 @@ impl HostCarrier {
              {{-# NOINLINE {binder_name} #-}}\n\
              {binder_name} :: TidepoolCarrierType.{ty_name}\n\
              {binder_name} = TidepoolCarrierMagic.lazy {binder_name}\n",
-            ty_module = self.host_type.module,
-            ty_name = self.host_type.name,
+            ty_module = self.representation.host_type().module,
+            ty_name = self.representation.host_type().name,
         )
     }
 }
 
-/// One host value to mount through a [`HostCarrier`]. Mirrors the payload
-/// shapes [`ResidentSession::mount_json_binding_in`],
-/// [`ResidentSession::mount_text_binding_in`], and
-/// [`ResidentSession::mount_typed_binding_in`] already accept.
+/// Fixed host values accepted by a [`HostCarrier`]. A Job payload is its
+/// session ID; the carrier supplies the exact Job and Text constructors.
 pub enum HostPayload<'a> {
     Json(&'a serde_json::Value),
     Text(&'a str),
-    Job(&'a dyn tidepool_bridge::ToHaskell),
+    Job(&'a str),
 }
 
 fn json_runtime_layout_optional(prepared: &PreparedProgram) -> Option<JsonLayout<DataConId>> {
@@ -321,6 +414,176 @@ fn json_runtime_layout(prepared: &PreparedProgram) -> Result<JsonLayout<DataConI
             "compiled host mount has no authenticated JSON layout".into(),
         )))
     })
+}
+
+fn own_host_code(code: TurnCode<'_>) -> TurnCode<'static> {
+    TurnCode {
+        table: std::borrow::Cow::Owned(code.table.into_owned()),
+        sites: std::borrow::Cow::Owned(code.sites.into_owned()),
+        prepared: std::borrow::Cow::Owned(code.prepared.into_owned()),
+        certification: std::borrow::Cow::Owned(code.certification.into_owned()),
+    }
+}
+
+fn host_mount_failure(detail: impl Into<String>) -> ResidentError {
+    ResidentError::Run(RuntimeError::Jit(EffectError::Handler(detail.into())))
+}
+
+fn exact_host_constructor(
+    code: &TurnCode<'_>,
+    root: &NominalHead,
+    occurrence: &str,
+    fields: &[RuntimeRep],
+) -> Result<DataConId, ResidentError> {
+    let mut rows = code.prepared.constructors().iter().filter(|row| {
+        row.family.unit == root.unit
+            && row.family.module == root.module
+            && row.family.namespace == "type"
+            && row.family.occurrence == root.name
+            && row.family.record_parent.is_none()
+            && row.identity.unit == root.unit
+            && row.identity.module == root.module
+            && row.identity.namespace == "constructor"
+            && row.identity.occurrence == occurrence
+            && row.identity.record_parent.is_none()
+    });
+    let row = rows.next().ok_or_else(|| {
+        host_mount_failure(format!(
+            "host mount lacks exact constructor {}:{}:{occurrence}",
+            root.unit, root.module
+        ))
+    })?;
+    if rows.any(|other| other != row)
+        || row.result_rep != RuntimeRep::LiftedRef
+        || row.field_reps != fields
+        || row.tag != 1
+        || row.family_size != 1
+        || code
+            .table
+            .get(row.host_id)
+            .is_none_or(|table| table.rep_arity as usize != fields.len() || table.tag != row.tag)
+    {
+        return Err(host_mount_failure(
+            "host constructor differs from its authenticated table",
+        ));
+    }
+    Ok(row.host_id)
+}
+
+// The sealed target retains the jointly admitted Job/Text representation. The
+// compiler verifies Job's field against its selected Text owner before seeding
+// these rows; the wire carries physical fields, not their boxed nominal types.
+// A second same-spelling Text owner makes this bundle ambiguous and is refused.
+fn authenticated_text_constructor(code: &TurnCode<'_>) -> Result<DataConId, ResidentError> {
+    let mut roots = code.prepared.constructors().iter().filter(|row| {
+        !row.family.unit.is_empty()
+            && row.family.module == "Data.Text.Internal"
+            && row.family.namespace == "type"
+            && row.family.occurrence == "Text"
+            && row.family.record_parent.is_none()
+    });
+    let row = roots
+        .next()
+        .ok_or_else(|| host_mount_failure("host mount has no authenticated Text representation"))?;
+    if roots.any(|other| other.family != row.family) {
+        return Err(host_mount_failure("host mount has conflicting Text owners"));
+    }
+    exact_host_constructor(
+        code,
+        &NominalHead {
+            unit: row.family.unit.clone(),
+            module: row.family.module.clone(),
+            name: row.family.occurrence.clone(),
+        },
+        "Text",
+        &[
+            RuntimeRep::UnliftedRef,
+            RuntimeRep::Int(64),
+            RuntimeRep::Int(64),
+        ],
+    )
+}
+
+fn host_representation(
+    binder: &BoundBinder,
+    code: &TurnCode<'_>,
+    expected: HostBindingType,
+) -> Result<(NominalHead, HostRepresentation), ResidentError> {
+    require_host_binding_authority(binder, expected)?;
+    let root = binder
+        .root_head
+        .as_ref()
+        .ok_or_else(|| host_mount_failure("compiled host binder lacks its nominal root"))?;
+    if root.unit.is_empty() || root.module != expected.module || root.name != expected.name {
+        return Err(host_mount_failure(
+            "compiled host binder differs from its authenticated nominal root",
+        ));
+    }
+    let representation = match expected.authority {
+        HostBindingAuthority::JsonValue => {
+            let layout = json_runtime_layout(&code.prepared)?;
+            let constructors = code.prepared.constructors();
+            (*code
+                .prepared
+                .json_layout()
+                .ok_or_else(|| host_mount_failure("host JSON layout missing"))?)
+            .try_map(|id| {
+                let row = constructors
+                    .get(id.0 as usize)
+                    .ok_or_else(|| host_mount_failure("host JSON layout constructor missing"))?;
+                if code.table.get(row.host_id).is_none_or(|table| {
+                    table.rep_arity as usize != row.field_reps.len() || table.tag != row.tag
+                }) {
+                    return Err(host_mount_failure(
+                        "host JSON layout differs from its compiler table",
+                    ));
+                }
+                Ok(())
+            })?;
+            for id in [
+                layout.object,
+                layout.array,
+                layout.string,
+                layout.number,
+                layout.bool_,
+                layout.null,
+            ] {
+                if constructors
+                    .iter()
+                    .find(|row| row.host_id == id)
+                    .is_none_or(|row| {
+                        row.family.unit != root.unit
+                            || row.family.module != root.module
+                            || row.family.namespace != "type"
+                            || row.family.occurrence != root.name
+                            || row.family.record_parent.is_some()
+                    })
+                {
+                    return Err(host_mount_failure(
+                        "host JSON layout disagrees with its original nominal root",
+                    ));
+                }
+            }
+            HostRepresentation::Json(layout)
+        }
+        HostBindingAuthority::Text => HostRepresentation::Text {
+            text: exact_host_constructor(
+                code,
+                root,
+                "Text",
+                &[
+                    RuntimeRep::UnliftedRef,
+                    RuntimeRep::Int(64),
+                    RuntimeRep::Int(64),
+                ],
+            )?,
+        },
+        HostBindingAuthority::CommandJob => HostRepresentation::Job {
+            job: exact_host_constructor(code, root, "Job", &[RuntimeRep::LiftedRef])?,
+            text: authenticated_text_constructor(code)?,
+        },
+    };
+    Ok((root.clone(), representation))
 }
 
 /// Require the compiler-issued sidecar before any host mount can merge a
@@ -3996,16 +4259,15 @@ where
     ) -> Result<(), ResidentError> {
         refuse_checked_turn(&code)?;
         self.settle_dropped_custody();
-        self.validate_compiled_mount_target(
+        let representation = self.validate_compiled_mount_target(
             scope,
             binder,
             gen,
             &code,
             HostBindingType::JSON_VALUE,
         )?;
-        let layout = json_runtime_layout(&code.prepared)?;
         self.mount_host_value_in(scope, binder, gen, code, |engine, realm, _| {
-            engine.build_host_json(realm, value, &layout)
+            representation.build(engine, realm, HostPayload::Json(value))
         })
     }
 
@@ -4023,10 +4285,10 @@ where
     ) -> Result<(), ResidentError> {
         refuse_checked_turn(&code)?;
         self.settle_dropped_custody();
-        self.validate_compiled_mount_target(scope, binder, gen, &code, HostBindingType::TEXT)?;
-        self.validate_text_runtime_constructor(&code)?;
-        self.mount_host_value_in(scope, binder, gen, code, |engine, realm, table| {
-            engine.build_host_text(realm, text, table)
+        let representation =
+            self.validate_compiled_mount_target(scope, binder, gen, &code, HostBindingType::TEXT)?;
+        self.mount_host_value_in(scope, binder, gen, code, |engine, realm, _| {
+            representation.build(engine, realm, HostPayload::Text(text))
         })
     }
 
@@ -4056,82 +4318,46 @@ where
     /// Fill the sole original checked host binder without entering its placeholder.
     pub fn mount_checked_host_input(
         &mut self,
-        admission: Arc<super::RuntimeCheckedItemAdmission>,
-        binder: &BoundBinder,
-        code: TurnCode<'_>,
+        carrier: &HostCarrier,
         payload: HostPayload<'_>,
     ) -> Result<super::PendingHostValueWrite, ResidentError> {
+        let (admission, binder) = carrier.checked_binding()?;
+        if !carrier.representation.matches_payload(&payload) {
+            return Err(ResidentError::UnsupportedCheckedTurn);
+        }
         self.settle_dropped_custody();
         let scope = admission.prefix().admission().visibility().scope;
         let generation = admission.generation();
-        let expected = match &payload {
-            HostPayload::Json(_) => HostBindingType::JSON_VALUE,
-            HostPayload::Text(_) => HostBindingType::TEXT,
-            HostPayload::Job(_) => HostBindingType::COMMAND_JOB,
-        };
-        if admission.prefix().admission().host_carrier() != Some((binder.name.as_str(), expected))
-            || self.run_context.lexical_scope != scope
-        {
+        if self.run_context.lexical_scope != scope {
             return Err(ResidentError::UnsupportedCheckedTurn);
         }
-        let certification = code
+        self.validate_host_mount_geometry(scope, binder, generation)?;
+        let code = carrier.code();
+        let execution = code
             .certification
             .as_ref()
             .as_ref()
+            .and_then(|certification| certification.checked_execution())
             .ok_or(ResidentError::UnsupportedCheckedTurn)?;
-        let execution = certification
-            .checked_execution()
-            .ok_or(ResidentError::UnsupportedCheckedTurn)?;
-        if certification
-            .checked_prefix()
-            .is_none_or(|prefix| !Arc::ptr_eq(prefix, admission.prefix()))
-            || execution.item() != admission.item()
-            || !code.sites.is_empty()
-        {
-            return Err(ResidentError::UnsupportedCheckedTurn);
-        }
-        certification
-            .validate_checked_table(&code.table)
-            .map_err(SessionError::Compile)?;
-        certification
-            .validate_checked_bind(&code.prepared, generation.0, std::slice::from_ref(binder))
-            .map_err(SessionError::Compile)?;
         let interface = execution
             .value_interface_certificate()
             .ok_or(ResidentError::UnsupportedCheckedTurn)?;
-        if interface.owner() != SessionModule::val(generation) {
-            return Err(ResidentError::UnsupportedCheckedTurn);
-        }
-        self.validate_compiled_mount_target(scope, binder, generation, &code, expected)?;
-        let layout = match &payload {
-            HostPayload::Json(_) => Some(json_runtime_layout(&code.prepared)?),
-            HostPayload::Text(_) => {
-                self.validate_text_runtime_constructor(&code)?;
-                None
-            }
-            HostPayload::Job(_) => None,
-        };
         let session_root = admission.snapshot().view().session_root().to_path_buf();
         self.state.consume_host_carrier_reservation(
-            &admission,
+            admission,
             execution,
             &binder.name,
-            expected,
+            carrier.representation.host_type(),
         )?;
         let execution = execution.clone();
+        let representation = carrier.representation;
         self.mount_host_value_with_interface_in(
             scope,
             binder,
             generation,
-            code,
+            carrier.code(),
             ValueInterfaceSource::Checked,
-            move |engine, realm, table| match payload {
-                HostPayload::Json(value) => {
-                    engine.build_host_json(realm, value, &layout.expect("JSON layout validated"))
-                }
-                HostPayload::Text(value) => engine.build_host_text(realm, value, table),
-                HostPayload::Job(value) => engine.build_host_value(realm, value, table),
-            },
+            move |engine, realm, _| representation.build(engine, realm, payload),
         )?;
         if let Err(error) = self.state.retain_checked_value_interface(interface) {
             self.retire_host_binding_owner(&session_root, binder);
@@ -4176,9 +4402,9 @@ where
     /// `Val.G<gen>` source is a hand-written stub written at
     /// `<session_root>/Tidepool/Session/Val/G<gen>.hs` (an ordinary home
     /// module a later turn's downsweep finds on the include path -- never
-    /// injected via `--inject-val`, since it has no `.hi`), and it is
-    /// validated exactly as a compiler-issued binder
-    /// ([`Self::validate_compiled_mount_target`]).
+    /// injected via `--inject-val`, since it has no `.hi`). The reusable
+    /// carrier already retains validated representation evidence; this mount
+    /// validates the fresh binding slot and payload kind.
     ///
     /// `gen`'s module is recorded as a stub generation
     /// ([`super::persistent::PersistentSession::mark_stub_generation`]) so
@@ -4193,7 +4419,10 @@ where
         carrier: &HostCarrier,
         payload: HostPayload<'_>,
     ) -> Result<BoundBinder, ResidentError> {
-        if carrier.checked {
+        let HostCarrierOrigin::Reusable(shape) = &carrier.origin else {
+            return Err(ResidentError::UnsupportedCheckedTurn);
+        };
+        if !carrier.representation.matches_payload(&payload) {
             return Err(ResidentError::UnsupportedCheckedTurn);
         }
         self.settle_dropped_custody();
@@ -4206,21 +4435,12 @@ where
             name: name.to_string(),
             var_id: session_var_id(&module, name),
             module: module.clone(),
-            tier: carrier.shape.tier,
-            type_display: carrier.shape.type_display.clone(),
-            root_head: carrier.shape.root_head.clone(),
-            host_authority: carrier.shape.host_authority,
+            tier: shape.tier,
+            type_display: shape.type_display.clone(),
+            root_head: Some(shape.root.clone()),
+            host_authority: Some(carrier.representation.host_type().authority),
         };
-        self.validate_compiled_mount_target(
-            scope,
-            &binder,
-            gen,
-            &carrier.code(),
-            carrier.host_type,
-        )?;
-        if carrier.host_type == HostBindingType::TEXT {
-            self.validate_text_runtime_constructor(&carrier.code())?;
-        }
+        self.validate_host_mount_geometry(scope, &binder, gen)?;
 
         let stub_source = carrier.stub_source(&module, name);
         let stub_path = session_root.join(SessionModule::val(gen).relative_hs_path());
@@ -4245,27 +4465,11 @@ where
         // leave a stub source on disk with no binding to authorize it --
         // that source has never been marked a stub generation, so it would
         // sit on the include path as an ordinary, undocumented home module.
-        let mount_result = match payload {
-            HostPayload::Json(value) => json_runtime_layout(&carrier.prepared).and_then(|layout| {
-                self.mount_host_value_in(scope, &binder, gen, carrier.code(), |engine, realm, _| {
-                    engine.build_host_json(realm, value, &layout)
-                })
-            }),
-            HostPayload::Text(text) => self.mount_host_value_in(
-                scope,
-                &binder,
-                gen,
-                carrier.code(),
-                |engine, realm, table| engine.build_host_text(realm, text, table),
-            ),
-            HostPayload::Job(value) => self.mount_host_value_in(
-                scope,
-                &binder,
-                gen,
-                carrier.code(),
-                |engine, realm, table| engine.build_host_value(realm, value, table),
-            ),
-        };
+        let representation = carrier.representation;
+        let mount_result =
+            self.mount_host_value_in(scope, &binder, gen, carrier.code(), |engine, realm, _| {
+                representation.build(engine, realm, payload)
+            });
         if let Err(error) = mount_result {
             std::fs::remove_file(&stub_path).ok();
             return Err(error);
@@ -4390,6 +4594,25 @@ where
             })
     }
 
+    fn validate_host_mount_geometry(
+        &self,
+        scope: ScopeId,
+        binder: &BoundBinder,
+        generation: Generation,
+    ) -> Result<(), ResidentError> {
+        if !self.state.scope_tree().is_live(scope) {
+            return Err(SessionError::DeadScope(scope).into());
+        }
+        self.state
+            .validate_new_binding_ids([SessionVarId::from_extract(binder.var_id)])?;
+        if binder.module != SessionModule::val(generation).module_name() {
+            return Err(host_mount_failure(
+                "host binder differs from its mount generation",
+            ));
+        }
+        Ok(())
+    }
+
     fn validate_compiled_mount_target(
         &self,
         scope: ScopeId,
@@ -4397,174 +4620,10 @@ where
         gen: Generation,
         code: &TurnCode<'_>,
         expected: HostBindingType,
-    ) -> Result<(), ResidentError> {
-        if !self.state.scope_tree().is_live(scope) {
-            return Err(SessionError::DeadScope(scope).into());
-        }
-        self.state
-            .validate_new_binding_ids([SessionVarId::from_extract(binder.var_id)])?;
-        let expected_module = SessionModule::val(gen).module_name();
-        if binder.module != expected_module {
-            return Err(ResidentError::Run(RuntimeError::Jit(EffectError::Handler(
-                format!(
-                    "compiled binder `{}` belongs to {}, expected {expected_module}",
-                    binder.name, binder.module
-                ),
-            ))));
-        }
-        require_host_binding_authority(binder, expected)?;
-        let Some(root) = &binder.root_head else {
-            return Err(ResidentError::Run(RuntimeError::Jit(EffectError::Handler(
-                format!(
-                    "compiled binder `{}` has no nominal root type evidence",
-                    binder.name
-                ),
-            ))));
-        };
-        if root.unit.is_empty() || root.module != expected.module || root.name != expected.name {
-            return Err(ResidentError::Run(RuntimeError::Jit(EffectError::Handler(
-                format!(
-                    "compiled binder `{}` has root {}:{}:{}; host mount requires {}.{}",
-                    binder.name, root.unit, root.module, root.name, expected.module, expected.name,
-                ),
-            ))));
-        }
-        if expected == HostBindingType::JSON_VALUE {
-            return self.validate_json_mount_layout(&code.prepared, root, binder);
-        }
-        for qualified in expected.constructors {
-            let id = self
-                .host_constructor_id(&code.table, expected, qualified)
-                .ok_or_else(|| {
-                    ResidentError::Run(RuntimeError::Jit(EffectError::Handler(format!(
-                        "host mount requires compiler constructor {qualified}"
-                    ))))
-                })?;
-            let family = code
-                .prepared
-                .constructors()
-                .iter()
-                .find(|declaration| declaration.host_id == id)
-                .map(|declaration| &declaration.family)
-                .ok_or_else(|| {
-                    ResidentError::Run(RuntimeError::Jit(EffectError::Handler(format!(
-                        "host mount constructor {qualified} has no prepared family identity"
-                    ))))
-                })?;
-            if family.unit != root.unit
-                || family.module != root.module
-                || family.namespace != "type"
-                || family.occurrence != root.name
-                || family.record_parent.is_some()
-            {
-                return Err(ResidentError::Run(RuntimeError::Jit(EffectError::Handler(
-                    format!(
-                        "compiled binder `{}` root {}:{}:{} does not match constructor family {}:{}:{}:{}",
-                        binder.name,
-                        root.unit,
-                        root.module,
-                        root.name,
-                        family.unit,
-                        family.module,
-                        family.namespace,
-                        family.occurrence,
-                    ),
-                ))));
-            }
-        }
-        Ok(())
-    }
-
-    fn validate_json_mount_layout(
-        &self,
-        prepared: &PreparedProgram,
-        root: &NominalHead,
-        binder: &BoundBinder,
-    ) -> Result<(), ResidentError> {
-        let layout = json_runtime_layout(prepared)?;
-        let check = |host_id: DataConId| {
-            let family = prepared
-                .constructors()
-                .iter()
-                .find(|declaration| declaration.host_id == host_id)
-                .map(|declaration| &declaration.family)
-                .ok_or_else(|| {
-                    ResidentError::Run(RuntimeError::Jit(EffectError::Handler(
-                        "authenticated JSON layout names no prepared constructor".into(),
-                    )))
-                })?;
-            if family.unit != root.unit
-                || family.module != root.module
-                || family.namespace != "type"
-                || family.occurrence != root.name
-                || family.record_parent.is_some()
-            {
-                return Err(ResidentError::Run(RuntimeError::Jit(EffectError::Handler(
-                    format!(
-                        "compiled binder `{}` root evidence disagrees with authenticated JSON layout",
-                        binder.name,
-                    ),
-                ))));
-            }
-            Ok(())
-        };
-        check(layout.object)?;
-        check(layout.array)?;
-        check(layout.string)?;
-        check(layout.number)?;
-        check(layout.bool_)?;
-        check(layout.null)
-    }
-
-    /// `Text` is authenticated by both its compiler table id and prepared
-    /// family identity before a direct host mount allocates it.
-    fn validate_text_runtime_constructor(&self, code: &TurnCode<'_>) -> Result<(), ResidentError> {
-        let qualified = "Data.Text.Text";
-        let id = self
-            .host_constructor_id(&code.table, HostBindingType::TEXT, qualified)
-            .ok_or_else(|| {
-                ResidentError::Run(RuntimeError::Jit(EffectError::Handler(format!(
-                    "host Text mount requires compiler constructor {qualified}"
-                ))))
-            })?;
-        let family = code
-            .prepared
-            .constructors()
-            .iter()
-            .find(|declaration| declaration.host_id == id)
-            .map(|declaration| &declaration.family)
-            .ok_or_else(|| {
-                ResidentError::Run(RuntimeError::Jit(EffectError::Handler(
-                    "host Text constructor has no prepared family identity".into(),
-                )))
-            })?;
-        if family.unit.is_empty()
-            || family.module != "Data.Text.Internal"
-            || family.namespace != "type"
-            || family.occurrence != "Text"
-            || family.record_parent.is_some()
-        {
-            return Err(ResidentError::Run(RuntimeError::Jit(EffectError::Handler(
-                format!(
-                    "host Text constructor has unexpected family {}:{}:{}:{}",
-                    family.unit, family.module, family.namespace, family.occurrence,
-                ),
-            ))));
-        }
-        Ok(())
-    }
-
-    fn host_constructor_id(
-        &self,
-        table: &DataConTable,
-        expected: HostBindingType,
-        qualified: &str,
-    ) -> Option<DataConId> {
-        table.get_by_qualified_name(qualified).or_else(|| {
-            (expected == HostBindingType::TEXT && qualified == "Data.Text.Text")
-                .then(|| table.get_by_qualified_name("Data.Text.Internal.Text"))
-                .flatten()
-        })
+    ) -> Result<HostRepresentation, ResidentError> {
+        self.validate_host_mount_geometry(scope, binder, gen)?;
+        let (_, representation) = host_representation(binder, code, expected)?;
+        Ok(representation)
     }
 
     /// Install, build, bind, and unpin one payload-independent interface as
@@ -8800,11 +8859,11 @@ mod authored_publication_tests {
         let before_prefix = prefix.snapshot();
 
         assert!(matches!(
-            session.mount_checked_host_input(
+            HostCarrier::from_checked(
                 item_admission,
-                page,
+                page.clone(),
                 code.clone(),
-                HostPayload::Json(&serde_json::Value::Null)
+                HostBindingType::JSON_VALUE
             ),
             Err(ResidentError::UnsupportedCheckedTurn)
         ));
@@ -8840,16 +8899,8 @@ mod authored_publication_tests {
             )),
             Err(ResidentError::UnsupportedCheckedTurn)
         ));
-        let carrier = HostCarrier::from_compiled(page, code.clone(), HostBindingType::TEXT);
         assert!(matches!(
-            session.mount_carrier_in(
-                root.path(),
-                scope,
-                "freshCarrier",
-                generation,
-                &carrier,
-                HostPayload::Text("host value")
-            ),
+            HostCarrier::from_compiled(page, code.clone(), HostBindingType::TEXT),
             Err(ResidentError::UnsupportedCheckedTurn)
         ));
         assert!(
