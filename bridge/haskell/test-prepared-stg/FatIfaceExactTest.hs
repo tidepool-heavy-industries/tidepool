@@ -1,4 +1,6 @@
-module Main (main) where
+module Main (main, tests) where
+
+import Tidepool.Test.Runner (TestTree, runTests, testCase, testGroup)
 
 import Control.Exception (finally)
 import Control.Monad (unless)
@@ -32,7 +34,14 @@ assert :: Bool -> String -> IO ()
 assert ok message = unless ok (ioError (userError message))
 
 main :: IO ()
-main = do
+main = runTests tests
+
+tests :: TestTree
+tests = testGroup "test-prepared-stg"
+  [testCase "exact interface cache lifecycle" scenario]
+
+scenario :: IO ()
+scenario = do
   tmp <- getTemporaryDirectory
   withTempDirectory tmp $ \work -> do
     let fixtures = "test-prepared-stg" </> "fat-iface-fixtures"

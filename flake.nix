@@ -226,7 +226,7 @@
                 });
           };
         };
-        ghcEnv = hsPkgs.ghcWithPackages (
+        ghcPackages =
           ps: with ps; [
             freer-simple
             lens
@@ -238,7 +238,11 @@
             safe
             random
             splitmix
-          ]
+          ];
+        ghcEnv = hsPkgs.ghcWithPackages ghcPackages;
+        # Test providers stay outside the deployed worker closure.
+        ghcTestEnv = hsPkgs.ghcWithPackages (ps:
+          ghcPackages ps ++ [ ps.tasty ps.tasty-hunit ps.tasty-quickcheck ps.QuickCheck ]
         );
         embeddedWebAssets = harnessPkgs.buildNpmPackage {
           pname = "exomonad-harness-web";
@@ -265,7 +269,7 @@
           ];
           buildInputs = [
             rust
-            ghcEnv
+            ghcTestEnv
             pkgs.cabal-install
             pkgs.openssl
             pkgs.jq
@@ -517,6 +521,10 @@
         packages.buck-rust = rust;
         packages.buck-buck2 = buck2Release;
         packages.buck-ghc = ghcEnv;
+        packages.buck-test-ghc = ghcTestEnv;
+        packages.buck-haskell-test-closure = pkgs.closureInfo {
+          rootPaths = [ ghcTestEnv ];
+        };
         packages.buck-cc = pkgs.stdenv.cc;
         packages.buck-binutils = pkgs.binutils;
         packages.buck-node = pkgs.nodejs_24;

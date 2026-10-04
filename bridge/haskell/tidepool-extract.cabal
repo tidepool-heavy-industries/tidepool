@@ -145,7 +145,13 @@ library assignment-internal
   default-extensions: OverloadedStrings
   ghc-options:      -Wall
 
+common tasty-tests
+  hs-source-dirs:   test-support
+  other-modules:    Tidepool.Test.Runner
+  build-depends:    tasty >= 1.5 && < 1.6, tasty-hunit
+
 test-suite cell-splitter-test
+  import:           tasty-tests
   type:             exitcode-stdio-1.0
   main-is:          CellSplitterTest.hs
   hs-source-dirs:   test-cell-splitter
@@ -175,6 +181,7 @@ test-suite cell-splitter-test
   ghc-options:      -Wall -rtsopts
 
 test-suite declaration-join-test
+  import:           tasty-tests
   type:             exitcode-stdio-1.0
   main-is:          DeclarationJoinTest.hs
   hs-source-dirs:   test-cell-splitter
@@ -193,6 +200,7 @@ test-suite declaration-join-test
   ghc-options:      -Wall
 
 test-suite declaration-join-proof
+  import:           tasty-tests
   type:             exitcode-stdio-1.0
   main-is:          DeclarationJoinProof.hs
   hs-source-dirs:   test-cell-splitter
@@ -206,6 +214,7 @@ test-suite declaration-join-proof
   ghc-options:      -Wall
 
 test-suite display-tree-test
+  import:           tasty-tests
   type:             exitcode-stdio-1.0
   main-is:          DisplayTreeTest.hs
   hs-source-dirs:   lib test-display-tree
@@ -218,6 +227,7 @@ test-suite display-tree-test
   ghc-options:      -Wall
 
 test-suite introspection-search-test
+  import:           tasty-tests
   type:             exitcode-stdio-1.0
   main-is:          IntrospectionSearchTest.hs
   hs-source-dirs:   test
@@ -261,6 +271,7 @@ executable tidepool-extract-bin
   ghc-options:      -Wall -with-rtsopts=-T
 
 test-suite execution-inventory
+  import:           tasty-tests
   type:             exitcode-stdio-1.0
   main-is:          ExecutionInventoryTest.hs
   hs-source-dirs:   test-execution-inventory
@@ -272,6 +283,7 @@ test-suite execution-inventory
   ghc-options:      -Wall
 
 test-suite execution-schema-encode
+  import:           tasty-tests
   type:             exitcode-stdio-1.0
   main-is:          Main.hs
   hs-source-dirs:   test-execution-schema-encode
@@ -287,6 +299,7 @@ test-suite execution-schema-encode
   ghc-options:      -Wall
 
 test-suite execution-schema-projection
+  import:           tasty-tests
   type:             exitcode-stdio-1.0
   main-is:          ExecutionProjectionProbe.hs
   hs-source-dirs:   test-prepared-stg
@@ -310,6 +323,7 @@ test-suite execution-schema-projection
   ghc-options:      -Wall
 
 test-suite execution-corpus-projection
+  import:           tasty-tests
   type:             exitcode-stdio-1.0
   main-is:          ExecutionCorpusProbe.hs
   hs-source-dirs:   test-execution-corpus
@@ -328,6 +342,7 @@ test-suite execution-corpus-projection
   ghc-options:      -Wall
 
 test-suite planned-declaration-test
+  import:           tasty-tests
   type:             exitcode-stdio-1.0
   main-is:          Main.hs
   hs-source-dirs:   test-planned-declaration
@@ -345,6 +360,7 @@ test-suite planned-declaration-test
   ghc-options: -Wall
 
 test-suite source-boot-product-reuse-test
+  import:           tasty-tests
   type:             exitcode-stdio-1.0
   main-is:          Main.hs
   hs-source-dirs:   test-source-boot
@@ -372,6 +388,7 @@ test-suite source-boot-product-reuse-test
   ghc-options: -Wall -rtsopts
 
 test-suite prepared-stg-pipeline-test
+  import:           tasty-tests
   type:             exitcode-stdio-1.0
   main-is:          Main.hs
   hs-source-dirs:   test-prepared-stg
@@ -395,6 +412,7 @@ test-suite prepared-stg-pipeline-test
   default-extensions: OverloadedStrings
 
 test-suite compile-input-policy-test
+  import:           tasty-tests
   type:             exitcode-stdio-1.0
   main-is:          Main.hs
   hs-source-dirs:   test-compile-input-policy
@@ -419,6 +437,7 @@ test-suite compile-input-policy-test
 -- first time this stanza is built.
 -- Run: cabal test swarm-spec-test  (needs the nix with-packages GHC on PATH).
 test-suite swarm-spec-test
+  import:           tasty-tests
   type:             exitcode-stdio-1.0
   main-is:          SwarmSpecTest.hs
   hs-source-dirs:   lib, test-swarm
@@ -427,6 +446,7 @@ test-suite swarm-spec-test
     SwarmSpec
   build-depends:
     base       >= 4.20 && < 5,
+    tasty-quickcheck,
     QuickCheck >= 2.14 && < 2.16
   default-language: GHC2024
   default-extensions:
@@ -437,6 +457,7 @@ test-suite swarm-spec-test
   ghc-options:      -Wall
 
 test-suite fat-iface-exact-test
+  import:           tasty-tests
   type:             exitcode-stdio-1.0
   main-is:          FatIfaceExactTest.hs
   hs-source-dirs:   test-prepared-stg
@@ -453,6 +474,7 @@ test-suite fat-iface-exact-test
 -- Wave-5 B2: recover one real package body from an -O0 caller, prepare it in
 -- its defining interface context, and project it together with the caller.
 test-suite recovered-body-test
+  import:           tasty-tests
   type:             exitcode-stdio-1.0
   main-is:          RecoveredBodyTest.hs
   hs-source-dirs:   test-prepared-stg
@@ -468,6 +490,7 @@ test-suite recovered-body-test
   ghc-options:      -Wall
 
 test-suite prepared-recovery-test
+  import:           tasty-tests
   type:             exitcode-stdio-1.0
   main-is:          PreparedRecoveryTest.hs
   hs-source-dirs:   test-prepared-stg
@@ -487,6 +510,7 @@ test-suite prepared-recovery-test
 -- optional pure-validation measurements: cabal run family-consistency-test
 -- -- --benchmark +RTS -T. Compiler startup/loading is outside the measurement.
 test-suite family-consistency-test
+  import:           tasty-tests
   type:             exitcode-stdio-1.0
   main-is:          Main.hs
   hs-source-dirs:   test-family-consistency
@@ -502,6 +526,7 @@ test-suite family-consistency-test
 
 
 test-suite worker-response-test
+  import:           tasty-tests
   type:             exitcode-stdio-1.0
   main-is:          WorkerResponseTest.hs
   hs-source-dirs:   test-worker-response

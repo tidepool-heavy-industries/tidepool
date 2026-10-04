@@ -1,7 +1,9 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE OverloadedStrings #-}
 
-module Main (main) where
+module Main (main, tests) where
+
+import Tidepool.Test.Runner (TestTree, runTests, testCase, testGroup)
 
 import Control.Exception (bracket, evaluate, finally)
 import Control.Monad (forM, unless)
@@ -58,7 +60,14 @@ assert :: Bool -> String -> IO ()
 assert ok message = unless ok (ioError (userError message))
 
 main :: IO ()
-main = do
+main = runTests tests
+
+tests :: TestTree
+tests = testGroup "test-prepared-stg"
+  [testCase "prepared recovery closure and group merging" scenario]
+
+scenario :: IO ()
+scenario = do
   assertOverlapMerge
   assertSubsetPreservesFullGroup
   root <- getCurrentDirectory

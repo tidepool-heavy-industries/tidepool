@@ -1,4 +1,6 @@
-module Main (main) where
+module Main (main, tests) where
+
+import Tidepool.Test.Runner (TestTree, runTests, testCase, testGroup)
 
 import Codec.CBOR.Read (deserialiseFromBytes)
 import Codec.CBOR.Encoding (encodeBytes, encodeListLen, encodeString, encodeWord64)
@@ -10,7 +12,6 @@ import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BL
 import Data.Text qualified as T
 import Data.Word (Word32)
-import System.Environment (getArgs)
 import System.Directory (getTemporaryDirectory, removeFile)
 import System.IO (openBinaryTempFile, hClose)
 import Tidepool.ExecutionEncode
@@ -77,10 +78,17 @@ candidateManifestChecks = do
         "candidate manifest accepted a relative source path")
 
 main :: IO ()
-main = do
-  candidateManifestChecks
-  moduleProductEncodingChecks
-  arguments <- getArgs
+main = runTests tests
+
+tests :: TestTree
+tests = testGroup "execution-schema-encode"
+  [ testCase "bounded candidate descriptor decoding" candidateManifestChecks
+  , testCase "module product encoding" moduleProductEncodingChecks
+  , testCase "prepared wire structure and identities" encodingChecks
+  ]
+
+encodingChecks :: IO ()
+encodingChecks = do
   let first = encodeWireProgram representative
       second = encodeWireProgram representative
   assert (first == second) "prepared execution encoding is not deterministic"
@@ -148,13 +156,6 @@ main = do
   assert (drop 2 identityTerms ==
       [[TInt 3, TInt (fromIntegral tagValue)] | tagValue <- [1 :: Int .. 10]])
     "wired-in error kinds did not preserve their stable declaration-order tags"
-
-  case arguments of
-    [] -> pure ()
-    ["--write-schema6-fixture", output] ->
-      BS.writeFile output (encodeWireProgram schema6Representative)
-    _ -> ioError (userError
-      "usage: execution-schema-encode [--write-schema6-fixture output.cbor]")
 
   let localBody = Let
         (NonRecursive (HeapBinding (ValueId 8)

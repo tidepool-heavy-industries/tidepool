@@ -8,6 +8,8 @@
 {-# LANGUAGE TypeOperators #-}
 module Main where
 
+import Tidepool.Test.Runner (TestTree, runTests, testCase, testGroup)
+
 import Prelude
 import Control.Monad (unless)
 import Control.Monad.Freer (Eff, interpret, run)
@@ -47,7 +49,14 @@ handleModel (ModelAnnotateWith token op annotation)
 handleModel (ModelCloseWith _) = modify (<> (["closed"] :: [Text])) >> pure (Right ())
 
 main :: IO ()
-main = do
+main = runTests tests
+
+tests :: TestTree
+tests = testGroup "test-model-turn"
+  [testCase "typed model callbacks hooks receipts and nullable schemas" scenario]
+
+scenario :: IO ()
+scenario = do
   unless (toolDispatchReply (Left (UnknownTool "missing")) == object
     ["status" .= ("refused" :: Text), "kind" .= ("unknown_tool" :: Text)
     ,"tool" .= ("missing" :: Text), "error" .= ("no such tool: missing" :: Text)])

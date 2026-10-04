@@ -1,13 +1,12 @@
-module Main (main) where
+module Main (main, tests) where
 
-import Data.ByteString qualified as BS
+import Tidepool.Test.Runner (TestTree, runTests, testCase, testGroup)
+
 import CallerResultProjectionTest (verifyCallerResultProjection)
 import DeferredFunctionProjectionTest (verifyDeferredFunctionProjection)
 import ExecutionProjectionTest
   (projectProjectionContract, verifyRetainedImportProjection)
 import ModuleEvidenceProjectionTest (verifyModuleEvidenceProjection)
-import System.Environment (getArgs)
-import Tidepool.ExecutionEncode (encodeWireProgram)
 import Tidepool.GhcPipeline
   ( PipelineSelection(PreparedStg), PreparedPipelineResult(..)
   , runPipelineSelected )
@@ -15,24 +14,22 @@ import System.Directory (getCurrentDirectory)
 import System.FilePath ((</>))
 
 main :: IO ()
-main = do
-  arguments <- getArgs
-  case arguments of
-    ["--caller-result"] -> verifyCallerResultProjection
-    ["--module-evidence"] -> verifyModuleEvidenceProjection
-    _ -> fullProbe arguments
+main = runTests tests
 
-fullProbe :: [String] -> IO ()
-fullProbe arguments = do
-  verifyCallerResultProjection
+tests :: TestTree
+tests = testGroup "execution-schema-projection"
+  [ testCase "caller chosen result" verifyCallerResultProjection
+  , testCase "module evidence" verifyModuleEvidenceProjection
+  , testCase "deferred function" verifyDeferredFunctionProjection
+  , testCase "retained import" verifyRetainedImportProjection
+  , testCase "compiled M3 projection contract" compiledProjectionContract
+  ]
+
+compiledProjectionContract :: IO ()
+compiledProjectionContract = do
   root <- getCurrentDirectory
-  verifyDeferredFunctionProjection
-  verifyRetainedImportProjection
   let fixtureDir = root </> "test-prepared-stg"
   result <- runPipelineSelected PreparedStg
     (fixtureDir </> "M3Vertical.hs") [fixtureDir]
-  program <- projectProjectionContract (pprModules result)
-  case arguments of
-    [] -> pure ()
-    [output] -> BS.writeFile output (encodeWireProgram program)
-    _ -> ioError (userError "usage: execution-schema-projection [output.cbor]")
+  _ <- projectProjectionContract (pprModules result)
+  pure ()
