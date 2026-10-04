@@ -1122,6 +1122,7 @@ validationMemoCompilation = bracket temporary removeDirectoryRecursive $ \root -
       child = root </> "WarmChild.hs"
       target = root </> "WarmTarget.hs"
       producer = root </> "MemoProducer.hs"
+      facade = root </> "MemoFacade.hs"
       consumer = root </> "MemoConsumer.hs"
       memoTarget = root </> "MemoTarget.hs"
       chainLength = 16 :: Int
@@ -1141,7 +1142,8 @@ validationMemoCompilation = bracket temporary removeDirectoryRecursive $ \root -
     , "result = value"
     ]
   writeFile producer "module MemoProducer (value) where\nvalue :: Int\nvalue = 42\n"
-  writeFile consumer "module MemoConsumer (result) where\nimport MemoProducer (value)\nresult = value + 1\n"
+  writeFile facade "module MemoFacade (value) where\nimport MemoProducer (value)\n"
+  writeFile consumer "module MemoConsumer (result) where\nimport MemoFacade (value)\nresult = value + 1\n"
   writeFile memoTarget "module MemoTarget where\nimport MemoConsumer (result)\nfinal = result\n"
   withResidentPipelineSelected [root] $ \compile -> do
     cold <- compile PreparedStg mempty GeneralCompile Nothing target [] Nothing
@@ -1161,11 +1163,13 @@ validationMemoCompilation = bracket temporary removeDirectoryRecursive $ \root -
     assertStgSharing "request target body is prepared afresh" False ["WarmTarget"] coldSharing warmSharing
     executableCold <- compile PreparedStg mempty GeneralCompile Nothing memoTarget [] Nothing
     executableColdSharing <- compilerProductSharing executableCold
+    assertEqual "reexport consumer selects its defining executable owner"
+      ["MemoConsumer", "MemoProducer", "MemoTarget"] (preparedOwnerNames executableCold)
     executableWarm <- compile PreparedStg mempty GeneralCompile Nothing memoTarget [] Nothing
     executableWarmSharing <- compilerProductSharing executableWarm
     assertPreparedEquivalent "complete cached product preserves native output" executableCold executableWarm
     assertCoreSharing "transaction retains executable canonical owners" True
-      ["MemoProducer", "MemoConsumer"] executableColdSharing executableWarmSharing
+      ["MemoProducer", "MemoFacade", "MemoConsumer"] executableColdSharing executableWarmSharing
     assertStgSharing "transaction retains executable prepared bodies" True
       ["MemoProducer", "MemoConsumer"] executableColdSharing executableWarmSharing
     previousDrop <- lookupEnv "TIDEPOOL_TEST_DROP_MEMO_INTERFACE"

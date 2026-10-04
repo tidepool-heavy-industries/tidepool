@@ -934,7 +934,7 @@ data ModuleFront = ModuleFront
   , mfCapturedType :: Maybe String
   , mfCheckedBinderPins :: [CheckedBinderPin]
   , mfResultType :: Maybe Type
-  , mfReferencedModules :: Set.Set ModuleName
+  , mfReferencedModules :: Set.Set Module
   , mfQuasiQuoteOrigins :: QuasiQuoteOrigins
     -- ^ Classified once from the parsed source in 'compileFront'; see
     -- 'classifyQuasiQuoteOrigins'.
@@ -1410,7 +1410,9 @@ definingModuleForOcc hscEnv modName occ = pure $ case lookupHpt (hsc_HPT hscEnv)
 -- prove its dependents valid without retaining its compiler session graph.
 data ModuleFacts = ModuleFacts
   { moduleFactTyCons :: [TyCon]
-  , moduleFactReferences :: Set.Set ModuleName
+  , moduleFactReferences :: Set.Set Module
+    -- ^ Keep defining units until the current home compiler view selects
+    -- its relation. A package module with the same name is another owner.
   , moduleFactPackageImports :: PackageImportEvidence
   , moduleFactHasDependentFiles :: Bool
   , moduleFactQuasiQuoteOrigins :: QuasiQuoteOrigins
@@ -2293,10 +2295,6 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                   (Set.toList (directHomeDeps modSum)))
               recordValidity modSum isValid =
                 liftIO (modifyIORef' validThisCycleRef (Map.insert (ms_mod_name modSum) isValid))
-              executableDepsValid modSum = liftIO $ do
-                validMap <- readIORef executableValidRef
-                pure (all (\d -> Map.findWithDefault False d validMap)
-                  (Set.toList (directHomeDeps modSum)))
               recordExecutableValidity modSum isValid =
                 liftIO (modifyIORef' executableValidRef (Map.insert (ms_mod_name modSum) isValid))
               cachedInterface modSum entry
@@ -2548,8 +2546,23 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
               -- All owners are already finalized; this only selects STG work.
               forceValidationOnly <- liftIO (lookupEnv "TIDEPOOL_TEST_FORCE_VALIDATION_ONLY")
               let referencesByMod = Map.fromList
-                    [ (ms_mod_name (observationSummary observation), moduleFactReferences fact)
+                    [ (ms_mod_name (observationSummary observation), Set.fromList
+                        [moduleName owner | owner <- Set.toList (moduleFactReferences fact)
+                          , isHomeUnit (hsc_home_unit certifiedEnv) (moduleUnit owner)])
                     | (observation, fact) <- zip observations' facts ]
+                  -- Source validity still covers all imports. Prepared reuse
+                  -- additionally needs the defining home bodies referenced by
+                  -- the same Core graph that selects STG, including dictionaries
+                  -- and names reached through reexports. Compile-time and type-only
+                  -- imports need their canonical facts, but no prepared body.
+                  executableDepsValid modSum = liftIO $ do
+                    validMap <- readIORef executableValidRef
+                    let name = ms_mod_name modSum
+                    pure $ case Map.lookup name referencesByMod of
+                      Nothing -> False
+                      Just referenced -> all (\owner -> Map.member owner referencesByMod
+                        && Map.findWithDefault False owner validMap)
+                        (Set.toList (Set.delete name referenced))
                   reachableMods0 = reachableModuleClosure targetModName' referencesByMod
                   -- A focused fault-injection test can omit one real reachable
                   -- owner from STG preparation without changing its finalization.
@@ -4780,16 +4793,16 @@ reachableModuleClosure target referencesByMod = go (Set.singleton target) [targe
             new  = refs `Set.difference` visited
         in go (visited `Set.union` new) (ms ++ Set.toList new)
 
--- | Every external module referenced by a module's top-level binding RHSs.
+-- | Every defining module referenced by a module's top-level binding RHSs.
 -- This graph-independent fact stays valid when a later request changes the
 -- set of home modules; reachability intersects it with that request's graph.
-moduleRefs :: ModGuts -> Set.Set ModuleName
+moduleRefs :: ModGuts -> Set.Set Module
 moduleRefs guts = Set.unions (map rhsModules (mg_binds guts))
   where
     rhsModules (NonRec _ rhs) = externalVarModules rhs
     rhsModules (Rec ps)       = Set.unions [ externalVarModules rhs | (_, rhs) <- ps ]
 
--- | Every home module (restricted to @known@) referenced by a real 'Var'
+-- | Every defining module referenced by a real 'Var'
 -- occurrence anywhere in a Core expression, at any binding depth. No
 -- bound-variable tracking needed, unlike 'Translate.exprFreeVarKeys': a Core
 -- 'Var' occurrence already points at its exact binder 'Id' (resolved by the
@@ -4802,12 +4815,12 @@ moduleRefs guts = Set.unions (map rhsModules (mg_binds guts))
 -- mode this item must avoid is EXCLUDING a module the target's Core
 -- genuinely needs; including one too many only gives back some of the tier's
 -- win, never correctness.
-externalVarModules :: CoreExpr -> Set.Set ModuleName
+externalVarModules :: CoreExpr -> Set.Set Module
 externalVarModules = go
   where
     go expr = case expr of
       Var v -> case nameModule_maybe (idName v) of
-        Just m -> Set.singleton (moduleName m)
+        Just m -> Set.singleton m
         _ -> Set.empty
       Lit _           -> Set.empty
       App f a         -> go f `Set.union` go a
