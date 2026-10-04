@@ -370,6 +370,8 @@ test-suite source-boot-product-reuse-test
                     FinalizedCoreTest
                     ExactScopeV9Test
                     CandidateGraphDescriptorTest
+                    CandidateExecutionSourcesTest
+                    SourceBootFixtureSupport
   build-depends:
     base >= 4.20 && < 5,
     ghc >= 9.12 && < 9.13,

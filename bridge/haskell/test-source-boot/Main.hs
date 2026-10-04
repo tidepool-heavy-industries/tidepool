@@ -1,5 +1,8 @@
 module Main (main) where
 
+import CandidateExecutionSourcesTest (candidateExecutionSourcesTest)
+import SourceBootFixtureSupport
+
 import ExecutionSourceDecodeTest (executionSourceDecodeChecks, executionSourceDecodeBenchmark, executionSourceDecodeSnapshots, executionSourceResolutionBudgetChecks)
 import ExactScopeV9Test (exactScopeV9Checks, nativeOriginChecks, candidateCanonicalChecks)
 import CandidateGraphDescriptorTest (candidateGraphDescriptorChecks)
@@ -53,12 +56,12 @@ import GHC.Unit.Finder.Types (FinderCache(..))
 import GHC.Unit.Module.Location (ml_hi_file)
 import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
 import GHC.Builtin.Names (gHC_PRIM)
-import GHC.Tc.Types (tcg_imports, tcg_type_env)
+import GHC.Tc.Types (tcg_imports, tcg_type_env, tcg_mod)
 import GHC.Unit.Module.Deps (imp_mods, Usage(..))
 import GHC.Unit.Module.Graph (ModuleGraphNode(..), mgModSummaries', mkModuleGraph)
 import GHC.Types.SourceFile (HscSource(..))
 import Control.Monad.IO.Class (liftIO)
-import GHC.Driver.Session (targetProfile, wopt_set, xopt, WarningFlag(Opt_WarnMissingSignatures))
+import GHC.Driver.Session (importPaths, targetProfile, wopt_set, xopt, WarningFlag(Opt_WarnMissingSignatures))
 import GHC.LanguageExtensions.Type qualified as LangExt
 import GHC.Types.Error (isEmptyMessages)
 import GHC.Types.Name.Set (nameSetElemsStable)
@@ -635,21 +638,11 @@ checkedValueTypeClosure effects = withScratch $ \work -> do
     _ -> fail "checked command type requirements cannot be decoded"
   unless (("main","Tidepool.Command.Types") `elem` requirements) $
     fail "checked Command fixture lacks its real home type dependency"
-  originals <- forM (Map.toAscList (pprProductInterfaces prepared)) $ \(name,iface) -> do
-    let path = work </> (moduleNameString name ++ ".original.hi")
-    writeBinIface (targetProfile (hsc_dflags environment)) QuietBinIFace NormalCompression path iface
-    bytes <- BS.readFile path
-    dependencies <- either fail pure (selectedHomeRequirements (pprDependencies prepared) "main" (moduleNameString name))
-    let artifact = ExactIfaceArtifact "main" (moduleNameString name) path (digest bytes) dependencies
-        packagesPath = path ++ ".packages"
-        packages = encodePackageImports artifact
-          (Map.findWithDefault emptyPackageImports name (pprPackageImports prepared))
-    BS.writeFile packagesPath packages
-    pure (artifact,packagesPath,digest packages)
-  let value = ExactIfaceArtifact "main" "Tidepool.Session.Val.G7" valuePath (digest valueBytes) requirements
-      lexical = [(artifact,exactRequirements artifact) | (artifact,_,_) <- originals]
-  writeExactMetadataScopeWithLexical scopePath originals lexical
+  let ownerNames = map moduleNameString (Map.keys (pprProductInterfaces prepared))
+  writeGenuineCandidateLexicalScope ownerNames work producerPath [work,"lib",effects] scopePath prepared
   base <- readExactScope scopePath >>= either fail pure
+  let originals = scopeInterfaces base
+      value = ExactIfaceArtifact "main" "Tidepool.Session.Val.G7" valuePath (digest valueBytes) requirements
   valuePackages <- BS.readFile (valuePath ++ ".packages")
   let admitted = base
         { scopeInterfaces = scopeInterfaces base ++ [(value,valuePath ++ ".packages",digest valuePackages)]
@@ -1421,80 +1414,7 @@ exactRetainedQuoter = withTiming $ withScratch $ \work -> do
   putStrLn "exact retained quoter: cold source-less original42, Core-only compiler dependency, missing/corrupt/wrong-owner Core refusal, capture-only source drift, no preprocessing/frontend replay, explicit current/hidden authority refusal, cancellation/recovery"
 
 -- The GHC fixture issues the original recipe alongside actual native group
--- bytes and the producer's positive source/resolution evidence. Rust's real
--- prepare_compilation emitter is exercised separately by executionSourceWire.
-writeExecutionScope :: FilePath -> FilePath -> PreparedPipelineResult -> [String] -> IO ()
-writeExecutionScope path work original lexicalNames = do
-  let productRoot = path ++ ".products"
-  createDirectoryIfMissing True productRoot
-  let environment = prHscEnv (pprPipelineResult original)
-      context name = ProjectionContext "test" "matched"
-        (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) Map.empty
-        (SymbolIdentity "main" (T.pack name) "value" "answerValue" Nothing) [] Nothing Nothing Nothing Nothing
-      text = TString . T.pack
-      key unit name = TList [text unit,text name]
-      optional = maybe TNull text
-      symbol originalSymbol = TList [TString (symbolUnit originalSymbol),TString (symbolModule originalSymbol)
-        ,TString (symbolNamespace originalSymbol),TString (symbolOccurrence originalSymbol)
-        ,maybe TNull TString (symbolRecordParent originalSymbol)]
-      originalGroup group = TList [TInt (fromIntegral (projectedOriginalOrdinal group))
-        ,TList (map symbol (projectedBinders group)),TList [TList [symbol (globalIdentity global)
-          ,TBool (isJust (globalRequiredGeneration global))] | global <- projectedGlobals (projectedBody group)]]
-      evidence = pprDependencies original
-  unless (dependencyCacheSafe evidence && dependencySelectionComplete evidence) $
-    fail "execution fixture lacks positive original input evidence"
-  rows <- forM (pprModules original) $ \prepared -> do
-    let name = moduleNameString (moduleName (pmModule prepared))
-        unit = unitString (moduleUnit (pmModule prepared))
-        hi = productRoot </> (name ++ ".execution.hi")
-        nativePath = hi ++ ".tpmod"
-    iface <- maybe (fail "original execution owner lacks an interface") pure
-      (Map.lookup (mkModuleName name) (pprProductInterfaces original))
-    writeBinIface (targetProfile (hsc_dflags environment)) QuietBinIFace NormalCompression hi iface
-    bytes <- BS.readFile hi
-    groups <- either (fail . show) pure (projectPreparedModuleGroups (context name) prepared)
-    let native = encodeModuleProducts [(T.pack unit,T.pack name,bytes,groups)]
-        nativeSha = digest native
-        version = nativeSha
-    BS.writeFile nativePath native
-    requirements <- either fail pure (selectedHomeRequirements evidence unit name)
-    let artifact = ExactIfaceArtifact unit name hi (digest bytes) requirements
-        packages = encodePackageImports artifact
-          (Map.findWithDefault emptyPackageImports (mkModuleName name) (pprPackageImports original))
-        packagePath = hi ++ ".packages"
-        identity = [text unit,text name,text version,text (digest bytes),text nativeSha]
-        owner = TList (map text [unit,name,hi,digest bytes]
-          ++ [TList [key u m | (u,m) <- requirements],text packagePath,text (digest packages)])
-        productRow = TList [text unit,text name,text version,text (digest bytes),text nativeSha,text nativePath,TList (map originalGroup groups)]
-    BS.writeFile packagePath packages
-    pure (name,identity,owner,productRow)
-  let list f values = TList (map f values)
-      source row = TList [text (dependencySourcePath row),text (dependencySourceSha256 row)]
-      resolution row = TList [text (renderDependencyQualifier (dependencyResolutionQualifier row)),text (dependencyResolutionModule row),TBool (dependencyResolutionBoot row)
-        ,optional (dependencyResolutionSelected row),list text (dependencyResolutionCandidates row)]
-      imported row = TList [text (renderDependencyQualifier (dependencyImportQualifier row)),text (dependencyImportName row),TBool (dependencyImportBoot row),optional (dependencyImportSelected row)]
-      node row = TList [text (dependencyModuleUnit row),text (dependencyModuleName row),TBool (dependencyModuleBoot row)
-        ,text (dependencyModuleSource row),list imported (dependencyModuleImports row),text "ready"]
-      proof = TList [TBool True,TBool True,list source (dependencySources evidence),list resolution (dependencyResolutions evidence)
-        ,list node (dependencyModules evidence),list text (dependencyPackages evidence)]
-      zero = replicate 64 '0'
-  origin <- case dependencyModules evidence of
-    first:_ -> pure (dependencyModuleSource first)
-    [] -> fail "execution fixture has no source owner"
-  originalText <- readFile origin
-  let graph = TList [text "TPEXECUTIONSOURCE",TInt 1,text "tidepool-ghc-pipeline-v1",text zero,TNull
-        ,list text [work],TList [text origin,text originalText],proof
-        ,TList [TList (identity ++ [TBool True,TNull]) | (_,identity,_,_) <- rows],TList [],TList []]
-      graphBytes = toStrictByteString (encodeTerm graph)
-      graphSha = digest graphBytes
-      graphPath = takeDirectory path </> ("execution-" ++ graphSha ++ ".cbor")
-      scope = TList [text "TPEXACTSCOPE",text "6",text zero,text zero,TList [owner | (_,_,owner,_) <- rows]
-        ,TList [TList [key "main" name,TList []] | name <- lexicalNames]
-        ,TList [productRow | (_,_,_,productRow) <- rows]
-        ,TList [TList [TList [text graphSha,text graphPath]],TList [TList (identity ++ [text graphSha]) | (_,identity,_,_) <- rows]],TNull]
-  BS.writeFile graphPath graphBytes
-  BS.writeFile path (toStrictByteString (encodeTerm scope))
-
+-- Execution custody comes from actual captured originals and the Rust issuer.
 exactReexportQuoter :: IO ()
 exactReexportQuoter = withTiming $ withScratch $ \work -> do
   forM_ ["MetadataQuoteSupport.hs","MetadataQuoter.hs","ExecutionReexportFacade.hs"
@@ -1703,7 +1623,7 @@ exactExecutionValues = withTiming $ withScratch $ \work -> do
   let valuePath = sessionHiPath work valueOwner
   bytes <- BS.readFile valuePath
   let value = ExactIfaceArtifact "main" "Tidepool.Session.Val.G8" valuePath (digest bytes) []
-  writeExactMetadataScope scopePath []
+  writeGenuineEmptyMetadataScope scopePath
   base <- readExactScope scopePath >>= either fail pure
   let admitted = base {scopePurpose=ExactCellPurpose (CheckedCellAdmission (replicate 64 '0') (replicate 64 '0')
         (replicate 64 '0') [] ["Tidepool.Session.Val.G8"] [] [value] Nothing AuthoredCellCheck) [work]}
@@ -2196,64 +2116,6 @@ candidateSitedSiblingsAt work = do
 
 -- The fixture encoder keys complete legacy values by their canonical CBOR.
 -- Its tables therefore preserve identity fields and every global requirement.
-data FixtureInventory = FixtureInventory
-  { fixtureSymbols :: Map.Map BS.ByteString Int
-  , fixtureSymbolRows :: [Term]
-  , fixtureGlobals :: Map.Map BS.ByteString Int
-  , fixtureGlobalRows :: [Term]
-  }
-
-compactInventoryRows :: [Term] -> Either String (Term,Term,[Term])
-compactInventoryRows rows = do
-  (inventory,compact) <- mapFixtureInventory compactRow empty rows
-  pure (TList (reverse (fixtureSymbolRows inventory)),TList (reverse (fixtureGlobalRows inventory)),compact)
-  where
-    empty = FixtureInventory Map.empty [] Map.empty []
-    compactRow inventory (TList fields) | length fields == 16 = case drop 10 fields of
-      TList groups:_ -> do
-        (next,compact) <- mapFixtureInventory compactGroup inventory groups
-        pure (next,TList (take 10 fields ++ [TList compact] ++ drop 11 fields))
-      _ -> Left "fixture candidate lacks groups"
-    compactRow _ _ = Left "fixture candidate must have sixteen fields"
-    compactGroup inventory (TList [ordinal,TList binders,TList globals]) = do
-      (withBinders,binderRefs) <- mapFixtureInventory internFixtureSymbol inventory binders
-      (withGlobals,globalRefs) <- mapFixtureInventory internFixtureGlobal withBinders globals
-      pure (withGlobals,TList [ordinal,TList binderRefs,TList globalRefs])
-    compactGroup _ _ = Left "fixture original group must have three fields"
-
-mapFixtureInventory :: (FixtureInventory -> a -> Either String (FixtureInventory,b))
-  -> FixtureInventory -> [a] -> Either String (FixtureInventory,[b])
-mapFixtureInventory step initial values = do
-  (final,reversed) <- foldM (\(inventory,acc) value -> do
-    (next,result) <- step inventory value
-    pure (next,result:acc)) (initial,[]) values
-  pure (final,reverse reversed)
-
-internFixtureSymbol :: FixtureInventory -> Term -> Either String (FixtureInventory,Term)
-internFixtureSymbol inventory value@(TList [_,_,_,_,_]) =
-  let key = toStrictByteString (encodeTerm value)
-  in case Map.lookup key (fixtureSymbols inventory) of
-    Just index -> Right (inventory,TInt index)
-    Nothing ->
-      let index = Map.size (fixtureSymbols inventory)
-      in Right (inventory
-        { fixtureSymbols = Map.insert key index (fixtureSymbols inventory)
-        , fixtureSymbolRows = value:fixtureSymbolRows inventory },TInt index)
-internFixtureSymbol _ _ = Left "fixture symbol must have five fields"
-
-internFixtureGlobal :: FixtureInventory -> Term -> Either String (FixtureInventory,Term)
-internFixtureGlobal inventory value@(TList [identity,rep,signature,evaluated,generation]) =
-  let key = toStrictByteString (encodeTerm value)
-  in case Map.lookup key (fixtureGlobals inventory) of
-    Just index -> Right (inventory,TInt index)
-    Nothing -> do
-      (withSymbol,symbolRef) <- internFixtureSymbol inventory identity
-      let index = Map.size (fixtureGlobals withSymbol)
-      pure (withSymbol
-        { fixtureGlobals = Map.insert key index (fixtureGlobals withSymbol)
-        , fixtureGlobalRows = TList [symbolRef,rep,signature,evaluated,generation]:fixtureGlobalRows withSymbol },TInt index)
-internFixtureGlobal _ _ = Left "fixture global must have five fields"
-
 candidateCompactInventory :: IO ()
 candidateCompactInventory = withScratch $ \work -> do
   let identity = SymbolIdentity "main" "Fixture" "value" "entry" Nothing
@@ -2865,365 +2727,6 @@ freshExecutionRecipeTest = withScratch $ \work -> do
     fail "aggregate budget withholding hid corrupt advertised graph"
   putStrLn "fresh execution recipe: issuer, original lineage, shared negative contexts and strict/optional budget controls passed"
 
-candidateExecutionSourcesTest :: IO ()
-candidateExecutionSourcesTest = withTiming $ withScratch $ \work -> do
-  forM_ ["MetadataQuoteSupport.hs","MetadataQuoter.hs","ExecutionReexportFacade.hs","ExecutionReexportTarget.hs"] $ \name ->
-    copyFile ("test-source-boot/fixtures" </> name) (work </> name)
-  original <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
-    Nothing (work </> "ExecutionReexportFacade.hs") [work] Nothing
-  let sourceScopePath = work </> "original-scope.cbor"
-      candidatePath = manifest work
-  writeExecutionScope sourceScopePath work original ["ExecutionReexportFacade"]
-  originalScope <- readExactScope sourceScopePath >>= either fail pure
-  originalTerm <- readTerm sourceScopePath
-  parcel <- case originalTerm of
-    TList [_,_,_,_,_,_,_,TList [_,references],_] -> pure (TList
-      [TList [TList [TString (T.pack (executionGraphSha256 graph)),TBytes (executionGraphBytes graph)]
-        | graph <- scopeExecutionGraphs originalScope],references])
-    _ -> fail "candidate fixture lacks original execution parcel"
-  let owners = ["MetadataQuoteSupport","MetadataQuoter"]
-  writeManifestFor owners work original
-  descriptors <- readTerm candidatePath >>= \case
-    TList [_,_,_,_,TList rows,_] -> pure rows
-    _ -> fail "candidate fixture lacks source descriptors"
-  rows <- forM descriptors $ \case
-    TList fields@(TString _:TString name:_) -> do
-      product' <- case [value | value <- scopeProducts originalScope, originalModule value == T.unpack name] of
-        [value] -> pure value
-        _ -> fail "candidate fixture lacks actual original product"
-      prepared <- case [value | value <- pprModules original, moduleName (pmModule value) == mkModuleName (T.unpack name)] of
-        [value] -> pure value
-        _ -> fail "candidate fixture lacks paired prepared body"
-      let context = ProjectionContext "test" "matched"
-            (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) Map.empty
-            (SymbolIdentity "main" name "value" "answerValue" Nothing) [] Nothing Nothing Nothing Nothing
-      groups <- either (fail . show) pure (projectPreparedModuleGroups context prepared)
-      pure (TList [case index of
-        6 -> TString (T.pack (originalVersion product'))
-        7 -> TString (T.pack (originalProductSha256 product'))
-        10 -> TList (map candidateGroupTerm groups)
-        13 -> TString (T.pack (originalProductPath product'))
-        _ -> field | (index,field) <- zip [0::Int ..] fields])
-    _ -> fail "candidate fixture has malformed descriptor"
-  (symbols,globals,compactRows) <- either fail pure (compactInventoryRows rows)
-  let filteredParcel = case parcel of
-        TList [graphs,TList refs] -> TList [graphs,TList [reference | reference@(TList (_:TString name:_)) <- refs
-          , T.unpack name `elem` owners]]
-        _ -> parcel
-      envelope value = TList [TString "TPMCAN",TString "8",symbols,globals,TList compactRows,value]
-      writeTerm path value = BS.writeFile path (toStrictByteString (encodeTerm value))
-  writeTerm candidatePath (envelope filteredParcel)
-  offered <- readModuleCandidates candidatePath >>= either fail pure
-  unless (length offered == 2 && all (isJust . candidateExecutionSources) offered) $
-    fail "candidate reader lost original execution provenance"
-  accepted <- runPipelineSessionSelected (PreparedProducts (Just candidatePath)) Set.empty CertifyHomeProductsCompile
-    Nothing (work </> "ExecutionReexportFacade.hs") [work] Nothing
-  unless (Set.fromList (map candidateModule (pprAcceptedCandidates accepted)) == Set.fromList owners) $
-    fail "real GHC admission did not accept the proven source-selected originals"
-  -- Keep the dependency as an exact original while offering its importer.
-  -- Root replacement remains forbidden even though its tuple is identical.
-  let crossoverScopePath = work </> "candidate-original-scope.cbor"
-      crossoverScope = emptySessionScope {ssRoot=work,ssExactScope=Just crossoverScopePath}
-      helperName = "MetadataQuoteSupport"
-      helperRows rows' = [row | row@(TList (_:TString name:_)) <- rows', name == helperName]
-      crossoverTerm lexical = case originalTerm of
-        TList fields -> TList [case (index,field) of
-          (4,TList rows') -> TList (helperRows rows')
-          (5,_) -> TList [TList [TList [TString "main",TString helperName],TList []] | lexical]
-          (6,TList rows') -> TList (helperRows rows')
-          (7,TList [graphs,TList refs]) -> TList [graphs,TList (helperRows refs)]
-          (8,_) -> TList [TString "cell-check2",TString (T.replicate 64 "0")
-            ,TString (T.replicate 64 "0"),TString (T.replicate 64 "0")
-            ,TList [],TList [],TList [],TList [],TList [TString (T.pack work)]]
-          _ -> field | (index,field) <- zip [0::Int ..] fields]
-        _ -> originalTerm
-      crossover = runPipelineSessionSelected (PreparedProducts (Just candidatePath)) Set.empty
-        CertifyHomeProductsCompile (Just crossoverScope)
-        (work </> "ExecutionReexportFacade.hs") [work] Nothing
-      requireImporter result = unless
-        (map candidateModule (pprAcceptedCandidates result) == ["MetadataQuoter"]
-          && "MetadataQuoteSupport" `notElem` preparedNames result) $
-        fail "exact dependency reuse rejected its importer or replaced the protected original"
-  writeTerm crossoverScopePath (crossoverTerm True)
-  crossoverAccepted <- crossover
-  requireImporter crossoverAccepted
-  let helperSource = work </> "MetadataQuoteSupport.hs"
-  bracket (BS.readFile helperSource <* removeFile helperSource) (BS.writeFile helperSource) $ \_ -> do
-    sourceFreeOriginal <- crossover
-    requireImporter sourceFreeOriginal
-  let sharedGraphParcel = case filteredParcel of
-        TList [_,references] -> TList [TList [],references]
-        other -> other
-  writeTerm candidatePath (envelope sharedGraphParcel)
-  readModuleCandidates candidatePath >>= \case
-    Left _ -> pure ()
-    Right _ -> fail "candidate manifest borrowed an unavailable original graph"
-  sharedCandidates <- readModuleCandidatesWithGraphs (scopeExecutionGraphs originalScope) candidatePath
-    >>= either fail pure
-  unless (length sharedCandidates == 2) $ fail "combined exact graph inventory lost candidate recipes"
-  sharedGraphAccepted <- crossover
-  requireImporter sharedGraphAccepted
-  writeTerm candidatePath (envelope filteredParcel)
-  -- Exact-produced evidence keeps its authenticated home edge in the graph,
-  -- outside the ordinary import rows. Preserve the real GHC source/body pair.
-  let exactRows = [case row of
-        TList fields@(_:TString "MetadataQuoter":_) -> TList [case (index,field) of
-          (9,TList imports) -> TList [edge | edge@(TList (_:TString name:_)) <- imports, name /= helperName]
-          _ -> field | (index,field) <- zip [0::Int ..] fields]
-        other -> other | row <- compactRows]
-  exactParcel <- case filteredParcel of
-    TList [TList [TList [_,TBytes graphBytes]],TList refs] -> do
-      graph <- either (fail . show) (pure . snd) (deserialiseFromBytes decodeTerm (BSL.fromStrict graphBytes))
-      let removeOriginal node = case node of
-            TList fields@(_:TString "MetadataQuoter":_) -> TList [case (index,field) of
-              (4,TList imports) -> TList [edge | edge@(TList (_:TString name:_)) <- imports, name /= helperName]
-              _ -> field | (index,field) <- zip [0::Int ..] fields]
-            other -> other
-          exactGraph = case graph of
-            TList fields -> TList [case (index,field) of
-              (7,TList evidence) -> TList [if column == 4 then case value of
-                TList modules -> TList (map removeOriginal modules)
-                other -> other else value | (column,value) <- zip [0::Int ..] evidence]
-              (9,_) -> TList [TList [TString "main",TString "MetadataQuoter"
-                ,TList [TList [TString "main",TString helperName]]]]
-              _ -> field | (index,field) <- zip [0::Int ..] fields]
-            other -> other
-          exactBytes = toStrictByteString (encodeTerm exactGraph)
-          exactSha = TString (T.pack (digest exactBytes))
-          references = [TList [if index == 5 then exactSha else field
-            | (index,field) <- zip [0::Int ..] fields] | TList fields <- refs]
-      pure (TList [TList [TList [exactSha,TBytes exactBytes]],TList references])
-    _ -> fail "candidate fixture lacks one authenticated graph"
-  writeTerm candidatePath (TList [TString "TPMCAN",TString "8",symbols,globals,TList exactRows,exactParcel])
-  graphOriginalAccepted <- crossover
-  requireImporter graphOriginalAccepted
-  writeTerm candidatePath (envelope filteredParcel)
-  let reservedScope = case crossoverTerm True of
-        TList fields -> TList [case (index,field) of
-          (8,TList auth) -> TList [if column == 6 then TList [TString "MetadataQuoter"] else entry
-            | (column,entry) <- zip [0::Int ..] auth]
-          _ -> field | (index,field) <- zip [0::Int ..] fields]
-        other -> other
-  writeTerm crossoverScopePath reservedScope
-  reserved <- crossover
-  unless (null (pprAcceptedCandidates reserved) && "MetadataQuoter" `elem` preparedNames reserved) $
-    fail "reserved source owner was admitted as a cached replacement root"
-  -- Actual source selection, rather than inventory membership, authorizes
-  -- the same dependency when it was initially hidden from lexical imports.
-  writeTerm crossoverScopePath (crossoverTerm False)
-  crossoverSelected <- crossover
-  requireImporter crossoverSelected
-  let unsealedScope = case crossoverTerm False of
-        TList fields -> TList [if index == 8 then TNull else field
-          | (index,field) <- zip [0::Int ..] fields]
-        other -> other
-  writeTerm crossoverScopePath unsealedScope
-  hidden <- try crossover :: IO (Either SomeException PreparedPipelineResult)
-  unless (case hidden of
-      Left reason -> "OriginalSourceSelectionRejected" `isInfixOf` show reason
-      Right _ -> False) $
-    fail "hidden inventory original became visible without current source-selection authority"
-  writeTerm crossoverScopePath (crossoverTerm False)
-  -- Without the importer's authenticated recipe, raw path normalization is
-  -- forbidden and source compilation remains the safe fallback.
-  writeTerm candidatePath (envelope (TList [TList [],TList []]))
-  unproven <- crossover
-  unless (null (pprAcceptedCandidates unproven) && "MetadataQuoter" `elem` preparedNames unproven) $
-    fail "exact dependency without a recipe bypassed current compilation"
-  writeTerm candidatePath (envelope filteredParcel)
-  copyFile "test-source-boot/fixtures/MetadataQuoteSupportChanged.hs" (work </> "MetadataQuoteSupport.hs")
-  differentOriginal <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
-    Nothing (work </> "MetadataQuoteSupport.hs") [work] Nothing
-  writeExecutionScope crossoverScopePath work differentOriginal [T.unpack helperName]
-  mismatched <- crossover
-  unless (null (pprAcceptedCandidates mismatched) && "MetadataQuoter" `elem` preparedNames mismatched) $
-    fail "cached importer admitted a different current exact dependency tuple"
-  changed <- runPipelineSessionSelected (PreparedProducts (Just candidatePath)) Set.empty CertifyHomeProductsCompile
-    Nothing (work </> "ExecutionReexportFacade.hs") [work] Nothing
-  unless (null (pprAcceptedCandidates changed)) $
-    fail "candidate execution provenance bypassed current source validation"
-  copyFile "test-source-boot/fixtures/MetadataQuoteSupport.hs" (work </> "MetadataQuoteSupport.hs")
-  let emptyExecution = originalScope {scopeExecutionGraphs=[],scopeExecutionOwners=[]}
-      parcels = [value | candidate <- pprAcceptedCandidates accepted, Just value <- [candidateExecutionSources candidate]]
-  promoted <- either (fail . show) pure
-    (extendExactExecutionSources (concatMap fst parcels) (map snd parcels) emptyExecution)
-  unless (length (scopeExecutionOwners promoted) == 2
-      && scopeLexical promoted == scopeLexical emptyExecution
-      && scopeInterfaces promoted == scopeInterfaces emptyExecution) $
-    fail "candidate execution promotion changed lexical/interface authority"
-  unless (extendExactExecutionSources (concatMap fst parcels) (map snd parcels) promoted == Right promoted) $
-    fail "identical original candidate execution promotion conflicts"
-  shared <- either (fail . show) pure (executionSourceClosure (scopeExecutionGraphs promoted)
-    (scopeExecutionOwners promoted) (scopeExecutionNativeOwners promoted)
-    [("main","MetadataQuoter"),("main","MetadataQuoteSupport")])
-  unless (length shared == 2) (fail "two roots from one original cycle lost their shared helper")
-  helperOriginal <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
-    Nothing (work </> "MetadataQuoteSupport.hs") [work] Nothing
-  let helperScopePath = work </> "helper-only-original.cbor"
-  writeExecutionScope helperScopePath work helperOriginal ["MetadataQuoteSupport"]
-  helperScope <- readExactScope helperScopePath >>= either fail pure
-  -- The helper's independent receipt has a different graph digest but the
-  -- same exact tuple; fresh parent edges retain their own graph provenance.
-  copyFile helperScopePath crossoverScopePath
-  independentlyAuthenticated <- crossover
-  requireImporter independentlyAuthenticated
-  helperReference <- case scopeExecutionOwners helperScope of
-    [value] -> pure value
-    _ -> fail "helper-only source cycle has another native owner"
-  unless (executionRefIdentity helperReference `elem` scopeExecutionNativeOwners promoted) $
-    fail "separate GHC helper source cycle did not preserve its actual native/interface pairing"
-  let mixedGraphs = scopeExecutionGraphs promoted ++ scopeExecutionGraphs helperScope
-      mixedReferences = [if executionIdentityKey (executionRefIdentity reference) == ("main","MetadataQuoteSupport")
-        then helperReference else reference | reference <- scopeExecutionOwners promoted]
-  differentLocal <- either (fail . show) pure (executionSourceClosure mixedGraphs mixedReferences
-    (scopeExecutionNativeOwners promoted) [("main","MetadataQuoter")])
-  unless (length differentLocal == 2) (fail "fresh local helper borrowed or required its separately authenticated graph")
-  differentShared <- either (fail . show) pure (executionSourceClosure mixedGraphs mixedReferences
-    (scopeExecutionNativeOwners promoted) [("main","MetadataQuoter"),("main","MetadataQuoteSupport")])
-  unless (length differentShared == 2) (fail "equivalent local recipes from different original cycles did not share their helper")
-  let conflictingGraphs = [if executionGraphSha256 graph == executionRefGraph helperReference
-        then graph {executionGraphEvidence=(executionGraphEvidence graph) {
-          dependencySources=[source {dependencySourceSha256=replicate 64 'f'}
-            | source <- dependencySources (executionGraphEvidence graph)]}}
-        else graph | graph <- mixedGraphs]
-  case executionSourceClosure conflictingGraphs mixedReferences (scopeExecutionNativeOwners promoted)
-      [("main","MetadataQuoter"),("main","MetadataQuoteSupport")] of
-    Left _ -> pure ()
-    Right _ -> fail "two roots silently selected conflicting same-owner original source recipes"
-  quoterRef <- case [reference | reference <- scopeExecutionOwners promoted
-      , executionIdentityKey (executionRefIdentity reference) == ("main","MetadataQuoter")] of
-    [reference] -> pure reference
-    _ -> fail "shared-recipe fixture lacks one quoter reference"
-  quoterNode <- either (fail . show) pure (executionSourceOriginalNode mixedGraphs
-    (executionRefIdentity quoterRef) (executionRefGraph quoterRef))
-  let originalGraph = executionNodeGraph quoterNode
-      applies row = any (\edge -> dependencyImportQualifier edge == dependencyResolutionQualifier row
-        && dependencyImportName edge == dependencyResolutionModule row
-        && dependencyImportBoot edge == dependencyResolutionBoot row)
-        (dependencyModuleImports (executionNodeModule quoterNode))
-      originalEvidence = executionGraphEvidence originalGraph
-      alternateGraph = originalGraph {executionGraphSha256=replicate 64 'd',
-        executionGraphEvidence=originalEvidence {dependencyResolutions=
-          [if applies row then row {dependencyResolutionCandidates=
-              (work </> "unproven-shadow.hs") : dependencyResolutionCandidates row}
-            else row | row <- dependencyResolutions originalEvidence]}}
-  unless (any applies (dependencyResolutions originalEvidence)) $
-    fail "shared-recipe fixture lacks applicable negative-resolution witnesses"
-  contextualNodes <- either (fail . show) pure (executionSourceOriginalClosure (alternateGraph:mixedGraphs)
-    [quoterRef,quoterRef {executionRefGraph=executionGraphSha256 alternateGraph}])
-  contextualQuoter <- case [node | node <- contextualNodes
-      , executionNodeIdentity node == executionRefIdentity quoterRef] of
-    [node] -> pure node
-    _ -> fail "shared source recipe lost its exact quoter owner"
-  contextualResolutions <- either (fail . show) pure
-    (executionNodeOriginalResolutions (alternateGraph:mixedGraphs) contextualQuoter)
-  unless (Set.fromList [executionGraphSha256 originalGraph,executionGraphSha256 alternateGraph]
-        `Set.isSubsetOf` executionNodeOriginalGraphs contextualQuoter
-      && work </> "unproven-shadow.hs" `elem` concatMap dependencyResolutionCandidates contextualResolutions) $
-    fail "shared source dedup discarded another recipe's negative-resolution constraints"
-  -- Each level shares both later levels. Revalidating settled recipes per
-  -- incoming path expands this bounded source inventory exponentially.
-  let dagNames = ["SharedRecipe" ++ show index | index <- [0::Int ..35]]
-      dagIdentity name = (executionRefIdentity helperReference) {executionModule=name}
-      dagPath name = work </> name ++ ".hs"
-      dagModules = [DependencyModule "main" name False (dagPath name)
-          [DependencyImport DependencyUnqualified child False (Just (dagPath child))
-            | child <- take 2 (drop (index+1) dagNames)] ProductReady
-        | (index,name) <- zip [0::Int ..] dagNames]
-      dagGraph = originalGraph {executionGraphSha256=replicate 64 'c',
-        executionGraphOwners=[ExecutionSourceOwner (dagIdentity name) True Nothing | name <- dagNames],
-        executionGraphExactImports=[],executionGraphEvidence=originalEvidence {
-          dependencySources=[DependencySource (dagPath name) (replicate 64 'a') | name <- dagNames],
-          dependencyModules=dagModules,dependencyResolutions=[]}}
-      dagRefs=[ExecutionSourceRef (dagIdentity "SharedRecipe0") (executionGraphSha256 dagGraph)]
-  dagResult <- timeout 2000000 $ evaluate $ case executionSourceClosure [dagGraph] dagRefs
-      (map dagIdentity dagNames) [("main","SharedRecipe0")] of
-    Left refusal -> Left refusal
-    Right nodes -> Right (length nodes)
-  unless (dagResult == Just (Right 36)) $
-    fail "shared source recipe DAG did not finish with exactly 36 owners inside its bounded traversal"
-  let providerRefs = [reference | (_,reference) <- parcels
-        , executionIdentityKey (executionRefIdentity reference) == ("main","MetadataQuoter")]
-  local <- either (fail . show) pure
-    (extendExactExecutionSources (concatMap fst parcels) providerRefs emptyExecution)
-  localNodes <- either (fail . show) pure (executionSourceClosure (scopeExecutionGraphs local)
-    (scopeExecutionOwners local) (scopeExecutionNativeOwners local) [("main","MetadataQuoter")])
-  unless (length (scopeExecutionOwners local) == 1 && length localNodes == 2) $
-    fail "fresh local source recipe incorrectly required a separately published helper capability"
-  let missingHelper = emptyExecution {scopeProducts=
-        filter ((/= "MetadataQuoteSupport") . originalModule) (scopeProducts emptyExecution)}
-  unavailable <- either (fail . show) pure
-    (extendExactExecutionSources (concatMap fst parcels) providerRefs missingHelper)
-  unless (null (scopeExecutionOwners unavailable) && scopeProducts unavailable == scopeProducts missingHelper
-      && case executionSourceClosure (scopeExecutionGraphs unavailable) (scopeExecutionOwners unavailable)
-          (scopeExecutionNativeOwners unavailable) [("main","MetadataQuoter")] of Left _ -> True; _ -> False) $
-    fail "missing dependency capability either rejected native inventory or authorized an unavailable execution root"
-  let noProducts = emptyExecution {scopeProducts=[]}
-  unless (case extendExactExecutionSources (concatMap fst parcels) (map snd parcels) noProducts of Left _ -> True; _ -> False) $
-    fail "prospective candidate recipe entered a scope before native promotion"
-  unless (case extendExactExecutionSources (concatMap fst parcels) (map snd parcels)
-      emptyExecution {scopeProducerSha256=replicate 64 'f'} of Left _ -> True; _ -> False) $
-    fail "candidate recipe promoted another compiler producer"
-  -- Re-emitting the admitted parcel exercises the actual source-free load:
-  -- target sees only the thin reexport facade, not the hidden defining owner.
-  let admittedPath = work </> "promoted-scope.cbor"
-      admittedTerm = case originalTerm of
-        TList fields -> TList [case (index,field,filteredParcel) of
-          (7,TList [graphDescriptors,_],TList [_,references]) -> TList [graphDescriptors,references]
-          _ -> field | (index,field) <- zip [0::Int ..] fields]
-        _ -> originalTerm
-  writeTerm admittedPath admittedTerm
-  result <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty GeneralCompile
-    (Just emptySessionScope {ssRoot=work,ssExactScope=Just admittedPath})
-    (work </> "ExecutionReexportTarget.hs") [work] Nothing
-  unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult result))) $
-    fail "promoted cached original recipes did not execute through the thin facade"
-  let corrupt = case filteredParcel of
-        TList [graphs,TList (TList fields:refs)] ->
-          TList [graphs,TList (TList [if index == 2 then TString (T.replicate 64 "f") else field
-            | (index,field) <- zip [0::Int ..] fields]:refs)]
-        _ -> filteredParcel
-  let wrongDigest = case filteredParcel of
-        TList [TList (TList [_,bytes]:graphs),refs] ->
-          TList [TList (TList [TString (T.replicate 64 "f"),bytes]:graphs),refs]
-        _ -> filteredParcel
-      duplicateRef = case filteredParcel of
-        TList [graphs,TList (first:refs)] -> TList [graphs,TList (first:first:refs)]
-        _ -> filteredParcel
-  forM_ [("wrong original version",corrupt),("graph digest",wrongDigest)
-      ,("duplicate owner",duplicateRef),("unoffered original owner",parcel)] $ \(label,invalid) -> do
-    writeTerm candidatePath (envelope invalid)
-    readModuleCandidates candidatePath >>= \case
-      Left _ -> pure ()
-      Right _ -> fail ("candidate execution manifest accepted " ++ label)
-  putStrLn "candidate execution sources: actual native/source and matching exact dependency admission, protected roots, selected-source authority, missing/mismatched proof and source drift refusals, accepted-only promotion, no lexical widening, thin reexport execution and identity/digest/duplicate/producer refusals passed"
-  where
-    readTerm path = do
-      bytes <- BS.readFile path
-      either (fail . show) (pure . snd) (deserialiseFromBytes decodeTerm (BSL.fromStrict bytes))
-    candidateGroupTerm group = TList [TInt (fromIntegral (projectedOriginalOrdinal group))
-      ,TList (map symbolTerm (projectedBinders group)),TList [TList
-        [symbolTerm (globalIdentity global),repTerm (globalRep global)
-        ,maybe TNull signatureTerm (globalEntrySignature global >>= \(SignatureId index) ->
-          atIndex (projectedSignatures (projectedBody group)) (fromIntegral index))
-        ,TBool (globalRequiredEvaluated global),maybe TNull (TInt . fromIntegral) (globalRequiredGeneration global)]
-        | global <- projectedGlobals (projectedBody group)]]
-    symbolTerm value = TList [TString (symbolUnit value),TString (symbolModule value),TString (symbolNamespace value)
-      ,TString (symbolOccurrence value),maybe TNull TString (symbolRecordParent value)]
-    repTerm value = TList $ case value of
-      VoidRep -> [TString "void",TInt 0]
-      LiftedRefRep -> [TString "lifted",TInt 0]
-      UnliftedRefRep -> [TString "unlifted",TInt 0]
-      AddressRep -> [TString "address",TInt 0]
-      IntRep width -> [TString "int",TInt (fromIntegral width)]
-      WordRep width -> [TString "word",TInt (fromIntegral width)]
-      FloatRep width -> [TString "float",TInt (fromIntegral width)]
-    signatureTerm value = TList [TList (map repTerm (signatureArguments value)),case signatureResults value of
-      Returns reps -> TList [TString "returns",TList (map repTerm reps)]
-      NoSuccess -> TList [TString "no_success",TList []]
-      CallerResult -> TList [TString "caller_result",TList []]]
-    atIndex values index = case drop index values of value:_ -> Just value; [] -> Nothing
-
 candidateExecutionWire :: FilePath -> IO ()
 candidateExecutionWire path = do
   candidates <- readModuleCandidates path >>= either fail pure
@@ -3261,22 +2764,6 @@ candidateExecutionWire path = do
   putStrLn ("Rust TPMCAN8 decoder/retained closure: owners=" ++ show (map candidateModule candidates)
     ++ " graphs=" ++ show (Set.size (Set.fromList (map executionGraphSha256 graphs)))
     ++ "; source/native/interface/package bytes match; owner/digest refusals passed (synthetic decoder fixture, not GHC admission)")
-hasIntResultLiteral :: Integer -> [Core.CoreBind] -> Bool
-hasIntResultLiteral expected = any (\case
-      Core.NonRec binder rhs -> getOccString binder == "__result" && contains rhs
-      Core.Rec bindings -> any (\(binder, rhs) -> getOccString binder == "__result" && contains rhs) bindings)
-  where
-    contains = \case
-      Core.Lit (LitNumber LitNumInt value) -> value == expected
-      Core.App function argument -> contains function || contains argument
-      Core.Lam _ body -> contains body
-      Core.Let binding body -> any (contains . snd) (Core.flattenBinds [binding]) || contains body
-      Core.Case scrutinee _ _ alternatives -> contains scrutinee
-        || any (\(Core.Alt _ _ rhs) -> contains rhs) alternatives
-      Core.Cast body _ -> contains body
-      Core.Tick _ body -> contains body
-      _ -> False
-
 -- A real splice executes in both dependency and target. The recorded side
 -- effect rejects replay even if two frontend executions produce identical Core.
 finalizedFrontendOnce :: IO ()
@@ -3714,34 +3201,13 @@ hydratedSiteSiblings = withScratch $ \work -> do
     fail "a malformed captured carrier field was admitted for Int injection"
   putStrLn "hydrated site siblings: 11 checks passed (native/exact, private native/exact, wrong interface owner, foreign surface unit, two missing owners, missing sibling, incompatible sibling, malformed carrier ABI)"
 
-writeExactMetadataScope :: FilePath -> [(ExactIfaceArtifact, FilePath, String)] -> IO ()
-writeExactMetadataScope path owners = writeExactMetadataScopeWithLexical path owners []
-
-writeExactMetadataScopeWithLexical
-  :: FilePath -> [(ExactIfaceArtifact, FilePath, String)]
-  -> [(ExactIfaceArtifact, [(String, String)])] -> IO ()
-writeExactMetadataScopeWithLexical path owners lexical = do
-  let text = encodeString . T.pack
-      identity (unit, name) = encodeListLen 2 <> text unit <> text name
-      owner (artifact, packages, sha) = encodeListLen 7
-        <> foldMap text [exactUnit artifact, exactModule artifact, exactPath artifact, exactSha256 artifact]
-        <> encodeListLen 0 <> text packages <> text sha
-      selected (artifact, requirements) = encodeListLen 2
-        <> identity (exactUnit artifact, exactModule artifact)
-        <> encodeListLen (fromIntegral (length requirements)) <> foldMap identity requirements
-  BS.writeFile path (toStrictByteString (encodeListLen 7
-    <> encodeString "TPEXACTSCOPE" <> encodeString "2"
-    <> foldMap encodeString (replicate 2 (T.replicate 64 "0"))
-    <> encodeListLen (fromIntegral (length owners)) <> foldMap owner owners
-    <> encodeListLen (fromIntegral (length lexical)) <> foldMap selected lexical <> encodeListLen 0))
-
 exactBashMetadata :: FilePath -> IO ()
 exactBashMetadata effects = withTiming $ withScratch $ \work -> do
   let target = work </> "MetadataBashTarget.hs"
       scopePath = work </> "exact-scope.cbor"
       scope = emptySessionScope { ssRoot = work, ssExactScope = Just scopePath }
   copyFile "test-source-boot/fixtures/MetadataBashTarget.hs" target
-  writeExactMetadataScope scopePath []
+  writeGenuineEmptyMetadataScope scopePath
   withResidentPipelineSelected [work, "lib", effects] $ \compile -> do
     normal <- compile CheckedEnvironment Set.empty GeneralCompile Nothing target [] Nothing
     (checked, diagnostics) <- captureDiagnostics $
@@ -4341,11 +3807,6 @@ verifyChangedPackageInterface producer identity evidence program global = withSc
     fail "restored standalone package lookup changed its canonical Name"
   putStrLn "package certification: changed interface refused and restored bytes recovered"
 
-withTiming :: IO a -> IO a
-withTiming action = bracket (lookupEnv "TIDEPOOL_TIMING") restore $ \_ ->
-  setEnv "TIDEPOOL_TIMING" "1" >> action
-  where restore = maybe (unsetEnv "TIDEPOOL_TIMING") (setEnv "TIDEPOOL_TIMING")
-
 captureDiagnostics :: IO a -> IO (a, String)
 captureDiagnostics action = do
   temporary <- getTemporaryDirectory
@@ -4566,15 +4027,9 @@ exerciseRefusalsWith requireAccepted work reuse = do
   reuse >>= requireAccepted "resident reuse after refusal"
 
 
-manifest :: FilePath -> FilePath
-manifest work = work </> "module-candidates.cbor"
-
 reuseFresh :: FilePath -> IO PreparedPipelineResult
 reuseFresh work = runPipelineSelected (PreparedProducts (Just (manifest work)))
   (work </> "CacheEntry.hs") [work]
-
-preparedNames :: PreparedPipelineResult -> [String]
-preparedNames = map (moduleNameString . moduleName . pmModule) . pprModules
 
 requireReused :: String -> PreparedPipelineResult -> IO ()
 requireReused label result = unless
@@ -4619,60 +4074,3 @@ verifyHydration work cold = do
     case restored of
       Left reason -> liftIO (fail ("fresh SOURCE hydration refused: " ++ reason))
       Right _ -> pure ()
-
-writeManifestFor :: [String] -> FilePath -> PreparedPipelineResult -> IO ()
-writeManifestFor names work cold = do
-  candidates <- forM names $ \name -> do
-    let key = mkModuleName name
-        nodes = [node | node <- dependencyModules (pprDependencies cold)
-          , dependencyModuleName node == name, not (dependencyModuleBoot node)]
-    node <- case nodes of
-      [value] -> pure value
-      _ -> fail "SOURCE module lacks one compiler graph witness"
-    iface <- maybe (fail "SOURCE module lacks a skinny interface") pure
-      (Map.lookup key (pprProductInterfaces cold))
-    let hi = work </> (name ++ ".candidate.hi")
-    writeBinIface (targetProfile (hsc_dflags (prHscEnv (pprPipelineResult cold))))
-      QuietBinIFace NormalCompression hi iface
-    bytes <- BS.readFile hi
-    source <- sourceEvidence (dependencyModuleSource node)
-    let artifact = ExactIfaceArtifact (dependencyModuleUnit node) name hi (digest bytes) []
-        packages = encodePackageImports artifact
-          (Map.findWithDefault emptyPackageImports key (pprPackageImports cold))
-        packagePath = hi ++ ".packages"
-        text = encodeString . T.pack
-        imports = dependencyModuleImports node
-        productPath = hi ++ ".descriptor-only.tpmod"
-    -- These fixtures exercise source/interface admission without publishing
-    -- native products. Runtime promotion separately requires a framed TPMOD.
-    BS.writeFile productPath BS.empty
-    BS.writeFile packagePath packages
-    pure $ encodeListLen 14
-      <> foldMap text [dependencyModuleUnit node, name, dependencyModuleSource node
-        , dependencySourceSha256 source, hi, digest bytes]
-      <> foldMap text [replicate 64 '0', digest BS.empty, replicate 64 '0']
-      <> encodeListLen (fromIntegral (length imports))
-      <> foldMap (\imported -> encodeListLen 4
-        <> text (renderDependencyQualifier (dependencyImportQualifier imported)) <> text (dependencyImportName imported)
-        <> encodeBool (dependencyImportBoot imported)
-        <> text (maybe "" id (dependencyImportSelected imported))) imports
-      <> encodeListLen 0 <> text packagePath <> text (digest packages) <> text productPath
-  BS.writeFile (manifest work) (toStrictByteString
-    (encodeListLen 6 <> encodeString "TPMCAN" <> encodeString "8"
-      <> encodeListLen 0 <> encodeListLen 0
-      <> encodeListLen (fromIntegral (length candidates)) <> mconcat candidates
-      <> encodeListLen 2 <> encodeListLen 0 <> encodeListLen 0))
-
-digest :: BS.ByteString -> String
-digest = concatMap (\byte -> let text = showHex byte ""
-  in replicate (2 - length text) '0' ++ text) . BS.unpack . SHA.hash
-
-withScratch :: (FilePath -> IO a) -> IO a
-withScratch action = bracket
-  (do root <- getTemporaryDirectory
-      (path, handle) <- openTempFile root "tidepool-source-boot-test"
-      hClose handle
-      removeFile path
-      createDirectory path
-      pure path)
-  removeDirectoryRecursive action
