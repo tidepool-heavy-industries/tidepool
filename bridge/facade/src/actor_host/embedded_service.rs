@@ -535,9 +535,17 @@ where
         conversation,
         mut incoming,
         round_control,
-        ..
+        observation,
     } = embedded;
     let actor = conversation.identity().actor.clone();
+    let provider_thread = format!(
+        "{}:{}:{}",
+        conversation.identity().run,
+        actor.0,
+        conversation.identity().incarnation
+    );
+    // The supervisor starts the driver only after accepting its attachment.
+    observation.publish_provider_binding(None, provider_thread.clone());
     let engine = conversation
         .engine::<A, _>(
             transport,
@@ -547,12 +555,7 @@ where
                 tools: Vec::new(),
                 model,
                 effort,
-                session_id: format!(
-                    "{}:{}:{}",
-                    conversation.identity().run,
-                    actor.0,
-                    conversation.identity().incarnation
-                ),
+                session_id: provider_thread.clone(),
                 agent: actor.clone(),
             },
             NonZeroU64::new(settings.context_capacity_tokens).ok_or("zero context capacity")?,
@@ -601,10 +604,12 @@ where
         }
         let recovering_this_round = recovering || frontier.pending_head.is_some();
         let mut lifetime_stopped = false;
+        let round = round_control
+            .begin()
+            .map_err(|error| format!("could not begin embedded Engine round: {error}"))?;
+        let observed_round =
+            observation.begin_provider_turn(provider_thread.clone(), round.id().0.to_string())?;
         let result = {
-            let round = round_control
-                .begin()
-                .map_err(|error| format!("could not begin embedded Engine round: {error}"))?;
             lifecycle.publish(actor_ref, harness::server::HostActorLifecycle::Running);
             let run = async {
                 if recovering_this_round {
@@ -656,12 +661,20 @@ where
                 // request. Durable explicit input triggers existing recovery,
                 // which reconciles retained claims without dispatching them.
                 tracing::warn!(?actor, ?head_request, %cause, "embedded provider round interrupted; awaiting explicit input");
+                observed_round.fail(exomonad_model::ProviderFailure::TransportFailed);
                 recovering = true;
                 lifecycle.publish(actor_ref, harness::server::HostActorLifecycle::Waiting);
                 continue;
             }
             Err(error) => {
-                let (head, cleanup) = cancelled_round(error, head.clone())?;
+                let (head, cleanup) = match cancelled_round(error, head.clone()) {
+                    Ok(cancelled) => cancelled,
+                    Err(error) => {
+                        observed_round
+                            .fail(exomonad_model::ProviderFailure::Other(error.to_string()));
+                        return Err(error);
+                    }
+                };
                 (head, true, false, cleanup)
             }
         };
@@ -690,11 +703,22 @@ where
                     "embedded head advance failed alongside Engine cleanup"
                 );
             }
+            observed_round.fail(exomonad_model::ProviderFailure::Other(error.to_string()));
             return Err(error);
         }
         if !advanced.map_err(|error| error.to_string())? {
             return Err(format!("embedded conversation {} lost its durable head", actor.0).into());
         }
+        // Provider idleness authorizes typed cleanup. Publish it only after
+        // Engine settlement and the matching durable head transition.
+        if interrupted {
+            observed_round.interrupt();
+        } else if rejected {
+            observed_round.fail(exomonad_model::ProviderFailure::RequestRejected);
+        } else {
+            observed_round.succeed();
+        }
+        drop(round);
         if lifetime_stopped || *cancellation.borrow() {
             return Ok(());
         }

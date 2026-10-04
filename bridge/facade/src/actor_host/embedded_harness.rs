@@ -171,6 +171,7 @@ impl EmbeddedHarnessRuntime {
             ));
         }
         let actor_identity = actor.identity();
+        let observation = installation.observation();
         self.prepare_application(actor_identity, &identity)?;
         let (wakes, incoming) = mpsc::unbounded_channel();
         let round_control = Arc::new(EmbeddedRoundControl::default());
@@ -195,6 +196,7 @@ impl EmbeddedHarnessRuntime {
             conversation,
             incoming,
             round_control,
+            observation,
         })
     }
 
@@ -275,6 +277,7 @@ impl EmbeddedHarnessRuntime {
             conversation,
             incoming,
             round_control,
+            observation: installation.runtime_observation.clone(),
         })
     }
 
@@ -291,6 +294,7 @@ pub(super) struct EmbeddedConversation {
     pub(super) conversation: Arc<Conversation>,
     pub(super) incoming: mpsc::UnboundedReceiver<DurableMailboxWake>,
     pub(super) round_control: Arc<EmbeddedRoundControl>,
+    pub(super) observation: exomonad_actor::ActorRuntimeObservationHandle,
 }
 
 /// The host and its single Engine driver share one exact active-round slot.
@@ -357,6 +361,10 @@ impl RoundCancellationHandle {
 }
 
 impl EmbeddedRoundLease {
+    pub(super) fn id(&self) -> EmbeddedRoundId {
+        self.handle.id
+    }
+
     pub(super) fn cancellation(&self) -> watch::Receiver<bool> {
         self.receiver.clone()
     }
