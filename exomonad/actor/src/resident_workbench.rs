@@ -16648,12 +16648,15 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                 })
                 .expect("original authenticated input site");
             inputs.push(input);
-            session
-                .abort(
-                    activation.cont_id(),
-                    "fixture retained original input".into(),
-                )
-                .unwrap();
+            let activation_id = activation.cont_id().to_owned();
+            assert!(matches!(
+                session.abort(&activation_id, "fixture retained original input".into()),
+                Err(ResidentError::Run(tidepool_runtime::RuntimeError::Jit(
+                    tidepool_effect::EffectError::Handler(reason)
+                ))) if reason == "ask aborted by caller: fixture retained original input"
+            ));
+            assert!(!session.parked_holes().contains(&activation_id.as_str()));
+            assert!(session.parked_holes().contains(&submission.cont_id()));
             let next = session.resume(submission, ()).unwrap();
             if request == 1 {
                 reservation = suspend(next);
