@@ -1019,6 +1019,99 @@ fn refuse_changed_checked_sites(resident: &mut TestSession, fixture: &InputFixtu
 }
 
 #[test]
+fn resident_parcel_preserves_original_authenticated_request_across_sessions() {
+    let fixture = InputFixture::compile(
+        include_str!("fixtures/activation-input-function.hs"),
+        false,
+        SessionId(1706),
+    );
+    let mut source = fixture.fresh();
+    let reservation = fixture.start(&mut source);
+    let submission = suspended(source.resume(reservation, 1).unwrap());
+    let payload = source
+        .live_payload_handle(submission.cont_id())
+        .unwrap()
+        .unwrap();
+    let original = Arc::clone(&payload.provenance);
+    assert!(
+        !original.authenticated_inputs.is_empty(),
+        "real compiler issuer authenticates input"
+    );
+    let observations_only = ProgramProvenance::from_sites(&fixture.producer.asks).unwrap();
+    assert!(
+        observations_only.authenticated_inputs.is_empty(),
+        "public metadata construction cannot create input authority"
+    );
+    let shared = source.export_shared(&payload).unwrap();
+    assert!(Arc::ptr_eq(&shared.provenance, &original));
+    let destination_root = tempfile::tempdir().unwrap();
+    let mut destination =
+        InputFixture::fresh_in(SessionId(1707), &destination_root, &fixture.recipe);
+    let wrong_owner = source
+        .retain_binding_custody("activationReceiver")
+        .unwrap()
+        .unwrap();
+    let before = destination.residency();
+    assert!(matches!(
+        destination.export_shared(&payload),
+        Err(ResidentError::ForeignCustody)
+    ));
+    assert!(matches!(
+        destination.export_custody(wrong_owner),
+        Err(ResidentError::ForeignCustody)
+    ));
+    assert_eq!(
+        destination.residency(),
+        before,
+        "foreign export cannot attach another owner's metadata"
+    );
+    let consumed = source.export_custody(payload).unwrap();
+    assert!(Arc::ptr_eq(&consumed.provenance, &original));
+    let imported = destination.import_parcel(shared, RealmId::ROOT).unwrap();
+    let repeated = destination.import_parcel(consumed, RealmId::ROOT).unwrap();
+    assert!(Arc::ptr_eq(&imported.provenance, &original));
+    assert!(Arc::ptr_eq(&repeated.provenance, &original));
+    drop(source);
+
+    let receiver = destination
+        .retain_binding_custody("activationReceiver")
+        .unwrap()
+        .unwrap();
+    let activation = suspended(
+        destination
+            .run_rooted_application(
+                "importedOriginalRequest",
+                &receiver,
+                &imported,
+                RealmId::ROOT,
+                None,
+            )
+            .unwrap(),
+    );
+    let site = parked_site(&mut destination, &activation);
+    let parked = destination.parked_program_provenance(&activation).unwrap();
+    assert!(parked.sites[&site].same_metadata(&original.sites[&site]));
+    assert_eq!(
+        parked.authenticated_inputs[&site], original.authenticated_inputs[&site],
+        "the original selected immutable interface view survives source retirement"
+    );
+    let realm = destination.parked_realm(&activation).unwrap();
+    let input = destination
+        .capture_activation_input(&activation, realm, site)
+        .unwrap();
+    assert_eq!(input.input_type(), original.sites[&site].inputs[0].ty);
+    assert!(Arc::ptr_eq(&input.custody.provenance, &parked));
+    assert!(destination.discard_custody(imported));
+    assert!(destination.discard_custody(repeated));
+    destination
+        .abort(
+            activation.cont_id(),
+            "transfer qualification complete".into(),
+        )
+        .unwrap();
+}
+
+#[test]
 fn activation_function_input_preserves_value_across_repeated_checked_mounts() {
     let fixture = InputFixture::compile(
         include_str!("fixtures/activation-input-function.hs"),

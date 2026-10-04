@@ -67,6 +67,23 @@ pub struct ProgramProvenance {
     authenticated_inputs: BTreeMap<u64, tidepool_toolchain::artifact_inventory::ArtifactView>,
 }
 
+/// Detached native value with its original immutable compiler provenance.
+/// Only this session's custody exporter can pair the two; importing never
+/// manufactures compiler observations or authenticated input authority.
+#[must_use = "a resident parcel must be imported or deliberately dropped"]
+pub struct ResidentParcel {
+    native: Parcel,
+    provenance: Arc<ProgramProvenance>,
+}
+
+static_assertions::assert_not_impl_any!(ResidentParcel: Clone, Copy);
+
+impl ResidentParcel {
+    pub fn bytes(&self) -> usize {
+        self.native.bytes()
+    }
+}
+
 pub type ProgramProvenanceError = YieldSiteCollision;
 
 impl ProgramProvenance {
@@ -3856,7 +3873,7 @@ where
         discarded
     }
 
-    /// Export the value `custody` roots as a detached [`Parcel`] another
+    /// Export the value `custody` roots as a detached [`ResidentParcel`] another
     /// session's machine (sharing this run's [`tidepool_codegen::prepared_program::ImageRegistry`])
     /// can import -- the session-layer half of a value crossing two
     /// [`ResidentSession`]s. Consumes the custody: the export itself is a
@@ -3864,8 +3881,14 @@ where
     /// like `inspect_retained`), so once the parcel is safely out this
     /// releases the handle exactly as [`Self::discard_custody`] would --
     /// the parcel is now the value's only owner on this side.
-    pub fn export_custody(&mut self, custody: RootCustody) -> Result<Parcel, ResidentError> {
+    pub fn export_custody(
+        &mut self,
+        custody: RootCustody,
+    ) -> Result<ResidentParcel, ResidentError> {
         self.settle_dropped_custody();
+        if !Arc::ptr_eq(&custody.cleanup.0, &self.custody_cleanup) {
+            return Err(ResidentError::ForeignCustody);
+        }
         let transfer = custody.into_transfer();
         let handle = transfer.handle;
         let Some(engine) = self.state.prepared_mut() else {
@@ -3879,11 +3902,15 @@ where
             released,
             "a handle just exported must still be live to release"
         );
+        let provenance = Arc::clone(&transfer.provenance);
         transfer.commit();
-        Ok(parcel)
+        Ok(ResidentParcel {
+            native: parcel,
+            provenance,
+        })
     }
 
-    /// Export the value `custody` roots as a detached [`Parcel`], WITHOUT
+    /// Export the value `custody` roots as a detached [`ResidentParcel`], WITHOUT
     /// consuming or releasing `custody` -- the borrowing counterpart to
     /// [`Self::export_custody`], for a value more than one destination
     /// machine may need to import independently (a request's published
@@ -3892,8 +3919,14 @@ where
     /// non-consuming read of the machine (see [`Self::export_custody`]'s own
     /// doc); this only differs by skipping the `discard_handle` after it, so
     /// the root stays live here for the next caller to export again.
-    pub fn export_shared(&mut self, custody: &RootCustody) -> Result<Parcel, ResidentError> {
+    pub fn export_shared(
+        &mut self,
+        custody: &RootCustody,
+    ) -> Result<ResidentParcel, ResidentError> {
         self.settle_dropped_custody();
+        if !Arc::ptr_eq(&custody.cleanup.0, &self.custody_cleanup) {
+            return Err(ResidentError::ForeignCustody);
+        }
         let Some(handle) = custody.handle else {
             unreachable!("live custody always contains its handle");
         };
@@ -3902,31 +3935,29 @@ where
                 format!("cannot export {handle:?}: the prepared machine is not installed"),
             ))));
         };
-        Ok(engine.export_parcel(handle)?)
+        Ok(ResidentParcel {
+            native: engine.export_parcel(handle)?,
+            provenance: Arc::clone(&custody.provenance),
+        })
     }
 
-    /// Import `parcel` under `owner`, rooting its value as a new old-space
-    /// arena in this session's machine (`PreparedEngine::import_parcel`),
-    /// and mint a [`RootCustody`] over it with this session's own
-    /// cleanup/provenance -- the session-layer half of a value crossing two
-    /// [`ResidentSession`]s, mirroring how [`Self::live_payload_handle_owned_by`]
-    /// mints custody for a handle taken under another resource scope.
-    ///
-    /// The imported value never passed through one of THIS session's yield
-    /// sites -- it was not produced by resuming a parked frame here -- so its
-    /// provenance starts empty, the same choice already made for a value
-    /// minted without a parked frame behind it. Retained binding custody instead
-    /// preserves its binding's original provenance.
+    /// Import the original native value and immutable compiler provenance
+    /// under this session's cleanup owner. Imported binding roots retain the
+    /// same provenance for later binding capture and cross-session export.
     #[allow(
         clippy::expect_used,
         reason = "exact identities are preflighted and native import mints live handles under this exclusive checkout"
     )]
     pub fn import_parcel(
         &mut self,
-        parcel: Parcel,
+        parcel: ResidentParcel,
         owner: RealmId,
     ) -> Result<RootCustody, ResidentError> {
         self.settle_dropped_custody();
+        let ResidentParcel {
+            native: parcel,
+            provenance,
+        } = parcel;
         let imports = self
             .state
             .prepared()
@@ -3985,12 +4016,14 @@ where
                 defining_expr: None,
                 scope: ScopeId::ROOT,
             }).expect("all library identities preflighted before native import under exclusive checkout");
+            self.binding_provenance
+                .insert(id.raw(), Arc::clone(&provenance));
             self.advance_public_visibility(ScopeId::ROOT);
         }
         Ok(RootCustody::new(
             handle,
             Arc::clone(&self.custody_cleanup),
-            Arc::new(ProgramProvenance::default()),
+            provenance,
         ))
     }
 
@@ -8256,7 +8289,12 @@ mod authored_publication_tests {
         assert!(cancelled.load(std::sync::atomic::Ordering::Relaxed));
     }
 
-    fn parcel_source_fixture() -> (TestSession, Parcel, PreparedHandle, Vec<SymbolIdentity>) {
+    fn parcel_source_fixture() -> (
+        TestSession,
+        ResidentParcel,
+        PreparedHandle,
+        Vec<SymbolIdentity>,
+    ) {
         use tidepool_repr::execution_schema::{
             testing, Atom, ExprFrame, GlobalDecl, GlobalId, Group, HeapRhs, ResultContract,
             RuntimeRep, Signature, SignatureId, UpdatePolicy, ValueRef,
@@ -8313,12 +8351,8 @@ mod authored_publication_tests {
         );
         let handle = entry.value.handle;
         source.state.bind(entry).unwrap();
-        let parcel = source
-            .state
-            .prepared_mut()
-            .unwrap()
-            .export_parcel(handle.raw())
-            .unwrap();
+        let custody = source.retain_binding_custody("payload").unwrap().unwrap();
+        let parcel = source.export_shared(&custody).unwrap();
         (source, parcel, handle, identities)
     }
 
@@ -8340,7 +8374,7 @@ mod authored_publication_tests {
                 .state
                 .prepared()
                 .unwrap()
-                .pending_parcel_import_identities(&parcel),
+                .pending_parcel_import_identities(&parcel.native),
             identities
         );
         let residency = destination.residency();
@@ -8368,7 +8402,7 @@ mod authored_publication_tests {
 
     #[test]
     fn parcel_imported_binding_handles_survive_caller_realm_and_repeat_import() {
-        let (mut source, parcel, payload, identities) = parcel_source_fixture();
+        let (mut source, parcel, _payload, identities) = parcel_source_fixture();
         let mut destination = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, None);
         let bootstrap = crate::session::prepared::tests::rooted_publication_fixture(
             &mut destination.state,
@@ -8377,19 +8411,16 @@ mod authored_publication_tests {
         );
         destination.state.bind(bootstrap).unwrap();
         let owner = RealmId(481);
+        let provenance = Arc::clone(&parcel.provenance);
         let custody = destination.import_parcel(parcel, owner).unwrap();
         let revision = destination.state.bindings().mutation_revision();
-        let repeated = source
-            .state
-            .prepared_mut()
-            .unwrap()
-            .export_parcel(payload.raw())
-            .unwrap();
+        let source_custody = source.retain_binding_custody("payload").unwrap().unwrap();
+        let repeated = source.export_shared(&source_custody).unwrap();
         assert!(destination
             .state
             .prepared()
             .unwrap()
-            .pending_parcel_import_identities(&repeated)
+            .pending_parcel_import_identities(&repeated.native)
             .is_empty());
         let repeated_custody = destination.import_parcel(repeated, owner).unwrap();
         assert_eq!(destination.state.bindings().mutation_revision(), revision);
@@ -8401,7 +8432,39 @@ mod authored_publication_tests {
                 .get(parcel_library_binding(identity).unwrap().0)
                 .unwrap();
             let handle = entry.value.handle;
-            assert_eq!(&entry.value.identity, identity);
+            let imported_id = entry.id;
+            let binding = destination
+                .retain_binding_custody_in(ScopeId::ROOT, &identity.occurrence, imported_id)
+                .unwrap()
+                .unwrap();
+            assert!(
+                Arc::ptr_eq(&binding.provenance, &provenance),
+                "imported binding capture retains the original carrier"
+            );
+            let exported = destination.export_shared(&binding).unwrap();
+            let mut third = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, None);
+            let bootstrap = crate::session::prepared::tests::rooted_publication_fixture(
+                &mut third.state,
+                "bootstrap",
+                486,
+            );
+            third.state.bind(bootstrap).unwrap();
+            let arrived = third.import_parcel(exported, RealmId::ROOT).unwrap();
+            assert!(
+                Arc::ptr_eq(&arrived.provenance, &provenance),
+                "binding re-export to a third machine cannot replace its provenance"
+            );
+            assert!(third.discard_custody(arrived));
+            assert_eq!(
+                &destination
+                    .state
+                    .bindings()
+                    .get(imported_id)
+                    .unwrap()
+                    .value
+                    .identity,
+                identity
+            );
             assert_eq!(
                 destination
                     .state

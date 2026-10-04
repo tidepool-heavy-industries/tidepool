@@ -1,7 +1,7 @@
 use std::fmt;
 
 use tidepool_repr::SessionId;
-use tidepool_runtime::session::{Parcel, ResidentHole, RootCustody};
+use tidepool_runtime::session::{ResidentHole, ResidentParcel, RootCustody};
 
 use crate::ActorRef;
 
@@ -51,11 +51,11 @@ pub(crate) struct ResidentWaitRequest {
 }
 
 /// One live Haskell value crossing the mailbox, either already rooted under
-/// an exclusive machine handle or still sealed in a detached [`Parcel`].
+/// an exclusive machine handle or still sealed in a detached [`ResidentParcel`].
 ///
 /// The session tag lets the actor kernel reject a cross-machine delivery
 /// before a [`RootCustody`] handle ever leaves its envelope -- but only for
-/// the `Runtime` form: a [`Parcel`] carries no machine affinity of its own
+/// the `Runtime` form: a [`ResidentParcel`] carries no machine affinity of its own
 /// (see [`tidepool_codegen::prepared_program::evacuation`]'s module doc) and
 /// is always deliverable, wherever it lands, by importing it into the
 /// receiving machine instead. Dropping this value drops whatever it holds:
@@ -70,7 +70,7 @@ pub struct MailboxValue {
 
 enum MailboxRoot {
     Runtime(RootCustody),
-    Parcel(Parcel),
+    Parcel(ResidentParcel),
     #[cfg(test)]
     Probe {
         _drop: DropProbe,
@@ -80,7 +80,7 @@ enum MailboxRoot {
 
 /// Which real form a [`MailboxRoot::Probe`] stands in for -- the probe never
 /// touches a machine, so this only needs to steer [`MailboxValue::deliver`]'s
-/// branch, not carry any actual [`RootCustody`]/[`Parcel`] payload.
+/// branch, not carry any actual [`RootCustody`]/[`ResidentParcel`] payload.
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ProbeKind {
@@ -96,7 +96,7 @@ pub(crate) enum ProbeKind {
 /// the primitive a delivery site matches on to decide which operation to run.
 pub enum MailboxDelivery {
     Runtime(RootCustody),
-    Parcel(Parcel),
+    Parcel(ResidentParcel),
     #[cfg(test)]
     Probe(DropProbe),
 }
@@ -111,7 +111,7 @@ pub(crate) enum MailboxTransfer {
         session: SessionId,
         custody: RootCustody,
     },
-    Parcel(Parcel),
+    Parcel(ResidentParcel),
     #[cfg(test)]
     ProbeRuntime {
         session: SessionId,
@@ -153,11 +153,11 @@ impl MailboxValue {
         }
     }
 
-    /// Wrap a detached [`Parcel`] for delivery. `session` is the value's
+    /// Wrap a detached [`ResidentParcel`] for delivery. `session` is the value's
     /// nominal origin (mirrors [`Self::new`]) -- purely informational for
     /// this form, since [`Self::deliver`] never rejects a `Parcel` on tag
     /// mismatch the way it does a `Runtime` custody.
-    pub fn parcel(session: SessionId, parcel: Parcel) -> Self {
+    pub fn parcel(session: SessionId, parcel: ResidentParcel) -> Self {
         Self {
             session,
             root: MailboxRoot::Parcel(parcel),

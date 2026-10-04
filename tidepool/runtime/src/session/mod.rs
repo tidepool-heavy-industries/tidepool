@@ -79,11 +79,9 @@ pub use prepared::{
     PreparedSettlement, RealmId, RequestCompileAnnotations, RuntimeCompileInputs, SiteTypeEvidence,
 };
 pub use publication::{PublicationCancellation, PublicationDecision, PublicationPhase};
-// Re-exported for callers that pass a value across two resident sessions'
-// machines ([`resident::ResidentSession::export_custody`]/`import_parcel`)
-// and any composition root that wires the sessions' shared image cache
-// ([`resident::ResidentSession::set_image_registry`]).
-pub use tidepool_codegen::prepared_program::{ImageRegistry, Parcel};
+// Composition roots wire the sessions' shared immutable native image cache
+// through [`resident::ResidentSession::set_image_registry`].
+pub use tidepool_codegen::prepared_program::ImageRegistry;
 
 pub use recovery::{
     DeclarationRecoveryReport, RecoveryFormatRefusal, RecoveryPublicOwner, RestoredDeclaration,
@@ -113,8 +111,8 @@ pub use resident::{
     truncate_preview_at_line, CompiledActivationInput, HostBindingType, HostCarrier, HostPayload,
     MountedActivationInput, PendingPreparedInstall, PendingPreparedMode, PreparedStartupEntry,
     ProgramProvenance, ProgramProvenanceError, ReadyPreparedInstall, ResidentContinuationEvent,
-    ResidentError, ResidentHole, ResidentOutcome, ResidentResumeError, ResidentSession,
-    RootCustody, RuntimeActivationInput, RuntimeActivationInputAdmission,
+    ResidentError, ResidentHole, ResidentOutcome, ResidentParcel, ResidentResumeError,
+    ResidentSession, RootCustody, RuntimeActivationInput, RuntimeActivationInputAdmission,
     RuntimeProgressPublication, SessionRunContext,
 };
 
