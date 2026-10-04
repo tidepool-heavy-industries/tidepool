@@ -1,7 +1,28 @@
 //! Shared real resident setup for focused and recursive actor scenarios.
 
 use super::*;
-use exomonad_tool::{ToolArguments, ToolInvocation, ToolInvocationContext};
+use exomonad_tool::{
+    ConversationOrigin, OriginalOperation, ToolArguments, ToolInvocation, ToolInvocationContext,
+    ToolInvocationOrigin,
+};
+
+/// Dispatch and completion share one original operation; namespaces identify nested calls.
+pub(super) fn original_tool_call(
+    operation: OriginalOperation,
+) -> (
+    ToolInvocationContext,
+    tidepool_runtime::session::WorkbenchForkBoundary,
+) {
+    let invocation = ToolInvocationContext {
+        call_id: operation.call_id.clone(),
+        origin: ToolInvocationOrigin::Model(operation.clone()),
+        namespace: None,
+    };
+    (
+        invocation,
+        tidepool_runtime::session::WorkbenchForkBoundary::Hosted(operation),
+    )
+}
 
 // Semantic acceptance includes cold whole-cell compilation, validation and
 // native attachment in a debug build. Performance gates keep their own budgets.
@@ -621,25 +642,22 @@ pub(super) async fn dispatch_haskell_script_response(
     script: &str,
 ) -> Result<exomonad_actor::ResidentToolResponse, exomonad_actor::ResidentToolError> {
     let call_id = uuid::Uuid::new_v4().simple().to_string();
+    let (invocation, completion) = original_tool_call(OriginalOperation {
+        origin: ConversationOrigin::External {
+            thread_id: "actor-host-vertical".into(),
+        },
+        request_id: call_id.clone(),
+        call_id,
+    });
     let result = endpoint
         .dispatch_boxed(ToolInvocation {
-            context: Some(ToolInvocationContext::external(
-                "actor-host-vertical".into(),
-                call_id.clone(),
-                call_id.clone(),
-                Some(call_id.clone()),
-                Some("haskell".into()),
-            )),
+            context: Some(invocation),
             name: exomonad_actor::HASKELL_TOOL.into(),
             arguments: ToolArguments::Raw(script.into()),
         })
         .await;
     endpoint
-        .complete_boxed(tidepool_runtime::session::WorkbenchForkBoundary::external(
-            "actor-host-vertical".into(),
-            call_id.clone(),
-            call_id,
-        ))
+        .complete_boxed(completion)
         .await
         .expect("recorded tool completion");
     result
@@ -651,26 +669,23 @@ pub(super) async fn dispatch_structured_tool(
     arguments: serde_json::Value,
 ) -> serde_json::Value {
     let call_id = uuid::Uuid::new_v4().simple().to_string();
+    let (invocation, completion) = original_tool_call(OriginalOperation {
+        origin: ConversationOrigin::External {
+            thread_id: "actor-host-vertical".into(),
+        },
+        request_id: call_id.clone(),
+        call_id,
+    });
     let result = endpoint
         .dispatch_json_boxed(ToolInvocation {
-            context: Some(ToolInvocationContext::external(
-                "actor-host-vertical".into(),
-                call_id.clone(),
-                call_id.clone(),
-                Some(call_id.clone()),
-                Some(name.into()),
-            )),
+            context: Some(invocation),
             name: name.into(),
             arguments: ToolArguments::Structured(arguments),
         })
         .await
         .unwrap_or_else(|error| panic!("{name} tool failed: {error}"));
     endpoint
-        .complete_boxed(tidepool_runtime::session::WorkbenchForkBoundary::external(
-            "actor-host-vertical".into(),
-            call_id.clone(),
-            call_id,
-        ))
+        .complete_boxed(completion)
         .await
         .expect("recorded tool completion");
     result

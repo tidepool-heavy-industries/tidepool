@@ -3,9 +3,12 @@
 use super::test_campaign::TestCampaign;
 use super::test_campaign::{
     dispatch_haskell_script, dispatch_haskell_script_result, dispatch_lookup, dispatch_status,
+    original_tool_call,
 };
 use super::*;
-use exomonad_tool::{ToolArguments, ToolInvocation, ToolInvocationContext};
+use exomonad_tool::{
+    ConversationOrigin, OriginalOperation, ToolArguments, ToolInvocation, ToolInvocationContext,
+};
 
 fn example(document: &str) -> &str {
     examples(document).next().unwrap()
@@ -40,16 +43,17 @@ async fn assert_deferred_original_owner(source: &str, checkpoint: bool) {
     let mut campaign = TestCampaign::start().await;
     let root = Arc::clone(&campaign.root_installation.policy);
     let call_id = format!("deferred-original-owner-{checkpoint}");
+    let (invocation, completion) = original_tool_call(OriginalOperation {
+        origin: ConversationOrigin::External {
+            thread_id: "original-owner-test".into(),
+        },
+        request_id: call_id.clone(),
+        call_id,
+    });
     committed(root.as_ref(), "data DeferredInput = DeferredInput Int deriving Show\ndata DeferredReply = DeferredReply Int deriving Show").await;
     let result = root
         .dispatch_boxed(ToolInvocation {
-            context: Some(ToolInvocationContext::external(
-                "original-owner-test".into(),
-                call_id.clone(),
-                call_id.clone(),
-                Some(call_id.clone()),
-                Some("haskell".into()),
-            )),
+            context: Some(invocation),
             name: exomonad_actor::HASKELL_TOOL.into(),
             arguments: ToolArguments::Raw(source.into()),
         })
@@ -80,13 +84,7 @@ async fn assert_deferred_original_owner(source: &str, checkpoint: bool) {
     assert!(!staged_child.model_actor, "{staged_child:?}");
     assert!(staged_child.terminal.is_none(), "{staged_child:?}");
     let staged_identity = staged_child.actor;
-    root.complete_boxed(tidepool_runtime::session::WorkbenchForkBoundary::external(
-        "original-owner-test".into(),
-        call_id.clone(),
-        call_id,
-    ))
-    .await
-    .unwrap();
+    root.complete_boxed(completion.clone()).await.unwrap();
     let child = campaign
         .next_deployment(
             "original child tool installation",
@@ -163,6 +161,13 @@ async fn failed_deferred_capture_does_not_release_child_tools() {
     let mut campaign = TestCampaign::start().await;
     let root = Arc::clone(&campaign.root_installation.policy);
     let call_id = "deferred-original-owner-failure".to_owned();
+    let (invocation, completion) = original_tool_call(OriginalOperation {
+        origin: ConversationOrigin::External {
+            thread_id: "original-owner-test".into(),
+        },
+        request_id: call_id.clone(),
+        call_id,
+    });
     committed(root.as_ref(), "data DeferredInput = DeferredInput Int deriving Show\ndata DeferredReply = DeferredReply Int deriving Show").await;
     let source = format!(
         "{}\nerror \"deferred-before-commit-failure\" >> pure ()",
@@ -170,13 +175,7 @@ async fn failed_deferred_capture_does_not_release_child_tools() {
     );
     let result = root
         .dispatch_boxed(ToolInvocation {
-            context: Some(ToolInvocationContext::external(
-                "original-owner-test".into(),
-                call_id.clone(),
-                call_id.clone(),
-                Some(call_id.clone()),
-                Some("haskell".into()),
-            )),
+            context: Some(invocation),
             name: exomonad_actor::HASKELL_TOOL.into(),
             arguments: ToolArguments::Raw(source),
         })
@@ -188,13 +187,8 @@ async fn failed_deferred_capture_does_not_release_child_tools() {
         "deferred-before-commit-failure",
     );
     assert!(campaign.actor.terminal().get().is_none());
-    root.complete_boxed(tidepool_runtime::session::WorkbenchForkBoundary::external(
-        "original-owner-test".into(),
-        call_id.clone(),
-        call_id,
-    ))
-    .await
-    .unwrap();
+    root.complete_boxed(completion.clone()).await.unwrap();
+    root.complete_boxed(completion).await.unwrap();
     let aborted_children: Vec<_> = campaign
         .forest
         .inspect_host_graph()
@@ -1643,16 +1637,17 @@ async fn execute_examples(rich_response: bool, suffix: Option<&str>, groups: usi
         ""
     };
     let call_id = "documentation-unfold".to_owned();
+    let (invocation, completion) = original_tool_call(OriginalOperation {
+        origin: ConversationOrigin::External {
+            thread_id: "actor-host-vertical".into(),
+        },
+        request_id: call_id.clone(),
+        call_id,
+    });
     let result = tokio::time::timeout(
         Duration::from_secs(120),
         root.dispatch_json_boxed(ToolInvocation {
-            context: Some(ToolInvocationContext::external(
-                "actor-host-vertical".into(),
-                call_id.clone(),
-                call_id.clone(),
-                Some(call_id.clone()),
-                Some("haskell".into()),
-            )),
+            context: Some(invocation),
             name: exomonad_actor::HASKELL_TOOL.into(),
             arguments: ToolArguments::Raw(format!(
                 "{}\n{}\n{}\n{}",
@@ -1678,11 +1673,7 @@ async fn execute_examples(rich_response: bool, suffix: Option<&str>, groups: usi
     campaign.assert_no_deployment("child started before tool completion", |event| {
         matches!(event, LocalResidentDeployment::PolicyInstalled(_))
     });
-    let completion = tidepool_runtime::session::WorkbenchForkBoundary::external(
-        "actor-host-vertical".into(),
-        call_id.clone(),
-        call_id,
-    );
+
     let expected_children = groups * 2;
     root.complete_boxed(completion.clone()).await.unwrap();
     root.complete_boxed(completion).await.unwrap();
