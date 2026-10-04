@@ -148,7 +148,7 @@ import Tidepool.ExactScope
   , originalGroupFromCandidate
   , extendExactExecutionSources, extendExactExecutionSourcesWithinBudget, scopeExecutionNativeOwners )
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
-import ProgressBoundaryTest (progressBoundaryChecks, watchReplyEvidenceChecks)
+import ProgressBoundaryTest (progressBoundaryChecks, watchReplyEvidenceChecks, watchReplyWarmAuthorityChecks)
 import FinalizedCoreTest (finalizedCoreChecks)
 import Tidepool.CheckedCell (CheckedSignature(..), RequestTypeSignatures(..), RequestHelperRecipe(..), captureCheckedSignature, encodeCheckedSignature, encodeRequestTypeSignatures
   , captureCheckedTypeWitness, sealCheckedTypeWitness, encodeCheckedTypeWitness, rewriteCheckedAnnotations, rewriteHostInputType, rewriteRequestTypes, NativeParsedModule(..), thenNativeModule, typecheckNativeModule, typecheckNativeModuleWithDiagnostics)
@@ -245,6 +245,7 @@ main = getArgs >>= \case
   ["--checked-value-type-closure", effects] -> checkedValueTypeClosure effects
   ["--progress-boundary", effects] -> progressBoundaryChecks effects
   ["--watch-reply-evidence", effects, work] -> withTiming (watchReplyEvidenceChecks effects work)
+  ["--watch-reply-warm-authority", effects, work] -> withTiming (watchReplyWarmAuthorityChecks effects work)
   ["--execution-source-wire", path] -> executionSourceWire path
   ["--execution-source-closure-wire", path] -> executionSourceClosureWire path
   ["--exact-retained-quoter"] -> exactRetainedQuoter

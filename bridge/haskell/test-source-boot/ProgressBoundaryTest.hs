@@ -1,4 +1,4 @@
-module ProgressBoundaryTest (progressBoundaryChecks, watchReplyEvidenceChecks) where
+module ProgressBoundaryTest (progressBoundaryChecks, watchReplyEvidenceChecks, watchReplyWarmAuthorityChecks) where
 
 import Control.Exception (bracket)
 import Control.Monad (forM, forM_, unless)
@@ -112,13 +112,42 @@ progressBoundaryChecks effects = bracket scratch removeDirectoryRecursive $ \wor
 -- The explicit destination retains successful GHC projections for inspection.
 -- It contains compiler output, never a hand-built authority packet.
 watchReplyEvidenceChecks :: FilePath -> FilePath -> IO ()
-watchReplyEvidenceChecks effects work = do
+watchReplyEvidenceChecks = watchReplyEvidenceWith Nothing
+
+-- The defining Watch module is unchanged between the two genuine compiles.
+-- Only the target's import of the KnownEffect instance provider changes.
+watchReplyWarmAuthorityChecks :: FilePath -> FilePath -> IO ()
+watchReplyWarmAuthorityChecks = watchReplyEvidenceWith
+  (Just "test-source-boot/fixtures/WatchReplyEvidenceWarmup.hs")
+
+watchReplyEvidenceWith :: Maybe FilePath -> FilePath -> FilePath -> IO ()
+watchReplyEvidenceWith warmup effects work = do
   createDirectoryIfMissing True work
   let target = work </> "WatchReplyEvidence.hs"
       includes = [work, "lib", effects]
-  copyFile "test-source-boot/fixtures/WatchReplyEvidence.hs" target
   withResidentPipelineSelected includes $ \compile -> do
+    forM_ warmup $ \source -> do
+      copyFile source target
+      prepared <- compile (PreparedProducts Nothing) Set.empty GeneralCompile Nothing target includes Nothing
+      let initial = work </> "warm-general"
+      createDirectoryIfMissing True initial
+      copyFile target (initial </> "WatchReplyEvidence.hs")
+      _ <- retainWatchReplyEvidence initial prepared
+      unless (any ((== "Tidepool.Agent.Watch.Internal") . moduleNameString . moduleName . pmModule)
+          (pprModules prepared)) $
+        fail "general warmup did not prepare the genuine Watch defining module"
+    copyFile "test-source-boot/fixtures/WatchReplyEvidence.hs" target
     result <- compile (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile Nothing target includes Nothing
+    rows <- retainWatchReplyEvidence work result
+    forM_ rows $ \(occurrence, targetRows, originalRows) -> do
+      unless (any (== [True]) targetRows) $
+        fail ("watch target lacks its closed Int reply row: " ++ T.unpack occurrence)
+      unless (any (== [True]) originalRows) $
+        fail ("watch native original lacks its closed Int reply row: " ++ T.unpack occurrence)
+  putStrLn ("watch reply evidence retained at " ++ work)
+
+retainWatchReplyEvidence :: FilePath -> PreparedPipelineResult -> IO [(T.Text, [[Bool]], [[Bool]])]
+retainWatchReplyEvidence work result = do
     let environment = prHscEnv (pprPipelineResult result)
         context entry = ProjectionContext "ghc-9.12-prepared-stg" "ghc-9.12.2"
           (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) Map.empty
@@ -151,18 +180,14 @@ watchReplyEvidenceChecks effects work = do
       pure wire
     let originalBodies = [projectedBody group | (owner, Right groups) <- outcomes
           , moduleNameString (moduleName owner) == "Tidepool.Agent.Watch.Internal", group <- groups]
-    forM_ ["RegisterWatchWith", "RegisterWatchGroupsWith"] $ \occurrence -> do
+    forM ["RegisterWatchWith", "RegisterWatchGroupsWith"] $ \occurrence -> do
       let targetRows = [replyRows occurrence (programConstructors wire) (programTypes wire)
             (programSites wire) (programVerbSites wire) | wire <- targets]
           originalRows = [replyRows occurrence (projectedConstructors body) (projectedTypes body)
             (projectedSites body) (projectedVerbSites body) | body <- originalBodies]
       putStrLn ("watch reply evidence " ++ T.unpack occurrence ++ ": targets=" ++ show targetRows
         ++ " originals=" ++ show originalRows ++ " census=" ++ show census)
-      unless (any (== [True]) targetRows) $
-        fail ("watch target lacks its closed Int reply row: " ++ T.unpack occurrence)
-      unless (any (== [True]) originalRows) $
-        fail ("watch native original lacks its closed Int reply row: " ++ T.unpack occurrence)
-  putStrLn ("watch reply evidence retained at " ++ work)
+      pure (occurrence, targetRows, originalRows)
  where
   replyRows occurrence constructors types sites verbs =
     [case types !! fromIntegral index of
