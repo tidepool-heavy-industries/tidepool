@@ -36,7 +36,7 @@ import Tidepool.Agent.Assignment.Internal (NameError (..), renderNameError)
 import Tidepool.Binders
 import Tidepool.TurnSource
   ( spliceTemplate, generatedScaffoldModuleName, renameScaffoldModuleHeader
-  , captureCompilerDefaultRecipe, qualifyCompilerDefault, preambleDefaultDeclaration )
+  , captureCompilerDefaultRecipe, qualifyCompilerDefault, preambleDefaultDeclaration, preambleImportMarker )
 import Tidepool.SessionArtifacts (mkBoundBinders)
 import Tidepool.DiagJson (Diag (..), DiagSeverity(..), DependencyLoadFailure(..), diagsFromSourceError)
 import Tidepool.ExtractUtil (getLibdir)
@@ -398,6 +398,10 @@ compilerDefaultRecipeChecks = do
   unchanged <- either fail pure (qualifyCompilerDefault plain [] "module Plain where\nimport Prelude\ndefault (Int)\n")
   unless (unchanged == "module Plain where\nimport Prelude\ndefault (Int)\n") $
     fail "compiler default recipe changed an authored declaration"
+  forM_ ["module Malformed where\n" ++ preambleImportMarker ++ "default (Text)\n"
+    , "module Malformed where\n" ++ preambleImportMarker ++ preambleDefaultDeclaration] $ \malformed ->
+      unless (case captureCompilerDefaultRecipe flags malformed of Left _ -> True; Right _ -> False) $
+        fail "malformed compiler default recipe silently became an authored default"
 
 orderedInferenceSegments :: IO ()
 orderedInferenceSegments = do

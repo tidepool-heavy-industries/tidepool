@@ -17,7 +17,7 @@ module Tidepool.TurnSource
   , qualifyCompilerDefault, preambleDefaultDeclaration, preambleImportMarker, importQualifierNamespaces
   ) where
 
-import GHC (GhcPs, ImportDecl(..), ModuleName, hsmodImports, unLoc, moduleNameString, mkModuleName)
+import GHC (GhcPs, ImportDecl(..), ModuleName, hsmodImports, hsmodName, unLoc, moduleNameString, mkModuleName)
 import GHC.Builtin.Types (intTyConName, doubleTyConName)
 import GHC.Driver.Config.Parser (initParserOpts)
 import GHC.Driver.Session (DynFlags, xopt_set)
@@ -64,8 +64,12 @@ importQualifierNamespaces imported = unLoc (ideclName imported)
 captureCompilerDefaultRecipe :: DynFlags -> String -> Either String CompilerDefaultRecipe
 captureCompilerDefaultRecipe flags template =
   case T.breakOn (T.pack preambleDefaultDeclaration) (T.pack template) of
-    (_, remaining) | T.null remaining -> Right NoCompilerDefault
+    (_, remaining) | T.null remaining ->
+      if T.pack preambleImportMarker `T.isInfixOf` T.pack template
+        then Left "compiler preamble import marker lacks its canonical default declaration"
+        else Right NoCompilerDefault
     (before, remaining) -> do
+      _ <- replaceTemplateMarker preambleImportMarker preambleImportMarker template
       let after = T.drop (length preambleDefaultDeclaration) remaining
       if T.pack preambleDefaultDeclaration `T.isInfixOf` after
         then Left "compiler preamble repeats its default declaration"
@@ -80,7 +84,8 @@ captureCompilerDefaultRecipe flags template =
             (mkRealSrcLoc (mkFastString "<compiler-preamble>") 1 1)) of
             PFailed _ -> Left "GHC could not parse the compiler preamble imports"
             POk _ parsed -> Right (PrimitiveCompilerDefault
-              (concatMap (importQualifierNamespaces . unLoc) (hsmodImports (unLoc parsed))))
+              (map unLoc (maybeToList (hsmodName (unLoc parsed)))
+                ++ concatMap (importQualifierNamespaces . unLoc) (hsmodImports (unLoc parsed))))
 
 qualifyCompilerDefault :: CompilerDefaultRecipe -> [ModuleName] -> String -> Either String String
 qualifyCompilerDefault NoCompilerDefault _ template = Right template
