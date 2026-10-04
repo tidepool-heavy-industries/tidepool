@@ -148,7 +148,7 @@ import System.Directory (canonicalizePath, makeAbsolute, doesFileExist, getModif
 import System.Posix.Temp (mkdtemp)
 import System.IO (hPutStrLn, stderr, readFile', IOMode(ReadMode), withBinaryFile)
 import Control.Monad.IO.Class (liftIO)
-import Control.Monad (forM, forM_, when, unless, filterM)
+import Control.Monad (forM, forM_, when, unless, filterM, foldM)
 import Data.Data (Data, cast, gmapQ)
 import Data.Generics (everything, mkQ)
 import Data.Foldable (toList)
