@@ -179,6 +179,10 @@ else:
         self.assertEqual((generation / "config").read_bytes(), (self.root / ".buckconfig.local").read_bytes())
         self.assertIn(str(generation), result.stdout)
         self.assertIn("uid=", (generation / "owner").read_text())
+        configured = (generation / "config").read_text()
+        self.assertIn("test_tools = " + str(self.outputs / "buck-test-tools"), configured)
+        self.assertTrue((generation / "roots/buck-test-tools").is_symlink())
+        self.assertTrue((generation / "roots/buck-test-tools-closure").is_symlink())
 
     def test_new_selection_keeps_prior_generation_and_optional_outputs_separate(self):
         result = self.run_configure()

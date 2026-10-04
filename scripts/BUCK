@@ -33,9 +33,9 @@ sh_test(
     env = {
         "TIDEPOOL_TEST_PYTHON": "$(exe toolchains//:python)",
         "TIDEPOOL_SCRIPT_TEST_ROOT": "$(location :script_test_resources)",
-        "PATH": read_root_config("nix", "action_path"),
+        "PATH": "$(location toolchains//:test_tools)/bin:" + read_root_config("nix", "action_path"),
     },
-    resources = [":script_test_resources", "toolchains//:python", "toolchains//:test_tools_closure"],
+    resources = [":script_test_resources", "toolchains//:python", "toolchains//:test_tools_closure", "toolchains//:test_tools"],
     visibility = ["PUBLIC"],
 )
 

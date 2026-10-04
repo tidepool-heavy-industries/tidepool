@@ -244,6 +244,15 @@
         ghcTestEnv = hsPkgs.ghcWithPackages (ps:
           ghcPackages ps ++ [ ps.tasty ps.tasty-hunit ps.tasty-quickcheck ps.QuickCheck ]
         );
+        # One package selection owns both the executable test surface and the
+        # closure-info resources used by existing native process consumers.
+        testToolPackages = [ pkgs.git pkgs.bash pkgs.coreutils ]
+          ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.util-linux ];
+        testTools = pkgs.buildEnv {
+          name = "buck-test-tools";
+          pathsToLink = [ "/bin" ];
+          paths = testToolPackages;
+        };
         embeddedWebAssets = harnessPkgs.buildNpmPackage {
           pname = "exomonad-harness-web";
           version = "2aa685129aa4da4b3ec637abcf17666f087b93c8";
@@ -582,12 +591,9 @@
           ]
           ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.systemd ];
         };
+        packages.buck-test-tools = testTools;
         packages.buck-test-tools-closure = pkgs.closureInfo {
-          rootPaths = [
-            pkgs.git
-            pkgs.bash
-            pkgs.coreutils
-          ];
+          rootPaths = testToolPackages ++ [ testTools ];
         };
         packages.buck-browser-test-closure = pkgs.closureInfo {
           rootPaths = [

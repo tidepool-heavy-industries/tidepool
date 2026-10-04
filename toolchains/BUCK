@@ -132,6 +132,13 @@ nix_directory(
 )
 
 nix_directory(
+    name = "test_tools",
+    cp = read_root_config("nix", "coreutils") + "/cp",
+    store_path = read_root_config("nix", "test_tools"),
+    visibility = ["PUBLIC"],
+)
+
+nix_directory(
     name = "test_tools_closure",
     cp = read_root_config("nix", "coreutils") + "/cp",
     store_path = read_root_config("nix", "test_tools_closure"),
