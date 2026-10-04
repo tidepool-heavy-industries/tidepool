@@ -6228,6 +6228,13 @@ pub(super) mod tests {
                             top.identity.unit = "foreign-unit".into();
                         }
                         top.binding.id = ValueId(wire.bindings.len() as u32);
+                        let HeapRhs::Function { body, .. } = &mut top.binding.rhs else {
+                            unreachable!()
+                        };
+                        *body = wire.expressions.nodes.len();
+                        wire.expressions
+                            .nodes
+                            .push(wire.expressions.nodes[0].clone());
                         if owned {
                             owned_id = Some(top.binding.id);
                         }
