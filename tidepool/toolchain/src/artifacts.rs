@@ -2795,6 +2795,28 @@ pub fn build_prepared_fixture(
 
 pub(crate) const AUTHORED_PRODUCT_PROBE_MODULE: &str = "TidepoolAuthoredProductProbe";
 
+/// Validate consumed bytes and import witnesses against a build action's
+/// declared module and complete readable source trees. This shares the worker
+/// dependency reader with ordinary artifact admission and grants no execution.
+pub fn validate_prepared_fixture_sources(
+    evidence_bytes: &[u8],
+    source: &Path,
+    include: &[PathBuf],
+) -> Result<(), CompileError> {
+    validate_build_action_source_closure(evidence_bytes, source, include)?;
+    cache::DependencyEvidence::from_worker(
+        evidence_bytes,
+        source,
+        &std::fs::read_to_string(source)?,
+    )
+    .ok_or_else(|| {
+        CompileError::ExtractFailed(
+            "build-action consumed bytes or import witnesses changed".into(),
+        )
+    })?;
+    Ok(())
+}
+
 fn validate_build_action_source_closure(
     evidence_bytes: &[u8],
     source: &Path,
@@ -2813,11 +2835,11 @@ fn validate_build_action_source_closure(
     for root in include {
         let manifest = cache::source_root_manifest(root)
             .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
-        for (relative, _) in manifest.files() {
+        for (relative, _) in manifest {
             declared.insert(std::fs::canonicalize(root.join(relative))?);
         }
     }
-    for consumed in evidence.sources {
+    for consumed in &evidence.sources {
         if !declared.contains(&std::fs::canonicalize(&consumed.path)?) {
             return Err(CompileError::ExtractFailed(format!(
                 "build action consumed an undeclared source: {}",
@@ -3089,7 +3111,7 @@ fn compile_invocation_inner(
         let package_bundle_bytes =
             std::fs::read(temp_dir.path().join("module-package-imports.cbor"))?;
         if matches!(policy, CompilationPolicy::BuildAction { .. }) {
-            validate_build_action_source_closure(&evidence_bytes, &input_path, inv.include)?;
+            validate_prepared_fixture_sources(&evidence_bytes, &input_path, inv.include)?;
         }
         let exact_source = exact_request
             .as_ref()
@@ -3939,7 +3961,7 @@ pub enum ConstructorIdentityMismatch {
 /// pinned by each side independently (both read `dataConTag` directly), and
 /// disagreeing tags at agreeing name+id would indicate the SAME bug this
 /// check exists to catch, just observed through a different field.
-fn check_constructor_identity_agreement(
+pub fn check_constructor_identity_agreement(
     target: &str,
     artifact: &PreparedArtifact,
     table: &DataConTable,

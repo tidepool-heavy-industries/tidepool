@@ -20,6 +20,16 @@ const REPORT_VERSION: u32 = 2;
 /// Arguments are paths owned by the corpus verification recipe. The child
 /// receives a manifest index, never a command string derived from a program.
 enum Command {
+    ValidateFixture {
+        directory: PathBuf,
+        source: PathBuf,
+        include: Vec<PathBuf>,
+    },
+    VerifyCohort {
+        directory: PathBuf,
+        expectations: PathBuf,
+        output: PathBuf,
+    },
     EffectsCore {
         include: PathBuf,
     },
@@ -42,7 +52,7 @@ enum Command {
     },
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Deserialize, serde::Serialize)]
 struct CorpusReport {
     version: u32,
     source_targets: Vec<tidepool_prepared_corpus::SourceTargetMapping>,
@@ -59,7 +69,7 @@ struct ManifestSummary {
     source_unmapped: usize,
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Deserialize, serde::Serialize)]
 struct StageTotal {
     stage: Stage,
     passed: usize,
@@ -108,6 +118,16 @@ struct OperationAccumulator {
 fn main() -> Result<(), Box<dyn Error>> {
     let command = parse_arguments()?;
     match command {
+        Command::ValidateFixture {
+            directory,
+            source,
+            include,
+        } => validate_fixture(&directory, &source, &include),
+        Command::VerifyCohort {
+            directory,
+            expectations,
+            output,
+        } => verify_cohort(directory, expectations, output),
         Command::EffectsCore { include } => {
             let module = include.join("Tidepool/Effects/Core.hs");
             if !module.is_file() {
@@ -142,6 +162,24 @@ fn parse_arguments() -> Result<Command, Box<dyn Error>> {
 }
 
 fn parse_values(values: Vec<OsString>) -> Result<Command, Box<dyn Error>> {
+    if let [mode, directory, source, roots @ ..] = values.as_slice() {
+        if mode == "validate-fixture" {
+            return Ok(Command::ValidateFixture {
+                directory: directory.into(),
+                source: source.into(),
+                include: roots.iter().map(PathBuf::from).collect(),
+            });
+        }
+    }
+    if let [mode, directory, expectations, output] = values.as_slice() {
+        if mode == "verify-cohort" {
+            return Ok(Command::VerifyCohort {
+                directory: directory.into(),
+                expectations: expectations.into(),
+                output: output.into(),
+            });
+        }
+    }
     if let [mode, include] = values.as_slice() {
         if mode == "effects-core" {
             return Ok(Command::EffectsCore {
@@ -200,8 +238,201 @@ fn parse_values(values: Vec<OsString>) -> Result<Command, Box<dyn Error>> {
 fn usage() -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidInput,
-        "usage: prepared-corpus effects-core GENERATED_INCLUDE | prepared-corpus audit-operations MANIFEST OUTPUT | prepared-corpus run MANIFEST EXPECTATIONS METADATA OUTPUT | prepared-corpus child MANIFEST EXPECTATIONS METADATA OUTPUT INDEX",
+        "usage: prepared-corpus validate-fixture DIRECTORY SOURCE [INCLUDE...] | prepared-corpus verify-cohort DIRECTORY EXPECTATIONS REPORT | prepared-corpus effects-core GENERATED_INCLUDE | prepared-corpus audit-operations MANIFEST OUTPUT | prepared-corpus run MANIFEST EXPECTATIONS METADATA OUTPUT | prepared-corpus child MANIFEST EXPECTATIONS METADATA OUTPUT INDEX",
     )
+}
+
+fn validate_fixture(
+    directory: &Path,
+    source: &Path,
+    include: &[PathBuf],
+) -> Result<(), Box<dyn Error>> {
+    let manifest_path = directory.join("manifest.json");
+    let manifest = read_manifest(&manifest_path)?;
+    let summary = validate_manifest(&manifest)?;
+    if manifest.programs.is_empty() || summary.source_unmapped != 0 {
+        return Err(invalid_manifest(
+            "fixture must retain a nonempty complete mapped target set".into(),
+        ));
+    }
+    let inventory: tidepool_prepared_corpus::DiagnosticInventory =
+        read_json(&directory.join("diagnostic-inventory.json"))?;
+    if inventory.version != 1
+        || inventory.targets.len() != manifest.programs.len()
+        || inventory
+            .targets
+            .iter()
+            .zip(&manifest.programs)
+            .any(|(target, program)| {
+                target.name != program.name || target.diagnostic_failure.is_some()
+            })
+    {
+        return Err(invalid_manifest(
+            "fixture diagnostic inventory is incomplete or mismatched".into(),
+        ));
+    }
+    let (table, _) = read_metadata(&fs::read(directory.join("meta.cbor"))?)?;
+    let dependencies = fs::read(directory.join("dependencies.json"))?;
+    tidepool_toolchain::artifacts::validate_prepared_fixture_sources(
+        &dependencies,
+        source,
+        include,
+    )?;
+    let mut expected_files = BTreeSet::from([
+        "manifest.json".to_string(),
+        "meta.cbor".into(),
+        "dependencies.json".into(),
+        "diagnostic-inventory.json".into(),
+    ]);
+    for row in &manifest.programs {
+        let ProjectionOutcome::Projected { artifact, .. } = &row.projection else {
+            return Err(invalid_manifest(format!(
+                "fixture projection refused {}",
+                row.name
+            )));
+        };
+        if !expected_files.insert(artifact.clone()) {
+            return Err(invalid_manifest(format!(
+                "fixture artifact reused by multiple targets: {artifact}"
+            )));
+        }
+        let program = tidepool_toolchain::prepared_artifact::PreparedArtifact::parse(
+            fs::read(manifest_artifact_path(&manifest_path, artifact)?)?,
+            tidepool_repr::execution_schema::DecodeLimits::default(),
+        )?;
+        tidepool_toolchain::artifacts::check_constructor_identity_agreement(
+            &row.name, &program, &table,
+        )?;
+    }
+    let observed_files = fs::read_dir(directory)?
+        .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    if observed_files != expected_files {
+        return Err(invalid_manifest(
+            "fixture output file set differs from its complete manifest".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn verify_cohort(
+    directory: PathBuf,
+    expectations: PathBuf,
+    output: PathBuf,
+) -> Result<(), Box<dyn Error>> {
+    run_corpus(
+        directory.join("manifest.json"),
+        expectations.clone(),
+        directory.join("meta.cbor"),
+        output.clone(),
+    )?;
+    let report: CorpusReport = read_json(&output)?;
+    let programs = report.programs;
+    if report.version != REPORT_VERSION
+        || report.stg_programs != programs.len()
+        || report.source_unmapped != 0
+    {
+        return Err(invalid_manifest(
+            "cohort report is incomplete or incompatible".into(),
+        ));
+    }
+    let oracle: Expectations = read_json(&expectations)?;
+    let manifest = read_manifest(&directory.join("manifest.json"))?;
+    validate_oracle_domain(&manifest, &oracle)?;
+    if programs.is_empty() || programs.len() != manifest.programs.len() {
+        return Err(invalid_manifest(
+            "cohort executed an incomplete or empty program set".into(),
+        ));
+    }
+    for (row, program) in manifest.programs.iter().zip(&programs) {
+        if program.name != row.name {
+            return Err(invalid_manifest(
+                "cohort report identity differs from manifest".into(),
+            ));
+        }
+        for stage in [
+            Stage::Projection,
+            Stage::Validation,
+            Stage::Admission,
+            Stage::Compilation,
+        ] {
+            if !matches!(program.stages.get(stage).outcome, Outcome::Passed) {
+                return Err(invalid_manifest(format!(
+                    "{} did not pass {stage:?}",
+                    row.name
+                )));
+            }
+        }
+        let execution = &program.stages.get(Stage::Execution).outcome;
+        let comparison = &program.stages.get(Stage::Comparison).outcome;
+        let accepted = if oracle.source_tops.is_none() {
+            matches!(execution, Outcome::Passed) && matches!(comparison, Outcome::Passed)
+        } else {
+            match execution {
+                Outcome::Passed => match comparison {
+                    Outcome::Passed => true,
+                    Outcome::NoOracle => {
+                        OracleScope::of(row.expectation_key.as_deref(), &oracle)
+                            == OracleScope::CompilerIntroduced
+                    }
+                    Outcome::MissingExpectation => {
+                        row.expectation_key.as_ref().is_some_and(|key| {
+                            matches!(
+                                oracle.refusals.get(key).map(|refusal| &refusal.class),
+                                Some(tidepool_prepared_corpus::SourceRefusal::Unrepresentable)
+                            )
+                        })
+                    }
+                    _ => false,
+                },
+                Outcome::Classified {
+                    class: Classification::NotClosed,
+                    ..
+                } => {
+                    matches!(comparison, Outcome::NotReached)
+                        && (OracleScope::of(row.expectation_key.as_deref(), &oracle)
+                            == OracleScope::CompilerIntroduced
+                            || row.expectation_key.as_ref().is_some_and(|key| {
+                                matches!(
+                                    oracle.refusals.get(key).map(|refusal| &refusal.class),
+                                    Some(tidepool_prepared_corpus::SourceRefusal::NotClosed)
+                                )
+                            }))
+                }
+                Outcome::Classified {
+                    class: Classification::NoFiniteObservation,
+                    ..
+                } => {
+                    matches!(comparison, Outcome::NotReached)
+                        && (OracleScope::of(row.expectation_key.as_deref(), &oracle)
+                            == OracleScope::CompilerIntroduced
+                            || matches!(
+                                expected_for(row, &oracle),
+                                Some(
+                                    Expectation::NoFiniteObservation
+                                        | Expectation::CyclicObservation
+                                )
+                            ))
+                }
+                // Compiler-introduced tops have no source oracle, but every
+                // emitted row still has to pass projection through compilation.
+                Outcome::Classified { .. } => {
+                    OracleScope::of(row.expectation_key.as_deref(), &oracle)
+                        == OracleScope::CompilerIntroduced
+                        && matches!(comparison, Outcome::NotReached)
+                }
+                _ => false,
+            }
+        };
+        if !accepted {
+            return Err(invalid_manifest(format!(
+                "{} has unaccepted execution/comparison: {execution:?}; {comparison:?}",
+                row.name
+            )));
+        }
+    }
+    println!("prepared corpus: {} programs verified", programs.len());
+    Ok(())
 }
 
 fn audit_operations(manifest_path: PathBuf, output: PathBuf) -> Result<(), Box<dyn Error>> {
@@ -925,6 +1156,7 @@ mod tests {
         )
         .unwrap();
         let expectations = Expectations {
+            refusals: Default::default(),
             source_revision: "test".into(),
             source_tops: None,
             expectations: [("historical".into(), Expectation::Int(7))]
@@ -947,6 +1179,7 @@ mod tests {
         )
         .unwrap();
         let oracle = |tops: &[&str], entries: Vec<(&str, Expectation)>| Expectations {
+            refusals: Default::default(),
             source_revision: "test".into(),
             source_tops: Some(tops.iter().map(|top| top.to_string()).collect()),
             expectations: entries
