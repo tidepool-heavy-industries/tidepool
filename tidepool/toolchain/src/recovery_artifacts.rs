@@ -2170,7 +2170,7 @@ mod tests {
         .unwrap();
         assert!(matches!(
             verify_materialized_ref(run.path(), &references[0]),
-            Err(RecoveryArtifactError::DigestMismatch(_))
+            Err(RecoveryArtifactError::CertifiedOwnersDigestMismatch(_))
         ));
         assert!(matches!(
             materialize_certified_products(run.path(), [7; 32], &products[..1]),
