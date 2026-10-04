@@ -2412,6 +2412,7 @@ async fn run_owned(
                 forest: Arc::clone(&forest),
                 runtime: Arc::clone(&service.runtime),
                 observer: hooks.observer.clone(),
+                owners: Arc::clone(&application_owners),
             });
         }
     }

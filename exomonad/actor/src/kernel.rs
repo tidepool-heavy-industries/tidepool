@@ -666,8 +666,173 @@ struct AdmissionOwner {
 
 #[derive(Default)]
 struct AdmissionState {
-    closed: bool,
+    phase: AdmissionPhase,
     transactions: usize,
+    provider: Option<NativeProvider>,
+}
+
+#[derive(Default, PartialEq, Eq)]
+enum AdmissionPhase {
+    #[default]
+    Open,
+    IdleRetirementClaim,
+    Closed,
+}
+
+#[derive(PartialEq, Eq)]
+enum NativeProviderState {
+    NotStarted,
+    Active,
+    Idle,
+    NeedsAttention,
+}
+
+struct NativeProvider {
+    state: NativeProviderState,
+    probe: std::sync::Arc<dyn Fn() -> Result<bool, String> + Send + Sync>,
+}
+
+/// Native round admission and idle retirement share the actor's mailbox fence.
+/// The provider lease never holds a short Store transaction across inference.
+#[derive(Clone)]
+pub struct NativeProviderAdmission {
+    owner: std::sync::Arc<AdmissionOwner>,
+    observation: crate::ActorRuntimeObservationHandle,
+}
+
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub enum NativeProviderStartError {
+    #[error("idle retirement is being checked")]
+    RetirementPending,
+    #[error("actor admission is closed")]
+    Closed,
+    #[error("native provider round cannot start: {0}")]
+    Invalid(&'static str),
+}
+
+pub struct NativeProviderTurnLease {
+    admission: NativeProviderAdmission,
+    observation: Option<crate::ProviderTurnLease>,
+}
+
+impl NativeProviderAdmission {
+    /// Wait for the current retirement decision, then re-read durable work.
+    /// The notification is registered before checking the fence.
+    pub async fn wait_for_retirement_decision(&self) {
+        loop {
+            let changed = self.owner.released.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if self.owner.state.lock().phase != AdmissionPhase::IdleRetirementClaim {
+                return;
+            }
+            changed.await;
+        }
+    }
+
+    pub fn begin_provider_turn(
+        &self,
+        thread: String,
+        turn: String,
+    ) -> Result<NativeProviderTurnLease, NativeProviderStartError> {
+        let mut state = self.owner.state.lock();
+        match state.phase {
+            AdmissionPhase::IdleRetirementClaim => {
+                return Err(NativeProviderStartError::RetirementPending)
+            }
+            AdmissionPhase::Closed => return Err(NativeProviderStartError::Closed),
+            AdmissionPhase::Open => {}
+        }
+        let provider = state
+            .provider
+            .as_mut()
+            .ok_or(NativeProviderStartError::Invalid(
+                "native provider is not attached",
+            ))?;
+        if provider.state == NativeProviderState::Active {
+            return Err(NativeProviderStartError::Invalid(
+                "a native provider round is already active",
+            ));
+        }
+        let observation = self
+            .observation
+            .begin_provider_turn(thread, turn)
+            .map_err(NativeProviderStartError::Invalid)?;
+        provider.state = NativeProviderState::Active;
+        Ok(NativeProviderTurnLease {
+            admission: self.clone(),
+            observation: Some(observation),
+        })
+    }
+}
+
+impl NativeProviderTurnLease {
+    pub fn succeed(mut self) {
+        self.finish(NativeProviderState::Idle, |observation| {
+            observation.succeed()
+        });
+    }
+
+    pub fn fail(mut self, failure: exomonad_model::ProviderFailure) {
+        self.finish(NativeProviderState::NeedsAttention, |observation| {
+            observation.fail(failure)
+        });
+    }
+
+    pub fn interrupt(mut self) {
+        self.finish(NativeProviderState::NeedsAttention, |observation| {
+            observation.interrupt()
+        });
+    }
+
+    fn finish(
+        &mut self,
+        outcome: NativeProviderState,
+        publish: impl FnOnce(crate::ProviderTurnLease),
+    ) {
+        let Some(observation) = self.observation.take() else {
+            return;
+        };
+        let mut state = self.admission.owner.state.lock();
+        publish(observation);
+        if let Some(provider) = state.provider.as_mut() {
+            provider.state = outcome;
+        }
+    }
+}
+
+impl Drop for NativeProviderTurnLease {
+    fn drop(&mut self) {
+        self.finish(NativeProviderState::NeedsAttention, |observation| {
+            observation.interrupt()
+        });
+    }
+}
+
+/// Temporarily closes all ingress while the durable owner checks pending input.
+/// A forced close dominates an abandoned claim and is never reopened by Drop.
+struct IdleRetirementClaim(std::sync::Arc<AdmissionOwner>);
+
+impl IdleRetirementClaim {
+    fn commit(self) -> Result<(), &'static str> {
+        let mut state = self.0.state.lock();
+        if state.phase != AdmissionPhase::IdleRetirementClaim {
+            return Err("actor closed while idle retirement was being checked");
+        }
+        state.phase = AdmissionPhase::Closed;
+        self.0.released.notify_waiters();
+        Ok(())
+    }
+}
+
+impl Drop for IdleRetirementClaim {
+    fn drop(&mut self) {
+        let mut state = self.0.state.lock();
+        if state.phase == AdmissionPhase::IdleRetirementClaim {
+            state.phase = AdmissionPhase::Open;
+            self.0.released.notify_waiters();
+        }
+    }
 }
 
 /// Protects a synchronous host transaction from cooperative actor retirement.
@@ -691,13 +856,59 @@ impl MailboxAdmission {
     pub(crate) fn hosted_cell(&self) -> &HostedCellSlot {
         &self.1
     }
+    fn attach_provider(
+        &self,
+        observation: crate::ActorRuntimeObservationHandle,
+        probe: std::sync::Arc<dyn Fn() -> Result<bool, String> + Send + Sync>,
+    ) -> Result<NativeProviderAdmission, &'static str> {
+        let mut state = self.0.state.lock();
+        if state.phase != AdmissionPhase::Open || state.provider.is_some() {
+            return Err("native provider cannot attach to a closed or already attached actor");
+        }
+        state.provider = Some(NativeProvider {
+            state: NativeProviderState::NotStarted,
+            probe,
+        });
+        Ok(NativeProviderAdmission {
+            owner: self.0.clone(),
+            observation,
+        })
+    }
+
+    fn claim_idle(&self) -> Result<IdleRetirementClaim, String> {
+        let probe = {
+            let mut state = self.0.state.lock();
+            if state.phase != AdmissionPhase::Open || state.transactions != 0 {
+                return Err("actor is closing or has an admitted transaction".into());
+            }
+            let provider = state
+                .provider
+                .as_ref()
+                .ok_or("native provider has not attached")?;
+            if provider.state != NativeProviderState::Idle {
+                return Err("native provider is not confirmed idle".into());
+            }
+            let probe = provider.probe.clone();
+            state.phase = AdmissionPhase::IdleRetirementClaim;
+            probe
+        };
+        let claim = IdleRetirementClaim(self.0.clone());
+        // Never acquire the Store mutex under the admission mutex. Existing
+        // short transactions are refused above; ingress stays fenced here.
+        if !probe()? {
+            return Err("native provider has pending durable work or lost its binding".into());
+        }
+        Ok(claim)
+    }
+
     pub(crate) fn close(&self) {
-        self.0.state.lock().closed = true;
+        self.0.state.lock().phase = AdmissionPhase::Closed;
+        self.0.released.notify_waiters();
     }
 
     fn transaction(&self) -> Option<ActorAdmissionLease> {
         let mut state = self.0.state.lock();
-        if state.closed {
+        if state.phase != AdmissionPhase::Open {
             return None;
         }
         state.transactions += 1;
@@ -713,7 +924,7 @@ impl MailboxAdmission {
             released.as_mut().enable();
             {
                 let state = self.0.state.lock();
-                debug_assert!(state.closed);
+                debug_assert!(state.phase != AdmissionPhase::Open);
                 if state.transactions == 0 {
                     return;
                 }
@@ -736,7 +947,8 @@ impl MailboxAdmission {
     ) -> Result<(), Box<ractor::MessagingErr<KernelMessage>>> {
         let mut admission = self.0.state.lock();
         address.send_message(fence).map_err(Box::new)?;
-        admission.closed = true;
+        admission.phase = AdmissionPhase::Closed;
+        self.0.released.notify_waiters();
         Ok(())
     }
 }
@@ -908,7 +1120,7 @@ impl LocalActorRef {
     /// belong to the existing Ractor mailbox even while execution is paused.
     pub(crate) fn admit_mailbox(&self, message: KernelMessage) -> Result<(), KernelCallFailure> {
         let admission = self.admission.0.state.lock();
-        if admission.closed {
+        if admission.phase != AdmissionPhase::Open {
             return Err(KernelCallFailure::MailboxClosed(self.identity));
         }
         self.address
@@ -922,6 +1134,38 @@ impl LocalActorRef {
         self.admission
             .transaction()
             .ok_or(KernelCallFailure::MailboxClosed(self.identity))
+    }
+
+    /// Attach the durable native work probe once for this exact incarnation.
+    pub fn attach_native_provider(
+        &self,
+        observation: crate::ActorRuntimeObservationHandle,
+        probe: impl Fn() -> Result<bool, String> + Send + Sync + 'static,
+    ) -> Result<NativeProviderAdmission, &'static str> {
+        self.admission
+            .attach_provider(observation, std::sync::Arc::new(probe))
+    }
+
+    /// Atomically fence new provider rounds and input before checking the Store.
+    pub async fn retire_idle_by(
+        &self,
+        supervisor: ActorRef,
+        terminal: ActorTerminal,
+    ) -> Result<ActorTerminal, KernelInvocationFailure> {
+        if let Some(existing) = self.terminal.get() {
+            return Ok(existing);
+        }
+        let rejected = |detail: String| KernelInvocationFailure::Rejected {
+            actor: self.identity,
+            detail,
+            receipts: Vec::new(),
+        };
+        self.admission
+            .claim_idle()
+            .map_err(rejected)?
+            .commit()
+            .map_err(|detail| rejected(detail.into()))?;
+        self.retire_by(supervisor, terminal).await
     }
 
     pub fn cast(&self, sender: ActorRef, request: MailboxValue) -> Result<(), KernelCallFailure> {
@@ -1078,6 +1322,119 @@ impl LocalActorRef {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn native_admission(
+        probe: impl Fn() -> Result<bool, String> + Send + Sync + 'static,
+    ) -> (MailboxAdmission, NativeProviderAdmission) {
+        let admission = MailboxAdmission::default();
+        let provider = admission
+            .attach_provider(
+                crate::ActorRuntimeObservationHandle::default(),
+                std::sync::Arc::new(probe),
+            )
+            .unwrap();
+        (admission, provider)
+    }
+
+    fn succeed_native(provider: &NativeProviderAdmission, turn: &str) {
+        provider
+            .begin_provider_turn("thread".into(), turn.into())
+            .unwrap()
+            .succeed();
+    }
+
+    #[tokio::test]
+    async fn idle_retirement_fences_input_and_rounds_until_claim_is_released() {
+        let (admission, provider) = native_admission(|| Ok(true));
+        succeed_native(&provider, "first");
+        let claim = admission.claim_idle().unwrap();
+        assert!(admission.transaction().is_none());
+        assert!(matches!(
+            provider.begin_provider_turn("thread".into(), "next".into()),
+            Err(NativeProviderStartError::RetirementPending)
+        ));
+        let waiting = provider.wait_for_retirement_decision();
+        tokio::pin!(waiting);
+        assert!(futures_util::poll!(&mut waiting).is_pending());
+        drop(claim);
+        assert!(futures_util::poll!(&mut waiting).is_ready());
+        assert!(admission.transaction().is_some());
+        succeed_native(&provider, "next");
+    }
+
+    #[test]
+    fn idle_retirement_refuses_admitted_input_and_durable_work_before_wake() {
+        let pending = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let read = pending.clone();
+        let (admission, provider) =
+            native_admission(move || Ok(!read.load(std::sync::atomic::Ordering::SeqCst)));
+        succeed_native(&provider, "first");
+        let input = admission.transaction().unwrap();
+        assert!(admission.claim_idle().is_err());
+        pending.store(true, std::sync::atomic::Ordering::SeqCst);
+        drop(input);
+        // Durable commit exists, but no wake has reached the provider.
+        assert!(admission.claim_idle().is_err());
+        assert!(admission.transaction().is_some());
+        let round = provider
+            .begin_provider_turn("thread".into(), "second".into())
+            .unwrap();
+        assert!(admission.claim_idle().is_err());
+        pending.store(false, std::sync::atomic::Ordering::SeqCst);
+        round.succeed();
+        admission.claim_idle().unwrap().commit().unwrap();
+        assert!(admission.transaction().is_none());
+        assert!(matches!(
+            provider.begin_provider_turn("thread".into(), "third".into()),
+            Err(NativeProviderStartError::Closed)
+        ));
+    }
+
+    #[test]
+    fn idle_retirement_does_not_treat_abandoned_or_failed_rounds_as_idle() {
+        let (admission, provider) = native_admission(|| Ok(true));
+        assert!(admission.claim_idle().is_err());
+        drop(
+            provider
+                .begin_provider_turn("thread".into(), "first".into())
+                .unwrap(),
+        );
+        assert!(admission.claim_idle().is_err());
+        provider
+            .begin_provider_turn("thread".into(), "second".into())
+            .unwrap()
+            .fail(exomonad_model::ProviderFailure::RequestRejected);
+        assert!(admission.claim_idle().is_err());
+        succeed_native(&provider, "third");
+        assert!(admission.claim_idle().is_ok());
+    }
+
+    #[tokio::test]
+    async fn idle_retirement_forced_close_dominates_claim_rollback() {
+        let (admission, provider) = native_admission(|| Ok(true));
+        succeed_native(&provider, "first");
+        let claim = admission.claim_idle().unwrap();
+        let waiting = provider.wait_for_retirement_decision();
+        tokio::pin!(waiting);
+        assert!(futures_util::poll!(&mut waiting).is_pending());
+        admission.close();
+        assert!(futures_util::poll!(&mut waiting).is_ready());
+        assert!(claim.commit().is_err());
+        assert!(admission.transaction().is_none());
+        assert!(matches!(
+            provider.begin_provider_turn("thread".into(), "second".into()),
+            Err(NativeProviderStartError::Closed)
+        ));
+    }
+
+    #[test]
+    fn idle_retirement_probe_failure_reopens_admission() {
+        let (admission, provider) = native_admission(|| Err("Store unavailable".into()));
+        succeed_native(&provider, "first");
+        assert!(admission.claim_idle().is_err());
+        assert!(admission.transaction().is_some());
+        succeed_native(&provider, "second");
+    }
 
     #[tokio::test]
     async fn admission_close_waits_for_all_transactions_and_rejects_new_ones() {

@@ -171,6 +171,7 @@ impl EmbeddedHarnessRuntime {
             ));
         }
         let actor_identity = actor.identity();
+        let provider_actor = actor.clone();
         let observation = installation.observation();
         self.prepare_application(actor_identity, &identity)?;
         let (wakes, incoming) = mpsc::unbounded_channel();
@@ -192,7 +193,14 @@ impl EmbeddedHarnessRuntime {
             parent,
         )?);
         self.bind_application(actor_identity, &conversation)?;
+        let provider_admission = attach_native_provider(
+            &provider_actor,
+            &conversation,
+            self.store.clone(),
+            observation.clone(),
+        )?;
         Ok(EmbeddedConversation {
+            provider_admission,
             conversation,
             incoming,
             round_control,
@@ -248,6 +256,7 @@ impl EmbeddedHarnessRuntime {
         let actor = installation.actor.clone();
         let parent = checkpoint.origin().clone();
         let actor_identity = actor.identity();
+        let provider_actor = actor.clone();
         self.prepare_application(actor_identity, &identity)?;
         let (wakes, incoming) = mpsc::unbounded_channel();
         let round_control = Arc::new(EmbeddedRoundControl::default());
@@ -273,7 +282,14 @@ impl EmbeddedHarnessRuntime {
             &json!({}),
         )?);
         self.bind_application(actor_identity, &conversation)?;
+        let provider_admission = attach_native_provider(
+            &provider_actor,
+            &conversation,
+            self.store.clone(),
+            installation.runtime_observation.clone(),
+        )?;
         Ok(EmbeddedConversation {
+            provider_admission,
             conversation,
             incoming,
             round_control,
@@ -290,7 +306,36 @@ impl EmbeddedHarnessRuntime {
     }
 }
 
+fn attach_native_provider(
+    actor: &LocalActorRef,
+    conversation: &Conversation,
+    store: Arc<Store>,
+    observation: exomonad_actor::ActorRuntimeObservationHandle,
+) -> Result<exomonad_actor::NativeProviderAdmission, EmbeddedError> {
+    let identity = conversation.identity().clone();
+    actor
+        .attach_native_provider(observation, move || {
+            if !store
+                .embedded_binding_matches(&identity)
+                .map_err(|error| error.to_string())?
+            {
+                return Ok(false);
+            }
+            let frontier = store
+                .embedded_round_frontier(&identity)
+                .map_err(|error| error.to_string())?;
+            Ok(frontier.pending_head.is_none()
+                && frontier.pending_interruption.is_none()
+                && store
+                    .unread(&identity.actor.0)
+                    .map_err(|error| error.to_string())?
+                    .is_empty())
+        })
+        .map_err(|error| EmbeddedError::Binding(error.into()))
+}
+
 pub(super) struct EmbeddedConversation {
+    pub(super) provider_admission: exomonad_actor::NativeProviderAdmission,
     pub(super) conversation: Arc<Conversation>,
     pub(super) incoming: mpsc::UnboundedReceiver<DurableMailboxWake>,
     pub(super) round_control: Arc<EmbeddedRoundControl>,

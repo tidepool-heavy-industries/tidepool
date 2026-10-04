@@ -56,7 +56,7 @@ def main():
     output = Path(args.output).absolute()
     if output.exists():
         parser.error("oracle output must be absent")
-    with tempfile.TemporaryDirectory(prefix="suite-native-oracle-") as scratch:
+    with tempfile.TemporaryDirectory(prefix="suite-native-oracle-", dir=Path.cwd()) as scratch:
         names = Path(scratch) / "names"
         names.write_text("\n".join(keys) + "\n")
         environment = {"PATH": os.environ["PATH"], "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "GHC_ENVIRONMENT": "-", "TMPDIR": scratch, "SUITE_ORACLE_NAMES": str(names)}

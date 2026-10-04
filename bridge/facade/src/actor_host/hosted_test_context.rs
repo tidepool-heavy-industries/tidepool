@@ -84,6 +84,16 @@ pub(super) struct HostedActorContext {
     pub(super) forest: Arc<ResidentForest<ExomonadHandlerStack, CapturedOutput>>,
     pub(super) runtime: Arc<embedded_harness::EmbeddedHarnessRuntime>,
     pub(super) observer: HostTestObserver,
+    pub(super) owners: InteractiveOwners,
+}
+
+impl HostedActorContext {
+    pub(super) fn binding(
+        &self,
+        actor: ActorRef,
+    ) -> Option<embedded_harness::EmbeddedActorBinding> {
+        embedded_binding(&self.owners, actor)
+    }
 }
 
 /// One test executor for the existing production run, including its shutdown.

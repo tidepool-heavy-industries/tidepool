@@ -79,24 +79,27 @@ fn run() -> Result<(), String> {
         .into_iter()
         .map(|path| required(Some(path), "--include"))
         .collect::<Result<Vec<_>, _>>()?;
-    let scratch = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let scratch = tempfile::tempdir_in(std::env::current_dir().map_err(|error| error.to_string())?)
+        .map_err(|error| error.to_string())?;
     // This process owns no concurrent work. Discard inherited runtime input
     // selection and contain compiler/package caches inside its action scratch.
     unsafe {
-        for name in [
-            tidepool_extract_cmd::DAEMON_SOCKET_ENV,
-            tidepool_toolchain::toolchain::ENV_COMPILER_MODULES,
-            "GHC_ENVIRONMENT",
-            "GHC_PACKAGE_PATH",
-        ] {
+        let inherited = std::env::vars_os()
+            .map(|(name, _)| name)
+            .filter(|name| name.to_string_lossy().starts_with("TIDEPOOL_"))
+            .collect::<Vec<_>>();
+        for name in inherited {
             std::env::remove_var(name);
         }
+        std::env::remove_var("GHC_PACKAGE_PATH");
+        std::env::remove_var("GHCRTS");
         std::env::set_var("GHC_ENVIRONMENT", "-");
         std::env::set_var("TIDEPOOL_EXTRACT", frontend);
         std::env::set_var("TIDEPOOL_EXTRACT_WORKER", worker);
         std::env::set_var("TIDEPOOL_COMPILER_DEPLOYMENT", deployment);
         std::env::set_var("TIDEPOOL_GHC_LIBDIR", ghc_libdir);
         std::env::set_var("LD_LIBRARY_PATH", libraries);
+        std::env::set_var("TMPDIR", scratch.path());
         std::env::set_var("XDG_CACHE_HOME", scratch.path().join("cache"));
         std::env::set_var(
             "TIDEPOOL_COMPILE_CACHE_DIR",

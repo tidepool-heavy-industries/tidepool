@@ -6464,7 +6464,7 @@ where
                         Some(AgentStopProjection::Failed("provider is not confirmed idle; cleanup observation is stale or needs attention".into()))
                     } else if let Some(target) = kernel.resolve(actor) {
                         match target
-                            .retire_by(
+                            .retire_idle_by(
                                 context.actor,
                                 ActorTerminal {
                                     kind: ActorExitKind::Cancelled,
