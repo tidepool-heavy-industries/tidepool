@@ -6152,11 +6152,19 @@ mod tests {
         let _daemon = TestEnvGuard::unset("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
         let root = tempfile::tempdir().unwrap();
         let effects = TestEffectSurface::minimal(&[]).unwrap();
-        let lib = SessionLib::open(SessionId(995), root.path(), ModuleEnv::standalone_default())
-            .unwrap()
-            .with_validation_include(effects.include_paths().to_vec());
+        let mut lib =
+            SessionLib::open(SessionId(995), root.path(), ModuleEnv::standalone_default())
+                .unwrap()
+                .with_validation_include(effects.include_paths().to_vec());
+        lib.attach_recovery_graph_v2(&root.path().join("declarations.json"))
+            .unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
         let public = session.mint_scope(ScopeId::ROOT).unwrap();
+        let inherited_generation = session
+            .define_scoped_in(public, &["data PriorNominal = PriorNominal Int"])
+            .unwrap();
+        let inherited_surface = session.exact_exports_in(public, &["PriorNominal"]).unwrap();
+        let inherited_exports = inherited_surface.declarations().unwrap().to_vec();
         let execution = Arc::new(session.begin_private_execution(public).unwrap());
         let view = execution.view();
         let imports = view.turn_imports(&crate::session::SourceImports::new());
@@ -6280,6 +6288,29 @@ mod tests {
         resident
             .adopt_checked_declaration(reservation.clone())
             .unwrap();
+        let selected = resident
+            .exact_exports_in(execution.private_scope(), &["PriorNominal", "LocalBox"])
+            .unwrap();
+        assert!(selected
+            .declarations()
+            .unwrap()
+            .contains(&inherited_exports[0]));
+        let view = resident.compile_view_in(execution.private_scope()).unwrap();
+        let facade = selected.materialize(&view).unwrap();
+        assert!(facade.source_artifact().is_none());
+        let projection = facade.projection().unwrap();
+        assert!(projection
+            .receipt()
+            .exports()
+            .contains(&inherited_exports[0]));
+        assert!(projection
+            .context()
+            .lexical_graph()
+            .iter()
+            .any(|node| node.owner.module == projection.module_name()));
+        assert!(!projection.context().lexical_graph().iter().any(
+            |node| node.owner.module == SessionModule::lib(inherited_generation).module_name()
+        ));
         assert_eq!(protected.snapshot().compiler_prefix().next_item(), 1);
         assert!(resident.adopt_checked_declaration(reservation).is_err());
         let original_context = protected

@@ -74,6 +74,31 @@ fn op_wrap(name: &str) -> String {
     }
 }
 
+impl From<&tidepool_toolchain::declaration_join::DeclarationExport> for ExportItem {
+    fn from(export: &tidepool_toolchain::declaration_join::DeclarationExport) -> Self {
+        use tidepool_toolchain::declaration_join::DeclarationKind;
+        let name = export.head.occurrence.clone();
+        let children = || {
+            export
+                .children
+                .iter()
+                .map(|child| child.occurrence.clone())
+                .collect()
+        };
+        match export.kind {
+            DeclarationKind::Value => Self::Value { name },
+            DeclarationKind::Type => Self::Type {
+                name,
+                cons: children(),
+            },
+            DeclarationKind::Class => Self::Class {
+                name,
+                methods: children(),
+            },
+        }
+    }
+}
+
 impl ExportItem {
     pub(crate) fn head_namespace(&self) -> tidepool_toolchain::declaration_join::ExportNamespace {
         use tidepool_toolchain::declaration_join::ExportNamespace;
@@ -164,6 +189,30 @@ pub(super) fn extend_exports_by_head(exports: &mut Vec<ExportItem>, introduced: 
         });
         exports.push(item.clone());
     }
+}
+
+/// Compose selected compiler identities, never identities reconstructed from source heads.
+/// Replacements remove complete groups in the same namespace; hidden instance and
+/// family evidence remains owned independently by the declaration certificates.
+pub(super) fn select_authored_exports(
+    inherited: &[tidepool_toolchain::declaration_join::DeclarationExport],
+    retractions: &[super::DeclarationRetraction],
+    introduced: &[tidepool_toolchain::declaration_join::DeclarationExport],
+) -> Vec<tidepool_toolchain::declaration_join::DeclarationExport> {
+    let mut selected = inherited.to_vec();
+    selected.retain(|export| {
+        !retractions
+            .iter()
+            .any(|retraction| retraction.selects(export.head.namespace, &export.head.occurrence))
+    });
+    for export in introduced {
+        selected.retain(|prior| {
+            prior.head.namespace != export.head.namespace
+                || prior.head.occurrence != export.head.occurrence
+        });
+        selected.push(export.clone());
+    }
+    selected
 }
 
 /// One declaration turn: the raw source text(s) appended this turn and the
@@ -279,9 +328,7 @@ enum DeclarationSlot {
     Committed(DeclTurn),
     CertifiedAuthored {
         turn: DeclTurn,
-        evidence: Arc<tidepool_toolchain::declaration_join::CertifiedAuthoredDeclaration>,
-        context: Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>,
-        surface: AdmittedDeclarationSurface,
+        prepared: Arc<super::lexical_projection::PreparedAuthoredDeclaration>,
     },
     Joined(JoinedDeclaration),
     Recovered(RecoveredDeclaration),
@@ -473,25 +520,31 @@ impl DeclLog {
         &mut self,
         generation: Generation,
         turn: DeclTurn,
-        evidence: tidepool_toolchain::declaration_join::CertifiedAuthoredDeclaration,
-        context: Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>,
-        surface: AdmittedDeclarationSurface,
+        prepared: Arc<super::lexical_projection::PreparedAuthoredDeclaration>,
     ) -> bool {
-        if evidence.product().owner().module != SessionModule::lib(generation).module_name()
+        if prepared.generation != generation
+            || prepared.parent != turn.parent.unwrap_or(Generation(0))
+            || prepared.evidence.product().owner().module
+                != SessionModule::lib(generation).module_name()
             || !self.commit_reserved_authored(generation, turn.clone())
         {
             return false;
         }
         self.turns.insert(
             generation,
-            DeclarationSlot::CertifiedAuthored {
-                turn,
-                evidence: Arc::new(evidence),
-                context,
-                surface,
-            },
+            DeclarationSlot::CertifiedAuthored { turn, prepared },
         );
         true
+    }
+
+    pub(crate) fn projection_at(
+        &self,
+        generation: Generation,
+    ) -> Option<&Arc<super::CertifiedDeclarationProjection>> {
+        match self.turns.get(&generation)? {
+            DeclarationSlot::CertifiedAuthored { prepared, .. } => Some(&prepared.projection),
+            _ => None,
+        }
     }
 
     pub(crate) fn certified_authored_at(
@@ -499,7 +552,7 @@ impl DeclLog {
         generation: Generation,
     ) -> Option<&tidepool_toolchain::declaration_join::CertifiedAuthoredDeclaration> {
         match self.turns.get(&generation)? {
-            DeclarationSlot::CertifiedAuthored { evidence, .. } => Some(evidence),
+            DeclarationSlot::CertifiedAuthored { prepared, .. } => Some(&prepared.evidence),
             _ => None,
         }
     }
@@ -509,7 +562,7 @@ impl DeclLog {
         generation: Generation,
     ) -> Option<Arc<tidepool_toolchain::declaration_join::CertifiedAuthoredDeclaration>> {
         match self.turns.get(&generation)? {
-            DeclarationSlot::CertifiedAuthored { evidence, .. } => Some(evidence.clone()),
+            DeclarationSlot::CertifiedAuthored { prepared, .. } => Some(prepared.evidence.clone()),
             _ => None,
         }
     }
@@ -520,7 +573,9 @@ impl DeclLog {
     ) -> Option<Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>> {
         match self.turns.get(&generation)? {
             DeclarationSlot::Joined(joined) => Some(joined.context.clone()),
-            DeclarationSlot::CertifiedAuthored { context, .. } => Some(context.clone()),
+            DeclarationSlot::CertifiedAuthored { prepared, .. } => {
+                Some(prepared.projection.context().clone())
+            }
             DeclarationSlot::Recovered(recovered) => Some(recovered.evidence.context().clone()),
             _ => None,
         }
@@ -552,7 +607,9 @@ impl DeclLog {
         generation: Generation,
     ) -> Option<&[tidepool_toolchain::declaration_join::DeclarationExport]> {
         match self.turns.get(&generation)? {
-            DeclarationSlot::CertifiedAuthored { evidence, .. } => Some(evidence.lexical_exports()),
+            DeclarationSlot::CertifiedAuthored { prepared, .. } => {
+                Some(prepared.projection.receipt().exports())
+            }
             DeclarationSlot::Joined(joined) => Some(joined.evidence.exports()),
             DeclarationSlot::Recovered(recovered) => Some(recovered.evidence.exports()),
             DeclarationSlot::Reserved | DeclarationSlot::Committed(_) => None,
@@ -565,7 +622,7 @@ impl DeclLog {
     ) -> Option<&AdmittedDeclarationSurface> {
         match self.turns.get(&generation)? {
             DeclarationSlot::Joined(joined) => Some(&joined.surface),
-            DeclarationSlot::CertifiedAuthored { surface, .. } => Some(surface),
+            DeclarationSlot::CertifiedAuthored { prepared, .. } => Some(&prepared.surface),
             DeclarationSlot::Recovered(recovered) => Some(&recovered.surface),
             _ => None,
         }
@@ -1178,7 +1235,11 @@ pub fn render_module_with_vals(
     // genuine — a pure-bind-promoted decl shadows exactly like a real one.
     let all_session_heads: Vec<&ExportItem> = prior.iter().chain(this.items.iter()).collect();
 
-    let prev_module = this.parent.map(SessionModule::lib);
+    let prev_module = this.parent.map(|parent| {
+        log.projection_at(parent)
+            .map(|projection| projection.module_name().to_owned())
+            .unwrap_or_else(|| SessionModule::lib(parent).module_name())
+    });
 
     let mut out = String::new();
     out.push_str(&merged_pragmas);
@@ -1191,8 +1252,8 @@ pub fn render_module_with_vals(
     // Export list: re-export the prior gen (its non-hidden names) selectively,
     // then this turn's items explicitly.
     let mut exports: Vec<String> = Vec::new();
-    if let Some(prev) = prev_module {
-        exports.push(format!("module {}", prev.module_name()));
+    if let Some(prev) = &prev_module {
+        exports.push(format!("module {}", prev));
     }
     for item in &this.items {
         exports.push(item.render_entry());
@@ -1215,16 +1276,12 @@ pub fn render_module_with_vals(
         out.push_str(&hide_session_heads(imp, &all_session_heads));
         out.push('\n');
     }
-    if let Some(prev) = prev_module {
+    if let Some(prev) = &prev_module {
         if hidden_prior.is_empty() {
-            out.push_str(&format!("import {}\n", prev.module_name()));
+            out.push_str(&format!("import {}\n", prev));
         } else {
             let hides: Vec<String> = hidden_prior.iter().map(|p| p.render_entry()).collect();
-            out.push_str(&format!(
-                "import {} hiding ({})\n",
-                prev.module_name(),
-                hides.join(", ")
-            ));
+            out.push_str(&format!("import {} hiding ({})\n", prev, hides.join(", ")));
         }
     }
     for imp in &hoisted_imports {
@@ -1347,6 +1404,65 @@ mod tests {
     fn push_chained(log: &mut DeclLog, mut t: DeclTurn) -> Generation {
         t.parent = (log.generation().0 > 0).then_some(log.generation());
         log.push(t)
+    }
+
+    #[test]
+    fn admitted_export_selection_preserves_original_groups_and_exact_namespace_replacements() {
+        use tidepool_toolchain::declaration_join::{
+            DeclarationExport, DeclarationKind, ExportIdentity, ExportNamespace,
+        };
+        let export = |generation, namespace, occurrence: &str| DeclarationExport {
+            kind: if namespace == ExportNamespace::Type {
+                DeclarationKind::Class
+            } else {
+                DeclarationKind::Value
+            },
+            head: ExportIdentity {
+                unit: "main".into(),
+                module: SessionModule::lib(Generation(generation)).module_name(),
+                namespace,
+                occurrence: occurrence.into(),
+                record_parent: None,
+            },
+            children: vec![],
+        };
+        let mut original_type = export(1, ExportNamespace::Type, "Same");
+        original_type
+            .children
+            .push(export(1, ExportNamespace::Value, "method").head);
+        original_type
+            .children
+            .push(export(1, ExportNamespace::Type, "Family").head);
+        let original_value = export(1, ExportNamespace::Value, "Same");
+        let inherited = vec![original_type.clone(), original_value.clone()];
+        let unrelated = export(3, ExportNamespace::Type, "M2JoinA");
+        let selection = select_authored_exports(&inherited, &[], &[unrelated.clone()]);
+        assert_eq!(
+            selection,
+            vec![original_type.clone(), original_value.clone(), unrelated]
+        );
+        let shadow = export(4, ExportNamespace::Type, "Same");
+        let selection = select_authored_exports(&selection, &[], &[shadow.clone()]);
+        assert!(!selection.contains(&original_type));
+        assert!(selection.contains(&original_value));
+        assert!(selection.contains(&shadow));
+        let selection = select_authored_exports(
+            &selection,
+            &[DeclarationRetraction::Head {
+                namespace: ExportNamespace::Value,
+                occurrence: "Same".into(),
+            }],
+            &[],
+        );
+        assert!(!selection.contains(&original_value));
+        assert!(selection.contains(&shadow));
+        let selection = select_authored_exports(
+            &selection,
+            &[DeclarationRetraction::Name("Same".into())],
+            &[],
+        );
+        assert!(!selection.iter().any(|item| item.head.occurrence == "Same"));
+        assert_eq!(inherited, vec![original_type, original_value]);
     }
 
     #[test]

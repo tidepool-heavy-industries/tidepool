@@ -23,6 +23,8 @@ mod dialect;
 #[path = "exact_recovery_acceptance_tests.rs"]
 mod exact_recovery_acceptance_tests;
 pub mod facade;
+mod lexical_projection;
+pub use lexical_projection::CertifiedDeclarationProjection;
 pub mod inspection;
 pub mod kernel;
 mod paired_publication;
@@ -171,6 +173,7 @@ pub enum ResidentSessionState {
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use tidepool_codegen::binding_table::SourceLeaseKey;
 use tidepool_codegen::scope::ScopeId;
@@ -829,7 +832,7 @@ pub struct StagedDeclaration {
     /// or off it, against a private candidate directory (a split cell
     /// preparation).
     rendered: RenderedModule,
-    certified_authored: Option<tidepool_toolchain::declaration_join::CertifiedAuthoredDeclaration>,
+    certified_authored: Option<Arc<lexical_projection::PreparedAuthoredDeclaration>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -843,6 +846,7 @@ impl StagedDeclaration {
         use tidepool_toolchain::declaration_join::ExportNamespace;
         let mut names = match &self.certified_authored {
             Some(certificate) => certificate
+                .evidence
                 .introduced_exports()
                 .iter()
                 .flat_map(|export| std::iter::once(&export.head).chain(export.children.iter()))
@@ -912,6 +916,7 @@ impl StagedDeclaration {
 /// checkout that is released immediately after.
 #[derive(Clone, Debug)]
 pub struct DeclarationCandidateRender {
+    projection_baseline: Option<lexical_projection::DeclarationProjectionBaseline>,
     exact_context:
         Option<std::sync::Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>>,
     session_id: SessionId,
@@ -1449,6 +1454,13 @@ impl SessionLib {
         (g.0 > 0).then(|| SessionModule::lib(g))
     }
 
+    pub(crate) fn current_declaration_projection_in(
+        &self,
+        scope: ScopeId,
+    ) -> Option<Arc<CertifiedDeclarationProjection>> {
+        self.log.projection_at(self.scope_tip(scope)).cloned()
+    }
+
     /// Persistent imports visible at `scope`, derived from the same ordered
     /// declaration chain that is transferred during session recovery.
     #[must_use]
@@ -1582,6 +1594,24 @@ impl SessionLib {
         scope: ScopeId,
         heads: &[&str],
     ) -> Result<ExactExportSurface, ExactExportError> {
+        self.select_exact_exports_in(scope, None, heads)
+    }
+
+    pub fn exact_exports_in_namespace(
+        &self,
+        scope: ScopeId,
+        namespace: tidepool_toolchain::declaration_join::ExportNamespace,
+        heads: &[&str],
+    ) -> Result<ExactExportSurface, ExactExportError> {
+        self.select_exact_exports_in(scope, Some(namespace), heads)
+    }
+
+    fn select_exact_exports_in(
+        &self,
+        scope: ScopeId,
+        namespace: Option<tidepool_toolchain::declaration_join::ExportNamespace>,
+        heads: &[&str],
+    ) -> Result<ExactExportSurface, ExactExportError> {
         let available = self.log.exports_at(self.scope_tip(scope));
         let mut selected = Vec::new();
         for head in heads
@@ -1589,19 +1619,27 @@ impl SessionLib {
             .map(|head| head.trim())
             .filter(|head| !head.is_empty())
         {
-            let item = available
+            let matching = available
                 .iter()
-                .find(|item| item.head_name() == head)
-                .cloned()
-                .ok_or_else(|| ExactExportError::UnknownExport {
+                .filter(|item| {
+                    item.head_name() == head
+                        && namespace.is_none_or(|namespace| namespace == item.head_namespace())
+                })
+                .collect::<Vec<_>>();
+            if matching.is_empty() {
+                return Err(ExactExportError::UnknownExport {
                     scope,
                     name: head.to_string(),
-                })?;
-            if !selected
-                .iter()
-                .any(|prior: &ExportItem| prior.head_name() == item.head_name())
-            {
-                selected.push(item);
+                });
+            }
+            // A spelling selects all its declaration namespaces, never an arbitrary first match.
+            for item in matching {
+                if !selected.iter().any(|prior: &ExportItem| {
+                    prior.head_namespace() == item.head_namespace()
+                        && prior.head_name() == item.head_name()
+                }) {
+                    selected.push(item.clone());
+                }
             }
         }
         let declarations = if selected.is_empty() {
@@ -1624,12 +1662,27 @@ impl SessionLib {
                         .collect::<Option<Vec<_>>>()
                 })
         };
-        Ok(ExactExportSurface::new(
-            self.id,
-            self.current_module_in(scope),
-            selected,
-            declarations,
-        ))
+        if let Some(exports) = declarations.filter(|exports| !exports.is_empty()) {
+            let baseline = lexical_projection::DeclarationProjectionBaseline::capture(
+                self,
+                self.scope_tip(scope),
+            )
+            .map_err(|_| ExactExportError::UncertifiedExports)?
+            .ok_or(ExactExportError::UncertifiedExports)?;
+            Ok(ExactExportSurface::certified(
+                self.id,
+                self.current_module_in(scope),
+                baseline,
+                exports,
+                self.extra_include.clone(),
+            ))
+        } else {
+            Ok(ExactExportSurface::legacy(
+                self.id,
+                self.current_module_in(scope),
+                selected,
+            ))
+        }
     }
 
     /// Append a declaration turn. Extracts binder names from GHC, regenerates the
@@ -1902,6 +1955,7 @@ impl SessionLib {
         let generation = log.push(turn.clone());
         let rendered = render::render_module_with_vals(&log, generation, &self.env, import_modules);
         DeclarationCandidateRender {
+            projection_baseline: None,
             exact_context: self.log.joined_context_at(self.scope_tip(scope)),
             session_id: self.id,
             root: self.root.clone(),
@@ -1937,6 +1991,11 @@ impl SessionLib {
             assert_eq!(candidate.generation, reserved);
             candidate.base_generation = reserved;
             candidate.reserved = true;
+            candidate.projection_baseline =
+                lexical_projection::DeclarationProjectionBaseline::capture(
+                    self,
+                    candidate.base_tip,
+                )?;
         }
         Ok(candidate)
     }
@@ -1983,21 +2042,20 @@ impl SessionLib {
         {
             return Err(SessionError::StaleStagedDeclaration);
         }
-        let authored_context = staged
-            .certified_authored
-            .as_ref()
-            .map(|certificate| {
-                paired_publication::authored_context(self, staged.base_tip, certificate)
-            })
-            .transpose()?;
+        if staged.certified_authored.as_ref().is_some_and(|prepared| {
+            prepared.generation != staged.generation || prepared.parent != staged.base_tip
+        }) {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
         let staged_graph = if staged.reserved
             && staged.persistence == DeclarationPersistence::Durable
             && self.durable_graph.is_some()
         {
-            let (context, _) = authored_context
+            let prepared = staged
+                .certified_authored
                 .as_ref()
                 .ok_or(SessionError::StaleStagedDeclaration)?;
-            Some(self.stage_private_authored_graph(&staged, context)?)
+            Some(self.stage_private_authored_graph(&staged, prepared.projection.context())?)
         } else {
             None
         };
@@ -2045,12 +2103,6 @@ impl SessionLib {
                 staged
                     .certified_authored
                     .expect("authored evidence preflight"),
-                authored_context
-                    .as_ref()
-                    .expect("authored context preflight")
-                    .0
-                    .clone(),
-                authored_context.expect("authored context preflight").1,
             ));
             self.tips.insert(staged.scope, staged.generation);
             staged.generation
@@ -2101,10 +2153,11 @@ impl SessionLib {
         if state.unconfirmed.is_some() || state.graph.high_water() < staged.generation {
             return Err(SessionError::StaleStagedDeclaration);
         }
-        let certified = staged
+        let prepared = staged
             .certified_authored
             .as_ref()
             .ok_or_else(|| invalid("reserved declaration has no certified authored product"))?;
+        let certified = &prepared.evidence;
         if staged.turn.parent != (staged.base_tip.0 > 0).then_some(staged.base_tip)
             || staged.base_tip.0 > 0 && staged.exact_context.is_none()
         {
@@ -2213,8 +2266,8 @@ impl SessionLib {
                 implementation_refs: Vec::new(),
                 artifact_refs,
                 lexical_roots: vec![tidepool_toolchain::declaration_join::ExactModuleIdentity {
-                    unit: certified.product().owner().unit.clone(),
-                    module: staged.module.module_name(),
+                    unit: prepared.projection.receipt().reserved().unit.clone(),
+                    module: prepared.projection.module_name().to_owned(),
                 }],
                 lexical: context.lexical_graph().to_vec(),
                 exports,
@@ -2228,8 +2281,8 @@ impl SessionLib {
                 .collect(),
                 workbench_imports: staged.turn.workbench_imports.specs().to_vec(),
                 instances: paired_publication::recovery_instances(
-                    certified.instances(),
-                    certified.family_closure(),
+                    prepared.projection.receipt().instances(),
+                    prepared.projection.receipt().family_closure(),
                 ),
                 state: if live_dependencies.is_empty() {
                     recovery::RecoveryNodeState::ExactArtifactClosure
@@ -2686,7 +2739,14 @@ pub fn validate_declaration_candidate(
             ),
         };
         match certified {
-            Ok(certified) => Some(certified),
+            Ok(certified) => Some(lexical_projection::prepare_authored_projection(
+                candidate.projection_baseline.as_ref(),
+                candidate.generation,
+                Arc::new(certified),
+                &candidate.turn.retracts,
+                &includes,
+                &candidate.root,
+            )?),
             Err(error) => {
                 remove_module_artifacts(primary_root, candidate.rendered.module);
                 return Err(SessionError::Compile(error));
@@ -2985,7 +3045,7 @@ mod tests {
         assert_eq!(lib.scope_tip(private), Generation(1));
         assert_eq!(
             lib.log.certified_authored_at(Generation(1)),
-            Some(&exact_evidence)
+            Some(exact_evidence.evidence.as_ref())
         );
         assert_eq!(lib.scope_tip(ScopeId::ROOT), Generation(0));
         assert!(matches!(

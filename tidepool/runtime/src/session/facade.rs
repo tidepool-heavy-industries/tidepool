@@ -1,73 +1,103 @@
-//! Content-addressed Haskell facades for exact session exports.
-//!
-//! A fresh actor must see selected declarations without inheriting the
-//! defining actor's lexical scope. The facade generated here imports an exact
-//! gen-versioned [`SessionModule`] and re-exports only the selected GHC-derived
-//! [`ExportItem`]s. It is a regenerable source artifact in the existing
-//! session include tree, not a declaration replay, program-image registry, or
-//! live-root owner.
+//! Compiler-issued selected declaration interfaces. Source-only compatibility
+//! facades remain separate and cannot authorize nominal actor payloads.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use tidepool_repr::{SessionId, SessionModule};
 use tidepool_toolchain::declaration_join::DeclarationExport;
 
-use super::{ExportItem, SessionCompileView};
+use super::lexical_projection::{issue_projection, DeclarationProjectionBaseline};
+use super::{CertifiedDeclarationProjection, ExportItem, SessionCompileView};
 
-/// An exact declaration surface minted by [`super::SessionLib`]. Fields are
-/// private so callers cannot claim that an arbitrary name is exported by a
-/// module; selection is checked against the authoritative declaration log.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ExportAuthority {
+    Empty,
+    Legacy,
+    Certified {
+        baseline: Arc<DeclarationProjectionBaseline>,
+        exports: Vec<DeclarationExport>,
+        includes: Vec<PathBuf>,
+    },
+}
+
+/// Selected compiler identities with their original owned lexical closure.
+/// Callers cannot turn names or available interfaces into export authority.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExactExportSurface {
     session: SessionId,
     source: Option<SessionModule>,
     items: Vec<ExportItem>,
-    declarations: Option<Vec<DeclarationExport>>,
+    authority: ExportAuthority,
 }
 
 impl ExactExportSurface {
-    pub(crate) fn new(
+    pub(crate) fn legacy(
         session: SessionId,
         source: Option<SessionModule>,
         mut items: Vec<ExportItem>,
-        declarations: Option<Vec<DeclarationExport>>,
     ) -> Self {
         items.sort_by_key(ExportItem::render_entry);
-        items.dedup_by(|left, right| left.head_name() == right.head_name());
+        items.dedup_by(|left, right| {
+            left.head_namespace() == right.head_namespace() && left.head_name() == right.head_name()
+        });
+        let authority = if items.is_empty() {
+            ExportAuthority::Empty
+        } else {
+            ExportAuthority::Legacy
+        };
         Self {
             session,
             source,
             items,
-            declarations,
+            authority,
         }
     }
 
-    #[must_use]
+    pub(super) fn certified(
+        session: SessionId,
+        source: Option<SessionModule>,
+        baseline: DeclarationProjectionBaseline,
+        mut exports: Vec<DeclarationExport>,
+        includes: Vec<PathBuf>,
+    ) -> Self {
+        for export in &mut exports {
+            export.children.sort();
+        }
+        exports.sort_by(|left, right| left.head.cmp(&right.head));
+        Self {
+            session,
+            source,
+            items: exports.iter().map(ExportItem::from).collect(),
+            authority: ExportAuthority::Certified {
+                baseline: Arc::new(baseline),
+                exports,
+                includes,
+            },
+        }
+    }
+
     pub fn session(&self) -> SessionId {
         self.session
     }
-
-    #[must_use]
     pub fn source_module(&self) -> Option<SessionModule> {
         self.source
     }
-
-    #[must_use]
     pub fn items(&self) -> &[ExportItem] {
         &self.items
     }
 
-    /// Compiler-issued original identities for the selected export membrane.
-    /// Legacy source-only surfaces cannot authorize nominal actor payloads.
     pub fn declarations(&self) -> Result<&[DeclarationExport], ExactExportError> {
-        self.declarations
-            .as_deref()
-            .ok_or(ExactExportError::UncertifiedExports)
+        match &self.authority {
+            ExportAuthority::Empty => Ok(&[]),
+            ExportAuthority::Legacy => Err(ExactExportError::UncertifiedExports),
+            ExportAuthority::Certified { exports, .. } => Ok(exports),
+        }
     }
 
-    /// Materialize this surface under the exact session root named by `view`.
-    /// Existing identical content is reused; writes are atomic best-effort
-    /// because the file is a fully regenerable compile artifact.
+    /// Issue a selected interface through the same compiler join owner used by
+    /// cumulative declaration views. The original modules remain dependencies;
+    /// only this interface is a new lexical root.
     pub fn materialize(
         &self,
         view: &SessionCompileView,
@@ -78,110 +108,126 @@ impl ExactExportSurface {
                 view: view.session(),
             });
         }
-        let identity = FacadeIdentity::for_surface(self);
-        let source = render_facade(&identity, self);
-        let path = view.session_root().join(identity.relative_hs_path());
-        if std::fs::read(&path).is_ok_and(|existing| existing == source.as_bytes()) {
+        if let ExportAuthority::Certified {
+            baseline,
+            exports,
+            includes,
+        } = &self.authority
+        {
+            let projection = issue_projection(
+                &baseline.context,
+                &baseline.owner,
+                &baseline.surface,
+                exports,
+                &baseline.instances,
+                &baseline.families,
+                includes,
+                view.session_root(),
+            )?;
+            let identity = FacadeIdentity {
+                digest: projection.receipt().expected_public_version().to_owned(),
+            };
             return Ok(MaterializedFacade {
                 identity,
-                path,
-                source,
+                artifact: FacadeArtifact::Certified(projection),
             });
         }
-        let parent = path
-            .parent()
-            .ok_or_else(|| ExactFacadeError::InvalidPath(path.clone()))?;
-        std::fs::create_dir_all(parent).map_err(|source| ExactFacadeError::Io {
-            path: parent.to_path_buf(),
-            source,
-        })?;
-        tidepool_atomic_write::write_best_effort(&path, source.as_bytes()).map_err(|error| {
-            ExactFacadeError::Io {
-                path: error.path,
-                source: error.source,
-            }
-        })?;
+        let identity = FacadeIdentity::for_legacy_surface(self);
+        let source = render_legacy_facade(&identity, self);
+        let path = view.session_root().join(identity.relative_hs_path());
+        if !std::fs::read(&path).is_ok_and(|existing| existing == source.as_bytes()) {
+            let parent = path
+                .parent()
+                .ok_or_else(|| ExactFacadeError::InvalidPath(path.clone()))?;
+            std::fs::create_dir_all(parent).map_err(|source| ExactFacadeError::Io {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+            tidepool_atomic_write::write_best_effort(&path, source.as_bytes()).map_err(
+                |error| ExactFacadeError::Io {
+                    path: error.path,
+                    source: error.source,
+                },
+            )?;
+        }
         Ok(MaterializedFacade {
             identity,
-            path,
-            source,
+            artifact: FacadeArtifact::Source { path, source },
         })
     }
 }
 
-/// Stable identity of one generated facade. Its digest covers the originating
-/// session, exact source module, and selected exports.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct FacadeIdentity {
     digest: String,
 }
 
 impl FacadeIdentity {
-    fn for_surface(surface: &ExactExportSurface) -> Self {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(b"tidepool-exact-export-facade-v1\0");
-        hasher.update(&surface.session.0.to_le_bytes());
+    fn for_legacy_surface(surface: &ExactExportSurface) -> Self {
+        let mut hash = blake3::Hasher::new();
+        hash.update(b"tidepool-source-only-export-facade-v2\0");
+        hash.update(&surface.session.0.to_le_bytes());
         if let Some(module) = surface.source {
-            hasher.update(module.module_name().as_bytes());
+            hash.update(module.module_name().as_bytes());
         }
-        hasher.update(b"\0");
+        hash.update(b"\0");
         for item in &surface.items {
-            hasher.update(item.render_entry().as_bytes());
-            hasher.update(b"\0");
+            hash.update(item.render_entry().as_bytes());
+            hash.update(b"\0");
         }
         Self {
-            digest: hasher.finalize().to_hex().to_string(),
+            digest: hash.finalize().to_hex().to_string(),
         }
     }
-
-    #[must_use]
     pub fn digest(&self) -> &str {
         &self.digest
     }
-
-    #[must_use]
     pub fn module_name(&self) -> String {
         format!("Tidepool.Actor.Surface.H{}", self.digest)
     }
-
-    #[must_use]
     pub fn relative_hs_path(&self) -> PathBuf {
         PathBuf::from(format!("Tidepool/Actor/Surface/H{}.hs", self.digest))
     }
 }
 
-/// A materialized facade importable from the originating session root.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum FacadeArtifact {
+    Source { path: PathBuf, source: String },
+    Certified(Arc<CertifiedDeclarationProjection>),
+}
+
+/// The same issued projection survives descriptor, installation and seed
+/// transfers. Certified interfaces are never reduced to source import strings.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MaterializedFacade {
     identity: FacadeIdentity,
-    path: PathBuf,
-    source: String,
+    artifact: FacadeArtifact,
 }
-
 impl MaterializedFacade {
-    #[must_use]
     pub fn identity(&self) -> &FacadeIdentity {
         &self.identity
     }
-
-    #[must_use]
     pub fn module_name(&self) -> String {
         self.identity.module_name()
     }
-
-    #[must_use]
-    pub fn path(&self) -> &Path {
-        &self.path
+    pub fn projection(&self) -> Option<&Arc<CertifiedDeclarationProjection>> {
+        match &self.artifact {
+            FacadeArtifact::Certified(projection) => Some(projection),
+            FacadeArtifact::Source { .. } => None,
+        }
     }
-
-    #[must_use]
-    pub fn source(&self) -> &str {
-        &self.source
+    pub fn source_artifact(&self) -> Option<(&Path, &str)> {
+        match &self.artifact {
+            FacadeArtifact::Source { path, source } => Some((path, source)),
+            FacadeArtifact::Certified(_) => None,
+        }
     }
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum ExactFacadeError {
+    #[error(transparent)]
+    Projection(#[from] super::SessionError),
     #[error("exact export surface belongs to session {surface}, not compile view {view}")]
     WrongSession { surface: SessionId, view: SessionId },
     #[error("facade target has no parent directory: {}", .0.display())]
@@ -209,22 +255,22 @@ pub enum ExactExportError {
     },
 }
 
-fn render_facade(identity: &FacadeIdentity, surface: &ExactExportSurface) -> String {
-    let module = identity.module_name();
-    let entries: Vec<String> = surface.items.iter().map(ExportItem::render_entry).collect();
-    let mut source = String::from("-- GENERATED — exact actor export membrane. Do not edit.\n");
-    source.push_str(&format!("module {module}"));
+fn render_legacy_facade(identity: &FacadeIdentity, surface: &ExactExportSurface) -> String {
+    let entries = surface
+        .items
+        .iter()
+        .map(ExportItem::render_entry)
+        .collect::<Vec<_>>();
+    let mut source = format!("-- GENERATED — source-only export membrane.\n{{-# LANGUAGE NoImplicitPrelude, ExplicitNamespaces, TypeOperators #-}}\nmodule {}", identity.module_name());
     if entries.is_empty() {
         source.push_str(" () where\n");
         return source;
     }
-    source.push_str("\n  ( ");
-    source.push_str(&entries.join("\n  , "));
-    source.push_str("\n  ) where\n");
-    if let Some(source_module) = surface.source {
+    source.push_str(&format!("\n  ( {}\n  ) where\n", entries.join("\n  , ")));
+    if let Some(module) = surface.source {
         source.push_str(&format!(
             "import {} ({})\n",
-            source_module.module_name(),
+            module.module_name(),
             entries.join(", ")
         ));
     }
@@ -237,45 +283,6 @@ mod tests {
     use crate::session::SourceImports;
     use tidepool_codegen::scope::ScopeId;
     use tidepool_repr::Generation;
-
-    #[test]
-    fn certified_export_surface_preserves_original_identity_under_join_wrapper() {
-        use tidepool_toolchain::declaration_join::{
-            DeclarationKind, ExportIdentity, ExportNamespace,
-        };
-        let identity = |namespace, occurrence: &str| ExportIdentity {
-            unit: "original-unit".into(),
-            module: "Tidepool.Session.Lib.G1".into(),
-            namespace,
-            occurrence: occurrence.into(),
-            record_parent: None,
-        };
-        let original = DeclarationExport {
-            kind: DeclarationKind::Type,
-            head: identity(ExportNamespace::Type, "Original"),
-            children: vec![identity(
-                ExportNamespace::Constructor,
-                "OriginalConstructor",
-            )],
-        };
-        let surface = ExactExportSurface::new(
-            SessionId(8),
-            Some(SessionModule::lib(Generation(9))),
-            vec![ExportItem::Type {
-                name: "Original".into(),
-                cons: vec!["OriginalConstructor".into()],
-            }],
-            Some(vec![original.clone()]),
-        );
-        assert_eq!(surface.declarations().unwrap(), &[original]);
-        assert_eq!(
-            surface.source_module(),
-            Some(SessionModule::lib(Generation(9)))
-        );
-        let source = render_facade(&FacadeIdentity::for_surface(&surface), &surface);
-        assert!(source.contains("import Tidepool.Session.Lib.G9 (Original(..))"));
-    }
-
     #[test]
     fn materialized_facade_reexports_only_selected_exact_items() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -298,7 +305,7 @@ mod tests {
             }),
         }
         .canonicalize();
-        let surface = ExactExportSurface::new(
+        let surface = ExactExportSurface::legacy(
             SessionId(8),
             Some(SessionModule::lib(Generation(4))),
             vec![
@@ -310,7 +317,6 @@ mod tests {
                     cons: vec!["Finding".into()],
                 },
             ],
-            None,
         );
 
         assert!(matches!(
@@ -318,14 +324,10 @@ mod tests {
             Err(ExactExportError::UncertifiedExports)
         ));
         let facade = surface.materialize(&view).expect("materialize facade");
-        assert!(facade.source().contains("Finding(..)"));
-        assert!(facade.source().contains("review"));
-        assert!(facade
-            .source()
-            .contains("import Tidepool.Session.Lib.G4 (Finding(..), review)"));
-        assert_eq!(
-            std::fs::read_to_string(facade.path()).unwrap(),
-            facade.source()
-        );
+        let (path, source) = facade.source_artifact().unwrap();
+        assert!(source.contains("Finding(..)"));
+        assert!(source.contains("review"));
+        assert!(source.contains("import Tidepool.Session.Lib.G4 (Finding(..), review)"));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), source);
     }
 }

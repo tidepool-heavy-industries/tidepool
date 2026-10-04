@@ -26,15 +26,15 @@ use super::{
 };
 
 #[derive(Clone)]
-struct DeclarationTip {
-    generation: Generation,
-    owner: ExactModuleIdentity,
-    turn: DeclTurn,
-    context: Arc<ExactDeclarationContext>,
-    surface: AdmittedDeclarationSurface,
-    exports: Vec<DeclarationExport>,
-    instances: InstanceInventory,
-    families: Vec<ExportIdentity>,
+pub(super) struct DeclarationTip {
+    pub(super) generation: Generation,
+    pub(super) owner: ExactModuleIdentity,
+    pub(super) turn: DeclTurn,
+    pub(super) context: Arc<ExactDeclarationContext>,
+    pub(super) surface: AdmittedDeclarationSurface,
+    pub(super) exports: Vec<DeclarationExport>,
+    pub(super) instances: InstanceInventory,
+    pub(super) families: Vec<ExportIdentity>,
 }
 
 #[derive(Clone)]
@@ -150,7 +150,10 @@ fn module_owner(certificate: &CertifiedAuthoredDeclaration) -> ExactModuleIdenti
     }
 }
 
-fn tip(lib: &SessionLib, generation: Generation) -> Result<Option<DeclarationTip>, SessionError> {
+pub(super) fn tip(
+    lib: &SessionLib,
+    generation: Generation,
+) -> Result<Option<DeclarationTip>, SessionError> {
     if generation == Generation(0) {
         return Ok(None);
     }
@@ -192,28 +195,17 @@ fn tip(lib: &SessionLib, generation: Generation) -> Result<Option<DeclarationTip
             recovered.evidence.family_closure().to_vec(),
         )
     } else if let Some(authored) = lib.log.certified_authored_at(generation) {
-        let inherited = turn
-            .parent
-            .map(|parent| tip(lib, parent))
-            .transpose()?
-            .flatten();
-        let instances = merge_instances(
-            &lib.root,
-            inherited
-                .as_ref()
-                .map(|tip| tip.instances.clone())
-                .unwrap_or_default(),
-            authored.instances(),
-        )?;
-        let mut families = inherited.map(|tip| tip.families).unwrap_or_default();
-        families.extend_from_slice(authored.family_closure());
-        families.sort();
-        families.dedup();
+        let projection = lib.log.projection_at(generation).ok_or_else(|| {
+            invalid_at(
+                &lib.root,
+                "authored tip lacks its admitted lexical projection",
+            )
+        })?;
         (
             module_owner(authored),
-            authored.lexical_exports().to_vec(),
-            instances,
-            families,
+            projection.receipt().exports().to_vec(),
+            projection.receipt().instances().clone(),
+            projection.receipt().family_closure().to_vec(),
         )
     } else {
         return Err(invalid_at(
@@ -263,7 +255,7 @@ fn paired_version(base: &PublicManifestBase) -> String {
     blake3::hash(&bytes).to_hex().to_string()
 }
 
-fn extend_admitted_surface(
+pub(super) fn extend_admitted_surface(
     authored: &CertifiedAuthoredDeclaration,
     mut prior: AdmittedDeclarationSurface,
 ) -> Result<AdmittedDeclarationSurface, SessionError> {
@@ -273,35 +265,6 @@ fn extend_admitted_surface(
     prior.roots.dedup();
     prior.lexical = addition.lexical;
     Ok(prior)
-}
-
-pub(super) fn authored_context(
-    lib: &SessionLib,
-    parent: Generation,
-    certificate: &CertifiedAuthoredDeclaration,
-) -> Result<(Arc<ExactDeclarationContext>, AdmittedDeclarationSurface), SessionError> {
-    let prior = tip(lib, parent)?;
-    let surface = extend_admitted_surface(
-        certificate,
-        prior
-            .as_ref()
-            .map(|tip| tip.surface.clone())
-            .unwrap_or_default(),
-    )?;
-    let mut lexical = surface.lexical.clone();
-    lexical.push(ExactLexicalNode {
-        owner: module_owner(certificate),
-        imports: surface.roots.clone(),
-    });
-    let certificate = Arc::new(certificate.clone());
-    let context = if let Some(prior) = prior {
-        (*prior.context)
-            .clone()
-            .extend(&[certificate], &[], lexical)?
-    } else {
-        ExactDeclarationContext::new(&[certificate], &[], lexical)?
-    };
-    Ok((Arc::new(context), surface))
 }
 
 pub(super) fn exact_retractions(
@@ -377,7 +340,7 @@ pub(super) fn recovery_instances(
     }
 }
 
-fn merge_instances(
+pub(super) fn merge_instances(
     path: &Path,
     mut selected: InstanceInventory,
     addition: &InstanceInventory,
