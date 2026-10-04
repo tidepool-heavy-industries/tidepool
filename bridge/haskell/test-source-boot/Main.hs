@@ -62,7 +62,7 @@ import GHC.Driver.Session (targetProfile, wopt_set, xopt, WarningFlag(Opt_WarnMi
 import GHC.LanguageExtensions.Type qualified as LangExt
 import GHC.Types.Error (isEmptyMessages)
 import GHC.Types.Name.Set (nameSetElemsStable)
-import GHC.Driver.Hooks (hscCompileCoreExprHook)
+import GHC.Driver.Hooks (hscCompileCoreExprHook, runMetaHook)
 import GHC.Iface.Make (mkIfaceTc)
 import GHC.Iface.Recomp (MaybeValidated(..), checkOldIface)
 import GHC.Iface.Tidy (mkBootModDetailsTc)
@@ -249,6 +249,7 @@ main = getArgs >>= \case
   ["--execution-source-closure-wire", path] -> executionSourceClosureWire path
   ["--exact-retained-quoter"] -> exactRetainedQuoter
   ["--retained-execution-publication"] -> retainedExecutionPublication
+  ["--retained-execution-th-counter"] -> retainedExecutionThCounter
   ["--exact-reexport-quoter"] -> exactReexportQuoter
   ["--exact-execution-hidden-instance"] -> exactExecutionHiddenInstance
   ["--exact-execution-values"] -> exactExecutionValues
@@ -949,10 +950,16 @@ generatedScaffoldRetained manifestPath sealPath = withTiming $ withScratch $ \wo
 -- is retained only as canonical interface/Core custody in the emitted scope.
 captureRetainedCompilerFixture
   :: FilePath -> IO (PreparedPipelineResult, SessionScope, ExactScope)
-captureRetainedCompilerFixture work = do
-  forM_ ["MetadataQuoter.hs", "MetadataQuotedTarget.hs", "MetadataRetainedWitness.hs"
+captureRetainedCompilerFixture work =
+  captureRetainedCompilerFixtureWith "MetadataRetainedWitness.hs" [work] work
+
+captureRetainedCompilerFixtureWith
+  :: FilePath -> [FilePath] -> FilePath -> IO (PreparedPipelineResult, SessionScope, ExactScope)
+captureRetainedCompilerFixtureWith witnessFixture includes work = do
+  forM_ ["MetadataQuoter.hs", "MetadataQuotedTarget.hs"
     , "MetadataCurrentSourceTarget.hs"] $ \name ->
     copyFile ("test-source-boot/fixtures" </> name) (work </> name)
+  copyFile ("test-source-boot/fixtures" </> witnessFixture) (work </> "MetadataRetainedWitness.hs")
   copyFile "test-source-boot/fixtures/MetadataQuoteSupportRetainedCore.hs"
     (work </> "MetadataQuoteSupport.hs")
   let source = work </> "MetadataQuoter.hs"
@@ -961,8 +968,8 @@ captureRetainedCompilerFixture work = do
       helper = ("main", "MetadataQuoteSupport")
       witness = ("main", "MetadataRetainedWitness")
   original <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
-    Nothing source [work] Nothing
-  writeGenuineExecutionScope [snd helper] [snd helper] work source [work] scopePath original
+    Nothing source includes Nothing
+  writeGenuineExecutionScope [snd helper] [snd helper] work source includes scopePath original
   exact <- readExactScope scopePath >>= either fail pure
   let proofs = scopeDurableInterfaces exact
   unless (map originalModule (scopeProducts exact) == [snd helper]
@@ -971,6 +978,49 @@ captureRetainedCompilerFixture work = do
       && maybe False (Map.member witness . canonicalRequirements) (Map.lookup helper proofs)) $
     fail "retained fixture lost its interface/Core-only compiler dependency or acquired its native product"
   pure (original, session, exact)
+
+-- This original uses an existing audited quasiquoter. Its compiler observation
+-- is independent of authored side effects and does not change cache policy.
+retainedExecutionThCounter :: IO ()
+retainedExecutionThCounter = withTiming $ withScratch $ \work -> do
+  library <- canonicalizePath "lib"
+  ((_, session, exact), initialDiagnostics) <- captureDiagnostics $
+    captureRetainedCompilerFixtureWith "MetadataRetainedAuditedWitness.hs" [work,library] work
+  let target = work </> "MetadataQuotedTarget.hs"
+      proofs = scopeDurableInterfaces exact
+      witness = ("main", "MetadataRetainedWitness")
+      retained = Map.keys proofs
+      freshNames = Set.fromList (map mkModuleName ["MetadataQuoter", "MetadataQuotedTarget"])
+      metaCount :: (String, String) -> String -> Int
+      metaCount owner diagnostics = length
+        [() | line <- lines diagnostics, "tidepool-meta-execution " `isPrefixOf` line
+          , let fields = words line
+          , ("owner_sha256=" ++ digest (TE.encodeUtf8 (T.pack (show owner)))) `elem` fields
+          , ("unit=" ++ show (fst owner)) `elem` fields
+          , ("module=" ++ show (snd owner)) `elem` fields
+          , "owner_truncated=False" `elem` fields]
+  unless (metaCount witness initialDiagnostics > 0
+      && all (`Map.member` proofs)
+        [("main", "Tidepool.QQ.Validate"), ("main", "Tidepool.Data.Text")]) $
+    fail "audited retained original omitted its actual splice observation or genuine library closure"
+  removeRetainedCompilerSources work exact
+  withResidentPipelineSelected [work] $ \compile -> do
+    (prepared, diagnostics) <- captureDiagnostics $ compile
+      (PreparedProducts Nothing) Set.empty GeneralCompile (Just session) target [work] Nothing
+    unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult prepared))
+        && counterValues "exact_execution_original_load_owners" diagnostics == [fromIntegral (length retained)]
+        && counterValues "exact_execution_fresh_provider_compiles" diagnostics == [1]
+        && Map.keysSet (pprFinalizedModules prepared) == freshNames
+        && all (\(_,owner) -> Map.notMember (mkModuleName owner) (pprProductInterfaces prepared)) retained
+        && all (\(_,owner) -> ("tidepool-canonical-frontend module=" ++ owner)
+          `notElem` lines diagnostics) retained
+        && all (\owner -> metaCount owner diagnostics == 0) retained
+        && metaCount ("main", "MetadataQuotedTarget") diagnostics > 0
+        && isNothing (runMetaHook (hsc_hooks (prHscEnv (pprPipelineResult prepared))))) $
+      fail "retained audited original replayed TH, lost original42, or skipped the fresh target observation"
+    putStrLn ("retained TH observations: original=" ++ show (metaCount witness initialDiagnostics)
+      ++ " retained=" ++ show (sum [metaCount owner diagnostics | owner <- retained])
+      ++ " fresh_target=" ++ show (metaCount ("main", "MetadataQuotedTarget") diagnostics))
 
 removeRetainedCompilerSources :: FilePath -> ExactScope -> IO ()
 removeRetainedCompilerSources work exact =
