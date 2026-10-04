@@ -52,7 +52,9 @@ async fn assert_deferred_original_owner(source: &str, checkpoint: bool) {
             arguments: ToolArguments::Raw(source.into()),
         })
         .await
-        .unwrap();
+        .unwrap()
+        .into_json()
+        .expect("structured observer receives the typed workbench response");
     assert_eq!(result["status"], "committed", "{result}");
     campaign.assert_no_deployment("deferred child booted before completion", |event| {
         matches!(
@@ -162,7 +164,9 @@ async fn failed_deferred_capture_does_not_release_child_tools() {
             arguments: ToolArguments::Raw(source),
         })
         .await
-        .unwrap();
+        .unwrap()
+        .into_json()
+        .expect("structured observer receives the typed workbench response");
     assert_ne!(result["status"], "committed", "{result}");
     assert!(
         result
@@ -3810,7 +3814,12 @@ async fn explicit_display_expands_siblings_without_compilation_or_repeated_effec
                 response.status,
                 tidepool_runtime::session::WorkbenchRunStatus::RequestCancelled
             );
-            assert_eq!(output, serde_json::to_value(response).unwrap());
+            match output {
+                exomonad_actor::ResidentToolResponse::Workbench(output) => {
+                    assert_eq!(&output, response);
+                }
+                other => panic!("cancelled notebook lost its typed workbench receipt: {other:?}"),
+            }
         }
         other => {
             panic!("original tool transport lost the canonical cancellation receipt: {other:?}")

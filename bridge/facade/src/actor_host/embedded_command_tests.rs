@@ -656,7 +656,9 @@ async fn embedded_host_hands_out_and_executes_the_resident_command_backend() {
         .await
         .expect("resident command settles")
         .expect("resident command task joins")
-        .expect("resident command succeeds");
+        .expect("resident command succeeds")
+        .into_json()
+        .expect("structured observer receives the typed workbench response");
     assert_eq!(result["status"], "committed", "{result}");
     let output = result["items"][0]["output"]
         .as_str()
