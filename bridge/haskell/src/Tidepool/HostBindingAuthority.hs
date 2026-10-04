@@ -10,37 +10,31 @@ module Tidepool.HostBindingAuthority
   , classifyHostBindingAuthority
   ) where
 
-import Control.Exception (IOException, try)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
-import Crypto.Hash.SHA256 qualified as SHA256
 import Data.Map.Strict qualified as Map
 import GHC.Core.DataCon
   ( StrictnessMark(MarkedStrict), dataConName, dataConOrigArgTys, dataConRepStrictness )
 import GHC.Core.TyCo.Rep (Scaled(..), Type(CastTy))
 import GHC.Core.Type (coreView, splitTyConApp_maybe)
 import GHC.Core.TyCon (TyCon, tyConDataCons, tyConName)
-import GHC.Driver.Env (HscEnv, hsc_home_unit)
+import GHC.Driver.Env (HscEnv)
 import GHC.Driver.Env.Types (hsc_unit_env)
 import GHC.Tc.Utils.TcType (tcSplitSigmaTy)
 import GHC.Types.Name (nameModule_maybe, nameOccName)
 import GHC.Types.Name.Occurrence (occNameString)
-import GHC.Types.PkgQual (PkgQual(NoPkgQual, OtherPkg))
+import GHC.Types.PkgQual (PkgQual(OtherPkg))
 import GHC.Unit.Finder (FindResult(..), findImportedModule)
 import GHC.Unit.Module (Module, mkModuleName, moduleName, moduleNameString, moduleUnit)
-import GHC.Unit.Module.Location (ml_hs_file)
 import GHC.Unit.Env (ue_units)
 import GHC.Unit.Info (PackageName(..))
-import GHC.Unit.Home (homeUnitAsUnit)
-import GHC.Unit.Types (unitString)
 import GHC.Unit.State (lookupPackageName)
 import GHC.Data.FastString (fsLit)
 import Language.Haskell.TH.Syntax (addDependentFile, lift, loc_filename, location, runIO)
 import System.FilePath (takeDirectory, (</>))
-import Numeric (showHex)
-import Tidepool.ExactScope (CanonicalInterfaceAdmission, admittedInterfaceSourceSha256)
+import Tidepool.ExactScope (CanonicalInterfaceAdmission, resolveShippedHomeModule)
 import Tidepool.PreparedJson
-  ( JsonAuthority, jsonValueLayoutForType, resolveJsonAuthority )
+  ( JsonAuthority, jsonValueLayoutForType, resolveJsonAuthorityWithCanonicalInterfaces )
 
 data HostBindingAuthority
   = JsonValueAuthority
@@ -71,7 +65,7 @@ resolveHostBindingAuthorities roots env admitted = do
       needsText = any (hasRoot "Data.Text.Internal" "Text") roots
       needsJob = any (hasRoot "Tidepool.Command.Types" "Job") roots
   jsonValueAuthority <- if needsJson
-    then resolveJsonAuthority env
+    then resolveJsonAuthorityWithCanonicalInterfaces env admitted
     else pure Nothing
   textModule <- if needsText || needsJob then resolveTextModule env else pure Nothing
   commandJobModule <- if needsJob then resolveCommandJobModule env admitted else pure Nothing
@@ -89,27 +83,8 @@ resolveTextModule env = case lookupPackageName
 
 resolveCommandJobModule :: HscEnv
   -> Map.Map (String,String) CanonicalInterfaceAdmission -> IO (Maybe Module)
-resolveCommandJobModule env admitted = do
-  found <- findImportedModule env (mkModuleName "Tidepool.Command.Types") NoPkgQual
-  case found of
-    Found moduleLocation owner
-      | moduleUnit owner == homeUnitAsUnit (hsc_home_unit env) ->
-        case ml_hs_file moduleLocation of
-          Just source -> do
-            actual <- try (BS.readFile source) :: IO (Either IOException ByteString)
-            pure $ case actual of
-              Right bytes | bytes == shippedCommandTypesSource -> Just owner
-              _ -> Nothing
-          Nothing -> pure $ case Map.lookup
-              (unitString (moduleUnit owner), moduleNameString (moduleName owner)) admitted of
-            Just proof | admittedInterfaceSourceSha256 proof == shippedCommandTypesSha256 -> Just owner
-            _ -> Nothing
-    _ -> pure Nothing
-
-shippedCommandTypesSha256 :: String
-shippedCommandTypesSha256 = concatMap hexByte (BS.unpack (SHA256.hash shippedCommandTypesSource))
-  where
-    hexByte byte = let rendered = showHex byte "" in replicate (2 - length rendered) '0' ++ rendered
+resolveCommandJobModule env admitted =
+  resolveShippedHomeModule env admitted "Tidepool.Command.Types" shippedCommandTypesSource
 
 -- | Classify only the exact outer TyCon. This neither reads a rendered type
 -- nor descends into arguments, so @Job Text@ cannot borrow Text authority.

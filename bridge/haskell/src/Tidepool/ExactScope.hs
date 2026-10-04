@@ -6,7 +6,7 @@ module Tidepool.ExactScope
   , PlannedCellAdmission(..), PlannedCellSlot(..)
   , ExactInterfaceEvidence(..), CanonicalInterfaceProof, CanonicalCoreArtifact
   , CanonicalInterfaceAdmission(..), scopeCanonicalInterfaces, scopeDurableInterfaces
-  , admittedInterfaceHomeUnits, admittedInterfaceSourceSha256
+  , admittedInterfaceHomeUnits, admittedInterfaceSourceSha256, resolveShippedHomeModule
   , admittedInterfaceRequirements, admittedInterfaceCore
   , validateCanonicalInterfaceProof, validateCandidateCanonicalInterfaceProof
   , canonicalCertificatePath, canonicalCertificateSha256, canonicalCoreArtifact
@@ -34,7 +34,13 @@ import Data.Maybe (isJust)
 import qualified Data.Text as T
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
-import GHC.Driver.Env (HscEnv)
+import GHC.Driver.Env (HscEnv, hsc_home_unit)
+import GHC.Types.PkgQual (PkgQual(NoPkgQual))
+import GHC.Unit.Finder (FindResult(..), findImportedModule)
+import GHC.Unit.Home (homeUnitAsUnit)
+import GHC.Unit.Module (Module, mkModuleName, moduleName, moduleNameString, moduleUnit)
+import GHC.Unit.Module.Location (ml_hs_file)
+import GHC.Unit.Types (unitString)
 import Data.Word (Word64)
 import Numeric (showHex)
 import System.Directory (createDirectory, createDirectoryIfMissing, makeAbsolute, doesFileExist)
@@ -153,6 +159,28 @@ admittedInterfaceHomeUnits (LocalInterfaceAdmission proof) = localFinalizedHomeU
 admittedInterfaceSourceSha256 :: CanonicalInterfaceAdmission -> String
 admittedInterfaceSourceSha256 (DurableInterfaceAdmission proof) = canonicalSourceSha256 proof
 admittedInterfaceSourceSha256 (LocalInterfaceAdmission proof) = localFinalizedSourceSha256 proof
+
+-- | Authenticate one selected home owner against shipped source. A virtual
+-- finder location uses only the exact request's verified canonical proof.
+resolveShippedHomeModule :: HscEnv
+  -> Map.Map (String,String) CanonicalInterfaceAdmission
+  -> String -> BS.ByteString -> IO (Maybe Module)
+resolveShippedHomeModule env admitted name expected = do
+  found <- findImportedModule env (mkModuleName name) NoPkgQual
+  case found of
+    Found location owner
+      | moduleUnit owner == homeUnitAsUnit (hsc_home_unit env) ->
+        case ml_hs_file location of
+          Just source -> do
+            actual <- try (BS.readFile source) :: IO (Either IOException BS.ByteString)
+            pure $ case actual of
+              Right bytes | bytes == expected -> Just owner
+              _ -> Nothing
+          Nothing -> pure $ case Map.lookup
+              (unitString (moduleUnit owner), moduleNameString (moduleName owner)) admitted of
+            Just proof | admittedInterfaceSourceSha256 proof == digest expected -> Just owner
+            _ -> Nothing
+    _ -> pure Nothing
 
 admittedInterfaceRequirements :: CanonicalInterfaceAdmission -> Map.Map (String,String) String
 admittedInterfaceRequirements (DurableInterfaceAdmission proof) = canonicalRequirements proof

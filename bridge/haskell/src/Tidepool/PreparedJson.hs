@@ -2,13 +2,14 @@
 
 module Tidepool.PreparedJson
   ( JsonAuthority, JsonSpec(..), JsonError(..)
-  , classifyJson, resolveJsonAuthority, jsonAuthorityLayout, jsonValueLayoutForType
+  , classifyJson, resolveJsonAuthority, resolveJsonAuthorityWithCanonicalInterfaces
+  , jsonAuthorityLayout, jsonValueLayoutForType
   ) where
 
-import Control.Exception (IOException, try)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.List (find)
+import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as Text
 import GHC.Core.DataCon (DataCon, dataConName, dataConOrigArgTys)
@@ -16,19 +17,17 @@ import GHC.Core.TyCo.Rep (Scaled(..), Type)
 import GHC.Core.TyCon (tyConDataCons)
 import GHC.Core.Type (splitFunTys, splitTyConApp_maybe)
 import GHC.Core.TyCon qualified
-import GHC.Driver.Env (HscEnv, hsc_HPT, hsc_home_unit)
+import GHC.Driver.Env (HscEnv, hsc_HPT)
 import GHC.Driver.Env.Types (hsc_unit_env)
 import GHC.Types.Id (Id, idType, isDeadEndId)
 import GHC.Types.Name (isExternalName, nameModule_maybe, nameOccName)
 import GHC.Types.Name.Occurrence (occNameString)
-import GHC.Types.PkgQual (PkgQual(NoPkgQual, OtherPkg))
+import GHC.Types.PkgQual (PkgQual(OtherPkg))
 import GHC.Types.Var (varName)
 import GHC.Unit.Finder (FindResult(..), findImportedModule)
 import GHC.Unit.Module (Module, mkModuleName, moduleName, moduleNameString, moduleUnit)
-import GHC.Unit.Module.Location (ml_hs_file)
 import GHC.Unit.Env (ue_units)
 import GHC.Unit.Info (PackageName(..))
-import GHC.Unit.Home (homeUnitAsUnit)
 import GHC.Unit.Home.ModInfo (HomeModInfo(..), lookupHpt)
 import GHC.Unit.Module.ModDetails (md_types)
 import GHC.Unit.State (lookupPackageName)
@@ -37,6 +36,7 @@ import GHC.Types.TypeEnv (typeEnvTyCons)
 import GHC.Data.FastString (fsLit)
 import GHC.Utils.Outputable (ppr, showSDocUnsafe)
 import Tidepool.ExecutionSchema (JsonLayout(..))
+import Tidepool.ExactScope (CanonicalInterfaceAdmission, resolveShippedHomeModule)
 import Language.Haskell.TH.Syntax (addDependentFile, lift, loc_filename, location, runIO)
 import System.FilePath (takeDirectory, (</>))
 
@@ -62,12 +62,16 @@ jsonAuthorityLayout :: JsonAuthority -> JsonLayout DataCon
 jsonAuthorityLayout (JsonAuthority _ _ _ layout) = layout
 
 resolveJsonAuthority :: HscEnv -> IO (Maybe JsonAuthority)
+resolveJsonAuthority env = resolveJsonAuthorityWithCanonicalInterfaces env Map.empty
+
 -- Source authentication covers the numeric interpretation as well as the
 -- outer Value carrier. Package dependencies must come from the selected
 -- installed owners; a same-shaped home shadow does not grant intrinsic authority.
-resolveJsonAuthority env = do
-  valueOwner <- shippedHome "Tidepool.Aeson.Value" shippedValueSource
-  scientificOwner <- shippedHome "Tidepool.Aeson.Scientific" shippedScientificSource
+resolveJsonAuthorityWithCanonicalInterfaces :: HscEnv
+  -> Map.Map (String,String) CanonicalInterfaceAdmission -> IO (Maybe JsonAuthority)
+resolveJsonAuthorityWithCanonicalInterfaces env admitted = do
+  valueOwner <- resolveShippedHomeModule env admitted "Tidepool.Aeson.Value" shippedValueSource
+  scientificOwner <- resolveShippedHomeModule env admitted "Tidepool.Aeson.Scientific" shippedScientificSource
   textOwner <- installed "text" "Data.Text.Internal"
   mapOwner <- installed "containers" "Data.Map.Internal"
   primitiveOwner <- installed "ghc-prim" "GHC.Types"
@@ -87,17 +91,6 @@ resolveJsonAuthority env = do
     layout <- jsonValueLayoutForTyCon scientific text map_ primitive integer tyCon
     Just (JsonAuthority owner (moduleUnit text) either_ layout)
  where
-  shippedHome name expected = do
-    found <- findImportedModule env (mkModuleName name) NoPkgQual
-    case found of
-      Found moduleLocation owner
-        | moduleUnit owner == homeUnitAsUnit (hsc_home_unit env)
-        , Just source <- ml_hs_file moduleLocation -> do
-            actual <- try (BS.readFile source) :: IO (Either IOException ByteString)
-            pure $ case actual of
-              Right bytes | bytes == expected -> Just owner
-              _ -> Nothing
-      _ -> pure Nothing
   installed package name = case lookupPackageName
       (ue_units (hsc_unit_env env)) (PackageName (fsLit package)) of
     Nothing -> pure Nothing
