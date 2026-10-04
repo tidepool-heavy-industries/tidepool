@@ -411,7 +411,9 @@ fn merge_instances(
 impl FinalExecutionIntent {
     /// Names observed from the exact native identities selected for publication.
     pub fn native_binding_names(&self) -> Vec<String> {
-        self.private.bindings.iter()
+        self.private
+            .bindings
+            .iter()
             .filter(|(_, id)| self.write_ids.contains(id))
             .map(|(name, _)| name.clone())
             .collect()

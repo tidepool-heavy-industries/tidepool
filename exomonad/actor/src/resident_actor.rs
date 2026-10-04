@@ -3033,7 +3033,7 @@ enum OwnedWorkbenchWait {
             'static,
             (
                 Result<String, tidepool_bridge_effects::CommandError>,
-                Option<String>,
+                Option<crate::resident_workbench::RetainedHostBinding>,
             ),
         >,
     },
@@ -9993,6 +9993,7 @@ where
                     match workbench
                         .bind_tool_result(context.clone(), handle.clone(), output.clone())
                         .await
+                        .and_then(|binding| binding.accept().map(|_| ()))
                     {
                         Ok(()) => {
                             let detail = crate::after_tool::compact_reason(&text);

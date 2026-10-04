@@ -12,7 +12,7 @@ pub(super) struct CommandPresentationRequest {
 pub(super) struct PreparedCommandPresentation {
     job: String,
     presentation: CommandPresentation,
-    binding: Option<String>,
+    binding: Option<crate::resident_workbench::RetainedHostBinding>,
     displayed_pages: Option<Vec<(CommandStream, CommandPage)>>,
 }
 
@@ -28,6 +28,7 @@ impl PreparedCommandPresentation {
         recovered_bindings: &mut Vec<String>,
     ) -> Result<(), ResidentActorWorkbenchError> {
         if let Some(binding) = self.binding {
+            let binding = binding.accept()?;
             recovered_bindings.push(binding.clone());
             fragment.retain_job_binding(binding);
         }
@@ -141,6 +142,7 @@ where
             let retained = workbench
                 .bind_command_job(context.clone(), job.clone())
                 .await?;
+            let name = retained.name();
             if oversized {
                 shortened |= text.len() > (8 * 1024).min(limit).saturating_sub(512);
                 *text = crate::workbench_display::bounded_output(
@@ -148,10 +150,10 @@ where
                     (8 * 1024).min(limit).saturating_sub(512),
                 );
                 *text = format!(
-                    "retained as {retained} :: Cmd.Job\nnext: read_output session_id={job}, stream=Stdout (or Stderr), offset=0. Do not rerun.\n{text}"
+                    "retained as {name} :: Cmd.Job\nnext: read_output session_id={job}, stream=Stdout (or Stderr), offset=0. Do not rerun.\n{text}"
                 );
             } else {
-                *text = format!("retained as {retained} :: Cmd.Job\n{text}");
+                *text = format!("retained as {name} :: Cmd.Job\n{text}");
             }
             binding = Some(retained);
         }
@@ -174,7 +176,10 @@ pub(super) async fn retain_job_binding<H, O>(
     workbench: &crate::ResidentActorWorkbench<H, O>,
     job: String,
     permitted: bool,
-) -> (Result<String, CommandError>, Option<String>)
+) -> (
+    Result<String, CommandError>,
+    Option<crate::resident_workbench::RetainedHostBinding>,
+)
 where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
@@ -194,8 +199,10 @@ where
             .await
             .map_err(|error| CommandError::CommandUnavailable(error.to_string())),
     };
-    let binding = result.as_ref().ok().cloned();
-    (result, binding)
+    match result {
+        Ok(binding) => (Ok(binding.name().to_owned()), Some(binding)),
+        Err(error) => (Err(error), None),
+    }
 }
 
 #[cfg(test)]

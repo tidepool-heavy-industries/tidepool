@@ -121,6 +121,16 @@ pub struct PendingHostValueWrite {
     write: CertifiedPrivateValueWrite,
 }
 
+impl std::fmt::Debug for PendingHostValueWrite {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PendingHostValueWrite")
+            .field("scope", &self.scope)
+            .field("id", &self.id)
+            .finish_non_exhaustive()
+    }
+}
+
 impl PendingHostValueWrite {
     pub(super) fn mounted(
         session: &PersistentSession,
@@ -132,7 +142,8 @@ impl PendingHostValueWrite {
         let entry = session
             .resolve_in(scope, &binder.name)
             .filter(|entry| {
-                entry.id == id && entry.scope == scope
+                entry.id == id
+                    && entry.scope == scope
                     && entry.module.gen.0 == execution.generation()
             })
             .ok_or(SessionError::StaleStagedDeclaration)?;

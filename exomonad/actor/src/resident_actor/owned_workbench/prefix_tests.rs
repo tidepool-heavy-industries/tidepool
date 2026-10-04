@@ -42,28 +42,30 @@ fn prefix_publication_preserves_failed_cell_eligibility_and_cancellation_veto() 
     )));
     let failed = Err(failure(vec![receipt(WorkbenchItemStatus::Committed)]));
     assert_eq!(
-        private_publication_intent(&rejected),
+        private_publication_intent(&rejected, false),
         Some(ExecutionPublicationIntent::CommittedNativePrefix)
     );
     assert_eq!(
-        private_publication_intent(&failed),
+        private_publication_intent(&failed, false),
         Some(ExecutionPublicationIntent::CommittedNativePrefix)
     );
-    assert!(
-        private_publication_intent(&Ok(KernelStep::Continue(response(
+    assert!(private_publication_intent(
+        &Ok(KernelStep::Continue(response(
             WorkbenchRunStatus::Rejected,
             vec![receipt(WorkbenchItemStatus::NotRun)]
-        ))))
-        .is_none()
-    );
-    assert!(private_publication_intent(&Err(failure(Vec::new()))).is_none());
-    assert!(
-        private_publication_intent(&Ok(KernelStep::Continue(response(
+        ))),
+        false
+    )
+    .is_none());
+    assert!(private_publication_intent(&Err(failure(Vec::new())), false).is_none());
+    assert!(private_publication_intent(
+        &Ok(KernelStep::Continue(response(
             WorkbenchRunStatus::RequestCancelled,
             vec![receipt(WorkbenchItemStatus::Committed)]
-        ))))
-        .is_none()
-    );
+        ))),
+        false
+    )
+    .is_none());
 
     let mut declaration = receipt(WorkbenchItemStatus::Committed);
     declaration.kind = Some(WorkbenchCellItemKind::Declaration);
@@ -89,22 +91,25 @@ fn prefix_publication_preserves_failed_cell_eligibility_and_cancellation_veto() 
         source_items: Vec::new(),
     }];
     annotate_workbench_receipts(&mut raw_failure.receipts, Some(&checked));
-    assert!(private_publication_intent(&Err(raw_failure)).is_none());
+    assert!(private_publication_intent(&Err(raw_failure), false).is_none());
     let declarations_only = Err(failure(vec![declaration.clone()]));
-    assert!(private_publication_intent(&declarations_only).is_none());
+    assert!(private_publication_intent(&declarations_only, false).is_none());
     let mixed = Err(failure(vec![
         declaration,
         receipt(WorkbenchItemStatus::Committed),
     ]));
     assert_eq!(
-        private_publication_bindings(&mixed),
+        private_publication_bindings(&mixed, &["completedPrefix".into()]),
         vec!["completedPrefix"]
     );
     assert_eq!(
-        private_publication_intent(&Ok(KernelStep::Continue(response(
-            WorkbenchRunStatus::Committed,
-            vec![]
-        )))),
+        private_publication_intent(
+            &Ok(KernelStep::Continue(response(
+                WorkbenchRunStatus::Committed,
+                vec![]
+            ))),
+            false
+        ),
         Some(ExecutionPublicationIntent::CompletedCell)
     );
 
@@ -194,4 +199,35 @@ fn prefix_publication_failure_retains_original_run_diagnostic_and_secondary_caus
         })
     );
     assert_eq!(failed.total, 3);
+}
+
+#[test]
+fn accepted_effect_write_authorizes_native_prefix_but_receipt_names_do_not() {
+    let failed = Err(WorkbenchExecutionFailure {
+        receipts: vec![receipt(WorkbenchItemStatus::Stopped)],
+        point: WorkbenchFailurePoint::InputUnit { index: 0 },
+        publication: None,
+        total: 1,
+        source: ResidentActorWorkbenchError::ActorProtocol(
+            "same item failed after retention".into(),
+        ),
+    });
+    assert_eq!(private_publication_intent(&failed, false), None);
+    assert_eq!(
+        private_publication_intent(&failed, true),
+        Some(ExecutionPublicationIntent::CommittedNativePrefix)
+    );
+    assert_eq!(
+        private_publication_bindings(&failed, &["exactPublishedBinding".into()]),
+        vec!["exactPublishedBinding"]
+    );
+    let cancelled = Ok(KernelStep::Continue(WorkbenchResponse {
+        status: WorkbenchRunStatus::RequestCancelled,
+        publication: None,
+        summary: None,
+        items: vec![receipt(WorkbenchItemStatus::Stopped)],
+        next_index: 1,
+        total: 1,
+    }));
+    assert_eq!(private_publication_intent(&cancelled, true), None);
 }

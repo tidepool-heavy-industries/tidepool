@@ -865,6 +865,8 @@ struct HostInputRetirement {
     input: MountedHostInput,
     _lease: tidepool_runtime::session::resident::BindingLease,
     background_retire: Box<dyn FnOnce() + Send>,
+    write: Option<tidepool_runtime::session::PendingHostValueWrite>,
+    private: Option<Arc<tidepool_runtime::session::PrivateExecutionAdmission>>,
 }
 
 impl HostInputRetirement {
@@ -873,6 +875,8 @@ impl HostInputRetirement {
         context: crate::ActorSessionContext,
         input: MountedHostInput,
         lease: tidepool_runtime::session::resident::BindingLease,
+        write: tidepool_runtime::session::PendingHostValueWrite,
+        private: Option<Arc<tidepool_runtime::session::PrivateExecutionAdmission>>,
     ) -> Self
     where
         H: DispatchEffect<O> + Send + 'static,
@@ -907,15 +911,45 @@ impl HostInputRetirement {
             input,
             _lease: lease,
             background_retire,
+            write: Some(write),
+            private,
         }
     }
 
-    fn keep_binding(mut self) {
+    fn keep_binding(mut self) -> Result<(), ResidentActorWorkbenchError> {
+        if let Some(private) = &self.private {
+            self.write
+                .take()
+                .expect("original host mount write")
+                .accept(private)
+                .map_err(|error| ResidentActorWorkbenchError::Resident(error.into()))?;
+        }
         self.background_retire = Box::new(|| {});
+        Ok(())
     }
 
     fn mounted_input(&self) -> &MountedHostInput {
         &self.input
+    }
+}
+
+/// A named host result whose mount remains guarded until its owned effect step
+/// accepts it. The name is presentation; the guard carries exact runtime proof.
+pub(crate) struct RetainedHostBinding {
+    name: String,
+    mounted: Option<HostInputRetirement>,
+}
+
+impl RetainedHostBinding {
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub(crate) fn accept(self) -> Result<String, ResidentActorWorkbenchError> {
+        if let Some(mounted) = self.mounted {
+            mounted.keep_binding()?;
+        }
+        Ok(self.name)
     }
 }
 
@@ -4110,7 +4144,7 @@ where
         context: crate::ActorSessionContext,
         binding: String,
         result: String,
-    ) -> Result<(), ResidentActorWorkbenchError> {
+    ) -> Result<RetainedHostBinding, ResidentActorWorkbenchError> {
         let (reservation, binder, compiled, dependencies) = self
             .prepare_host_input(context.clone(), HostCarrierKind::Text, Some(binding))
             .await?;
@@ -4124,9 +4158,12 @@ where
                 false,
             )
             .await?;
-        mounted.keep_binding();
+        let name = mounted.mounted_input().name.clone();
         drop(dependencies);
-        Ok(())
+        Ok(RetainedHostBinding {
+            name,
+            mounted: Some(mounted),
+        })
     }
 
     /// Compile the input interface and preview together, commit the input,
@@ -4333,10 +4370,14 @@ where
     ) -> Result<HostInputRetirement, ResidentActorWorkbenchError> {
         let mount_access = self.access.sharing();
         let guard_context = context.clone();
+        let private = self
+            .private_execution
+            .as_ref()
+            .map(|scope| scope.admission.clone());
         self.access
             .with_machine(context.clone(), move |session, context, _| {
                 let session_root = reservation.snapshot().view().session_root().to_path_buf();
-                session
+                let write = session
                     .mount_checked_host_input(
                         reservation,
                         &binder,
@@ -4371,6 +4412,8 @@ where
                     guard_context,
                     mounted,
                     lease,
+                    write,
+                    private,
                 ))
             })
             .await
@@ -5054,16 +5097,28 @@ where
         &self,
         context: crate::ActorSessionContext,
         job: String,
-    ) -> Result<String, ResidentActorWorkbenchError> {
+    ) -> Result<RetainedHostBinding, ResidentActorWorkbenchError> {
         let original_job = job.clone();
+        let private = self
+            .private_execution
+            .as_ref()
+            .map(|scope| scope.admission.clone());
         let existing = self
             .access
             .with_machine(context.clone(), move |session, context, _| {
-                Ok(session.host_text_binding_in(context.placement.lexical_scope, &original_job))
+                Ok(match private {
+                    Some(private) => session.accepted_host_text_binding_in(&private, &original_job),
+                    None => {
+                        session.host_text_binding_in(context.placement.lexical_scope, &original_job)
+                    }
+                })
             })
             .await?;
         if let Some(binding) = existing {
-            return Ok(binding);
+            return Ok(RetainedHostBinding {
+                name: binding,
+                mounted: None,
+            });
         }
         let (reservation, binder, compiled, dependencies) = self
             .prepare_host_input(context.clone(), HostCarrierKind::Job, None)
@@ -5081,9 +5136,11 @@ where
             .await
             .map_err(|error| command_job_carrier_failure(&job, error))?;
         let binding = mounted.mounted_input().name.clone();
-        mounted.keep_binding();
         drop(dependencies);
-        Ok(binding)
+        Ok(RetainedHostBinding {
+            name: binding,
+            mounted: Some(mounted),
+        })
     }
 
     /// Compile-and-run one scope-free Bind/Expr fragment — the tool
@@ -11554,17 +11611,23 @@ mod request_tests {
         let first = workbench
             .bind_command_job(context.clone(), "job one".into())
             .await
-            .expect("first checked Job binding");
+            .expect("first checked Job binding")
+            .accept()
+            .unwrap();
         let second = workbench
             .bind_command_job(context.clone(), "job two".into())
             .await
-            .expect("second checked Job binding");
+            .expect("second checked Job binding")
+            .accept()
+            .unwrap();
         assert_ne!(first, second);
         let before_repeat = tidepool_extract_cmd::extract_spawn_count();
         let repeated = workbench
             .bind_command_job(context.clone(), "job one".into())
             .await
-            .expect("same job retains its original binder");
+            .expect("same job retains its original binder")
+            .accept()
+            .unwrap();
         assert_eq!(repeated, first);
         assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before_repeat);
         workbench
@@ -11596,11 +11659,15 @@ mod request_tests {
         workbench
             .bind_tool_result(context.clone(), "tool_one".into(), "output one".into())
             .await
-            .expect("first checked Text binding");
+            .expect("first checked Text binding")
+            .accept()
+            .unwrap();
         workbench
             .bind_tool_result(context.clone(), "tool_two".into(), "output two".into())
             .await
-            .expect("second checked Text binding");
+            .expect("second checked Text binding")
+            .accept()
+            .unwrap();
         workbench
             .access
             .with_machine(context, |session, context, _| {
@@ -11619,6 +11686,200 @@ mod request_tests {
             })
             .await
             .expect("original Text bindings remain protected compilation inputs");
+    }
+
+    #[tokio::test]
+    async fn failed_private_prefix_selects_completed_native_and_accepted_host_writes_only() {
+        let (machines, public, source, _root) = actor_registry_fixture();
+        let (workbench, private) = ResidentActorWorkbench::new(machines, source, None, None)
+            .admit_private_cell_for_test(public.clone())
+            .await
+            .unwrap();
+        workbench
+            .execute_cell_for_test(
+                private.clone(),
+                "data PrivateOnly = PrivateOnly\ncompletedNative <- pure (41 :: Int)",
+            )
+            .await
+            .unwrap();
+        let accepted = workbench
+            .bind_command_job(private.clone(), "accepted job".into())
+            .await
+            .unwrap()
+            .accept()
+            .unwrap();
+        let repeated = workbench
+            .bind_command_job(private.clone(), "accepted job".into())
+            .await
+            .unwrap()
+            .accept()
+            .unwrap();
+        assert_eq!(accepted, repeated, "same accepted write is reused");
+        let unaccepted = workbench
+            .bind_command_job(private.clone(), "unaccepted job".into())
+            .await
+            .unwrap();
+        let unaccepted_name = unaccepted.name().to_owned();
+        let original = workbench
+            .access
+            .with_machine(private.clone(), {
+                let accepted = accepted.clone();
+                move |session, context, _| {
+                    let scope = context.placement.lexical_scope;
+                    Ok((
+                        session.current_binding_in(scope, &accepted).unwrap().0,
+                        session
+                            .current_binding_in(scope, "completedNative")
+                            .unwrap()
+                            .0,
+                    ))
+                }
+            })
+            .await
+            .unwrap();
+        let execution = workbench.private_execution.as_ref().unwrap().clone();
+        let selected = workbench_runner_for_test(&workbench)
+            .publish_private_execution(
+                private.clone(),
+                execution,
+                tidepool_runtime::session::ExecutionPublicationIntent::CommittedNativePrefix,
+            )
+            .await
+            .unwrap();
+        let PrivateExecutionPublication::Manifest {
+            commit,
+            native_bindings,
+        } = selected
+        else {
+            panic!("completed exact native prefix must publish");
+        };
+        assert_eq!(
+            commit,
+            tidepool_runtime::session::PublicManifestCommit::Ephemeral
+        );
+        assert_eq!(native_bindings.len(), 2, "{native_bindings:?}");
+        assert!(native_bindings.contains(&accepted));
+        assert!(native_bindings.contains(&"completedNative".to_owned()));
+        assert!(!native_bindings.contains(&unaccepted_name));
+        workbench
+            .access
+            .with_machine(public, move |session, context, _| {
+                let scope = context.placement.lexical_scope;
+                assert_eq!(
+                    session.current_binding_in(scope, &accepted).unwrap().0,
+                    original.0
+                );
+                assert_eq!(
+                    session
+                        .current_binding_in(scope, "completedNative")
+                        .unwrap()
+                        .0,
+                    original.1
+                );
+                assert!(session
+                    .current_binding_in(scope, &unaccepted_name)
+                    .is_none());
+                assert!(!session
+                    .current_decl_heads_in(scope)
+                    .iter()
+                    .any(|(name, _)| name == "PrivateOnly"));
+                Ok(())
+            })
+            .await
+            .unwrap();
+        drop(unaccepted);
+    }
+
+    #[tokio::test]
+    async fn cancelled_unaccepted_host_write_cannot_publish_or_transfer_to_another_execution() {
+        let (machines, public, source, _root) = actor_registry_fixture();
+        let (workbench, private) = ResidentActorWorkbench::new(machines, source, None, None)
+            .admit_private_cell_for_test(public.clone())
+            .await
+            .unwrap();
+        let execution = workbench.private_execution.as_ref().unwrap().clone();
+        let before = workbench
+            .access
+            .with_machine(public.clone(), |session, context, _| {
+                Ok(session
+                    .public_visibility_snapshot_in(context.placement.lexical_scope)
+                    .unwrap())
+            })
+            .await
+            .unwrap();
+        let mut pending = workbench
+            .bind_command_job(private.clone(), "cancelled job".into())
+            .await
+            .unwrap();
+        let name = pending.name().to_owned();
+        let wrong = workbench
+            .access
+            .with_machine(public.clone(), |session, context, _| {
+                session
+                    .begin_private_execution(context.placement.lexical_scope)
+                    .map_err(|error| ResidentActorWorkbenchError::Resident(error.into()))
+            })
+            .await
+            .unwrap();
+        let proof = pending.mounted.as_mut().unwrap().write.take().unwrap();
+        assert!(
+            proof.accept(&wrong).is_err(),
+            "a mount cannot transfer to a different private owner"
+        );
+        assert!(!wrong.has_completed_native_writes());
+        assert!(!execution.admission.has_completed_native_writes());
+        execution.decision.request_cancellation();
+        drop(pending);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let name = name.clone();
+                if workbench
+                    .access
+                    .with_machine(private.clone(), move |session, context, _| {
+                        Ok(session
+                            .current_binding_in(context.placement.lexical_scope, &name)
+                            .is_none())
+                    })
+                    .await
+                    .unwrap()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("unaccepted mount guard retires its exact binding");
+        let outcome = workbench_runner_for_test(&workbench)
+            .publish_private_execution(
+                private,
+                execution,
+                tidepool_runtime::session::ExecutionPublicationIntent::CommittedNativePrefix,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            PrivateExecutionPublication::Manifest {
+                commit: tidepool_runtime::session::PublicManifestCommit::Cancelled,
+                ..
+            }
+        ));
+        workbench
+            .access
+            .with_machine(public, move |session, context, _| {
+                assert_eq!(
+                    session.public_visibility_snapshot_in(context.placement.lexical_scope),
+                    Some(before)
+                );
+                assert!(session
+                    .current_binding_in(context.placement.lexical_scope, &name)
+                    .is_none());
+                session.retire_scope(wrong.private_scope());
+                Ok(())
+            })
+            .await
+            .unwrap();
     }
 
     /// For an ordinary workbench fragment (`begin_fragment`/`begin_ready_block`),
@@ -12325,7 +12586,8 @@ mod request_tests {
             assert!(matches!(
                 published,
                 PrivateExecutionPublication::Manifest {
-                    commit: tidepool_runtime::session::PublicManifestCommit::Ephemeral, ..
+                    commit: tidepool_runtime::session::PublicManifestCommit::Ephemeral,
+                    ..
                 }
             ));
             let public_scope = execution.public_scope;

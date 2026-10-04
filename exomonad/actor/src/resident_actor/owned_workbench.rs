@@ -1266,21 +1266,37 @@ where
                     let binding = match &answer {
                         WorkbenchAfterToolAnswer::Settled(Ok(
                             crate::after_tool::Annotation::Pruned { .. },
-                        )) => {
-                            workbench
-                                .bind_tool_result(
-                                    context,
-                                    frame.handle().to_owned(),
-                                    frame.output().to_owned(),
-                                )
-                                .await
-                        }
-                        _ => Ok(()),
+                        )) => workbench
+                            .bind_tool_result(
+                                context,
+                                frame.handle().to_owned(),
+                                frame.output().to_owned(),
+                            )
+                            .await
+                            .map(Some),
+                        _ => Ok(None),
                     };
                     (answer, binding)
                 })
             },
             |behavior, _kernel, mut owned, (answer, binding)| {
+                let binding = binding.and_then(|binding| {
+                    if let Some(binding) = binding {
+                        if owned
+                            .state
+                            .effects
+                            .control
+                            .as_ref()
+                            .is_some_and(|control| control.cancellation_requested())
+                        {
+                            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                                "tool-result retention cancelled before acceptance".into(),
+                            ));
+                        }
+                        binding.accept()?;
+                    }
+                    Ok(())
+                });
                 let mut slot = owned
                     .state
                     .cursor
@@ -1824,6 +1840,11 @@ where
                     timing.sync_scope(|| {
                         cleanup.sync_scope(|| {
                             let result = prepared.and_then(|prepared| {
+                                if control.cancellation_requested() {
+                                    return Err(ResidentActorWorkbenchError::ActorProtocol(
+                                        "command presentation cancelled before acceptance".into(),
+                                    ));
+                                }
                                 let cursor = &mut owned.state.cursor;
                                 let fragment = cursor
                                     .running
@@ -1967,7 +1988,27 @@ where
                     boundary,
                 ))
             },
-            move |behavior, _kernel, mut owned, result| {
+            move |behavior, _kernel, mut owned, mut result| {
+                let retained_binding = match result.retained_job_binding.take() {
+                    Some(binding)
+                        if !owned
+                            .state
+                            .effects
+                            .control
+                            .as_ref()
+                            .is_some_and(|control| control.cancellation_requested()) =>
+                    {
+                        match binding.accept() {
+                            Ok(name) => Some(name),
+                            Err(error) => {
+                                result.disposition = WorkbenchOperationDisposition::Unknown;
+                                result.outcome = Err(error);
+                                None
+                            }
+                        }
+                    }
+                    _ => None,
+                };
                 owned
                     .state
                     .cursor
@@ -1997,7 +2038,7 @@ where
                         .expect("captured command owns its fragment")
                         .record_started_job(job);
                 }
-                if let Some(binding) = result.retained_job_binding {
+                if let Some(binding) = retained_binding {
                     owned
                         .state
                         .cursor
@@ -2073,13 +2114,9 @@ where
         );
         // Native prefixes survive failure; declarations require whole-cell success.
         // Cancellation retains the original publication decision's veto.
-        if let Some(publication) = owned
-            .private
-            .as_ref()
-            .and_then(|private| private_publication_intent(
-                &result, private.admission.has_completed_native_writes(),
-            ))
-        {
+        if let Some(publication) = owned.private.as_ref().and_then(|private| {
+            private_publication_intent(&result, private.admission.has_completed_native_writes())
+        }) {
             return Ok(WorkbenchAdvance::Park(Self::publish_owned_execution_task(
                 owned,
                 behavior.environment.clone(),
@@ -2331,13 +2368,12 @@ fn private_publication_intent(
     completed_native_writes: bool,
 ) -> Option<ExecutionPublicationIntent> {
     let completed_prefix = |receipts: &[WorkbenchItemReceipt]| {
-        (completed_native_writes || receipts
-            .iter()
-            .any(|receipt| {
+        (completed_native_writes
+            || receipts.iter().any(|receipt| {
                 receipt.status == WorkbenchItemStatus::Committed
                     && receipt.kind != Some(WorkbenchCellItemKind::Declaration)
             }))
-            .then_some(ExecutionPublicationIntent::CommittedNativePrefix)
+        .then_some(ExecutionPublicationIntent::CommittedNativePrefix)
     };
     let response = match result {
         Ok(KernelStep::Continue(response) | KernelStep::ContinueLater(response))
@@ -2370,10 +2406,6 @@ fn private_publication_bindings(
     }
     receipts
         .iter()
-        .filter(|receipt| {
-            publication != Some(ExecutionPublicationIntent::CommittedNativePrefix)
-                || receipt.kind != Some(WorkbenchCellItemKind::Declaration)
-        })
         .flat_map(|receipt| receipt.installed_bindings.iter().cloned())
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()

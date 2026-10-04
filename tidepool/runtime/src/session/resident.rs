@@ -2665,10 +2665,11 @@ where
             .iter()
             .filter_map(|(_, id)| {
                 self.state.bindings().get(*id).and_then(|entry| {
-                    (entry.scope == scope && !self.hidden_host_bindings.contains_key(id)
+                    (entry.scope == scope
+                        && !self.hidden_host_bindings.contains_key(id)
                         && (publication == super::ExecutionPublicationIntent::CompletedCell
                             || completed.get(id).is_some_and(|proof| proof.matches(entry))))
-                        .then_some(*id)
+                    .then_some(*id)
                 })
             })
             .collect();
@@ -4059,7 +4060,7 @@ where
         binder: &BoundBinder,
         code: TurnCode<'_>,
         payload: HostPayload<'_>,
-    ) -> Result<(), ResidentError> {
+    ) -> Result<super::PendingHostValueWrite, ResidentError> {
         self.settle_dropped_custody();
         let scope = admission.prefix().admission().visibility().scope;
         let generation = admission.generation();
@@ -4117,6 +4118,7 @@ where
             &binder.name,
             expected,
         )?;
+        let execution = execution.clone();
         self.mount_host_value_with_interface_in(
             scope,
             binder,
@@ -4135,7 +4137,36 @@ where
             self.retire_host_binding_owner(&session_root, binder);
             return Err(error.into());
         }
-        Ok(())
+        match super::PendingHostValueWrite::mounted(&self.state, scope, binder, execution) {
+            Ok(write) => Ok(write),
+            Err(error) => {
+                self.retire_host_binding_owner(&session_root, binder);
+                Err(error.into())
+            }
+        }
+    }
+
+    /// Reuse only an already accepted private host write. A still-guarded mount
+    /// with the same job text is not evidence that its effect owner accepted it.
+    pub fn accepted_host_text_binding_in(
+        &self,
+        admission: &super::PrivateExecutionAdmission,
+        text: &str,
+    ) -> Option<String> {
+        if !Arc::ptr_eq(&admission.owner, self.state.admission_owner())
+            || admission.owner_epoch != self.state.admission_owner().epoch()
+        {
+            return None;
+        }
+        let scope = admission.private_scope();
+        let name = self.host_text_binding_in(scope, text)?;
+        let entry = self.state.resolve_in(scope, &name)?;
+        admission
+            .completed_values
+            .lock()
+            .get(&entry.id)
+            .is_some_and(|write| write.matches(entry))
+            .then_some(name)
     }
 
     /// Mount `payload` under a freshly minted `name`/`gen` binder through a

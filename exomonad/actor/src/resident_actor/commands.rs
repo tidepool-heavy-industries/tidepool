@@ -14,7 +14,7 @@ pub(super) struct CommandResolution {
     /// `resident_workbench::settle_fragment`.
     pub started_job: Option<String>,
     /// Binding installed by the host for this exact notebook item.
-    pub retained_job_binding: Option<String>,
+    pub retained_job_binding: Option<crate::resident_workbench::RetainedHostBinding>,
 }
 
 pub(super) fn disposition<T>(result: &Result<T, CommandError>) -> WorkbenchOperationDisposition {

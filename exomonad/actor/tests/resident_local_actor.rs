@@ -1276,6 +1276,13 @@ async fn resident_await_watch_case(case: WatchCase) {
                 .expect("failed unit receipt is retained");
             assert_eq!(receipt.installed_bindings.len(), 1, "{receipt:?}");
             let binding = &receipt.installed_bindings[0];
+            assert!(
+                matches!(failure.publication.as_ref(), Some(
+                tidepool_runtime::session::WorkbenchPublicationOutcome::Published { bindings }
+            ) if bindings == &vec![binding.clone()]),
+                "recovery requires the actual exact native publication: {:?}",
+                failure.publication
+            );
             assert!(!binding.contains("session_id:"), "{receipt:?}");
             assert!(
                 receipt.output.contains(binding),
@@ -1319,6 +1326,13 @@ async fn resident_await_watch_case(case: WatchCase) {
                     .await
                     .expect("the binding remains usable after the failed cell");
             assert_eq!(binding_read["status"], "committed", "{binding_read:?}");
+            assert_eq!(
+                command_backend
+                    .completion_count
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "recovering the binding observes the original command, without replay"
+            );
             assert_eq!(
                 binding_read["items"][0]["operations"][0]["effect"], "command job",
                 "{binding_read:?}"

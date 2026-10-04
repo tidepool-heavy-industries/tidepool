@@ -60,9 +60,9 @@ pub use persistent::{
 };
 
 pub use admission::{
-    NativeSetupAdmissionFailure, NativeSetupInputInventory, PendingHostValueWrite, PrivateExecutionAdmission,
-    RuntimeCellAdmission, RuntimeCheckedItemAdmission, RuntimeCheckedPrefix,
-    RuntimeCheckedPrefixSnapshot, RuntimeLexicalScopeLease,
+    NativeSetupAdmissionFailure, NativeSetupInputInventory, PendingHostValueWrite,
+    PrivateExecutionAdmission, RuntimeCellAdmission, RuntimeCheckedItemAdmission,
+    RuntimeCheckedPrefix, RuntimeCheckedPrefixSnapshot, RuntimeLexicalScopeLease,
 };
 pub use paired_publication::{
     AcceptedDeclarationPublication, CertifiedDeclarationPublication, DeclarationPublicationBase,
