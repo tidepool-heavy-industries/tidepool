@@ -972,10 +972,14 @@ impl<'code> PreparedMachine<'code> {
         self.install(ProgramCustody::Shared(image), instance, &imports)
     }
 
-    pub(crate) fn has_instance(&self, instance: &Arc<InstanceImage>) -> bool {
+    pub(crate) fn program_for_instance(&self, instance: &Arc<InstanceImage>) -> Option<ProgramId> {
         self.programs
-            .values()
-            .any(|installed| Arc::ptr_eq(&installed.instance, instance))
+            .iter()
+            .find_map(|(id, installed)| Arc::ptr_eq(&installed.instance, instance).then_some(*id))
+    }
+
+    pub(crate) fn has_instance(&self, instance: &Arc<InstanceImage>) -> bool {
+        self.program_for_instance(instance).is_some()
     }
 
     /// The program whose objects carry `header`, if any program owns it

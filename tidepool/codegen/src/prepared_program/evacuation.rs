@@ -671,11 +671,7 @@ impl PreparedMachine<'_> {
                     .into_iter()
                     .map(|image| {
                         let program = self
-                            .programs
-                            .iter()
-                            .find_map(|(id, installed)| {
-                                Arc::ptr_eq(&installed.instance, &image.instance).then_some(*id)
-                            })
+                            .program_for_instance(&image.instance)
                             .expect("successful parcel import installs every exact instance");
                         (program, image.image)
                     })
