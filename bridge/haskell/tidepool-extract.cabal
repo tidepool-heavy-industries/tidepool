@@ -30,6 +30,7 @@ extra-source-files:
   test-source-boot/fixtures/*.hs
   test-source-boot/fixtures/*.hs-boot
   test-planned-declaration/fixtures/*.hs
+  test-check/fixtures/Ext/Tiny.hs
 
 -- Internal (unexposed) sub-library: the genuinely shared extractor
 -- implementation, compiled ONCE per configuration instead of once per
@@ -760,3 +761,200 @@ test-suite model-turn-test
                    cryptohash-sha256, lens, safe, errors, witherable
   default-language: GHC2024
   ghc-options: -Wall
+
+test-suite native-helper-contract
+  import:           tasty-tests
+  type:             exitcode-stdio-1.0
+  main-is:          NativeContract.hs
+  hs-source-dirs:   test-check generated/effects lib actors
+  other-modules:
+    Tidepool.Aeson
+    Tidepool.Aeson.FromJSON
+    Tidepool.Aeson.KeyMap
+    Tidepool.Aeson.Lens
+    Tidepool.Aeson.Scientific
+    Tidepool.Aeson.Value
+    Tidepool.Check
+    Tidepool.Data.Text
+    Tidepool.Data.Time
+    Tidepool.Double
+    Tidepool.Duration
+    Tidepool.Effects.Core
+    Tidepool.FilePath
+    Tidepool.Internal.RequestSite
+    Tidepool.Patch
+    Tidepool.Prelude
+    Tidepool.QQ.Fmt.Runtime
+    Tidepool.Records
+    Tidepool.Records.Bridged
+    Tidepool.Records.Stable
+    Tidepool.Render
+  build-depends:    base >= 4.20 && < 5, freer-simple, text, containers, lens, safe, errors, witherable, directory, process
+  default-language: GHC2024
+  ghc-options: -Wall -Wno-simplifiable-class-constraints
+
+test-suite pinned-source-contract
+  import:           tasty-tests
+  type:             exitcode-stdio-1.0
+  main-is:          PinnedContract.hs
+  hs-source-dirs:   test-check generated/pinned generated/effects lib actors
+  other-modules:
+    Project.Checks
+    Tidepool.Aeson
+    Tidepool.Aeson.FromJSON
+    Tidepool.Aeson.KeyMap
+    Tidepool.Aeson.Lens
+    Tidepool.Aeson.Scientific
+    Tidepool.Aeson.Value
+    Tidepool.Check
+    Tidepool.Data.Text
+    Tidepool.Data.Time
+    Tidepool.Double
+    Tidepool.Duration
+    Tidepool.Effects.Core
+    Tidepool.FilePath
+    Tidepool.Internal.RequestSite
+    Tidepool.Patch
+    Tidepool.Prelude
+    Tidepool.QQ.Fmt.Runtime
+    Tidepool.Records
+    Tidepool.Records.Bridged
+    Tidepool.Records.Stable
+    Tidepool.Render
+  build-depends:    base >= 4.20 && < 5, freer-simple, text, containers, lens, safe, errors, witherable, directory, process
+  default-language: GHC2024
+  ghc-options: -Wall -Wno-simplifiable-class-constraints
+
+test-suite automation-helper-contract
+  import:           tasty-tests
+  type:             exitcode-stdio-1.0
+  main-is:          automation-helper-contract.hs
+  hs-source-dirs:   ../../exomonad/examples/workspace/.exomonad/checks ../../exomonad/examples/workspace/.exomonad generated/jev/core generated/effects generated/protocol lib actors
+  other-modules:
+    Exomonad.Contrib.Types
+    Jev.Core
+    Jev.Core.Contract
+    Jev.Core.Json
+    Jev.Core.Schema
+    Jev.Host
+    Jev.Operators
+    Jev.Tidepool
+    Project.AssumptionWatch
+    Project.ParallelInvestigate
+    Project.SlowCommandWatch
+    Tidepool.Actor
+    Tidepool.Actor.Internal
+    Tidepool.Actor.Record
+    Tidepool.Actor.Source
+    Tidepool.Actors.Exomonad
+    Tidepool.Actors.Internal.Agent
+    Tidepool.Actors.Observe
+    Tidepool.Actors.Role
+    Tidepool.Actors.Unfold
+    Tidepool.Actors.Worktree
+    Tidepool.Aeson
+    Tidepool.Aeson.FromJSON
+    Tidepool.Aeson.KeyMap
+    Tidepool.Aeson.Lens
+    Tidepool.Aeson.Schema
+    Tidepool.Aeson.Scientific
+    Tidepool.Aeson.Value
+    Tidepool.Agent.Assignment
+    Tidepool.Agent.Assignment.Internal
+    Tidepool.Agent.Launch
+    Tidepool.Agent.Ref
+    Tidepool.Agent.Reply
+    Tidepool.Agent.Reply.Internal
+    Tidepool.Agent.Session
+    Tidepool.Agent.Watch
+    Tidepool.Agent.Watch.Internal
+    Tidepool.Command
+    Tidepool.Command.Types
+    Tidepool.Data.Text
+    Tidepool.Data.Time
+    Tidepool.Double
+    Tidepool.Duration
+    Tidepool.Effects
+    Tidepool.Effects.Authored
+    Tidepool.Effects.Core
+    Tidepool.Effects.Row
+    Tidepool.FilePath
+    Tidepool.Inspection
+    Tidepool.Inspection.Display
+    Tidepool.Inspection.Tree
+    Tidepool.Internal.ActorRef
+    Tidepool.Internal.ExitCell
+    Tidepool.Internal.RequestSite
+    Tidepool.Journal
+    Tidepool.Patch
+    Tidepool.Prelude
+    Tidepool.QQ.Bash
+    Tidepool.QQ.Fmt.Runtime
+    Tidepool.QQ.Label
+    Tidepool.QQ.Validate
+    Tidepool.Records
+    Tidepool.Records.Bridged
+    Tidepool.Records.Stable
+    Tidepool.Render
+    Tidepool.Worktree
+  build-depends:    base >= 4.20 && < 5, freer-simple, text, containers, lens, safe, errors, witherable, template-haskell
+  default-language: GHC2024
+  ghc-options: -Wall -Wno-simplifiable-class-constraints
+
+test-suite browser-scenario-contract
+  import:           tasty-tests
+  type:             exitcode-stdio-1.0
+  main-is:          browser-scenario-contract.hs
+  hs-source-dirs:   ../../exomonad/examples/workspace/.exomonad/checks ../../exomonad/examples/workspace/.exomonad generated/effects generated/protocol lib actors
+  other-modules:
+    Exomonad.Contrib.Check.Cargo
+    Project.BrowserScenario
+    Project.TestEvidence
+    Tidepool.Actor
+    Tidepool.Actor.Internal
+    Tidepool.Actor.Record
+    Tidepool.Actor.Source
+    Tidepool.Aeson
+    Tidepool.Aeson.FromJSON
+    Tidepool.Aeson.KeyMap
+    Tidepool.Aeson.Lens
+    Tidepool.Aeson.Schema
+    Tidepool.Aeson.Scientific
+    Tidepool.Aeson.Value
+    Tidepool.Agent.Assignment
+    Tidepool.Agent.Assignment.Internal
+    Tidepool.Agent.Launch
+    Tidepool.Agent.Ref
+    Tidepool.Agent.Reply
+    Tidepool.Agent.Reply.Internal
+    Tidepool.Agent.Watch
+    Tidepool.Agent.Watch.Internal
+    Tidepool.Command
+    Tidepool.Command.Types
+    Tidepool.Data.Text
+    Tidepool.Data.Time
+    Tidepool.Double
+    Tidepool.Duration
+    Tidepool.Effects
+    Tidepool.Effects.Authored
+    Tidepool.Effects.Core
+    Tidepool.Effects.Row
+    Tidepool.FilePath
+    Tidepool.Inspection
+    Tidepool.Inspection.Display
+    Tidepool.Inspection.Tree
+    Tidepool.Internal.ActorRef
+    Tidepool.Internal.ExitCell
+    Tidepool.Internal.RequestSite
+    Tidepool.Patch
+    Tidepool.Prelude
+    Tidepool.QQ.Bash
+    Tidepool.QQ.Fmt.Runtime
+    Tidepool.Records
+    Tidepool.Records.Bridged
+    Tidepool.Records.Stable
+    Tidepool.Render
+    Tidepool.Worktree
+  build-depends:    base >= 4.20 && < 5, freer-simple, text, containers, lens, safe, errors, witherable, template-haskell
+  default-language: GHC2024
+  ghc-options: -Wall -Wno-simplifiable-class-constraints

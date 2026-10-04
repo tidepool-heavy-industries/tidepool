@@ -5,10 +5,11 @@
 
 -- Native handlers execute the exported workflow; the script rejects every
 -- unexpected command effect, including background starts and timed observations.
-module Main (main) where
+module Main (main, tests) where
 
 import Control.Exception (ErrorCall, Exception, throwIO, try)
 import Control.Monad (forM_, unless)
+import Tidepool.Test.Runner
 import Control.Monad.Freer (Eff, interpretM, runM)
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.Text (Text)
@@ -123,8 +124,8 @@ focusedObservation scenario = observation (Cmd.CommandExited 0) Cmd.CommandClean
       <> "\"matched\":[\"" <> name <> "\"],\"runnable\":[\"" <> name <> "\"],\"summaries\":[[1,0,0,0,0]],\"exit_code\":0}"
       <> "\nfocused test record end\nfocused test record status: available\n"
 
-main :: IO ()
-main = do
+sourceContracts :: IO ()
+sourceContracts = do
   let preparation = Cmd.commandArgv prepareSpec
       readiness = Cmd.commandArgv readySpec
   assert "preparation exact source guard and mandatory web steps" $
@@ -152,6 +153,10 @@ main = do
       && focusedTarget standalone == "test:standalone_browser"
       && focusedFilter standalone == "standalone_missing_assets_and_clean_and_process_loss_reopen"
       && focusedExpected journey == 1 && focusedExpected standalone == 1
+
+workflowContracts :: IO ()
+workflowContracts = do
+  let journey = browserFocusedSpec workspace BrowserJourney
   invalid <- execute [] $ runBrowserScenarios (workspace { browserCheckout = "relative" }) resources [BrowserJourney]
   assert "invalid directory before effects" $ case invalid of Left (InvalidBrowserCheckout "relative") -> True; _ -> False
   empty <- execute [] $ runBrowserScenarios workspace resources []
@@ -249,6 +254,19 @@ main = do
     :: IO (Either ProtocolFailure (Either ErrorCall (Either BrowserRunIssue BrowserResult)))
   assert "wrong-job protocol failure cannot masquerade as expected await refusal" $
     case protocolRejected of Left _ -> True; _ -> False
+  where
+    matches refused scenario key result = case (refused, result) of
+      (True, Left (FocusedStartRefused Cmd.CommandUnauthorized)) -> True
+      (False, Right terminal) -> focusedSpec terminal == browserFocusedSpec workspace scenario
+        && focusedCommand terminal == receipt key (focusedObservation scenario)
+        && focusedEvidencePath terminal == Just "/tmp/evidence.json"
+        && focusedPreparation terminal == NoPreparation
+      _ -> False
+
+scopedHelperContracts :: IO ()
+scopedHelperContracts = do
+  let journey = browserFocusedSpec workspace BrowserJourney
+  journeyCommand <- focusedSpecFor BrowserJourney
   emptyRunner <- execute [] $ startFocusedScopedInWith [] (browserCheckout workspace) (focusedMemory resources) journey
   assert "scoped helper rejects empty runner before effects" $ case emptyRunner of Left EmptyRunner -> True; _ -> False
   invalidExpected <- execute [] $ startFocusedScopedIn (browserCheckout workspace) (focusedMemory resources)
@@ -258,12 +276,14 @@ main = do
   assert "scoped helper rejects relative checkout before effects" $ case relativeFocused of Left (NonAbsoluteCheckout "relative") -> True; _ -> False
   _ <- execute [Background journeyCommand "actor-owned"] $
     startFocusedIn (browserCheckout workspace) (focusedMemory resources) journey
-  putStrLn "browser-scenario-contract: 24 workflow cases passed; protocol-failure isolation regression and 3 scoped-helper validation cases, command parity and production source/spec checks passed"
-  where
-    matches refused scenario key result = case (refused, result) of
-      (True, Left (FocusedStartRefused Cmd.CommandUnauthorized)) -> True
-      (False, Right terminal) -> focusedSpec terminal == browserFocusedSpec workspace scenario
-        && focusedCommand terminal == receipt key (focusedObservation scenario)
-        && focusedEvidencePath terminal == Just "/tmp/evidence.json"
-        && focusedPreparation terminal == NoPreparation
-      _ -> False
+  pure ()
+
+tests :: TestTree
+tests = testGroup "browser-scenario contract"
+  [ testCase "production source and command specification" sourceContracts
+  , testCase "workflow admission refusal and caller-order collection" workflowContracts
+  , testCase "scoped helper validation and actor command parity" scopedHelperContracts
+  ]
+
+main :: IO ()
+main = runTests tests

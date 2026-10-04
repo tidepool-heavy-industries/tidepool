@@ -10,11 +10,11 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import System.Directory (createDirectoryIfMissing)
-import System.Environment (getArgs)
 import System.Exit (ExitCode (..))
 import System.Process (readProcessWithExitCode)
 import qualified Tidepool.Check as Check
 import Tidepool.Effects.Core (RecipeCheck (..))
+import Tidepool.Test.Runner
 
 require :: String -> Bool -> IO ()
 require label observed = do
@@ -79,64 +79,87 @@ host successes execute = runM . interpret handler
         else throwIO (ErrorCall (Text.unpack name))
       _ -> error "unexpected recipe effect"
 
-main :: IO ()
-main = do
-  [support, scratch] <- getArgs
-  require "true assertion completes" (run (Check.assertThat "true" True) == ())
-  throws "false assertion throws" (evaluate (run (Check.assertThat "false" False)))
-  throws "discarded false blocks continuation"
-    (evaluate (run (Check.assertThat "discarded" False >> pure (42 :: Int))))
-  let observe :: Eff '[State Int] Bool
-      observe = modify @Int (+ 1) >> ((>= 3) <$> get @Int)
-      (_, observations) = run (runState (0 :: Int) (Check.assertEventually "eventual" observe))
-  require "eventual success observes exactly three times" (observations == 3)
-  let finalObservation :: Eff '[State Int] Bool
-      finalObservation = do
-        modify @Int (+ 1)
-        count <- get @Int
-        if count > 120 then error "observation limit exceeded" else pure (count == 120)
-      (_, bounded) = run (runState (0 :: Int) (Check.assertEventually "last" finalObservation))
-  require "120th observation may succeed" (bounded == 120)
-  falseObservations <- newIORef (0 :: Int)
-  throws "120 false observations fail" $
-    runM $ Check.assertEventually "bounded" $
-      sendM (modifyIORef' falseObservations (+ 1) >> pure False)
-  require "failed await performs exactly 120 observations" . (== 120) =<< readIORef falseObservations
+boundedObservations :: IO (Either ErrorCall (), Int)
+boundedObservations = do
+  observations <- newIORef (0 :: Int)
+  result <- try @ErrorCall $ runM $ Check.assertEventually "bounded" $
+    sendM (modifyIORef' observations (+ 1) >> pure False)
+  count <- readIORef observations
+  pure (result, count)
+
+nativeDecoder :: IO (Either ErrorCall Int, [Text])
+nativeDecoder = do
   successes <- newIORef []
-  cellNumber <- newIORef (0 :: Int)
-  let executeSource source = do
-        number <- readIORef cellNumber
-        modifyIORef' cellNumber (+ 1)
-        outcome <- runCell support (scratch ++ "/cell-" ++ show number) source
-        -- Native GHC cannot execute the turn-status JSON intrinsic. Stop at
-        -- this effect boundary after running the exact generated actor cell.
-        throwIO outcome
-      execute = host successes executeSource
-      checked label source = execute $ do
-        actor <- Check.root
-        Check.assertCell actor label source
-      awaited label source = execute $ do
-        actor <- Check.root
-        Check.awaitCell actor label source
-      cellResult label expected action = do
-        result <- try @CellOutcome action
-        require label (case result of Left outcome -> outcome == expected; Right _ -> False)
-  cellResult "pure assertion executes in actor scope" CellAccepted (checked "scoped true" "scopedValue == 42")
-  cellResult "case-expression assertion preserves layout" CellAccepted
-    (checked "case predicate" "case Just scopedValue of\n  Just value -> value == 42\n  Nothing -> False")
-  cellResult "false actor cell fails" CellFailed (checked "false cell" "scopedValue == 0")
-  cellResult "non-Bool actor cell is rejected" CellRejected (checked "wrong type" "scopedValue")
-  cellResult "typed await executes in actor scope" CellAccepted (awaited "typed await" "pure (scopedValue == 42)")
-  cellResult "do-action await preserves layout" CellAccepted
-    (awaited "do predicate" "do\n  let value = scopedValue\n  pure (value == 42)")
-  cellResult "non-Bool action is rejected" CellRejected (awaited "wrong action type" "pure scopedValue")
-  require "cell boundary never counts success before accepting turn status" . null =<< readIORef successes
-  failedCounts <- newIORef []
-  throws "native turn decoder rejects before continuation" $
-    host failedCounts (const (pure "{\"status\":\"failed\",\"items\":[{\"output\":\"True\"}]}")) $ do
+  result <- try @ErrorCall $
+    host successes (const (pure "{\"status\":\"failed\",\"items\":[{\"output\":\"True\"}]}")) $ do
       actor <- Check.root
       Check.assertCell actor "failed turn" "True"
       pure (42 :: Int)
-  require "native decoder rejection records zero successes" . null =<< readIORef failedCounts
-  putStrLn "executed: 17 native helper contract checks"
-  putStrLn "not executed: successful host counting requires the prepared-runtime JSON intrinsic"
+  counted <- readIORef successes
+  pure (result, counted)
+
+cellCheck :: String -> Bool -> Text -> CellOutcome -> IO [Text]
+cellCheck label awaited source expected = do
+  support <- requiredInput "TIDEPOOL_TEST_EFFECTS_DIR"
+  successes <- newIORef []
+  let executeSource emitted = runCell support ("native-contract-cells/" ++ label) emitted >>= throwIO
+      action = host successes executeSource $ do
+        actor <- Check.root
+        if awaited then Check.awaitCell actor (Text.pack label) source else Check.assertCell actor (Text.pack label) source
+  result <- try @CellOutcome action
+  require label (case result of Left outcome -> outcome == expected; Right _ -> False)
+  readIORef successes
+
+tests :: TestTree
+tests = testGroup "native helper contract"
+  [ testCase "true assertion completes" $
+      require "true" (run (Check.assertThat "true" True) == ())
+  , testCase "false assertion throws" $
+      throws "false" (evaluate (run (Check.assertThat "false" False)))
+  , testCase "discarded false blocks continuation" $
+      throws "discarded" (evaluate (run (Check.assertThat "discarded" False >> pure (42 :: Int))))
+  , testCase "eventual success observes exactly three times" $ do
+      let observe :: Eff '[State Int] Bool
+          observe = modify @Int (+ 1) >> ((>= 3) <$> get @Int)
+          (_, observations) = run (runState (0 :: Int) (Check.assertEventually "eventual" observe))
+      require "three observations" (observations == 3)
+  , testCase "120th observation may succeed" $ do
+      let observe :: Eff '[State Int] Bool
+          observe = do
+            modify @Int (+ 1)
+            count <- get @Int
+            if count > 120 then error "observation limit exceeded" else pure (count == 120)
+          (_, observations) = run (runState (0 :: Int) (Check.assertEventually "last" observe))
+      require "last observation" (observations == 120)
+  , testCase "120 false observations fail" $ do
+      (result, _) <- boundedObservations
+      require "bounded failure" (case result of Left _ -> True; Right _ -> False)
+  , testCase "failed await performs exactly 120 observations" $ do
+      (_, count) <- boundedObservations
+      require "bounded count" (count == 120)
+  , testCase "pure assertion executes in actor scope" $
+      cellCheck "scoped-true" False "scopedValue == 42" CellAccepted >> pure ()
+  , testCase "case-expression assertion preserves layout" $
+      cellCheck "case-predicate" False "case Just scopedValue of\n  Just value -> value == 42\n  Nothing -> False" CellAccepted >> pure ()
+  , testCase "false actor cell fails" $
+      cellCheck "false-cell" False "scopedValue == 0" CellFailed >> pure ()
+  , testCase "non-Bool actor cell is rejected" $
+      cellCheck "wrong-type" False "scopedValue" CellRejected >> pure ()
+  , testCase "typed await executes in actor scope" $
+      cellCheck "typed-await" True "pure (scopedValue == 42)" CellAccepted >> pure ()
+  , testCase "do-action await preserves layout" $
+      cellCheck "do-predicate" True "do\n  let value = scopedValue\n  pure (value == 42)" CellAccepted >> pure ()
+  , testCase "non-Bool action is rejected" $
+      cellCheck "wrong-action" True "pure scopedValue" CellRejected >> pure ()
+  , testCase "cell boundary never counts success before accepting turn status" $
+      cellCheck "uncounted-boundary" False "scopedValue == 42" CellAccepted >>= require "no premature success" . null
+  , testCase "native turn decoder rejects before continuation" $ do
+      (result, _) <- nativeDecoder
+      require "decoder refused" (case result of Left _ -> True; Right _ -> False)
+  , testCase "native decoder rejection records zero successes" $ do
+      (_, successes) <- nativeDecoder
+      require "no successes" (null successes)
+  ]
+
+main :: IO ()
+main = runTests tests

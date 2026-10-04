@@ -7,9 +7,10 @@
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 
-module Main (main) where
+module Main (main, tests) where
 
 import Control.Monad (unless, void)
+import Tidepool.Test.Runner
 import Control.Monad.Freer (Eff, Member, interpret, interpretM, run, runM)
 import qualified Control.Monad.Freer.State as State
 import Control.Exception (ErrorCall, Exception, throw, throwIO, try)
@@ -79,8 +80,8 @@ assert label passed = do
   unless passed (error label)
   putStrLn ("passed: " ++ label)
 
-main :: IO ()
-main = do
+planningContracts :: IO ()
+planningContracts = do
   let probe name = CommandProbe name name "/tmp" (Cmd.MiB 64) (Cmd.argv ["true"])
       available = map probe ["one", "two", "three"]
       names plan = map probeName (plannedStart plan)
@@ -121,7 +122,6 @@ main = do
       Left (InvalidProbeMemory "two") -> True
       _ -> False)
 
-  nativeContracts
 
 -- Interpret the production Eff program with the real generated Commands GADT.
 -- A closed trace records admission, exact identities and bounded output reads;
@@ -339,3 +339,12 @@ nativeContracts = do
     :: IO (Either ProtocolFailure (Either ErrorCall (Either Cmd.CommandError Cmd.Job)))
   assert "native protocol failures escape the checked-command ErrorCall catch"
     (case protocol of { Left UnexpectedFiniteEffect -> True; _ -> False })
+
+tests :: TestTree
+tests = testGroup "automation-helper contract"
+  [ testCase "typed selection and bounded probe planning" planningContracts
+  , testCase "generated command admission identity and failure isolation" nativeContracts
+  ]
+
+main :: IO ()
+main = runTests tests

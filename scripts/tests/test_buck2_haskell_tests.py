@@ -126,6 +126,42 @@ executable standalone
     def test_checked_in_components_match_cabal_graph(self):
         self.assertEqual((GENERATOR.PACKAGE / "tests.bzl").read_text(), GENERATOR.render())
 
+    def test_workspace_module_uses_its_source_owner_export(self):
+        path, target = GENERATOR.source("Project.BrowserScenario", [
+            "../../exomonad/examples/workspace/.exomonad"])
+        self.assertEqual(path, "Project/BrowserScenario.hs")
+        self.assertEqual(target,
+                         "//exomonad/examples/workspace:authored_haskell_Project_BrowserScenario_hs")
+
+    def test_pinned_contract_uses_actual_facade_fixture(self):
+        self.assertEqual(GENERATOR.source("Project.Checks", ["generated/pinned"]),
+                         ("Project/Checks.hs", "//bridge/facade:workspace_pinned_check_source"))
+
+    def test_pinned_jev_modules_are_declared_artifact_projections(self):
+        for module, path in (("Jev.Core", "core/Jev/Core.hs"),
+                             ("Jev.Core.Schema", "core/Jev/Core/Schema.hs")):
+            self.assertEqual(GENERATOR.source(module, ["generated/jev/core"]),
+                             (path.removeprefix("core/"),
+                              "toolchains//:jev_sources[" + GENERATOR.normalized_path(path) + "]"))
+        self.assertFalse(GENERATOR.is_jev_core("Jev.CoreSomethingElse"))
+
+    def test_jev_projection_roster_comes_from_cabal_module_declarations(self):
+        rendered = GENERATOR.render()
+        paths, _ = json.JSONDecoder().raw_decode(rendered.split("JEV_SOURCE_PATHS = ", 1)[1])
+        self.assertEqual(paths, ["core/Jev/Core.hs", "core/Jev/Core/Contract.hs",
+                                 "core/Jev/Core/Json.hs", "core/Jev/Core/Schema.hs"])
+        roster = self.roster()
+        modules = GENERATOR.words(roster["automation-helper-contract"]["fields"]["other-modules"])
+        self.assertEqual(paths, sorted("core/" + module.replace(".", "/") + ".hs"
+                                       for module in modules if GENERATOR.is_jev_core(module)))
+
+    def test_unowned_external_source_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "Unowned.hs"
+            path.write_text("module Unowned where\n")
+            with self.assertRaisesRegex(ValueError, "needs an owning native source export"):
+                GENERATOR.source_location(path)
+
 
 if __name__ == "__main__":
     unittest.main()

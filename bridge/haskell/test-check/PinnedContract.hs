@@ -8,9 +8,10 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import qualified Project.Checks as Pinned
-import System.Environment (getArgs)
 import System.Exit (ExitCode (..))
 import System.Process (readProcessWithExitCode)
+import System.Directory (createDirectoryIfMissing, copyFile)
+import Tidepool.Test.Runner
 import Tidepool.Effects.Core (RecipeCheck (..))
 
 data Captured = Captured Text deriving (Show)
@@ -22,9 +23,13 @@ handler request = case request of
   RecipeTurn _ source -> sendM (throwIO (Captured source))
   _ -> error "unexpected effect before pinned assertion source capture"
 
-main :: IO ()
-main = do
-  [support, scratch] <- getArgs
+pinnedContract :: IO ()
+pinnedContract = do
+  support <- requiredInput "TIDEPOOL_TEST_EFFECTS_DIR"
+  let scratch = "pinned-contract-cells"
+  createDirectoryIfMissing True (scratch ++ "/Ext")
+  createDirectoryIfMissing True (scratch ++ "/cell-objects")
+  copyFile "test-check/fixtures/Ext/Tiny.hs" (scratch ++ "/Ext/Tiny.hs")
   captured <- try @Captured (runM (interpret handler Pinned.pinned))
   source <- case captured of
     Left (Captured cell) -> pure cell
@@ -56,4 +61,10 @@ main = do
   writeFile (scratch ++ "/cell-execution.log") (stdoutText ++ stderrText)
   evaluate completed >>= \status -> unless (status == ExitSuccess) (error "pinned actor assertion failed")
   putStrLn "passed: actual pinned fixture emits a typed assertion evaluated with external Ext.Tiny (tiny = 41)"
-  putStrLn "executed: 1 native pinned-source contract; not executed: facade flake capture and resident host integration"
+
+tests :: TestTree
+tests = testGroup "pinned-source contract"
+  [testCase "actual pinned fixture emits an assertion evaluated with external Ext.Tiny" pinnedContract]
+
+main :: IO ()
+main = runTests tests
