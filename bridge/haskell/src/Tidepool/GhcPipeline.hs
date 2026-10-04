@@ -33,11 +33,10 @@ import GHC.Driver.Hooks (hscCompileCoreExprHook, hscFrontendHook, runPhaseHook)
 import GHC.Data.StringBuffer (stringToStringBuffer)
 import qualified GHC.Data.Maybe as MaybeErr
 import GHC.Driver.Backend (backendGeneratesCode, backendWritesFiles, backendCanReuseLoadedCode)
-import GHC.Driver.Env (hscUpdateFlags, hscUpdateHPT, hsc_HPT, hsc_home_unit, hscSetFlags, runHsc')
+import GHC.Driver.Env (hscUpdateFlags, hscUpdateHPT, hsc_HPT, hsc_home_unit, runHsc')
 import GHC.Driver.Env.Types (HscEnv(hsc_mod_graph, hsc_unit_env, hsc_logger, hsc_dflags, hsc_FC, hsc_targets, hsc_hooks, hsc_interp))
 import GHC.Driver.Monad (reflectGhc, reifyGhc, Session(..))
 import GHC.Unit.Home.ModInfo (HomeModInfo(..), HomeModLinkable(..), emptyHomeModInfoLinkable, justBytecode, addToHpt, lookupHpt)
-import GHC.Unit.Module.Location (ModLocation(..))
 import GHC.Unit.Module.ModDetails (ModDetails, md_types, md_insts)
 import GHC.Unit.Module.Status (HscBackendAction(..))
 import GHC.Types.ForeignStubs (ForeignStubs(NoStubs))
@@ -52,7 +51,7 @@ import GHC.Iface.Make (mkIfaceTc, mkPartialIface, mkFullIface)
 import GHC.Iface.Recomp (MaybeValidated(..), checkOldIface)
 import GHC.Unit.Finder (initFinderCache)
 import GHC.Unit.Module.ModIface (set_mi_extra_decls)
-import GHC.Unit.Module.Deps (imp_mods, Usage(..))
+import GHC.Unit.Module.Deps (imp_mods)
 import GHC.Unit.Finder (FindResult(Found), findImportedModule)
 import GHC.Iface.Tidy (mkBootModDetailsTc)
 import GHC.Types.SourceFile (HscSource(..))
@@ -4059,10 +4058,7 @@ selectCurrentSourceOriginals admitted intents recipe sourceGraph = do
 
 data ValidatedOriginalSources = ValidatedOriginalSources
   { validatedOriginalGraph :: ModuleGraph
-  , validatedOriginalTargets :: [Target]
   , validatedOriginalEvidence :: DependencyEvidence
-  , validatedOriginalNegatives :: [FilePath]
-  , validatedOriginalPackages :: [PackageImportRoot]
   }
 
 -- Current source selection and compile-time bytecode loading share the same
@@ -4125,7 +4121,7 @@ validateExactOriginalSources admitted interfaces sourceGraph nodes = do
             (FreshSourceSummaryChanged (ownerKey (ms_mod originalFresh)) originalPath
               (show (ms_hs_hash originalFresh)) executionPath (show (ms_hs_hash summary)))))
     _ -> pure ()
-  observations <- forM nodes $ \node -> do
+  forM_ nodes $ \node -> do
     let key = executionIdentityKey (executionNodeIdentity node)
         original = executionNodeModule node
         source = dependencyModuleSource original
@@ -4218,8 +4214,6 @@ validateExactOriginalSources admitted interfaces sourceGraph nodes = do
           unless (package `elem` packageInterfaces packageProof) $
             liftIO (throwIO (ExecutionSourcePackageChanged key))
         _ -> liftIO (throwIO (ExecutionSourcePackageChanged key))
-    pure (concatMap negative currentResolutions ++ concatMap originalNegative originalResolutions,
-      packageInterfaces packageProof)
   -- Native interface validity and executable loading use their respective
   -- profiles. No equality with a newly emitted bytecode interface is assumed.
   native <- liftIO (hydrateExactScope env interfaces)
@@ -4237,8 +4231,7 @@ validateExactOriginalSources admitted interfaces sourceGraph nodes = do
       OutOfDateItem reason _ -> liftIO (throwIO (ExecutionSourceChangedDuring key
         (OriginalInterfaceRecompileRequired (ExecutionSourceInterfaceReason reason))))
   setSession env {hsc_targets=hsc_targets initial}
-  pure (ValidatedOriginalSources executionGraph extraTargets current
-    (nubOrd (concatMap fst observations)) (Set.toAscList (Set.fromList (concatMap snd observations))))
+  pure (ValidatedOriginalSources executionGraph current)
 
 planExactExecutionLoad
   :: FilePath -> ExactScope -> [(ExactIfaceArtifact, ModIface)] -> [(ExactIfaceArtifact, ModIface)] -> ModuleName
