@@ -1912,6 +1912,12 @@ async fn run_owned(
     if let (Some(service), Some(transport)) = (&mut embedded_service, test_transport) {
         service.set_test_transport(transport);
     }
+    #[cfg(test)]
+    if let (Some(service), Some(hooks)) = (&mut embedded_service, &mut test_hooks) {
+        if let Some(factory) = hooks.transport.take() {
+            service.set_test_transport(factory(&service.runtime, &config));
+        }
+    }
     let mut embedded_startup =
         embedded_service
             .as_ref()

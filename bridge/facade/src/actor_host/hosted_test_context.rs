@@ -61,13 +61,23 @@ impl HostTestObserver {
     }
 }
 
+pub(super) type HostTransportFactory = Box<
+    dyn FnOnce(
+            &Arc<embedded_harness::EmbeddedHarnessRuntime>,
+            &ActorHostConfig,
+        ) -> Arc<dyn harness::engine::ResponsesTransport>
+        + Send,
+>;
+
 pub(super) struct HostTestHooks {
     pub(super) observer: HostTestObserver,
     pub(super) assembled: Option<oneshot::Sender<HostedActorContext>>,
     pub(super) stopping: watch::Receiver<bool>,
+    pub(super) transport: Option<HostTransportFactory>,
 }
 
 /// These handles are issued by the production assembly after durable startup.
+#[derive(Clone)]
 pub(super) struct HostedActorContext {
     pub(super) config: ActorHostConfig,
     pub(super) actor: LocalActorRef,
@@ -214,6 +224,28 @@ impl HostedTestRuntime {
         transport: &Arc<dyn harness::engine::ResponsesTransport>,
         configure: impl FnOnce(&mut ActorHostConfig),
     ) -> Result<Self, String> {
+        Self::start_owned(settings, configure, Some(Arc::clone(transport)), None).await
+    }
+
+    pub(super) async fn start_with_factory(
+        settings: &crate::exomonad::EmbeddedLaunchConfig,
+        configure: impl FnOnce(&mut ActorHostConfig),
+        transport: impl FnOnce(
+                &Arc<embedded_harness::EmbeddedHarnessRuntime>,
+                &ActorHostConfig,
+            ) -> Arc<dyn harness::engine::ResponsesTransport>
+            + Send
+            + 'static,
+    ) -> Result<Self, String> {
+        Self::start_owned(settings, configure, None, Some(Box::new(transport))).await
+    }
+
+    async fn start_owned(
+        settings: &crate::exomonad::EmbeddedLaunchConfig,
+        configure: impl FnOnce(&mut ActorHostConfig),
+        transport: Option<Arc<dyn harness::engine::ResponsesTransport>>,
+        transport_factory: Option<HostTransportFactory>,
+    ) -> Result<Self, String> {
         tidepool_testing::eval_harness::require_extract();
         let repository =
             exomonad_worktree::testing::TestRepo::init().map_err(|error| error.to_string())?;
@@ -253,10 +285,10 @@ impl HostedTestRuntime {
             observer,
             assembled: Some(assembled),
             stopping,
+            transport: transport_factory,
         };
         let (ready, mut readiness) = mpsc::unbounded_channel();
         let (complete, mut outcome) = oneshot::channel();
-        let transport = Arc::clone(transport);
         // The application retains non-Send errors across its cleanup awaits.
         // Keep that future on this executor, rather than changing its owners.
         let thread = std::thread::Builder::new()
@@ -268,7 +300,7 @@ impl HostedTestRuntime {
                     .map_err(|error| error.to_string())
                     .and_then(|runtime| {
                         runtime.block_on(async move {
-                            run_owned(config, ready, lease, Some(transport), Some(hooks))
+                            run_owned(config, ready, lease, transport, Some(hooks))
                                 .await
                                 .map_err(|error| error.to_string())
                         })
