@@ -8,6 +8,12 @@ worker-tree trial. Source-ready candidates are not acceptance evidence.
 
 ## Ownership contract
 
+- Keep exact GHC identities typed until wire encoding. Carry validated immutable
+  evidence across compiler phases instead of reconstructing authority from
+  names, paths, or rendered types.
+- Use sum types for genuinely exclusive admission modes. Separate a product's
+  semantic identity from the request context's obligations; preserve and check
+  each context's obligations without changing the immutable product.
 - A finalized module owns its canonical skinny interface and matching tidy
   Core, produced by the same frontend execution. Keep compact checked facts;
   do not retain a mutable HscEnv or TcGblEnv in the product.
