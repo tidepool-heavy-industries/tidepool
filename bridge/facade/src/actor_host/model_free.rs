@@ -20,8 +20,7 @@ pub(super) struct ModelFreeSession {
     pub forest: Arc<ResidentForest<ExomonadHandlerStack, CapturedOutput>>,
     pub _program: Arc<tidepool_runtime::session::CompiledTurn>,
     /// The same [`exomonad_actor::ChildSessionFactory`] installed on `forest`
-    /// — kept accessible for tests that call it directly rather than
-    /// through the (still-unwired) launch path.
+    /// — retained for direct factory tests as well as opt-in launch tests.
     pub _child_session_factory:
         exomonad_actor::ChildSessionFactory<ExomonadHandlerStack, CapturedOutput>,
     pub hosted: tokio::task::JoinHandle<()>,
@@ -54,6 +53,45 @@ impl ModelFreeSession {
         transform: impl FnOnce(Arc<dyn ForkWorkspaceAdmission>) -> Arc<dyn ForkWorkspaceAdmission>,
         conversation: Option<exomonad_actor::ConversationReader>,
         model_factory: Option<Arc<dyn exomonad_actor::CellModelFactory>>,
+    ) -> Result<Self> {
+        Self::start_configured(
+            config,
+            transform,
+            conversation,
+            model_factory,
+            |forest, _| forest,
+        )
+        .await
+    }
+
+    /// Qualify the existing optional dedicated-machine factory with the same
+    /// compiled bootstrap as the root. Default model-free hosts share a machine.
+    #[cfg(test)]
+    pub(super) async fn start_with_child_sessions(
+        config: &ActorHostConfig,
+        transform: impl FnOnce(Arc<dyn ForkWorkspaceAdmission>) -> Arc<dyn ForkWorkspaceAdmission>,
+        conversation: Option<exomonad_actor::ConversationReader>,
+        model_factory: Option<Arc<dyn exomonad_actor::CellModelFactory>>,
+    ) -> Result<Self> {
+        Self::start_configured(
+            config,
+            transform,
+            conversation,
+            model_factory,
+            |forest, program| forest.with_child_bootstrap_program(program),
+        )
+        .await
+    }
+
+    async fn start_configured(
+        config: &ActorHostConfig,
+        transform: impl FnOnce(Arc<dyn ForkWorkspaceAdmission>) -> Arc<dyn ForkWorkspaceAdmission>,
+        conversation: Option<exomonad_actor::ConversationReader>,
+        model_factory: Option<Arc<dyn exomonad_actor::CellModelFactory>>,
+        configure_forest: impl FnOnce(
+            ResidentForest<ExomonadHandlerStack, CapturedOutput>,
+            Arc<tidepool_runtime::session::CompiledTurn>,
+        ) -> ResidentForest<ExomonadHandlerStack, CapturedOutput>,
     ) -> Result<Self> {
         let session_root = Arc::new(tempfile::tempdir()?);
         let host_incarnation = Arc::new(HostIncarnationLease::claim(session_root.path())?);
@@ -114,9 +152,9 @@ impl ModelFreeSession {
                 tidepool_mcp::InstalledEffectSupport::installed_effect_support,
             )
             .with_image_registry(image_registry);
-        // No child bootstrap program: every launch stays on its launching
-        // session, matching the run host.
-        let _ = &program;
+        // The default configuration matches the run host. Optional factory
+        // qualification installs its bootstrap before any actor is admitted.
+        forest = configure_forest(forest, Arc::clone(&program));
         forest.set_jev_backend(super::jev_backend(config));
         if let Some(layers) = &source_layers {
             forest.set_source_layers(layers.clone());

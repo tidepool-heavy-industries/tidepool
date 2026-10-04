@@ -3,16 +3,14 @@ use super::test_campaign::{dispatch_haskell_script, TestCampaign};
 use exomonad_actor::{ActorExitKind, ActorTerminal, LocalResidentDeployment};
 use std::time::Duration;
 
-/// A selected typed fork without `RepoEvent`
-/// goes through the real launch path, not the factory called directly: it
-/// gets a machine session distinct from the root's, runs a cell there, and
-/// the dedicated session is released once the actor retires. `TestCampaign`
-/// installs the composition root's factory, bootstrap program and image
-/// registry, so the assertion that the sessions differ is what rules out
-/// the same-session fallback producing a misleading green.
+/// Opt-in qualification of the dedicated-machine factory through a selected
+/// typed launch. Default campaigns and the production host share a machine.
+/// This campaign explicitly installs the root's compiled child bootstrap;
+/// the child must retain its nominal inputs, allocate its own declarations,
+/// and release its distinct machine on retirement.
 #[tokio::test]
-async fn selected_context_child_gets_its_own_machine_and_is_torn_down_on_retirement() {
-    let mut campaign = TestCampaign::start().await;
+async fn opted_in_selected_context_child_owns_and_retires_its_machine() {
+    let mut campaign = TestCampaign::start_with_child_sessions().await;
     let root = campaign.root_installation.policy.clone();
     let root_session = campaign
         .forest
@@ -52,7 +50,7 @@ async fn selected_context_child_gets_its_own_machine_and_is_torn_down_on_retirem
         .expect("child actor has a session");
     assert_ne!(
         child_session, root_session,
-        "an eligible SelectedContext launch must own its own machine, not share the root's"
+        "an opted-in eligible SelectedContext launch must own its own machine"
     );
 
     installation

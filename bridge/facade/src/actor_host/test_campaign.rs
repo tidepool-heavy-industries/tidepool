@@ -127,6 +127,11 @@ pub(super) struct TestCampaign {
     pub root_installation: exomonad_actor::LocalResidentInstallation,
 }
 
+enum ChildMachinePolicy {
+    Shared,
+    Dedicated,
+}
+
 impl TestCampaign {
     /// Drive the production durable output sink without creating a provider turn.
     /// Other deployments remain available to the campaign's existing consumers.
@@ -328,6 +333,20 @@ impl TestCampaign {
         Self::start_with_research_policy(exomonad_actor::ResearchPolicy::default()).await
     }
 
+    /// Opt into the existing dedicated-machine factory. Ordinary campaigns
+    /// retain the production host's shared-machine policy.
+    pub async fn start_with_child_sessions() -> Self {
+        Self::start_configured(
+            exomonad_actor::ResearchPolicy::default(),
+            |admission| admission,
+            |_| {},
+            None,
+            None,
+            ChildMachinePolicy::Dedicated,
+        )
+        .await
+    }
+
     pub async fn start_with_shell() -> Self {
         Self::start_with_config(
             exomonad_actor::ResearchPolicy::default(),
@@ -377,6 +396,25 @@ impl TestCampaign {
         conversation: Option<exomonad_actor::ConversationReader>,
         model_factory: Option<Arc<dyn exomonad_actor::CellModelFactory>>,
     ) -> Self {
+        Self::start_configured(
+            research_policy,
+            transform,
+            configure,
+            conversation,
+            model_factory,
+            ChildMachinePolicy::Shared,
+        )
+        .await
+    }
+
+    async fn start_configured(
+        research_policy: exomonad_actor::ResearchPolicy,
+        transform: impl FnOnce(Arc<dyn ForkWorkspaceAdmission>) -> Arc<dyn ForkWorkspaceAdmission>,
+        configure: impl FnOnce(&mut ActorHostConfig),
+        conversation: Option<exomonad_actor::ConversationReader>,
+        model_factory: Option<Arc<dyn exomonad_actor::CellModelFactory>>,
+        child_machine_policy: ChildMachinePolicy,
+    ) -> Self {
         tidepool_testing::eval_harness::require_extract();
         install_trace_file();
         let repository = exomonad_worktree::testing::TestRepo::init().unwrap();
@@ -420,13 +458,26 @@ impl TestCampaign {
             hosted,
             deployments,
             root_installation,
-        } = super::model_free::ModelFreeSession::start_with_model_factory(
-            &config,
-            transform,
-            conversation,
-            model_factory,
-        )
-        .await
+        } = match child_machine_policy {
+            ChildMachinePolicy::Shared => {
+                super::model_free::ModelFreeSession::start_with_model_factory(
+                    &config,
+                    transform,
+                    conversation,
+                    model_factory,
+                )
+                .await
+            }
+            ChildMachinePolicy::Dedicated => {
+                super::model_free::ModelFreeSession::start_with_child_sessions(
+                    &config,
+                    transform,
+                    conversation,
+                    model_factory,
+                )
+                .await
+            }
+        }
         .unwrap();
         Self {
             config,
