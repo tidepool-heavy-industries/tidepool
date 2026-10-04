@@ -212,6 +212,17 @@ async fn start_host(
     )
     .await
     .unwrap();
+    let binding = host.context.binding(host.context.actor.identity()).unwrap();
+    binding
+        .conversation()
+        .unwrap()
+        .input(
+            "initial-round",
+            "acceptance",
+            "establish a completed provider round",
+        )
+        .await
+        .expect("real host admits the initial user input");
     (host, received, files)
 }
 
