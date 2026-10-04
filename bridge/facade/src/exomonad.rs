@@ -1243,7 +1243,7 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
         &host_environment,
         &configuration.launch.host_filesystem,
     );
-    let unset_environment = compiler_deployment_unsets(&host_environment);
+    let unset_environment = deployment_environment_unsets(&host_environment);
     let launch = tmux
         .spawn_window(&TmuxLaunch {
             window_name: "Host".into(),
@@ -1402,7 +1402,7 @@ fn compiler_daemon_launch(
     compiler: &CompilerConfig,
 ) -> TmuxLaunch {
     let environment = pane_environment();
-    let unset_environment = compiler_deployment_unsets(&environment);
+    let unset_environment = deployment_environment_unsets(&environment);
     TmuxLaunch {
         window_name: "Compiler".into(),
         cwd: workspace.into(),
@@ -2609,7 +2609,8 @@ fn retain_run_executable(run_root: &Path, name: &str, source: &Path) -> std::io:
     Ok(destination)
 }
 
-const COMPILER_DEPLOYMENT_ENV_NAMES: &[&str] = &[
+const DEPLOYMENT_ENV_NAMES: &[&str] = &[
+    "EXOMONAD_EMBEDDED_ASSET_ROOT",
     tidepool_toolchain::toolchain::ENV_COMPILER_DEPLOYMENT,
     tidepool_toolchain::toolchain::ENV_COMPILER_MODULES,
 ];
@@ -2667,15 +2668,15 @@ fn pane_environment_from(
     ];
     NAMES
         .iter()
-        .chain(COMPILER_DEPLOYMENT_ENV_NAMES)
+        .chain(DEPLOYMENT_ENV_NAMES)
         .filter_map(|name| read(name).map(|value| ((*name).into(), value)))
         .collect()
 }
 
-fn compiler_deployment_unsets(
+fn deployment_environment_unsets(
     environment: &std::collections::BTreeMap<String, String>,
 ) -> std::collections::BTreeSet<String> {
-    COMPILER_DEPLOYMENT_ENV_NAMES
+    DEPLOYMENT_ENV_NAMES
         .iter()
         .filter(|name| !environment.contains_key(**name))
         .map(|name| (*name).to_owned())
@@ -3921,22 +3922,28 @@ mod tests {
     }
 
     #[test]
-    fn compiler_deployment_environment_preserves_present_and_clears_absent() {
+    fn deployment_environment_preserves_present_and_clears_absent() {
         let deployment = tidepool_toolchain::toolchain::ENV_COMPILER_DEPLOYMENT;
         let modules = tidepool_toolchain::toolchain::ENV_COMPILER_MODULES;
+        let assets = "EXOMONAD_EMBEDDED_ASSET_ROOT";
         for selected in [
             std::collections::BTreeMap::new(),
             std::collections::BTreeMap::from([(deployment.to_owned(), "compiler.json".to_owned())]),
             std::collections::BTreeMap::from([(modules.to_owned(), "catalog.json".to_owned())]),
+            std::collections::BTreeMap::from([(
+                assets.to_owned(),
+                "/nix/store/matched-web".to_owned(),
+            )]),
             std::collections::BTreeMap::from([
                 (deployment.to_owned(), "compiler.json".to_owned()),
                 (modules.to_owned(), "catalog.json".to_owned()),
+                (assets.to_owned(), "/nix/store/matched-web".to_owned()),
             ]),
         ] {
             let environment = pane_environment_from(|name| selected.get(name).cloned());
             assert_eq!(environment, selected);
-            let unset = compiler_deployment_unsets(&environment);
-            for name in [deployment, modules] {
+            let unset = deployment_environment_unsets(&environment);
+            for name in [deployment, modules, assets] {
                 assert_eq!(unset.contains(name), !selected.contains_key(name));
             }
             assert!(unset.iter().all(|name| !environment.contains_key(name)));
