@@ -232,8 +232,6 @@ impl From<Effort> for ExomonadEffort {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, clap::ValueEnum)]
-
 /// The default `Result`-returning `main` prints an unhandled `Err` via
 /// `Debug`, not `Display` — so every `runtime_error`/`ConfigError`/`BinError`
 /// message this binary hand-crafts for an operator (including
