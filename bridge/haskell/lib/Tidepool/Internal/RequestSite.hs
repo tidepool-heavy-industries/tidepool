@@ -10,7 +10,7 @@ module Tidepool.Internal.RequestSite (RequestSite, requestSiteIdentity) where
 import Data.Kind (Type)
 
 type role RequestSite nominal nominal
-newtype RequestSite (inputs :: [Type]) reply = RequestSite Int
+newtype RequestSite (inputs :: [Type]) (reply :: Type) = RequestSite Int
 
 -- | Correlation for private actor settlement steps. This does not issue new
 -- reply evidence; only the compiler can construct the indexed carrier.

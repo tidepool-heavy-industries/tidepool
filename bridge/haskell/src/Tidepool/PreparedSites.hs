@@ -296,10 +296,15 @@ elaboratePreparedSites env authority siblings bindings = do
                         eqType (varType inputsVariable) (mkListTy liftedTypeKind)
                           && eqType (varType replyVariable) liftedTypeKind
                       _ -> False
-                if isNewTyCon carrier && tyConArity carrier == 2
-                    && tyConRoles carrier == [Nominal, Nominal] && validKinds
-                  then Right ()
-                  else Left "RequestSite constructor ABI must be a nominal newtype indexed by [Type] and Type"
+                if isNewTyCon carrier then Right ()
+                  else Left "RequestSite constructor ABI must be a newtype"
+                if tyConArity carrier == 2 then Right ()
+                  else Left ("RequestSite constructor ABI must have exactly two indices; found "
+                    ++ show (tyConArity carrier))
+                if tyConRoles carrier == [Nominal, Nominal] then Right ()
+                  else Left "RequestSite constructor ABI must have two nominal roles"
+                if validKinds then Right ()
+                  else Left "RequestSite constructor ABI indices must have kinds [Type] and Type"
                 carrierConstructor <- case tyConDataCons carrier of
                   [constructor] | isVanillaDataCon constructor
                     , length (dataConUnivTyVars constructor) == 2 -> Right constructor
