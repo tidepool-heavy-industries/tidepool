@@ -175,6 +175,7 @@ use tidepool_runtime::DEFAULT_NURSERY_SIZE;
 
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinSet;
+use tracing::Instrument;
 
 use self::application_supervisor::run_interactive_applications;
 use self::embedded_projection::LifecyclePublisher;
@@ -1751,6 +1752,7 @@ async fn run_with_test_transport(
     run_owned(config, readiness, host_incarnation, Some(transport), None).await
 }
 
+#[tracing::instrument(target = "tidepool::actor_host::startup", name = "host_run", skip_all, fields(run_root = %config.run_root.display()))]
 async fn run_owned(
     config: ActorHostConfig,
     readiness: mpsc::UnboundedSender<ActorHostReadiness>,
@@ -1768,7 +1770,8 @@ async fn run_owned(
     let workspace = config.workspace.clone();
     let resource_run_root = run_root.clone();
     let (worktrees, bindings) = tidepool_runtime::spawn_blocking_in_span(move || {
-        actor_worktree_resources(&workspace, &resource_run_root)
+        tracing::info_span!(target: "tidepool::actor_host::startup", "worktree_resources")
+            .in_scope(|| actor_worktree_resources(&workspace, &resource_run_root))
     })
     .await??;
     let bindings = Arc::new(Mutex::new(bindings));
@@ -1811,6 +1814,9 @@ async fn run_owned(
         &run_root,
         settings,
         Arc::clone(&host_incarnation),
+    )
+    .instrument(
+        tracing::info_span!(target: "tidepool::actor_host::startup", "embedded_service_prepare"),
     )
     .await
     .map_err(runtime_error)?;
@@ -1920,30 +1926,34 @@ async fn run_owned(
         accepted_source.clone(),
         bootstrap_identity.clone(),
     )?;
-    let (root_actor, mut root_task, startup_release) = match recovered_root {
-        Some((_, identity)) => {
-            forest
-                .admit_pending_root_with_identity(
-                    descriptor,
-                    entry,
-                    identity,
-                    startup_intent.clone(),
-                )
-                .await?
-        }
-        None => {
-            let mut intent = startup_intent.clone();
-            let run_root = run_root.clone();
-            forest
-                .admit_pending_root(descriptor, entry, move |identity| {
-                    intent.conversation = embedded_recovery::conversation(
-                        &embedded_recovery::host_identity(&run_root, "/root", identity),
-                    );
-                    intent
-                })
-                .await?
-        }
-    };
+    let (root_actor, mut root_task, startup_release) = async {
+        Ok::<_, Box<dyn std::error::Error>>(match recovered_root {
+            Some((_, identity)) => {
+                forest
+                    .admit_pending_root_with_identity(
+                        descriptor,
+                        entry,
+                        identity,
+                        startup_intent.clone(),
+                    )
+                    .await?
+            }
+            None => {
+                let mut intent = startup_intent.clone();
+                let run_root = run_root.clone();
+                forest
+                    .admit_pending_root(descriptor, entry, move |identity| {
+                        intent.conversation = embedded_recovery::conversation(
+                            &embedded_recovery::host_identity(&run_root, "/root", identity),
+                        );
+                        intent
+                    })
+                    .await?
+            }
+        })
+    }
+    .instrument(tracing::info_span!(target: "tidepool::actor_host::startup", "root_admission"))
+    .await?;
     startup_intent.conversation = embedded_recovery::conversation(
         &embedded_recovery::host_identity(&run_root, "/root", root_actor.identity()),
     );
@@ -2079,6 +2089,9 @@ async fn run_owned(
             .map_err(runtime_error)?;
         Ok::<(), Box<dyn std::error::Error>>(())
     }
+    .instrument(
+        tracing::info_span!(target: "tidepool::actor_host::startup", "root_declaration_recovery"),
+    )
     .await;
     if let Err(error) = declaration_recovery {
         let summary = format!("root declaration recovery remains unavailable: {error}");
@@ -2256,6 +2269,7 @@ async fn run_owned(
 
     let host_graph_forest = Arc::clone(&forest);
     let host_graph = Arc::new(move || host_graph_forest.inspect_host_graph());
+    tracing::info!(target: "tidepool::actor_host::startup", actor = %root_actor.identity(), "production assembly ready");
     #[cfg(test)]
     let test_observer = test_hooks.as_ref().map(|hooks| hooks.observer.clone());
     #[cfg(test)]
@@ -2915,6 +2929,11 @@ fn driver_sources(
     Ok(DriverSources { preamble, include })
 }
 
+#[tracing::instrument(
+    target = "tidepool::actor_host::startup",
+    name = "compile_driver",
+    skip_all
+)]
 fn compile_driver(
     haskell_root: &Path,
     inputs: Option<&crate::exomonad::workspace::FrozenWorkspace>,
@@ -2971,6 +2990,11 @@ type CompiledRoot = (
     Arc<tidepool_runtime::session::ImageRegistry>,
 );
 
+#[tracing::instrument(
+    target = "tidepool::actor_host::startup",
+    name = "compile_root",
+    skip_all
+)]
 fn compile_root(
     config: &ActorHostConfig,
     run_root: &Path,
@@ -3149,7 +3173,9 @@ fn compile_root(
     // every child session bootstraps with this same driver image rather
     // than a second compile of it.
     machine.set_image_registry(Arc::clone(&image_registry));
-    let entry = machine.prepare_startup_entry(compiled.code())?;
+    let entry =
+        tracing::info_span!(target: "tidepool::actor_host::startup", "prepare_startup_entry")
+            .in_scope(|| machine.prepare_startup_entry(compiled.code()))?;
     machine.seal_recovery_initialization_scope(lexical_scope)?;
     let mut descriptor = ActorDescriptor::new(
         "exomonad-root",

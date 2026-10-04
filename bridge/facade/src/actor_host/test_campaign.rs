@@ -441,7 +441,7 @@ impl TestCampaign {
         root: CampaignRoot,
     ) -> Self {
         tidepool_testing::eval_harness::require_extract();
-        install_trace_file();
+        install_tracing();
         let repository = exomonad_worktree::testing::TestRepo::init().unwrap();
         repository
             .writer()
@@ -525,32 +525,41 @@ impl TestCampaign {
     }
 }
 
-/// Diagnostic tracing for a campaign run: with `TIDEPOOL_TEST_TRACE=<path>`,
-/// every `tidepool*` target at debug level is appended to that file (the
-/// filter can be replaced through `RUST_LOG`). Unset, nothing is installed.
-fn install_trace_file() {
-    let Some(path) = std::env::var_os("TIDEPOOL_TEST_TRACE") else {
-        return;
-    };
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .unwrap_or_else(|error| panic!("TIDEPOOL_TEST_TRACE {path:?}: {error}"));
-    let filter = tracing_subscriber::EnvFilter::try_from_env("RUST_LOG").unwrap_or_else(|_| {
-        tracing_subscriber::EnvFilter::new(
-            "warn,tidepool=debug,exomonad_actor=debug,tidepool_runtime=debug",
-        )
-    });
-    // A second campaign in the same process keeps the first subscriber.
-    // best-effort: a global subscriber may already be installed.
-    tracing_subscriber::fmt()
+/// Retain phase and compile observations across the host's executor threads.
+/// An isolated native test owns the global subscriber; an already-installed
+/// measurement subscriber keeps its filter and writer. Explicit trace files
+/// remain supported, otherwise libtest's writer retains JSON in test output.
+pub(super) fn install_tracing() {
+    let filter = tracing_subscriber::EnvFilter::new(
+        "warn,tidepool::actor_host::startup=info,tidepool_runtime::compile=info,\
+         tidepool_runtime::compile::modules=debug,tidepool_runtime::session::turn=info,\
+         exomonad_harness::timing=debug,tidepool_runtime::prepared_install=info,\
+         tidepool_codegen::prepared_compile=info,tidepool_extract_cmd::endpoint=debug,\
+         exomonad_actor::workbench_phase=info,exomonad::content=off",
+    );
+    let subscriber = tracing_subscriber::fmt()
+        .json()
         .with_ansi(false)
         .with_thread_names(true)
         .with_env_filter(filter)
-        .with_writer(std::sync::Mutex::new(file))
-        .try_init()
-        .ok();
+        .with_span_events(
+            tracing_subscriber::fmt::format::FmtSpan::NEW
+                | tracing_subscriber::fmt::format::FmtSpan::CLOSE,
+        )
+        .with_test_writer();
+    if let Some(path) = std::env::var_os("TIDEPOOL_TEST_TRACE") {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .unwrap_or_else(|error| panic!("TIDEPOOL_TEST_TRACE {path:?}: {error}"));
+        subscriber
+            .with_writer(std::sync::Mutex::new(file))
+            .try_init()
+            .ok();
+    } else {
+        subscriber.try_init().ok();
+    }
 }
 
 pub(super) fn committed_display_text(response: &serde_json::Value) -> &str {

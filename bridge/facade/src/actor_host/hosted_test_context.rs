@@ -284,6 +284,7 @@ impl HostedTestRuntime {
         transport: Option<Arc<dyn harness::engine::ResponsesTransport>>,
         transport_factory: Option<HostTransportFactory>,
     ) -> Result<Self, String> {
+        super::test_campaign::install_tracing();
         let mut settings = settings.clone();
         if let Some(root) = std::env::var_os("EXOMONAD_EMBEDDED_ASSET_ROOT") {
             settings.asset_root = std::path::PathBuf::from(root);

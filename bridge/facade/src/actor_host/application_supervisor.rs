@@ -421,6 +421,7 @@ pub(super) async fn run_interactive_applications(
                         );
                     }
                     LocalResidentDeployment::PolicyInstalled(installation) => {
+                        tracing::info!(target: "tidepool::actor_host::startup", actor = %installation.actor.identity(), "actor policy installed");
                         #[cfg(test)]
                         if let Some(observer) = &test_observer { observer.installed(&installation); }
                         let provider_attachment = match provider_attachment::ProviderAttachment::admit(
@@ -806,6 +807,7 @@ pub(super) async fn run_interactive_applications(
                                 if let Err(error) = provider_attachment.validate() {
                                     break Some(format!("actor {actor:?} provider readiness is unavailable: {error}"));
                                 }
+                                tracing::info!(target: "tidepool::actor_host::startup", actor = %root_identity, "embedded root ready");
                                 readiness
                                     .send(ActorHostReadiness::EmbeddedReady {
                                         root: root_identity,
