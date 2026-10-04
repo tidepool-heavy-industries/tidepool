@@ -23,6 +23,7 @@ enum Command {
     ValidateFixture {
         directory: PathBuf,
         source: PathBuf,
+        targets: PathBuf,
         include: Vec<PathBuf>,
     },
     VerifyCohort {
@@ -121,8 +122,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         Command::ValidateFixture {
             directory,
             source,
+            targets,
             include,
-        } => validate_fixture(&directory, &source, &include),
+        } => validate_fixture(&directory, &source, &targets, &include),
         Command::VerifyCohort {
             directory,
             expectations,
@@ -162,11 +164,12 @@ fn parse_arguments() -> Result<Command, Box<dyn Error>> {
 }
 
 fn parse_values(values: Vec<OsString>) -> Result<Command, Box<dyn Error>> {
-    if let [mode, directory, source, roots @ ..] = values.as_slice() {
+    if let [mode, directory, source, targets, roots @ ..] = values.as_slice() {
         if mode == "validate-fixture" {
             return Ok(Command::ValidateFixture {
                 directory: directory.into(),
                 source: source.into(),
+                targets: targets.into(),
                 include: roots.iter().map(PathBuf::from).collect(),
             });
         }
@@ -238,19 +241,33 @@ fn parse_values(values: Vec<OsString>) -> Result<Command, Box<dyn Error>> {
 fn usage() -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidInput,
-        "usage: prepared-corpus validate-fixture DIRECTORY SOURCE [INCLUDE...] | prepared-corpus verify-cohort DIRECTORY EXPECTATIONS REPORT | prepared-corpus effects-core GENERATED_INCLUDE | prepared-corpus audit-operations MANIFEST OUTPUT | prepared-corpus run MANIFEST EXPECTATIONS METADATA OUTPUT | prepared-corpus child MANIFEST EXPECTATIONS METADATA OUTPUT INDEX",
+        "usage: prepared-corpus validate-fixture DIRECTORY SOURCE TARGETS [INCLUDE...] | prepared-corpus verify-cohort DIRECTORY EXPECTATIONS REPORT | prepared-corpus effects-core GENERATED_INCLUDE | prepared-corpus audit-operations MANIFEST OUTPUT | prepared-corpus run MANIFEST EXPECTATIONS METADATA OUTPUT | prepared-corpus child MANIFEST EXPECTATIONS METADATA OUTPUT INDEX",
     )
 }
 
 fn validate_fixture(
     directory: &Path,
     source: &Path,
+    targets: &Path,
     include: &[PathBuf],
 ) -> Result<(), Box<dyn Error>> {
     let manifest_path = directory.join("manifest.json");
     let manifest = read_manifest(&manifest_path)?;
     let summary = validate_manifest(&manifest)?;
-    if manifest.programs.is_empty() || summary.source_unmapped != 0 {
+    let requested = fs::read_to_string(targets)?
+        .lines()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let reported = manifest
+        .source_targets
+        .iter()
+        .map(|target| target.source_name.clone())
+        .collect::<Vec<_>>();
+    if requested.is_empty()
+        || requested != reported
+        || manifest.programs.is_empty()
+        || summary.source_unmapped != 0
+    {
         return Err(invalid_manifest(
             "fixture must retain a nonempty complete mapped target set".into(),
         ));

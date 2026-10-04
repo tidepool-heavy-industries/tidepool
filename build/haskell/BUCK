@@ -1,0 +1,6 @@
+load("@prelude//:rules.bzl", "export_file", "sh_test")
+
+export_file(name = "corpus_fixture_driver", src = "corpus_fixture.py", visibility = ["PUBLIC"])
+export_file(name = "suite_oracle_driver", src = "suite_oracle.py", visibility = ["PUBLIC"])
+
+export_file(name = "corpus_test", src = "corpus_test.sh", visibility = ["PUBLIC"])

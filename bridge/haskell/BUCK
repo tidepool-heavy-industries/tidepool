@@ -1,3 +1,4 @@
+load("//build/haskell:corpus_fixture.bzl", "tidepool_prepared_corpus", "tidepool_native_oracle", "tidepool_corpus_test")
 load("//build/haskell:prepared_fixture.bzl", "tidepool_prepared_fixture")
 load("@prelude//:rules.bzl", "export_file", "filegroup", "haskell_binary", "haskell_library", "sh_test")
 load(
@@ -270,30 +271,10 @@ filegroup(
 )
 
 # Exact compile-time resources consumed by the native repr targets.
-export_file(
-    name = "m3_vertical_fixture",
-    src = "test-prepared-stg/fixtures/m3-vertical.cbor",
-    visibility = ["PUBLIC"],
-)
 
-export_file(
-    name = "schema6_intrinsic_fixture",
-    src = "test-execution-schema-encode/fixtures/schema6-intrinsic.cbor",
-    visibility = ["PUBLIC"],
-)
 
 # Compile-time resources referenced by codegen's unit-test modules.
-export_file(
-    name = "freer_resume_fixture",
-    src = "test-prepared-stg/fixtures/freer-resume.cbor",
-    visibility = ["PUBLIC"],
-)
 
-export_file(
-    name = "freer_retention_fixture",
-    src = "test-prepared-stg/fixtures/freer-retention.cbor",
-    visibility = ["PUBLIC"],
-)
 
 # Source and fixture artifacts exposed to native actions that model these
 # dependencies explicitly.
@@ -450,5 +431,423 @@ tidepool_prepared_fixture(
     name = "freer_retention_prepared",
     source = "test-prepared-stg/FreerRetention.hs",
     targets = ["freerRequest"],
+    visibility = ["PUBLIC"],
+)
+
+# Source roots declare every readable Haskell input without coupling otherwise
+# independent cohort source files to one broad fixture tree.
+filegroup(
+    name = "corpus_library_sources",
+    srcs = {source: source for source in glob(["lib/**/*.hs"], exclude = ["lib/**/Prelude_cbor/**"])},
+    visibility = ["PUBLIC"],
+)
+filegroup(
+    name = "corpus_formatting_sources",
+    srcs = {"FormattingContract.hs": "test-prepared-stg/FormattingContract.hs"},
+    visibility = ["PUBLIC"],
+)
+filegroup(
+    name = "corpus_formatting_shadow_sources",
+    srcs = {"Data/Text.hs": "test-prepared-stg/formatting-dependency-shadow/Data/Text.hs"},
+    visibility = ["PUBLIC"],
+)
+filegroup(
+    name = "native_oracle_sources",
+    srcs = {
+        "SuiteOracle.hs": "test-prepared-stg/suite-oracle/SuiteOracle.hs",
+        "SuiteOracleTH.hs": "test-prepared-stg/suite-oracle/SuiteOracleTH.hs",
+        "SuiteOracleRender.hs": "test-prepared-stg/suite-oracle/SuiteOracleRender.hs",
+    },
+    visibility = ["PUBLIC"],
+)
+filegroup(
+    name = "suite_source_root",
+    srcs = {"Suite.hs": "test/Suite.hs"},
+    visibility = ["PUBLIC"],
+)
+
+_CORPUS_LIBRARY_ROOTS = [
+    ("//bridge/protocol:generated", "bridge/haskell/lib"),
+    (":corpus_library_sources", "lib"),
+]
+
+tidepool_prepared_corpus(
+    name = "corpus_suite",
+    source = "test/Suite.hs",
+    module = "Suite",
+    targets_file = "test/SuiteTargets",
+    source_roots = _CORPUS_LIBRARY_ROOTS,
+    all_tops = True,
+    metadata_targets = ["con_left", "con_right", "con_just", "con_nothing", "showInt"],
+    visibility = ["PUBLIC"],
+)
+
+tidepool_native_oracle(
+    name = "oracle_suite",
+    corpus = ":corpus_suite",
+    module = "Suite",
+    source = "test-prepared-stg/suite-oracle/SuiteOracle.hs",
+    source_roots = _CORPUS_LIBRARY_ROOTS + [(":suite_source_root", ""), (":native_oracle_sources", "")],
+    classifications = "test-prepared-stg/suite-oracle/SuiteOracleClassifications.json",
+    nonterminating = "test-prepared-stg/suite-oracle/SuiteOracleNonterminating.txt",
+    visibility = ["PUBLIC"],
+)
+
+tidepool_prepared_corpus(
+    name = "corpus_project_work_candidate",
+    source = "test-prepared-stg/ProjectWorkCandidate.hs",
+    module = "ProjectWorkCandidate",
+    targets_file = "test-prepared-stg/ProjectWorkCandidateTargets",
+    source_roots = [("//bridge/facade:corpus_project_sources", "")] + _CORPUS_LIBRARY_ROOTS,
+    visibility = ["PUBLIC"],
+)
+
+filegroup(
+    name = "oracle_source_project_work_candidate",
+    srcs = {"ProjectWorkCandidate.hs": "test-prepared-stg/ProjectWorkCandidate.hs"},
+)
+
+tidepool_native_oracle(
+    name = "oracle_project_work_candidate",
+    corpus = ":corpus_project_work_candidate",
+    module = "ProjectWorkCandidate",
+    source = "test-prepared-stg/suite-oracle/SuiteOracle.hs",
+    source_roots = [("//bridge/facade:corpus_project_sources", "")] + _CORPUS_LIBRARY_ROOTS + [(":oracle_source_project_work_candidate", ""), (":native_oracle_sources", "")],
+    classifications = "test-prepared-stg/suite-oracle/NoClassifications.json",
+    nonterminating = "test-prepared-stg/suite-oracle/NoNonterminating.txt",
+    contract = True,
+    visibility = ["PUBLIC"],
+)
+
+tidepool_prepared_corpus(
+    name = "corpus_agent_watch_await_settled",
+    source = "test-prepared-stg/AwaitSettledDependencies.hs",
+    module = "AwaitSettledDependencies",
+    targets_file = "test-prepared-stg/AwaitSettledDependenciesTargets",
+    source_roots = [("//bridge/mcp:effects_generated", "")] + _CORPUS_LIBRARY_ROOTS,
+    visibility = ["PUBLIC"],
+)
+
+filegroup(
+    name = "oracle_source_agent_watch_await_settled",
+    srcs = {"AwaitSettledDependencies.hs": "test-prepared-stg/AwaitSettledDependencies.hs"},
+)
+
+tidepool_native_oracle(
+    name = "oracle_agent_watch_await_settled",
+    corpus = ":corpus_agent_watch_await_settled",
+    module = "AwaitSettledDependencies",
+    source = "test-prepared-stg/suite-oracle/SuiteOracle.hs",
+    source_roots = [("//bridge/mcp:effects_generated", "")] + _CORPUS_LIBRARY_ROOTS + [(":oracle_source_agent_watch_await_settled", ""), (":native_oracle_sources", "")],
+    classifications = "test-prepared-stg/suite-oracle/NoClassifications.json",
+    nonterminating = "test-prepared-stg/suite-oracle/NoNonterminating.txt",
+    contract = True,
+    visibility = ["PUBLIC"],
+)
+
+tidepool_prepared_corpus(
+    name = "corpus_recovered_base_contract",
+    source = "test-prepared-stg/RecoveredBody.hs",
+    module = "RecoveredBody",
+    targets_file = "test-prepared-stg/RecoveredBodyTargets",
+    source_roots = _CORPUS_LIBRARY_ROOTS,
+    visibility = ["PUBLIC"],
+)
+
+filegroup(
+    name = "oracle_source_recovered_base_contract",
+    srcs = {"RecoveredBody.hs": "test-prepared-stg/RecoveredBody.hs"},
+)
+
+tidepool_native_oracle(
+    name = "oracle_recovered_base_contract",
+    corpus = ":corpus_recovered_base_contract",
+    module = "RecoveredBody",
+    source = "test-prepared-stg/suite-oracle/SuiteOracle.hs",
+    source_roots = _CORPUS_LIBRARY_ROOTS + [(":oracle_source_recovered_base_contract", ""), (":native_oracle_sources", "")],
+    classifications = "test-prepared-stg/suite-oracle/NoClassifications.json",
+    nonterminating = "test-prepared-stg/suite-oracle/NoNonterminating.txt",
+    contract = True,
+    visibility = ["PUBLIC"],
+)
+
+tidepool_prepared_corpus(
+    name = "corpus_formatting_execution_contract",
+    source = "test-prepared-stg/FormattingExecutionContract.hs",
+    module = "FormattingExecutionContract",
+    targets_file = "test-prepared-stg/FormattingExecutionTargets",
+    source_roots = [(":corpus_formatting_sources", "")] + _CORPUS_LIBRARY_ROOTS,
+    visibility = ["PUBLIC"],
+)
+
+filegroup(
+    name = "oracle_source_formatting_execution_contract",
+    srcs = {"FormattingExecutionContract.hs": "test-prepared-stg/FormattingExecutionContract.hs"},
+)
+
+tidepool_native_oracle(
+    name = "oracle_formatting_execution_contract",
+    corpus = ":corpus_formatting_execution_contract",
+    module = "FormattingExecutionContract",
+    source = "test-prepared-stg/suite-oracle/SuiteOracle.hs",
+    source_roots = [(":corpus_formatting_sources", "")] + _CORPUS_LIBRARY_ROOTS + [(":oracle_source_formatting_execution_contract", ""), (":native_oracle_sources", "")],
+    classifications = "test-prepared-stg/suite-oracle/NoClassifications.json",
+    nonterminating = "test-prepared-stg/suite-oracle/NoNonterminating.txt",
+    contract = True,
+    visibility = ["PUBLIC"],
+)
+
+tidepool_prepared_corpus(
+    name = "corpus_formatting_dependency_shadow",
+    source = "test-prepared-stg/FormattingDependencyShadow.hs",
+    module = "FormattingDependencyShadow",
+    targets_file = "test-prepared-stg/FormattingDependencyShadowTargets",
+    source_roots = [(":corpus_formatting_shadow_sources", "")] + _CORPUS_LIBRARY_ROOTS,
+    visibility = ["PUBLIC"],
+)
+
+filegroup(
+    name = "oracle_source_formatting_dependency_shadow",
+    srcs = {"FormattingDependencyShadow.hs": "test-prepared-stg/FormattingDependencyShadow.hs"},
+)
+
+tidepool_native_oracle(
+    name = "oracle_formatting_dependency_shadow",
+    corpus = ":corpus_formatting_dependency_shadow",
+    module = "FormattingDependencyShadow",
+    source = "test-prepared-stg/suite-oracle/SuiteOracle.hs",
+    source_roots = [(":corpus_formatting_shadow_sources", "")] + _CORPUS_LIBRARY_ROOTS + [(":oracle_source_formatting_dependency_shadow", ""), (":native_oracle_sources", "")],
+    classifications = "test-prepared-stg/suite-oracle/NoClassifications.json",
+    nonterminating = "test-prepared-stg/suite-oracle/NoNonterminating.txt",
+    contract = True,
+    visibility = ["PUBLIC"],
+)
+
+tidepool_prepared_corpus(
+    name = "corpus_fingerprint_execution_contract",
+    source = "test-prepared-stg/FingerprintExecutionContract.hs",
+    module = "FingerprintExecutionContract",
+    targets_file = "test-prepared-stg/FingerprintExecutionTargets",
+    source_roots = _CORPUS_LIBRARY_ROOTS,
+    visibility = ["PUBLIC"],
+)
+
+filegroup(
+    name = "oracle_source_fingerprint_execution_contract",
+    srcs = {"FingerprintExecutionContract.hs": "test-prepared-stg/FingerprintExecutionContract.hs"},
+)
+
+tidepool_native_oracle(
+    name = "oracle_fingerprint_execution_contract",
+    corpus = ":corpus_fingerprint_execution_contract",
+    module = "FingerprintExecutionContract",
+    source = "test-prepared-stg/suite-oracle/SuiteOracle.hs",
+    source_roots = _CORPUS_LIBRARY_ROOTS + [(":oracle_source_fingerprint_execution_contract", ""), (":native_oracle_sources", "")],
+    classifications = "test-prepared-stg/suite-oracle/NoClassifications.json",
+    nonterminating = "test-prepared-stg/suite-oracle/NoNonterminating.txt",
+    contract = True,
+    visibility = ["PUBLIC"],
+)
+
+tidepool_prepared_corpus(
+    name = "corpus_time_intrinsic_contract",
+    source = "test-prepared-stg/TimeIntrinsicContract.hs",
+    module = "TimeIntrinsicContract",
+    targets_file = "test-prepared-stg/TimeIntrinsicTargets",
+    source_roots = _CORPUS_LIBRARY_ROOTS,
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "oracle_time_intrinsic_contract",
+    src = "test-prepared-stg/TimeIntrinsicExpectations.json",
+    visibility = ["PUBLIC"],
+)
+
+tidepool_prepared_corpus(
+    name = "corpus_containers_contract",
+    source = "test-prepared-stg/ContainersContract.hs",
+    module = "ContainersContract",
+    targets_file = "test-prepared-stg/ContainersContractTargets",
+    source_roots = _CORPUS_LIBRARY_ROOTS,
+    visibility = ["PUBLIC"],
+)
+
+filegroup(
+    name = "oracle_source_containers_contract",
+    srcs = {"ContainersContract.hs": "test-prepared-stg/ContainersContract.hs"},
+)
+
+tidepool_native_oracle(
+    name = "oracle_containers_contract",
+    corpus = ":corpus_containers_contract",
+    module = "ContainersContract",
+    source = "test-prepared-stg/suite-oracle/SuiteOracle.hs",
+    source_roots = _CORPUS_LIBRARY_ROOTS + [(":oracle_source_containers_contract", ""), (":native_oracle_sources", "")],
+    classifications = "test-prepared-stg/suite-oracle/NoClassifications.json",
+    nonterminating = "test-prepared-stg/suite-oracle/NoNonterminating.txt",
+    contract = True,
+    visibility = ["PUBLIC"],
+)
+
+tidepool_prepared_corpus(
+    name = "corpus_bignum_contract",
+    source = "test-prepared-stg/BignumContract.hs",
+    module = "BignumContract",
+    targets_file = "test-prepared-stg/BignumContractTargets",
+    source_roots = _CORPUS_LIBRARY_ROOTS,
+    visibility = ["PUBLIC"],
+)
+
+filegroup(
+    name = "oracle_source_bignum_contract",
+    srcs = {"BignumContract.hs": "test-prepared-stg/BignumContract.hs"},
+)
+
+tidepool_native_oracle(
+    name = "oracle_bignum_contract",
+    corpus = ":corpus_bignum_contract",
+    module = "BignumContract",
+    source = "test-prepared-stg/suite-oracle/SuiteOracle.hs",
+    source_roots = _CORPUS_LIBRARY_ROOTS + [(":oracle_source_bignum_contract", ""), (":native_oracle_sources", "")],
+    classifications = "test-prepared-stg/suite-oracle/NoClassifications.json",
+    nonterminating = "test-prepared-stg/suite-oracle/NoNonterminating.txt",
+    contract = True,
+    visibility = ["PUBLIC"],
+)
+
+tidepool_prepared_corpus(
+    name = "corpus_usertypes_contract",
+    source = "test-prepared-stg/UserTypesContract.hs",
+    module = "UserTypesContract",
+    targets_file = "test-prepared-stg/UserTypesContractTargets",
+    source_roots = _CORPUS_LIBRARY_ROOTS,
+    visibility = ["PUBLIC"],
+)
+
+filegroup(
+    name = "oracle_source_usertypes_contract",
+    srcs = {"UserTypesContract.hs": "test-prepared-stg/UserTypesContract.hs"},
+)
+
+tidepool_native_oracle(
+    name = "oracle_usertypes_contract",
+    corpus = ":corpus_usertypes_contract",
+    module = "UserTypesContract",
+    source = "test-prepared-stg/suite-oracle/SuiteOracle.hs",
+    source_roots = _CORPUS_LIBRARY_ROOTS + [(":oracle_source_usertypes_contract", ""), (":native_oracle_sources", "")],
+    classifications = "test-prepared-stg/suite-oracle/NoClassifications.json",
+    nonterminating = "test-prepared-stg/suite-oracle/NoNonterminating.txt",
+    contract = True,
+    visibility = ["PUBLIC"],
+)
+
+tidepool_prepared_corpus(
+    name = "corpus_text_contract",
+    source = "test-prepared-stg/TextContract.hs",
+    module = "TextContract",
+    targets_file = "test-prepared-stg/TextContractTargets",
+    source_roots = _CORPUS_LIBRARY_ROOTS,
+    visibility = ["PUBLIC"],
+)
+
+filegroup(
+    name = "oracle_source_text_contract",
+    srcs = {"TextContract.hs": "test-prepared-stg/TextContract.hs"},
+)
+
+tidepool_native_oracle(
+    name = "oracle_text_contract",
+    corpus = ":corpus_text_contract",
+    module = "TextContract",
+    source = "test-prepared-stg/suite-oracle/SuiteOracle.hs",
+    source_roots = _CORPUS_LIBRARY_ROOTS + [(":oracle_source_text_contract", ""), (":native_oracle_sources", "")],
+    classifications = "test-prepared-stg/suite-oracle/NoClassifications.json",
+    nonterminating = "test-prepared-stg/suite-oracle/NoNonterminating.txt",
+    contract = True,
+    visibility = ["PUBLIC"],
+)
+
+tidepool_corpus_test(
+    name = "corpus_suite_test",
+    corpus = ":corpus_suite",
+    expectations = ":oracle_suite",
+    visibility = ["PUBLIC"],
+)
+
+tidepool_corpus_test(
+    name = "corpus_project_work_candidate_test",
+    corpus = ":corpus_project_work_candidate",
+    expectations = ":oracle_project_work_candidate",
+    visibility = ["PUBLIC"],
+)
+
+tidepool_corpus_test(
+    name = "corpus_agent_watch_await_settled_test",
+    corpus = ":corpus_agent_watch_await_settled",
+    expectations = ":oracle_agent_watch_await_settled",
+    visibility = ["PUBLIC"],
+)
+
+tidepool_corpus_test(
+    name = "corpus_recovered_base_contract_test",
+    corpus = ":corpus_recovered_base_contract",
+    expectations = ":oracle_recovered_base_contract",
+    visibility = ["PUBLIC"],
+)
+
+tidepool_corpus_test(
+    name = "corpus_formatting_execution_contract_test",
+    corpus = ":corpus_formatting_execution_contract",
+    expectations = ":oracle_formatting_execution_contract",
+    visibility = ["PUBLIC"],
+)
+
+tidepool_corpus_test(
+    name = "corpus_formatting_dependency_shadow_test",
+    corpus = ":corpus_formatting_dependency_shadow",
+    expectations = ":oracle_formatting_dependency_shadow",
+    visibility = ["PUBLIC"],
+)
+
+tidepool_corpus_test(
+    name = "corpus_fingerprint_execution_contract_test",
+    corpus = ":corpus_fingerprint_execution_contract",
+    expectations = ":oracle_fingerprint_execution_contract",
+    visibility = ["PUBLIC"],
+)
+
+tidepool_corpus_test(
+    name = "corpus_time_intrinsic_contract_test",
+    corpus = ":corpus_time_intrinsic_contract",
+    expectations = ":oracle_time_intrinsic_contract",
+    visibility = ["PUBLIC"],
+)
+
+tidepool_corpus_test(
+    name = "corpus_containers_contract_test",
+    corpus = ":corpus_containers_contract",
+    expectations = ":oracle_containers_contract",
+    visibility = ["PUBLIC"],
+)
+
+tidepool_corpus_test(
+    name = "corpus_bignum_contract_test",
+    corpus = ":corpus_bignum_contract",
+    expectations = ":oracle_bignum_contract",
+    visibility = ["PUBLIC"],
+)
+
+tidepool_corpus_test(
+    name = "corpus_usertypes_contract_test",
+    corpus = ":corpus_usertypes_contract",
+    expectations = ":oracle_usertypes_contract",
+    visibility = ["PUBLIC"],
+)
+
+tidepool_corpus_test(
+    name = "corpus_text_contract_test",
+    corpus = ":corpus_text_contract",
+    expectations = ":oracle_text_contract",
     visibility = ["PUBLIC"],
 )

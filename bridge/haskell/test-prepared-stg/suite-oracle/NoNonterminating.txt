@@ -1,0 +1,1 @@
+# No permitted nonterminating targets in a complete value contract.
