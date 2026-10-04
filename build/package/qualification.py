@@ -493,6 +493,40 @@ def run_cohort(args) -> int:
     return code
 
 
+class NativeExecution:
+    """One actual host child selected and recorded by the frozen owner."""
+    def __init__(self, path, descriptor, command, process, started_ns, descriptor_sha256):
+        self.path, self.descriptor, self.command = path, descriptor, command
+        self.process, self.started_ns = process, started_ns
+        self.descriptor_sha256 = descriptor_sha256
+
+    def record(self, report: Path) -> None:
+        write_json(report, {
+            "schema": 1, "descriptor_sha256": self.descriptor_sha256, "command": self.command,
+            "source_oid": self.descriptor["source_oid"], "harness_revision": self.descriptor["harness_revision"],
+            "profile": self.descriptor["profile"], "stdlib_mode": self.descriptor["stdlib_mode"],
+            "process_execution_count": 1, "executed_test_count": None,
+            "exit_code": self.process.returncode, "elapsed_ns": time.monotonic_ns() - self.started_ns,
+        })
+
+
+def launch_execution(path: Path, arguments: list[str], *, stdout=None, stderr=None,
+                     cache_root: Path | None = None) -> NativeExecution:
+    """Expose the same verified operation to CLI and asynchronous observers."""
+    path = path.absolute()
+    descriptor = verify(path)
+    if not arguments or any(flag in arguments for flag in ("--help", "-h", "--version", "-V")):
+        raise ValueError("live execution requires an actual package operation")
+    command = [descriptor["programs"]["host"], *arguments]
+    environment = execution_environment(descriptor)
+    if cache_root is not None:
+        environment["XDG_CACHE_HOME"] = str(cache_root.resolve(strict=True))
+    admitted_digest = sha256(path)
+    started = time.monotonic_ns()
+    process = subprocess.Popen(command, env=environment, stdout=stdout, stderr=stderr)
+    return NativeExecution(path, descriptor, command, process, started, admitted_digest)
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -539,19 +573,17 @@ def main(argv=None) -> int:
         elif args.command == "run":
             return run_cohort(args)
         elif args.command == "exec":
-            descriptor = verify(args.descriptor.absolute())
             arguments = args.arguments[1:] if args.arguments[:1] == ["--"] else args.arguments
-            if not arguments or any(flag in arguments for flag in ("--help", "-h", "--version", "-V")):
-                raise ValueError("live execution requires an actual package operation")
-            command = [descriptor["programs"]["host"], *arguments]
-            started = time.monotonic_ns()
-            result = subprocess.run(command, env=execution_environment(descriptor), check=False)
-            write_json(args.report, {"schema": 1, "descriptor_sha256": sha256(args.descriptor), "command": command,
-                                     "source_oid": descriptor["source_oid"], "harness_revision": descriptor["harness_revision"],
-                                     "profile": descriptor["profile"], "stdlib_mode": descriptor["stdlib_mode"],
-                                     "process_execution_count": 1, "executed_test_count": None,
-                                     "exit_code": result.returncode, "elapsed_ns": time.monotonic_ns() - started})
-            return result.returncode
+            execution = launch_execution(args.descriptor, arguments)
+            try:
+                return execution.process.wait()
+            except BaseException:
+                if execution.process.poll() is None:
+                    execution.process.kill()
+                execution.process.wait(timeout=5)
+                raise
+            finally:
+                execution.record(args.report)
         return 0
     except (ValueError, OSError, KeyError, subprocess.SubprocessError) as error:
         print(f"native qualification failed: {error}", file=sys.stderr)

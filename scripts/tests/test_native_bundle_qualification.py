@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import tempfile
 import subprocess
+import sys
 import unittest
 from unittest.mock import patch
 
@@ -15,6 +16,43 @@ SPEC.loader.exec_module(qualification)
 
 
 class NativeQualificationTests(unittest.TestCase):
+    def test_shared_execution_provider_records_actual_process_and_declared_environment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            descriptor_path = root / 'qualification.json'
+            descriptor_path.write_text('retained descriptor bytes')
+            admitted_digest = qualification.sha256(descriptor_path)
+            descriptor = {'programs':{'host':sys.executable}, 'environment':{'TIDEPOOL_EXTRACT':'/frozen/compiler'},
+                          'source_oid':'a' * 40, 'harness_revision':'b' * 40,
+                          'profile':'fast-dev', 'stdlib_mode':'source-backed'}
+            code = "import os,json; print(json.dumps([os.environ['TIDEPOOL_EXTRACT'],os.environ.get('TIDEPOOL_COMPILER_MODULES'),os.environ['XDG_CACHE_HOME']]))"
+            with patch.object(qualification, 'verify', return_value=descriptor), \
+                 patch.dict(os.environ, {'TIDEPOOL_EXTRACT':'/ambient/compiler', 'TIDEPOOL_COMPILER_MODULES':'/ambient/catalog'}):
+                execution = qualification.launch_execution(descriptor_path, ['-c', code],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, cache_root=root)
+                stdout, stderr = execution.process.communicate(timeout=5)
+                descriptor_path.write_text('changed after admission')
+                execution.record(root / 'process.json')
+            self.assertEqual(execution.process.returncode, 0, stderr)
+            self.assertEqual(json.loads(stdout), ['/frozen/compiler', None, str(root)])
+            receipt = json.loads((root / 'process.json').read_text())
+            self.assertEqual(receipt['command'], [sys.executable, '-c', code])
+            self.assertEqual(receipt['process_execution_count'], 1)
+            self.assertEqual(receipt['descriptor_sha256'], admitted_digest)
+            self.assertEqual(receipt['exit_code'], 0)
+
+    def test_shared_execution_provider_refuses_before_launch(self):
+        with patch.object(qualification, 'verify', side_effect=ValueError('changed bundle')), \
+             patch.object(qualification.subprocess, 'Popen') as spawn:
+            with self.assertRaisesRegex(ValueError, 'changed bundle'):
+                qualification.launch_execution(Path('/missing/qualification.json'), ['init'])
+        spawn.assert_not_called()
+        with patch.object(qualification, 'verify', return_value={}), \
+             patch.object(qualification.subprocess, 'Popen') as spawn:
+            with self.assertRaisesRegex(ValueError, 'actual package operation'):
+                qualification.launch_execution(Path('/missing/qualification.json'), ['--help'])
+        spawn.assert_not_called()
+
     def test_workspace_descriptor_must_match_the_actual_committed_gitlink(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory)

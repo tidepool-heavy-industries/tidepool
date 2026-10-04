@@ -31,85 +31,84 @@ class ColdStartObservationTests(unittest.TestCase):
             self.assertFalse(missing["completed"])
             self.assertIn("trace unavailable", missing["failure"])
 
-    def test_runner_does_not_claim_an_unobserved_build_profile(self):
+    def test_unverified_bundle_refuses_before_component_or_startup(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            binary = root / "exomonad"
-            binary.write_bytes(b"\x7fELFfixture")
-            binary.chmod(0o700)
             workspace = root / "workspace"
             workspace.mkdir()
             output = root / "evidence"
-            argv = [str(SCRIPT), "--package-entrypoint", str(binary),
-                    "--binary-path", str(binary), "--workspace", str(workspace),
-                    "--output", str(output), "--cargo-lock", str(binary),
-                    "--harness-checkout", str(root)]
+            argv = [str(SCRIPT), "--descriptor", str(root / "qualification.json"),
+                    "--workspace", str(workspace), "--output", str(output)]
             with mock.patch.object(gate.sys, "argv", argv), \
-                    mock.patch.object(gate, "matched_harness_schema", side_effect=gate.GateError("fixture refusal")), \
+                    mock.patch.object(gate, "FrozenOperator", side_effect=gate.GateError("frozen refusal")), \
                     mock.patch.object(gate, "run_one") as run:
                 self.assertEqual(gate.main(), 1)
             run.assert_not_called()
-            report = json.loads((output / "report.json").read_text())
-            runner = report["runners"]["cold_start"]
-            self.assertNotIn("profile", runner)
-            self.assertEqual(runner["binary_sha256"], gate.sha256(binary))
+            runner = json.loads((output / "report.json").read_text())["runners"]["cold_start"]
+            self.assertNotIn("native_qualification", runner)
+            self.assertEqual(runner["process_execution_count"], 0)
             self.assertEqual(runner["exit_code"], 1)
 
-    def test_schema_authority_uses_pinned_owner_instead_of_current_head(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            subprocess.run(['git', 'init', '--quiet', str(root)], check=True)
-            def commit(version):
-                owner = root / 'crates/harness/src/store/schema.rs'
-                owner.parent.mkdir(parents=True, exist_ok=True)
-                owner.write_text(f'pub const VERSION: u32 = {version};\n')
-                subprocess.run(['git', '-C', str(root), 'add', '.'], check=True)
-                subprocess.run(['git', '-C', str(root), '-c', 'user.name=Fixture', '-c',
-                                'user.email=fixture@example.invalid', 'commit', '--quiet', '-m', 'schema'], check=True)
-                return subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True).strip()
-            pinned = commit(8)
-            commit(9)
-            lock = root / 'matched.lock'
-            lock.write_text('[[package]]\nname="harness"\nsource="git+https://github.com/tidepool-heavy-industries/exomonad-harness.git?rev=' + pinned + '#' + pinned + '"\n')
-            authority = gate.matched_harness_schema(lock, root)
-            self.assertEqual(authority['version'], 8)
-            self.assertEqual(authority['revision'], pinned)
-            self.assertEqual(authority['owner_bytes'], b'pub const VERSION: u32 = 8;\n')
-            self.assertEqual(authority['lock_sha256'], gate.sha256(lock))
-            # Dirty/newer owner files cannot silently change the matched contract.
-            (root / 'crates/harness/src/store/schema.rs').write_text('invalid current owner')
-            self.assertEqual(gate.matched_harness_schema(lock, root)['version'], 8)
+    def schema_operator(self):
+        operator = gate.FrozenOperator.__new__(gate.FrozenOperator)
+        operator.descriptor = {"harness_revision": "a" * 40}
+        return operator
 
-    def test_schema_authority_refuses_missing_ambiguous_or_nonexact_pin(self):
+    def test_schema_authority_comes_from_frozen_compiled_component(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            lock = root / 'lock'
-            for content in ('', '[[package]]\nname="harness"\nsource="path:local"\n',
-                            '[[package]]\nname="harness"\n[[package]]\nname="harness"\n'):
-                lock.write_text(content)
-                with self.assertRaises(gate.GateError):
-                    gate.matched_harness_schema(lock, root)
+            output = Path(temporary)
+            operator = self.schema_operator()
+            def component(arguments, report):
+                self.assertEqual(arguments, ["harness-store-schema"])
+                report.write_text('{"exit_code":0,"command":["/frozen/host","harness-store-schema"]}')
+                return subprocess.CompletedProcess(arguments, 0, '{"version":12}\n', '')
+            with mock.patch.object(operator, "run", side_effect=component):
+                authority = operator.store_schema(output)
+            self.assertEqual(authority["version"], 12)
+            self.assertEqual(authority["revision"], "a" * 40)
+            self.assertEqual(authority["process_report_sha256"], gate.sha256(output / "store-schema.process.json"))
+            self.assertEqual(json.loads((output / "store-schema.json").read_text()), {"version": 12})
 
-    def test_schema_authority_refuses_unavailable_or_ambiguous_owner(self):
+    def test_schema_authority_refuses_malformed_component_metadata(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            operator = self.schema_operator()
+            for content in ('not-json', '{"version":true}', '{"version":0}',
+                            '{"version":4294967296}', '{"version":12,"extra":1}'):
+                with self.subTest(content=content), mock.patch.object(operator, "run", return_value=
+                        subprocess.CompletedProcess([], 0, content, '')):
+                    with self.assertRaises(gate.GateError):
+                        operator.store_schema(Path(temporary))
+            with mock.patch.object(operator, "run", return_value=subprocess.CompletedProcess([], 9, '{"version":12}', '')):
+                with self.assertRaisesRegex(gate.GateError, 'could not report'):
+                    operator.store_schema(Path(temporary))
+
+    def test_main_attempts_exactly_five_startups_after_compiled_schema_admission(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            subprocess.run(['git', 'init', '--quiet', str(root)], check=True)
-            owner = root / 'crates/harness/src/store/schema.rs'
-            owner.parent.mkdir(parents=True)
-            owner.write_text('pub const VERSION: u32 = 8;\npub const VERSION: u32 = 9;\n')
-            subprocess.run(['git', '-C', str(root), 'add', '.'], check=True)
-            subprocess.run(['git', '-C', str(root), '-c', 'user.name=Fixture', '-c',
-                            'user.email=fixture@example.invalid', 'commit', '--quiet', '-m', 'ambiguous'], check=True)
-            revision = subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True).strip()
-            lock = root / 'matched.lock'
-            def pin(value):
-                lock.write_text('[[package]]\nname="harness"\nsource="git+https://github.com/tidepool-heavy-industries/exomonad-harness.git?rev=' + value + '#' + value + '"\n')
-            pin(revision)
-            with self.assertRaisesRegex(gate.GateError, 'version declaration'):
-                gate.matched_harness_schema(lock, root)
-            pin('0' * 40)
-            with self.assertRaisesRegex(gate.GateError, 'owner is unavailable'):
-                gate.matched_harness_schema(lock, root)
+            binary = root / "host"
+            binary.write_bytes(b'actual frozen bytes')
+            workspace = root / "workspace"
+            workspace.mkdir()
+            output = root / "evidence"
+            operator = mock.Mock()
+            operator.provenance.return_value = {'profile':'fast-dev', 'descriptor':str(root / 'qualification.json')}
+            operator.descriptor = {'programs':{'host':str(binary), 'host_elf':str(binary)}}
+            operator.store_schema.return_value = {'version':12}
+            def startup(index, args, output, report):
+                self.assertEqual(args.harness_store_schema, 12)
+                report['runners']['cold_start']['process_execution_count'] += 1
+                return {'index':index, 'completed':True}
+            argv = [str(SCRIPT), '--descriptor', str(root / 'qualification.json'),
+                    '--workspace', str(workspace), '--output', str(output)]
+            with mock.patch.object(gate.sys, 'argv', argv), \
+                 mock.patch.object(gate, 'FrozenOperator', return_value=operator), \
+                 mock.patch.object(gate, 'embedded_settings'), \
+                 mock.patch.object(gate, 'run_one', side_effect=startup) as run:
+                self.assertEqual(gate.main(), 0)
+            self.assertEqual([call.args[0] for call in run.call_args_list], list(range(5)))
+            retained = json.loads((output / 'report.json').read_text())
+            self.assertEqual(retained['runners']['cold_start']['process_execution_count'], 5)
+            self.assertEqual(retained['runners']['cold_start']['native_qualification']['profile'], 'fast-dev')
 
     def test_read_only_store_refuses_schema_other_than_projected_owner(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -283,7 +282,7 @@ class ColdStartObservationTests(unittest.TestCase):
             output.mkdir()
             args = argparse.Namespace(
                 harness_store_schema=8,
-                package_entrypoint=Path("/frozen/package/bin/exomonad"),
+                operator=mock.Mock(),
                 workspace=workspace,
             )
             report = {"samples": [], "runners": {"cold_start": {"process_execution_count": 0}}}
@@ -296,12 +295,12 @@ class ColdStartObservationTests(unittest.TestCase):
                 pointer = workspace / ".exomonad" / "sessions" / session / "run-id"
                 pointer.parent.mkdir(parents=True)
                 pointer.write_text("run-partial-17\n")
-                return process
+                return mock.Mock(process=process, command=argv, started_ns=gate.time.monotonic_ns())
 
-            with mock.patch.object(gate.subprocess, "Popen", side_effect=partial_init), \
+            with mock.patch.object(args.operator, "launch", side_effect=partial_init), \
                     mock.patch.object(gate, "state_root", return_value=root / "state"), \
                     mock.patch.object(gate, "stop_run", return_value=(
-                        [str(args.package_entrypoint), "stop", "--run-id", "run-partial-17",
+                        ["/frozen/host", "stop", "--run-id", "run-partial-17",
                          "--session", "placeholder"], 0)) as stop:
                 with self.assertRaises(gate.GateError):
                     gate.run_one(0, args, output, report)
@@ -316,6 +315,69 @@ class ColdStartObservationTests(unittest.TestCase):
             self.assertEqual(sample["stop_exit_code"], 0)
             self.assertIsNone(sample["provider_requests"])
             self.assertFalse(sample["provider_request_evidence"]["verified"])
+
+    def test_startup_observation_retains_real_store_and_rejects_provider_attempts(self):
+        for attempts in (0, 1):
+            with self.subTest(attempts=attempts), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                workspace, output = root / 'workspace', root / 'output'
+                workspace.mkdir()
+                output.mkdir()
+                binary, compiler, worker = root / 'host', root / 'compiler', root / 'worker'
+                for path in (binary, compiler, worker):
+                    path.write_text(path.name)
+                run_root = root / 'state/tidepool/exomonad/runs/observed-run'
+                (run_root / 'harness').mkdir(parents=True)
+                connection = sqlite3.connect(run_root / 'harness/store.sqlite')
+                with connection:
+                    connection.executescript('CREATE TABLE schema_version(version INTEGER NOT NULL);'
+                        'INSERT INTO schema_version VALUES(12); CREATE TABLE decisions(hook TEXT NOT NULL);'
+                        'CREATE TABLE events(kind TEXT NOT NULL);')
+                    if attempts:
+                        connection.execute("INSERT INTO decisions VALUES('before-request')")
+                connection.close()
+                logs = workspace / '.exomonad/logs'
+                logs.mkdir(parents=True)
+                boot = {'message':'compiler daemon ready', 'run_id':'observed-run', 'daemon_epoch':'epoch',
+                        'daemon_pid':123, 'producer':'producer', 'executable':str(compiler), 'worker':str(worker)}
+                (logs / 'observed-run-compiler.jsonl').write_text(json.dumps({'fields':boot}) + '\n')
+                operator = mock.Mock()
+                operator.environment = {'TIDEPOOL_EXTRACT':str(compiler), 'TIDEPOOL_EXTRACT_WORKER':str(worker)}
+                process = mock.Mock(returncode=0)
+                process.poll.return_value = 0
+                def launch(arguments, **kwargs):
+                    session = arguments[arguments.index('--session') + 1]
+                    pointer = workspace / '.exomonad/sessions' / session / 'run-id'
+                    pointer.parent.mkdir(parents=True)
+                    pointer.write_text('observed-run\n')
+                    (run_root / 'status.json').write_text(json.dumps({'run_id':'observed-run', 'session':session,
+                        'workspace':str(workspace), 'phase':{'state':'embedded_ready'}}))
+                    return mock.Mock(command=[str(binary), *arguments], process=process, started_ns=gate.time.monotonic_ns())
+                operator.launch.side_effect = launch
+                args = argparse.Namespace(operator=operator, workspace=workspace, harness_store_schema=12)
+                report = {'samples':[], 'runners':{'cold_start':{'process_execution_count':0, 'binary_sha256':gate.sha256(binary)}}}
+                with mock.patch.object(gate, 'state_root', return_value=root / 'state'), \
+                     mock.patch.object(gate, 'observe_ready', return_value=({}, {})) as browser, \
+                     mock.patch.object(gate, 'host_pid', return_value=321), \
+                     mock.patch.object(gate, 'retained_host_executable', return_value=binary), \
+                     mock.patch.object(gate, 'live_executable_sha256', return_value=gate.sha256(binary)), \
+                     mock.patch.object(gate, 'live_compiler_identity', return_value={
+                         'compiler_executable_sha256':gate.sha256(compiler), 'compiler_worker_sha256':gate.sha256(worker)}), \
+                     mock.patch.object(gate, 'stop_run', return_value=(['frozen-host', 'stop'], 0)) as stop:
+                    if attempts:
+                        with self.assertRaises(gate.GateError):
+                            gate.run_one(0, args, output, report)
+                        sample = report['samples'][0]
+                        self.assertFalse(sample['completed'])
+                    else:
+                        sample = gate.run_one(0, args, output, report)
+                        self.assertTrue(sample['completed'])
+                    browser.assert_called_once()
+                    stop.assert_called_once()
+                self.assertEqual(sample['provider_requests'], attempts)
+                self.assertTrue(sample['provider_request_evidence']['verified'])
+                self.assertEqual(report['runners']['cold_start']['process_execution_count'], 1)
+                self.assertEqual(sample['daemon_trace_sha256'], gate.sha256(logs / 'observed-run-compiler.jsonl'))
 
     def test_live_executable_hash_reads_the_running_process_inode(self):
         executable = Path(os.readlink("/proc/self/exe")).resolve(strict=True)
@@ -376,11 +438,11 @@ class ColdStartObservationTests(unittest.TestCase):
             output.mkdir()
             args = argparse.Namespace(
                 harness_store_schema=8,
-                package_entrypoint=Path("/frozen/package/bin/exomonad"),
+                operator=mock.Mock(),
                 workspace=workspace,
             )
             report = {"samples": [], "runners": {"cold_start": {"process_execution_count": 0}}}
-            with mock.patch.object(gate.subprocess, "Popen", side_effect=OSError("exec failed")):
+            with mock.patch.object(args.operator, "launch", side_effect=OSError("exec failed")):
                 with self.assertRaises(gate.GateError):
                     gate.run_one(0, args, output, report)
             self.assertEqual(report["runners"]["cold_start"]["process_execution_count"], 0)

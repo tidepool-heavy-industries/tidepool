@@ -144,6 +144,45 @@ def worker_build_evidence(manifest, problems):
         problems.append(f'worker optimized build evidence: {error}')
 
 
+def frozen_runner_evidence(manifest, runner):
+    reference = runner.get("native_qualification")
+    if not isinstance(reference, dict):
+        raise ValueError("native runner has no frozen qualification reference")
+    operator = COLD_START_GATE.FrozenOperator(Path(reference["descriptor"]))
+    if operator.provenance() != reference:
+        raise ValueError("native runner differs from the frozen qualification owner")
+    if reference["source_oid"] != manifest.get("source_oid"):
+        raise ValueError("native runner source differs from the measured manifest")
+    if reference["profile"] != "production":
+        raise ValueError("performance acceptance requires the declared native production profile")
+    selected = operator.descriptor["programs"]
+    if (runner.get("binary_path") != selected["host_elf"]
+            or runner.get("binary_sha256") != file_sha256(Path(selected["host_elf"]))
+            or runner.get("package_entrypoint") != selected["host"]):
+        raise ValueError("cold runner does not match the frozen host component")
+    return operator
+
+
+def frozen_store_schema_evidence(operator, authority):
+    if not isinstance(authority, dict) or authority.get("revision") != operator.descriptor["harness_revision"]:
+        raise ValueError("Store schema differs from the frozen Harness component")
+    for path_key, hash_key in (("metadata", "metadata_sha256"), ("process_report", "process_report_sha256")):
+        if not retained_digest(authority.get(path_key), authority.get(hash_key)):
+            raise ValueError("compiled Store schema evidence is absent or changed")
+    metadata = json.loads(Path(authority["metadata"]).read_text())
+    receipt = json.loads(Path(authority["process_report"]).read_text())
+    if metadata != {"version": authority.get("version")} or type(metadata.get("version")) is not int or not 0 < metadata["version"] <= 0xffffffff:
+        raise ValueError("compiled Store schema metadata is malformed")
+    if (receipt.get("command") != [operator.descriptor["programs"]["host"], "harness-store-schema"]
+            or receipt.get("descriptor_sha256") != operator.provenance()["descriptor_sha256"]
+            or receipt.get("source_oid") != operator.descriptor["source_oid"]
+            or receipt.get("harness_revision") != operator.descriptor["harness_revision"]
+            or receipt.get("profile") != operator.descriptor["profile"]
+            or receipt.get("stdlib_mode") != operator.descriptor["stdlib_mode"]
+            or receipt.get("exit_code") != 0 or receipt.get("process_execution_count") != 1):
+        raise ValueError("Store schema was not reported by the actual frozen host component")
+
+
 def runner_evidence(manifest, kind, problems):
     runners = manifest.get("runners", {})
     runner = runners.get(kind, {}) if isinstance(runners, dict) else {}
@@ -156,7 +195,13 @@ def runner_evidence(manifest, kind, problems):
         problems.append(f"runner {kind} has no exact argv array")
     if runner.get("exit_code") != 0:
         problems.append(f"runner {kind} is not a successful execution")
-    rust_build_evidence(manifest, runner, kind, problems)
+    if kind == "cold_start" and "native_qualification" in runner:
+        try:
+            frozen_runner_evidence(manifest, runner)
+        except (COLD_START_GATE.GateError, OSError, ValueError, TypeError, AttributeError, KeyError) as error:
+            problems.append(f"cold native qualification evidence: {error}")
+    else:
+        rust_build_evidence(manifest, runner, kind, problems)
     expected, executed = runner.get("expected_test_count"), runner.get("executed_test_count")
     minimum = 0 if kind == "cold_start" else 1
     if type(expected) is not int or expected < minimum or type(executed) is not int or expected != executed:
@@ -674,7 +719,7 @@ def analyze_durable(rows):
 def package_cold_samples(path, manifest):
     """Adapt the package owner's retained report without inventing provenance."""
     cold_report = json.loads(path.read_text())
-    if cold_report.get("schema") != 2 or cold_report.get("failure") is not None:
+    if cold_report.get("schema") not in (2, 3) or cold_report.get("failure") is not None:
         raise ValueError("package cold-start report is incomplete or unsupported")
     runners = cold_report.get("runners")
     cold_runner = runners.get("cold_start") if isinstance(runners, dict) else None
@@ -695,7 +740,14 @@ def package_cold_samples(path, manifest):
         if not retained_digest(cold_runner.get(path_key), cold_runner.get(digest_key)):
             raise ValueError(f"package cold-start {path_key} is not retained with its recorded digest")
     current = manifest.get("runners", {}).get("cold_start", {})
-    if not isinstance(current, dict) or not current.get("rust_build"):
+    if cold_report["schema"] == 3:
+        operator = frozen_runner_evidence(manifest, cold_runner)
+        frozen_store_schema_evidence(operator, cold_runner.get("harness_store_schema"))
+        if not isinstance(current, dict):
+            raise ValueError("manifest cold runner is malformed")
+        if "native_qualification" in current and current["native_qualification"] != cold_runner["native_qualification"]:
+            raise ValueError("manifest cold runner differs from the frozen qualification")
+    elif not isinstance(current, dict) or not current.get("rust_build"):
         raise ValueError("manifest must supply the actual cold runner Rust build packet")
     for key in ("binary_path", "binary_sha256", "package_entrypoint", "package_entrypoint_sha256"):
         if key in current and current.get(key) != cold_runner.get(key):

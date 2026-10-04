@@ -14,10 +14,10 @@ import argparse
 import base64
 import hashlib
 import http.client
+import importlib.util
 import ipaddress
 import json
 import os
-import re
 from pathlib import Path
 import secrets
 import socket
@@ -118,46 +118,59 @@ def read_session_run_id(workspace: Path, session: str) -> str | None:
     return run_id
 
 
-def matched_harness_schema(lock_path: Path, checkout: Path) -> dict:
-    """Project schema authority from the exact Harness revision in Cargo.lock.
+class FrozenOperator:
+    """Use the frozen package's existing execution owner for every host operation."""
+    def __init__(self, descriptor: Path):
+        self.path = descriptor.resolve(strict=True)
+        owner_path = self.path.with_name("qualification.py")
+        spec = importlib.util.spec_from_file_location("frozen_native_qualification", owner_path)
+        self.owner = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.owner)
+        self.descriptor = self.owner.verify(self.path)
+        if not callable(getattr(self.owner, "launch_execution", None)):
+            raise GateError("frozen bundle lacks the current native operation provider; freeze the owning native build")
+        self.environment = self.owner.execution_environment(self.descriptor)
 
-    This is source/build-contract evidence. The delivery packet must separately
-    establish that the packaged ELF was built with this same lockfile.
-    """
-    if lock_path.stat().st_size > 4 * 1024 * 1024:
-        raise GateError("matched Cargo.lock exceeds the provenance bound")
-    lock_bytes = lock_path.read_bytes()
-    lock = tomllib.loads(lock_bytes.decode())
-    packages = [row for row in lock.get("package", []) if row.get("name") == "harness"]
-    if len(packages) != 1:
-        raise GateError("matched Cargo.lock must contain exactly one Harness package")
-    source = packages[0].get("source", "")
-    match = re.fullmatch(
-        r"git\+https://github\.com/tidepool-heavy-industries/exomonad-harness\.git\?rev=([0-9a-f]{40})#([0-9a-f]{40})",
-        source,
-    )
-    if not match or match[1] != match[2]:
-        raise GateError("Harness source must have one exact matched revision pin")
-    revision = match[1]
-    owner_path = "crates/harness/src/store/schema.rs"
-    try:
-        owner = subprocess.run(
-            ["git", "-C", str(checkout), "show", f"{revision}:{owner_path}"],
-            check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10,
-        ).stdout
-    except subprocess.SubprocessError as error:
-        raise GateError("matched Harness schema owner is unavailable") from error
-    if len(owner) > 65536:
-        raise GateError("Harness schema owner exceeds the provenance bound")
-    declarations = re.findall(rb"(?m)^pub const VERSION: u32 = ([1-9][0-9]{0,4});$", owner)
-    if len(declarations) != 1:
-        raise GateError("Harness schema owner lacks one supported version declaration")
-    return {
-        "version": int(declarations[0]), "revision": revision, "source": source,
-        "owner_path": owner_path, "owner_sha256": hashlib.sha256(owner).hexdigest(),
-        "lock_sha256": hashlib.sha256(lock_bytes).hexdigest(),
-        "owner_bytes": owner, "lock_bytes": lock_bytes,
-    }
+    def launch(self, arguments, *, stdout=None, stderr=None, cache_root=None):
+        return self.owner.launch_execution(self.path, arguments, stdout=stdout, stderr=stderr,
+                                           cache_root=cache_root)
+
+    def run(self, arguments, report: Path, timeout=30):
+        execution = self.launch(arguments, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            stdout, stderr = execution.process.communicate(timeout=timeout)
+        except BaseException:
+            if execution.process.poll() is None:
+                execution.process.kill()
+            execution.process.wait(timeout=5)
+            raise
+        finally:
+            execution.record(report)
+        return subprocess.CompletedProcess(execution.command, execution.process.returncode,
+            stdout.decode(errors="replace"), stderr.decode(errors="replace"))
+
+    def store_schema(self, output: Path):
+        receipt = output / "store-schema.process.json"
+        result = self.run(["harness-store-schema"], receipt)
+        if result.returncode != 0:
+            raise GateError("frozen host could not report its compiled Store schema")
+        try:
+            schema = json.loads(result.stdout)
+        except json.JSONDecodeError as error:
+            raise GateError("frozen host returned malformed Store schema metadata") from error
+        if (not isinstance(schema, dict) or set(schema) != {"version"}
+                or type(schema["version"]) is not int or not 0 < schema["version"] <= 0xffffffff):
+            raise GateError("frozen host returned unsupported Store schema metadata")
+        metadata = output / "store-schema.json"
+        metadata.write_text(json.dumps(schema) + "\n")
+        return {**schema, "revision": self.descriptor["harness_revision"],
+                "metadata": str(metadata), "metadata_sha256": sha256(metadata),
+                "process_report": str(receipt), "process_report_sha256": sha256(receipt)}
+
+    def provenance(self):
+        return {"descriptor": str(self.path), "descriptor_sha256": sha256(self.path),
+                **{key: self.descriptor[key] for key in (
+                    "source_oid", "harness_revision", "profile", "stdlib_mode")}}
 
 
 def provider_store_evidence(store_path: Path, expected_schema: int) -> dict:
@@ -229,8 +242,6 @@ def embedded_settings(workspace: Path) -> tuple[str, str, str]:
         origin_scheme = embedded.get("public_origin_scheme", "https")
     except (OSError, KeyError, TypeError, tomllib.TOMLDecodeError) as error:
         raise GateError(f"cannot read embedded launch settings from {config_path}") from error
-    if config.get("launch", {}).get("backend") != "embedded":
-        raise GateError("frozen workspace must select the embedded backend")
     if not isinstance(listen, str):
         raise GateError("embedded launch listen address is malformed")
     if origin_scheme not in ("http", "https"):
@@ -485,10 +496,10 @@ def reap_init_observer(process: subprocess.Popen, failure: str | None) -> tuple[
             raise GateError("could not reap packaged init observer child") from error
 
 
-def stop_run(entrypoint: Path, run_id: str, session: str, output: Path) -> tuple[list[str], int]:
-    argv = [str(entrypoint), "stop", "--run-id", run_id, "--session", session]
-    completed = subprocess.run(argv, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                               timeout=30, check=False)
+def stop_run(operator: FrozenOperator, run_id: str, session: str, output: Path) -> tuple[list[str], int]:
+    completed = operator.run(["stop", "--run-id", run_id, "--session", session],
+                             output / "stop.process.json")
+    argv = completed.args
     (output / "stop.stdout").write_text(completed.stdout)
     (output / "stop.stderr").write_text(completed.stderr)
     return argv, completed.returncode
@@ -503,8 +514,8 @@ def write_report(path: Path, report: dict) -> None:
 
 def run_one(index: int, args, output: Path, report: dict) -> dict:
     session = f"cold-start-{index}-{uuid.uuid4().hex[:12]}"
-    argv = [str(args.package_entrypoint), "init", "--workspace", str(args.workspace),
-            "--session", session, "--no-attach"]
+    arguments = ["init", "--workspace", str(args.workspace), "--session", session, "--no-attach"]
+    argv = None
     artifact = output / f"sample-{index}"
     artifact.mkdir()
     cache_path = artifact / "user-cache"
@@ -514,6 +525,7 @@ def run_one(index: int, args, output: Path, report: dict) -> dict:
     deadline = started_ns + int(MAX_SAMPLE_SECONDS * 1_000_000_000)
     run_id = None
     process = None
+    execution = None
     status = None
     settled_ns = None
     pid = None
@@ -527,9 +539,10 @@ def run_one(index: int, args, output: Path, report: dict) -> dict:
     failure = None
     with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
         try:
-            child_environment = dict(os.environ)
-            child_environment["XDG_CACHE_HOME"] = str(cache_path)
-            process = subprocess.Popen(argv, stdout=stdout, stderr=stderr, env=child_environment)
+            execution = args.operator.launch(arguments, stdout=stdout, stderr=stderr, cache_root=cache_path)
+            process, argv = execution.process, execution.command
+            started_ns = execution.started_ns
+            deadline = started_ns + int(MAX_SAMPLE_SECONDS * 1_000_000_000)
             report["runners"]["cold_start"]["process_execution_count"] += 1
             while time.monotonic_ns() < deadline:
                 try:
@@ -553,9 +566,16 @@ def run_one(index: int, args, output: Path, report: dict) -> dict:
                             run_root = status_path.parent
                             host_path = retained_host_executable(run_root, pid)
                             host_sha256 = live_executable_sha256(pid, host_path)
+                            if host_sha256 != report["runners"]["cold_start"]["binary_sha256"]:
+                                raise GateError("live host differs from the frozen native host")
                             trace_path = args.workspace / ".exomonad" / "logs" / f"{run_id}-compiler.jsonl"
                             daemon_boot = compiler_boot(trace_path, run_id)
                             live_compiler = live_compiler_identity(daemon_boot)
+                            for selected_key, live_key in (
+                                    ("TIDEPOOL_EXTRACT", "compiler_executable_sha256"),
+                                    ("TIDEPOOL_EXTRACT_WORKER", "compiler_worker_sha256")):
+                                if live_compiler[live_key] != sha256(Path(args.operator.environment[selected_key])):
+                                    raise GateError("live compiler differs from the frozen native compiler")
                             init_exit = process.poll()
                             if init_exit not in (None, 0):
                                 raise GateError(f"packaged init exited with status {init_exit}")
@@ -572,13 +592,20 @@ def run_one(index: int, args, output: Path, report: dict) -> dict:
                 raise GateError(f"cold start exceeded {MAX_SAMPLE_SECONDS}s")
             if settled_ns is None:
                 raise GateError("cold start had no readiness timestamp")
-        except Exception as error:  # retain exact failure and still delegate cleanup
+        except (Exception, KeyboardInterrupt) as error:  # retain failure and delegate cleanup
             if settled_ns is None:
                 settled_ns = time.monotonic_ns()
             failure = f"{type(error).__name__}: {error}"
         finally:
             if process is not None:
-                init_exit, failure = reap_init_observer(process, failure)
+                try:
+                    init_exit, failure = reap_init_observer(process, failure)
+                except (GateError, OSError, subprocess.SubprocessError) as error:
+                    failure = failure or f"init observer cleanup failed: {error}"
+                try:
+                    execution.record(artifact / "init.process.json")
+                except OSError as error:
+                    failure = failure or f"init process receipt unavailable: {error}"
 
     # A failed init can write run-id and exit between polling iterations. Recover
     # that durable identity before deciding whether the package must retire a run.
@@ -629,14 +656,13 @@ def run_one(index: int, args, output: Path, report: dict) -> dict:
         sample["status_path"] = str(run_root / "status.json")
     if run_id:
         try:
-            stop_argv, stop_exit = stop_run(args.package_entrypoint, run_id, session, artifact)
+            stop_argv, stop_exit = stop_run(args.operator, run_id, session, artifact)
             sample["stop_command"] = stop_argv
             sample["stop_exit_code"] = stop_exit
             if stop_exit != 0:
                 sample["failure"] = sample["failure"] or f"packaged exomonad stop exited with status {stop_exit}"
-        except (OSError, subprocess.SubprocessError) as error:
-            sample["stop_command"] = [str(args.package_entrypoint), "stop", "--run-id", run_id,
-                                      "--session", session]
+        except (GateError, OSError, ValueError, subprocess.SubprocessError) as error:
+            sample["stop_command"] = None
             sample["stop_exit_code"] = None
             sample["failure"] = sample["failure"] or f"packaged exomonad stop failed: {error}"
         store_path = run_root / "harness" / "store.sqlite"
@@ -671,53 +697,34 @@ def run_one(index: int, args, output: Path, report: dict) -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--package-entrypoint", required=True, type=Path)
-    parser.add_argument("--binary-path", required=True, type=Path)
+    parser.add_argument("--descriptor", required=True, type=Path)
     parser.add_argument("--workspace", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--cargo-lock", required=True, type=Path, help="lockfile used for the packaged ELF build")
-    parser.add_argument("--harness-checkout", required=True, type=Path, help="Git repository containing that exact Harness source revision")
-    parser.add_argument("--compiler-producer", help="expected compiler producer identity")
     args = parser.parse_args()
-    args.package_entrypoint = args.package_entrypoint.resolve(strict=True)
-    args.binary_path = args.binary_path.resolve(strict=True)
     args.workspace = args.workspace.resolve(strict=True)
     args.output = args.output.resolve()
-    if not args.package_entrypoint.is_file() or not os.access(args.package_entrypoint, os.X_OK):
-        parser.error("--package-entrypoint must be an executable file")
-    if not args.binary_path.is_file() or not os.access(args.binary_path, os.X_OK):
-        parser.error("--binary-path must be the executable packaged ELF")
-    with args.binary_path.open("rb") as binary:
-        if binary.read(4) != b"\x7fELF":
-            parser.error("--binary-path does not contain an ELF executable")
     args.output.mkdir(parents=True, exist_ok=False, mode=0o700)
-    runner = {
-        "binary_path": str(args.binary_path),
-        "binary_sha256": sha256(args.binary_path),
-        "package_entrypoint": str(args.package_entrypoint),
-        "package_entrypoint_sha256": sha256(args.package_entrypoint),
-        "command": [sys.executable, str(Path(__file__).resolve()), *sys.argv[1:]],
-        "exit_code": None,
-        "expected_test_count": 0,
-        "executed_test_count": 0,
-        "process_execution_count": 0,
-    }
-    report = {"schema": 2, "runners": {"cold_start": runner}, "samples": [], "failure": None}
+    runner = {"command": [sys.executable, str(Path(__file__).resolve()), *sys.argv[1:]],
+              "exit_code": None, "expected_test_count": 0, "executed_test_count": 0,
+              "process_execution_count": 0}
+    report = {"schema": 3, "runners": {"cold_start": runner}, "samples": [], "failure": None}
     report_path = args.output / "report.json"
     write_report(report_path, report)
     try:
-        schema = matched_harness_schema(args.cargo_lock.resolve(strict=True), args.harness_checkout.resolve(strict=True))
-        args.harness_store_schema = schema["version"]
-        (args.output / "matched-harness-schema.rs").write_bytes(schema.pop("owner_bytes"))
-        (args.output / "matched-Cargo.lock").write_bytes(schema.pop("lock_bytes"))
-        runner["harness_store_schema"] = schema
+        args.operator = FrozenOperator(args.descriptor)
+        runner["native_qualification"] = args.operator.provenance()
+        selected = args.operator.descriptor["programs"]
+        runner.update(binary_path=selected["host_elf"], binary_sha256=sha256(Path(selected["host_elf"])),
+                      package_entrypoint=selected["host"], package_entrypoint_sha256=sha256(Path(selected["host"])))
+        # Validate the required native loopback fixture before starting any host.
+        embedded_settings(args.workspace)
+        runner["harness_store_schema"] = args.operator.store_schema(args.output)
+        args.harness_store_schema = runner["harness_store_schema"]["version"]
         write_report(report_path, report)
         for index in range(SAMPLE_COUNT):
             sample = run_one(index, args, args.output, report)
             report["samples"].append(sample)
             write_report(report_path, report)
-            if args.compiler_producer and sample.get("compiler_producer") != args.compiler_producer:
-                raise GateError(f"sample {index} compiler producer did not match the package pin")
         runner["exit_code"] = 0
         write_report(report_path, report)
         return 0

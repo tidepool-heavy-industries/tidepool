@@ -12,6 +12,9 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Inspect the Store contract compiled into this exact host.
+    #[command(hide = true)]
+    HarnessStoreSchema,
     /// Connect an Exomonad credential record to a ChatGPT plan.
     Auth {
         #[command(subcommand)]
@@ -248,6 +251,13 @@ fn main() {
 
 fn try_main() -> Result<(), Box<dyn std::error::Error>> {
     let command = Cli::parse().command;
+    if let Command::HarnessStoreSchema = command {
+        println!(
+            "{}",
+            serde_json::json!({"version": harness::store::VERSION})
+        );
+        return Ok(());
+    }
     if let Command::MountHelper = command {
         return Ok(());
     }
@@ -285,6 +295,7 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
     match command {
+        Command::HarnessStoreSchema => unreachable!("handled before runtime construction"),
         Command::Auth {
             action:
                 AuthCommand::Login {
@@ -582,24 +593,28 @@ mod tests {
                 ..
             }
         ));
-        assert!(Cli::try_parse_from([
-            "exomonad",
-            "run-map",
-            "/run",
-            "--since",
-            "15m",
-            "--from-unix-ms",
-            "1"
-        ])
-        .is_err());
-        assert!(Cli::try_parse_from([
-            "exomonad",
-            "run-map",
-            "/sanitized/run",
-            "--from-unix-ms",
-            "invalid"
-        ])
-        .is_err());
+        assert!(
+            Cli::try_parse_from([
+                "exomonad",
+                "run-map",
+                "/run",
+                "--since",
+                "15m",
+                "--from-unix-ms",
+                "1"
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "exomonad",
+                "run-map",
+                "/sanitized/run",
+                "--from-unix-ms",
+                "invalid"
+            ])
+            .is_err()
+        );
     }
 
     #[test]

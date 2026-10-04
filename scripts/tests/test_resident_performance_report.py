@@ -7,7 +7,7 @@ import json
 import io
 import sqlite3
 import tarfile
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 SPEC = importlib.util.spec_from_file_location(
     "resident_performance", Path(__file__).parents[1] / "resident-performance-report.py"
@@ -393,6 +393,63 @@ class ResidentPerformanceReport(unittest.TestCase):
             "schema": 2, "failure": None, "runners": {"cold_start": runner}, "samples": rows,
         }))
         return report_path, rows
+
+    def native_cold_fixture(self, manifest, samples, root):
+        path, rows = self.package_cold_report_fixture(manifest, samples, root)
+        document = json.loads(path.read_text())
+        runner = document['runners']['cold_start']
+        provenance = {'descriptor':str(root / 'qualification.json'), 'descriptor_sha256':'f' * 64,
+                      'source_oid':manifest['source_oid'], 'harness_revision':'a' * 40,
+                      'profile':'production', 'stdlib_mode':'source-backed'}
+        operator = Mock()
+        operator.provenance.return_value = provenance
+        operator.descriptor = {**provenance, 'programs':{'host':runner['package_entrypoint'], 'host_elf':runner['binary_path']}}
+        metadata = root / 'store-schema.json'
+        metadata.write_text('{"version":8}')
+        receipt = root / 'schema-process.json'
+        receipt.write_text(json.dumps({**provenance, 'command':[runner['package_entrypoint'], 'harness-store-schema'],
+                                      'exit_code':0, 'process_execution_count':1}))
+        runner['native_qualification'] = provenance
+        runner['harness_store_schema'] = {'version':8, 'revision':'a' * 40,
+            'metadata':str(metadata), 'metadata_sha256':REPORT.file_sha256(metadata),
+            'process_report':str(receipt), 'process_report_sha256':REPORT.file_sha256(receipt)}
+        runner.pop('rust_build', None)
+        manifest['runners']['cold_start'].pop('rust_build', None)
+        document['schema'] = 3
+        path.write_text(json.dumps(document))
+        return path, operator
+
+    def test_native_cold_report_uses_frozen_owner_and_compiled_schema_without_cargo_packet(self):
+        samples, _, manifest = self.fixture()
+        with tempfile.TemporaryDirectory() as temporary:
+            path, operator = self.native_cold_fixture(manifest, samples, Path(temporary))
+            with patch.object(REPORT.COLD_START_GATE, 'FrozenOperator', return_value=operator):
+                rows, runner, traces = REPORT.package_cold_samples(path, manifest)
+                problems = []
+                REPORT.runner_evidence({'source_oid':manifest['source_oid'], 'runners':{'cold_start':runner}}, 'cold_start', problems)
+            self.assertEqual(problems, [])
+            self.assertEqual(len(rows), 5)
+            self.assertEqual(len(traces), 5)
+            self.assertNotIn('rust_build', runner)
+
+    def test_native_cold_report_refuses_other_source_profile_or_changed_component_metadata(self):
+        samples, _, manifest = self.fixture()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path, operator = self.native_cold_fixture(manifest, samples, root)
+            with patch.object(REPORT.COLD_START_GATE, 'FrozenOperator', return_value=operator):
+                original_oid = manifest['source_oid']
+                manifest['source_oid'] = 'other-revision'
+                with self.assertRaisesRegex(ValueError, 'source differs'):
+                    REPORT.package_cold_samples(path, manifest)
+                manifest['source_oid'] = original_oid
+                operator.provenance.return_value['profile'] = 'fast-dev'
+                with self.assertRaisesRegex(ValueError, 'differs from the frozen qualification'):
+                    REPORT.package_cold_samples(path, manifest)
+                operator.provenance.return_value['profile'] = 'production'
+                (root / 'store-schema.json').write_text('{"version":9}')
+                with self.assertRaisesRegex(ValueError, 'absent or changed'):
+                    REPORT.package_cold_samples(path, manifest)
 
     def test_package_cold_report_adapts_actual_samples_and_preserves_build_packet(self):
         samples, events, manifest = self.fixture()
