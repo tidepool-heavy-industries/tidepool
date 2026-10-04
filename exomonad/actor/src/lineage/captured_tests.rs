@@ -39,7 +39,6 @@ fn fixture(
     groups
         .settle_checkpoint(&token, SessionId(7), true)
         .unwrap();
-    let lease = groups.checkpoint(&token, SessionId(7)).unwrap();
     let (group, paths) = groups
         .begin_at_boundary(
             owner,
@@ -49,8 +48,15 @@ fn fixture(
             boundary.clone(),
         )
         .unwrap();
-    groups
-        .claim_with_checkpoint(group, owner, &paths[0].allocated, Some(&token))
+    let (lease, attachment) = groups
+        .claim_with_checkpoint(
+            group,
+            owner,
+            &paths[0].allocated,
+            Some((&token, SessionId(7))),
+        )
+        .unwrap()
+        .checkpoint
         .unwrap();
     groups.attach_child(group, owner, child).unwrap();
     let descriptor = ActorDescriptor::new(
@@ -65,7 +71,6 @@ fn fixture(
     .with_fork_group(group)
     .with_context_parent(owner)
     .with_checkpoint_token(Some(token));
-    let attachment = lease.host_attachment.lock().clone();
     groups
         .retain_checkpoint_admission(
             group,

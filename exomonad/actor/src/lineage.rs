@@ -138,6 +138,8 @@ pub struct ForkGroupId(pub u64);
 pub enum ForkGroupError {
     #[error(transparent)]
     Path(#[from] ActorPathError),
+    #[error("checkpoint refusal: {0:?}")]
+    Checkpoint(CheckpointRefusal),
     #[error("unknown fork group {0}")]
     Unknown(u64),
     #[error("actor {actual:?} does not own fork group {group}")]
@@ -363,6 +365,21 @@ pub enum CheckpointPhase {
     Released,
     // A branch admitted before release may still finish provider binding.
     ReleasedAfterPublication,
+}
+
+/// Checkpoint metadata used to validate a proposed launch, not child admission.
+pub(crate) struct CheckpointPreview(CheckpointLease);
+
+impl CheckpointPreview {
+    pub(crate) fn lease(&self) -> &CheckpointLease {
+        &self.0
+    }
+}
+
+/// The group reservation and checkpoint installation share admitted together.
+pub(crate) struct ClaimedForkChild {
+    pub(crate) path: ActorPath,
+    pub(crate) checkpoint: Option<(CheckpointLease, Option<HostedCheckpointAttachment>)>,
 }
 
 #[derive(Clone)]
@@ -685,11 +702,20 @@ impl ForkGroupRegistry {
         Ok(lease)
     }
 
-    /// Snapshot the opaque host attachment while the registry still admits
-    /// this checkpoint. A child that wins admission retains this capability
-    /// even if the issuer releases the token before the child installs tools.
-    pub(crate) fn admitted_checkpoint(
+    /// Preview metadata for launch validation. Release may still win before
+    /// claim_with_checkpoint atomically admits the group path and installation.
+    pub(crate) fn preview_checkpoint(
         &self,
+        token: &str,
+        session: SessionId,
+    ) -> Result<CheckpointPreview, CheckpointRefusal> {
+        self.checkpoint_admission_locked(&self.state.lock(), token, session)
+            .map(|(lease, _)| CheckpointPreview(lease))
+    }
+
+    fn checkpoint_admission_locked(
+        &self,
+        state: &ForkGroupsState,
         token: &str,
         session: SessionId,
     ) -> Result<(CheckpointLease, Option<HostedCheckpointAttachment>), CheckpointRefusal> {
@@ -699,7 +725,6 @@ impl ForkGroupRegistry {
         if namespace != self.checkpoint_namespace.to_string() {
             return Err(CheckpointRefusal::ProcessRestartUnsupported);
         }
-        let state = self.state.lock();
         let lease = match state.checkpoints.get(token) {
             Some(lease) => lease,
             None => {
@@ -1056,21 +1081,24 @@ impl ForkGroupRegistry {
         path: &ActorPath,
     ) -> Result<ActorPath, ForkGroupError> {
         self.claim_with_checkpoint(id, owner, path, None)
+            .map(|claim| claim.path)
     }
 
-    pub fn claim_with_checkpoint(
+    /// Linearize child admission under the same lock as release: only a full
+    /// path and budget claim retains the checkpoint share for installation.
+    pub(crate) fn claim_with_checkpoint(
         &self,
         id: ForkGroupId,
         owner: ActorRef,
         path: &ActorPath,
-        token: Option<&str>,
-    ) -> Result<ActorPath, ForkGroupError> {
+        checkpoint: Option<(&str, SessionId)>,
+    ) -> Result<ClaimedForkChild, ForkGroupError> {
         let mut state = self.state.lock();
-        let sponsors = if let Some(token) = token {
-            let lease = state
-                .checkpoints
-                .get(token)
-                .ok_or(ForkGroupError::Unknown(id.0))?;
+        let checkpoint = checkpoint
+            .map(|(token, session)| self.checkpoint_admission_locked(&state, token, session))
+            .transpose()
+            .map_err(ForkGroupError::Checkpoint)?;
+        let sponsors = if let Some((lease, _)) = &checkpoint {
             for &actor in &lease.budget_sponsors {
                 if let Some(&maximum) = state.descendant_limits.get(&actor) {
                     let active = reserved_descendants(&state, actor)
@@ -1118,7 +1146,10 @@ impl ForkGroupRegistry {
         }
         group.checkpoint_sponsors[group.claimed] = sponsors;
         group.claimed += 1;
-        Ok(reservation.allocated.clone())
+        Ok(ClaimedForkChild {
+            path: reservation.allocated.clone(),
+            checkpoint,
+        })
     }
 
     pub fn attach_child(
@@ -2160,35 +2191,116 @@ mod tests {
     }
 
     #[test]
-    fn admitted_child_keeps_host_attachment_after_release_before_installation() {
-        let groups = ForkGroupRegistry::new(ActorLineageRegistry::default());
-        let issuer = ActorRef::first(ActorId(1));
-        let (token, drops) = checkpoint_with_attachment(
-            &groups,
-            issuer,
-            WorkbenchForkBoundary::external("thread".into(), "call".into(), "call".into()),
-            ScopeId(9),
-        );
-        let (admitted_lease, admitted_attachment) = groups
-            .admitted_checkpoint(&token, SessionId(7))
-            .expect("child can win admission while publication is pending");
-        groups
-            .settle_checkpoint(&token, SessionId(7), true)
-            .unwrap();
-        groups.release_checkpoint(&token, SessionId(7)).unwrap();
-        assert!(matches!(
-            groups.admitted_checkpoint(&token, SessionId(7)),
-            Err(CheckpointRefusal::ReleasedCheckpoint)
-        ));
-        assert!(admitted_lease.host_attachment::<AttachmentDrop>().is_some());
-        let retained = admitted_attachment
-            .expect("admitted child keeps the opaque attachment")
-            .downcast::<AttachmentDrop>()
-            .expect("installed host receives the original attachment type");
-        assert_eq!(drops.load(Ordering::SeqCst), 0);
-        drop(admitted_lease);
-        drop(retained);
-        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    fn checkpoint_claim_linearizes_release_before_child_installation() {
+        for release_before_claim in [true, false] {
+            let groups = ForkGroupRegistry::new(ActorLineageRegistry::default());
+            let issuer = ActorRef::first(ActorId(1));
+            let (token, drops) = checkpoint_with_attachment(
+                &groups,
+                issuer,
+                WorkbenchForkBoundary::external("thread".into(), "call".into(), "call".into()),
+                ScopeId(9),
+            );
+            let (group, paths) = groups
+                .begin(
+                    issuer,
+                    ActorPath::parse("work").unwrap(),
+                    vec![segment("child")],
+                    None,
+                )
+                .unwrap();
+            let preview = groups.preview_checkpoint(&token, SessionId(7)).unwrap();
+            assert!(matches!(
+                groups.claim_with_checkpoint(
+                    group,
+                    issuer,
+                    &paths[0].allocated,
+                    Some((&token, SessionId(8)))
+                ),
+                Err(ForkGroupError::Checkpoint(CheckpointRefusal::WrongSession))
+            ));
+            assert!(matches!(
+                groups.claim_with_checkpoint(
+                    group,
+                    issuer,
+                    &ActorPath::parse("wrong/child").unwrap(),
+                    Some((&token, SessionId(7)))
+                ),
+                Err(ForkGroupError::WrongChildPath { .. })
+            ));
+            assert_eq!(groups.state.lock().groups[&group].claimed, 0);
+            if release_before_claim {
+                groups
+                    .settle_checkpoint(&token, SessionId(7), true)
+                    .unwrap();
+                assert_eq!(
+                    groups.release_checkpoint(&token, SessionId(7)),
+                    Ok(Some(ScopeId(9)))
+                );
+            }
+            let claim = groups.claim_with_checkpoint(
+                group,
+                issuer,
+                &paths[0].allocated,
+                Some((&token, SessionId(7))),
+            );
+            if release_before_claim {
+                assert!(matches!(
+                    claim,
+                    Err(ForkGroupError::Checkpoint(
+                        CheckpointRefusal::ReleasedCheckpoint
+                    ))
+                ));
+                let state = groups.state.lock();
+                let reservation = &state.groups[&group];
+                assert_eq!(
+                    reservation.claimed, 0,
+                    "preview cannot consume a child reservation"
+                );
+                assert!(reservation.checkpoint_sponsors[0].is_none());
+                drop(state);
+                assert_eq!(
+                    drops.load(Ordering::SeqCst),
+                    0,
+                    "preview still owns its metadata share"
+                );
+                drop(preview);
+                assert_eq!(drops.load(Ordering::SeqCst), 1);
+            } else {
+                let claim = claim.expect("full registry claim wins before release");
+                assert_eq!(claim.path, paths[0].allocated);
+                let (admitted_lease, admitted_attachment) = claim.checkpoint.unwrap();
+                drop(preview);
+                groups
+                    .settle_checkpoint(&token, SessionId(7), true)
+                    .unwrap();
+                assert_eq!(
+                    groups.release_checkpoint(&token, SessionId(7)),
+                    Ok(Some(ScopeId(9)))
+                );
+                assert!(matches!(
+                    groups.preview_checkpoint(&token, SessionId(7)),
+                    Err(CheckpointRefusal::ReleasedCheckpoint)
+                ));
+                assert!(admitted_lease.host_attachment::<AttachmentDrop>().is_some());
+                let retained = admitted_attachment
+                    .expect("claimed child owns the original opaque attachment")
+                    .downcast::<AttachmentDrop>()
+                    .expect("installation after release receives the original attachment type");
+                assert_eq!(drops.load(Ordering::SeqCst), 0);
+                drop(admitted_lease);
+                drop(retained);
+                assert_eq!(drops.load(Ordering::SeqCst), 1);
+            }
+            assert_eq!(
+                groups.release_checkpoint(&token, SessionId(7)),
+                Ok(Some(ScopeId(9)))
+            );
+            groups
+                .confirm_checkpoint_release(&token, SessionId(7), ScopeId(9))
+                .unwrap();
+            assert_eq!(groups.release_checkpoint(&token, SessionId(7)), Ok(None));
+        }
     }
 
     #[test]
@@ -2551,7 +2663,12 @@ mod tests {
             )
             .unwrap();
         groups
-            .claim_with_checkpoint(first, coordinator, &paths[0].allocated, Some(&token))
+            .claim_with_checkpoint(
+                first,
+                coordinator,
+                &paths[0].allocated,
+                Some((&token, SessionId(7))),
+            )
             .unwrap();
         groups.attach_child(first, coordinator, child).unwrap();
         let (second, paths) = groups
@@ -2563,7 +2680,12 @@ mod tests {
             )
             .unwrap();
         assert!(matches!(
-            groups.claim_with_checkpoint(second, coordinator, &paths[0].allocated, Some(&token)),
+            groups.claim_with_checkpoint(
+                second,
+                coordinator,
+                &paths[0].allocated,
+                Some((&token, SessionId(7)))
+            ),
             Err(ForkGroupError::DescendantBudgetExceeded { maximum: 1, .. })
         ));
         assert!(matches!(
@@ -2643,7 +2765,12 @@ mod tests {
                 )
                 .unwrap();
             groups
-                .claim_with_checkpoint(group, coordinator, &paths[0].allocated, Some(token))
+                .claim_with_checkpoint(
+                    group,
+                    coordinator,
+                    &paths[0].allocated,
+                    Some((token, SessionId(7))),
+                )
                 .unwrap();
             groups.attach_child(group, coordinator, child).unwrap();
             groups.request_commit(group, coordinator).unwrap();
@@ -2681,7 +2808,7 @@ mod tests {
             )
             .unwrap();
         assert!(matches!(
-            groups.claim_with_checkpoint(extra, coordinator, &paths[0].allocated, Some(&second)),
+            groups.claim_with_checkpoint(extra, coordinator, &paths[0].allocated, Some((&second, SessionId(7)))),
             Err(ForkGroupError::DescendantBudgetExceeded { coordinator, maximum: 2, .. }) if coordinator == issuer
         ));
         groups.abort(extra, coordinator).unwrap();
@@ -2700,7 +2827,12 @@ mod tests {
             )
             .unwrap();
         groups
-            .claim_with_checkpoint(freed, coordinator, &paths[0].allocated, Some(&second))
+            .claim_with_checkpoint(
+                freed,
+                coordinator,
+                &paths[0].allocated,
+                Some((&second, SessionId(7))),
+            )
             .unwrap();
     }
 
@@ -2733,7 +2865,12 @@ mod tests {
             )
             .unwrap();
         groups
-            .claim_with_checkpoint(group, coordinator, &paths[0].allocated, Some(&token))
+            .claim_with_checkpoint(
+                group,
+                coordinator,
+                &paths[0].allocated,
+                Some((&token, SessionId(7))),
+            )
             .unwrap();
         groups.attach_child(group, coordinator, child).unwrap();
         let phase = groups.request_commit(group, coordinator).unwrap();

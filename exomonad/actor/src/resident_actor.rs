@@ -4873,12 +4873,12 @@ where
                     .runner
                     .child_session_startup_lease(descriptor.placement().session)
             });
-            let checkpoint_admission = descriptor
+            let checkpoint_preview = descriptor
                 .checkpoint_token()
                 .map(|token| {
                     self.environment
                         .fork_groups
-                        .admitted_checkpoint(token, context.placement.session)
+                        .preview_checkpoint(token, context.placement.session)
                 })
                 .transpose()
                 .map_err(|refusal| {
@@ -4886,18 +4886,14 @@ where
                         "checkpoint refusal: {refusal:?}"
                     ))
                 })?;
-            let checkpoint_lease = checkpoint_admission
-                .as_ref()
-                .map(|(lease, _)| lease.clone());
-            let retained_checkpoint_scope = checkpoint_lease
-                .as_ref()
-                .map(|lease| lease.retained_scope().cloned())
-                .transpose()
-                .map_err(|refusal| {
+            let checkpoint_lease = checkpoint_preview.as_ref().map(|preview| preview.lease());
+            if let Some(lease) = checkpoint_lease {
+                lease.retained_scope().map_err(|refusal| {
                     ResidentActorWorkbenchError::ActorProtocol(format!(
                         "checkpoint retained-scope refusal: {refusal:?}"
                     ))
                 })?;
+            }
             if descriptor.model().is_none() {
                 let checkpoint_model = checkpoint_lease
                     .as_ref()
@@ -4989,28 +4985,42 @@ where
                 );
                 descriptor = descriptor.with_persistence_policy(policy);
             }
+            let mut checkpoint_admission = None;
             if let Some(group) = fork_group {
                 let requested = crate::ActorPath::parse(descriptor.label()).map_err(|error| {
                     ResidentActorWorkbenchError::ActorProtocol(error.to_string())
                 })?;
-                let allocated = self
+                let claim = self
                     .environment
                     .fork_groups
                     .claim_with_checkpoint(
                         group,
                         context.actor,
                         &requested,
-                        descriptor.checkpoint_token(),
+                        descriptor
+                            .checkpoint_token()
+                            .map(|token| (token, context.placement.session)),
                     )
                     .map_err(|error| {
                         ResidentActorWorkbenchError::ActorProtocol(self.name_coordinator(error))
                     })?;
-                descriptor = descriptor.with_actor_path(allocated);
+                descriptor = descriptor.with_actor_path(claim.path);
+                checkpoint_admission = claim.checkpoint;
             } else if descriptor.context_parent().is_some() {
                 return Err(ResidentActorWorkbenchError::ActorProtocol(
                     "context fork did not name an admission group".into(),
                 ));
             }
+            drop(checkpoint_preview);
+            let retained_checkpoint_scope = checkpoint_admission
+                .as_ref()
+                .map(|(lease, _)| lease.retained_scope().cloned())
+                .transpose()
+                .map_err(|refusal| {
+                    ResidentActorWorkbenchError::ActorProtocol(format!(
+                        "checkpoint retained-scope refusal: {refusal:?}"
+                    ))
+                })?;
             // The exact issuing claim is still pending here. The admitted child
             // retains this host share across workspace waits and parent publication.
             let inherited_host_attachment = effect_owner

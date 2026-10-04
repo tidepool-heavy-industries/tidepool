@@ -16634,6 +16634,13 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         let workbench =
             ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None, None);
         let runner = ResidentActorRunner::new(Arc::clone(&machines), source.clone());
+        let baseline_handles = workbench
+            .access
+            .with_machine(context.clone(), |session, _, _| {
+                Ok(session.value_handle_count())
+            })
+            .await
+            .expect("initial runtime binding-root ledger");
         let parent = workbench
             .begin_fragment_split(
                 context.clone(),
@@ -16641,7 +16648,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                 ParsedBlock {
                     ordinal: 1,
                     total: 1,
-                    source: "capturedValue <- pure (41 :: Int)".into(),
+                    source: "capturedValue <- pure ((+) (41 :: Int))".into(),
                 },
                 None,
             )
@@ -16684,14 +16691,33 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         groups
             .settle_checkpoint(&token, context.placement.session, true)
             .expect("Haskell checkpoint answer delivered");
-        let first = groups
-            .admitted_checkpoint(&token, context.placement.session)
-            .expect("first child admitted before parent completion")
-            .0;
-        let second = groups
-            .admitted_checkpoint(&token, context.placement.session)
-            .expect("second child admitted before parent completion")
-            .0;
+        let (group, paths) = groups
+            .begin(
+                context.actor,
+                crate::ActorPath::parse("captured/work").unwrap(),
+                vec![
+                    crate::ActorPathSegment::new("first").unwrap(),
+                    crate::ActorPathSegment::new("second").unwrap(),
+                ],
+                None,
+            )
+            .unwrap();
+        let mut claims = paths.iter().map(|path| {
+            groups
+                .claim_with_checkpoint(
+                    group,
+                    context.actor,
+                    &path.allocated,
+                    Some((&token, context.placement.session)),
+                )
+                .expect("child path and checkpoint admitted before parent completion")
+                .checkpoint
+                .unwrap()
+                .0
+        });
+        let first = claims.next().unwrap();
+        let second = claims.next().unwrap();
+        drop(claims);
         let (release_first, first_ready) = tokio::sync::oneshot::channel();
         let (release_second, second_ready) = tokio::sync::oneshot::channel();
         let delayed_child = |admitted: crate::lineage::CheckpointLease,
@@ -16763,7 +16789,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                 .expect("original scope retirement acknowledged");
             assert!(groups.retains_session(context.placement.session));
             assert!(matches!(
-                groups.admitted_checkpoint(&token, context.placement.session),
+                groups.preview_checkpoint(&token, context.placement.session),
                 Err(crate::CheckpointRefusal::ReleasedCheckpoint)
             ));
             release_first.send(()).unwrap();
@@ -16776,24 +16802,49 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         );
         drop(first_lease);
         assert!(groups.retains_session(context.placement.session));
+        workbench
+            .access
+            .with_machine(context.clone(), move |session, _, _| {
+                session.outstanding_custody();
+                assert!(
+                    session.compile_view_in(retained_scope).is_some(),
+                    "first lease drop preserves the capsule"
+                );
+                assert!(session
+                    .binding_names_in(retained_scope)
+                    .contains(&"capturedValue".into()));
+                assert!(
+                    session.residency().unwrap().persistent_roots > 0,
+                    "captured closure has real machine roots"
+                );
+                Ok(())
+            })
+            .await
+            .expect("runtime owner observes surviving capture");
         drop(second_lease);
         assert!(!groups.retains_session(context.placement.session));
         workbench
             .access
             .with_machine(context.clone(), move |session, context, _| {
-                // Ordinary owner admission reaps the dropped lexical capsule.
-                let temporary = session.retain_lexical_scope(ScopeId::ROOT)?;
-                let scope = temporary.scope();
-                drop(temporary);
-                session.retire_scope(scope);
+                assert!(
+                    session.compile_view_in(retained_scope).is_some(),
+                    "last lease drop queues retirement until owner entry settles it"
+                );
+                session.outstanding_custody();
                 assert!(session.compile_view_in(retained_scope).is_none());
+                assert!(session.binding_names_in(retained_scope).is_empty());
+                assert_eq!(session.scope_binding_count(retained_scope), 0);
                 session.retire_scope(context.placement.lexical_scope);
+                assert!(
+                    session.residency().unwrap().persistent_roots > 0,
+                    "both reminted children still own the captured closure"
+                );
                 Ok(())
             })
             .await
-            .expect("capsule and failed parent release their roots");
+            .expect("actual runtime owner drains final capsule retirement");
 
-        for child in [first, second] {
+        for (index, child) in [first, second].into_iter().enumerate() {
             let step = workbench
                 .begin_fragment_split(
                     child.clone(),
@@ -16801,7 +16852,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                     ParsedBlock {
                         ordinal: 1,
                         total: 1,
-                        source: "if capturedValue + 1 == (42 :: Int) then pure () else error \"unexpected inherited value\"".into(),
+                        source: "if capturedValue 1 == (42 :: Int) then pure () else error \"unexpected inherited value\"".into(),
                     },
                     None,
                 )
@@ -16820,12 +16871,22 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             assert!(output.starts_with("[bound observation"), "{output}");
             workbench
                 .access
-                .with_machine(child.clone(), |session, context, _| {
+                .with_machine(child.clone(), move |session, context, _| {
                     let scope = context.placement.lexical_scope;
                     assert!(session
                         .binding_names_in(scope)
                         .contains(&"capturedValue".into()));
-                    session.retire_scope(scope);
+                    let roots_before = session.persistent_roots_count();
+                    let retired = session.retire_scope(scope);
+                    let roots_after = session.persistent_roots_count();
+                    assert_eq!(roots_before - roots_after, retired.roots_released);
+                    if index == 1 {
+                        assert!(
+                            retired.roots_released > 0,
+                            "last child releases actual inherited closure roots"
+                        );
+                        assert_eq!(session.value_handle_count(), baseline_handles, "all callable and observation binding handles return to the initial ledger");
+                    }
                     assert!(session.compile_view_in(scope).is_none());
                     assert_eq!(session.scope_binding_count(scope), 0);
                     Ok(())

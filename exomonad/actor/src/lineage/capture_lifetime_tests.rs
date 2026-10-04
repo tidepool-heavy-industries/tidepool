@@ -39,6 +39,29 @@ fn capture(
     (token, original, retained_scope, boundary)
 }
 
+fn claim_capture(groups: &ForkGroupRegistry, token: &str, name: &str) -> CheckpointLease {
+    let owner = ActorRef::first(crate::ActorId(1));
+    let (group, paths) = groups
+        .begin(
+            owner,
+            ActorPath::parse(name).unwrap(),
+            vec![ActorPathSegment::new("child").unwrap()],
+            None,
+        )
+        .unwrap();
+    groups
+        .claim_with_checkpoint(
+            group,
+            owner,
+            &paths[0].allocated,
+            Some((token, SessionId(7))),
+        )
+        .unwrap()
+        .checkpoint
+        .unwrap()
+        .0
+}
+
 #[test]
 fn released_capture_preserves_two_admissions_until_last_lexical_share() {
     let groups = ForkGroupRegistry::new(ActorLineageRegistry::default());
@@ -47,8 +70,8 @@ fn released_capture_preserves_two_admissions_until_last_lexical_share() {
     groups
         .settle_checkpoint(&token, SessionId(7), true)
         .unwrap();
-    let first = groups.admitted_checkpoint(&token, SessionId(7)).unwrap().0;
-    let second = groups.admitted_checkpoint(&token, SessionId(7)).unwrap().0;
+    let first = claim_capture(&groups, &token, "first");
+    let second = claim_capture(&groups, &token, "second");
     assert_eq!(
         first.issuer_persistence_policy,
         crate::ActorPersistencePolicy::Durable
@@ -75,7 +98,7 @@ fn released_capture_preserves_two_admissions_until_last_lexical_share() {
         "in-flight admissions retain the machine"
     );
     assert!(matches!(
-        groups.admitted_checkpoint(&token, SessionId(7)),
+        groups.preview_checkpoint(&token, SessionId(7)),
         Err(CheckpointRefusal::ReleasedCheckpoint)
     ));
     // Original-root retirement happened before either asynchronous admission
@@ -126,7 +149,7 @@ fn retained_checkpoint_scope_refuses_another_runtime_owner() {
     groups
         .settle_checkpoint(&token, SessionId(7), true)
         .unwrap();
-    let admitted = groups.admitted_checkpoint(&token, SessionId(7)).unwrap().0;
+    let admitted = claim_capture(&groups, &token, "foreign-owner");
     let mut foreign = PersistentSession::new(None, 1024);
     assert!(foreign
         .mint_scope_from_lease(admitted.retained_scope().unwrap())
