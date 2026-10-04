@@ -9838,6 +9838,7 @@ where
             .compile_view(session_view)?
             .with_workbench_imports(&source.workbench_imports)
             .with_request_helper_recipe(source.request_helper_recipe)
+            .map_err(ResidentActorWorkbenchError::Compile)?
     } else {
         let session_view = session
             .compile_view_in(context.placement.lexical_scope)
@@ -9857,6 +9858,7 @@ where
             .compile_view(session_view)?
             .with_workbench_imports(&source.workbench_imports)
             .with_request_helper_recipe(source.request_helper_recipe)
+            .map_err(ResidentActorWorkbenchError::Compile)?
     };
     Ok((
         source,
@@ -10033,7 +10035,8 @@ where
     Ok(context
         .compile_view(session_view)?
         .with_workbench_imports(&source.workbench_imports)
-        .with_request_helper_recipe(source.request_helper_recipe))
+        .with_request_helper_recipe(source.request_helper_recipe)
+        .map_err(ResidentActorWorkbenchError::Compile)?)
 }
 
 /// Compile one fresh, payload-independent value interface. Its binder is

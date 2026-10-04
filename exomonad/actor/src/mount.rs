@@ -419,7 +419,6 @@ pub type ActorSourceLayerResolver = std::sync::Arc<dyn ActorSourceLayers>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActorCompileView {
     session: SessionCompileView,
-    request_helper_recipe: tidepool_toolchain::declaration_join::RequestHelperRecipe,
     external: SourceImports,
     source_layer: std::sync::Arc<[PathBuf]>,
 }
@@ -435,21 +434,15 @@ impl ActorCompileView {
     pub fn exact_compile_context(
         &self,
     ) -> Option<std::sync::Arc<tidepool_toolchain::declaration_join::ExactCompileContext>> {
-        self.session.exact_compile_context().map(|context| {
-            std::sync::Arc::new(
-                (*context)
-                    .clone()
-                    .with_request_helper_recipe(self.request_helper_recipe),
-            )
-        })
+        self.session.exact_compile_context()
     }
 
     pub(crate) fn with_request_helper_recipe(
         mut self,
         recipe: tidepool_toolchain::declaration_join::RequestHelperRecipe,
-    ) -> Self {
-        self.request_helper_recipe = recipe;
-        self
+    ) -> Result<Self, tidepool_runtime::CompileError> {
+        self.session = self.session.with_request_helper_recipe(recipe)?;
+        Ok(self)
     }
 
     /// Exact external, declaration, and live-value imports for a turn template.
@@ -563,12 +556,9 @@ impl ActorCompileView {
             None => field(&mut hasher, &[0]),
         }
         if let Some(context) = self.exact_compile_context() {
-            if let Some(signatures) = context.request_types() {
-                field(&mut hasher, &signatures.metadata_digest());
-                field(
-                    &mut hasher,
-                    context.request_helper_recipe().as_str().as_bytes(),
-                );
+            if let Some(annotations) = context.request_annotations() {
+                field(&mut hasher, &annotations.signatures().metadata_digest());
+                field(&mut hasher, annotations.helper_recipe().as_str().as_bytes());
                 field(&mut hasher, &context.declarations().semantic_sha256());
             }
         }
@@ -710,7 +700,6 @@ impl ActorSessionContext {
             });
         }
         Ok(ActorCompileView {
-            request_helper_recipe: Default::default(),
             session,
             external: self.source_imports.imports.clone(),
             source_layer: self.source_layer.clone(),

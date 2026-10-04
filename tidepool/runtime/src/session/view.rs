@@ -302,6 +302,27 @@ impl SessionCompileView {
         Ok(self)
     }
 
+    /// Bind helpers only to the authenticated request context in this view.
+    pub fn with_request_helper_recipe(
+        mut self,
+        recipe: tidepool_toolchain::declaration_join::RequestHelperRecipe,
+    ) -> Result<Self, crate::CompileError> {
+        match self.request_context.take() {
+            Some(context) => {
+                self.request_context = Some(Arc::new(
+                    (*context).clone().with_request_helper_recipe(recipe)?,
+                ));
+            }
+            None if recipe == tidepool_toolchain::declaration_join::RequestHelperRecipe::None => {}
+            None => {
+                return Err(crate::CompileError::ExtractFailed(
+                    "actor reply helpers require an authenticated request context".into(),
+                ));
+            }
+        }
+        Ok(self)
+    }
+
     #[must_use]
     pub fn exact_compile_context(
         &self,

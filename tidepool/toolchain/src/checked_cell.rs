@@ -3263,6 +3263,67 @@ mod tests {
     }
 
     #[test]
+    fn request_annotations_require_signatures_and_preserve_helper_mode() {
+        use crate::declaration_join::{
+            ExactCompileContext, ExactDeclarationContext, RequestHelperRecipe,
+        };
+        let ordinary = ExactCompileContext::new(std::sync::Arc::new(
+            ExactDeclarationContext::new(&[], &[], Vec::new()).unwrap(),
+        ));
+        assert_eq!(
+            ordinary
+                .clone()
+                .with_request_helper_recipe(RequestHelperRecipe::None)
+                .unwrap(),
+            ordinary,
+        );
+        assert!(ordinary
+            .clone()
+            .with_request_helper_recipe(RequestHelperRecipe::ActorReply)
+            .is_err());
+        assert!(ordinary.request_annotations().is_none());
+
+        for progress in [false, true] {
+            let mut bytes = Vec::new();
+            ciborium::into_writer(&request_signature_codec_fixture(progress), &mut bytes).unwrap();
+            let signatures =
+                std::sync::Arc::new(RequestTypeSignatures::from_bytes(&bytes).unwrap());
+            let type_only = ordinary.clone().with_request_types(signatures.clone());
+            let annotations = type_only.request_annotations().unwrap();
+            assert!(std::sync::Arc::ptr_eq(
+                annotations.signatures(),
+                &signatures
+            ));
+            assert_eq!(annotations.helper_recipe(), RequestHelperRecipe::None);
+            let reply = type_only
+                .with_request_helper_recipe(RequestHelperRecipe::ActorReply)
+                .unwrap();
+            let annotations = reply.request_annotations().unwrap();
+            assert!(std::sync::Arc::ptr_eq(
+                annotations.signatures(),
+                &signatures
+            ));
+            assert_eq!(annotations.helper_recipe(), RequestHelperRecipe::ActorReply);
+            let mut replacement_bytes = Vec::new();
+            ciborium::into_writer(
+                &request_signature_codec_fixture(!progress),
+                &mut replacement_bytes,
+            )
+            .unwrap();
+            let replacement =
+                std::sync::Arc::new(RequestTypeSignatures::from_bytes(&replacement_bytes).unwrap());
+            assert_ne!(replacement.metadata_digest(), signatures.metadata_digest());
+            let replaced = reply.with_request_types(replacement.clone());
+            let annotations = replaced.request_annotations().unwrap();
+            assert!(std::sync::Arc::ptr_eq(
+                annotations.signatures(),
+                &replacement
+            ));
+            assert_eq!(annotations.helper_recipe(), RequestHelperRecipe::ActorReply);
+        }
+    }
+
+    #[test]
     fn request_type_signatures_native_codec_preserves_payload_and_progress() {
         use super::*;
         for progress in [false, true] {

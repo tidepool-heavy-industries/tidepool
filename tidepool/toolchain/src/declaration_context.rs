@@ -49,21 +49,46 @@ impl RequestHelperRecipe {
     }
 }
 
+/// Request-local signatures together with their trusted helper recipe.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RequestAnnotations {
+    signatures: Arc<crate::checked_cell::RequestTypeSignatures>,
+    helper_recipe: RequestHelperRecipe,
+}
+
+impl RequestAnnotations {
+    fn new(
+        signatures: Arc<crate::checked_cell::RequestTypeSignatures>,
+        helper_recipe: RequestHelperRecipe,
+    ) -> Self {
+        Self {
+            signatures,
+            helper_recipe,
+        }
+    }
+
+    pub fn signatures(&self) -> &Arc<crate::checked_cell::RequestTypeSignatures> {
+        &self.signatures
+    }
+
+    pub fn helper_recipe(&self) -> RequestHelperRecipe {
+        self.helper_recipe
+    }
+}
+
 /// Request-local compiler inputs. Persistent publication retains declarations
 /// separately, so native request annotations cannot enter a lexical snapshot.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExactCompileContext {
     declarations: Arc<ExactDeclarationContext>,
-    request_types: Option<Arc<crate::checked_cell::RequestTypeSignatures>>,
-    request_helper_recipe: RequestHelperRecipe,
+    request_annotations: Option<RequestAnnotations>,
 }
 
 impl ExactCompileContext {
     pub fn new(declarations: Arc<ExactDeclarationContext>) -> Self {
         Self {
             declarations,
-            request_types: None,
-            request_helper_recipe: RequestHelperRecipe::None,
+            request_annotations: None,
         }
     }
 
@@ -72,24 +97,47 @@ impl ExactCompileContext {
     }
 
     pub fn request_types(&self) -> Option<&Arc<crate::checked_cell::RequestTypeSignatures>> {
-        self.request_types.as_ref()
+        self.request_annotations
+            .as_ref()
+            .map(RequestAnnotations::signatures)
     }
 
+    pub fn request_annotations(&self) -> Option<&RequestAnnotations> {
+        self.request_annotations.as_ref()
+    }
+
+    /// Replace signature authentication while preserving the chosen helper mode.
     pub fn with_request_types(
         mut self,
         signatures: Arc<crate::checked_cell::RequestTypeSignatures>,
     ) -> Self {
-        self.request_types = Some(signatures);
+        self.request_annotations = Some(RequestAnnotations::new(
+            signatures,
+            self.request_helper_recipe(),
+        ));
         self
     }
 
-    pub fn with_request_helper_recipe(mut self, recipe: RequestHelperRecipe) -> Self {
-        self.request_helper_recipe = recipe;
-        self
+    pub fn with_request_helper_recipe(
+        mut self,
+        recipe: RequestHelperRecipe,
+    ) -> Result<Self, CompileError> {
+        match &mut self.request_annotations {
+            Some(annotations) => annotations.helper_recipe = recipe,
+            None if recipe == RequestHelperRecipe::None => {}
+            None => {
+                return Err(CompileError::ExtractFailed(
+                    "actor reply helpers require original request type signatures".into(),
+                ));
+            }
+        }
+        Ok(self)
     }
 
     pub fn request_helper_recipe(&self) -> RequestHelperRecipe {
-        self.request_helper_recipe
+        self.request_annotations
+            .as_ref()
+            .map_or(RequestHelperRecipe::None, RequestAnnotations::helper_recipe)
     }
 
     pub(crate) fn with_declarations(mut self, declarations: Arc<ExactDeclarationContext>) -> Self {
@@ -98,11 +146,11 @@ impl ExactCompileContext {
     }
 
     fn authorization(&self, purpose: Option<Value>) -> Option<Value> {
-        match &self.request_types {
-            Some(signatures) => Some(Value::Array(vec![
+        match &self.request_annotations {
+            Some(annotations) => Some(Value::Array(vec![
                 text("request-types2"),
-                signatures.authorization_value(),
-                text(self.request_helper_recipe.as_str()),
+                annotations.signatures.authorization_value(),
+                text(annotations.helper_recipe.as_str()),
                 purpose.unwrap_or(Value::Null),
             ])),
             None => purpose,
