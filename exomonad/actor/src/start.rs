@@ -445,10 +445,14 @@ impl ResidentActorStart {
         // this seeds does not exist yet (see `ChildSessionSeed`'s doc
         // comment).
         let seed = if eligibility.eligible {
+            let declaration_high_water = session.declaration_generation_high_water();
+            if facade.is_some() && declaration_high_water.is_none() {
+                return Err(ActorStartCaptureError::NoCompileView);
+            }
             Some(ChildSessionSeed {
                 facade: facade.clone(),
                 val_generation: session.val_gen(),
-                declaration_high_water: session.declaration_generation_high_water(),
+                declaration_high_water,
             })
         } else {
             None

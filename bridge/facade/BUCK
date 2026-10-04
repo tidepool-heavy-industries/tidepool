@@ -831,6 +831,7 @@ rust_filegroup(
         "src/actor_host/fixtures/startup_authored_failure.hs": "bridge/facade/src/actor_host/fixtures/startup_authored_failure.hs",
         "src/actor_host/fixtures/unconstrained_spec_later_helper.hs": "bridge/facade/src/actor_host/fixtures/unconstrained_spec_later_helper.hs",
         "src/actor_host/fixtures/usage_comparisons.hs": "bridge/facade/src/actor_host/fixtures/usage_comparisons.hs",
+        "src/actor_host/fresh_selected_child_setup.hs": "bridge/facade/src/actor_host/fresh_selected_child_setup.hs",
         "src/actor_host/host_incarnation.rs": "bridge/facade/src/actor_host/host_incarnation.rs",
         "src/actor_host/hosted_retirement/failed_child.hs": "bridge/facade/src/actor_host/hosted_retirement/failed_child.hs",
         "src/actor_host/hosted_retirement/failed_child_preamble.hs": "bridge/facade/src/actor_host/hosted_retirement/failed_child_preamble.hs",

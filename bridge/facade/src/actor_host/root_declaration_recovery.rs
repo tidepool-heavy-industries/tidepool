@@ -2,7 +2,7 @@
 //! lease. Runtime owns its codec, protected hydration and manifest publication.
 
 use super::HostIncarnationLease;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tidepool_codegen::scope::ScopeId;
 use tidepool_repr::SessionId;
@@ -17,6 +17,18 @@ struct RootDeclarationRunAuthority {
 impl RecoveryRunAuthority for RootDeclarationRunAuthority {
     fn owns_run(&self, run_root: &Path) -> std::io::Result<bool> {
         self.lease.owns_run(run_root)
+    }
+}
+
+struct ChildDeclarationRunAuthority {
+    lease: Arc<HostIncarnationLease>,
+    host_root: PathBuf,
+    child_root: PathBuf,
+}
+
+impl RecoveryRunAuthority for ChildDeclarationRunAuthority {
+    fn owns_run(&self, run_root: &Path) -> std::io::Result<bool> {
+        Ok(run_root == self.child_root && self.lease.owns_run(&self.host_root)?)
     }
 }
 
@@ -67,6 +79,46 @@ pub(super) fn attach(
     )
 }
 
+/// A child owns its graph under its exact session directory while the retained
+/// host lease continues to own the enclosing run.
+pub(super) fn attach_child(
+    library: &mut SessionLib,
+    host_root: &Path,
+    lease: Arc<HostIncarnationLease>,
+) -> Result<(), SessionError> {
+    let host_root = host_root
+        .canonicalize()
+        .map_err(|error| SessionError::RecoveryManifest {
+            path: host_root.to_path_buf(),
+            detail: error.to_string(),
+        })?;
+    let child_root = host_root
+        .join("haskell-session-children")
+        .join(library.session_id().0.to_string());
+    let actual_root =
+        library
+            .include_dir()
+            .canonicalize()
+            .map_err(|error| SessionError::RecoveryManifest {
+                path: library.include_dir().to_path_buf(),
+                detail: error.to_string(),
+            })?;
+    if actual_root != child_root {
+        return Err(SessionError::RecoveryManifest {
+            path: actual_root,
+            detail: "child declaration graph requires its exact session directory".into(),
+        });
+    }
+    library.attach_owned_recovery_graph_v3(
+        child_root.join("declarations.json"),
+        Arc::new(ChildDeclarationRunAuthority {
+            lease,
+            host_root,
+            child_root,
+        }),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -79,6 +131,71 @@ mod tests {
             ModuleEnv::standalone_default(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn child_graphs_keep_independent_high_water_under_the_same_host_lease() {
+        let run = tempfile::tempdir().unwrap();
+        let lease = Arc::new(HostIncarnationLease::claim(run.path()).unwrap());
+        let mut root_library = library(run.path());
+        attach(&mut root_library, run.path(), lease.clone()).unwrap();
+        root_library
+            .initialize_captured_declaration_high_water(tidepool_repr::Generation(3))
+            .unwrap();
+        let root_bytes = std::fs::read(run.path().join("root-declarations.json")).unwrap();
+        let mut paths = Vec::new();
+        for high_water in [4, 7] {
+            let id = tidepool_runtime::session::fresh_session_id();
+            let child_root = run
+                .path()
+                .join("haskell-session-children")
+                .join(id.0.to_string());
+            let mut child =
+                SessionLib::open(id, &child_root, ModuleEnv::standalone_default()).unwrap();
+            attach_child(&mut child, run.path(), lease.clone()).unwrap();
+            assert_eq!(child.generation(), tidepool_repr::Generation(0));
+            child
+                .initialize_captured_declaration_high_water(tidepool_repr::Generation(high_water))
+                .unwrap();
+            let path = child_root.join("declarations.json");
+            let graph: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            assert_eq!(graph["source_session"], id.0);
+            assert_eq!(graph["high_water"], high_water);
+            paths.push(path);
+        }
+        assert_ne!(paths[0], paths[1]);
+        assert_eq!(
+            std::fs::read(run.path().join("root-declarations.json")).unwrap(),
+            root_bytes
+        );
+    }
+
+    #[test]
+    fn child_graph_refuses_wrong_host_lease_and_another_session_directory() {
+        let owned = tempfile::tempdir().unwrap();
+        let foreign = tempfile::tempdir().unwrap();
+        let lease = Arc::new(HostIncarnationLease::claim(owned.path()).unwrap());
+        let id = tidepool_runtime::session::fresh_session_id();
+        let child_root = foreign
+            .path()
+            .join("haskell-session-children")
+            .join(id.0.to_string());
+        let mut child = SessionLib::open(id, &child_root, ModuleEnv::standalone_default()).unwrap();
+        assert!(attach_child(&mut child, foreign.path(), lease.clone()).is_err());
+        assert!(!child_root.join("declarations.json").exists());
+        let wrong_root = owned
+            .path()
+            .join("haskell-session-children")
+            .join(id.0.to_string());
+        let mut wrong = SessionLib::open(
+            tidepool_runtime::session::fresh_session_id(),
+            &wrong_root,
+            ModuleEnv::standalone_default(),
+        )
+        .unwrap();
+        assert!(attach_child(&mut wrong, owned.path(), lease).is_err());
+        assert!(!wrong_root.join("declarations.json").exists());
     }
 
     #[test]

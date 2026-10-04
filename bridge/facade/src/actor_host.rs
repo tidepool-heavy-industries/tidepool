@@ -4502,7 +4502,7 @@ fn compile_root(
         let mut library = SessionLib::open(child_session_id, &session_root, module_env)
             .map_err(|error| format!("child session declaration plane: {error}"))?
             .with_validation_include(validation_include);
-        root_declaration_recovery::attach(
+        root_declaration_recovery::attach_child(
             &mut library,
             &child_run_root,
             Arc::clone(&child_run_lease),

@@ -422,7 +422,7 @@ async fn composition_root_child_session_factory_runs_a_cell() {
     campaign.hosted.await.unwrap();
 }
 
-/// An eligible `startAgent` launch (`SelectedContext`, no `RepoEvent`)
+/// A selected typed fork without `RepoEvent`
 /// goes through the real launch path, not the factory called directly: it
 /// gets a machine session distinct from the root's, runs a cell there, and
 /// the dedicated session is released once the actor retires. `TestCampaign`
@@ -430,7 +430,6 @@ async fn composition_root_child_session_factory_runs_a_cell() {
 /// registry, so the assertion that the sessions differ is what rules out
 /// the same-session fallback producing a misleading green.
 #[tokio::test]
-#[ignore = "hosts install no child bootstrap program until the cross-session request-site and root-machine thunk defects are fixed (branch p7-fault)"]
 async fn selected_context_child_gets_its_own_machine_and_is_torn_down_on_retirement() {
     let mut campaign = test_campaign::TestCampaign::start().await;
     let root = campaign.root_installation.policy.clone();
@@ -439,12 +438,23 @@ async fn selected_context_child_gets_its_own_machine_and_is_torn_down_on_retirem
         .actor_session(campaign.actor.identity())
         .expect("root actor has a session");
 
-    let setup = dispatch_haskell_script(
+    let parent = dispatch_haskell_script(
         root.as_ref(),
-        "child <- startAgent (withAgentLifetime ActorOwned (readonlyAgent \"cross-session-child\"))",
-    )
-    .await;
-    assert_eq!(setup["status"], "committed", "{setup:?}");
+        "data FreshParentInput = FreshParentInput Int deriving Show\ndata FreshParentReply = FreshParentReply Int deriving Show",
+    ).await;
+    assert_eq!(parent["status"], "committed", "{parent}");
+    let parent_manifest_path = campaign.session_root.path().join("root-declarations.json");
+    let parent_manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&parent_manifest_path).unwrap()).unwrap();
+    let parent_high_water = parent_manifest["high_water"].as_u64().unwrap();
+    let root_for_setup = root.clone();
+    let setup = tokio::spawn(async move {
+        dispatch_haskell_script(
+            root_for_setup.as_ref(),
+            include_str!("fresh_selected_child_setup.hs"),
+        )
+        .await
+    });
     let installation = campaign
         .next_deployment(
             "cross-session child policy installation",
@@ -464,9 +474,110 @@ async fn selected_context_child_gets_its_own_machine_and_is_torn_down_on_retirem
         "an eligible SelectedContext launch must own its own machine, not share the root's"
     );
 
-    let reply = dispatch_haskell_script(installation.policy.as_ref(), "40 + 2 :: Int").await;
-    assert_eq!(reply["status"], "committed", "{reply:?}");
-    assert_eq!(reply["items"][0]["output"], "42", "{reply:?}");
+    installation
+        .fork_gate
+        .as_ref()
+        .expect("selected fork readiness owner")
+        .mark_ready()
+        .unwrap();
+    let setup = setup.await.unwrap();
+    assert_eq!(setup["status"], "committed", "{setup}");
+    campaign
+        .next_deployment(
+            "fresh child typed activation",
+            Duration::from_secs(120),
+            |event| match event {
+                LocalResidentDeployment::SessionReady { activation }
+                    if activation.id.actor() == installation.actor.identity() =>
+                {
+                    Ok(activation)
+                }
+                other => Err(other),
+            },
+        )
+        .await;
+    let store = display_output::open_run_store(campaign.session_root.path()).unwrap();
+    let reply = campaign.drive_actor_output(&store, dispatch_haskell_script(
+        installation.policy.as_ref(),
+        "data FreshChildNominal = FreshChildNominal FreshParentInput\nfreshChildValue <- pure (FreshChildNominal sessionInput)\ndisplay (case freshChildValue of FreshChildNominal (FreshParentInput n) -> n + 1)",
+    )).await;
+    assert_eq!(reply["status"], "committed", "{reply}");
+    let display = reply["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|item| item["operations"].as_array().unwrap())
+        .find_map(|operation| operation.get("display"))
+        .unwrap();
+    assert_eq!(display["text"], "42", "{reply}");
+    let child_root = campaign
+        .session_root
+        .path()
+        .join("haskell-session-children")
+        .join(child_session.0.to_string());
+    let child_manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(child_root.join("declarations.json")).unwrap())
+            .unwrap();
+    assert_eq!(child_manifest["source_session"], child_session.0);
+    let authored = child_manifest["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| {
+            node["kind"] == "authored"
+                && node["exports"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|export| export["identity"]["occurrence"] == "FreshChildNominal")
+        })
+        .unwrap();
+    let generation = authored["id"].as_u64().unwrap();
+    assert!(generation > parent_high_water, "{child_manifest}");
+    let identity = authored["exports"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|export| export["identity"]["occurrence"] == "FreshChildNominal")
+        .unwrap();
+    assert_eq!(
+        identity["identity"]["module"],
+        tidepool_repr::SessionModule::lib(tidepool_repr::Generation(generation)).module_name()
+    );
+    let projections: Vec<tidepool_toolchain::recovery_artifacts::RecoveryJoinRef> = child_manifest
+        ["artifacts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|artifact| artifact["kind"] == "join")
+        .map(|artifact| serde_json::from_value(artifact["reference"].clone()).unwrap())
+        .collect();
+    assert!(
+        authored["lexical"].as_array().unwrap().iter().any(|node| {
+            node["owner"]["module"] == identity["identity"]["module"]
+                && node["imports"].as_array().unwrap().iter().any(|import| {
+                    projections.iter().any(|projection| {
+                        import["unit"] == projection.unit && import["module"] == projection.module
+                    })
+                })
+        }),
+        "the child declaration must import the issued selected interface: {child_manifest}"
+    );
+    for projection in &projections {
+        tidepool_toolchain::recovery_artifacts::verify_materialized_join(&child_root, projection)
+            .unwrap();
+    }
+    let parent_after: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&parent_manifest_path).unwrap()).unwrap();
+    assert!(!parent_after["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|node| node["exports"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|export| export["identity"]["occurrence"] == "FreshChildNominal")));
 
     installation
         .actor
