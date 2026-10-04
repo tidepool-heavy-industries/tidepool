@@ -154,8 +154,8 @@ pub use resident_tools::{
 };
 pub use resident_workbench::{
     ActorMachineRegistry, ActorWorkbenchSource, ChildSessionFactory, InstalledToolLease,
-    ResidentActorRunner, ResidentActorWorkbench, ResidentActorWorkbenchError,
-    ResidentMachineMeasurement, ToolDispatchError, ToolDispatchReply,
+    RequestWorkbenchScope, ResidentActorRunner, ResidentActorWorkbench,
+    ResidentActorWorkbenchError, ResidentMachineMeasurement, ToolDispatchError, ToolDispatchReply,
 };
 pub use role::{
     render_child_budget, ActorEffectKey, ActorRole, DescendantBudget, EffectiveRole,

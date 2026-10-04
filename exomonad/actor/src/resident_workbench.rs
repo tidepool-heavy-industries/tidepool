@@ -1285,9 +1285,7 @@ where
 /// Concrete resident workbench for one typed agent-session obligation.
 pub struct ResidentActorWorkbench<H, O> {
     access: ResidentMachineAccess<H, O>,
-    response: Option<ResponseExpectation>,
-    request: Option<crate::RequestId>,
-
+    request_scope: Option<RequestWorkbenchScope>,
     json_input: Option<serde_json::Value>,
     compilation_authority: Option<Arc<crate::resident_actor::WorkbenchCompilationAuthority>>,
     private_execution: Option<Arc<ExecutionPrivateScope>>,
@@ -1485,31 +1483,28 @@ enum WorkbenchDisplay {
     ToolDispatch,
 }
 
-#[derive(Clone, Copy)]
-struct RequestWorkbenchScope<'a> {
-    response: Option<&'a ResponseExpectation>,
-    request: Option<crate::RequestId>,
+/// One typed response obligation and the request identity it belongs to.
+#[derive(Clone)]
+pub struct RequestWorkbenchScope {
+    pub response: ResponseExpectation,
+    pub request: crate::RequestId,
 }
 
-impl RequestWorkbenchScope<'_> {
-    fn source(
-        &self,
-        source: &ActorWorkbenchSource,
+impl ActorWorkbenchSource {
+    fn for_workbench(
+        mut self,
         context: &crate::ActorSessionContext,
-    ) -> ActorWorkbenchSource {
-        let mut source = source.clone();
-        source.preamble = match (self.response, self.request) {
-            (Some(_), Some(request)) => {
-                source.request_helper_recipe =
-                    tidepool_toolchain::declaration_join::RequestHelperRecipe::ActorReply;
-                source.request_preamble(request, &context.haskell_effects_alias)
-            }
-            (None, None) => source.preamble.to_string(),
-            _ => unreachable!("request workbench scope is constructed atomically"),
+        request_scope: Option<&RequestWorkbenchScope>,
+    ) -> Self {
+        if let Some(scope) = request_scope {
+            self.request_helper_recipe =
+                tidepool_toolchain::declaration_join::RequestHelperRecipe::ActorReply;
+            self.preamble = self
+                .request_preamble(scope.request, &context.haskell_effects_alias)
+                .into();
         }
-        .into();
-        source.preamble = actor_preamble(&source.preamble, context).into();
-        source
+        self.preamble = actor_preamble(&self.preamble, context).into();
+        self
     }
 }
 
@@ -2988,11 +2983,14 @@ impl<H, O> ResidentActorRunner<H, O> {
     ) -> ResidentActorWorkbench<H, O> {
         let mut access = self.access.sharing();
         access.source.request_evidence = Some(evidence);
-        ResidentActorWorkbench::from_access(access, Some(response), Some(request))
+        ResidentActorWorkbench::from_access(
+            access,
+            Some(RequestWorkbenchScope { response, request }),
+        )
     }
 
     pub(crate) fn application_workbench(&self) -> ResidentActorWorkbench<H, O> {
-        ResidentActorWorkbench::from_access(self.access.sharing(), None, None)
+        ResidentActorWorkbench::from_access(self.access.sharing(), None)
     }
 }
 
@@ -3000,8 +2998,7 @@ impl<H, O> ResidentActorWorkbench<H, O> {
     pub(crate) fn shared_for_command_binding(&self) -> Self {
         Self {
             access: self.access.sharing(),
-            response: self.response.clone(),
-            request: self.request.clone(),
+            request_scope: self.request_scope.clone(),
             json_input: self.json_input.clone(),
             compilation_authority: self.compilation_authority.clone(),
             private_execution: self.private_execution.clone(),
@@ -3012,26 +3009,18 @@ impl<H, O> ResidentActorWorkbench<H, O> {
     pub fn new(
         machines: Arc<ActorMachineRegistry<H, O>>,
         source: ActorWorkbenchSource,
-        response: Option<ResponseExpectation>,
-        request: Option<crate::RequestId>,
+        request_scope: Option<RequestWorkbenchScope>,
     ) -> Self {
-        Self::from_access(
-            ResidentMachineAccess::new(machines, source),
-            response,
-            request,
-        )
+        Self::from_access(ResidentMachineAccess::new(machines, source), request_scope)
     }
 
     fn from_access(
         access: ResidentMachineAccess<H, O>,
-        response: Option<ResponseExpectation>,
-        request: Option<crate::RequestId>,
+        request_scope: Option<RequestWorkbenchScope>,
     ) -> Self {
         Self {
             access,
-            response,
-            request,
-
+            request_scope,
             json_input: None,
             compilation_authority: None,
             private_execution: None,
@@ -3796,9 +3785,7 @@ where
             })?;
             let mut installer = ResidentActorWorkbench {
                 access: self.access.sharing(),
-                response: None,
-                request: None,
-
+                request_scope: None,
                 json_input: None,
                 compilation_authority: Some(authority.clone()),
                 private_execution: None,
@@ -4181,15 +4168,11 @@ where
                 declaration_worth_showing(module, &self.access.source.workspace_modules)
             })
         });
-        let mut source = self.access.source.clone();
-        if let (Some(_), Some(request)) = (&self.response, self.request) {
-            source.request_helper_recipe =
-                tidepool_toolchain::declaration_join::RequestHelperRecipe::ActorReply;
-            source.preamble = source
-                .request_preamble(request, &context.haskell_effects_alias)
-                .into();
-        }
-        source.preamble = actor_preamble(&source.preamble, &context).into();
+        let source = self
+            .access
+            .source
+            .clone()
+            .for_workbench(&context, self.request_scope.as_ref());
 
         let authority = self.compilation_authority.clone().ok_or_else(|| {
             ResidentActorWorkbenchError::ActorProtocol(
@@ -4457,7 +4440,7 @@ where
             kind.anchor(),
             kind.type_name()
         );
-        let mut installer = Self::from_access(self.access.sharing(), None, None);
+        let mut installer = Self::from_access(self.access.sharing(), None);
         installer.access.source.workbench_imports = kind.imports();
         installer.access.source.request_evidence = None;
         installer.access.source.request_helper_recipe =
@@ -4557,8 +4540,7 @@ where
         let admission_execution = execution.clone();
         let snapshot_source = self.access.source.clone();
 
-        let response = self.response.clone();
-        let request = self.request;
+        let request_scope = self.request_scope.clone();
         let mounted_input = leased_input
             .as_ref()
             .map(|guard| guard.mounted_input().clone());
@@ -4570,8 +4552,7 @@ where
                     session,
                     context,
                     snapshot_source,
-                    response.as_ref(),
-                    request,
+                    request_scope.as_ref(),
                     mounted_input.as_ref(),
                     execution
                         .as_ref()
@@ -4776,23 +4757,12 @@ where
         context: crate::ActorSessionContext,
         discovery: crate::status_tool::StatusDiscovery,
     ) -> Result<String, ResidentActorWorkbenchError> {
-        let response = self.response.clone();
-        let request = self.request;
+        let request_scope = self.request_scope.clone();
 
-        let mut source = self.access.source.clone();
+        let source = self.access.source.clone();
         self.access
             .with_machine(context, move |session, context, _| {
-                source.preamble = match (response.as_ref(), request) {
-                    (Some(_), Some(request)) => {
-                        source.request_helper_recipe =
-                            tidepool_toolchain::declaration_join::RequestHelperRecipe::ActorReply;
-                        source.request_preamble(request, &context.haskell_effects_alias)
-                    }
-                    (None, None) => source.preamble.to_string(),
-                    _ => unreachable!("request workbench scope is constructed atomically"),
-                }
-                .into();
-                source.preamble = actor_preamble(&source.preamble, context).into();
+                let source = source.for_workbench(context, request_scope.as_ref());
                 run_status_discovery(session, context, &source, discovery)?
                     .map_err(ResidentActorWorkbenchError::ActorProtocol)
             })
@@ -4823,17 +4793,17 @@ where
         usage: crate::UsagePointerTable,
         execution_control: Option<Arc<crate::WorkbenchExecutionControl>>,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
-        let source = RequestWorkbenchScope {
-            response: self.response.as_ref(),
-            request: self.request,
-        }
-        .source(&self.access.source, &context);
+        let source = self
+            .access
+            .source
+            .clone()
+            .for_workbench(&context, self.request_scope.as_ref());
 
         // Whether this workbench is currently presenting a typed request:
-        // `Tidepool.RequestWorkbenchScope`'s preamble binds `respond`/
+        // The request scope's preamble binds `respond`/
         // `sessionReply`/`sessionInput`/`reportProgress` only then, and a
         // miss on one of those names outside that window should say so.
-        let request_pending = self.request.is_some();
+        let request_pending = self.request_scope.is_some();
         // Documentation and rejected-only requests need the current view for
         // their response, but no compiler request. Keep those small paths in
         // one checkout and avoid a blocking-pool hop.
@@ -5283,17 +5253,7 @@ where
         let step = self
             .access
             .with_machine(context.clone(), move |session, context, _| {
-                begin_fragment(
-                    session,
-                    context,
-                    &source,
-                    RequestWorkbenchScope {
-                        response: None,
-                        request: None,
-                    },
-                    block,
-                    verdict.as_ref(),
-                )
+                begin_fragment(session, context, &source, None, block, verdict.as_ref())
             })
             .await?;
         Ok(step)
@@ -5612,7 +5572,7 @@ fn begin_fragment<H, O>(
     session: &mut ResidentSession<H, O>,
     context: &crate::ActorSessionContext,
     source: &ActorWorkbenchSource,
-    scope: RequestWorkbenchScope<'_>,
+    request_scope: Option<&RequestWorkbenchScope>,
     block: ParsedBlock,
     verdict: Option<&TurnClassification>,
 ) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError>
@@ -5620,7 +5580,7 @@ where
     H: DispatchEffect<O> + Send,
     O: OutputSink + Sync,
 {
-    let source = scope.source(source, context);
+    let source = source.clone().for_workbench(context, request_scope);
     let compiled = match compile_block(
         session,
         context,
@@ -9751,13 +9711,11 @@ enum CellSnapshotAdmission<'a> {
     PrivateExecution(&'a tidepool_runtime::session::PrivateExecutionAdmission),
 }
 
-#[allow(clippy::too_many_arguments)]
 fn snapshot_cell_program<H, O>(
     session: &mut ResidentSession<H, O>,
     context: &crate::ActorSessionContext,
     mut source: ActorWorkbenchSource,
-    response: Option<&ResponseExpectation>,
-    request: Option<crate::RequestId>,
+    request_scope: Option<&RequestWorkbenchScope>,
     mounted_input: Option<&MountedHostInput>,
     admission: CellSnapshotAdmission<'_>,
 ) -> Result<(ActorWorkbenchSource, CellProgramSnapshot), ResidentActorWorkbenchError>
@@ -9785,17 +9743,7 @@ where
             "resident cell session has no declaration plane".into(),
         )
     })?;
-    source.preamble = match (response, request) {
-        (Some(_), Some(request)) => {
-            source.request_helper_recipe =
-                tidepool_toolchain::declaration_join::RequestHelperRecipe::ActorReply;
-            source.request_preamble(request, &context.haskell_effects_alias)
-        }
-        (None, None) => source.preamble.to_string(),
-        _ => unreachable!("request workbench scope is constructed atomically"),
-    }
-    .into();
-    source.preamble = actor_preamble(&source.preamble, context).into();
+    let source = source.for_workbench(context, request_scope);
     let view = if let CellSnapshotAdmission::PrivateExecution(execution) = admission {
         if execution.private_scope() != context.placement.lexical_scope {
             return Err(ResidentActorWorkbenchError::Resident(
@@ -11398,11 +11346,7 @@ mod request_tests {
             &mut session,
             &context,
             &input_source,
-            RequestWorkbenchScope {
-                response: None,
-                request: None,
-
-            },
+            None,
             ParsedBlock {
                 ordinal: 1,
                 total: 1,
@@ -11428,10 +11372,7 @@ mod request_tests {
             &mut session,
             &context,
             &text_source,
-            RequestWorkbenchScope {
-                response: None,
-                request: None,
-            },
+            None,
             ParsedBlock {
                 ordinal: 1,
                 total: 1,
@@ -11605,7 +11546,7 @@ mod request_tests {
     async fn command_job_mounts_retain_original_checked_interfaces_and_reuse_exact_job() {
         use tidepool_runtime::session::turn::HostBindingAuthority;
         let (machines, public, source, _root) = actor_registry_fixture();
-        let (workbench, context) = ResidentActorWorkbench::new(machines, source, None, None)
+        let (workbench, context) = ResidentActorWorkbench::new(machines, source, None)
             .admit_private_cell_for_test(public.clone())
             .await
             .unwrap();
@@ -11730,7 +11671,7 @@ mod request_tests {
     async fn tool_result_mounts_retain_original_checked_interfaces() {
         use tidepool_runtime::session::turn::HostBindingAuthority;
         let (machines, public, source, _root) = actor_registry_fixture();
-        let (workbench, context) = ResidentActorWorkbench::new(machines, source, None, None)
+        let (workbench, context) = ResidentActorWorkbench::new(machines, source, None)
             .admit_private_cell_for_test(public.clone())
             .await
             .unwrap();
@@ -11830,7 +11771,7 @@ mod request_tests {
     #[tokio::test]
     async fn failed_private_prefix_selects_completed_native_and_accepted_host_writes_only() {
         let (machines, public, source, _root) = actor_registry_fixture();
-        let (workbench, private) = ResidentActorWorkbench::new(machines, source, None, None)
+        let (workbench, private) = ResidentActorWorkbench::new(machines, source, None)
             .admit_private_cell_for_test(public.clone())
             .await
             .unwrap();
@@ -11935,7 +11876,7 @@ mod request_tests {
     #[tokio::test]
     async fn cancelled_unaccepted_host_write_cannot_publish_or_transfer_to_another_execution() {
         let (machines, public, source, _root) = actor_registry_fixture();
-        let (workbench, private) = ResidentActorWorkbench::new(machines, source, None, None)
+        let (workbench, private) = ResidentActorWorkbench::new(machines, source, None)
             .admit_private_cell_for_test(public.clone())
             .await
             .unwrap();
@@ -12091,10 +12032,7 @@ mod request_tests {
             &mut direct_session,
             &direct_context,
             &direct_source,
-            RequestWorkbenchScope {
-                response: None,
-                request: None,
-            },
+            None,
             block,
             Some(&verdict),
         )
@@ -12609,8 +12547,7 @@ mod request_tests {
     #[tokio::test]
     async fn admitted_cell_preserves_shadowing_polykinds_and_prologue_only_items() {
         let (machines, context, source, _root) = actor_registry_fixture();
-        let initial =
-            ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None, None);
+        let initial = ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
         let (initial, private_context) = initial
             .admit_private_cell_for_test(context.clone())
             .await
@@ -12623,7 +12560,7 @@ mod request_tests {
             .publish_completed_cell_for_test(private_context)
             .await
             .unwrap();
-        let workbench = ResidentActorWorkbench::new(machines, source, None, None);
+        let workbench = ResidentActorWorkbench::new(machines, source, None);
         let (workbench, context) = workbench
             .admit_private_cell_for_test(context)
             .await
@@ -12889,7 +12826,7 @@ mod request_tests {
     #[tokio::test]
     async fn authored_cell_requires_both_source_and_private_execution_admission() {
         let (machines, context, source, _root) = actor_registry_fixture();
-        let workbench = ResidentActorWorkbench::new(machines, source, None, None)
+        let workbench = ResidentActorWorkbench::new(machines, source, None)
             .with_json_input(Some(serde_json::json!(42)));
         let scope = crate::call_timing::CallScope::new(
             "cell",
@@ -12931,8 +12868,7 @@ mod request_tests {
     async fn planned_cell_refuses_changed_own_scope_but_ignores_sibling_and_child_commits() {
         for mutate_own in [false, true] {
             let (machines, context, source, _root) = actor_registry_fixture();
-            let initial =
-                ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None, None);
+            let initial = ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
             let (initial, private_context) = initial
                 .admit_private_cell_for_test(context.clone())
                 .await
@@ -12946,7 +12882,7 @@ mod request_tests {
                 .await
                 .unwrap();
             let workbench =
-                ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None, None);
+                ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
             let (workbench, context) = workbench
                 .admit_private_cell_for_test(context)
                 .await
@@ -12988,12 +12924,8 @@ mod request_tests {
                 for scope in [sibling, child] {
                     let mut changing = context.clone();
                     changing.placement.lexical_scope = scope;
-                    let changing_workbench = ResidentActorWorkbench::new(
-                        Arc::clone(&machines),
-                        source.clone(),
-                        None,
-                        None,
-                    );
+                    let changing_workbench =
+                        ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
                     let (changing_workbench, private_context) = changing_workbench
                         .admit_private_cell_for_test(changing)
                         .await
@@ -13062,8 +12994,7 @@ mod request_tests {
     #[tokio::test]
     async fn lookup_inspects_checked_bound_value_on_repeated_requests() {
         let (machines, context, source, _root) = actor_lookup_registry_fixture();
-        let workbench =
-            ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None, None);
+        let workbench = ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
         let mut sibling_context = context.clone();
         sibling_context.placement.lexical_scope = workbench
             .access
@@ -13077,7 +13008,7 @@ mod request_tests {
         for public_context in [context, sibling_context] {
             let public_scope = public_context.placement.lexical_scope;
             let checked_workbench =
-                ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None, None);
+                ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
             let (checked_workbench, private_context) = checked_workbench
                 .admit_private_cell_for_test(public_context)
                 .await
@@ -13292,7 +13223,6 @@ mod request_tests {
                 Arc::clone(&machines),
                 source.clone(),
                 None,
-                None,
             ));
             let validation = if sibling_write {
                 concat!(
@@ -13453,7 +13383,7 @@ mod request_tests {
     #[tokio::test]
     async fn actor_empty_snapshot_answers_uncancelled_type_search() {
         let (machines, context, source, _root) = actor_lookup_registry_fixture();
-        let workbench = ResidentActorWorkbench::new(machines, source.clone(), None, None);
+        let workbench = ResidentActorWorkbench::new(machines, source.clone(), None);
         let (view, inputs, prepared) = workbench
             .access
             .with_machine(context.clone(), move |session, context, _| {
@@ -13495,7 +13425,7 @@ mod request_tests {
     #[tokio::test]
     async fn parked_actor_snapshot_answers_uncancelled_type_search() {
         let (machines, context, source, _root) = actor_lookup_registry_fixture();
-        let workbench = ResidentActorWorkbench::new(machines, source.clone(), None, None);
+        let workbench = ResidentActorWorkbench::new(machines, source.clone(), None);
         let step = workbench
             .begin_fragment_split(
                 context.clone(),
@@ -13522,11 +13452,11 @@ mod request_tests {
             continuation_id.clone(),
             "parked inspection qualification abandoned".into(),
         );
-        let source = RequestWorkbenchScope {
-            response: workbench.response.as_ref(),
-            request: workbench.request,
-        }
-        .source(&workbench.access.source, &context);
+        let source = workbench
+            .access
+            .source
+            .clone()
+            .for_workbench(&context, workbench.request_scope.as_ref());
         let (view, inputs, prepared) = workbench
             .access
             .with_machine(context.clone(), move |session, context, _| {
@@ -13587,7 +13517,7 @@ mod request_tests {
     #[tokio::test]
     async fn parked_lookup_transaction_answers_uncancelled_varied_type_search() {
         let (machines, context, source, _root) = actor_lookup_registry_fixture();
-        let workbench = ResidentActorWorkbench::new(machines, source.clone(), None, None);
+        let workbench = ResidentActorWorkbench::new(machines, source.clone(), None);
         let step = workbench
             .begin_fragment_split(
                 context.clone(),
@@ -13655,7 +13585,6 @@ mod request_tests {
         let workbench = Arc::new(ResidentActorWorkbench::new(
             Arc::clone(&machines),
             source.clone(),
-            None,
             None,
         ));
         let trace_path = lookup_trace_path();
@@ -13804,11 +13733,10 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             .unwrap();
         let machines = Arc::new(ActorMachineRegistry::new());
         machines.insert_idle(context.placement.session, Box::new(session));
-        let workbench =
-            ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None, None)
-                .with_compilation_authority(
-                    crate::resident_actor::WorkbenchCompilationAuthority::for_test(context.clone()),
-                );
+        let workbench = ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None)
+            .with_compilation_authority(
+                crate::resident_actor::WorkbenchCompilationAuthority::for_test(context.clone()),
+            );
         let before = workbench
             .access
             .with_machine(context.clone(), |session, context, _| {
@@ -15922,7 +15850,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
     #[tokio::test]
     async fn planned_cell_defers_declaration_until_its_admitted_item() {
         let (machines, context, source, _root) = actor_registry_fixture();
-        let workbench = ResidentActorWorkbench::new(machines, source, None, None);
+        let workbench = ResidentActorWorkbench::new(machines, source, None);
         let public_context = context.clone();
         let (workbench, context) = workbench
             .admit_private_cell_for_test(context)
@@ -16016,7 +15944,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
     #[tokio::test]
     async fn planned_cell_keeps_request_json_input_owned_across_native_preparation() {
         let (machines, public, source, _root) = actor_registry_fixture();
-        let workbench = ResidentActorWorkbench::new(machines, source, None, None)
+        let workbench = ResidentActorWorkbench::new(machines, source, None)
             .with_json_input(Some(serde_json::json!({"greeting": "hi"})));
         let (workbench, context) = workbench
             .admit_private_cell_for_test(public.clone())
@@ -16338,7 +16266,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         source
             .workbench_imports
             .extend_text("qualified Tidepool.Agent.Reply as TidepoolReply");
-        let workbench = ResidentActorWorkbench::new(machines, source, None, None);
+        let workbench = ResidentActorWorkbench::new(machines, source, None);
         let (workbench, context) = workbench
             .admit_private_cell_for_test(context)
             .await
@@ -16667,7 +16595,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         .unwrap();
         let machines = Arc::new(ActorMachineRegistry::new());
         machines.insert_idle(context.placement.session, Box::new(session));
-        let workbench = ResidentActorWorkbench::new(machines, source, None, None)
+        let workbench = ResidentActorWorkbench::new(machines, source, None)
             .with_compilation_authority(
                 crate::resident_actor::WorkbenchCompilationAuthority::for_test(context.clone()),
             );
@@ -16743,10 +16671,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             &mut session,
             &context,
             &source,
-            RequestWorkbenchScope {
-                response: None,
-                request: None,
-            },
+            None,
             ParsedBlock {
                 ordinal: 1,
                 total: 1,
@@ -16760,7 +16685,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         let before = session.public_visibility_snapshot_in(public_scope).unwrap();
         let machines = Arc::new(ActorMachineRegistry::new());
         machines.insert_idle(context.placement.session, Box::new(session));
-        let workbench = ResidentActorWorkbench::new(machines, source, None, None)
+        let workbench = ResidentActorWorkbench::new(machines, source, None)
             .with_compilation_authority(
                 crate::resident_actor::WorkbenchCompilationAuthority::for_test(context.clone()),
             );
@@ -16802,7 +16727,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
     #[tokio::test]
     async fn request_scope_alias_borrow_refuses_a_shadowed_mount() {
         let (machines, context, source, _root) = actor_registry_fixture();
-        let workbench = ResidentActorWorkbench::new(machines, source.clone(), None, None);
+        let workbench = ResidentActorWorkbench::new(machines, source.clone(), None);
         let step = workbench
             .begin_fragment_split(
                 context.clone(),
@@ -16858,8 +16783,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         source
             .workbench_imports
             .extend_text("qualified Tidepool.Agent.Reply as TidepoolReply");
-        let workbench =
-            ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None, None);
+        let workbench = ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
         let runner = ResidentActorRunner::new(machines, source.clone());
         let step = workbench
             .begin_fragment_split(
@@ -17001,8 +16925,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         source
             .workbench_imports
             .extend_text("qualified Tidepool.Agent.Reply as TidepoolReply");
-        let workbench =
-            ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None, None);
+        let workbench = ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
         let runner = ResidentActorRunner::new(machines, source);
         let (workbench, context) = workbench
             .admit_private_cell_for_test(context)
@@ -17098,11 +17021,11 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         let _guard = tracing::subscriber::set_default(subscriber);
 
         let (wb_a, context_a) =
-            ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None, None)
+            ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None)
                 .admit_private_cell_for_test(context_a)
                 .await
                 .unwrap();
-        let (wb_b, context_b) = ResidentActorWorkbench::new(machines, source, None, None)
+        let (wb_b, context_b) = ResidentActorWorkbench::new(machines, source, None)
             .admit_private_cell_for_test(context_b)
             .await
             .unwrap();
@@ -17199,7 +17122,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
     async fn begin_fragment_split_after_bootstrap_matches_single_checkout_begin_fragment() {
         let (split_machines, split_context, split_source, _split_root) = actor_registry_fixture();
         let split_workbench =
-            ResidentActorWorkbench::new(split_machines, split_source.clone(), None, None);
+            ResidentActorWorkbench::new(split_machines, split_source.clone(), None);
         let (mut direct_session, direct_context, direct_source, _direct_root) =
             host_mount_fixture();
 
@@ -17255,10 +17178,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             &mut direct_session,
             &direct_context,
             &direct_source,
-            RequestWorkbenchScope {
-                response: None,
-                request: None,
-            },
+            None,
             block,
             Some(&verdict),
         )
@@ -17309,8 +17229,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
     #[tokio::test]
     async fn public_visibility_snapshot_pairs_declaration_and_exact_binding_identities() {
         let (machines, context, source, _root) = actor_registry_fixture();
-        let workbench =
-            ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None, None);
+        let workbench = ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
         let runner = ResidentActorRunner::new(machines, source.clone());
         let before = runner
             .public_visibility_snapshot(context.clone())
@@ -17375,8 +17294,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
     #[tokio::test]
     async fn answered_haskell_effect_reports_later_continuation_failure_as_delivered() {
         let (machines, context, source, _root) = actor_registry_fixture();
-        let workbench =
-            ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None, None);
+        let workbench = ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
         let runner = ResidentActorRunner::new(machines, source.clone());
         let step = workbench
             .begin_fragment_split(
@@ -17411,8 +17329,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
     async fn captured_haskell_binding_outlives_failed_parent_and_released_token_for_two_delayed_children(
     ) {
         let (machines, context, source, _root) = actor_registry_fixture();
-        let workbench =
-            ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None, None);
+        let workbench = ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
         let runner = ResidentActorRunner::new(Arc::clone(&machines), source.clone());
         let baseline_handles = workbench
             .access
@@ -17755,8 +17672,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
     async fn external_work_releases_machine_until_its_failure_settles() {
         let (machines, mut context, source, _root) = actor_registry_fixture();
         context.haskell_effects_alias = "'[Exomonad.Notifications, Exomonad.ActorContext]".into();
-        let workbench =
-            ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None, None);
+        let workbench = ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
         let runner = Arc::new(ResidentActorRunner::new(
             Arc::clone(&machines),
             source.clone(),
@@ -17849,7 +17765,6 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             Arc::clone(&machines),
             source.clone(),
             None,
-            None,
         ));
 
         let (block, verdict) = suspending_fragment();
@@ -17940,8 +17855,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
     async fn actor_continuation_handoff_preserves_successor_and_aborts_other_cell_holes() {
         let (machines, mut context, source, _root) = actor_registry_fixture();
         context.haskell_effects_alias = "'[Exomonad.Notifications, Exomonad.ActorContext]".into();
-        let workbench =
-            ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None, None);
+        let workbench = ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
         let runner = ResidentActorRunner::new(machines, source.clone());
         let cell = ParkedHoleAbortGuard::with_latest(
             &workbench.access,
@@ -18089,7 +18003,6 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             Arc::clone(&machines),
             source.clone(),
             None,
-            None,
         ));
         let park = |workbench: Arc<ResidentActorWorkbench<_, _>>,
                     context: crate::ActorSessionContext,
@@ -18165,7 +18078,6 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             Arc::clone(&machines),
             source.clone(),
             None,
-            None,
         ));
         let (block, verdict) = suspending_fragment();
         let unrelated = workbench
@@ -18196,10 +18108,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                                     session,
                                     context,
                                     &source,
-                                    RequestWorkbenchScope {
-                                        response: None,
-                                        request: None,
-                                    },
+                                    None,
                                     block,
                                     Some(&verdict),
                                 )?;
@@ -18256,7 +18165,6 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         let workbench = Arc::new(ResidentActorWorkbench::new(
             Arc::clone(&machines),
             source.clone(),
-            None,
             None,
         ));
         let (block, verdict) = suspending_fragment();
@@ -18338,7 +18246,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
     async fn exact_cleanup_acknowledgement_allows_a_later_native_fragment() {
         let (machines, mut context, source, _root) = actor_registry_fixture();
         context.haskell_effects_alias = "'[Exomonad.Notifications, Exomonad.ActorContext]".into();
-        let workbench = ResidentActorWorkbench::new(machines.clone(), source.clone(), None, None);
+        let workbench = ResidentActorWorkbench::new(machines.clone(), source.clone(), None);
         let guard = ParkedHoleAbortGuard::with_latest(
             &workbench.access,
             context.clone(),
@@ -18397,7 +18305,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
     async fn failed_abort_frame_owner(lose_machine: bool) {
         let (machines, mut context, source, _root) = actor_registry_fixture();
         context.haskell_effects_alias = "'[Exomonad.Notifications, Exomonad.ActorContext]".into();
-        let workbench = ResidentActorWorkbench::new(machines.clone(), source.clone(), None, None);
+        let workbench = ResidentActorWorkbench::new(machines.clone(), source.clone(), None);
         let authority = Arc::new(());
         let authority_weak = Arc::downgrade(&authority);
         let mut failed_cleanup_context = context.clone();
@@ -18561,7 +18469,6 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             &mut session,
             &context,
             source.clone(),
-            None,
             None,
             None,
             CellSnapshotAdmission::ProtectedSetup,
