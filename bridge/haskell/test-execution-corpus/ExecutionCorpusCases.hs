@@ -61,14 +61,7 @@ data Outcome
   = Projected FilePath SymbolIdentity
   | Rejected String
 
--- Each cohort remains a compiler transaction with its own output and cleanup.
--- The compiler process is shared; GHC graphs are released between cohorts.
-splitRequests :: [String] -> [[String]]
-splitRequests [] = []
-splitRequests arguments = case break (== "--next") arguments of
-  (request, []) -> [request]
-  (request, _ : rest) -> request : splitRequests rest
-
+-- Each cohort is one compiler transaction with its own output and cleanup.
 runProbe :: (FilePath -> [FilePath] -> IO PreparedPipelineResult) -> [String] -> IO ()
 runProbe compile rawArguments = do
   let (metadataTargets, arguments) = case rawArguments of
