@@ -50,7 +50,6 @@ fn fixture() -> (
         Arc::clone(&machines),
         ActorWorkbenchSource::new("", Vec::new()),
         None,
-        None,
     );
     (machines, workbench, session_id, retired, root)
 }
