@@ -21,6 +21,7 @@ serde_json = { workspace = true, features = ["arbitrary_precision"] }
 blake3.workspace = true
 
 [dev-dependencies]
+tempfile.workspace = true
 tidepool-repr.workspace = true
 tidepool-effect.workspace = true
 tidepool-protocol.workspace = true

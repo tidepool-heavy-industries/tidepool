@@ -257,15 +257,12 @@ pub fn forks() -> Effect {
                 doc: &["Refusal-bearing release of one committed fork group's scheduler metadata."],
             },
         ],
-        foreign_types: &[
-            ("ActorLaunchRole", "crate::ActorLaunchRoleWire"),
-            ("ActorEffectProfile", "crate::ActorEffectProfileWire"),
-            ("WorktreeSpec", "tidepool_bridge_effects::WtWorktreeSpec"),
-            ("DirtyPolicy", "tidepool_bridge_effects::WtDirtyPolicy"),
-            (
-                "WorktreeHandle",
-                "tidepool_bridge_effects::WtWorktreeHandle",
-            ),
+        external_types: &[
+            crate::schema::ExternalType { haskell_name: "ActorLaunchRole", rust_wire: "crate::ActorLaunchRoleWire", core_module: None },
+            crate::schema::ExternalType { haskell_name: "ActorEffectProfile", rust_wire: "crate::ActorEffectProfileWire", core_module: None },
+            crate::schema::ExternalType { haskell_name: "WorktreeSpec", rust_wire: "tidepool_bridge_effects::WtWorktreeSpec", core_module: None },
+            crate::schema::ExternalType { haskell_name: "DirtyPolicy", rust_wire: "tidepool_bridge_effects::WtDirtyPolicy", core_module: None },
+            crate::schema::ExternalType { haskell_name: "WorktreeHandle", rust_wire: "tidepool_bridge_effects::WtWorktreeHandle", core_module: None },
         ],
         errors: None,
         verbs: vec![
@@ -302,12 +299,12 @@ pub fn forks() -> Effect {
                 args.push(Arg {
                     name: "worktreeSpec",
                     ty: HsType::maybe(HsType::Named("WorktreeSpec")),
-                    rust: RustBinding::Path("Option<tidepool_bridge_effects::WtWorktreeSpec>"),
+                    rust: RustBinding::External,
                 });
                 args.push(Arg {
                     name: "boundDirtyPolicy",
                     ty: HsType::Named("DirtyPolicy"),
-                    rust: RustBinding::Path("tidepool_bridge_effects::WtDirtyPolicy"),
+                    rust: RustBinding::External,
                 });
                 args.push(Arg {
                     name: "effectKeys",
@@ -404,7 +401,7 @@ pub fn forks() -> Effect {
                     Arg {
                         name: "role",
                         ty: HsType::Named("ActorLaunchRole"),
-                        rust: RustBinding::Path("crate::ActorLaunchRoleWire"),
+                        rust: RustBinding::External,
                     },
                     Arg {
                         name: "effectKeys",

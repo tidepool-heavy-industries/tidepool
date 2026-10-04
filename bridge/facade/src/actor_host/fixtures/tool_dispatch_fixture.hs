@@ -11,7 +11,6 @@ import GHC.Generics (Generic)
 import Tidepool.Aeson.FromJSON (FromJSON)
 import Tidepool.Aeson.Value (Value (..), object, toJSON, (.=))
 import Tidepool.Agent.Contract
-import Tidepool.Agent.Spawn ()
 
 newtype DispatchInput = DispatchInput {content :: Text}
   deriving (Generic, FromJSON, JsonSchema)

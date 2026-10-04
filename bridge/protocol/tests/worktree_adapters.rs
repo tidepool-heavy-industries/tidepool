@@ -1,10 +1,4 @@
-//! Pin tests for `gen::adapter_rs`'s Worktree output.
-//!
-//! Worktree is deliberately absent from [`tidepool_protocol::effects::all`], so
-//! `generated_files_are_current` never sees this module — nothing is written to
-//! disk on this branch. These tests exercise `gen::adapter_rs::file` directly
-//! against `effects::all_described()`, which is the test-only view that
-//! includes Worktree.
+//! Narrow rendering pins for schema-owned Worktree adapters.
 
 use tidepool_protocol::gen::{adapter_rs, handler_rs};
 

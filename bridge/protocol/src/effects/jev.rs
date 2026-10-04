@@ -54,7 +54,7 @@ pub fn jev() -> Effect {
             domain: None,
             doc: &[],
         }],
-        foreign_types: &[],
+        external_types: &[],
         errors: None,
         verbs: vec![Verb {
             ctor: "JevAskWith",

@@ -1,6 +1,6 @@
 //! Generator: the Rust WIRE types, emitted into `tidepool-bridge-effects`.
 //!
-//! Replaces the hand-written `Wt*`/`Ev*`/`Ag*` blocks and — the point of the
+//! Replaces the hand-written `Wt*`/`Ev*` blocks and — the point of the
 //! whole lane — the comment above them:
 //!
 //! > Field ORDER in these structs is the wire contract and must match those
@@ -53,6 +53,8 @@ pub fn module_index(effects: &[Effect]) -> GeneratedFile {
         .filter(|e| has_wire_types(e))
         .map(effect_module_name)
         .collect();
+    let mut modules = modules;
+    modules.push("model_control".to_string());
     GeneratedFile {
         path: "tidepool/bridge-effects/src/generated/mod.rs".to_string(),
         contents: index_body("Generated effect wire types", &modules, true),
@@ -72,18 +74,29 @@ fn body(e: &Effect) -> String {
     let mut out = header("//! ", &format!("`{}` wire types", e.name));
     out.push('\n');
 
-    // A `foreign_types` entry names a wire type another effect's OWN generated
+    // A `external_types` entry names a wire type another effect's OWN generated
     // module declares (Event's `EventWatch` etc. name Worktree's `WtWorktreeId`).
     // Every generated wire module lives in `tidepool-bridge-effects`, and the
     // crate root flattens every effect's module (`pub use generated::*;`), so
     // the foreign name is reachable at `crate::<Name>` regardless of which
     // sibling module actually declares it. rustfmt sorts `use` items
     // lexically, and `crate` sorts before `tidepool_bridge_derive`.
-    if !e.foreign_types.is_empty() {
-        let mut names: Vec<&str> = e.foreign_types.iter().map(|(_, wire)| *wire).collect();
+    if !e.external_types.is_empty() {
+        let mut names: Vec<&str> = e
+            .external_types
+            .iter()
+            .map(|r| r.rust_wire)
+            .filter(|wire| {
+                !wire.contains("::") && wire.chars().next().is_some_and(char::is_uppercase)
+            })
+            .collect();
         names.sort_unstable();
         names.dedup();
-        out.push_str(&format!("use crate::{{{}}};\n", names.join(", ")));
+        match names.as_slice() {
+            [] => {}
+            [only] => out.push_str(&format!("use crate::{only};\n")),
+            _ => out.push_str(&format!("use crate::{{{}}};\n", names.join(", "))),
+        }
     }
 
     // rustfmt unwraps a single-name brace list, so emit the unwrapped form
@@ -154,7 +167,7 @@ fn rust_type(e: &Effect, ty: &HsType) -> String {
         HsType::Bool => "bool".to_string(),
         // The vendored aeson JSON value, ret-only wherever it appears in a wire
         // record today (`RepositoryEvent::ObservedMessage`'s bare payload) — the
-        // same `serde_json::Value` spelling `AgCyclePayload`/`AgAgentStep` use
+        // `serde_json::Value` spelling used by the JSON bridge
         // for the same reason (no `FromHaskell` for it, so it never decodes).
         HsType::Value => "serde_json::Value".to_string(),
         HsType::List(inner) => format!("Vec<{}>", rust_type(e, inner)),

@@ -1,23 +1,6 @@
-//! This migration's acceptance bar, mechanically: the `EffectDecl` a migrated
-//! effect produces must be identical, field for field, to what the schema in
-//! `tidepool-protocol` renders.
-//!
-//! This test is written to run BEFORE the flip, against the still-hand-written
-//! `<eff>_effect_def!` macro — that is what makes it a proof rather than a
-//! tautology. Green here means the schema reproduces the hand-maintained
-//! artifact exactly, and only then is the hand copy deleted.
-//!
-//! It stays green after the flip, where it still earns its place: byte equality
-//! of the generated FILE (`tidepool-protocol`'s `generated_files_are_current`)
-//! and equality of the compiled VALUE are different failure modes. A bug in the
-//! generator's Rust-string escaping could emit a file that differs from the
-//! schema's intent while still round-tripping its own bytes; this catches that,
-//! because it compares what the compiler actually built.
-//!
-//! Why the comparison is field-by-field rather than one `assert_eq!` on the
-//! whole struct: `EffectDecl` is `&'static str` data, so a mismatch buried in a
-//! 400-byte helper string is unreadable in a whole-struct dump. Each field
-//! reports itself.
+//! The compiled EffectDecl values must equal their owning schema projections.
+//! This catches escaping and source mapping errors in the compiled consumer.
+//! Native generation and real GHC consumers own artifact and module acceptance.
 
 /// Every field of `EffectDecl` must be accounted for here. If a field is added
 /// to `EffectDecl` and not to this list, the destructuring below stops

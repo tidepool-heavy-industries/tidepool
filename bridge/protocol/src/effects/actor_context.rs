@@ -35,7 +35,7 @@ pub fn actor_context() -> Effect {
         helpers_row_polymorphic: true,
         extra_imports: &[],
         type_defs: type_defs(),
-        foreign_types: &[],
+        external_types: &[],
         errors: None,
         verbs: vec![Verb {
             ctor: "ActorContextWith",

@@ -36,6 +36,22 @@ pub const SUBSTRATE_MARKER: &str = "-- @substrate-helper@";
 // Effect
 // ---------------------------------------------------------------------------
 
+/// A nominal reference shared by generated Rust and Haskell consumers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExternalType {
+    pub haskell_name: &'static str,
+    pub rust_wire: &'static str,
+    /// `None` means the type is declared by another effect in the same Core.
+    pub core_module: Option<&'static str>,
+}
+
+impl ExternalType {
+    pub fn core_import(self) -> Option<String> {
+        self.core_module
+            .map(|module| format!("import {module} ({})", self.haskell_name))
+    }
+}
+
 /// One effect, completely.
 #[derive(Clone, Debug)]
 pub struct Effect {
@@ -82,18 +98,9 @@ pub struct Effect {
     /// Supporting Haskell declarations emitted before the GADT. The error ADT
     /// is NOT listed here — it is derived from [`Effect::errors`].
     pub type_defs: Vec<TypeDef>,
-    /// `(Haskell name, Rust wire name)` pairs for a NAMED type this effect's own
-    /// `type_defs` reference but which is declared by ANOTHER, already-migrated
-    /// effect (Event's `EventWatch` names Worktree's `WorktreeId`). All Haskell
-    /// declarations still land in the ONE generated `Tidepool.Effects` module
-    /// regardless of which effect owns them, so the Haskell side needs no
-    /// change — this table exists only so [`Effect::wire_rust_of`] (and
-    /// [`Effect::validate`]'s undeclared-reference check) can resolve a WIRE
-    /// Rust spelling this effect does not itself own. Kept effect-local (no
-    /// `Vec<Effect>` threaded through the generator) rather than a
-    /// whole-registry lookup, because the pairing is small and the owning
-    /// effect's wire name is already public, stable data.
-    pub foreign_types: &'static [(&'static str, &'static str)],
+    /// References to types owned outside this effect. Leaf modules are imported
+    /// by Core; companion helpers remain in `extra_imports`.
+    pub external_types: &'static [ExternalType],
     /// This effect's typed per-verb failure ADT (#335), if it has one.
     pub errors: Option<ErrorAdt>,
     /// The GADT constructors, one per verb.
@@ -293,18 +300,18 @@ impl Effect {
     ///
     /// # Panics
     /// Panics when `name` is neither declared by this effect nor listed in its
-    /// [`Effect::foreign_types`]. That is a generation-time failure by design —
+    /// [`Effect::external_types`]. That is a generation-time failure by design —
     /// an under-specified schema must not produce output.
     #[must_use]
     pub fn wire_rust_of(&self, name: &str) -> &'static str {
         if let Some(td) = self.type_def(name) {
             return td.wire_name();
         }
-        if let Some((_, wire)) = self.foreign_types.iter().find(|(hs, _)| *hs == name) {
-            return wire;
+        if let Some(reference) = self.external_types.iter().find(|r| r.haskell_name == name) {
+            return reference.rust_wire;
         }
         panic!(
-            "{}: no type_defs entry (own or foreign_types) declares `{name}`, so it has \
+            "{}: no type_defs entry (own or external_types) declares `{name}`, so it has \
              no wire Rust spelling. A type from another mechanism (a `HaskellRecord` bridged \
              record) cannot appear in a generated wire struct.",
             self.name
@@ -511,10 +518,12 @@ impl Effect {
             };
             for ty in referenced {
                 for n in named_types(ty) {
-                    if !td_seen.contains(&n) && !self.foreign_types.iter().any(|(hs, _)| *hs == n) {
+                    if !td_seen.contains(&n)
+                        && !self.external_types.iter().any(|r| r.haskell_name == n)
+                    {
                         errs.push(format!(
                             "{}: {} references `{n}`, which this effect does not declare \
-                             and which is not listed in `foreign_types`",
+                             and which is not listed in `external_types`",
                             self.name, t.name
                         ));
                     }
@@ -522,17 +531,27 @@ impl Effect {
             }
         }
 
-        for (hs, wire) in self.foreign_types {
-            if td_seen.contains(hs) {
+        for reference in self.external_types {
+            let hs = reference.haskell_name;
+            let wire = reference.rust_wire;
+            if td_seen.contains(&hs) {
                 errs.push(format!(
-                    "{}: `{hs}` is listed in foreign_types but is also declared in this \
-                     effect's own type_defs — foreign_types is for names OTHER effects own",
+                    "{}: `{hs}` is listed in external_types but is also declared in this \
+                     effect's own type_defs — external_types is for names OTHER effects own",
                     self.name
                 ));
             }
+            if let Some(module) = reference.core_module {
+                if module.is_empty() || module == "Tidepool.Effects.Core" {
+                    errs.push(format!(
+                        "{}: external `{hs}` needs a leaf Core import",
+                        self.name
+                    ));
+                }
+            }
             if wire.is_empty() {
                 errs.push(format!(
-                    "{}: foreign_types entry for `{hs}` carries an empty wire name",
+                    "{}: external_types entry for `{hs}` carries an empty wire name",
                     self.name
                 ));
             }
@@ -732,7 +751,6 @@ pub struct Verb {
     pub errors: Option<&'static str>,
     /// How a suspension carrying this constructor must be routed.
     pub handling: HandlingClass,
-
 }
 
 impl Verb {
@@ -770,6 +788,8 @@ pub enum RustBinding {
     /// Derived mechanically from the Haskell type: `Text`→`String`,
     /// `Int`→`i64`, `Bool`→`bool`, `[Text]`→`Vec<String>`.
     Derived,
+    /// Resolve the named constructor through the effect's external references.
+    External,
     /// `tidepool_bridge::HaskellValue` — a materialized Haskell value, interpreted by the
     /// method using `cx`'s table.
     HaskellValue,
@@ -792,8 +812,28 @@ impl RustBinding {
     /// is a GENERATION-time failure by design: an under-specified schema must
     /// not produce output.
     #[must_use]
-    pub fn rust_type(self, ty: &HsType, whose: &str) -> String {
+    pub fn rust_type(self, ty: &HsType, whose: &str, effect: &Effect) -> String {
         match self {
+            RustBinding::External => {
+                fn resolve(ty: &HsType, effect: &Effect, whose: &str) -> String {
+                    match ty {
+                        HsType::Maybe(inner) => {
+                            format!("Option<{}>", resolve(inner, effect, whose))
+                        }
+                        HsType::List(inner) => format!("Vec<{}>", resolve(inner, effect, whose)),
+                        HsType::App(head, _) => resolve(head, effect, whose),
+                        HsType::Named(name) => effect
+                            .external_types
+                            .iter()
+                            .find(|r| r.haskell_name == *name)
+                            .unwrap_or_else(|| panic!("{whose}: undeclared external type `{name}`"))
+                            .rust_wire
+                            .to_string(),
+                        _ => panic!("{whose}: external binding has no nominal type"),
+                    }
+                }
+                resolve(ty, effect, whose)
+            }
             RustBinding::HaskellValue => "tidepool_bridge::HaskellValue".to_string(),
             RustBinding::JsonValue => "crate::effect_glue::JsonArg".to_string(),
             RustBinding::Bridged(n) => format!("tidepool_bridge_effects::{n}"),
@@ -1262,8 +1302,6 @@ pub enum HandlingClass {
     Ask,
     /// Serviced immediately by the driver from cycle state.
     ReadState,
-    /// Routed to the driver's subagent service.
-    Subagent,
     /// Dispatched into a driver-owned outer-row handler.
     OuterDispatch(OuterEffect),
     /// Routed to the driver's green-thread (`Tidepool.Async`) scheduler.

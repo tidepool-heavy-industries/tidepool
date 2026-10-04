@@ -1,16 +1,7 @@
 //! A tiny "is this a readable, executable regular file" check.
 //!
-//! Used both by this crate's own [`crate::resolve_bin`] (for the strict
-//! `$TIDEPOOL_EXTRACT` override) and by `exomonad-agent`'s Codex binary
-//! locator (`$TIDEPOOL_CODEX_BIN`), which independently authored a
-//! byte-for-byte copy of the Unix implementation. Consolidated here rather
-//! than into a new crate: this crate is the workspace's small process-boundary
-//! leaf (see the crate docs) — the natural home
-//! for a helper anything can depend on without pulling in a real dependency
-//! graph. A caller's own platform policy (e.g. `exomonad-agent` is Linux-only
-//! and applies this unconditionally, with no non-Unix fallback path of its
-//! own) stays with the caller; this module only owns the file-permission
-//! check itself.
+//! Used by this crate's binary resolver for strict executable overrides.
+//! This module owns the file-permission check; callers own platform policy.
 
 use std::path::Path;
 

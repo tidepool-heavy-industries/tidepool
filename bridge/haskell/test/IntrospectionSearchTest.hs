@@ -1,6 +1,8 @@
 {-# LANGUAGE PartialTypeSignatures #-}
 
-module Main (main) where
+module Main (main, tests) where
+
+import Tidepool.Test.Runner (TestTree, runTests, testCase, testGroup)
 
 import Control.Monad (unless)
 import GHC
@@ -14,7 +16,14 @@ import System.Process (callProcess, readProcess)
 import Tidepool.Introspection
 
 main :: IO ()
-main = do
+main = runTests tests
+
+tests :: TestTree
+tests = testGroup "test"
+  [testCase "compiled introspection searches" scenario]
+
+scenario :: IO ()
+scenario = do
   root <- (</> "tidepool-introspection-search-test") <$> getTemporaryDirectory
   createDirectoryIfMissing True root
   let source = root </> "LookupFixture.hs"

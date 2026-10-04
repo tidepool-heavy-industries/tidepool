@@ -15,20 +15,39 @@ pub(super) struct EmbeddedPolicyInstallation {
     actor: ActorRef,
     policy: Arc<dyn ResidentToolEndpoint>,
     projection: Result<Arc<EmbeddedToolProjection>, String>,
+    observation: exomonad_actor::ActorRuntimeObservationHandle,
 }
 
 impl EmbeddedPolicyInstallation {
     pub(super) fn from_installation(installation: &LocalResidentInstallation) -> Self {
-        Self::new(installation.actor.identity(), installation.policy.clone())
+        Self::with_observation(
+            installation.actor.identity(),
+            installation.policy.clone(),
+            installation.runtime_observation.clone(),
+        )
     }
 
+    #[cfg(test)]
     fn new(actor: ActorRef, policy: Arc<dyn ResidentToolEndpoint>) -> Self {
+        Self::with_observation(actor, policy, Default::default())
+    }
+
+    fn with_observation(
+        actor: ActorRef,
+        policy: Arc<dyn ResidentToolEndpoint>,
+        observation: exomonad_actor::ActorRuntimeObservationHandle,
+    ) -> Self {
         let projection = project_tools(policy.tools()).map(Arc::new);
         Self {
             actor,
             policy,
             projection,
+            observation,
         }
+    }
+
+    pub(super) fn observation(&self) -> exomonad_actor::ActorRuntimeObservationHandle {
+        self.observation.clone()
     }
 
     pub(super) fn actor(&self) -> ActorRef {

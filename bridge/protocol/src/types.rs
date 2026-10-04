@@ -329,8 +329,7 @@ pub enum TypeShape {
 pub enum IdentityPayload {
     /// `data X = X Text` — the id is a string.
     Text,
-    /// `data X = X Int` — the id is an integer (Event's `EventId`, Subagent's
-    /// `AgentId`; not exercised by the Worktree slice).
+    /// `data X = X Int` — the identity is an integer.
     Int,
 }
 

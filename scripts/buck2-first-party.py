@@ -807,6 +807,10 @@ load("//build/rust:defs.bzl", "tidepool_rust_test_cases")
         unit_deps, unit_named = dependency_sets(
             package, enabled_dependencies, forwarded_features, include_dev=True
         )
+    if package_name == "exomonad-actor":
+        unit_deps, unit_named = dependency_sets(
+            package, enabled_dependencies, forwarded_features, include_dev=True
+        )
     if package_name == "tidepool-runtime":
         # Compile-fail actions use declared rustc inputs instead of trybuild Cargo.
         unit_package = dict(package)

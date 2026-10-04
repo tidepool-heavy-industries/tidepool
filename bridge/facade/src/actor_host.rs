@@ -1,26 +1,21 @@
-//! Composition root for the first actor-native interactive swarm.
+//! Native Exomonad host composition.
 //!
-//! The daemon owns resident Haskell scheduling and exact actor lifecycle. One
-//! stock interactive agent is attached to each installed Haskell tool policy;
-//! tmux is process ownership and observability, never message transport.
+//! The host owns resident Haskell scheduling and exact actor lifecycle.
+//! Harness owns provider conversations; shared Rust owners supervise commands.
 
-#[cfg(all(test, feature = "codex-compat"))]
+#[cfg(test)]
 mod agent_spec_tests;
 #[cfg(test)]
 mod embedded_agent_spec_tests;
+#[cfg(test)]
+mod hosted_test_context;
 
 #[cfg(test)]
 pub(crate) use crate::transport_test_support::ResidentToolEndpointTestExt;
-#[cfg(all(test, feature = "codex-compat"))]
-mod background_command_example_tests;
-#[cfg(all(test, feature = "codex-compat"))]
-mod call_timing_tests;
-#[cfg(all(test, feature = "codex-compat"))]
-mod cell_compile_cost_tests;
+
 mod cell_context;
 mod cell_model;
-#[cfg(all(test, feature = "codex-compat"))]
-pub(crate) mod command_jobs_tests;
+
 #[cfg(test)]
 mod command_test_support;
 mod commands;
@@ -30,8 +25,7 @@ pub(crate) use effect_vocabulary::exomonad_effect_declarations;
 mod application_supervisor;
 #[cfg(test)]
 mod context_transaction_acceptance_tests;
-#[cfg(all(test, feature = "codex-compat"))]
-mod custody_tests;
+
 mod delivery;
 mod display_output;
 #[cfg(test)]
@@ -61,68 +55,40 @@ mod embedded_reflect;
 mod embedded_service;
 #[cfg(test)]
 mod scaffold_admission_tests;
-#[cfg(all(test, feature = "codex-compat"))]
-use delivery::deliver_pending;
+
 #[cfg(test)]
 use delivery::embedded_notification_operation_id;
-#[cfg(feature = "codex-compat")]
-use delivery::run_delivery_pump;
-#[cfg(any(test, feature = "codex-compat"))]
+
+#[cfg(test)]
 use delivery::{admit_notification, observe_notification_receipt};
-#[cfg(all(test, feature = "codex-compat"))]
-use delivery::{
-    deliver_pending_checked, observe_inbound_delivery, remind_turn_ended_without_respond,
-};
+
 use delivery::{
     observe_embedded_notification, schedule_embedded_notification_drain,
     schedule_embedded_notification_send,
 };
-#[cfg(all(test, feature = "codex-compat"))]
-use delivery::{
-    run_periodic_observation, supervise_delivery, turn_end_reminder, until_shutdown,
-    ActorObservation, WithoutEvidence, POSSIBLY_SEEN_PREFIX, PROVIDER_POLL_INTERVAL,
-    REDELIVERED_PREFIX, WITHDRAW_WITHOUT_EVIDENCE_AFTER,
-};
+
 #[cfg(test)]
 mod embedded_shutdown_tests;
 mod host_incarnation;
-#[cfg(feature = "codex-compat")]
-mod hosted_retirement;
-#[cfg(all(test, feature = "codex-compat"))]
-mod hosted_tools_tests;
-#[cfg(all(test, feature = "codex-compat"))]
-mod invocation_lifetime_tests;
-#[cfg(all(test, feature = "codex-compat"))]
-mod jev_tests;
+
 #[cfg(test)]
 mod lookup_availability_tests;
 #[cfg(test)]
 mod m1_host_tests;
-#[cfg(feature = "codex-compat")]
-mod native_launch;
+
 #[cfg(test)]
 mod native_prefix_publication_tests;
-#[cfg(all(test, feature = "codex-compat"))]
-mod observation_budget_tests;
+
 mod overlay_resource;
 #[cfg(test)]
 mod packaged_catalog_tests;
 #[cfg(test)]
 mod prepared_display_tests;
 pub(crate) use overlay_resource::valid_artifact_path;
-#[cfg(all(test, feature = "codex-compat"))]
-mod source_reload_tests;
-#[cfg(all(test, feature = "codex-compat"))]
-#[path = "host_dynamic_tools/tui_resource_tests.rs"]
-mod tui_resource_tests;
-#[cfg(all(test, feature = "codex-compat"))]
-#[path = "host_dynamic_tools/tui_sleep_tests.rs"]
-mod tui_sleep_tests;
+
 mod workspace;
 pub mod workspace_cleanup;
-mod workspace_publication;
-#[cfg(feature = "codex-compat")]
-use workspace::WorkspaceLayout;
+
 pub(crate) use workspace::{copy_helper_draft, initialize_helper_draft};
 use workspace::{ActiveWorkspace, PreparedWorkspace};
 #[cfg(test)]
@@ -131,17 +97,35 @@ mod model_free;
 mod prompt_catalog;
 mod provider_attachment;
 pub(crate) mod recipe_checks;
-#[cfg(all(test, feature = "codex-compat"))]
-mod research_policy_tests;
-#[cfg(all(test, feature = "codex-compat"))]
-mod resource_tests;
+
 mod root_declaration_recovery;
 mod scoped_custody;
-#[cfg(feature = "codex-compat")]
-mod socket_directory;
+
+#[cfg(test)]
+mod background_command_example_tests;
+#[cfg(test)]
+mod call_timing_tests;
+#[cfg(test)]
+mod cell_compile_cost_tests;
+#[cfg(test)]
+pub(crate) mod command_jobs_tests;
+#[cfg(test)]
+mod custody_tests;
+#[cfg(test)]
+mod hosted_tools_tests;
+#[cfg(test)]
+mod invocation_lifetime_tests;
+#[cfg(test)]
+mod jev_tests;
+#[cfg(test)]
+mod observation_budget_tests;
+#[cfg(test)]
+mod research_policy_tests;
+#[cfg(test)]
+mod source_reload_tests;
 #[cfg(test)]
 mod test_campaign;
-#[cfg(all(test, feature = "codex-compat"))]
+#[cfg(test)]
 mod tests;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -158,36 +142,17 @@ use exomonad_actor::{
     ForkWorkspaceSeed, LocalActorRef, LocalResidentDeployment, LocalResidentInstallation,
     ResidentActorRoot, ResidentForest,
 };
-use exomonad_agent::interactive::InputProducerId;
-#[cfg(feature = "codex-compat")]
-use exomonad_agent::{
-    copy_interactive_binding, native_interactive_backend, read_interactive_binding,
-};
-#[cfg(feature = "codex-compat")]
-use exomonad_agent::{
-    BackendThreadId, InputOperationId, InputPurpose, InteractiveAgentBackend,
-    InteractiveInputEnvelope, InteractiveInputMode, InteractiveInputTarget,
-};
-#[cfg(feature = "codex-compat")]
-use exomonad_agent::{
-    InteractiveAgentSpec, InteractiveNativeSandbox, InteractiveNativeToolPolicy,
-    InteractivePolicyMount,
-};
-use exomonad_agent::{InteractiveLaunchMode, QueueReadyThread, ReasoningEffort};
+
+use exomonad_actor::ForkEffort;
 use frunk::{hlist, HCons, HNil};
 use futures_util::FutureExt;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
 use exomonad_node::DurableInbox;
-#[cfg(feature = "codex-compat")]
-use exomonad_node::{
-    ProcessInvocation, ProcessSupervisorClient, ProcessSupervisorManifest, ServiceEnvironment,
-    TmuxLaunch,
-};
+
 use exomonad_node::{ProcessMountBoundary, TmuxPaneId, TmuxSession, BUBBLEWRAP_PROGRAM};
-#[cfg(feature = "codex-compat")]
-use exomonad_worktree::WorktreeHandle;
+
 use exomonad_worktree::{
     ActiveBinding, AgentRef as WorktreePrincipal, BindingTable, EventJournal, GitCli, WorktreeId,
     WorktreeManager, WorktreeMonitor, WorktreeRegistry,
@@ -201,30 +166,25 @@ use tidepool_handlers::{
 };
 use tidepool_mcp::CapturedOutput;
 use tidepool_runtime::session::{
-    insert_preamble_imports, resident_workbench_templates, run_turn, ResidentSession,
-    ResidentSessionState, SessionLib, TurnRequest as HaskellTurnRequest, TurnResult,
+    insert_preamble_imports, resident_workbench_templates, run_turn, ResidentSession, SessionLib,
+    TurnRequest as HaskellTurnRequest, TurnResult,
 };
 use tidepool_runtime::DEFAULT_NURSERY_SIZE;
-#[cfg(feature = "codex-compat")]
-use tokio::net::UnixListener;
+
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinSet;
 
 use self::application_supervisor::run_interactive_applications;
 use self::embedded_projection::LifecyclePublisher;
 pub(crate) use self::host_incarnation::HostIncarnationLease;
-#[cfg(feature = "codex-compat")]
-use self::native_launch::launch_prepared_interactive_application;
+
 use self::overlay_resource::{
     ArtifactInspection, OverlayResourceLease, OverlaySnapshot, SharedOverlayResource,
 };
 use self::prompt_catalog::{FrozenBasePrompt, PromptId};
-#[cfg(feature = "codex-compat")]
-use self::socket_directory::SocketDirectory;
 
 /// Every interactive actor sees its own repository at this path. Bubblewrap
-/// mount namespaces make the shared name safe across concurrent actors, while
-/// Codex needs only one persisted project-trust decision.
+/// mount namespaces make the shared name safe across concurrent actors.
 pub(crate) const ACTOR_PROJECT_ROOT: &str = "/tmp/exomonad-actor-workspace";
 const ACTOR_BUILD_TARGET: &str = ".exomonad/build/cargo";
 
@@ -243,11 +203,9 @@ const EXOMONAD_REPLACED_EFFECT_NAMES: &[&str] = &[
     "worktreeHead",
     "worktreeId",
 ];
-#[cfg(feature = "codex-compat")]
-const CHILD_LIFECYCLE_NOTICE: &str = "A child actor changed lifecycle state.";
+
 const APPLICATION_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(15);
-#[cfg(feature = "codex-compat")]
-const APPLICATION_TASK_GRACE_TIMEOUT: Duration = Duration::from_secs(5);
+
 const PROCESS_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
 
 type ExomonadHandlerStack = HCons<
@@ -278,8 +236,6 @@ struct ActorForkWorkspaceAdmission {
     manager: WorktreeManager,
     bindings: Arc<Mutex<BindingTable>>,
     runtime: String,
-    #[cfg(feature = "codex-compat")]
-    native: Option<NativeForkAdmission>,
 }
 
 struct ActorWorkspaceCustody {
@@ -382,72 +338,6 @@ impl Drop for ActorWorkspaceCustody {
 }
 
 impl ActorForkWorkspaceAdmission {
-    #[cfg(feature = "codex-compat")]
-    fn recover_workspace(
-        &self,
-        predecessor: ActorRef,
-        successor: ActorRef,
-        worktree: &str,
-        role: exomonad_actor::ActorRole,
-    ) -> Result<Arc<dyn exomonad_actor::ForkWorkspaceCustody>, ForkWorkspaceAdmissionError> {
-        if !WorktreeId::is_path_safe(worktree) {
-            return Err(ForkWorkspaceAdmissionError {
-                detail: "invalid recovery worktree id".into(),
-            });
-        }
-        let worktree = WorktreeId::from_raw(worktree);
-        // The sole caller has already verified durable predecessor retirement.
-        // A live Mounted checkout must be sealed from its exact descriptor
-        // before lookup may materialize ordinary host working files.
-        self.manager
-            .seal_orphaned_mounted_view(&worktree)
-            .map_err(|error| ForkWorkspaceAdmissionError {
-                detail: error.to_string(),
-            })?;
-        if self
-            .manager
-            .lookup(&worktree)
-            .map_err(|error| ForkWorkspaceAdmissionError {
-                detail: error.to_string(),
-            })?
-            .is_none()
-        {
-            return Err(ForkWorkspaceAdmissionError {
-                detail: "recovery worktree is not registered".into(),
-            });
-        }
-        let predecessor_principal = WorktreePrincipal::exact_actor(
-            &self.runtime,
-            predecessor.id.0,
-            predecessor.incarnation.0,
-        );
-        let successor_principal =
-            WorktreePrincipal::exact_actor(&self.runtime, successor.id.0, successor.incarnation.0);
-        let binding = self
-            .bindings
-            .lock()
-            .recover_active(
-                &worktree,
-                &predecessor_principal,
-                &successor_principal,
-                current_time_ms(),
-            )
-            .map_err(|error| ForkWorkspaceAdmissionError {
-                detail: error.to_string(),
-            })?;
-        self.authority
-            .install_grant(successor.into(), worktree_grant(role));
-        Ok(Arc::new(ActorWorkspaceCustody {
-            runtime: self.runtime.clone(),
-            bindings: self.bindings.clone(),
-            binding: Mutex::new(Some(binding)),
-            actor: successor,
-            state: Arc::new(Mutex::new(scoped_custody::CustodyState::default())),
-            workspace: None,
-            inheritance_notice: None,
-        }))
-    }
-
     fn bind_workspace(
         &self,
         actor: ActorRef,
@@ -546,31 +436,7 @@ impl ForkWorkspaceAdmission for ActorForkWorkspaceAdmission {
             .map_err(|error| ForkWorkspaceAdmissionError {
                 detail: format!("workspace preparation task failed: {error}"),
             })??;
-            #[cfg(feature = "codex-compat")]
-            let (handle, workspace, notice) = match &custody.native {
-                Some(native) if native.layout.is_some() => {
-                    let prepared = native
-                        .prepare_workspace(owner, authorized, _policy)
-                        .await
-                        .map_err(|error| ForkWorkspaceAdmissionError {
-                            detail: error.to_string(),
-                        })?;
-                    (prepared.handle, Some(prepared.workspace), prepared.notice)
-                }
-                _ => {
-                    let handle =
-                        tidepool_runtime::spawn_blocking_in_span(move || authorized.materialize())
-                            .await
-                            .map_err(|error| ForkWorkspaceAdmissionError {
-                                detail: format!("workspace preparation task failed: {error}"),
-                            })?
-                            .map_err(|error| ForkWorkspaceAdmissionError {
-                                detail: tidepool_handlers::render_worktree_error(&error),
-                            })?;
-                    (handle, None, None)
-                }
-            };
-            #[cfg(not(feature = "codex-compat"))]
+
             let (handle, workspace, notice) = {
                 let handle =
                     tidepool_runtime::spawn_blocking_in_span(move || authorized.materialize())
@@ -597,13 +463,11 @@ fn fork_workspace_admission(
     authority: ActorWorktreeAuthority,
     bindings: Arc<Mutex<BindingTable>>,
     runtime: String,
-    #[cfg(feature = "codex-compat")] native: Option<NativeForkAdmission>,
 ) -> Arc<ActorForkWorkspaceAdmission> {
     Arc::new(ActorForkWorkspaceAdmission {
         bindings,
         runtime,
-        #[cfg(feature = "codex-compat")]
-        native,
+
         manager: worktrees.clone(),
         authority: authority.clone(),
         worktrees: Arc::new(Mutex::new(ActorWorktreeHandler::new(
@@ -626,13 +490,12 @@ pub struct ActorHostConfig {
     pub haskell_root: PathBuf,
     pub run_root: PathBuf,
     pub root_binding_path: PathBuf,
-    pub backend: crate::exomonad::HostBackendOptions,
+
     pub embedded: Option<crate::exomonad::EmbeddedLaunchConfig>,
     pub tmux_session: String,
     pub model: String,
-    pub effort: ReasoningEffort,
+    pub effort: ForkEffort,
     pub research_policy: exomonad_actor::ResearchPolicy,
-    pub root_launch_mode: InteractiveLaunchMode,
     pub pane_environment: std::collections::BTreeMap<String, String>,
     /// Answers actors' `Jev` requests; `None` uses the TypeSafe client with
     /// the key from `TYPESAFE_API_KEY` or the secrets directory.
@@ -642,13 +505,6 @@ pub struct ActorHostConfig {
 const PROCESS_RECOVERY_RECORD: &str = "process-recovery.json";
 // The local forest admits its root first, before any child actor identities.
 const ROOT_ACTOR_ID: exomonad_actor::ActorId = exomonad_actor::ActorId(1);
-
-#[cfg(feature = "codex-compat")]
-fn hosted_operation_journal(run_root: &Path, actor: exomonad_actor::ActorId) -> PathBuf {
-    run_root
-        .join("hosted-operations")
-        .join(format!("{}.v1.jsonl", actor.0))
-}
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -846,44 +702,10 @@ fn remove_predecessor_socket_root(path: &Path) -> Result<(), std::io::Error> {
     }
 }
 
-#[cfg(feature = "codex-compat")]
-fn recovery_role(
-    durable: &exomonad_actor::DurableActorAdmission,
-    research_policy: exomonad_actor::ResearchPolicy,
-) -> Option<exomonad_actor::EffectiveRole> {
-    let role = match durable.role.as_str() {
-        "research" => exomonad_actor::EffectiveRole::research(),
-        "coding" => exomonad_actor::EffectiveRole::coding(),
-        "scaffolding" => {
-            exomonad_actor::EffectiveRole::scaffolding(exomonad_actor::DescendantBudget {
-                maximum_depth: durable.descendant_depth,
-                maximum_active_children: durable.descendant_active_children,
-            })
-        }
-        "integration" => exomonad_actor::EffectiveRole::integration(),
-        // A second root or an inherited role carries authority that cannot be
-        // reconstructed from the compact durable role name alone.
-        "root" | "inherited" => return None,
-        _ => return None,
-    };
-    Some(role.with_research_policy(research_policy))
-}
-
 fn operator_effective_role(
     research_policy: exomonad_actor::ResearchPolicy,
 ) -> exomonad_actor::EffectiveRole {
     exomonad_actor::EffectiveRole::root().with_research_policy(research_policy)
-}
-
-#[cfg(feature = "codex-compat")]
-fn predecessor_process_was_retired(run_root: &Path, actor: ActorRef) -> bool {
-    let path = run_root
-        .join(format!("{}-{}", actor.id.0, actor.incarnation.0))
-        .join(PROCESS_RECOVERY_RECORD);
-    std::fs::read(path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<ProcessRecoveryRecord>(&bytes).ok())
-        .is_some_and(|record| record.version == 1 && record.retired)
 }
 
 fn next_actor_incarnation(actor: ActorRef) -> Result<ActorRef, Box<dyn std::error::Error>> {
@@ -1007,223 +829,17 @@ fn durable_root_identity(
 
 fn contains_durable_root_admission(records: &[exomonad_actor::DurableActorRecord]) -> bool {
     records.iter().any(|record| {
-        record.admission.role == "root"
+        record.admission.role == exomonad_actor::ActorRole::Root
             && record.admission.creator.is_none()
             && record.admission.supervisor_parent.is_none()
             && record.admission.context_parent.is_none()
     })
 }
 
-#[cfg(feature = "codex-compat")]
-fn latest_recoverable_actor_records(
-    records: &[exomonad_actor::DurableActorRecord],
-    root: ActorRef,
-) -> Vec<exomonad_actor::DurableActorRecord> {
-    let mut latest = BTreeMap::new();
-    for record in records
-        .iter()
-        .filter(|record| record.admission.actor.id != root.id)
-    {
-        latest
-            .entry(record.admission.actor.id)
-            .and_modify(|current: &mut &exomonad_actor::DurableActorRecord| {
-                if record.admission.actor.incarnation > current.admission.actor.incarnation {
-                    *current = record;
-                }
-            })
-            .or_insert(record);
-    }
-    latest
-        .into_values()
-        .filter(|record| {
-            record.terminal.is_none()
-                && record
-                    .application
-                    .as_ref()
-                    .is_some_and(|application| application.conversation.is_some())
-        })
-        .cloned()
-        .collect()
-}
-
 #[allow(
     clippy::too_many_arguments,
     reason = "heterogeneous recovery inputs (forest, paths, actor identity, durable records, compiled program, policy, admission); no natural grouping"
 )]
-#[cfg(feature = "codex-compat")]
-async fn recover_prior_actors(
-    forest: &Arc<ResidentForest<ExomonadHandlerStack, CapturedOutput>>,
-    run_root: &Path,
-    root: ActorRef,
-    incarnation: exomonad_actor::Incarnation,
-    records: &[exomonad_actor::DurableActorRecord],
-    program: Arc<tidepool_runtime::session::CompiledTurn>,
-    research_policy: exomonad_actor::ResearchPolicy,
-    worktree_admission: &ActorForkWorkspaceAdmission,
-    accepted_source: Option<&str>,
-) -> BTreeMap<ActorRef, (ActorRef, QueueReadyThread)> {
-    if incarnation == exomonad_actor::Incarnation::FIRST {
-        return BTreeMap::new();
-    }
-    let mut pending = latest_recoverable_actor_records(records, root);
-    let mut recovered = BTreeMap::new();
-    let mut recovered_ids = std::collections::BTreeSet::from([root.id]);
-    loop {
-        let mut progressed = false;
-        let mut remaining = Vec::new();
-        for record in pending {
-            let durable = &record.admission;
-            let parents_ready = [
-                durable.creator,
-                durable.supervisor_parent,
-                durable.context_parent,
-            ]
-            .into_iter()
-            .flatten()
-            .all(|parent| recovered_ids.contains(&parent.id));
-            if !parents_ready {
-                remaining.push(record);
-                continue;
-            }
-            let Some(application) = &record.application else {
-                continue;
-            };
-            let Some(expected_conversation) = application
-                .conversation
-                .as_ref()
-                .and_then(exomonad_actor::ApplicationConversation::codex_thread)
-            else {
-                continue;
-            };
-            if application.accepted_source.as_deref() != accepted_source {
-                tracing::warn!(actor = %durable.actor,
-                    recorded_source = ?application.accepted_source,
-                    current_source = ?accepted_source,
-                    "durable actor accepted-source identity cannot be verified");
-                continue;
-            }
-            if has_legacy_checkout_source_layer(run_root, &durable.source_layer) {
-                tracing::warn!(actor = %durable.actor,
-                    "legacy checkout tooling layer cannot be adopted by the coherent run-source host");
-                continue;
-            }
-            let Some(role) = recovery_role(durable, research_policy) else {
-                tracing::warn!(actor = %durable.actor, role = %durable.role,
-                    "durable actor role cannot be reconstructed");
-                continue;
-            };
-            if durable.launch_worktrees.len() > 1
-                || durable.source_layer.iter().any(|path| !path.exists())
-                || !predecessor_process_was_retired(run_root, durable.actor)
-            {
-                tracing::warn!(actor = %durable.actor,
-                    "durable actor resources are not independently recoverable");
-                continue;
-            }
-            if let Err(error) = crate::host_dynamic_tools::validate_operation_recovery(
-                hosted_operation_journal(run_root, durable.actor.id),
-            ) {
-                tracing::warn!(actor = %durable.actor, %error,
-                    "durable actor operation ownership cannot be verified");
-                continue;
-            }
-            let thread = match read_interactive_binding(&application.binding_path).await {
-                Ok(thread) if thread.id().0 == expected_conversation => thread,
-                Ok(_) => {
-                    tracing::warn!(actor = %durable.actor,
-                        "durable actor conversation binding changed identity");
-                    continue;
-                }
-                Err(error) => {
-                    tracing::warn!(actor = %durable.actor, %error,
-                        "durable actor conversation binding is unavailable");
-                    continue;
-                }
-            };
-            let successor = match next_actor_incarnation(durable.actor) {
-                Ok(successor) => successor,
-                Err(error) => {
-                    tracing::warn!(actor = %durable.actor, %error,
-                        "durable actor incarnation cannot advance");
-                    continue;
-                }
-            };
-            let custody = match durable.launch_worktrees.as_slice() {
-                [] => None,
-                [worktree] => match worktree_admission.recover_workspace(
-                    durable.actor,
-                    successor,
-                    worktree,
-                    role.role(),
-                ) {
-                    Ok(custody) => Some(custody),
-                    Err(error) => {
-                        tracing::warn!(actor = %durable.actor, detail = %error.detail,
-                            "durable actor worktree custody could not be recovered");
-                        continue;
-                    }
-                },
-                _ => {
-                    tracing::warn!(actor = %durable.actor,
-                        "durable actor names more than one launch worktree");
-                    continue;
-                }
-            };
-            let (actor, task) = match forest
-                .recover_durable_program_root(durable, role, program.clone(), custody)
-                .await
-            {
-                Ok(actor) => actor,
-                Err(error) => {
-                    tracing::warn!(actor = %durable.actor, %error,
-                        "durable actor program could not be reconstructed");
-                    continue;
-                }
-            };
-            drop(task);
-            let binding = run_root
-                .join(format!(
-                    "{}-{}",
-                    actor.identity().id.0,
-                    actor.identity().incarnation.0
-                ))
-                .join("binding.json");
-            if let Err(error) = copy_interactive_binding(&binding, &thread).await {
-                tracing::warn!(actor = %durable.actor, %error,
-                    "recovered actor binding could not be republished");
-                if let Err(shutdown_error) = actor
-                    .shutdown(ActorTerminal {
-                        kind: ActorExitKind::Failed,
-                        summary: "recovered conversation binding could not be republished".into(),
-                    })
-                    .await
-                {
-                    tracing::warn!(actor = %durable.actor, error = %shutdown_error,
-                        "recovered actor could not be shut down after a republish failure");
-                }
-                continue;
-            }
-            recovered_ids.insert(actor.identity().id);
-            recovered.insert(actor.identity(), (durable.actor, thread));
-            progressed = true;
-        }
-        if remaining.is_empty() || !progressed {
-            for record in remaining {
-                tracing::warn!(actor = %record.admission.actor,
-                    "durable actor lineage has an unavailable predecessor");
-            }
-            break;
-        }
-        pending = remaining;
-    }
-    recovered
-}
-
-#[cfg(feature = "codex-compat")]
-fn has_legacy_checkout_source_layer(run_root: &Path, source_layer: &[PathBuf]) -> bool {
-    let legacy = run_root.join("workspace/checkouts");
-    source_layer.iter().any(|path| path.starts_with(&legacy))
-}
 
 impl ActorHostConfig {
     /// Whether this run's captured workspace supplies the Jev authoring
@@ -1341,7 +957,6 @@ fn resolve_worker_launch(
 ) -> Result<exomonad_actor::WorkerLaunchPreview, String> {
     let mut instructions = developer_instructions_selected(
         &request.role,
-        &InteractiveLaunchMode::Fresh,
         config.workspace_inputs.as_ref(),
         request.instructions.as_deref(),
     );
@@ -1356,11 +971,7 @@ fn resolve_worker_launch(
             (request.context == exomonad_actor::ForkContext::SelectedContext)
                 .then(|| config.model.clone())
         }),
-        effort: request.effort.unwrap_or(match config.effort {
-            ReasoningEffort::Low => exomonad_actor::ForkEffort::Low,
-            ReasoningEffort::Medium => exomonad_actor::ForkEffort::Medium,
-            ReasoningEffort::High => exomonad_actor::ForkEffort::High,
-        }),
+        effort: request.effort.unwrap_or(config.effort),
         instructions,
         base_fingerprint: base_fingerprint.into(),
         workspace_identity: config
@@ -1379,33 +990,10 @@ fn append_inheritance_authority(instructions: &mut String) {
     instructions.push_str("\nInherited parent bindings do not grant parent authority; the runtime policy above governs this actor.\n");
 }
 
-fn launch_effort(
-    mode: &InteractiveLaunchMode,
-    default: ReasoningEffort,
-    requested: Option<exomonad_actor::ForkEffort>,
-) -> ReasoningEffort {
-    match requested {
-        Some(exomonad_actor::ForkEffort::Low) => ReasoningEffort::Low,
-        Some(exomonad_actor::ForkEffort::Medium) => ReasoningEffort::Medium,
-        Some(exomonad_actor::ForkEffort::High) => ReasoningEffort::High,
-        None if matches!(mode, InteractiveLaunchMode::Fork { .. }) => ReasoningEffort::Low,
-        None => default,
-    }
-}
-
 #[derive(Debug, Clone)]
 pub enum ActorHostReadiness {
     /// Coordination failed; the native application may still be alive.
     CoordinationFailed { root: ActorRef, error: String },
-    /// The root pane is selected, but its queue-ready session binding has not
-    /// yet been published.
-    AwaitingBinding { root: ActorRef },
-    /// The v2 host-tools session callback proved that the exact surrounding
-    /// thread is durably addressable by native lifecycle commands.
-    Ready {
-        root: ActorRef,
-        thread: QueueReadyThread,
-    },
     /// The embedded browser listener is bound and its root conversation is
     /// attached to the admitted resident actor.
     EmbeddedReady {
@@ -1424,37 +1012,6 @@ pub enum ActorHostReadiness {
         predecessor: ActorRef,
         reason: String,
     },
-}
-
-#[cfg(feature = "codex-compat")]
-struct InteractiveDeployment {
-    _provider_attachment: provider_attachment::ProviderAttachment,
-    /// Retain the view independently of the bootstrap and native process lifetimes.
-    active_workspace: Arc<ActiveWorkspace>,
-    supervisor: Option<ActorRef>,
-    notified_provider_failures: std::collections::BTreeSet<(String, String)>,
-    actor: ActorRef,
-    local_actor: LocalActorRef,
-    pane: TmuxPaneId,
-    workspace: PathBuf,
-    inbox: Arc<ActorInbox>,
-    notification_inbox_key: String,
-    /// Exact durable producer scope used for native input deduplication. This
-    /// binds the run/inbox owner and actor incarnation; it is not a display ID.
-    input_producer: InputProducerId,
-    update_reconciliations: Arc<Mutex<BTreeMap<String, PendingUpdateReconciliation>>>,
-    connection: InteractiveConnection,
-    service: hosted_retirement::HostedOwner,
-    socket_directory: SocketDirectory,
-    process_recovery_record: PathBuf,
-    worktree_custody: Option<Arc<dyn exomonad_actor::ForkWorkspaceCustody>>,
-    failure_reported: bool,
-    last_activation_sequence: u64,
-    thread: Option<QueueReadyThread>,
-    fork_gate: Option<exomonad_actor::ForkGroupGate>,
-    checkpoint: Option<exomonad_actor::CheckpointLease>,
-    runtime_observation: exomonad_actor::ActorRuntimeObservationHandle,
-    fork_parent_thread: Option<BackendThreadId>,
 }
 
 fn embedded_root_attachment_error(
@@ -1647,290 +1204,22 @@ async fn drain_embedded_browser_commands(
 }
 
 #[derive(Clone)]
-#[cfg(feature = "codex-compat")]
-struct PendingUpdateReconciliation {
-    inbox: Arc<ActorInbox>,
-    sequence: u64,
-    context: DeliveryProvenance,
-    reconciler: exomonad_actor::RequestUpdateReconciler,
-}
-
-#[cfg(feature = "codex-compat")]
-impl PendingUpdateReconciliation {
-    #[cfg(feature = "codex-compat")]
-    fn retain_unconfirmed(&self, detail: String) {
-        let exact_receipt = matches!(
-            self.inbox.observe_receipt(self.sequence),
-            Ok(exomonad_node::ReceiptLookup::Retained(ref evidence))
-                if evidence.context == self.context
-        );
-        if !exact_receipt {
-            tracing::warn!(
-                sequence = self.sequence,
-                "request-update reconciliation retained without matching inbox receipt"
-            );
-            return;
-        }
-        if let Err(error) = self
-            .reconciler
-            .reconcile(exomonad_actor::LateUpdateEvidence::Unconfirmed(detail))
-        {
-            tracing::warn!(
-                sequence = self.sequence,
-                %error,
-                "request-update reconciliation could not retain unconfirmed evidence"
-            );
-        }
-    }
-}
-
-#[cfg(feature = "codex-compat")]
-enum InteractiveConnection {
-    // Pane, inbox, tool listener, and cleanup are already owned in this state.
-    AwaitingBinding,
-    Bound {
-        delivery_shutdown: oneshot::Sender<()>,
-        delivery: tokio::task::JoinHandle<()>,
-    },
-}
-
-#[cfg(feature = "codex-compat")]
-struct InteractiveBindingRequest {
-    control: crate::host_dynamic_tools::HostToolControl,
-    path: PathBuf,
-    expected: Option<BackendThreadId>,
-}
-
-#[cfg(feature = "codex-compat")]
-struct LaunchedInteractiveApplication {
-    deployment: InteractiveDeployment,
-    binding: InteractiveBindingRequest,
-}
-
-#[cfg(feature = "codex-compat")]
-struct OwnerNotification {
-    owner: ActorRef,
-    inbox: Arc<ActorInbox>,
-    event: DurableActorEvent,
+struct BoundWorkspace {
+    workspace: Arc<ActiveWorkspace>,
 }
 
 type ActorInbox = DurableInbox<DurableActorEvent, DeliveryProvenance>;
-#[cfg(feature = "codex-compat")]
-type WatchRetentionCheck = Arc<dyn Fn(ActorRef, exomonad_actor::WatchId) -> bool + Send + Sync>;
-/// Whether the owner has already observed a watch (via `ObserveWatchWith` or
-/// `pollWatch`) settled at or after the given `occurred_at_unix_ms`. Backed
-/// by `ResidentForest::watch_observed_since`.
-#[cfg(feature = "codex-compat")]
-type WatchObservationCheck =
-    Arc<dyn Fn(ActorRef, exomonad_actor::WatchId, u64) -> bool + Send + Sync>;
-/// The request presented to an actor that it has not begun replying to.
-/// Backed by `ResidentForest::open_request_without_reply`.
-#[cfg(feature = "codex-compat")]
-type OpenRequestCheck = Arc<dyn Fn(ActorRef) -> Option<exomonad_actor::RequestId> + Send + Sync>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 enum DeliveryProvenance {
-    Notification {
-        sender: ActorRef,
-        target: ActorRef,
-    },
-    #[cfg(feature = "codex-compat")]
-    RequestUpdate {
-        owner: ActorRef,
-        target: ActorRef,
-        request: exomonad_actor::RequestId,
-        update: u64,
-    },
+    Notification { sender: ActorRef, target: ActorRef },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 enum DurableActorEvent {
-    #[cfg(feature = "codex-compat")]
-    Typed(TypedActorEvent),
     Text(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
-#[cfg(feature = "codex-compat")]
-enum TypedActorEvent {
-    ProviderTurnFailed {
-        #[serde(default)]
-        revision: u64,
-        actor: ActorRef,
-        thread: String,
-        turn: String,
-        failure: exomonad_agent::ProviderFailure,
-    },
-    SessionReady {
-        sequence: u64,
-        request: exomonad_actor::RequestId,
-        input_type: String,
-        message: String,
-    },
-    WatchChanged {
-        #[serde(flatten)]
-        notification: exomonad_actor::WatchNotification,
-    },
-    SettlementChanged {
-        #[serde(flatten)]
-        notification: exomonad_actor::SettlementNotification,
-    },
-    RequestCancellation {
-        #[serde(flatten)]
-        notification: exomonad_actor::RequestCancellationNotification,
-    },
-    RequestUpdate {
-        request: exomonad_actor::RequestId,
-        update: u64,
-        message: String,
-    },
-    CleanupFinished {
-        receipt: InteractiveCleanupReceipt,
-    },
-    ChildExited,
-}
-
-impl DurableActorEvent {
-    #[cfg(feature = "codex-compat")]
-    fn session(activation: &exomonad_actor::ResidentActivation) -> Self {
-        Self::Typed(TypedActorEvent::SessionReady {
-            sequence: activation.id.sequence(),
-            request: activation.request,
-            input_type: activation.input_type.clone(),
-            message: activation.message.clone(),
-        })
-    }
-
-    /// `reader_launched_at` is the launch time of the actor this text is being
-    /// delivered to, not of whatever actor the event is about. The label has to
-    /// say so: it read "since actor launch" beside a child's settlement, and a
-    /// live parent was told its child had taken five and a half minutes when the
-    /// child had lived seventy seconds. The figure was the parent's own age.
-    #[cfg(feature = "codex-compat")]
-    fn render(&self, reader_launched_at: Option<i64>) -> String {
-        let elapsed = |occurred: u64| match reader_launched_at
-            .and_then(|start| i64::try_from(occurred).ok()?.checked_sub(start))
-            .filter(|elapsed| *elapsed >= 0)
-        {
-            Some(ms) => format!(
-                "+{}m{:02}s into your session",
-                ms / 60_000,
-                (ms / 1000) % 60
-            ),
-            None => "elapsed time unavailable".to_owned(),
-        };
-        match self {
-            Self::Typed(TypedActorEvent::ProviderTurnFailed { actor, thread, turn, failure, .. }) => format!(
-                "actor {}@{} provider turn {turn:?} in thread {thread:?} failed: {failure:?}. The actor request remains pending. Inspect status before deciding whether to retire or recover it; further steering does not repair rejected history.",
-                actor.id.0, actor.incarnation.0,
-            ),
-            Self::Typed(TypedActorEvent::SessionReady { message, .. }) => message.clone(),
-            Self::Text(message) => message.clone(),
-            // A watch names no single child: `register_watch_groups` can
-            // fold several requests' targets under one watch, and a `Ready`
-            // transition carries no request (or target) at all, so there is
-            // no child identity to render here even when a settlement on
-            // the same request would have one.
-            Self::Typed(TypedActorEvent::WatchChanged { notification })
-                if matches!(notification.transition, exomonad_actor::WatchTransition::RouteFailed { .. }) => format!(
-                "route {} failed: {:?} ({}). Recover owned handles with `listRoutes`, then inspect with `pollRoute`. Earlier effects may have completed; do not replay the callback blindly.",
-                notification.watch.0,
-                notification.current,
-                elapsed(notification.occurred_at_unix_ms),
-            ),
-            Self::Typed(TypedActorEvent::WatchChanged { notification }) => format!(
-                "watch {} {:?}: {:?} → {:?} ({}). This records the transition when it was observed; cleanup may since have forgotten the watch.",
-                notification.watch.0,
-                notification.label,
-                notification.previous,
-                notification.current,
-                elapsed(notification.occurred_at_unix_ms),
-            ),
-            Self::Typed(TypedActorEvent::SettlementChanged { notification })
-                if notification.command_job.is_some() =>
-            {
-                let job = notification.command_job.as_deref().unwrap_or_default();
-                match (&notification.transition, &notification.reply_preview) {
-                    (exomonad_actor::SettlementTransition::Ready, Some(report)) => format!(
-                        "job {job} finished ({}).\n{report}",
-                        elapsed(notification.occurred_at_unix_ms),
-                    ),
-                    (transition, _) => format!(
-                        "job {job} no longer reports its completion to you: {} ({}). Its retained output stays readable with read_output session_id={job}; nothing reruns.",
-                        command_settlement_loss(transition),
-                        elapsed(notification.occurred_at_unix_ms),
-                    ),
-                }
-            }
-            Self::Typed(TypedActorEvent::SettlementChanged { notification }) => {
-                let identity = settlement_identity_line(notification);
-                match &notification.reply_preview {
-                    Some(preview) => format!(
-                        "{identity}request {} {:?} settled {:?} ({}).\nReply:\n{preview}\n\nSettlement is not integration.",
-                        notification.request.0,
-                        notification.label,
-                        notification.transition,
-                        elapsed(notification.occurred_at_unix_ms),
-                    ),
-                    None => format!(
-                        "{identity}request {} {:?} settled {:?} ({}). Inspect its retained `Response` with `pollResponse`; settlement is not integration.",
-                        notification.request.0,
-                        notification.label,
-                        notification.transition,
-                        elapsed(notification.occurred_at_unix_ms),
-                    ),
-                }
-            }
-            Self::Typed(TypedActorEvent::RequestCancellation { notification }) => format!(
-                "request {} {:?} has cancellation pending ({:?}; {}). Inspect `sessionReply` with `pollReply`; acknowledge it with `acknowledgeCancellation sessionReply` when the active work is safely quiescent.",
-                notification.request.0,
-                notification.label,
-                notification.reason,
-                elapsed(notification.occurred_at_unix_ms),
-            ),
-            Self::Typed(TypedActorEvent::RequestUpdate { message, .. }) => message.clone(),
-            Self::Typed(TypedActorEvent::CleanupFinished { receipt }) => receipt.render(),
-            Self::Typed(TypedActorEvent::ChildExited) => CHILD_LIFECYCLE_NOTICE.into(),
-        }
-    }
-}
-
-/// Why a command job's settlement ended without its report, in words.
-#[cfg(feature = "codex-compat")]
-fn command_settlement_loss(transition: &exomonad_actor::SettlementTransition) -> &'static str {
-    use exomonad_actor::{ResponseFailure, SettlementTransition};
-    match transition {
-        SettlementTransition::Ready => "its report was not retained",
-        SettlementTransition::Unavailable(ResponseFailure::RequesterStopped) => {
-            "the actor that owned it stopped"
-        }
-        SettlementTransition::Unavailable(ResponseFailure::Released) => {
-            "its settlement was released"
-        }
-        SettlementTransition::Unavailable(_) => "its settlement became unavailable",
-    }
-}
-
-/// The settled child's identity, as a first line ahead of the settlement
-/// body: its full `exomonad/<path>` actor path (the same string the tmux
-/// window shows), and the exact commit it was seeded from when it was
-/// launched from a fork workspace. Either half may be absent (an unforked
-/// target has no path; a target not launched from a fork workspace has no
-/// recorded revision), and the line is empty when there is nothing to say.
-///
-/// The engine has no notion of a re-fork attempt of the same label — a
-/// relaunch under the same path is a distinct actor identity, not a
-/// numbered retry of this one — so no attempt number is rendered here.
-#[cfg(feature = "codex-compat")]
-fn settlement_identity_line(notification: &exomonad_actor::SettlementNotification) -> String {
-    match (&notification.target_path, &notification.target_revision) {
-        (Some(path), Some(revision)) => format!("{path} (seeded from {revision})\n"),
-        (Some(path), None) => format!("{path}\n"),
-        (None, _) => String::new(),
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1966,13 +1255,6 @@ struct InteractiveCleanupReceipt {
 }
 
 impl InteractiveCleanupReceipt {
-    #[cfg(feature = "codex-compat")]
-    fn degraded(&self) -> bool {
-        self.components
-            .iter()
-            .any(|component| !matches!(component.outcome, CleanupComponentOutcome::Completed))
-    }
-
     /// Components that did not settle, each named with its reason.
     fn retained(&self) -> Vec<String> {
         self.components
@@ -1999,25 +1281,9 @@ impl InteractiveCleanupReceipt {
             exomonad_actor::ResourceRelease::Retained(retained.join("; "))
         }
     }
-
-    #[cfg(feature = "codex-compat")]
-    fn render(&self) -> String {
-        let actor = format!("{}@{}", self.actor.id.0, self.actor.incarnation.0);
-        let retained = self.retained();
-        if retained.is_empty() {
-            format!("Actor {actor} is stopped and its resources are released.")
-        } else {
-            format!(
-                "Actor {actor} is stopped. Resources still retained: {}. Nothing is deleted: worktrees, branches and commits stay available. The host and sibling actors are unaffected.",
-                retained.join("; ")
-            )
-        }
-    }
 }
 
 struct InteractiveApplicationOwner {
-    #[cfg(feature = "codex-compat")]
-    supervisor: Option<ActorRef>,
     creator_workspace: Option<BoundWorkspace>,
     cancel: Option<oneshot::Sender<NativeRetirement>>,
     native_retirement: NativeRetirement,
@@ -2025,13 +1291,9 @@ struct InteractiveApplicationOwner {
     fork_gate: Option<exomonad_actor::ForkGroupGate>,
     custody: Option<Arc<dyn exomonad_actor::ForkWorkspaceCustody>>,
     scoped_retention: Option<scoped_custody::ScopedHostRetention>,
-    #[cfg(feature = "codex-compat")]
-    hosted: hosted_retirement::HostedSlot,
+
     embedded_policy: Option<Arc<embedded_policy::EmbeddedPolicyInstallation>>,
-    #[cfg(feature = "codex-compat")]
-    launch: HostLaunchState,
-    #[cfg(feature = "codex-compat")]
-    pending_activations: Vec<exomonad_actor::ResidentActivation>,
+
     embedded: Option<EmbeddedApplicationState>,
     terminal: Option<ActorTerminal>,
     retirement: Arc<Mutex<Option<InteractiveCleanupReceipt>>>,
@@ -2068,31 +1330,6 @@ enum NativeRetirement {
     #[default]
     Preserve,
     Terminate,
-}
-
-#[derive(Clone)]
-#[cfg(feature = "codex-compat")]
-enum HostLaunchState {
-    Pending,
-    Published,
-    Abandoned,
-    Failed(String),
-}
-
-#[cfg(feature = "codex-compat")]
-impl HostLaunchState {
-    /// Phrase describing why the host cannot yet (or ever) hand off a
-    /// published application for this actor, for surfacing to a caller whose
-    /// delivery landed on an admitted actor with no provider running.
-    #[cfg(feature = "codex-compat")]
-    fn provider_not_started_phase(&self) -> String {
-        match self {
-            HostLaunchState::Pending => "launching".to_string(),
-            HostLaunchState::Failed(reason) => format!("launch failed: {reason}"),
-            HostLaunchState::Abandoned => "launch abandoned".to_string(),
-            HostLaunchState::Published => "provider retired".to_string(),
-        }
-    }
 }
 
 type InteractiveOwners = Arc<Mutex<HashMap<ActorRef, InteractiveApplicationOwner>>>;
@@ -2182,100 +1419,28 @@ fn embedded_actor_for_task(owners: &InteractiveOwners, task: tokio::task::Id) ->
     })
 }
 
-#[derive(Clone)]
-struct BoundWorkspace {
-    workspace: Arc<ActiveWorkspace>,
-    thread: QueueReadyThread,
-}
-
-#[derive(Clone)]
-#[cfg(feature = "codex-compat")]
-struct NativeForkAdmission {
-    owners: InteractiveOwners,
-    backend: Arc<dyn InteractiveAgentBackend>,
-    layout: Option<WorkspaceLayout>,
-}
-
-#[cfg(feature = "codex-compat")]
-fn native_tool_policy(
-    native_tools: exomonad_actor::NativeToolClass,
-) -> InteractiveNativeToolPolicy {
-    match native_tools {
-        exomonad_actor::NativeToolClass::InspectionOnly => {
-            InteractiveNativeToolPolicy::InspectionOnly
-        }
-        exomonad_actor::NativeToolClass::Coding
-        | exomonad_actor::NativeToolClass::Integration
-        | exomonad_actor::NativeToolClass::Inherited => InteractiveNativeToolPolicy::Standard,
-    }
-}
-
-/// Read an actor's OWN conversation, or report that it has none.
-///
-/// The actor identity arrives from the executing turn, so the lookup can only
-/// find the caller's own binding. An actor with no bound application — an
-/// operator proxy, a context whose application has not started, a retired one
-/// — is `Unbound`; no other actor's conversation, the root's included, stands
-/// in for it.
-#[cfg(feature = "codex-compat")]
-fn conversation_reader(
-    owners: InteractiveOwners,
-    backend: Arc<dyn InteractiveAgentBackend>,
-) -> exomonad_actor::ConversationReader {
-    Arc::new(move |actor, count| {
-        let bound = owners
-            .lock()
-            .get(&actor)
-            .filter(|owner| owner.terminal.is_none())
-            .and_then(|owner| owner.creator_workspace.as_ref())
-            .map(|workspace| workspace.thread.clone());
-        let backend = Arc::clone(&backend);
-        Box::pin(async move {
-            let Some(thread) = bound else {
-                return Err(exomonad_actor::ConversationUnavailable::Unbound);
-            };
-            match backend.conversation(&thread, count).await {
-                Ok(Some(turns)) => Ok(turns),
-                Ok(None) => Err(exomonad_actor::ConversationUnavailable::Unreadable(
-                    "this conversation keeps no readable durable record".into(),
-                )),
-                Err(error) => Err(exomonad_actor::ConversationUnavailable::Unreadable(
-                    error.to_string(),
-                )),
-            }
-        })
-    })
-}
-
-#[cfg(feature = "codex-compat")]
-impl NativeForkAdmission {
-    async fn build_snapshot(
-        &self,
-        creator: ActorRef,
-        native_tools: exomonad_actor::NativeToolClass,
-    ) -> Option<OverlaySnapshot> {
-        if native_tool_policy(native_tools) == InteractiveNativeToolPolicy::InspectionOnly {
-            return None;
-        }
-        self.owners
-            .lock()
-            .get(&creator)
-            .filter(|owner| owner.terminal.is_none())
-            .and_then(|owner| owner.creator_workspace.as_ref())
-            .and_then(|owner| owner.workspace.build.as_ref())
-            .and_then(SharedOverlayResource::latest_snapshot)
-    }
-}
-
 impl InteractiveApplicationOwner {
-    fn should_retire_undeployed_native(&self, has_deployment: bool) -> bool {
-        self.embedded.is_none() && !has_deployment
+    #[cfg(test)]
+    fn reserve_scoped_process(
+        &mut self,
+        actor: ActorRef,
+    ) -> Result<Arc<Mutex<scoped_custody::ScopedProcessSlot>>, scoped_custody::ScopedClaimError>
+    {
+        if self.scoped_retention.is_some() {
+            return Err(scoped_custody::ScopedClaimError::AlreadyClaimed);
+        }
+        let custody = self
+            .custody
+            .clone()
+            .ok_or(scoped_custody::ScopedClaimError::MissingLease)?;
+        let retention = scoped_custody::reserve(custody, actor)?;
+        let slot = retention.slot.clone();
+        self.scoped_retention = Some(retention);
+        Ok(slot)
     }
 
     fn embedded() -> Self {
         Self {
-            #[cfg(feature = "codex-compat")]
-            supervisor: None,
             creator_workspace: None,
             cancel: None,
             native_retirement: NativeRetirement::Preserve,
@@ -2283,41 +1448,13 @@ impl InteractiveApplicationOwner {
             fork_gate: None,
             custody: None,
             scoped_retention: None,
-            #[cfg(feature = "codex-compat")]
-            hosted: Arc::new(Mutex::new(None)),
+
             embedded_policy: None,
-            #[cfg(feature = "codex-compat")]
-            launch: HostLaunchState::Published,
-            #[cfg(feature = "codex-compat")]
-            pending_activations: Vec::new(),
+
             embedded: Some(EmbeddedApplicationState::new()),
             terminal: None,
             retirement: Arc::new(Mutex::new(None)),
         }
-    }
-
-    #[cfg(feature = "codex-compat")]
-    fn reserve_scope(
-        &mut self,
-        workspace: ActorWorkspaceRequest<'_>,
-        actor: ActorRef,
-    ) -> Result<Arc<Mutex<scoped_custody::ScopedProcessSlot>>, scoped_custody::ScopedClaimError>
-    {
-        if self.scoped_retention.is_some() {
-            return Err(scoped_custody::ScopedClaimError::AlreadyClaimed);
-        }
-        let retention = match (workspace, self.custody.as_ref()) {
-            (_, Some(custody)) => scoped_custody::reserve(custody.clone(), actor)?,
-            (ActorWorkspaceRequest::SourceCheckout, None) => {
-                scoped_custody::reserve_source_checkout()
-            }
-            (ActorWorkspaceRequest::Worktree(_), None) => {
-                return Err(scoped_custody::ScopedClaimError::MissingLease);
-            }
-        };
-        let slot = retention.slot.clone();
-        self.scoped_retention = Some(retention);
-        Ok(slot)
     }
 
     fn cancel(&mut self) {
@@ -2535,11 +1672,6 @@ fn handoff_application_owners(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let retained = owners.lock().values().any(|owner| {
         owner.scoped_retention.is_some() || owner.custody.is_some() || {
-            #[cfg(feature = "codex-compat")]
-            {
-                owner.hosted.lock().is_some()
-            }
-            #[cfg(not(feature = "codex-compat"))]
             {
                 false
             }
@@ -2559,70 +1691,6 @@ fn handoff_application_owners(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RootRunDisposition {
-    Complete,
-    Recover,
-}
-
-#[cfg(feature = "codex-compat")]
-#[derive(Debug, Clone, Copy)]
-enum InteractiveOperation {
-    BindWorktree,
-    PrepareRuntime,
-    BindToolHost,
-    BuildCommand,
-    ServeToolHost,
-    LaunchProcess,
-    DiscoverBinding,
-}
-
-#[cfg(feature = "codex-compat")]
-impl fmt::Display for InteractiveOperation {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let name = match self {
-            Self::BindWorktree => "bind actor worktree",
-            Self::PrepareRuntime => "prepare runtime",
-            Self::BindToolHost => "bind tool host",
-            Self::BuildCommand => "build agent command",
-            Self::ServeToolHost => "serve host dynamic tools",
-            Self::LaunchProcess => "launch agent process",
-            Self::DiscoverBinding => "discover conversation binding",
-        };
-        formatter.write_str(name)
-    }
-}
-
-#[cfg(feature = "codex-compat")]
-impl InteractiveOperation {
-    fn failure_class(self) -> ExternalApplicationFailureClass {
-        match self {
-            Self::BindWorktree => ExternalApplicationFailureClass::WorktreeBinding,
-            Self::BuildCommand => ExternalApplicationFailureClass::CommandConstruction,
-            Self::LaunchProcess => ExternalApplicationFailureClass::ProcessLaunch,
-            Self::BindToolHost
-            | Self::ServeToolHost
-            | Self::DiscoverBinding
-            | Self::PrepareRuntime => ExternalApplicationFailureClass::ToolHostStartup,
-        }
-    }
-}
-
-#[cfg(feature = "codex-compat")]
-#[derive(Debug, thiserror::Error)]
-#[error("actor {actor:?} failed to {operation}: {detail}")]
-struct InteractiveApplicationError {
-    actor: ActorRef,
-    operation: InteractiveOperation,
-    detail: String,
-    disposition: LaunchDisposition,
-}
-
-#[cfg(feature = "codex-compat")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LaunchDisposition {
-    Failed,
-    Cancelled,
-}
 
 async fn apply_application_failure(
     actor: LocalActorRef,
@@ -2644,56 +1712,24 @@ async fn apply_application_failure(
     }
 }
 
-#[cfg(feature = "codex-compat")]
-fn application_error(
-    actor: ActorRef,
-    operation: InteractiveOperation,
-    error: impl fmt::Display,
-) -> InteractiveApplicationError {
-    InteractiveApplicationError {
-        actor,
-        operation,
-        detail: error.to_string(),
-        disposition: LaunchDisposition::Failed,
-    }
-}
-
 struct InteractiveFleet {
     provider_forest: Arc<ResidentForest<ExomonadHandlerStack, CapturedOutput>>,
     root: LocalActorRef,
     config: ActorHostConfig,
     run_root: PathBuf,
     output_store: Arc<harness::store::Store>,
-    #[cfg(feature = "codex-compat")]
-    tmux: TmuxSession,
-    #[cfg(feature = "codex-compat")]
-    backend: HostRuntimeMode,
+
     worktrees: WorktreeManager,
-    #[cfg(feature = "codex-compat")]
-    bindings: Arc<Mutex<BindingTable>>,
+
     /// Readiness events are best-effort notifications: a dropped receiver
     /// means the caller stopped observing startup, not a delivery bug, so
     /// every `readiness.send(..)` below discards the `SendError` with `.ok()`.
     readiness: mpsc::UnboundedSender<ActorHostReadiness>,
     worktree_authority: ActorWorktreeAuthority,
-    #[cfg(feature = "codex-compat")]
-    watch_retention: WatchRetentionCheck,
-    #[cfg(feature = "codex-compat")]
-    watch_observation: WatchObservationCheck,
-    #[cfg(feature = "codex-compat")]
-    open_request: OpenRequestCheck,
-    /// `None` when the run has no frozen workspace to compare against, in
-    /// which case source drift is never observed (see
-    /// `run_delivery_pump`'s source observation loop).
-    #[cfg(feature = "codex-compat")]
-    source_layers: Option<Arc<crate::exomonad::source::ExomonadSourceReload>>,
-    #[cfg(feature = "codex-compat")]
-    actor_recovery: Arc<exomonad_actor::ActorRecoveryJournal>,
-    #[cfg(feature = "codex-compat")]
-    recovered_threads: Arc<BTreeMap<ActorRef, (ActorRef, QueueReadyThread)>>,
-    #[cfg(feature = "codex-compat")]
-    recovered_root_predecessor: Option<ActorRef>,
+
     host_graph: Arc<dyn Fn() -> Vec<exomonad_actor::ActorGraphNode> + Send + Sync>,
+    #[cfg(test)]
+    test_observer: Option<hosted_test_context::HostTestObserver>,
 }
 
 #[derive(Clone)]
@@ -2702,37 +1738,8 @@ struct InteractiveLaunchContext {
     root: ActorRef,
     config: ActorHostConfig,
     run_root: PathBuf,
-    #[cfg(feature = "codex-compat")]
-    tmux: TmuxSession,
-    #[cfg(feature = "codex-compat")]
-    backend: HostRuntimeMode,
+
     worktrees: WorktreeManager,
-    #[cfg(feature = "codex-compat")]
-    source_layers: Option<Arc<crate::exomonad::source::ExomonadSourceReload>>,
-    #[cfg(feature = "codex-compat")]
-    bindings: Arc<Mutex<BindingTable>>,
-    #[cfg(feature = "codex-compat")]
-    actor_recovery: Arc<exomonad_actor::ActorRecoveryJournal>,
-    #[cfg(feature = "codex-compat")]
-    recovered_threads: Arc<BTreeMap<ActorRef, (ActorRef, QueueReadyThread)>>,
-}
-
-#[derive(Clone)]
-enum HostRuntimeMode {
-    #[cfg(feature = "codex-compat")]
-    Codex(Arc<dyn InteractiveAgentBackend>),
-    Embedded,
-}
-
-impl HostRuntimeMode {
-    #[cfg(feature = "codex-compat")]
-    fn codex_backend(&self) -> Option<&Arc<dyn InteractiveAgentBackend>> {
-        match self {
-            #[cfg(feature = "codex-compat")]
-            Self::Codex(backend) => Some(backend),
-            Self::Embedded => None,
-        }
-    }
 }
 
 fn active_source_identity(
@@ -2762,9 +1769,6 @@ enum StartupRecoveryRefusal {
         "root application lacks its required atomic startup intent; retained state is unavailable"
     )]
     MissingRootStartupIntent,
-    #[cfg(feature = "codex-compat")]
-    #[error("Codex root recovery lacks the required atomic startup intent; retained state is unavailable")]
-    CodexMissingStartupIntent,
 }
 
 // The host incarnation fences identities even when a predecessor failed before
@@ -2815,6 +1819,8 @@ pub(crate) async fn run(
         host_incarnation,
         #[cfg(test)]
         None,
+        #[cfg(test)]
+        None,
     )
     .await
 }
@@ -2826,14 +1832,15 @@ async fn run_with_test_transport(
     host_incarnation: HostIncarnationLease,
     transport: Arc<dyn harness::engine::ResponsesTransport>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    run_owned(config, readiness, host_incarnation, Some(transport)).await
+    run_owned(config, readiness, host_incarnation, Some(transport), None).await
 }
 
 async fn run_owned(
-    mut config: ActorHostConfig,
+    config: ActorHostConfig,
     readiness: mpsc::UnboundedSender<ActorHostReadiness>,
     host_incarnation: HostIncarnationLease,
     #[cfg(test)] test_transport: Option<Arc<dyn harness::engine::ResponsesTransport>>,
+    #[cfg(test)] mut test_hooks: Option<hosted_test_context::HostTestHooks>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let host_incarnation = Arc::new(host_incarnation);
     let run_root = config.run_root.clone();
@@ -2847,22 +1854,7 @@ async fn run_owned(
     let bindings = Arc::new(Mutex::new(bindings));
     let worktree_authority =
         ActorWorktreeAuthority::new(runtime_namespace(&run_root), Arc::clone(&bindings));
-    let tmux = TmuxSession::new(&config.tmux_session)?;
-    if config.backend.kind() != crate::exomonad::ExomonadBackend::Embedded && !tmux.exists().await?
-    {
-        return Err(runtime_error(format!(
-            "Exomonad tmux session {:?} does not exist",
-            config.tmux_session
-        )));
-    }
-    #[cfg(feature = "codex-compat")]
-    let runtime_backend = match &config.backend {
-        #[cfg(feature = "codex-compat")]
-        crate::exomonad::HostBackendOptions::Codex(installation) => {
-            HostRuntimeMode::Codex(native_interactive_backend(installation.clone()))
-        }
-        crate::exomonad::HostBackendOptions::Embedded => HostRuntimeMode::Embedded,
-    };
+
     let application_owners: InteractiveOwners = Arc::new(Mutex::new(HashMap::new()));
     let source_layers = source_service(
         &config,
@@ -2888,19 +1880,14 @@ async fn run_owned(
         exomonad_actor::ActorRecoveryJournal::open_existing(actor_recovery_path)
     }?;
     let prior_actor_records = actor_recovery.records();
-    #[cfg(feature = "codex-compat")]
-    if config.backend.kind() == crate::exomonad::ExomonadBackend::Codex
-        && contains_durable_root_admission(&prior_actor_records)
-    {
-        return Err(StartupRecoveryRefusal::CodexMissingStartupIntent.into());
-    }
+
     let run_journal_mode = run_journal_mode(
         host_incarnation.incarnation(),
         &config.root_binding_path,
         &run_journal_path,
         prior_actor_records.is_empty(),
     )?;
-    let embedded_service = if config.backend.kind() == crate::exomonad::ExomonadBackend::Embedded {
+    let embedded_service = {
         let settings = config
             .embedded
             .as_ref()
@@ -2914,8 +1901,6 @@ async fn run_owned(
             .await
             .map_err(runtime_error)?,
         )
-    } else {
-        None
     };
     let output_store = match embedded_service.as_ref() {
         Some(service) => service.runtime.store(),
@@ -2926,6 +1911,12 @@ async fn run_owned(
     #[cfg(test)]
     if let (Some(service), Some(transport)) = (&mut embedded_service, test_transport) {
         service.set_test_transport(transport);
+    }
+    #[cfg(test)]
+    if let (Some(service), Some(hooks)) = (&mut embedded_service, &mut test_hooks) {
+        if let Some(factory) = hooks.transport.take() {
+            service.set_test_transport(factory(&service.runtime, &config));
+        }
     }
     let mut embedded_startup =
         embedded_service
@@ -2961,40 +1952,12 @@ async fn run_owned(
     } else {
         exomonad_actor::ResidentRootEntry::Prepared(machine.run_startup_entry(entry)?)
     };
-    #[cfg(feature = "codex-compat")]
-    let native_fork_admission = match &runtime_backend {
-        #[cfg(feature = "codex-compat")]
-        HostRuntimeMode::Codex(backend) => Some(NativeForkAdmission {
-            owners: application_owners.clone(),
-            backend: backend.clone(),
-            layout: Some(WorkspaceLayout {
-                run_namespace: runtime_namespace(&run_root),
-                source_root: config.workspace.clone(),
-                source_exclude: config.source_exclude.clone(),
-                source_import: config.source_import,
-                root_imports: Arc::default(),
-                worktrees: worktrees.clone(),
-                backend: backend.clone(),
-                base_prompt: FrozenBasePrompt::materialize_selected(
-                    &run_root,
-                    config
-                        .workspace_inputs
-                        .as_ref()
-                        .and_then(|inputs| inputs.prompts.get("core"))
-                        .map(String::as_str),
-                    config.jev_surface(),
-                )?,
-            }),
-        }),
-        HostRuntimeMode::Embedded => None,
-    };
+
     let worktree_admission = fork_workspace_admission(
         worktrees.clone(),
         worktree_authority.clone(),
         bindings.clone(),
         runtime_namespace(&run_root),
-        #[cfg(feature = "codex-compat")]
-        native_fork_admission,
     );
     let (forest, deployments) = ResidentForest::new_with_launch_resolver(
         source,
@@ -3012,13 +1975,7 @@ async fn run_owned(
         .with_child_session_factory(child_session_factory)
         .with_handler_effect_support(tidepool_mcp::InstalledEffectSupport::installed_effect_support)
         .with_image_registry(image_registry);
-    #[cfg(feature = "codex-compat")]
-    if let HostRuntimeMode::Codex(backend) = &runtime_backend {
-        forest = forest.with_conversation_reader(conversation_reader(
-            application_owners.clone(),
-            backend.clone(),
-        ));
-    }
+
     if let Some(service) = &embedded_service {
         forest = forest.with_conversation_reader(embedded_reflect::run_conversation_reader(
             service.runtime.store(),
@@ -3048,26 +2005,7 @@ async fn run_owned(
             "host recovery cannot adopt a root without complete durable actor, source, and conversation evidence",
         ));
     }
-    #[cfg(feature = "codex-compat")]
-    let recovered_root_predecessor = recovered_root.map(|(predecessor, _)| predecessor);
-    #[cfg(feature = "codex-compat")]
-    if let (true, Some(predecessor)) = (
-        matches!(
-            &config.backend,
-            crate::exomonad::HostBackendOptions::Codex(_)
-        ),
-        recovered_root_predecessor,
-    ) {
-        crate::host_dynamic_tools::validate_operation_recovery(hosted_operation_journal(
-            &run_root,
-            predecessor.id,
-        ))
-        .map_err(|error| {
-            runtime_error(format!(
-                "root actor {predecessor} cannot be recovered without hosted-operation evidence: {error}"
-            ))
-        })?;
-    }
+
     forest
         .fence_recovery_identities(
             prior_actor_records
@@ -3304,36 +2242,11 @@ async fn run_owned(
         forest.shutdown().await;
         return Err(runtime_error(summary));
     }
-    #[cfg(feature = "codex-compat")]
-    let recovered_threads = Arc::new(match &runtime_backend {
-        HostRuntimeMode::Codex(_) => {
-            recover_prior_actors(
-                &forest,
-                &run_root,
-                root_actor.identity(),
-                host_incarnation.incarnation(),
-                &prior_actor_records,
-                program.clone(),
-                config.research_policy,
-                &worktree_admission,
-                accepted_source.as_deref(),
-            )
-            .await
-        }
-        HostRuntimeMode::Embedded => BTreeMap::new(),
-    });
-    #[cfg(not(feature = "codex-compat"))]
-    let recovered_threads = Arc::new(BTreeMap::<ActorRef, (ActorRef, QueueReadyThread)>::new());
-    let recovered_predecessors = recovered_threads
-        .values()
-        .map(|(predecessor, _)| *predecessor)
-        .collect::<std::collections::BTreeSet<_>>();
+
     let unavailable_records = prior_actor_records
         .iter()
         .filter(|record| {
-            record.terminal.is_none()
-                && record.admission.actor.id != root_actor.identity().id
-                && !recovered_predecessors.contains(&record.admission.actor)
+            record.terminal.is_none() && record.admission.actor.id != root_actor.identity().id
         })
         .map(|record| record.admission.actor)
         .collect::<Vec<_>>();
@@ -3349,21 +2262,13 @@ async fn run_owned(
     if host_incarnation.incarnation() != exomonad_actor::Incarnation::FIRST {
         let notice_path = run_root.join("host-recovery-notice.txt");
         let mut notice = std::fs::read_to_string(&notice_path).unwrap_or_default();
-        let recovered = recovered_threads
-            .iter()
-            .map(|(actor, (predecessor, _))| format!("{predecessor}->{actor}"))
-            .collect::<Vec<_>>();
         let unavailable = unavailable_records
             .iter()
             .map(ToString::to_string)
             .collect::<Vec<_>>();
         notice.push_str(&format!(
             " Durable actor reconstruction admitted: {}. Durable actors still unavailable: {}.",
-            if recovered.is_empty() {
-                "none".into()
-            } else {
-                recovered.join(", ")
-            },
+            "none",
             if unavailable.is_empty() {
                 "none".into()
             } else {
@@ -3492,25 +2397,24 @@ async fn run_owned(
     };
     tracing::info!(socket = %operator_socket.display(), "operator control and attachment ready");
     let (shutdown, shutdown_rx) = watch::channel(None);
-    let (root_config, root_config_rx) = watch::channel(config.clone());
-    #[cfg(feature = "codex-compat")]
-    let watch_forest = Arc::clone(&forest);
+    let (_root_config, root_config_rx) = watch::channel(config.clone());
+
     let host_graph_forest = Arc::clone(&forest);
     let host_graph = Arc::new(move || host_graph_forest.inspect_host_graph());
-    #[cfg(feature = "codex-compat")]
-    let watch_retention: WatchRetentionCheck =
-        Arc::new(move |owner, watch| watch_forest.retains_watch(owner, watch));
-    #[cfg(feature = "codex-compat")]
-    let watch_observation_forest = Arc::clone(&forest);
-    #[cfg(feature = "codex-compat")]
-    let watch_observation: WatchObservationCheck = Arc::new(move |owner, watch, occurred_at| {
-        watch_observation_forest.watch_observed_since(owner, watch, occurred_at)
-    });
-    #[cfg(feature = "codex-compat")]
-    let open_request_forest = Arc::clone(&forest);
-    #[cfg(feature = "codex-compat")]
-    let open_request: OpenRequestCheck =
-        Arc::new(move |actor| open_request_forest.open_request_without_reply(actor));
+    #[cfg(test)]
+    let test_observer = test_hooks.as_ref().map(|hooks| hooks.observer.clone());
+    #[cfg(test)]
+    if let (Some(hooks), Some(service)) = (&mut test_hooks, &embedded_service) {
+        if let Some(assembled) = hooks.assembled.take() {
+            let _ = assembled.send(hosted_test_context::HostedActorContext {
+                config: config.clone(),
+                actor: root_actor.clone(),
+                forest: Arc::clone(&forest),
+                runtime: Arc::clone(&service.runtime),
+                observer: hooks.observer.clone(),
+            });
+        }
+    }
     let mut applications_task = tokio::spawn(run_interactive_applications(
         deployments,
         application_owners.clone(),
@@ -3520,42 +2424,34 @@ async fn run_owned(
             config: config.clone(),
             run_root: run_root.clone(),
             output_store,
-            #[cfg(feature = "codex-compat")]
-            tmux: tmux.clone(),
-            #[cfg(feature = "codex-compat")]
-            backend: runtime_backend,
+
             worktrees,
-            #[cfg(feature = "codex-compat")]
-            bindings,
+
             readiness: readiness.clone(),
             worktree_authority: worktree_authority.clone(),
-            #[cfg(feature = "codex-compat")]
-            watch_retention,
-            #[cfg(feature = "codex-compat")]
-            watch_observation,
-            #[cfg(feature = "codex-compat")]
-            open_request,
-            #[cfg(feature = "codex-compat")]
-            source_layers,
-            #[cfg(feature = "codex-compat")]
-            actor_recovery: actor_recovery.clone(),
-            #[cfg(feature = "codex-compat")]
-            recovered_threads,
-            #[cfg(feature = "codex-compat")]
-            recovered_root_predecessor,
+
             host_graph,
+            #[cfg(test)]
+            test_observer,
         },
         shutdown_rx,
         root_config_rx,
         embedded_service,
     ));
-    let mut recovery = 0_u64;
     let mut applications_finished = false;
     let mut root_active = true;
+    let test_stop = async {
+        #[cfg(test)]
+        hosted_test_context::test_stop(&mut test_hooks).await;
+        #[cfg(not(test))]
+        std::future::pending::<()>().await;
+    };
+    tokio::pin!(test_stop);
     let result: Result<(), Box<dyn std::error::Error>> = async {
         loop {
             tokio::select! {
                 signal = operator_shutdown() => { signal?; break Ok(()); }
+                _ = &mut test_stop => break Ok(()),
                 result = &mut applications_task => {
                     applications_finished = true;
                     break result.map_err(join_error)?.map_err(runtime_error);
@@ -3563,73 +2459,8 @@ async fn run_owned(
                 result = &mut root_task, if root_active => {
                     result.map_err(join_error)?;
                     let terminal = root_actor.terminal().get().ok_or_else(|| runtime_error("root stopped without terminal"))?;
-                    let application = actor_recovery.records().into_iter()
-                        .find(|record| record.admission.actor == root_actor.identity())
-                        .and_then(|record| record.application);
-                    let conversation = application.as_ref().and_then(|application|
-                        application.conversation.as_ref().or(application.intended_conversation.as_ref()));
-                    if terminal.kind == ActorExitKind::Failed && native_exit_required(conversation) {
-                        let pane = application_owners.lock().get(&root_actor.identity())
-                            .and_then(|owner| owner.pane.lock().clone());
-                        if let Err(error) = confirm_native_exit(&tmux, pane.as_ref()).await {
-                            readiness.send(ActorHostReadiness::CoordinationFailed {
-                                root: root_actor.identity(),
-                                error: terminal.summary.clone(),
-                            }).ok();
-                            if root_never_bound(application.as_ref(), &config.root_binding_path) {
-                                // The root never reached a queue-ready binding in
-                                // this run, so there is no live conversation this
-                                // host could be retained to preserve. Staying up
-                                // only holds the incarnation lease and every
-                                // worktree binding lock a fresh run of this
-                                // workspace needs — exit instead of lingering.
-                                tracing::error!(%error, failure = %terminal.summary, "root coordination stopped before its conversation was ever bound; exiting instead of retaining an unbindable session");
-                                break Err(runtime_error(format!(
-                                    "Exomonad root failed before its conversation was ever bound and native execution is unconfirmed ({error}): {}",
-                                    terminal.summary
-                                )));
-                            }
-                            tracing::error!(%error, failure = %terminal.summary, "root coordination stopped; native execution unconfirmed, retaining session without automatic conversation resume");
-                            root_active = false;
-                            continue;
-                        }
-                    }
-                    let resident_state = forest.resident_session_state();
-                    match prepare_root_recovery(
-                        &mut config,
-                        root_actor.identity(),
-                        terminal,
-                        resident_state,
-                        &mut recovery,
-                    ).await {
-                        Ok(RootRunDisposition::Recover) => {}
-                        Ok(RootRunDisposition::Complete) => {
-                            root_active = false;
-                            continue;
-                        }
-                        Err(error) => {
-                            readiness.send(ActorHostReadiness::CoordinationFailed {
-                                root: root_actor.identity(),
-                                error: error.to_string(),
-                            }).ok();
-                            if root_never_bound(application.as_ref(), &config.root_binding_path) {
-                                // Same reasoning as the unconfirmed-native-exit
-                                // case above: nothing was ever bound in this run,
-                                // so there is nothing worth staying up for. Exit
-                                // and release every lock a fresh run needs.
-                                tracing::error!(%error, "model root recovery unavailable and no conversation was ever bound; exiting instead of retaining an unbindable session");
-                                break Err(error);
-                            }
-                            tracing::error!(%error, "model root recovery unavailable; operator forest remains attached");
-                            root_active = false;
-                            continue;
-                        }
-                    }
-                    root_config.send_replace(config.clone());
-                    (root_actor, root_task) = forest.recover_program_root(root_actor.identity(), "exomonad-root".into(),
-                        exomonad_actor::EffectiveRole::root().with_research_policy(config.research_policy), program.clone())
-                        .await.map_err(|e| runtime_error(e.to_string()))?;
-                    worktree_authority.install_grant(root_actor.identity().into(), ActorWorktreeGrant::Repository);
+                    root_active = false;
+
                 }
             }
         }
@@ -3664,6 +2495,7 @@ async fn run_owned(
 
 /// An embedded application has no independently running native process.
 /// Unknown ownership retains the native exit guard until its exit is proven.
+#[cfg(test)]
 fn native_exit_required(conversation: Option<&exomonad_actor::ApplicationConversation>) -> bool {
     !matches!(
         conversation,
@@ -3671,6 +2503,7 @@ fn native_exit_required(conversation: Option<&exomonad_actor::ApplicationConvers
     )
 }
 
+#[cfg(test)]
 fn root_never_bound(
     application: Option<&exomonad_actor::DurableActorApplication>,
     root_binding_path: &Path,
@@ -3681,97 +2514,8 @@ fn root_never_bound(
     }
 }
 
-async fn confirm_native_exit(tmux: &TmuxSession, pane: Option<&TmuxPaneId>) -> Result<(), String> {
-    let pane = pane.ok_or("native launch outcome is unknown")?;
-    match tmux.pane_status(pane).await {
-        Ok(Some(status)) if status.dead => Ok(()),
-        Ok(_) => Err("native pane is live or its exit is unconfirmed".into()),
-        Err(error) => Err(format!("cannot confirm native pane exit: {error}")),
-    }
-}
-
 /// Classify an intentional completion or prepare an abnormal root for a fresh
 /// incarnation attached to the retained conversation.
-async fn prepare_root_recovery(
-    config: &mut ActorHostConfig,
-    actor: ActorRef,
-    terminal: ActorTerminal,
-    resident_state: ResidentSessionState,
-    recovery: &mut u64,
-) -> Result<RootRunDisposition, Box<dyn std::error::Error>> {
-    #[cfg(not(feature = "codex-compat"))]
-    {
-        let _ = (config, actor, terminal, resident_state, recovery);
-        return Ok(RootRunDisposition::Complete);
-    }
-    #[cfg(feature = "codex-compat")]
-    if matches!(
-        &config.backend,
-        crate::exomonad::HostBackendOptions::Embedded
-    ) {
-        return Ok(RootRunDisposition::Complete);
-    }
-    #[cfg(feature = "codex-compat")]
-    {
-        let Some((launch_mode, thread)) =
-            root_recovery_launch_mode(&config.root_binding_path, &terminal, resident_state).await?
-        else {
-            return Ok(RootRunDisposition::Complete);
-        };
-        *recovery = (*recovery).saturating_add(1);
-        tracing::warn!(
-            ?actor,
-            kind = ?terminal.kind,
-            summary = %terminal.summary,
-            ?resident_state,
-            recovery = *recovery,
-            thread = %thread.id().0,
-            "Exomonad root stopped abnormally; recreating a fresh root incarnation"
-        );
-        config.root_launch_mode = launch_mode;
-        Ok(RootRunDisposition::Recover)
-    }
-}
-
-#[cfg(feature = "codex-compat")]
-async fn root_recovery_launch_mode(
-    binding_path: &Path,
-    terminal: &ActorTerminal,
-    resident_state: ResidentSessionState,
-) -> Result<Option<(InteractiveLaunchMode, QueueReadyThread)>, Box<dyn std::error::Error>> {
-    if terminal.kind != ActorExitKind::Failed {
-        return Ok(None);
-    }
-    match resident_state {
-        ResidentSessionState::Uninitialized | ResidentSessionState::Reusable => {}
-        ResidentSessionState::Running => {
-            return Err(runtime_error(
-                "Exomonad root failed while its resident session remains running; automatic recovery cannot overtake the admitted operation",
-            ));
-        }
-        ResidentSessionState::Unavailable => {
-            return Err(runtime_error(
-                "Exomonad root failed with an unavailable resident machine; automatic recovery cannot recreate live values or grants",
-            ));
-        }
-        ResidentSessionState::Gone => {
-            return Err(runtime_error(
-                "Exomonad root failed after its resident session was retired; automatic recovery requires the original session incarnation",
-            ));
-        }
-    }
-    let thread = read_interactive_binding(binding_path)
-        .await
-        .map_err(|error| {
-            runtime_error(format!(
-                "Exomonad root {terminal:?} and its conversation cannot be resumed: {error}"
-            ))
-        })?;
-    Ok(Some((
-        InteractiveLaunchMode::Resume(thread.id().clone()),
-        thread,
-    )))
-}
 
 async fn await_applications(
     task: &mut tokio::task::JoinHandle<Result<(), String>>,
@@ -4010,19 +2754,6 @@ fn runtime_namespace(run_root: &Path) -> String {
 /// Builds the exact producer identity `input_control` and the host-input
 /// queue key rows against. The only owner of this format; a reader matching
 /// queue rows (`run_map`'s review) must call this rather than re-deriving it.
-pub(crate) fn input_producer_id(
-    run_root: &Path,
-    actor: ActorRef,
-    inbox_key: &str,
-) -> Result<InputProducerId, exomonad_agent::interactive::InputEnvelopeError> {
-    InputProducerId::new(format!(
-        "{}\0{}\0{}\0{}",
-        run_root.to_string_lossy(),
-        inbox_key,
-        actor.id.0,
-        actor.incarnation.0
-    ))
-}
 
 struct CompiledExomonadDriver {
     preamble: String,
@@ -4592,14 +3323,7 @@ fn compile_root(
     // rather than a compile failure over a module nothing on its search path
     // defines. The same answer tells the agent so in its instructions.
     let jev = config.jev_surface() == prompt_catalog::JevSurface::Installed;
-    let context_support = if matches!(
-        config.backend,
-        crate::exomonad::HostBackendOptions::Embedded
-    ) {
-        vec![exomonad_tool::ToolEffectKey::ContextReadWrite]
-    } else {
-        Vec::new()
-    };
+    let context_support = vec![exomonad_tool::ToolEffectKey::ContextReadWrite];
     let mut workbench = ActorWorkbenchSource::new(preamble, include)
         .with_installed_effect_support(context_support)
         .with_imports(WORKBENCH_SURFACE_MODULE)
@@ -4667,179 +3391,6 @@ fn render_root_compile_failure(
     runtime_error(format!(
         "root interactive driver compilation failed:\n{detail}"
     ))
-}
-
-#[cfg(feature = "codex-compat")]
-fn spawn_undeployed_hosted_retirement(
-    retirements: &mut JoinSet<InteractiveCleanupReceipt>,
-    actor: ActorRef,
-    owners: &InteractiveOwners,
-    tmux: &TmuxSession,
-) {
-    let retained = {
-        let rows = owners.lock();
-        rows.get(&actor).map(|row| {
-            (
-                row.hosted.lock().clone(),
-                row.pane.lock().clone(),
-                row.scoped_retention
-                    .as_ref()
-                    .map(|retention| retention.slot.clone()),
-                row.retirement.clone(),
-                row.native_retirement,
-            )
-        })
-    };
-    let Some((service, pane, scope, receipt_slot, native_retirement)) = retained else {
-        return;
-    };
-    let tmux = tmux.clone();
-    retirements.spawn(async move {
-        let http = match service {
-            Some(mut service) => stop_retired_tool_service(actor, &mut service).await,
-            None => CleanupComponentOutcome::Completed,
-        };
-        let process = retire_scoped_process(scope, native_retirement)
-            .await
-            .unwrap_or_else(|| CleanupComponentOutcome::Failed {
-                detail: "undeployed launch has no exact native process row".into(),
-            });
-        let pane = match pane {
-            None => CleanupComponentOutcome::Completed,
-            Some(pane)
-                if native_retirement == NativeRetirement::Preserve
-                    || matches!(process, CleanupComponentOutcome::Completed) =>
-            {
-                retire_pane_artifact(&tmux, &pane, native_retirement).await
-            }
-            Some(_) => CleanupComponentOutcome::Failed {
-                detail: "pane retained because exact process termination is unconfirmed".into(),
-            },
-        };
-        let receipt = InteractiveCleanupReceipt {
-            actor,
-            components: vec![
-                CleanupComponentReceipt {
-                    component: CleanupComponent::ToolService,
-                    outcome: http,
-                },
-                CleanupComponentReceipt {
-                    component: CleanupComponent::Process,
-                    outcome: process,
-                },
-                CleanupComponentReceipt {
-                    component: CleanupComponent::Pane,
-                    outcome: pane,
-                },
-            ],
-        };
-        receipt_slot.lock().get_or_insert_with(|| receipt.clone());
-        receipt
-    });
-}
-
-#[cfg(feature = "codex-compat")]
-fn spawn_owned_retirement(
-    retirements: &mut JoinSet<InteractiveCleanupReceipt>,
-    deployment: InteractiveDeployment,
-    tmux: TmuxSession,
-    owners: &InteractiveOwners,
-) {
-    let (scope, receipt_slot, native_retirement) = {
-        let rows = owners.lock();
-        #[allow(clippy::expect_used, reason = "exact deployment retention row")]
-        let row = rows
-            .get(&deployment.actor)
-            .expect("exact deployment retention row");
-        (
-            row.scoped_retention
-                .as_ref()
-                .map(|retention| retention.slot.clone()),
-            row.retirement.clone(),
-            row.native_retirement,
-        )
-    };
-    // Only slots cross the task boundary; neither owns a back-reference to its
-    // map row. Namespace cleanup is status only and does not discharge host work.
-    retirements.spawn(async move {
-        hosted_retirement::settle_input_seal(&deployment.service, APPLICATION_TASK_GRACE_TIMEOUT)
-            .await;
-        let process = retire_scoped_process(scope, native_retirement).await;
-        let receipt =
-            retire_interactive_application_guarded(deployment, &tmux, native_retirement, process)
-                .await;
-        receipt_slot.lock().get_or_insert_with(|| receipt.clone());
-        receipt
-    });
-}
-
-/// Consume the exact retained slot without moving it out of the lifecycle row.
-/// The returned outcome is reporting evidence only: the slot still owns the
-/// cleanup receipt and the caller must account for hosted work and leases.
-#[cfg(feature = "codex-compat")]
-async fn retire_scoped_process(
-    scope: Option<Arc<Mutex<scoped_custody::ScopedProcessSlot>>>,
-    native_retirement: NativeRetirement,
-) -> Option<CleanupComponentOutcome> {
-    let scope = scope?;
-    // The slot only leaves `Reserved` once `stage_supervisor` runs, immediately
-    // before the tmux native-process submission. A row still `Reserved` at
-    // retirement (admission timeout, workspace preparation failure, or any
-    // other error raised before that point) is certain to have never spawned
-    // a native process, so there is nothing to preserve or stop either way.
-    if matches!(*scope.lock(), scoped_custody::ScopedProcessSlot::Reserved) {
-        return Some(CleanupComponentOutcome::Completed);
-    }
-    if native_retirement == NativeRetirement::Preserve {
-        return Some(CleanupComponentOutcome::Failed {
-            detail: "native process intentionally preserved; exact scope remains retained".into(),
-        });
-    }
-    let stopped = tidepool_runtime::spawn_blocking_in_span(move || {
-        scoped_custody::stop_retained_slot(
-            &scope,
-            std::time::Instant::now() + APPLICATION_SHUTDOWN_TIMEOUT,
-        )
-    })
-    .await;
-    Some(match stopped {
-        Ok(Ok(_)) => CleanupComponentOutcome::Completed,
-        Ok(Err(error)) => CleanupComponentOutcome::Failed {
-            detail: format!("exact scoped process cleanup remains unconfirmed: {error}"),
-        },
-        Err(error) => CleanupComponentOutcome::Failed {
-            detail: format!("scoped process cleanup task failed: {error}"),
-        },
-    })
-}
-
-#[cfg(feature = "codex-compat")]
-async fn retain_input_custody_and_bind(
-    owner: &hosted_retirement::HostedOwner,
-    backend: Arc<dyn InteractiveAgentBackend>,
-    thread: &QueueReadyThread,
-    producer: &InputProducerId,
-    provider_attachment: &provider_attachment::ProviderAttachment,
-) -> Result<(), String> {
-    hosted_retirement::begin_input_seal(
-        owner,
-        Arc::clone(&backend),
-        thread.clone(),
-        producer.clone(),
-    )
-    .await
-    .map_err(|error| format!("could not retain native input custody: {error}"))?;
-    provider_attachment
-        .validate()
-        .map_err(|error| format!("native provider attachment is unavailable: {error}"))?;
-    if !thread.supports_active_input() {
-        return Ok(());
-    }
-    match backend.bind_input(thread).await {
-        Ok(exomonad_agent::InputAdmission::Admitted) => Ok(()),
-        Ok(outcome) => Err(format!("native input bind returned {outcome:?}")),
-        Err(error) => Err(format!("could not bind native input control: {error}")),
-    }
 }
 
 fn embedded_resource_release(
@@ -4959,398 +3510,12 @@ async fn drain_embedded_shutdown<A: fmt::Debug + Send + 'static, L: Send + 'stat
     }
 }
 
-#[cfg(feature = "codex-compat")]
-struct LaunchShutdown<T> {
-    completed: Vec<T>,
-    failures: Vec<LaunchShutdownFailure>,
-}
-
-#[derive(Debug, thiserror::Error)]
-#[cfg(feature = "codex-compat")]
-enum LaunchShutdownFailure {
-    #[error("interactive launch cleanup failed: {0}")]
-    Launch(InteractiveApplicationError),
-    #[error("interactive launch join failed; cleanup unconfirmed: {0}")]
-    Join(tokio::task::JoinError),
-    #[error("interactive launch cleanup timed out with {pending} unsettled tasks; abort requested, cleanup unconfirmed")]
-    TimedOut { pending: usize },
-}
-
-#[cfg(feature = "codex-compat")]
-impl<T> LaunchShutdown<T> {
-    fn record<A>(
-        &mut self,
-        result: Result<(A, Result<Option<T>, InteractiveApplicationError>), tokio::task::JoinError>,
-    ) {
-        match result {
-            Ok((_, Ok(Some(completed)))) => self.completed.push(completed),
-            Ok((_, Ok(None))) => {}
-            Ok((_, Err(error))) => self.failures.push(LaunchShutdownFailure::Launch(error)),
-            Err(error) => self.failures.push(LaunchShutdownFailure::Join(error)),
-        }
-    }
-}
-
-/// Keep observed completed deployments outside timeout-owned futures so they can
-/// still be retired if a later launch fails or cannot finish. Aborting a task is
-/// not proof that its process, hosted work or resource cleanup completed.
-#[cfg(feature = "codex-compat")]
-async fn drain_launches_for_shutdown<A: Send + 'static, T: Send + 'static>(
-    launches: &mut JoinSet<(A, Result<Option<T>, InteractiveApplicationError>)>,
-    grace: Duration,
-) -> LaunchShutdown<T> {
-    let mut outcome = LaunchShutdown {
-        completed: Vec::new(),
-        failures: Vec::new(),
-    };
-    let deadline = tokio::time::Instant::now() + grace;
-    while !launches.is_empty() {
-        match tokio::time::timeout_at(deadline, launches.join_next()).await {
-            Ok(Some(result)) => outcome.record(result),
-            Ok(None) => break,
-            Err(_) => {
-                outcome.failures.push(LaunchShutdownFailure::TimedOut {
-                    pending: launches.len(),
-                });
-                launches.abort_all();
-                // Preserve results already ready at the cutoff. Do not wait
-                // indefinitely for cancellation or label it cleanup success.
-                while let Some(result) = launches.try_join_next() {
-                    outcome.record(result);
-                }
-                break;
-            }
-        }
-    }
-    outcome
-}
-
-#[cfg(feature = "codex-compat")]
-struct InteractiveInheritance {
-    thread: Option<BackendThreadId>,
-    build_snapshot: Option<OverlaySnapshot>,
-}
-
-#[cfg(feature = "codex-compat")]
-struct InteractiveLaunchRetention {
-    hosted: hosted_retirement::HostedSlot,
-    pane: Arc<Mutex<Option<TmuxPaneId>>>,
-    process: Arc<Mutex<scoped_custody::ScopedProcessSlot>>,
-}
-
-#[cfg(feature = "codex-compat")]
-async fn launch_interactive_application(
-    installation: LocalResidentInstallation,
-    context: InteractiveLaunchContext,
-    cancelled: oneshot::Receiver<NativeRetirement>,
-    inherited: InteractiveInheritance,
-    retention: InteractiveLaunchRetention,
-    provider_attachment: provider_attachment::ProviderAttachment,
-) -> Result<Option<LaunchedInteractiveApplication>, InteractiveApplicationError> {
-    provider_attachment.validate().map_err(|error| {
-        application_error(
-            installation.actor.identity(),
-            InteractiveOperation::PrepareRuntime,
-            error,
-        )
-    })?;
-    let worktree = prepare_actor_worktree(&installation, &context)?;
-    launch_prepared_interactive_application(
-        installation,
-        context,
-        worktree,
-        cancelled,
-        inherited,
-        retention,
-        provider_attachment,
-    )
-    .await
-}
-
-#[cfg(feature = "codex-compat")]
-fn prepare_actor_worktree(
-    installation: &LocalResidentInstallation,
-    context: &InteractiveLaunchContext,
-) -> Result<Option<WorktreeHandle>, InteractiveApplicationError> {
-    let actor = installation.actor.identity();
-    let raw_id =
-        match actor_workspace_request(actor == context.root, &installation.launch_worktrees)
-            .map_err(|detail| {
-                application_error(actor, InteractiveOperation::BindWorktree, detail)
-            })? {
-            ActorWorkspaceRequest::SourceCheckout => return Ok(None),
-            ActorWorkspaceRequest::Worktree(raw_id) => raw_id,
-        };
-    if !WorktreeId::is_path_safe(raw_id) {
-        return Err(application_error(
-            actor,
-            InteractiveOperation::BindWorktree,
-            "the worktree recipe carried an invalid durable id",
-        ));
-    }
-    let id = WorktreeId::from_raw(raw_id);
-    let handle = context
-        .worktrees
-        .lookup(&id)
-        .map_err(|error| application_error(actor, InteractiveOperation::BindWorktree, error))?
-        .ok_or_else(|| {
-            application_error(
-                actor,
-                InteractiveOperation::BindWorktree,
-                format!("worktree {id} is not registered"),
-            )
-        })?;
-    let principal = WorktreePrincipal::exact_actor(
-        &runtime_namespace(&context.run_root),
-        actor.id.0,
-        actor.incarnation.0,
-    );
-    if installation.worktree_custody.is_none()
-        || context
-            .bindings
-            .lock()
-            .current(handle.id())
-            .is_none_or(|binding| binding.agent() != &principal)
-    {
-        return Err(application_error(
-            actor,
-            InteractiveOperation::BindWorktree,
-            "exact pre-bootstrap worktree custody is absent",
-        ));
-    }
-    Ok(Some(handle))
-}
-
-#[cfg(feature = "codex-compat")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg(feature = "codex-compat")]
-enum ActorWorkspaceRequest<'a> {
-    /// The actor may inspect the source checkout. Only the root receives write
-    /// authority for it; an ordinary actor without a worktree remains a useful
-    /// orchestration or review actor rather than acquiring ambient code-write
-    /// authority by accident.
-    SourceCheckout,
-    Worktree(&'a str),
-}
-
-#[cfg(feature = "codex-compat")]
-fn actor_workspace_request<'a>(
-    root: bool,
-    launch_worktrees: &'a [String],
-) -> Result<ActorWorkspaceRequest<'a>, String> {
-    match (root, launch_worktrees) {
-        (_, []) => Ok(ActorWorkspaceRequest::SourceCheckout),
-        (false, [worktree]) => Ok(ActorWorkspaceRequest::Worktree(worktree)),
-        (true, _) => Err("the root application may not carry a child worktree recipe".into()),
-        (false, worktrees) => Err(format!(
-            "an interactive actor may carry at most one worktree recipe, received {}",
-            worktrees.len()
-        )),
-    }
-}
-
 fn current_time_ms() -> i64 {
     let millis = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
     i64::try_from(millis).unwrap_or(i64::MAX)
-}
-
-#[cfg(feature = "codex-compat")]
-/// Acquire exclusive path custody before the first fallible preparation step.
-fn prepare_socket_inbox(
-    actor: ActorRef,
-    socket_root: PathBuf,
-    rows: PathBuf,
-    cursor: PathBuf,
-) -> Result<(SocketDirectory, UnixListener, Arc<ActorInbox>), InteractiveApplicationError> {
-    let socket = SocketDirectory::create(socket_root)
-        .map_err(|error| application_error(actor, InteractiveOperation::PrepareRuntime, error))?;
-    let prepared: Result<_, InteractiveApplicationError> = (|| {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(socket.path(), std::fs::Permissions::from_mode(0o700))
-                .map_err(|error| {
-                    application_error(actor, InteractiveOperation::PrepareRuntime, error)
-                })?;
-        }
-        let listener = UnixListener::bind(socket.path().join("host-tools.sock"))
-            .map_err(|error| application_error(actor, InteractiveOperation::BindToolHost, error))?;
-        let inbox = ActorInbox::open(rows, cursor).map_err(|error| {
-            application_error(actor, InteractiveOperation::PrepareRuntime, error)
-        })?;
-        Ok((listener, Arc::new(inbox)))
-    })();
-    match prepared {
-        Ok((listener, inbox)) => Ok((socket, listener, inbox)),
-        Err(error) => Err(socket_launch_failure(
-            actor,
-            error.operation,
-            error.detail,
-            socket,
-        )),
-    }
-}
-
-#[cfg(feature = "codex-compat")]
-fn socket_cleanup_outcome(socket: SocketDirectory) -> CleanupComponentOutcome {
-    match socket.release() {
-        Ok(()) => CleanupComponentOutcome::Completed,
-        Err(error) => CleanupComponentOutcome::Failed {
-            detail: error.to_string(),
-        },
-    }
-}
-
-#[cfg(feature = "codex-compat")]
-fn socket_launch_failure(
-    actor: ActorRef,
-    operation: InteractiveOperation,
-    cause: impl fmt::Display,
-    socket: SocketDirectory,
-) -> InteractiveApplicationError {
-    let detail = match socket_cleanup_outcome(socket) {
-        CleanupComponentOutcome::Failed { detail } => {
-            format!("{cause}; socket cleanup failed: {detail}")
-        }
-        _ => cause.to_string(),
-    };
-    application_error(actor, operation, detail)
-}
-
-#[cfg(feature = "codex-compat")]
-fn socket_launch_cancelled(
-    actor: ActorRef,
-    cause: impl fmt::Display,
-    socket: SocketDirectory,
-) -> InteractiveApplicationError {
-    let mut error =
-        socket_launch_failure(actor, InteractiveOperation::LaunchProcess, cause, socket);
-    error.disposition = LaunchDisposition::Cancelled;
-    error
-}
-
-#[cfg(feature = "codex-compat")]
-async fn deliver_session_activation(
-    application: &mut InteractiveDeployment,
-    activation: exomonad_actor::ResidentActivation,
-) -> Result<(), String> {
-    let actor = activation.id.actor();
-    if accepts_activation(application, &activation) {
-        let sequence = activation.id.sequence();
-        if let Err(error) = publish_inbox_event(
-            Arc::clone(&application.inbox),
-            DurableActorEvent::session(&activation),
-        )
-        .await
-        {
-            application.failure_reported = true;
-            let local_actor = application.local_actor.clone();
-            tracing::warn!(?actor, %error, "actor activation delivery degraded");
-            apply_application_failure(
-                local_actor,
-                ExternalApplicationFailure {
-                    class: ExternalApplicationFailureClass::ToolHostStartup,
-                    detail: error,
-                },
-            )
-            .await?;
-            return Ok(());
-        }
-        application
-            .runtime_observation
-            .publish_request_activation(activation.request, sequence);
-        application.last_activation_sequence = sequence;
-    }
-    Ok(())
-}
-
-#[cfg(feature = "codex-compat")]
-fn accepts_activation(
-    deployment: &InteractiveDeployment,
-    activation: &exomonad_actor::ResidentActivation,
-) -> bool {
-    accepts_activation_id(
-        deployment.actor,
-        deployment.last_activation_sequence,
-        activation.id.actor(),
-        activation.id.sequence(),
-    )
-}
-
-#[cfg(feature = "codex-compat")]
-fn accepts_activation_id(
-    actor: ActorRef,
-    last_sequence: u64,
-    candidate_actor: ActorRef,
-    candidate_sequence: u64,
-) -> bool {
-    candidate_actor == actor && candidate_sequence > last_sequence
-}
-
-/// Toolchain processes selected for the source checkout are not valid in a
-/// child worktree. Each worker resolves tools from its own sources instead.
-#[cfg(feature = "codex-compat")]
-fn workspace_local_toolchain_pins(is_root: bool) -> BTreeSet<String> {
-    if is_root {
-        return BTreeSet::new();
-    }
-
-    [
-        "TIDEPOOL_EXTRACT",
-        "TIDEPOOL_EXTRACT_WORKER",
-        "TIDEPOOL_EXTRACT_DAEMON_SOCKET",
-    ]
-    .into_iter()
-    .map(str::to_owned)
-    .collect()
-}
-
-#[cfg(feature = "codex-compat")]
-struct ActorLaunchEnvironment {
-    set: BTreeMap<String, String>,
-    unset: BTreeSet<String>,
-}
-
-/// Compose the host environment and actor-local credentials before handing
-/// them to tmux. A worker's explicit unsets win over values captured from the
-/// root process; handing the same name to both tmux channels is ambiguous and
-/// rejected by the deployment adapter.
-#[cfg(feature = "codex-compat")]
-fn actor_launch_environment(
-    mut inherited: BTreeMap<String, String>,
-    is_root: bool,
-    build_output: Option<&Path>,
-) -> ActorLaunchEnvironment {
-    inherited.insert("CODEX_WORKSPACE_SNAPSHOTS".into(), "1".into());
-    if let Some(build_output) = build_output {
-        inherited.insert(
-            "CARGO_TARGET_DIR".into(),
-            build_output.to_string_lossy().into_owned(),
-        );
-        // A host compiler-cache daemon resolves the shared visible pathname in
-        // its own mount namespace. Empty overrides also disable Cargo config
-        // wrappers, keeping compiler execution inside this actor's workspace.
-        inherited.insert("RUSTC_WRAPPER".into(), String::new());
-        inherited.insert("RUSTC_WORKSPACE_WRAPPER".into(), String::new());
-    }
-    let unset = workspace_local_toolchain_pins(is_root);
-    inherited.retain(|name, _| !unset.contains(name));
-    ActorLaunchEnvironment {
-        set: inherited,
-        unset,
-    }
-}
-
-#[cfg(feature = "codex-compat")]
-fn fresh_process_supervisor_secret() -> String {
-    format!(
-        "{}{}",
-        uuid::Uuid::new_v4().simple(),
-        uuid::Uuid::new_v4().simple()
-    )
 }
 
 /// Resolve the same bubblewrap selected by the already-frozen pane PATH. The
@@ -5387,32 +3552,10 @@ fn supply_resident_command_backend(
     authority: &ActorWorktreeAuthority,
     worktrees: &WorktreeManager,
     actor: ActorRef,
-    #[cfg(feature = "codex-compat")] resource_client: Option<
-        Arc<exomonad_node::command_resources::CommandResourceClient>,
-    >,
+
     host_resources: Option<Arc<exomonad_node::command_resources::CommandResourceClient>>,
-    #[cfg(feature = "codex-compat")] thread: Option<QueueReadyThread>,
-    #[cfg(feature = "codex-compat")] native: Option<Arc<dyn InteractiveAgentBackend>>,
 ) {
     let backend = (|| {
-        #[cfg(feature = "codex-compat")]
-        if let Some(thread) = thread {
-            let resources = resource_client.as_ref().cloned().ok_or_else(|| {
-                tidepool_bridge_effects::CommandError::CommandUnavailable(
-                    "this run has no command resource authority".into(),
-                )
-            })?;
-            let Some(native) = native else {
-                return Err(tidepool_bridge_effects::CommandError::CommandUnavailable(
-                    "native command backend is unavailable for the embedded provider".into(),
-                ));
-            };
-            return Ok(Arc::new(commands::NativeCommandBackend::new(
-                native, thread, resources, actor,
-            ))
-                as Arc<dyn exomonad_actor::command_jobs::CommandBackend>);
-        }
-
         let resources = host_resources.ok_or_else(|| {
             tidepool_bridge_effects::CommandError::CommandUnavailable(
                 "this run has no command resource authority".into(),
@@ -5519,514 +3662,6 @@ fn open_embedded_actor_binding(
     ))
 }
 
-/// The checkout's Git head and dirty files, via [`GitCli`] — the sole
-/// sanctioned way to invoke git in this repository. There is no recorded
-/// build revision for the running binary to compare `head` against; see
-/// `exomonad_actor::CheckoutGitDrift`.
-#[cfg(feature = "codex-compat")]
-fn checkout_git_drift(
-    worktrees: &WorktreeManager,
-    worktree_id: &str,
-) -> std::result::Result<exomonad_actor::CheckoutGitDrift, String> {
-    let handle = worktrees
-        .lookup(&WorktreeId::from_raw(worktree_id))
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| format!("worktree {worktree_id:?} is not allocated"))?;
-    git_drift_at(worktrees.git(), handle.cwd())
-}
-
-/// A checkout's Git head and dirty files at `cwd`.
-#[cfg(feature = "codex-compat")]
-fn git_drift_at(
-    git: &GitCli,
-    cwd: &std::path::Path,
-) -> std::result::Result<exomonad_actor::CheckoutGitDrift, String> {
-    let head = git
-        .try_run(cwd, &["rev-parse", "HEAD"])
-        .map_err(|error| error.to_string())?
-        .trimmed()
-        .to_owned();
-    let dirty = exomonad_worktree::git::inspect::dirty_summary(git, cwd)
-        .map_err(|error| error.to_string())?;
-    let mut dirty_files: Vec<String> = dirty
-        .staged
-        .into_iter()
-        .chain(dirty.unstaged)
-        .chain(dirty.untracked)
-        .collect();
-    dirty_files.sort();
-    dirty_files.dedup();
-    Ok(exomonad_actor::CheckoutGitDrift { head, dirty_files })
-}
-
-#[cfg(feature = "codex-compat")]
-fn prepare_owner_notification(
-    notice: &exomonad_actor::ChildExitNotice,
-    deployments: &[InteractiveDeployment],
-) -> Option<OwnerNotification> {
-    if notice
-        .child
-        .terminal()
-        .retirement_acknowledged_by(notice.owner)
-    {
-        return None;
-    }
-    let owner_application = deployments.iter().find(|app| app.actor == notice.owner)?;
-    Some(OwnerNotification {
-        owner: notice.owner,
-        inbox: Arc::clone(&owner_application.inbox),
-        event: DurableActorEvent::Typed(TypedActorEvent::ChildExited),
-    })
-}
-
-#[cfg(feature = "codex-compat")]
-async fn publish_owner_notification(
-    notification: OwnerNotification,
-) -> (ActorRef, Result<(), String>) {
-    publish_inbox_event_for(notification.owner, notification.inbox, notification.event).await
-}
-
-#[cfg(feature = "codex-compat")]
-async fn publish_inbox_event_for(
-    actor: ActorRef,
-    inbox: Arc<ActorInbox>,
-    event: DurableActorEvent,
-) -> (ActorRef, Result<(), String>) {
-    (actor, publish_inbox_event(inbox, event).await)
-}
-
-#[cfg(feature = "codex-compat")]
-async fn publish_inbox_event(
-    inbox: Arc<ActorInbox>,
-    event: DurableActorEvent,
-) -> Result<(), String> {
-    tidepool_runtime::spawn_blocking_in_span(move || {
-        if let DurableActorEvent::Typed(TypedActorEvent::ProviderTurnFailed {
-            actor,
-            thread,
-            revision,
-            ..
-        }) = &event
-        {
-            inbox
-                .publish_latest(
-                    format!(
-                        "provider-failure:{}@{}:{thread}",
-                        actor.id.0, actor.incarnation.0
-                    ),
-                    *revision,
-                    event,
-                )
-                .map(|_| ())
-        } else {
-            inbox.publish(event).map(|_| ())
-        }
-    })
-    .await
-    .map_err(|error| format!("actor inbox publisher task: {error}"))?
-    .map_err(|error| error.to_string())?;
-    Ok(())
-}
-
-#[cfg(feature = "codex-compat")]
-async fn retire_interactive_application_guarded(
-    deployment: InteractiveDeployment,
-    tmux: &TmuxSession,
-    native_retirement: NativeRetirement,
-    scoped_process: Option<CleanupComponentOutcome>,
-) -> InteractiveCleanupReceipt {
-    let actor = deployment.actor;
-    match AssertUnwindSafe(retire_interactive_application(
-        deployment,
-        tmux,
-        native_retirement,
-        scoped_process,
-    ))
-    .catch_unwind()
-    .await
-    {
-        Ok(receipt) => receipt,
-        Err(_) => panicked_cleanup_receipt(actor),
-    }
-}
-
-/// A lost retirement task cannot identify which owner panicked or which later
-/// owners it never reached. Preserve every cleanup domain as unknown rather
-/// than mislabelling one component and silently omitting the rest.
-#[cfg(feature = "codex-compat")]
-fn panicked_cleanup_receipt(actor: ActorRef) -> InteractiveCleanupReceipt {
-    InteractiveCleanupReceipt {
-        actor,
-        components: [
-            CleanupComponent::Process,
-            CleanupComponent::Pane,
-            CleanupComponent::ToolService,
-            CleanupComponent::Delivery,
-            CleanupComponent::Socket,
-            CleanupComponent::BuildResource,
-            CleanupComponent::WorktreeBinding,
-        ]
-        .into_iter()
-        .map(|component| CleanupComponentReceipt {
-            component,
-            outcome: CleanupComponentOutcome::Failed {
-                detail: "cleanup task panicked; component completion is unknown".into(),
-            },
-        })
-        .collect(),
-    }
-}
-
-#[cfg(feature = "codex-compat")]
-async fn retire_interactive_application(
-    mut deployment: InteractiveDeployment,
-    tmux: &TmuxSession,
-    native_retirement: NativeRetirement,
-    scoped_process: Option<CleanupComponentOutcome>,
-) -> InteractiveCleanupReceipt {
-    let actor = deployment.actor;
-    let exact_process_stopped = matches!(
-        scoped_process.as_ref(),
-        Some(CleanupComponentOutcome::Completed)
-    );
-    let mut components = Vec::with_capacity(6);
-    let mut delivery = match deployment.connection {
-        InteractiveConnection::AwaitingBinding => None,
-        InteractiveConnection::Bound {
-            delivery_shutdown,
-            delivery,
-            ..
-        } => {
-            // best-effort: the delivery task's receiver may already have
-            // ended if the task exited before shutdown was requested.
-            delivery_shutdown.send(()).ok();
-            Some(delivery)
-        }
-    };
-    if let Some(process) = scoped_process {
-        let pane = if native_retirement == NativeRetirement::Preserve
-            || matches!(process, CleanupComponentOutcome::Completed)
-        {
-            retire_pane_artifact(tmux, &deployment.pane, native_retirement).await
-        } else {
-            CleanupComponentOutcome::Failed {
-                detail: "pane retained because exact process termination is unconfirmed".into(),
-            }
-        };
-        components.push(CleanupComponentReceipt {
-            component: CleanupComponent::Process,
-            outcome: process,
-        });
-        components.push(CleanupComponentReceipt {
-            component: CleanupComponent::Pane,
-            outcome: pane,
-        });
-    } else {
-        components.push(CleanupComponentReceipt {
-            component: CleanupComponent::Process,
-            outcome: retire_native_pane(tmux, &deployment.pane, native_retirement).await,
-        });
-    }
-    let (service_outcome, delivery_outcome) = tokio::join!(
-        stop_retired_tool_service(deployment.actor, &mut deployment.service),
-        async {
-            if let Some(delivery) = delivery.as_mut() {
-                stop_retired_delivery(deployment.actor, delivery, APPLICATION_TASK_GRACE_TIMEOUT)
-                    .await
-            } else {
-                CleanupComponentOutcome::Completed
-            }
-        },
-    );
-    components.push(CleanupComponentReceipt {
-        component: CleanupComponent::ToolService,
-        outcome: service_outcome,
-    });
-    components.push(CleanupComponentReceipt {
-        component: CleanupComponent::Delivery,
-        outcome: delivery_outcome,
-    });
-    let retirement_record_error = exact_process_stopped
-        .then(|| mark_process_recovery_retired(&deployment.process_recovery_record).err())
-        .flatten();
-    let retirement_recorded = exact_process_stopped && retirement_record_error.is_none();
-    let quiescent = retirement_recorded
-        && components
-            .iter()
-            .filter(|component| {
-                matches!(
-                    component.component,
-                    CleanupComponent::ToolService | CleanupComponent::Delivery
-                )
-            })
-            .all(|component| matches!(component.outcome, CleanupComponentOutcome::Completed));
-    let mut socket_directory = deployment.socket_directory;
-    if quiescent {
-        socket_directory.work_settled();
-    }
-    let socket_outcome = retirement_record_error.map_or_else(
-        || socket_cleanup_outcome(socket_directory),
-        |error| CleanupComponentOutcome::Failed {
-            detail: format!("process retirement evidence remains retained: {error}"),
-        },
-    );
-    components.push(CleanupComponentReceipt {
-        component: CleanupComponent::Socket,
-        outcome: socket_outcome,
-    });
-    let build_outcome = if quiescent {
-        match deployment
-            .active_workspace
-            .retire(&deployment.active_workspace.view)
-            .await
-        {
-            Ok(()) => CleanupComponentOutcome::Completed,
-            Err(error) => CleanupComponentOutcome::Failed {
-                detail: error.to_string(),
-            },
-        }
-    } else {
-        CleanupComponentOutcome::Failed {
-            detail: "workspace retained: exact process and hosted work must both settle".into(),
-        }
-    };
-    let workspace_retired = matches!(build_outcome, CleanupComponentOutcome::Completed);
-    components.push(CleanupComponentReceipt {
-        component: CleanupComponent::BuildResource,
-        outcome: build_outcome,
-    });
-    let binding_outcome = if let Some(custody) = deployment.worktree_custody.take() {
-        if workspace_retired {
-            if let Some(custody) =
-                (custody.as_ref() as &dyn std::any::Any).downcast_ref::<ActorWorkspaceCustody>()
-            {
-                let completed = {
-                    let mut state = custody.state.lock();
-                    state.launch = scoped_custody::LaunchCustody::Unclaimed;
-                    state
-                        .terminal
-                        .as_ref()
-                        .is_some_and(|exit| exit.kind == ActorExitKind::Completed)
-                };
-                let binding = custody.binding.lock().take();
-                match binding
-                    .map(|binding| {
-                        if completed {
-                            binding.complete(&mut custody.bindings.lock())
-                        } else {
-                            binding.release(&mut custody.bindings.lock())
-                        }
-                    })
-                    .transpose()
-                {
-                    Ok(_) => CleanupComponentOutcome::Completed,
-                    Err(error) => CleanupComponentOutcome::Failed {
-                        detail: error.to_string(),
-                    },
-                }
-            } else {
-                CleanupComponentOutcome::Failed {
-                    detail: "unknown workspace custody owner".into(),
-                }
-            }
-        } else {
-            CleanupComponentOutcome::Failed {
-                detail: "custody retained: the workspace view was not retired (see BuildResource)"
-                    .into(),
-            }
-        }
-    } else {
-        CleanupComponentOutcome::Completed
-    };
-    components.push(CleanupComponentReceipt {
-        component: CleanupComponent::WorktreeBinding,
-        outcome: binding_outcome,
-    });
-    InteractiveCleanupReceipt { actor, components }
-}
-
-#[cfg(feature = "codex-compat")]
-fn mark_process_recovery_retired(path: &Path) -> std::io::Result<()> {
-    let mut record: ProcessRecoveryRecord =
-        serde_json::from_slice(&std::fs::read(path)?).map_err(std::io::Error::other)?;
-    if record.version != 1 {
-        return Err(std::io::Error::other(
-            "unsupported process recovery record version",
-        ));
-    }
-    record.retired = true;
-    tidepool_atomic_write::write_durable(
-        path,
-        &serde_json::to_vec_pretty(&record).map_err(std::io::Error::other)?,
-    )
-    .map_err(std::io::Error::from)
-}
-
-/// Account for exact resident cleanup before draining the original HTTP task.
-/// Namespace/native and external-handler domains remain independently unknown.
-#[cfg(feature = "codex-compat")]
-async fn stop_retired_tool_service(
-    actor: ActorRef,
-    service: &mut hosted_retirement::HostedOwner,
-) -> CleanupComponentOutcome {
-    match hosted_retirement::observe(service,
-        hosted_retirement::CompletionBoundary::AbortForShutdown,
-        APPLICATION_TASK_GRACE_TIMEOUT).await {
-        hosted_retirement::HostedObservation::Observed {
-            input_seal,
-            seal: hosted_retirement::SealObservation::Confirmed(seal),
-            resident: hosted_retirement::ResidentObservation::Accounted(cleanup),
-            http: hosted_retirement::HttpObservation::Drained,
-        } if input_seal.confirms_retirement()
-            && seal.actor() == actor
-            && cleanup.actor() == actor
-            && cleanup.is_confirmed() => CleanupComponentOutcome::Completed,
-        hosted_retirement::HostedObservation::Observed {
-            input_seal,
-            seal: hosted_retirement::SealObservation::TerminalPath,
-            resident: hosted_retirement::ResidentObservation::Accounted(cleanup),
-            http: hosted_retirement::HttpObservation::Drained,
-        } if input_seal.confirms_retirement()
-            && cleanup.actor() == actor
-            && cleanup.is_confirmed() => CleanupComponentOutcome::Completed,
-        observation => CleanupComponentOutcome::Failed {
-            detail: format!("resident/HTTP cleanup retained: {observation:?}; native/external cleanup is not established"),
-        },
-    }
-}
-
-#[cfg(feature = "codex-compat")]
-async fn stop_retired_delivery(
-    actor: ActorRef,
-    delivery: &mut tokio::task::JoinHandle<()>,
-    grace: Duration,
-) -> CleanupComponentOutcome {
-    match tokio::time::timeout(grace, &mut *delivery).await {
-        Ok(Ok(())) => CleanupComponentOutcome::Completed,
-        Ok(Err(error)) => {
-            tracing::warn!(actor = ?actor, %error, "retired actor inbox task failed");
-            CleanupComponentOutcome::Failed {
-                detail: error.to_string(),
-            }
-        }
-        Err(_) => {
-            tracing::debug!(actor = ?actor, "forcing retired actor inbox task to stop");
-            delivery.abort();
-            // best-effort: the task was just aborted; the join outcome is
-            // already reported above as `Forced`.
-            delivery.await.ok();
-            CleanupComponentOutcome::Forced
-        }
-    }
-}
-
-#[cfg(feature = "codex-compat")]
-async fn retire_native_pane(
-    tmux: &TmuxSession,
-    pane: &TmuxPaneId,
-    disposition: NativeRetirement,
-) -> CleanupComponentOutcome {
-    let detail = match disposition {
-        NativeRetirement::Preserve => {
-            "native TUI preserved; hosted coordination unavailable; process custody retained".into()
-        }
-        NativeRetirement::Terminate => match tmux.kill_pane(pane).await {
-            Ok(()) => {
-                "pane cleanup requested; exact process termination remains unconfirmed".into()
-            }
-            Err(error) => error.to_string(),
-        },
-    };
-    CleanupComponentOutcome::Failed { detail }
-}
-
-/// Once an exact scope owner accounted for the process, tmux is only a UI
-/// artifact. Its disappearance cannot strengthen the process observation.
-#[cfg(feature = "codex-compat")]
-async fn retire_pane_artifact(
-    tmux: &TmuxSession,
-    pane: &TmuxPaneId,
-    disposition: NativeRetirement,
-) -> CleanupComponentOutcome {
-    match disposition {
-        NativeRetirement::Preserve => CleanupComponentOutcome::Completed,
-        NativeRetirement::Terminate => match tmux.kill_pane(pane).await {
-            Ok(()) => CleanupComponentOutcome::Completed,
-            Err(error) => CleanupComponentOutcome::Failed {
-                detail: error.to_string(),
-            },
-        },
-    }
-}
-
-#[cfg(feature = "codex-compat")]
-async fn discover_interactive_binding(
-    actor: ActorRef,
-    request: InteractiveBindingRequest,
-    tmux: &TmuxSession,
-    pane: &TmuxPaneId,
-) -> Result<QueueReadyThread, InteractiveApplicationError> {
-    let mut binding_poll = tokio::time::interval(Duration::from_millis(100));
-    let mut pane_health = tokio::time::interval(Duration::from_secs(2));
-    loop {
-        tokio::select! {
-            _ = binding_poll.tick() => {
-                // A retained binding belongs to the previous launch until this
-                // exact tool host has accepted the new TUI's session callback.
-                if !request.control.session_attached() {
-                    continue;
-                }
-                if let Ok(thread) = read_interactive_binding(&request.path).await {
-                    if let Some(expected) = &request.expected {
-                        if expected != thread.id() {
-                            return Err(application_error(
-                                actor,
-                                InteractiveOperation::DiscoverBinding,
-                                format!(
-                                    "resume published thread {} instead of retained thread {}",
-                                    thread.id().0, expected.0
-                                ),
-                            ));
-                        }
-                    }
-                    let binding = request.control.challenged_binding();
-                    if thread.supports_active_input() && binding.is_none() {
-                        continue;
-                    }
-                    return Ok(thread.with_challenged_session_binding(binding));
-                }
-            }
-            _ = pane_health.tick() => {
-                let status = tmux.pane_status(pane).await.map_err(|error| {
-                    application_error(actor, InteractiveOperation::DiscoverBinding, error)
-                })?;
-                if status.as_ref().is_none_or(|status| status.dead) {
-                    let exit_status = status.and_then(|status| status.exit_status);
-                    let output = tmux
-                        .capture_pane(pane, 120)
-                        .await
-                        .unwrap_or_else(|error| format!("<pane output unavailable: {error}>"));
-                    let detail = if output.is_empty() {
-                        format!(
-                            "interactive application exited before conversation binding; exit_status={exit_status:?}"
-                        )
-                    } else {
-                        format!(
-                            "interactive application exited before conversation binding; exit_status={exit_status:?}; pane_output={output:?}"
-                        )
-                    };
-                    tracing::error!(?actor, ?exit_status, pane_output = %output, "interactive application exited before binding");
-                    return Err(application_error(
-                        actor,
-                        InteractiveOperation::DiscoverBinding,
-                        detail,
-                    ));
-                }
-            }
-        }
-    }
-}
-
 async fn wait_for_shutdown(mut shutdown: watch::Receiver<Option<NativeRetirement>>) {
     if shutdown.borrow().is_some() {
         return;
@@ -6058,16 +3693,12 @@ async fn operator_shutdown() -> Result<(), std::io::Error> {
 }
 
 #[cfg(test)]
-fn developer_instructions(
-    effective_role: &exomonad_actor::EffectiveRole,
-    mode: &InteractiveLaunchMode,
-) -> String {
-    developer_instructions_selected(effective_role, mode, None, None)
+fn developer_instructions(effective_role: &exomonad_actor::EffectiveRole) -> String {
+    developer_instructions_selected(effective_role, None, None)
 }
 
 fn developer_instructions_selected(
     effective_role: &exomonad_actor::EffectiveRole,
-    mode: &InteractiveLaunchMode,
     inputs: Option<&crate::exomonad::workspace::FrozenWorkspace>,
     instructions: Option<&str>,
 ) -> String {
@@ -6084,18 +3715,12 @@ fn developer_instructions_selected(
     };
     if let Some(body) = inputs.and_then(|inputs| inputs.prompts.get(key)) {
         let mut body = body.clone();
-        if role == exomonad_actor::ActorRole::Root
-            && matches!(mode, InteractiveLaunchMode::Resume(_))
-        {
-            body.push_str(PromptId::RecreatedRoot.body());
-        }
+
         return append_effective_role(body, effective_role);
     }
     if role == exomonad_actor::ActorRole::Root {
         let mut instructions = PromptId::ExomonadRoot.body().to_string();
-        if matches!(mode, InteractiveLaunchMode::Resume(_)) {
-            instructions.push_str(PromptId::RecreatedRoot.body());
-        }
+
         append_effective_role(instructions, effective_role)
     } else {
         let instructions = match role {

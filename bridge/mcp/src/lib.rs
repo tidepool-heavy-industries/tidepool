@@ -557,13 +557,7 @@ mod tests {
         assert!(r.contains("__user = let {\n __b =\nsizeRank 9 <$> sized\n  where\n    sized ="));
     }
 
-    /// The per-effect descriptions are served verbatim as
-    /// `tidepool://effect/{name}`, so their snippets are style guide too. Two
-    /// things they must model, because following them otherwise does not
-    /// compile: `askUser @T` needs `FromJSON` (its constraint is literally
-    /// `DerivedForm a = (FormRoot a, FromJSON a)` — `Generic` alone builds the
-    /// form but cannot read the submission back), and the typed spawn is
-    /// `spawnAgent @r`, whose result type additionally needs `JsonSchema`.
+    /// The askUser description must show the derives needed to read submissions.
     #[test]
     fn effect_descriptions_model_the_typed_derive_sets() {
         let ask = askuser_decl().description;
@@ -574,20 +568,6 @@ mod tests {
         assert!(
             ask.contains("deriving (Generic, FromJSON)") && ask.contains("askUser @Deploy"),
             "askUser must carry a worked `askUser @T` example:\n{ask}"
-        );
-
-        let sub = subagent_decl().description;
-        assert!(
-            sub.contains("deriving (Generic, FromJSON, JsonSchema)"),
-            "a typed spawn result type needs JsonSchema in its derive set:\n{sub}"
-        );
-        assert!(
-            sub.contains("spawnAgent @WorkerResult (spawnSpec"),
-            "the typed spawn surface must be shown, not only recommended:\n{sub}"
-        );
-        assert!(
-            sub.contains("Tidepool.Agent.Spawn"),
-            "the typed spawn surface is not auto-imported — name its module:\n{sub}"
         );
     }
 

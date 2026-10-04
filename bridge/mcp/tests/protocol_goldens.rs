@@ -37,7 +37,6 @@ fn all_declaration_names_and_order_are_explicit() {
             "Meta",
             "Ask",
             "Llm",
-            "Subagent",
             "Exec",
             "Journal",
             "Worktree",

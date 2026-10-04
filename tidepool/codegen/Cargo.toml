@@ -50,5 +50,8 @@ path = "tests/native_md5_link.rs"
 name = "prepared_control"
 path = "tests/prepared_control.rs"
 
+[dev-dependencies]
+tidepool-test-data.workspace = true
+
 [lints]
 workspace = true

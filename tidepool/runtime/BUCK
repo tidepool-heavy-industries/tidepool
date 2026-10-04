@@ -144,6 +144,7 @@ rust_filegroup(
         "src/session/fixtures/paired-rich-base.hs": "tidepool/runtime/src/session/fixtures/paired-rich-base.hs",
         "src/session/fixtures/protected-scale-bind.hs": "tidepool/runtime/src/session/fixtures/protected-scale-bind.hs",
         "src/session/fixtures/protected-scale-foundation.hs": "tidepool/runtime/src/session/fixtures/protected-scale-foundation.hs",
+        "src/session/fixtures/recovery-control.hs": "tidepool/runtime/src/session/fixtures/recovery-control.hs",
         "src/session/fixtures/recovery-dependent.hs": "tidepool/runtime/src/session/fixtures/recovery-dependent.hs",
         "src/session/fixtures/recovery-native-packet.json": "tidepool/runtime/src/session/fixtures/recovery-native-packet.json",
         "src/session/fixtures/recovery-original.hs": "tidepool/runtime/src/session/fixtures/recovery-original.hs",

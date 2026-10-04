@@ -1,6 +1,5 @@
 //! What `exomonad init` checks and prints before it starts anything: the
-//! workspace revision the run will compile, the interactive Codex it will
-//! launch, and the compile daemons it will run beside.
+//! workspace revision the run will compile and the compile daemons it will run beside.
 //!
 //! Observation does the I/O; [`assess`] is the pure decision the tests drive
 //! with synthetic observations.
@@ -94,8 +93,6 @@ pub(crate) enum PersistentDaemon {
 pub(crate) struct LaunchObservation {
     pub(crate) pinned_workspace: String,
     pub(crate) workspace: WorkspaceRevision,
-    /// Resolved executable and version, or the resolution error.
-    pub(crate) codex: Option<Result<(PathBuf, String), String>>,
     /// The extractor the run's own daemon executes and its producer identity.
     pub(crate) extractor: Result<(PathBuf, String), String>,
     pub(crate) persistent_socket: PathBuf,
@@ -103,10 +100,7 @@ pub(crate) struct LaunchObservation {
 }
 
 impl LaunchObservation {
-    pub(crate) fn observe(
-        workspace: &Path,
-        codex: Option<Result<(PathBuf, String), String>>,
-    ) -> Self {
+    pub(crate) fn observe(workspace: &Path) -> Self {
         let persistent_socket = tidepool_toolchain::paths::persistent_compile_daemon_socket();
         let persistent = if !persistent_socket.exists() {
             PersistentDaemon::Absent
@@ -131,7 +125,6 @@ impl LaunchObservation {
         Self {
             pinned_workspace: DEFAULT_WORKSPACE_REV.to_owned(),
             workspace: observe_workspace(workspace, DEFAULT_WORKSPACE_REV),
-            codex,
             extractor,
             persistent_socket,
             persistent,
@@ -236,16 +229,6 @@ pub(crate) fn assess(observation: &LaunchObservation, mode: PreflightMode) -> Ve
             )
         }
     };
-    let codex = observation.codex.as_ref().map(|codex| match codex {
-        Ok((executable, version)) => (
-            Verdict::Ok,
-            format!(
-                "{} ({version}) from EXOMONAD_INTERACTIVE_CODEX_BIN",
-                executable.display()
-            ),
-        ),
-        Err(error) => (Verdict::Fail, error.clone()),
-    });
     let socket = observation.persistent_socket.display();
     let compiler = match &observation.extractor {
         Err(error) => (Verdict::Fail, format!("no extractor for the run: {error}")),
@@ -275,7 +258,6 @@ pub(crate) fn assess(observation: &LaunchObservation, mode: PreflightMode) -> Ve
         }
     };
     let mut checks = vec![("workspace", workspace)];
-    checks.extend(codex.map(|result| ("codex", result)));
     checks.push(("compiler", compiler));
     checks
         .into_iter()
@@ -305,10 +287,6 @@ mod tests {
                 revision: PINNED.into(),
                 recency: Recency::Same,
             },
-            codex: Some(Ok((
-                "/nix/store/codex/bin/codex".into(),
-                "codex-cli 1.0".into(),
-            ))),
             extractor: Ok(("/run/tidepool-extract".into(), PRODUCER.into())),
             persistent_socket: "/cache/battery-daemon/extract.sock".into(),
             persistent: PersistentDaemon::Live {
@@ -324,7 +302,7 @@ mod tests {
     #[test]
     fn healthy_launch_passes_every_check() {
         let lines = assess(&healthy(), PreflightMode::Strict);
-        assert_eq!(verdicts(&lines), [Verdict::Ok; 3]);
+        assert_eq!(verdicts(&lines), [Verdict::Ok; 2]);
         assert_eq!(
             lines[0].to_string(),
             "preflight workspace: ok checkout 46de15cfe528 matches pinned 46de15cfe528"
@@ -334,7 +312,6 @@ mod tests {
     #[test]
     fn embedded_launch_does_not_preflight_a_native_executable() {
         let mut observation = healthy();
-        observation.codex = None;
         let lines = assess(&observation, PreflightMode::Strict);
         assert_eq!(
             lines.iter().map(|line| line.check).collect::<Vec<_>>(),
@@ -355,32 +332,21 @@ mod tests {
             producer: "b".repeat(64),
         };
         let lines = assess(&observation, PreflightMode::Warn);
-        assert_eq!(
-            verdicts(&lines),
-            [Verdict::Warn, Verdict::Ok, Verdict::Warn]
-        );
+        assert_eq!(verdicts(&lines), [Verdict::Warn, Verdict::Warn]);
         assert!(lines[0].detail.contains("pinned is newer"), "{}", lines[0]);
         assert!(lines[0].detail.contains("a5bbb3b00000"), "{}", lines[0]);
-        assert!(lines[2].detail.contains("stale"), "{}", lines[2]);
+        assert!(lines[1].detail.contains("stale"), "{}", lines[1]);
     }
 
     #[test]
-    fn missing_codex_or_extractor_fails_in_every_mode() {
+    fn missing_extractor_fails_in_every_mode() {
         let mut observation = healthy();
-        observation.codex = Some(Err(
-            "EXOMONAD_INTERACTIVE_CODEX_BIN must explicitly name the pinned interactive Codex executable".into(),
-        ));
         observation.extractor = Err("tidepool-extract not found".into());
         let lines = assess(&observation, PreflightMode::Warn);
-        assert_eq!(
-            verdicts(&lines),
-            [Verdict::Ok, Verdict::Fail, Verdict::Fail]
-        );
-        assert!(
-            lines[1]
-                .to_string()
-                .starts_with("preflight codex:     FAIL")
-        );
+        assert_eq!(verdicts(&lines), [Verdict::Ok, Verdict::Fail]);
+        assert!(lines[1]
+            .to_string()
+            .starts_with("preflight compiler:  FAIL"));
     }
 
     #[test]
@@ -393,11 +359,11 @@ mod tests {
         };
         assert_eq!(
             verdicts(&assess(&observation, PreflightMode::Warn)),
-            [Verdict::Warn, Verdict::Ok, Verdict::Ok]
+            [Verdict::Warn, Verdict::Ok]
         );
         assert_eq!(
             verdicts(&assess(&observation, PreflightMode::Strict)),
-            [Verdict::Fail, Verdict::Ok, Verdict::Ok]
+            [Verdict::Fail, Verdict::Ok]
         );
     }
 
@@ -408,7 +374,7 @@ mod tests {
         observation.persistent = PersistentDaemon::Unreachable;
         assert_eq!(
             verdicts(&assess(&observation, PreflightMode::Strict)),
-            [Verdict::Ok; 3]
+            [Verdict::Ok; 2]
         );
     }
 

@@ -1,21 +1,13 @@
--- | Runner for 'SwarmSpec''s property families. A plain @exitcode-stdio-1.0@
--- test-suite (the @varid-mechanism-test@/@extract-fidelity-test@ precedent),
--- not hspec/tasty — QuickCheck alone is already a new dependency for this
--- package, and reusing this codebase's existing "assert and exit non-zero"
--- idiom keeps it to one.
-module Main (main) where
+module Main (main, tests) where
 
-import System.Exit (exitFailure, exitSuccess)
-import Test.QuickCheck
-
+import Tidepool.Test.Runner (TestTree, runTests, testGroup)
+import Test.Tasty (localOption)
+import Test.Tasty.QuickCheck (QuickCheckTests(..), testProperty)
 import SwarmSpec (properties)
 
 main :: IO ()
-main = do
-  results <- mapM (uncurry run) properties
-  if and results then exitSuccess else exitFailure
-  where
-    run name prop = do
-      putStrLn ("--- " <> name <> " ---")
-      res <- quickCheckWithResult stdArgs {maxSuccess = 200} prop
-      pure (isSuccess res)
+main = runTests tests
+
+tests :: TestTree
+tests = localOption (QuickCheckTests 200) $
+  testGroup "swarm-spec" [testProperty name property | (name, property) <- properties]

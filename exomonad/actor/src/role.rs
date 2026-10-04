@@ -1,6 +1,7 @@
 //! One accepted actor role projected into runtime, workspace, prompt, and status policy.
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ActorRole {
     Root,
     Research,
@@ -8,6 +9,19 @@ pub enum ActorRole {
     Scaffolding,
     Integration,
     Inherited,
+}
+
+impl std::fmt::Display for ActorRole {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Root => "root",
+            Self::Research => "research",
+            Self::Coding => "coding",
+            Self::Scaffolding => "scaffolding",
+            Self::Integration => "integration",
+            Self::Inherited => "inherited",
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -935,5 +949,27 @@ mod tests {
         assert_eq!(attenuated.prompt_profile(), narrow.prompt_profile());
         assert_eq!(attenuated.effect_keys(), narrow.effect_keys());
         assert_eq!(attenuated.descendants().maximum_depth, 2);
+    }
+}
+
+#[cfg(test)]
+mod wire_tests {
+    use super::ActorRole;
+
+    #[test]
+    fn roles_have_explicit_wire_names_and_reject_unknown_authority() {
+        for (role, name) in [
+            (ActorRole::Root, "root"),
+            (ActorRole::Research, "research"),
+            (ActorRole::Coding, "coding"),
+            (ActorRole::Scaffolding, "scaffolding"),
+            (ActorRole::Integration, "integration"),
+            (ActorRole::Inherited, "inherited"),
+        ] {
+            let encoded = serde_json::to_string(&role).unwrap();
+            assert_eq!(encoded, format!("\"{name}\""));
+            assert_eq!(serde_json::from_str::<ActorRole>(&encoded).unwrap(), role);
+        }
+        assert!(serde_json::from_str::<ActorRole>("\"administrator\"").is_err());
     }
 }

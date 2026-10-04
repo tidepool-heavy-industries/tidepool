@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-use tidepool::exomonad::{ExomonadAgentDefaults, ExomonadBackend, ExomonadEffort};
+use tidepool::exomonad::{ExomonadAgentDefaults, ExomonadEffort};
 
 #[derive(Debug, Parser)]
 #[command(name = "exomonad", about = "Run typed Tidepool actor ensembles")]
@@ -149,7 +149,7 @@ enum Command {
         /// Override `.exomonad/config.toml` for this run.
         #[arg(long, value_enum)]
         effort: Option<Effort>,
-        /// Skip the launch preflight (workspace pin, interactive Codex, compile daemons).
+        /// Skip the launch preflight (workspace pin and compile daemons).
         #[arg(long, conflicts_with = "strict_preflight")]
         no_preflight: bool,
         /// Treat launch preflight warnings as failures.
@@ -177,18 +177,12 @@ enum Command {
         status_path: PathBuf,
         #[arg(long)]
         root_binding_path: PathBuf,
-        #[arg(long, hide = true)]
-        interactive_agent_bin: Option<PathBuf>,
-        #[arg(long, hide = true)]
-        interactive_agent_version: Option<String>,
         #[arg(long)]
         resume_root: bool,
         #[arg(long, hide = true)]
         model: String,
         #[arg(long, value_enum, hide = true)]
         effort: Effort,
-        #[arg(long, value_enum, hide = true, default_value_t = Backend::Codex)]
-        backend: Backend,
     },
 }
 
@@ -239,20 +233,6 @@ impl From<Effort> for ExomonadEffort {
 }
 
 #[derive(Debug, Clone, Copy, Default, clap::ValueEnum)]
-enum Backend {
-    #[default]
-    Codex,
-    Embedded,
-}
-
-impl From<Backend> for ExomonadBackend {
-    fn from(value: Backend) -> Self {
-        match value {
-            Backend::Codex => Self::Codex,
-            Backend::Embedded => Self::Embedded,
-        }
-    }
-}
 
 /// The default `Result`-returning `main` prints an unhandled `Err` via
 /// `Debug`, not `Display` — so every `runtime_error`/`ConfigError`/`BinError`
@@ -367,9 +347,7 @@ async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
                 .duration_since(std::time::UNIX_EPOCH)?
                 .as_millis()
                 .try_into()?;
-            #[cfg(feature = "codex-compat")]
-            let codex_home = exomonad_agent::backend::codex::isolation::codex_home().ok();
-            #[cfg(not(feature = "codex-compat"))]
+
             let codex_home = None;
             let observation = tidepool::run_map::Observation {
                 now_unix_ms,
@@ -501,22 +479,15 @@ async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
             run_root,
             status_path,
             root_binding_path,
-            interactive_agent_bin,
-            interactive_agent_version,
             resume_root,
             model,
             effort,
-            backend,
         } => {
             // `_trace_guard` must stay a named binding: dropping it closes the
             // trace appender's flush channel and the JSONL file stops growing.
             let (_log_path, _trace_guard) =
                 tidepool::exomonad::init_host_tracing(&workspace, &run_id)?;
-            let backend = tidepool::exomonad::HostBackendOptions::from_parts(
-                backend.into(),
-                interactive_agent_bin,
-                interactive_agent_version,
-            )?;
+
             tidepool::exomonad::host(tidepool::exomonad::HostOptions {
                 workspace,
                 session,
@@ -524,7 +495,6 @@ async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
                 run_root,
                 status_path,
                 root_binding_path,
-                backend,
                 resume_root,
                 agent: ExomonadAgentDefaults {
                     model,

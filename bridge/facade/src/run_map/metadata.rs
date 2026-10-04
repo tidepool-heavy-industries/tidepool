@@ -85,8 +85,7 @@ impl RootBinding {
     }
 }
 
-/// Projects recorded text, not the versioned QueueReadyThread proof returned by
-/// exomonad_agent::read_interactive_binding. Never use this as launch readiness.
+/// Projects historical recorded text for read-only diagnostics. It cannot authorize a launch.
 pub(super) fn binding_thread(path: &Path, read_bound: u64) -> Evidence<String> {
     let value = (|| -> Option<String> {
         let mut bytes = Vec::new();

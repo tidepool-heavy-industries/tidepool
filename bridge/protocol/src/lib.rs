@@ -38,6 +38,7 @@
 pub mod effects;
 pub mod gen;
 pub mod hs;
+pub mod model_control;
 pub mod schema;
 pub mod types;
 
@@ -60,7 +61,9 @@ pub fn generated_files() -> Vec<GeneratedFile> {
             panic!("schema is invalid:\n  {}", problems.join("\n  "));
         }
     }
-    all_files(&effects)
+    let mut files = all_files(&effects);
+    files.extend(model_control::generated_files());
+    files
 }
 
 /// The `Ask` member of the suspension-decode roster, generated into

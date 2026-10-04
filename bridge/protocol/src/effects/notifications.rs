@@ -46,7 +46,7 @@ pub fn notifications() -> Effect {
         type_defs: vec![
             sum("NotificationError", vec![variant("NotificationUnauthorized", vec![]), variant("NotificationUnavailable", vec![]), variant("NotificationInvalidReceipt", vec![]), variant("NotificationAdmissionUnconfirmed", vec![HsType::Text]), variant("NotificationStorageFailure", vec![HsType::Text])]),
             sum("NotificationState", vec![variant("NotificationAccepted", vec![]), variant("NotificationPresented", vec![]), variant("NotificationUnconfirmed", vec![])]),
-        ], foreign_types: &[], errors: None,
+        ], external_types: &[], errors: None,
         verbs: vec![
             Verb { ctor: "NotifyWith", method: "notify_with", args: vec![Arg { name: "target", ty: address(), rust: RustBinding::Path("(i64, i64)") }, Arg { name: "message", ty: HsType::Text, rust: RustBinding::Derived }], ret: HsType::either(HsType::Named("NotificationError"), receipt()), errors: None, handling: HandlingClass::Actor },
             Verb { ctor: "PollNotificationWith", method: "poll_notification_with", args: vec![Arg { name: "receipt", ty: receipt(), rust: RustBinding::Path("((i64, i64), ((i64, i64), (String, i64)))") }], ret: HsType::either(HsType::Named("NotificationError"), HsType::Named("NotificationState")), errors: None, handling: HandlingClass::Actor },

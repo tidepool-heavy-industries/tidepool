@@ -81,12 +81,30 @@ fn run_prepared_once_with_nursery(
         })
 }
 
-const ARTIFACT: &[u8] =
-    include_bytes!("../../../bridge/haskell/test-prepared-stg/fixtures/m3-vertical.cbor");
-const FREER_RETENTION_ARTIFACT: &[u8] =
-    include_bytes!("../../../bridge/haskell/test-prepared-stg/fixtures/freer-retention.cbor");
-const FREER_RESUME_ARTIFACT: &[u8] =
-    include_bytes!("../../../bridge/haskell/test-prepared-stg/fixtures/freer-resume.cbor");
+fn artifact() -> &'static [u8] {
+    static BYTES: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    BYTES.get_or_init(|| {
+        tidepool_test_data::prepared_resources::read_target("TIDEPOOL_M3_FIXTURE_DIR", "result")
+    })
+}
+fn freer_retention_artifact() -> &'static [u8] {
+    static BYTES: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    BYTES.get_or_init(|| {
+        tidepool_test_data::prepared_resources::read_target(
+            "TIDEPOOL_FREER_RETENTION_FIXTURE_DIR",
+            "freerRequest",
+        )
+    })
+}
+fn freer_resume_artifact() -> &'static [u8] {
+    static BYTES: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    BYTES.get_or_init(|| {
+        tidepool_test_data::prepared_resources::read_target(
+            "TIDEPOOL_FREER_RESUME_FIXTURE_DIR",
+            "freerResumeEntries",
+        )
+    })
+}
 /// `program`'s GHC-computed final `Int`, transcribed from
 /// `FreerResumeOracle.hs` run under the pinned GHC 9.12.2 (see that file's
 /// header and `FreerResume.md`). Never hand-derived.
@@ -94,61 +112,85 @@ const FREER_RESUME_EXPECTATIONS: &str =
     include_str!("../../../bridge/haskell/test-prepared-stg/FreerResumeExpectations.json");
 
 #[test]
-fn compiler_json_reply_streams_using_the_parked_program_layout() {
+fn compiler_typed_receive_parks_and_resumes_json_after_collection() {
     use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
+    use tidepool_repr::execution_schema::{ConstructorId, ConstructorReply};
     use tidepool_runtime::prepared_execution::{ParkPolicy, PreparedEngine, PreparedSettlement};
 
     tidepool_testing::eval_harness::require_extract();
     let surface = tidepool_testing::effect_surface::TestEffectSurface::minimal(&[
-        tidepool_mcp::runllmturn_decl(),
+        tidepool_mcp::actor_local_decl(),
     ])
-    .expect("JSON reply effect surface");
+    .expect("typed receive effect surface");
     let compiled = tidepool_runtime::compile_haskell(
         include_str!("fixtures/JsonReply.hs"),
         "__prepared",
         &surface.include_path_refs(),
     )
-    .expect("compile JSON reply without JSON intrinsic calls");
+    .expect("compile typed receive through post-tidy carrier issuance");
     let prepared = compiled.prepared.into_prepared();
+    let receiver = prepared
+        .constructors()
+        .iter()
+        .position(|constructor| {
+            constructor.identity.module == "Tidepool.Effects.Core"
+                && constructor.identity.occurrence == "ActorReceiveWith"
+        })
+        .expect("compiler retained the genuine receive constructor");
+    assert!(prepared.constructor_replies().contains(&(
+        ConstructorId(receiver as u32),
+        ConstructorReply::AtSite,
+    )));
     assert!(prepared.json_layout().is_some());
     let table = compiled.table.with_json_layout(None);
     let (mut engine, program) = PreparedEngine::bootstrap_with_nursery_bytes(prepared, 4096)
-        .expect("bootstrap compiler-produced JSON reply");
-    let PreparedSettlement::Suspended {
-        request,
-        continuation,
-    } = engine
-        .run_settled(program, RealmId::ROOT)
-        .expect("run JSON request")
-    else {
-        panic!("JSON request must suspend")
-    };
-    let parked = engine
-        .park_suspension(
-            program,
-            RealmId::ROOT,
-            ParkPolicy {
-                principal: tidepool_repr::PrincipalId::SYSTEM,
-                effect_policy: EffectRunPolicy::SuspendAll,
-                live_payload: LivePayloadPolicy::None,
-            },
+        .expect("bootstrap compiler-produced typed receive");
+    let mut parked = Vec::new();
+    for _ in 0..2 {
+        let PreparedSettlement::Suspended {
             request,
             continuation,
-            &table,
-        )
-        .expect("park compiler-produced JSON site");
-    let payload = serde_json::json!({"mixed": [true, false, null, 42, "text", {"nested": []}]});
-    let resumed = engine
-        .resume_with_structural_answer(parked.id, &payload, &table)
-        .expect("stream JSON with the owner's physical map layout");
-    let PreparedSettlement::Done { value } = resumed.settlement else {
-        panic!("JSON reply must complete")
-    };
-    let observed = engine.observe(program, value).expect("observe JSON reply");
-    let decoded = tidepool_runtime::value_to_json(&observed, &table, 0);
-    assert_eq!(decoded, payload);
-    assert!(engine.release(value));
-    assert_eq!(engine.parked_count(), 0);
+        } = engine
+            .run_settled(program, RealmId::ROOT)
+            .expect("run typed receive")
+        else {
+            panic!("typed receive must suspend")
+        };
+        parked.push(
+            engine
+                .park_suspension(
+                    program,
+                    RealmId::ROOT,
+                    ParkPolicy {
+                        principal: tidepool_repr::PrincipalId::SYSTEM,
+                        effect_policy: EffectRunPolicy::SuspendAll,
+                        live_payload: LivePayloadPolicy::None,
+                    },
+                    request,
+                    continuation,
+                    &table,
+                )
+                .expect("park with the compiler-issued carrier"),
+        );
+    }
+    assert_eq!(engine.parked_count(), 2);
+    engine
+        .quiesce_and_collect_now()
+        .expect("collect while typed continuations remain parked");
+    for (index, parked) in parked.into_iter().rev().enumerate() {
+        let payload = serde_json::json!({"index": index, "mixed": [true, false, null, 42, "text", {"nested": []}]});
+        let resumed = engine
+            .resume_with_structural_answer(parked.id, &payload, &table)
+            .expect("stream JSON with the parked owner's physical map layout");
+        let PreparedSettlement::Done { value } = resumed.settlement else {
+            panic!("typed reply must complete")
+        };
+        let observed = engine.observe(program, value).expect("observe typed reply");
+        let decoded = tidepool_runtime::value_to_json(&observed, &table, 0);
+        assert_eq!(decoded, payload);
+        assert!(engine.release(value));
+        assert_eq!(engine.parked_count(), 1 - index);
+    }
 }
 
 #[test]
@@ -768,7 +810,7 @@ fn requirements() -> ProgramRequirements {
 }
 
 fn imports() -> MachineImports {
-    let prepared = parse_program(ARTIFACT, &requirements(), DecodeLimits::default()).unwrap();
+    let prepared = parse_program(artifact(), &requirements(), DecodeLimits::default()).unwrap();
     MachineImports {
         values: prepared
             .globals()
@@ -791,7 +833,7 @@ fn imports() -> MachineImports {
 
 fn freer_effect_identity() -> DataConId {
     let prepared = parse_program(
-        FREER_RETENTION_ARTIFACT,
+        freer_retention_artifact(),
         &requirements(),
         DecodeLimits::default(),
     )
@@ -825,7 +867,7 @@ fn one_shot_runs_closed_compiled_program_and_returns_values() {
 fn one_shot_rejects_missing_import_malformed_and_precancel() {
     let cancel = Arc::new(AtomicBool::new(false));
     let missing = run_prepared_once(
-        ARTIFACT,
+        artifact(),
         &requirements(),
         DecodeLimits::default(),
         MachineImports::default(),
@@ -846,7 +888,7 @@ fn one_shot_rejects_missing_import_malformed_and_precancel() {
 
     cancel.store(true, std::sync::atomic::Ordering::Release);
     let cancelled = run_prepared_once(
-        ARTIFACT,
+        artifact(),
         &requirements(),
         DecodeLimits::default(),
         imports(),
@@ -888,7 +930,7 @@ fn retained_session_caches_closed_program_and_rejects_unclosed_artifact() {
     ));
     assert_eq!(machine.disposition(), MachineDisposition::Reusable);
 
-    // `imports()` builds a `MachineImports` whose facts satisfy `ARTIFACT`'s
+    // `imports()` builds a `MachineImports` whose facts satisfy `artifact()`'s
     // own declared globals exactly (so `link_program` succeeds), but no real
     // `PreparedHandle` backs any of those identities: `install_program`
     // refuses with `ExecutionError::UnknownPreparedHandle`, the same
@@ -899,13 +941,13 @@ fn retained_session_caches_closed_program_and_rejects_unclosed_artifact() {
     // existing machine reusable.
     let (mut unclosed_machine, _first) = open_strict_machine();
     let unclosed_linked = link_program(
-        parse_program(ARTIFACT, &requirements(), DecodeLimits::default()).unwrap(),
+        parse_program(artifact(), &requirements(), DecodeLimits::default()).unwrap(),
         &imports(),
     )
-    .expect("ARTIFACT's declared globals satisfy imports()'s fabricated facts");
+    .expect("artifact()'s declared globals satisfy imports()'s fabricated facts");
     let unclosed_compiled = unclosed_machine
         .compile_for_install(&unclosed_linked)
-        .expect("ARTIFACT compiles");
+        .expect("artifact() compiles");
     let rejected = unclosed_machine
         .install_program(unclosed_compiled, ImportBindings::new())
         .unwrap_err();
@@ -934,7 +976,7 @@ fn retained_session_caches_closed_program_and_rejects_unclosed_artifact() {
 
 #[test]
 fn runtime_retains_a_real_freer_continuation_without_observing_it() {
-    let (mut machine, program, entry) = open_closed_machine(FREER_RETENTION_ARTIFACT);
+    let (mut machine, program, entry) = open_closed_machine(freer_retention_artifact());
     let first = machine
         .run_entry_retained(program, entry, &[], call_options(false), RealmId::ROOT)
         .expect("first Freer request is retained");
@@ -977,7 +1019,7 @@ fn runtime_retains_a_real_freer_continuation_without_observing_it() {
 }
 
 /// One `TopBinding` (with its enclosing group's recursion flattened) matching
-/// `occurrence` in `FREER_RESUME_ARTIFACT`'s home module. Panics rather than
+/// `occurrence` in `freer_resume_artifact()`'s home module. Panics rather than
 /// returning `Option` because every caller below treats a missing top as a
 /// probe-shape failure, not a runtime condition to branch on.
 fn freer_resume_top(
@@ -1080,7 +1122,7 @@ fn expected_program_value() -> i64 {
 /// Resolve a freer constructor from the artifact by its defining module.
 fn freer_resume_constructor_identity(module: &str, occurrence: &str) -> DataConId {
     let prepared = parse_program(
-        FREER_RESUME_ARTIFACT,
+        freer_resume_artifact(),
         &requirements(),
         DecodeLimits::default(),
     )
@@ -1297,7 +1339,7 @@ fn freer_resume_loop_drives_qapp_to_completion_via_managed_resume_arguments(
 }
 
 /// Every top and constructor identity `E3`'s parking-semantics tests below
-/// need out of `FREER_RESUME_ARTIFACT`, gathered once so each test states
+/// need out of `freer_resume_artifact()`, gathered once so each test states
 /// only what it actually exercises.
 struct FreerResumeFixture {
     program_top: TopBinding,
@@ -1313,7 +1355,7 @@ struct FreerResumeFixture {
 impl FreerResumeFixture {
     fn load() -> Self {
         let prepared = parse_program(
-            FREER_RESUME_ARTIFACT,
+            freer_resume_artifact(),
             &requirements(),
             DecodeLimits::default(),
         )
@@ -1828,7 +1870,7 @@ fn unrelated_entry_runs_while_a_parked_k_stays_untouched_and_machine_reusable(
 fn cancellation_before_commit_leaves_a_parked_k_valid_for_retry() {
     let requirements = requirements();
     let prepared = parse_program(
-        FREER_RESUME_ARTIFACT,
+        freer_resume_artifact(),
         &requirements,
         DecodeLimits::default(),
     )
@@ -2140,7 +2182,7 @@ fn drive_direct_to_val(
 fn two_realms_share_one_machine_cancel_reset_close_independently_of_each_other() {
     let fixture = FreerResumeFixture::load();
     let prepared = parse_program(
-        FREER_RESUME_ARTIFACT,
+        freer_resume_artifact(),
         &requirements(),
         DecodeLimits::default(),
     )
@@ -2435,7 +2477,7 @@ fn park_second_program(
     machine: &mut PreparedMachine<'static>,
     fixture: &FreerResumeFixture,
 ) -> (ProgramId, PreparedHandle) {
-    let program = install_closed(machine, FREER_RESUME_ARTIFACT);
+    let program = install_closed(machine, freer_resume_artifact());
     let result = machine
         .run_entry_retained(
             program,
@@ -2610,19 +2652,7 @@ fn c0_unrelated_entry_of_a_second_installed_program_runs_while_the_first_stays_p
     assert_eq!(machine.disposition(), MachineDisposition::Reusable);
 }
 
-// ---- S6: end-to-end retained import through the session runtime ---------
-
-const IMPORT_PRODUCER_ARTIFACT: &[u8] =
-    include_bytes!("../../../bridge/haskell/test-prepared-stg/fixtures/import-producer.cbor");
-const IMPORT_CONSUMER_ARTIFACT: &[u8] =
-    include_bytes!("../../../bridge/haskell/test-prepared-stg/fixtures/import-consumer.cbor");
-/// `consumerValueAt 0#`'s GHC-computed value, transcribed from
-/// `ImportConsumerOracle.hs` run under the pinned GHC 9.12.2. Never
-/// hand-derived. (The same file also carries `consumerResult`'s value,
-/// read by `s6_direct_global_call_runs_against_the_oracle`.)
-const IMPORT_CONSUMER_EXPECTATIONS: &str =
-    include_str!("../../../bridge/haskell/test-prepared-stg/ImportConsumerExpectations.json");
-
+// Locate exact compiler-produced tops without retaining legacy import snapshots.
 fn tops(prepared: &PreparedProgram) -> Vec<TopBinding> {
     prepared
         .bindings()
@@ -2688,478 +2718,46 @@ fn top_arity(prepared: &PreparedProgram, top: &TopBinding) -> usize {
     }
 }
 
-/// Build the [`ImportedValue`] facts that `link_program` checks for a
-/// declared import from `handle`'s live state and its generation.
-fn imported_value_for(
-    machine: &PreparedMachine<'static>,
-    owner: &PreparedProgram,
-    top: &TopBinding,
-    identity: SymbolIdentity,
-    handle: PreparedHandle,
-    generation: u64,
-) -> ImportedValue {
-    let entry_signature = match &top.binding.rhs {
-        tidepool_repr::execution_schema::HeapRhs::Function { signature, .. } => {
-            Some(owner.signatures()[signature.0 as usize].clone())
-        }
-        _ => None,
-    };
-    ImportedValue {
-        identity,
-        rep: handle.rep(),
-        entry_signature,
-        evaluated: machine.handle_is_evaluated(handle).expect("handle is live"),
-        generation,
-    }
-}
-
-/// Link and install `prepared` against exactly the named imports.
-fn install_importing(
-    machine: &mut PreparedMachine<'static>,
-    prepared: PreparedProgram,
-    imports: &[(SymbolIdentity, PreparedHandle, ImportedValue)],
-) -> Result<ProgramId, PreparedRuntimeError> {
-    let mut values = MachineImports::default();
-    let mut bindings = ImportBindings::new();
-    for (identity, handle, imported) in imports {
-        values.values.insert(identity.clone(), imported.clone());
-        bindings.insert(identity.clone(), *handle);
-    }
-    let linked = link_program(prepared, &values)?;
-    let compiled = machine
-        .compile_for_install(&linked)
-        .map_err(PreparedRuntimeError::Compile)?;
-    machine
-        .install_program(compiled, bindings)
-        .map_err(PreparedRuntimeError::Run)
-}
-
-fn producer_identity(occurrence: &str) -> SymbolIdentity {
-    SymbolIdentity {
-        unit: "main".to_owned(),
-        module: "ImportProducer".to_owned(),
-        namespace: "value".to_owned(),
-        occurrence: occurrence.to_owned(),
-        record_parent: None,
-    }
-}
-
-fn expected_consumer_value() -> Vec<i64> {
-    let parsed: serde_json::Value = serde_json::from_str(IMPORT_CONSUMER_EXPECTATIONS)
-        .expect("ImportConsumerExpectations.json parses as JSON");
-    parsed["expectations"]["consumerValueAt"]["value"]
-        .as_array()
-        .expect("consumerValue expectation is a list")
-        .iter()
-        .map(|element| {
-            element
-                .as_i64()
-                .expect("consumerValue elements are integers")
-        })
-        .collect()
-}
-
-fn expected_consumer_result() -> i64 {
-    let parsed: serde_json::Value = serde_json::from_str(IMPORT_CONSUMER_EXPECTATIONS)
-        .expect("ImportConsumerExpectations.json parses as JSON");
-    parsed["expectations"]["consumerResult"]["value"]
-        .as_i64()
-        .expect("consumerResult expectation is an integer")
-}
-
-/// An observed boxed `Int`: a bare literal or an `I#` box around one.
-fn observed_int(value: &HaskellValue) -> i64 {
-    match value {
-        HaskellValue::Lit(tidepool_repr::Literal::LitInt(n)) => *n,
-        HaskellValue::Con(_, boxed) => match boxed.as_slice() {
-            [HaskellValue::Lit(tidepool_repr::Literal::LitInt(n))] => *n,
-            other => panic!("unexpected boxed Int {other:?}"),
-        },
-        other => panic!("unexpected Int shape {other:?}"),
-    }
-}
-
-/// Flatten an observed `[Int]`: a cons cell is `Con(_, [head, tail])`, nil
-/// is `Con(_, [])`, and each head is a bare literal or an `I#` box around one.
-fn observed_int_list(value: &HaskellValue) -> Vec<i64> {
-    let mut out = Vec::new();
-    let mut cursor = value;
-    loop {
-        match cursor {
-            HaskellValue::Con(_, fields) if fields.is_empty() => return out,
-            HaskellValue::Con(_, fields) if fields.len() == 2 => {
-                let head = match &fields[0] {
-                    HaskellValue::Lit(tidepool_repr::Literal::LitInt(n)) => *n,
-                    HaskellValue::Con(_, boxed) => match boxed.as_slice() {
-                        [HaskellValue::Lit(tidepool_repr::Literal::LitInt(n))] => *n,
-                        other => panic!("unexpected boxed list head {other:?}"),
-                    },
-                    other => panic!("unexpected list head {other:?}"),
-                };
-                out.push(head);
-                cursor = &fields[1];
-            }
-            other => panic!("unexpected list shape {other:?}"),
-        }
-    }
-}
-
-/// Rung 2 end to end through the session runtime: install the producer,
-/// bind `producerValue` and `producerFn` as retained tops at the generation
-/// the consumer was projected against, install the consumer importing both,
-/// run its data-only entry with collections between every step and compare
-/// against the GHC oracle, then show a consumer linked against a stale
-/// generation is refused before anything is installed and that leased
-/// bindings cannot be released. `consumerResult` (which applies the
-/// imported `producerFn` by calling it directly) is exercised by
-/// `s6_direct_global_call_runs_against_the_oracle` below.
 #[test]
-fn retained_import_end_to_end_links_consumer_against_bound_producer_tops() {
-    let producer = parse_program(
-        IMPORT_PRODUCER_ARTIFACT,
-        &requirements(),
-        DecodeLimits::default(),
-    )
-    .expect("import-producer artifact parses");
-    assert!(
-        producer.globals().is_empty(),
-        "the producer is a closed program"
-    );
-    let consumer = parse_program(
-        IMPORT_CONSUMER_ARTIFACT,
-        &requirements(),
-        DecodeLimits::default(),
-    )
-    .expect("import-consumer artifact parses");
-    let value_identity = producer_identity("producerValue");
-    let fn_identity = producer_identity("producerFn");
-    for identity in [&value_identity, &fn_identity] {
-        let declaration = consumer
-            .globals()
-            .iter()
-            .find(|global| &global.identity == identity)
-            .unwrap_or_else(|| panic!("consumer declares {identity:?} as a global"));
-        assert_eq!(
-            declaration.required_generation,
-            Some(11),
-            "S5 pinned both imports at retained generation 11"
-        );
-    }
-    let producer_value_top = top_named(&producer, "ImportProducer", "producerValue");
-    let producer_fn_top = top_named(&producer, "ImportProducer", "producerFn");
-    let consumer_value_top = top_named_any(
-        &consumer,
-        "ImportConsumer",
-        &["consumerValueAt", "$wconsumerValueAt"],
-    );
-    let scalar_args = vec![0_u64; top_arity(&consumer, &consumer_value_top)];
-    let managed_args: Vec<CodegenPreparedInput> = scalar_args
-        .iter()
-        .map(|word| CodegenPreparedInput::Scalar(*word))
-        .collect();
-
-    let (mut machine, first) = open_closed_machine_from(producer.clone());
-    let bound_value = machine
-        .retain_top(first, producer_value_top.binding.id)
-        .expect("producerValue retains");
-    let bound_fn = machine
-        .retain_top(first, producer_fn_top.binding.id)
-        .expect("producerFn retains");
-    assert_eq!(machine.handle_count(), 2);
-
-    let imported_value = imported_value_for(
-        &machine,
-        &producer,
-        &producer_value_top,
-        value_identity.clone(),
-        bound_value,
-        11,
-    );
-    let imported_fn = imported_value_for(
-        &machine,
-        &producer,
-        &producer_fn_top,
-        fn_identity.clone(),
-        bound_fn,
-        11,
-    );
-    let program = install_importing(
-        &mut machine,
-        consumer.clone(),
-        &[
-            (value_identity.clone(), bound_value, imported_value),
-            (fn_identity.clone(), bound_fn, imported_fn),
-        ],
-    )
-    .expect("consumer links against both generation-11 bindings and installs");
-    assert_ne!(program, first);
-    // The prepared engine does not lease imported handles; the installed
-    // program keeps its import slots live until the machine is retired.
-
-    let expected = expected_consumer_value();
-    let observed = machine
-        .run_entry(
-            program,
-            consumer_value_top.binding.id,
-            &scalar_args,
-            call_options(true),
-            RealmId::ROOT,
-        )
-        .expect("consumerValueAt reads producerValue through its import slot");
-    assert_eq!(observed.values.len(), 1);
-    assert_eq!(observed_int_list(&observed.values[0]), expected);
-    let again = machine
-        .run_entry(
-            program,
-            consumer_value_top.binding.id,
-            &scalar_args,
-            call_options(true),
-            RealmId::ROOT,
-        )
-        .expect("a second run after another collection reads the same import");
-    assert_eq!(observed_int_list(&again.values[0]), expected);
-
-    // The consumer reads through the slot: one new root for the retained
-    // result, the two bound roots untouched, and the result releases.
-    let mut retained = machine
-        .run_entry_retained(
-            program,
-            consumer_value_top.binding.id,
-            &managed_args,
-            call_options(true),
-            RealmId::ROOT,
-        )
-        .expect("consumerValueAt retains");
-    assert_eq!(machine.handle_count(), 3);
-    let value = take_managed(&mut retained.values, 0);
-    assert!(machine.release(value));
-    assert_eq!(machine.handle_count(), 2);
-
-    // The pinned target holds the imported function as a constructor field:
-    // it flows through bind/link/install as a value and is readable.
-    let entries_top = top_named_any(
-        &consumer,
-        "ImportConsumer",
-        &["consumerEntries", "$wconsumerEntries"],
-    );
-    let entries_args: Vec<CodegenPreparedInput> = (0..top_arity(&consumer, &entries_top))
-        .map(|_| CodegenPreparedInput::Scalar(0))
-        .collect();
-    let mut entries = machine
-        .run_entry_retained(
-            program,
-            entries_top.binding.id,
-            &entries_args,
-            call_options(true),
-            RealmId::ROOT,
-        )
-        .expect("consumerEntries builds its pair at run time");
-    let pair = take_managed(&mut entries.values, 0);
-    let PreparedOuterCodegen::Constructor {
-        fields: mut pair_fields,
-        ..
-    } = machine
-        .inspect_outer(pair, RealmId::ROOT)
-        .expect("the pair inspects");
-    assert!(machine.release(pair));
-    assert_eq!(pair_fields.len(), 2);
-    let list = take_managed(&mut pair_fields, 0);
-    let function = take_managed(&mut pair_fields, 1);
-    // The list field is this module's own lazy `consumerValueAt n`: a thunk
-    // the host never forces (the evaluated list was already read above
-    // through the entry itself).
-    match machine.inspect_outer(list, RealmId::ROOT) {
-        Err(ExecutionError::Observation(ObservationFailure::Unobservable(kind))) => {
-            assert_eq!(format!("{kind:?}"), "Thunk")
-        }
-        Err(other) => panic!("expected the typed Unobservable(Thunk) refusal, got {other:?}"),
-        Ok(_) => panic!("an unforced thunk must not inspect as a constructor"),
-    }
-    assert!(machine.release(list));
-    match machine.inspect_outer(function, RealmId::ROOT) {
-        Err(ExecutionError::Observation(ObservationFailure::Unobservable(kind))) => assert_eq!(
-            format!("{kind:?}"),
-            "Function",
-            "the imported function is held as a callable, never entered"
+fn generated_haskell_fixtures_round_trip_through_the_current_typed_codec() {
+    for (directory, targets) in [
+        ("TIDEPOOL_M3_FIXTURE_DIR", &["result"][..]),
+        (
+            "TIDEPOOL_FREER_RETENTION_FIXTURE_DIR",
+            &["freerRequest"][..],
         ),
-        Err(other) => panic!("expected the typed Unobservable(Function) refusal, got {other:?}"),
-        Ok(_) => panic!("a function-typed import must not inspect as a constructor"),
+        (
+            "TIDEPOOL_FREER_RESUME_FIXTURE_DIR",
+            &[
+                "program",
+                "resumeInt",
+                "freerResumeEntries",
+                "askArgument",
+                "valResult",
+            ][..],
+        ),
+    ] {
+        for target in targets {
+            let bytes = tidepool_test_data::prepared_resources::read_target(directory, target);
+            let produced = parse_program(&bytes, &requirements(), DecodeLimits::default()).unwrap();
+            let typed = tidepool_test_data::prepared::wire_from_prepared(&produced);
+            let encoded = tidepool_test_data::prepared_encode::encode_wire_program(&typed);
+            let decoded =
+                parse_program(&encoded, &requirements(), DecodeLimits::default()).unwrap();
+            assert_eq!(
+                decoded, produced,
+                "independent Haskell producer target {target}"
+            );
+            if directory == "TIDEPOOL_M3_FIXTURE_DIR" {
+                let reverse = produced
+                    .globals()
+                    .iter()
+                    .find(|global| global.identity.occurrence == "reverse")
+                    .expect("the actual M3 projection retains Data.List.reverse");
+                assert!(reverse.required_evaluated);
+                assert_eq!(reverse.required_generation, None);
+                assert_eq!(reverse.identity.record_parent, None);
+            }
+        }
     }
-    assert!(machine.release(function));
-    assert_eq!(machine.handle_count(), 2);
-
-    // A consumer projected against generation 11 does not link against
-    // bindings whose `ImportedValue.generation` reads 12, and the refusal
-    // installs nothing. `PreparedMachine` carries no generation-stamped
-    // binding table of its own, so this step retains two fresh handles to the
-    // same tops and hand-builds their
-    // `ImportedValue`s at a fabricated stale generation instead of
-    // advancing a real session generation counter and rebinding.
-    let stale_value = machine
-        .retain_top(first, producer_value_top.binding.id)
-        .expect("producerValue retains again for the stale-generation probe");
-    let stale_fn = machine
-        .retain_top(first, producer_fn_top.binding.id)
-        .expect("producerFn retains again for the stale-generation probe");
-    let handles_before = machine.handle_count();
-    let stale_value_import = imported_value_for(
-        &machine,
-        &producer,
-        &producer_value_top,
-        value_identity.clone(),
-        stale_value,
-        12,
-    );
-    let stale_fn_import = imported_value_for(
-        &machine,
-        &producer,
-        &producer_fn_top,
-        fn_identity.clone(),
-        stale_fn,
-        12,
-    );
-    let error = install_importing(
-        &mut machine,
-        consumer,
-        &[
-            (value_identity.clone(), stale_value, stale_value_import),
-            (fn_identity.clone(), stale_fn, stale_fn_import),
-        ],
-    )
-    .expect_err("a stale generation must not link");
-    assert!(
-        matches!(&error, PreparedRuntimeError::Link(link) if matches!(**link, LinkError::ImportContract(_))),
-        "expected ImportContract, got {error:?}"
-    );
-    assert_eq!(error.kind(), PreparedFailureKind::Rejected);
-    assert_eq!(machine.handle_count(), handles_before);
-    assert_eq!(machine.disposition(), MachineDisposition::Reusable);
-
-    // `bound_value`/`bound_fn` are left retained (the production
-    // `PreparedEngine` route never leases them either; leaving them alive
-    // matches the installed program's live import slots. The
-    // never-installed-against stale handles release cleanly.
-    assert!(machine.release(stale_value));
-    assert!(machine.release(stale_fn));
-    assert_eq!(machine.handle_count(), 2);
-    assert_eq!(machine.disposition(), MachineDisposition::Reusable);
-}
-
-const IMPORT_CONSUMER_RESULT_ARTIFACT: &[u8] = include_bytes!(
-    "../../../bridge/haskell/test-prepared-stg/fixtures/import-consumer-result.cbor"
-);
-
-/// S6, the direct-call half: `consumerResultAt 0#` -- whose body is
-/// `producerFn (length producerValue)`, the imported function called
-/// directly by name (`ValueRef::Global` callee) -- installs, links against
-/// the two generation-11 bindings, runs through the machine-wide resolver,
-/// and returns the GHC oracle's value. Before G0 this exact artifact was
-/// refused at admission (a closed-world `Call` arm with no `Global` case),
-/// which is why it is pinned as its own fixture rather than bundled into
-/// `import-consumer.cbor`.
-#[test]
-fn s6_direct_global_call_runs_against_the_oracle() {
-    let producer = parse_program(
-        IMPORT_PRODUCER_ARTIFACT,
-        &requirements(),
-        DecodeLimits::default(),
-    )
-    .expect("import-producer artifact parses");
-    let consumer_result = parse_program(
-        IMPORT_CONSUMER_RESULT_ARTIFACT,
-        &requirements(),
-        DecodeLimits::default(),
-    )
-    .expect("import-consumer-result artifact parses");
-    let value_identity = producer_identity("producerValue");
-    let fn_identity = producer_identity("producerFn");
-    for identity in [&value_identity, &fn_identity] {
-        let declaration = consumer_result
-            .globals()
-            .iter()
-            .find(|global| &global.identity == identity)
-            .unwrap_or_else(|| panic!("consumer-result declares {identity:?} as a global"));
-        assert_eq!(
-            declaration.required_generation,
-            Some(11),
-            "projected against the same retained generation as the pinned consumer"
-        );
-    }
-    let producer_value_top = top_named(&producer, "ImportProducer", "producerValue");
-    let producer_fn_top = top_named(&producer, "ImportProducer", "producerFn");
-
-    let (mut machine, first) = open_closed_machine_from(producer.clone());
-    let bound_value = machine
-        .retain_top(first, producer_value_top.binding.id)
-        .expect("producerValue retains");
-    let bound_fn = machine
-        .retain_top(first, producer_fn_top.binding.id)
-        .expect("producerFn retains");
-
-    let result_top = top_named_any(
-        &consumer_result,
-        "ImportConsumer",
-        &["consumerResultAt", "$wconsumerResultAt"],
-    );
-    let scalar_args = vec![0_u64; top_arity(&consumer_result, &result_top)];
-
-    let imported_value = imported_value_for(
-        &machine,
-        &producer,
-        &producer_value_top,
-        value_identity.clone(),
-        bound_value,
-        11,
-    );
-    let imported_fn = imported_value_for(
-        &machine,
-        &producer,
-        &producer_fn_top,
-        fn_identity.clone(),
-        bound_fn,
-        11,
-    );
-    let program = install_importing(
-        &mut machine,
-        consumer_result,
-        &[
-            (value_identity.clone(), bound_value, imported_value),
-            (fn_identity.clone(), bound_fn, imported_fn),
-        ],
-    )
-    .expect("a direct call to an imported function is admitted and links");
-    assert_ne!(program, first);
-    // Imported handles remain live while the installed program can reach its
-    // slots; the machine has no separate lease counter.
-
-    let observed = machine
-        .run_entry(
-            program,
-            result_top.binding.id,
-            &scalar_args,
-            call_options(true),
-            RealmId::ROOT,
-        )
-        .expect("consumerResultAt applies the imported producerFn through the resolver");
-    assert_eq!(observed.values.len(), 1);
-    assert_eq!(
-        observed_int(&observed.values[0]),
-        expected_consumer_result(),
-        "producerFn (length producerValue) per ImportConsumerOracle.hs"
-    );
-    let again = machine
-        .run_entry(
-            program,
-            result_top.binding.id,
-            &scalar_args,
-            call_options(true),
-            RealmId::ROOT,
-        )
-        .expect("a second run after another collection resolves the same import");
-    assert_eq!(observed_int(&again.values[0]), expected_consumer_result());
-
-    assert_eq!(machine.handle_count(), 2);
-    assert_eq!(machine.disposition(), MachineDisposition::Reusable);
-    // Imported handles remain live while the installed program can reach its
-    // slots; the machine has no separate lease-refusal path.
 }

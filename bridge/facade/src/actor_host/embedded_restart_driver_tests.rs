@@ -132,6 +132,7 @@ fn attach_with_provider(
         conversation: Arc::new(Conversation::attach(runtime.store(), host, None).unwrap()),
         incoming,
         round_control: Arc::new(super::super::embedded_harness::EmbeddedRoundControl::default()),
+        observation: Default::default(),
     }
 }
 async fn wait_head(
@@ -212,15 +213,13 @@ async fn driver_reopens_delivered_pending_round_without_wake_then_waits_for_expl
             .head_request;
         assert_eq!(inputs.lock().unwrap().len(), 1);
         assert!(runtime.store().unread("/root").unwrap().is_empty());
-        assert!(
-            runtime
-                .store()
-                .agent(&old.actor)
-                .unwrap()
-                .unwrap()
-                .head_request
-                .is_none()
-        );
+        assert!(runtime
+            .store()
+            .agent(&old.actor)
+            .unwrap()
+            .unwrap()
+            .head_request
+            .is_none());
     }
     let runtime = Arc::new(EmbeddedHarnessRuntime::open(files.path(), 1).unwrap());
     let mut next = old.clone();
@@ -435,14 +434,12 @@ async fn driver_retains_actor_after_eof_and_explicit_input_never_redispatches_ad
         let interrupted = runtime.store().embedded_round_frontier(&identity).unwrap();
         assert!(interrupted.settled_head.is_none());
         let pending = interrupted.pending_head.unwrap();
-        assert!(
-            runtime
-                .store()
-                .events(Some(&pending))
-                .unwrap()
-                .iter()
-                .any(|e| e.kind == "model_interrupted")
-        );
+        assert!(runtime
+            .store()
+            .events(Some(&pending))
+            .unwrap()
+            .iter()
+            .any(|e| e.kind == "model_interrupted"));
         tokio::time::sleep(std::time::Duration::from_millis(30)).await;
         assert_eq!(
             inputs.lock().unwrap().len(),

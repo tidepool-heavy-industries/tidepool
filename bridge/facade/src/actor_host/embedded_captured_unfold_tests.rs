@@ -25,8 +25,25 @@ enum CapturedScenario {
     ConcurrentNominalJoin,
 }
 
+#[derive(Clone, Copy)]
+enum CallMode {
+    Blocking,
+    Asynchronous,
+}
+
+fn haskell_call(call_id: &str, source: &str, mode: CallMode) -> harness::item::Item {
+    harness::item::Item(json!({
+        "type": "custom_tool_call", "call_id": call_id, "name": "haskell", "input": source,
+        "async": matches!(mode, CallMode::Asynchronous),
+    }))
+}
+
 enum RootStep {
-    Tool { call_id: String, source: String },
+    Tool {
+        call_id: String,
+        source: String,
+        mode: CallMode,
+    },
     Finish,
 }
 
@@ -37,6 +54,10 @@ struct ChildRounds {
 
 struct CapturedHostTransport {
     runtime: Arc<embedded_harness::EmbeddedHarnessRuntime>,
+    setup_settlements: Mutex<Option<tokio::sync::broadcast::Receiver<OperationId>>>,
+    parent_prefix: Mutex<Option<Vec<harness::item::Item>>>,
+    provider_outputs: Mutex<HashMap<OperationId, Vec<harness::item::Item>>>,
+    provider_changed: watch::Sender<u64>,
     scenario: CapturedScenario,
     root_origin: ConversationIdentity,
     root_round: AtomicUsize,
@@ -75,6 +96,27 @@ impl CapturedHostTransport {
             actor: AgentPath(actor.into()),
             incarnation: incarnation.into(),
         };
+        {
+            let operations = self.operations.lock();
+            let mut outputs = self.provider_outputs.lock();
+            for ((owner, call), operation) in operations.iter() {
+                if owner != &origin {
+                    continue;
+                }
+                let returned = request
+                    .input
+                    .iter()
+                    .filter(|item| {
+                        item.0["type"] == "custom_tool_call_output" && item.0["call_id"] == *call
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if !returned.is_empty() {
+                    outputs.insert(operation.clone(), returned);
+                }
+            }
+        }
+        self.provider_changed.send_modify(|revision| *revision += 1);
         let (_, path) = request
             .session_id
             .rsplit_once(':')
@@ -94,16 +136,28 @@ impl CapturedHostTransport {
                     }
                 }))],
                 2 => {
+                    *self.parent_prefix.lock() = Some(request.input.clone());
                     self.setup_requested.notify_one();
                     self.setup_ready.notified().await;
-                    vec![harness::item::Item(json!({
-                        "type":"custom_tool_call", "call_id":PENDING_CALL, "name":"haskell",
-                        "input":match self.scenario {
-                            CapturedScenario::Success | CapturedScenario::CancelWhileParked => include_str!("embedded_captured_unfold_and_await.hs"),
-                            CapturedScenario::FailureAfterReplies => include_str!("embedded_captured_unfold_await_then_fail.hs"),
-                            CapturedScenario::ConcurrentNominalJoin => include_str!("embedded_nominal_join_a.hs"),
-                        }
-                    }))]
+                    vec![haskell_call(
+                        PENDING_CALL,
+                        match self.scenario {
+                            CapturedScenario::Success | CapturedScenario::CancelWhileParked => {
+                                include_str!("embedded_captured_unfold_and_await.hs")
+                            }
+                            CapturedScenario::FailureAfterReplies => {
+                                include_str!("embedded_captured_unfold_await_then_fail.hs")
+                            }
+                            CapturedScenario::ConcurrentNominalJoin => {
+                                include_str!("embedded_nominal_join_a.hs")
+                            }
+                        },
+                        if self.scenario == CapturedScenario::ConcurrentNominalJoin {
+                            CallMode::Asynchronous
+                        } else {
+                            CallMode::Blocking
+                        },
+                    )]
                 }
                 _ => match self
                     .root_steps
@@ -113,7 +167,11 @@ impl CapturedHostTransport {
                     .await
                     .expect("scripted root steps remain available")
                 {
-                    RootStep::Tool { call_id, source } => {
+                    RootStep::Tool {
+                        call_id,
+                        source,
+                        mode,
+                    } => {
                         if call_id == "captured-after-interrupt" {
                             assert!(
                                 request
@@ -123,9 +181,7 @@ impl CapturedHostTransport {
                                 "resumed root request must include its durable browser input"
                             );
                         }
-                        vec![harness::item::Item(json!({
-                            "type":"custom_tool_call", "call_id":call_id, "name":"haskell", "input":source
-                        }))]
+                        vec![haskell_call(&call_id, &source, mode)]
                     }
                     RootStep::Finish => vec![harness::item::Item(json!({
                         "type":"message", "role":"assistant", "phase":"final_answer",
@@ -144,52 +200,6 @@ impl CapturedHostTransport {
                 state.round += 1;
                 (state.ordinal, state.round)
             };
-            if round == 2 {
-                let input = serde_json::to_value(&request.input).unwrap();
-                let items = input.as_array().unwrap();
-                let call_id = format!("captured-child-{path}");
-                let returned: Vec<_> = items
-                    .iter()
-                    .filter(|item| {
-                        item["type"] == "custom_tool_call_output" && item["call_id"] == call_id
-                    })
-                    .collect();
-                assert_eq!(
-                    returned.len(),
-                    1,
-                    "child follow-up must return exactly its original synchronous Haskell call"
-                );
-                let receipt: Value = serde_json::from_str(
-                    returned[0]["output"]
-                        .as_str()
-                        .expect("returned Haskell receipt is encoded as JSON text"),
-                )
-                .expect("returned Haskell receipt is valid JSON");
-                assert_eq!(receipt["status"], "replied", "{receipt}");
-                let expected_items =
-                    if self.scenario == CapturedScenario::FailureAfterReplies && ordinal >= 2 {
-                        3
-                    } else {
-                        1
-                    };
-                let committed = receipt["items"].as_array().expect("child item receipts");
-                assert_eq!(committed.len(), expected_items, "{receipt}");
-                for item in committed {
-                    assert_eq!(item["status"], "committed", "{receipt}");
-                }
-                assert_eq!(receipt["publication"]["status"], "published", "{receipt}");
-                let reply = committed.last().expect("child reply receipt");
-                assert_eq!(reply["terminalTransfer"], "replyAccepted", "{receipt}");
-                assert!(
-                    reply["operations"]
-                        .as_array()
-                        .is_some_and(|operations| operations.iter().any(|operation| {
-                            operation["effect"] == "reply"
-                                && operation["disposition"] == "committed"
-                        })),
-                    "typed reply effect was not committed: {receipt}"
-                );
-            }
             let items = match round {
                 1 => {
                     let current = if ordinal < 2 {
@@ -287,6 +297,16 @@ impl CapturedHostTransport {
                         "content":[{"type":"output_text","text":"retained child scope remains usable"}]
                     }))]
                 }
+                2 if self.scenario == CapturedScenario::ConcurrentNominalJoin => {
+                    let mut finished = self.finish_children.subscribe();
+                    while !*finished.borrow_and_update() {
+                        finished.changed().await.unwrap();
+                    }
+                    vec![harness::item::Item(json!({
+                        "type":"message", "role":"assistant", "phase":"final_answer",
+                        "content":[{"type":"output_text","text":"original nominal reply delivered"}]
+                    }))]
+                }
                 2 => vec![harness::item::Item(json!({
                     "type":"message", "role":"assistant", "phase":"final_answer",
                     "content":[{"type":"output_text","text":"typed reply delivered"}]
@@ -337,9 +357,9 @@ impl ResponsesTransport for CapturedHostTransport {
     ) -> Result<ResponsesTurn, TransportError> {
         let turn = self.create_for_request(request_id, request).await?;
         for item in &turn.items {
-            let _ = sink
-                .send(harness::transport::sse::StreamEvent::ItemDone(item.clone()))
-                .await;
+            sink.send(harness::transport::sse::StreamEvent::ItemDone(item.clone()))
+                .await
+                .map_err(|_| TransportError::Stream("provider stream receiver closed".into()))?;
         }
         Ok(turn)
     }
@@ -351,6 +371,10 @@ fn assert_committed_haskell_value(response: &Value, expected: &str) {
     let committed_item =
         serde_json::to_value(tidepool_runtime::session::WorkbenchItemStatus::Committed).unwrap();
     assert_eq!(response["status"], committed_run, "{response}");
+    assert_eq!(response["publication"]["status"], "published", "{response}");
+    for item in response["items"].as_array().expect("cell item receipts") {
+        assert_eq!(item["status"], committed_item, "{response}");
+    }
     let item = response["items"]
         .as_array()
         .expect("WorkbenchResponse.items must be an array")
@@ -373,6 +397,142 @@ fn assert_committed_haskell_value(response: &Value, expected: &str) {
         "{response}"
     );
     assert!(display["output"]["run"].as_str().is_some(), "{response}");
+}
+
+fn assert_replied_cell(receipt: &Value, expected_items: usize) {
+    assert_eq!(receipt["status"], "replied", "{receipt}");
+    assert_eq!(receipt["publication"]["status"], "published", "{receipt}");
+    let items = receipt["items"].as_array().expect("child item receipts");
+    assert_eq!(items.len(), expected_items, "{receipt}");
+    for item in items {
+        assert_eq!(item["status"], "committed", "{receipt}");
+    }
+    let reply = items.last().unwrap();
+    assert_eq!(reply["terminalTransfer"], "replyAccepted", "{receipt}");
+    assert!(
+        reply["operations"]
+            .as_array()
+            .is_some_and(|operations| operations
+                .iter()
+                .any(|operation| operation["effect"] == "reply"
+                    && operation["disposition"] == "committed")),
+        "typed reply effect was not committed: {receipt}"
+    );
+}
+
+async fn received_output(transport: &CapturedHostTransport, operation: &OperationId) {
+    let mut changed = transport.provider_changed.subscribe();
+    let expected = transport
+        .runtime
+        .store()
+        .replay_output_operation(operation)
+        .unwrap()
+        .expect("exact operation has durable output before provider delivery");
+    tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, async {
+        loop {
+            if let Some(returned) = transport.provider_outputs.lock().get(operation).cloned() {
+                assert_eq!(
+                    returned,
+                    vec![expected.clone()],
+                    "provider must receive exactly the durable original output"
+                );
+                return;
+            }
+            changed
+                .changed()
+                .await
+                .expect("provider observation owner remains live");
+        }
+    })
+    .await
+    .expect("exact durable output returned to its provider conversation");
+}
+
+async fn durable_output(
+    runtime: &embedded_harness::EmbeddedHarnessRuntime,
+    operation: &OperationId,
+    output: &JobOutput,
+) {
+    let expected =
+        harness::item::Item::tool_output(&operation.call, harness::item::ToolKind::Custom, output);
+    tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, async {
+        loop {
+            if let Some(item) = runtime.store().replay_output_operation(operation).unwrap() {
+                assert_eq!(
+                    item, expected,
+                    "Store must retain the exact Scheduler terminal output"
+                );
+                let claims = runtime.store().claims_for_operation(operation).unwrap();
+                assert!(!claims.is_empty());
+                assert!(claims.iter().all(|claim| claim.operation == *operation
+                    && claim.state == harness::store::ClaimState::Settled));
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("exact operation and output become durably settled");
+}
+
+async fn successful_rounds(
+    context: &super::hosted_test_context::HostedActorContext,
+    actors: &[ActorRef],
+) {
+    tokio::time::timeout(Duration::from_secs(120), async {
+        loop {
+            let graph = context.forest.inspect_host_graph();
+            if actors.iter().all(|actor| {
+                graph.iter().any(|node| {
+                    node.actor == *actor
+                        && !node.provider_observation_stale
+                        && node.provider_turn.as_ref().is_some_and(|turn| {
+                            turn.state == exomonad_model::ProviderTurnState::Succeeded
+                        })
+                        && node.active_requests.is_empty()
+                        && node.queued_requests.is_empty()
+                })
+            }) {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("actual Engine success and durable settlement authorize idle cleanup");
+}
+
+async fn finish_root(
+    transport: &CapturedHostTransport,
+    context: &super::hosted_test_context::HostedActorContext,
+) {
+    transport.root_steps_tx.send(RootStep::Finish).unwrap();
+    successful_rounds(context, &[context.actor.identity()]).await;
+}
+
+fn assert_absent_binding(response: &Value, binding: &str) {
+    assert_preflight_rejection(response);
+    assert_eq!(
+        response["publication"]["status"], "notPublished",
+        "{response}"
+    );
+    assert_eq!(response["publication"]["reason"], "rejected", "{response}");
+    let diagnostics = response["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|item| item["diagnostics"].as_array().into_iter().flatten())
+        .filter_map(|diagnostic| diagnostic["message"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        diagnostics.contains(binding),
+        "specific absent binding missing from diagnostics: {response}"
+    );
+    assert!(
+        diagnostics.to_lowercase().contains("not in scope"),
+        "absence must be proved by name resolution: {response}"
+    );
 }
 
 async fn embedded_operation(
@@ -406,7 +566,7 @@ async fn embedded_operation(
         "exact checkpoint operation must belong to one recorded provider response"
     );
     eprintln!("[captured-engine] wait exact operation {operation:?}");
-    match tokio::time::timeout(
+    let output = tokio::time::timeout(
         settlement_budget,
         runtime.scheduler().wait(&claim.operation),
     )
@@ -414,8 +574,9 @@ async fn embedded_operation(
     .unwrap_or_else(|_| {
         panic!("embedded Haskell operation {call_id} did not settle within {settlement_budget:?}")
     })
-    .unwrap()
-    {
+    .unwrap();
+    durable_output(runtime, operation, &output).await;
+    match output {
         JobOutput::Completed(result) => result.map_err(|error| error.to_string()),
         other => panic!("embedded Haskell operation {call_id} failed: {other:?}"),
     }
@@ -482,6 +643,7 @@ async fn root_tool_call(
         .send(RootStep::Tool {
             call_id: call_id.into(),
             source: source.into(),
+            mode: CallMode::Blocking,
         })
         .unwrap();
     tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, async {
@@ -493,12 +655,14 @@ async fn root_tool_call(
                     settled, expected,
                     "settlement must match the exact provider call"
                 );
-                return embedded_operation(
+                let result = embedded_operation(
                     &transport.runtime,
                     &expected,
                     COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
                 )
                 .await;
+                received_output(transport, &expected).await;
+                return result;
             }
         }
     })
@@ -532,18 +696,21 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
     let (root_steps_tx, root_steps) = mpsc::unbounded_channel();
     let prepared_transport = Arc::new(Mutex::new(None));
     let transport_slot = prepared_transport.clone();
-    let (mut campaign, service) = test_campaign::TestCampaign::start_with_embedded_engine(
-        |config| {
-            config.embedded = Some(settings.clone());
-        },
-        move |service, config| {
+    let host = super::hosted_test_context::HostedTestRuntime::start_with_factory(
+        &settings,
+        |_| {},
+        move |runtime, config| {
             let root_origin = ConversationIdentity::Embedded {
                 run: runtime_namespace(&config.run_root),
                 actor: AgentPath("/root".into()),
                 incarnation: exomonad_actor::Incarnation::FIRST.0.to_string(),
             };
             let transport = Arc::new(CapturedHostTransport {
-                runtime: service.runtime.clone(),
+                runtime: runtime.clone(),
+                setup_settlements: Mutex::new(Some(runtime.scheduler().operation_settlements())),
+                parent_prefix: Mutex::new(None),
+                provider_outputs: Mutex::new(HashMap::new()),
+                provider_changed: watch::channel(0).0,
                 scenario,
                 root_origin,
                 root_round: AtomicUsize::new(0),
@@ -560,18 +727,20 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
                 reads: reads_tx,
                 requests: requests_tx,
             });
-            service.set_test_transport(transport.clone());
-            *transport_slot.lock() = Some(transport);
+            *transport_slot.lock() = Some(transport.clone());
+            transport
         },
     )
-    .await;
+    .await
+    .expect("production embedded host starts");
     let transport = prepared_transport
         .lock()
         .take()
         .expect("scripted Responses transport");
+    let campaign = host.context.clone();
     let actor = campaign.actor.identity();
-    let runtime = Arc::clone(&service.runtime);
-    let address = service.address;
+    let runtime = Arc::clone(&host.runtime);
+    let address = host.address;
     let root_origin = transport.root_origin.clone();
     assert_eq!(
         root_origin,
@@ -581,89 +750,8 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
             incarnation: actor.incarnation.0.to_string(),
         }
     );
-    let (lifecycle_tx, lifecycle_rx) = mpsc::channel(32);
-    let mut installation = campaign.root_installation.clone();
-    installation.initial_user_message = Some("start checkpoint fixture".into());
-    lifecycle_tx
-        .send(LocalResidentDeployment::PolicyInstalled(Box::new(
-            installation,
-        )))
-        .await
-        .unwrap();
-    let mut deployments = campaign.take_deployments();
-    let captured_actors = Arc::new(Mutex::new(Vec::new()));
-    let forwarded_actors = captured_actors.clone();
-    let forward = tokio::spawn(async move {
-        while let Some(deployment) = deployments.recv().await {
-            if let LocalResidentDeployment::PolicyInstalled(installation) = &deployment {
-                if installation.checkpoint.is_some() {
-                    forwarded_actors.lock().push(installation.actor.clone());
-                }
-            }
-            if lifecycle_tx.send(deployment).await.is_err() {
-                break;
-            }
-        }
-    });
-    let (readiness_tx, mut readiness_rx) = mpsc::unbounded_channel();
-    let (shutdown_tx, shutdown_rx) = watch::channel(None);
-    let (_config_tx, config_rx) = watch::channel(campaign.config.clone());
-    let fleet = InteractiveFleet {
-        provider_forest: Arc::clone(&campaign.forest),
-        root: campaign.actor.clone(),
-        config: campaign.config.clone(),
-        run_root: campaign.config.run_root.clone(),
-        output_store: service.runtime.store(),
-        #[cfg(feature = "codex-compat")]
-        tmux: TmuxSession::new(&campaign.config.tmux_session).unwrap(),
-        #[cfg(feature = "codex-compat")]
-        backend: HostRuntimeMode::Embedded,
-        worktrees: campaign.worktrees.clone(),
-        #[cfg(feature = "codex-compat")]
-        bindings: campaign.bindings.clone(),
-        readiness: readiness_tx,
-        worktree_authority: campaign.authority.clone(),
-        #[cfg(feature = "codex-compat")]
-        watch_retention: Arc::new(|_, _| false),
-        #[cfg(feature = "codex-compat")]
-        watch_observation: Arc::new(|_, _, _| false),
-        #[cfg(feature = "codex-compat")]
-        open_request: Arc::new(|_| None),
-        #[cfg(feature = "codex-compat")]
-        source_layers: None,
-        #[cfg(feature = "codex-compat")]
-        actor_recovery: exomonad_actor::ActorRecoveryJournal::open(
-            campaign.config.run_root.join("actor-lifecycle.v2.jsonl"),
-        )
-        .unwrap(),
-        #[cfg(feature = "codex-compat")]
-        recovered_threads: Arc::new(BTreeMap::new()),
-        #[cfg(feature = "codex-compat")]
-        recovered_root_predecessor: None,
-        host_graph: {
-            let forest = campaign.forest.clone();
-            Arc::new(move || forest.inspect_host_graph())
-        },
-    };
     let scheduler = runtime.scheduler();
-    // The provider records its operation before Harness admits it. Observe
-    // settlement from before launch rather than waiting on an unadmitted ID.
-    let mut setup_settlements = scheduler.operation_settlements();
-    let host = tokio::spawn(run_interactive_applications(
-        lifecycle_rx,
-        Arc::new(Mutex::new(HashMap::new())),
-        fleet,
-        shutdown_rx,
-        config_rx,
-        Some(service),
-    ));
-    assert!(matches!(
-        tokio::time::timeout(Duration::from_secs(30), readiness_rx.recv())
-            .await
-            .expect("production embedded host did not become ready"),
-        Some(ActorHostReadiness::EmbeddedReady { .. })
-    ));
-
+    let mut setup_settlements = transport.setup_settlements.lock().take().unwrap();
     tokio::time::timeout(
         Duration::from_secs(60),
         transport.scope_setup_issued.notified(),
@@ -701,11 +789,7 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
     // Subscribe before issuing the parent call: settlement may precede observation,
     // and Scheduler::wait refuses operations that are not admitted yet.
     let mut parent_settlements = scheduler.operation_settlements();
-    let parked_before = campaign
-        .forest
-        .measurement_snapshot()
-        .and_then(|snapshot| snapshot.parked)
-        .expect("resident parked measurement after setup");
+
     transport.setup_ready.notify_one();
     let mut sessions = std::collections::HashSet::new();
     for _ in 0..2 {
@@ -732,6 +816,19 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
         .await
         .expect("captured children did not start while the parent call was pending")
         .unwrap();
+        let frozen = transport
+            .parent_prefix
+            .lock()
+            .clone()
+            .expect("original request prefix captured");
+        assert!(
+            request.input.starts_with(&frozen),
+            "child history must preserve the exact frozen provider prefix"
+        );
+        assert!(request
+            .input
+            .iter()
+            .all(|item| item.0["call_id"] != PENDING_CALL && item.0["call_id"] != REUSE_CALL));
         let parent = transport.operation(&root_origin, PENDING_CALL);
         assert!(
             runtime
@@ -757,28 +854,32 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
         "[captured-engine] two child provider branches ready while exact parent claim is pending"
     );
     if scenario == CapturedScenario::CancelWhileParked {
-        tokio::time::timeout(Duration::from_secs(30), async {
-            loop {
-                if campaign
-                    .forest
-                    .measurement_snapshot()
-                    .and_then(|snapshot| snapshot.parked)
-                    .is_some_and(|parked| parked > parked_before)
-                {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("original compiled pipeline parks before cancellation");
+        let pending = transport.operation(&root_origin, PENDING_CALL);
         let target = harness::embedding::HostIdentity {
             run: runtime_namespace(&campaign.config.run_root),
             actor: AgentPath("/root".into()),
             incarnation: actor.incarnation.0.to_string(),
         };
-        let api = format!("http://{address}/api");
-        let origin = format!("https://{address}");
+        let native = exomonad_tool::ToolInvocationContext {
+            origin: exomonad_tool::ToolInvocationOrigin::Model(
+                embedded_harness::original_operation(&target, &pending).unwrap(),
+            ),
+            call_id: pending.call.0.clone(),
+            namespace: None,
+        };
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while campaign.actor.hosted_workbench_waiting(&native).is_none() {
+                assert!(runtime
+                    .store()
+                    .claims_for_operation(&pending)
+                    .unwrap()
+                    .iter()
+                    .any(|claim| claim.state == harness::store::ClaimState::Pending));
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the exact native cancellation owner is armed");
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
@@ -815,6 +916,8 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
                 expected_round: round,
             },
         };
+        assert!(campaign.actor.hosted_workbench_waiting(&native).is_some());
+        assert!(scheduler.output(&pending).await.unwrap().is_none());
         let requested = client
             .post(format!("{api}/commands"))
             .header("Origin", &origin)
@@ -830,11 +933,11 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
             .expect("exact original parent operation settles after browser interrupt")
             .unwrap();
         match cancelled {
-            JobOutput::CancelledWithReceipt(Ok(receipt)) => {
+            JobOutput::CancelledWithReceipt(Ok(ref receipt)) => {
                 assert_eq!(receipt["publication"]["status"], "notPublished");
                 assert_eq!(receipt["publication"]["reason"], "cancelled");
             }
-            JobOutput::CancelledWithReceipt(Err(failure)) | JobOutput::Completed(Err(failure)) => {
+            JobOutput::CancelledWithReceipt(Err(ref failure)) => {
                 let metadata = failure
                     .metadata()
                     .expect("cancellation retains its publication outcome");
@@ -843,7 +946,24 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
             }
             other => panic!("parked pipeline did not settle as cancelled: {other:?}"),
         }
-        let known_children = captured_actors.lock().clone();
+        assert!(
+            matches!(
+                scheduler
+                    .cancellation_acknowledgment(&pending)
+                    .await
+                    .unwrap(),
+                Some(harness::provider::CancellationAcknowledgment::StoppedWithReceipt(_))
+            ),
+            "the exact native owner must acknowledge cancellation"
+        );
+        durable_output(&runtime, &pending, &cancelled).await;
+        let known_children = campaign
+            .observer
+            .installations()
+            .into_iter()
+            .filter(|installation| installation.checkpoint)
+            .map(|installation| installation.actor)
+            .collect::<Vec<_>>();
         assert_eq!(known_children.len(), 2);
         for child in &known_children {
             let terminal = child.terminal();
@@ -909,7 +1029,7 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
         )
         .await
         .unwrap();
-        assert_preflight_rejection(&absent);
+        assert_absent_binding(&absent, "capturedValue");
         let cleaned = root_tool_call(
             &transport,
             "captured-interrupted-group-cleanup",
@@ -922,19 +1042,11 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
             campaign.actor.terminal().get().is_none(),
             "resumed root remains live until ordinary shutdown"
         );
-        transport.root_steps_tx.send(RootStep::Finish).unwrap();
-        shutdown_tx.send_replace(Some(NativeRetirement::Terminate));
-        let result = tokio::time::timeout(Duration::from_secs(30), host)
+        received_output(&transport, &pending).await;
+        finish_root(&transport, &campaign).await;
+        host.stop()
             .await
-            .expect("production host terminates after parked cancellation")
-            .unwrap();
-        assert!(result.is_ok(), "{result:?}");
-        campaign.forest.shutdown().await;
-        campaign.hosted.await.unwrap();
-        forward.abort();
-        if let Err(error) = forward.await {
-            assert!(error.is_cancelled());
-        }
+            .expect("production shutdown confirms host and forest cleanup");
         return;
     }
     if scenario == CapturedScenario::ConcurrentNominalJoin {
@@ -984,7 +1096,7 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
                         "captured child cell rejected before typed reply: {operation:?}: {cause}"
                     )
                         });
-                assert_eq!(reply["status"], "replied", "{reply}");
+                assert_replied_cell(&reply, 1);
                 assert!(replied.insert(operation.origin));
             }
         }
@@ -999,7 +1111,16 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
     .await;
     match scenario {
         CapturedScenario::Success | CapturedScenario::CancelWhileParked => {
-            assert_committed_haskell_value(&result.unwrap(), "True")
+            assert_committed_haskell_value(&result.unwrap(), "True");
+            received_output(&transport, &transport.operation(&root_origin, PENDING_CALL)).await;
+            let public = root_tool_call(
+                &transport,
+                "captured-public-prefix",
+                "display (capturedValue == 41 && capturedGetter == 42)",
+            )
+            .await
+            .unwrap();
+            assert_committed_haskell_value(&public, "True");
         }
         CapturedScenario::ConcurrentNominalJoin => {
             let published_a = result.unwrap();
@@ -1016,6 +1137,7 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
             .await
             .expect("final provider tool reads both A and B public declarations");
             assert_committed_haskell_value(&joined, "True");
+            received_output(&transport, &transport.operation(&root_origin, PENDING_CALL)).await;
         }
         CapturedScenario::FailureAfterReplies => {
             result.expect_err(
@@ -1069,7 +1191,7 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
                 )
                 .await
                 .expect("missing failed-cell name returns a compile rejection");
-                assert_preflight_rejection(&absent);
+                assert_absent_binding(&absent, name);
             }
             let rebound = root_tool_call(
                 &transport, "captured-parent-rebind",
@@ -1104,14 +1226,38 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
             )
             .await
             .expect("the failed cell's transferred capture admits and joins a third child");
-            requests_rx
+            let third_request = requests_rx
                 .try_recv()
                 .expect("third child provider request");
+            let frozen = transport.parent_prefix.lock().clone().unwrap();
+            assert!(
+                third_request.input.starts_with(&frozen),
+                "transferred capture preserves its exact original provider prefix"
+            );
+            let (prefix, incarnation) = third_request.session_id.rsplit_once(':').unwrap();
+            let (run, path) = prefix.rsplit_once(':').unwrap();
+            let origin = ConversationIdentity::Embedded {
+                run: run.into(),
+                actor: AgentPath(path.into()),
+                incarnation: incarnation.into(),
+            };
+            assert!(
+                !sessions.contains(&origin),
+                "reuse must admit an independent third child"
+            );
+            let third_operation = transport.operation(&origin, &format!("captured-child-{path}"));
+            let reply = embedded_operation(
+                &runtime,
+                &third_operation,
+                TYPED_CHILD_REPLY_SETTLEMENT_BUDGET,
+            )
+            .await
+            .unwrap();
+            assert_replied_cell(&reply, 3);
             assert_committed_haskell_value(&reused, "True");
             eprintln!(
                 "[captured-engine] retained children and independently reused capture succeeded"
             );
-            transport.finish_children.send_replace(true);
         }
     }
     let expected_children = if scenario != CapturedScenario::FailureAfterReplies {
@@ -1120,6 +1266,53 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
         3
     };
     assert_eq!(transport.children.lock().len(), expected_children);
+    if matches!(
+        scenario,
+        CapturedScenario::FailureAfterReplies | CapturedScenario::ConcurrentNominalJoin
+    ) {
+        for origin in &sessions {
+            let operation =
+                transport.operation(origin, &format!("captured-child-{}", origin.actor().0));
+            received_output(&transport, &operation).await;
+        }
+        let refusal = root_tool_call(
+            &transport,
+            "captured-active-cleanup-refusal",
+            include_str!("embedded_captured_group_cleanup.hs"),
+        )
+        .await
+        .unwrap();
+        assert_committed_haskell_value(&refusal, "False");
+        let actors = campaign
+            .observer
+            .installations()
+            .into_iter()
+            .filter(|installation| {
+                installation.checkpoint && installation.actor.terminal().get().is_none()
+            })
+            .map(|installation| installation.actor.identity())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actors.len(),
+            2,
+            "refused cleanup must retain both actor-owned children"
+        );
+        for actor in &actors {
+            let node = campaign
+                .forest
+                .inspect_host_graph()
+                .into_iter()
+                .find(|node| node.actor == *actor)
+                .unwrap();
+            assert!(node
+                .provider_turn
+                .as_ref()
+                .is_some_and(|turn| turn.state == exomonad_model::ProviderTurnState::Active));
+            assert!(node.terminal.is_none());
+        }
+        transport.finish_children.send_replace(true);
+        successful_rounds(&campaign, &actors).await;
+    }
     let cleaned = root_tool_call(
         &transport,
         "captured-group-cleanup",
@@ -1128,7 +1321,13 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
     .await
     .expect("known original group cleanup settles");
     assert_committed_haskell_value(&cleaned, "True");
-    let known_children = captured_actors.lock().clone();
+    let known_children = campaign
+        .observer
+        .installations()
+        .into_iter()
+        .filter(|installation| installation.checkpoint)
+        .map(|installation| installation.actor)
+        .collect::<Vec<_>>();
     assert_eq!(known_children.len(), expected_children);
     for child in &known_children {
         let terminal = child.terminal();
@@ -1141,19 +1340,10 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
         assert_eq!(cleanup.actor(), child.identity());
         assert!(cleanup.is_confirmed(), "{cleanup:?}");
     }
-    transport.root_steps_tx.send(RootStep::Finish).unwrap();
-    shutdown_tx.send_replace(Some(NativeRetirement::Terminate));
-    let result = tokio::time::timeout(Duration::from_secs(30), host)
+    finish_root(&transport, &campaign).await;
+    host.stop()
         .await
-        .expect("production host did not terminate")
-        .expect("production host task panicked");
-    assert!(result.is_ok(), "production host cleanup failed: {result:?}");
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
-    forward.abort();
-    if let Err(error) = forward.await {
-        assert!(error.is_cancelled());
-    }
+        .expect("production shutdown confirms host and forest cleanup");
 }
 
 fn preflight_invocation(
@@ -1221,7 +1411,7 @@ async fn admitted_cell_late_type_error_has_no_effect_or_publication_on_retry() {
     let mut campaign = test_campaign::TestCampaign::start_with_config(
         exomonad_actor::ResearchPolicy::default(), |admission| admission,
         |config| {
-            config.backend = crate::exomonad::HostBackendOptions::Embedded;
+
             let authored = config.workspace.join(".exomonad");
             std::fs::create_dir_all(&authored).unwrap();
             std::fs::write(authored.join("AgentSpec.hs"), include_str!("embedded_bad_final_agent_spec.hs")).unwrap();

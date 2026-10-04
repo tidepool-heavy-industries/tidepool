@@ -44,7 +44,6 @@ the nearest crate guide.
 | `tidepool-protocol` | Source schema for effect and error definitions |
 | `tidepool-mcp` | MCP server library and generated Haskell effect surface |
 | `tidepool-handlers` | Concrete effect handlers |
-| `exomonad-agent` | Typed coding-agent backend boundary |
 | `exomonad-worktree` | Managed coding checkouts, repository observation, and journal |
 | `tidepool` | Public facade and composition-root binaries |
 

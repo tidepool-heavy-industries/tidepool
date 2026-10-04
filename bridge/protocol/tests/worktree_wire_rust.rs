@@ -1,9 +1,4 @@
-//! The pin for `gen::wire_rs`'s Worktree output — the wire-record analogue of
-//! `generated_files_are_current.rs`'s third layer.
-//!
-//! Worktree is deliberately not in [`tidepool_protocol::effects::all`], so
-//! nothing here is written to disk — this test calls the generator directly
-//! against [`tidepool_protocol::effects::worktree::worktree`].
+//! Narrow rendering pins for the Worktree wire projection.
 //!
 //! Two independent proofs:
 //!

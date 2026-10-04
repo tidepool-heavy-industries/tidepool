@@ -9,6 +9,7 @@ rust-version.workspace = true
 description = "Single-source bridged-record types shared by effect handlers and test mocks"
 
 [dependencies]
+exomonad-tool.workspace = true
 tidepool-bridge.workspace = true
 tidepool-bridge-derive.workspace = true
 tidepool-repr.workspace = true

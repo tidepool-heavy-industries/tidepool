@@ -14,3 +14,6 @@ mod metadata_strictness;
 #[cfg(target_os = "linux")]
 #[path = "../strict_jsonl_directory.rs"]
 mod strict_jsonl_directory;
+
+#[path = "../projected_groups.rs"]
+mod projected_groups;

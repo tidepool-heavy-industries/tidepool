@@ -12,13 +12,6 @@ readme = "../../README.md"
 keywords = ["haskell", "jit", "cranelift", "effects", "compiler"]
 categories = ["compilers"]
 
-[features]
-default = ["codex-compat"]
-codex-compat = [
-    "exomonad-agent/codex-compat",
-    "dep:codex-shoal-protocol",
-]
-
 [[bin]]
 name = "tidepool"
 path = "src/main.rs"
@@ -50,8 +43,7 @@ tidepool-toolchain.workspace = true
 tidepool-mcp.workspace = true
 tidepool-handlers.workspace = true
 exomonad-worktree.workspace = true
-exomonad-agent = { workspace = true, default-features = false }
-codex-shoal-protocol = { workspace = true, optional = true }
+exomonad-model.workspace = true
 exomonad-actor.workspace = true
 exomonad-tool.workspace = true
 harness.workspace = true

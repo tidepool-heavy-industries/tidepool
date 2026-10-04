@@ -53,3 +53,11 @@ mirror a list that immediately goes stale. Effects not in that set remain in
 2. Extending what the schema can express (a new `HelperBody` shape, a new
    `HsType` variant): these are deliberate, reviewed additions — see the
    "no raw escape hatches" rule above before reaching for a shortcut.
+
+Native generated artifacts are owned by `//bridge/protocol:generated`. Consumers
+map its declared output files into their source trees. The executable requires
+`--output-root DIRECTORY`; it never infers or rewrites the workspace. `--list`
+provides the schema output roster for `build/protocol/outputs.txt`; the build
+action refuses a roster that differs from the schema. The MCP production composer
+exports `Core`, `Authored`, and the effect shim through
+`//bridge/mcp:effects_generated` for declared Haskell compilation.

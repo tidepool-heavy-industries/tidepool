@@ -13,9 +13,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
-#[path = "m1_host_fixture.rs"]
-pub(super) mod host_fixture;
-use host_fixture::{cell_output_matches, RunningBrowserHost};
+use super::hosted_test_context::{cell_output_matches, HostedTestRuntime};
 
 #[path = "m1_browser_process.rs"]
 mod browser_process;
@@ -43,7 +41,9 @@ async fn production_browser_executes_resident_haskell_retries_and_controls_root(
     browser_runner::production_browser_journey().await;
 }
 
-fn browser_target(campaign: &test_campaign::TestCampaign) -> harness::embedding::HostIdentity {
+fn browser_target(
+    campaign: &super::hosted_test_context::HostedActorContext,
+) -> harness::embedding::HostIdentity {
     harness::embedding::HostIdentity {
         run: runtime_namespace(&campaign.config.run_root),
         actor: AgentPath("/root".into()),
@@ -263,10 +263,10 @@ async fn production_host_retains_http_haskell_commands_and_reconnects_without_re
         calls: Arc::new(AtomicUsize::new(0)),
     });
     let host_transport: Arc<dyn ResponsesTransport> = transport.clone();
-    let fixture = RunningBrowserHost::start(&settings, &host_transport)
+    let fixture = HostedTestRuntime::start(&settings, &host_transport)
         .await
         .unwrap();
-    let campaign = &fixture.campaign;
+    let campaign = &fixture.context;
     let target = browser_target(campaign);
     let embedded_runtime = Arc::clone(&fixture.runtime);
     let address = fixture.address;
@@ -520,7 +520,6 @@ async fn host_cancellation_stops_a_real_running_haskell_cell() {
         exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |config| {
-            config.backend = crate::exomonad::HostBackendOptions::Embedded;
             config.embedded = Some(settings.clone());
         },
     )
@@ -692,11 +691,11 @@ async fn rejected_request_host_case(authentication: bool, tool_before_rejection:
         reject_successor: tokio::sync::Notify::new(),
     });
     let host_transport: Arc<dyn ResponsesTransport> = transport.clone();
-    let fixture = RunningBrowserHost::start(&settings, &host_transport)
+    let fixture = HostedTestRuntime::start(&settings, &host_transport)
         .await
         .unwrap();
-    let target = browser_target(&fixture.campaign);
-    let actor = fixture.campaign.actor.identity();
+    let target = browser_target(&fixture.context);
+    let actor = fixture.context.actor.identity();
     let api = format!("http://{}/api", fixture.address);
     let origin = format!("https://{}", fixture.address);
     let client = reqwest::Client::new();
@@ -790,8 +789,8 @@ async fn rejected_request_host_case(authentication: bool, tool_before_rejection:
         if tool_before_rejection { 2 } else { 1 },
         "provider rejection retried without input"
     );
-    assert!(fixture.campaign.actor.terminal().get().is_none());
-    assert_eq!(fixture.campaign.actor.identity(), actor);
+    assert!(fixture.context.actor.terminal().get().is_none());
+    assert_eq!(fixture.context.actor.identity(), actor);
     let (mut socket, snapshot) = browser_snapshot_until(fixture.address, &cookie, "waiting").await;
     assert_eq!(snapshot["snapshot"]["conversations"][0]["state"], "idle");
     let failed = snapshot["snapshot"]["requests"]
@@ -898,7 +897,7 @@ async fn rejected_request_host_case(authentication: bool, tool_before_rejection:
         );
     }
     drop(requests);
-    assert!(fixture.campaign.actor.terminal().get().is_none());
+    assert!(fixture.context.actor.terminal().get().is_none());
     socket.close(None).await.unwrap();
     fixture.stop().await.unwrap();
 }

@@ -1,4 +1,4 @@
-use super::m1_host_tests::host_fixture::RunningBrowserHost;
+use super::hosted_test_context::HostedTestRuntime;
 use super::*;
 use async_trait::async_trait;
 use harness::{
@@ -112,10 +112,10 @@ async fn next_round(rounds: &mut mpsc::UnboundedReceiver<RequestedRound>) -> Req
 
 async fn next_round_with_state(
     rounds: &mut mpsc::UnboundedReceiver<RequestedRound>,
-    fixture: &mut RunningBrowserHost,
+    fixture: &mut HostedTestRuntime,
 ) -> RequestedRound {
-    let root = fixture.campaign.actor.identity();
-    let forest = Arc::clone(&fixture.campaign.forest);
+    let root = fixture.context.actor.identity();
+    let forest = Arc::clone(&fixture.context.forest);
     let waiting = async {
         loop {
             tokio::select! {
@@ -204,7 +204,7 @@ fn reasoning_item(call_id: &str) -> Item {
     }))
 }
 
-fn raw_request_items(fixture: &RunningBrowserHost, request: &ResponsesRequest) -> Vec<Item> {
+fn raw_request_items(fixture: &HostedTestRuntime, request: &ResponsesRequest) -> Vec<Item> {
     raw_request_history(fixture, request)
         .into_iter()
         .map(|(_, _, item)| item)
@@ -212,10 +212,10 @@ fn raw_request_items(fixture: &RunningBrowserHost, request: &ResponsesRequest) -
 }
 
 fn raw_request_history(
-    fixture: &RunningBrowserHost,
+    fixture: &HostedTestRuntime,
     request: &ResponsesRequest,
 ) -> Vec<(harness::model::RequestId, harness::item::ItemHash, Item)> {
-    let run = runtime_namespace(&fixture.campaign.config.run_root);
+    let run = runtime_namespace(&fixture.context.config.run_root);
     let actor_and_incarnation = request
         .session_id
         .strip_prefix(&format!("{run}:"))
@@ -363,7 +363,7 @@ fn settings() -> (tempfile::TempDir, crate::exomonad::EmbeddedLaunchConfig) {
 
 async fn start() -> (
     tempfile::TempDir,
-    RunningBrowserHost,
+    HostedTestRuntime,
     mpsc::UnboundedReceiver<RequestedRound>,
 ) {
     start_with_spec_and_model(
@@ -377,7 +377,7 @@ async fn start_with_spec(
     spec: Option<&str>,
 ) -> (
     tempfile::TempDir,
-    RunningBrowserHost,
+    HostedTestRuntime,
     mpsc::UnboundedReceiver<RequestedRound>,
 ) {
     let initial_model = if spec.is_some() {
@@ -393,13 +393,13 @@ async fn start_with_spec_and_model(
     initial_model: &str,
 ) -> (
     tempfile::TempDir,
-    RunningBrowserHost,
+    HostedTestRuntime,
     mpsc::UnboundedReceiver<RequestedRound>,
 ) {
     let (files, settings) = settings();
     let (requests, rounds) = mpsc::unbounded_channel();
     let transport: Arc<dyn ResponsesTransport> = Arc::new(ScriptedProvider(requests));
-    let fixture = RunningBrowserHost::start_configured(&settings, &transport, |config| {
+    let fixture = HostedTestRuntime::start_configured(&settings, &transport, |config| {
         let authored = config.workspace.join(".exomonad");
         std::fs::create_dir_all(&authored).unwrap();
         config.model = initial_model.into();
@@ -439,7 +439,7 @@ async fn start_with_spec_and_model(
     })
     .await
     .unwrap();
-    let actor = fixture.campaign.actor.identity();
+    let actor = fixture.context.actor.identity();
     let origin = format!("https://{}", fixture.address);
     let api = format!("http://{}/api", fixture.address);
     let client = reqwest::Client::new();
@@ -465,7 +465,7 @@ async fn start_with_spec_and_model(
             operation_id: harness::embedding::ClientOperationId(uuid::Uuid::new_v4()),
             command: harness::server::HostCommand::Input {
                 target: harness::embedding::HostIdentity {
-                    run: runtime_namespace(&fixture.campaign.config.run_root),
+                    run: runtime_namespace(&fixture.context.config.run_root),
                     actor: AgentPath("/root".into()),
                     incarnation: actor.incarnation.0.to_string(),
                 },
@@ -482,7 +482,7 @@ async fn start_with_spec_and_model(
 #[tokio::test]
 async fn native_notebook_scheduling_preserves_effects_and_published_bindings() {
     let (_files, fixture, mut rounds) = start_with_spec(None).await;
-    let actor = fixture.campaign.actor.identity();
+    let actor = fixture.context.actor.identity();
     let first = next_round(&mut rounds).await;
     let session = first.request.session_id.clone();
     first.cell(
@@ -528,7 +528,7 @@ async fn native_notebook_scheduling_preserves_effects_and_published_bindings() {
         "44"
     );
     assert_eq!(following.request.session_id, session);
-    assert_eq!(fixture.campaign.actor.identity(), actor);
+    assert_eq!(fixture.context.actor.identity(), actor);
     following.finish();
     fixture.stop().await.unwrap();
 }
@@ -548,12 +548,12 @@ fn has_user_text(request: &ResponsesRequest, expected: &str) -> bool {
     })
 }
 
-fn root_context_state(fixture: &RunningBrowserHost) -> harness::context::ContextRequestState {
+fn root_context_state(fixture: &HostedTestRuntime) -> harness::context::ContextRequestState {
     let store = fixture.runtime.store();
     let identity = harness::embedding::HostIdentity {
-        run: runtime_namespace(&fixture.campaign.config.run_root),
+        run: runtime_namespace(&fixture.context.config.run_root),
         actor: AgentPath("/root".into()),
-        incarnation: fixture.campaign.actor.identity().incarnation.0.to_string(),
+        incarnation: fixture.context.actor.identity().incarnation.0.to_string(),
     };
     // The scripted successor is admitted but has not returned a final answer.
     // Its current prefix belongs to the pending frontier, before round settlement.
@@ -671,7 +671,7 @@ async fn resident_sync_native_trim_preserves_reasoning_and_deferred_child_bindin
 #[tokio::test]
 async fn resident_sync_notes_commit_before_deferred_children_and_child_model_switch() {
     let (_files, mut fixture, mut rounds) = start().await;
-    let root_identity = fixture.campaign.actor.identity();
+    let root_identity = fixture.context.actor.identity();
     let setup = next_round(&mut rounds).await;
     assert!(setup.is_root());
     setup.cell(
@@ -738,8 +738,8 @@ async fn resident_sync_notes_commit_before_deferred_children_and_child_model_swi
         }
     }
     assert_eq!(child_sessions.len(), 2);
-    assert_eq!(fixture.campaign.actor.identity(), root_identity);
-    assert!(fixture.campaign.actor.terminal().get().is_none());
+    assert_eq!(fixture.context.actor.identity(), root_identity);
+    assert!(fixture.context.actor.terminal().get().is_none());
     fixture.stop().await.unwrap();
 }
 
@@ -749,7 +749,7 @@ async fn resident_compiled_sync_handler_commits_context_and_model_before_inferen
         "fixtures/context_acceptance_agent_spec.hs"
     )))
     .await;
-    let actor = fixture.campaign.actor.identity();
+    let actor = fixture.context.actor.identity();
     let first = next_round(&mut rounds).await;
     assert!(first.is_root());
     assert!(
@@ -810,8 +810,8 @@ async fn resident_compiled_sync_handler_commits_context_and_model_before_inferen
     let after = root_context_state(&fixture);
     assert_eq!(after.generation, 1);
     assert_eq!(after.model.as_deref(), Some("gpt-6.1-sol"));
-    assert_eq!(fixture.campaign.actor.identity(), actor);
-    assert!(fixture.campaign.actor.terminal().get().is_none());
+    assert_eq!(fixture.context.actor.identity(), actor);
+    assert!(fixture.context.actor.terminal().get().is_none());
     successor.cell(
         "inspect-context",
         include_str!("fixtures/context_acceptance_inspect.hs"),
@@ -847,8 +847,8 @@ async fn resident_compiled_sync_handler_commits_context_and_model_before_inferen
         "Child finding: The cache key must include the selected transcript prefix."
     ));
     assert_eq!(root_context_state(&fixture).generation, 2);
-    assert_eq!(fixture.campaign.actor.identity(), actor);
-    assert!(fixture.campaign.actor.terminal().get().is_none());
+    assert_eq!(fixture.context.actor.identity(), actor);
+    assert!(fixture.context.actor.terminal().get().is_none());
     inspected.finish();
     fixture.stop().await.unwrap();
 }
@@ -937,7 +937,7 @@ async fn resident_sync_context_failure_keeps_prefix_model_and_defers_children() 
 #[tokio::test]
 async fn resident_async_failed_deferred_unfold_keeps_bindings_and_never_launches_children() {
     let (_files, fixture, mut rounds) = start().await;
-    let actor = fixture.campaign.actor.identity();
+    let actor = fixture.context.actor.identity();
     let setup = next_round(&mut rounds).await;
     setup.async_cell(
         "async-failure-setup",
@@ -995,7 +995,7 @@ async fn resident_async_failed_deferred_unfold_keeps_bindings_and_never_launches
         ),
         _ => panic!("expected the authored native failure, received {settled:?}"),
     }
-    let graph = fixture.campaign.forest.inspect_host_graph();
+    let graph = fixture.context.forest.inspect_host_graph();
     assert!(
         graph.iter().filter(|node| node.actor != actor).all(|node| {
             node.terminal
@@ -1019,8 +1019,8 @@ async fn resident_async_failed_deferred_unfold_keeps_bindings_and_never_launches
         output["items"].as_array().unwrap().last().unwrap()["output"],
         "42"
     );
-    assert_eq!(fixture.campaign.actor.identity(), actor);
-    assert!(fixture.campaign.actor.terminal().get().is_none());
+    assert_eq!(fixture.context.actor.identity(), actor);
+    assert!(fixture.context.actor.terminal().get().is_none());
     reused.finish();
     assert!(
         tokio::time::timeout(Duration::from_millis(200), rounds.recv())
@@ -1033,7 +1033,7 @@ async fn resident_async_failed_deferred_unfold_keeps_bindings_and_never_launches
 #[tokio::test]
 async fn resident_sync_context_cancel_discards_staging_and_never_launches_children() {
     let (_files, fixture, mut rounds) = start().await;
-    let root_identity = fixture.campaign.actor.identity();
+    let root_identity = fixture.context.actor.identity();
     let setup = next_round(&mut rounds).await;
     setup.cell(
         "context-setup",
@@ -1048,9 +1048,9 @@ async fn resident_sync_context_cancel_discards_staging_and_never_launches_childr
     );
     let store = fixture.runtime.store();
     let identity = harness::embedding::HostIdentity {
-        run: runtime_namespace(&fixture.campaign.config.run_root),
+        run: runtime_namespace(&fixture.context.config.run_root),
         actor: AgentPath("/root".into()),
-        incarnation: fixture.campaign.actor.identity().incarnation.0.to_string(),
+        incarnation: fixture.context.actor.identity().incarnation.0.to_string(),
     };
     let operation = tokio::time::timeout(CELL_TIMEOUT, async {
         loop {
@@ -1066,7 +1066,7 @@ async fn resident_sync_context_cancel_discards_staging_and_never_launches_childr
                     namespace: None,
                 };
                 if fixture
-                    .campaign
+                    .context
                     .actor
                     .hosted_workbench_waiting(&context)
                     .is_some()
@@ -1160,8 +1160,8 @@ async fn resident_sync_context_cancel_discards_staging_and_never_launches_childr
             .find(|(_, _, item)| item == &original_setup)
             .map(|(_, hash, _)| hash)
     );
-    assert_eq!(fixture.campaign.actor.identity(), root_identity);
-    assert!(fixture.campaign.actor.terminal().get().is_none());
+    assert_eq!(fixture.context.actor.identity(), root_identity);
+    assert!(fixture.context.actor.terminal().get().is_none());
     let prefix = |history: Vec<(harness::model::RequestId, harness::item::ItemHash, Item)>| {
         history
             .into_iter()

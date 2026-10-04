@@ -187,13 +187,13 @@ pub struct DurableActorAdmission {
     pub supervisor_parent: Option<ActorRef>,
     pub context_parent: Option<ActorRef>,
     pub actor_path: Option<String>,
-    pub role: String,
+    pub role: crate::ActorRole,
     #[serde(default)]
     pub descendant_depth: u16,
     #[serde(default)]
     pub descendant_active_children: Option<u16>,
     pub model: Option<String>,
-    pub effort: Option<String>,
+    pub effort: Option<crate::ForkEffort>,
     pub instructions: Option<String>,
     pub launch_worktrees: Vec<String>,
     pub source_layer: Vec<PathBuf>,
@@ -209,13 +209,11 @@ impl DurableActorAdmission {
             supervisor_parent: descriptor.supervisor_parent(),
             context_parent: descriptor.context_parent(),
             actor_path: descriptor.actor_path().map(ToString::to_string),
-            role: format!("{:?}", descriptor.effective_role().role()).to_ascii_lowercase(),
+            role: descriptor.effective_role().role(),
             descendant_depth: descendants.maximum_depth,
             descendant_active_children: descendants.maximum_active_children,
             model: descriptor.model_name().map(str::to_owned),
-            effort: descriptor
-                .fork_effort()
-                .map(|effort| format!("{effort:?}").to_ascii_lowercase()),
+            effort: descriptor.fork_effort(),
             instructions: descriptor.instructions().map(str::to_owned),
             launch_worktrees: launch_worktrees.to_vec(),
             source_layer: descriptor.source_layer().to_vec(),
@@ -461,7 +459,7 @@ impl ActorRecoveryJournal {
             .get(&successor.actor)
             .ok_or_else(|| std::io::Error::other("root successor admission is absent"))?;
         let is_root = |record: &DurableActorRecord| {
-            record.admission.role == "root"
+            record.admission.role == crate::ActorRole::Root
                 && record.admission.creator.is_none()
                 && record.admission.supervisor_parent.is_none()
                 && record.admission.context_parent.is_none()
@@ -876,7 +874,7 @@ fn validate_startup(
             "startup manifest predecessor and exact revision pin must be paired",
         ));
     }
-    if admission.role != "root"
+    if admission.role != crate::ActorRole::Root
         || admission.creator.is_some()
         || admission.supervisor_parent.is_some()
         || admission.context_parent.is_some()
@@ -897,7 +895,7 @@ fn validate_startup(
         if previous == admission.actor
             || owner_for_admission(&prior.admission) == owner_for_admission(admission)
             || prior.admission.actor_path != admission.actor_path
-            || prior.admission.role != "root"
+            || prior.admission.role != crate::ActorRole::Root
             || records.values().any(|record| {
                 record
                     .startup
@@ -1057,7 +1055,7 @@ fn validate_application_intent(
         incarnation,
     }) = intent
     {
-        let root = admission.role == "root"
+        let root = admission.role == crate::ActorRole::Root
             && admission.creator.is_none()
             && admission.supervisor_parent.is_none()
             && admission.context_parent.is_none();

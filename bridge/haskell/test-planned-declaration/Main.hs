@@ -1,4 +1,6 @@
-module Main (main) where
+module Main (main, tests) where
+
+import Tidepool.Test.Runner (TestTree, runTests, testCase, testGroup)
 
 import Control.Exception (bracket, IOException, try)
 import Control.Monad (forM_, unless)
@@ -49,8 +51,16 @@ import Tidepool.Session
   , mkThinSessionIface, writeSessionIface, injectSessionIface, sessionHiPath, sessionBinderName, registerSessionInterfaceLocation )
 
 main :: IO ()
-main = withScratch $ \work -> do
-  checkSessionModuleNames
+main = runTests tests
+
+tests :: TestTree
+tests = testGroup "test-planned-declaration"
+  [ testCase "reserved session module identity" checkSessionModuleNames
+  , testCase "certified original declaration lifecycle" scenario
+  ]
+
+scenario :: IO ()
+scenario = withScratch $ \work -> do
   authored <- readFile "test-planned-declaration/fixtures/cell.hs"
   wrapper <- readFile "test-planned-declaration/fixtures/decl-wrapper.hs"
   checkWrapper <- readFile "test-planned-declaration/fixtures/check-wrapper.hs"

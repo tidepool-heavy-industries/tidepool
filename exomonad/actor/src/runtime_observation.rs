@@ -591,7 +591,91 @@ pub struct ActorRuntimeObservationHandle {
     inner: Arc<RwLock<ActorRuntimeObservation>>,
 }
 
+/// Observation of an actual provider round. Dropping an unfinished round cannot
+/// leave the actor reporting success or an indefinitely active provider.
+pub struct ProviderTurnLease {
+    owner: ActorRuntimeObservationHandle,
+    turn: Option<exomonad_model::ProviderTurnObservation>,
+    settled_revision: usize,
+}
+
+impl ProviderTurnLease {
+    pub fn succeed(mut self) {
+        self.finish(exomonad_model::ProviderTurnState::Succeeded);
+    }
+
+    pub fn fail(mut self, failure: exomonad_model::ProviderFailure) {
+        self.finish(exomonad_model::ProviderTurnState::Failed(failure));
+    }
+
+    pub fn interrupt(mut self) {
+        self.finish(exomonad_model::ProviderTurnState::Interrupted);
+    }
+
+    fn finish(&mut self, outcome: exomonad_model::ProviderTurnState) {
+        let Some(mut turn) = self.turn.take() else {
+            return;
+        };
+        let mut state = self.owner.inner.write();
+        if !state.provider_turn.as_ref().is_some_and(|current| {
+            current.thread == turn.thread
+                && current.turn == turn.turn
+                && current.revision == turn.revision
+        }) {
+            return;
+        }
+        turn.revision = self.settled_revision;
+        turn.state = outcome;
+        state.provider_turn = Some(turn);
+        state.provider_observation_stale = false;
+        state.provider_idle_since_unix_ms = Some(unix_time_ms());
+    }
+}
+
+impl Drop for ProviderTurnLease {
+    fn drop(&mut self) {
+        self.finish(exomonad_model::ProviderTurnState::Interrupted);
+    }
+}
+
 impl ActorRuntimeObservationHandle {
+    /// Called by the round owner after it has acquired its execution lease.
+    /// Success is published only after the corresponding durable settlement.
+    pub fn begin_provider_turn(
+        &self,
+        thread: String,
+        turn: String,
+    ) -> Result<ProviderTurnLease, &'static str> {
+        let mut state = self.inner.write();
+        if state
+            .provider_turn
+            .as_ref()
+            .is_some_and(|current| current.state == exomonad_model::ProviderTurnState::Active)
+        {
+            return Err("a provider round is already observed active");
+        }
+        let settled_revision = state
+            .provider_turn
+            .as_ref()
+            .map_or(0, |previous| previous.revision)
+            .checked_add(2)
+            .ok_or("provider observation revision exhausted")?;
+        let turn = exomonad_model::ProviderTurnObservation {
+            thread,
+            turn,
+            revision: settled_revision - 1,
+            state: exomonad_model::ProviderTurnState::Active,
+        };
+        state.provider_observation_stale = false;
+        state.provider_idle_since_unix_ms = None;
+        state.provider_turn = Some(turn.clone());
+        Ok(ProviderTurnLease {
+            owner: self.clone(),
+            turn: Some(turn),
+            settled_revision,
+        })
+    }
+
     pub fn publish_launch_role(&self, role: crate::EffectiveRole, launched_at_unix_ms: i64) {
         let mut observation = self.inner.write();
         observation.launch_role = Some(role);
@@ -861,6 +945,90 @@ impl ActorRuntimeObservationHandle {
 mod provider_health_tests {
     use super::*;
     use exomonad_model::{ProviderObservation, ProviderTurnObservation, ProviderTurnState};
+
+    #[test]
+    fn owned_provider_round_authorizes_idle_only_after_success() {
+        let handle = ActorRuntimeObservationHandle::default();
+        let round = handle
+            .begin_provider_turn("thread".into(), "first".into())
+            .unwrap();
+        assert_eq!(
+            handle.snapshot().disposition(false),
+            AgentDisposition::SettledAwaitingProvider
+        );
+        assert!(handle
+            .begin_provider_turn("thread".into(), "overlap".into())
+            .is_err());
+        round.succeed();
+        assert_eq!(
+            handle.snapshot().disposition(false),
+            AgentDisposition::IdleRetained
+        );
+        assert_eq!(
+            handle.snapshot().disposition(true),
+            AgentDisposition::Working
+        );
+        let settled_revision = handle.snapshot().provider_turn.unwrap().revision;
+        let next = handle
+            .begin_provider_turn("thread".into(), "next".into())
+            .unwrap();
+        assert!(handle.snapshot().provider_turn.unwrap().revision > settled_revision);
+        assert!(handle.snapshot().provider_idle_since_unix_ms.is_none());
+        next.fail(exomonad_model::ProviderFailure::RequestRejected);
+        assert_eq!(
+            handle.snapshot().disposition(false),
+            AgentDisposition::NeedsAttention
+        );
+    }
+
+    #[test]
+    fn abandoned_provider_round_requires_attention_until_a_new_success() {
+        let handle = ActorRuntimeObservationHandle::default();
+        let round = handle
+            .begin_provider_turn("thread".into(), "first".into())
+            .unwrap();
+        drop(round);
+        assert_eq!(
+            handle.snapshot().provider_turn.unwrap().state,
+            ProviderTurnState::Interrupted
+        );
+        assert_eq!(
+            handle.snapshot().disposition(false),
+            AgentDisposition::NeedsAttention
+        );
+        handle
+            .begin_provider_turn("thread".into(), "recovered".into())
+            .unwrap()
+            .succeed();
+        assert_eq!(
+            handle.snapshot().disposition(false),
+            AgentDisposition::IdleRetained
+        );
+    }
+
+    #[test]
+    fn obsolete_provider_round_cannot_overwrite_newer_observation() {
+        let handle = ActorRuntimeObservationHandle::default();
+        let old = handle
+            .begin_provider_turn("thread".into(), "old".into())
+            .unwrap();
+        handle.publish_provider_observation(ProviderObservation {
+            turn: Some(ProviderTurnObservation {
+                thread: "thread".into(),
+                turn: "new".into(),
+                revision: 10,
+                state: ProviderTurnState::Active,
+            }),
+            ..Default::default()
+        });
+        old.succeed();
+        let observed = handle.snapshot();
+        assert_eq!(observed.provider_turn.as_ref().unwrap().turn, "new");
+        assert_eq!(
+            observed.disposition(false),
+            AgentDisposition::SettledAwaitingProvider
+        );
+    }
 
     #[test]
     fn retirement_candidate_requires_positive_idle_and_no_request() {

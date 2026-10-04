@@ -222,7 +222,6 @@ async fn embedded_checkpoint_children_survive_a_later_parent_cell_failure() {
         exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |config| {
-            config.backend = crate::exomonad::HostBackendOptions::Embedded;
             config.embedded = Some(settings.clone());
         },
     )
@@ -297,37 +296,18 @@ async fn embedded_checkpoint_children_survive_a_later_parent_cell_failure() {
     let (shutdown_tx, shutdown_rx) = watch::channel(None);
     let (_config_tx, config_rx) = watch::channel(campaign.config.clone());
     let fleet = InteractiveFleet {
+            test_observer: None,
         provider_forest: Arc::clone(&campaign.forest),
         root: campaign.actor.clone(),
         config: campaign.config.clone(),
         run_root: campaign.config.run_root.clone(),
         output_store: service.runtime.store(),
-        #[cfg(feature = "codex-compat")]
-        tmux: TmuxSession::new(&campaign.config.tmux_session).unwrap(),
-        #[cfg(feature = "codex-compat")]
-        backend: HostRuntimeMode::Embedded,
+
         worktrees: campaign.worktrees.clone(),
-        #[cfg(feature = "codex-compat")]
-        bindings: campaign.bindings.clone(),
+
         readiness: readiness_tx,
         worktree_authority: campaign.authority.clone(),
-        #[cfg(feature = "codex-compat")]
-        watch_retention: Arc::new(|_, _| false),
-        #[cfg(feature = "codex-compat")]
-        watch_observation: Arc::new(|_, _, _| false),
-        #[cfg(feature = "codex-compat")]
-        open_request: Arc::new(|_| None),
-        #[cfg(feature = "codex-compat")]
-        source_layers: None,
-        #[cfg(feature = "codex-compat")]
-        actor_recovery: exomonad_actor::ActorRecoveryJournal::open(
-            campaign.config.run_root.join("actor-lifecycle.v2.jsonl"),
-        )
-        .unwrap(),
-        #[cfg(feature = "codex-compat")]
-        recovered_threads: Arc::new(BTreeMap::new()),
-        #[cfg(feature = "codex-compat")]
-        recovered_root_predecessor: None,
+
         host_graph: {
             let forest = campaign.forest.clone();
             Arc::new(move || forest.inspect_host_graph())

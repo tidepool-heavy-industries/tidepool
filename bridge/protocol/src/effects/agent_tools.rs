@@ -29,7 +29,7 @@ pub fn agent_tools() -> Effect {
         helpers_row_polymorphic: true,
         extra_imports: &[],
         type_defs: Vec::new(),
-        foreign_types: &[],
+        external_types: &[],
         errors: None,
         verbs: vec![
             Verb {

@@ -6,6 +6,8 @@
 
 module Main where
 
+import Tidepool.Test.Runner (TestTree, runTests, testCase, testGroup)
+
 import Control.Exception (evaluate)
 import Control.Monad (unless)
 import Data.Text (Text)
@@ -15,36 +17,40 @@ import GHC.Generics (Generic)
 import Tidepool.Inspection.Tree
 
 main :: IO ()
-main = do
-  punctuationAndChildrenRespectBudget
-  pagesCoverTheExactTree
-  infiniteLeavesAreProductive
-  exhaustedBudgetDoesNotForceTheNextField
-  legacyLeavesReportUnavailableDetail
-  applicationsParenthesizeOnlyAboveApplicationPrecedence
-  compactCompoundValuesStayOnOneLine
-  wideCompoundValuesBreakOnlyWhenNeeded
-  textUsesEscapedStringLiterals
-  topLevelTextKeepsLineBreaks
-  nonAsciiTextIsNotNumericallyEscaped
-  controlCharactersAreEscaped
-  independentSiblingsKeepTheirKeys
-  collapsedFieldsRemainLazy
-  infiniteSequencesHaveBoundedFrontiers
-  continuedFrontierLabelsStayBounded
-  smallSequenceGrantsAdvanceTheirActualSuffix
-  unsupportedFieldsRemainOpaque
-  structuralGenericUsesFieldNames
-  recursiveGenericDisplayIsProductive
-  nestedInfiniteStringsAreProductive
-  collapsedSequenceTailRemainsLazy
-  shortGroupBudgetDoesNotForceFields
-  exactBudgetRetainsUnknownSuffixes
-  tinyGrantsRetainConstructorNames
-  tinyConstructorFieldsAdvanceTheirActualSuffix
-  oversizedConstructorNamesMakeProgressWithoutHidingFields
-  oversizedFieldNamesRetainTheirSuffixAndValue
-  unavailableDetailDoesNotReplaceSupportedText
+main = runTests tests
+
+tests :: TestTree
+tests = testGroup "display-tree"
+  [ testCase "punctuationAndChildrenRespectBudget" punctuationAndChildrenRespectBudget
+  , testCase "pagesCoverTheExactTree" pagesCoverTheExactTree
+  , testCase "infiniteLeavesAreProductive" infiniteLeavesAreProductive
+  , testCase "exhaustedBudgetDoesNotForceTheNextField" exhaustedBudgetDoesNotForceTheNextField
+  , testCase "legacyLeavesReportUnavailableDetail" legacyLeavesReportUnavailableDetail
+  , testCase "applicationsParenthesizeOnlyAboveApplicationPrecedence" applicationsParenthesizeOnlyAboveApplicationPrecedence
+  , testCase "compactCompoundValuesStayOnOneLine" compactCompoundValuesStayOnOneLine
+  , testCase "wideCompoundValuesBreakOnlyWhenNeeded" wideCompoundValuesBreakOnlyWhenNeeded
+  , testCase "textUsesEscapedStringLiterals" textUsesEscapedStringLiterals
+  , testCase "topLevelTextKeepsLineBreaks" topLevelTextKeepsLineBreaks
+  , testCase "nonAsciiTextIsNotNumericallyEscaped" nonAsciiTextIsNotNumericallyEscaped
+  , testCase "controlCharactersAreEscaped" controlCharactersAreEscaped
+  , testCase "independentSiblingsKeepTheirKeys" independentSiblingsKeepTheirKeys
+  , testCase "collapsedFieldsRemainLazy" collapsedFieldsRemainLazy
+  , testCase "infiniteSequencesHaveBoundedFrontiers" infiniteSequencesHaveBoundedFrontiers
+  , testCase "continuedFrontierLabelsStayBounded" continuedFrontierLabelsStayBounded
+  , testCase "smallSequenceGrantsAdvanceTheirActualSuffix" smallSequenceGrantsAdvanceTheirActualSuffix
+  , testCase "unsupportedFieldsRemainOpaque" unsupportedFieldsRemainOpaque
+  , testCase "structuralGenericUsesFieldNames" structuralGenericUsesFieldNames
+  , testCase "recursiveGenericDisplayIsProductive" recursiveGenericDisplayIsProductive
+  , testCase "nestedInfiniteStringsAreProductive" nestedInfiniteStringsAreProductive
+  , testCase "collapsedSequenceTailRemainsLazy" collapsedSequenceTailRemainsLazy
+  , testCase "shortGroupBudgetDoesNotForceFields" shortGroupBudgetDoesNotForceFields
+  , testCase "exactBudgetRetainsUnknownSuffixes" exactBudgetRetainsUnknownSuffixes
+  , testCase "tinyGrantsRetainConstructorNames" tinyGrantsRetainConstructorNames
+  , testCase "tinyConstructorFieldsAdvanceTheirActualSuffix" tinyConstructorFieldsAdvanceTheirActualSuffix
+  , testCase "oversizedConstructorNamesMakeProgressWithoutHidingFields" oversizedConstructorNamesMakeProgressWithoutHidingFields
+  , testCase "oversizedFieldNamesRetainTheirSuffixAndValue" oversizedFieldNamesRetainTheirSuffixAndValue
+  , testCase "unavailableDetailDoesNotReplaceSupportedText" unavailableDetailDoesNotReplaceSupportedText
+  ]
 
 applicationsParenthesizeOnlyAboveApplicationPrecedence :: IO ()
 applicationsParenthesizeOnlyAboveApplicationPrecedence = do

@@ -1,6 +1,6 @@
 //! Production interrupt-to-owner-acknowledgment and subsequent cleanup samples.
 
-use super::warm_cell_performance::{ClientRequests, DaemonTrace, require_owned_daemon};
+use super::warm_cell_performance::{require_owned_daemon, ClientRequests, DaemonTrace};
 use super::*;
 use harness::model::{CallId, ConversationIdentity, OperationId, RequestId};
 use harness::provider::CancellationAcknowledgment;
@@ -146,7 +146,7 @@ async fn submit_input(
     assert_eq!(response.status(), reqwest::StatusCode::ACCEPTED);
 }
 
-async fn idle_projection(fixture: &RunningBrowserHost, cookie: &str) -> Value {
+async fn idle_projection(fixture: &HostedTestRuntime, cookie: &str) -> Value {
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             let (mut socket, snapshot) = browser_snapshot(fixture.address, cookie).await;
@@ -163,7 +163,7 @@ async fn idle_projection(fixture: &RunningBrowserHost, cookie: &str) -> Value {
 }
 
 async fn active_sleep(
-    fixture: &RunningBrowserHost,
+    fixture: &HostedTestRuntime,
     operation: &OperationId,
     context: &exomonad_tool::ToolInvocationContext,
     cookie: &str,
@@ -184,23 +184,21 @@ async fn active_sleep(
                     harness::store::ClaimState::Pending,
                     "authored Sleep must remain pending before interruption"
                 );
-                assert!(
-                    fixture
-                        .runtime
-                        .scheduler()
-                        .output(operation)
-                        .await
-                        .unwrap()
-                        .is_none()
-                );
-                if let Some(execution) = fixture.campaign.actor.hosted_workbench_waiting(context) {
+                assert!(fixture
+                    .runtime
+                    .scheduler()
+                    .output(operation)
+                    .await
+                    .unwrap()
+                    .is_none());
+                if let Some(execution) = fixture.context.actor.hosted_workbench_waiting(context) {
                     let (mut socket, snapshot) = browser_snapshot(fixture.address, cookie).await;
                     socket.close(None).await.unwrap();
                     let root = &snapshot["snapshot"]["actors"][0];
                     if root["lifecycle"] == "running"
                         && !root["activeRound"].is_null()
                         && fixture
-                            .campaign
+                            .context
                             .actor
                             .hosted_workbench_waiting(context)
                             .as_ref()
@@ -277,10 +275,10 @@ async fn production_engine_store_active_cancellation_50() {
         concurrent_jobs: 1,
     };
     let provider: Arc<dyn ResponsesTransport> = transport.clone();
-    let fixture = RunningBrowserHost::start(&settings, &provider)
+    let fixture = HostedTestRuntime::start(&settings, &provider)
         .await
         .unwrap();
-    let target = browser_target(&fixture.campaign);
+    let target = browser_target(&fixture.context);
     let api = format!("http://{}/api", fixture.address);
     let origin = format!("https://{}", fixture.address);
     let client = reqwest::Client::new();
@@ -360,7 +358,7 @@ async fn production_engine_store_active_cancellation_50() {
         // below can establish that this interrupt actually stopped this call.
         assert_eq!(
             fixture
-                .campaign
+                .context
                 .actor
                 .hosted_workbench_waiting(&context)
                 .as_ref(),
@@ -445,15 +443,13 @@ async fn production_engine_store_active_cancellation_50() {
             "durable output must retain cancellation, never the authored post-Sleep success"
         );
         idle_projection(&fixture, &cookie).await;
+        assert!(fixture
+            .context
+            .actor
+            .hosted_workbench_waiting(&context)
+            .is_none());
         assert!(
-            fixture
-                .campaign
-                .actor
-                .hosted_workbench_waiting(&context)
-                .is_none()
-        );
-        assert!(
-            fixture.campaign.actor.terminal().get().is_none(),
+            fixture.context.actor.terminal().get().is_none(),
             "interrupt preserves the issuer actor"
         );
         let control = store

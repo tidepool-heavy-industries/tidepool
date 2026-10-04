@@ -20,10 +20,22 @@ pub fn agent_launch() -> Effect {
         helpers_row_polymorphic: true,
         extra_imports: &[],
         type_defs: Vec::new(),
-        foreign_types: &[
-            ("ActorLaunchRole", "crate::ActorLaunchRoleWire"),
-            ("ActorEffectProfile", "crate::ActorEffectProfileWire"),
-            ("WorkerLifetime", "crate::WorkerLifetime"),
+        external_types: &[
+            crate::schema::ExternalType {
+                haskell_name: "ActorLaunchRole",
+                rust_wire: "crate::ActorLaunchRoleWire",
+                core_module: None,
+            },
+            crate::schema::ExternalType {
+                haskell_name: "ActorEffectProfile",
+                rust_wire: "crate::ActorEffectProfileWire",
+                core_module: None,
+            },
+            crate::schema::ExternalType {
+                haskell_name: "WorkerLifetime",
+                rust_wire: "crate::WorkerLifetime",
+                core_module: None,
+            },
         ],
         errors: None,
         verbs: vec![Verb {
@@ -86,12 +98,12 @@ pub(crate) fn launch_args(forked: bool) -> Vec<Arg> {
         Arg {
             name: "role",
             ty: HsType::Named("ActorLaunchRole"),
-            rust: RustBinding::Path("crate::ActorLaunchRoleWire"),
+            rust: RustBinding::External,
         },
         Arg {
             name: "profile",
             ty: HsType::Named("ActorEffectProfile"),
-            rust: RustBinding::Path("crate::ActorEffectProfileWire"),
+            rust: RustBinding::External,
         },
         Arg {
             name: "launchWorktrees",
@@ -103,7 +115,7 @@ pub(crate) fn launch_args(forked: bool) -> Vec<Arg> {
         args.push(Arg {
             name: "lifetime",
             ty: HsType::Named("WorkerLifetime"),
-            rust: RustBinding::Path("crate::WorkerLifetime"),
+            rust: RustBinding::External,
         });
     }
     args

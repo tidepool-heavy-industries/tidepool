@@ -181,7 +181,22 @@ pub fn matches_expected_failure(
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceRefusal {
+    NotClosed,
+    Unrepresentable,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct OracleRefusal {
+    pub class: SourceRefusal,
+    pub reason: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Expectations {
+    #[serde(default)]
+    pub refusals: BTreeMap<String, OracleRefusal>,
     pub source_revision: String,
     /// The generated oracle's domain: every manifest expectation key that GHC
     /// resolves to a binding declared in the source module. `None` for
@@ -211,6 +226,62 @@ impl OracleScope {
             (Some(_), _) => Self::CompilerIntroduced,
         }
     }
+}
+
+/// Compiler-owned diagnostic facts beside a cohort's portable code.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiagnosticInventory {
+    pub version: u32,
+    pub targets: Vec<TargetDiagnostic>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TargetDiagnostic {
+    pub name: String,
+    pub operations: Vec<DiagnosticOperation>,
+    pub labels: Vec<DiagnosticLabel>,
+    pub recovery_failures: Vec<String>,
+    pub diagnostic_failure: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiagnosticOperation {
+    pub module: String,
+    pub kind: DiagnosticOperationKind,
+    pub identity: String,
+    pub arguments: Vec<DiagnosticRepresentation>,
+    pub results: DiagnosticRepresentation,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DiagnosticOperationKind {
+    Primop,
+    Primcall,
+    Foreign,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+pub enum DiagnosticRepresentation {
+    Known {
+        reps: Vec<String>,
+    },
+    Unavailable {
+        reason: String,
+        #[serde(rename = "type")]
+        type_presentation: String,
+    },
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiagnosticLabel {
+    pub module: String,
+    pub identity: String,
 }
 
 /// Produced directly from GHC's prepared modules, not translated Core filenames.
@@ -1530,6 +1601,7 @@ mod tests {
     #[test]
     fn oracle_scope_distinguishes_source_tops_only_when_a_domain_is_declared() {
         let mut expectations = Expectations {
+            refusals: BTreeMap::new(),
             source_revision: "test".into(),
             source_tops: None,
             expectations: BTreeMap::new(),

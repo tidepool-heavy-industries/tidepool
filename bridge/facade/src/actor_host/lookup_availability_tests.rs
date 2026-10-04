@@ -8,7 +8,6 @@ async fn hosted_lookup_uses_actual_actor_row_for_constraint_availability() {
         exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |config| {
-            config.backend = crate::exomonad::HostBackendOptions::Embedded;
             configure_notebook_lookup_workspace(config);
         },
     )

@@ -310,13 +310,5 @@ crate::ask_effect_def!(crate::effect_defs::effect_decl_projection);
 
 crate::llm_effect_def!(crate::effect_defs::effect_decl_projection);
 
-// Worktree / RepoEvent, Subagent, Journal, and Green are all opt-in: NOT in
-// `build_base_stack`'s row, so a caller wanting managed worktrees, repository events, coupled
-// agent+worktree spawn, the run journal, or green threads builds its own row
-// containing them (the Worktree/RepoEvent acceptance harness does).
-// Worktree/RepoEvent/Journal/Green are MIGRATED —
-// `worktree_decl()`/`event_decl()`/`journal_decl()`/`green_decl()` come from
-// `src/generated/`, not a macro here. Subagent additionally requires
-// Worktree in the same row (its types reference
-// WorktreeSpec/WorktreeHandle/WorktreeError).
-crate::subagent_effect_def!(crate::effect_defs::effect_decl_projection);
+// Worktree, RepoEvent, Journal, and Green are opt-in effects outside the base row.
+// Their declarations come from src/generated/.

@@ -28,14 +28,16 @@ import GHC.Core.Make (mkCoreConApps)
 import GHC.Builtin.Types (intDataCon, intTy, mkListTy, mkPromotedListTy, liftedTypeKind)
 import GHC.Core.TyCo.Rep (Type(..), Scaled(..))
 import GHC.Core.TyCo.Subst (substTyWith)
-import GHC.Core.Coercion (Role(Nominal))
+import GHC.Core.Coercion
+  ( Role(Nominal, Representational), mkSymCo, mkUnbranchedAxInstCo )
+import GHC.Core.Utils (mkCast)
 import GHC.Data.FastString (fsLit)
 import GHC.Types.Unique.Supply (UniqSupply, initUs, mkSplitUniqSupply, takeUniqFromSupply)
 import GHC.Core.Type
   ( mkTyConApp, splitTyConApp_maybe
   , isLiftedTypeKind, typeKind )
 import GHC.Core.TyCo.Compare (eqType)
-import GHC.Core.TyCon (TyCon, isNewTyCon, tyConArity, tyConDataCons, tyConRoles, tyConTyVars)
+import GHC.Core.TyCon (TyCon, isNewTyCon, newTyConCo, tyConArity, tyConDataCons, tyConRoles, tyConTyVars)
 import GHC.Core.DataCon
   ( DataCon, dataConOrigResTy, dataConName, dataConWorkId, dataConWrapId_maybe
   , dataConInstOrigArgTys, dataConUnivTyVars, isVanillaDataCon )
@@ -323,7 +325,7 @@ elaboratePreparedSites env authority siblings bindings = do
                 if not (eqType instantiatedResult carrierType && validField)
                   then Left "RequestSite constructor ABI must accept exactly one Int field"
                   else if eqType carrierType (spCarrierType plan)
-                    then Right (wire, inputs, requestTypes, carrierConstructor, reply)
+                    then Right (wire, inputs, requestTypes, carrier, reply)
                     else Left "site-aware sibling has another RequestSite input or reply index" of
                 Left detail -> do
                   modify' (\current -> current
@@ -331,7 +333,7 @@ elaboratePreparedSites env authority siblings bindings = do
                         (vsName spec ++ " site in " ++ T.unpack originName ++ ": " ++ detail)
                         : esRejections current })
                   pure (mkApps headExpr rewrittenArguments)
-                Right (wireType, siteInputs, requestTypes, carrierConstructor, carrierReply) -> do
+                Right (wireType, siteInputs, requestTypes, carrierTyCon, carrierReply) -> do
                   missing <- traverse freshEvidence (spMissingEvidence plan)
                   ordinal <- nextOrdinal originName
                   witnesses <- liftIO (traverse (captureCheckedTypeWitness env) siteInputs)
@@ -341,9 +343,14 @@ elaboratePreparedSites env authority siblings bindings = do
                         { ysInputTypeWitnesses = witnesses, ysRequestTypeSignatures = signatures }
                       literal = mkCoreConApps intDataCon
                         [Lit (LitNumber LitNumInt (fromIntegral (ysSite site)))]
-                      carrier = mkCoreConApps carrierConstructor
-                        [ Type (mkPromotedListTy liftedTypeKind siteInputs)
-                        , Type carrierReply, literal ]
+                      -- Sites are elaborated after simplify/tidy. A newtype
+                      -- worker application cannot survive into CorePrep/STG;
+                      -- use its genuine representation axiom to wrap the Int.
+                      carrierArguments =
+                        [mkPromotedListTy liftedTypeKind siteInputs, carrierReply]
+                      carrier = mkCast literal (mkSymCo
+                        (mkUnbranchedAxInstCo Representational
+                          (newTyConCo carrierTyCon) carrierArguments []))
                   current <- get
                   let (wireNode, graph1) = runState (internType wireType) (esTypeGraph current)
                       (inputNodes, graph2) = runState (traverse internType siteInputs) graph1

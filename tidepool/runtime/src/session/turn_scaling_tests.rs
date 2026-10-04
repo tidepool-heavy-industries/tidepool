@@ -15,7 +15,7 @@ use tidepool_testing::effect_surface::TestEffectSurface;
 use tidepool_toolchain::checked_cell::CheckedItemKind;
 
 #[derive(Clone)]
-struct QuietOutput;
+pub(in crate::session) struct QuietOutput;
 
 impl OutputSink for QuietOutput {
     fn drain(&self) -> Vec<String> {
@@ -27,11 +27,11 @@ impl OutputSink for QuietOutput {
     }
 }
 
-type ScaleSession = ResidentSession<frunk::HNil, QuietOutput>;
+pub(in crate::session) type ScaleSession = ResidentSession<frunk::HNil, QuietOutput>;
 
 /// Choose the existing publication owner; durable measurements never use the
 /// ephemeral publication shortcut.
-enum ScalePublication {
+pub(in crate::session) enum ScalePublication {
     Ephemeral,
     Durable {
         owner: RecoveryPublicOwner,
@@ -141,7 +141,7 @@ fn measured<T>(
     measured_duration(resident, images, scenario, phase, item, action).0
 }
 
-fn execute_cell(
+pub(in crate::session) fn execute_cell(
     resident: &mut ScaleSession,
     public: ScopeId,
     effects: &TestEffectSurface,
@@ -224,6 +224,7 @@ fn try_execute_cell_with_authority_checks(
         authority_checks,
         &SourceImports::new(),
     )
+    .map(|(elapsed, _)| elapsed)
 }
 
 fn try_execute_cell_with_template_imports(
@@ -238,7 +239,7 @@ fn try_execute_cell_with_template_imports(
     publication_target: &ScalePublication,
     authority_checks: AuthorityChecks,
     template_imports: &SourceImports,
-) -> Result<Duration, ResidentError> {
+) -> Result<(Duration, Vec<Arc<PreparedProgram>>), ResidentError> {
     let cell_started = Instant::now();
     let mut expected_public_winners: std::collections::BTreeMap<_, _> = resident
         .public_visibility_snapshot_in(public)
@@ -370,6 +371,13 @@ fn try_execute_cell_with_template_imports(
                 .collect::<Vec<_>>(),
         })
     );
+    // Keep the actual compiler products for owner tests that inspect structural
+    // link contracts. These are observations of admitted output, not authority.
+    let native_targets = program
+        .items()
+        .iter()
+        .filter_map(|item| item.native().map(|native| native.target_owned()))
+        .collect();
     let prefix = resident
         .begin_cell_program(admission, program)
         .unwrap()
@@ -620,7 +628,7 @@ fn try_execute_cell_with_template_imports(
             "phase": format!("{label}.artifact_inventory"), "inventory": inventory,
         })
     );
-    Ok(elapsed)
+    Ok((elapsed, native_targets))
 }
 
 fn growing_prefix_with_publication(prefix: usize, baseline: usize, durable: bool) {
@@ -1595,4 +1603,198 @@ fn demand_missing_retained(
     };
     eprintln!("durable-recovery exact_missing_retained={identity:?} generation={generation}");
     (identity, generation)
+}
+
+/// Real retained values and a callable cross the checked-cell compiler boundary.
+/// Rebinding changes the public winner while previously admitted declarations
+/// continue to demand the exact original native owners.
+#[test]
+fn checked_cell_retained_imports_preserve_value_callable_and_generation() {
+    tidepool_testing::eval_harness::require_extract();
+    let root = tempfile::tempdir().unwrap();
+    let effects = TestEffectSurface::minimal(&[]).unwrap();
+    let images = Arc::new(ImageRegistry::new());
+    let lib = SessionLib::open(
+        SessionId(1010),
+        root.path(),
+        ModuleEnv::standalone_default(),
+    )
+    .unwrap()
+    .with_validation_include(effects.include_paths().to_vec());
+    let mut persistent = PersistentSession::new(Some(lib), 1024 * 1024);
+    persistent.set_image_registry(images.clone());
+    let public = persistent.mint_scope(ScopeId::ROOT).unwrap();
+    let mut resident =
+        ResidentSession::from_persistent_for_test(frunk::HNil, QuietOutput, persistent);
+    execute_cell(
+        &mut resident,
+        public,
+        &effects,
+        &images,
+        (0, 0),
+        "retained_producer",
+        include_str!("fixtures/retained-import-producer.hs"),
+        0,
+        &ScalePublication::Ephemeral,
+    );
+    let value_owner = resident
+        .current_binding_in(public, "producerValue")
+        .unwrap();
+    let callable_owner = resident.current_binding_in(public, "producerFn").unwrap();
+    assert_ne!(value_owner.0, callable_owner.0);
+    execute_cell(
+        &mut resident,
+        public,
+        &effects,
+        &images,
+        (0, 0),
+        "retained_consumer_declaration",
+        include_str!("fixtures/retained-import-consumer.hs"),
+        1,
+        &ScalePublication::Ephemeral,
+    );
+
+    // The producer fixture returns this exact list. Its callable adds the
+    // list length, so applying it to that length yields 3 + 3.
+    let expected_value = [1_i64, 2, 3];
+    let expected_result = 6_i64;
+    let check_original = format!(
+        "if consumerValue == {expected_value:?} && consumerResult == {expected_result} then pure () else error \"retained import oracle mismatch\""
+    );
+    let (_, targets) = try_execute_cell_with_template_imports(
+        &mut resident,
+        public,
+        &effects,
+        &images,
+        (0, 0),
+        "retained_original_consumer",
+        &check_original,
+        0,
+        &ScalePublication::Ephemeral,
+        AuthorityChecks::Configured,
+        &SourceImports::new(),
+    )
+    .unwrap();
+    assert_authentic_retained_link_rejects_wrong_generation(&targets);
+
+    let retained = resident.prepared_retained();
+    for owner in [value_owner, callable_owner] {
+        assert!(retained.iter().any(|(identity, generation)| identity.module
+            == owner.1.module_name()
+            && *generation == owner.1.gen().0));
+    }
+    execute_cell(
+        &mut resident,
+        public,
+        &effects,
+        &images,
+        (0, 0),
+        "retained_replacement",
+        include_str!("fixtures/retained-import-replacement.hs"),
+        0,
+        &ScalePublication::Ephemeral,
+    );
+    assert_ne!(
+        resident
+            .current_binding_in(public, "producerValue")
+            .unwrap(),
+        value_owner
+    );
+    assert_ne!(
+        resident.current_binding_in(public, "producerFn").unwrap(),
+        callable_owner
+    );
+    execute_cell(
+        &mut resident,
+        public,
+        &effects,
+        &images,
+        (0, 0),
+        "retained_original_after_rebind",
+        &check_original,
+        0,
+        &ScalePublication::Ephemeral,
+    );
+    execute_cell(
+        &mut resident,
+        public,
+        &effects,
+        &images,
+        (0, 0),
+        "retained_current_after_rebind",
+        "if producerValue == [10,20] && producerFn (length producerValue) == 102 then pure () else error \"current import mismatch\"",
+        0,
+        &ScalePublication::Ephemeral,
+    );
+    let roots_before = resident.persistent_roots_count();
+    let retirement = resident.retire_scope(public);
+    assert!(retirement.bindings_retired >= 4);
+    assert!(retirement.roots_released > 0);
+    assert_eq!(
+        resident.persistent_roots_count(),
+        roots_before - retirement.roots_released
+    );
+    assert!(resident
+        .current_binding_in(public, "producerValue")
+        .is_none());
+    assert!(resident.current_binding_in(public, "producerFn").is_none());
+    assert!(!resident
+        .prepared_retained()
+        .iter()
+        .any(
+            |(identity, _)| identity.module == value_owner.1.module_name()
+                || identity.module == callable_owner.1.module_name()
+        ));
+    assert_eq!(resident.parked_count(), 0);
+}
+
+/// Structural negative only: correct shape metadata is taken from actual
+/// compiler output. No product certification or machine installation is minted
+/// here. The valid link control must pass before its generation is changed.
+fn assert_authentic_retained_link_rejects_wrong_generation(targets: &[Arc<PreparedProgram>]) {
+    use tidepool_repr::execution_schema::{link_program, ImportedValue, LinkError, MachineImports};
+    let mut tested = false;
+    for target in targets {
+        let Some(retained) = target
+            .globals()
+            .iter()
+            .find(|global| global.required_generation.is_some())
+        else {
+            continue;
+        };
+        let mut imports = MachineImports::default();
+        for global in target.globals() {
+            imports.values.insert(
+                global.identity.clone(),
+                ImportedValue {
+                    identity: global.identity.clone(),
+                    rep: global.rep,
+                    entry_signature: global
+                        .entry_signature
+                        .map(|signature| target.signatures()[signature.0 as usize].clone()),
+                    evaluated: global.required_evaluated,
+                    generation: global.required_generation.unwrap_or(0),
+                },
+            );
+        }
+        assert!(link_program(target.as_ref().clone(), &imports).is_ok());
+        let correct = imports.clone();
+        let imported = imports.values.get_mut(&retained.identity).unwrap();
+        imported.generation = imported.generation.checked_add(1).unwrap();
+        assert_eq!(
+            link_program(target.as_ref().clone(), &imports).unwrap_err(),
+            LinkError::ImportContract(retained.identity.clone())
+        );
+        let mut missing = correct;
+        missing.values.remove(&retained.identity);
+        assert_eq!(
+            link_program(target.as_ref().clone(), &missing).unwrap_err(),
+            LinkError::MissingImport(retained.identity.clone())
+        );
+        tested = true;
+    }
+    assert!(
+        tested,
+        "production consumer must retain a generation-stamped global import"
+    );
 }

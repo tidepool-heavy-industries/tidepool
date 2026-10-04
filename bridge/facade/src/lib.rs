@@ -16,8 +16,7 @@ pub mod actor_host;
 pub mod compile_report;
 pub mod exomonad;
 pub mod haskell_sources;
-#[cfg(feature = "codex-compat")]
-mod host_dynamic_tools;
+
 pub mod model_turn;
 pub mod run_map;
 pub use tidepool_bridge as bridge;

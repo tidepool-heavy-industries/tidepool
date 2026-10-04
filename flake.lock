@@ -1,20 +1,5 @@
 {
   "nodes": {
-    "codex": {
-      "inputs": {
-        "nixpkgs": "nixpkgs",
-        "rust-overlay": "rust-overlay"
-      },
-      "locked": {
-        "path": "./vendor/codex",
-        "type": "path"
-      },
-      "original": {
-        "path": "./vendor/codex",
-        "type": "path"
-      },
-      "parent": []
-    },
     "flake-utils": {
       "inputs": {
         "systems": "systems"
@@ -83,22 +68,6 @@
         "type": "github"
       }
     },
-    "nixpkgs": {
-      "locked": {
-        "lastModified": 1769461804,
-        "narHash": "sha256-msG8SU5WsBUfVVa/9RPLaymvi5bI8edTavbIq3vRlhI=",
-        "owner": "NixOS",
-        "repo": "nixpkgs",
-        "rev": "bfc1b8a4574108ceef22f02bafcf6611380c100d",
-        "type": "github"
-      },
-      "original": {
-        "owner": "NixOS",
-        "ref": "nixos-unstable",
-        "repo": "nixpkgs",
-        "type": "github"
-      }
-    },
     "nixpkgs_2": {
       "locked": {
         "lastModified": 1771008912,
@@ -117,34 +86,12 @@
     },
     "root": {
       "inputs": {
-        "codex": "codex",
         "flake-utils": "flake-utils",
         "harnessNixpkgs": "harnessNixpkgs",
         "harnessWeb": "harnessWeb",
         "jev-dsl": "jev-dsl",
         "nixpkgs": "nixpkgs_2",
         "rust-overlay": "rust-overlay_2"
-      }
-    },
-    "rust-overlay": {
-      "inputs": {
-        "nixpkgs": [
-          "codex",
-          "nixpkgs"
-        ]
-      },
-      "locked": {
-        "lastModified": 1788332415,
-        "narHash": "sha256-BTFrmyh0oaVDsvA9NNw0YpbbeppTwU0t70iVx672Ew8=",
-        "owner": "oxalica",
-        "repo": "rust-overlay",
-        "rev": "860d7c835ab91bfc8972b67092f5f2db8e9390a0",
-        "type": "github"
-      },
-      "original": {
-        "owner": "oxalica",
-        "repo": "rust-overlay",
-        "type": "github"
       }
     },
     "rust-overlay_2": {

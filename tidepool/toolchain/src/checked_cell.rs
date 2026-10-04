@@ -4106,8 +4106,8 @@ mod tests {
             .is_err());
         let prepared = Arc::new(
             tidepool_repr::execution_schema::parse_program(
-                include_bytes!(
-                    "../../../bridge/haskell/test-prepared-stg/fixtures/m3-vertical.cbor"
+                &tidepool_test_data::prepared_encode::encode_wire_program(
+                    &tidepool_repr::execution_schema::testing::wire_program(),
                 ),
                 &crate::prepared_artifact::production_requirements().unwrap(),
                 tidepool_repr::execution_schema::DecodeLimits::default(),

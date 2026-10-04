@@ -219,13 +219,10 @@ pub fn agent_inspection() -> Effect {
                 doc: &["Explicit, refusal-bearing release of terminal actor observations."],
             },
         ],
-        foreign_types: &[
-            ("ActorContextRole", "crate::ActorContextRoleWire"),
-            (
-                "ProviderUsageObservation",
-                "crate::ProviderUsageObservationWire",
-            ),
-            ("ProviderUsageSummary", "crate::ProviderUsageSummaryWire"),
+        external_types: &[
+            crate::schema::ExternalType { haskell_name: "ActorContextRole", rust_wire: "crate::ActorContextRoleWire", core_module: None },
+            crate::schema::ExternalType { haskell_name: "ProviderUsageObservation", rust_wire: "crate::ProviderUsageObservationWire", core_module: None },
+            crate::schema::ExternalType { haskell_name: "ProviderUsageSummary", rust_wire: "crate::ProviderUsageSummaryWire", core_module: None },
         ],
         errors: None,
         verbs: vec![

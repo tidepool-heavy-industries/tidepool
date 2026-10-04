@@ -29,7 +29,7 @@ pub fn lookup() -> Effect {
         helpers_row_polymorphic: true,
         extra_imports: &[],
         type_defs: type_defs(),
-        foreign_types: &[],
+        external_types: &[],
         errors: None,
         verbs: vec![verb(
             "LookupRaw",

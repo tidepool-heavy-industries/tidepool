@@ -2,7 +2,7 @@
 //!
 //! `Tidepool.Async`'s substrate (`AsyncSpawnWith`/`AsyncDoneWith`/
 //! `AsyncJoinAnyWith`/`AsyncStatusWith`/`AsyncCancelWith`).
-//! Routed by CONSTRUCTOR NAME only, same discipline as [`crate::effects::subagent`]:
+//! Routed by CONSTRUCTOR NAME only, using the schema-owned roster:
 //! `classify_hole` never decodes a Green verb's payload (`AsyncSpawnWith`'s
 //! body field carries a live closure), so every
 //! live payload field beyond a bare `Int` is bound as
@@ -105,7 +105,7 @@ pub fn green() -> Effect {
             domain: None,
             doc: &[],
         }],
-        foreign_types: &[],
+        external_types: &[],
         errors: None,
         verbs: vec![
             Verb {

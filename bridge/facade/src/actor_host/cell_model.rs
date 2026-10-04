@@ -194,9 +194,9 @@ pub(super) fn admitted_factory(
     config: &ActorHostConfig,
 ) -> Arc<dyn CellModelFactory> {
     let effort = match config.effort {
-        exomonad_agent::ReasoningEffort::Low => Effort::Low,
-        exomonad_agent::ReasoningEffort::Medium => Effort::Medium,
-        exomonad_agent::ReasoningEffort::High => Effort::High,
+        exomonad_actor::ForkEffort::Low => Effort::Low,
+        exomonad_actor::ForkEffort::Medium => Effort::Medium,
+        exomonad_actor::ForkEffort::High => Effort::High,
     };
     #[cfg(test)]
     if let Some(transport) = service.test_transport() {

@@ -1279,19 +1279,6 @@ async fn a_nested_shell_record_declares_its_tools_in_place_and_both_halves_answe
             .unwrap_or_else(|| panic!("{name} is not declared: {declared:?}"))
     };
 
-    // Every description the shipped `Tidepool.Command.Tools` stdlib (nested
-    // here as `shell`) declares must clear the hosted provider's limit, or
-    // the actor refuses to start. This is the real compiled tool set, not a
-    // fixture, so a description grown past the limit fails here first.
-    for tool in policy.tools().iter() {
-        let length = tool.description().chars().count();
-        assert!(
-            length <= crate::host_dynamic_tools::DESCRIPTION_LIMIT,
-            "`{}` describes itself in {length} characters; the provider limit is {}",
-            tool.name(),
-            crate::host_dynamic_tools::DESCRIPTION_LIMIT
-        );
-    }
     let bash = index("bash");
     let cancel = index("cancel_command");
     let probe_at = index("probe");

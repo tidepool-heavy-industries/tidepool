@@ -7,7 +7,7 @@
 //! OWN types (`WorktreeId`, `GitOid`, `BranchName`) rather than only their own
 //! effect's:**
 //!
-//! 1. [`crate::schema::Effect::foreign_types`] — a small (Haskell name, Rust
+//! 1. [`crate::schema::Effect::external_types`] — a small (Haskell name, Rust
 //!    wire name) table for a NAMED type this effect's `type_defs` reference but
 //!    do not themselves declare. All Haskell decls land in one generated
 //!    `Tidepool.Effects` module regardless of which effect owns them, so the
@@ -15,7 +15,7 @@
 //!    `wire_rust_of` lookup needed a fallback.
 //! 2. `HsType::Value` as a wire record field type (`RepositoryEvent`'s
 //!    `ObservedMessage EventId MailboxId Value`), rendering as `serde_json::Value` —
-//!    the same spelling `AgCyclePayload`/`AgAgentStep` already use for a
+//!    the concrete spelling for a
 //!    ret-only JSON payload.
 //!
 //! **Type-def relocation, not just helper relocation.** `Event a` and
@@ -180,10 +180,22 @@ pub fn event() -> Effect {
         // when the generated `Tidepool.Effects` defined them.
         extra_imports: &["import Tidepool.Event"],
         type_defs: type_defs(),
-        foreign_types: &[
-            ("WorktreeId", "WtWorktreeId"),
-            ("GitOid", "WtGitOid"),
-            ("BranchName", "WtBranchName"),
+        external_types: &[
+            crate::schema::ExternalType {
+                haskell_name: "WorktreeId",
+                rust_wire: "WtWorktreeId",
+                core_module: None,
+            },
+            crate::schema::ExternalType {
+                haskell_name: "GitOid",
+                rust_wire: "WtGitOid",
+                core_module: None,
+            },
+            crate::schema::ExternalType {
+                haskell_name: "BranchName",
+                rust_wire: "WtBranchName",
+                core_module: None,
+            },
         ],
         // Typed per-verb failure (#335): overflow, an unknown subscription/
         // mailbox, a lost/failed source, or an oversized timeout are DATA an

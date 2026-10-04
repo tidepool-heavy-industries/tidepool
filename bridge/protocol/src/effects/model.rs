@@ -21,7 +21,7 @@ pub fn model() -> Effect {
         helpers_row_polymorphic: true,
         extra_imports: &["import Tidepool.Model"],
         type_defs: vec![],
-        foreign_types: &[],
+        external_types: &[],
         errors: Some(ErrorAdt {
             name: "ModelBoundaryError",
             variants: [

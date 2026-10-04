@@ -601,12 +601,10 @@ async fn durable_command_drain_runs_without_a_channel_hint_and_skips_claimed_wor
     assert!(fixture.hosts[&actor].controls.lock().unwrap().is_empty());
 }
 
-#[cfg(not(feature = "codex-compat"))]
 use super::test_campaign::TestCampaign;
-#[cfg(not(feature = "codex-compat"))]
+
 use exomonad_tool::{ToolArguments, ToolInvocation};
 
-#[cfg(not(feature = "codex-compat"))]
 #[tokio::test]
 #[ignore = "requires delegated cgroups and bubblewrap"]
 async fn embedded_host_hands_out_and_executes_the_resident_command_backend() {

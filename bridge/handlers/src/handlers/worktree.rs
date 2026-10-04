@@ -681,12 +681,6 @@ impl tidepool_effect::dispatch::EffectHandler<tidepool_mcp::CapturedOutput>
 // which (`AdapterKind::HandWritten(reason)`) so a later lane can see what it
 // may safely regenerate without re-deriving the judgement.
 //
-// The handful re-exported `pub(crate)` are REUSED by `handlers::agent` — the
-// Subagent wire types embed the Worktree ones (`AgSpawnWorkspace` carries a
-// `WtWorktreeSpec`/`WtWorktreeId`, `AgWorkerRun` a `WtWorktreeHandle`, and the
-// wire `SpawnError` carries this module's wire `WorktreeError`), so a second
-// copy over there would be two conversions to keep in step with one contract.
-// ============================================================================
 
 pub(crate) use crate::generated::worktree_adapters::{
     branch_name_from_wire, branch_name_to_wire, dirty_policy_from_wire, git_oid_to_wire,

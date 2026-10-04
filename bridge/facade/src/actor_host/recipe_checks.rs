@@ -157,13 +157,13 @@ impl Driver {
             workspace: repository.path().to_path_buf(),
             run_root: runtime.path().join("selection-0"),
             root_binding_path: runtime.path().join("unused-native-binding.json"),
-            backend: crate::exomonad::HostBackendOptions::Embedded,
+
             embedded: None,
             tmux_session: "unused-in-recipe-check".into(),
             model: defaults.defaults.model,
             effort: defaults.defaults.effort.into(),
             research_policy: defaults.research,
-            root_launch_mode: InteractiveLaunchMode::Fresh,
+
             pane_environment: BTreeMap::new(),
             jev: None,
         };

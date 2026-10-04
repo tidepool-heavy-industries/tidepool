@@ -141,3 +141,12 @@ pub fn standard_datacon_table() -> DataConTable {
     });
     table
 }
+
+/// Typed codecs for structural prepared-schema fixtures.
+pub mod prepared_encode;
+
+/// Declared immutable fixture resources read at test runtime.
+pub mod prepared_resources;
+
+/// Representation fixtures with no compiler provenance.
+pub mod prepared;

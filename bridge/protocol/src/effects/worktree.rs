@@ -105,7 +105,7 @@ pub fn worktree() -> Effect {
         // re-exported from the same place so each name has one public origin.
         extra_imports: &["import Tidepool.Worktree"],
         type_defs: type_defs(),
-        foreign_types: &[],
+        external_types: &[],
         // Worktree failures are authored data, not eval aborts. The
         // domain-to-wire map remains hand-written because several variants
         // differ in representation and therefore carry mapping decisions.

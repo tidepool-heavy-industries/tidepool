@@ -2705,14 +2705,11 @@ async fn background_bash_returns_at_once_and_its_notice_carries_the_source() {
     assert_eq!(command.specs.lock()[0].argv[4], "cargo test -p crate --lib");
     assert_eq!(notice.command_job.as_deref(), Some(job.as_str()));
     assert_eq!(notice.target_revision.as_deref(), Some(commit));
-    let rendered = DurableActorEvent::Typed(TypedActorEvent::SettlementChanged {
-        notification: notice,
-    })
-    .render(None);
+    let rendered = notice.reply_preview.expect("settled command report");
     assert_eq!(
         rendered,
         format!(
-            "job {job} finished (elapsed time unavailable).\ncommand: cargo test -p crate --lib\nexit 0 · process and cleanup terminal · output complete\nstarted in /work/tree at {commit} with uncommitted changes\nstdout tail:\nrunning 3 tests\ntest result: ok\nFull output: read_output session_id={job}; nothing reruns. The checkout was not guarded while it ran; a pass covers this source only, not a later revision."
+            "command: cargo test -p crate --lib\nexit 0 · process and cleanup terminal · output complete\nstarted in /work/tree at {commit} with uncommitted changes\nstdout tail:\nrunning 3 tests\ntest result: ok\nFull output: read_output session_id={job}; nothing reruns. The checkout was not guarded while it ran; a pass covers this source only, not a later revision."
         )
     );
     campaign.forest.shutdown().await;

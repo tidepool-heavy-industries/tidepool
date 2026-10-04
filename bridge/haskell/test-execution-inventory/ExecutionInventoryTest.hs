@@ -1,11 +1,20 @@
-module Main (main) where
+module Main (main, tests) where
+
+import Tidepool.Test.Runner (TestTree, runTests, testCase, testGroup)
 
 import Data.List (isInfixOf)
 import Data.Set qualified as Set
 import Tidepool.ExecutionIR
 
 main :: IO ()
-main = do
+main = runTests tests
+
+tests :: TestTree
+tests = testGroup "test-execution-inventory"
+  [testCase "inventory rendering preserves facts" scenario]
+
+scenario :: IO ()
+scenario = do
   let local = ExactName "tidepool-test" "Fixture" "loop"
       text = ExactName "text-2.1" "Data.Text.Internal" "Text"
       integer = ExactName "ghc-bignum-1.3" "GHC.Num.Integer" "Integer"

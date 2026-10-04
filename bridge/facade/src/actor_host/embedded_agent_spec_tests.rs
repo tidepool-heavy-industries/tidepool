@@ -30,7 +30,7 @@ async fn issued_tool_snapshot_keeps_old_handler_after_spec_reload() {
         exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |config| {
-            config.backend = crate::exomonad::HostBackendOptions::Embedded;
+
             write_spec(&config.workspace, "old-handler", "old slot");
             std::fs::write(
                 config.workspace.join(".exomonad/config.toml"),

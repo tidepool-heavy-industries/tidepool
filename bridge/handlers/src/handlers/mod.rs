@@ -1,4 +1,3 @@
-pub mod agent;
 pub mod console;
 pub mod entropy;
 pub mod event;
@@ -12,12 +11,11 @@ mod journal_version;
 pub mod kv;
 pub mod llm;
 pub mod meta;
-pub mod source;
 pub mod model;
+pub mod source;
 pub mod time;
 pub mod worktree;
 
-pub use agent::*;
 pub use console::*;
 pub use entropy::*;
 pub use event::*;
@@ -30,7 +28,7 @@ pub use journal::*;
 pub use kv::*;
 pub use llm::*;
 pub use meta::*;
-pub use source::*;
 pub use model::*;
+pub use source::*;
 pub use time::*;
 pub use worktree::*;

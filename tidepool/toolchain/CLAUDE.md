@@ -47,3 +47,22 @@ the former eval and invocation cache layouts; neither is read or written.
 `source_root_manifest` and `source_roots_identity` still own whole-source-revision
 identities for workspace capture and reload. Those identities describe a source
 snapshot; they do not determine which files a compiled program consumed.
+
+## Immutable build fixtures
+
+`tidepool_prepared_fixture` in `build/haskell/prepared_fixture.bzl` invokes
+`tidepool-toolchain`'s `prepared-fixture` binary through `build_prepared_fixture`.
+One action compiles one module and its complete ordered target set against a
+pinned compiler deployment/package closure and explicit source directory trees.
+The CLI binds the configured frontend directly, clears inherited compiler and
+package selection, and uses private scratch as its current directory. Admission
+checks complete source evidence against the declared trees before export.
+
+Build actions never read or publish the runtime memo, module-candidate store,
+deployment catalog or runtime build-products directory. Production readers
+validate every requested prepared program, typed-site sidecar, metadata and
+product certificate before any portable output is exported. The directory
+contains `meta.cbor`, `<target>.prepared.cbor` and `<target>.asks.json` for every
+target. `PreparedFixtureInfo` exposes that directory and the target artifacts.
+Test runners supply it as a runtime resource. Source-bound certificates remain
+at the original compilation paths and are discarded with action scratch.

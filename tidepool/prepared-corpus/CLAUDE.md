@@ -1,3 +1,26 @@
 # tidepool-prepared-corpus
 
-Owns the compiler-derived prepared-STG corpus runner and its expected outcomes in `fixtures/prepared-corpus-expectations.json`; `just fixtures-check` relies on this crate to validate and execute corpus cases, while its per-item watchdog aborts suspected non-terminating cases with the item name. Focused check: `just fixtures-check`.
+Owns the compiler-derived prepared-STG corpus consumer, typed projection and
+diagnostic inventories, oracle outcomes and six-stage acceptance policy.
+`prepared-corpus validate-fixture` admits a complete declared source/target
+output set through production metadata, prepared-program and source-evidence
+readers. It grants no execution authority.
+
+`prepared-corpus verify-cohort` executes every manifest row in an isolated
+process and requires a nonzero complete count. Contract cohorts pass all six
+stages. Suite retains every compiler-introduced row through compilation and
+checks source outcomes against native GHC values or explicit typed refusals.
+The existing per-item watchdog records the exact suspected nontermination;
+crashes and missing child reports cannot omit rows.
+
+`build/haskell/corpus_fixture.bzl` owns declared per-module corpus actions.
+Every cohort carries same-transaction metadata, dependencies and diagnostic
+inventory as immutable runtime resources. Native oracle actions reuse
+`SuiteOracleTH` and `SuiteOracleRender`, compiling and evaluating the declared
+source with pinned GHC. Time-intrinsic expectations remain independent chrono
+goldens because the Haskell source is an intrinsic placeholder.
+
+Focused validation uses the relevant
+`//bridge/haskell:corpus_<cohort>_test` target through the admitted pinned Buck
+entrypoint. `just fixtures-check` selects these targets; it does not maintain a
+second compiler cache, oracle updater, corpus registry or acceptance policy.

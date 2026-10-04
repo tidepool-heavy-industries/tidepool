@@ -1,6 +1,8 @@
 {-# LANGUAGE GADTs #-}
 
-module Main (main) where
+module Main (main, tests) where
+
+import Tidepool.Test.Runner (TestTree, runTests, testCase, testGroup)
 
 import Control.Monad (unless)
 import Control.Monad.IO.Class (liftIO)
@@ -20,7 +22,6 @@ import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.Var (varName, varType)
 import GHC.Utils.Outputable (ppr, showSDocUnsafe)
 import System.Directory (getCurrentDirectory)
-import System.Environment (getArgs)
 import System.FilePath ((</>))
 import System.Exit (ExitCode(..))
 import System.Process (proc, readCreateProcessWithExitCode)
@@ -50,16 +51,16 @@ assert :: Bool -> String -> IO ()
 assert ok message = unless ok (ioError (userError message))
 
 main :: IO ()
-main = do
-  args <- getArgs
-  case args of
-    [] -> assertAllRecoveredBodies
-    ["owner-interface-cache"] -> do
+main = runTests tests
+
+tests :: TestTree
+tests = testGroup "recovered-body"
+  [ testCase "original recovered body closure" assertAllRecoveredBodies
+  , testCase "owner interface cache reuse eviction and retry" $ do
       root <- getCurrentDirectory
       libdir <- trim <$> readProcessGhc ["--print-libdir"]
       assertSemigroupSubset root libdir
-      putStrLn "owner interface cache: ok (reused owner, evicted owner, missing interface retried)"
-    _ -> ioError (userError "expected no arguments or owner-interface-cache")
+  ]
 
 assertAllRecoveredBodies :: IO ()
 assertAllRecoveredBodies = do

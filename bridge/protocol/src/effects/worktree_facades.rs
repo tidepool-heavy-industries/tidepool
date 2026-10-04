@@ -7,27 +7,62 @@
 use crate::hs::HsType;
 use crate::schema::{Arg, Effect, HandlingClass, Polymorphism, RustBinding, Verb};
 
-const FOREIGN: &[(&str, &str)] = &[
-    ("WorktreeError", "crate::generated::worktree::WorktreeError"),
-    ("WorktreeSpec", "tidepool_bridge_effects::WtWorktreeSpec"),
-    ("DirtyPolicy", "tidepool_bridge_effects::WtDirtyPolicy"),
-    (
-        "WorktreeHandle",
-        "tidepool_bridge_effects::WtWorktreeHandle",
-    ),
-    ("WorktreeId", "tidepool_bridge_effects::WtWorktreeId"),
-    (
-        "WorktreeSummary",
-        "tidepool_bridge_effects::WtWorktreeSummary",
-    ),
-    ("BranchName", "tidepool_bridge_effects::WtBranchName"),
-    ("GitOid", "tidepool_bridge_effects::WtGitOid"),
-    (
-        "SubmissionObservation",
-        "tidepool_bridge_effects::WtSubmissionObservation",
-    ),
-    ("MergeRequest", "tidepool_bridge_effects::WtMergeRequest"),
-    ("MergeOutcome", "tidepool_bridge_effects::WtMergeOutcome"),
+const FOREIGN: &[crate::schema::ExternalType] = &[
+    crate::schema::ExternalType {
+        haskell_name: "WorktreeError",
+        rust_wire: "crate::generated::worktree::WorktreeError",
+        core_module: None,
+    },
+    crate::schema::ExternalType {
+        haskell_name: "WorktreeSpec",
+        rust_wire: "tidepool_bridge_effects::WtWorktreeSpec",
+        core_module: None,
+    },
+    crate::schema::ExternalType {
+        haskell_name: "DirtyPolicy",
+        rust_wire: "tidepool_bridge_effects::WtDirtyPolicy",
+        core_module: None,
+    },
+    crate::schema::ExternalType {
+        haskell_name: "WorktreeHandle",
+        rust_wire: "tidepool_bridge_effects::WtWorktreeHandle",
+        core_module: None,
+    },
+    crate::schema::ExternalType {
+        haskell_name: "WorktreeId",
+        rust_wire: "tidepool_bridge_effects::WtWorktreeId",
+        core_module: None,
+    },
+    crate::schema::ExternalType {
+        haskell_name: "WorktreeSummary",
+        rust_wire: "tidepool_bridge_effects::WtWorktreeSummary",
+        core_module: None,
+    },
+    crate::schema::ExternalType {
+        haskell_name: "BranchName",
+        rust_wire: "tidepool_bridge_effects::WtBranchName",
+        core_module: None,
+    },
+    crate::schema::ExternalType {
+        haskell_name: "GitOid",
+        rust_wire: "tidepool_bridge_effects::WtGitOid",
+        core_module: None,
+    },
+    crate::schema::ExternalType {
+        haskell_name: "SubmissionObservation",
+        rust_wire: "tidepool_bridge_effects::WtSubmissionObservation",
+        core_module: None,
+    },
+    crate::schema::ExternalType {
+        haskell_name: "MergeRequest",
+        rust_wire: "tidepool_bridge_effects::WtMergeRequest",
+        core_module: None,
+    },
+    crate::schema::ExternalType {
+        haskell_name: "MergeOutcome",
+        rust_wire: "tidepool_bridge_effects::WtMergeOutcome",
+        core_module: None,
+    },
 ];
 
 #[must_use]
@@ -47,41 +82,25 @@ pub fn bound_worktree() -> Effect {
             plain(
                 "BoundWorktreeLookup",
                 "bound_worktree_lookup",
-                vec![arg(
-                    "treeId",
-                    "WorktreeId",
-                    "tidepool_bridge_effects::WtWorktreeId",
-                )],
+                vec![arg("treeId", "WorktreeId")],
                 result("WorktreeHandle"),
             ),
             plain(
                 "BoundWorktreeBranchOf",
                 "bound_worktree_branch_of",
-                vec![arg(
-                    "treeId",
-                    "WorktreeId",
-                    "tidepool_bridge_effects::WtWorktreeId",
-                )],
+                vec![arg("treeId", "WorktreeId")],
                 result("BranchName"),
             ),
             plain(
                 "BoundWorktreeHeadOf",
                 "bound_worktree_head_of",
-                vec![arg(
-                    "treeId",
-                    "WorktreeId",
-                    "tidepool_bridge_effects::WtWorktreeId",
-                )],
+                vec![arg("treeId", "WorktreeId")],
                 result("GitOid"),
             ),
             plain(
                 "BoundWorktreeObserveSubmission",
                 "bound_worktree_observe_submission",
-                vec![arg(
-                    "treeId",
-                    "WorktreeId",
-                    "tidepool_bridge_effects::WtWorktreeId",
-                )],
+                vec![arg("treeId", "WorktreeId")],
                 result("SubmissionObservation"),
             ),
         ],
@@ -99,11 +118,7 @@ pub fn worktree_registry() -> Effect {
             plain(
                 "WorktreeRegistryLookup",
                 "worktree_registry_lookup",
-                vec![arg(
-                    "treeId",
-                    "WorktreeId",
-                    "tidepool_bridge_effects::WtWorktreeId",
-                )],
+                vec![arg("treeId", "WorktreeId")],
                 result("WorktreeHandle"),
             ),
             plain(
@@ -155,37 +170,19 @@ pub fn worktree_allocation() -> Effect {
             plain(
                 "WorktreeAllocationCreate",
                 "worktree_allocation_create",
-                vec![arg(
-                    "spec",
-                    "WorktreeSpec",
-                    "tidepool_bridge_effects::WtWorktreeSpec",
-                )],
+                vec![arg("spec", "WorktreeSpec")],
                 result("WorktreeHandle"),
             ),
             plain(
                 "WorktreeAllocationCreateForActorPath",
                 "worktree_allocation_create_for_actor_path",
-                vec![
-                    arg(
-                        "spec",
-                        "WorktreeSpec",
-                        "tidepool_bridge_effects::WtWorktreeSpec",
-                    ),
-                    text_arg("actorPath"),
-                ],
+                vec![arg("spec", "WorktreeSpec"), text_arg("actorPath")],
                 result("WorktreeHandle"),
             ),
             plain(
                 "WorktreeAllocationCreateFromBoundForActorPath",
                 "worktree_allocation_create_from_bound_for_actor_path",
-                vec![
-                    arg(
-                        "dirtyPolicy",
-                        "DirtyPolicy",
-                        "tidepool_bridge_effects::WtDirtyPolicy",
-                    ),
-                    text_arg("actorPath"),
-                ],
+                vec![arg("dirtyPolicy", "DirtyPolicy"), text_arg("actorPath")],
                 result("WorktreeHandle"),
             ),
         ],
@@ -202,11 +199,7 @@ pub fn worktree_integration() -> Effect {
         vec![plain(
             "WorktreeIntegrationTryMerge",
             "worktree_integration_try_merge",
-            vec![arg(
-                "request",
-                "MergeRequest",
-                "tidepool_bridge_effects::WtMergeRequest",
-            )],
+            vec![arg("request", "MergeRequest")],
             result("MergeOutcome"),
         )],
     )
@@ -233,7 +226,7 @@ fn effect(
         helpers_row_polymorphic: true,
         extra_imports: &[],
         type_defs: Vec::new(),
-        foreign_types: FOREIGN,
+        external_types: FOREIGN,
         errors: None,
         verbs,
         helpers: Vec::new(),
@@ -259,11 +252,11 @@ fn result(ok: &'static str) -> HsType {
     HsType::either(HsType::Named("WorktreeError"), HsType::Named(ok))
 }
 
-fn arg(name: &'static str, ty: &'static str, rust: &'static str) -> Arg {
+fn arg(name: &'static str, ty: &'static str) -> Arg {
     Arg {
         name,
         ty: HsType::Named(ty),
-        rust: RustBinding::Path(rust),
+        rust: RustBinding::External,
     }
 }
 
