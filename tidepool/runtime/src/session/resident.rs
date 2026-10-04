@@ -23,7 +23,7 @@ use tidepool_repr::execution_schema::{
 };
 
 use super::admission::CheckedTurnCompletion;
-use super::prepared::{ParkPolicy, PreparedRuntimeError, PreparedSettlement};
+use super::prepared::{ParkPolicy, PreparedRuntimeError, PreparedSettlement, HOME_UNIT};
 use super::turn::TurnCode;
 use tidepool_codegen::suspension::{ContinuationId, RealmId, ValueHandle};
 use tidepool_effect::dispatch::{
@@ -1618,16 +1618,23 @@ fn binding_ids_of(mode: &PreparedTurnMode<'_>) -> Vec<SessionVarId> {
     }
 }
 
-fn parcel_library_binding(identity: &SymbolIdentity) -> Option<(SessionVarId, SessionModule)> {
-    let generation = identity
-        .module
-        .strip_prefix("Tidepool.Session.Lib.G")?
-        .parse::<u64>()
-        .ok()?;
-    Some((
-        SessionVarId::from_extract(session_var_id(&identity.module, &identity.occurrence)),
-        SessionModule::lib(Generation(generation)),
-    ))
+struct ParcelLibraryBinding {
+    id: SessionVarId,
+    module: SessionModule,
+}
+
+fn parcel_library_binding(identity: &SymbolIdentity) -> Option<ParcelLibraryBinding> {
+    if identity.unit != HOME_UNIT {
+        return None;
+    }
+    let module = SessionModule::from_module_name(&identity.module)?;
+    if module.kind != tidepool_repr::SessionModuleKind::Lib {
+        return None;
+    }
+    Some(ParcelLibraryBinding {
+        id: SessionVarId::from_extract(session_var_id(&identity.module, &identity.occurrence)),
+        module,
+    })
 }
 
 fn is_checked_turn(code: &TurnCode<'_>) -> bool {
@@ -3951,7 +3958,7 @@ where
             native: parcel,
             provenance,
         } = parcel;
-        let imports = self
+        let mut bindings: BTreeMap<SymbolIdentity, ParcelLibraryBinding> = self
             .state
             .prepared()
             .ok_or_else(|| {
@@ -3959,12 +3966,14 @@ where
                     "cannot import a parcel: the prepared machine is not installed".into(),
                 )))
             })?
-            .pending_parcel_import_identities(&parcel);
-        self.state.validate_new_binding_ids(
-            imports
-                .iter()
-                .filter_map(|identity| parcel_library_binding(identity).map(|(id, _)| id)),
-        )?;
+            .pending_parcel_import_identities(&parcel)
+            .into_iter()
+            .filter_map(|identity| {
+                parcel_library_binding(&identity).map(|binding| (identity, binding))
+            })
+            .collect();
+        self.state
+            .validate_new_binding_ids(bindings.values().map(|binding| binding.id))?;
         let engine = self
             .state
             .prepared_mut()
@@ -3972,30 +3981,26 @@ where
         let (handle, imports) = engine.import_parcel(parcel, owner)?;
         // Exact imports were checked before native allocation. Adopt their
         // binding handles to ROOT before the caller's realm can close.
+        // The native preflight and report enumerate the same missing instance
+        // imports, deduplicated by full identity. Consume those original plans;
+        // package imports stay rooted by their native installation.
         let resolved: Vec<(
             SymbolIdentity,
+            ParcelLibraryBinding,
             PreparedHandle,
             tidepool_codegen::old_space::RootSlot,
         )> = imports
             .into_iter()
-            .filter(|(identity, _)| parcel_library_binding(identity).is_some())
-            .map(|(identity, imported)| {
+            .filter_map(|(identity, imported)| {
+                let (identity, binding) = bindings.remove_entry(&identity)?;
                 let root = engine
                     .adopt(imported)
                     .expect("a just-imported binding handle is live");
-                (identity, imported, root)
+                Some((identity, binding, imported, root))
             })
             .collect();
-        for (identity, imported, root) in resolved {
-            // Only an identity whose module is a `Lib.G<n>` declaration
-            // module names a generation this way -- the shape every
-            // `Tidepool.Actor.Surface.H<digest>` facade re-export uses
-            // (`start.rs`'s `facade_heads`); anything else is left for
-            // `code_exports`'s package-top fallback in `resolve_imports`
-            // instead of a binding-store entry this session cannot mint a
-            // meaningful generation for.
-            let (id, module) =
-                parcel_library_binding(&identity).expect("selected exact library import");
+        for (identity, binding, imported, root) in resolved {
+            let ParcelLibraryBinding { id, module } = binding;
             self.state.bind(BindingEntry {
                 name: BindingName(identity.occurrence.clone()),
                 id,
@@ -8424,6 +8429,17 @@ mod authored_publication_tests {
         PreparedHandle,
         Vec<SymbolIdentity>,
     ) {
+        parcel_source_fixture_in_unit(HOME_UNIT)
+    }
+
+    fn parcel_source_fixture_in_unit(
+        unit: &str,
+    ) -> (
+        TestSession,
+        ResidentParcel,
+        PreparedHandle,
+        Vec<SymbolIdentity>,
+    ) {
         use tidepool_repr::execution_schema::{
             testing, Atom, ExprFrame, GlobalDecl, GlobalId, Group, HeapRhs, ResultContract,
             RuntimeRep, Signature, SignatureId, UpdatePolicy, ValueRef,
@@ -8438,8 +8454,11 @@ mod authored_publication_tests {
             );
             entry.module = SessionModule::lib(Generation(generation));
             entry.value.identity = testing::identity(&entry.module.module_name(), name);
-            entry.value.identity.unit = "main".into();
-            entry.id = parcel_library_binding(&entry.value.identity).unwrap().0;
+            entry.value.identity.unit = unit.into();
+            entry.id = SessionVarId::from_extract(session_var_id(
+                &entry.value.identity.module,
+                &entry.value.identity.occurrence,
+            ));
             identities.push(entry.value.identity.clone());
             source.state.bind(entry).unwrap();
         }
@@ -8486,6 +8505,67 @@ mod authored_publication_tests {
     }
 
     #[test]
+    fn parcel_foreign_unit_library_spelling_keeps_native_identity_without_home_publication() {
+        let (_source, parcel, _payload, identities) =
+            parcel_source_fixture_in_unit("parcel-package");
+        let mut destination = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, None);
+        let mut home = crate::session::prepared::tests::rooted_publication_fixture(
+            &mut destination.state,
+            "first",
+            481,
+        );
+        home.module = SessionModule::lib(Generation(481));
+        home.value.identity = identities[0].clone();
+        home.value.identity.unit = HOME_UNIT.into();
+        home.id = SessionVarId::from_extract(session_var_id(
+            &home.value.identity.module,
+            &home.value.identity.occurrence,
+        ));
+        let home_id = home.id;
+        let home_identity = home.value.identity.clone();
+        let home_handle = home.value.handle;
+        destination.state.bind(home).unwrap();
+        assert_eq!(
+            destination
+                .state
+                .prepared()
+                .unwrap()
+                .pending_parcel_import_identities(&parcel.native),
+            identities
+        );
+        let revision = destination.state.bindings().mutation_revision();
+        let modules = destination.state.live_val_modules();
+        let provenance = Arc::clone(&parcel.provenance);
+        // The package and home symbols have the same module/occurrence and
+        // therefore the same legacy VarId, but only the home unit owns a row.
+        let custody = destination.import_parcel(parcel, RealmId(481)).unwrap();
+        assert_eq!(destination.state.bindings().mutation_revision(), revision);
+        assert_eq!(destination.state.live_val_modules(), modules);
+        let home = destination.state.bindings().get(home_id).unwrap();
+        assert_eq!(home.value.identity, home_identity);
+        assert_eq!(home.value.handle, home_handle);
+        assert!(destination
+            .state
+            .bindings()
+            .get(SessionVarId::from_extract(session_var_id(
+                &identities[1].module,
+                &identities[1].occurrence,
+            )))
+            .is_none());
+        assert!(destination.binding_provenance.is_empty());
+        let reexported = destination.export_shared(&custody).unwrap();
+        let carried = reexported
+            .native
+            .images()
+            .iter()
+            .flat_map(|image| image.imports.iter().map(|(identity, _)| identity.clone()))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(carried, identities.into_iter().collect());
+        assert!(Arc::ptr_eq(&reexported.provenance, &provenance));
+        assert!(destination.discard_custody(custody));
+    }
+
+    #[test]
     fn parcel_binding_conflict_refuses_before_native_import_and_partial_visibility() {
         let (_source, parcel, _payload, identities) = parcel_source_fixture();
         let mut destination = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, None);
@@ -8494,7 +8574,7 @@ mod authored_publication_tests {
             "occupied",
             484,
         );
-        let id = parcel_library_binding(&identities[1]).unwrap().0;
+        let id = parcel_library_binding(&identities[1]).unwrap().id;
         existing.id = id;
         let handle = existing.value.handle;
         destination.state.bind(existing).unwrap();
@@ -8517,7 +8597,7 @@ mod authored_publication_tests {
         assert!(destination
             .state
             .bindings()
-            .get(parcel_library_binding(&identities[0]).unwrap().0)
+            .get(parcel_library_binding(&identities[0]).unwrap().id)
             .is_none());
         assert_eq!(
             destination
@@ -8558,7 +8638,7 @@ mod authored_publication_tests {
             let entry = destination
                 .state
                 .bindings()
-                .get(parcel_library_binding(identity).unwrap().0)
+                .get(parcel_library_binding(identity).unwrap().id)
                 .unwrap();
             let handle = entry.value.handle;
             let imported_id = entry.id;
@@ -8617,7 +8697,7 @@ mod authored_publication_tests {
             assert!(destination
                 .state
                 .bindings()
-                .get(parcel_library_binding(&identity).unwrap().0)
+                .get(parcel_library_binding(&identity).unwrap().id)
                 .is_some());
         }
     }

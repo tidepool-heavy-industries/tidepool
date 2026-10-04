@@ -2283,7 +2283,7 @@ const CODE_EXPORT_GENERATION: u64 = 0;
 /// turn target, the session declaration environment and binding store, the workspace source layer,
 /// and the Tidepool library modules on the include path. All of it can
 /// differ from one turn to the next, so none of it is ever exported.
-const HOME_UNIT: &str = "main";
+pub(super) const HOME_UNIT: &str = "main";
 
 /// Which of `prepared`'s own tops later turns may import rather than project
 /// a body for: the ones an INSTALLED PACKAGE defines.
