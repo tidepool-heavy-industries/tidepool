@@ -22,6 +22,16 @@ nix_haskell_toolchain(
     visibility = ["PUBLIC"],
 )
 
+# Test packages are installed only in this host-side toolchain. Compiler
+# workers and authored source capture retain toolchains//:haskell.
+nix_haskell_toolchain(
+    name = "haskell_tests",
+    ghc = read_root_config("nix", "test_ghc", ""),
+    ghc_pkg = read_root_config("nix", "test_ghc_pkg", ""),
+    haddock = read_root_config("nix", "test_haddock", ""),
+    visibility = ["PUBLIC"],
+)
+
 nix_haskell_toolchain(
     name = "haskell_with_extractor_source_inputs",
     ghc = read_root_config("nix", "ghc"),
@@ -152,5 +162,18 @@ nix_directory(
 nix_tool(
     name = "bubblewrap",
     executable = read_root_config("nix", "bubblewrap", ""),
+    visibility = ["PUBLIC"],
+)
+
+nix_tool(
+    name = "test_ghc",
+    executable = read_root_config("nix", "test_ghc", ""),
+    visibility = ["PUBLIC"],
+)
+
+nix_directory(
+    name = "haskell_test_closure",
+    cp = read_root_config("nix", "coreutils") + "/cp",
+    store_path = read_root_config("nix", "haskell_test_closure", ""),
     visibility = ["PUBLIC"],
 )

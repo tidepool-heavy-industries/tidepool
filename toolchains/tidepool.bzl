@@ -29,6 +29,8 @@ nix_rust_toolchain = rule(
 
 def _nix_haskell_toolchain_impl(ctx):
     compiler = ctx.attrs.ghc
+    if not compiler:
+        fail("{} requires its pinned GHC closure; materialize the declared Nix output and configure Buck (--tests for host test targets)".format(ctx.label))
     if ctx.attrs.extra_compile_inputs:
         # Prelude's compile action wraps this value in cmd_args, so hidden
         # artifacts become declared inputs without becoming GHC arguments.

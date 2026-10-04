@@ -500,6 +500,23 @@ source = "git+https://example.invalid/tokio-tungstenite?rev=aaaaaaaaaaaaaaaaaaaa
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("source-ambiguous Reindeer target", result.stderr)
 
+    def test_compile_fail_contract_registers_declared_metadata_and_valid_control(self):
+        stem = "machine_lease_double_borrow"
+        self.write(f"tidepool/runtime/tests/compile_fail/{stem}.rs", "fn main() {}\n")
+        self.write(f"tidepool/runtime/tests/compile_fail/{stem}.stderr", "error[E0499]: borrow\n")
+        self.write(f"tidepool/runtime/tests/compile_pass/{stem}.rs", "fn main() {}\n")
+        result = self.generate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        buck, _ = self.groups("tidepool/runtime")
+        contract = buck.split(f'rust_compile_fail(\n    name = "compile_fail_{stem}",', 1)[1].split("\n)\n", 1)[0]
+        self.assertIn('"tidepool_runtime": ":tidepool_runtime"', contract)
+        self.assertIn('control = "tests/compile_pass/machine_lease_double_borrow.rs"', contract)
+        self.assertNotIn("trybuild", contract)
+        (self.root / f"tidepool/runtime/tests/compile_pass/{stem}.rs").unlink()
+        refused = self.generate()
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("needs pinned diagnostic and valid control", refused.stderr)
+
     def test_runtime_tests_separate_native_admission_from_compiler_resources(self):
         result = self.generate()
         self.assertEqual(result.returncode, 0, result.stderr)

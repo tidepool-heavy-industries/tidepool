@@ -522,6 +522,37 @@ def render_rule(rule, name, target, package, deps, named, extra="", features=(),
     return "\n".join(lines)
 
 
+def compile_fail_cases(package, library):
+    directory = pathlib.Path(package["manifest_path"]).parent
+    extra_dependencies = {
+        "machine_lease_double_borrow": (),
+        "prepared_install_consumes_pending": (),
+        "prepared_install_crossed_image": ("frunk", "tidepool-mcp"),
+    }
+    rules = []
+    for source in sorted((directory / "tests/compile_fail").glob("*.rs")):
+        if source.stem not in extra_dependencies:
+            raise SystemExit(f"unregistered native compile-fail contract {source}")
+        expected = source.with_suffix(".stderr")
+        control = directory / "tests/compile_pass" / source.name
+        if not expected.is_file() or not control.is_file():
+            raise SystemExit(f"native compile-fail contract needs pinned diagnostic and valid control: {source}")
+        dependencies = {library["name"].replace("-", "_"): ":" + library["name"]}
+        for name in extra_dependencies[source.stem]:
+            declaration = next(dep for dep in package["dependencies"] if dep["name"] == name)
+            dependencies[name.replace("-", "_")] = dependency_label(
+                declaration, linux_dependency(package, declaration))
+        lines = ["rust_compile_fail(", f'    name = "compile_fail_{source.stem}",']
+        for key, path in (("source", source), ("control", control), ("expected", expected)):
+            lines.append(f"    {key} = {json.dumps(path.relative_to(directory).as_posix())},")
+        lines.append("    dependencies = {")
+        lines.extend(f"        {json.dumps(alias)}: {json.dumps(label)},"
+                     for alias, label in sorted(dependencies.items()))
+        lines.extend(["    },", '    visibility = ["PUBLIC"],', ")", ""])
+        rules.append("\n".join(lines))
+    return "\n".join(rules)
+
+
 def runtime_test_cases(binary):
     """Admission checks use native machines but do not start a compiler worker."""
     tests = ["session::admission::tests::" + name for name in (
@@ -686,6 +717,7 @@ for package_name, package in local.items():
         rules.append('load("//build/rust:defs.bzl", "tidepool_rust_isolated_test")\n')
     if package_name == "tidepool-runtime":
         rules.append('load("//build/rust:defs.bzl", "tidepool_rust_test_cases")\n')
+        rules.append('load("//build/rust:compile_fail.bzl", "rust_compile_fail")\n')
     if package_name == "tidepool":
         rules.append('''load("//build/rust:buildscript.bzl", "tidepool_buildscript_run")
 load("//build/rust:facade_build_inputs.bzl", "tidepool_facade_build_inputs")
@@ -800,6 +832,8 @@ tidepool_buildscript_run(
     selected_tests = [target for target in tests if not (
         package_name == "tidepool-runtime" and target["name"] == "compile_fail"
     )]
+    if package_name == "tidepool-runtime" and libraries:
+        rules.append(compile_fail_cases(package, libraries[0]))
     for target in selected_tests:
         deps = dev_deps + ([":" + libraries[0]["name"]] if libraries else [])
         extra = ""

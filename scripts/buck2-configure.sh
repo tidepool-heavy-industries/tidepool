@@ -6,19 +6,19 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 usage() {
-  printf 'Usage: scripts/buck2-configure.sh [--runtime-stdlib]\n'
+  printf 'Usage: scripts/buck2-configure.sh [--runtime-stdlib] [--tests]\n'
 }
 
 runtime_stdlib=false
-if [[ $# == 1 && $1 == --runtime-stdlib ]]; then
-  runtime_stdlib=true
-elif [[ $# == 1 && ( $1 == --help || $1 == -h ) ]]; then
-  usage
-  exit 0
-elif [[ $# != 0 ]]; then
-  usage >&2
-  exit 2
-fi
+test_toolchain=false
+for argument in "$@"; do
+  case "$argument" in
+    --runtime-stdlib) runtime_stdlib=true ;;
+    --tests) test_toolchain=true ;;
+    --help|-h) usage; exit 0 ;;
+    *) usage >&2; exit 2 ;;
+  esac
+done
 
 if ! mountpoint -q "$PWD/buck-out"; then
   printf 'Provision a real per-checkout buck-out bind mount before configuring Buck: %s/buck-out\n' "$PWD" >&2
@@ -48,6 +48,23 @@ output_path() {
 rust="$(output_path rust)"
 ghc="$(output_path ghc)"
 ghc_libdir="$("${ghc}/bin/ghc" --print-libdir)"
+# Test packages select a distinct wrapper/package environment. Never substitute
+# this libdir or compiler for the production worker's declared GHC closure.
+test_ghc=
+test_ghc_bin=
+test_ghc_pkg=
+test_haddock=
+test_ghc_libdir=
+haskell_test_closure=
+if [[ $test_toolchain == true ]]; then
+  test_ghc_root="$(output_path test-ghc)"
+  test_ghc=$test_ghc_root/bin/ghc
+  test_ghc_bin=$test_ghc_root/bin
+  test_ghc_pkg=$test_ghc_root/bin/ghc-pkg
+  test_haddock=$test_ghc_root/bin/haddock
+  test_ghc_libdir="$("$test_ghc" --print-libdir)"
+  haskell_test_closure="$(output_path haskell-test-closure)"
+fi
 cc="$(output_path cc)"
 binutils="$(output_path binutils)"
 node="$(output_path node)"
@@ -107,6 +124,12 @@ ghc_bin = $ghc/bin
 ghc_pkg = $ghc/bin/ghc-pkg
 haddock = $ghc/bin/haddock
 ghc_libdir = $ghc_libdir
+test_ghc = $test_ghc
+test_ghc_bin = $test_ghc_bin
+test_ghc_pkg = $test_ghc_pkg
+test_haddock = $test_haddock
+test_ghc_libdir = $test_ghc_libdir
+haskell_test_closure = $haskell_test_closure
 cc = $cc/bin/cc
 cxx = $cc/bin/c++
 ar = $binutils/bin/ar
