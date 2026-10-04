@@ -2339,20 +2339,53 @@ fn exportable_code_tops(
     exports
 }
 
+#[derive(Clone, Copy)]
+struct PackageOwnerRef<'a> {
+    unit: &'a str,
+    module: &'a str,
+    binder: &'a SymbolIdentity,
+    interface_digest: &'a [u8; 32],
+}
+
+impl PackageOwnerRef<'_> {
+    fn matches(self, owner: &ImportOwner) -> bool {
+        matches!(owner, ImportOwner::Package { unit, module, binder, interface_digest }
+            if unit.as_str() == self.unit && module.as_str() == self.module && binder == self.binder
+                && interface_digest == self.interface_digest)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct CodeExportOwnerRef<'a> {
+    binder: &'a SymbolIdentity,
+    generation: u64,
+    root_id: u64,
+    interface_digest: Option<&'a [u8; 32]>,
+}
+
+impl CodeExportOwnerRef<'_> {
+    fn to_owned(self) -> ImportOwner {
+        ImportOwner::CodeExport {
+            binder: self.binder.clone(),
+            generation: self.generation,
+            root_id: self.root_id,
+            interface_digest: self.interface_digest.copied(),
+        }
+    }
+}
+
 fn certified_package_owner_diagnostic(
     target: &CertifiedTargetImage,
     target_owners: &[ImportOwner],
     demanded: &[DemandedImage],
-    owner: &ImportOwner,
+    owner: PackageOwnerRef<'_>,
     target_exports: &BTreeMap<SymbolIdentity, ValueId>,
     code_exports: &BTreeMap<SymbolIdentity, CodeExport>,
     interfaces_match: bool,
     interface_digest: Option<[u8; 32]>,
     limits: PackageOwnerDiagnosticLimits,
 ) -> CertifiedPackageOwnerDiagnostic {
-    let ImportOwner::Package { binder, .. } = owner else {
-        unreachable!("package owner diagnostics require package ownership")
-    };
+    let binder = owner.binder;
 
     let globals = target.prepared.globals();
     let target_globals: Vec<_> = globals
@@ -2374,7 +2407,13 @@ fn certified_package_owner_diagnostic(
     let direct_groups: BTreeSet<_> = demanded
         .iter()
         .enumerate()
-        .filter(|(_, image)| image.group().imports().iter().any(|import| import == owner))
+        .filter(|(_, image)| {
+            image
+                .group()
+                .imports()
+                .iter()
+                .any(|import| owner.matches(import))
+        })
         .map(|(index, _)| index)
         .collect();
     let mut group_order: Vec<_> = direct_groups.iter().copied().collect();
@@ -2408,7 +2447,7 @@ fn certified_package_owner_diagnostic(
         for (fact_index, demanded_index) in group_order.iter().enumerate() {
             let imports = demanded[*demanded_index].group().imports();
             for (position, import) in imports.iter().enumerate() {
-                let selected_priority = if import == owner {
+                let selected_priority = if owner.matches(import) {
                     0
                 } else if matches!(import, ImportOwner::Source { .. }) {
                     1
@@ -2506,12 +2545,7 @@ fn certified_package_owner_diagnostic(
                     interface_digest: export.interface_digest,
                     protected_interface_matches: matches_protected_package_interface(
                         export,
-                        match owner {
-                            ImportOwner::Package {
-                                interface_digest, ..
-                            } => interface_digest,
-                            _ => unreachable!(),
-                        },
+                        owner.interface_digest,
                     ),
                 }
             });
@@ -3218,33 +3252,29 @@ impl PreparedEngine {
 
     fn code_export_import(
         &self,
-        owner: &ImportOwner,
+        owner: CodeExportOwnerRef<'_>,
         declaration: &tidepool_repr::execution_schema::GlobalDecl,
     ) -> Result<BatchImport, PreparedRuntimeError> {
-        let ImportOwner::CodeExport {
+        let CodeExportOwnerRef {
             binder,
             generation,
             root_id,
             interface_digest,
-        } = owner
-        else {
-            unreachable!("code export import has a code export owner")
-        };
+        } = owner;
         let export = self
             .code_exports
             .get(binder)
             .filter(|export| {
                 binder == &declaration.identity
-                    && declaration.required_generation == Some(*generation)
-                    && *generation == CODE_EXPORT_GENERATION
-                    && export.handle.raw().0 == *root_id
+                    && declaration.required_generation == Some(generation)
+                    && generation == CODE_EXPORT_GENERATION
+                    && export.handle.raw().0 == root_id
                     && export.handle.rep() == declaration.rep
                     && interface_digest
-                        .as_ref()
                         .is_none_or(|digest| matches_protected_package_interface(export, digest))
                     && self.machine.prepared_handle_of(export.handle.raw()) == Some(export.handle)
             })
-            .ok_or_else(|| PreparedRuntimeError::MissingCertifiedOwner(owner.clone()))?;
+            .ok_or_else(|| PreparedRuntimeError::MissingCertifiedOwner(owner.to_owned()))?;
         // The batch owner checks the declared callable signature and required
         // evaluatedness against this producer's signature and live native root.
         Ok(BatchImport::Existing {
@@ -3472,8 +3502,21 @@ impl PreparedEngine {
                             entry_signature: None,
                         });
                     }
-                    ImportOwner::CodeExport { .. } => {
-                        imports.push(self.code_export_import(owner, declaration)?);
+                    ImportOwner::CodeExport {
+                        binder,
+                        generation,
+                        root_id,
+                        interface_digest,
+                    } => {
+                        imports.push(self.code_export_import(
+                            CodeExportOwnerRef {
+                                binder,
+                                generation: *generation,
+                                root_id: *root_id,
+                                interface_digest: interface_digest.as_ref(),
+                            },
+                            declaration,
+                        )?);
                     }
                     ImportOwner::Package {
                         unit,
@@ -3654,7 +3697,12 @@ impl PreparedEngine {
                             &target,
                             target_owners,
                             &demanded,
-                            owner,
+                            PackageOwnerRef {
+                                unit,
+                                module,
+                                binder,
+                                interface_digest,
+                            },
                             &target_exports,
                             &self.code_exports,
                             matches_target,
@@ -4028,9 +4076,20 @@ impl PreparedEngine {
                                 entry_signature: None,
                             }
                         }
-                        ImportOwner::CodeExport { .. } => {
-                            self.code_export_import(owner, declaration)?
-                        }
+                        ImportOwner::CodeExport {
+                            binder,
+                            generation,
+                            root_id,
+                            interface_digest,
+                        } => self.code_export_import(
+                            CodeExportOwnerRef {
+                                binder,
+                                generation: *generation,
+                                root_id: *root_id,
+                                interface_digest: interface_digest.as_ref(),
+                            },
+                            declaration,
+                        )?,
                         ImportOwner::Package {
                             unit,
                             module,
@@ -7345,6 +7404,21 @@ pub(super) mod tests {
         let owner = engine
             .retained_package_code_export_owner(&binder, 0, &[9; 32])
             .unwrap();
+        let ImportOwner::CodeExport {
+            binder: owner_binder,
+            generation,
+            root_id,
+            interface_digest,
+        } = &owner
+        else {
+            panic!("retained package fixture must supply a code export owner")
+        };
+        let owner_ref = CodeExportOwnerRef {
+            binder: owner_binder,
+            generation: *generation,
+            root_id: *root_id,
+            interface_digest: interface_digest.as_ref(),
+        };
         let declaration = GlobalDecl {
             identity: binder.clone(),
             rep: RuntimeRep::LiftedRef,
@@ -7352,7 +7426,7 @@ pub(super) mod tests {
             required_evaluated: true,
             required_generation: Some(0),
         };
-        assert!(engine.code_export_import(&owner, &declaration).is_ok());
+        assert!(engine.code_export_import(owner_ref, &declaration).is_ok());
         for (identity, generation, digest) in [
             (binder.clone(), 0, [0; 32]),
             (binder.clone(), 0, [8; 32]),
@@ -7372,8 +7446,23 @@ pub(super) mod tests {
         let foreign_owner = foreign
             .retained_package_code_export_owner(&binder, 0, &[9; 32])
             .unwrap();
+        let ImportOwner::CodeExport {
+            binder: foreign_binder,
+            generation,
+            root_id,
+            interface_digest,
+        } = &foreign_owner
+        else {
+            panic!("foreign package fixture must supply a code export owner")
+        };
+        let foreign_owner_ref = CodeExportOwnerRef {
+            binder: foreign_binder,
+            generation: *generation,
+            root_id: *root_id,
+            interface_digest: interface_digest.as_ref(),
+        };
         assert!(
-            matches!(engine.code_export_import(&foreign_owner, &declaration),
+            matches!(engine.code_export_import(foreign_owner_ref, &declaration),
             Err(PreparedRuntimeError::MissingCertifiedOwner(actual)) if actual == foreign_owner)
         );
         for changed in [None, Some([8; 32])] {
@@ -7382,7 +7471,7 @@ pub(super) mod tests {
                 .get_mut(&binder)
                 .unwrap()
                 .interface_digest = changed;
-            assert!(matches!(engine.code_export_import(&owner, &declaration),
+            assert!(matches!(engine.code_export_import(owner_ref, &declaration),
                 Err(PreparedRuntimeError::MissingCertifiedOwner(actual)) if actual == owner));
         }
         engine
@@ -7392,13 +7481,13 @@ pub(super) mod tests {
             .interface_digest = Some([9; 32]);
         let mut wrong_rep = declaration.clone();
         wrong_rep.rep = RuntimeRep::Address;
-        assert!(matches!(engine.code_export_import(&owner, &wrong_rep),
+        assert!(matches!(engine.code_export_import(owner_ref, &wrong_rep),
             Err(PreparedRuntimeError::MissingCertifiedOwner(actual)) if actual == owner));
         let export = engine.code_exports.remove(&binder).unwrap();
         assert!(engine
             .retained_package_code_export_owner(&binder, 0, &[9; 32])
             .is_none());
-        assert!(matches!(engine.code_export_import(&owner, &declaration),
+        assert!(matches!(engine.code_export_import(owner_ref, &declaration),
             Err(PreparedRuntimeError::MissingCertifiedOwner(actual)) if actual == owner));
         assert!(engine.release(export.handle));
     }
@@ -7780,11 +7869,26 @@ pub(super) mod tests {
             .map(|(identity, value, _)| (identity, value))
             .collect();
         let capped_demanded = selected(&good);
+        let capped_owner = package_owner([9; 32]);
+        let ImportOwner::Package {
+            unit,
+            module,
+            binder,
+            interface_digest,
+        } = &capped_owner
+        else {
+            panic!("package diagnostic fixture must supply a package owner")
+        };
         let capped_diagnostic = certified_package_owner_diagnostic(
             &capped_target,
             std::slice::from_ref(&source_owner),
             &capped_demanded,
-            &package_owner([9; 32]),
+            PackageOwnerRef {
+                unit,
+                module,
+                binder,
+                interface_digest,
+            },
             &capped_target_exports,
             &engine.code_exports,
             false,
