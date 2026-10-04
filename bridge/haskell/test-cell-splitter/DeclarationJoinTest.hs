@@ -376,7 +376,7 @@ configure root = do
     }
 
 ghcLibdir :: IO FilePath
-ghcLibdir = reverse . dropWhile (`elem` "\r\n") . reverse <$> readProcess "ghc" ["--print-libdir"] ""
+ghcLibdir = reverse . dropWhile (`elem` ['\r', '\n']) . reverse <$> readProcess "ghc" ["--print-libdir"] ""
 
 artifact :: FilePath -> String -> IO ExactIfaceArtifact
 artifact root name = do
