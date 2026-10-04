@@ -1793,7 +1793,8 @@ candidateSitedSiblingsAt work = do
       scopePath = work </> "exact-scope.cbor"
       capturedPath = work </> "captured-scope.cbor"
       scope = emptySessionScope { ssRoot = work, ssExactScope = Just scopePath }
-      owners = ["Tidepool.Internal.RequestSite", "Tidepool.Agent.Reply.Internal", "Tidepool.Actors.Unfold"]
+      candidates = ["Tidepool.Internal.RequestSite", "Tidepool.Agent.Reply.Internal"]
+      owners = candidates ++ ["Tidepool.Actors.Unfold"]
   createDirectoryIfMissing True unfoldDir
   createDirectoryIfMissing True replyDir
   createDirectoryIfMissing True (work </> "Tidepool/Internal")
@@ -1805,13 +1806,15 @@ candidateSitedSiblingsAt work = do
     Nothing owner [work] Nothing
   originals <- newOriginalInterfaceArtifacts (prHscEnv (pprPipelineResult original))
     (pprFinalizedModules original) [] work
-  writeGenuineCandidateLexicalScope owners owners work owner [work] capturedPath original
+  writeGenuineCandidateLexicalScope candidates owners work owner [work] capturedPath original
   writeGenuineEmptyMetadataScope scopePath
-  -- A fresh compiler admits the source/interface candidates without preparing
-  -- their bodies. This must not accidentally rely on a previous worker memo.
+  -- Native candidates retain their original certified interfaces; Unfold is
+  -- compiled from source here and retained only in the canonical lexical scope.
   reused <- runPipelineSessionSelected (PreparedProducts (Just (manifest work)))
     Set.empty GeneralCompile (Just scope) target [work] Nothing
-  unless (Set.fromList (map candidateModule (pprAcceptedCandidates reused)) == Set.fromList owners
+  unless (Set.fromList (map candidateModule (pprAcceptedCandidates reused)) == Set.fromList candidates
+      && any ((== "Tidepool.Actors.Unfold") . dependencyModuleName)
+        (dependencyModules (pprDependencies reused))
       && preparedNames reused == ["HydratedChildTarget"]) $
     fail "typed sibling regression did not exercise the hydrated candidate path"
   forM_ (pprAcceptedCandidates reused) $ \candidate -> do
@@ -1843,7 +1846,7 @@ candidateSitedSiblingsAt work = do
     _ -> fail "source-free exact child surface lost its typed sibling or site identity"
   unless (map pmYieldSites (pprModules captured) == map pmYieldSites (pprModules reused)) $
     fail "source-free sibling hydration changed the original typed suspension site"
-  putStrLn "candidate typed siblings: certified candidates and source-free exact owners retain childSited and typed sites without dependency recompilation"
+  putStrLn "candidate typed siblings: native candidates plus fresh Unfold and source-free canonical owners retain childSited and typed sites"
 
 -- The fixture encoder keys complete legacy values by their canonical CBOR.
 -- Its tables therefore preserve identity fields and every global requirement.
