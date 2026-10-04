@@ -6381,6 +6381,37 @@ mod tests {
             .lexical_graph()
             .iter()
             .any(|node| node.owner.module == prepared_declaration.projection.module_name()));
+        let selected_inputs =
+            crate::session::RuntimeCompileInputs::new(None, vec![projection.clone()]).unwrap();
+        let shared = projected
+            .clone()
+            .with_compile_inputs(&selected_inputs)
+            .unwrap();
+        let repeated = shared
+            .clone()
+            .with_compile_inputs(&selected_inputs)
+            .unwrap();
+        assert_eq!(
+            shared.exact_declaration_context(),
+            repeated.exact_declaration_context()
+        );
+        assert_eq!(
+            projected.exact_declaration_context(),
+            projected
+                .clone()
+                .with_compile_inputs(&source_inputs)
+                .unwrap()
+                .exact_declaration_context()
+        );
+        let graph = shared.exact_declaration_context().unwrap().lexical_graph();
+        assert_eq!(
+            graph
+                .iter()
+                .map(|node| &node.owner)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            graph.len()
+        );
         assert!(resident.adopt_checked_declaration(reservation).is_err());
         let original_context = protected
             .snapshot()

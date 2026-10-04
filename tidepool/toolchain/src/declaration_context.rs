@@ -2063,6 +2063,18 @@ impl ExactDeclarationContext {
         Ok(self)
     }
 
+    /// Add issued joins and their selected lexical nodes without duplicating
+    /// an already retained owner. Equal import sets are idempotent; different
+    /// selections for the same owner remain a conflict.
+    pub fn extend_lexical_joins(
+        self,
+        joins: &[Arc<AcceptedJoin>],
+        lexical: &[ExactLexicalNode],
+    ) -> Result<Self, CompileError> {
+        let lexical = compose_lexical_nodes(self.lexical.iter().chain(lexical))?;
+        self.extend(&[], joins, lexical)
+    }
+
     /// Admit the original supporting homes sealed by the same checked-cell
     /// transaction. Lexical exposure remains a separate caller-selected graph.
     pub(crate) fn extend_checked_original_products(
@@ -2272,30 +2284,14 @@ impl ExactDeclarationContext {
         mut self,
         values: &[Arc<crate::checked_cell::CheckedValueArtifact>],
     ) -> Result<Self, CompileError> {
-        let mut lexical = self
-            .lexical
-            .iter()
-            .map(|node| (node.owner.clone(), node.imports.clone()))
-            .collect::<BTreeMap<_, _>>();
+        let mut lexical = self.lexical.clone();
         for value in values {
             let interface = value.certified_interface();
             self.admit_producer(interface.interface().toolchain_identity_sha256())?;
             self.inventory = self.inventory.merge(value.artifact_view())?;
-            for node in value.source_lexical() {
-                if lexical
-                    .insert(node.owner.clone(), node.imports.clone())
-                    .is_some_and(|previous| previous != node.imports)
-                {
-                    return Err(failure(
-                        "retained value changes its source-selected lexical graph",
-                    ));
-                }
-            }
+            lexical.extend_from_slice(value.source_lexical());
         }
-        self.lexical = lexical
-            .into_iter()
-            .map(|(owner, imports)| ExactLexicalNode { owner, imports })
-            .collect();
+        self.lexical = compose_lexical_nodes(&lexical)?;
         self.normalize()?;
         Ok(self)
     }
@@ -2310,20 +2306,15 @@ impl ExactDeclarationContext {
             .into_iter()
             .map(|descriptor| descriptor.owner)
             .collect::<BTreeSet<_>>();
-        let mut selected = BTreeMap::new();
-        for node in self.lexical.iter().chain(support) {
-            if node.owner.module.starts_with("Tidepool.Session.") {
-                continue;
-            }
-            if selected
-                .insert(node.owner.clone(), node.imports.clone())
-                .is_some_and(|previous| previous != node.imports)
-            {
-                return Err(failure(
-                    "value source surface has conflicting selected edges",
-                ));
-            }
-        }
+        let selected = compose_lexical_nodes(
+            self.lexical
+                .iter()
+                .chain(support)
+                .filter(|node| !node.owner.module.starts_with("Tidepool.Session.")),
+        )?
+        .into_iter()
+        .map(|node| (node.owner, node.imports))
+        .collect::<BTreeMap<_, _>>();
         let roots = selected
             .keys()
             .filter(|owner| retained.contains(*owner))
@@ -3122,10 +3113,73 @@ fn sha256(bytes: &[u8]) -> String {
     format!("{:x}", sha2::Sha256::digest(bytes))
 }
 
+/// Compose selections by exact owner and unordered import set. Duplicate
+/// edges inside an individual input remain malformed, and differing sets
+/// for one owner never acquire authority by union.
+fn compose_lexical_nodes<'a>(
+    nodes: impl IntoIterator<Item = &'a ExactLexicalNode>,
+) -> Result<Vec<ExactLexicalNode>, CompileError> {
+    let mut selected: BTreeMap<ExactModuleIdentity, Vec<ExactModuleIdentity>> = BTreeMap::new();
+    for node in nodes {
+        let mut imports = node.imports.clone();
+        imports.sort();
+        if imports.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(failure("duplicate selected lexical import"));
+        }
+        if let Some(previous) = selected.get(&node.owner) {
+            if previous != &imports {
+                return Err(failure(format!(
+                    "conflicting selected lexical imports for {}:{}",
+                    node.owner.unit, node.owner.module
+                )));
+            }
+        } else {
+            selected.insert(node.owner.clone(), imports);
+        }
+    }
+    Ok(selected
+        .into_iter()
+        .map(|(owner, imports)| ExactLexicalNode { owner, imports })
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::artifact_inventory::ArtifactKind;
+
+    #[test]
+    fn lexical_composition_retains_shared_owners_idempotently() {
+        let node = ExactLexicalNode {
+            owner: identity("fixture", "Consumer"),
+            imports: vec![identity("fixture", "Second"), identity("fixture", "First")],
+        };
+        let mut reordered = node.clone();
+        reordered.imports.reverse();
+        let merged = compose_lexical_nodes([&node, &reordered]).unwrap();
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].owner, node.owner);
+        assert_eq!(merged[0].imports, reordered.imports);
+        assert_eq!(
+            compose_lexical_nodes(merged.iter().chain(merged.iter())).unwrap(),
+            merged
+        );
+    }
+
+    #[test]
+    fn lexical_composition_refuses_conflicting_or_duplicate_edges() {
+        let node = ExactLexicalNode {
+            owner: identity("fixture", "Consumer"),
+            imports: vec![identity("fixture", "First")],
+        };
+        let mut conflicting = node.clone();
+        conflicting.imports.push(identity("fixture", "Second"));
+        assert!(compose_lexical_nodes([&node, &conflicting]).is_err());
+        assert!(compose_lexical_nodes([&conflicting, &node]).is_err());
+        let mut duplicate = node.clone();
+        duplicate.imports.push(duplicate.imports[0].clone());
+        assert!(compose_lexical_nodes([&duplicate]).is_err());
+    }
 
     #[test]
     fn certified_demand_tags_preserve_full_identity_and_refuse_generation_conflicts() {

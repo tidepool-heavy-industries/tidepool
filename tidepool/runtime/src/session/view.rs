@@ -345,13 +345,13 @@ impl SessionCompileView {
                 Some(context) => (**context).clone(),
                 None => ExactDeclarationContext::new(&[], &[], Vec::new())?,
             };
-            let mut lexical = context.lexical_graph().to_vec();
+            let mut lexical = Vec::new();
             let mut joins = Vec::new();
             for projection in inputs.projections() {
                 lexical.extend_from_slice(projection.context().lexical_graph());
                 joins.push(projection.receipt().clone());
             }
-            context = context.extend(&[], &joins, lexical)?;
+            context = context.extend_lexical_joins(&joins, &lexical)?;
             Arc::make_mut(&mut self.projection).exact_context = Some(Arc::new(context));
         }
         if let Some(annotations) = inputs.annotations() {
