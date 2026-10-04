@@ -2245,14 +2245,16 @@ where
                             let error = ResidentActorWorkbenchError::ActorProtocol(
                                 "private publication refused after execution terminated".into(),
                             );
-                            let publication = WorkbenchPublicationOutcome::Rejected {
-                                detail: error.to_string(),
-                            };
+                            let failure = private_publication_rejection(
+                                owned.state.effects.control.as_ref().unwrap(),
+                                result,
+                                error,
+                            );
                             return Self::settle_owned_execution(
                                 behavior,
                                 &kernel,
                                 owned,
-                                Err(private_publication_failure(result, error, publication)),
+                                Err(failure),
                             );
                         }
                         let mut result = result;
@@ -2288,23 +2290,17 @@ where
                                 ))
                             }
                         };
-                        owned
-                            .state
-                            .effects
-                            .control
-                            .as_ref()
-                            .expect("owned execution retains its original control")
-                            .publication_decision()
-                            .terminate();
-                        let publication = WorkbenchPublicationOutcome::Rejected {
-                            detail: error.to_string(),
-                        };
-                        Self::settle_owned_execution(
-                            behavior,
-                            &kernel,
-                            owned,
-                            Err(private_publication_failure(result, error, publication)),
-                        )
+                        let failure = private_publication_rejection(
+                            owned
+                                .state
+                                .effects
+                                .control
+                                .as_ref()
+                                .expect("owned execution retains its original control"),
+                            result,
+                            error,
+                        );
+                        Self::settle_owned_execution(behavior, &kernel, owned, Err(failure))
                     }
                 }
             },
@@ -2490,6 +2486,29 @@ fn mark_private_publication(
     let publication = WorkbenchPublicationOutcome::Published { bindings };
     set_private_publication(&mut result, publication);
     result
+}
+
+fn private_publication_rejection(
+    control: &crate::WorkbenchExecutionControl,
+    result: Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
+    source: ResidentActorWorkbenchError,
+) -> WorkbenchExecutionFailure {
+    // Settle the arbiter before reading its sticky winning-cancellation proof.
+    // A claimed write that fails before rename retains its real failure.
+    control.publication_decision().terminate();
+    let publication = if control
+        .native_cancel()
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        WorkbenchPublicationOutcome::NotPublished {
+            reason: WorkbenchNotPublishedReason::Cancelled,
+        }
+    } else {
+        WorkbenchPublicationOutcome::Rejected {
+            detail: source.to_string(),
+        }
+    };
+    private_publication_failure(result, source, publication)
 }
 
 fn private_publication_failure(

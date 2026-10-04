@@ -168,3 +168,83 @@ fn an_incomplete_ordinary_return_cannot_publish_a_cell() {
         Some(WorkbenchNotPublishedReason::Failed)
     );
 }
+
+#[test]
+fn publication_error_obeys_the_cancellation_arbiter_and_retains_diagnostics() {
+    for cancellation_wins in [true, false] {
+        let control = crate::WorkbenchExecutionControl::untracked();
+        if cancellation_wins {
+            assert!(control.request_cancellation());
+        } else {
+            let claim = control.publication_decision().claim_commit().unwrap();
+            assert!(!control.request_cancellation());
+            assert!(claim.before_rename_failure());
+        }
+        let failure = private_publication_rejection(
+            &control,
+            Ok(KernelStep::Continue(response(
+                WorkbenchRunStatus::Committed,
+            ))),
+            ResidentActorWorkbenchError::ActorProtocol("publication preparation failed".into()),
+        );
+        let expected = if cancellation_wins {
+            WorkbenchPublicationOutcome::NotPublished {
+                reason: WorkbenchNotPublishedReason::Cancelled,
+            }
+        } else {
+            WorkbenchPublicationOutcome::Rejected {
+                detail: failure.source.to_string(),
+            }
+        };
+        assert_eq!(failure.publication.as_ref(), Some(&expected));
+        assert!(expected.public_bindings().is_empty());
+        assert_eq!(failure.receipts.len(), 1);
+        assert_eq!(failure.receipts[0].installed_bindings, ["privateProgress"]);
+        assert!(failure
+            .source
+            .to_string()
+            .contains("publication preparation failed"));
+        let actor = ActorRef::first(crate::ActorId(1));
+        let result = Err(KernelInvocationFailure::Workbench(
+            crate::KernelWorkbenchFailure {
+                actor,
+                receipts: failure.receipts,
+                point: failure.point,
+                total: failure.total,
+                publication: failure.publication,
+                diagnostic: failure.source.failure_diagnostic(),
+                detail: failure.source.to_string(),
+            },
+        ));
+        let exit = control.finish_cell(WorkbenchExecutionId::from_digest([30; 16]), &result, true);
+        assert_eq!(
+            exit.cause,
+            if cancellation_wins {
+                crate::CellExitCause::Cancelled
+            } else {
+                crate::CellExitCause::Failed
+            }
+        );
+    }
+}
+
+#[test]
+fn publication_error_termination_prevents_a_later_cancellation_from_reclassifying_it() {
+    let control = crate::WorkbenchExecutionControl::untracked();
+    let failure = private_publication_rejection(
+        &control,
+        Ok(KernelStep::Continue(response(
+            WorkbenchRunStatus::Committed,
+        ))),
+        ResidentActorWorkbenchError::ActorProtocol("certification refused".into()),
+    );
+    assert!(!control.request_cancellation());
+    assert!(control.context_cancellation_requested());
+    assert!(matches!(
+        failure.publication,
+        Some(WorkbenchPublicationOutcome::Rejected { .. })
+    ));
+    assert!(!control
+        .native_cancel()
+        .load(std::sync::atomic::Ordering::Acquire));
+}
