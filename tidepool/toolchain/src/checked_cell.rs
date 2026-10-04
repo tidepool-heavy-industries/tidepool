@@ -2001,7 +2001,7 @@ impl ExactCompiledPrefix {
             || !projection
                 .recovery_products()
                 .iter()
-                .any(|product| product.artifact_id() == original.artifact_id())
+                .any(|product| product == original)
         {
             return Err(failure(
                 "declaration projection has another original implementation",
@@ -2027,7 +2027,7 @@ impl ExactCompiledPrefix {
             .iter()
             .map(|node| (node.owner.clone(), node))
             .collect::<BTreeMap<_, _>>();
-        let initial_interfaces = initial.interface_owners();
+        let initial_interfaces = initial.joined_interfaces();
         let mut selected = BTreeSet::new();
         for retained in retained_projections {
             let owner = crate::declaration_join::ExactModuleIdentity {
@@ -2036,9 +2036,9 @@ impl ExactCompiledPrefix {
             };
             if retained.toolchain_identity_sha256() != self.cell.producer
                 || !initial_lexical.contains_key(&owner)
-                || !initial_interfaces.iter().any(|interface| {
-                    interface.owner == owner && interface.sha256 == hash(retained.interface_bytes())
-                })
+                || !initial_interfaces
+                    .iter()
+                    .any(|interface| interface == retained.interface())
             {
                 return Err(failure(
                     "retained projection was not selected by this checked cell",
@@ -2874,7 +2874,7 @@ pub(crate) fn retain_projection_inputs(
     context: &crate::declaration_context::ExactDeclarationContext,
     projections: &[Arc<crate::declaration_join::AcceptedJoin>],
 ) -> Result<Vec<Arc<crate::declaration_join::AcceptedJoin>>, CompileError> {
-    let interfaces = context.interface_owners();
+    let interfaces = context.joined_interfaces();
     let selected = context
         .lexical_graph()
         .iter()
@@ -2888,9 +2888,9 @@ pub(crate) fn retain_projection_inputs(
         };
         if !seen.insert(owner.clone())
             || !selected.contains(&owner)
-            || !interfaces.iter().any(|interface| {
-                interface.owner == owner && interface.sha256 == hash(projection.interface_bytes())
-            })
+            || !interfaces
+                .iter()
+                .any(|interface| interface == projection.interface())
         {
             return Err(failure(
                 "captured projection lacks one exact selected initial interface",

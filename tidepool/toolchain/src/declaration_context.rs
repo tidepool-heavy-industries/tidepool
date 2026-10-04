@@ -798,7 +798,7 @@ impl GeneratedScaffoldImportAuthority {
             match &self.role {
                 GeneratedScaffoldRole::Resume(owner) => product.owner() == owner,
                 GeneratedScaffoldRole::PlannedDeclaration(certificate) =>
-                    product.artifact_id() == certificate.product().artifact_id()
+                    product == certificate.product()
                     && certificate.toolchain_identity_sha256() == context.producer,
             })
         })
@@ -1103,7 +1103,7 @@ impl ExactCompilationRequest {
                     .context
                     .recovery_products()
                     .iter()
-                    .any(|product| product.artifact_id() == certificate.product().artifact_id())
+                    .any(|product| product == certificate.product())
             {
                 return Err(failure(
                     "checked recipe original differs from its admitted certificate",
