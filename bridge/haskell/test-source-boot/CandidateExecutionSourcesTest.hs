@@ -213,7 +213,7 @@ candidateExecutionSourcesTest = withTiming $ withScratch $ \work -> do
   unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult result))) $
     fail "retained original recipes did not execute through the thin facade"
   -- Negative wire controls mutate a current genuine offer and preserve its
-  -- canonical owner evidence. Promised graphs cannot be borrowed from a cache.
+  -- canonical owner evidence. A descriptor promises its exact file bytes.
   originalTerm <- readTerm sourceScopePath
   parcel <- case offerTerm of
     TList [_,_,_,_,_,value,_] -> pure value
@@ -240,14 +240,23 @@ candidateExecutionSourcesTest = withTiming $ withScratch $ \work -> do
         TList [_,refs] -> TList [TList [],refs]
         _ -> parcel
   forM_ [("wrong original version",corrupt),("graph digest",wrongDigest)
-      ,("duplicate owner",duplicateRef),("unoffered original owner",allOriginals)
-      ,("missing promised graph",missingGraph)] $ \(label,invalid) -> do
+      ,("duplicate owner",duplicateRef),("unoffered original owner",allOriginals)] $ \(label,invalid) -> do
     writeTerm candidatePath (envelope invalid)
     forM_ [readModuleCandidates candidatePath,
         readModuleCandidatesWithGraphs (scopeExecutionGraphs originalScope) candidatePath] $ \readOffer ->
       readOffer >>= \case
         Left _ -> pure ()
         Right _ -> fail ("candidate execution manifest accepted " ++ label)
+  -- Omitting a descriptor differs from promising a missing file: exact-scope
+  -- inventory can close the same original reference without widening authority.
+  writeTerm candidatePath (envelope missingGraph)
+  readModuleCandidates candidatePath >>= \case
+    Left _ -> pure ()
+    Right _ -> fail "candidate reference resolved without its authenticated original graph"
+  sharedOffer <- readModuleCandidatesWithGraphs (scopeExecutionGraphs originalScope) candidatePath
+    >>= either fail pure
+  unless (sharedOffer == offered) $
+    fail "authenticated exact graph inventory changed original candidate custody"
   BS.writeFile candidatePath offerBytes
   restored <- readModuleCandidates candidatePath >>= either fail pure
   unless (restored == offered) $ fail "restored production offer changed its original execution custody"
