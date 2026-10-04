@@ -2786,7 +2786,26 @@ fn check_cell_impl(
         req.compile_generation,
         req.compile_view_evidence,
     )?;
-    if req.exact_context.is_some() {
+    if let Some(admission) = admission {
+        // This owner validates receipts with the same-request original
+        // declaration before admitting the final checking source.
+        let authority = offer
+            .admit_checked_cell(temp.path())
+            .map_err(|error| offer.retain_failure(temp.path(), &output.stderr, error))?;
+        if authority.checked_source() != checked.checked_source {
+            return Err(offer
+                .retain_failure(
+                    temp.path(),
+                    &output.stderr,
+                    CompileError::ExtractFailed(
+                        "checked source differs from its admitted cell authority".into(),
+                    ),
+                )
+                .into());
+        }
+        checked.authority = Some(authority);
+        checked.admission = Some(admission);
+    } else if req.exact_context.is_some() {
         let validated = (|| {
             let witnesses = offer.validate_exact_outputs(temp.path())?;
             let module =
@@ -2805,14 +2824,6 @@ fn check_cell_impl(
         validated.map_err(|error| offer.retain_failure(temp.path(), &output.stderr, error))?;
     }
     checked.warnings = report.diagnostics;
-    if let Some(admission) = admission {
-        checked.authority = Some(
-            offer
-                .admit_checked_cell(temp.path())
-                .map_err(|error| offer.retain_failure(temp.path(), &output.stderr, error))?,
-        );
-        checked.admission = Some(admission);
-    }
     Ok(checked)
 }
 
