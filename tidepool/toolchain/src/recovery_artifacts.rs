@@ -12,6 +12,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tidepool_repr::execution_schema::CachedHomeOwner;
 
+/// Structural recovery fixtures for downstream tests. Disabled in production builds.
+#[cfg(feature = "test-support")]
+pub mod test_support;
+
 /// Compiler requests own disposable inputs; recovery publications must survive
 /// a crash. Both modes verify the same immutable bytes and path ownership.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -9,6 +9,10 @@ rust-version.workspace = true
 description = "Locate, validate, fingerprint, and cache the Tidepool toolchain and its compile outputs"
 readme = "../../README.md"
 
+[features]
+# Enables structural artifact fixtures only for downstream dev-dependencies.
+test-support = []
+
 [dependencies]
 tidepool-atomic-write.workspace = true
 thiserror.workspace = true

@@ -1863,7 +1863,7 @@ pub(crate) fn fixture_module_interface(
     )
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn fixture_interface_bytes(
     producer: [u8; 32],
     unit: &str,

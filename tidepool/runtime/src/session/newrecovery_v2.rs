@@ -1914,12 +1914,6 @@ mod tests {
     fn owner(path: &str) -> RecoveryPublicOwner {
         RecoveryPublicOwner::new(&tidepool_repr::ActorPath::parse(path).unwrap(), 1).unwrap()
     }
-    use sha2::{Digest, Sha256};
-    use tidepool_repr::execution_schema::{CachedHomeOwner, ModuleVersion};
-    use tidepool_toolchain::certified_products::encode_home_certification_with_module;
-    use tidepool_toolchain::recovery_artifacts::{
-        materialize_recovery_closure, RecoveryArtifactInput,
-    };
 
     const IFACE_SHA: [u8; 32] = [
         0xc7, 0x96, 0xd3, 0x7c, 0x6d, 0x49, 0x1e, 0x8f, 0x0c, 0x6e, 0x9b, 0x83, 0xee, 0xd3, 0x4c,
@@ -2007,165 +2001,17 @@ mod tests {
         }
     }
 
-    fn payload_sha(bytes: &[u8]) -> [u8; 32] {
-        Sha256::digest(bytes).into()
-    }
-
-    fn module_certificate(reference: &RecoveryModuleInterfaceRef) -> Vec<u8> {
-        use ciborium::value::Value;
-        let hex = |sha: &[u8; 32]| {
-            sha.iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<String>()
-        };
-        let interface = &reference.interface;
-        let value = Value::Array(vec![
-            Value::Text("TPFINALMODULE".into()),
-            Value::Integer(1.into()),
-            Value::Text("tidepool-ghc-finalized-module-v1".into()),
-            Value::Text(hex(&interface.toolchain_identity_sha256)),
-            Value::Array(vec![Value::Text(interface.unit.clone())]),
-            Value::Text(interface.unit.clone()),
-            Value::Text(interface.module.clone()),
-            Value::Text(hex(&[0x33; 32])),
-            Value::Text(hex(&interface.skinny_iface_sha256)),
-            Value::Text(hex(&interface.package_imports_sha256)),
-            reference
-                .core
-                .as_ref()
-                .map_or(Value::Null, |core| Value::Text(hex(&core.sha256))),
-            Value::Array(vec![]),
-        ]);
-        let mut bytes = Vec::new();
-        ciborium::ser::into_writer(&value, &mut bytes).unwrap();
-        bytes
-    }
-
-    fn reseal_fixture_home(root: &Path, home: &mut RecoveryArtifactRef) {
-        let canonical = home
-            .module_interface
-            .as_mut()
-            .expect("fixture has canonical interface");
-        canonical.interface.package_imports_sha256 = home.package_imports_sha256;
-        let certificate = module_certificate(canonical);
-        canonical.certificate_sha256 = payload_sha(&certificate);
-        fs::write(root.join(&canonical.certificate_path), certificate).unwrap();
-        let owner = CachedHomeOwner {
-            unit: home.unit.clone(),
-            module: home.module.clone(),
-            module_version: ModuleVersion(home.module_version),
-            skinny_iface_sha256: home.skinny_iface_sha256,
-            product_sha256: home.product_sha256,
-        };
-        let native = encode_home_certification_with_module(
-            &owner,
-            &[],
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            canonical.certificate_sha256,
-        )
-        .unwrap();
-        home.certification_sha256 = payload_sha(&native);
-        fs::write(root.join(&home.certification_path), native).unwrap();
-    }
-
     fn fixture(root: &Path) -> RecoveryGraphWire {
-        let source = tempfile::tempdir().unwrap();
-        let iface = source.path().join("Lib.hi");
-        let product = source.path().join("Lib.product");
-        fs::write(&iface, b"interface").unwrap();
-        let value = ciborium::value::Value::Array(vec![
-            ciborium::value::Value::Text("TPMOD".into()),
-            ciborium::value::Value::Integer(1.into()),
-            ciborium::value::Value::Array(vec![ciborium::value::Value::Array(vec![
-                ciborium::value::Value::Text("main".into()),
-                ciborium::value::Value::Text("Lib".into()),
-                ciborium::value::Value::Bytes(b"interface".to_vec()),
-                ciborium::value::Value::Array(vec![]),
-            ])]),
-        ]);
-        let mut product_bytes = Vec::new();
-        ciborium::ser::into_writer(&value, &mut product_bytes).unwrap();
+        fixture_with_package(root, None)
+    }
 
-        fs::write(&product, product_bytes).unwrap();
-        let home_owner = CachedHomeOwner {
-            unit: "main".into(),
-            module: "Lib".into(),
-            module_version: ModuleVersion([0x22; 32]),
-            skinny_iface_sha256: IFACE_SHA,
-            product_sha256: [
-                203, 118, 219, 99, 35, 245, 3, 47, 232, 172, 108, 229, 10, 166, 133, 26, 194, 49,
-                195, 255, 222, 100, 218, 15, 219, 241, 254, 186, 229, 90, 19, 16,
-            ],
-        };
-        let package_witness = ciborium::value::Value::Array(vec![
-            ciborium::value::Value::Text("TPPKGROOTS".into()),
-            ciborium::value::Value::Text("2".into()),
-            ciborium::value::Value::Array(vec![
-                ciborium::value::Value::Text("main".into()),
-                ciborium::value::Value::Text("Lib".into()),
-                ciborium::value::Value::Text(
-                    IFACE_SHA
-                        .iter()
-                        .map(|byte| format!("{byte:02x}"))
-                        .collect::<Vec<_>>()
-                        .join(""),
-                ),
-            ]),
-            ciborium::value::Value::Array(vec![]),
-            ciborium::value::Value::Array(vec![]),
-        ]);
-        let mut package_bytes = Vec::new();
-        ciborium::ser::into_writer(&package_witness, &mut package_bytes).unwrap();
-        let package_sha = payload_sha(&package_bytes);
-        fs::write(source.path().join("Lib.hi.packages"), package_bytes).unwrap();
-        fs::write(source.path().join("Lib.core"), b"core").unwrap();
-        let mut canonical = RecoveryModuleInterfaceRef {
-            interface: RecoveryJoinRef {
-                toolchain_identity_sha256: [0x11; 32],
-                unit: "main".into(),
-                module: "Lib".into(),
-                skinny_iface_sha256: IFACE_SHA,
-                interface_path: "Lib.hi".into(),
-                package_imports_path: "Lib.hi.packages".into(),
-                package_imports_sha256: package_sha,
-            },
-            certificate_path: "Lib.module".into(),
-            certificate_sha256: [0; 32],
-            core: Some(tidepool_toolchain::recovery_artifacts::RecoveryCoreRef {
-                path: "Lib.core".into(),
-                sha256: payload_sha(b"core"),
-                bytes: 4,
-            }),
-        };
-        let module_bytes = module_certificate(&canonical);
-        canonical.certificate_sha256 = payload_sha(&module_bytes);
-        fs::write(
-            source.path().join(&canonical.certificate_path),
-            module_bytes,
-        )
-        .unwrap();
-        let certification = encode_home_certification_with_module(
-            &home_owner,
-            &[],
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            canonical.certificate_sha256,
-        )
-        .unwrap();
-        fs::write(source.path().join("Lib.hi.owners"), certification).unwrap();
-        let materialized = materialize_recovery_closure(
-            root,
-            [0x11; 32],
-            &[RecoveryArtifactInput {
-                owner: &home_owner,
-                interface_source: &iface,
-                product_source: &product,
-                module_interface: (source.path(), &canonical),
-            }],
-        )
-        .unwrap();
-        let artifact = RecoveryArtifactClosure::Home(materialized.into_iter().next().unwrap());
+    fn fixture_with_package(root: &Path, package: Option<&Path>) -> RecoveryGraphWire {
+        let materialized =
+            tidepool_toolchain::recovery_artifacts::test_support::materialize_empty_native(
+                root, package,
+            )
+            .unwrap();
+        let artifact = RecoveryArtifactClosure::Home(materialized);
         let key = artifact.artifact_id();
         let export = RecoveryExport {
             identity: identity("answer"),
@@ -3794,34 +3640,18 @@ mod tests {
 
     #[test]
     fn artifact_validation_shares_package_bytes_and_rechecks_each_read() {
-        use ciborium::value::Value;
         use tidepool_toolchain::recovery_artifacts::{
             materialize_joined_interface, verify_materialized_join_with_work,
-            verify_materialized_ref_with_work,
+            verify_materialized_ref_with_work, with_recovery_artifact_verification,
         };
 
         let dir = tempfile::tempdir().unwrap();
         let package = dir.path().join("package.hi");
         fs::write(&package, b"interface").unwrap();
-        let mut wire = fixture(dir.path());
+        let mut wire = fixture_with_package(dir.path(), Some(&package));
         let RecoveryArtifactClosure::Home(home) = home_artifact_mut(&mut wire) else {
             unreachable!()
         };
-        let sidecar = dir.path().join(&home.package_imports_path);
-        let mut witness: Value =
-            ciborium::de::from_reader(fs::read(&sidecar).unwrap().as_slice()).unwrap();
-        let Value::Array(fields) = &mut witness else {
-            unreachable!()
-        };
-        fields[3] = Value::Array(vec![Value::Array(vec![
-            Value::Text("base-unit".into()),
-            Value::Text("Data.Base".into()),
-            Value::Text(package.display().to_string()),
-            Value::Text(IFACE_SHA.iter().map(|byte| format!("{byte:02x}")).collect()),
-        ])]);
-        let mut bytes = Vec::new();
-        ciborium::ser::into_writer(&witness, &mut bytes).unwrap();
-        fs::write(&sidecar, bytes).unwrap();
         let join = materialize_joined_interface(
             dir.path(),
             home.toolchain_identity_sha256,
@@ -3831,12 +3661,14 @@ mod tests {
             home.skinny_iface_sha256,
         )
         .unwrap();
-        home.package_imports_sha256 = join.package_imports_sha256;
-        reseal_fixture_home(dir.path(), home);
         let certification_path = dir.path().join(&home.certification_path);
         let mut separate = RecoveryArtifactWork::default();
         verify_materialized_ref_with_work(dir.path(), home, &mut separate).unwrap();
         verify_materialized_join_with_work(dir.path(), &join, &mut separate).unwrap();
+        with_recovery_artifact_verification(dir.path(), &mut separate, |verification| {
+            verification.verify_module_interface(home.module_interface.as_ref().unwrap())
+        })
+        .unwrap();
         wire.artifacts
             .retain(|artifact| !matches!(artifact, RecoveryArtifactClosure::ModuleInterface(_)));
         wire.artifact_dependencies.clear();
@@ -3858,7 +3690,7 @@ mod tests {
             .is_empty());
         assert_eq!(
             separate.hash_bytes - batched.hash_bytes,
-            b"interface".len() as u64
+            2 * b"interface".len() as u64
         );
 
         let bytes = serde_json::to_vec(&graph).unwrap();

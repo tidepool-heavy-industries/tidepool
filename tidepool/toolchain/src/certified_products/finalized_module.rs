@@ -674,7 +674,7 @@ pub(super) fn recover_interface(
     })
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn fixture_interface(
     producer: [u8; 32],
     unit: &str,

@@ -96,6 +96,14 @@ actions supplied through the test environment, without becoming Rust link inputs
 A Buck test result is evidence only for its selected target; all
 other packages retain their existing `just` checks until migrated and accepted.
 
+Runtime recovery unit tests use the toolchain's nondefault `test-support`
+feature through a Cargo dev-dependency. Cargo/`just` is authoritative for this
+test closure. The Buck generator does not represent separate dev-feature
+dependency variants, so the runtime unit-test Buck target is unsupported for
+this closure. Production Buck targets keep `test-support` disabled. Do not
+regenerate them from Cargo's globally unified feature list; generator `--check`
+cannot establish this test closure's feature correctness.
+
 Additional focused execution targets include:
 
 | Target | Execution boundary |
