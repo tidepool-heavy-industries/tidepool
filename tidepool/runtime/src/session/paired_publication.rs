@@ -459,6 +459,29 @@ impl PersistentSession {
         source_keys: Vec<SourceLeaseKey>,
         publication: ExecutionPublicationIntent,
     ) -> Result<Arc<FinalExecutionIntent>, SessionError> {
+        let completed_values = admission.completed_values.lock();
+        self.freeze_execution_intent_locked(
+            admission,
+            write_ids,
+            source_keys,
+            publication,
+            &completed_values,
+        )
+    }
+
+    /// The caller holds this admission's ledger lock from write selection
+    /// through final sealing, so effect acceptance cannot enter between them.
+    pub(super) fn freeze_execution_intent_locked(
+        &mut self,
+        admission: &super::PrivateExecutionAdmission,
+        write_ids: Vec<SessionVarId>,
+        source_keys: Vec<SourceLeaseKey>,
+        publication: ExecutionPublicationIntent,
+        completed_values: &parking_lot::MutexGuard<
+            '_,
+            std::collections::HashMap<SessionVarId, super::admission::CertifiedPrivateValueWrite>,
+        >,
+    ) -> Result<Arc<FinalExecutionIntent>, SessionError> {
         if !Arc::ptr_eq(&admission.owner, self.admission_owner())
             || admission.owner_epoch != self.admission_owner().epoch()
             || admission.view().session() != self.lib().session_id()
@@ -466,9 +489,6 @@ impl PersistentSession {
         {
             return Err(SessionError::StaleStagedDeclaration);
         }
-        // Effect acceptance uses this same owner lock, so no write can enter
-        // between freezing the selected proof set and sealing the final intent.
-        let completed_values = admission.completed_values.lock();
         if let Some(intent) = admission.final_intent.get() {
             if self
                 .public_visibility_snapshot_in(admission.private_scope())
@@ -521,7 +541,7 @@ impl PersistentSession {
             source_keys,
             Some(admission.scope_lease.clone()),
             admission.durable_owner.clone(),
-            &completed_values,
+            completed_values,
             publication,
         )?;
         assert!(

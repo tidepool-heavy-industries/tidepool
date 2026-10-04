@@ -2673,12 +2673,12 @@ where
                 })
             })
             .collect();
-        drop(completed);
-        self.state.freeze_execution_intent_for(
+        self.state.freeze_execution_intent_locked(
             admission,
             writes,
             snapshot.source_instances,
             publication,
+            &completed,
         )
     }
 

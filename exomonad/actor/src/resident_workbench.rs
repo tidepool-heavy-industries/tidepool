@@ -11787,7 +11787,10 @@ mod request_tests {
             })
             .await
             .unwrap();
-        drop(unaccepted);
+        assert!(
+            unaccepted.accept().is_err(),
+            "a sealed native prefix refuses late effect acceptance"
+        );
     }
 
     #[tokio::test]
@@ -11798,6 +11801,13 @@ mod request_tests {
             .await
             .unwrap();
         let execution = workbench.private_execution.as_ref().unwrap().clone();
+        let mut pending = workbench
+            .bind_command_job(private.clone(), "cancelled job".into())
+            .await
+            .unwrap();
+        let name = pending.name().to_owned();
+        // Checked mounting establishes the machine incarnation. Compare
+        // cancellation against that initialized public snapshot.
         let before = workbench
             .access
             .with_machine(public.clone(), |session, context, _| {
@@ -11807,11 +11817,6 @@ mod request_tests {
             })
             .await
             .unwrap();
-        let mut pending = workbench
-            .bind_command_job(private.clone(), "cancelled job".into())
-            .await
-            .unwrap();
-        let name = pending.name().to_owned();
         let wrong = workbench
             .access
             .with_machine(public.clone(), |session, context, _| {
