@@ -94,61 +94,85 @@ const FREER_RESUME_EXPECTATIONS: &str =
     include_str!("../../../bridge/haskell/test-prepared-stg/FreerResumeExpectations.json");
 
 #[test]
-fn compiler_json_reply_streams_using_the_parked_program_layout() {
+fn compiler_typed_receive_parks_and_resumes_json_after_collection() {
     use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
+    use tidepool_repr::execution_schema::{ConstructorId, ConstructorReply};
     use tidepool_runtime::prepared_execution::{ParkPolicy, PreparedEngine, PreparedSettlement};
 
     tidepool_testing::eval_harness::require_extract();
     let surface = tidepool_testing::effect_surface::TestEffectSurface::minimal(&[
-        tidepool_mcp::runllmturn_decl(),
+        tidepool_mcp::actor_local_decl(),
     ])
-    .expect("JSON reply effect surface");
+    .expect("typed receive effect surface");
     let compiled = tidepool_runtime::compile_haskell(
         include_str!("fixtures/JsonReply.hs"),
         "__prepared",
         &surface.include_path_refs(),
     )
-    .expect("compile JSON reply without JSON intrinsic calls");
+    .expect("compile typed receive through post-tidy carrier issuance");
     let prepared = compiled.prepared.into_prepared();
+    let receiver = prepared
+        .constructors()
+        .iter()
+        .position(|constructor| {
+            constructor.identity.module == "Tidepool.Effects.Core"
+                && constructor.identity.occurrence == "ActorReceiveWith"
+        })
+        .expect("compiler retained the genuine receive constructor");
+    assert!(prepared.constructor_replies().contains(&(
+        ConstructorId(receiver as u32),
+        ConstructorReply::AtSite,
+    )));
     assert!(prepared.json_layout().is_some());
     let table = compiled.table.with_json_layout(None);
     let (mut engine, program) = PreparedEngine::bootstrap_with_nursery_bytes(prepared, 4096)
-        .expect("bootstrap compiler-produced JSON reply");
-    let PreparedSettlement::Suspended {
-        request,
-        continuation,
-    } = engine
-        .run_settled(program, RealmId::ROOT)
-        .expect("run JSON request")
-    else {
-        panic!("JSON request must suspend")
-    };
-    let parked = engine
-        .park_suspension(
-            program,
-            RealmId::ROOT,
-            ParkPolicy {
-                principal: tidepool_repr::PrincipalId::SYSTEM,
-                effect_policy: EffectRunPolicy::SuspendAll,
-                live_payload: LivePayloadPolicy::None,
-            },
+        .expect("bootstrap compiler-produced typed receive");
+    let mut parked = Vec::new();
+    for _ in 0..2 {
+        let PreparedSettlement::Suspended {
             request,
             continuation,
-            &table,
-        )
-        .expect("park compiler-produced JSON site");
-    let payload = serde_json::json!({"mixed": [true, false, null, 42, "text", {"nested": []}]});
-    let resumed = engine
-        .resume_with_structural_answer(parked.id, &payload, &table)
-        .expect("stream JSON with the owner's physical map layout");
-    let PreparedSettlement::Done { value } = resumed.settlement else {
-        panic!("JSON reply must complete")
-    };
-    let observed = engine.observe(program, value).expect("observe JSON reply");
-    let decoded = tidepool_runtime::value_to_json(&observed, &table, 0);
-    assert_eq!(decoded, payload);
-    assert!(engine.release(value));
-    assert_eq!(engine.parked_count(), 0);
+        } = engine
+            .run_settled(program, RealmId::ROOT)
+            .expect("run typed receive")
+        else {
+            panic!("typed receive must suspend")
+        };
+        parked.push(
+            engine
+                .park_suspension(
+                    program,
+                    RealmId::ROOT,
+                    ParkPolicy {
+                        principal: tidepool_repr::PrincipalId::SYSTEM,
+                        effect_policy: EffectRunPolicy::SuspendAll,
+                        live_payload: LivePayloadPolicy::None,
+                    },
+                    request,
+                    continuation,
+                    &table,
+                )
+                .expect("park with the compiler-issued carrier"),
+        );
+    }
+    assert_eq!(engine.parked_count(), 2);
+    engine
+        .quiesce_and_collect_now()
+        .expect("collect while typed continuations remain parked");
+    for (index, parked) in parked.into_iter().rev().enumerate() {
+        let payload = serde_json::json!({"index": index, "mixed": [true, false, null, 42, "text", {"nested": []}]});
+        let resumed = engine
+            .resume_with_structural_answer(parked.id, &payload, &table)
+            .expect("stream JSON with the parked owner's physical map layout");
+        let PreparedSettlement::Done { value } = resumed.settlement else {
+            panic!("typed reply must complete")
+        };
+        let observed = engine.observe(program, value).expect("observe typed reply");
+        let decoded = tidepool_runtime::value_to_json(&observed, &table, 0);
+        assert_eq!(decoded, payload);
+        assert!(engine.release(value));
+        assert_eq!(engine.parked_count(), 1 - index);
+    }
 }
 
 #[test]

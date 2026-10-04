@@ -3596,10 +3596,14 @@ hydratedSiteSiblings = withScratch $ \work -> do
             tops (NonRecursive binding) = [binding]
             tops (Recursive bindings) = bindings
         program <- either (fail . show) pure (projectPrepared context [target'])
-        unless ([length arguments | TopBinding identity (HeapBinding _ (Function _ arguments _ _))
-              <- concatMap tops (programBindings program), identity == root] == [1]
+        unless (any (\(TopBinding identity _) -> identity == root)
+              (concatMap tops (programBindings program))
             && any ((== sibling) . globalIdentity) (programGlobals program)) $
-          fail "hydrated sibling changed the capture root arity or original defining global"
+          fail "hydrated sibling lost its capture root or original defining global"
+        unless (all (\global -> let identity = globalIdentity global in
+            symbolModule identity /= "Tidepool.Internal.RequestSite"
+              || symbolOccurrence identity /= "RequestSite") (programGlobals program)) $
+          fail "post-tidy site issuance retained a newtype constructor worker"
         case pmYieldSites target' of
           [site] | ysOrigin site == "HydratedSiteExpr.__result"
             , stType (ysAnswer site) == "Bool"
