@@ -99,6 +99,13 @@ Deploy a fresh Tailscale-accessible workspace with Sol 6.1 root and recursive
 Luna child/grandchild; exercise typed replies, cleanup and a custom TUI task.
 Retain the previous host until this smoke succeeds.
 
+Qualify the exact deployment bundle, not only an independently built compiler
+pair. Record runtime, extractor, resident worker, source/stdlib products and
+browser asset identities together. The final M1/M2 gates must use those bundle
+components; package `--help` or a catalog-only smoke cannot substitute for them.
+A configured toolchain flake may provide compilers, but must not silently select
+a different project revision's runtime products.
+
 ## Full migration gate
 
 Every retained suite is discoverable and owned. Every positive fixture has a
