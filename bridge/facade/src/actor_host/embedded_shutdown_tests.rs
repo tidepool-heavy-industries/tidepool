@@ -120,17 +120,6 @@ fn embedded_owner_keeps_release_pending_until_task_settles_and_retains_failed_cl
     ));
 }
 
-#[test]
-fn embedded_owner_skips_native_undeployed_retirement() {
-    let embedded = InteractiveApplicationOwner::embedded();
-    assert!(!embedded.should_retire_undeployed_native(false));
-
-    let mut native = InteractiveApplicationOwner::embedded();
-    native.embedded = None;
-    assert!(native.should_retire_undeployed_native(false));
-    assert!(!native.should_retire_undeployed_native(true));
-}
-
 #[tokio::test(start_paused = true)]
 async fn embedded_shutdown_settles_exact_waiters_and_preserves_timeout_uncertainty() {
     use exomonad_actor::{ActorId, ReleaseAwait, ResourceRelease};

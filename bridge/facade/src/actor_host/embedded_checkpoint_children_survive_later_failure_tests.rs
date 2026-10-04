@@ -296,6 +296,7 @@ async fn embedded_checkpoint_children_survive_a_later_parent_cell_failure() {
     let (shutdown_tx, shutdown_rx) = watch::channel(None);
     let (_config_tx, config_rx) = watch::channel(campaign.config.clone());
     let fleet = InteractiveFleet {
+            test_observer: None,
         provider_forest: Arc::clone(&campaign.forest),
         root: campaign.actor.clone(),
         config: campaign.config.clone(),

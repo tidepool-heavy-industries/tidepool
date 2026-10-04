@@ -21,6 +21,8 @@ pub(super) async fn run_interactive_applications(
         worktree_authority,
 
         host_graph,
+        #[cfg(test)]
+        test_observer,
     } = fleet;
     let base_prompt = FrozenBasePrompt::materialize_selected(
         &run_root,
@@ -422,6 +424,8 @@ pub(super) async fn run_interactive_applications(
                         );
                     }
                     LocalResidentDeployment::PolicyInstalled(installation) => {
+                        #[cfg(test)]
+                        if let Some(observer) = &test_observer { observer.installed(&installation); }
                         let provider_attachment = match provider_attachment::ProviderAttachment::admit(
                             Arc::clone(&provider_forest), installation.actor.identity(),
                         ) {

@@ -61,7 +61,7 @@ pub(super) fn compressible_history(request: &ResponsesRequest) -> String {
 }
 
 pub(super) fn assert_applied_compaction(
-    host: &RunningBrowserHost,
+    host: &HostedTestRuntime,
     operation: &OperationId,
 ) -> harness::model::RequestId {
     let store = host.runtime.store();
@@ -103,7 +103,7 @@ pub(super) fn assert_applied_compaction(
 }
 
 async fn wait_for_armed_cell(
-    host: &RunningBrowserHost,
+    host: &HostedTestRuntime,
     target: &harness::embedding::HostIdentity,
     operation: &OperationId,
 ) {
@@ -118,7 +118,7 @@ async fn wait_for_armed_cell(
         loop {
             wait_for_cell_state(host, operation, CellState::Pending, Duration::from_secs(1)).await;
             if host
-                .campaign
+                .context
                 .actor
                 .hosted_workbench_waiting(&context)
                 .is_some()
@@ -283,7 +283,7 @@ enum CellState {
 }
 
 fn resident_cell_operation(
-    host: &RunningBrowserHost,
+    host: &HostedTestRuntime,
     target: &harness::embedding::HostIdentity,
 ) -> OperationId {
     let claims = host
@@ -310,7 +310,7 @@ fn resident_cell_operation(
 }
 
 async fn wait_for_cell_state(
-    host: &RunningBrowserHost,
+    host: &HostedTestRuntime,
     operation: &OperationId,
     expected: CellState,
     timeout: Duration,
@@ -446,7 +446,7 @@ async fn real_host_retains_one_late_haskell_output_across_compaction() {
         successor: successor_tx,
         late_output: late_output_tx,
     });
-    let host = RunningBrowserHost::start(&settings, &transport)
+    let host = HostedTestRuntime::start(&settings, &transport)
         .await
         .expect("production embedded host should start");
     let client = reqwest::Client::new();
@@ -466,7 +466,7 @@ async fn real_host_retains_one_late_haskell_output_across_compaction() {
         .next()
         .unwrap()
         .to_owned();
-    let target = browser_target(&host.campaign);
+    let target = browser_target(&host.context);
 
     submit_host_input(
         &client,

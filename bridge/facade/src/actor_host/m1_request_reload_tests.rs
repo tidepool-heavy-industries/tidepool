@@ -101,7 +101,7 @@ fn bounded_receipt(value: &Value) -> Value {
     })
 }
 
-async fn assert_pending(host: &RunningBrowserHost, operation: &OperationId, phase: &str) {
+async fn assert_pending(host: &HostedTestRuntime, operation: &OperationId, phase: &str) {
     let output = host.runtime.scheduler().output(operation).await.unwrap();
     if let Some(output) = output {
         let terminal = match &output {
@@ -197,7 +197,7 @@ fn assert_value(item: &Item, call: &str, expected: &str) {
     assert_eq!(receipt["output"].as_str().unwrap().trim(), expected);
 }
 
-fn operation(host: &RunningBrowserHost, request: &RequestId, call: &str) -> OperationId {
+fn operation(host: &HostedTestRuntime, request: &RequestId, call: &str) -> OperationId {
     host.runtime
         .store()
         .recorded_operation_for_request(request, &CallId(call.into()))
@@ -205,7 +205,7 @@ fn operation(host: &RunningBrowserHost, request: &RequestId, call: &str) -> Oper
         .expect("issued typed operation must have its original durable claim")
 }
 
-async fn completed(host: &RunningBrowserHost, operation: &OperationId, expected: &str) {
+async fn completed(host: &HostedTestRuntime, operation: &OperationId, expected: &str) {
     let result = tokio::time::timeout(Duration::from_secs(90), async {
         loop {
             match host.runtime.scheduler().output(operation).await.unwrap() {
@@ -260,7 +260,7 @@ async fn real_host_pins_typed_handler_across_reload_and_pending_compaction() {
     };
     let (requests, mut receiver) = mpsc::unbounded_channel();
     let transport: Arc<dyn ResponsesTransport> = Arc::new(ReloadTransport(requests));
-    let host = RunningBrowserHost::start_configured(&settings, &transport, |config| {
+    let host = HostedTestRuntime::start_configured(&settings, &transport, |config| {
         let authored = config.workspace.join(".exomonad");
         std::fs::create_dir_all(&authored).unwrap();
         std::fs::write(authored.join("AgentSpec.hs"), SPEC).unwrap();
@@ -286,7 +286,7 @@ async fn real_host_pins_typed_handler_across_reload_and_pending_compaction() {
         .next()
         .unwrap()
         .to_owned();
-    let target = browser_target(&host.campaign);
+    let target = browser_target(&host.context);
     real_host_late_output_tests::submit_host_input(
         &client,
         host.address,
@@ -299,24 +299,19 @@ async fn real_host_pins_typed_handler_across_reload_and_pending_compaction() {
 
     let first = issued(&mut receiver).await;
     let original_request = first.id.clone().expect("normal Engine request identity");
-    assert!(
-        first
-            .request
-            .tools
-            .iter()
-            .any(|tool| tool["name"] == "probe")
-    );
+    assert!(first
+        .request
+        .tools
+        .iter()
+        .any(|tool| tool["name"] == "probe"));
     let declared = first.request.tools.clone();
     // The transport already owns the request. Reload before its call is emitted.
     std::fs::write(
-        host.campaign
-            .config
-            .workspace
-            .join(".exomonad/AgentSpec.hs"),
+        host.context.config.workspace.join(".exomonad/AgentSpec.hs"),
         SPEC.replace("offset = 2", "offset = 3"),
     )
     .unwrap();
-    host.campaign
+    host.context
         .root_installation
         .policy
         .dispatch_boxed(exomonad_tool::ToolInvocation {
@@ -352,7 +347,7 @@ async fn real_host_pins_typed_handler_across_reload_and_pending_compaction() {
     };
     tokio::time::timeout(Duration::from_secs(90), async {
         while host
-            .campaign
+            .context
             .actor
             .hosted_workbench_waiting(&context)
             .is_none()
@@ -376,13 +371,11 @@ async fn real_host_pins_typed_handler_across_reload_and_pending_compaction() {
     before_compaction.reply.send(trigger).unwrap();
 
     let compact = issued(&mut receiver).await;
-    assert!(
-        compact
-            .request
-            .tools_allowed
-            .as_ref()
-            .is_some_and(Vec::is_empty)
-    );
+    assert!(compact
+        .request
+        .tools_allowed
+        .as_ref()
+        .is_some_and(Vec::is_empty));
     assert_pending(&host, &old, "compaction-issued").await;
     compact
         .reply
@@ -396,13 +389,11 @@ async fn real_host_pins_typed_handler_across_reload_and_pending_compaction() {
     let successor_request = successor.id.clone().expect("compacted successor identity");
     assert_ne!(successor_request, original_request);
     assert_eq!(successor.request.tools, declared);
-    assert!(
-        successor
-            .request
-            .input
-            .iter()
-            .any(|item| { item.0["type"] == "function_call" && item.0["call_id"] == OLD_CALL })
-    );
+    assert!(successor
+        .request
+        .input
+        .iter()
+        .any(|item| { item.0["type"] == "function_call" && item.0["call_id"] == OLD_CALL }));
     assert_eq!(outputs(&successor.request, OLD_CALL).count(), 0);
     assert_eq!(
         real_host_late_output_tests::assert_applied_compaction(&host, &old),
@@ -410,16 +401,12 @@ async fn real_host_pins_typed_handler_across_reload_and_pending_compaction() {
     );
     let inherited = host.runtime.store().claims_for_operation(&old).unwrap();
     assert_eq!(inherited.len(), 2, "original and compacted claimant only");
-    assert!(
-        inherited
-            .iter()
-            .any(|claim| claim.request == successor_request)
-    );
-    assert!(
-        inherited
-            .iter()
-            .all(|claim| claim.operation == old && claim.state == ClaimState::Pending)
-    );
+    assert!(inherited
+        .iter()
+        .any(|claim| claim.request == successor_request));
+    assert!(inherited
+        .iter()
+        .all(|claim| claim.operation == old && claim.state == ClaimState::Pending));
     successor
         .reply
         .send(probe_turn("new-installed-handler", NEW_CALL, 0))

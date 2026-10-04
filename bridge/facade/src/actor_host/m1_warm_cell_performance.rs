@@ -550,7 +550,7 @@ async fn production_engine_store_warm_display_cells_50() {
         concurrent_jobs: 1,
     };
     let provider: Arc<dyn ResponsesTransport> = transport.clone();
-    let fixture = RunningBrowserHost::start(&settings, &provider)
+    let fixture = HostedTestRuntime::start(&settings, &provider)
         .await
         .unwrap();
     // Startup belongs to warm-up evidence, never a measured cell's attribution.
@@ -578,7 +578,7 @@ async fn production_engine_store_warm_display_cells_50() {
         .unwrap()
         .to_owned();
     let submission = browser_input(
-        &browser_target(&fixture.campaign),
+        &browser_target(&fixture.context),
         "Measure fifty actual varied Haskell displays.",
     );
     let accepted = client

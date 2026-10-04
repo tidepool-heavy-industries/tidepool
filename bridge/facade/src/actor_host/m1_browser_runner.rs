@@ -275,10 +275,10 @@ fn required_path(name: &str) -> Result<PathBuf, String> {
 }
 
 async fn verify_cancelled_resident_call(
-    fixture: &RunningBrowserHost,
+    fixture: &HostedTestRuntime,
     expected_operation: &harness::model::OperationId,
 ) -> Result<(), String> {
-    let target = browser_target(&fixture.campaign);
+    let target = browser_target(&fixture.context);
     let call = harness::model::CallId("browser-cancellable-cell".into());
     let claims = fixture
         .runtime
@@ -322,7 +322,7 @@ async fn verify_cancelled_resident_call(
 }
 
 async fn pending_sleep_operation(
-    fixture: &RunningBrowserHost,
+    fixture: &HostedTestRuntime,
 ) -> Result<Option<harness::model::OperationId>, String> {
     let call = harness::model::CallId("browser-cancellable-cell".into());
     let claims = fixture
@@ -337,7 +337,7 @@ async fn pending_sleep_operation(
             Err("cancellable resident call has multiple originating operations".into())
         };
     };
-    let target = browser_target(&fixture.campaign);
+    let target = browser_target(&fixture.context);
     let context = exomonad_tool::ToolInvocationContext {
         origin: exomonad_tool::ToolInvocationOrigin::Model(
             embedded_harness::original_operation(&target, &claim.operation)
@@ -370,7 +370,7 @@ async fn pending_sleep_operation(
         return Err("cancellable resident operation settled before interruption".into());
     }
     if fixture
-        .campaign
+        .context
         .actor
         .hosted_workbench_waiting(&context)
         .is_none()
@@ -378,8 +378,8 @@ async fn pending_sleep_operation(
         return Ok(None);
     }
 
-    let actor = fixture.campaign.actor.identity();
-    let graph = fixture.campaign.forest.inspect_host_graph();
+    let actor = fixture.context.actor.identity();
+    let graph = fixture.context.forest.inspect_host_graph();
     let Some(node) = graph.into_iter().find(|node| node.actor == actor) else {
         return Ok(None);
     };
@@ -394,7 +394,7 @@ async fn pending_sleep_operation(
 }
 
 async fn drive_browser(
-    fixture: &RunningBrowserHost,
+    fixture: &HostedTestRuntime,
     secret: &str,
     mut barriers: mpsc::UnboundedReceiver<Barrier>,
 ) -> Result<(), String> {
@@ -402,7 +402,7 @@ async fn drive_browser(
     let driver = required_path("TIDEPOOL_BROWSER_DRIVER")?;
     let browsers = required_path("PLAYWRIGHT_BROWSERS_PATH")?;
     let mut process = BrowserProcess::spawn(&node, &driver, &browsers)?;
-    let identity = browser_target(&fixture.campaign);
+    let identity = browser_target(&fixture.context);
     let ready = json!({
         "type":"ready", "version":1, "base_url":format!("http://{}", fixture.address),
         "session_secret":secret, "actor":{"name":identity.actor.0,"incarnation":identity.incarnation},
@@ -557,7 +557,7 @@ pub(super) async fn production_browser_journey() {
     });
     let host_transport: Arc<dyn ResponsesTransport> = transport.clone();
     let host_started = tokio::time::Instant::now();
-    let fixture = RunningBrowserHost::start_configured(&settings, &host_transport, |config| {
+    let fixture = HostedTestRuntime::start_configured(&settings, &host_transport, |config| {
         let authored = config.workspace.join(".exomonad");
         std::fs::create_dir_all(&authored).unwrap();
         std::fs::write(authored.join("AgentSpec.hs"), include_str!("fixtures/browser_agent_spec.hs")).unwrap();
@@ -631,8 +631,8 @@ pub(super) async fn production_browser_journey() {
             eprintln!("browser gate final durable event kinds={kinds:?}");
         }
     }
-    let terminal = fixture.campaign.actor.terminal().get();
-    let retirement_cleanup = fixture.campaign.actor.terminal().cleanup();
+    let terminal = fixture.context.actor.terminal().get();
+    let retirement_cleanup = fixture.context.actor.terminal().cleanup();
     let cleanup_started = tokio::time::Instant::now();
     let cleanup = fixture.stop().await;
     eprintln!(

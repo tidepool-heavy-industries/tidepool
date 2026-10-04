@@ -1,7 +1,7 @@
 //! Eight real captured child actors, sequential cells within each actor.
 
 use super::warm_cell_performance::{
-    ClientRequests, CompilerInvocation, DaemonTrace, Workload, require_owned_daemon,
+    require_owned_daemon, ClientRequests, CompilerInvocation, DaemonTrace, Workload,
 };
 use super::*;
 use harness::model::{CallId, ConversationIdentity, OperationId, RequestId};
@@ -272,7 +272,7 @@ async fn production_engine_store_eight_actors_sequential_cells() {
         concurrent_jobs: ACTORS + 1,
     };
     let provider: Arc<dyn ResponsesTransport> = transport.clone();
-    let fixture = RunningBrowserHost::start(&settings, &provider)
+    let fixture = HostedTestRuntime::start(&settings, &provider)
         .await
         .unwrap();
     trace.read();
@@ -298,7 +298,7 @@ async fn production_engine_store_eight_actors_sequential_cells() {
         .header("Origin", &origin)
         .header(reqwest::header::COOKIE, cookie)
         .json(&browser_input(
-            &browser_target(&fixture.campaign),
+            &browser_target(&fixture.context),
             "Launch eight real captured measurement actors.",
         ))
         .send()
@@ -321,9 +321,9 @@ async fn production_engine_store_eight_actors_sequential_cells() {
         }
         // All children are held at their actual provider display boundary.
         // Snapshot gauges belong to the exact machine owner, never a global delta.
-        let nodes = fixture.campaign.forest.inspect_host_graph();
-        let target = browser_target(&fixture.campaign);
-        let conversations = HashMap::from([(fixture.campaign.actor.identity(), target.clone())]);
+        let nodes = fixture.context.forest.inspect_host_graph();
+        let target = browser_target(&fixture.context);
+        let conversations = HashMap::from([(fixture.context.actor.identity(), target.clone())]);
         let mut releases = Vec::new();
         for observed in wave {
             assert_eq!(observed.cell.sequence, next[observed.cell.actor]);
@@ -333,14 +333,12 @@ async fn production_engine_store_eight_actors_sequential_cells() {
             let claims = store.claims_for_operation(operation).unwrap();
             assert_eq!(claims.len(), 1);
             assert_eq!(claims[0].state, harness::store::ClaimState::Settled);
-            assert!(
-                store
-                    .replay_tool_output_operation(operation)
-                    .unwrap()
-                    .is_some()
-            );
+            assert!(store
+                .replay_tool_output_operation(operation)
+                .unwrap()
+                .is_some());
             let matching = nodes.iter().filter(|node| {
-                if node.actor == fixture.campaign.actor.identity() { return false; }
+                if node.actor == fixture.context.actor.identity() { return false; }
                 let parent = embedded_context::selected_provider_parent(&target.run, node.creator, &nodes, &conversations).unwrap();
                 parent.child_path(node.actor) == *operation.origin.actor()
                     && matches!(&operation.origin, ConversationIdentity::Embedded { incarnation, .. } if incarnation == &node.actor.incarnation.0.to_string())
@@ -352,12 +350,12 @@ async fn production_engine_store_eight_actors_sequential_cells() {
             );
             let actor = matching[0].actor;
             let session = fixture
-                .campaign
+                .context
                 .forest
                 .actor_session(actor)
                 .expect("exact child session placement");
             let machine = fixture
-                .campaign
+                .context
                 .forest
                 .measurement_snapshot_for(actor)
                 .expect("paused measured actor has an idle native owner snapshot");

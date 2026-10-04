@@ -7,6 +7,8 @@
 mod agent_spec_tests;
 #[cfg(test)]
 mod embedded_agent_spec_tests;
+#[cfg(test)]
+mod hosted_test_context;
 
 #[cfg(test)]
 pub(crate) use crate::transport_test_support::ResidentToolEndpointTestExt;
@@ -1726,6 +1728,8 @@ struct InteractiveFleet {
     worktree_authority: ActorWorktreeAuthority,
 
     host_graph: Arc<dyn Fn() -> Vec<exomonad_actor::ActorGraphNode> + Send + Sync>,
+    #[cfg(test)]
+    test_observer: Option<hosted_test_context::HostTestObserver>,
 }
 
 #[derive(Clone)]
@@ -1815,6 +1819,8 @@ pub(crate) async fn run(
         host_incarnation,
         #[cfg(test)]
         None,
+        #[cfg(test)]
+        None,
     )
     .await
 }
@@ -1826,7 +1832,7 @@ async fn run_with_test_transport(
     host_incarnation: HostIncarnationLease,
     transport: Arc<dyn harness::engine::ResponsesTransport>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    run_owned(config, readiness, host_incarnation, Some(transport)).await
+    run_owned(config, readiness, host_incarnation, Some(transport), None).await
 }
 
 async fn run_owned(
@@ -1834,6 +1840,7 @@ async fn run_owned(
     readiness: mpsc::UnboundedSender<ActorHostReadiness>,
     host_incarnation: HostIncarnationLease,
     #[cfg(test)] test_transport: Option<Arc<dyn harness::engine::ResponsesTransport>>,
+    #[cfg(test)] mut test_hooks: Option<hosted_test_context::HostTestHooks>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let host_incarnation = Arc::new(host_incarnation);
     let run_root = config.run_root.clone();
@@ -2388,7 +2395,20 @@ async fn run_owned(
 
     let host_graph_forest = Arc::clone(&forest);
     let host_graph = Arc::new(move || host_graph_forest.inspect_host_graph());
-
+    #[cfg(test)]
+    let test_observer = test_hooks.as_ref().map(|hooks| hooks.observer.clone());
+    #[cfg(test)]
+    if let (Some(hooks), Some(service)) = (&mut test_hooks, &embedded_service) {
+        if let Some(assembled) = hooks.assembled.take() {
+            let _ = assembled.send(hosted_test_context::HostedActorContext {
+                config: config.clone(),
+                actor: root_actor.clone(),
+                forest: Arc::clone(&forest),
+                runtime: Arc::clone(&service.runtime),
+                observer: hooks.observer.clone(),
+            });
+        }
+    }
     let mut applications_task = tokio::spawn(run_interactive_applications(
         deployments,
         application_owners.clone(),
@@ -2405,6 +2425,8 @@ async fn run_owned(
             worktree_authority: worktree_authority.clone(),
 
             host_graph,
+            #[cfg(test)]
+            test_observer,
         },
         shutdown_rx,
         root_config_rx,
@@ -2412,10 +2434,18 @@ async fn run_owned(
     ));
     let mut applications_finished = false;
     let mut root_active = true;
+    let test_stop = async {
+        #[cfg(test)]
+        hosted_test_context::test_stop(&mut test_hooks).await;
+        #[cfg(not(test))]
+        std::future::pending::<()>().await;
+    };
+    tokio::pin!(test_stop);
     let result: Result<(), Box<dyn std::error::Error>> = async {
         loop {
             tokio::select! {
                 signal = operator_shutdown() => { signal?; break Ok(()); }
+                _ = &mut test_stop => break Ok(()),
                 result = &mut applications_task => {
                     applications_finished = true;
                     break result.map_err(join_error)?.map_err(runtime_error);
