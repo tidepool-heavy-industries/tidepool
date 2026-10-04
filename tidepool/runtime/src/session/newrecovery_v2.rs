@@ -1503,6 +1503,18 @@ fn validate_shape(graph: &impl GraphRead) -> Result<(), RecoveryError> {
                 )));
             }
         }
+        // Interface requirements select canonical carriers. Native IDs remain
+        // exact implementation references, irrespective of their digest order.
+        for id in artifact_owners.values_mut() {
+            if let RecoveryArtifactClosure::Home(home) = artifacts[&*id] {
+                *id = ArtifactDescriptor::from_recovery_module_interface(
+                    home.module_interface
+                        .as_ref()
+                        .expect("validated native companion"),
+                )
+                .id;
+            }
+        }
         for dependency in &node.live_dependencies {
             let RecoveryLiveDependency::NativeBinding {
                 artifact_id,
@@ -2097,9 +2109,13 @@ mod tests {
         let mut value = value_interface_from(home, "Val1");
         value.requirements.push(module("main", "Lib"));
         value.artifact_id = ArtifactDescriptor::from_recovery_value_interface(&value).id;
+        let canonical_id = ArtifactDescriptor::from_recovery_module_interface(
+            home.module_interface.as_ref().unwrap(),
+        )
+        .id;
         let edge = RecoveryArtifactDependency {
             source: value.artifact_id,
-            target: home_artifact(&wire).artifact_id(),
+            target: canonical_id,
             dependency: ArtifactDependency::Interface,
         };
         wire.nodes[0].artifact_refs.push(value.artifact_id);
@@ -2280,6 +2296,13 @@ mod tests {
         let value = make_value("Val1", vec![module("main", "Other"), module("main", "Lib")]);
         let mut wire = fixture(root.path());
         let home_id = home_artifact(&wire).artifact_id();
+        let RecoveryArtifactClosure::Home(home) = home_artifact(&wire) else {
+            unreachable!()
+        };
+        let canonical_id = ArtifactDescriptor::from_recovery_module_interface(
+            home.module_interface.as_ref().unwrap(),
+        )
+        .id;
         for node in &mut wire.nodes {
             node.artifact_refs
                 .extend([home_id, other.artifact_id, value.artifact_id]);
@@ -2287,7 +2310,7 @@ mod tests {
         wire.artifact_dependencies.extend([
             RecoveryArtifactDependency {
                 source: value.artifact_id,
-                target: home_id,
+                target: canonical_id,
                 dependency: ArtifactDependency::Interface,
             },
             RecoveryArtifactDependency {
@@ -2302,6 +2325,57 @@ mod tests {
         ]);
         install_fixture_canonical_interfaces(&mut wire);
         wire.seal().unwrap();
+        let mut wrong_target = wire.clone();
+        wrong_target
+            .artifact_dependencies
+            .iter_mut()
+            .find(|edge| edge.source == value.artifact_id && edge.target == canonical_id)
+            .unwrap()
+            .target = home_id;
+        assert_eq!(
+            wrong_target.seal().unwrap_err().detail,
+            "recovery node 1 has a value interface requirement without its direct artifact edge"
+        );
+        let mut native_id_orders = [false; 2];
+        for version in 0..=u8::MAX {
+            let native = tidepool_toolchain::recovery_artifacts::test_support::materialize_empty_native_with_version(
+                root.path(),
+                None,
+                tidepool_repr::execution_schema::ModuleVersion([version; 32]),
+            )
+            .unwrap();
+            let native = RecoveryArtifactClosure::Home(native);
+            let native_id = native.artifact_id();
+            assert_ne!(native_id, canonical_id);
+            let order = usize::from(native_id > canonical_id);
+            if native_id_orders[order] {
+                continue;
+            }
+            let mut ordered = wire.clone();
+            *home_artifact_mut(&mut ordered) = native;
+            for node in &mut ordered.nodes {
+                for id in &mut node.artifact_refs {
+                    if *id == home_id {
+                        *id = native_id;
+                    }
+                }
+            }
+            for edge in &mut ordered.artifact_dependencies {
+                if edge.source == home_id {
+                    edge.source = native_id;
+                }
+            }
+            ordered.seal().unwrap();
+            snapshot(&ordered).capture_inventory(root.path()).unwrap();
+            native_id_orders[order] = true;
+            if native_id_orders == [true; 2] {
+                break;
+            }
+        }
+        assert_eq!(
+            native_id_orders, [true; 2],
+            "owning native variants must cover both sides of the canonical content ID"
+        );
         let stored = wire
             .artifacts
             .iter_mut()

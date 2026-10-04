@@ -13,6 +13,16 @@ pub fn materialize_empty_native(
     root: &Path,
     external_package: Option<&Path>,
 ) -> Result<RecoveryArtifactRef, RecoveryArtifactError> {
+    materialize_empty_native_with_version(root, external_package, ModuleVersion([0x22; 32]))
+}
+
+/// Vary only the native version while retaining the same canonical interface.
+/// This lets downstream recovery tests exercise either content-ID ordering.
+pub fn materialize_empty_native_with_version(
+    root: &Path,
+    external_package: Option<&Path>,
+    module_version: ModuleVersion,
+) -> Result<RecoveryArtifactRef, RecoveryArtifactError> {
     let producer = [0x11; 32];
     let bytes = b"interface".to_vec();
     let interface_sha256: [u8; 32] = Sha256::digest(&bytes).into();
@@ -66,7 +76,7 @@ pub fn materialize_empty_native(
     let owner = CachedHomeOwner {
         unit: "main".into(),
         module: "Lib".into(),
-        module_version: ModuleVersion([0x22; 32]),
+        module_version,
         skinny_iface_sha256: interface_sha256,
         product_sha256: Sha256::digest(&product_bytes).into(),
     };
