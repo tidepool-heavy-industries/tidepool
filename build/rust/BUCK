@@ -11,3 +11,9 @@ export_file(
     src = "isolated-libtest.py",
     visibility = ["PUBLIC"],
 )
+
+export_file(
+    name = "compile_fail_runner",
+    src = "compile-fail.py",
+    visibility = ["PUBLIC"],
+)

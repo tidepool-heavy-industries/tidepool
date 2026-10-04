@@ -1,3 +1,5 @@
+load(":rust_inputs.bzl", "declare_rust_test_inputs")
+load(":tests.bzl", "declare_haskell_test_components")
 load("//build/haskell:corpus_fixture.bzl", "tidepool_prepared_corpus", "tidepool_native_oracle", "tidepool_corpus_test")
 load("//build/haskell:prepared_fixture.bzl", "tidepool_prepared_fixture")
 load("@prelude//:rules.bzl", "export_file", "filegroup", "haskell_binary", "haskell_library", "sh_test")
@@ -128,153 +130,9 @@ haskell_binary(
     visibility = ["PUBLIC"],
 )
 
-# This focused native executable compiles the same encoder test source that
-# Cabal exposes as execution-schema-encode. Building it checks the component;
-# running it remains a separate test action.
-haskell_binary(
-    name = "execution_schema_encode_test",
-    srcs = {"Main.hs": "test-execution-schema-encode/Main.hs"},
-    deps = [":tidepool_extract_internal"],
-    compiler_flags = encoder_test_flags("-XOverloadedStrings"),
-    linker_flags = encoder_test_link_flags(),
-    visibility = ["PUBLIC"],
-)
-
-haskell_binary(
-    name = "compile_input_policy_test",
-    srcs = {"Main.hs": "test-compile-input-policy/Main.hs"},
-    deps = [":tidepool_extract_internal"],
-    compiler_flags = extractor_binary_flags("-XOverloadedStrings"),
-    linker_flags = extractor_binary_link_flags(),
-    visibility = ["PUBLIC"],
-)
-
-sh_test(
-    name = "compile_input_policy",
-    test = ":compile_input_policy_test",
-    visibility = ["PUBLIC"],
-)
-
-haskell_binary(
-    name = "worker_response_test",
-    srcs = {"Main.hs": "test-worker-response/WorkerResponseTest.hs"},
-    deps = [":tidepool_extract_internal"],
-    compiler_flags = worker_response_test_flags("-XOverloadedStrings"),
-    linker_flags = worker_response_test_link_flags(),
-    visibility = ["PUBLIC"],
-)
-
-sh_test(
-    name = "worker_response",
-    test = ":worker_response_test",
-    visibility = ["PUBLIC"],
-)
-
-sh_test(
-    name = "execution_schema_encode",
-    test = ":execution_schema_encode_test",
-    visibility = ["PUBLIC"],
-)
-
-# The test compiles each original family producer once and shares its immutable
-# axioms across conflict cases. --benchmark measures only pure validation.
-haskell_binary(
-    name = "family_consistency_test",
-    srcs = {"Main.hs": "test-family-consistency/Main.hs"},
-    deps = [":tidepool_extract_internal"],
-    compiler_flags = extractor_binary_flags("-package", "process"),
-    linker_flags = extractor_binary_link_flags() + ["-package", "process", "-rtsopts", "-with-rtsopts=-T"],
-    visibility = ["PUBLIC"],
-)
-
-sh_test(
-    name = "family_consistency",
-    test = ":family_consistency_test",
-    env = {
-        "PATH": read_root_config("nix", "ghc_bin") + ":" + read_root_config("nix", "action_path"),
-        "TIDEPOOL_GHC_LIBDIR": read_root_config("nix", "ghc_libdir"),
-    },
-    visibility = ["PUBLIC"],
-)
-
-# The native suites consume the same sources and fixture paths as Cabal.
-haskell_binary(
-    name = "planned_declaration_test",
-    srcs = {"Main.hs": "test-planned-declaration/Main.hs"},
-    deps = [":tidepool_extract_internal"],
-    compiler_flags = extractor_binary_flags("-package", "mtl"),
-    linker_flags = extractor_binary_link_flags() + ["-package", "mtl"],
-    visibility = ["PUBLIC"],
-)
-
-filegroup(
-    name = "planned_declaration_fixtures",
-    srcs = glob(["test-planned-declaration/fixtures/*.hs"]),
-)
-
-sh_test(
-    name = "planned_declaration",
-    test = "test-with-fixtures.sh",
-    args = [
-        "$(exe :planned_declaration_test)",
-        "$(location :planned_declaration_fixtures)",
-    ],
-    resources = [":planned_declaration_test", ":planned_declaration_fixtures"],
-    env = {
-        "PATH": read_root_config("nix", "ghc_bin") + ":" + read_root_config("nix", "action_path"),
-        "TIDEPOOL_GHC_LIBDIR": read_root_config("nix", "ghc_libdir"),
-    },
-    test_rule_timeout_ms = 300000,
-    visibility = ["PUBLIC"],
-)
-
-haskell_binary(
-    name = "source_boot_product_reuse_test",
-    srcs = {
-        "Main.hs": "test-source-boot/Main.hs",
-        "GenuineCandidateFixture.hs": "test-source-boot/GenuineCandidateFixture.hs",
-        "ExecutionSourceDecodeTest.hs": "test-source-boot/ExecutionSourceDecodeTest.hs",
-        "ProgressBoundaryTest.hs": "test-source-boot/ProgressBoundaryTest.hs",
-        "ExactScopeV9Test.hs": "test-source-boot/ExactScopeV9Test.hs",
-        "CandidateGraphDescriptorTest.hs": "test-source-boot/CandidateGraphDescriptorTest.hs",
-        "FinalizedCoreTest.hs": "test-source-boot/FinalizedCoreTest.hs",
-    },
-    deps = [":tidepool_extract_internal"],
-    compiler_flags = extractor_binary_flags("-XOverloadedStrings", "-package", "process", "-package", "ghc-boot"),
-    linker_flags = extractor_binary_link_flags() + ["-package", "process", "-package", "ghc-boot"],
-    visibility = ["PUBLIC"],
-)
-
-sh_test(
-    name = "source_boot_product_reuse",
-    test = "test-with-fixtures.sh",
-    args = [
-        "$(exe :source_boot_product_reuse_test)",
-        "$(location :source_boot_fixtures)",
-    ],
-    resources = [
-        ":source_boot_product_reuse_test",
-        ":source_boot_fixtures",
-    ],
-    env = {
-        "PATH": read_root_config("nix", "ghc_bin") + ":" + read_root_config("nix", "action_path"),
-        "TIDEPOOL_GHC_LIBDIR": read_root_config("nix", "ghc_libdir"),
-    },
-    visibility = ["PUBLIC"],
-)
-
-filegroup(
-    name = "source_boot_fixtures",
-    srcs = glob(["test-source-boot/fixtures/*.hs", "test-source-boot/fixtures/*.hs-boot"]) + [
-        "lib/Tidepool/Internal/RequestSite.hs",
-    ],
-)
-
-# Exact compile-time resources consumed by the native repr targets.
-
-
-# Compile-time resources referenced by codegen's unit-test modules.
-
+# Every counted test and helper follows the Cabal source/module roster.
+declare_haskell_test_components()
+declare_rust_test_inputs()
 
 # Source and fixture artifacts exposed to native actions that model these
 # dependencies explicitly.
@@ -404,10 +262,10 @@ export_file(
 
 filegroup(
     name = "facade_embedded_sources",
-    srcs = {source: source for source in glob(
+    srcs = dict([(source, source) for source in glob(
         ["lib/**/*.hs", "actors/**/*.hs"],
-        exclude = ["lib/**/Prelude_cbor/**"],
-    )},
+        exclude = ["lib/**/Prelude_cbor/**", "lib/Tidepool/Internal/ModelControl.hs"],
+    )] + [("lib/Tidepool/Internal/ModelControl.hs", "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Internal_ModelControl_hs]")]),
     visibility = ["PUBLIC"],
 )
 
@@ -438,7 +296,7 @@ tidepool_prepared_fixture(
 # independent cohort source files to one broad fixture tree.
 filegroup(
     name = "corpus_library_sources",
-    srcs = {source: source for source in glob(["lib/**/*.hs"], exclude = ["lib/**/Prelude_cbor/**"])},
+    srcs = dict([(source, source) for source in glob(["lib/**/*.hs"], exclude = ["lib/**/Prelude_cbor/**", "lib/Tidepool/Internal/ModelControl.hs"])] + [("lib/Tidepool/Internal/ModelControl.hs", "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Internal_ModelControl_hs]")]),
     visibility = ["PUBLIC"],
 )
 filegroup(

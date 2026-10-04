@@ -39,6 +39,8 @@ else:
     name = sys.argv[-1].split('.')[-2]
     if name == 'buck-ghc':
         print(os.environ['TEST_GHC_ROOT'])
+    elif name == 'buck-test-ghc':
+        print(os.environ['TEST_TEST_GHC_ROOT'])
     elif name == 'buck-python':
         print(str(Path(sys.executable).parent.parent))
     else:
@@ -48,6 +50,11 @@ else:
         self.ghc.mkdir(parents=True)
         shutil.copyfile(self.tools / "ghc", self.ghc / "ghc")
         (self.ghc / "ghc").chmod(0o755)
+
+        self.test_ghc = self.root / "test-ghc/bin"
+        self.test_ghc.mkdir(parents=True)
+        (self.test_ghc / "ghc").write_text("#!/bin/sh\necho /nix/store/checked-test-ghc/lib\n")
+        (self.test_ghc / "ghc").chmod(0o755)
 
     def executable(self, name, source):
         path = self.tools / name
@@ -64,6 +71,7 @@ else:
             TEST_NIX_LOG=str(self.log),
             TEST_SOURCE_CAPTURE=str(self.capture),
             TEST_GHC_ROOT=str(self.ghc.parent),
+            TEST_TEST_GHC_ROOT=str(self.test_ghc.parent),
         )
         return subprocess.run(
             ["bash", str(self.root / "scripts/buck2-configure.sh"), *args],
@@ -77,6 +85,20 @@ else:
         self.assertIn("runtime_stdlib_products = \n", text)
         self.assertNotIn('"flake"', self.log.read_text())
         self.assertNotIn("runtime-stdlib-products", self.log.read_text())
+
+    def test_host_test_closure_is_explicit_and_keeps_production_libdir(self):
+        control = self.run_configure()
+        self.assertEqual(control.returncode, 0, control.stderr)
+        ordinary = (self.root / ".buckconfig.local").read_text()
+        self.assertIn("test_ghc = \n", ordinary)
+        self.assertNotIn("buck-test-ghc", self.log.read_text())
+        result = self.run_configure("--tests")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        configured = (self.root / ".buckconfig.local").read_text()
+        self.assertIn("ghc_libdir = /nix/store/checked-ghc/lib\n", configured)
+        self.assertIn("test_ghc_libdir = /nix/store/checked-test-ghc/lib\n", configured)
+        self.assertIn("test_ghc = " + str(self.test_ghc / "ghc"), configured)
+        self.assertIn("haskell_test_closure = /nix/store/checked-buck-haskell-test-closure", configured)
 
     def test_reduced_toolchain_capture_refuses_project_resource_selection(self):
         result = self.run_configure("--runtime-stdlib")

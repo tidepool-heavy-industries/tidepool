@@ -34,3 +34,10 @@ export_file(
     src = ".exomonad/skills/exomonad-workbench/SKILL.md",
     visibility = ["PUBLIC"],
 )
+
+# Compile-time inputs for the facade's published-example tests.
+filegroup(
+    name = "facade_test_sources",
+    srcs = {source: source for source in glob([".exomonad/**/*.hs", ".exomonad/**/*.md", ".exomonad/**/*.json"])},
+    visibility = ["PUBLIC"],
+)

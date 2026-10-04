@@ -102,6 +102,9 @@ TEST_ONLY_SOURCES = {
     }),
     'tidepool-toolchain': frozenset({
         'tidepool/toolchain/src/module_candidates/codec_measurement.rs',
+        'tidepool/toolchain/src/module_candidates/fixture_packets.rs',
+        'tidepool/toolchain/src/certified_products/resume_issuer_tests.rs',
+        'tidepool/toolchain/tests/fixtures/resume-issuer/ResumeCapture.hs',
         'tidepool/toolchain/tests/fixtures/deployment-module-package/Consumer.hs',
         'tidepool/toolchain/tests/fixtures/materialization-fault.c',
         'tidepool/toolchain/tests/fixtures/owned-declaration/ExactConsumer.hs',
@@ -121,7 +124,7 @@ def integration_target_sources(targets):
     from pathlib import Path
 
     path_attr = re.compile(r'#\[path\s*=\s*"([^"]+)"\]')
-    module = re.compile(r'(?m)^\s*(?:(?:pub(?:\([^)]*\))?)\s+)?mod\s+(\w+)\s*;')
+    module = re.compile(r'(?m)^[ \t]*(?P<attrs>(?:#\[[^\n]+?\][ \t]*)*)(?:(?:pub(?:\([^)]*\))?)[ \t]+)?mod[ \t]+(?P<name>\w+)[ \t]*;')
     result = {}
     unknown = set()
 
@@ -155,11 +158,12 @@ def integration_target_sources(targets):
                         cursor -= 1
                         continue
                     break
-                attr = [value for line in attrs for value in path_attr.finditer(line)]
+                attr = [value for line in reversed(attrs) for value in path_attr.finditer(line)]
+                attr.extend(path_attr.finditer(match["attrs"]))
                 if attr:
                     child = (source.parent / attr[-1][1]).resolve()
                 else:
-                    name = match[1]
+                    name = match["name"]
                     base = source.parent if source == entry or source.name in ("mod.rs", "lib.rs", "main.rs") else source.parent / source.stem
                     options = (base / f"{name}.rs", base / name / "mod.rs")
                     child = next((item.resolve() for item in options if item.is_file()), None)

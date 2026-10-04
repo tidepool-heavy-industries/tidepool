@@ -64,6 +64,73 @@ class FeatureSelectionError(ValueError):
 
 PROFILE_NAME = "embedded-native"
 
+# These workspace roots have native library, binary and test owners. The graph
+# generators share this roster so a new development dependency cannot disappear
+# from the Reindeer inputs while remaining present in a first-party test target.
+NATIVE_PACKAGES = frozenset({
+    "tidepool-atomic-write", "tidepool-repr", "tidepool-heap", "tidepool-bignum",
+    "tidepool-bridge", "tidepool-effect", "tidepool-codegen", "tidepool-extract-cmd",
+    "tidepool-extract-report", "tidepool-toolchain", "tidepool-bridge-derive",
+    "tidepool-runtime", "tidepool-mcp", "tidepool-handlers", "tidepool",
+    "exomonad-model", "exomonad-model-output", "exomonad-tool", "tidepool-bridge-effects",
+    "exomonad-node", "exomonad-worktree", "exomonad-actor", "jev-integration",
+    "tidepool-testing", "tidepool-test-data", "tidepool-prepared-corpus", "tidepool-protocol",
+})
+
+
+def reject_local_feature_requests(metadata, root_names, no_default=(), overrides=None):
+    """Require one first-party configuration instead of workspace feature union.
+
+    Empty default markers are harmless. Every other local feature request needs
+    an explicit native target variant; development features cannot silently
+    change the production library used by another root.
+    """
+    packages = {package["id"]: package for package in metadata["packages"]}
+    members = set(metadata["workspace_members"])
+    local = {package["name"]: package for package in packages.values()
+             if package["id"] in members and package.get("source") is None}
+    overrides = overrides or {}
+    for root_name in sorted(root_names):
+        root = local[root_name]
+        pending = [(root, root_name, set(overrides.get(root_name, ())),
+                    root_name not in no_default)]
+        visited = set()
+        while pending:
+            package, edge, requested, defaults = pending.pop()
+            definitions = package.get("features", {})
+            if defaults and "default" in definitions:
+                requested.add("default")
+            unsupported = {feature for feature in requested
+                           if feature != "default" or definitions.get("default")}
+            if unsupported:
+                raise FeatureSelectionError(
+                    f"unsupported local Cargo feature(s) {', '.join(sorted(unsupported))} "
+                    f"for package {package['name']}; native root {root_name}; edge {edge}; "
+                    "declare a native target variant rather than unifying development features"
+                )
+            if package["id"] in visited:
+                continue
+            visited.add(package["id"])
+            # Only roots own development edges. Local libraries reached through
+            # them contribute their normal/build dependencies, never their tests.
+            for dependency in package["dependencies"]:
+                if dependency["kind"] == "dev" and package["name"] != root_name:
+                    continue
+                if dependency.get("optional", False):
+                    continue
+                if dependency["target"] not in (None, "cfg(unix)"):
+                    continue
+                target = local.get(dependency["name"])
+                if target is None:
+                    continue
+                alias = dependency_key(dependency)
+                kind = dependency["kind"] or "normal"
+                pending.append((target,
+                    f"{package['name']} --{kind}:{alias}--> {target['name']}",
+                    set(dependency.get("features", ())),
+                    dependency.get("uses_default_features", True)))
+
+
 
 def load_profile(root):
     """Load the checked-in feature selection shared by the Buck generators."""

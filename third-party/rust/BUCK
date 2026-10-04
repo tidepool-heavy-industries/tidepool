@@ -1357,41 +1357,6 @@ cargo.rust_library(
 )
 
 http_archive(
-    name = "block-buffer-0.12.1.crate",
-    sha256 = "d2f6c7dbe95a6ed67ad9f18e57daf93a2f034c524b99fd2b76d18fdfeb6660aa",
-    strip_prefix = "block-buffer-0.12.1",
-    urls = ["https://static.crates.io/crates/block-buffer/0.12.1/download"],
-    visibility = [],
-)
-
-cargo.rust_library(
-    name = "block-buffer-0.12",
-    srcs = [":block-buffer-0.12.1.crate"],
-    crate = "block_buffer",
-    crate_root = "block-buffer-0.12.1.crate/src/lib.rs",
-    edition = "2024",
-    env = {
-        "CARGO_BIN_NAME": "block_buffer",
-        "CARGO_CRATE_NAME": "block_buffer",
-        "CARGO_MANIFEST_DIR": "block-buffer-0.12.1.crate",
-        "CARGO_PKG_AUTHORS": "RustCrypto Developers",
-        "CARGO_PKG_DESCRIPTION": "Buffer types for block processing of data",
-        "CARGO_PKG_HOMEPAGE": "",
-        "CARGO_PKG_NAME": "block-buffer",
-        "CARGO_PKG_README": "README.md",
-        "CARGO_PKG_REPOSITORY": "https://github.com/RustCrypto/utils",
-        "CARGO_PKG_RUST_VERSION": "1.85",
-        "CARGO_PKG_VERSION": "0.12.1",
-        "CARGO_PKG_VERSION_MAJOR": "0",
-        "CARGO_PKG_VERSION_MINOR": "12",
-        "CARGO_PKG_VERSION_PATCH": "1",
-        "CARGO_PKG_VERSION_PRE": "",
-    },
-    visibility = [],
-    deps = [":hybrid-array-0.4"],
-)
-
-http_archive(
     name = "bon-3.10.0.crate",
     sha256 = "9e3fac94a66da67200398458a25412bcc3f9b6443b5119a6cad9cf3ccfcd8cc6",
     strip_prefix = "bon-3.10.0",
@@ -2263,37 +2228,42 @@ cargo.rust_library(
 )
 
 http_archive(
-    name = "const-oid-0.10.2.crate",
-    sha256 = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c",
-    strip_prefix = "const-oid-0.10.2",
-    urls = ["https://static.crates.io/crates/const-oid/0.10.2/download"],
+    name = "console-0.16.4.crate",
+    sha256 = "4fe5f465a4f6fee88fad41b85d990f84c835335e85b5d9e6e63e0d06d28cba7c",
+    strip_prefix = "console-0.16.4",
+    urls = ["https://static.crates.io/crates/console/0.16.4/download"],
     visibility = [],
 )
 
 cargo.rust_library(
-    name = "const-oid-0.10",
-    srcs = [":const-oid-0.10.2.crate"],
-    crate = "const_oid",
-    crate_root = "const-oid-0.10.2.crate/src/lib.rs",
-    edition = "2024",
+    name = "console-0.16",
+    srcs = [":console-0.16.4.crate"],
+    crate = "console",
+    crate_root = "console-0.16.4.crate/src/lib.rs",
+    edition = "2021",
     env = {
-        "CARGO_BIN_NAME": "const_oid",
-        "CARGO_CRATE_NAME": "const_oid",
-        "CARGO_MANIFEST_DIR": "const-oid-0.10.2.crate",
-        "CARGO_PKG_AUTHORS": "RustCrypto Developers",
-        "CARGO_PKG_DESCRIPTION": "Const-friendly implementation of the ISO/IEC Object Identifier (OID) standard\nas defined in ITU X.660, with support for BER/DER encoding/decoding as well as\nheapless no_std (i.e. embedded) support\n",
-        "CARGO_PKG_HOMEPAGE": "https://github.com/RustCrypto/formats/tree/master/const-oid",
-        "CARGO_PKG_NAME": "const-oid",
+        "CARGO_BIN_NAME": "console",
+        "CARGO_CRATE_NAME": "console",
+        "CARGO_MANIFEST_DIR": "console-0.16.4.crate",
+        "CARGO_PKG_AUTHORS": "",
+        "CARGO_PKG_DESCRIPTION": "A terminal and console abstraction for Rust",
+        "CARGO_PKG_HOMEPAGE": "https://github.com/console-rs/console",
+        "CARGO_PKG_NAME": "console",
         "CARGO_PKG_README": "README.md",
-        "CARGO_PKG_REPOSITORY": "https://github.com/RustCrypto/formats",
-        "CARGO_PKG_RUST_VERSION": "1.85",
-        "CARGO_PKG_VERSION": "0.10.2",
+        "CARGO_PKG_REPOSITORY": "https://github.com/console-rs/console",
+        "CARGO_PKG_RUST_VERSION": "1.71",
+        "CARGO_PKG_VERSION": "0.16.4",
         "CARGO_PKG_VERSION_MAJOR": "0",
-        "CARGO_PKG_VERSION_MINOR": "10",
-        "CARGO_PKG_VERSION_PATCH": "2",
+        "CARGO_PKG_VERSION_MINOR": "16",
+        "CARGO_PKG_VERSION_PATCH": "4",
         "CARGO_PKG_VERSION_PRE": "",
     },
+    features = [
+        "alloc",
+        "std",
+    ],
     visibility = [],
+    deps = [":libc-0.2"],
 )
 
 http_archive(
@@ -3416,41 +3386,6 @@ cargo.rust_library(
 )
 
 http_archive(
-    name = "crypto-common-0.2.2.crate",
-    sha256 = "ce6e4c961d6cd6c9a86db418387425e8bdeaf05b3c8bc1411e6dca4c252f1453",
-    strip_prefix = "crypto-common-0.2.2",
-    urls = ["https://static.crates.io/crates/crypto-common/0.2.2/download"],
-    visibility = [],
-)
-
-cargo.rust_library(
-    name = "crypto-common-0.2",
-    srcs = [":crypto-common-0.2.2.crate"],
-    crate = "crypto_common",
-    crate_root = "crypto-common-0.2.2.crate/src/lib.rs",
-    edition = "2024",
-    env = {
-        "CARGO_BIN_NAME": "crypto_common",
-        "CARGO_CRATE_NAME": "crypto_common",
-        "CARGO_MANIFEST_DIR": "crypto-common-0.2.2.crate",
-        "CARGO_PKG_AUTHORS": "RustCrypto Developers",
-        "CARGO_PKG_DESCRIPTION": "Common traits used by cryptographic algorithms",
-        "CARGO_PKG_HOMEPAGE": "",
-        "CARGO_PKG_NAME": "crypto-common",
-        "CARGO_PKG_README": "README.md",
-        "CARGO_PKG_REPOSITORY": "https://github.com/RustCrypto/traits",
-        "CARGO_PKG_RUST_VERSION": "1.85",
-        "CARGO_PKG_VERSION": "0.2.2",
-        "CARGO_PKG_VERSION_MAJOR": "0",
-        "CARGO_PKG_VERSION_MINOR": "2",
-        "CARGO_PKG_VERSION_PATCH": "2",
-        "CARGO_PKG_VERSION_PRE": "",
-    },
-    visibility = [],
-    deps = [":hybrid-array-0.4"],
-)
-
-http_archive(
     name = "darling-0.23.0.crate",
     sha256 = "25ae13da2f202d56bd7f91c25fba009e7717a1e4a1cc98a76d844b65ae912e9d",
     strip_prefix = "darling-0.23.0",
@@ -3954,53 +3889,6 @@ cargo.rust_library(
     deps = [
         ":block-buffer-0.10",
         ":crypto-common-0.1",
-    ],
-)
-
-http_archive(
-    name = "digest-0.11.3.crate",
-    sha256 = "f1dd6dbb5841937940781866fa1281a1ff7bd3bf827091440879f9994983d5c2",
-    strip_prefix = "digest-0.11.3",
-    urls = ["https://static.crates.io/crates/digest/0.11.3/download"],
-    visibility = [],
-)
-
-cargo.rust_library(
-    name = "digest-0.11",
-    srcs = [":digest-0.11.3.crate"],
-    crate = "digest",
-    crate_root = "digest-0.11.3.crate/src/lib.rs",
-    edition = "2024",
-    env = {
-        "CARGO_BIN_NAME": "digest",
-        "CARGO_CRATE_NAME": "digest",
-        "CARGO_MANIFEST_DIR": "digest-0.11.3.crate",
-        "CARGO_PKG_AUTHORS": "RustCrypto Developers",
-        "CARGO_PKG_DESCRIPTION": "Traits for cryptographic hash functions and message authentication codes",
-        "CARGO_PKG_HOMEPAGE": "",
-        "CARGO_PKG_NAME": "digest",
-        "CARGO_PKG_README": "README.md",
-        "CARGO_PKG_REPOSITORY": "https://github.com/RustCrypto/traits",
-        "CARGO_PKG_RUST_VERSION": "1.85",
-        "CARGO_PKG_VERSION": "0.11.3",
-        "CARGO_PKG_VERSION_MAJOR": "0",
-        "CARGO_PKG_VERSION_MINOR": "11",
-        "CARGO_PKG_VERSION_PATCH": "3",
-        "CARGO_PKG_VERSION_PRE": "",
-    },
-    features = [
-        "alloc",
-        "block-api",
-        "default",
-        "oid",
-    ],
-    named_deps = {
-        "common": ":crypto-common-0.2",
-    },
-    visibility = [],
-    deps = [
-        ":block-buffer-0.12",
-        ":const-oid-0.10",
     ],
 )
 
@@ -6320,41 +6208,6 @@ cargo.rust_library(
 )
 
 http_archive(
-    name = "hybrid-array-0.4.14.crate",
-    sha256 = "707114b52a152fa7bdb290cd7cd5912d9467273b6d74e21b8d81aca1f8533f6b",
-    strip_prefix = "hybrid-array-0.4.14",
-    urls = ["https://static.crates.io/crates/hybrid-array/0.4.14/download"],
-    visibility = [],
-)
-
-cargo.rust_library(
-    name = "hybrid-array-0.4",
-    srcs = [":hybrid-array-0.4.14.crate"],
-    crate = "hybrid_array",
-    crate_root = "hybrid-array-0.4.14.crate/src/lib.rs",
-    edition = "2024",
-    env = {
-        "CARGO_BIN_NAME": "hybrid_array",
-        "CARGO_CRATE_NAME": "hybrid_array",
-        "CARGO_MANIFEST_DIR": "hybrid-array-0.4.14.crate",
-        "CARGO_PKG_AUTHORS": "RustCrypto Developers",
-        "CARGO_PKG_DESCRIPTION": "Hybrid typenum-based and const generic array types designed to provide the\nflexibility of typenum-based expressions while also allowing interoperability\nand a transition path to const generics\n",
-        "CARGO_PKG_HOMEPAGE": "",
-        "CARGO_PKG_NAME": "hybrid-array",
-        "CARGO_PKG_README": "README.md",
-        "CARGO_PKG_REPOSITORY": "https://github.com/RustCrypto/hybrid-array",
-        "CARGO_PKG_RUST_VERSION": "1.85",
-        "CARGO_PKG_VERSION": "0.4.14",
-        "CARGO_PKG_VERSION_MAJOR": "0",
-        "CARGO_PKG_VERSION_MINOR": "4",
-        "CARGO_PKG_VERSION_PATCH": "14",
-        "CARGO_PKG_VERSION_PRE": "",
-    },
-    visibility = [],
-    deps = [":typenum-1"],
-)
-
-http_archive(
     name = "hyper-1.11.0.crate",
     sha256 = "d22053281f852e11534f5198498373cbb59295120a20771d90f7ed1897490a72",
     strip_prefix = "hyper-1.11.0",
@@ -7049,6 +6902,57 @@ cargo.rust_library(
     deps = [
         ":equivalent-1",
         ":hashbrown-0.17",
+    ],
+)
+
+alias(
+    name = "insta",
+    actual = ":insta-1",
+    visibility = ["PUBLIC"],
+)
+
+http_archive(
+    name = "insta-1.48.0.crate",
+    sha256 = "86f0f8fee8c926415c58d6ae43a08523a26faccb2323f5e6b644fe7dd4ef6b82",
+    strip_prefix = "insta-1.48.0",
+    urls = ["https://static.crates.io/crates/insta/1.48.0/download"],
+    visibility = [],
+)
+
+cargo.rust_library(
+    name = "insta-1",
+    srcs = [":insta-1.48.0.crate"],
+    crate = "insta",
+    crate_root = "insta-1.48.0.crate/src/lib.rs",
+    edition = "2021",
+    env = {
+        "CARGO_BIN_NAME": "insta",
+        "CARGO_CRATE_NAME": "insta",
+        "CARGO_MANIFEST_DIR": "insta-1.48.0.crate",
+        "CARGO_PKG_AUTHORS": "Armin Ronacher <armin.ronacher@active-4.com>",
+        "CARGO_PKG_DESCRIPTION": "A snapshot testing library for Rust",
+        "CARGO_PKG_HOMEPAGE": "https://insta.rs/",
+        "CARGO_PKG_NAME": "insta",
+        "CARGO_PKG_README": "README.md",
+        "CARGO_PKG_REPOSITORY": "https://github.com/mitsuhiko/insta",
+        "CARGO_PKG_RUST_VERSION": "1.66.0",
+        "CARGO_PKG_VERSION": "1.48.0",
+        "CARGO_PKG_VERSION_MAJOR": "1",
+        "CARGO_PKG_VERSION_MINOR": "48",
+        "CARGO_PKG_VERSION_PATCH": "0",
+        "CARGO_PKG_VERSION_PRE": "",
+    },
+    features = [
+        "colors",
+        "console",
+        "default",
+    ],
+    visibility = [],
+    deps = [
+        ":console-0.16",
+        ":once_cell-1",
+        ":similar-2",
+        ":tempfile-3",
     ],
 )
 
@@ -11695,7 +11599,7 @@ cargo.rust_library(
 )
 
 alias(
-    name = "sha2-0_10_9",
+    name = "sha2",
     actual = ":sha2-0.10",
     visibility = ["PUBLIC"],
 )
@@ -11740,56 +11644,6 @@ cargo.rust_library(
         ":cfg-if-1",
         ":cpufeatures-0.2",
         ":digest-0.10",
-    ],
-)
-
-alias(
-    name = "sha2-0_11_0",
-    actual = ":sha2-0.11",
-    visibility = ["PUBLIC"],
-)
-
-http_archive(
-    name = "sha2-0.11.0.crate",
-    sha256 = "446ba717509524cb3f22f17ecc096f10f4822d76ab5c0b9822c5f9c284e825f4",
-    strip_prefix = "sha2-0.11.0",
-    urls = ["https://static.crates.io/crates/sha2/0.11.0/download"],
-    visibility = [],
-)
-
-cargo.rust_library(
-    name = "sha2-0.11",
-    srcs = [":sha2-0.11.0.crate"],
-    crate = "sha2",
-    crate_root = "sha2-0.11.0.crate/src/lib.rs",
-    edition = "2024",
-    env = {
-        "CARGO_BIN_NAME": "sha2",
-        "CARGO_CRATE_NAME": "sha2",
-        "CARGO_MANIFEST_DIR": "sha2-0.11.0.crate",
-        "CARGO_PKG_AUTHORS": "RustCrypto Developers",
-        "CARGO_PKG_DESCRIPTION": "Pure Rust implementation of the SHA-2 hash function family\nincluding SHA-224, SHA-256, SHA-384, and SHA-512.\n",
-        "CARGO_PKG_HOMEPAGE": "",
-        "CARGO_PKG_NAME": "sha2",
-        "CARGO_PKG_README": "README.md",
-        "CARGO_PKG_REPOSITORY": "https://github.com/RustCrypto/hashes",
-        "CARGO_PKG_RUST_VERSION": "1.85",
-        "CARGO_PKG_VERSION": "0.11.0",
-        "CARGO_PKG_VERSION_MAJOR": "0",
-        "CARGO_PKG_VERSION_MINOR": "11",
-        "CARGO_PKG_VERSION_PATCH": "0",
-        "CARGO_PKG_VERSION_PRE": "",
-    },
-    features = [
-        "alloc",
-        "default",
-        "oid",
-    ],
-    visibility = [],
-    deps = [
-        ":cfg-if-1",
-        ":cpufeatures-0.3",
-        ":digest-0.11",
     ],
 )
 
@@ -11935,6 +11789,45 @@ cargo.rust_library(
         "CARGO_PKG_VERSION_PATCH": "10",
         "CARGO_PKG_VERSION_PRE": "",
     },
+    visibility = [],
+)
+
+http_archive(
+    name = "similar-2.7.0.crate",
+    sha256 = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa",
+    strip_prefix = "similar-2.7.0",
+    urls = ["https://static.crates.io/crates/similar/2.7.0/download"],
+    visibility = [],
+)
+
+cargo.rust_library(
+    name = "similar-2",
+    srcs = [":similar-2.7.0.crate"],
+    crate = "similar",
+    crate_root = "similar-2.7.0.crate/src/lib.rs",
+    edition = "2018",
+    env = {
+        "CARGO_BIN_NAME": "similar",
+        "CARGO_CRATE_NAME": "similar",
+        "CARGO_MANIFEST_DIR": "similar-2.7.0.crate",
+        "CARGO_PKG_AUTHORS": "Armin Ronacher <armin.ronacher@active-4.com>:Pierre-Étienne Meunier <pe@pijul.org>:Brandon Williams <bwilliams.eng@gmail.com>",
+        "CARGO_PKG_DESCRIPTION": "A diff library for Rust",
+        "CARGO_PKG_HOMEPAGE": "",
+        "CARGO_PKG_NAME": "similar",
+        "CARGO_PKG_README": "README.md",
+        "CARGO_PKG_REPOSITORY": "https://github.com/mitsuhiko/similar",
+        "CARGO_PKG_RUST_VERSION": "1.60",
+        "CARGO_PKG_VERSION": "2.7.0",
+        "CARGO_PKG_VERSION_MAJOR": "2",
+        "CARGO_PKG_VERSION_MINOR": "7",
+        "CARGO_PKG_VERSION_PATCH": "0",
+        "CARGO_PKG_VERSION_PRE": "",
+    },
+    features = [
+        "default",
+        "inline",
+        "text",
+    ],
     visibility = [],
 )
 
@@ -14124,7 +14017,6 @@ cargo.rust_library(
         "CARGO_PKG_VERSION_PATCH": "1",
         "CARGO_PKG_VERSION_PRE": "",
     },
-    features = ["const-generics"],
     visibility = [],
 )
 

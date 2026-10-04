@@ -27,6 +27,7 @@ path = "empty.rs"
 "glob" = { package = "glob", version = "=0.3.4", default-features = true, features = [] }
 "harness" = { package = "harness", version = "=0.1.0", default-features = true, features = [], git = "https://github.com/tidepool-heavy-industries/exomonad-harness.git", rev = "2aa685129aa4da4b3ec637abcf17666f087b93c8" }
 "ignore" = { package = "ignore", version = "=0.4.33", default-features = true, features = [] }
+"insta" = { package = "insta", version = "=1.48.0", default-features = true, features = [] }
 "inventory" = { package = "inventory", version = "=0.3.24", default-features = true, features = [] }
 "libc" = { package = "libc", version = "=0.2.189", default-features = true, features = [] }
 "log" = { package = "log", version = "=0.4.33", default-features = true, features = [] }
@@ -47,14 +48,13 @@ path = "empty.rs"
 "serde" = { package = "serde", version = "=1.0.229", default-features = true, features = ["derive"] }
 "serde_json" = { package = "serde_json", version = "=1.0.151", default-features = true, features = ["arbitrary_precision", "float_roundtrip"] }
 "serial_test" = { package = "serial_test", version = "=3.5.0", default-features = true, features = [] }
-"sha2-0_10_9" = { package = "sha2", version = "=0.10.9", default-features = true, features = [] }
-"sha2-0_11_0" = { package = "sha2", version = "=0.11.0", default-features = true, features = [] }
+"sha2" = { package = "sha2", version = "=0.10.9", default-features = true, features = [] }
 "stacker" = { package = "stacker", version = "=0.1.25", default-features = true, features = [] }
 "static_assertions" = { package = "static_assertions", version = "=1.1.0", default-features = true, features = [] }
 "syn" = { package = "syn", version = "=3.0.3", default-features = true, features = ["extra-traits", "full"] }
 "tempfile" = { package = "tempfile", version = "=3.27.0", default-features = true, features = [] }
 "thiserror" = { package = "thiserror", version = "=2.0.20", default-features = true, features = [] }
-"tokio" = { package = "tokio", version = "=1.53.1", default-features = true, features = ["fs", "io-util", "macros", "net", "process", "rt", "rt-multi-thread", "signal", "sync", "time"] }
+"tokio" = { package = "tokio", version = "=1.53.1", default-features = true, features = ["io-util", "macros", "net", "process", "rt", "rt-multi-thread", "signal", "sync", "test-util", "time"] }
 "tokio-tungstenite" = { package = "tokio-tungstenite", version = "=0.29.0", default-features = true, features = [] }
 "toml" = { package = "toml", version = "=1.1.4+spec-1.1.0", default-features = true, features = [] }
 "tracing" = { package = "tracing", version = "=0.1.44", default-features = true, features = [] }

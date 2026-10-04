@@ -14,21 +14,23 @@ import tomllib
 
 from buck2_cargo_features import (
     CRATES_IO_SOURCE,
+    NATIVE_PACKAGES,
+    reject_local_feature_requests,
     FeatureSelectionError,
     effective_feature_selection,
-    load_profile,
     metadata_feature_args,
     parse_locked_git_source,
     reject_forbidden_closure,
     resolve as resolve_cargo_features,
 )
-from test_source_ownership import TEST_ONLY_SOURCES
+from test_source_ownership import TEST_ONLY_SOURCES, integration_target_sources
 
 
 def cargo_dependency_key(dependency):
     return dependency["rename"] or dependency["name"]
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+HASKELL_RUST_INPUTS = set()
 arguments = argparse.ArgumentParser(description=__doc__)
 arguments.add_argument("--package", action="append", required=True, help="Cargo package to generate (repeatable)")
 arguments.add_argument(
@@ -44,34 +46,12 @@ options = arguments.parse_args()
 selected = set(options.package)
 if selected & {"tidepool", "tidepool-runtime"}:
     selected.add("tidepool-testing")
-SUPPORTED_PACKAGES = {
-    "tidepool-atomic-write", "tidepool-repr", "tidepool-heap", "tidepool-bignum",
-    "tidepool-bridge", "tidepool-effect", "tidepool-codegen", "tidepool-extract-cmd",
-    "tidepool-extract-report", "tidepool-toolchain", "tidepool-bridge-derive",
-    "tidepool-runtime", "tidepool-mcp", "tidepool-handlers", "tidepool",
-    "exomonad-model", "exomonad-tool", "tidepool-bridge-effects",
-    "exomonad-node", "exomonad-worktree", "exomonad-actor", "exomonad-agent",
-    "tidepool-testing", "tidepool-test-data",
-}
-NORMAL_DEPENDENCY_ONLY_PACKAGES = {
-    "tidepool-bignum", "tidepool-bridge", "tidepool-effect", "tidepool-codegen",
-    "tidepool-extract-report", "tidepool-bridge-derive", "tidepool-runtime",
-    "exomonad-model", "exomonad-tool", "tidepool-bridge-effects",
-    "exomonad-node", "exomonad-worktree", "exomonad-actor", "exomonad-agent",
-    "tidepool-mcp", "tidepool-handlers", "tidepool",
-    "tidepool-testing",
-}
-UNIT_TEST_PACKAGES = {
-    "tidepool-atomic-write", "tidepool-repr", "tidepool-heap", "tidepool-codegen",
-    "tidepool-extract-cmd", "tidepool-toolchain", "tidepool", "tidepool-runtime",
-    "exomonad-actor",
-}
-ISOLATED_UNIT_TEST_PACKAGES = {
-    "tidepool-codegen", "tidepool-extract-cmd", "tidepool-toolchain",
-}
-EXTRACTOR_FREE_ONLY_PACKAGES = {"tidepool-extract-cmd", "tidepool-toolchain"}
-LIBRARY_TARGET_ONLY_PACKAGES = {
-    "tidepool-extract-report", "tidepool-toolchain",
+SUPPORTED_PACKAGES = NATIVE_PACKAGES
+# Every executable suite uses the existing counted, process-isolated runner.
+# Shared harness owners publish their named execution groups separately.
+GENERATED_BIN_NAMES = {
+    "tidepool-protocol-gen": "tidepool_protocol_gen",
+    "tidepool-effects-gen": "tidepool_effects_gen",
 }
 unsupported = selected - SUPPORTED_PACKAGES
 if unsupported:
@@ -128,6 +108,7 @@ try:
     reject_forbidden_closure(
         metadata, selected | NO_DEFAULT_FEATURES | set(FEATURE_OVERRIDES)
     )
+    reject_local_feature_requests(metadata, selected | set(FEATURE_OVERRIDES), NO_DEFAULT_FEATURES, FEATURE_OVERRIDES)
 except FeatureSelectionError as error:
     raise SystemExit(str(error)) from error
 
@@ -138,7 +119,7 @@ def feature_plan(package):
             package,
             FEATURE_OVERRIDES.get(package["name"], set()),
             package["name"] not in NO_DEFAULT_FEATURES,
-            resolved_node=resolved_nodes[package["id"]],
+            resolved_node=None,
         )
     except FeatureSelectionError as error:
         raise SystemExit(str(error)) from error
@@ -294,35 +275,13 @@ def render_strings(values, indent=4):
     return "\n".join(" " * indent + json.dumps(value) + "," for value in values)
 
 
-# The repr Cargo suite is one explicit integration target with sibling module
-# files. Other current integration targets are standalone crate roots.
-INTEGRATION_SOURCES = {
-    ("tidepool-repr", "repr"): (
-        "tests/suites/repr.rs",
-        "tests/execution_schema_codec.rs",
-        "tests/execution_schema_contract.rs",
-        "tests/extend_checked_equivalence.rs",
-        "tests/metadata_strictness.rs",
-        "tests/strict_jsonl_directory.rs",
-    ),
-}
-
-# These codegen fixture includes are inside #[cfg(test)] modules. Keep the
-# library action independent of the Haskell test corpus until test migration.
-CODEGEN_TEST_FIXTURES = {
-    "bridge/haskell/test-prepared-stg/fixtures/freer-resume.cbor",
-    "bridge/haskell/test-prepared-stg/fixtures/freer-retention.cbor",
-}
-
 LIBRARY_TEST_FIXTURES = {
-    ("tidepool-codegen", "tidepool_codegen"): CODEGEN_TEST_FIXTURES,
     ("tidepool-extract-cmd", "tidepool_extract_cmd"): {
         "bridge/haskell/src/Tidepool/ExtractRequest.hs",
         "bridge/haskell/src/Tidepool/Timing.hs",
         "bridge/haskell/src/Tidepool/GhcPipeline.hs",
     },
     ("tidepool-toolchain", "tidepool_toolchain"): {
-        "bridge/haskell/test-prepared-stg/fixtures/m3-vertical.cbor",
         "bridge/haskell/test-cell-splitter/fixtures/declaration-join/join-v2.cbor",
         "bridge/haskell/test-cell-splitter/fixtures/declaration-join/join-v2.json",
         "bridge/haskell/test-cell-splitter/fixtures/declaration-join/inventory-v2.cbor",
@@ -340,8 +299,6 @@ LIBRARY_TEST_FIXTURES = {
     },
 }
 
-CODEGEN_NATIVE_TESTS = {"native_md5_link"}
-
 # Each module is declared behind #[cfg(test)] in prepared_program.rs.
 CODEGEN_TEST_ONLY_SOURCES = {
     "apply_tests.rs", "bytes_tests.rs", "caller_result_tests.rs",
@@ -350,31 +307,43 @@ CODEGEN_TEST_ONLY_SOURCES = {
     "retention_tests.rs", "settlement_tests.rs", "tests.rs",
 }
 
-# The no-default facade test profile does not compile these test modules: each
-# is guarded by `cfg(all(test, feature = "codex-compat"))` at its owning
-# module declaration. Keep them out of its source and fixture closure too.
-TIDEPOOL_CODEX_TEST_ONLY_SOURCES = {
-    "src/actor_host/agent_spec_tests.rs",
-    "src/actor_host/background_command_example_tests.rs",
-    "src/actor_host/call_timing_tests.rs",
-    "src/actor_host/cell_compile_cost_tests.rs",
-    "src/actor_host/command_jobs_tests.rs",
-    "src/actor_host/custody_tests.rs",
-    "src/actor_host/hosted_retirement.rs",
-    "src/actor_host/hosted_tools_tests.rs",
-    "src/actor_host/jev_tests.rs",
-    "src/actor_host/lookup_availability_tests.rs",
-    "src/actor_host/observation_budget_tests.rs",
-    "src/actor_host/research_policy_tests.rs",
-    "src/actor_host/resource_tests.rs",
-    "src/actor_host/source_reload_tests.rs",
-    "src/actor_host/tests.rs",
-    "src/actor_host/tui_resource_tests.rs",
-    "src/actor_host/tui_sleep_tests.rs",
-    "src/actor_host/workspace_tests.rs",
-}
+def protocol_output_paths():
+    manifest = ROOT / "build/protocol/outputs.txt"
+    if not manifest.is_file():
+        raise SystemExit("missing schema-owned build/protocol/outputs.txt")
+    paths = manifest.read_text().splitlines()
+    names = set()
+    for path in paths:
+        parsed = pathlib.PurePosixPath(path)
+        if not path or parsed.is_absolute() or ".." in parsed.parts or parsed.as_posix() != path:
+            raise SystemExit(f"invalid generated protocol output path {path!r}")
+        name = path.replace("/", "_").replace(".", "_")
+        if name in names:
+            raise SystemExit(f"duplicate generated protocol subtarget {name}")
+        names.add(name)
+    if not paths:
+        raise SystemExit("protocol output roster must not be empty")
+    return paths
 
-NO_DEFAULT_PROFILE = load_profile(ROOT)
+
+def generated_protocol_label(path):
+    return "//bridge/protocol:generated[" + path.replace("/", "_").replace(".", "_") + "]"
+
+
+def generated_producer_rules(package_name):
+    if package_name == "tidepool-protocol":
+        paths = protocol_output_paths()
+        name, generator = "generated", ":tidepool_protocol_gen"
+    elif package_name == "tidepool-mcp":
+        paths = ["Tidepool/Effects/Core.hs", "Tidepool/Effects/Authored.hs", "Tidepool/Effects.hs"]
+        name, generator = "effects_generated", ":tidepool_effects_gen"
+    else:
+        return ""
+    return "\n".join([
+        "protocol_generated(", f"    name = {json.dumps(name)},",
+        f"    generator = {json.dumps(generator)},", "    outputs = [",
+        render_strings(paths, 8), "    ],", '    visibility = ["PUBLIC"],', ")", "",
+    ])
 
 
 def source_inputs(package, target, features=(), test_target=False):
@@ -390,13 +359,6 @@ def source_inputs(package, target, features=(), test_target=False):
         sources = {source for source in sources
                    if source.relative_to(ROOT).as_posix() not in test_only}
         facade_unit_test = package["name"] == "tidepool" and target["name"].endswith("_unit_tests")
-        if package["name"] == "tidepool" and "codex-compat" not in features:
-            codex_root = directory / "src/host_dynamic_tools.rs"
-            codex_modules = directory / "src/host_dynamic_tools"
-            sources = {
-                source for source in sources
-                if source != codex_root and not source.is_relative_to(codex_modules)
-            }
         if package["name"] == "tidepool" and not facade_unit_test:
             sources = {
                 source for source in sources
@@ -404,18 +366,6 @@ def source_inputs(package, target, features=(), test_target=False):
                 and not source.stem.endswith("_tests")
                 and source.stem != "test_campaign"
             }
-        if facade_unit_test and "codex-compat" not in features:
-            sources = {
-                source for source in sources
-                if source.relative_to(directory).as_posix() not in TIDEPOOL_CODEX_TEST_ONLY_SOURCES
-            }
-        if (
-            package["name"] == "exomonad-agent"
-            and package["name"] in NO_DEFAULT_PROFILE
-            and "codex-compat" not in features
-        ):
-            codex_sources = directory / "src/backend/codex"
-            sources = {source for source in sources if not source.is_relative_to(codex_sources)}
         if "lib" in target["kind"] or "proc-macro" in target["kind"]:
             binary_roots = {
                 pathlib.Path(candidate["src_path"]).resolve()
@@ -432,30 +382,27 @@ def source_inputs(package, target, features=(), test_target=False):
                     raise SystemExit(f"missing declared codegen test-only source {source}")
                 sources.discard(source)
     else:
-        # Cargo gives the crate root. The repr suite has explicit sibling
-        # modules; standalone integration targets need only their own root.
-        declared = INTEGRATION_SOURCES.get((package["name"], target["name"]))
-        if declared is None:
-            sources.add(source_root)
+        # The shared module walker owns each integration root and its #[path]
+        # children. Unknown declarations refuse generation rather than widening
+        # a target to every test source or losing a sibling module.
+        if "test" in target["kind"]:
+            graph, unknown = integration_target_sources([target])
+            if unknown:
+                raise SystemExit(f"unresolved integration modules for {package['name']}:{target['name']}")
+            sources.update(graph)
         else:
-            for relative in declared:
-                source = directory / relative
-                if not source.is_file():
-                    raise SystemExit(f"missing integration source {source}")
-                sources.add(source)
+            sources.add(source_root)
     includes = re.compile(r'include_(?:str|bytes)!\s*\(\s*"([^\"]+)"')
     pending = [path for path in sources if path.suffix == ".rs"]
     external_labels = {
-        "bridge/haskell/test-prepared-stg/fixtures/m3-vertical.cbor": "//bridge/haskell:m3_vertical_fixture",
-        "bridge/haskell/test-execution-schema-encode/fixtures/schema6-intrinsic.cbor": "//bridge/haskell:schema6_intrinsic_fixture",
+        "Cargo.lock": "//:workspace_cargo_lock",
+        "bridge/handlers/src/lib.rs": "//bridge/handlers:handler_library_source",
         "bridge/atomic-write/tests/fixtures/directory_fault.c": "//bridge/atomic-write:directory_fault_fixture",
         "tidepool/runtime/src/session/fixtures/activation-input-function.hs": "//tidepool/runtime:activation_input_function_fixture",
         "tidepool/runtime/src/session/fixtures/activation-input-receiver.hs": "//tidepool/runtime:activation_input_receiver_fixture",
         "tidepool/runtime/src/session/fixtures/activation-input-resident-original.hs": "//tidepool/runtime:activation_input_resident_original_fixture",
         "tidepool/runtime/src/session/fixtures/activation-input-resident-request.hs": "//tidepool/runtime:activation_input_resident_request_fixture",
         "tidepool/runtime/src/session/fixtures/activation-input-resident-shadow.hs": "//tidepool/runtime:activation_input_resident_shadow_fixture",
-        "bridge/haskell/test-prepared-stg/fixtures/freer-resume.cbor": "//bridge/haskell:freer_resume_fixture",
-        "bridge/haskell/test-prepared-stg/fixtures/freer-retention.cbor": "//bridge/haskell:freer_retention_fixture",
         "bridge/haskell/src/Tidepool/ExtractRequest.hs": "//bridge/haskell:extract_request_source",
         "bridge/haskell/src/Tidepool/Timing.hs": "//bridge/haskell:timing_source",
         "bridge/haskell/src/Tidepool/WorkerServer.hs": "//bridge/haskell:worker_server_source",
@@ -523,7 +470,9 @@ def source_inputs(package, target, features=(), test_target=False):
         contents = source.read_text()
         relatives = list(includes.findall(contents))
         for relative in relatives:
-            included = (source.parent / relative).resolve()
+            included = pathlib.Path(os.path.abspath(source.parent / relative))
+            if not included.resolve().is_relative_to(ROOT):
+                raise SystemExit(f"compile-time input outside repository {included} from {source}")
             if included.is_relative_to(ROOT) and included.relative_to(ROOT).as_posix() in test_only:
                 continue
             if (
@@ -550,7 +499,17 @@ def source_inputs(package, target, features=(), test_target=False):
             if not included.is_relative_to(ROOT):
                 raise SystemExit(f"compile-time input outside repository {included} from {source}")
             repo_relative = included.relative_to(ROOT).as_posix()
+            if test_target and repo_relative.startswith("exomonad/examples/workspace/.exomonad/"):
+                external["//exomonad/examples/workspace:facade_test_sources"] = "exomonad/examples/workspace"
+                continue
             if repo_relative in LIBRARY_TEST_FIXTURES.get((package["name"], target["name"]), set()):
+                continue
+            if repo_relative.startswith("bridge/haskell/") and repo_relative not in external_labels:
+                relative = repo_relative.removeprefix("bridge/haskell/")
+                if included.suffix == ".cbor" and relative.startswith(("test-prepared-stg/fixtures/", "test-execution-schema-encode/fixtures/")):
+                    raise SystemExit(f"prepared program bytes must be declared runtime resources, not compile-time inputs: {repo_relative}")
+                HASKELL_RUST_INPUTS.add(relative)
+                external["//bridge/haskell:rust_input_" + relative.replace("/", "_").replace(".", "_").replace("-", "_")] = repo_relative
                 continue
             if repo_relative not in external_labels:
                 raise SystemExit(f"no Buck file input target for {repo_relative} (from {source})")
@@ -560,7 +519,84 @@ def source_inputs(package, target, features=(), test_target=False):
         for source in sources
     }
     mapped.update(external)
+    # Schema output paths define the source closure, including outputs that do
+    # not yet exist in the checkout. Checked-in generated copies are not inputs
+    # to native Rust compilation.
+    if package["name"] in {
+        "tidepool-mcp", "tidepool-handlers", "tidepool-bridge-effects",
+        "tidepool-runtime", "exomonad-actor", "tidepool",
+    }:
+        for path in protocol_output_paths():
+            if path.startswith(CURRENT_DIR + "/src/generated/") and path.endswith(".rs"):
+                mapped.pop(path.removeprefix(CURRENT_DIR + "/"), None)
+                mapped[generated_protocol_label(path)] = path
     return dict(sorted(mapped.items(), key=lambda item: item[1]))
+
+
+PREPARED_FIXTURE_RESOURCES = {
+    "M3": ("TIDEPOOL_M3_FIXTURE_DIR", "//bridge/haskell:m3_vertical_prepared"),
+    "Resume": ("TIDEPOOL_FREER_RESUME_FIXTURE_DIR", "//bridge/haskell:freer_resume_prepared"),
+    "Retention": ("TIDEPOOL_FREER_RETENTION_FIXTURE_DIR", "//bridge/haskell:freer_retention_prepared"),
+}
+
+
+def test_runtime_inputs(package_name, target_name, unit=False):
+    env, resources, worker = {}, [], False
+    fixture_names = []
+    if package_name == "tidepool-codegen" and unit:
+        fixture_names = ["Resume", "Retention"]
+    elif package_name == "tidepool-runtime":
+        if unit or target_name in {"session", "prepared_execution"}:
+            fixture_names = ["M3", "Resume", "Retention"]
+        elif target_name == "prepared_resident_composite":
+            fixture_names = ["Resume"]
+    for name in fixture_names:
+        variable, label = PREPARED_FIXTURE_RESOURCES[name]
+        env[variable] = "$(location " + label + ")"
+        resources.append(label)
+    if package_name in {"tidepool-toolchain", "tidepool-runtime", "tidepool-testing", "exomonad-actor"}:
+        worker = True
+        env.update({
+            "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_deployment)",
+            "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
+            "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
+            "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
+            "TIDEPOOL_EXTRACT_RUNTIME_LIBRARIES": "$(location //build/package:tidepool_extract_runtime_libraries)",
+            "LD_LIBRARY_PATH": "$(location //build/package:tidepool_extract_runtime_libraries)",
+            "TIDEPOOL_KEEP_TEST_LOGS": "1",
+        })
+        resources.extend(["//build/package:compiler_deployment", "//bridge/haskell:facade_embedded_sources", "//build/package:tidepool_extract_runtime_libraries"])
+    if package_name == "tidepool-toolchain" and target_name == "prepared_fixture":
+        env["TIDEPOOL_PREPARED_FIXTURE_COMPILER"] = "$(exe //tidepool/toolchain:prepared-fixture)"
+        resources.append("//tidepool/toolchain:prepared-fixture")
+    if package_name == "tidepool-mcp" and target_name == "generated_surface_contracts":
+        worker = True
+        env.update({
+            "TIDEPOOL_EFFECTS_SOURCE_ROOT": "$(location :effects_generated)",
+            "TIDEPOOL_PROTOCOL_HASKELL_ROOT": "$(location //bridge/protocol:generated)/bridge/haskell/lib",
+            "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
+            "TIDEPOOL_HASKELL_ACTORS_DIR": "$(location //bridge/haskell:facade_embedded_sources)/actors",
+            "TIDEPOOL_GENERATED_SURFACE_FIXTURES": "$(location :generated_surface_fixtures)",
+            "TIDEPOOL_GHC": "$(exe toolchains//:ghc)",
+        })
+        resources.extend([":effects_generated", "//bridge/protocol:generated", "//bridge/haskell:facade_embedded_sources", ":generated_surface_fixtures"])
+    if package_name == "tidepool-protocol":
+        env["RUSTFMT"] = "$(exe toolchains//:rustfmt)"
+        resources.append("toolchains//:rustfmt")
+    return env, sorted(set(resources)), worker
+
+
+def runtime_arguments(env, resources, worker):
+    lines = []
+    if env:
+        lines.append("    env = {")
+        lines.extend(f"        {json.dumps(key)}: {json.dumps(value)}," for key, value in sorted(env.items()))
+        lines.append("    },")
+    if resources:
+        lines.extend(["    resources = [", render_strings(resources, 8), "    ],"])
+    if worker:
+        lines.append("    haskell_worker = True,")
+    return "\n".join(lines)
 
 
 def render_rule(rule, name, target, package, deps, named, extra="", features=(), test_target=False):
@@ -607,20 +643,64 @@ def render_rule(rule, name, target, package, deps, named, extra="", features=(),
     return "\n".join(lines)
 
 
+def compile_fail_cases(package, library):
+    directory = pathlib.Path(package["manifest_path"]).parent
+    extra_dependencies = {
+        "machine_lease_double_borrow": (),
+        "prepared_install_consumes_pending": (),
+        "prepared_install_crossed_image": ("frunk", "tidepool-mcp"),
+    }
+    rules = []
+    for source in sorted((directory / "tests/compile_fail").glob("*.rs")):
+        if source.stem not in extra_dependencies:
+            raise SystemExit(f"unregistered native compile-fail contract {source}")
+        expected = source.with_suffix(".stderr")
+        control = directory / "tests/compile_pass" / source.name
+        if not expected.is_file() or not control.is_file():
+            raise SystemExit(f"native compile-fail contract needs pinned diagnostic and valid control: {source}")
+        dependencies = {library["name"].replace("-", "_"): ":" + library["name"]}
+        for name in extra_dependencies[source.stem]:
+            declaration = next(dep for dep in package["dependencies"] if dep["name"] == name)
+            dependencies[name.replace("-", "_")] = dependency_label(
+                declaration, linux_dependency(package, declaration))
+        lines = ["rust_compile_fail(", f'    name = "compile_fail_{source.stem}",']
+        for key, path in (("source", source), ("control", control), ("expected", expected)):
+            lines.append(f"    {key} = {json.dumps(path.relative_to(directory).as_posix())},")
+        lines.append("    dependencies = {")
+        lines.extend(f"        {json.dumps(alias)}: {json.dumps(label)},"
+                     for alias, label in sorted(dependencies.items()))
+        lines.extend(["    },", '    visibility = ["PUBLIC"],', ")", ""])
+        rules.append("\n".join(lines))
+    return "\n".join(rules)
+
+
 def actor_observation_test_cases(binary):
-    tests = ["runtime_observation::provider_health_tests::" + name for name in (
-        "owned_provider_round_authorizes_idle_only_after_success",
-        "abandoned_provider_round_requires_attention_until_a_new_success",
-        "obsolete_provider_round_cannot_overwrite_newer_observation",
-    )]
-    return "\n".join([
-        "tidepool_rust_test_cases(",
-        '    name = "actor_runtime_observation_lease_tests",',
-        f"    binary = {json.dumps(':' + binary)},",
-        "    exact_tests = [", render_strings(tests, 8), "    ],",
-        "    expected_count = 3,", "    jobs = 1,", "    timeout = 30,",
-        "    test_rule_timeout_ms = 150000,", '    visibility = ["PUBLIC"],', ")", "",
-    ])
+    groups = [
+        ("actor_runtime_observation_lease_tests", "runtime_observation::provider_health_tests::", (
+            "owned_provider_round_authorizes_idle_only_after_success",
+            "abandoned_provider_round_requires_attention_until_a_new_success",
+            "obsolete_provider_round_cannot_overwrite_newer_observation",
+        )),
+        ("actor_idle_retirement_fence_tests", "kernel::tests::", (
+            "idle_retirement_fences_input_and_rounds_until_claim_is_released",
+            "idle_retirement_refuses_admitted_input_and_durable_work_before_wake",
+            "idle_retirement_does_not_treat_abandoned_or_failed_rounds_as_idle",
+            "idle_retirement_forced_close_dominates_claim_rollback",
+            "idle_retirement_probe_failure_reopens_admission",
+        )),
+    ]
+    rules = []
+    for name, prefix, leaves in groups:
+        tests = [prefix + leaf for leaf in leaves]
+        rules.append("\n".join([
+            "tidepool_rust_test_cases(", f"    name = {json.dumps(name)},",
+            f"    binary = {json.dumps(':' + binary)},",
+            "    exact_tests = [", render_strings(tests, 8), "    ],",
+            f"    expected_count = {len(tests)},", "    jobs = 1,", "    timeout = 30,",
+            f"    test_rule_timeout_ms = {(len(tests) * 30 + 60) * 1000},",
+            '    visibility = ["PUBLIC"],', ")", "",
+        ]))
+    return "\n".join(rules)
 
 
 def runtime_test_cases(binary):
@@ -839,7 +919,7 @@ def facade_test_cases(binary):
 
 header = '''# @generated by scripts/buck2-first-party.py from Cargo metadata.
 load("//build/rust:defs.bzl", "tidepool_rust_binary", "tidepool_rust_library", "tidepool_rust_test")
-load("@prelude//:rules.bzl", "cxx_library", "export_file")
+load("@prelude//:rules.bzl", "cxx_library", "export_file", "filegroup")
 load("@prelude//rust:sources.bzl", "rust_filegroup")
 '''
 
@@ -853,12 +933,18 @@ for package_name, package in local.items():
     if has_custom_build and package_name not in {"tidepool-codegen", "tidepool"}:
         raise SystemExit(f"{package_name} has a build.rs target; add a native Buck action before selecting it")
     rules = [header]
+    if package_name in {"tidepool-protocol", "tidepool-mcp"}:
+        rules.append('load("//build/protocol:defs.bzl", "protocol_generated")\n')
     if package_name == "tidepool-codegen":
         rules.append('load("//build/rust:codegen-md5.bzl", "tidepool_codegen_md5")\n')
-    if package_name in ISOLATED_UNIT_TEST_PACKAGES:
-        rules.append('load("//build/rust:defs.bzl", "tidepool_rust_isolated_test")\n')
-    if package_name in {"tidepool-runtime", "exomonad-actor"}:
+    rules.append('load("//build/rust:defs.bzl", "tidepool_rust_isolated_test")\n')
+    if package_name == "exomonad-actor":
         rules.append('load("//build/rust:defs.bzl", "tidepool_rust_test_cases")\n')
+    if package_name == "tidepool-toolchain":
+        rules.append('load("//build/rust:executable_resource.bzl", "runtime_executable")\n')
+    if package_name == "tidepool-runtime":
+        rules.append('load("//build/rust:defs.bzl", "tidepool_rust_test_cases")\n')
+        rules.append('load("//build/rust:compile_fail.bzl", "rust_compile_fail")\n')
     if package_name == "tidepool":
         rules.append('''load("//build/rust:buildscript.bzl", "tidepool_buildscript_run")
 load("//build/rust:facade_build_inputs.bzl", "tidepool_facade_build_inputs")
@@ -867,14 +953,8 @@ load("//build/rust:defs.bzl", "tidepool_rust_test_cases")
     normal_deps, normal_named = dependency_sets(package, enabled_dependencies, forwarded_features)
     if package_name == "tidepool-codegen":
         normal_named["prepared_md5_native"] = ":prepared_md5_native"
-    dev_deps, dev_named = dependency_sets(package, enabled_dependencies, forwarded_features, include_dev=True) if package_name not in NORMAL_DEPENDENCY_ONLY_PACKAGES else ([], {})
+    dev_deps, dev_named = dependency_sets(package, enabled_dependencies, forwarded_features, include_dev=True)
     unit_deps, unit_named = dev_deps, dev_named
-    if package_name == "tidepool-codegen":
-        # Native engine unit tests use exactly the library's dependency surface.
-        # Admit a new dev dependency explicitly before expanding this closure.
-        if any(dependency["kind"] == "dev" for dependency in package["dependencies"]):
-            raise SystemExit("Model codegen dev dependencies before extending its native unit target")
-        unit_deps, unit_named = normal_deps, normal_named
     if package_name == "tidepool":
         unit_deps, unit_named = dependency_sets(
             package, enabled_dependencies, forwarded_features, include_dev=True
@@ -884,8 +964,7 @@ load("//build/rust:defs.bzl", "tidepool_rust_test_cases")
             package, enabled_dependencies, forwarded_features, include_dev=True
         )
     if package_name == "tidepool-runtime":
-        # trybuild belongs only to the separate compile_fail integration target.
-        # It runs Cargo itself and is deliberately outside this native libtest.
+        # Compile-fail actions use declared rustc inputs instead of trybuild Cargo.
         unit_package = dict(package)
         unit_package["dependencies"] = [
             dependency for dependency in package["dependencies"]
@@ -937,8 +1016,6 @@ tidepool_buildscript_run(
 ''')
     libraries = [target for target in targets if "lib" in target["kind"] or "proc-macro" in target["kind"]]
     binaries = [target for target in targets if "bin" in target["kind"]]
-    if package_name in LIBRARY_TARGET_ONLY_PACKAGES:
-        binaries = []
     tests = [target for target in targets if "test" in target["kind"]]
     for target in libraries:
         extra = "    proc_macro = True," if "proc-macro" in target["kind"] else ""
@@ -950,58 +1027,67 @@ tidepool_buildscript_run(
         rules.append("tidepool_codegen_md5()\n")
     for target in binaries:
         deps = normal_deps + ([":" + libraries[0]["name"]] if libraries else [])
-        binary_name = target["name"] + "_bin" if libraries and target["name"] == libraries[0]["name"] else target["name"]
+        binary_name = target["name"] + "_bin" if libraries and target["name"] == libraries[0]["name"] else GENERATED_BIN_NAMES.get(target["name"], target["name"])
         extra = ""
         if package_name == "tidepool":
             extra = '    env = {"OUT_DIR": "$(location :tidepool_build_script_run[out_dir])"},'
         rules.append(render_rule("tidepool_rust_binary", binary_name, target, package, deps, normal_named, extra, features=package_features))
-    if libraries and package_name in UNIT_TEST_PACKAGES:
+    for target in binaries:
+        if not target.get("test", True):
+            continue
+        binary_name = target["name"] + "_bin" if libraries and target["name"] == libraries[0]["name"] else GENERATED_BIN_NAMES.get(target["name"], target["name"])
+        deps = dev_deps + ([":" + libraries[0]["name"]] if libraries else [])
+        env, resources, worker = test_runtime_inputs(package_name, target["name"])
+        extra = runtime_arguments(env, resources, worker)
+        if package_name == "tidepool":
+            extra += '\n    env = {"OUT_DIR": "$(location :tidepool_build_script_run[out_dir])"},'
+        rules.append(render_rule("tidepool_rust_isolated_test", binary_name + "_unit_tests", target, package, deps, dev_named, extra, features=package_features, test_target=True))
+    rules.append(generated_producer_rules(package_name))
+    if libraries and libraries[0].get("test", True):
         library = libraries[0]
         unit_target = dict(library)
         unit_target["name"] = library["name"] + "_unit_tests"
-        unit_rule = (
-            "tidepool_rust_isolated_test"
-            if package_name in ISOLATED_UNIT_TEST_PACKAGES
-            else "tidepool_rust_test"
-        )
+        unit_rule = "tidepool_rust_isolated_test"
         unit_extra = ""
-        if package_name == "tidepool-toolchain":
-            unit_extra = (
-                '    env = {"TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)", '
-                '"TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)"},\n'
-                "    haskell_worker = True,"
-            )
+        env, resources, worker = test_runtime_inputs(package_name, unit_target["name"], unit=True)
+        unit_extra = runtime_arguments(env, resources, worker)
         if package_name == "tidepool":
             unit_rule = "tidepool_rust_binary"
             unit_extra = '''    env = {"OUT_DIR": "$(location :tidepool_build_script_run[out_dir])"},
     rustc_flags = ["--test"],'''
-        if package_name == "tidepool-runtime":
+        if package_name in {"tidepool-runtime", "exomonad-actor"}:
             unit_rule = "tidepool_rust_binary"
             unit_extra = '    rustc_flags = ["--test"],'
         rules.append(render_rule(unit_rule, unit_target["name"], unit_target, package, unit_deps, unit_named, unit_extra, features=package_features, test_target=True))
+        if package_name == "tidepool-toolchain":
+            rules.append('''runtime_executable(
+    name = "candidate_fixture_issuer",
+    executable = ":tidepool_toolchain_unit_tests_binary",
+    visibility = ["PUBLIC"],
+)
+''')
         if package_name == "tidepool":
             rules.append(facade_test_cases(unit_target["name"]))
         if package_name == "tidepool-runtime":
             rules.append(runtime_test_cases(unit_target["name"]))
         if package_name == "exomonad-actor":
             rules.append(actor_observation_test_cases(unit_target["name"]))
-    selected_tests = [
-        target for target in tests
-        if (
-            package_name not in EXTRACTOR_FREE_ONLY_PACKAGES
-            and package_name not in NORMAL_DEPENDENCY_ONLY_PACKAGES
-        ) or (package_name == "tidepool-codegen" and target["name"] in CODEGEN_NATIVE_TESTS)
-    ]
+    selected_tests = [target for target in tests if not (
+        package_name == "tidepool-runtime" and target["name"] == "compile_fail"
+    )]
+    if package_name == "tidepool-runtime" and libraries:
+        rules.append(compile_fail_cases(package, libraries[0]))
     for target in selected_tests:
         deps = dev_deps + ([":" + libraries[0]["name"]] if libraries else [])
-        extra = ""
+        env, resources, worker = test_runtime_inputs(package_name, target["name"])
+        extra = runtime_arguments(env, resources, worker)
         if package["name"] == "tidepool-atomic-write" and target["name"] == "strict_directory":
             extra = '    env = {"TIDEPOOL_DIRECTORY_FAULT_LIBRARY": "$(location :directory_fault_shared)"},'
         if package["name"] == "tidepool-repr" and target["name"] == "repr":
             extra = '    env = {"TIDEPOOL_DIRECTORY_FAULT_LIBRARY": "$(location //bridge/atomic-write:directory_fault_shared)"},'
         rules.append(
             render_rule(
-                "tidepool_rust_test",
+                "tidepool_rust_isolated_test",
                 target["name"],
                 target,
                 package,
@@ -1011,6 +1097,30 @@ tidepool_buildscript_run(
                 package_features,
             )
         )
+    if package_name == "tidepool-handlers":
+        rules.append('''export_file(
+    name = "handler_library_source",
+    src = "src/lib.rs",
+    visibility = ["PUBLIC"],
+)
+''')
+    if package_name == "tidepool-mcp":
+        rules.append('''filegroup(
+    name = "generated_surface_fixtures",
+    srcs = {path[len("tests/fixtures/generated-surface/"): ]: path for path in glob(["tests/fixtures/generated-surface/*.hs"])},
+    visibility = ["PUBLIC"],
+)
+''')
+    if package_name == "tidepool":
+        rules.append('''filegroup(
+    name = "corpus_project_sources",
+    srcs = {
+        "Project/Work.hs": "src/actor_host/fixtures/project/Work.hs",
+        "Project/Types.hs": "src/actor_host/fixtures/project/Types.hs",
+    },
+    visibility = ["PUBLIC"],
+)
+''')
     if package["name"] == "tidepool-runtime":
         for fixture in (
             "function", "receiver", "resident-original", "resident-request", "resident-shadow",
@@ -1039,6 +1149,14 @@ cxx_library(
     output = "\n".join(rules)
     output_path = ROOT / CURRENT_DIR / "BUCK"
     outputs[output_path] = output
+
+if HASKELL_RUST_INPUTS:
+    lines = ['# @generated by scripts/buck2-first-party.py from exact Rust include inputs.',
+             'load("@prelude//:rules.bzl", "export_file")', '', 'def declare_rust_test_inputs():']
+    for relative in sorted(HASKELL_RUST_INPUTS):
+        name = "rust_input_" + relative.replace("/", "_").replace(".", "_").replace("-", "_")
+        lines.append(f"    export_file(name = {json.dumps(name)}, src = {json.dumps(relative)}, visibility = [\"PUBLIC\"])")
+    outputs[ROOT / "bridge/haskell/rust_inputs.bzl"] = "\n".join(lines) + "\n"
 
 if options.check:
     stale = False
