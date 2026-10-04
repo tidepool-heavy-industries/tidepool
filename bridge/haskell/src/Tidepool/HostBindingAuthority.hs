@@ -13,6 +13,8 @@ module Tidepool.HostBindingAuthority
 import Control.Exception (IOException, try)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
+import Crypto.Hash.SHA256 qualified as SHA256
+import Data.Map.Strict qualified as Map
 import GHC.Core.DataCon
   ( StrictnessMark(MarkedStrict), dataConName, dataConOrigArgTys, dataConRepStrictness )
 import GHC.Core.TyCo.Rep (Scaled(..), Type(CastTy))
@@ -30,10 +32,13 @@ import GHC.Unit.Module.Location (ml_hs_file)
 import GHC.Unit.Env (ue_units)
 import GHC.Unit.Info (PackageName(..))
 import GHC.Unit.Home (homeUnitAsUnit)
+import GHC.Unit.Types (unitString)
 import GHC.Unit.State (lookupPackageName)
 import GHC.Data.FastString (fsLit)
 import Language.Haskell.TH.Syntax (addDependentFile, lift, loc_filename, location, runIO)
 import System.FilePath (takeDirectory, (</>))
+import Numeric (showHex)
+import Tidepool.ExactScope (CanonicalInterfaceAdmission, admittedInterfaceSourceSha256)
 import Tidepool.PreparedJson
   ( JsonAuthority, jsonValueLayoutForType, resolveJsonAuthority )
 
@@ -59,8 +64,9 @@ shippedCommandTypesSource = BS.pack $(do
 -- | Resolve only authorities whose spelling occurs at a binding root. The
 -- cheap candidate scan is deliberately before every module-finder and source
 -- read: an ordinary @Int@ notebook bind must do no host-authority I/O.
-resolveHostBindingAuthorities :: [Type] -> HscEnv -> IO HostBindingAuthorities
-resolveHostBindingAuthorities roots env = do
+resolveHostBindingAuthorities :: [Type] -> HscEnv
+  -> Map.Map (String,String) CanonicalInterfaceAdmission -> IO HostBindingAuthorities
+resolveHostBindingAuthorities roots env admitted = do
   let needsJson = any (hasRoot "Tidepool.Aeson.Value" "Value") roots
       needsText = any (hasRoot "Data.Text.Internal" "Text") roots
       needsJob = any (hasRoot "Tidepool.Command.Types" "Job") roots
@@ -68,7 +74,7 @@ resolveHostBindingAuthorities roots env = do
     then resolveJsonAuthority env
     else pure Nothing
   textModule <- if needsText || needsJob then resolveTextModule env else pure Nothing
-  commandJobModule <- if needsJob then resolveCommandJobModule env else pure Nothing
+  commandJobModule <- if needsJob then resolveCommandJobModule env admitted else pure Nothing
   pure HostBindingAuthorities { jsonValueAuthority, textModule, commandJobModule }
 
 resolveTextModule :: HscEnv -> IO (Maybe Module)
@@ -81,18 +87,29 @@ resolveTextModule env = case lookupPackageName
       Found _ owner -> Just owner
       _ -> Nothing
 
-resolveCommandJobModule :: HscEnv -> IO (Maybe Module)
-resolveCommandJobModule env = do
+resolveCommandJobModule :: HscEnv
+  -> Map.Map (String,String) CanonicalInterfaceAdmission -> IO (Maybe Module)
+resolveCommandJobModule env admitted = do
   found <- findImportedModule env (mkModuleName "Tidepool.Command.Types") NoPkgQual
   case found of
     Found moduleLocation owner
-      | moduleUnit owner == homeUnitAsUnit (hsc_home_unit env)
-      , Just source <- ml_hs_file moduleLocation -> do
-      actual <- try (BS.readFile source) :: IO (Either IOException ByteString)
-      pure $ case actual of
-        Right bytes | bytes == shippedCommandTypesSource -> Just owner
-        _ -> Nothing
+      | moduleUnit owner == homeUnitAsUnit (hsc_home_unit env) ->
+        case ml_hs_file moduleLocation of
+          Just source -> do
+            actual <- try (BS.readFile source) :: IO (Either IOException ByteString)
+            pure $ case actual of
+              Right bytes | bytes == shippedCommandTypesSource -> Just owner
+              _ -> Nothing
+          Nothing -> pure $ case Map.lookup
+              (unitString (moduleUnit owner), moduleNameString (moduleName owner)) admitted of
+            Just proof | admittedInterfaceSourceSha256 proof == shippedCommandTypesSha256 -> Just owner
+            _ -> Nothing
     _ -> pure Nothing
+
+shippedCommandTypesSha256 :: String
+shippedCommandTypesSha256 = concatMap hexByte (BS.unpack (SHA256.hash shippedCommandTypesSource))
+  where
+    hexByte byte = let rendered = showHex byte "" in replicate (2 - length rendered) '0' ++ rendered
 
 -- | Classify only the exact outer TyCon. This neither reads a rendered type
 -- nor descends into arguments, so @Job Text@ cannot borrow Text authority.

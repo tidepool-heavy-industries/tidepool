@@ -206,7 +206,8 @@ import Tidepool.ExactScope
   ( ExactScope(..), ExactCompilation(..), SourceSelectedOriginals(..), extendSourceSelectedOriginals, CheckedCellAdmission(..), CheckedCellPurpose(..), CheckedItemAdmission(..), CheckedItemPurpose(..), readExactScope, revalidateExactScope, scopeValueInterfaces
   , writeExactCompilation, scopeExecutionNativeOwners )
 import Tidepool.ExactScope
-  ( CanonicalInterfaceProof, validateCandidateCanonicalInterfaceProof
+  ( CanonicalInterfaceProof, CanonicalInterfaceAdmission, scopeCanonicalInterfaces
+  , validateCandidateCanonicalInterfaceProof
   , canonicalCertificatePath, canonicalCertificateSha256, canonicalCoreArtifact
   , canonicalCorePath, canonicalCoreSha256 )
 import Tidepool.ExecutionSource
@@ -299,6 +300,9 @@ data PipelineResult = PipelineResult
   { prBinds  :: [CoreBind]
   , prTyCons :: [TyCon]
   , prHscEnv :: HscEnv
+  -- | Verified canonical owners selected by this exact compiler request.
+  -- Retained home interfaces have no source location in the GHC finder.
+  , prCanonicalInterfaceAdmissions :: Map.Map (String,String) CanonicalInterfaceAdmission
   -- | The GHC-inferred type of the target module's @__user@ binding (the eval's
   -- top-level expression), rendered to a string via 'ppr'. 'Nothing' when no
   -- @__user@ binding is present (e.g. fixture/Suite extraction). Captured at the
@@ -2687,6 +2691,8 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                 { prBinds  = allBinds
                 , prTyCons = allTyCons
                 , prHscEnv = cpFinalEnv plan hscFinal
+                , prCanonicalInterfaceAdmissions = maybe Map.empty scopeCanonicalInterfaces
+                    (pvExactScope variant)
                 , prCapturedType = capturedType
                 , prCheckedBinderPins = checkedBinderPins
                 , prResultType   = resultTy

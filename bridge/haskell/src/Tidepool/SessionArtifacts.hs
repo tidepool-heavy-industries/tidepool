@@ -72,6 +72,7 @@ mkBoundBinders bindNames generation root result = do
             ++ " names but its result has " ++ show (length types) ++ " fields"
   let persistedTypes = map stabilizeEffectRows componentTypes
   authorities <- resolveHostBindingAuthorities persistedTypes hsc
+    (prCanonicalInterfaceAdmissions result)
   let build name ty persistedType =
         let
             occurrence = mkVarOcc name
