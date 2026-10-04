@@ -16140,7 +16140,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
     }
 
     /// The native program retains its mounted request input across preparation;
-    /// later items can refer to the exact binding produced by an earlier item.
+    /// later items and closures retain the exact original input after a new mount.
     #[tokio::test]
     async fn planned_cell_keeps_request_json_input_owned_across_native_preparation() {
         let (machines, public, source, _root) = actor_registry_fixture();
@@ -16184,7 +16184,8 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             })
             .await
             .unwrap();
-        let cell = "seen <- pure input\nechoed <- pure seen".to_string();
+        let cell = "seen <- pure input\nechoed <- pure seen\ncapturedInput <- pure (\\() -> input)"
+            .to_string();
 
         let (checked, prepared) = workbench
             .prepare_checked_cell(
@@ -16195,28 +16196,28 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                 Some(host_owner),
             )
             .await
-            .expect("a two-item native program retains its request input");
+            .expect("a three-item native program retains its request input and closure");
         assert_eq!(
             checked.items.len(),
-            2,
-            "both bind statements must classify as items: {checked:?}"
+            3,
+            "all three bind statements must classify as items: {checked:?}"
         );
         assert!(
             checked
                 .items
                 .iter()
                 .all(|item| item.verdict.kind == TurnKind::Bind),
-            "neither item is a declaration: {checked:?}"
+            "every item is a binding: {checked:?}"
         );
         let PreparedCell {
             items,
             dependencies,
         } = prepared;
-        assert_eq!(items.len(), 2);
+        assert_eq!(items.len(), 3);
         assert!(
             items.iter().all(|item| item.ready.item.kind()
                 == tidepool_toolchain::checked_cell::CheckedItemKind::Bind),
-            "both items retain their admitted program authority"
+            "all three items retain their admitted program authority"
         );
         let input_name = dependencies
             ._input
@@ -16261,6 +16262,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                             let scope = context.placement.lexical_scope;
                             assert!(session.current_binding_in(scope, "seen").is_some());
                             assert!(session.current_binding_in(scope, "echoed").is_some());
+                            assert!(session.current_binding_in(scope, "capturedInput").is_some());
                             Ok(session.current_binding_in(scope, &input_name).is_none())
                         }
                     })
@@ -16280,6 +16282,9 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             .await;
         let original_echo = workbench
             .host_binding_identity_for_test(context.clone(), "echoed")
+            .await;
+        let original_capture = workbench
+            .host_binding_identity_for_test(context.clone(), "capturedInput")
             .await;
         workbench
             .execute_cell_for_test(context.clone(), include_str!("fixtures/host-json-first.hs"))
@@ -16304,6 +16309,12 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                 .host_binding_identity_for_test(context.clone(), "echoed")
                 .await,
             original_echo
+        );
+        assert_eq!(
+            workbench
+                .host_binding_identity_for_test(context.clone(), "capturedInput")
+                .await,
+            original_capture
         );
         workbench
             .execute_cell_for_test(context.clone(), "data Value = SourceValue Bool")
@@ -16331,6 +16342,12 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             .await
             .unwrap();
         drop(host_dependencies);
+        assert_eq!(
+            workbench
+                .host_binding_identity_for_test(context.clone(), "capturedInput")
+                .await,
+            original_capture
+        );
         let source = include_str!("fixtures/host-json-retained.hs");
         let (checked, prepared) = workbench
             .prepare_checked_cell(
@@ -16385,6 +16402,12 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                 .await,
             original_echo
         );
+        assert_eq!(
+            workbench
+                .host_binding_identity_for_test(context.clone(), "capturedInput")
+                .await,
+            original_capture
+        );
         workbench
             .host_binding_identity_for_test(context.clone(), "secondSeen")
             .await;
@@ -16394,9 +16417,15 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             .unwrap();
         assert_eq!(
             workbench
-                .host_binding_identity_for_test(public, "seen")
+                .host_binding_identity_for_test(public.clone(), "seen")
                 .await,
             original
+        );
+        assert_eq!(
+            workbench
+                .host_binding_identity_for_test(public, "capturedInput")
+                .await,
+            original_capture
         );
     }
 
