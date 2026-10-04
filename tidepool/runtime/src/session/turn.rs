@@ -6433,7 +6433,9 @@ mod tests {
             .view()
             .exact_declaration_context()
             .cloned();
-        for item in [replacement, binding, expression] {
+        let value_items = [replacement, binding, expression];
+        let expected_value_outputs = value_items.len() as u64;
+        for item in value_items {
             let reservation = resident
                 .admit_checked_item(protected.clone(), item.clone())
                 .unwrap();
@@ -6585,7 +6587,7 @@ mod tests {
         let input_work = checked.checked_item(0).unwrap().input_work();
         assert_eq!(input_work.initial_files_written, 0);
         assert_eq!(input_work.initial_bytes_written_and_hashed, 0);
-        assert_eq!(input_work.output_files_hashed, 4);
+        assert_eq!(input_work.output_files_hashed, expected_value_outputs);
         assert!(input_work.output_bytes_hashed > 0);
         eprintln!("checked-original input_work={input_work:?}");
     }
