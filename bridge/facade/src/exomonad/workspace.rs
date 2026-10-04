@@ -1152,17 +1152,15 @@ mod tests {
 
     #[test]
     fn runtime_libraries_are_captured_and_changed_sources_refuse_publication() {
-        if crate::haskell_sources::DEV_SOURCE_IDENTITY.is_none() {
-            return;
-        }
         let root = tempfile::tempdir().unwrap();
-        let stdlib = root.path().join("stdlib");
-        let actors = root.path().join("actors");
-        std::fs::create_dir_all(stdlib.join("Tidepool")).unwrap();
-        std::fs::create_dir_all(actors.join("Tidepool")).unwrap();
-        std::fs::write(stdlib.join("Tidepool/Prelude.hs"), "old stdlib").unwrap();
-        std::fs::write(actors.join("Tidepool/Check.hs"), "old actors").unwrap();
-        let sources = [stdlib.clone(), actors.clone()];
+        let selected = crate::haskell_sources::runtime_source_roots(None).unwrap();
+        let relative = [PathBuf::from("stdlib"), PathBuf::from("actors")];
+        for (source, path) in selected.iter().zip(&relative) {
+            capture_sources(source, path, root.path(), &mut BTreeMap::new()).unwrap();
+        }
+        let sources = relative.map(|path| root.path().join(path));
+        let prelude = sources[0].join("Tidepool/Prelude.hs");
+        let original = std::fs::read_to_string(&prelude).unwrap();
         let expected = tidepool_toolchain::cache::source_roots_identity(
             crate::haskell_sources::DEV_SOURCE_DOMAIN,
             &sources,
@@ -1177,20 +1175,22 @@ mod tests {
             &mut BTreeMap::new(),
         )
         .unwrap();
-        std::fs::write(stdlib.join("Tidepool/Prelude.hs"), "new stdlib").unwrap();
+        std::fs::write(prelude, format!("{original}\n-- changed after capture\n")).unwrap();
         assert_eq!(
             std::fs::read_to_string(captured[0].join("Tidepool/Prelude.hs")).unwrap(),
-            "old stdlib"
+            original
         );
-        assert!(
-            capture_runtime_libraries(
-                &sources,
-                &expected,
-                &destination,
-                uuid::Uuid::new_v4(),
-                &mut BTreeMap::new(),
-            )
-            .is_err()
+        let refused = capture_runtime_libraries(
+            &sources,
+            &expected,
+            &destination,
+            uuid::Uuid::new_v4(),
+            &mut BTreeMap::new(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            refused.to_string(),
+            "runtime Haskell library changed during run capture"
         );
     }
 

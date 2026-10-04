@@ -512,16 +512,14 @@ mod tests {
         assert_eq!(schema, before);
     }
 
-    /// Live smoke against the real OpenAI API — runs only when OPENAI_API_KEY is set.
+    /// Explicitly selected live smoke against the real OpenAI API.
     #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires live OpenAI API access and a configured OPENAI_API_KEY"]
     async fn live_smoke_openai() {
-        if std::env::var("OPENAI_API_KEY")
-            .map(|k| k.trim().is_empty())
-            .unwrap_or(true)
-        {
-            eprintln!("skipping live_smoke_openai: OPENAI_API_KEY not set");
-            return;
-        }
+        assert!(
+            std::env::var("OPENAI_API_KEY").is_ok_and(|key| !key.trim().is_empty()),
+            "live_smoke_openai requires a nonempty configured OPENAI_API_KEY"
+        );
         let client = genai::Client::default();
         let model = "gpt-6-luna";
 

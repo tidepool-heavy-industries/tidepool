@@ -306,13 +306,10 @@ mod tests {
 
     #[test]
     fn embedded_stdlib_retains_production_internal_modules() {
-        if EMBEDDED_STDLIB.is_empty() {
-            // TIDEPOOL_EMBED_HASKELL is unset for this build: build.rs emits
-            // an empty bundle by design (see its doc comment), so there is no
-            // embedded content to assert on here. Rerun with
-            // TIDEPOOL_EMBED_HASKELL=1 to exercise this check.
-            return;
-        }
+        assert!(
+            !EMBEDDED_STDLIB.is_empty(),
+            "embedded library proof requires TIDEPOOL_EMBED_HASKELL=1"
+        );
         assert!(EMBEDDED_STDLIB
             .iter()
             .any(|(path, _)| *path == "Tidepool/Internal/ExitCell.hs"));

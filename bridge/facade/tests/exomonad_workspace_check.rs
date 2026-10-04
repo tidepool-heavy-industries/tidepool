@@ -14,16 +14,10 @@ use std::process::Command;
 
 #[test]
 fn check_uses_embedded_sources_and_rejects_invalid_workspace_modules() {
-    if tidepool::haskell_sources::EMBEDDED_EXOMONAD_HASKELL.is_empty() {
-        // TIDEPOOL_EMBED_HASKELL is unset for this build: build.rs emits an
-        // empty bundle by design (see its doc comment), so there is no
-        // embedded library for the spawned `exomonad` binary to fall back to
-        // when run outside a checkout, which is exactly what this test
-        // exercises. Rerun with TIDEPOOL_EMBED_HASKELL=1 to exercise this
-        // check — same guard as
-        // `haskell_sources::tests::embedded_stdlib_contains_production_internal_modules_only`.
-        return;
-    }
+    assert!(
+        !tidepool::haskell_sources::EMBEDDED_EXOMONAD_HASKELL.is_empty(),
+        "embedded workspace proof requires TIDEPOOL_EMBED_HASKELL=1"
+    );
     let root = tempfile::tempdir().unwrap();
     let workspace = root.path().join("app");
     let authored = workspace.join(".exomonad");
