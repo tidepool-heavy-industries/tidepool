@@ -583,10 +583,11 @@ mod actual_seal {
         // `companion_import`). Production's own driver preamble
         // (`actor_host::driver_sources`) uses `Omit` for exactly this reason.
         let preamble = insert_preamble_imports(
-            &tidepool_mcp::build_preamble_with_companions(
+            &tidepool_mcp::build_notebook_preamble_with_companions_hiding(
                 &declarations,
                 false,
                 tidepool_mcp::CompanionImports::Omit,
+                &[],
             ),
             "Tidepool.Actors.Internal.ExomonadDriver",
         );

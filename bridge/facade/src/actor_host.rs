@@ -35,8 +35,6 @@ mod display_output;
 #[cfg(test)]
 mod documentation_tests;
 #[cfg(test)]
-mod scaffold_admission_tests;
-#[cfg(test)]
 mod embedded_captured_unfold_tests;
 #[cfg(test)]
 mod embedded_checkpoint_children_survive_later_failure_tests;
@@ -57,6 +55,8 @@ mod embedded_recovery;
 mod embedded_recovery_tests;
 mod embedded_reflect;
 mod embedded_service;
+#[cfg(test)]
+mod scaffold_admission_tests;
 #[cfg(all(test, feature = "codex-compat"))]
 use delivery::deliver_pending;
 #[cfg(test)]
@@ -4273,7 +4273,7 @@ fn driver_sources(
         None => crate::haskell_sources::ensure_embedded_stdlib()?,
     });
     let mut preamble = insert_preamble_imports(
-        &tidepool_mcp::build_preamble_with_companions_hiding(
+        &tidepool_mcp::build_notebook_preamble_with_companions_hiding(
             &declarations,
             false,
             tidepool_mcp::CompanionImports::Omit,

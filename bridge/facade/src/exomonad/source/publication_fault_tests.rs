@@ -94,7 +94,7 @@ async fn actor_case(project: &Path, run: &Path, fault: bool) {
     include.extend(layers.layer.active_include_paths().unwrap());
     include.extend(layers.frozen.include.iter().cloned());
     let preamble = insert_preamble_imports(
-        &tidepool_mcp::build_preamble(&declarations, false),
+        &tidepool_mcp::build_notebook_preamble(&declarations, false),
         "PublicationFaultDriver (FaultEffects, faultDriver)",
     );
     let preamble = insert_preamble_imports(&preamble, "Tidepool.Agent.Contract");

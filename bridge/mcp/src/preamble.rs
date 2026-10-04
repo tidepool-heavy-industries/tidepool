@@ -714,6 +714,12 @@ pub enum PaginateMode {
     Passthrough,
 }
 
+#[derive(Clone, Copy)]
+enum PreamblePurpose {
+    Notebook,
+    Eval(PaginateMode),
+}
+
 fn companion_import(import: &'static str, has_source_effect: bool) -> &'static str {
     if has_source_effect && import == "import Tidepool.Actor" {
         // The actor facade's authored `Source` record and the effect GADT's
@@ -770,10 +776,13 @@ pub fn build_preamble_with_companions(
     user_library: bool,
     companion_imports: CompanionImports,
 ) -> String {
-    let mut out = String::new();
-    pragmas_and_imports(&mut out, effects, user_library, companion_imports, &[]);
-    paginate_alias(&mut out, effects, PaginateMode::Interactive);
-    out
+    build_preamble_for(
+        effects,
+        user_library,
+        companion_imports,
+        &[],
+        PreamblePurpose::Eval(PaginateMode::Interactive),
+    )
 }
 
 /// Build a curated preamble whose facade intentionally replaces selected
@@ -785,16 +794,41 @@ pub fn build_preamble_with_companions_hiding(
     companion_imports: CompanionImports,
     hidden_effect_names: &[&str],
 ) -> String {
-    let mut out = String::new();
-    pragmas_and_imports(
-        &mut out,
+    build_preamble_for(
         effects,
         user_library,
         companion_imports,
         hidden_effect_names,
-    );
-    paginate_alias(&mut out, effects, PaginateMode::Interactive);
-    out
+        PreamblePurpose::Eval(PaginateMode::Interactive),
+    )
+}
+
+/// The resident notebook renders through its admitted display recipes. Its
+/// declarations do not carry the expression evaluator's pagination alias.
+#[must_use]
+pub fn build_notebook_preamble(effects: &[EffectDecl], user_library: bool) -> String {
+    build_notebook_preamble_with_companions_hiding(
+        effects,
+        user_library,
+        CompanionImports::Include,
+        &[],
+    )
+}
+
+#[must_use]
+pub fn build_notebook_preamble_with_companions_hiding(
+    effects: &[EffectDecl],
+    user_library: bool,
+    companion_imports: CompanionImports,
+    hidden_effect_names: &[&str],
+) -> String {
+    build_preamble_for(
+        effects,
+        user_library,
+        companion_imports,
+        hidden_effect_names,
+        PreamblePurpose::Notebook,
+    )
 }
 
 /// Like [`build_preamble`] but with non-interactive (truncate-only) pagination:
@@ -815,15 +849,34 @@ pub fn build_preamble_non_interactive_mode(
     user_library: bool,
     mode: PaginateMode,
 ) -> String {
+    build_preamble_for(
+        effects,
+        user_library,
+        CompanionImports::Include,
+        &[],
+        PreamblePurpose::Eval(mode),
+    )
+}
+
+fn build_preamble_for(
+    effects: &[EffectDecl],
+    user_library: bool,
+    companion_imports: CompanionImports,
+    hidden_effect_names: &[&str],
+    purpose: PreamblePurpose,
+) -> String {
     let mut out = String::new();
     pragmas_and_imports(
         &mut out,
         effects,
         user_library,
-        CompanionImports::Include,
-        &[],
+        companion_imports,
+        hidden_effect_names,
     );
-    paginate_alias(&mut out, effects, mode);
+    match purpose {
+        PreamblePurpose::Notebook => {}
+        PreamblePurpose::Eval(mode) => paginate_alias(&mut out, effects, mode),
+    }
     out
 }
 
@@ -1062,10 +1115,33 @@ pub fn library_vocab(dirs: &[std::path::PathBuf], only: Option<&str>) -> String 
 #[cfg(test)]
 mod vocab_tests {
     use super::{
-        build_preamble_with_companions, build_preamble_with_companions_hiding,
-        parse_library_exports, session_decl_module_env_hiding,
-        session_decl_module_env_with_companions, CompanionImports,
+        build_notebook_preamble, build_notebook_preamble_with_companions_hiding,
+        build_preamble_non_interactive_mode, build_preamble_with_companions,
+        build_preamble_with_companions_hiding, parse_library_exports,
+        session_decl_module_env_hiding, session_decl_module_env_with_companions, CompanionImports,
+        PaginateMode,
     };
+
+    #[test]
+    fn notebook_preamble_omits_eval_pagination_without_changing_imports() {
+        let effects = [crate::ask_decl()];
+        let notebook = build_notebook_preamble(&effects, true);
+        for (mode, pagination) in [
+            (
+                PaginateMode::Interactive,
+                "paginateResult = paginateInteractive\n\n",
+            ),
+            (PaginateMode::Truncate, "paginateResult = paginateTrunc\n\n"),
+            (PaginateMode::Passthrough, "paginateResult _ v = pure v\n\n"),
+        ] {
+            let eval = build_preamble_non_interactive_mode(&effects, true, mode);
+            assert_eq!(
+                eval,
+                format!("{notebook}paginateResult :: Int -> Value -> M Value\n{pagination}")
+            );
+        }
+        assert!(!notebook.contains("paginateResult"));
+    }
 
     #[test]
     fn curated_facade_can_replace_selected_generated_helpers() {
@@ -1078,6 +1154,18 @@ mod vocab_tests {
             &hidden,
         );
         assert!(preamble.contains("import Tidepool.Effects hiding (tryMerge, worktreeHead)\n"));
+        let notebook = build_notebook_preamble_with_companions_hiding(
+            &[crate::worktree_decl()],
+            false,
+            CompanionImports::Omit,
+            &hidden,
+        );
+        assert!(notebook.contains("import Tidepool.Effects hiding (tryMerge, worktreeHead)\n"));
+        assert!(!notebook.contains("paginateResult"));
+        assert_eq!(
+            preamble.strip_prefix(&notebook),
+            Some("paginateResult :: Int -> Value -> M Value\npaginateResult = paginateTrunc\n\n")
+        );
 
         let declarations =
             session_decl_module_env_hiding(&[worktree], false, CompanionImports::Omit, &hidden);

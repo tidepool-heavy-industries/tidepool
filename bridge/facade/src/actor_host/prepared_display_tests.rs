@@ -32,7 +32,7 @@ async fn prepared_first_display_returns_admission_before_consumer_and_survives_f
         include.push(crate::haskell_sources::ensure_exomonad_haskell().unwrap());
         include.push(tidepool_testing::eval_harness::prelude_path());
         let preamble = insert_preamble_imports(
-            &tidepool_mcp::build_preamble(&declarations, false),
+            &tidepool_mcp::build_notebook_preamble(&declarations, false),
             "qualified Tidepool.Effects.Core as Core",
         );
         let templates = resident_workbench_templates(&preamble, "'[Console]", "");

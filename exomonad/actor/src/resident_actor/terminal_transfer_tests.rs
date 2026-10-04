@@ -51,7 +51,7 @@ async fn accepted_native_reply_publication_refusal_settles_request_and_retires_a
     include.push(
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../bridge/haskell/actors"),
     );
-    let mut preamble = tidepool_mcp::build_preamble(&declarations, false);
+    let mut preamble = tidepool_mcp::build_notebook_preamble(&declarations, false);
     for import in [
         "qualified Tidepool.Actor as Mailbox",
         "Tidepool.Agent.Reply (Replies, detachRequest)",

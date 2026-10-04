@@ -120,7 +120,7 @@ async fn two_checkpoint_children_remint_after_workspace_wait_token_release_and_i
     let mut include = effects.include_paths().to_vec();
     include.push(eval_harness::prelude_path());
     let preamble = insert_preamble_imports(
-        &tidepool_mcp::build_preamble(&declarations, false),
+        &tidepool_mcp::build_notebook_preamble(&declarations, false),
         "Tidepool.Agent.Contract",
     );
     let preamble = insert_preamble_imports(&preamble, "qualified Tidepool.Effects.Core as Core");
@@ -397,7 +397,7 @@ async fn two_captured_readers_reply_before_parent_failure_and_survive_final_chec
     let mut include = effects.include_paths().to_vec();
     include.push(eval_harness::prelude_path());
     let preamble = insert_preamble_imports(
-        &tidepool_mcp::build_preamble(&declarations, false),
+        &tidepool_mcp::build_notebook_preamble(&declarations, false),
         "Tidepool.Agent.Contract",
     );
     let preamble = insert_preamble_imports(&preamble, "qualified Tidepool.Effects.Core as Core");
@@ -795,7 +795,7 @@ async fn partial_captured_group_startup_failure_cleans_first_child_and_preserves
     let mut include = effects.include_paths().to_vec();
     include.push(eval_harness::prelude_path());
     let preamble = insert_preamble_imports(
-        &tidepool_mcp::build_preamble(&declarations, false),
+        &tidepool_mcp::build_notebook_preamble(&declarations, false),
         "Tidepool.Agent.Contract",
     );
     let preamble = insert_preamble_imports(&preamble, "qualified Tidepool.Effects.Core as Core");

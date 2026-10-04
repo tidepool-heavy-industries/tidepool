@@ -1070,7 +1070,7 @@ async fn hosted_authored_failed_child_cleanup_retains_http_uncertainty() {
     let mut include = effects.include_paths().to_vec();
     include.push(tidepool_testing::eval_harness::prelude_path());
     let preamble = insert_preamble_imports(
-        &tidepool_mcp::build_preamble(&declarations, false),
+        &tidepool_mcp::build_notebook_preamble(&declarations, false),
         "Tidepool.Agent.Contract",
     );
     let preamble = format!(

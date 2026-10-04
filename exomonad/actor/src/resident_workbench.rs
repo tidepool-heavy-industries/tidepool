@@ -11097,7 +11097,7 @@ mod request_tests {
         include.push(tidepool_testing::eval_harness::prelude_path());
         include.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../bridge/haskell/actors"));
         let preamble = insert_preamble_imports(
-            &tidepool_mcp::build_preamble(&declarations, false),
+            &tidepool_mcp::build_notebook_preamble(&declarations, false),
             "qualified Tidepool.Actors.Exomonad as Exomonad\nqualified Tidepool.Lookup as LookupApi",
         );
         let effects_alias = "'[Exomonad.Notifications, Sleep, Lookup]";
@@ -11307,7 +11307,7 @@ mod request_tests {
         include.push(tidepool_testing::eval_harness::prelude_path());
         include.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../bridge/haskell/actors"));
         let preamble = insert_preamble_imports(
-            &tidepool_mcp::build_preamble(&declarations, false),
+            &tidepool_mcp::build_notebook_preamble(&declarations, false),
             "qualified Tidepool.Actors.Exomonad as Exomonad",
         );
         let effects_alias = "'[Exomonad.Notifications, Sleep]";
@@ -16465,7 +16465,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         let mut include = effects.include_paths().to_vec();
         include.push(tidepool_testing::eval_harness::prelude_path());
         include.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../bridge/haskell/actors"));
-        let mut preamble = tidepool_mcp::build_preamble(&declarations, false);
+        let mut preamble = tidepool_mcp::build_notebook_preamble(&declarations, false);
         for import in [
             "Tidepool.Agent.Reply (Replies)",
             "Tidepool.Agent.Ref (AgentProtocol(..))",
