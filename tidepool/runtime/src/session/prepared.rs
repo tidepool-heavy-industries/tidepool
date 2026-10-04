@@ -10459,15 +10459,37 @@ pub(super) mod tests {
                 node: TypeNodeId(0)
             }
         );
-        let id = park_attested_fixture(&mut engine, first, reply);
+        let realm = RealmId::fresh();
+        let continuation = engine.machine.retain_handle_value(function, realm).unwrap();
+        let id = engine
+            .machine
+            .park(
+                continuation,
+                realm,
+                None,
+                ParkRequest {
+                    principal: PrincipalId::SYSTEM,
+                    effect_policy: EffectRunPolicy::SuspendAll,
+                    live_payload: LivePayloadPolicy::None,
+                    evidence: PreparedFrameEvidence {
+                        reply,
+                        runner: first,
+                        resume_entry: ValueId(0),
+                        continuation_rep: continuation.rep(),
+                    },
+                },
+            )
+            .unwrap();
         assert!(engine.release(function));
         engine.quiesce_and_collect_now().unwrap();
         assert!(
             engine.programs.contains_key(&first),
             "the parked frame retains its evidence owner separately"
         );
-        assert_eq!(engine.parked(id).unwrap().1.reply, reply);
-        engine.close_realm(RealmId::ROOT);
+        let (frame_realm, evidence) = engine.parked(id).unwrap();
+        assert_eq!(frame_realm, realm);
+        assert_eq!(evidence.reply, reply);
+        assert_eq!(engine.close_realm(realm), (1, 0));
         assert_eq!(engine.parked_count(), 0);
         assert_eq!(engine.stowed_roots_count(), 0);
         engine.quiesce_and_collect_now().unwrap();
