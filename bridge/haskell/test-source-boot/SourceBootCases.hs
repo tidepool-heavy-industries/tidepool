@@ -141,7 +141,7 @@ import Tidepool.GhcPipeline
   , withResidentPipelineSelectedRequests )
 import Tidepool.ModuleCandidates (ModuleCandidate(..), CandidateGroup(..), CandidateGlobal(..)
   , readModuleCandidates, readModuleCandidatesWithGraphs, candidateExecutionSources, candidateOriginalIdentity
-  , candidateCoreDescriptor)
+  , candidateCoreDescriptor, captureCandidateManifest, readCapturedModuleCandidatesWithGraphs)
 import Tidepool.PackageWitness (PackageImportEvidence(..), PackageImportRoot(..), encodePackageImports, emptyPackageImports, readPackageImports, revalidatePackageImports)
 import Tidepool.PreparedStg (PreparedModule(..), PreparedCoverage(..))
 import Tidepool.FatIface (readExactInterface)
@@ -1588,6 +1588,10 @@ exactToOrdinary = withTiming $ withScratch $ \work -> do
           ++ either show (const "unexpected success") refused)
       ordinaryQuote compile
     runRequest (pure ()) $ \compile -> do
+      warmExact <- compile CheckedEnvironment Set.empty GeneralCompile
+        (Just scope {ssExactScope=Just helperPath}) (work </> "MetadataQuotedTarget.hs") [work] Nothing
+      unless (maybe False (`eqType` intTy) (crResultType warmExact)) $
+        fail "exact cancellation fixture did not first establish its reusable environment"
       cancelling <- readFile "test-source-boot/fixtures/ExecutionCancellingQuoter.hs"
       let marker = work </> "cancel-marker"
       writeFile (work </> "MetadataQuoter.hs") (T.unpack (T.replace "EXECUTION_CANCEL_MARKER" (T.pack marker) (T.pack cancelling)))
@@ -2139,6 +2143,16 @@ candidateCompactInventory = withScratch $ \work -> do
       && length globalRows == length globals -> pure ()
     _ -> fail "production inventory merged complete identities or global requirements"
   decoded <- readModuleCandidates issuedPath >>= either fail pure
+  capturedOffer <- captureCandidateManifest issuedPath >>= either fail pure
+  issuedBytes <- BS.readFile issuedPath
+  BS.writeFile issuedPath (BSC.pack "changed after capture")
+  capturedDecoded <- readCapturedModuleCandidatesWithGraphs [] capturedOffer >>= either fail pure
+  unless (capturedDecoded == decoded) $
+    fail "candidate admission did not consume its captured envelope"
+  readModuleCandidates issuedPath >>= \case
+    Left _ -> pure ()
+    Right _ -> fail "candidate envelope drift was accepted by a new capture"
+  BS.writeFile issuedPath issuedBytes
   unless (map candidateGroups decoded == [groups,reverse groups]) $
     fail "compact inventory changed exact values, order or ordinal"
   firstRow <- case rows of
@@ -2835,6 +2849,63 @@ quasiQuoteCodegenTransition = withTiming $ withScratch $ \work -> do
     run >>= requireFree "after plugin refusal"
   putStrLn "quasiquote codegen: resident quote-free/real-quote/quote-free, external plugin refusal and recovery passed"
 
+exactTransactionReuse :: IO ()
+exactTransactionReuse = withTiming $ withScratch $ \work -> do
+  let fixture name = "test-source-boot/fixtures" </> name
+      target = work </> "MetadataTarget.hs"
+      installOwner = copyFile (fixture "MetadataOwner.hs") (work </> "MetadataOwner.hs")
+      frontends diagnostics = length
+        [line | line <- lines diagnostics
+        , line == "tidepool-canonical-frontend module=MetadataOwner"
+          || line == "tidepool-checked module=MetadataOwner target=False"]
+      isInt checked = maybe False (`eqType` intTy) (crResultType checked)
+  installOwner
+  copyFile (fixture "MetadataTarget.hs") target
+  scopePath <- writeGenuineEmptyMetadataScope work
+  let relocatedPath = work </> "same-empty-scope.cbor"
+      scope = emptySessionScope {ssRoot=work,ssExactScope=Just scopePath
+        ,ssIncarnation=Just "exact-transaction-reuse"}
+      relocated = scope {ssExactScope=Just relocatedPath}
+  copyFile scopePath relocatedPath
+  withResidentPipelineSelectedRequests [work] $ \runRequest -> do
+    runRequest (pure ()) $ \compile -> do
+      let check session = compile CheckedEnvironment Set.empty GeneralCompile
+            (Just session) target [work] Nothing
+      (cold,coldDiagnostics) <- captureDiagnostics (check scope)
+      unless (isInt cold && frontends coldDiagnostics == 1) $
+        fail "cold exact transaction did not compile its real source dependency"
+      (warm,warmDiagnostics) <- captureDiagnostics (check relocated)
+      unless (isInt warm && frontends warmDiagnostics == 0
+          && counterValues "transaction_reused_source_products" warmDiagnostics == [1]) $
+        fail "identical empty exact scopes repeated a dependency frontend"
+      (native,nativeDiagnostics) <- captureDiagnostics $
+        compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope)
+          target [work] Nothing
+      unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult native))
+          && frontends nativeDiagnostics == 0
+          && counterValues "transaction_reused_source_products" nativeDiagnostics == [1]
+          && Map.member (mkModuleName "MetadataOwner") (pprFinalizedModules native)) $
+        fail "check to native preparation replayed its dependency or lost original42"
+      copyFile (fixture "MetadataOwnerWithoutInstance.hs") (work </> "MetadataOwner.hs")
+      changed <- sourceFailureDiagnostics (check scope)
+      case changed of
+        Left diagnostics | any (\diagnostic -> sourceDiagnosticAt target
+            "No instance for" diagnostic && "Available Int" `isInfixOf` dMessage diagnostic) diagnostics -> pure ()
+        Left diagnostics -> fail ("changed dependency failed for another reason: " ++ show diagnostics)
+        Right _ -> fail "warm exact transaction borrowed a removed instance"
+      installOwner
+      (recovered,recoveryDiagnostics) <- captureDiagnostics (check scope)
+      unless (isInt recovered && frontends recoveryDiagnostics == 1) $
+        fail "synchronous refusal retained partial compiler products"
+    runRequest (pure ()) $ \compile -> do
+      (next,nextDiagnostics) <- captureDiagnostics $
+        compile CheckedEnvironment Set.empty GeneralCompile (Just relocated)
+          target [work] Nothing
+      unless (isInt next && frontends nextDiagnostics == 1
+          && counterValues "transaction_reused_source_products" nextDiagnostics == [0]) $
+        fail "source compiler products survived their transaction"
+  putStrLn "exact transaction reuse: check/check and check/native skip dependency work; instance drift, refusal recovery and transaction close passed"
+
 exactLoadedMetadata :: IO ()
 exactLoadedMetadata = withTiming $ withScratch $ \work -> do
   let fixture name = "test-source-boot/fixtures" </> name
@@ -2956,11 +3027,22 @@ exactLoadedMetadata = withTiming $ withScratch $ \work -> do
         ++ " executable_demand=" ++ show (counterValues "candidate_executable_required" metadataDiagnostics)
         ++ " owner_frontends=" ++ show (frontendCount "MetadataOwner" metadataDiagnostics))
       ) `finally` BS.writeFile corePath originalCore
+    copyFile (fixture "MetadataLoadedFamilyCompatible.hs") (work </> "MetadataLoadedFamily.hs")
+    compatibleFamily <- compile CheckedEnvironment Set.empty GeneralCompile (Just hiddenScope)
+      (work </> "MetadataFamilyTarget.hs") [work] Nothing
+    unless (resultType compatibleFamily == Just "Int") $
+      fail "compatible loaded and hidden exact family equations did not establish warm state"
+    install "MetadataLoadedFamily.hs"
     family <- try (compile CheckedEnvironment Set.empty GeneralCompile (Just hiddenScope)
       (work </> "MetadataFamilyTarget.hs") [work] Nothing) :: IO (Either SomeException CheckedEnvironmentResult)
     case family of
       Left failure | "retained family consistency" `isInfixOf` show failure -> pure ()
       _ -> fail "loaded metadata lost the hidden original family conflict"
+    copyFile (fixture "MetadataLoadedFamilyCompatible.hs") (work </> "MetadataLoadedFamily.hs")
+    recoveredFamily <- compile CheckedEnvironment Set.empty GeneralCompile (Just hiddenScope)
+      (work </> "MetadataFamilyTarget.hs") [work] Nothing
+    unless (resultType recoveredFamily == Just "Int") $
+      fail "family conflict retained stale source equations in the next exact preflight"
     (_, untrackedDiagnostics) <- captureDiagnostics (checked "MetadataUntrackedTarget.hs")
     unless (frontendCount "MetadataUntracked" untrackedDiagnostics == 1
         && "tidepool-checked-loaded-source module=MetadataUntracked" `elem` lines untrackedDiagnostics) $

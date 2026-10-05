@@ -49,6 +49,7 @@ tests = testGroup "source-boot"
   , testCase "exact to ordinary transition" $ exactToOrdinary
   , testCase "checked value imports" $ checkedValueImports
   , testCase "loaded exact metadata" $ exactLoadedMetadata
+  , testCase "exact transaction reuse" $ exactTransactionReuse
   , testCase "quasiquote codegen transition" $ quasiQuoteCodegenTransition
   , testCase "package inputs" $ withTiming packageInputs
   , testCase "session native body demand" sessionNativeBodyDemand
