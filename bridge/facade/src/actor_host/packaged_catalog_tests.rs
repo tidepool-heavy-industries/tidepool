@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use tidepool_toolchain::certified_products::ProductOrigin;
 
 #[test]
-#[ignore = "requires the matched Nix deployment catalog and empty user caches"]
+#[ignore = "requires the matched native deployment catalog and empty user caches"]
 fn packaged_cohort_executes_and_displays_without_build_inputs() {
     assert!(
         !Path::new(env!("CARGO_MANIFEST_DIR")).exists(),
@@ -45,7 +45,7 @@ fn packaged_cohort_executes_and_displays_without_build_inputs() {
     let catalog: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&catalog_path).unwrap()).unwrap();
     let root = catalog_path.parent().unwrap();
-    let cohort: BTreeSet<String> = catalog["modules"]
+    let inventory: BTreeSet<(String, String)> = catalog["modules"]
         .as_array()
         .unwrap()
         .iter()
@@ -54,7 +54,10 @@ fn packaged_cohort_executes_and_displays_without_build_inputs() {
                 &std::fs::read(root.join(module["owner"]["path"].as_str().unwrap())).unwrap(),
             )
             .unwrap();
-            owner["module"].as_str().unwrap().to_owned()
+            (
+                owner["unit"].as_str().unwrap().to_owned(),
+                owner["module"].as_str().unwrap().to_owned(),
+            )
         })
         .collect();
 
@@ -78,9 +81,35 @@ fn packaged_cohort_executes_and_displays_without_build_inputs() {
         tidepool_runtime::session::ExpressionLift::Pure,
     );
         let target = tidepool_runtime::session::PREPARED_SCAFFOLD_TARGET;
-        let mut compiled =
-            tidepool_runtime::compile_targets(&source, &[target], &source_roots, |_, _, _| {})
-                .expect("package-backed expression compilation");
+        let compile_start = std::time::Instant::now();
+        let mut compiled = tidepool_runtime::compile_targets(
+            &source,
+            &[target],
+            &source_roots,
+            |stage, elapsed, bytes| {
+                eprintln!(
+                    "deployment compile {row}: stage={stage} elapsed_ns={} payload_bytes={bytes}",
+                    elapsed.as_nanos(),
+                );
+            },
+        )
+        .expect("package-backed expression compilation");
+        eprintln!(
+            "deployment compile {row}: total_elapsed_ns={}",
+            compile_start.elapsed().as_nanos(),
+        );
+        let accepted: BTreeSet<_> = compiled
+            .certified_groups
+            .iter()
+            .filter(|group| group.origin() == ProductOrigin::Cached)
+            .map(|group| (group.owner().unit.clone(), group.owner().module.clone()))
+            .collect();
+        eprintln!(
+            "deployment catalog {}: {row}: inventory={} accepted_cached_owners={}",
+            package.catalog_identity(),
+            serde_json::to_string(&inventory).unwrap(),
+            serde_json::to_string(&accepted).unwrap(),
+        );
         let cached: BTreeSet<_> = compiled
             .certified_groups
             .iter()
@@ -92,11 +121,15 @@ fn packaged_cohort_executes_and_displays_without_build_inputs() {
         assert!(cached.contains("Tidepool.FilePath"));
         assert!(cached.contains(imported_row));
         assert!(cached.contains("Tidepool.Effects.Core"));
+        // The worker's canonicalLoadPhase refuses accepted candidates at
+        // T_Hsc with CandidateFrontendReplayRefused. The assertion below also
+        // rejects catalog owners reported as freshly extracted in the groups.
         let replayed = compiled
             .certified_groups
             .iter()
             .filter(|group| {
-                cohort.contains(&group.owner().module) && group.origin() == ProductOrigin::Fresh
+                inventory.contains(&(group.owner().unit.clone(), group.owner().module.clone()))
+                    && group.origin() == ProductOrigin::Fresh
             })
             .count();
         assert_eq!(replayed, 0, "catalog owners must not be re-extracted");
@@ -106,6 +139,7 @@ fn packaged_cohort_executes_and_displays_without_build_inputs() {
             .unwrap()
             .prepared
             .into_prepared();
+        let execution_start = std::time::Instant::now();
         let value = tidepool_runtime::run_prepared_program(
             prepared,
             &compiled.table,
@@ -115,6 +149,10 @@ fn packaged_cohort_executes_and_displays_without_build_inputs() {
             |_| {},
         )
         .expect("actual native execution of the package-backed target");
+        eprintln!(
+            "deployment execution {row}: elapsed_ns={}",
+            execution_start.elapsed().as_nanos(),
+        );
         let displayed = tidepool_runtime::value_to_json(&value, &compiled.table, 0);
         assert_eq!(displayed, serde_json::json!("42"));
         eprintln!(
