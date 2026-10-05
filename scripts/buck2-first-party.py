@@ -546,6 +546,7 @@ PREPARED_FIXTURE_RESOURCES = {
     "M3": ("TIDEPOOL_M3_FIXTURE_DIR", "//bridge/haskell:m3_vertical_prepared"),
     "Resume": ("TIDEPOOL_FREER_RESUME_FIXTURE_DIR", "//bridge/haskell:freer_resume_prepared"),
     "Retention": ("TIDEPOOL_FREER_RETENTION_FIXTURE_DIR", "//bridge/haskell:freer_retention_prepared"),
+    "TypedReceive": ("TIDEPOOL_TYPED_RECEIVE_FIXTURE_DIR", "//bridge/haskell:typed_receive_prepared"),
 }
 
 
@@ -557,6 +558,8 @@ def test_runtime_inputs(package_name, target_name, unit=False):
     elif package_name == "tidepool-runtime":
         if unit or target_name in {"session", "prepared_execution"}:
             fixture_names = ["M3", "Resume", "Retention"]
+        if not unit and target_name in {"session", "prepared_execution"}:
+            fixture_names.append("TypedReceive")
         elif target_name == "prepared_resident_composite":
             fixture_names = ["Resume"]
     for name in fixture_names:
@@ -639,6 +642,7 @@ RUNTIME_RESOURCE_ENV_KEYS = (
     "TIDEPOOL_HASKELL_ACTORS_DIR",
     "TIDEPOOL_M3_FIXTURE_DIR",
     "TIDEPOOL_PRELUDE_DIR",
+    "TIDEPOOL_TYPED_RECEIVE_FIXTURE_DIR",
 )
 
 

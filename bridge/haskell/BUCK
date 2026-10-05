@@ -213,6 +213,14 @@ _CORPUS_LIBRARY_ROOTS = [
     (":corpus_library_sources", "lib"),
 ]
 
+tidepool_prepared_fixture(
+    name = "typed_receive_prepared",
+    source = "test-prepared-stg/JsonReply.hs",
+    targets = ["__prepared"],
+    source_roots = [("//bridge/mcp:effects_generated", "")] + _CORPUS_LIBRARY_ROOTS,
+    visibility = ["PUBLIC"],
+)
+
 tidepool_prepared_corpus(
     name = "corpus_suite",
     source = "test/Suite.hs",

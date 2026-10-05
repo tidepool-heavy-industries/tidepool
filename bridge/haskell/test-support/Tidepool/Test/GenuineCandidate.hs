@@ -33,7 +33,7 @@ import Tidepool.GhcPipeline (PreparedPipelineResult(..), PipelineResult(..))
 import Tidepool.CompilerProducts
   ( CertifiedOriginalProducts, prepareCompilerProjectionContext, retainedOriginalInterfaces
   , writeCertifiedProductsKeeping )
-import Tidepool.PreparedStg (PreparedModule(..))
+import Tidepool.PreparedStg (pmModule)
 import Tidepool.Session (Generation(..), SessionModule(..), SessionModuleKind(..))
 
 -- Only the capture constructor consumes a compiler result. Later selections

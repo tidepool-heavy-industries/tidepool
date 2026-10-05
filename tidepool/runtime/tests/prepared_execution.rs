@@ -113,22 +113,34 @@ const FREER_RESUME_EXPECTATIONS: &str =
 
 #[test]
 fn compiler_typed_receive_parks_and_resumes_json_after_collection() {
+    let directory = std::env::var("TIDEPOOL_TYPED_RECEIVE_FIXTURE_DIR")
+        .expect("declared compiler-produced typed receive fixture");
+    let artifact = tidepool_test_data::prepared_resources::read_target(
+        "TIDEPOOL_TYPED_RECEIVE_FIXTURE_DIR",
+        "__prepared",
+    );
+    let prepared = parse_program(
+        &artifact,
+        &tidepool_toolchain::prepared_artifact::production_requirements()
+            .expect("production compiler requirements"),
+        DecodeLimits::default(),
+    )
+    .expect("decode compiler-produced typed receive fixture");
+    let metadata = std::fs::read(std::path::Path::new(&directory).join("meta.cbor"))
+        .expect("declared fixture constructor metadata");
+    let (table, _) = tidepool_repr::serial::read_metadata(&metadata)
+        .expect("decode fixture constructor metadata");
+    assert_typed_receive_json(prepared, table);
+}
+
+pub(super) fn assert_typed_receive_json(
+    prepared: PreparedProgram,
+    table: tidepool_repr::DataConTable,
+) {
     use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
     use tidepool_repr::execution_schema::{ConstructorId, ConstructorReply};
     use tidepool_runtime::prepared_execution::{ParkPolicy, PreparedEngine, PreparedSettlement};
 
-    tidepool_testing::eval_harness::require_extract();
-    let surface = tidepool_testing::effect_surface::TestEffectSurface::minimal(&[
-        tidepool_mcp::actor_local_decl(),
-    ])
-    .expect("typed receive effect surface");
-    let compiled = tidepool_runtime::compile_haskell(
-        include_str!("fixtures/JsonReply.hs"),
-        "__prepared",
-        &surface.include_path_refs(),
-    )
-    .expect("compile typed receive through post-tidy carrier issuance");
-    let prepared = compiled.prepared.into_prepared();
     let receiver = prepared
         .constructors()
         .iter()
@@ -142,7 +154,7 @@ fn compiler_typed_receive_parks_and_resumes_json_after_collection() {
         ConstructorReply::AtSite,
     )));
     assert!(prepared.json_layout().is_some());
-    let table = compiled.table.with_json_layout(None);
+    let table = table.with_json_layout(None);
     let (mut engine, program) = PreparedEngine::bootstrap_with_nursery_bytes(prepared, 4096)
         .expect("bootstrap compiler-produced typed receive");
     let mut parked = Vec::new();
