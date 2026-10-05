@@ -286,14 +286,18 @@ pub(crate) struct CertifiedRetainedCoreProducts {
 
 impl CertifiedRetainedCoreProducts {
     pub(crate) fn matches_emitted(&self, emitted: &RawModuleProduct) -> Option<bool> {
-        let product = self.products.get(&(emitted.unit.clone(), emitted.module.clone()))?;
+        let product = self
+            .products
+            .get(&(emitted.unit.clone(), emitted.module.clone()))?;
         Some(product.original_native().is_some_and(|native| {
             native.matches_original(product)
                 && emitted.interface == product.interface_bytes()
                 && emitted.groups.len() == native.groups.len()
-                && emitted.groups.iter().zip(native.groups.iter()).all(|(emitted, original)| {
-                    emitted == original.group()
-                })
+                && emitted
+                    .groups
+                    .iter()
+                    .zip(native.groups.iter())
+                    .all(|(emitted, original)| emitted == original.group())
         }))
     }
 }
@@ -3980,7 +3984,9 @@ pub(crate) fn certify_products(
         .unwrap_or_default();
     let mut retained_seals = BTreeMap::new();
     for interface in inherited_module_interfaces.iter().chain(
-        inherited_products.iter().filter_map(|product| product.module_interface()),
+        inherited_products
+            .iter()
+            .filter_map(|product| product.module_interface()),
     ) {
         let key = (interface.unit().to_owned(), interface.module().to_owned());
         if retained_seals
@@ -4040,7 +4046,8 @@ pub(crate) fn certify_products(
             )
             .map_err(|_| CertificationError::Mismatch("fresh package import witness"))?;
         let promoted = receipt.modules.iter().any(|module| {
-            module.unit == product.unit && module.module == product.module
+            module.unit == product.unit
+                && module.module == product.module
                 && module.origin == ProductOrigin::RetainedCore
         });
         for (owner, (selected_path, sha256)) in imported_packages {
@@ -4072,7 +4079,12 @@ pub(crate) fn certify_products(
     let fresh_digests = receipt
         .modules
         .iter()
-        .any(|module| matches!(module.origin, ProductOrigin::Fresh | ProductOrigin::RetainedCore))
+        .any(|module| {
+            matches!(
+                module.origin,
+                ProductOrigin::Fresh | ProductOrigin::RetainedCore
+            )
+        })
         .then(|| {
             let start = std::time::Instant::now();
             let digests = (sha(fresh_product_bytes), sha(fresh_evidence_bytes));
@@ -4090,198 +4102,209 @@ pub(crate) fn certify_products(
         if !seen_modules.insert(key.clone()) {
             return Err(CertificationError::Mismatch("duplicate receipt module"));
         }
-        let (product, receipt_bytes, product_bytes, package_bytes, evidence_digest, source_sha, version) =
-            match accepted.origin {
-                ProductOrigin::Fresh => {
-                    fresh_modules.insert(key.clone());
-                    if accepted.module_version.is_some() {
-                        return Err(CertificationError::Mismatch(
-                            "fresh version must be derived",
-                        ));
-                    }
-                    let product = matching_product(parsed_fresh, &key.0, &key.1)?;
-                    let module_bytes = fresh_sidecars
-                        .get(&key)
-                        .ok_or(CertificationError::Mismatch("fresh module product"))?;
-                    let source_sha = ready_source_sha(final_evidence, &key.0, &key.1)?;
-                    let version = if let Some(admission) = exact {
-                        crate::module_candidates::exact_module_version_for_product(
-                            endpoint_identity,
-                            &admission.request.semantic_sha256,
-                            &key.0,
-                            &key.1,
-                            &source_sha,
-                            &product.interface,
-                            module_bytes,
-                            fresh_package_imports
-                                .get(&key)
-                                .ok_or(CertificationError::Mismatch("fresh package imports"))?,
-                        )
-                    } else {
-                        fresh_module_version(
-                            endpoint_identity,
-                            include,
-                            &source_sha,
-                            &product.interface,
-                            module_bytes,
-                            fresh_package_imports
-                                .get(&key)
-                                .ok_or(CertificationError::Mismatch("fresh package imports"))?,
-                        )?
-                    };
-                    (
-                        product,
-                        fresh_product_bytes,
-                        *module_bytes,
-                        fresh_package_imports
-                            .get(&key)
-                            .ok_or(CertificationError::Mismatch("fresh package imports"))?
-                            .as_slice(),
-                        fresh_digests.expect("fresh receipt has aggregate digests").1,
-                        source_sha,
-                        version,
-                    )
+        let (
+            product,
+            receipt_bytes,
+            product_bytes,
+            package_bytes,
+            evidence_digest,
+            source_sha,
+            version,
+        ) = match accepted.origin {
+            ProductOrigin::Fresh => {
+                fresh_modules.insert(key.clone());
+                if accepted.module_version.is_some() {
+                    return Err(CertificationError::Mismatch(
+                        "fresh version must be derived",
+                    ));
                 }
-                ProductOrigin::Cached => {
-                    let bundle = candidates
-                        .and_then(|set| set.by_owner.get(&key))
-                        .ok_or(CertificationError::Mismatch("selected candidate"))?;
-                    if accepted.module_version.as_ref() != Some(&bundle.owner.module_version)
-                        || bundle.owner.skinny_iface_sha256 != accepted.skinny_iface_sha256
-                        || bundle.owner.product_sha256 != accepted.product_sha256
-                        || bundle.source_sha256 != hex(&accepted.source_sha256)
-                        || bundle.iface_sha256 != hex(&accepted.skinny_iface_sha256)
-                    {
-                        return Err(CertificationError::Mismatch("candidate owner/evidence"));
-                    }
-                    bundle
-                        .evidence
-                        .validate(&bundle.target_source)
-                        .map_err(|failure| CertificationError::CandidateEvidence {
-                            unit: key.0.clone(),
-                            module: key.1.clone(),
-                            failure: Box::new(failure),
-                        })?;
-                    if sha(&read_bounded(&bundle.source, SOURCE_LIMIT)?) != accepted.source_sha256
-                        || sha(&read_bounded(&bundle.iface_path, PACKAGE_INTERFACE_LIMIT)?)
-                            != accepted.skinny_iface_sha256
-                        || hex(&sha(&read_bounded(&bundle.package_imports_path, 4 << 20)?))
-                            != bundle.package_imports_sha256
-                    {
-                        return Err(CertificationError::StaleEvidence);
-                    }
-                    let sidecar = read_bounded(&bundle.package_imports_path, 4 << 20)?;
-                    if sidecar != bundle.package_imports_bytes {
-                        return Err(CertificationError::StaleEvidence);
-                    }
-                    crate::recovery_artifacts::validate_package_imports_with_validation(
-                        &sidecar,
+                let product = matching_product(parsed_fresh, &key.0, &key.1)?;
+                let module_bytes = fresh_sidecars
+                    .get(&key)
+                    .ok_or(CertificationError::Mismatch("fresh module product"))?;
+                let source_sha = ready_source_sha(final_evidence, &key.0, &key.1)?;
+                let version = if let Some(admission) = exact {
+                    crate::module_candidates::exact_module_version_for_product(
+                        endpoint_identity,
+                        &admission.request.semantic_sha256,
                         &key.0,
                         &key.1,
-                        &accepted.skinny_iface_sha256,
-                        &bundle.package_imports_path,
-                        &mut validation,
-                    )
-                    .map_err(|_| CertificationError::StaleEvidence)?;
-                    let original = parse_module_products(
-                        &bundle.product_bytes,
-                        &requirements,
-                        crate::module_candidates::product_decode_limits(),
-                    )?;
-                    if matching_product(&original, &key.0, &key.1)? != &bundle.product {
-                        return Err(CertificationError::Mismatch("original product bytes"));
-                    }
-                    if ready_source_sha(final_evidence, &key.0, &key.1)? != accepted.source_sha256 {
-                        return Err(CertificationError::Mismatch("candidate current source"));
-                    }
-                    if exact.is_none() {
-                        let original_imports = bundle
-                            .evidence
-                            .modules
-                            .iter()
-                            .find(|row| row.unit == key.0 && row.module == key.1 && !row.boot)
-                            .map(|row| &row.imports);
-                        let current_imports = final_evidence
-                            .modules
-                            .iter()
-                            .find(|row| row.unit == key.0 && row.module == key.1 && !row.boot)
-                            .map(|row| &row.imports);
-                        if original_imports.is_none()
-                            || original_imports.map(|rows| rows.len())
-                                != current_imports.map(|rows| rows.len())
-                            || original_imports
-                                .unwrap()
-                                .iter()
-                                .zip(current_imports.unwrap())
-                                .any(|(old, new)| {
-                                    old.qualifier != new.qualifier
-                                        || old.module != new.module
-                                        || old.boot != new.boot
-                                        || old.selected != new.selected
-                                })
-                        {
-                            return Err(CertificationError::Mismatch("candidate direct imports"));
-                        }
-                    }
-                    // `bundle.product` is a clone of the exact parsed original.
-                    (
-                        &bundle.product,
-                        bundle.product_bytes.as_slice(),
-                        bundle.product_bytes.as_slice(),
-                        bundle.package_imports_bytes.as_slice(),
-                        sha(&serde_json::to_vec(&*bundle.evidence)
-                            .map_err(|_| CertificationError::Mismatch("dependency witness encoding"))?),
-                        ready_source_sha(&bundle.evidence, &key.0, &key.1)?,
-                        bundle.owner.module_version.clone(),
-                    )
-                }
-                ProductOrigin::RetainedCore => {
-                    exact.ok_or(CertificationError::Mismatch(
-                        "retained core requires exact request",
-                    ))?;
-                    if inherited_products.iter().any(|product| {
-                        product.owner().unit == key.0 && product.owner().module == key.1
-                    }) {
-                        return Err(CertificationError::Mismatch(
-                            "retained core replaces native owner",
-                        ));
-                    }
-                    let canonical = inherited_module_interfaces
-                        .iter()
-                        .find(|interface| interface.unit() == key.0 && interface.module() == key.1)
-                        .ok_or(CertificationError::Mismatch(
-                            "retained core lacks inherited canonical original",
-                        ))?;
-                    let product = matching_product(parsed_fresh, &key.0, &key.1)?;
-                    let module_bytes = fresh_sidecars
-                        .get(&key)
-                        .ok_or(CertificationError::Mismatch("retained module product"))?;
-                    let package_bytes = fresh_package_imports
-                        .get(&key)
-                        .ok_or(CertificationError::Mismatch("retained package imports"))?;
-                    canonical.validate_native_promotion(
-                        accepted,
-                        producer_sha256,
-                        &retained_seals,
+                        &source_sha,
                         &product.interface,
-                        package_bytes,
-                    )?;
-                    let source_sha = canonical.source_sha256();
-                    // Local source edges are validated before assigning stable
-                    // promotion versions. This placeholder never leaves staging.
-                    let version = ModuleVersion([0; 32]);
-                    fresh_modules.insert(key.clone());
-                    (
-                        product,
-                        fresh_product_bytes,
-                        *module_bytes,
-                        package_bytes.as_slice(),
-                        sha(canonical.certificate_bytes()),
-                        source_sha,
-                        version,
+                        module_bytes,
+                        fresh_package_imports
+                            .get(&key)
+                            .ok_or(CertificationError::Mismatch("fresh package imports"))?,
                     )
+                } else {
+                    fresh_module_version(
+                        endpoint_identity,
+                        include,
+                        &source_sha,
+                        &product.interface,
+                        module_bytes,
+                        fresh_package_imports
+                            .get(&key)
+                            .ok_or(CertificationError::Mismatch("fresh package imports"))?,
+                    )?
+                };
+                (
+                    product,
+                    fresh_product_bytes,
+                    *module_bytes,
+                    fresh_package_imports
+                        .get(&key)
+                        .ok_or(CertificationError::Mismatch("fresh package imports"))?
+                        .as_slice(),
+                    fresh_digests
+                        .expect("fresh receipt has aggregate digests")
+                        .1,
+                    source_sha,
+                    version,
+                )
+            }
+            ProductOrigin::Cached => {
+                let bundle = candidates
+                    .and_then(|set| set.by_owner.get(&key))
+                    .ok_or(CertificationError::Mismatch("selected candidate"))?;
+                if accepted.module_version.as_ref() != Some(&bundle.owner.module_version)
+                    || bundle.owner.skinny_iface_sha256 != accepted.skinny_iface_sha256
+                    || bundle.owner.product_sha256 != accepted.product_sha256
+                    || bundle.source_sha256 != hex(&accepted.source_sha256)
+                    || bundle.iface_sha256 != hex(&accepted.skinny_iface_sha256)
+                {
+                    return Err(CertificationError::Mismatch("candidate owner/evidence"));
                 }
-            };
+                bundle
+                    .evidence
+                    .validate(&bundle.target_source)
+                    .map_err(|failure| CertificationError::CandidateEvidence {
+                        unit: key.0.clone(),
+                        module: key.1.clone(),
+                        failure: Box::new(failure),
+                    })?;
+                if sha(&read_bounded(&bundle.source, SOURCE_LIMIT)?) != accepted.source_sha256
+                    || sha(&read_bounded(&bundle.iface_path, PACKAGE_INTERFACE_LIMIT)?)
+                        != accepted.skinny_iface_sha256
+                    || hex(&sha(&read_bounded(&bundle.package_imports_path, 4 << 20)?))
+                        != bundle.package_imports_sha256
+                {
+                    return Err(CertificationError::StaleEvidence);
+                }
+                let sidecar = read_bounded(&bundle.package_imports_path, 4 << 20)?;
+                if sidecar != bundle.package_imports_bytes {
+                    return Err(CertificationError::StaleEvidence);
+                }
+                crate::recovery_artifacts::validate_package_imports_with_validation(
+                    &sidecar,
+                    &key.0,
+                    &key.1,
+                    &accepted.skinny_iface_sha256,
+                    &bundle.package_imports_path,
+                    &mut validation,
+                )
+                .map_err(|_| CertificationError::StaleEvidence)?;
+                let original = parse_module_products(
+                    &bundle.product_bytes,
+                    &requirements,
+                    crate::module_candidates::product_decode_limits(),
+                )?;
+                if matching_product(&original, &key.0, &key.1)? != &bundle.product {
+                    return Err(CertificationError::Mismatch("original product bytes"));
+                }
+                if ready_source_sha(final_evidence, &key.0, &key.1)? != accepted.source_sha256 {
+                    return Err(CertificationError::Mismatch("candidate current source"));
+                }
+                if exact.is_none() {
+                    let original_imports = bundle
+                        .evidence
+                        .modules
+                        .iter()
+                        .find(|row| row.unit == key.0 && row.module == key.1 && !row.boot)
+                        .map(|row| &row.imports);
+                    let current_imports = final_evidence
+                        .modules
+                        .iter()
+                        .find(|row| row.unit == key.0 && row.module == key.1 && !row.boot)
+                        .map(|row| &row.imports);
+                    if original_imports.is_none()
+                        || original_imports.map(|rows| rows.len())
+                            != current_imports.map(|rows| rows.len())
+                        || original_imports
+                            .unwrap()
+                            .iter()
+                            .zip(current_imports.unwrap())
+                            .any(|(old, new)| {
+                                old.qualifier != new.qualifier
+                                    || old.module != new.module
+                                    || old.boot != new.boot
+                                    || old.selected != new.selected
+                            })
+                    {
+                        return Err(CertificationError::Mismatch("candidate direct imports"));
+                    }
+                }
+                // `bundle.product` is a clone of the exact parsed original.
+                (
+                    &bundle.product,
+                    bundle.product_bytes.as_slice(),
+                    bundle.product_bytes.as_slice(),
+                    bundle.package_imports_bytes.as_slice(),
+                    sha(&serde_json::to_vec(&*bundle.evidence).map_err(|_| {
+                        CertificationError::Mismatch("dependency witness encoding")
+                    })?),
+                    ready_source_sha(&bundle.evidence, &key.0, &key.1)?,
+                    bundle.owner.module_version.clone(),
+                )
+            }
+            ProductOrigin::RetainedCore => {
+                exact.ok_or(CertificationError::Mismatch(
+                    "retained core requires exact request",
+                ))?;
+                if inherited_products
+                    .iter()
+                    .any(|product| product.owner().unit == key.0 && product.owner().module == key.1)
+                {
+                    return Err(CertificationError::Mismatch(
+                        "retained core replaces native owner",
+                    ));
+                }
+                let canonical = inherited_module_interfaces
+                    .iter()
+                    .find(|interface| interface.unit() == key.0 && interface.module() == key.1)
+                    .ok_or(CertificationError::Mismatch(
+                        "retained core lacks inherited canonical original",
+                    ))?;
+                let product = matching_product(parsed_fresh, &key.0, &key.1)?;
+                let module_bytes = fresh_sidecars
+                    .get(&key)
+                    .ok_or(CertificationError::Mismatch("retained module product"))?;
+                let package_bytes = fresh_package_imports
+                    .get(&key)
+                    .ok_or(CertificationError::Mismatch("retained package imports"))?;
+                canonical.validate_native_promotion(
+                    accepted,
+                    producer_sha256,
+                    &retained_seals,
+                    &product.interface,
+                    package_bytes,
+                )?;
+                let source_sha = canonical.source_sha256();
+                // Local source edges are validated before assigning stable
+                // promotion versions. This placeholder never leaves staging.
+                let version = ModuleVersion([0; 32]);
+                fresh_modules.insert(key.clone());
+                (
+                    product,
+                    fresh_product_bytes,
+                    *module_bytes,
+                    package_bytes.as_slice(),
+                    sha(canonical.certificate_bytes()),
+                    source_sha,
+                    version,
+                )
+            }
+        };
         let owner = CachedHomeOwner {
             unit: key.0.clone(),
             module: key.1.clone(),
@@ -4493,35 +4516,47 @@ pub(crate) fn certify_products(
         if *origin != ProductOrigin::RetainedCore {
             continue;
         }
-        let imports = imports.iter().cloned().map(|import| {
-            resolve_receipt_owner_with_validation(
-                import, &source_groups, &receipt.packages, &mut validation,
-            )
-        }).collect::<CertResult<Vec<_>>>()?;
-        promoted.get_mut(&(owner.unit.clone(), owner.module.clone()))
+        let imports = imports
+            .iter()
+            .cloned()
+            .map(|import| {
+                resolve_receipt_owner_with_validation(
+                    import,
+                    &source_groups,
+                    &receipt.packages,
+                    &mut validation,
+                )
+            })
+            .collect::<CertResult<Vec<_>>>()?;
+        promoted
+            .get_mut(&(owner.unit.clone(), owner.module.clone()))
             .ok_or(CertificationError::Mismatch("retained staged owner"))?
-            .groups.insert(group.original_ordinal(), imports);
+            .groups
+            .insert(group.original_ordinal(), imports);
     }
     let promotion_versions = retained_core::module_versions(&promoted, &receipt.packages)?;
     for (owner, _, _, _, _, origin) in &mut module_bytes {
         if *origin == ProductOrigin::RetainedCore {
             owner.module_version = promotion_versions
                 .get(&(owner.unit.clone(), owner.module.clone()))
-                .ok_or(CertificationError::Mismatch("retained derived identity"))?.clone();
+                .ok_or(CertificationError::Mismatch("retained derived identity"))?
+                .clone();
         }
     }
     for (origin, owner, _, _) in &mut groups {
         if *origin == ProductOrigin::RetainedCore {
             owner.module_version = promotion_versions
                 .get(&(owner.unit.clone(), owner.module.clone()))
-                .ok_or(CertificationError::Mismatch("retained derived identity"))?.clone();
+                .ok_or(CertificationError::Mismatch("retained derived identity"))?
+                .clone();
         }
     }
     for (owner, origin) in source_groups.groups.values_mut() {
         if *origin == ProductOrigin::RetainedCore {
             owner.module_version = promotion_versions
                 .get(&(owner.unit.clone(), owner.module.clone()))
-                .ok_or(CertificationError::Mismatch("retained derived identity"))?.clone();
+                .ok_or(CertificationError::Mismatch("retained derived identity"))?
+                .clone();
         }
     }
     let mut groups: Vec<PendingCertifiedGroup> = groups
@@ -4799,14 +4834,26 @@ pub(crate) fn certify_products(
         }
     }
     let retained_core_products = CertifiedRetainedCoreProducts {
-        products: receipt.modules.iter()
+        products: receipt
+            .modules
+            .iter()
             .filter(|module| module.origin == ProductOrigin::RetainedCore)
             .map(|module| {
-                let product = recovery_products.iter().find(|product| {
-                    product.owner().unit == module.unit && product.owner().module == module.module
-                }).ok_or(CertificationError::Mismatch("certified retained assembly owner"))?;
-                Ok(((module.unit.clone(), module.module.clone()), product.clone()))
-            }).collect::<CertResult<_>>()?,
+                let product = recovery_products
+                    .iter()
+                    .find(|product| {
+                        product.owner().unit == module.unit
+                            && product.owner().module == module.module
+                    })
+                    .ok_or(CertificationError::Mismatch(
+                        "certified retained assembly owner",
+                    ))?;
+                Ok((
+                    (module.unit.clone(), module.module.clone()),
+                    product.clone(),
+                ))
+            })
+            .collect::<CertResult<_>>()?,
     };
     if let Some(admission) = exact {
         groups.extend(admission.request.groups.iter().cloned());
@@ -9058,7 +9105,8 @@ pub(crate) mod tests {
         assert_eq!(decoded.modules[0].module_version, None);
         assert!(decoded.finalization.modules.is_empty());
         compact.as_array_mut().unwrap()[2].as_array_mut().unwrap()[0]
-            .as_array_mut().unwrap()[0] = value_text("retained");
+            .as_array_mut()
+            .unwrap()[0] = value_text("retained");
         assert!(matches!(
             decode_receipt(&receipt_bytes(&compact)),
             Err(CertificationError::Receipt("product origin")),

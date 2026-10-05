@@ -4491,8 +4491,8 @@ fn assemble_with_products(
                             .and_then(|groups| groups.get(&group.original_ordinal()))
                             .is_some_and(|original| *original == group)
                     })
-            } else if let Some(admitted) = certified_retained
-                .and_then(|proof| proof.matches_emitted(product))
+            } else if let Some(admitted) =
+                certified_retained.and_then(|proof| proof.matches_emitted(product))
             {
                 admitted
             } else {
@@ -5346,7 +5346,8 @@ mod module_product_tests {
             None,
             Some(&proof),
             |_, _, _| {},
-        ).is_err());
+        )
+        .is_err());
     }
 
     #[test]
