@@ -7,6 +7,8 @@
 mod checked_quoter_program;
 #[path = "../prepared_execution.rs"]
 mod prepared_execution;
+#[path = "../retained_core_receive.rs"]
+mod retained_core_receive;
 #[path = "../prepared_residency.rs"]
 mod prepared_residency;
 #[path = "../prepared_resident_composite.rs"]
