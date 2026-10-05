@@ -1676,10 +1676,7 @@ pub(super) enum TurnPurpose {
         execution: Arc<ExactCompiledItem>,
         prefix: Arc<super::RuntimeCheckedPrefix>,
     },
-    ActivationInput {
-        proof: Arc<tidepool_toolchain::checked_cell::ExactCompiledActivationInput>,
-        prefix: Arc<super::RuntimeCheckedPrefix>,
-    },
+    ActivationPreview(Arc<tidepool_toolchain::activation_preview::ExactCompiledActivationPreview>),
     Display(Arc<tidepool_toolchain::checked_cell::ExactCompiledDisplay>),
     /// Immutable constructor code from an original checked host item. This
     /// carries no runtime prefix, authored execution or fresh binding authority.
@@ -1699,38 +1696,17 @@ impl TurnPurpose {
                 Some(CheckedNativeProof::Execution(_)) => Err(CompileError::ExtractFailed(
                     "checked execution lacks its runtime prefix owner".into(),
                 )),
-                Some(CheckedNativeProof::ActivationInput(_)) => Err(CompileError::ExtractFailed(
-                    "host activation input requires its affine mount consumer".into(),
-                )),
+                Some(CheckedNativeProof::ActivationPreview(proof)) => {
+                    Ok(Self::ActivationPreview(proof.clone()))
+                }
             };
         };
-        if admission.prefix().admission().is_host_activation() {
-            let Some(CheckedNativeProof::ActivationInput(proof)) = proof else {
-                return Err(CompileError::ExtractFailed(
-                    "host activation input lacks its distinct sealed mount recipe".into(),
-                ));
-            };
-            if proof.item() != admission.item() || proof.generation() != admission.generation().0 {
-                return Err(CompileError::ExtractFailed(
-                    "activation output differs from its exact input admission".into(),
-                ));
-            }
-            proof.validate_runtime_admission(
-                admission.digest(),
-                admission.prefix().admission().digest(),
-            )?;
-            Ok(Self::ActivationInput {
-                proof: proof.clone(),
-                prefix: admission.prefix().clone(),
-            })
-        } else {
-            let Some(CheckedNativeProof::Execution(execution)) = proof else {
-                return Err(CompileError::ExtractFailed(
-                    "checked item lacks a sealed execution recipe".into(),
-                ));
-            };
-            Self::execution(execution.clone(), admission)
-        }
+        let Some(CheckedNativeProof::Execution(execution)) = proof else {
+            return Err(CompileError::ExtractFailed(
+                "checked item lacks a sealed execution recipe".into(),
+            ));
+        };
+        Self::execution(execution.clone(), admission)
     }
 
     fn execution(
@@ -1800,7 +1776,6 @@ impl TurnCertification {
     pub fn checked_item(&self) -> Option<&ExactCheckedItem> {
         match &self.purpose {
             TurnPurpose::Execution { execution, .. } => Some(execution.item()),
-            TurnPurpose::ActivationInput { proof, .. } => Some(proof.item()),
             _ => None,
         }
     }
@@ -1810,19 +1785,17 @@ impl TurnCertification {
             _ => None,
         }
     }
-    pub(crate) fn checked_activation_input(
+    pub(crate) fn checked_activation_preview(
         &self,
-    ) -> Option<&Arc<tidepool_toolchain::checked_cell::ExactCompiledActivationInput>> {
+    ) -> Option<&Arc<tidepool_toolchain::activation_preview::ExactCompiledActivationPreview>> {
         match &self.purpose {
-            TurnPurpose::ActivationInput { proof, .. } => Some(proof),
+            TurnPurpose::ActivationPreview(proof) => Some(proof),
             _ => None,
         }
     }
     pub fn checked_prefix(&self) -> Option<&Arc<super::RuntimeCheckedPrefix>> {
         match &self.purpose {
-            TurnPurpose::Execution { prefix, .. } | TurnPurpose::ActivationInput { prefix, .. } => {
-                Some(prefix)
-            }
+            TurnPurpose::Execution { prefix, .. } => Some(prefix),
             _ => None,
         }
     }
@@ -1833,7 +1806,7 @@ impl TurnCertification {
             TurnPurpose::Execution { execution, .. } | TurnPurpose::HostPrototype(execution) => {
                 execution.validate_table(table)
             }
-            TurnPurpose::ActivationInput { proof, .. } => proof.validate_table(table),
+            TurnPurpose::ActivationPreview(proof) => proof.validate_table(table),
             TurnPurpose::Display(display) => display.validate_table(table),
         }
     }
@@ -1846,9 +1819,9 @@ impl TurnCertification {
     ) -> Result<(), CompileError> {
         let execution = match &self.purpose {
             TurnPurpose::Ordinary => return Ok(()),
-            TurnPurpose::ActivationInput { .. } | TurnPurpose::HostPrototype(_) => {
+            TurnPurpose::ActivationPreview(_) | TurnPurpose::HostPrototype(_) => {
                 return Err(CompileError::ExtractFailed(
-                    "host activation input requires its affine mount consumer".into(),
+                    "protected host output requires its owning runtime consumer".into(),
                 ))
             }
             TurnPurpose::Display(_) => {
@@ -2465,130 +2438,105 @@ pub fn check_cell_admitted(
     check_cell_impl(req, Some(admission), Some(templates))
 }
 
-/// Check only the placeholder interface belonging to an original host input.
-/// The protected role cannot authorize evaluation of that placeholder.
-pub fn check_activation_input(
-    owner: &super::RuntimeActivationInputAdmission,
-) -> Result<CellCheck, CellCheckFailure> {
-    let view = owner.admission.view();
-    let include = owner
-        .admission
-        .include_paths()
-        .iter()
-        .map(PathBuf::as_path)
-        .collect::<Vec<_>>();
-    if !owner.admission.is_host_activation() {
-        return Err(CompileError::ExtractFailed(
-            "activation lacks its original host admission".into(),
-        )
-        .into());
-    }
-    check_cell_admitted(
-        CellCheckRequest {
-            exact_context: view.exact_compile_context(),
-            cell_text: &owner.specification.cell_source,
-            template: &owner.specification.template_source,
-            include: &include,
-            session_root: view.session_root(),
-            inject_modules: &owner.specification.injected_modules,
-            compile_generation: view.next_value_generation().0,
-            compile_view_evidence: &owner.compile_view_evidence,
-            session_id: Some(view.session()),
-        },
-        owner.admission.clone(),
-        &owner.templates,
-    )
+/// Result of preparing the original-type display after the live binding commits.
+pub enum ActivationPreviewCompilation {
+    Ready(super::CompiledActivationPreview),
+    OriginalDisplayEvidenceUnavailable,
 }
 
-/// Produce only the opaque compiler recipe for the original host mount.
-pub fn compile_activation_input(
-    owner: &super::RuntimeActivationInputAdmission,
-    admission: Arc<super::RuntimeCheckedItemAdmission>,
-) -> Result<super::CompiledActivationInput, TurnFailure> {
-    if !owner.admission.is_host_activation()
-        || !Arc::ptr_eq(admission.prefix().admission(), &owner.admission)
-        || admission.item().index() != 0
-        || admission.item().kind() != tidepool_toolchain::checked_cell::CheckedItemKind::Bind
-        || admission.item().binders() != ["sessionInput"]
-        || admission.item().source() != owner.specification.cell_source
-    {
-        return Err(CompileError::ExtractFailed(
-            "activation compile has another input owner or item".into(),
-        )
-        .into());
-    }
-    let snapshot = admission.snapshot();
-    let view = snapshot.view();
-    let include = owner
-        .admission
-        .include_paths()
-        .iter()
-        .map(PathBuf::as_path)
-        .collect::<Vec<_>>();
-    let result = run_turn_with_admission(
-        TurnRequest {
-            exact_context: view.exact_compile_context(),
-            session_id: Some(view.session()),
-            turn_text: admission.item().source(),
-            templates: &owner.templates,
-            include: &include,
-            session_root: view.session_root(),
-            inject_modules: &snapshot.compiler_prefix().injected_modules(),
-            gen: admission.generation().0,
-            verdict: Some(TurnClassification {
-                kind: TurnKind::Bind,
-                binders: vec!["sessionInput".into()],
-                items: Vec::new(),
-            }),
-            target: None,
-            retained_imports: snapshot.admitted_retained_imports(),
+/// Compile a pure recipe against the mounted original input's exact interface.
+pub fn compile_activation_preview(
+    admission: Arc<super::RuntimeActivationPreviewAdmission>,
+    template_source: &str,
+    budget: u64,
+    includes: &[PathBuf],
+) -> Result<ActivationPreviewCompilation, TurnFailure> {
+    use tidepool_toolchain::activation_preview::{
+        ActivationPreviewSelection, ActivationPreviewSpecification,
+    };
+    let view = admission.view();
+    let context = admission.exact_context().clone();
+    let temp = TempDir::new()?;
+    let input_path = temp.path().join("ActivationPreviewTemplate.hs");
+    std::fs::write(&input_path, template_source)?;
+    let mut cmd = extract_cmd()?;
+    cmd.input(&input_path)
+        .turn()
+        .activation_preview()
+        .turn_out(temp.path().join("turn.cbor"))
+        .output_dir(temp.path())
+        .includes(includes)
+        .session_root(view.session_root())
+        .session_incarnation(view.session().0.to_string())
+        .bind_gen(admission.generation().0);
+    let endpoint = bind_extract_cmd(&cmd)?;
+    let selection = ModuleCandidateOffer::select_activation_preview(
+        &endpoint,
+        includes,
+        temp.path(),
+        context,
+        admission.input_interface().clone(),
+        ActivationPreviewSpecification {
+            admission_digest: admission.digest(),
+            generation: admission.generation().0,
+            budget,
+            template_source: template_source.into(),
         },
-        true,
-        Some(admission.clone()),
     )?;
-    let TurnResult::Bind {
-        bound, compiled, ..
-    } = result
-    else {
+    let ActivationPreviewSelection::Ready(offer) = selection else {
+        return Ok(ActivationPreviewCompilation::OriginalDisplayEvidenceUnavailable);
+    };
+    if let Some(root) = offer.checked_value_root() {
+        cmd.session_root(root);
+    }
+    offer.apply_to(&mut cmd)?;
+    crate::paths::apply_admitted_build_products_dir(&mut cmd, &endpoint);
+    let run = endpoint
+        .execute(&cmd)
+        .map_err(|error| offer.retain_execution_failure(temp.path(), &cmd, map_notfound(error)))?;
+    timing::log_interface_counts(&run.output.stderr);
+    forward_extract_timing(&String::from_utf8_lossy(&run.output.stderr), "extract");
+    crate::diag::decode_extract_result(
+        run.output.status.success(),
+        &run.output.stdout,
+        &run.output.stderr,
+    )
+    .map_err(|error| offer.retain_failure(temp.path(), &cmd, &run.output.stderr, error))?;
+    let result = decode_turn_output_dir(temp.path(), &offer, None)
+        .map_err(|error| offer.retain_failure(temp.path(), &cmd, &run.output.stderr, error))?;
+    let TurnResult::Expr { compiled, .. } = result else {
         return Err(CompileError::ExtractFailed(
-            "activation did not produce its checked input binder".into(),
+            "activation preview produced a binding or declaration".into(),
         )
         .into());
     };
-    let [binder] = bound.as_slice() else {
-        return Err(
-            CompileError::ExtractFailed("activation produced another binder set".into()).into(),
-        );
-    };
-    let certification = compiled.certification.as_ref().ok_or_else(|| {
-        CompileError::ExtractFailed("activation has no sealed native products".into())
-    })?;
-    let proof = certification.checked_activation_input().ok_or_else(|| {
-        CompileError::ExtractFailed("activation has no distinct host input receipt".into())
-    })?;
-    if binder.name != "sessionInput"
-        || proof.item() != admission.item()
+    let proof = compiled
+        .certification
+        .as_ref()
+        .and_then(TurnCertification::checked_activation_preview)
+        .ok_or_else(|| {
+            CompileError::ExtractFailed("activation preview lacks its sealed native proof".into())
+        })?
+        .clone();
+    if proof.admission_digest() != admission.digest()
         || proof.generation() != admission.generation().0
+        || !Arc::ptr_eq(proof.input_interface(), admission.input_interface())
         || !proof.matches_target(&compiled.prepared)
-        || certification
-            .checked_prefix()
-            .is_none_or(|prefix| !Arc::ptr_eq(prefix, admission.prefix()))
     {
         return Err(CompileError::ExtractFailed(
-            "activation output differs from its exact input admission".into(),
+            "activation preview differs from its mounted input admission".into(),
         )
         .into());
     }
     proof.validate_table(&compiled.table)?;
-    proof.validate_bound_binders(&[encode_bound_binder_authority(binder)])?;
-    proof.validate_runtime_admission(admission.digest(), owner.admission.digest())?;
-    let proof = proof.clone();
-    Ok(super::CompiledActivationInput {
-        admission,
-        binder: binder.clone(),
-        compiled,
-        proof,
-    })
+    proof.validate_yield_sites(&compiled.asks)?;
+    Ok(ActivationPreviewCompilation::Ready(
+        super::CompiledActivationPreview {
+            admission,
+            compiled,
+            proof,
+        },
+    ))
 }
 
 fn validate_cell_admitted_request(
@@ -2598,7 +2546,6 @@ fn validate_cell_admitted_request(
     let view = admission.view();
     if admission.private_execution().is_none()
         && !admission.is_native_setup()
-        && !admission.is_host_activation()
         && admission.host_carrier().is_none()
     {
         return Err(CompileError::ExtractFailed(
@@ -2825,12 +2772,7 @@ fn check_cell_impl(
             temp.path(),
             context,
             specification,
-            match admission.host_activation_input_witness() {
-                Some(witness) => {
-                    tidepool_toolchain::artifacts::CheckedCellPurpose::HostActivationInput(witness)
-                }
-                None => tidepool_toolchain::artifacts::CheckedCellPurpose::Authored,
-            },
+            tidepool_toolchain::artifacts::CheckedCellPurpose::Authored,
             admission
                 .interfaces()
                 .iter()
@@ -2950,7 +2892,7 @@ fn check_cell_impl(
 /// When `req.verdict` is supplied, a missing template for the verdict's
 /// selector is caught here, before any process is spawned.
 pub fn run_turn(req: TurnRequest<'_>) -> Result<TurnResult, TurnFailure> {
-    run_turn_with_admission(req, false, None)
+    run_turn_with_admission(req, None)
 }
 
 /// Select the precompiled native item from the complete immutable program.
@@ -3058,12 +3000,6 @@ pub fn run_checked_item(
     item_admission: Arc<super::RuntimeCheckedItemAdmission>,
 ) -> Result<TurnResult, TurnFailure> {
     let prefix = item_admission.prefix();
-    if prefix.admission().is_host_activation() {
-        return Err(CompileError::ExtractFailed(
-            "host activation input requires its affine compile and mount route".into(),
-        )
-        .into());
-    }
     let item = item_admission.item();
     let snapshot = item_admission.snapshot();
     let view = snapshot.view();
@@ -3095,35 +3031,19 @@ pub fn run_checked_item(
     if prefix.cell_program().is_some() {
         return consume_cell_program_item(item_admission);
     }
-    run_turn_with_admission(req, false, Some(item_admission))
+    run_turn_with_admission(req, Some(item_admission))
 }
 
-/// Protected host-input recipe: the checked bind supplies the exact interface
-/// while the settled entry renders the separately mounted original input.
-pub fn assemble_checked_activation_module(
-    preamble: &str,
-    effect_stack: &str,
-    budget: usize,
-) -> String {
+/// Pure original-type rendering recipe; it publishes no resident value interface.
+pub fn assemble_activation_preview_module(budget: u64) -> String {
+    let preamble = "{-# LANGUAGE DataKinds, FlexibleContexts #-}\nmodule Input where\nimport Control.Monad.Freer (Eff)\n";
     let preamble = super::insert_preamble_imports(
-        preamble,
+        &with_resume_import(preamble),
         "qualified Tidepool.Inspection as TidepoolInspection",
     );
-    let source = assemble_bind_module(
-        &preamble,
-        "",
-        "__result",
-        effect_stack,
-        "{{TURN_STMT}}",
-        "({{BINDERS}})",
-    );
-    let scaffold = prepared_scaffold_binding("__result");
-    let mut source = source
-        .strip_suffix(&scaffold)
-        .expect("bind assembler ends with its prepared scaffold")
-        .to_owned();
+    let mut source = preamble;
     source.push_str(&format!(
-        "__activationPreview :: TidepoolActivationInput -> Eff {effect_stack} ({TEXT_ALIAS}.Text, Bool)\n\
+        "__activationPreview :: TidepoolActivationInput -> Eff '[] ({TEXT_ALIAS}.Text, Bool)\n\
          __activationPreview __activationInput = pure ({{{{ACTIVATION_PREVIEW}}}})\n\
          __tidepoolActivationConstraint :: TidepoolInspection.WorkbenchDisplay value => value -> ()\n\
          __tidepoolActivationConstraint _ = ()\n\
@@ -3148,7 +3068,6 @@ pub fn assemble_checked_activation_module(
 )]
 fn run_turn_with_admission(
     req: TurnRequest<'_>,
-    activation_preview: bool,
     checked: Option<Arc<super::RuntimeCheckedItemAdmission>>,
 ) -> Result<TurnResult, TurnFailure> {
     let verdict_arg = match &req.verdict {
@@ -3180,9 +3099,6 @@ fn run_turn_with_admission(
 
     let mut cmd = extract_cmd()?;
     cmd.input(&turn_path).turn();
-    if activation_preview {
-        cmd.activation_preview();
-    }
 
     for (i, tmpl) in req.templates.iter().enumerate() {
         let path = temp.path().join(format!("template-{i}.hs"));
@@ -3233,40 +3149,19 @@ fn run_turn_with_admission(
             .iter()
             .map(|template| (template.kind.wire_name().into(), template.source.clone()))
             .collect::<Vec<_>>();
-        if admission.prefix().admission().is_host_activation() {
-            if !activation_preview {
-                return Err(CompileError::ExtractFailed(
-                    "host activation input lacks its protected preview purpose".into(),
-                )
-                .into());
-            }
-            ModuleCandidateOffer::select_checked_activation_item(
-                endpoint.identity().producer_bytes(),
-                &include,
-                temp.path(),
-                req.exact_context.clone(),
-                admission.item().clone(),
-                admission.snapshot().compiler_prefix().clone(),
-                admission.digest(),
-                req.gen,
-                &templates,
-                settled_bindings,
-            )?
-        } else {
-            ModuleCandidateOffer::select_checked_item(
-                endpoint.identity().producer_bytes(),
-                &include,
-                temp.path(),
-                req.exact_context.clone(),
-                admission.item().clone(),
-                admission.snapshot().compiler_prefix().clone(),
-                admission.digest(),
-                req.gen,
-                admission.observation_name(),
-                &templates,
-                settled_bindings,
-            )?
-        }
+        ModuleCandidateOffer::select_checked_item(
+            endpoint.identity().producer_bytes(),
+            &include,
+            temp.path(),
+            req.exact_context.clone(),
+            admission.item().clone(),
+            admission.snapshot().compiler_prefix().clone(),
+            admission.digest(),
+            req.gen,
+            admission.observation_name(),
+            &templates,
+            settled_bindings,
+        )?
     } else if req.exact_context.is_none() {
         ModuleCandidateOffer::select_admitted(&endpoint, &include, temp.path())?
     } else {
