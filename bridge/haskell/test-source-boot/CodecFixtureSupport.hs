@@ -20,26 +20,12 @@ import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text qualified as T
 import Data.Word (Word32, Word64)
-import GenuineCandidateFixture (issueCodecFixturePacket)
+import Tidepool.Test.CandidateCodec (CandidateCodecCase(..), writeCandidateCodecFixture)
+import Tidepool.Test.FixturePacket (issueCodecFixturePacket)
 import System.FilePath ((</>))
 import System.IO (IOMode(ReadMode), withBinaryFile)
 import Tidepool.ExecutionSchema (SymbolIdentity(..))
 import Tidepool.CheckedCell (RequestHelperRecipe(..))
-
-data CandidateCodecCase
-  = EmptyCandidateInventory
-  | CompactCandidateInventory
-  | BoundedExpandedCandidateInventory
-  | SingleGroupCandidateInventory
-
-writeCandidateCodecFixture :: FilePath -> CandidateCodecCase -> IO FilePath
-writeCandidateCodecFixture work scenario = do
-  packet <- codecRequest work (case scenario of
-    EmptyCandidateInventory -> "candidate_empty"
-    CompactCandidateInventory -> "candidate_compact"
-    BoundedExpandedCandidateInventory -> "candidate_expanded_within_bound"
-    SingleGroupCandidateInventory -> "candidate_structural_group") []
-  pure (packet </> "module-candidates.cbor")
 
 data CanonicalCodecInputs = CanonicalCodecInputs
   { codecCanonicalUnit :: String

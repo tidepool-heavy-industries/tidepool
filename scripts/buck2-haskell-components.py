@@ -309,15 +309,17 @@ def render(metadata=None):
             runtime.append(":" + child)
         elif declared_tools:
             raise ValueError(f"{component.name} needs a native runtime binding for its Cabal build tools")
+        if name in {"source_boot_product_reuse_test", "prepared_stg_pipeline_test"}:
+            env["TIDEPOOL_CANDIDATE_FIXTURE_ISSUER"] = RuntimeInput(literal("$(exe //tidepool/toolchain:candidate_fixture_issuer)"), RuntimeInputRole.EXECUTABLE)
+            runtime.append("//tidepool/toolchain:candidate_fixture_issuer")
         if name == "source_boot_product_reuse_test":
             env.update({
-                "TIDEPOOL_CANDIDATE_FIXTURE_ISSUER": RuntimeInput(literal("$(exe //tidepool/toolchain:candidate_fixture_issuer)"), RuntimeInputRole.EXECUTABLE),
                 "TIDEPOOL_COMPILER_DEPLOYMENT": RuntimeInput(literal("$(location //build/package:compiler_deployment)"), RuntimeInputRole.FILE),
                 "TIDEPOOL_EXTRACT": RuntimeInput(literal("$(exe //tidepool/extract-cmd:tidepool-extract)"), RuntimeInputRole.EXECUTABLE),
                 "TIDEPOOL_EXTRACT_WORKER": RuntimeInput(literal("$(exe :tidepool_extract_bin)"), RuntimeInputRole.EXECUTABLE),
                 "LD_LIBRARY_PATH": RuntimeInput(literal("$(location //build/package:tidepool_extract_runtime_libraries)"), RuntimeInputRole.LIBRARY_SEARCH_LIST),
             })
-            runtime.extend(["//tidepool/toolchain:candidate_fixture_issuer", "//build/package:compiler_deployment", "//build/package:tidepool_extract_runtime_libraries"])
+            runtime.extend(["//build/package:compiler_deployment", "//build/package:tidepool_extract_runtime_libraries"])
         path_roles = " ".join(key + ":" + value.role.value for key, value in env.items())
         env_text = "{\n" + "\n".join("    " + literal(key) + ": " + value.expression + ","
                                     for key, value in env.items())

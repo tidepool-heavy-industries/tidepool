@@ -58,6 +58,7 @@ import Tidepool.DependencyEvidence (DependencySource(..), sourceEvidence)
 import Tidepool.ModuleCandidates
   ( CandidateGroup(..), CandidateGlobal(..), ModuleCandidate(..), readModuleCandidates )
 import Tidepool.PackageWitness (encodePackageImports)
+import Tidepool.Test.CandidateCodec (CandidateCodecCase(..), writeCandidateCodecFixture)
 import Tidepool.OriginalProductRoots (requiredOriginalPackageGlobalsWithRetained)
 
 -- Exercise the skinny interface retained for a prepared defining module,
@@ -309,27 +310,10 @@ verifyOriginalProductCatalogue work = do
       a = directory </> "ModuleProductCatalogA.hs"
       b = directory </> "ModuleProductCatalogB.hs"
       replyInternal = directory </> "Tidepool" </> "Agent" </> "Reply" </> "Internal.hs"
-      manifest = directory </> "candidate-template.cbor"
-      seal = T.replicate 64 "a"
-      candidateRow = encodeListLen 16
-        <> encodeString "main"
-        <> encodeString "ModuleProductCatalogA"
-        <> encodeString (T.pack a) <> encodeString seal
-        <> encodeString (T.pack (a ++ ".hi")) <> encodeString seal
-        <> encodeString seal <> encodeString seal <> encodeString seal
-        <> encodeListLen 0 <> encodeListLen 0
-        <> encodeString (T.pack (a ++ ".packages")) <> encodeString seal
-        <> encodeString (T.pack (a ++ ".tpmod"))
-        <> encodeListLen 0
-        <> encodeListLen 5 <> encodeString "module"
-        <> encodeString (T.pack (a ++ ".certificate")) <> encodeString seal
-        <> encodeString (T.pack (a ++ ".core")) <> encodeString seal
-      manifestBytes = toLazyByteString
-        (encodeListLen 7 <> encodeString "TPMCAN" <> encodeString "10"
-          <> encodeListLen 0 <> encodeListLen 0 <> encodeListLen 1 <> candidateRow
-          <> encodeListLen 2 <> encodeListLen 0 <> encodeListLen 0 <> encodeString seal)
   createDirectoryIfMissing True directory
-  BS.writeFile manifest (BL.toStrict manifestBytes)
+  -- Only unit/module/groups enter the pure cached-closure walk below. This
+  -- structural codec input makes no candidate admission or certification claim.
+  manifest <- writeCandidateCodecFixture directory EmptyCandidateInventory
   candidateResult <- readModuleCandidates manifest
   baseCandidate <- case candidateResult of
     Right [candidate] -> pure candidate
@@ -450,7 +434,7 @@ verifyOriginalProductCatalogue work = do
   case requiredOriginalPackageGlobalsWithRetained [] [cachedProduct] [] Set.empty
       (Schema.programGlobals cachedDependent) of
     Left _ -> pure ()
-    Right _ -> ioError (userError "cached original product authorized its omitted dependent helper")
+    Right _ -> ioError (userError "cached original closure included its omitted dependent helper")
   let safeIdentity = Schema.SymbolIdentity
         (T.pack (unitString (moduleUnit (pmModule moduleA))))
         "ModuleProductCatalogA" "value" "safeValue" Nothing

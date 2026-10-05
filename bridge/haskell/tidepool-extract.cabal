@@ -391,6 +391,8 @@ test-suite source-boot-product-reuse-test
                     CandidateExecutionSourcesTest
                     SourceBootFixtureSupport
                     CodecFixtureSupport
+                    Tidepool.Test.CandidateCodec
+                    Tidepool.Test.FixturePacket
   build-tool-depends: tidepool-extract:source-boot-child
   build-depends:
     base >= 4.20 && < 5,
@@ -418,6 +420,8 @@ test-suite prepared-stg-pipeline-test
     RetainedPluginTest
     TypeEvidenceChecks
     ModuleProductRoundtripTest
+    Tidepool.Test.CandidateCodec
+    Tidepool.Test.FixturePacket
   build-depends:
     base         >= 4.20 && < 5,
     ghc          >= 9.12 && < 9.13,
@@ -429,7 +433,8 @@ test-suite prepared-stg-pipeline-test
     text,
     tidepool-extract-internal,
     directory,
-    filepath
+    filepath,
+    process
   default-language: GHC2024
   default-extensions: OverloadedStrings
 
@@ -587,7 +592,7 @@ executable declaration-join-consumer
 
 executable source-boot-child
   main-is:          SourceBootChildMain.hs
-  hs-source-dirs:   test-source-boot
+  hs-source-dirs:   test-source-boot test-support
   other-modules:    SourceBootCases
                     ExecutionSourceDecodeTest
                     GenuineCandidateFixture
@@ -598,6 +603,8 @@ executable source-boot-child
                     CandidateExecutionSourcesTest
                     SourceBootFixtureSupport
                     CodecFixtureSupport
+                    Tidepool.Test.CandidateCodec
+                    Tidepool.Test.FixturePacket
   build-depends:
     base >= 4.20 && < 5,
     ghc >= 9.12 && < 9.13,

@@ -126,6 +126,16 @@ class ComponentProjectionTests(unittest.TestCase):
                       "TIDEPOOL_TEST_EFFECTS_DIR:directory TIDEPOOL_PRELUDE_DIR:directory "
                       "TIDEPOOL_TEST_PYTHON:executable", rendered)
 
+    def test_prepared_catalogue_codec_uses_declared_issuer_without_capture_inputs(self):
+        metadata = self.metadata(tests=[component("prepared-stg-pipeline-test", "test-suite",
+                                                 "tests", ("test",), ())])
+        rendered = G.render(metadata)
+        self.assertIn('"TIDEPOOL_CANDIDATE_FIXTURE_ISSUER": "$(exe //tidepool/toolchain:candidate_fixture_issuer)"', rendered)
+        self.assertIn("TIDEPOOL_CANDIDATE_FIXTURE_ISSUER:executable", rendered)
+        self.assertIn('"//tidepool/toolchain:candidate_fixture_issuer"', rendered)
+        self.assertNotIn("TIDEPOOL_COMPILER_DEPLOYMENT", rendered)
+        self.assertNotIn("TIDEPOOL_EXTRACT_WORKER", rendered)
+
     def test_generated_sources_and_workspace_sources_keep_owning_producers(self):
         self.assertEqual(G.source("Tidepool.Internal.ModelControl", ["generated/protocol"])[1],
                          "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Internal_ModelControl_hs]")
