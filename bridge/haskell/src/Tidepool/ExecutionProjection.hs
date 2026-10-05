@@ -1722,23 +1722,29 @@ projectTopPair prepared binder rhs = do
 -- are available. Only selected emitted tops must satisfy the defining entry;
 -- expected interface facts never substitute for the body's actual ABI.
 validateExpectedEntry :: PreparedModule -> Id -> HeapRhs -> P ()
-validateExpectedEntry prepared binder rhs = case preparedExpectedEntry prepared binder of
-  Nothing -> pure ()
-  Just original -> do
-    (required, requiresEvaluated) <- importedEntry original
-    (offered, evaluated) <- case rhs of
-      Function signature _ _ _ -> (\entry -> (Just entry, True)) <$> signatureForId signature
-      Thunk signature _ _ _ -> (\entry -> (Just entry, False)) <$> signatureForId signature
-      Constructor{} -> pure (Nothing, True)
-      Bytes{} -> pure (Nothing, True)
-    let entryMatches = case importedIdLFInfo original of
-          LFUnknown{} -> True
-          _ -> offered == required
-    unless (entryMatches
-        && (not requiresEvaluated || evaluated)) $ do
-      symbol <- topIdentity binder
-      lift (Left (RecoveredEntryContractMismatch symbol
-        required requiresEvaluated offered evaluated))
+validateExpectedEntry prepared binder rhs = do
+  purpose <- gets projectionPurpose
+  case purpose of
+    OriginalHomeProduct _ -> pure ()
+    ExecutableTarget -> validate
+ where
+  validate = case preparedExpectedEntry prepared binder of
+    Nothing -> pure ()
+    Just original -> do
+      (required, requiresEvaluated) <- importedEntry original
+      (offered, evaluated) <- case rhs of
+        Function signature _ _ _ -> (\entry -> (Just entry, True)) <$> signatureForId signature
+        Thunk signature _ _ _ -> (\entry -> (Just entry, False)) <$> signatureForId signature
+        Constructor{} -> pure (Nothing, True)
+        Bytes{} -> pure (Nothing, True)
+      let entryMatches = case importedIdLFInfo original of
+            LFUnknown{} -> True
+            _ -> offered == required
+      unless (entryMatches
+          && (not requiresEvaluated || evaluated)) $ do
+        symbol <- topIdentity binder
+        lift (Left (RecoveredEntryContractMismatch symbol
+          required requiresEvaluated offered evaluated))
 
 formattingSpecFor :: Id -> P (Maybe FormattingSpec)
 formattingSpecFor binder = do
