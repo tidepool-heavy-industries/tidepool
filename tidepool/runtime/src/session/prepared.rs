@@ -5825,6 +5825,7 @@ pub(super) mod tests {
     };
     use tidepool_repr::DataCon;
     use tidepool_repr::SessionModule;
+    use tidepool_test_data::prepared as prepared_data;
 
     fn certified_source_group(
         name: &str,
@@ -6224,9 +6225,9 @@ pub(super) mod tests {
             Arc::new(DefinitionFacts {
                 tops: BTreeMap::new(),
                 sites: Vec::new(),
-                types: Vec::new(),
+                types: Arc::default(),
                 constructor_replies: Vec::new(),
-                constructors,
+                constructors: constructors.into(),
                 json_layout: None,
                 by_identity,
             }),
@@ -9362,7 +9363,7 @@ pub(super) mod tests {
                 },
             ),
         ]);
-        wire.types = testing::type_graph(nodes, &edges, &wire.constructors)
+        wire.types = prepared_data::type_graph(nodes, &edges, &wire.constructors)
             .expect("JSON and framed templates");
         wire.sites = vec![
             SiteRow {
@@ -10046,7 +10047,7 @@ pub(super) mod tests {
     }
 
     fn closed_reply_type(form: DeclarationForm) -> Arc<TypeGraph> {
-        testing::closed_type_graph(testing::identity("Fixture.Types", "Reply"), form)
+        prepared_data::closed_type_graph(testing::identity("Fixture.Types", "Reply"), form)
     }
 
     fn polymorphic_reply_type(rendered: &str, body_is_bound: bool) -> Arc<TypeGraph> {
@@ -10089,7 +10090,7 @@ pub(super) mod tests {
             });
             edges.push((4, 5, TypeEdge::Head));
         }
-        testing::type_graph(nodes, &edges, &[]).expect("finite polymorphic reply type")
+        prepared_data::type_graph(nodes, &edges, &[]).expect("finite polymorphic reply type")
     }
 
     fn response_result_types(
@@ -10150,7 +10151,7 @@ pub(super) mod tests {
             (expression, declaration, TypeEdge::Head),
             (expression, expressions[argument], TypeEdge::Argument(0)),
         ]);
-        testing::type_graph(nodes, &edges, &[]).expect("finite request input and reply types")
+        prepared_data::type_graph(nodes, &edges, &[]).expect("finite request input and reply types")
     }
 
     /// An effect constructor with immutable static reply evidence. `revision`
@@ -10215,7 +10216,7 @@ pub(super) mod tests {
         );
         let mut text = testing::identity("Fixture.Types", "Text");
         text.namespace = "type".into();
-        let types = testing::type_graph(
+        let types = prepared_data::type_graph(
             vec![
                 TypeNode::Root {
                     domain: RootDomain::Closed,
@@ -10440,7 +10441,7 @@ pub(super) mod tests {
             .expect("bounded request compatibility"));
         let (wrong, _) = PreparedEngine::bootstrap(typed_site_program(
             43,
-            testing::closed_type_roots(&[
+            prepared_data::closed_type_roots(&[
                 (
                     testing::identity("Fixture.Types", "Text"),
                     DeclarationForm::Text,
@@ -10738,7 +10739,7 @@ pub(super) mod tests {
         ];
         let mut kind = testing::identity("Fixture.Types", "Type");
         kind.namespace = "type".into();
-        wire.types = testing::type_graph(
+        wire.types = prepared_data::type_graph(
             vec![
                 TypeNode::Root {
                     domain: RootDomain::ConstructorScheme,
@@ -10893,7 +10894,7 @@ pub(super) mod tests {
     fn admitted_site_and_verb_survive_multiple_and_final_retirement() {
         let routing = |revision| {
             let prepared = verb_program(revision, closed_reply_type(DeclarationForm::Text));
-            let mut wire = testing::wire_from_prepared(&prepared);
+            let mut wire = prepared_data::wire_from_prepared(&prepared);
             wire.sites = vec![SiteRow {
                 site: 7,
                 origin: "Fixture.Routing".into(),
