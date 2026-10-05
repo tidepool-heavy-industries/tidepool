@@ -149,7 +149,7 @@ impl BrowserTransport {
                     "raw_input",
                     harness::item::Item(json!({
                         "type":"custom_tool_call", "name":"haskell",
-                        "call_id":"browser-real-cell", "input":"40 + 2 :: Int"
+                        "call_id":"browser-real-cell", "input":"_ <- display (40 + 2 :: Int)"
                     })),
                 )
             } else if !state.raw_completed && result_present {
@@ -157,21 +157,13 @@ impl BrowserTransport {
                 ("raw_result", final_answer("The resident cell returned 42."))
             } else if state.raw_completed && state.typed_issued == 0 && contains_input(TYPED_INPUT)
             {
-                assert!(
-                    request.tools.iter().any(|tool| {
-                        tool["type"] == "function"
-                            && tool["name"] == "probe"
-                            && tool["strict"] == true
-                    }),
-                    "the model request must contain the actual installed typed tool"
-                );
                 state.typed_issued = 1;
                 ("typed_first", probe_call("browser-typed-first", 40))
             } else if state.typed_issued == 1
                 && request
                     .input
                     .iter()
-                    .any(|item| typed_result_matches(item, "browser-typed-first", "Number 42"))
+                    .any(|item| typed_result_matches(item, "browser-typed-first", "42"))
             {
                 state.typed_issued = 2;
                 ("typed_second", probe_call("browser-typed-second", 41))
@@ -180,7 +172,7 @@ impl BrowserTransport {
                 && request
                     .input
                     .iter()
-                    .any(|item| typed_result_matches(item, "browser-typed-second", "Number 43"))
+                    .any(|item| typed_result_matches(item, "browser-typed-second", "43"))
             {
                 state.typed_completed = true;
                 (
@@ -195,7 +187,7 @@ impl BrowserTransport {
                     harness::item::Item(json!({
                         "type":"custom_tool_call", "name":"haskell",
                         "call_id":"browser-cancellable-cell",
-                        "input":"do { sleep (seconds 30); pure (99 :: Int) }"
+                        "input":"do { sleep (seconds 30); _ <- display (99 :: Int); pure () }"
                     })),
                 )
             } else if state.cancel_issued && !state.continued && contains_input(CONTINUE_INPUT) {
@@ -223,6 +215,23 @@ impl BrowserTransport {
             };
             (format!("browser-request-{}", state.requests), phase, item)
         };
+        let required_kind = match item.0["type"].as_str() {
+            Some("custom_tool_call") => Some("custom"),
+            Some("function_call") => Some("function"),
+            _ => None,
+        };
+        if let Some(kind) = required_kind {
+            if !request.tools.iter().any(|tool| {
+                tool["type"] == kind
+                    && tool["name"] == item.0["name"]
+                    && (kind != "function" || tool["strict"] == true)
+            }) {
+                return Err(TransportError::Stream(format!(
+                    "browser scripted {phase} call requires installed {kind} tool {} in its issuing request",
+                    item.0["name"],
+                )));
+            }
+        }
         let (release, released) = oneshot::channel();
         self.barriers
             .send(Barrier {
@@ -444,9 +453,22 @@ async fn drive_browser(
         let mut cancel_pending_at = None;
         let mut cancel_operation = None;
         let mut continued = false;
+        let mut root_retired = false;
         let readiness_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         loop {
             tokio::select! {
+                biased;
+                terminal = fixture.context.actor.terminal().wait(), if !root_retired => {
+                    if !continued || terminal.kind != exomonad_actor::ActorExitKind::Cancelled {
+                        return Err(format!(
+                            "browser root exited at phase={last_phase} ({:?}): {}",
+                            terminal.kind, terminal.summary,
+                        ));
+                    }
+                    // The final browser retire command is verified by its real
+                    // control receipt and the retained cleanup below.
+                    root_retired = true;
+                }
                 _ = tokio::time::sleep_until(readiness_deadline), if !started => {
                     return Err("browser did not acknowledge readiness".to_owned());
                 }
@@ -464,14 +486,18 @@ async fn drive_browser(
                         typed_completed = true;
                     }
                     if barrier.phase == "cancel_wait" {
-                        cancel_operation = Some(tokio::time::timeout(Duration::from_secs(300), async {
-                            loop {
-                                if let Some(operation) = pending_sleep_operation(fixture).await? {
-                                    return Ok::<_, String>(operation);
+                        cancel_operation = Some(fixture.context.while_root_live(
+                            "browser pending native sleep effect",
+                            tokio::time::timeout(Duration::from_secs(300), async {
+                                loop {
+                                    if let Some(operation) = pending_sleep_operation(fixture).await? {
+                                        return Ok::<_, String>(operation);
+                                    }
+                                    tokio::time::sleep(Duration::from_millis(10)).await;
                                 }
-                                tokio::time::sleep(Duration::from_millis(10)).await;
-                            }
-                        }).await.map_err(|_| "cancellable cell exceeded its compilation/effect-admission budget before reaching the captured native sleep effect")??);
+                            }),
+                        ).await.map_err(|error| error.to_string())?
+                            .map_err(|_| "cancellable cell exceeded its compilation/effect-admission budget before reaching the captured native sleep effect")??);
                         cancel_pending_at = Some(tokio::time::Instant::now());
                     }
                     if barrier.phase == "continued" {
