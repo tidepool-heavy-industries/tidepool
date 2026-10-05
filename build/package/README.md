@@ -1,37 +1,78 @@
-The first native delivery uses `//build/package:native_runtime_bundle`. It carries
-Buck's host, libtest, extractor frontend and worker, declared shared libraries, Haskell
-sources, actors and browser assets. Its `source-backed` stdlib mode compiles
-through the normal compiler; it does not qualify a canonical module catalog or
-durable module-cache deployment. The catalog-backed `matched_runtime_bundle`
-is a separate package mode and cannot substitute for this qualification.
+`//build/package:native_runtime_bundle` carries Buck's host, libtest, extractor
+frontend and worker, declared shared libraries, Haskell sources, actors and
+browser assets. With no native catalog selection it uses `source-backed` mode.
+An explicit retained source root or retention record selects `catalog-backed`
+mode and requires the complete valid selection; invalid configuration cannot
+fall back to source compilation. `native_source_runtime_bundle` remains the
+explicit source-backed development target. The older Nix `matched_runtime_bundle`
+is a separate package owner until the native catalog delivery gate passes.
 
-The native catalog migration starts with `//build/package:native_catalog_sources`.
-It snapshots the existing runtime `lib` and `actors` trees and the genuine generated
-Core/Authored pair. Its import probe is projected from the pinned Cabal
-`native-helper-contract` module metadata, excluding test source owners and adding
-Authored from the existing effect-module roster. Test dependencies and the
-invocation-specific `Tidepool.Effects` shim are not catalog inputs. The actual
-compiler's complete module closure must still pass catalog admission; this
-initial selection does not cover every shipped helper.
+`//build/package:native_catalog_sources` snapshots the existing runtime `lib`
+and `actors` trees, the genuine generated stable effect modules, and pinned Jev
+`core` sources. Its import probe is projected from source-owned modules across
+the pinned Cabal component metadata and the existing stable-effect/Jev source
+owners. Test-only source roots, test package dependencies, workspace-specific
+Orchestrate modules and the invocation-specific `Tidepool.Effects` shim are
+excluded. Production catalog admission still checks the actual compiler's
+complete closure; direct import selection alone is not passing evidence.
 
-Retain that exact source snapshot before compiling original module products:
+The current metadata projects 67 direct imports. These are source selections;
+compiler-produced module counts require the native action and gate report.
+
+| Evidence | Owner | Current count |
+| --- | --- | ---: |
+| Stable effect direct imports | Generated effect roster | 3 |
+| Stdlib direct imports | Pinned Cabal source ownership | 53 |
+| Actor direct imports | Pinned Cabal source ownership | 7 |
+| Jev direct imports | Pinned Jev source projection | 4 |
+| Full source file inventory | Retained snapshot record | Requires retention run |
+| Compiled module closure | Native catalog producer/admission | Requires native build |
+| Cold consumer execution | Frozen `catalog-gate` report | Requires gate run |
+
+Retain that exact snapshot before compiling original module products:
 
 ```sh
 CATALOG_SOURCES="$(python3 build/package/qualification.py retain-sources \
   --snapshot "$BUCK_CATALOG_SOURCES" --output "$SOURCE_RETENTION" \
   --runtime-tools "$DECLARED_RUNTIME_TOOLS")"
+CATALOG_RECORD="$SOURCE_RETENTION/share/exomonad/retained-catalog-sources.json"
 ```
 
-The same qualification owner checks the source inventory, Nix registration and
-NAR identity, and retains a GC root. The command returns the original canonical
-source root directly for the subsequent native action; it does not reconfigure
-the toolchain. `select-sources --record RECORD --snapshot SNAPSHOT --runtime-tools TOOLS`
-revalidates a previously retained selection when resuming delivery. Fixed source
-names and bytes give the same retained original paths
-across runs. The source retention record must survive until final qualification
-retains those roots. This preparation boundary alone does not establish a native
-catalog deployment; the schema, packaging and runtime selection cutover remain
-required before catalog-backed qualification.
+The qualification owner compares full file inventories, verifies the original
+Nix path and NAR identity, and creates and checks a registered GC root.
+`select-sources --record RECORD --snapshot SNAPSHOT --runtime-tools TOOLS`
+revalidates that exact retention when resuming. Source names and bytes determine
+the original store root. Retain the record and collector root until freezing
+transfers retention to the final bundle.
+
+The native action consumes the current source snapshot, a declared copy of the
+original retained root, and declared retention-record bytes. Stage the exact
+selection through `scripts/buck2-configure.sh` or root Buck configuration:
+`nix.native_catalog_source_root` is the returned original root;
+`nix.native_catalog_retention_record` is the canonical record path;
+`nix.native_catalog_retention` is that record's exact JSON value. The declared
+record artifact is generated from configuration bytes; the mutable evidence
+path supplies only the original collector-root location.
+
+`//build/package:native_catalog` rechecks all three source inventories and actual
+Nix retention before invoking the existing Buck `tidepool-module-package` with
+the original `TidepoolCatalog.hs`, `catalogSentinel`, original source root and
+ordinary action output directory. Frontend, worker, compiler deployment, GHC
+libdir and runtime libraries are explicit action inputs. It rechecks source
+retention after production and binds the complete product inventory, catalog
+SHA-256 and schema-4 source selection. The roles are ordered as stable effects,
+stdlib, actors and Jev, under one original root. Producer/worker identities,
+source evidence and product metadata are copied without rewriting.
+
+The catalog-backed bundle retains those exact products and selection. Freezing
+validates their inventories and NAR/collector evidence, creates a registered
+source GC root owned by the final bundle, and seals a new retention record.
+The original retention may then be retired independently. Qualified execution
+and the native entrypoint select the frozen catalog with its original `lib`
+and actor roots. Rust catalog admission owns the BLAKE3 source manifest and
+module/interface validation; qualification also binds the full original source
+inventory and NAR identity. Source tests do not establish a compiled native
+catalog, M1/M2 execution or live deployment acceptance.
 
 Build the native bundle and
 `//build/testing/browser:driver_bundle` in one selected native profile. Retain the
@@ -99,6 +140,23 @@ python3 "$FINAL_BUNDLE/share/exomonad/qualification.py" run "$DESCRIPTOR" \
 
 For the parallel command, `ADMITTED_USER_SLICE` names an existing user slice
 whose resource bounds have been checked for the chosen concurrency.
+
+The catalog acceptance route requires the frozen descriptor. It verifies the
+exact native selection before entering the consumer namespace, exposes the
+original frozen bundle at its canonical path, and runs the one mandatory
+catalog consumer in fresh caches with checkout and Buck build inputs absent.
+The report requires one executed passing test; compilation or an empty
+selection cannot satisfy it.
+
+```sh
+python3 "$FINAL_BUNDLE/share/exomonad/qualification.py" catalog-gate \
+  "$DESCRIPTOR" --output "$CATALOG_GATE_EVIDENCE"
+```
+
+The native `bin/exomonad` entrypoint independently verifies the retained
+qualification descriptor and obtains its environment from that owner before
+executing the host. An assembled action output must therefore be frozen before
+launching it directly.
 
 Launch the same package bytes for the actual recursive live smoke. `exec`
 verifies the descriptor and runtime dependencies, supplies the same environment,

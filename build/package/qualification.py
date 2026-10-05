@@ -48,15 +48,16 @@ ARTIFACT_TARGETS = {
 EXTERNAL_INPUTS = {"TIDEPOOL_GHC_LIBDIR", "TIDEPOOL_BROWSER_NODE", "PLAYWRIGHT_BROWSERS_PATH", "runtime_tools"}
 BUILD_CONTRACT_FIELDS = ("profile", "feature_profile", "stdlib_mode", "source_inputs", "source_inputs_sha256", "artifacts")
 CATALOG_SOURCE_METADATA = "catalog-sources.json"
-CATALOG_SOURCE_ROOTS = {"effects": "effects", "stdlib": "lib", "actors": "actors"}
+CATALOG_SOURCE_ROOTS = {"effects": "effects", "stdlib": "lib", "actors": "actors", "jev": "jev/core"}
 RETAINED_CATALOG_SOURCES = "share/exomonad/retained-catalog-sources.json"
-
+NATIVE_CATALOG_BUILD = "native-catalog-build.json"
+NATIVE_SOURCE_ROLES = ["stable_effects", "stdlib", "actors", "jev"]
+CATALOG_TEST = "actor_host::packaged_catalog_tests::packaged_cohort_executes_and_displays_without_build_inputs"
 
 def programs(root: Path) -> dict:
     return {"libtest": str(root / "bin/tidepool-tests"),
             "runner": str(root / "share/exomonad/isolated-libtest.py"),
             "host": str(root / "bin/exomonad"), "host_elf": str(root / "bin/exomonad-unwrapped")}
-
 
 def cohorts() -> dict:
     return {"m2": {"tests": M2_TESTS, "expected_count": len(M2_TESTS), "ignored": False, "timeout": 600,
@@ -65,7 +66,6 @@ def cohorts() -> dict:
                                      M2_SELECTED_CODING_TEST: 900}},
             "m1": {"tests": M1_TESTS, "expected_count": 1, "ignored": True, "timeout": 900}}
 
-
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as source:
@@ -73,11 +73,9 @@ def sha256(path: Path) -> str:
             digest.update(block)
     return digest.hexdigest()
 
-
 def write_json(path: Path, value: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
-
 
 def inventory(root: Path, excluded=()) -> dict:
     """Bind copied bytes and declared immutable closure references, including modes."""
@@ -103,10 +101,8 @@ def inventory(root: Path, excluded=()) -> dict:
         entries[relative] = item
     return entries
 
-
 def digest_inventory(entries: dict) -> str:
     return hashlib.sha256(json.dumps(entries, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-
 
 def nix_path(path: Path) -> Path:
     resolved = path.resolve(strict=True)
@@ -114,10 +110,8 @@ def nix_path(path: Path) -> Path:
         raise ValueError(f"toolchain inputs must be declared immutable Nix paths: {path}")
     return resolved
 
-
 def store_root(path: Path) -> Path:
     return Path(*nix_path(path).parts[:4])
-
 
 def nix_metadata(tools: Path, roots: list[str]) -> dict:
     executable = str(tools / "bin/nix-store")
@@ -128,7 +122,6 @@ def nix_metadata(tools: Path, roots: list[str]) -> dict:
     if len(hashes) != len(closure) or not closure or any(not value.startswith("sha256:") for value in hashes):
         raise ValueError("declared Nix closure lacks complete SHA-256 NAR evidence")
     return {"roots": roots, "closure": closure, "nar_hashes": dict(zip(closure, hashes))}
-
 
 def pin_nix_closure(root: Path, tools: Path, selected: list[Path]) -> tuple[dict, list[dict]]:
     roots = sorted({str(store_root(path)) for path in selected})
@@ -141,8 +134,8 @@ def pin_nix_closure(root: Path, tools: Path, selected: list[Path]) -> tuple[dict
         if target.resolve(strict=True) != Path(selected_root):
             raise ValueError(f"Nix did not retain the requested deployment root: {target}")
         pinned.append({"path": str(target), "store_path": selected_root, "command": command, "exit_code": 0})
+    verify_registered_gc_roots(tools, pinned)
     return nix_metadata(tools, roots), pinned
-
 
 def catalog_source_inventory(root: Path) -> dict:
     """Retained source names are original evidence, so aliases are forbidden."""
@@ -153,15 +146,16 @@ def catalog_source_inventory(root: Path) -> dict:
         raise ValueError("catalog sources must be regular files without aliases")
     return entries
 
-
 def catalog_source_metadata(root: Path) -> dict:
     metadata = json.loads((root / CATALOG_SOURCE_METADATA).read_text())
     if (not isinstance(metadata, dict)
-            or set(metadata) != {"schema", "kind", "component", "modules", "roots", "probe", "targets"}
+            or set(metadata) != {"schema", "kind", "components", "modules", "roots", "probe", "targets"}
             or metadata["schema"] != 1 or metadata["kind"] != "native-catalog-source-snapshot"
             or metadata["roots"] != CATALOG_SOURCE_ROOTS
             or metadata["probe"] != "TidepoolCatalog.hs" or metadata["targets"] != ["catalogSentinel"]
-            or not isinstance(metadata["component"], str) or not metadata["component"]
+            or not isinstance(metadata["components"], list) or not metadata["components"]
+            or any(not isinstance(component, str) or not component for component in metadata["components"])
+            or metadata["components"] != sorted(set(metadata["components"]))
             or not isinstance(metadata["modules"], dict) or not metadata["modules"]):
         raise ValueError("invalid native catalog source metadata")
     for module, relative in metadata["modules"].items():
@@ -170,8 +164,11 @@ def catalog_source_metadata(root: Path) -> dict:
         if not isinstance(relative, str):
             raise ValueError("invalid catalog module path")
         path = Path(relative)
-        if (path.is_absolute() or not path.parts or path.parts[0] not in CATALOG_SOURCE_ROOTS.values()
-                or path.parts[1:] != tuple(module.split(".")[:-1]) + (module.split(".")[-1] + ".hs",)
+        owners = [Path(relative_root) for relative_root in CATALOG_SOURCE_ROOTS.values()
+                  if path.is_relative_to(relative_root)]
+        module_path = Path(*module.split(".")).with_suffix(".hs")
+        if (path.is_absolute() or len(owners) != 1
+                or path.relative_to(owners[0]) != module_path
                 or not (root / path).is_file()):
             raise ValueError(f"catalog module lacks its declared original source: {module}")
     for relative in CATALOG_SOURCE_ROOTS.values():
@@ -181,23 +178,22 @@ def catalog_source_metadata(root: Path) -> dict:
         raise ValueError("catalog probe differs from its declared module cohort")
     return metadata
 
-
 def catalog_probe(modules: dict) -> str:
     return ("module TidepoolCatalog where\n"
             + "".join(f"import {module} ()\n" for module in sorted(modules))
             + "catalogSentinel :: Int\ncatalogSentinel = 0\n")
 
-
 def snapshot_catalog_sources(args) -> None:
     """Buck owns the source projection and generators; qualification owns bytes."""
     cohort = json.loads(args.cohort.read_text())
-    if (not isinstance(cohort, dict) or set(cohort) != {"component", "modules"}
+    if (not isinstance(cohort, dict) or set(cohort) != {"components", "modules"}
             or not isinstance(cohort["modules"], dict)):
         raise ValueError("invalid metadata-derived catalog cohort")
     root = args.output.absolute()
     root.mkdir(parents=True, exist_ok=False)
     for relative in ("lib", "actors"):
         shutil.copytree(args.sources / relative, root / relative, symlinks=False)
+    shutil.copytree(args.jev_sources / "core", root / "jev/core", symlinks=False)
     (root / "effects").mkdir()
     for relative in cohort["modules"].values():
         if not isinstance(relative, str):
@@ -220,7 +216,6 @@ def snapshot_catalog_sources(args) -> None:
         path.chmod(0o755 if path.is_dir() else 0o644)
     catalog_source_metadata(root)
     catalog_source_inventory(root)
-
 
 def retain_catalog_sources(args) -> Path:
     source = args.snapshot.resolve(strict=True)
@@ -255,8 +250,7 @@ def retain_catalog_sources(args) -> Path:
     verify_retained_catalog_sources(record, source, tools)
     return retained
 
-
-def verify_retained_catalog_sources(record: Path, snapshot: Path, tools: Path) -> Path:
+def verify_retained_catalog_sources(record: Path, snapshot: Path, tools: Path, *, record_origin: Path | None = None) -> Path:
     """Return the original compiler root only after current retention checks."""
     value = json.loads(record.read_text())
     if (not isinstance(value, dict)
@@ -276,11 +270,130 @@ def verify_retained_catalog_sources(record: Path, snapshot: Path, tools: Path) -
     if value["nix_closure"] != nix_metadata(tools, [str(original)]):
         raise ValueError("retained catalog NAR registration changed")
     pins = value["gc_roots"]
-    expected_pin = record.parent / "gc-roots" / hashlib.sha256(str(original).encode()).hexdigest()
+    expected_pin = (record_origin or record).parent / "gc-roots" / hashlib.sha256(str(original).encode()).hexdigest()
     if (len(pins) != 1 or pins[0]["path"] != str(expected_pin)
             or pins[0]["store_path"] != str(original) or expected_pin.resolve(strict=True) != original):
         raise ValueError("retained catalog source GC root is missing or changed")
+    verify_registered_gc_roots(tools, pins)
     return original
+
+
+def verify_registered_gc_roots(tools: Path, pins: list[dict]) -> None:
+    """A symlink alone does not establish registration with the Nix collector."""
+    for pinned in pins:
+        target = Path(pinned["path"])
+        if not target.is_absolute() or target.resolve(strict=True) != Path(pinned["store_path"]):
+            raise ValueError("deployment Nix GC root was removed or changed")
+        registered = subprocess.check_output(
+            [str(tools / "bin/nix-store"), "--query", "--roots", pinned["store_path"]],
+            text=True, timeout=60).splitlines()
+        if str(target) not in {line.split(" -> ", 1)[0] for line in registered}:
+            raise ValueError("deployment Nix GC root is not registered")
+
+def native_catalog_selection(catalog: Path, original: Path) -> dict:
+    value = json.loads(catalog.read_text())
+    selection = value.get("source_selection")
+    if (value.get("schema") != 4 or not isinstance(selection, dict)
+            or set(selection) != {"snapshot_root", "roles", "source_files"}
+            or selection["snapshot_root"] != str(original)
+            or selection["roles"] != NATIVE_SOURCE_ROLES):
+        raise ValueError("native catalog does not select the retained ordered source roles")
+    files = selection["source_files"]
+    expected = sorted(path for path, item in catalog_source_inventory(original).items()
+                      if item["kind"] == "file" and path.endswith(".hs"))
+    if (not isinstance(files, list)
+            or any(not isinstance(item, list) or len(item) != 2
+                   or not isinstance(item[0], str) or not isinstance(item[1], str)
+                   or re.fullmatch(r"[0-9a-f]{64}", item[1]) is None for item in files)
+            or [item[0] for item in files] != expected):
+        raise ValueError("native catalog source selection lacks the complete source manifest")
+    return selection
+
+
+def native_catalog_products(root: Path) -> dict:
+    entries = inventory(root, [NATIVE_CATALOG_BUILD, "source-retention.json"])
+    if any(item["kind"] == "symlink" for item in entries.values()):
+        raise ValueError("native catalog products must be regular artifact bytes")
+    return entries
+
+
+def verify_native_catalog(root: Path, tools: Path) -> dict:
+    shared = root / "share/exomonad"
+    contract = json.loads((shared / "native-build-contract.json").read_text())
+    catalog = shared / "catalog/catalog.json"
+    receipt = json.loads((shared / "catalog" / NATIVE_CATALOG_BUILD).read_text())
+    if (not isinstance(receipt, dict)
+            or set(receipt) != {"schema", "kind", "producer_target", "catalog_sha256", "source_selection", "source_inventory_sha256", "retention_record_origin", "product_inventory", "product_inventory_sha256"}
+            or receipt["schema"] != 1 or receipt["kind"] != "native-catalog-build"
+            or receipt["producer_target"] != "//tidepool/toolchain:tidepool-module-package"):
+        raise ValueError("unsupported native catalog build evidence")
+    record = shared / RETAINED_CATALOG_SOURCES.split("/")[-1]
+    # Before freezing the action's original retention record is selected; after
+    # freezing the bundle owns an independently registered collector root.
+    if record.exists():
+        origin = record
+    else:
+        record = shared / "catalog/source-retention.json"
+        origin = Path(receipt["retention_record_origin"])
+    retained = json.loads(record.read_text())
+    original = Path(retained["original_root"])
+    verify_retained_catalog_sources(record, original, tools, record_origin=origin)
+    selection = native_catalog_selection(catalog, original)
+    products = native_catalog_products(catalog.parent)
+    products_digest = digest_inventory(products)
+    if receipt["product_inventory"] != products or receipt["product_inventory_sha256"] != products_digest:
+        raise ValueError("native catalog product inventory changed")
+    expected = {"catalog_sha256": sha256(catalog), "source_selection": selection,
+                "source_inventory_sha256": retained["inventory_sha256"],
+                "product_inventory_sha256": products_digest}
+    if contract.get("native_catalog") != expected or any(receipt.get(key) != value for key, value in expected.items()):
+        raise ValueError("native catalog differs from the owning build source selection")
+    return expected
+
+
+def transfer_catalog_retention(root: Path, contract: dict, gc_roots: list[dict], tools: Path) -> None:
+    original = Path(contract["native_catalog"]["source_selection"]["snapshot_root"])
+    retention = json.loads((root / "share/exomonad/catalog/source-retention.json").read_text())
+    retention["gc_roots"] = [item for item in gc_roots if item["store_path"] == str(original)]
+    write_json(root / RETAINED_CATALOG_SOURCES, retention)
+    verify_native_catalog(root, tools)
+
+
+def build_native_catalog(args) -> None:
+    tools = nix_path(args.runtime_tools)
+    original = verify_retained_catalog_sources(args.retention_record, args.snapshot, tools,
+                                                record_origin=args.retention_record_origin)
+    if args.source_root != original or catalog_source_inventory(args.declared_source_root.resolve(strict=True)) != catalog_source_inventory(original):
+        raise ValueError("configured catalog root differs from the complete declared source snapshot")
+    output = args.output.absolute()
+    if output != output.resolve():
+        raise ValueError("native catalog requires a canonical action output")
+    environment = execution_environment({"environment": {
+        "TIDEPOOL_EXTRACT": str(args.frontend.resolve(strict=True)),
+        "TIDEPOOL_EXTRACT_WORKER": str(args.worker.resolve(strict=True)),
+        "TIDEPOOL_COMPILER_DEPLOYMENT": str(args.deployment.resolve(strict=True)),
+        "TIDEPOOL_GHC_LIBDIR": str(nix_path(args.ghc_libdir)),
+        "LD_LIBRARY_PATH": str(args.libraries.resolve(strict=True)),
+        "PATH": str(tools / "bin"),
+    }})
+    command = [str(args.producer.resolve(strict=True)), "build", "--source", str(original / "TidepoolCatalog.hs"),
+               "--target", "catalogSentinel", "--source-root", str(original), "--output-root", str(output)]
+    subprocess.run(command, env=environment, check=True)
+    # Recheck the entire inventory after the producer has consumed it.
+    verify_retained_catalog_sources(args.retention_record, args.snapshot, tools,
+                                   record_origin=args.retention_record_origin)
+    selection = native_catalog_selection(output / "catalog.json", original)
+    retained = json.loads(args.retention_record.read_text())
+    shutil.copy2(args.retention_record, output / "source-retention.json")
+    products = native_catalog_products(output)
+    write_json(output / NATIVE_CATALOG_BUILD, {
+        "schema": 1, "kind": "native-catalog-build",
+        "producer_target": "//tidepool/toolchain:tidepool-module-package",
+        "catalog_sha256": sha256(output / "catalog.json"), "source_selection": selection,
+        "source_inventory_sha256": retained["inventory_sha256"],
+        "retention_record_origin": str(args.retention_record_origin),
+        "product_inventory": products, "product_inventory_sha256": digest_inventory(products),
+    })
 
 
 def declared_haskell_sources(source: Path, bundle: Path) -> dict:
@@ -303,7 +416,6 @@ def declared_haskell_sources(source: Path, bundle: Path) -> dict:
         evidence[packaged] = expected
     return evidence
 
-
 def verify_build_contract(source: Path, bundle: Path, contract: dict, expected_profile: str) -> None:
     if contract["profile"] != expected_profile:
         raise ValueError("native bundle profile differs from the requested qualification profile")
@@ -321,7 +433,6 @@ def verify_build_contract(source: Path, bundle: Path, contract: dict, expected_p
             raise ValueError(f"native bundle was built from different source bytes: {relative}")
     verify_artifact_contract(bundle, contract)
 
-
 def verify_artifact_contract(bundle: Path, contract: dict) -> None:
     if set(contract["artifacts"]) != set(ARTIFACT_TARGETS):
         raise ValueError("native build contract does not own every qualified executable")
@@ -329,7 +440,6 @@ def verify_artifact_contract(bundle: Path, contract: dict) -> None:
         artifact = contract["artifacts"][relative]
         if artifact["target"] != target or artifact["sha256"] != sha256(bundle / relative):
             raise ValueError(f"mixed native build artifact: {relative}")
-
 
 def workspace_gitlink(path: Path) -> dict:
     record = json.loads(path.read_text())
@@ -340,7 +450,6 @@ def workspace_gitlink(path: Path) -> dict:
         raise ValueError("workspace Gitlink input must describe one exact recorded submodule revision")
     return record
 
-
 def verify_workspace_gitlink(source: Path, path: Path) -> dict:
     record = workspace_gitlink(path)
     actual = subprocess.check_output([
@@ -350,7 +459,6 @@ def verify_workspace_gitlink(source: Path, path: Path) -> dict:
     if actual != expected:
         raise ValueError("bundled workspace Gitlink differs from the source HEAD recorded submodule")
     return record
-
 
 def verify_workspace_bundle(bundle: Path, record: dict, git: Path) -> None:
     heads = subprocess.check_output([str(git), "bundle", "list-heads", str(bundle)], text=True)
@@ -369,11 +477,10 @@ def verify_workspace_bundle(bundle: Path, record: dict, git: Path) -> None:
         subprocess.run([str(git), "-C", str(repository), "fsck", "--no-dangling"], check=True,
                        stdout=subprocess.DEVNULL)
 
-
 def native_environment(root: Path) -> dict:
     ghc = (root / "share/exomonad/ghc-libdir.txt").read_text().strip()
     tools = (root / "share/exomonad/runtime-tools").resolve(strict=True)
-    return {
+    environment = {
         "TIDEPOOL_EXTRACT": str(root / "bin/tidepool-extract"),
         "TIDEPOOL_EXTRACT_WORKER": str(root / "bin/tidepool-extract-bin"),
         "TIDEPOOL_COMPILER_DEPLOYMENT": str(root / "share/exomonad/compiler-deployment.json"),
@@ -388,6 +495,14 @@ def native_environment(root: Path) -> dict:
         "TIDEPOOL_KEEP_TEST_LOGS": "1",
     }
 
+    contract = json.loads((root / "share/exomonad/native-build-contract.json").read_text())
+    if contract["stdlib_mode"] == "catalog-backed":
+        selection = verify_native_catalog(root, tools)["source_selection"]
+        environment["TIDEPOOL_COMPILER_MODULES"] = str(root / "share/exomonad/catalog/catalog.json")
+        environment["TIDEPOOL_PRELUDE_DIR"] = str(Path(selection["snapshot_root"]) / "lib")
+    elif contract["stdlib_mode"] != "source-backed":
+        raise ValueError("unsupported native stdlib mode")
+    return environment
 
 def execution_environment(descriptor: dict) -> dict:
     environment = dict(os.environ)
@@ -397,7 +512,6 @@ def execution_environment(descriptor: dict) -> dict:
         environment.pop(key, None)
     environment.update(descriptor["environment"])
     return environment
-
 
 def elf_interpreter(path: Path) -> str | None:
     with path.open("rb") as source:
@@ -415,7 +529,6 @@ def elf_interpreter(path: Path) -> str | None:
                 source.seek(position)
                 return source.read(length).rstrip(b"\0").decode()
     return None
-
 
 def loader_evidence(root: Path, environment: dict) -> dict:
     """Inspect the actual ELF loader resolution, not assumed worker link style."""
@@ -444,7 +557,6 @@ def loader_evidence(root: Path, environment: dict) -> dict:
                           "stdout": re.sub(r"0x[0-9a-f]+", "<address>", result.stdout)}
     return evidence
 
-
 def assemble(args) -> None:
     root = args.output.resolve()
     root.mkdir(parents=True, exist_ok=True)
@@ -472,13 +584,21 @@ def assemble(args) -> None:
     wrapper.chmod(0o755)
     source_inputs = {path.relative_to(args.build_sources).as_posix(): sha256(path)
                      for path in sorted(args.build_sources.rglob("*")) if path.is_file()}
-    write_json(shared / "native-build-contract.json", {
+    contract = {
         "profile": args.profile, "feature_profile": "embedded-native", "stdlib_mode": "source-backed",
         "source_inputs": source_inputs, "source_inputs_sha256": digest_inventory(source_inputs),
         "artifacts": {relative: {"target": target, "sha256": sha256(root / relative)}
                       for relative, target in ARTIFACT_TARGETS.items()},
-    })
-
+    }
+    if getattr(args, "catalog", None) is not None:
+        shutil.copytree(args.catalog, shared / "catalog", symlinks=False)
+        receipt = json.loads((shared / "catalog" / NATIVE_CATALOG_BUILD).read_text())
+        contract["stdlib_mode"] = "catalog-backed"
+        contract["native_catalog"] = {key: receipt[key] for key in
+            ("catalog_sha256", "source_selection", "source_inventory_sha256", "product_inventory_sha256")}
+    write_json(shared / "native-build-contract.json", contract)
+    if contract["stdlib_mode"] == "catalog-backed":
+        verify_native_catalog(root, tools)
 
 def freeze(args) -> Path:
     source = args.source_root.resolve(strict=True)
@@ -495,13 +615,15 @@ def freeze(args) -> Path:
             raise ValueError(f"recorded source submodule has tracked changes: {relative}")
         submodules.append({"path": relative, "source_oid": revision})
     contract = json.loads((args.bundle / "share/exomonad/native-build-contract.json").read_text())
-    if contract["feature_profile"] != "embedded-native" or contract["stdlib_mode"] != "source-backed":
-        raise ValueError("qualification requires the native source-backed bundle")
+    if contract["feature_profile"] != "embedded-native" or contract["stdlib_mode"] not in ("source-backed", "catalog-backed"):
+        raise ValueError("qualification requires a supported native bundle")
     verify_build_contract(source, args.bundle, contract, args.expect_profile)
     recorded_workspace = verify_workspace_gitlink(source, args.bundle / "share/exomonad/workspace-gitlink.json")
     verify_workspace_bundle(args.bundle / "share/exomonad/workspace.bundle", recorded_workspace,
                             (args.bundle / "share/exomonad/runtime-tools").resolve(strict=True) / "bin/git")
     haskell_sources = declared_haskell_sources(source, args.bundle)
+    if contract["stdlib_mode"] == "catalog-backed":
+        verify_native_catalog(args.bundle, (args.bundle / "share/exomonad/runtime-tools").resolve(strict=True))
     lock = tomllib.loads((source / "Cargo.lock").read_text())
     harness = [row for row in lock["package"] if row["name"] == "harness"]
     if len(harness) != 1:
@@ -526,6 +648,7 @@ def freeze(args) -> Path:
     shutil.copytree(args.browser_driver, root / "share/exomonad/browser-driver", symlinks=False)
     shutil.copy2(source / "build/rust/isolated-libtest.py", root / "share/exomonad/isolated-libtest.py")
     shutil.copy2(source / "build/package/qualification.py", root / "share/exomonad/qualification.py")
+    shutil.copy2(source / "build/package/packaged-catalog-consumer.sh", root / "share/exomonad/packaged-catalog-consumer.sh")
     environment = native_environment(root)
     environment.update(TIDEPOOL_BROWSER_NODE=str(nix_path(args.browser_node)),
                        TIDEPOOL_BROWSER_DRIVER=str(root / "share/exomonad/browser-driver/driver.mjs"),
@@ -549,7 +672,11 @@ def freeze(args) -> Path:
         if item["linkage"] == "dynamic":
             selected.append(Path(item["loader"]))
             selected.extend(Path(path) for path in item["libraries"] if path.startswith("/nix/store/"))
+    if contract["stdlib_mode"] == "catalog-backed":
+        selected.append(Path(contract["native_catalog"]["source_selection"]["snapshot_root"]))
     closure, gc_roots = pin_nix_closure(root, tools, selected)
+    if contract["stdlib_mode"] == "catalog-backed":
+        transfer_catalog_retention(root, contract, gc_roots, tools)
     copied_log = root / "share/exomonad/build.log"
     shutil.copy2(args.build_log, copied_log)
     descriptor = {
@@ -575,26 +702,24 @@ def freeze(args) -> Path:
     root.chmod(root.stat().st_mode & ~0o222)
     return destination
 
-
 def verify_frozen_inventory(root: Path, descriptor: dict) -> None:
     if inventory(root, [DESCRIPTOR]) != descriptor["inventory"]:
         raise ValueError("frozen runtime inventory changed")
     if digest_inventory(descriptor["inventory"]) != descriptor["inventory_sha256"]:
         raise ValueError("runtime inventory digest mismatch")
 
-
 def verify(path: Path) -> dict:
     descriptor = json.loads(path.read_text())
     root = Path(descriptor["bundle_root"])
     if not root.is_absolute() or root != root.resolve(strict=True) or path.absolute() != root / DESCRIPTOR or descriptor["schema"] != 1 or descriptor["kind"] != "native-runtime-qualification":
         raise ValueError("qualification descriptor was relocated or has an unsupported schema")
-    if descriptor["stdlib_mode"] != "source-backed" or descriptor["feature_profile"] != "embedded-native":
+    if descriptor["stdlib_mode"] not in ("source-backed", "catalog-backed") or descriptor["feature_profile"] != "embedded-native":
         raise ValueError("qualification is not the selected native source mode")
     if descriptor["programs"] != programs(root) or descriptor["cohorts"] != cohorts():
         raise ValueError("qualification cannot replace its owned programs or mandatory test cohorts")
     verify_frozen_inventory(root, descriptor)
     contract = json.loads((root / "share/exomonad/native-build-contract.json").read_text())
-    if any(descriptor[field] != contract[field] for field in BUILD_CONTRACT_FIELDS):
+    if any(descriptor.get(field) != contract.get(field) for field in (*BUILD_CONTRACT_FIELDS, "native_catalog")):
         raise ValueError("qualification differs from the owning native build contract")
     if not contract["source_inputs"] or digest_inventory(contract["source_inputs"]) != contract["source_inputs_sha256"]:
         raise ValueError("native build source manifest is missing or has an invalid digest")
@@ -609,6 +734,9 @@ def verify(path: Path) -> dict:
             raise ValueError(f"declared Nix selection changed: {path}")
     tools = Path(descriptor["external_inputs"]["runtime_tools"]["path"])
     expected_roots = {item["store_path"] for item in descriptor["external_inputs"].values()}
+    if descriptor["stdlib_mode"] == "catalog-backed":
+        selection = verify_native_catalog(root, tools)["source_selection"]
+        expected_roots.add(str(Path(selection["snapshot_root"])))
     for item in descriptor["elf_runtime"].values():
         if item["linkage"] == "dynamic":
             expected_roots.add(item["loader_store_path"])
@@ -624,6 +752,7 @@ def verify(path: Path) -> dict:
     for pinned in descriptor["gc_roots"]:
         if Path(pinned["path"]).resolve(strict=True) != Path(pinned["store_path"]):
             raise ValueError("deployment Nix GC root was removed or changed")
+    verify_registered_gc_roots(tools, descriptor["gc_roots"])
     expected_environment = native_environment(root)
     expected_environment.update(
         TIDEPOOL_BROWSER_NODE=descriptor["external_inputs"]["TIDEPOOL_BROWSER_NODE"]["path"],
@@ -635,7 +764,6 @@ def verify(path: Path) -> dict:
     if loader_evidence(root, execution_environment(descriptor)) != descriptor["elf_runtime"]:
         raise ValueError("native runtime loader dependency resolution changed")
     return descriptor
-
 
 def run_cohort(args) -> int:
     if args.jobs <= 0:
@@ -698,7 +826,6 @@ class NativeExecution:
             "exit_code": self.process.returncode, "elapsed_ns": time.monotonic_ns() - self.started_ns,
         })
 
-
 def launch_execution(path: Path, arguments: list[str], *, stdout=None, stderr=None,
                      cache_root: Path | None = None) -> NativeExecution:
     """Expose the same verified operation to CLI and asynchronous observers."""
@@ -716,11 +843,48 @@ def launch_execution(path: Path, arguments: list[str], *, stdout=None, stderr=No
     return NativeExecution(path, descriptor, command, process, started, admitted_digest)
 
 
+def run_catalog_gate(args) -> int:
+    path = args.descriptor.absolute()
+    descriptor = verify(path)
+    if descriptor["stdlib_mode"] != "catalog-backed":
+        raise ValueError("catalog gate requires the qualified native catalog mode")
+    output = args.output.absolute()
+    if output != output.resolve():
+        raise ValueError("catalog gate requires a canonical evidence directory")
+    output.mkdir(parents=True, exist_ok=False)
+    root = Path(descriptor["bundle_root"])
+    tools = Path(descriptor["external_inputs"]["runtime_tools"]["path"])
+    command = [str(tools / "bin/bash"), str(root / "share/exomonad/packaged-catalog-consumer.sh"),
+               str(root), str(path), str(tools / "bin/bwrap"), str(output), str(tools / "bin/python3")]
+    admitted_digest = sha256(path)
+    started = time.monotonic_ns()
+    result = subprocess.run(command, env=execution_environment(descriptor), check=False)
+    records = [json.loads(record.read_text()) for record in sorted((output / "tests").glob("*.json"))]
+    completed = (result.returncode == 0 and len(records) == 1 and records[0].get("test") == CATALOG_TEST
+                 and records[0].get("passed") is True
+                 and records[0].get("execution", {}).get("executed_test_count") == 1
+                 and records[0].get("execution", {}).get("exit_code") == 0)
+    counts = [record.get("execution", {}).get("executed_test_count") for record in records]
+    executed_count = sum(counts) if all(type(count) is int and count >= 0 for count in counts) else None
+    write_json(output / "report.json", {
+        "schema": 1, "kind": "native-catalog-gate", "descriptor": str(path),
+        "descriptor_sha256": admitted_digest, "bundle_root": str(root),
+        "source_oid": descriptor["source_oid"], "harness_revision": descriptor["harness_revision"],
+        "profile": descriptor["profile"], "stdlib_mode": descriptor["stdlib_mode"],
+        "native_catalog": descriptor["native_catalog"], "command": command,
+        "selected_test_count": 1,
+        "executed_test_count": executed_count,
+        "exit_code": result.returncode, "completed": completed,
+        "elapsed_ns": time.monotonic_ns() - started, "tests": records,
+    })
+    return 0 if completed else (result.returncode or 1)
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     snapshot = commands.add_parser("snapshot-sources")
-    for key in ("sources", "effects", "cohort", "output"):
+    for key in ("sources", "effects", "jev-sources", "cohort", "output"):
         snapshot.add_argument("--" + key, required=True, type=Path)
     retained = commands.add_parser("retain-sources")
     for key in ("snapshot", "output", "runtime-tools"):
@@ -728,7 +892,14 @@ def main(argv=None) -> int:
     selected = commands.add_parser("select-sources")
     for key in ("record", "snapshot", "runtime-tools"):
         selected.add_argument("--" + key, required=True, type=Path)
+    catalog = commands.add_parser("build-catalog")
+    for key in ("snapshot", "source-root", "declared-source-root", "retention-record", "retention-record-origin", "runtime-tools", "producer", "frontend", "worker", "deployment", "ghc-libdir", "libraries", "output"):
+        catalog.add_argument("--" + key, required=True, type=Path)
+    gate = commands.add_parser("catalog-gate")
+    gate.add_argument("descriptor", type=Path)
+    gate.add_argument("--output", type=Path, required=True)
     stage = commands.add_parser("assemble")
+    stage.add_argument("--catalog", type=Path)
     for key in ("output", "host", "view-helper", "frontend", "worker", "libtest", "build-sources", "workspace-gitlink", "workspace-git-bundle", "sources", "assets", "libraries", "harness-revision", "runtime-tools", "ghc-libdir", "entrypoint-template"):
         stage.add_argument("--" + key, required=True, type=Path)
     stage.add_argument("--profile", required=True, choices=("fast-dev", "debug", "production"))
@@ -763,6 +934,10 @@ def main(argv=None) -> int:
             print(retain_catalog_sources(args))
         elif args.command == "select-sources":
             print(verify_retained_catalog_sources(args.record, args.snapshot, nix_path(args.runtime_tools)))
+        elif args.command == "build-catalog":
+            build_native_catalog(args)
+        elif args.command == "catalog-gate":
+            return run_catalog_gate(args)
         elif args.command == "assemble":
             assemble(args)
         elif args.command == "freeze":

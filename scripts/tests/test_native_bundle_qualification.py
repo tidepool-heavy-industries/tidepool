@@ -54,12 +54,12 @@ class NativeQualificationTests(unittest.TestCase):
             self.assertEqual(command[command.index('--service-slice') + 1], 'tidepool-completion-build.slice')
             self.assertEqual([command[index + 1] for index, value in enumerate(command) if value == '--exact'], qualification.M2_TESTS)
             self.assertEqual([command[index + 1] for index, value in enumerate(command) if value == '--case-timeout'],
-                             [f'{name}=900' for name in sorted([qualification.M2_SURVIVAL_TEST, qualification.M2_NOMINAL_JOIN_TEST, qualification.M2_CHECKPOINT_RELEASE_TEST])])
+                             [f'{name}=900' for name in sorted([qualification.M2_SURVIVAL_TEST, qualification.M2_NOMINAL_JOIN_TEST, qualification.M2_CHECKPOINT_RELEASE_TEST, qualification.M2_SELECTED_CODING_TEST])])
             self.assertEqual(report['scheduling'], {
                 'jobs': 4, 'effective_jobs': 4, 'delegated_service': True,
                 'service_slice': 'tidepool-completion-build.slice', 'timeout_seconds': 600,
-                'case_timeout_seconds': {name: 900 for name in [qualification.M2_SURVIVAL_TEST, qualification.M2_NOMINAL_JOIN_TEST, qualification.M2_CHECKPOINT_RELEASE_TEST]}})
-            self.assertEqual(report['executed_test_count'], 6)
+                'case_timeout_seconds': {name: 900 for name in [qualification.M2_SURVIVAL_TEST, qualification.M2_NOMINAL_JOIN_TEST, qualification.M2_CHECKPOINT_RELEASE_TEST, qualification.M2_SELECTED_CODING_TEST]}})
+            self.assertEqual(report['executed_test_count'], 7)
             self.assertTrue(report['completed'])
 
     def test_invalid_run_scheduling_refuses_before_verification_or_launch(self):
@@ -254,6 +254,43 @@ class NativeQualificationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'escapes the bundle'):
                 qualification.inventory(root)
 
+    def test_catalog_gate_rejects_source_mode_before_launch(self):
+        with patch.object(qualification, 'verify', return_value={'stdlib_mode': 'source-backed'}), \
+             patch.object(qualification.subprocess, 'run') as execute:
+            with self.assertRaisesRegex(ValueError, 'qualified native catalog mode'):
+                qualification.run_catalog_gate(SimpleNamespace(descriptor=Path('/missing/descriptor'), output=Path('/missing/evidence')))
+        execute.assert_not_called()
+
+    def test_catalog_gate_requires_one_executed_passing_case_and_retains_admitted_digest(self):
+        cases = [('passing', 1, True, 0), ('zero', 0, True, 1), ('unknown', None, True, 1),
+                 ('failed', 1, False, 1), ('missing', None, None, 1)]
+        for label, count, passed, expected_code in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                path = root / 'qualification.json'
+                path.write_text('admitted descriptor')
+                admitted_digest = qualification.sha256(path)
+                output = root / 'evidence'
+                descriptor = {'bundle_root': str(root), 'stdlib_mode': 'catalog-backed',
+                              'external_inputs': {'runtime_tools': {'path': '/pinned/runtime-tools'}},
+                              'environment': {}, 'source_oid': 'a' * 40, 'harness_revision': 'b' * 40,
+                              'profile': 'fast-dev', 'native_catalog': {'catalog_sha256': 'c' * 64}}
+                def execute(command, **kwargs):
+                    self.assertEqual(command, ['/pinned/runtime-tools/bin/bash', str(root / 'share/exomonad/packaged-catalog-consumer.sh'),
+                        str(root), str(path), '/pinned/runtime-tools/bin/bwrap', str(output), '/pinned/runtime-tools/bin/python3'])
+                    if passed is not None:
+                        qualification.write_json(output / 'tests/case.json', {'test': qualification.CATALOG_TEST,
+                            'passed': passed, 'execution': {'executed_test_count': count, 'exit_code': 0}})
+                    path.write_text('changed after admission')
+                    return subprocess.CompletedProcess(command, 0)
+                with patch.object(qualification, 'verify', return_value=descriptor), \
+                     patch.object(qualification.subprocess, 'run', side_effect=execute):
+                    self.assertEqual(qualification.run_catalog_gate(SimpleNamespace(descriptor=path, output=output)), expected_code)
+                report = json.loads((output / 'report.json').read_text())
+                self.assertEqual(report['descriptor_sha256'], admitted_digest)
+                self.assertEqual(report['selected_test_count'], 1)
+                self.assertEqual(report['completed'], expected_code == 0)
+
 
 class CatalogSourceTests(unittest.TestCase):
     def setUp(self):
@@ -263,8 +300,11 @@ class CatalogSourceTests(unittest.TestCase):
         self.sources = self.root / 'sources'
         self.effects = self.root / 'generated'
         self.snapshot = self.root / 'snapshot'
+        self.jev_sources = self.root / 'jev'
+        (self.jev_sources / 'core/Jev').mkdir(parents=True)
+        (self.jev_sources / 'core/Jev/Core.hs').write_text('module Jev.Core where\n')
         self.modules = {
-            'Library': 'lib/Library.hs', 'Actor': 'actors/Actor.hs',
+            'Library': 'lib/Library.hs', 'Actor': 'actors/Actor.hs', 'Jev.Core': 'jev/core/Jev/Core.hs',
             'Tidepool.Effects.Core': 'effects/Tidepool/Effects/Core.hs',
             'Tidepool.Effects.Authored': 'effects/Tidepool/Effects/Authored.hs',
         }
@@ -277,9 +317,9 @@ class CatalogSourceTests(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text('generated ' + relative)
         self.cohort = self.root / 'cohort.json'
-        qualification.write_json(self.cohort, {'component': 'native-helper-contract', 'modules': self.modules})
+        qualification.write_json(self.cohort, {'components': ['native-helper-contract'], 'modules': self.modules})
         self.args = SimpleNamespace(sources=self.sources, effects=self.effects,
-                                    cohort=self.cohort, output=self.snapshot)
+                                    cohort=self.cohort, output=self.snapshot, jev_sources=self.jev_sources)
 
     def test_snapshot_keeps_library_roles_and_uses_declared_generated_bytes(self):
         source = self.sources / 'lib/Library.hs'
@@ -293,7 +333,7 @@ class CatalogSourceTests(unittest.TestCase):
         self.assertEqual((self.snapshot / 'effects/Tidepool/Effects/Core.hs').read_bytes(),
                          (self.effects / 'Tidepool/Effects/Core.hs').read_bytes())
         self.assertFalse((self.snapshot / 'effects/Tidepool/Effects.hs').exists())
-        self.assertEqual((self.snapshot / 'TidepoolCatalog.hs').read_text().count('import '), 4)
+        self.assertEqual((self.snapshot / 'TidepoolCatalog.hs').read_text().count('import '), 5)
         original.write_text('changed after source action')
         self.assertNotEqual((self.snapshot / 'lib/Library.hs').read_bytes(), original.read_bytes())
 
@@ -320,6 +360,9 @@ class CatalogSourceTests(unittest.TestCase):
 
         def add(command, **kwargs):
             observed.append(command)
+            if command[1:3] == ['--query', '--roots']:
+                pins = list((self.root / 'retention/share/exomonad/gc-roots').iterdir())
+                return '\n'.join(str(pin) + ' -> ' + str(retained) for pin in pins)
             self.assertEqual(command[1], '--add')
             staged = Path(command[2])
             self.assertEqual(staged.name, 'tidepool-catalog-sources')
@@ -360,6 +403,176 @@ class CatalogSourceTests(unittest.TestCase):
             Path(value['gc_roots'][0]['path']).unlink()
             with self.assertRaises(FileNotFoundError):
                 qualification.verify_retained_catalog_sources(record, self.snapshot, tools)
+
+    def retained_fixture(self):
+        qualification.snapshot_catalog_sources(self.args)
+        original = self.root / 'registered-source'
+        shutil.copytree(self.snapshot, original)
+        tools = self.root / 'tools'
+        (tools / 'bin').mkdir(parents=True)
+        record = self.root / 'retention' / qualification.RETAINED_CATALOG_SOURCES
+        pin = record.parent / 'gc-roots' / qualification.hashlib.sha256(str(original).encode()).hexdigest()
+        pin.parent.mkdir(parents=True)
+        pin.symlink_to(original)
+        nar = {'roots': [str(original)], 'closure': [str(original)],
+               'nar_hashes': {str(original): 'sha256:original'}}
+        inventory = qualification.catalog_source_inventory(original)
+        qualification.write_json(record, {
+            'schema': 1, 'kind': 'native-catalog-source-retention', 'original_root': str(original),
+            'inventory': inventory, 'inventory_sha256': qualification.digest_inventory(inventory),
+            'nix_closure': nar, 'gc_roots': [{'path': str(pin), 'store_path': str(original),
+                                             'command': ['fixture'], 'exit_code': 0}]})
+        return original, tools, record, pin, nar
+
+    @contextlib.contextmanager
+    def nix_checks(self, nar, pins):
+        def roots(command, **kwargs):
+            self.assertEqual(command[1:3], ['--query', '--roots'])
+            return '\n'.join(str(pin) + ' -> ' + nar['roots'][0] for pin in pins)
+        with patch.object(qualification, 'nix_path', side_effect=lambda path: path.resolve(strict=True)), \
+             patch.object(qualification, 'store_root', side_effect=lambda path: path.resolve(strict=True)), \
+             patch.object(qualification, 'nix_metadata', return_value=nar), \
+             patch.object(qualification.subprocess, 'check_output', side_effect=roots):
+            yield
+
+    def selection(self, original):
+        return {'snapshot_root': str(original), 'roles': qualification.NATIVE_SOURCE_ROLES,
+                'source_files': [[relative, 'b' * 64] for relative, item in
+                    qualification.catalog_source_inventory(original).items()
+                    if item['kind'] == 'file' and relative.endswith('.hs')]}
+
+    def catalog_fixture(self, original, tools, record):
+        bundle = self.root / 'bundle'
+        shared = bundle / 'share/exomonad'
+        catalog = shared / 'catalog/catalog.json'
+        qualification.write_json(catalog, {'schema': 4, 'source_selection': self.selection(original),
+                                          'producer_identity': [3] * 32, 'consumed_worker_identity': [4] * 32,
+                                          'modules': []})
+        shutil.copy2(record, catalog.parent / 'source-retention.json')
+        selected = {'catalog_sha256': qualification.sha256(catalog),
+                    'source_selection': self.selection(original),
+                    'source_inventory_sha256': json.loads(record.read_text())['inventory_sha256'],
+                    'product_inventory_sha256': qualification.digest_inventory(qualification.native_catalog_products(catalog.parent))}
+        qualification.write_json(catalog.parent / qualification.NATIVE_CATALOG_BUILD, {
+            'schema': 1, 'kind': 'native-catalog-build',
+            'producer_target': '//tidepool/toolchain:tidepool-module-package',
+            'retention_record_origin': str(record),
+            'product_inventory': qualification.native_catalog_products(catalog.parent), **selected})
+        contract = {'stdlib_mode': 'catalog-backed', 'native_catalog': selected}
+        qualification.write_json(shared / 'native-build-contract.json', contract)
+        (shared / 'runtime-tools').symlink_to(tools)
+        (shared / 'ghc-libdir.txt').write_text(str(tools) + '\n')
+        return bundle, contract, catalog
+
+    def test_registered_collector_root_is_required_beyond_a_matching_symlink(self):
+        original, tools, record, pin, nar = self.retained_fixture()
+        with self.nix_checks(nar, []), patch.object(qualification.subprocess, 'run'):
+            with self.assertRaisesRegex(ValueError, 'not registered'):
+                qualification.verify_retained_catalog_sources(record, self.snapshot, tools)
+        self.assertEqual(pin.resolve(), original)
+
+    def test_declared_record_copy_keeps_the_original_gc_evidence_location(self):
+        original, tools, record, pin, nar = self.retained_fixture()
+        declared = self.root / 'declared.json'
+        shutil.copy2(record, declared)
+        with self.nix_checks(nar, [pin]), patch.object(qualification.subprocess, 'run'):
+            self.assertEqual(qualification.verify_retained_catalog_sources(
+                declared, self.snapshot, tools, record_origin=record), original)
+            with self.assertRaisesRegex(ValueError, 'GC root is missing'):
+                qualification.verify_retained_catalog_sources(declared, self.snapshot, tools)
+
+    def test_catalog_binds_exact_roles_manifest_and_unmodified_producer_bytes(self):
+        original, tools, record, pin, nar = self.retained_fixture()
+        bundle, contract, catalog = self.catalog_fixture(original, tools, record)
+        with self.nix_checks(nar, [pin]), patch.object(qualification.subprocess, 'run'):
+            environment = qualification.native_environment(bundle)
+            self.assertEqual(environment['TIDEPOOL_PRELUDE_DIR'], str(original / 'lib'))
+            self.assertEqual(environment['TIDEPOOL_COMPILER_MODULES'], str(catalog))
+            self.assertEqual(qualification.verify_native_catalog(bundle, tools), contract['native_catalog'])
+            before = catalog.read_bytes()
+            altered = json.loads(before)
+            altered['source_selection']['roles'].reverse()
+            qualification.write_json(catalog, altered)
+            with self.assertRaisesRegex(ValueError, 'ordered source roles'):
+                qualification.verify_native_catalog(bundle, tools)
+            altered = json.loads(before)
+            altered['source_selection']['source_files'].pop()
+            qualification.write_json(catalog, altered)
+            with self.assertRaisesRegex(ValueError, 'complete source manifest'):
+                qualification.verify_native_catalog(bundle, tools)
+            altered = json.loads(before)
+            altered['consumed_worker_identity'][0] = 9
+            qualification.write_json(catalog, altered)
+            with self.assertRaisesRegex(ValueError, 'product inventory changed'):
+                qualification.verify_native_catalog(bundle, tools)
+            catalog.write_bytes(before)
+            self.assertEqual(qualification.verify_native_catalog(bundle, tools), contract['native_catalog'])
+            self.assertEqual(catalog.read_bytes(), before)
+
+    def test_frozen_bundle_transfers_real_source_root_and_survives_old_pin_removal(self):
+        original, tools, record, pin, nar = self.retained_fixture()
+        bundle, contract, catalog = self.catalog_fixture(original, tools, record)
+        before = catalog.read_bytes()
+        new_pin = bundle / 'share/exomonad/gc-roots' / pin.name
+        new_pin.parent.mkdir(parents=True)
+        new_pin.symlink_to(original)
+        pins = [{'path': str(new_pin), 'store_path': str(original), 'exit_code': 0, 'command': ['fixture']}]
+        with self.nix_checks(nar, [pin, new_pin]), patch.object(qualification.subprocess, 'run'):
+            qualification.transfer_catalog_retention(bundle, contract, pins, tools)
+        pin.unlink()
+        with self.nix_checks(nar, [new_pin]), patch.object(qualification.subprocess, 'run'):
+            qualification.verify_native_catalog(bundle, tools)
+            self.assertEqual(catalog.read_bytes(), before)
+            new_pin.unlink()
+            with self.assertRaises(FileNotFoundError):
+                qualification.verify_native_catalog(bundle, tools)
+
+    def test_native_action_refuses_changed_declared_snapshot_before_production(self):
+        original, tools, record, pin, nar = self.retained_fixture()
+        declared = self.root / 'declared'
+        shutil.copytree(original, declared)
+        (declared / 'actors/Actor.hs').write_text('substituted actor bytes')
+        with self.nix_checks(nar, [pin]), patch.object(qualification.subprocess, 'run') as execute:
+            with self.assertRaisesRegex(ValueError, 'complete declared source snapshot'):
+                qualification.build_native_catalog(SimpleNamespace(
+                    runtime_tools=tools, retention_record=record, snapshot=self.snapshot,
+                    retention_record_origin=record, source_root=original, declared_source_root=declared))
+            self.assertEqual(len(execute.call_args_list), 1)
+            self.assertIn('--verify-path', execute.call_args_list[0].args[0])
+
+    def test_native_action_uses_original_probe_and_explicit_compiler_then_rechecks(self):
+        original, tools, record, pin, nar = self.retained_fixture()
+        paths = {}
+        for name in ('producer', 'frontend', 'worker', 'deployment'):
+            paths[name] = self.root / name
+            paths[name].write_text(name)
+        output = self.root / 'native-products'
+        calls = []
+        def execute(command, **kwargs):
+            calls.append(command)
+            if '--verify-path' in command:
+                return subprocess.CompletedProcess(command, 0)
+            self.assertEqual(command, [str(paths['producer']), 'build', '--source', str(original / 'TidepoolCatalog.hs'),
+                '--target', 'catalogSentinel', '--source-root', str(original), '--output-root', str(output)])
+            env = kwargs['env']
+            self.assertEqual(env['TIDEPOOL_EXTRACT'], str(paths['frontend']))
+            self.assertEqual(env['TIDEPOOL_EXTRACT_WORKER'], str(paths['worker']))
+            self.assertEqual(env['TIDEPOOL_COMPILER_DEPLOYMENT'], str(paths['deployment']))
+            self.assertNotIn('TIDEPOOL_COMPILER_MODULES', env)
+            self.assertNotIn('TIDEPOOL_EXTRACT_DAEMON_SOCKET', env)
+            qualification.write_json(output / 'catalog.json', {'schema': 4, 'source_selection': self.selection(original)})
+            return subprocess.CompletedProcess(command, 0)
+        with self.nix_checks(nar, [pin]), patch.object(qualification.subprocess, 'run', side_effect=execute), \
+             patch.dict(os.environ, {'TIDEPOOL_COMPILER_MODULES': '/ambient/catalog',
+                                     'TIDEPOOL_EXTRACT_DAEMON_SOCKET': '/ambient/daemon'}):
+            qualification.build_native_catalog(SimpleNamespace(
+                runtime_tools=tools, retention_record=record, snapshot=self.snapshot, retention_record_origin=record,
+                source_root=original, declared_source_root=original, ghc_libdir=tools, libraries=tools,
+                output=output, **paths))
+        self.assertEqual(sum('--verify-path' in command for command in calls), 2)
+        self.assertEqual((output / 'source-retention.json').read_bytes(), record.read_bytes())
+        receipt = json.loads((output / qualification.NATIVE_CATALOG_BUILD).read_text())
+        self.assertEqual(receipt['catalog_sha256'], qualification.sha256(output / 'catalog.json'))
 
 
 if __name__ == '__main__':
