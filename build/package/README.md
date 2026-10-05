@@ -1,11 +1,19 @@
-`//build/package:native_runtime_bundle` carries Buck's host, libtest, extractor
-frontend and worker, declared shared libraries, Haskell sources, actors and
-browser assets. With no native catalog selection it uses `source-backed` mode.
-An explicit retained source root or retention record selects `catalog-backed`
-mode and requires the complete valid selection; invalid configuration cannot
-fall back to source compilation. `native_source_runtime_bundle` remains the
-explicit source-backed development target. The older Nix `matched_runtime_bundle`
-is a separate package owner until the native catalog delivery gate passes.
+`//build/package:native_runtime_bundle` is the source-backed release target. It
+carries Buck's host, libtest, extractor frontend and worker, declared shared
+libraries, Haskell sources, actors and browser assets. Retained catalog
+configuration does not change its mode.
+
+`//build/package:native_catalog_runtime_bundle` explicitly selects catalog-backed
+assembly through `//build/package:native_catalog`. It requires the complete
+retained source and compiler selection; invalid inputs refuse assembly. This
+new bundle still requires native catalog build, freeze and consumer qualification
+before delivery. The old Nix matched bundle and its smoke targets are removed.
+
+Both native bundles require executable `bash`, `python3`, `dirname`, `git`,
+`bwrap`, `tmux`, `systemd-run`, `systemctl`, `nix` and `nix-store` in their declared
+runtime-tools closure. Qualification checks these inputs during assembly,
+freezing and runtime environment selection. It cannot substitute ambient Python
+or other executables for missing package inputs.
 
 `//build/package:native_catalog_sources` snapshots the existing runtime `lib`
 and `actors` trees, the genuine generated stable effect modules, and pinned Jev

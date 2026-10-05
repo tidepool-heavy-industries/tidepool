@@ -19,7 +19,60 @@ qualification = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(qualification)
 
 
+def runtime_tools_fixture(root):
+    """Permission fixtures only; these files are never compiler/tool executions."""
+    tools = root / 'runtime-tools-fixture'
+    (tools / 'bin').mkdir(parents=True)
+    for name in qualification.REQUIRED_RUNTIME_EXECUTABLES:
+        path = tools / 'bin' / name
+        path.write_text('source-only executable permission fixture\n')
+        path.chmod(0o755)
+    return tools
+
+
 class NativeQualificationTests(unittest.TestCase):
+    def test_runtime_tool_owner_checks_declared_executable_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            tools = runtime_tools_fixture(root)
+            with patch.object(qualification, 'nix_path', side_effect=lambda path: path.resolve(strict=True)):
+                self.assertEqual(qualification.native_runtime_tools(tools), tools)
+                required = tools / 'bin/nix-store'
+                required.unlink()
+                required.mkdir()
+                with self.assertRaisesRegex(ValueError, 'lack executable nix-store'):
+                    qualification.native_runtime_tools(tools)
+
+    def test_missing_or_nonexecutable_python_refuses_assembly_freeze_and_environment_before_work(self):
+        for stage in ('assemble', 'freeze', 'environment'):
+            for condition in ('missing', 'nonexecutable'):
+                with self.subTest(stage=stage, condition=condition), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    tools = runtime_tools_fixture(root)
+                    python = tools / 'bin/python3'
+                    if condition == 'missing':
+                        python.unlink()
+                    else:
+                        python.chmod(0o644)
+                    bundle = root / 'bundle'
+                    (bundle / 'share/exomonad').mkdir(parents=True)
+                    (bundle / 'share/exomonad/runtime-tools').symlink_to(tools)
+                    output = root / 'assembled'
+                    args = SimpleNamespace(runtime_tools=tools, ghc_libdir=tools, output=output, bundle=bundle)
+                    with patch.object(qualification, 'nix_path', side_effect=lambda path: path.resolve(strict=True)), \
+                         patch.object(qualification.subprocess, 'run') as execute, \
+                         patch.object(qualification.subprocess, 'check_output') as query:
+                        with self.assertRaisesRegex(ValueError, 'lack executable python3'):
+                            if stage == 'assemble':
+                                qualification.assemble(args)
+                            elif stage == 'freeze':
+                                qualification.freeze(args)
+                            else:
+                                qualification.native_environment(bundle)
+                    self.assertFalse(output.exists())
+                    execute.assert_not_called()
+                    query.assert_not_called()
+
     def test_run_forwards_scheduling_and_sealed_watchdogs_and_records_them(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -430,8 +483,7 @@ class CatalogSourceTests(unittest.TestCase):
         qualification.snapshot_catalog_sources(self.args)
         original = self.root / 'registered-source'
         shutil.copytree(self.snapshot, original)
-        tools = self.root / 'tools'
-        (tools / 'bin').mkdir(parents=True)
+        tools = runtime_tools_fixture(self.root)
         record = self.root / 'retention' / qualification.RETAINED_CATALOG_SOURCES
         pin = record.parent / 'gc-roots' / qualification.hashlib.sha256(str(original).encode()).hexdigest()
         pin.parent.mkdir(parents=True)

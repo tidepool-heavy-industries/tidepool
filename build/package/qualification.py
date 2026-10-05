@@ -54,6 +54,9 @@ RETAINED_CATALOG_SOURCES = "share/exomonad/retained-catalog-sources.json"
 NATIVE_CATALOG_BUILD = "native-catalog-build.json"
 NATIVE_SOURCE_ROLES = ["stable_effects", "stdlib", "actors", "jev"]
 CATALOG_TEST = "actor_host::packaged_catalog_tests::packaged_cohort_executes_and_displays_without_build_inputs"
+REQUIRED_RUNTIME_EXECUTABLES = (
+    "bash", "python3", "dirname", "git", "bwrap", "tmux", "systemd-run", "systemctl", "nix", "nix-store",
+)
 
 def programs(root: Path) -> dict:
     return {"libtest": str(root / "bin/tidepool-tests"),
@@ -110,6 +113,17 @@ def nix_path(path: Path) -> Path:
     if not str(resolved).startswith("/nix/store/"):
         raise ValueError(f"toolchain inputs must be declared immutable Nix paths: {path}")
     return resolved
+
+
+def native_runtime_tools(path: Path) -> Path:
+    """Validate the executable closure used by the supported native runtime."""
+    tools = nix_path(path)
+    for name in REQUIRED_RUNTIME_EXECUTABLES:
+        executable = tools / "bin" / name
+        if not executable.is_file() or not os.access(executable, os.X_OK):
+            raise ValueError(f"declared native runtime tools lack executable {name}: {executable}")
+        nix_path(executable)
+    return tools
 
 def store_root(path: Path) -> Path:
     return Path(*nix_path(path).parts[:4])
@@ -553,8 +567,8 @@ def verify_workspace_bundle(bundle: Path, record: dict, git: Path) -> None:
                        stdout=subprocess.DEVNULL)
 
 def native_environment(root: Path) -> dict:
+    tools = native_runtime_tools(root / "share/exomonad/runtime-tools")
     ghc = (root / "share/exomonad/ghc-libdir.txt").read_text().strip()
-    tools = (root / "share/exomonad/runtime-tools").resolve(strict=True)
     environment = {
         "TIDEPOOL_EXTRACT": str(root / "bin/tidepool-extract"),
         "TIDEPOOL_EXTRACT_WORKER": str(root / "bin/tidepool-extract-bin"),
@@ -633,6 +647,7 @@ def loader_evidence(root: Path, environment: dict) -> dict:
     return evidence
 
 def assemble(args) -> None:
+    tools, ghc = native_runtime_tools(args.runtime_tools), nix_path(args.ghc_libdir)
     root = args.output.resolve()
     root.mkdir(parents=True, exist_ok=True)
     (root / "bin").mkdir(exist_ok=True)
@@ -653,7 +668,6 @@ def assemble(args) -> None:
     shutil.copy2(args.harness_revision, shared / "harness-source-revision.txt")
     shutil.copy2(args.workspace_gitlink, shared / "workspace-gitlink.json")
     shutil.copy2(args.workspace_git_bundle, shared / "workspace.bundle")
-    tools, ghc = nix_path(args.runtime_tools), nix_path(args.ghc_libdir)
     verify_workspace_bundle(shared / "workspace.bundle", workspace_gitlink(shared / "workspace-gitlink.json"), tools / "bin/git")
     (shared / "runtime-tools").symlink_to(tools)
     (shared / "ghc-libdir.txt").write_text(str(ghc) + "\n")
@@ -679,6 +693,7 @@ def assemble(args) -> None:
         verify_native_catalog(root, tools)
 
 def freeze(args) -> Path:
+    tools = native_runtime_tools(args.bundle / "share/exomonad/runtime-tools")
     source = args.source_root.resolve(strict=True)
     oid = subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
     if subprocess.check_output(["git", "-C", str(source), "status", "--porcelain", "--untracked-files=no", "--ignore-submodules=untracked"], text=True).strip():
@@ -698,10 +713,10 @@ def freeze(args) -> Path:
     verify_build_contract(source, args.bundle, contract, args.expect_profile)
     recorded_workspace = verify_workspace_gitlink(source, args.bundle / "share/exomonad/workspace-gitlink.json")
     verify_workspace_bundle(args.bundle / "share/exomonad/workspace.bundle", recorded_workspace,
-                            (args.bundle / "share/exomonad/runtime-tools").resolve(strict=True) / "bin/git")
+                            tools / "bin/git")
     original_sources = None
     if contract["stdlib_mode"] == "catalog-backed":
-        selection = verify_native_catalog(args.bundle, (args.bundle / "share/exomonad/runtime-tools").resolve(strict=True))["source_selection"]
+        selection = verify_native_catalog(args.bundle, tools)["source_selection"]
         original_sources = Path(selection["snapshot_root"])
     haskell_sources = declared_haskell_sources(source, args.bundle, original_sources)
     lock = tomllib.loads((source / "Cargo.lock").read_text())
@@ -812,7 +827,7 @@ def verify(path: Path) -> dict:
         path = nix_path(Path(item["path"]))
         if str(store_root(path)) != item["store_path"]:
             raise ValueError(f"declared Nix selection changed: {path}")
-    tools = Path(descriptor["external_inputs"]["runtime_tools"]["path"])
+    tools = native_runtime_tools(Path(descriptor["external_inputs"]["runtime_tools"]["path"]))
     expected_roots = {item["store_path"] for item in descriptor["external_inputs"].values()}
     if descriptor["stdlib_mode"] == "catalog-backed":
         selection = verify_native_catalog(root, tools)["source_selection"]
