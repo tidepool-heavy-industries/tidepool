@@ -469,10 +469,10 @@ mod tests {
     #[test]
     #[serial]
     fn successful_compilation_retains_original_inputs_after_native_execution_failure() {
-        use session::prepared::{PreparedEngine, PreparedRuntimeError};
+        use std::sync::{atomic::AtomicBool, Arc};
         use tidepool_codegen::host_fns::RuntimeError as NativeError;
-        use tidepool_codegen::prepared_program::ExecutionError;
-        use tidepool_codegen::suspension::RealmId;
+        use tidepool_codegen::prepared_program::{CompiledProgram, ExecutionError, RunOptions};
+        use tidepool_repr::execution_schema::{link_program, MachineImports};
 
         tidepool_testing::eval_harness::require_extract();
         let _diagnostic_scope = DiagnosticTestScope::when_not_owned_by_runner();
@@ -492,19 +492,30 @@ mod tests {
         );
         let source = format!("module {module} where\nresult :: Int\nresult = error \"diagnostic native execution failure\"\n");
         let compiled = compile_haskell(&source, "result", &[]).expect("genuine compiler control");
-        let (mut engine, program) = PreparedEngine::bootstrap(compiled.prepared.into_prepared())
-            .expect("genuine prepared native installation");
-        let failure = engine
-            .run_settled(program, RealmId::ROOT)
-            .err()
-            .expect("the admitted program must fail during native execution");
+        let prepared = compiled.prepared.into_prepared();
+        let entry = prepared.entry();
+        let linked = link_program(prepared, &MachineImports::default())
+            .expect("genuine prepared native admission");
+        let image = CompiledProgram::compile(&linked).expect("genuine prepared native compilation");
+        // This authored entry returns a plain Int. The codegen entry owner
+        // executes it directly; a resident turn's Settled scaffold is separate.
+        let failure = image
+            .run_entry(
+                entry,
+                &[],
+                &RunOptions::default(),
+                Arc::new(AtomicBool::new(false)),
+            )
+            .expect_err("the admitted program must fail during native execution");
         assert!(
-            matches!(failure, PreparedRuntimeError::Run(ExecutionError::Runtime(ref error))
-            if matches!(error.cause, NativeError::UserError | NativeError::RaisedException
-                | NativeError::RaisedExceptionMessage(_) | NativeError::WiredInError { .. })),
+            matches!(failure, ExecutionError::Runtime(ref error)
+                if matches!(error.cause, NativeError::UserError | NativeError::RaisedException)
+                || matches!(&error.cause, NativeError::RaisedExceptionMessage(message)
+                    | NativeError::WiredInError { message, .. }
+                    if message.contains("diagnostic native execution failure"))),
             "{failure:?}"
         );
-        drop(engine);
+        drop(image);
         let transaction = std::fs::read_dir(root.join("compiler-transactions"))
             .unwrap()
             .filter_map(Result::ok)
@@ -523,9 +534,21 @@ mod tests {
             report["original_directory"],
             transaction.path().to_string_lossy().as_ref()
         );
-        assert!(transaction.path().join("compiler-request.bin").is_file());
-        assert!(transaction.path().join("result.prepared.cbor").is_file());
-        assert!(transaction.path().join("consumed-sources.json").is_file());
+        for name in [
+            "compiler-request.bin",
+            "result.prepared.cbor",
+            "dependencies.json",
+            "certified-products.cbor",
+            "module-products.cbor",
+            "meta.cbor",
+            "consumed-sources.json",
+        ] {
+            let path = transaction.path().join(name);
+            assert!(
+                path.is_file() && path.metadata().unwrap().len() > 0,
+                "{path:?}"
+            );
+        }
     }
 
     /// The extractor captures the GHC-inferred type of the eval's top
