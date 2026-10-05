@@ -1540,16 +1540,42 @@ fn native_input_generation_retains_original_type_owner_after_source_readers_drop
         .artifact_view
         .inventory()
         .clone();
-    let original = fixture
+    let (original_unit, original_module, original_seal) = fixture
+        .producer
+        .asks
+        .iter()
+        .filter_map(|site| site.input_type_witnesses.first().and_then(Option::as_ref))
+        .flat_map(|witness| witness.interface_seals())
+        .find(|(_, module, _)| *module == "ActivationInputOriginal")
+        .map(|(unit, module, seal)| (unit.to_owned(), module.to_owned(), seal.to_owned()))
+        .expect("original input witness authenticates its private home type owner");
+    let producer_descriptors = fixture
         .producer
         .certification
         .as_ref()
         .unwrap()
         .artifact_view
-        .descriptors()
-        .into_iter()
-        .find(|descriptor| descriptor.owner.module == "ActivationInputOriginal")
-        .expect("compiler retained the actual original private home interface");
+        .descriptors();
+    let original = producer_descriptors
+        .iter()
+        .filter(|descriptor| {
+            descriptor.kind
+                == tidepool_toolchain::artifact_inventory::ArtifactKind::CanonicalModuleInterface
+        })
+        .find(|descriptor| {
+            descriptor.owner.unit == original_unit && descriptor.owner.module == original_module
+        })
+        .cloned()
+        .expect("compiler retained the actual original canonical home interface");
+    assert_eq!(
+        original
+            .interface_sha256
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>(),
+        original_seal,
+        "canonical interface seal matches the original authenticated input witness"
+    );
     let mut resident = fixture.fresh();
     let reservation = fixture.start(&mut resident);
     let (_submission, hole) = fixture.deliver(&mut resident, reservation, 1);
@@ -1581,11 +1607,28 @@ fn native_input_generation_retains_original_type_owner_after_source_readers_drop
     drop(producer);
     std::fs::remove_dir_all(root.path().join("home")).unwrap();
     let retained = evidence.compile_context(None).unwrap();
-    assert!(retained
-        .declarations()
-        .artifact_view()
-        .descriptors()
-        .contains(&original));
+    let retained_descriptors = retained.declarations().artifact_view().descriptors();
+    eprintln!(
+        "ACTIVATION_TYPE_CUSTODY {}",
+        serde_json::json!({
+            "selected": original,
+            "producer": producer_descriptors,
+            "retained": retained_descriptors,
+        })
+    );
+    assert!(
+        retained_descriptors.contains(&original),
+        "original canonical owner, producer and interface seals must survive: selected={original:?}, producer={producer_descriptors:?}, retained={retained_descriptors:?}"
+    );
+    assert_eq!(
+        retained.declarations().toolchain_identity_sha256(),
+        original.producer_sha256,
+        "type context retains the canonical interface's authenticated producer"
+    );
+    assert!(
+        retained.declarations().recovery_products().is_empty(),
+        "type custody grants no original native products"
+    );
     assert!(
         retained.declarations().lexical_graph().is_empty(),
         "type custody grants no source names"
