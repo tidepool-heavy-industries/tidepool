@@ -12,7 +12,11 @@ import Data.List (isInfixOf, nub, sort)
 import Data.String (fromString)
 import Data.Set qualified as Set
 import Data.Text qualified as Text
-import GHC (moduleNameString)
+import GHC (moduleNameString, mkModuleName, ModSummary(ms_location, ms_mod_name))
+import GHC.Driver.Env (hsc_mod_graph)
+import GHC.Unit.Module.Graph (ModuleGraphNode(..), mgModSummaries')
+import GHC.Unit.Module.ModGuts (CgGuts(..))
+import GHC.Unit.Home.ModInfo (HomeModInfo(hm_iface))
 import GHC.Builtin.Types (boolTy)
 import GHC.Core (Expr(..), bindersOf, flattenBinds)
 import GHC.Core.DataCon (dataConName, dataConRepArgTys)
@@ -36,13 +40,20 @@ import GHC.Unit.Types (moduleName)
 import System.Directory
   ( createDirectory, createDirectoryIfMissing, getTemporaryDirectory, makeAbsolute, removeFile, removePathForcibly )
 import System.IO (openTempFile, hClose)
+import System.Mem.StableName (StableName, makeStableName)
 import System.FilePath ((</>), normalise)
 import GHC.Types.SourceError (SourceError)
 import Tidepool.DiagJson (Diag(..), DiagSeverity(..), diagsFromSourceError)
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedPipelineResult(..), CompilePurpose(..)
   , PipelineResult(..), runPipelineSelected, withResidentPipelineSelected )
-import Tidepool.PreparedStg (pmModule, pmBindings, pmYieldSites, pmPreparedSites, pmTypeGraph, pmSiteRejections)
+import Tidepool.PreparedStg
+  ( pmModule, pmCoverage, pmBindings, pmYieldSites, pmPreparedSites, pmTypeGraph, pmSiteRejections
+  , RecoveredModuleInput(..), prepareRecoveredModule, newPreparedBodyCache, newPreparedBodyPreparer
+  , preparedUsesSiteAuthority )
+import Tidepool.FinalizedModule (FinalizedModule(..))
+import Tidepool.FatIface
+  ( OwnerInterfaceContext(..), newOwnerInterfaceCache, cacheOwnerInterface )
 import qualified Data.Map.Strict as Map
 import qualified Tidepool.ExecutionProjection as Projection
 import qualified Tidepool.ExecutionSchema as Schema
@@ -793,6 +804,10 @@ tests :: TestTree
 tests = testGroup "prepared-stg-pipeline"
   [ testCase "original constructor reply identities and type evidence" $
       withCaseScratch "constructor-reply-identity" runTypeEvidenceChecks
+  , testCase "recovered typed sites and intrinsic refusal" $
+      withCaseScratch "recovered-typed-sites" verifyRecoveredTypedPreparation
+  , testCase "intrinsic-free memo reuse and site request invalidation" $
+      withCaseScratch "prepared-cache-lifetime" verifyTypedPreparationCacheLifetime
   , testCase "original prepared pipeline and compiler authority" fullMain
   , testCase "projection interning and constructor conflicts" $
       withCaseScratch "projection-interning" verifyProjectionInterning
@@ -801,6 +816,129 @@ tests = testGroup "prepared-stg-pipeline"
   , testCase "original product catalogue" $
       withCaseScratch "original-product-catalogue" verifyOriginalProductCatalogue
   ]
+
+-- Every control starts from actual GHC finalized output. The recovered body
+-- cache receives its defining location/type context from that same output.
+writeTypedPreparationFixture :: FilePath -> IO FilePath
+writeTypedPreparationFixture dir = do
+  writeRequestSiteFixture dir
+  readFile "test-prepared-stg/site-fixtures/TypedPreparationActor.hs" >>=
+    writeFile (dir </> "Tidepool" </> "Actor.hs")
+  mapM_ (\name -> readFile ("test-prepared-stg/site-fixtures" </> name ++ ".hs")
+      >>= writeFile (dir </> name ++ ".hs"))
+    ["TypedPreparationOwner", "TypedPreparationPlain", "TypedPreparationEntry"]
+  pure (dir </> "TypedPreparationEntry.hs")
+
+preparedFixtureOwner :: String -> PreparedPipelineResult -> PreparedModule
+preparedFixtureOwner name result = case filter
+    ((== name) . moduleNameString . moduleName . pmModule) (pprModules result) of
+  [owner] -> owner
+  _ -> error ("missing prepared fixture owner " ++ name)
+
+finalizedFixtureOwner :: String -> PreparedPipelineResult -> FinalizedModule
+finalizedFixtureOwner name result = case Map.lookup (mkModuleName name) (pprFinalizedModules result) of
+  Just owner -> owner
+  Nothing -> error ("missing finalized fixture owner " ++ name)
+
+recoveredFixtureInput :: String -> PreparedPipelineResult -> RecoveredModuleInput
+recoveredFixtureInput name result = case
+    [ms_location summary | ModuleNode _ summary <- mgModSummaries'
+      (hsc_mod_graph (prHscEnv (pprPipelineResult result)))
+    , ms_mod_name summary == mkModuleName name] of
+  [location] -> RecoveredModuleInput (cg_module guts) location (cg_tycons guts) (cg_binds guts)
+  _ -> error ("missing defining fixture location " ++ name)
+  where guts = finalizedTidyGuts (finalizedFixtureOwner name result)
+
+verifyRecoveredTypedPreparation :: FilePath -> IO ()
+verifyRecoveredTypedPreparation dir = do
+  source <- writeTypedPreparationFixture dir
+  result <- runPipelineSelected PreparedStg source [dir]
+  let env = prHscEnv (pprPipelineResult result)
+      owner = preparedFixtureOwner "TypedPreparationOwner" result
+  assert (length (pmYieldSites owner) == 1 && null (pmSiteRejections owner))
+    "fresh valid control lacks its issued typed site"
+  recovered <- prepareRecoveredModule env (recoveredFixtureInput "TypedPreparationOwner" result)
+  assert (pmCoverage recovered == ExactBodySubset && preparedUsesSiteAuthority recovered
+      && length (pmYieldSites recovered) == 1 && null (pmSiteRejections recovered)
+      && not (null (pmPreparedSites recovered)))
+    "recovered typed Core bypassed site/carrier elaboration"
+  let replaced = result { pprModules = recovered : filter
+        ((/= pmModule recovered) . pmModule) (pprModules result) }
+  assertProjects "recovered unrelated entry" (projectEntry replaced "TypedPreparationOwner" "unrelated" mempty)
+  assertProjects "recovered issued receive" (projectEntry replaced "TypedPreparationOwner" "answer" mempty)
+  case projectEntry result "Tidepool.Actor" "receive" mempty of
+    Left Projection.UnelaboratedCompilerIntrinsic{} -> pure ()
+    other -> fail ("emitted unsited intrinsic definition escaped: "
+      ++ either show (const "projected executable") other)
+  assertProjects "unused intrinsic definition is omitted"
+    (projectEntry result "TypedPreparationOwner" "unrelated" mempty)
+  assertProjects "same occurrence in another original owner is ordinary code"
+    (projectEntry result "TypedPreparationPlain" "receive" mempty)
+  let context = Projection.ProjectionContext
+        { Projection.projectionProfile = "ghc-9.12-prepared-stg"
+        , Projection.projectionToolchain = "ghc-9.12.2"
+        , Projection.projectionTarget =
+            Schema.TargetDescriptor Schema.X86_64 Schema.LittleEndian 64 64 "sysv64" []
+        , Projection.projectionRetainedGenerations = mempty
+        , Projection.projectionEntry = Schema.SymbolIdentity "main" "TypedPreparationOwner"
+            "value" "unrelated" Nothing
+        , Projection.projectionAuxiliaryRoots = []
+        , Projection.projectionFormattingAuthority = Nothing
+        , Projection.projectionTimeAuthority = Nothing
+        , Projection.projectionJsonAuthority = Nothing
+        , Projection.projectionTextUnit = Nothing
+        }
+      interfaces = Map.map (hm_iface . finalizedHomeModInfo) (pprFinalizedModules result)
+      products = Projection.projectOriginalHomeModuleProducts env interfaces context mempty
+        (pprModules result)
+      intrinsicRefused omission = case Projection.omittedOriginalReason omission of
+        Projection.ProjectionFailed Projection.UnelaboratedCompilerIntrinsic{} -> True
+        _ -> False
+  assert (any (any intrinsicRefused . snd) (Projection.preparedModuleProductOmissions products))
+    "original product emission did not omit its unelaborated intrinsic definition"
+
+verifyTypedPreparationCacheLifetime :: FilePath -> IO ()
+verifyTypedPreparationCacheLifetime dir = do
+  source <- writeTypedPreparationFixture dir
+  withResidentPipelineSelected [dir] $ \compile -> do
+    cold <- compile PreparedStg mempty GeneralCompile Nothing source [] Nothing
+    warm <- compile PreparedStg mempty GeneralCompile Nothing source [] Nothing
+    let plain = preparedFixtureOwner "TypedPreparationPlain"
+        sited = preparedFixtureOwner "TypedPreparationOwner"
+        finalized = finalizedTidyGuts . finalizedFixtureOwner "TypedPreparationOwner"
+        identity :: a -> IO (StableName a)
+        identity value = evaluate value >>= makeStableName
+    assert (not (preparedUsesSiteAuthority (plain cold)) && preparedUsesSiteAuthority (sited cold))
+      "owning typed census misclassified cache controls"
+    coldPlain <- identity (plain cold)
+    warmPlain <- identity (plain warm)
+    coldSite <- identity (sited cold)
+    warmSite <- identity (sited warm)
+    coldCore <- identity (finalized cold)
+    warmCore <- identity (finalized warm)
+    assert (coldPlain == warmPlain) "intrinsic-free prepared memo was rebuilt"
+    assert (coldSite /= warmSite) "site-bearing prepared memo crossed a request boundary"
+    assert (coldCore == warmCore) "site request invalidation replayed stable finalization"
+    owners <- newOwnerInterfaceCache
+    bodies <- newPreparedBodyCache
+    let env = prHscEnv (pprPipelineResult cold)
+        input name = recoveredFixtureInput name cold
+    mapM_ (\name -> let recovered = input name in cacheOwnerInterface owners
+        (recoveredModule recovered) (OwnerInterfaceContext (recoveredLocation recovered) (recoveredTyCons recovered)))
+      ["TypedPreparationPlain", "TypedPreparationOwner"]
+    request <- newPreparedBodyPreparer env owners bodies
+    nextRequest <- newPreparedBodyPreparer env owners bodies
+    let prepare current name = let recovered = input name in
+          current (recoveredModule recovered) (recoveredBindings recovered)
+            >>= either (fail . show) pure
+    stable <- prepare request "TypedPreparationPlain" >>= identity
+    stableAgain <- prepare nextRequest "TypedPreparationPlain" >>= identity
+    scoped <- prepare request "TypedPreparationOwner" >>= identity
+    scopedAgain <- prepare request "TypedPreparationOwner" >>= identity
+    nextScoped <- prepare nextRequest "TypedPreparationOwner" >>= identity
+    assert (stable == stableAgain) "intrinsic-free recovered body lost stable reuse"
+    assert (scoped == scopedAgain && scoped /= nextScoped)
+      "recovered typed-site cache did not retain exactly one request lifetime"
 
 withCaseScratch :: String -> (FilePath -> IO a) -> IO a
 withCaseScratch name action = bracket temporary removePathForcibly action
