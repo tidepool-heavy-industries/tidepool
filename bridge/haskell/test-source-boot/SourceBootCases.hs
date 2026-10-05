@@ -15,6 +15,7 @@ import Tidepool.Test.GenuineCandidate
 
 import Codec.CBOR.Write (toStrictByteString)
 import Codec.CBOR.Read (deserialiseFromBytes)
+import Codec.CBOR.Decoding (decodeListLen, decodeString)
 import Codec.CBOR.Term (Term(..), decodeTerm, encodeTerm)
 import Data.ByteString.Lazy qualified as BSL
 import Control.Exception (SomeException, IOException, AsyncException(ThreadKilled), bracket, evaluate, finally, try, fromException, onException, mask, catches, Handler(..), throwIO)
@@ -82,7 +83,7 @@ import GHC.Unit.Types (unitString, unitIdString, stringToUnit, GenWithIsBoot(..)
 import Numeric (showHex)
 import System.Directory
   ( copyFile, createDirectory, createDirectoryIfMissing, removeDirectoryRecursive
-  , removeFile, renameFile, listDirectory, doesFileExist, getPermissions, setPermissions, executable
+  , removeFile, renameFile, listDirectory, doesFileExist, doesDirectoryExist, getPermissions, setPermissions, executable
   , getModificationTime, setModificationTime, withCurrentDirectory, getCurrentDirectory, canonicalizePath )
 import System.Environment (setEnv, lookupEnv, unsetEnv)
 import System.Exit (ExitCode(..))
@@ -138,7 +139,7 @@ import Tidepool.GhcPipeline
   , retainedCompilerArtifactClosure, retainedCompilerInterface
   , renderType, generatedScaffoldRecipe, activationPreviewInputType, withSourceImportIntents
   , CompilePurpose(..), runPipelineSelected, runPipelineSessionSelected, withResidentPipelineSelected
-  , withResidentPipelineSelectedRequests )
+  , withResidentPipelineSelectedRequests, withExactInterfaceTransaction )
 import Tidepool.ModuleCandidates (ModuleCandidate(..), CandidateGroup(..), CandidateGlobal(..)
   , readModuleCandidates, readModuleCandidatesWithGraphs, candidateExecutionSources, candidateOriginalIdentity
   , candidateCoreDescriptor, captureCandidateManifest, readCapturedModuleCandidatesWithGraphs)
@@ -147,7 +148,9 @@ import Tidepool.PreparedStg (PreparedModule(..), PreparedCoverage(..))
 import Tidepool.FatIface (readExactInterface)
 import Tidepool.Session (SessionScope(..), emptySessionScope)
 import Tidepool.RetainedUnfoldings (scopeRetainedSummaryHscEnv)
-import Tidepool.SessionArtifacts (mkBoundBinders, parseValModule)
+import Tidepool.SessionArtifacts (mkBoundBinders, parseValModule, emitHostBindingInterface)
+import Tidepool.DeclarationJoin (HostBindingInterfaceInput(..), BindingInterfacePurpose(..)
+  , DeclarationOperation(..), encodeHostBindingInterface, readDeclarationOperation)
 import Tidepool.Session (sessionHiPath, Generation(..), SessionModule(..), SessionModuleKind(..))
 import Tidepool.ExactScope
   ( ExactScope(..), ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..)
@@ -160,8 +163,8 @@ import Tidepool.ExactScope
   , originalGroupFromCandidate
   , extendExactExecutionSources, extendExactExecutionSourcesWithinBudget, scopeExecutionNativeOwners )
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
-import Tidepool.CheckedCell (CheckedSignature(..), RequestTypeSignatures(..), RequestHelperRecipe(..), captureCheckedSignature, encodeCheckedSignature, encodeRequestTypeSignatures
-  , captureCheckedTypeWitness, sealCheckedTypeWitness, encodeCheckedTypeWitness, rewriteCheckedAnnotations, rewriteHostInputType, rewriteRequestTypes, NativeParsedModule(..), thenNativeModule, typecheckNativeModule, typecheckNativeModuleWithDiagnostics)
+import Tidepool.CheckedCell (CheckedSignature(..), RequestTypeSignatures(..), RequestHelperRecipe(..), captureCheckedSignature, encodeCheckedSignature, decodeCheckedSignature, encodeRequestTypeSignatures
+  , captureCheckedTypeWitness, sealCheckedTypeWitness, encodeCheckedTypeWitness, validateCheckedTypeWitnessBytes, rewriteCheckedAnnotations, rewriteHostInputType, rewriteRequestTypes, NativeParsedModule(..), thenNativeModule, typecheckNativeModule, typecheckNativeModuleWithDiagnostics)
 import Tidepool.TurnSource (replaceTemplateMarker, spliceTemplate)
 import Tidepool.Binders (BoundBinder(..), analyzeCellWithFlags, CellSourcePlan(..))
 import Tidepool.ExecutionSource
@@ -2471,6 +2474,133 @@ nativeCheckedSignaturesTest = withScratch $ \work -> do
         liftIO $ unless (case refusedRequest of Left _ -> True; Right _ -> False)
           (fail "request recipe admitted missing, qualified, duplicated or unauthorized native slots")
   putStrLn "native checked signatures: 7 shapes, source-free nominal slot and authority/slot refusals passed"
+
+originalHomeThinInterfaceTest :: IO ()
+originalHomeThinInterfaceTest = originalThinInterfaceTest False
+
+packageOnlyThinInterfaceTest :: IO ()
+packageOnlyThinInterfaceTest = originalThinInterfaceTest True
+
+-- Compile once to obtain genuine original authority, then remove the source.
+-- The only operation below that removal is the native interface transaction.
+originalThinInterfaceTest :: Bool -> IO ()
+originalThinInterfaceTest packageOnly = withScratch $ \work -> do
+  let source = work </> "HostActivationOwner.hs"
+      output = work </> "thin-output"
+      manifest = work </> "thin-offer.cbor"
+  if packageOnly then writeFile source (unlines
+    ["module HostActivationOwner where", "import Data.Text (Text)"
+    ,"__result :: Text", "__result = undefined"])
+    else copyFile "test-source-boot/fixtures/HostActivationOwnerOriginal.hs" source
+  original <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty GeneralCompile Nothing source [work] Nothing
+  let pipeline = pprPipelineResult original
+  ty <- maybe (fail "thin fixture has no native input type") pure (prResultType pipeline)
+  raw <- captureCheckedTypeWitness (prHscEnv pipeline) ty
+    >>= maybe (fail "thin fixture has no canonical input witness") pure
+  originals <- newOriginalInterfaceArtifacts (prHscEnv pipeline) (pprFinalizedModules original) [] work
+  sealed <- sealCheckedTypeWitness originals raw
+    >>= maybe (fail "thin fixture input witness is unsealed") pure
+  offered <- maybe (fail "thin fixture cannot encode sealed witness") (pure . toStrictByteString)
+    (encodeCheckedTypeWitness sealed)
+  witnessTerm <- term offered
+  signature <- either (fail . show) (pure . snd)
+    (deserialiseFromBytes (decodeListLen >> decodeString >> decodeString >> decodeCheckedSignature)
+      (BSL.fromStrict offered))
+  fixture <- capturePreparedFixture work original
+  scopePath <- writeGenuineMetadataScope work ["HostActivationOwner" | not packageOnly] fixture
+  scope <- readExactScope scopePath >>= either fail pure
+  removeFile source
+  createDirectory output
+  let producer = scopeProducerSha256 scope
+      input = HostBindingInterfaceInput producer (replicate 64 'a') 71 "sessionInput"
+        signature scopePath output (OriginalLiveInput offered)
+      emit generation purpose supplied = withExactInterfaceTransaction [] $ \environment ->
+        emitHostBindingInterface environment producer generation "sessionInput" supplied scopePath output purpose
+      replace index value values = take index values ++ [value] ++ drop (index + 1) values
+      encoded = toStrictByteString . encodeTerm
+      refuseOffer value = do
+        BS.writeFile manifest value
+        refused <- try (readDeclarationOperation manifest) :: IO (Either IOException DeclarationOperation)
+        unless (case refused of Left _ -> True; Right _ -> False)
+          (fail "thin offer admitted malformed or legacy authority")
+  BS.writeFile manifest (encodeHostBindingInterface input)
+  decoded <- readDeclarationOperation manifest
+  unless (decoded == EmitHostBindingInterface input) (fail "thin offer lost original payload bytes")
+  offerFields <- term (encodeHostBindingInterface input) >>= \case
+    TList values -> pure values
+    _ -> fail "thin offer is not a row"
+  forM_ [replace 1 (TString "1") offerFields
+        ,take 9 offerFields
+        ,replace 9 (TList [TString "unknown"]) offerFields
+        ,replace 9 (TList [TString "host-built", TBytes offered]) offerFields
+        ,replace 9 (TList [TString "original-live-input"]) offerFields
+        ,replace 9 (TList [TString "original-live-input", TBytes (BS.replicate (4 * 1024 * 1024 + 1) 0)]) offerFields] $
+    refuseOffer . encoded . TList
+  refuseOffer (encodeHostBindingInterface input <> BS.singleton 0)
+  refuseOffer (BS.pack [0x98, 10] <> BS.drop 1 (encodeHostBindingInterface input))
+  case witnessTerm of
+    TList values -> do
+      let badNative = signature { signatureInterface = signatureInterface signature <> BS.singleton 0 }
+      badSignature <- term (toStrictByteString (encodeCheckedSignature badNative))
+      requireUserError "original signature authentication" "original input witness native signature differs from offer"
+        (emit 72 (OriginalLiveInput (encoded (TList (replace 2 badSignature values)))) signature)
+      case values !! 3 of
+        TBytes shape -> do
+          altered <- term shape >>= \case
+            TList [tag, owner, TList arguments] -> pure (TList [tag, owner, TList (arguments ++ [TList [tag, owner, TList arguments]])])
+            _ -> fail "thin fixture has no nominal canonical structure"
+          let mismatch = encoded (TList (replace 3 (TBytes (encoded altered)) values))
+          requireUserError "same owner different structure" "original input type structure or original interface seals differ from offer"
+            (emit 76 (OriginalLiveInput mismatch) signature)
+        _ -> fail "thin fixture canonical structure is not bytes"
+      case values !! 4 of
+        TList (TList seal : seals) -> do
+          let mismatched = TList (replace 4 (TList (TList (replace 2 (TString (T.replicate 64 "0")) seal) : seals)) values)
+          requireUserError "original interface seals" "original input type structure or original interface seals differ from offer"
+            (emit 73 (OriginalLiveInput (encoded mismatched)) signature)
+          let missing = encoded (TList (replace 4 (TList seals) values))
+          unless (case validateCheckedTypeWitnessBytes missing of Left _ -> True; Right _ -> False)
+            (fail "canonical witness admitted missing owner seals")
+        _ -> fail "thin fixture has no original nominal owner seals"
+      forM_ [offered <> BS.singleton 0, BS.pack [0x98, 5] <> BS.drop 1 offered
+            ,encoded (TList (replace 1 (TString "2") values))] $ \invalid ->
+        unless (case validateCheckedTypeWitnessBytes invalid of Left _ -> True; Right _ -> False)
+          (fail "canonical witness admitted a malformed envelope")
+    _ -> fail "thin fixture witness is not a row"
+  withExactInterfaceTransaction [] $ \environment ->
+    requireUserError "original producer" "host interface producer differs from exact scope"
+      (emitHostBindingInterface environment (replicate 64 '0') 74 "sessionInput" signature scopePath output (OriginalLiveInput offered))
+  unless packageOnly $
+    requireUserError "host-builder authority" "checked signature has no authenticated host representation"
+      (emit 75 HostBuilt signature)
+  (binder, issued) <- emit 71 (OriginalLiveInput offered) signature
+  unless (isNothing (bbHostAuthority binder)) (fail "original live input acquired host-builder authority")
+  fresh <- case issued of
+    OriginalLiveInput bytes -> pure bytes
+    HostBuilt -> fail "original live input returned a host-built receipt"
+  either fail pure (validateCheckedTypeWitnessBytes fresh)
+  freshTerm <- term fresh
+  unless (case (witnessTerm, freshTerm) of
+    (TList offeredFields, TList freshFields) -> drop 3 offeredFields == drop 3 freshFields
+    _ -> False) (fail "thin issuer changed original canonical structure or seals")
+  let path = sessionHiPath output (SessionModule ValMod (Generation 71))
+  forM_ [path, path ++ ".packages", path ++ ".requirements"] $ \file ->
+    doesFileExist file >>= \exists -> unless exists (fail "thin issuer omitted an interface companion")
+  outputs <- filesAt output
+  unless (sort outputs == sort [path, path ++ ".packages", path ++ ".requirements"])
+    (fail "thin issuer emitted products beyond the native interface companions")
+  forM_ [72,73,74,75,76] $ \generation -> do
+    exists <- doesFileExist (sessionHiPath output (SessionModule ValMod (Generation generation)))
+    when exists (fail "refused thin interface published a binding")
+ where
+  term bytes = either (fail . show) (pure . snd)
+    (deserialiseFromBytes decodeTerm (BSL.fromStrict bytes))
+  filesAt directory = do
+    entries <- listDirectory directory
+    fmap concat $ forM entries $ \entry -> do
+      let path = directory </> entry
+      nested <- doesDirectoryExist path
+      if nested then filesAt path else pure [path]
 
 hostActivationPurposeTest :: Maybe FilePath -> IO ()
 hostActivationPurposeTest destination = withScratch $ \work -> do

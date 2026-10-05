@@ -9,6 +9,7 @@ module Tidepool.SessionArtifacts
   ) where
 
 import Control.Monad (forM_, unless, when)
+import Control.Exception (bracket)
 import Control.Monad (forM)
 import Data.List (nub, isPrefixOf)
 import Data.Data (Data, Typeable, cast, gmapQ)
@@ -35,8 +36,9 @@ import GHC.Unit.Home (homeUnitAsUnit)
 import GHC.Driver.Env (HscEnv, hsc_home_unit)
 import GHC.Types.Name.Occurrence (OccName, mkVarOcc, occNameString)
 import Data.Word (Word64)
-import System.IO (hPutStrLn, stderr)
-import System.Directory (doesPathExist)
+import System.IO (hPutStrLn, stderr, openTempFile, hClose)
+import System.Directory (doesPathExist, createDirectory, removeDirectoryRecursive, removeFile)
+import System.FilePath (takeDirectory)
 
 import Tidepool.Binders (BoundBinder(..), ValueTier(..))
 import Tidepool.GhcPipeline
@@ -53,10 +55,14 @@ import Tidepool.Session
   , sessionModuleString, writeSessionIface )
 import Tidepool.Session (sessionHiPath)
 import Tidepool.ExactHydration
-  ( ExactIfaceArtifact(..), freshExactState, readExactIfaceArtifacts, hydrateExactScope )
+  ( ExactIfaceArtifact(..), freshExactState, readExactIfaceArtifacts, hydrateExactScope
+  , newOriginalInterfaceArtifacts )
 import Tidepool.ExactScope
   ( ExactScope(..), readExactScope, revalidateExactScope, scopeCanonicalInterfaces )
-import Tidepool.CheckedCell (CheckedSignature, resolveCheckedSignature)
+import Tidepool.CheckedCell (CheckedSignature, resolveCheckedSignature
+  , captureCheckedTypeWitness, sealCheckedTypeWitness, encodeCheckedTypeWitness
+  , validateOriginalInputTypeWitness, validateCheckedTypeWitnessBytes)
+import Tidepool.DeclarationJoin (BindingInterfacePurpose(..))
 import Tidepool.PackageWitness (PackageImportEvidence(..), CompilerProvidedImport(..), encodePackageImports, packageImportRoot)
 import qualified Crypto.Hash.SHA256 as SHA256
 import Numeric (showHex)
@@ -109,8 +115,8 @@ writeSessionBindings generation root (PreparedSessionBindings result bindings) =
 -- This operation emits a fresh type-only value interface without compiling code.
 emitHostBindingInterface
   :: HscEnv -> String -> Word64 -> String -> CheckedSignature -> FilePath -> FilePath
-  -> IO BoundBinder
-emitHostBindingInterface initial producer generation name signature manifest root = do
+  -> BindingInterfacePurpose -> IO (BoundBinder, BindingInterfacePurpose)
+emitHostBindingInterface initial producer generation name signature manifest root purpose = do
   scope <- readExactScope manifest >>= either fail pure
   unless (scopeProducerSha256 scope == producer) (fail "host interface producer differs from exact scope")
   fresh <- freshExactState initial
@@ -126,14 +132,38 @@ emitHostBindingInterface initial producer generation name signature manifest roo
   loaded <- readExactIfaceArtifacts fresh artifacts >>= either fail pure
   hydrated <- hydrateExactScope fresh loaded
   (ty, _) <- resolveCheckedSignature hydrated signature
-  authorities <- resolveHostBindingAuthorities [ty] hydrated (scopeCanonicalInterfaces scope)
-  representation <- maybe (fail "checked signature has no authenticated host representation") pure
-    (hostBindingRepresentationForType authorities ty)
-  binders <- writeNativeSessionBindings hydrated generation root [(name, ty, ty, Just representation)] []
+  (representation, issuedPurpose) <- case purpose of
+    HostBuilt -> do
+      authorities <- resolveHostBindingAuthorities [ty] hydrated (scopeCanonicalInterfaces scope)
+      representation <- maybe (fail "checked signature has no authenticated host representation") pure
+        (hostBindingRepresentationForType authorities ty)
+      pure (Just representation, HostBuilt)
+    OriginalLiveInput offered -> withWitnessScratch $ \scratch -> do
+      originalInterfaces <- newOriginalInterfaceArtifacts hydrated Map.empty artifacts scratch
+      witness <- captureCheckedTypeWitness hydrated ty
+        >>= maybe (fail "original input type has no canonical witness") pure
+      sealed <- sealCheckedTypeWitness originalInterfaces witness
+        >>= maybe (fail "original input type witness is unsealed") pure
+      either fail pure (validateOriginalInputTypeWitness signature offered sealed)
+      bytes <- maybe (fail "original input type witness is unsealed") (pure . toStrictByteString)
+        (encodeCheckedTypeWitness sealed)
+      either fail pure (validateCheckedTypeWitnessBytes bytes)
+      pure (Nothing, OriginalLiveInput bytes)
+  binders <- writeNativeSessionBindings hydrated generation root [(name, ty, ty, representation)] []
   revalidateExactScope hydrated scope >>= either fail pure
   case binders of
-    [binder] -> pure binder
+    [binder] -> pure (binder, issuedPurpose)
     _ -> fail "host interface did not issue exactly one binder"
+
+ where
+  withWitnessScratch = bracket acquire removeDirectoryRecursive
+  acquire = do
+    (path, handle) <- openTempFile (takeDirectory manifest) "original-input-witness"
+    hClose handle
+    -- Reserve the random name before creating the transaction-local directory.
+    removeFile path
+    createDirectory path
+    pure path
 
 writeNativeSessionBindings
   :: HscEnv -> Word64 -> FilePath

@@ -32,6 +32,8 @@ tests = testGroup "source-boot"
   , testCase "fresh execution recipe" $ freshExecutionRecipeTest
   , testCase "candidate graph descriptors" $ withTiming (withScratch candidateGraphDescriptorsAt)
   , testCase "native checked signatures" $ nativeCheckedSignaturesTest
+  , testCase "original home thin interface" originalHomeThinInterfaceTest
+  , testCase "package-only thin interface" packageOnlyThinInterfaceTest
   , testCase "host activation purpose" $ hostActivationPurposeTest Nothing
   , testCase "candidate execution sources" $ candidateExecutionSourcesTest
   , testCase "retained exact quoter" $ exactRetainedQuoter

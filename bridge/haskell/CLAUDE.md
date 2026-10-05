@@ -142,8 +142,8 @@ signatures supply the exact type authority.
 `TPEXACTCHECK` and `TPEXACTPROGRAM` use version 2; parser receipts use
 `TPCELLPLAN2`. The matched Rust/Haskell release rejects older observations and
 receipts. Worker fields 34 (`--turn-pin`) and 45 (`--cell-fold-turn`) are retired
-and rejected explicitly. Whole-cell checking remains the initial admission step
-for host inputs; execution uses admitted item recipes.
+and rejected explicitly. Original live inputs use a compiler-issued thin value
+interface; execution uses admitted item recipes.
 
 Canonical `TPFINALMODULE` version 3 certificates have thirteen fields. The final
 field is `["source-original", imports]` or `["native-authored-declaration", generation]`;
@@ -181,6 +181,24 @@ purposes and independently validate the resulting input type.
 This is a strict internal migration. Old three-field printed signatures are
 rejected. Deploy the Rust consumer and Haskell worker together and regenerate
 compiler-produced artifacts through their owning producers.
+
+## Thin binding interfaces
+
+`TPHOSTBINDINGINTERFACE` version 2 adds a closed purpose after the original
+nine fields: `["host-built"]` or `["original-live-input", canonical witness bytes]`.
+`TPHOSTBINDINGINTERFACERECEIPT` version 2 adds the matching result after its
+original eleven fields. Version 1, unknown purposes, wrong arity, noncanonical
+CBOR and trailing bytes are rejected. Witness bytes retain their four MiB bound.
+
+Host-built issuance requires the existing authenticated representation. Original
+live-input issuance resolves the original native signature only through the
+admitted exact interface environment, independently captures and seals its type,
+and compares canonical structure and original owner seals with the offered
+witness. The offered native signature must match the supplied original signature
+exactly; freshly captured GHC binary signatures are not canonical fingerprints.
+The receipt returns the independent sealed witness. Original live-input binders
+have no host-builder authority, including Text and JSON input types. Both paths
+share the native thin writer and emit no prepared products or source compilation.
 
 ## Compiler-issued execution recipes
 
