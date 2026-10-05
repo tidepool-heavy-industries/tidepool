@@ -2078,7 +2078,9 @@ fn original_checked_execution_context(
             producer,
             artifact_context.artifact_view(),
             lexical,
-            &required_instance_owners,
+            crate::declaration_context::OriginalInstanceOwnerCensus::CheckedSupport(
+                &required_instance_owners,
+            ),
         )?,
     ))
 }

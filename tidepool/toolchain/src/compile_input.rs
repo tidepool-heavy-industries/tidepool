@@ -697,7 +697,9 @@ pub(crate) fn seal(
                     .sha256(),
                 artifacts,
                 lexical,
-                &required_instance_owners,
+                crate::declaration_context::OriginalInstanceOwnerCensus::ConsumedSource(
+                    &required_instance_owners,
+                ),
             )?,
         ),
         target: prepared.clone(),

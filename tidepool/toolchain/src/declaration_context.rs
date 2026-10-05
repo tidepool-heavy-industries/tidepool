@@ -43,6 +43,14 @@ pub(crate) enum OriginalInstanceEnvironment {
     MissingOriginalOwners(Vec<ExactModuleIdentity>),
 }
 
+/// The ordinary input proof retains its complete consumed-source census.
+/// Checked support selection alone is narrower and cannot prove the absence
+/// of instances in the full originally consumed interface environment.
+pub(crate) enum OriginalInstanceOwnerCensus<'a> {
+    ConsumedSource(&'a [ExactModuleIdentity]),
+    CheckedSupport(&'a [ExactModuleIdentity]),
+}
+
 /// Trusted source recipe associated with request-local native type custody.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum RequestHelperRecipe {
@@ -2411,8 +2419,12 @@ impl ExactDeclarationContext {
         producer: [u8; 32],
         artifacts: &ArtifactView,
         lexical: Vec<ExactLexicalNode>,
-        required_instance_owners: &[ExactModuleIdentity],
+        census: OriginalInstanceOwnerCensus<'_>,
     ) -> Result<Self, CompileError> {
+        let (required_instance_owners, complete_census) = match census {
+            OriginalInstanceOwnerCensus::ConsumedSource(owners) => (owners, true),
+            OriginalInstanceOwnerCensus::CheckedSupport(owners) => (owners, false),
+        };
         let mut context = Self::new(&[], &[], Vec::new())?;
         context.admit_producer(producer)?;
         for descriptor in artifacts.descriptors() {
@@ -2458,10 +2470,12 @@ impl ExactDeclarationContext {
             node.imports.retain(|owner| retained.contains(owner));
         }
         context.normalize()?;
-        context.original_instance_environment = if missing.is_empty() {
+        context.original_instance_environment = if !missing.is_empty() {
+            OriginalInstanceEnvironment::MissingOriginalOwners(missing)
+        } else if complete_census {
             OriginalInstanceEnvironment::Complete
         } else {
-            OriginalInstanceEnvironment::MissingOriginalOwners(missing)
+            OriginalInstanceEnvironment::Unknown
         };
         Ok(context)
     }
