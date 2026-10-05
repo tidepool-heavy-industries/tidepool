@@ -100,7 +100,7 @@ import Tidepool.ExecutionEncode (encodeModuleProducts)
 
 import Tidepool.ExecutionProjection
   ( ProjectionContext(..), ProjectionError(..), projectPreparedModuleGroups
-  , projectPreparedModuleProducts, projectOriginalHomeModuleProducts, preparedModuleProductOutcomes, closeUnavailableOriginalGroups, closeUnavailableOriginalModules, topBinders
+  , projectPreparedModuleProducts, projectOriginalHomeModuleProducts, preparedModuleProductOutcomes, closeUnavailableOriginalGroups, closeUnavailableOriginalModules, preparedTopIdentities, topBinders
   , ReferenceFact(..), preparedModuleReferenceFacts, preparedRootIdentity, projectPrepared )
 import Tidepool.ExecutionProjection (resolveTextPackageUnit)
 import Tidepool.PreparedFormatting (resolveFormattingAuthority)
@@ -2023,19 +2023,19 @@ originalProjectionProducts = withScratch $ \work -> do
   unless (rejectedModules == Set.fromList ["A", "B", "C", "E", "F", "G", "H", "I"]) $
     fail "module-level rejection did not cover sibling binders and their dependants"
   writeFile (work </> "ProjectionUnavailableProvider.hs") $ unlines
-    ["{-# OPTIONS_GHC -O0 #-}", "module ProjectionUnavailableProvider (missing) where", "{-# NOINLINE missing #-}", "missing :: Int", "missing = 7"]
+    ["module ProjectionUnavailableProvider (missing) where", "{-# NOINLINE missing #-}", "missing :: Int -> Int", "missing x = if x == 0 then 7 else missing (x - 1)"]
   writeFile (work </> "ProjectionOwner.hs") $ unlines
-    [ "{-# OPTIONS_GHC -O0 #-}", "module ProjectionOwner (bad, good) where"
+    [ "module ProjectionOwner (bad, good) where"
     , "import ProjectionUnavailableProvider"
-    , "{-# NOINLINE bad #-}", "bad :: Int", "bad = missing"
-    , "{-# NOINLINE good #-}", "good :: Int", "good = 42" ]
+    , "{-# NOINLINE bad #-}", "bad :: Int -> Int", "bad x = missing x + 1"
+    , "{-# NOINLINE good #-}", "good :: Int -> Int", "good x = if x == 0 then 42 else good (x - 1)" ]
   writeFile (work </> "ProjectionIndependent.hs") $ unlines
-    ["{-# OPTIONS_GHC -O0 #-}", "module ProjectionIndependent (safe) where", "safe :: Int", "safe = 1"]
+    ["module ProjectionIndependent (safe) where", "safe :: Int", "safe = 1"]
   writeFile (work </> "ProjectionConsumer.hs") $ unlines
-    [ "{-# OPTIONS_GHC -O0 -Wno-unused-imports #-}"
+    [ "{-# OPTIONS_GHC -Wno-unused-imports #-}"
     , "module ProjectionConsumer (usesGood) where"
     , "import ProjectionOwner", "import ProjectionIndependent"
-    , "usesGood = good + 1" ]
+    , "usesGood :: Int -> Int", "usesGood x = good x + 1" ]
   paired <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
     Nothing (work </> "ProjectionConsumer.hs") [work] Nothing
   let findPrepared name = case [prepared | prepared <- pprModules paired
@@ -2052,7 +2052,8 @@ originalProjectionProducts = withScratch $ \work -> do
   provider <- findPrepared "ProjectionUnavailableProvider"
   independent <- findPrepared "ProjectionIndependent"
   known <- findBinder ownerModule "good"
-  missing <- findBinder provider "missing"
+  ownerBinders <- Set.fromList <$> either (fail . show) pure (preparedTopIdentities [ownerModule])
+  providerBinders <- Set.fromList <$> either (fail . show) pure (preparedTopIdentities [provider])
   safe <- findBinder independent "safe"
   let pairedEnv = prHscEnv (pprPipelineResult paired)
       pairedInterfaces = pprProductInterfaces paired
@@ -2063,11 +2064,12 @@ originalProjectionProducts = withScratch $ \work -> do
         (preparedModuleProductOutcomes (projectOriginalHomeModuleProducts pairedEnv
           pairedInterfaces pairedContext externalBinders [consumer]))
   case consumerOutcome mempty of
-    Just (Left (UnavailableOriginalHomeDependencies [missing])) | missing == known -> pure ()
+    Just (Left (UnavailableOriginalHomeDependencies missing))
+      | not (null missing), all (`Set.member` ownerBinders) missing -> pure ()
     other -> fail ("unowned home dependency did not fail closed: " ++ show other)
-  forM_ [("exact", Set.singleton known), ("candidate", Set.singleton known)] $
-      \(ownerKind, ownerBinders) ->
-        case consumerOutcome ownerBinders of
+  forM_ [("exact", ownerBinders), ("candidate", ownerBinders)] $
+      \(ownerKind, admittedBinders) ->
+        case consumerOutcome admittedBinders of
           Just (Right groups) | not (null groups) -> pure ()
           other -> fail (ownerKind ++ " owner did not preserve its dependent product: " ++ show other)
   let incompleteModules = filter ((/= pmModule provider) . pmModule) (pprModules paired)
@@ -2075,7 +2077,7 @@ originalProjectionProducts = withScratch $ \work -> do
         (projectOriginalHomeModuleProducts pairedEnv pairedInterfaces pairedContext mempty incompleteModules)
       moduleOutcome prepared = lookup (pmModule prepared) incompleteProducts
       rejectedByMissing prepared = case moduleOutcome prepared of
-        Just (Left (UnavailableOriginalHomeDependencies identities)) -> missing `elem` identities
+        Just (Left (UnavailableOriginalHomeDependencies identities)) -> any (`Set.member` providerBinders) identities
         _ -> False
       safeOutcome = moduleOutcome independent
   unless (rejectedByMissing ownerModule && rejectedByMissing consumer
