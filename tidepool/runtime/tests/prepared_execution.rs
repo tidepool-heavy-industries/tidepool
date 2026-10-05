@@ -154,7 +154,40 @@ pub(super) fn assert_typed_receive_json(
         ConstructorReply::AtSite,
     )));
     assert!(prepared.json_layout().is_some());
-    let table = table.with_json_layout(None);
+    assert!(prepared.sites().iter().any(|site| {
+        site.delivery == tidepool_repr::execution_schema::SiteDelivery::LiveReentry
+    }));
+    let payload_artifact = tidepool_test_data::prepared_resources::read_target(
+        "TIDEPOOL_TYPED_RECEIVE_FIXTURE_DIR",
+        "__payload",
+    );
+    let payload_prepared = parse_program(
+        &payload_artifact,
+        &tidepool_toolchain::prepared_artifact::production_requirements()
+            .expect("production compiler requirements"),
+        DecodeLimits::default(),
+    )
+    .expect("genuine compiler-produced typed payloads");
+    let json_layout = |program: &PreparedProgram| {
+        program.json_layout().expect("compiler-issued Value layout")
+            .try_map(|id| program.constructors().get(id.0 as usize)
+                .map(|constructor| constructor.host_id).ok_or(()))
+            .expect("declared canonical JSON constructors")
+    };
+    let layout = json_layout(&prepared);
+    assert_eq!(layout, json_layout(&payload_prepared));
+    let table = table.with_json_layout(Some(layout));
+    let (mut producer, payload_program) =
+        PreparedEngine::bootstrap_with_nursery_bytes(payload_prepared, 4096)
+            .expect("bootstrap Haskell payload producer");
+    let PreparedSettlement::Done { value: pair } = producer
+        .run_settled(payload_program, RealmId::ROOT)
+        .expect("execute Haskell typed payload producer")
+    else {
+        panic!("pure payload producer must complete")
+    };
+    let answers = producer.fields(pair, RealmId::ROOT, 2).expect("two typed payloads");
+    assert!(producer.release(pair));
     let (mut engine, program) = PreparedEngine::bootstrap_with_nursery_bytes(prepared, 4096)
         .expect("bootstrap compiler-produced typed receive");
     let mut parked = Vec::new();
@@ -189,11 +222,28 @@ pub(super) fn assert_typed_receive_json(
     engine
         .quiesce_and_collect_now()
         .expect("collect while typed continuations remain parked");
-    for (index, parked) in parked.into_iter().rev().enumerate() {
+    for (index, (parked, answer)) in parked.into_iter().rev().zip(answers).enumerate() {
         let payload = serde_json::json!({"index": index, "mixed": [true, false, null, 42, "text", {"nested": []}]});
+        assert!(matches!(
+            engine.resume_with_structural_answer(parked.id, &payload, &table),
+            Err(PreparedRuntimeError::AnswerDelivery {
+                delivery: tidepool_repr::execution_schema::SiteDelivery::LiveReentry,
+                ..
+            })
+        ));
+        assert_eq!(engine.parked_count(), 2 - index);
+        let produced = producer.observe(payload_program, answer).expect("observe typed Haskell payload");
+        assert_eq!(tidepool_runtime::value_to_json(&produced, &table, 0), payload);
+        let parcel = producer.export_parcel(answer.raw()).expect("export genuine typed value");
+        let (arrived, imports) = engine.import_parcel(parcel, RealmId::ROOT)
+            .expect("import value and its native owner into the receiver realm");
+        assert!(producer.release(answer));
+        engine.quiesce_and_collect_now().expect("collect imported live value and parked continuations");
         let resumed = engine
-            .resume_with_structural_answer(parked.id, &payload, &table)
-            .expect("stream JSON with the parked owner's physical map layout");
+            .resume_with_handle(parked.id, arrived)
+            .expect("resume with the receiver-owned live typed value");
+        assert!(engine.discard_handle(arrived));
+        engine.release_all(imports.into_iter().map(|(_, handle)| handle));
         let PreparedSettlement::Done { value } = resumed.settlement else {
             panic!("typed reply must complete")
         };
@@ -283,12 +333,11 @@ fn scientific_plain_and_quasiquoted_programs_share_one_representation() {
 fn native_json_intrinsics_preserve_arguments_from_optimized_importers() {
     use tidepool_extract_cmd::{resolve_bin, ExtractCmd, ResolvedExtractBin};
 
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap();
-    let source = root.join("bridge/haskell/test-prepared-stg/JsonIntrinsicDemand.hs");
+    let sources = std::path::PathBuf::from(
+        std::env::var("TIDEPOOL_NATIVE_JSON_SOURCE_DIR")
+            .expect("declared native JSON compiler source resources"),
+    );
+    let source = sources.join("JsonIntrinsicDemand.hs");
     let output = tempfile::tempdir().unwrap();
     let mut command = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved(
         resolve_bin().expect("resolve extractor").path,
@@ -296,8 +345,8 @@ fn native_json_intrinsics_preserve_arguments_from_optimized_importers() {
     command
         .input(&source)
         .targets(["result"])
-        .include(root.join("bridge/haskell/lib"))
-        .include(root.join("bridge/haskell/test-prepared-stg"))
+        .include(tidepool_testing::eval_harness::prelude_path())
+        .include(&sources)
         .output_dir(output.path());
     let extracted = command
         .bind()
@@ -325,12 +374,11 @@ fn native_json_intrinsics_preserve_arguments_from_optimized_importers() {
 fn native_json_parse_preserves_duplicate_policy_and_typed_failure() {
     use tidepool_extract_cmd::{resolve_bin, ExtractCmd, ResolvedExtractBin};
 
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap();
-    let source = root.join("bridge/haskell/test-prepared-stg/JsonIntrinsic.hs");
+    let sources = std::path::PathBuf::from(
+        std::env::var("TIDEPOOL_NATIVE_JSON_SOURCE_DIR")
+            .expect("declared native JSON compiler source resources"),
+    );
+    let source = sources.join("JsonIntrinsic.hs");
     let output = tempfile::tempdir().unwrap();
     let mut command = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved(
         resolve_bin().expect("resolve extractor").path,
@@ -347,7 +395,7 @@ fn native_json_parse_preserves_duplicate_policy_and_typed_failure() {
             "sharedValue",
             "lazyEncoded",
         ])
-        .include(root.join("bridge/haskell/lib"))
+        .include(tidepool_testing::eval_harness::prelude_path())
         .output_dir(output.path());
     let extracted = command
         .bind()

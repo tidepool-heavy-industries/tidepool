@@ -208,6 +208,16 @@ filegroup(
     visibility = ["PUBLIC"],
 )
 
+filegroup(
+    name = "native_json_test_sources",
+    srcs = {
+        "JsonIntrinsic.hs": "test-prepared-stg/JsonIntrinsic.hs",
+        "JsonIntrinsicDemand.hs": "test-prepared-stg/JsonIntrinsicDemand.hs",
+        "JsonIntrinsicDemandPayload.hs": "test-prepared-stg/JsonIntrinsicDemandPayload.hs",
+    },
+    visibility = ["PUBLIC"],
+)
+
 _CORPUS_LIBRARY_ROOTS = [
     ("//bridge/protocol:generated", "bridge/haskell/lib"),
     (":corpus_library_sources", "lib"),
@@ -216,7 +226,7 @@ _CORPUS_LIBRARY_ROOTS = [
 tidepool_prepared_fixture(
     name = "typed_receive_prepared",
     source = "test-prepared-stg/JsonReply.hs",
-    targets = ["__prepared"],
+    targets = ["__prepared", "__payload"],
     source_roots = [("//bridge/mcp:effects_generated", "")] + _CORPUS_LIBRARY_ROOTS,
     visibility = ["PUBLIC"],
 )

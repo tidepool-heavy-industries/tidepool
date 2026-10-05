@@ -587,6 +587,9 @@ def test_runtime_inputs(package_name, target_name, unit=False):
             "TIDEPOOL_KEEP_TEST_LOGS": "1",
         })
         resources.extend(["//build/package:compiler_deployment", "//bridge/haskell:facade_embedded_sources", "//build/package:tidepool_extract_runtime_libraries"])
+    if package_name == "tidepool-runtime" and not unit and target_name in {"session", "prepared_execution"}:
+        env["TIDEPOOL_NATIVE_JSON_SOURCE_DIR"] = "$(location //bridge/haskell:native_json_test_sources)"
+        resources.append("//bridge/haskell:native_json_test_sources")
     if package_name == "tidepool-runtime" and unit:
         env["TIDEPOOL_HASKELL_ACTORS_DIR"] = "$(location //bridge/haskell:facade_embedded_sources)/actors"
     if package_name == "tidepool-extract-cmd" and target_name == "daemon_integration":
@@ -647,6 +650,7 @@ RUNTIME_RESOURCE_ENV_KEYS = (
     "TIDEPOOL_M3_FIXTURE_DIR",
     "TIDEPOOL_PRELUDE_DIR",
     "TIDEPOOL_TYPED_RECEIVE_FIXTURE_DIR",
+    "TIDEPOOL_NATIVE_JSON_SOURCE_DIR",
 )
 
 
