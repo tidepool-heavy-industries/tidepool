@@ -2454,11 +2454,7 @@ impl ExactCheckedItem {
         let Some(expression) = &self.cell.items[self.index].expression else {
             return Ok(None);
         };
-        Ok(Some(match string(&row(expression, 5)?[1])? {
-            "pure" => CheckedExpressionLift::Pure,
-            "effectful" => CheckedExpressionLift::Effectful,
-            _ => return Err(failure("sealed expression has an unknown lift")),
-        }))
+        Ok(Some(decode_expression_lift(expression)?))
     }
     pub fn expression_presentation(
         &self,
@@ -2466,11 +2462,7 @@ impl ExactCheckedItem {
         let Some(expression) = &self.cell.items[self.index].expression else {
             return Ok(None);
         };
-        Ok(Some(match string(&row(expression, 5)?[2])? {
-            "rendered" => CheckedExpressionPresentation::Rendered,
-            "opaque" => CheckedExpressionPresentation::Opaque,
-            _ => return Err(failure("sealed expression has an unknown presentation")),
-        }))
+        Ok(Some(decode_expression_presentation(expression)?))
     }
     pub fn same_cell(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.cell, &other.cell)
@@ -4329,4 +4321,29 @@ pub(crate) fn fixture_checked_signature(
     bytes: &[u8],
 ) -> Result<ExactCheckedSignature, CompileError> {
     decode_signature(&decode(bytes)?)
+}
+
+fn decode_expression_lift(expression: &Value) -> Result<CheckedExpressionLift, CompileError> {
+    Ok(match string(&row(expression, 5)?[1])? {
+        "pure" => CheckedExpressionLift::Pure,
+        "effectful" => CheckedExpressionLift::Effectful,
+        _ => return Err(failure("sealed expression has an unknown lift")),
+    })
+}
+fn decode_expression_presentation(
+    expression: &Value,
+) -> Result<CheckedExpressionPresentation, CompileError> {
+    Ok(match string(&row(expression, 5)?[2])? {
+        "rendered" => CheckedExpressionPresentation::Rendered,
+        "opaque" => CheckedExpressionPresentation::Opaque,
+        _ => return Err(failure("sealed expression has an unknown presentation")),
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn fixture_expression_plan(bytes: &[u8]) -> Result<Value, CompileError> {
+    let expression = unique_key(&[decode(bytes)?], "__tidepool_cell_expr_0", 5)?;
+    decode_expression_lift(&expression)?;
+    decode_expression_presentation(&expression)?;
+    Ok(expression)
 }

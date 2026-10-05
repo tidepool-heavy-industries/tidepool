@@ -201,6 +201,7 @@ fn source_boot_codec_packet_producer() {
         "canonical_module" => canonical_module(&root, &arguments),
         "purpose" => purpose(&root, &arguments),
         "request_types" => request_types(&root, &arguments),
+        "expression_purpose" => expression_purpose(&root, &arguments),
         _ => panic!("unsupported codec operation: {operation}"),
     }
 }
@@ -798,5 +799,47 @@ fn request_types(root: &Path, arguments: &[Value]) {
         &mut bytes,
     )
     .unwrap();
+    tidepool_atomic_write::write_best_effort(&root.join("purpose.cbor"), &bytes).unwrap();
+}
+
+fn expression_purpose(root: &Path, arguments: &[Value]) {
+    use crate::artifacts::{checked_search_authorization, CheckedPurpose};
+    use crate::checked_cell::{encode_item_authorization, CheckedItemKind, ItemAuthorization};
+    assert_eq!(arguments.len(), 2, "expression purpose codec arguments");
+    let includes = arguments[0]
+        .as_array()
+        .expect("expression includes")
+        .iter()
+        .map(argument_path)
+        .collect::<Vec<_>>();
+    let expression = crate::checked_cell::fixture_expression_plan(
+        arguments[1]
+            .as_bytes()
+            .expect("compiler-owned expression plan bytes"),
+    )
+    .expect("owner reserved expression plan reader");
+    let body = encode_item_authorization(ItemAuthorization {
+        admission: [0xaa; 32],
+        receipt: [0xaa; 32],
+        index: 0,
+        source: "1",
+        kind: CheckedItemKind::Expression,
+        binders: &[],
+        templates: &[],
+        injected: &[],
+        signatures: &[],
+        expression: Some(&expression),
+        generation: 1,
+        runtime_prefix: [0xaa; 32],
+        imports: &[],
+        observation: Some("observation"),
+        planned: Value::Null,
+        settled: vec![],
+        value_interfaces: Value::Array(vec![]),
+        template_interfaces: Value::Array(vec![]),
+    });
+    let value = checked_search_authorization(CheckedPurpose::Item, body, &includes).unwrap();
+    let mut bytes = vec![];
+    ciborium::ser::into_writer(&value, &mut bytes).unwrap();
     tidepool_atomic_write::write_best_effort(&root.join("purpose.cbor"), &bytes).unwrap();
 }
