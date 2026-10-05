@@ -628,9 +628,27 @@ def test_runtime_inputs(package_name, target_name, unit=False):
     return env, sorted(set(resources)), worker
 
 
-def runtime_arguments(env, resources, worker, resource_env=None):
+RUNTIME_RESOURCE_ENV_KEYS = (
+    "TIDEPOOL_CELL_TEST_EXTRACT",
+    "TIDEPOOL_COMPILER_DEPLOYMENT",
+    "TIDEPOOL_EXTRACT",
+    "TIDEPOOL_EXTRACT_RUNTIME_LIBRARIES",
+    "TIDEPOOL_EXTRACT_WORKER",
+    "TIDEPOOL_FREER_RESUME_FIXTURE_DIR",
+    "TIDEPOOL_FREER_RETENTION_FIXTURE_DIR",
+    "TIDEPOOL_HASKELL_ACTORS_DIR",
+    "TIDEPOOL_M3_FIXTURE_DIR",
+    "TIDEPOOL_PRELUDE_DIR",
+)
+
+
+def runtime_arguments(env, resources, worker, resource_env=None, *, package_name=None):
     env = dict(env)
     resource_env = dict(resource_env or {})
+    if package_name == "tidepool-runtime":
+        for key in RUNTIME_RESOURCE_ENV_KEYS:
+            if key in env:
+                resource_env[key] = env.pop(key)
     for key in ("EXOMONAD_WORKSPACE_GITLINK", "EXOMONAD_WORKSPACE_GIT_BUNDLE", "EXOMONAD_NIX_BIN"):
         if key in env:
             resource_env[key] = env.pop(key)
@@ -764,6 +782,10 @@ def runtime_test_cases(binary):
         "native_admission_uses_exact_scoped_roots_and_keeps_its_original_ledger",
         "native_admission_commits_the_live_machine_export_owner",
     )]
+    compiler_env, compiler_resources, worker = test_runtime_inputs("tidepool-runtime", "")
+    compiler_arguments = runtime_arguments(
+        compiler_env, compiler_resources, worker, package_name="tidepool-runtime",
+    )
     rules = ["\n".join([
         "tidepool_rust_test_cases(",
         '    name = "runtime_admission_tests",',
@@ -782,14 +804,7 @@ def runtime_test_cases(binary):
             f'    exact_tests = ["session::turn::tests::{test}"],',
             "    expected_count = 1,", "    jobs = 1,", "    timeout = 600,",
             "    test_rule_timeout_ms = 660000,",
-            "    env = {",
-            '        "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_deployment)",',
-            '        "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",',
-            '        "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",',
-            '        "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",',
-            '        "TIDEPOOL_KEEP_TEST_LOGS": "1",',
-            "    },", "    haskell_worker = True,",
-            '    resources = ["//bridge/haskell:facade_embedded_sources", "//build/package:compiler_deployment"],',
+            compiler_arguments,
             '    visibility = ["PUBLIC"],', ")", "",
         ]))
     fixture_tests = ["session::turn::tests::" + name for name in (
@@ -808,17 +823,12 @@ def runtime_test_cases(binary):
         f"    binary = {json.dumps(':' + binary)},",
         "    exact_tests = [", render_strings(fixture_tests, 8), "    ],",
         f"    expected_count = {len(fixture_tests)},", "    jobs = 1,", "    timeout = 600,",
-        "    test_rule_timeout_ms = 660000,", "    env = {",
-        '        "TIDEPOOL_CELL_TEST_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",',
-        '        "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_deployment)",',
-        '        "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",',
-        '        "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",',
-        '        "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",',
-        '        "TIDEPOOL_KEEP_TEST_LOGS": "1",',
-        "    },", "    haskell_worker = True,", "    resources = [",
-        '        "//bridge/haskell:facade_embedded_sources",',
-        '        "//build/package:compiler_deployment",',
-        "    ],", '    visibility = ["PUBLIC"],', ")", "",
+        "    test_rule_timeout_ms = 660000,",
+        runtime_arguments(
+            {**compiler_env, "TIDEPOOL_CELL_TEST_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)"},
+            compiler_resources, worker, package_name="tidepool-runtime",
+        ),
+        '    visibility = ["PUBLIC"],', ")", "",
     ]))
     recovery_prefix = "session::recovery::newrecovery_v2::tests::"
     recovery_graph_tests = [recovery_prefix + name for name in (
@@ -880,16 +890,7 @@ def runtime_test_cases(binary):
             f"    test_rule_timeout_ms = {660000 if compiler else 150000},",
         ]
         if compiler:
-            lines.extend([
-                "    env = {",
-                '        "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_deployment)",',
-                '        "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",',
-                '        "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",',
-                '        "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",',
-                '        "TIDEPOOL_KEEP_TEST_LOGS": "1",',
-                "    },", "    haskell_worker = True,",
-                '    resources = ["//bridge/haskell:facade_embedded_sources", "//build/package:compiler_deployment"],',
-            ])
+            lines.append(compiler_arguments)
         lines.extend(['    visibility = ["PUBLIC"],', ")", ""])
         rules.append("\n".join(lines))
     return "\n".join(rules)
@@ -1120,7 +1121,7 @@ tidepool_buildscript_run(
         binary_name = target["name"] + "_bin" if libraries and target["name"] == libraries[0]["name"] else GENERATED_BIN_NAMES.get(target["name"], target["name"])
         deps = dev_deps + ([":" + libraries[0]["name"]] if libraries else [])
         env, resources, worker = test_runtime_inputs(package_name, target["name"])
-        extra = runtime_arguments(env, resources, worker)
+        extra = runtime_arguments(env, resources, worker, package_name=package_name)
         if package_name == "tidepool":
             extra += '\n    compile_env = {"OUT_DIR": "$(location :tidepool_build_script_run[out_dir])"},'
         rules.append(render_rule("tidepool_rust_isolated_test", binary_name + "_unit_tests", target, package, deps, dev_named, extra, features=package_features, test_target=True))
@@ -1133,7 +1134,7 @@ tidepool_buildscript_run(
         unit_rule = "tidepool_rust_isolated_test"
         unit_extra = ""
         env, resources, worker = test_runtime_inputs(package_name, unit_target["name"], unit=True)
-        unit_extra = runtime_arguments(env, resources, worker)
+        unit_extra = runtime_arguments(env, resources, worker, package_name=package_name)
         if package_name == "tidepool":
             unit_rule = "tidepool_rust_binary"
             unit_extra = '''    env = {"OUT_DIR": "$(location :tidepool_build_script_run[out_dir])"},
@@ -1147,7 +1148,7 @@ tidepool_buildscript_run(
             env, resources, worker = test_runtime_inputs(package_name, unit_target["name"], unit=True)
             if package_name == "tidepool-runtime":
                 env["TIDEPOOL_CELL_TEST_EXTRACT"] = "$(exe //tidepool/extract-cmd:tidepool-extract)"
-            rules.append("\n".join(["tidepool_rust_test_cases(", f"    name = {json.dumps(unit_target['name'] + '_all')},", f"    binary = {json.dumps(':' + unit_target['name'])},", "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 14400000,", runtime_arguments(env, resources, worker), '    visibility = ["PUBLIC"],', ")", ""]))
+            rules.append("\n".join(["tidepool_rust_test_cases(", f"    name = {json.dumps(unit_target['name'] + '_all')},", f"    binary = {json.dumps(':' + unit_target['name'])},", "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 14400000,", runtime_arguments(env, resources, worker, package_name=package_name), '    visibility = ["PUBLIC"],', ")", ""]))
         NATIVE_TARGETS[package_name]["libraries"][library["name"]].update({"test_build": "//" + CURRENT_DIR + ":" + unit_target["name"] + ("" if shared else "_binary"), "test": "//" + CURRENT_DIR + ":" + unit_target["name"] + ("_all" if shared else "")})
         if package_name == "tidepool-toolchain":
             env, resources, worker = test_runtime_inputs(package_name, "toolchain_source_proof_pairing_test", unit=True)
@@ -1159,7 +1160,7 @@ tidepool_buildscript_run(
                 '        "artifacts::source_proof_pairing_tests::source_selected_receipt_pairs_prior_program_support_with_actual_original_proof",',
                 "    ],", "    expected_count = 1,", "    ignored = True,",
                 "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 660000,",
-                runtime_arguments(env, resources, worker),
+                runtime_arguments(env, resources, worker, package_name=package_name),
                 '    visibility = ["PUBLIC"],', ")", "",
             ]))
             rules.append('''runtime_executable(
@@ -1191,7 +1192,7 @@ tidepool_buildscript_run(
                 for key in ("TIDEPOOL_KEEP_TEST_LOGS", "EXOMONAD_NIX_OFFLINE")
                 if key in resource_env
             }
-        extra = runtime_arguments(env, resources, worker, resource_env)
+        extra = runtime_arguments(env, resources, worker, resource_env, package_name=package_name)
         if package["name"] == "tidepool-atomic-write" and target["name"] == "strict_directory":
             extra = '    env = {"TIDEPOOL_DIRECTORY_FAULT_LIBRARY": "$(location :directory_fault_shared)"},'
         if package["name"] == "tidepool-repr" and target["name"] == "repr":
