@@ -568,6 +568,11 @@ pub(super) fn committed_display_text(response: &serde_json::Value) -> &str {
     for item in items {
         assert_eq!(item["status"], "committed", "{response}");
     }
+    explicit_display_text(response)
+}
+
+pub(super) fn explicit_display_text(response: &serde_json::Value) -> &str {
+    let items = response["items"].as_array().expect("cell item receipts");
     let displays = items
         .iter()
         .flat_map(|item| item["operations"].as_array().into_iter().flatten())
@@ -837,7 +842,7 @@ impl HostedScriptRound {
         );
         let item = value["items"].as_array().unwrap().last().unwrap();
         assert_eq!(item["status"], "committed", "{value}");
-        assert_eq!(item["output"], expected, "{value}");
+        assert_eq!(explicit_display_text(&value), expected, "{value}");
     }
 }
 

@@ -7,6 +7,27 @@ use super::test_campaign::{
 use super::*;
 use harness::model::AgentPath;
 
+async fn wait_for_succeeded_provider_turn(host: &HostedTestRuntime, actor: ActorRef) {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let succeeded = host
+                .context
+                .forest
+                .inspect_host_graph()
+                .into_iter()
+                .find(|node| node.actor == actor)
+                .and_then(|node| node.provider_turn)
+                .is_some_and(|turn| turn.state == exomonad_model::ProviderTurnState::Succeeded);
+            if succeeded {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("actor succeeds through its real provider turn before retirement");
+}
+
 #[tokio::test]
 async fn released_checkpoint_keeps_an_admitted_childs_hosted_context() {
     let files = tempfile::tempdir().unwrap();
@@ -64,27 +85,45 @@ async fn released_checkpoint_keeps_an_admitted_childs_hosted_context() {
     let issuer_done = next_hosted_script_round(&mut requests, &mut pending, &issuer_path).await;
     issuer_done.assert_committed("checkpoint-issuer-capture");
     issuer_done.finish();
-    tokio::time::timeout(Duration::from_secs(30), async {
-        loop {
-            let succeeded = host
-                .context
-                .forest
-                .inspect_host_graph()
-                .into_iter()
-                .find(|node| node.actor == issuer_id)
-                .and_then(|node| node.provider_turn)
-                .is_some_and(|turn| turn.state == exomonad_model::ProviderTurnState::Succeeded);
-            if succeeded {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .expect("issuer succeeds through its real provider turn before retirement");
+    wait_for_succeeded_provider_turn(&host, issuer_id).await;
+    // Provider completion leaves the typed assignment pending. Cleanup must
+    // retain the issuer until that assignment has actually replied.
     next_root.call(
+        "checkpoint-pending-cleanup-refusal",
+        include_str!("checkpoint_pending_cleanup_refusal.hs"),
+    );
+    let root_after_pending = next_hosted_script_round(&mut requests, &mut pending, &root).await;
+    root_after_pending.assert_value("checkpoint-pending-cleanup-refusal", "True");
+    assert!(issuer.actor.terminal().get().is_none());
+    assert!(issuer.actor.terminal().cleanup().is_none());
+    host.context
+        .binding(issuer_id)
+        .expect("production attachment retains the pending issuer")
+        .conversation()
+        .unwrap()
+        .input(
+            "checkpoint-issuer-reply-input",
+            "operator",
+            "Reply to the original typed capture assignment.",
+        )
+        .await
+        .unwrap();
+    next_hosted_script_round(&mut requests, &mut pending, &issuer_path)
+        .await
+        .call("checkpoint-issuer-reply", "respond (\"captured\" :: Text)");
+    let issuer_replied = next_hosted_script_round(&mut requests, &mut pending, &issuer_path).await;
+    let reply = issuer_replied.settled_output("checkpoint-issuer-reply");
+    assert_eq!(reply["status"], "replied", "{reply}");
+    assert_eq!(reply["publication"]["status"], "published", "{reply}");
+    assert_eq!(
+        reply["items"][0]["terminalTransfer"], "replyAccepted",
+        "{reply}"
+    );
+    issuer_replied.finish();
+    wait_for_succeeded_provider_turn(&host, issuer_id).await;
+    root_after_pending.call(
         "checkpoint-issuer-cleanup",
-        "planCleanupFor producer >>= executeCleanup >>= display . cleanupReceiptComplete",
+        include_str!("checkpoint_issuer_cleanup.hs"),
     );
     let root_after_cleanup = next_hosted_script_round(&mut requests, &mut pending, &root).await;
     root_after_cleanup.assert_value("checkpoint-issuer-cleanup", "True");
@@ -156,10 +195,24 @@ async fn released_checkpoint_keeps_an_admitted_childs_hosted_context() {
     let observer_after_read =
         next_hosted_script_round(&mut requests, &mut pending, &observer_path).await;
     observer_after_read.assert_value("checkpoint-inherited-read", "True");
-    observer_after_read.finish();
+    observer_after_read.call(
+        "checkpoint-observer-reply",
+        "respond (\"inspected\" :: Text)",
+    );
+    let observer_replied =
+        next_hosted_script_round(&mut requests, &mut pending, &observer_path).await;
+    let reply = observer_replied.settled_output("checkpoint-observer-reply");
+    assert_eq!(reply["status"], "replied", "{reply}");
+    assert_eq!(reply["publication"]["status"], "published", "{reply}");
+    assert_eq!(
+        reply["items"][0]["terminalTransfer"], "replyAccepted",
+        "{reply}"
+    );
+    observer_replied.finish();
+    wait_for_succeeded_provider_turn(&host, observer_id).await;
     root_after_refusal.call(
         "checkpoint-observer-cleanup",
-        "planCleanupFor observer >>= executeCleanup >>= display . cleanupReceiptComplete",
+        include_str!("checkpoint_observer_cleanup.hs"),
     );
     let root_done = next_hosted_script_round(&mut requests, &mut pending, &root).await;
     root_done.assert_value("checkpoint-observer-cleanup", "True");

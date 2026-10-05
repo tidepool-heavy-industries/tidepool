@@ -1,4 +1,4 @@
-use super::test_campaign::COLD_DEBUG_CELL_SETTLEMENT_BUDGET;
+use super::test_campaign::{explicit_display_text, COLD_DEBUG_CELL_SETTLEMENT_BUDGET};
 use super::*;
 use async_trait::async_trait;
 use harness::{
@@ -507,22 +507,7 @@ fn assert_committed_haskell_value(response: &Value, expected: &str) {
         .last()
         .expect("Haskell operation must have a result item");
     assert_eq!(item["status"], committed_item, "{response}");
-    let displays = response["items"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .flat_map(|item| item["operations"].as_array().into_iter().flatten())
-        .filter_map(|operation| operation.get("display"))
-        .collect::<Vec<_>>();
-    let [display] = displays.as_slice() else {
-        panic!("expected one explicit display: {response}");
-    };
-    assert_eq!(display["text"], expected, "{response}");
-    assert!(
-        display["output"]["sequence"].as_i64().is_some(),
-        "{response}"
-    );
-    assert!(display["output"]["run"].as_str().is_some(), "{response}");
+    assert_eq!(explicit_display_text(response), expected, "{response}");
 }
 
 fn assert_replied_cell(receipt: &Value, expected_items: usize) {

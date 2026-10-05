@@ -24,7 +24,10 @@ async fn embedded_checkpoint_scope_setup_starts_its_haskell_actor() {
         .await
         .call(
             "checkpoint-scope-setup",
-            include_str!("embedded_checkpoint_scope_setup.hs"),
+            &format!(
+                "{}\ndisplay True",
+                include_str!("embedded_checkpoint_scope_setup.hs")
+            ),
         );
     let settled = next_hosted_script_round(&mut requests, &mut pending, &root).await;
     settled.assert_value("checkpoint-scope-setup", "True");
@@ -52,7 +55,10 @@ async fn published_embedded_checkpoint_survives_capture_cell_failure() {
         .await
         .call(
             "checkpoint-scope-setup",
-            include_str!("embedded_checkpoint_scope_setup.hs"),
+            &format!(
+                "{}\ndisplay True",
+                include_str!("embedded_checkpoint_scope_setup.hs")
+            ),
         );
     let after_setup = next_hosted_script_round(&mut requests, &mut pending, &root).await;
     after_setup.assert_value("checkpoint-scope-setup", "True");
@@ -70,7 +76,10 @@ async fn published_embedded_checkpoint_survives_capture_cell_failure() {
     }
     after_failure.call(
         "checkpoint-parent-admit-stored-children",
-        include_str!("embedded_checkpoint_admit_stored_children.hs"),
+        &format!(
+            "{}\ndisplay True",
+            include_str!("embedded_checkpoint_admit_stored_children.hs")
+        ),
     );
     let root_after_admission = next_hosted_script_round(&mut requests, &mut pending, &root).await;
     root_after_admission.assert_value("checkpoint-parent-admit-stored-children", "True");
@@ -99,12 +108,15 @@ async fn published_embedded_checkpoint_survives_capture_cell_failure() {
         let path = AgentPath(format!("/root/a{}_i{}", id.id.0, id.incarnation.0));
         next_hosted_script_round(&mut requests, &mut pending, &path)
             .await
-            .call(&format!("checkpoint-child-{}-first", id.id.0), "(x, getX)");
+            .call(
+                &format!("checkpoint-child-{}-first", id.id.0),
+                "display (show (x, getX))",
+            );
         paths.push((id, path));
     }
     for (id, path) in &paths {
         let settled = next_hosted_script_round(&mut requests, &mut pending, path).await;
-        settled.assert_value(&format!("checkpoint-child-{}-first", id.id.0), "(41, 42)");
+        settled.assert_value(&format!("checkpoint-child-{}-first", id.id.0), "(41,42)");
         settled.finish();
     }
     for (id, _) in &paths {
@@ -144,11 +156,14 @@ async fn published_embedded_checkpoint_survives_capture_cell_failure() {
     for (id, path) in &paths {
         next_hosted_script_round(&mut requests, &mut pending, path)
             .await
-            .call(&format!("checkpoint-child-{}-later", id.id.0), "(x, getX)");
+            .call(
+                &format!("checkpoint-child-{}-later", id.id.0),
+                "display (show (x, getX))",
+            );
     }
     for (id, path) in &paths {
         let settled = next_hosted_script_round(&mut requests, &mut pending, path).await;
-        settled.assert_value(&format!("checkpoint-child-{}-later", id.id.0), "(41, 42)");
+        settled.assert_value(&format!("checkpoint-child-{}-later", id.id.0), "(41,42)");
         settled.finish();
     }
     assert_eq!(
