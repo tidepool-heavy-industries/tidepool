@@ -1,6 +1,7 @@
 module RetainedReceiveConsumer where
 
 import qualified RetainedReceiveOwner as Original
-import Tidepool.Internal.Resume (settle)
+import Tidepool.Internal.Resume (settle, resumeLifted)
 
 __prepared = settle Original.result
+__resume q x = settle (resumeLifted q x)
