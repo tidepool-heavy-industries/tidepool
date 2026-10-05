@@ -1328,10 +1328,7 @@ exactExecutionTransitiveInstance getFixture = withExecutionInstanceFixture getFi
   result <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope)
     (work </> "ExecutionFreshTarget.hs") [work] Nothing
   requireInstanceQuoterResult "transitive orphan" result
-  unless (any (\node -> dependencyModuleName node == "ExecutionFreshQuoter"
-        && any ((== "ExecutionSealedQuoter") . dependencyImportName) (dependencyModuleImports node))
-        (dependencyModules (pprDependencies result))) $
-    fail "fresh provider lost its real transitive orphan import"
+  requireExactProviderImport "ExecutionFreshQuoter" "ExecutionSealedQuoter" result
 
 exactExecutionUnrelatedInstance :: IO ExecutionInstanceFixture -> IO ()
 exactExecutionUnrelatedInstance getFixture = withExecutionInstanceFixture getFixture $ \work scope _ ->
@@ -1358,10 +1355,7 @@ exactExecutionUnrelatedInstance getFixture = withExecutionInstanceFixture getFix
     explicit <- compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope)
       (work </> "ExecutionExplicitOrphanTarget.hs") [work] Nothing
     requireInstanceQuoterResult "exact explicit orphan import" explicit
-    unless (any (\node -> dependencyModuleName node == "ExecutionExplicitOrphanQuoter"
-          && any ((== "ExecutionHiddenOrphan") . dependencyImportName) (dependencyModuleImports node))
-          (dependencyModules (pprDependencies explicit))) $
-      fail "explicit orphan-import control lost its actual import edge"
+    requireExactProviderImport "ExecutionExplicitOrphanQuoter" "ExecutionHiddenOrphan" explicit
     -- Use the same provider module in both observations. This makes the
     -- missing import the sole source difference and exercises warm isolation.
     writeUnrelatedProvider work (work </> "ExecutionExplicitOrphanQuoter.hs")
@@ -1386,6 +1380,28 @@ exactExecutionUnrelatedInstance getFixture = withExecutionInstanceFixture getFix
     copyFile "test-source-boot/fixtures/ExecutionExplicitOrphanQuoter.hs" provider
     recovered <- compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope) target [work] Nothing
     requireInstanceQuoterResult "restored explicit orphan import" recovered
+    requireExactProviderImport "ExecutionExplicitOrphanQuoter" "ExecutionHiddenOrphan" recovered
+
+-- ExactCompilation owns imports to retained interfaces. Its separate fresh
+-- dependency graph contains source-lookup edges after those imports are removed.
+requireExactProviderImport :: String -> String -> PreparedPipelineResult -> IO ()
+requireExactProviderImport provider imported prepared = do
+  compilation <- maybe (fail "instance provider lost its exact compilation evidence") pure
+    (pprExactCompilation prepared)
+  let expected = (DependencyUnqualified,imported,False,"main")
+      exactRows = [edges | (("main",owner,False),edges) <- compilationImports compilation
+        , owner == provider]
+      freshRows = [node | node <- dependencyModules (pprDependencies prepared)
+        , dependencyModuleUnit node == "main", dependencyModuleName node == provider
+        , not (dependencyModuleBoot node)]
+  unless (case (exactRows,freshRows) of
+      ([edges],[node]) -> expected `elem` edges
+        && all ((/= imported) . dependencyImportName) (dependencyModuleImports node)
+      _ -> False) $
+    fail ("instance provider lost its authored exact import or confused fresh source lookup"
+      ++ ": provider=" ++ provider ++ " expected=" ++ show expected
+      ++ " exact=" ++ show exactRows
+      ++ " fresh=" ++ show [map dependencyImportName (dependencyModuleImports node) | node <- freshRows])
 
 -- These provider fixtures check the actual dictionary result inside quoteExp.
 -- GHC must execute that check to produce the Int expression; floated Core
