@@ -7745,7 +7745,10 @@ where
                 (owner, bootstrap, None)
             }
         };
-        let installed_tools = self.installed_tools.current();
+        let installed_tools = prepared_installation
+            .as_ref()
+            .and_then(|installation| installation.prepared_tools.clone())
+            .or_else(|| self.installed_tools.current());
         let activation_source = match &installed_tools {
             Some(lease) => lease.source().clone(),
             None => self.freeze_installed_source(context.actor)?,
@@ -7887,7 +7890,13 @@ where
         }
         .await;
         if !matches!(&result, Ok(InteractivePark::Parked)) {
-            if let Err(cleanup) = workbench
+            // Preview authority may borrow a newly staged installation. Release
+            // it before retiring the input and its queued implementation leases.
+            drop(workbench);
+            if let Err(cleanup) = self
+                .environment
+                .runner
+                .application_workbench()
                 .retire_activation_input(context.clone(), input_binding)
                 .await
             {
