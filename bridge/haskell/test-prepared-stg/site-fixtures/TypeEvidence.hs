@@ -24,19 +24,26 @@ data Choice a where
   OnlyInt :: Choice Int
 data Chain = End | Link Chain
 data Nest a = Nest (Nest [a])
+data Nest2 a = Nest2 (Nest2 [[a]])
+data SameLayout = SameLayout Int
 data Packed = Packed {-# UNPACK #-} !Int
 data Progress progress
   = ProgressPending
   | ProgressUpdate progress
   | ProgressClosed
 
--- Original source forall positions distinguish schematic refusal leaves even
--- when the two leaf Types have the same rendered occurrence.
+-- Source telescope positions, unused binders and kinds remain semantic even
+-- when variables have identical diagnostic spelling.
 data ScopeReply answer where
   FirstScope :: forall a b. a -> b -> ScopeReply a
   SecondScope :: forall b a. a -> b -> ScopeReply a
   RepeatedScope :: forall a b. a -> b -> ScopeReply (Either a a)
   DistinctScope :: forall a b. a -> b -> ScopeReply (Either a b)
+  AlphaScope :: forall a b. a -> b -> ScopeReply a
+  AlphaRenamed :: forall reply ignored. reply -> ignored -> ScopeReply reply
+  UnusedScope :: forall (ignored :: Type) a. a -> ScopeReply a
+  NoUnusedScope :: forall a. a -> ScopeReply a
+  HigherKindScope :: forall (ignored :: Type -> Type) a. a -> ScopeReply a
 
 data Alts f xs where
   (:|) :: Alts f a -> Alts f rest -> Alts f (Either a rest)
@@ -68,6 +75,12 @@ recursiveData = receive @Chain "recursive"
 
 expandingData :: Maybe (Nest Int)
 expandingData = receive @(Nest Int) "expanding"
+
+expandingPair :: Maybe (Nest Int, Nest Bool)
+expandingPair = receive @(Nest Int, Nest Bool) "two nonregular applications"
+
+fasterExpanding :: Maybe (Nest2 Int)
+fasterExpanding = receive @(Nest2 Int) "two nested lists per declaration"
 
 phantomInt :: Maybe (Phantom Int)
 phantomInt = receive @(Phantom Int) "phantom int"
@@ -102,6 +115,7 @@ data Console a where
   ObserveProgress :: Console (Progress progress)
   FunctionReply :: Console (Int -> Int)
   PartialReply :: Console (Maybe a)
+  TemplateReply :: Console SameLayout
   GenuineCarrier :: RequestSite '[Int] a -> Console a
   MismatchedCarrier :: RequestSite '[Int] Bool -> Console Int
   StrictCarrier :: {-# UNPACK #-} !(RequestSite '[Int] Int) -> Console Int
@@ -116,6 +130,9 @@ data DictConsole parameter reply where
 {-# OPAQUE customSend #-}
 customSend :: Member Console effects => Eff effects ()
 customSend = send (Print "custom")
+
+templateReply :: Console SameLayout
+templateReply = TemplateReply
 
 partialReply :: Console (Maybe Int)
 partialReply = PartialReply

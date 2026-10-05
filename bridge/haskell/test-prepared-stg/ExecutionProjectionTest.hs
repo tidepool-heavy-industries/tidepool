@@ -12,6 +12,7 @@ import Data.ByteString qualified as BS
 import Data.List (nub)
 import Data.Word (Word64)
 import Data.Map.Strict qualified as Map
+import Data.IntMap.Strict qualified as IntMap
 import Data.Set qualified as Set
 import Data.Text qualified as Text
 import GHC.Builtin.Types
@@ -769,17 +770,17 @@ verifyBuiltinTypeIdentity = do
         }
       project text entry = case projectPreparedTarget (context text entry) (pprModules prepared) of
         Left failure -> ioError (userError ("builtin identity projection failed: " <> show failure))
-        Right program -> pure (programTypes program)
+        Right program -> pure (IntMap.elems (typeGraphNodes (programTypes program)))
       require condition message = unless condition (ioError (userError message))
-  forM_ [("realText", TypeText), ("realInteger", TypeInteger), ("realNatural", TypeNatural)] $ \(entry, expected) -> do
+  forM_ [("realText", TextDeclaration), ("realInteger", IntegerDeclaration), ("realNatural", NaturalDeclaration)] $ \(entry, expected) -> do
     nodes <- project authority entry
-    require (expected `elem` nodes) ("canonical builtin lost its graph evidence: " <> Text.unpack entry)
-  forM_ [("foreignInteger", "GHC.Num.Integer", "Integer", TypeInteger),
-         ("foreignNatural", "GHC.Num.Natural", "Natural", TypeNatural)] $ \(entry, owner, name, builtin) -> do
+    require (expected `elem` [form | TypeDeclaration _ _ form _ <- nodes]) ("canonical builtin lost its graph evidence: " <> Text.unpack entry)
+  forM_ [("foreignInteger", "GHC.Num.Integer", "Integer", IntegerDeclaration),
+         ("foreignNatural", "GHC.Num.Natural", "Natural", NaturalDeclaration)] $ \(entry, owner, name, builtin) -> do
     nodes <- project authority entry
-    require (builtin `notElem` nodes) "foreign nominal type acquired builtin evidence"
+    require (builtin `notElem` [form | TypeDeclaration _ _ form _ <- nodes]) "foreign nominal type acquired builtin evidence"
     require (any (\node -> case node of
-        TypeData family _ _ -> family == SymbolIdentity "main" owner "type" name Nothing
+        TypeDeclaration family _ _ _ -> family == SymbolIdentity "main" owner "type" name Nothing
         _ -> False) nodes) "foreign numeric family lost its nominal graph identity"
   forM_ [(authority, "foreignText"), (Nothing, "realText")] $ \(text, entry) ->
     case projectPreparedTarget (context text entry) (pprModules prepared) of

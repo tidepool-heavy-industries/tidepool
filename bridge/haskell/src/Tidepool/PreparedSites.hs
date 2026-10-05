@@ -12,6 +12,7 @@ module Tidepool.PreparedSites
   , requestReplyIndex
   ) where
 
+import Control.Exception (throwIO)
 import Control.Monad.State.Strict
 import Data.Bits ((.&.), xor)
 import Data.List (find, nub)
@@ -224,10 +225,11 @@ elaboratePreparedSites env authority siblings bindings = do
   uniques <- mkSplitUniqSupply 's'
   (bindings', final) <- runStateT (traverse rewriteBind bindings)
         (ElaborationState uniques mempty [] [] emptyTypeGraphBuilder [])
+  graph <- either throwIO pure (finishTypeGraph (esTypeGraph final))
   pure ( bindings'
        , reverse (esSites final)
        , reverse (esPreparedSites final)
-       , finishTypeGraph (esTypeGraph final)
+       , graph
        , reverse (esRejections final))
   where
     rewriteBind (NonRec binder rhs) =
@@ -352,9 +354,11 @@ elaboratePreparedSites env authority siblings bindings = do
                         (mkUnbranchedAxInstCo Representational
                           (newTyConCo carrierTyCon) carrierArguments []))
                   current <- get
-                  let (wireNode, graph1) = runState (internType wireType) (esTypeGraph current)
-                      (inputNodes, graph2) = runState (traverse internType siteInputs) graph1
-                      preparedSite = PreparedSite topBinder site (vsDelivery spec)
+                  (wireNode, graph1) <- either (liftIO . throwIO) pure
+                    (runStateT (internType wireType) (esTypeGraph current))
+                  (inputNodes, graph2) <- either (liftIO . throwIO) pure
+                    (runStateT (traverse internType siteInputs) graph1)
+                  let preparedSite = PreparedSite topBinder site (vsDelivery spec)
                         wireNode inputNodes
                   put current
                     { esSites = site : esSites current

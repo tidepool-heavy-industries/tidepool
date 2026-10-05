@@ -3,7 +3,7 @@
 
 -- | The prepared-STG execution schema. GHC values are projected into these
 -- finite semantic types before bytes cross into Rust; this is not an
--- introspection API and contains no rendered GHC syntax.
+-- introspection API. Diagnostic rendering is separate from graph semantics.
 module Tidepool.ExecutionSchema
   ( Architecture(..), Endianness(..), TargetDescriptor(..)
   , ProgramEnvelope(..), SymbolIdentity(..), RuntimeRep(..), ResultContract(..), Signature(..)
@@ -15,16 +15,20 @@ module Tidepool.ExecutionSchema
   , OperationIdentity(..), JsonLayout(..), WiredInErrorKind(..), ForeignConvention(..)
   , TopBinding(..), WireProgram(..), schemaVersion, executionAbiVersion
   , ProjectedGroup(..), ProjectedGroupBody(..)
-  , TypeNodeId(..), CtorRow(..), TypeNode(..), SiteDelivery(..), SiteRow(..), ConstructorReply(..)
+  , TypeNodeId(..), TypeGraph, TypeNode, TypeGraphF(..), TypeNodeF(..), TypeEdgeF(..)
+  , RootDomain(..), SourceBinderFlag(..), ParameterFlag(..), ForAllFlag(..)
+  , FunctionFlag(..), NominalHeadKind(..), DeclarationFormF(..), TypeLiteral(..), SyntaxRestriction(..)
+  , TypeEdgeRoleF(..), SiteDelivery(..), SiteRow(..), ConstructorReply(..)
   ) where
 
 import Data.ByteString (ByteString)
+import Data.IntMap.Strict (IntMap)
 import Data.Text (Text)
 import Data.Word (Word32, Word64, Word8)
 import GHC.Generics (Generic)
 
 schemaVersion, executionAbiVersion :: Word64
-schemaVersion = 15
+schemaVersion = 16
 executionAbiVersion = 9
 
 newtype ValueId = ValueId Word32 deriving stock (Eq, Ord, Show, Generic)
@@ -154,18 +158,56 @@ data Expr = Return [Atom] | Enter Atom SignatureId | Call Atom SignatureId [Atom
   | Jump JoinId [Atom]
   deriving stock (Eq, Show, Generic)
 data TopBinding = TopBinding SymbolIdentity HeapBinding deriving stock (Eq, Show, Generic)
-data CtorRow = CtorRow
-  { rowConstructor :: ConstructorId
-  , rowFields :: [TypeNodeId]
+-- Preparation retains original compiler objects in these payloads; projection
+-- assigns physical identities once. Child references live only in edges.
+data TypeGraphF constructor identity rep = TypeGraph
+  { typeGraphNodes :: IntMap (TypeNodeF constructor identity rep)
+  , typeGraphEdges :: IntMap [(TypeEdgeRoleF rep, TypeNodeId)]
+  } deriving stock (Eq, Ord, Show, Generic)
+type TypeGraph = TypeGraphF ConstructorId SymbolIdentity RuntimeRep
+type TypeNode = TypeNodeF ConstructorId SymbolIdentity RuntimeRep
+
+data RootDomain = ClosedRoot | ConstructorSchemeRoot
+  deriving stock (Eq, Ord, Show, Generic)
+data SourceBinderFlag = SourceSpecified | SourceInferred
+  deriving stock (Eq, Ord, Show, Generic)
+data ParameterFlag = NamedRequired | NamedSpecified | NamedInferred
+  | AnonymousVisible
+  deriving stock (Eq, Ord, Show, Generic)
+data ForAllFlag = ForAllRequired | ForAllSpecified | ForAllInferred
+  deriving stock (Eq, Ord, Show, Generic)
+data FunctionFlag = TypeToType | TypeToConstraint | ConstraintToType | ConstraintToConstraint
+  deriving stock (Eq, Ord, Show, Generic)
+data NominalHeadKind = NominalConstructor | NominalFamily
+  deriving stock (Eq, Ord, Show, Generic)
+data DeclarationFormF rep = DataDeclaration | NewtypeDeclaration Word32
+  | TextDeclaration | IntegerDeclaration | NaturalDeclaration | ScalarDeclaration rep
+  | OpaqueDeclaration NominalHeadKind Text
+  deriving stock (Eq, Ord, Show, Generic)
+data TypeLiteral = NaturalTypeLiteral Text | SymbolTypeLiteral Text | CharacterTypeLiteral Char
+  deriving stock (Eq, Ord, Show, Generic)
+data SyntaxRestriction = UnrestrictedSyntax | EffectHead
+  deriving stock (Eq, Ord, Show, Generic)
+data TypeNodeF constructor identity rep
+  = TypeRoot RootDomain [SourceBinderFlag] Text
+  | TypeDeclaration identity [ParameterFlag] (DeclarationFormF rep) SyntaxRestriction
+  | TypeConstructorTemplate constructor
+  | TypeBound Word32
+  | TypeNominalApplication
+  | TypeApplication
+  | TypeFunction FunctionFlag
+  | TypeForAll ForAllFlag
+  | TypeLiteral TypeLiteral
+  deriving stock (Eq, Ord, Show, Generic)
+data TypeEdgeRoleF rep
+  = TypeBinderKind Word32 | TypeBody | TypeHead | TypeArgument Word32
+  | TypeFunctionEdge | TypeApplyArgument | TypeMultiplicity | TypeDomain | TypeCodomain
+  | TypeKind | TypeConstructor Word32 | TypeField Word32 rep | TypeAliasRhs
+  deriving stock (Eq, Ord, Show, Generic)
+data TypeEdgeF rep = TypeEdge
+  { typeEdgeSource :: TypeNodeId, typeEdgeTarget :: TypeNodeId
+  , typeEdgeRole :: TypeEdgeRoleF rep
   } deriving stock (Eq, Show, Generic)
-data TypeNode
-  = TypeData SymbolIdentity [TypeNodeId] [CtorRow]
-  | TypeText
-  | TypeInteger
-  | TypeNatural
-  | TypeScalar RuntimeRep
-  | TypeUnconstructible Text Text
-  deriving stock (Eq, Show, Generic)
 data SiteDelivery = HostAnswer | LiveReentry | ExitCellFill | TerminalCapture
   deriving stock (Eq, Ord, Show, Generic)
 data SiteRow = SiteRow
@@ -180,10 +222,9 @@ data WireProgram = WireProgram
   { programEnvelope :: ProgramEnvelope, programSignatures :: [Signature]
   , programGlobals :: [GlobalDecl], programConstructors :: [ConstructorDecl]
   , programOperations :: [OperationDecl], programBindings :: [Group TopBinding]
-  , programEntry :: ValueId, programTypes :: [TypeNode], programSites :: [SiteRow]
-  -- | Request constructors whose reply is answered by a synthetic row in
-  -- 'programSites': an ordinary effect request carries no dynamic site, so
-  -- the host classifies it by its outer constructor.
+  , programEntry :: ValueId, programTypes :: TypeGraph, programSites :: [SiteRow]
+  -- | An unsited request retains its original constructor's scoped reply;
+  -- only the exact compiler carrier selects a dynamic site.
   , programConstructorReplies :: [(ConstructorId, ConstructorReply)]
   -- | Compiler-authenticated JSON constructor roles. Kept independently of
   -- intrinsic operations because typed host mounts and answers also need it.
@@ -200,7 +241,7 @@ data ProjectedGroupBody = ProjectedGroupBody
   , projectedConstructors :: [ConstructorDecl]
   , projectedOperations :: [OperationDecl]
   , projectedBindings :: [Group TopBinding]
-  , projectedTypes :: [TypeNode]
+  , projectedTypes :: TypeGraph
   , projectedSites :: [SiteRow]
   , projectedConstructorReplies :: [(ConstructorId, ConstructorReply)]
   , projectedJsonLayout :: Maybe (JsonLayout ConstructorId)

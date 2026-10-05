@@ -11,6 +11,7 @@ import Control.Monad (forM_, unless)
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BL
 import Data.Text qualified as T
+import Data.IntMap.Strict qualified as IntMap
 import Data.Word (Word32)
 import System.Directory (getTemporaryDirectory, removeFile)
 import System.IO (openBinaryTempFile, hClose)
@@ -108,20 +109,27 @@ encodingChecks = do
         representative { programJsonLayout = Just layout }))
   assert (jsonFields !! 16 == TList [TInt 1, TList (map TInt [0 .. 17])])
     "program JSON layout must preserve all eighteen named roles in wire order"
-  assert (evidenceFields !! 13 == TList
-      [ TList [TInt 0, familyTerm, TList [TInt 2, TInt 1]
-          , TList [TList [TInt 0, TList [TInt 0, TInt 1]]]]
-      , TList [TInt 4, TList [TInt 4, TInt 64]]
-      , TList [TInt 1]
-      , TList [TInt 2]
-      , TList [TInt 3]
-      , TList [TInt 5, TString "function", TString "Int -> Int"]
-      ]) "type evidence lost ordered arguments, recursive fields, or stable node tags"
+  let graphFields = termList (evidenceFields !! 13)
+      graphNodes = termList (graphFields !! 1)
+      graphEdges = termList (graphFields !! 2)
+  assert (head graphFields == TInt 1 && length graphFields == 3)
+    "finite type graph must carry one versioned node/edge envelope"
+  assert (take 3 graphNodes ==
+      [ TList [TInt 0, TInt 0, TList [], TString "Recursive"]
+      , TList [TInt 1, familyTerm, TList [], TList [TInt 0], TInt 0]
+      , TList [TInt 2, TInt 0] ])
+    "type graph lost scoped roots, complete nominal symbols or physical constructor references"
+  assert (take 4 graphEdges ==
+      [ TList [TInt 0, TInt 3, TList [TInt 1]]
+      , TList [TInt 1, TInt 2, TList [TInt 10, TInt 1]]
+      , TList [TInt 2, TInt 3, TList [TInt 11, TInt 0, TList [TInt 0]]]
+      , TList [TInt 2, TInt 5, TList [TInt 11, TInt 1, TList [TInt 4, TInt 64]]] ])
+    "type graph lost original recursive fields or paired source representations"
   assert (evidenceFields !! 14 == TList
       [ TList [TInt (41 + ordinal), TString "Fixture.entry", TInt ordinal
-          , TInt ordinal, TInt 0, TList [TInt 2, TInt 1]]
+          , TInt ordinal, TInt 0, TList [TInt 0, TInt 0]]
       | ordinal <- [0 .. 3]
-      ]) "site evidence fields or delivery tags differ from the schema 10 contract"
+      ]) "site evidence fields or delivery tags differ from the prepared type graph contract"
   assert (evidenceFields !! 15 == TList
       [TList [TInt 0, TList [TInt 0, TInt 0]]])
     "constructor reply table must pair an exact id with its static node"
@@ -321,7 +329,7 @@ representative = representativeWith result
 
 representativeWith :: Expr -> WireProgram
 representativeWith body = WireProgram envelope signatures globals constructors operations bindings
-  (ValueId 0) [] [] [] Nothing
+  (ValueId 0) (TypeGraph IntMap.empty IntMap.empty) [] [] Nothing
  where
   exact modul occurrence = SymbolIdentity "m3-fixture" modul "value" occurrence Nothing
   target = TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []
@@ -376,14 +384,29 @@ evidenceRepresentative = representative
           family LiftedRefRep [LiftedRefRep, IntRep 64] [False, True]
           (CheckedLayout [FieldLayout LiftedRefRep 0, FieldLayout (IntRep 64) 8]
             8 16 [True, False]) 1 1 0 ]
-  , programTypes =
-      [ TypeData family [TypeNodeId 2, TypeNodeId 1]
-          [CtorRow (ConstructorId 0) [TypeNodeId 0, TypeNodeId 1]]
-      , TypeScalar (IntRep 64), TypeText, TypeInteger, TypeNatural
-      , TypeUnconstructible "function" "Int -> Int" ]
+  , programTypes = TypeGraph (IntMap.fromAscList (zip [0 ..]
+      [ TypeRoot ClosedRoot [] "Recursive"
+      , TypeDeclaration family [] DataDeclaration UnrestrictedSyntax
+      , TypeConstructorTemplate (ConstructorId 0)
+      , TypeNominalApplication
+      , TypeDeclaration (family { symbolOccurrence = "Int#" }) [] (ScalarDeclaration (IntRep 64)) UnrestrictedSyntax
+      , TypeNominalApplication
+      , TypeDeclaration (family { symbolOccurrence = "Text" }) [] TextDeclaration UnrestrictedSyntax
+      , TypeDeclaration (family { symbolOccurrence = "Integer" }) [] IntegerDeclaration UnrestrictedSyntax
+      , TypeDeclaration (family { symbolOccurrence = "Natural" }) [] NaturalDeclaration UnrestrictedSyntax
+      , TypeFunction TypeToType
+      , TypeRoot ConstructorSchemeRoot [SourceSpecified] "Int -> Int"
+      , TypeBound 0 ])) (IntMap.fromAscList
+      [ (0, [(TypeBody, TypeNodeId 3)])
+      , (1, [(TypeConstructor 1, TypeNodeId 2)])
+      , (2, [(TypeField 0 LiftedRefRep, TypeNodeId 3), (TypeField 1 (IntRep 64), TypeNodeId 5)])
+      , (3, [(TypeHead, TypeNodeId 1)])
+      , (5, [(TypeHead, TypeNodeId 4)])
+      , (9, [(TypeMultiplicity, TypeNodeId 5), (TypeDomain, TypeNodeId 5), (TypeCodomain, TypeNodeId 5)])
+      , (10, [(TypeBinderKind 0, TypeNodeId 5), (TypeBody, TypeNodeId 9)]) ])
   , programSites =
       [ SiteRow (41 + ordinal) "Fixture.entry" ordinal delivery
-          (TypeNodeId 0) [TypeNodeId 2, TypeNodeId 1]
+          (TypeNodeId 0) [TypeNodeId 0, TypeNodeId 0]
       | (ordinal, delivery) <- zip [0 ..]
           [HostAnswer, LiveReentry, ExitCellFill, TerminalCapture] ]
   , programConstructorReplies = [(ConstructorId 0, StaticReply (TypeNodeId 0))]

@@ -6,6 +6,7 @@ import Control.Exception (SomeException, bracket, evaluate, fromException, throw
 import Control.Monad (unless)
 import Data.ByteString qualified as BS
 import Data.Foldable (toList)
+import Data.IntMap.Strict qualified as IntMap
 import Data.List (isInfixOf, nub, sort)
 import Data.String (fromString)
 import Data.Set qualified as Set
@@ -341,7 +342,7 @@ verifyJsonLayoutDemand authority result = do
   nested <- require "nested JSON evidence" (project nestedContext (pprModules result))
   assert (Schema.programJsonLayout nested /= Nothing)
     "nested JSON type evidence omitted authenticated roles"
-  assert (not (null (Schema.programTypes nested))
+  assert (not (IntMap.null (Schema.typeGraphNodes (Schema.programTypes nested)))
       && not (any isJsonOperation (Schema.programOperations nested)))
     "nested type regression fixture unexpectedly requires JSON operations"
  where
@@ -380,7 +381,7 @@ verifyNominalJsonConstructorDemand dir = do
   authority <- resolveJsonAuthority (prHscEnv (pprPipelineResult result))
     >>= maybe (ioError (userError "nominal JSON fixture lacks authority")) pure
   let valueTyCons = [ tc | prepared <- pprModules result
-        , TypePolicy.DataG _ tc _ _ <- TypePolicy.tgNodes (pmTypeGraph prepared)
+        , Schema.TypeDeclaration tc _ _ _ <- IntMap.elems (TypePolicy.tgNodes (pmTypeGraph prepared))
         , occNameString (nameOccName (TC.tyConName tc)) == "Value" ]
   valueTyCon <- case valueTyCons of
     tc : _ -> pure tc
@@ -401,12 +402,13 @@ verifyNominalJsonConstructorDemand dir = do
           Just boxer -> DC.DCR (DC.dataConWrapId constructor) boxer
             (DC.dataConRepArgTys constructor) (DC.dataConRepStrictness constructor)
             (DC.dataConImplBangs constructor))
-      replace prepared = prepared { pmTypeGraph = TypePolicy.TypeGraph
-        [ case node of
-            TypePolicy.DataG ty tc args rows | tc == valueTyCon ->
-              TypePolicy.DataG ty tc args [(clone con, children) | (con, children) <- rows]
-            _ -> node
-        | node <- TypePolicy.tgNodes (pmTypeGraph prepared) ] }
+      replace prepared = prepared { pmTypeGraph = (pmTypeGraph prepared)
+        { Schema.typeGraphNodes = IntMap.map (\node -> case node of
+            Schema.TypeDeclaration tc flags form restriction | tc == valueTyCon ->
+              Schema.TypeDeclaration otherTyCon flags form restriction
+            Schema.TypeConstructorTemplate con | DC.dataConTyCon con == valueTyCon ->
+              Schema.TypeConstructorTemplate (clone con)
+            _ -> node) (TypePolicy.tgNodes (pmTypeGraph prepared)) } }
       project modules = either (ioError . userError . show) pure
         (Projection.projectPreparedTarget context modules)
   assert (otherTyCon /= valueTyCon) "nominal JSON fixture did not change GHC identity"
@@ -593,8 +595,7 @@ verifyConstructorRepresentations dir = do
     [ map show (concatMap (maybe [] id . typePrimRep_maybe . scaledThing)
         (dataConRepArgTys constructor))
     | prepared <- pprModules result
-    , TypePolicy.DataG _ _ _ rows <- TypePolicy.tgNodes (pmTypeGraph prepared)
-    , (constructor, _) <- rows
+    , Schema.TypeConstructorTemplate constructor <- IntMap.elems (TypePolicy.tgNodes (pmTypeGraph prepared))
     , dataConOccurrence constructor == occurrence
     ]
   scaledThing (Scaled _ ty) = ty
@@ -616,8 +617,7 @@ verifyConstructorRepresentations dir = do
 verifyRepeatedConstructorEvidence :: PreparedPipelineResult -> IO ()
 verifyRepeatedConstructorEvidence result = do
   let originals = [ con | prepared <- pprModules result
-        , TypePolicy.DataG _ _ _ rows <- TypePolicy.tgNodes (pmTypeGraph prepared)
-        , (con, _) <- rows, occNameString (nameOccName (dataConName con)) == "NoUnpack" ]
+        , Schema.TypeConstructorTemplate con <- IntMap.elems (TypePolicy.tgNodes (pmTypeGraph prepared)), occNameString (nameOccName (dataConName con)) == "NoUnpack" ]
   original <- case originals of
     con : _ -> pure con
     [] -> ioError (userError "constructor collision fixture lacks NoUnpack evidence")
@@ -634,13 +634,29 @@ verifyRepeatedConstructorEvidence result = do
       fields = DC.dataConOrigArgTys original
       runtimeFields = DC.dataConRepArgTys original
       conflictingFields = [Scaled multiplicity wordPrimTy | Scaled multiplicity _ <- fields]
-      replace pair prepared = prepared { pmTypeGraph = TypePolicy.TypeGraph
-        [ case node of
-            TypePolicy.DataG ty tc args rows -> TypePolicy.DataG ty tc args
-              (concatMap (\row@(con, children) -> if con == original
-                then [(first, children) | first <- pair] else [row]) rows)
-            _ -> node
-        | node <- TypePolicy.tgNodes (pmTypeGraph prepared) ] }
+      replace pair prepared = prepared
+        { pmTypeGraph = Schema.TypeGraph
+            (IntMap.unions [Schema.typeGraphNodes graph | graph <- copies])
+            (IntMap.unions [Schema.typeGraphEdges graph | graph <- copies])
+        , pmPreparedSites = concat
+            [ [site { psWireNode = shifted offset (psWireNode site)
+                    , psInputNodes = map (shifted offset) (psInputNodes site)
+                    , psSite = (psSite site)
+                        { ysSite = ysSite (psSite site) + fromIntegral ordinal } }
+                | site <- pmPreparedSites prepared]
+            | (ordinal, offset) <- zip [0 :: Int ..] offsets ] }
+       where
+        graph = pmTypeGraph prepared
+        stride = IntMap.size (TypePolicy.tgNodes graph)
+        offsets = [ordinal * stride | ordinal <- [0 .. length pair - 1]]
+        shifted offset (Schema.TypeNodeId raw) = Schema.TypeNodeId (raw + fromIntegral offset)
+        copies = [Schema.TypeGraph
+          (IntMap.fromAscList [(index + offset, case node of
+            Schema.TypeConstructorTemplate con | con == original -> Schema.TypeConstructorTemplate replacement
+            _ -> node) | (index, node) <- IntMap.toAscList (TypePolicy.tgNodes graph)])
+          (IntMap.fromAscList [(index + offset, [(role, shifted offset child) | (role, child) <- children])
+            | (index, children) <- IntMap.toAscList (TypePolicy.tgEdges graph)])
+          | (offset, replacement) <- zip offsets pair]
       project pair = projectEntry
         (result { pprModules = map (replace pair) (pprModules result) })
         "StrictPlainMetadata" "noUnpack" mempty
@@ -649,14 +665,12 @@ verifyRepeatedConstructorEvidence result = do
         [prepared] -> prepared
         prepared -> error ("constructor collision fixture expected one target module, got "
           ++ show (map (moduleNameString . moduleName . pmModule) prepared))
-      replaceNominal occurrence replacement prepared = prepared { pmTypeGraph = TypePolicy.TypeGraph
-        [ case node of
-            TypePolicy.DataG ty tc args rows -> TypePolicy.DataG ty tc args
-              [ (if occNameString (nameOccName (dataConName con)) == occurrence
-                  then replacement else con, children)
-              | (con, children) <- rows ]
-            _ -> node
-        | node <- TypePolicy.tgNodes (pmTypeGraph prepared) ] }
+      replaceNominal occurrence replacement prepared = prepared { pmTypeGraph = (pmTypeGraph prepared)
+        { Schema.typeGraphNodes = IntMap.map (\node -> case node of
+            Schema.TypeConstructorTemplate con
+              | occNameString (nameOccName (dataConName con)) == occurrence ->
+                  Schema.TypeConstructorTemplate replacement
+            _ -> node) (TypePolicy.tgNodes (pmTypeGraph prepared)) } }
       siteOwnedBy occurrence site = occurrence `isInfixOf`
         Text.unpack (ysOrigin (psSite site))
       noUnpackRoot = case filter (siteOwnedBy "noUnpack") (pmPreparedSites target) of
@@ -733,12 +747,24 @@ assertWireSite label delivery family outcome = case outcome of
   Right program -> case Schema.programSites program of
     [site]
       | Schema.siteDelivery site == delivery
-      , Schema.TypeNodeId raw <- Schema.siteWire site
-      , node : _ <- drop (fromIntegral raw) (Schema.programTypes program)
-      , Schema.TypeData identity _ _ <- node
+      , Just identity <- nominalSiteIdentity (Schema.programTypes program) (Schema.siteWire site)
       , Schema.symbolOccurrence identity == fromString family -> pure ()
     sites -> ioError (userError (label ++ ": unexpected site evidence " ++ show sites
       ++ " in " ++ show (Schema.programTypes program)))
+
+nominalSiteIdentity :: Schema.TypeGraph -> Schema.TypeNodeId -> Maybe Schema.SymbolIdentity
+nominalSiteIdentity graph root = do
+  body <- child root Schema.TypeBody
+  declaration <- child body Schema.TypeHead
+  case node declaration of
+    Just (Schema.TypeDeclaration identity _ _ _) -> Just identity
+    _ -> Nothing
+ where
+  node (Schema.TypeNodeId raw) = IntMap.lookup (fromIntegral raw) (Schema.typeGraphNodes graph)
+  child (Schema.TypeNodeId raw) role = case
+      [target | (actual, target) <- IntMap.findWithDefault [] (fromIntegral raw) (Schema.typeGraphEdges graph), actual == role] of
+    [target] -> Just target
+    _ -> Nothing
 
 expectAuthoredParseFailure :: String -> FilePath -> IO result -> IO ()
 expectAuthoredParseFailure label target action = do
@@ -764,7 +790,9 @@ main = runTests tests
 
 tests :: TestTree
 tests = testGroup "prepared-stg-pipeline"
-  [ testCase "original prepared pipeline and compiler authority" fullMain
+  [ testCase "original constructor reply identities and type evidence" $
+      withCaseScratch "constructor-reply-identity" runTypeEvidenceChecks
+  , testCase "original prepared pipeline and compiler authority" fullMain
   , testCase "projection interning and constructor conflicts" $
       withCaseScratch "projection-interning" verifyProjectionInterning
   , testCase "module product interface roundtrip" $
@@ -931,7 +959,6 @@ fullMain = do
         , "marker :: Int"
         , "marker = generationMarker"
         ])
-      runTypeEvidenceChecks dir
       verifyPreparedPrivateImports
       verifyConstructorRepresentations dir
       verifyJsonDependencyAuthority dir

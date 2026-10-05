@@ -226,22 +226,28 @@ through their owning producers.
 
 ## Native constructor replies
 
-Prepared schema 15 / execution ABI 9 carries an exact constructor reply table.
-Each entry is `StaticReply TypeNodeId` or `ReplyAtSite`. Static reply graphs come
-from the saturated final lifted GHC DataCon result index, independently of the
-visible effect row or `KnownEffect` instances. Unresolved replies remain
-unconstructible nodes; partial algebraic graphs retain valid fieldless branches.
+Prepared schema 16 / execution ABI 9 carries the constructor reply table and
+one finite reply-type graph. Earlier prepared schemas are rejected; registered
+prepared artifacts must be regenerated through their original compiler producers.
+The graph stores scoped expressions, nominal declarations, original constructor
+field templates and ordered typed edges. Newtype RHS templates retain their
+eta-prefix scope. Recursive and nonregular recursive fields link declarations
+without instantiating an expanding field tree.
 
-Only the exact `Tidepool.Internal.RequestSite` TyCon with matching reply index
-and a proven first runtime Int field selects `ReplyAtSite`. Its private newtype
-constructor and nominal input/result roles prevent authored retagging. The
-compiler emits the carrier directly. There are no synthetic constructor sites,
-open reply defaults, numeric payload fallbacks, or absent-site sentinels.
-Stateful receive has intrinsic `Maybe state` evidence and keeps its separate
-checkpoint/reply/continue correlation key.
+An intrinsic static reply uses the complete source `DataCon` binder telescope;
+only the exact compiler-issued request-site carrier selects `AtSite`. Open
+parameters, functions and opaque families retain structural identity without
+acquiring host construction authority. Original field kinds and worker layouts
+must agree with the existing physical constructor inventory. Fieldless branches
+remain available when another branch requires an unsupported payload.
 
-This is a strict matched producer/runtime migration. Reject schema 14 / ABI 8
-artifacts and regenerate corpus and embedded artifacts through their producers.
+Rust validates and freezes one `Arc<TypeGraph>` backed by `petgraph`, with
+read-only graph access. Construction resolves a scoped expression and shared
+argument environment on demand. Reachable reply compatibility ignores local
+node IDs and diagnostic rendering. Whole ordered site evidence commitment is a
+separate contract. Exact wire/content identity still includes diagnostics;
+rendered type text never authorizes duplicate reply admission. Closed activation
+type bytes and original interface seals retain their separate existing format.
 
 ## Native request types
 

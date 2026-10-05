@@ -33,7 +33,7 @@ module Tidepool.ExecutionProjection
   , TextUnitAuthority(..)
   ) where
 
-import Control.Monad (foldM, forM, forM_, unless)
+import Control.Monad (foldM, forM, forM_, unless, when)
 import Control.Monad.State.Strict
 import Data.Bits (shiftR)
 import Data.ByteString qualified as BS
@@ -50,12 +50,13 @@ import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as Text
+import Data.Text.Encoding qualified as TextEncoding
 import Data.Word (Word32, Word64, Word8)
 import GHC.Builtin.PrimOps (PrimOp(..), PrimCall(..), primOpOcc)
 import GHC.Builtin.Types (doubleDataCon, intDataCon, intTy)
 import GHC.Core (AltCon(..))
 import GHC.Core.DataCon
-  ( DataCon, dataConName, dataConTheta, dataConOrigArgTys, dataConInstOrigArgTys, dataConRepArgTys, dataConRepArity, dataConWorkId
+  ( DataCon, dataConName, dataConTheta, dataConOrigArgTys, dataConRepArgTys, dataConRepArity, dataConWorkId
   , dataConTag, dataConTyCon, dataConOrigResTy, dataConImplBangs, HsImplBang(..)
   , isMarkedStrict, isUnboxedTupleDataCon )
 import GHC.Core.TyCo.Rep (Scaled(..), Type(..))
@@ -78,7 +79,7 @@ import GHC.Types.Literal (LitNumType(..), Literal(..), literalType)
 import GHC.Types.Id (idDmdSig, isDeadEndId, isDataConWorkId_maybe)
 import GHC.Types.ForeignCall qualified as Foreign
 import GHC.Types.Name (Name, isExternalName, nameModule_maybe, nameOccName)
-import GHC.Types.Name.Occurrence (fieldOcc_maybe, occNameString)
+import GHC.Types.Name.Occurrence (fieldOcc_maybe, isDataOcc, occNameString)
 import GHC.Types.RepType
   (typePrimRep_maybe, runtimeRepPrimRep_maybe, dataConRuntimeRepStrictness, unwrapType)
 import GHC.Types.Unique.Set (UniqSet, addListToUniqSet, addOneToUniqSet, elementOfUniqSet, emptyUniqSet, mkUniqSet, nonDetEltsUniqSet)
@@ -147,6 +148,7 @@ data ProjectionError
   -- | A typed site in a reachable top cannot carry concrete evidence. This
   -- is a source error, reported with the compiler's own guidance.
   | RejectedTypedSite Text
+  | TypeEvidenceIssuanceFailure TypePolicy.TypeGraphError
   deriving stock (Eq, Show)
 
 data ProjectionPurpose
@@ -1089,20 +1091,19 @@ projectModule = mapM (projectTop . fst) . pmBindings
 -- One module projection owns this immutable index. Its graph stays lazy so
 -- groups without typed sites do not force an otherwise unused full graph.
 data PreparedEvidenceIndex = PreparedEvidenceIndex
-  { evidenceGraph :: IntMap.IntMap TypePolicy.TypeNodeG
+  { evidenceGraph :: TypePolicy.TypeGraph
   , evidenceSitesByOwner :: Map Word64 [(Int, PreparedSite)]
   , evidenceRejectionsByOwner :: Map Word64 [(Int, SiteRejection)]
   }
 
 data SelectedPreparedEvidence = SelectedPreparedEvidence
-  { selectedEvidenceGraph :: IntMap.IntMap TypePolicy.TypeNodeG
+  { selectedEvidenceGraph :: TypePolicy.TypeGraph
   , selectedEvidenceSites :: [PreparedSite]
   }
 
 indexPreparedEvidence :: PreparedModule -> PreparedEvidenceIndex
 indexPreparedEvidence prepared = PreparedEvidenceIndex
-  { evidenceGraph = IntMap.fromAscList
-      (zip [0 :: Int ..] (TypePolicy.tgNodes (pmTypeGraph prepared)))
+  { evidenceGraph = pmTypeGraph prepared
   , evidenceSitesByOwner = Map.fromListWith (<>)
       [ (getKey (varUnique (psOwner site)), [(ordinal, site)])
       | (ordinal, site) <- zip [0 :: Int ..] (pmPreparedSites prepared) ]
@@ -1137,24 +1138,34 @@ preparedEvidence prepared = selectPreparedEvidence (indexPreparedEvidence prepar
 -- An admitted auxiliary root's own result type follows the module evidence
 -- ('lowerAuxiliaryRootEvidence'); intrinsic constructor reply graphs follow.
 lowerPreparedEvidence :: ProjectionContext -> [PreparedModule]
-  -> [SelectedPreparedEvidence] -> P ([TypeNode], [SiteRow], [(ConstructorId, ConstructorReply)])
+  -> [SelectedPreparedEvidence] -> P (TypeGraph, [SiteRow], [(ConstructorId, ConstructorReply)])
 lowerPreparedEvidence context modules evidence = do
-  (moduleNodes, moduleSites) <- foldM lowerOne ([], []) evidence
-  auxNodes <- lowerAuxiliaryRootEvidence context modules (length moduleNodes)
+  (moduleNodes, moduleSites) <- foldM lowerOne (emptyProjectedTypeGraph, []) evidence
+  auxNodes <- lowerAuxiliaryRootEvidence context modules (graphNodeCount moduleNodes)
   (verbNodes, verbSites) <-
     lowerConstructorReplies (mapMaybe pmRequestSiteTyCon modules)
-      (length moduleNodes + length auxNodes)
+      (graphNodeCount moduleNodes + graphNodeCount auxNodes)
   let sites = moduleSites
       duplicates = Map.keys (Map.filter (> (1 :: Int))
         (Map.fromListWith (+) [(siteId site, 1) | site <- sites]))
   case duplicates of
     duplicate : _ -> failShape
       ("duplicate selected prepared site id " <> Text.pack (show duplicate))
-    [] -> pure (moduleNodes <> auxNodes <> verbNodes, sites, verbSites)
+    [] -> do
+      let combined = unionTypeGraphs (unionTypeGraphs moduleNodes auxNodes) verbNodes
+      (graph, rebase) <- lift (assembleTypeGraph combined)
+      sites' <- traverse (\site -> do
+        wire <- lift (rebase (siteWire site))
+        inputs <- traverse (lift . rebase) (siteInputs site)
+        pure site { siteWire = wire, siteInputs = inputs }) sites
+      replies <- traverse (\(constructor, reply) -> (constructor,) <$> case reply of
+        StaticReply root -> StaticReply <$> lift (rebase root)
+        ReplyAtSite -> pure ReplyAtSite) verbSites
+      pure (graph, sites', replies)
  where
   lowerOne (priorNodes, priorSites) selectedEvidence = do
     let selected = selectedEvidenceSites selectedEvidence
-    (lowered, rebase) <- lowerSelectedTypeGraph (length priorNodes)
+    (lowered, rebase) <- lowerSelectedTypeGraph (graphNodeCount priorNodes)
       (selectedEvidenceGraph selectedEvidence)
     rows <- traverse (\site -> do
           wire <- rebase (psWireNode site)
@@ -1167,7 +1178,7 @@ lowerPreparedEvidence context modules evidence = do
               , siteWire = wire
               , siteInputs = inputs
               }) selected
-    pure (priorNodes <> lowered, priorSites <> rows)
+    pure (unionTypeGraphs priorNodes lowered, priorSites <> rows)
 
 -- Compare all reachable constructor evidence before projecting bindings or
 -- lowering any one graph. Representation recovery may roll one graph's local
@@ -1204,14 +1215,14 @@ validatePreparedEvidence context modules evidence hostConstructors = do
 -- variable, so interning one would fail the whole projection rather than
 -- leaving the root's own evidence merely absent. Concrete auxiliary roots
 -- are unaffected by this filter.
-lowerAuxiliaryRootEvidence :: ProjectionContext -> [PreparedModule] -> Int -> P [TypeNode]
+lowerAuxiliaryRootEvidence :: ProjectionContext -> [PreparedModule] -> Int -> P TypeGraph
 lowerAuxiliaryRootEvidence context modules base = do
   (nodes, graphRoots) <- auxiliaryRootTypeGraph context modules
   (lowered, _rebase) <- lowerTypeGraph base nodes graphRoots
   pure lowered
 
 auxiliaryRootTypeGraph :: ProjectionContext -> [PreparedModule]
-  -> P ([TypePolicy.TypeNodeG], [TypePolicy.TypeNodeId])
+  -> P (TypePolicy.TypeGraph, [TypePolicy.TypeNodeId])
 auxiliaryRootTypeGraph context modules = do
   let roots = Set.fromList (projectionAuxiliaryRoots context)
   topSymbolMap <- gets topSymbols
@@ -1225,31 +1236,32 @@ auxiliaryRootTypeGraph context modules = do
         , let answerType = snd (splitFunTys (varType binder))
         , isEmptyVarSet (tyCoVarsOfType answerType)
         ]
-      (graphRoots, builder) = runState
-        (traverse TypePolicy.internType answerTypes)
-        TypePolicy.emptyTypeGraphBuilder
-  pure (TypePolicy.tgNodes (TypePolicy.finishTypeGraph builder), graphRoots)
+  (graphRoots, builder) <- lift $ either (Left . TypeEvidenceIssuanceFailure) Right
+    (runStateT (traverse TypePolicy.internType answerTypes) TypePolicy.emptyTypeGraphBuilder)
+  graph <- lift $ either (Left . TypeEvidenceIssuanceFailure) Right (TypePolicy.finishTypeGraph builder)
+  pure (graph, graphRoots)
 
 -- | A genuine saturated GHC constructor owns its result graph independently
 -- of effect rows. Only the exact compiler-issued carrier selects dynamic sites.
-lowerConstructorReplies :: [GHC.TyCon] -> Int -> P ([TypeNode], [(ConstructorId, ConstructorReply)])
+lowerConstructorReplies :: [GHC.TyCon] -> Int -> P (TypeGraph, [(ConstructorId, ConstructorReply)])
 lowerConstructorReplies carriers base = do
   known <- gets (toList . constructors)
   let candidates =
-        [ (identity, index, atSite constructor index)
+        [ (constructor, identity, index, atSite constructor index)
         | (constructor, identity) <- known
         , Just index <- [requestReplyIndex constructor]
         ]
-      static = [(identity, index) | (identity, index, False) <- candidates]
-      (roots, builder) = runState
-        (traverse (TypePolicy.internType . snd) static)
-        TypePolicy.emptyTypeGraphBuilder
-  (lowered, rebase) <- lowerTypeGraph base
-    (TypePolicy.tgNodes (TypePolicy.finishTypeGraph builder)) roots
-  entries <- traverse (\((identity, _), root) ->
+      static = [(constructor, identity, index)
+        | (constructor, identity, index, False) <- candidates]
+  (roots, builder) <- lift $ either (Left . TypeEvidenceIssuanceFailure) Right
+    (runStateT (traverse (\(constructor, _, reply) ->
+      TypePolicy.internConstructorType constructor reply) static) TypePolicy.emptyTypeGraphBuilder)
+  graph <- lift $ either (Left . TypeEvidenceIssuanceFailure) Right (TypePolicy.finishTypeGraph builder)
+  (lowered, rebase) <- lowerTypeGraph base graph roots
+  entries <- traverse (\((_, identity, _), root) ->
       (identity,) . StaticReply <$> rebase root) (zip static roots)
-  let replies = Map.fromList (entries <> [(identity, ReplyAtSite) | (identity, _, True) <- candidates])
-  pure (lowered, [(identity, replies Map.! identity) | (identity, _, _) <- candidates])
+  let replies = Map.fromList (entries <> [(identity, ReplyAtSite) | (_, identity, _, True) <- candidates])
+  pure (lowered, [(identity, replies Map.! identity) | (_, identity, _, _) <- candidates])
  where
   atSite constructor reply = case (dataConOrigArgTys constructor, dataConRepArgTys constructor) of
     (Scaled _ first : _, Scaled _ runtimeFirst : _) ->
@@ -1261,146 +1273,305 @@ lowerConstructorReplies carriers base = do
         _ -> False
     _ -> False
 
--- | Lower the nodes of one elaboration-local graph reachable from @roots@,
--- in original order, as program nodes starting at @base@.
-lowerTypeGraph :: Int -> [TypePolicy.TypeNodeG] -> [TypePolicy.TypeNodeId]
-  -> P ([TypeNode], TypePolicy.TypeNodeId -> P TypeNodeId)
-lowerTypeGraph base nodes roots = do
-  selected <- lift (selectTypeGraph (IntMap.fromAscList (zip [0 :: Int ..] nodes)) roots)
+-- Scope and declaration edges remain finite through selection and lowering.
+-- Only final publication interns them into one output arena.
+lowerTypeGraph :: Int -> TypePolicy.TypeGraph -> [TypeNodeId]
+  -> P (TypeGraph, TypeNodeId -> P TypeNodeId)
+lowerTypeGraph base graph roots = do
+  selected <- lift (selectTypeGraph graph roots)
   lowerSelectedTypeGraph base selected
 
--- Select only reachable keys, preserving the graph's original order without
--- scanning every module node. Empty roots grant no evidence and need no graph.
-selectTypeGraph :: IntMap.IntMap TypePolicy.TypeNodeG -> [TypePolicy.TypeNodeId]
-  -> Either ProjectionError (IntMap.IntMap TypePolicy.TypeNodeG)
-selectTypeGraph _ [] = Right IntMap.empty
-selectTypeGraph nodes roots = do
-  reachable <- reachableTypeNodes nodes roots
-  pure (IntMap.fromAscList
-    [ (index, nodes IntMap.! index) | index <- Set.toAscList reachable ])
+selectTypeGraph :: TypePolicy.TypeGraph -> [TypeNodeId]
+  -> Either ProjectionError TypePolicy.TypeGraph
+selectTypeGraph _ [] = Right TypePolicy.emptyTypeGraph
+selectTypeGraph graph roots = do
+  reachable <- reachableTypeNodes graph roots
+  pure (TypeGraph (IntMap.filterWithKey (\index _ -> index `Set.member` reachable) (TypePolicy.tgNodes graph))
+    (IntMap.filterWithKey (\index _ -> index `Set.member` reachable) (TypePolicy.tgEdges graph)))
 
-lowerSelectedTypeGraph :: Int -> IntMap.IntMap TypePolicy.TypeNodeG
-  -> P ([TypeNode], TypePolicy.TypeNodeId -> P TypeNodeId)
-lowerSelectedTypeGraph base graphNodes = do
-  let ordered = map (TypePolicy.TypeNodeId . fromIntegral) (IntMap.keys graphNodes)
-      mapping = Map.fromList
-        [ (old, TypeNodeId (fromIntegral (base + offset)))
-        | (offset, old) <- zip [0 :: Int ..] ordered ]
-      rebase node = maybe
-        (failShape "prepared type graph reachability omitted a referenced node")
-        pure (Map.lookup node mapping)
-  lowered <- traverse (lowerTypeNode graphNodes rebase) ordered
-  pure (lowered, rebase)
-
-constructorsForTypeGraph :: [TypePolicy.TypeNodeG] -> [TypePolicy.TypeNodeId]
-  -> Either ProjectionError [DataCon]
-constructorsForTypeGraph nodes roots =
-  constructorsForSelectedTypeGraph <$>
-    selectTypeGraph (IntMap.fromAscList (zip [0 :: Int ..] nodes)) roots
-
-constructorsForSelectedTypeGraph :: IntMap.IntMap TypePolicy.TypeNodeG -> [DataCon]
-constructorsForSelectedTypeGraph = concatMap nodeConstructors . IntMap.elems
+lowerSelectedTypeGraph :: Int -> TypePolicy.TypeGraph
+  -> P (TypeGraph, TypeNodeId -> P TypeNodeId)
+lowerSelectedTypeGraph base original = do
+  rewritten <- traverseWithKey rewriteDeclaration (TypePolicy.tgNodes original)
+  let roots = [TypeNodeId (fromIntegral index)
+        | (index, TypeRoot{}) <- IntMap.toAscList rewritten]
+      outgoing = IntMap.mapWithKey (\index edges -> case IntMap.lookup index rewritten of
+        Just (TypeDeclaration _ _ (OpaqueDeclaration _ _) _) ->
+          [(role, target) | (role, target) <- edges, not (isConstructorEdge role)]
+        _ -> edges) (TypePolicy.tgEdges original)
+      rewrittenGraph = TypeGraph rewritten outgoing
+  selected <- lift (selectTypeGraph rewrittenGraph roots)
+  let ordered = IntMap.keys (TypePolicy.tgNodes selected)
+      mapping = IntMap.fromAscList
+        [(old, TypeNodeId (fromIntegral (base + offset))) | (offset, old) <- zip [0 :: Int ..] ordered]
+      rebase (TypeNodeId raw) = maybe
+        (failShape "finite type graph selection omitted a referenced node") pure
+        (IntMap.lookup (fromIntegral raw) mapping)
+  nodes <- traverse (\(index, node) -> do
+      converted <- lowerNode node
+      target <- rebase (TypeNodeId (fromIntegral index))
+      pure (typeNodeIndex target, converted)) (IntMap.toAscList (TypePolicy.tgNodes selected))
+  edges <- traverse (\(index, outgoing') -> do
+      source <- rebase (TypeNodeId (fromIntegral index))
+      converted <- traverse (\(role, target) -> (,) <$> lowerRole role <*> rebase target) outgoing'
+      pure (typeNodeIndex source, converted)) (IntMap.toAscList (TypePolicy.tgEdges selected))
+  pure (TypeGraph (IntMap.fromAscList nodes) (IntMap.fromAscList edges), rebase)
  where
-  nodeConstructors node = case node of
-    TypePolicy.DataG _ _ _ rows -> map fst rows
-    TypePolicy.TextG _ constructors -> constructors
-    TypePolicy.IntegerG _ constructors -> constructors
-    TypePolicy.NaturalG _ constructors -> constructors
-    _ -> []
+  traverseWithKey action = fmap IntMap.fromAscList . traverse (\(index, node) ->
+    (index,) <$> action index node) . IntMap.toAscList
+  isConstructorEdge TypeConstructor{} = True
+  isConstructorEdge _ = False
+  rewriteDeclaration index node = case node of
+    TypeDeclaration constructor flags form restriction -> do
+      attempted <- tryRepresentation $ case form of
+        DataDeclaration -> do
+          mapM_ verifyTemplate
+            [target | (TypeConstructor _, target) <- graphOutgoing original index]
+          pure form
+        TextDeclaration -> do
+          authority <- gets textUnit
+          case (authority, nameModule_maybe (GHC.tyConName constructor)) of
+            (Just (TextUnitAuthority expected), Just owner) | moduleUnit owner == expected ->
+              mapM_ internConstructor (GHC.tyConDataCons constructor) >> pure form
+            _ -> lift (Left (InvalidPreparedIdentity
+              "Text graph candidate lacks its selected compiler package identity"))
+        IntegerDeclaration -> mapM_ internConstructor (GHC.tyConDataCons constructor) >> pure form
+        NaturalDeclaration -> mapM_ internConstructor (GHC.tyConDataCons constructor) >> pure form
+        _ -> pure form
+      converted <- case attempted of
+        Right value -> pure value
+        Left (InvalidPreparedLayout _) -> pure (OpaqueDeclaration NominalConstructor "layout")
+        Left (InvalidPreparedRepresentation _) -> pure (OpaqueDeclaration NominalConstructor "representation")
+        Left failure -> lift (Left failure)
+      pure (TypeDeclaration constructor flags converted restriction)
+    _ -> pure node
+  verifyTemplate target = case IntMap.lookup (typeNodeIndex target) (TypePolicy.tgNodes original) of
+    Just (TypeConstructorTemplate constructor) -> do
+      let sourceFields = dataConOrigArgTys constructor
+          unpacked = any isUnpacked (dataConImplBangs constructor)
+      sourceReps <- traverse oneSourceRep sourceFields
+      issued <- traverse (projectRep . snd)
+        [(ordinal, rep) | (TypeField ordinal rep, _) <- graphOutgoing original (typeNodeIndex target)]
+      runtimeReps <- concat <$> traverse (\(Scaled _ fieldType) -> repsForType fieldType)
+        (dataConRepArgTys constructor)
+      resultReps <- repsForType (dataConOrigResTy constructor)
+      unless (not unpacked && sourceReps == issued && sourceReps == runtimeReps
+          && length sourceFields == length runtimeReps && resultReps == [LiftedRefRep])
+        (failLayout "original constructor field template is not one-to-one with its runtime layout")
+      ConstructorId identity <- internConstructor constructor
+      declared <- gets (fmap constructorFieldReps . Seq.lookup (fromIntegral identity) . constructorDecls)
+      unless (declared == Just sourceReps)
+        (failLayout "original field template differs from its physical constructor declaration")
+    _ -> failShape "finite type declaration names a non-constructor template"
+  oneSourceRep (Scaled _ fieldType) = do
+    reps <- repsForType fieldType
+    case reps of
+      [rep] -> pure rep
+      _ -> failLayout "original source field is void, flattened, or split"
+  isUnpacked HsUnpack{} = True
+  isUnpacked _ = False
+  lowerNode node = case node of
+    TypeRoot domain flags rendered -> pure (TypeRoot domain flags rendered)
+    TypeDeclaration constructor flags form restriction -> do
+      converted <- case form of
+        DataDeclaration -> pure DataDeclaration
+        NewtypeDeclaration arity -> pure (NewtypeDeclaration arity)
+        TextDeclaration -> pure TextDeclaration
+        IntegerDeclaration -> pure IntegerDeclaration
+        NaturalDeclaration -> pure NaturalDeclaration
+        ScalarDeclaration rep -> ScalarDeclaration <$> projectRep rep
+        OpaqueDeclaration headKind reason -> pure (OpaqueDeclaration headKind reason)
+      let name = GHC.tyConName constructor
+          namespace = if isDataOcc (nameOccName name) then "data" else "type"
+      pure (TypeDeclaration (nameSymbol namespace name) flags converted restriction)
+    TypeConstructorTemplate constructor -> TypeConstructorTemplate <$> internConstructor constructor
+    TypeBound index -> pure (TypeBound index)
+    TypeNominalApplication -> pure TypeNominalApplication
+    TypeApplication -> pure TypeApplication
+    TypeFunction flag -> pure (TypeFunction flag)
+    TypeForAll flag -> pure (TypeForAll flag)
+    TypeLiteral literal -> pure (TypeLiteral literal)
+  lowerRole role = case role of
+    TypeBinderKind index -> pure (TypeBinderKind index)
+    TypeBody -> pure TypeBody
+    TypeHead -> pure TypeHead
+    TypeArgument index -> pure (TypeArgument index)
+    TypeFunctionEdge -> pure TypeFunctionEdge
+    TypeApplyArgument -> pure TypeApplyArgument
+    TypeMultiplicity -> pure TypeMultiplicity
+    TypeDomain -> pure TypeDomain
+    TypeCodomain -> pure TypeCodomain
+    TypeKind -> pure TypeKind
+    TypeConstructor tag -> pure (TypeConstructor tag)
+    TypeField index rep -> TypeField index <$> projectRep rep
+    TypeAliasRhs -> pure TypeAliasRhs
 
-reachableTypeNodes :: IntMap.IntMap TypePolicy.TypeNodeG -> [TypePolicy.TypeNodeId]
+constructorsForTypeGraph :: TypePolicy.TypeGraph -> [TypeNodeId]
+  -> Either ProjectionError [DataCon]
+constructorsForTypeGraph graph roots = constructorsForSelectedTypeGraph <$> selectTypeGraph graph roots
+
+constructorsForSelectedTypeGraph :: TypePolicy.TypeGraph -> [DataCon]
+constructorsForSelectedTypeGraph = concatMap nodeConstructors . IntMap.elems . TypePolicy.tgNodes
+ where
+  nodeConstructors (TypeConstructorTemplate constructor) = [constructor]
+  nodeConstructors (TypeDeclaration constructor _ form _) = case form of
+    TextDeclaration -> GHC.tyConDataCons constructor
+    IntegerDeclaration -> GHC.tyConDataCons constructor
+    NaturalDeclaration -> GHC.tyConDataCons constructor
+    _ -> []
+  nodeConstructors _ = []
+
+reachableTypeNodes :: TypePolicy.TypeGraph -> [TypeNodeId]
   -> Either ProjectionError (Set Int)
-reachableTypeNodes nodes = go Set.empty
+reachableTypeNodes graph = go Set.empty
  where
   go visited [] = Right visited
-  go visited (TypePolicy.TypeNodeId raw : pending)
+  go visited (node : pending)
     | index `Set.member` visited = go visited pending
-    | otherwise = case IntMap.lookup index nodes of
-        Just current -> go (Set.insert index visited) (typeNodeEdges current <> pending)
-        Nothing -> Left (UnsupportedPreparedShape
-          "prepared type graph contains an out-of-range node")
-    where index = fromIntegral raw
-  typeNodeEdges graphNode = case graphNode of
-    TypePolicy.DataG _ _ arguments rows -> arguments <> concatMap snd rows
-    _ -> []
+    | IntMap.member index (TypePolicy.tgNodes graph) =
+        go (Set.insert index visited) (map snd (graphOutgoing graph index) <> pending)
+    | otherwise = Left (UnsupportedPreparedShape "finite type graph contains an out-of-range node")
+   where index = typeNodeIndex node
 
-lowerTypeNode
-  :: IntMap.IntMap TypePolicy.TypeNodeG
-  -> (TypePolicy.TypeNodeId -> P TypeNodeId)
-  -> TypePolicy.TypeNodeId
-  -> P TypeNode
-lowerTypeNode nodes rebase (TypePolicy.TypeNodeId raw) = case IntMap.lookup (fromIntegral raw) nodes of
-  Nothing -> failShape "prepared type graph contains an out-of-range node"
-  Just node -> case node of
-    TypePolicy.DataG ty tc arguments rows -> do
-      attempted <- tryRepresentation (lowerDataNode ty tc arguments rows)
-      case attempted of
-        Right lowered -> pure lowered
-        Left (InvalidPreparedLayout _) -> pure (refused "layout" ty)
-        Left (InvalidPreparedRepresentation _) -> pure (refused "representation" ty)
-        Left failure -> lift (Left failure)
-    TypePolicy.TextG ty constructors -> do
-      authority <- gets textUnit
-      case (authority, splitTyConApp_maybe ty) of
-        (Just (TextUnitAuthority expected), Just (constructor, []))
-          | Just owner <- nameModule_maybe (GHC.tyConName constructor)
-          , moduleUnit owner == expected -> lowerLeaf ty TypeText constructors
-        _ -> lift (Left (InvalidPreparedIdentity
-          "Text graph candidate lacks its selected compiler package identity"))
-    TypePolicy.IntegerG ty constructors -> lowerLeaf ty TypeInteger constructors
-    TypePolicy.NaturalG ty constructors -> lowerLeaf ty TypeNatural constructors
-    TypePolicy.ScalarG _ rep -> TypeScalar <$> projectRep rep
-    TypePolicy.UnconstructibleG _ reason rendered ->
-      pure (TypeUnconstructible reason rendered)
-    TypePolicy.ProjectionDefectG detail -> failRepresentation detail
+graphOutgoing :: TypeGraphF constructor identity rep -> Int -> [(TypeEdgeRoleF rep, TypeNodeId)]
+graphOutgoing graph index = IntMap.findWithDefault [] index (typeGraphEdges graph)
+
+typeNodeIndex :: TypeNodeId -> Int
+typeNodeIndex (TypeNodeId raw) = fromIntegral raw
+
+graphNodeCount :: TypeGraphF constructor identity rep -> Int
+graphNodeCount = IntMap.size . typeGraphNodes
+
+emptyProjectedTypeGraph :: TypeGraph
+emptyProjectedTypeGraph = TypeGraph IntMap.empty IntMap.empty
+
+unionTypeGraphs :: TypeGraph -> TypeGraph -> TypeGraph
+unionTypeGraphs first second = TypeGraph
+  (IntMap.union (typeGraphNodes first) (typeGraphNodes second))
+  (IntMap.union (typeGraphEdges first) (typeGraphEdges second))
+
+-- One final arena coalesces equal declarations and scoped syntax from all
+-- prepared inputs. Nominal collisions compare complete formal outgoing edges.
+data TypeArena = TypeArena
+  { arenaNodes :: !(IntMap.IntMap (Maybe TypeNode))
+  , arenaEdges :: !(IntMap.IntMap [(TypeEdgeRoleF RuntimeRep, TypeNodeId)])
+  , arenaDeclarations :: !(Map SymbolIdentity TypeNodeId)
+  , arenaExpressions :: !(Map (TypeNode, [(TypeEdgeRoleF RuntimeRep, TypeNodeId)]) TypeNodeId)
+  , arenaOriginals :: !(IntMap.IntMap TypeNodeId)
+  , arenaNext :: !Word32
+  , arenaWork :: !Int
+  , arenaBytes :: !Int
+  }
+
+type Assemble = StateT TypeArena (Either ProjectionError)
+
+assembleTypeGraph :: TypeGraph -> Either ProjectionError (TypeGraph, TypeNodeId -> Either ProjectionError TypeNodeId)
+assembleTypeGraph original = do
+  let initial = TypeArena IntMap.empty IntMap.empty Map.empty Map.empty IntMap.empty 0 0 0
+  (_, final) <- runStateT (do
+    -- Reserve every nominal owner before following expressions. Expression
+    -- edges form a DAG; declaration/template links can be mutually recursive.
+    mapM_ reserveDeclaration declarations
+    mapM_ completeDeclaration declarations
+    mapM_ intern [TypeNodeId (fromIntegral index)
+      | (index, TypeRoot{}) <- IntMap.toAscList (typeGraphNodes original)]) initial
+  nodes <- traverse completed (IntMap.toAscList (arenaNodes final))
+  let graph = TypeGraph (IntMap.fromAscList nodes) (arenaEdges final)
+      rebase identity = maybe (Left (UnsupportedPreparedShape "final type arena omitted a selected root")) Right
+        (IntMap.lookup (typeNodeIndex identity) (arenaOriginals final))
+  pure (graph, rebase)
  where
-  refused reason ty = TypeUnconstructible reason (Text.pack (showSDocUnsafe (ppr ty)))
-  lowerLeaf ty leaf constructors = do
-    attempted <- tryRepresentation (mapM_ internConstructor constructors)
-    case attempted of
-      Right () -> pure leaf
-      Left (InvalidPreparedRepresentation _) -> pure (refused "representation" ty)
-      Left (InvalidPreparedLayout _) -> pure (refused "layout" ty)
-      Left failure -> lift (Left failure)
-  lowerDataNode ty tc arguments rows = do
-    loweredRows <- traverse lowerRow rows
-    loweredArguments <- traverse rebase arguments
-    pure (TypeData (nameSymbol "type" (GHC.tyConName tc))
-      loweredArguments loweredRows)
-    where
-      lowerRow (constructor, fields) = do
-        sourceReps <- verifySourceLayout constructor
-        identity@(ConstructorId index) <- internConstructor constructor
-        -- The row is checked against the canonical declaration it will name,
-        -- not only the type graph's DataCon. Evidence reached through another
-        -- DataCon object for the same constructor must not borrow that
-        -- declaration with a different field shape.
-        declared <- gets (fmap constructorFieldReps
-          . Seq.lookup (fromIntegral index) . constructorDecls)
-        unless (declared == Just sourceReps)
-          (failLayout "prepared type constructor declaration differs from its source fields")
-        CtorRow identity <$> traverse rebase fields
-      verifySourceLayout constructor = do
-        let sourceFields = case splitTyConApp_maybe ty of
-              Just (_, args) -> dataConInstOrigArgTys constructor args
-              Nothing -> []
-            unpacked = any isUnpacked (dataConImplBangs constructor)
-        sourceReps <- traverse oneSourceRep sourceFields
-        runtimeReps <- concat <$> traverse (\(Scaled _ fieldType) -> repsForType fieldType)
-          (dataConRepArgTys constructor)
-        resultReps <- repsForType (dataConOrigResTy constructor)
-        unless (not unpacked && sourceReps == runtimeReps
-          && length sourceFields == length runtimeReps
-          && resultReps == [LiftedRefRep])
-          (failLayout "prepared type constructor source/runtime layout is not one-to-one")
-        pure sourceReps
-      oneSourceRep (Scaled _ fieldType) = do
-        reps <- repsForType fieldType
-        case reps of
-          [rep] -> pure rep
-          _ -> failLayout "prepared type source field is void, flattened, or split"
-      isUnpacked HsUnpack{} = True
-      isUnpacked _ = False
+  failure detail = lift (Left (UnsupportedPreparedShape detail))
+  completed (index, Just node) = Right (index, node)
+  completed (_, Nothing) = Left (UnsupportedPreparedShape "final type arena has an incomplete reservation")
+  intern old = do
+    work <- gets ((+ 1) . arenaWork)
+    if work > 16777216 then lift (Left (TypeEvidenceIssuanceFailure TypePolicy.TypeGraphWorkLimit))
+      else modify' (\arena -> arena { arenaWork = work })
+    known <- gets (IntMap.lookup (typeNodeIndex old) . arenaOriginals)
+    case known of
+      Just identity -> pure identity
+      Nothing -> case IntMap.lookup (typeNodeIndex old) (typeGraphNodes original) of
+        Nothing -> failure "final type arena input contains an invalid reference"
+        Just node@TypeDeclaration{} -> internDeclaration old node
+        Just node -> do
+          edges <- convertedEdges old
+          let key = (semanticWeight node, edges)
+          duplicate <- gets (Map.lookup key . arenaExpressions)
+          identity <- case duplicate of
+            Just existing -> pure existing
+            Nothing -> do
+              reserved <- reserve
+              publish reserved node edges
+              modify' (\arena -> arena
+                { arenaExpressions = Map.insert key reserved (arenaExpressions arena) })
+              pure reserved
+          remember old identity
+          pure identity
+  declarations = [(TypeNodeId (fromIntegral index), node)
+    | (index, node@TypeDeclaration{}) <- IntMap.toAscList (typeGraphNodes original)]
+  reserveDeclaration (old, TypeDeclaration symbol _ _ _) = do
+    duplicate <- gets (Map.lookup symbol . arenaDeclarations)
+    identity <- case duplicate of
+      Just existing -> pure existing
+      Nothing -> do
+        reserved <- reserve
+        modify' (\arena -> arena
+          { arenaDeclarations = Map.insert symbol reserved (arenaDeclarations arena) })
+        pure reserved
+    remember old identity
+  reserveDeclaration _ = failure "final type arena declaration category mismatch"
+  completeDeclaration (old, node) = do
+    known <- gets (IntMap.lookup (typeNodeIndex old) . arenaOriginals)
+    identity <- maybe (failure "final type arena declaration has no owner") pure known
+    edges <- convertedEdges old
+    previous <- gets (IntMap.lookup (typeNodeIndex identity) . arenaNodes)
+    case previous of
+      Just Nothing -> publish identity node edges
+      Just (Just existing) -> do
+        existingEdges <- gets (IntMap.findWithDefault [] (typeNodeIndex identity) . arenaEdges)
+        unless (semanticWeight existing == semanticWeight node && existingEdges == edges)
+          (lift (Left (TypeEvidenceIssuanceFailure TypePolicy.TypeGraphOriginalDeclarationMismatch)))
+      _ -> failure "final type arena declaration has no reservation"
+  internDeclaration old _ = do
+    known <- gets (IntMap.lookup (typeNodeIndex old) . arenaOriginals)
+    maybe (failure "final type arena declaration was not reserved") pure known
+  convertedEdges old = traverse (\(role, target) -> (role,) <$> intern target)
+    (graphOutgoing original (typeNodeIndex old))
+  remember old identity = modify' (\arena -> arena
+    { arenaOriginals = IntMap.insert (typeNodeIndex old) identity (arenaOriginals arena) })
+  reserve = do
+    next <- gets arenaNext
+    when (next >= 65535) (lift (Left (TypeEvidenceIssuanceFailure TypePolicy.TypeGraphNodeLimit)))
+    let identity = TypeNodeId next
+    modify' (\arena -> arena
+      { arenaNodes = IntMap.insert (fromIntegral next) Nothing (arenaNodes arena)
+      , arenaNext = next + 1 })
+    pure identity
+  publish identity node edges = do
+    let cost = 32 + nodeTextBytes node + length edges * 32
+    bytes <- gets ((+ cost) . arenaBytes)
+    when (bytes > 16777216) (lift (Left (TypeEvidenceIssuanceFailure TypePolicy.TypeGraphByteLimit)))
+    work <- gets ((+ cost) . arenaWork)
+    when (work > 16777216) (lift (Left (TypeEvidenceIssuanceFailure TypePolicy.TypeGraphWorkLimit)))
+    modify' (\arena -> arena
+      { arenaWork = work
+      , arenaNodes = IntMap.insert (typeNodeIndex identity) (Just node) (arenaNodes arena)
+      , arenaEdges = IntMap.insert (typeNodeIndex identity) edges (arenaEdges arena)
+      , arenaBytes = bytes })
+  semanticWeight (TypeRoot domain flags _) = TypeRoot domain flags ""
+  semanticWeight (TypeDeclaration symbol flags (OpaqueDeclaration headKind _) restriction) =
+    TypeDeclaration symbol flags (OpaqueDeclaration headKind "") restriction
+  semanticWeight node = node
+  nodeTextBytes node = case node of
+    TypeRoot _ flags rendered -> length flags + utf8Bytes rendered
+    TypeDeclaration symbol flags form _ -> length flags
+      + sum (map utf8Bytes [symbolUnit symbol, symbolModule symbol, symbolNamespace symbol, symbolOccurrence symbol])
+      + case form of OpaqueDeclaration _ reason -> utf8Bytes reason; _ -> 0
+    TypeLiteral (NaturalTypeLiteral value) -> utf8Bytes value
+    TypeLiteral (SymbolTypeLiteral value) -> utf8Bytes value
+    _ -> 0
+  utf8Bytes = BS.length . TextEncoding.encodeUtf8
 
 tryRepresentation :: P a -> P (Either ProjectionError a)
 tryRepresentation action = StateT $ \machineState -> case runStateT action machineState of

@@ -1,9 +1,13 @@
 module ModuleEvidenceProjectionTest (verifyModuleEvidenceProjection) where
 
 import Control.Monad (forM_, unless)
+import Control.Monad.State.Strict (runStateT)
+import Data.IntMap.Strict qualified as IntMap
+import GHC.Core.TyCon (PrimRep(..))
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
-import GHC.Builtin.Types (boolTy, boolTyCon)
+import Data.Text qualified as Text
+import GHC.Builtin.Types (boolTy)
 import GHC.Builtin.Types.Prim (addrPrimTy)
 import GHC.Stg.Syntax (GenStgTopBinding(..))
 import GHC.Types.Id (mkVanillaGlobal)
@@ -33,18 +37,20 @@ verifyModuleEvidenceProjection = do
     [first, second, empty] -> pure
       (projectedBody first, projectedBody second, projectedBody empty)
     _ -> fail "module evidence fixture lost a group"
-  let firstNode = TypeUnconstructible "first" "A"
-      thirdNode = TypeUnconstructible "third" "C"
-      row sid origin ordinal root inputs = SiteRow sid origin ordinal HostAnswer root inputs
-  assert (projectedTypes firstBody == [firstNode, thirdNode]
-      && projectedSites firstBody ==
-        [row 12 "alpha-one" 2 (TypeNodeId 0) [TypeNodeId 1],
-         row 13 "alpha-two" 3 (TypeNodeId 1) []])
-    "group evidence changed original node/site order or rebasing"
-  assert (projectedTypes secondBody == [thirdNode]
-      && projectedSites secondBody == [row 11 "beta" 1 (TypeNodeId 0) []])
+  let rows = projectedSites firstBody
+      sameHead body root expected = nominalHead (projectedTypes body) root == Just expected
+  assert (map siteId rows == [12, 13]
+      && map siteOrdinal rows == [2, 3]
+      && map siteOrigin rows == ["alpha-one", "alpha-two"]
+      && sameHead firstBody (siteWire (head rows)) "Bool"
+      && sameHead firstBody (siteWire (last rows)) "Addr#"
+      && siteInputs (head rows) == [siteWire (last rows)])
+    "group evidence changed original site order or scoped-root rebasing"
+  assert (case projectedSites secondBody of
+      [row] -> siteId row == 11 && sameHead secondBody (siteWire row) "Addr#"
+      _ -> False)
     "group evidence included another owner's rows"
-  assert (null (projectedTypes emptyBody) && null (projectedSites emptyBody))
+  assert (IntMap.null (typeGraphNodes (projectedTypes emptyBody)) && null (projectedSites emptyBody))
     "site-free group received unrelated module evidence"
   forM_ groups $ \group -> do
     selected <- either (fail . show) pure (projectPreparedModuleGroupsSelected context
@@ -54,24 +60,28 @@ verifyModuleEvidenceProjection = do
     { pmBindings = [last (pmBindings prepared)]
     , pmTypeGraph = error "site-free projection forced the module type graph"
     })
-  assert (all (null . projectedTypes . projectedBody) lazyEmpty)
+  assert (all (IntMap.null . typeGraphNodes . projectedTypes . projectedBody) lazyEmpty)
     "site-free projection produced type evidence"
   rejectShape "invalid reachable root"
-    "prepared type graph contains an out-of-range node" (prepared
-    { pmPreparedSites = [site alpha 21 "invalid-root" 0 99 []] })
+    "finite type graph contains an out-of-range node" (prepared
+    { pmPreparedSites = [site alpha 21 "invalid-root" 0 999999 []] })
   rejectShape "invalid reachable edge"
-    "prepared type graph contains an out-of-range node" (prepared
-    { pmPreparedSites = [site alpha 22 "invalid-edge" 0 0 []]
-    , pmTypeGraph = TypePolicy.TypeGraph
-        [TypePolicy.DataG boolTy boolTyCon [TypePolicy.TypeNodeId 99] []]
+    "finite type graph contains an out-of-range node" (prepared
+    { pmPreparedSites = [site alpha 22 "invalid-edge" 0 (raw firstRoot) []]
+    , pmTypeGraph = graph { typeGraphEdges = IntMap.insert (index firstRoot)
+        [(TypeBody, TypeNodeId 999999)] (typeGraphEdges graph) }
     })
   rejectShape "duplicate selected site id"
     "duplicate selected prepared site id 23" (prepared
-    { pmPreparedSites = [site alpha 23 "duplicate-one" 0 0 [],
-                         site alpha 23 "duplicate-two" 1 2 []] })
+    { pmPreparedSites = [site alpha 23 "duplicate-one" 0 (raw firstRoot) [],
+                         site alpha 23 "duplicate-two" 1 (raw thirdRoot) []] })
   case projectPreparedModuleGroups context (prepared
-    { pmPreparedSites = [site alpha 24 "reachable-defect" 0 1 []] }) of
-    Left (InvalidPreparedRepresentation "unreachable defect") -> pure ()
+    { pmPreparedSites = [site alpha 24 "reachable-defect" 0 (raw thirdRoot) []]
+    , pmTypeGraph = graph { typeGraphNodes = IntMap.map (\node -> case node of
+        TypeDeclaration tycon flags (OpaqueDeclaration _ "primitive") restriction ->
+          TypeDeclaration tycon flags (ScalarDeclaration (BoxedRep Nothing)) restriction
+        _ -> node) (typeGraphNodes graph) } }) of
+    Left (InvalidPreparedRepresentation "runtime-polymorphic boxed representation") -> pure ()
     outcome -> fail ("reachable projection defect was skipped: " ++ show outcome)
   case projectPreparedModuleGroups context (prepared
     { pmBindings = [last (pmBindings prepared)]
@@ -98,6 +108,15 @@ verifyModuleEvidenceProjection = do
     , psWireNode = TypePolicy.TypeNodeId root
     , psInputNodes = map TypePolicy.TypeNodeId inputs
     }
+  raw (TypeNodeId value) = value
+  index (TypeNodeId value) = fromIntegral value
+  (firstRoot, thirdRoot, graph) = case do
+      ((first, third), builder) <- runStateT ((,) <$> TypePolicy.internType boolTy
+        <*> TypePolicy.internType addrPrimTy) TypePolicy.emptyTypeGraphBuilder
+      issued <- TypePolicy.finishTypeGraph builder
+      pure (first, third, issued) of
+    Right result -> result
+    Left failure -> error (show failure)
   prepared = PreparedModule
     { pmModule = owner
     , pmCoverage = CompleteSourceModule
@@ -106,13 +125,10 @@ verifyModuleEvidenceProjection = do
     , pmTagSigs = emptyNameEnv
     , pmSitedSiblings = Map.empty
     , pmYieldSites = []
-    , pmPreparedSites = [site beta 11 "beta" 1 2 [],
-                         site alpha 12 "alpha-one" 2 0 [2],
-                         site alpha 13 "alpha-two" 3 2 []]
-    , pmTypeGraph = TypePolicy.TypeGraph
-        [ TypePolicy.UnconstructibleG boolTy "first" "A"
-        , TypePolicy.ProjectionDefectG "unreachable defect"
-        , TypePolicy.UnconstructibleG addrPrimTy "third" "C" ]
+    , pmPreparedSites = [site beta 11 "beta" 1 (raw thirdRoot) [],
+                         site alpha 12 "alpha-one" 2 (raw firstRoot) [raw thirdRoot],
+                         site alpha 13 "alpha-two" 3 (raw thirdRoot) []]
+    , pmTypeGraph = graph
     , pmSiteRejections = []
     , pmRequestSiteTyCon = Nothing
     }
@@ -133,3 +149,17 @@ verifyModuleEvidenceProjection = do
   rejectShape label expected module_ = case projectPreparedModuleGroups context module_ of
     Left (UnsupportedPreparedShape detail) | detail == expected -> pure ()
     outcome -> fail (label ++ " was not rejected: " ++ show outcome)
+
+nominalHead :: TypeGraph -> TypeNodeId -> Maybe Text.Text
+nominalHead graph root = do
+  body <- child root TypeBody
+  declaration <- child body TypeHead
+  case node declaration of
+    Just (TypeDeclaration identity _ _ _) -> Just (symbolOccurrence identity)
+    _ -> Nothing
+ where
+  node (TypeNodeId raw) = IntMap.lookup (fromIntegral raw) (typeGraphNodes graph)
+  child (TypeNodeId raw) role = case [target | (actual, target) <-
+      IntMap.findWithDefault [] (fromIntegral raw) (typeGraphEdges graph), actual == role] of
+    [target] -> Just target
+    _ -> Nothing

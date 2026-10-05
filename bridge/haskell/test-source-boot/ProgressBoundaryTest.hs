@@ -1,6 +1,7 @@
 module ProgressBoundaryTest (progressBoundaryChecks, watchReplyEvidenceChecks, watchReplyWarmAuthorityChecks) where
 
 import Control.Exception (bracket, try, SomeException)
+import Data.IntMap.Strict qualified as IntMap
 import Control.Monad (forM, forM_, unless)
 import Data.ByteString qualified as BS
 import Data.List (isInfixOf)
@@ -189,9 +190,18 @@ retainWatchReplyEvidence work result = do
       pure (occurrence, targetRows, originalRows)
  where
   replyRows occurrence constructors types replies =
-    [case types !! fromIntegral index of
-       TypeData family _ _ -> symbolOccurrence family == "Int"
-       _ -> False
+    [case do
+       body <- child (TypeNodeId index) TypeBody
+       declaration <- child body TypeHead
+       node <- nodeAt declaration
+       case node of TypeDeclaration family _ _ _ -> Just (symbolOccurrence family == "Int"); _ -> Nothing
+     of Just True -> True; _ -> False
     | (ConstructorId constructor, StaticReply (TypeNodeId index)) <- replies
     , symbolOccurrence (constructorIdentity (constructors !! fromIntegral constructor)) == occurrence
     ]
+   where
+    nodeAt (TypeNodeId raw) = IntMap.lookup (fromIntegral raw) (typeGraphNodes types)
+    child (TypeNodeId raw) role = case [target | (actual, target) <-
+        IntMap.findWithDefault [] (fromIntegral raw) (typeGraphEdges types), actual == role] of
+      [target] -> Just target
+      _ -> Nothing

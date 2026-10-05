@@ -19,6 +19,7 @@ import Codec.CBOR.Term (Term(..), decodeTerm, encodeTerm)
 import Data.ByteString.Lazy qualified as BSL
 import Control.Exception (SomeException, IOException, AsyncException(ThreadKilled), bracket, evaluate, finally, try, fromException, onException, mask, catches, Handler(..), throwIO)
 import Control.Concurrent (MVar, forkIO, killThread, myThreadId, throwTo, threadDelay, newEmptyMVar, putMVar, takeMVar)
+import Data.IntMap.Strict qualified as IntMap
 import Control.Monad (foldM, forM, forM_, unless, void, when)
 import GHC.Clock (getMonotonicTimeNSec)
 import Data.Word (Word32, Word64)
@@ -3502,7 +3503,7 @@ verifyRetainedPackageWitness producer evidence = do
             (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" [])
         , programSignatures = [], programGlobals = globals, programConstructors = []
         , programOperations = [], programBindings = [], programEntry = ValueId 0
-        , programTypes = [], programSites = [], programConstructorReplies = [], programJsonLayout = Nothing }
+        , programTypes = TypeGraph IntMap.empty IntMap.empty, programSites = [], programConstructorReplies = [], programJsonLayout = Nothing }
       encode globals = encodeCertifiedProducts producer OrdinaryExecutionSource Map.empty (emptyFinalizedModuleArtifacts producer) [] Nothing []
         [("target", program globals)] evidence "" ""
   withTiming $ do

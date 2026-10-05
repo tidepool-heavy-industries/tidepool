@@ -1,8 +1,15 @@
 module TypeEvidenceChecks (runTypeEvidenceChecks) where
 
-import Control.Monad (unless)
-import Data.Maybe (mapMaybe)
+import Control.Monad (unless, forM_)
+import Control.Monad.State.Strict (runStateT, lift)
+import Data.IntMap.Strict qualified as IntMap
 import Data.Map.Strict qualified as Map
+import Data.Text qualified as Text
+import GHC.Builtin.Types (boolTy)
+import GHC.Core.Coercion (mkNomReflCo)
+import GHC.Core.Type (typeKind, mkNumLitTy)
+import GHC.Core.TyCo.Rep (Type(..))
+import Tidepool.CanonicalTypeShape (captureClosedTypeShape, TypeShapeError(..))
 import GHC.Core.DataCon (dataConName)
 import GHC.Core.TyCon (tyConDataCons)
 import GHC.Types.Name (nameOccName)
@@ -13,38 +20,35 @@ import GHC.Unit.Module (moduleName, moduleNameString)
 import GHC.Unit.Module.ModDetails (md_types)
 import GHC.Unit.Module.ModIface (mi_module)
 import GHC.Driver.Env (hsc_HPT)
-import Tidepool.CanonicalTypeShape
-import Tidepool.ExactHydration (freshExactState, hydrateOriginalInterfaces)
-import Tidepool.PreparedSites (requestReplyIndex)
-import Tidepool.PreparedStg (PreparedModule(..))
-import Tidepool.TypePolicy qualified as TypePolicy
-import Data.Text qualified as Text
 import System.Directory (createDirectoryIfMissing)
 import System.FilePath ((</>))
 import Tidepool.CompilerProducts (prepareCompilerProjectionContext)
+import Tidepool.ExactHydration (freshExactState, hydrateOriginalInterfaces)
 import Tidepool.ExecutionProjection (ProjectionContext(..), projectPreparedTarget)
 import Tidepool.ExecutionSchema
 import Tidepool.GhcPipeline
   ( PipelineSelection(PreparedStg), PreparedPipelineResult(..), PipelineResult(..)
   , finalizedHomeModInfo, runPipelineSelected )
+import Tidepool.PreparedSites (requestReplyIndex)
+import Tidepool.PreparedStg (PreparedModule(..))
+import Tidepool.TypePolicy qualified as Policy
 
--- Compile the original and alpha control once each, then select entries using
--- the same compiler authorities and reachable owners as production.
+-- Two genuine compiler results test alpha and same-layout field semantics. They remain different
+-- source originals; graph equality never admits one as the other's certificate.
 runTypeEvidenceChecks :: FilePath -> IO ()
 runTypeEvidenceChecks directory = do
   let target = directory </> "TypeEvidence.hs"
   createDirectoryIfMissing True (directory </> "Tidepool" </> "Effects")
   writeFile (directory </> "Tidepool" </> "Effects" </> "Core.hs") (unlines
-    [ "{-# LANGUAGE ExplicitForAll #-}"
-    , "{-# LANGUAGE GADTs #-}"
+    [ "{-# LANGUAGE ExplicitForAll, GADTs #-}"
     , "module Tidepool.Effects.Core where"
     , "data AgentSession a where"
     , "  AgentAttachWith :: Maybe String -> AgentSession ()"
     , "data AgentTools a where"
-    , "  AgentToolsInstallWith :: AgentTools ()"
-    ])
+    , "  AgentToolsInstallWith :: AgentTools ()" ])
   createDirectoryIfMissing True (directory </> "Tidepool" </> "Internal")
-  readFile "lib/Tidepool/Internal/RequestSite.hs" >>= writeFile (directory </> "Tidepool" </> "Internal" </> "RequestSite.hs")
+  readFile "lib/Tidepool/Internal/RequestSite.hs" >>= writeFile
+    (directory </> "Tidepool" </> "Internal" </> "RequestSite.hs")
   writeFile (directory </> "Tidepool" </> "Actor.hs") (unlines
     [ "{-# LANGUAGE DataKinds, ExplicitForAll #-}"
     , "module Tidepool.Actor where"
@@ -54,312 +58,258 @@ runTypeEvidenceChecks directory = do
     , "receive _ = Nothing"
     , "{-# OPAQUE receiveSited #-}"
     , "receiveSited :: forall answer. RequestSite '[] answer -> String -> Maybe answer"
-    , "receiveSited _ _ = Nothing"
-    ])
+    , "receiveSited _ _ = Nothing" ])
   fixture <- readFile "test-prepared-stg/site-fixtures/TypeEvidence.hs"
   writeFile target fixture
-  result <- runPipelineSelected PreparedStg target [directory]
-  let alphaFixture = unlines
-        [if line == "  Echo :: a -> Console a" then "  Echo :: reply -> Console reply" else line
-        | line <- lines fixture]
+  original <- runPipelineSelected PreparedStg target [directory]
   assert (length [() | line <- lines fixture, line == "  Echo :: a -> Console a"] == 1)
-    "Echo alpha control must change exactly one actual source declaration"
-  writeFile target alphaFixture
-  secondResult <- runPipelineSelected PreparedStg target [directory]
+    "alpha control must change exactly one actual constructor declaration"
+  assert (length [() | line <- lines fixture, line == "data SameLayout = SameLayout Int"] == 1)
+    "formal declaration conflict control must change exactly one actual field"
+  writeFile target (unlines [case line of
+    "  Echo :: a -> Console a" -> "  Echo :: reply -> Console reply"
+    "data SameLayout = SameLayout Int" -> "data SameLayout = SameLayout Bool"
+    _ -> line | line <- lines fixture])
+  alpha <- runPipelineSelected PreparedStg target [directory]
   writeFile target fixture
-  originalContext <- contextFor result
-  alphaContext <- contextFor secondResult
-  let project context prepared entry auxiliary = projectPreparedTarget
-        (context { projectionEntry = (projectionEntry context)
-          { symbolOccurrence = Text.pack entry }
-        , projectionAuxiliaryRoots =
-            [(projectionEntry context) { symbolOccurrence = Text.pack name } | name <- auxiliary]
-        }) (pprModules prepared)
-      program entry = either
-        (ioError . userError . ((entry ++ ": ") ++) . show) pure
-        (project originalContext result entry [])
+  context <- contextFor original
+  alphaContext <- contextFor alpha
+  let project ctx result entry auxiliary = projectPreparedTarget
+        (ctx { projectionEntry = (projectionEntry ctx) { symbolOccurrence = entry }
+             , projectionAuxiliaryRoots = [(projectionEntry ctx) { symbolOccurrence = name }
+                 | name <- auxiliary] }) (pprModules result)
+      program entry = requireRight (project context original entry [])
       answer entry = do
         wire <- program entry
         case programSites wire of
-          [site] -> pure (wire, nodeAt wire (siteWire site))
-          sites -> ioError (userError (entry ++ ": expected one selected site, got "
-            ++ show (length sites)))
-      dataAnswer entry expected = do
-        (wire, node) <- answer entry
-        case node of
-          TypeData family arguments rows -> do
-            assert (symbolOccurrence family == expected)
-              (entry ++ ": incorrect normalized family " ++ show family)
-            pure (wire, arguments, rows)
-          other -> ioError (userError (entry ++ ": expected data evidence, got " ++ show other))
-      leafAnswer entry expected constructors = do
-        (wire, node) <- answer entry
-        assert (node == expected) (entry ++ ": wrong leaf evidence " ++ show node)
-        let names = map (symbolOccurrence . constructorIdentity) (programConstructors wire)
-        assert (all (`elem` names) constructors)
-          (entry ++ ": missing closure-only leaf constructors " ++ show names)
-
-  (_, _, boolRows) <- dataAnswer "boolAnswer" "Bool"
-  assert (length boolRows == 2) "Bool evidence must declare both constructors"
-  _ <- dataAnswer "nestedIdentity" "Int"
-  (_, _, maybeRows) <- dataAnswer "higherKinded" "Maybe"
-  assert (length maybeRows == 2) "higher-kinded newtype erased to incomplete Maybe"
-  (_, gadt) <- answer "impossibleGadt"
-  assert (isRefusal gadt) "GADT evidence admitted OnlyInt into Choice Bool"
-  (_, loop) <- answer "recursiveNewtype"
-  assert (isRefusal loop) "recursive newtype did not produce a bounded refusal"
-
-  (chain, _, chainRows) <- dataAnswer "recursiveData" "Chain"
-  chainRoot <- case programSites chain of
-    [site] -> pure (siteWire site)
-    _ -> ioError (userError "recursiveData: expected one selected site")
-  assert (map rowFields chainRows == [[], [chainRoot]])
-    "recursive data evidence did not close its constructor-field cycle"
-  (nest, _) <- answer "expandingData"
-  assert (length (programTypes nest) <= 65536
-    && any isRefusal (programTypes nest))
-    "nonregular recursive evidence did not stop at a bounded refusal"
-
-  (phantomIntWire, phantomIntArgs, _) <- dataAnswer "phantomInt" "Phantom"
-  (phantomBoolWire, phantomBoolArgs, _) <- dataAnswer "phantomBool" "Phantom"
-  assert (map (familyAt phantomIntWire) phantomIntArgs == [Just "Int"]
-    && map (familyAt phantomBoolWire) phantomBoolArgs == [Just "Bool"])
-    "phantom type arguments disappeared from evidence"
-  (leftWire, leftArgs, leftRows) <- dataAnswer "eitherIntBool" "Either"
-  (rightWire, rightArgs, _) <- dataAnswer "eitherBoolInt" "Either"
-  assert (map (familyAt leftWire) leftArgs == [Just "Int", Just "Bool"]
-    && map (familyAt rightWire) rightArgs == [Just "Bool", Just "Int"]
-    && length leftRows == 2)
-    "Either evidence lost argument order or the never-matched constructor"
-
-  leafAnswer "textAnswer" TypeText ["Text"]
-  leafAnswer "integerAnswer" TypeInteger ["IS", "IP", "IN"]
-  leafAnswer "naturalAnswer" TypeNatural ["NS", "NB"]
-  (_, packed) <- answer "packedAnswer"
-  assert (isRefusal packed) "UNPACK layout was admitted as source-field layout"
-  printWire <- program "printRequest"
-  printNode <- verbAnswer printWire "Print"
-  assert (familyOf printNode `elem` [Just "Unit", Just "()"])
-    ("Print's intrinsic reply is not unit: " ++ show printNode)
-  fetchWire <- program "fetchRequest"
-  fetchNode <- verbAnswer fetchWire "Fetch"
-  case fetchNode of
-    TypeData family arguments rows -> assert
-      (symbolOccurrence family == "Either" && length rows == 2
-        && map (familyAt fetchWire) arguments == [Just "Bool", Nothing]
-        && map (nodeAt fetchWire) (drop 1 arguments) == [TypeText])
-      ("Fetch's intrinsic reply lost its Either Bool Text evidence: " ++ show fetchNode)
-    other -> ioError (userError ("Fetch reply is not data evidence: " ++ show other))
-  echoWire <- program "echoRequest"
-  echoNode <- verbAnswer echoWire "Echo"
-  alphaEchoWire <- either (ioError . userError . show) pure
-    (project alphaContext secondResult "echoRequest" [])
-  alphaEchoNode <- verbAnswer alphaEchoWire "Echo"
-  assert (case (echoNode, alphaEchoNode) of
-    (TypeUnconstructible reason first, TypeUnconstructible otherReason second) ->
-      reason == otherReason && first /= second
-    _ -> False)
-    "actual original binder alpha-renaming did not exercise differing refusal diagnostics"
-  let echoDeclaration wire = [declaration | declaration <- programConstructors wire
-        , symbolModule (constructorIdentity declaration) == "TypeEvidence"
-        , symbolOccurrence (constructorIdentity declaration) == "Echo"]
-  assert (echoDeclaration echoWire == echoDeclaration alphaEchoWire)
-    "binder alpha-renaming changed the constructor's physical declaration"
-  assert (isRefusal echoNode) "an open reply index acquired structural construction authority"
-  functionWire <- program "functionRequest"
-  functionNode <- verbAnswer functionWire "FunctionReply"
-  assert (isRefusal functionNode) "a function reply index acquired structural construction authority"
-  profileWire <- program "profileWitness"
-  assert (null (programConstructorReplies profileWire))
-    "an effect-list witness acquired a lifted reply graph"
-  firstChoices <- mapM program ["polyChoice", "polyChoiceNested"]
-  secondChoices <- mapM (\entry -> either (ioError . userError . show) pure
-    (project alphaContext secondResult entry []))
-    ["polyChoice", "polyChoiceNested"]
-  mapM_ (\wire -> do
-      choice <- verbAnswer wire ":|"
-      assert (case choice of TypeData family _ _ -> symbolOccurrence family == "Either"; _ -> False)
-        "ordinary saturated alternatives constructor lacks its intrinsic partial reply graph")
-    (firstChoices <> secondChoices)
-  customWire <- program "customSend"
-  customNode <- verbAnswer customWire "Print"
-  assert (familyOf customNode `elem` [Just "Unit", Just "()"])
-    "custom Member/send effect without KnownEffect lost intrinsic reply evidence"
-  partialWire <- program "partialReply"
-  partialNode <- verbAnswer partialWire "PartialReply"
-  case partialNode of
-    TypeData family [payload] rows -> do
-      assert (symbolOccurrence family == "Maybe" && map rowFields rows == [[], [payload]])
-        "partial Maybe reply lost its fieldless Nothing branch"
-      assert (isRefusal (nodeAt partialWire payload)) "partial Maybe payload became constructible"
-    other -> ioError (userError ("partial Maybe reply lacks its graph: " ++ show other))
-  carrierWire <- program "genuineCarrier"
-  assert (replyFor carrierWire "TypeEvidence" "GenuineCarrier" == [ReplyAtSite])
-    "genuine carrier with GADT result equality did not select AtSite"
-  mapM_ (\(entry, constructor) -> do
+          [site] -> pure (wire, rootBody (programTypes wire) (siteWire site))
+          sites -> fail (Text.unpack entry ++ ": expected one site, got " ++ show sites)
+      requireHead entry name form = do
+        (wire, expression) <- answer entry
+        let (identity, actual, _) = nominal (programTypes wire) expression
+        assert (symbolOccurrence identity == name && actual == form)
+          (Text.unpack entry ++ ": wrong declaration " ++ show (identity, actual))
+        pure wire
+  bool <- requireHead "boolAnswer" "Bool" DataDeclaration
+  assert (length (templates bool "Bool") == 2) "Bool lost a constructor template"
+  nested <- requireHead "nestedIdentity" "Identity" (NewtypeDeclaration 1)
+  assert (any (\node -> case node of TypeBound 0 -> True; _ -> False)
+    (IntMap.elems (typeGraphNodes (programTypes nested)))) "Identity lost its formal parameter"
+  _ <- requireHead "higherKinded" "Wrap" (NewtypeDeclaration 1)
+  loop <- requireHead "recursiveNewtype" "Loop" (NewtypeDeclaration 0)
+  assert (IntMap.size (typeGraphNodes (programTypes loop)) < 256)
+    "recursive newtype was expanded instead of linked"
+  _ <- requireHead "impossibleGadt" "Choice"
+    (OpaqueDeclaration NominalConstructor "existential or constrained constructor")
+  _ <- requireHead "packedAnswer" "Packed" (OpaqueDeclaration NominalConstructor "layout")
+  chain <- requireHead "recursiveData" "Chain" DataDeclaration
+  assert (map (length . snd) (templates chain "Chain") == [0, 1])
+    "recursive data lost its original field template"
+  nest <- requireHead "expandingData" "Nest" DataDeclaration
+  assert (IntMap.size (typeGraphNodes (programTypes nest)) < 256
+      && map (length . snd) (templates nest "Nest") == [1])
+    "nonregular recursion did not remain a finite declaration template"
+  pair <- requireHead "expandingPair" "(,)" DataDeclaration
+  faster <- requireHead "fasterExpanding" "Nest2" DataDeclaration
+  assert (IntMap.size (typeGraphNodes (programTypes pair)) < 256
+      && IntMap.size (typeGraphNodes (programTypes faster)) < 256
+      && length (templates pair "Nest") == 1 && length (templates faster "Nest2") == 1)
+    "multiple applications or faster-growing recursive syntax expanded field instances"
+  forM_ [("phantomInt", "Phantom", ["Int"]), ("phantomBool", "Phantom", ["Bool"]),
+         ("eitherIntBool", "Either", ["Int", "Bool"]), ("eitherBoolInt", "Either", ["Bool", "Int"])] $
+    \(entry, name, expected) -> do
+      (wire, expression) <- answer entry
+      let (identity, _, arguments) = nominal (programTypes wire) expression
+      assert (symbolOccurrence identity == name
+        && map (headName (programTypes wire)) arguments == expected)
+        "nominal type arguments lost their order or phantom identity"
+  forM_ [("textAnswer", "Text", TextDeclaration, ["Text"]),
+         ("integerAnswer", "Integer", IntegerDeclaration, ["IS", "IP", "IN"]),
+         ("naturalAnswer", "Natural", NaturalDeclaration, ["NS", "NB"])] $
+    \(entry, name, form, constructors) -> do
+      wire <- requireHead entry name form
+      assert (all (`elem` map (symbolOccurrence . constructorIdentity) (programConstructors wire)) constructors)
+        "special building mode lost its authenticated physical constructors"
+  forM_ [("printRequest", "Print"), ("customSend", "Print")] $ \(entry, occurrence) -> do
+    wire <- program entry
+    assert (headName (programTypes wire) (replyBody wire "TypeEvidence" occurrence) `elem` ["Unit", "()"])
+      "intrinsic unsited reply lost its unit type"
+  fetch <- program "fetchRequest"
+  let (_, fetchForm, fetchArgs) = nominal (programTypes fetch) (replyBody fetch "TypeEvidence" "Fetch")
+  assert (fetchForm == DataDeclaration && map (headName (programTypes fetch)) fetchArgs == ["Bool", "Text"])
+    "Fetch lost Either Bool Text"
+  echo <- program "echoRequest"
+  alphaEcho <- requireRight (project alphaContext alpha "echoRequest" [])
+  let echoRoot wire = replyRoot wire "TypeEvidence" "Echo"
+      rendering wire = case nodeAt (programTypes wire) (echoRoot wire) of
+        TypeRoot ConstructorSchemeRoot _ text -> text
+        other -> error (show other)
+  assert (rendering echo /= rendering alphaEcho) "alpha control did not change the actual diagnostic"
+  assert (map (nodeAt (programTypes echo)) [rootBody (programTypes echo) (echoRoot echo)] == [TypeBound 0])
+    "open reply lost its scoped bound variable"
+  assert (namedConstructors echo "Echo" == namedConstructors alphaEcho "Echo")
+    "alpha-renaming changed the physical constructor declaration"
+  originalTemplate <- program "templateReply"
+  changedTemplate <- requireRight (project alphaContext alpha "templateReply" [])
+  assert (namedConstructors originalTemplate "SameLayout" == namedConstructors changedTemplate "SameLayout")
+    "formal declaration conflict control changed physical layout instead of only field type"
+  function <- program "functionRequest"
+  assert (case nodeAt (programTypes function) (replyBody function "TypeEvidence" "FunctionReply") of
+    TypeFunction{} -> True; _ -> False) "function reply lost exact syntax"
+  forM_ [("partialReply", "PartialReply", "Maybe", [0, 1]),
+         ("progressRequest", "ObserveProgress", "Progress", [0, 1, 0])] $
+    \(entry, occurrence, name, arities) -> do
       wire <- program entry
-      node <- verbAnswer wire constructor
-      assert (familyOf node == Just "Int")
-        (constructor ++ ": reply/input layout mismatch was admitted as AtSite"))
-    [("mismatchedCarrier", "MismatchedCarrier"), ("strictCarrier", "StrictCarrier"),
-     ("dictionaryCarrier", "DictionaryCarrier"), ("integerPayload", "IntegerPayload")]
-  progressWire <- program "progressRequest"
-  progressNode <- verbAnswer progressWire "ObserveProgress"
-  case progressNode of
-    TypeData family [payload] rows -> do
-      assert (symbolOccurrence family == "Progress"
-        && map rowFields rows == [[], [payload], []])
-        ("polymorphic progress reply lost its fieldless constructors: " ++ show progressNode)
-      assert (isRefusal (nodeAt progressWire payload))
-        "polymorphic progress payload was treated as constructible"
-    other -> ioError (userError ("polymorphic progress reply lacks algebraic evidence: " ++ show other))
-
-  mapM_ (\(entry, constructor) -> do
+      let (identity, form, arguments) = nominal (programTypes wire) (replyBody wire "TypeEvidence" occurrence)
+      assert (symbolOccurrence identity == name && form == DataDeclaration
+        && map (length . snd) (templates wire name) == arities
+        && map (nodeAt (programTypes wire)) arguments == [TypeBound 0])
+        "partial algebraic reply lost fieldless branches or its unresolved parameter"
+  carrier <- program "genuineCarrier"
+  assert (replyFor carrier "TypeEvidence" "GenuineCarrier" == [ReplyAtSite])
+    "genuine request-site carrier lost AtSite selection"
+  forM_ [("mismatchedCarrier", "MismatchedCarrier"), ("strictCarrier", "StrictCarrier"),
+         ("dictionaryCarrier", "DictionaryCarrier"), ("integerPayload", "IntegerPayload")] $
+    \(entry, occurrence) -> do
       wire <- program entry
-      node <- verbAnswerFrom wire "Tidepool.Effects.Core" constructor
-      assert (familyOf node `elem` [Just "Unit", Just "()"])
-        (constructor ++ ": private protocol request lost its unit reply row"))
-    [ ("agentAttachRequest", "AgentAttachWith")
-    , ("agentToolsInstallRequest", "AgentToolsInstallWith")
-    ]
-
+      assert (headName (programTypes wire) (replyBody wire "TypeEvidence" occurrence) == "Int")
+        "carrier layout mismatch was admitted as AtSite"
+  forM_ ["polyChoice", "polyChoiceNested"] $ \entry -> do
+    wire <- program entry
+    assert (headName (programTypes wire) (replyBody wire "TypeEvidence" ":|") == "Either")
+      "ordinary saturated alternatives lost their schematic reply"
+  profile <- program "profileWitness"
+  assert (null (programConstructorReplies profile)) "effect-list witness acquired a reply root"
+  forM_ [("agentAttachRequest", "AgentAttachWith"), ("agentToolsInstallRequest", "AgentToolsInstallWith")] $
+    \(entry, occurrence) -> do
+      wire <- program entry
+      assert (headName (programTypes wire) (replyBody wire "Tidepool.Effects.Core" occurrence) `elem` ["Unit", "()"])
+        "private protocol request lost unit evidence"
   empty <- program "unrelated"
-  assert (null (programSites empty) && null (programTypes empty))
-    "unreachable typed sites leaked into the selected artifact"
-
-  -- An admitted auxiliary root is not a declared site: its own result type
-  -- must still be interned, even though
-  -- 'unrelated' -- the selected entry here -- never otherwise constructs or
-  -- observes an 'Either'.
-  auxWire <- either
-    (ioError . userError . ("auxiliaryRootDecode: " ++) . show) pure
-    (project originalContext result "unrelated" ["auxiliaryRootDecode"])
-  let auxConstructorNames =
-        map (symbolOccurrence . constructorIdentity) (programConstructors auxWire)
-  assert (all (`elem` auxConstructorNames) ["Left", "Right"])
-    ("admitted auxiliary root's own Either evidence is missing: "
-      ++ show auxConstructorNames)
-  verifyOriginalReplyShapes result secondResult
+  assert (null (programSites empty) && IntMap.null (typeGraphNodes (programTypes empty)))
+    "unselected typed sites leaked into the artifact"
+  auxiliary <- requireRight (project context original "unrelated" ["auxiliaryRootDecode"])
+  assert (all (`elem` map (symbolOccurrence . constructorIdentity) (programConstructors auxiliary)) ["Left", "Right"])
+    "auxiliary root lost its own result constructors"
+  verifyOriginalScopes original alpha
+  let cast = CastTy boolTy (mkNomReflCo (typeKind boolTy))
+      coercion = CoercionTy (mkNomReflCo boolTy)
+      failure ty = case runStateT (Policy.internType ty) Policy.emptyTypeGraphBuilder of
+        Left category -> Just category
+        Right _ -> Nothing
+  assert (failure cast == Just Policy.TypeGraphCast && failure coercion == Just Policy.TypeGraphCoercion)
+    "unsupported cast/coercion syntax acquired graph evidence"
+  assert (case (captureClosedTypeShape cast, captureClosedTypeShape coercion) of
+    (Left TypeShapeCast, Left TypeShapeCoercion) -> True; _ -> False)
+    "closed activation changed its cast/coercion refusal classes"
+  assert (case runStateT (mapM (Policy.internType . mkNumLitTy) [0 .. 32767]) Policy.emptyTypeGraphBuilder of
+    Left Policy.TypeGraphNodeLimit -> True; _ -> False)
+    "one shared aggregate node budget was reset across independent roots"
  where
-  contextFor prepared = case
-      [pmModule modul | modul <- pprModules prepared,
-        moduleNameString (moduleName (pmModule modul)) == "TypeEvidence"] of
-    [owner] -> prepareCompilerProjectionContext prepared mempty owner "unrelated" [] Nothing
-    _ -> ioError (userError "type evidence fixture lacks its unique original module")
-  assert condition message = unless condition (ioError (userError message))
-  isRefusal TypeUnconstructible{} = True
-  isRefusal _ = False
-  nodeAt wire (TypeNodeId index) = programTypes wire !! fromIntegral index
-  familyAt wire index = familyOf (nodeAt wire index)
-  familyOf node = case node of
-    TypeData family _ _ -> Just (symbolOccurrence family)
-    _ -> Nothing
-  replyFor wire moduleName occurrence =
-    let named = [ ConstructorId index
-                | (index, declaration) <- zip [0 ..] (programConstructors wire)
-                , symbolModule (constructorIdentity declaration) == Text.pack moduleName
-                , symbolOccurrence (constructorIdentity declaration) == Text.pack occurrence ]
-    in [reply | (constructor, reply) <- programConstructorReplies wire, constructor `elem` named]
-  verbAnswer wire occurrence = verbAnswerFrom wire "TypeEvidence" occurrence
-  verbAnswerFrom wire moduleName occurrence = case replyFor wire moduleName occurrence of
-    [StaticReply node] -> pure (nodeAt wire node)
-    other -> ioError (userError (occurrence ++ ": expected one intrinsic static reply, got " ++ show other))
+  contextFor result = case [pmModule prepared | prepared <- pprModules result,
+    moduleNameString (moduleName (pmModule prepared)) == "TypeEvidence"] of
+      [owner] -> prepareCompilerProjectionContext result mempty owner "unrelated" [] Nothing
+      _ -> fail "type evidence fixture lacks its unique original module"
 
--- Compare genuine source DataCons and their exact original interface hydration.
--- Alpha-renamed source is a separate compiler result, not admitted as the same
--- original module; the equality here is solely schematic type semantics.
-verifyOriginalReplyShapes :: PreparedPipelineResult -> PreparedPipelineResult -> IO ()
-verifyOriginalReplyShapes original alpha = do
-  let originalInfos = map finalizedHomeModInfo (Map.elems (pprFinalizedModules original))
-      alphaInfos = map finalizedHomeModInfo (Map.elems (pprFinalizedModules alpha))
-      constructors infos = concatMap (concatMap tyConDataCons . typeEnvTyCons . md_types . hm_details)
-        [info | info <- infos, moduleNameString (moduleName (mi_module (hm_iface info))) == "TypeEvidence"]
-      originalConstructors = constructors originalInfos
-      alphaConstructors = constructors alphaInfos
-      select name values = case [constructor | constructor <- values
-          , occNameString (nameOccName (dataConName constructor)) == name] of
-        [constructor] -> pure constructor
-        _ -> ioError (userError ("missing or duplicated original constructor " ++ name))
-      shape constructor = case requestReplyIndex constructor of
-        Nothing -> ioError (userError "fixture constructor lacks intrinsic reply index")
-        Just reply -> either (ioError . userError .
-          (("original reply shape " ++ occNameString (nameOccName (dataConName constructor)) ++ ": ") ++) . show) pure
-          (captureGraphTypeShape (constructorTypeShapeScope constructor) reply)
-      require condition message = unless condition (ioError (userError message))
-  first <- select "Echo" originalConstructors >>= shape
-  second <- select "Echo" alphaConstructors >>= shape
-  require (first == second) "original source binder alpha-renaming changed schematic identity"
-  unitConstructor <- select "OnlyInt" originalConstructors
-  schematicInt <- shape unitConstructor
-  closedInt <- case requestReplyIndex unitConstructor of
-    Just reply -> either (ioError . userError . show) pure
-      (captureGraphTypeShape closedTypeShapeScope reply)
-    Nothing -> ioError (userError "closed/scheme fixture lacks reply")
-  require (canonicalShapeExpressionBytes schematicInt == canonicalShapeExpressionBytes closedInt
-    && schematicInt /= closedInt)
-    "constructor scheme and closed-type domains were conflated"
-  firstScope <- select "FirstScope" originalConstructors >>= shape
-  secondScope <- select "SecondScope" originalConstructors >>= shape
-  require (firstScope /= secondScope) "same-spelled reply variable lost its original binder position"
-  repeated <- select "RepeatedScope" originalConstructors >>= shape
-  distinct <- select "DistinctScope" originalConstructors >>= shape
-  require (repeated /= distinct) "schematic reply lost variable repetition"
-  let env = prHscEnv (pprPipelineResult original)
-  isolated <- freshExactState env
-  hydrated <- hydrateOriginalInterfaces isolated (map hm_iface originalInfos)
-  hydratedInfos <- mapM (\info -> maybe (ioError (userError "hydrated original interface missing")) pure
-    (lookupHpt (hsc_HPT hydrated) (moduleName (mi_module (hm_iface info))))) originalInfos
+-- Source and genuine original-interface hydration share one builder. This
+-- tests producer semantics, not Rust certificate admission; frozen M2 checks
+-- the same-original BranchU custody and repeated installation path.
+verifyOriginalScopes :: PreparedPipelineResult -> PreparedPipelineResult -> IO ()
+verifyOriginalScopes original alpha = do
+  let infos result = map finalizedHomeModInfo (Map.elems (pprFinalizedModules result))
+      constructors values = concatMap (concatMap tyConDataCons . typeEnvTyCons . md_types . hm_details)
+        [info | info <- values, moduleNameString (moduleName (mi_module (hm_iface info))) == "TypeEvidence"]
+      originalConstructors = constructors (infos original)
+      select name values = case [constructor | constructor <- values,
+        occNameString (nameOccName (dataConName constructor)) == name] of
+          [constructor] -> pure constructor
+          _ -> fail ("missing or duplicated constructor " ++ name)
+      issue constructor builder = maybe (Left Policy.TypeGraphOriginalDeclarationMismatch)
+        (\reply -> runStateT (Policy.internConstructorType constructor reply) builder) (requestReplyIndex constructor)
+      capture constructor builder = requireRight (issue constructor builder)
+  first <- select "Echo" originalConstructors
+  second <- select "Echo" (constructors (infos alpha))
+  (firstRoot, initial) <- capture first Policy.emptyTypeGraphBuilder
+  (secondRoot, shared) <- capture second initial
+  assert (firstRoot == secondRoot) "alpha-equivalent original replies did not share one graph root"
+  let names = ["FirstScope", "SecondScope", "RepeatedScope", "DistinctScope",
+        "AlphaScope", "AlphaRenamed", "UnusedScope", "NoUnusedScope", "HigherKindScope"]
+  scoped <- mapM (`select` originalConstructors) names
+  (roots, scopedBuilder) <- requireRight (runStateT
+    (mapM (\constructor -> maybe (lift (Left Policy.TypeGraphOriginalDeclarationMismatch))
+      (Policy.internConstructorType constructor) (requestReplyIndex constructor)) scoped) shared)
+  assert (length roots == 9 && roots !! 0 /= roots !! 1 && roots !! 2 /= roots !! 3
+      && roots !! 4 == roots !! 5 && roots !! 6 /= roots !! 7 && roots !! 6 /= roots !! 8)
+    "shared graph conflated alpha, binder position, repetition, unused binders or kinds"
+  intConstructor <- select "OnlyInt" originalConstructors
+  intReply <- maybe (fail "OnlyInt lacks its reply") pure (requestReplyIndex intConstructor)
+  (closed, closedBuilder) <- requireRight (runStateT (Policy.internType intReply) scopedBuilder)
+  (schematic, schemeBuilder) <- capture intConstructor closedBuilder
+  assert (closed /= schematic) "closed activation and constructor-scheme domains were conflated"
+  isolated <- freshExactState (prHscEnv (pprPipelineResult original))
+  hydrated <- hydrateOriginalInterfaces isolated (map hm_iface (infos original))
+  hydratedInfos <- mapM (\info -> maybe (fail "hydrated original interface missing") pure
+    (lookupHpt (hsc_HPT hydrated) (moduleName (mi_module (hm_iface info))))) (infos original)
   let hydratedConstructors = constructors hydratedInfos
-  let sourceShapes =
-        [(occNameString (nameOccName (dataConName constructor)),
-          captureGraphTypeShape (constructorTypeShapeScope constructor) reply)
-        | constructor <- originalConstructors, Just reply <- [requestReplyIndex constructor]]
-      hydratedShapes =
-        Map.fromListWith (++) [(occNameString (nameOccName (dataConName constructor)),
-          [captureGraphTypeShape (constructorTypeShapeScope constructor) reply])
-        | constructor <- hydratedConstructors, Just reply <- [requestReplyIndex constructor]]
-      sourceFindings = concatMap (\(occurrence, captured) -> case captured of
-        Left failure -> [("source constructor " ++ occurrence, UnsupportedShape failure)]
-        Right value -> case Map.lookup occurrence hydratedShapes of
-          Nothing -> [("hydrated constructor " ++ occurrence, MissingHydratedReply)]
-          Just [Left failure] -> [("hydrated constructor " ++ occurrence, UnsupportedShape failure)]
-          Just [Right other] | value /= other -> [("hydrated constructor " ++ occurrence, ChangedHydratedReply)]
-          Just [_] -> []
-          Just _ -> [("hydrated constructor " ++ occurrence, DuplicateHydratedReply)]) sourceShapes
-      closedFindings =
-        [("closed prepared " ++ moduleNameString (moduleName (pmModule prepared))
-          ++ ":" ++ show index, UnsupportedShape failure)
-        | prepared <- pprModules original
-        , (index, node) <- zip [0 :: Int ..] (TypePolicy.tgNodes (pmTypeGraph prepared))
-        , Just ty <- [graphType node]
-        , Left failure <- [captureGraphTypeShape closedTypeShapeScope ty]]
-      findings = sourceFindings ++ closedFindings
-      categories = Map.fromListWith (+) [(problem, 1 :: Int) | (_, problem) <- findings]
-      closedCount = sum [length (mapMaybe graphType (TypePolicy.tgNodes (pmTypeGraph prepared)))
-        | prepared <- pprModules original]
-  putStrLn ("original reply shape census: " ++ show (length sourceShapes)
-    ++ " constructor schemes, " ++ show closedCount ++ " closed prepared nodes; "
-    ++ "alpha/scope/domain controls passed")
-  unless (null findings) $ do
-    -- Bound retained locations while counting every category across the whole
-    -- fixture. No unsupported identity becomes a production admission rule.
-    putStrLn ("original reply shape census categories: " ++ show (Map.toAscList categories))
-    mapM_ (putStrLn . ("original reply shape census finding: " ++) . show) (take 32 findings)
-    ioError (userError ("original reply shape census found " ++ show (length findings)
-      ++ " unsupported or changed identities; all categories were collected"))
+  (_, final) <- foldScopes capture select originalConstructors hydratedConstructors schemeBuilder
+  originalTemplate <- select "TemplateReply" originalConstructors
+  changedTemplate <- select "TemplateReply" (constructors (infos alpha))
+  (_, templateBuilder) <- capture originalTemplate final
+  assert (case issue changedTemplate templateBuilder of
+    Left Policy.TypeGraphOriginalDeclarationMismatch -> True; _ -> False)
+    "same nominal declaration silently accepted different formal field types with equal layout"
+  graph <- requireRight (Policy.finishTypeGraph templateBuilder)
+  putStrLn ("finite original reply graph: " ++ show (length originalConstructors)
+    ++ " original constructors, " ++ show (IntMap.size (Policy.tgNodes graph))
+    ++ " shared nodes; alpha/scope/domain/source-interface controls passed")
  where
-  graphType node = case node of
-    TypePolicy.DataG ty _ _ _ -> Just ty
-    TypePolicy.TextG ty _ -> Just ty
-    TypePolicy.IntegerG ty _ -> Just ty
-    TypePolicy.NaturalG ty _ -> Just ty
-    TypePolicy.ScalarG ty _ -> Just ty
-    TypePolicy.UnconstructibleG ty _ _ -> Just ty
-    TypePolicy.ProjectionDefectG{} -> Nothing
+  foldScopes capture select sources hydrated = go sources
+   where
+    go [] builder = pure ((), builder)
+    go (constructor : rest) builder = case requestReplyIndex constructor of
+      Nothing -> go rest builder
+      Just _ -> do
+        (sourceRoot, next) <- capture constructor builder
+        other <- select (occNameString (nameOccName (dataConName constructor))) hydrated
+        (hydratedRoot, completed) <- capture other next
+        assert (sourceRoot == hydratedRoot) "original interface hydration changed the complete source scheme"
+        go rest completed
 
-data ShapeCensusProblem
-  = UnsupportedShape TypeShapeError
-  | MissingHydratedReply
-  | ChangedHydratedReply
-  | DuplicateHydratedReply
-  deriving (Eq, Ord, Show)
+assert :: Bool -> String -> IO ()
+assert condition message = unless condition (fail message)
+requireRight :: Show e => Either e a -> IO a
+requireRight = either (fail . show) pure
+nodeAt :: TypeGraph -> TypeNodeId -> TypeNode
+nodeAt graph (TypeNodeId index) = maybe (error "missing finite graph node") id
+  (IntMap.lookup (fromIntegral index) (typeGraphNodes graph))
+outgoing :: TypeGraph -> TypeNodeId -> [(TypeEdgeRoleF RuntimeRep, TypeNodeId)]
+outgoing graph (TypeNodeId index) = IntMap.findWithDefault [] (fromIntegral index) (typeGraphEdges graph)
+edge :: TypeGraph -> TypeNodeId -> TypeEdgeRoleF RuntimeRep -> TypeNodeId
+edge graph root role = case [target | (actual, target) <- outgoing graph root, actual == role] of
+  [target] -> target
+  _ -> error ("missing/duplicate finite graph edge " ++ show role)
+rootBody :: TypeGraph -> TypeNodeId -> TypeNodeId
+rootBody graph root = case nodeAt graph root of TypeRoot{} -> edge graph root TypeBody; _ -> error "reply is not a scoped root"
+nominal :: TypeGraph -> TypeNodeId -> (SymbolIdentity, DeclarationFormF RuntimeRep, [TypeNodeId])
+nominal graph expression = case nodeAt graph expression of
+  TypeNominalApplication -> case nodeAt graph (edge graph expression TypeHead) of
+    TypeDeclaration identity _ form _ -> (identity, form, [target | (TypeArgument _, target) <- outgoing graph expression])
+    _ -> error "nominal expression has no declaration"
+  other -> error ("expected nominal expression, got " ++ show other)
+headName :: TypeGraph -> TypeNodeId -> Text.Text
+headName graph expression = let (identity, _, _) = nominal graph expression in symbolOccurrence identity
+namedConstructors :: WireProgram -> Text.Text -> [ConstructorDecl]
+namedConstructors wire name = filter ((== name) . symbolOccurrence . constructorIdentity) (programConstructors wire)
+replyFor :: WireProgram -> Text.Text -> Text.Text -> [ConstructorReply]
+replyFor wire owner name = [reply | (ConstructorId index, reply) <- programConstructorReplies wire,
+  let identity = constructorIdentity (programConstructors wire !! fromIntegral index),
+  symbolModule identity == owner, symbolOccurrence identity == name]
+replyRoot :: WireProgram -> Text.Text -> Text.Text -> TypeNodeId
+replyRoot wire owner name = case replyFor wire owner name of [StaticReply root] -> root; other -> error (show other)
+replyBody :: WireProgram -> Text.Text -> Text.Text -> TypeNodeId
+replyBody wire owner name = rootBody (programTypes wire) (replyRoot wire owner name)
+templates :: WireProgram -> Text.Text -> [(Word, [(TypeEdgeRoleF RuntimeRep, TypeNodeId)])]
+templates wire name = [(fromIntegral tag, outgoing graph target)
+  | (index, TypeDeclaration identity _ DataDeclaration _) <- IntMap.toAscList (typeGraphNodes graph),
+    symbolOccurrence identity == name, (TypeConstructor tag, target) <- outgoing graph (TypeNodeId (fromIntegral index))]
+ where graph = programTypes wire

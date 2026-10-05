@@ -14,6 +14,7 @@ import Codec.CBOR.Write (toStrictByteString)
 import Data.ByteString (ByteString)
 import Data.Foldable (fold)
 import Data.List (mapAccumL)
+import Data.IntMap.Strict qualified as IntMap
 import Data.Sequence (Seq, (|>))
 import Data.Sequence qualified as Seq
 import Data.Text (Text)
@@ -34,7 +35,7 @@ encodeWireProgram program = toStrictByteString $ array
   , encodeListLen (fromIntegral (Seq.length frames)) <> fold frames
   , list id bindings
   , encodeValueId (programEntry program)
-  , list encodeTypeNode (programTypes program)
+  , encodeTypeGraph (programTypes program)
   , list encodeSiteRow (programSites program)
   , list encodeConstructorReply (programConstructorReplies program)
   , case programJsonLayout program of
@@ -66,7 +67,7 @@ encodeProjectedGroup group = toStrictByteString $ array
   , list encodeOperation (projectedOperations body)
   , encodeListLen (fromIntegral (Seq.length frames)) <> fold frames
   , list id bindings
-  , list encodeTypeNode (projectedTypes body)
+  , encodeTypeGraph (projectedTypes body)
   , list encodeSiteRow (projectedSites body)
   , list encodeConstructorReply (projectedConstructorReplies body)
   , case projectedJsonLayout body of
@@ -227,24 +228,79 @@ encodeJsonLayout layout = array (map encodeConstructorId
   , jsonScientific layout, jsonIntegerSmall layout, jsonIntegerPositive layout
   , jsonIntegerNegative layout, jsonText layout, jsonInt layout ])
 
+encodeTypeGraph :: TypeGraph -> Encoding
+encodeTypeGraph graph = array
+  [ encodeWord 1
+  , list encodeTypeNode (IntMap.elems (typeGraphNodes graph))
+  , list encodeTypeEdge
+      [ TypeEdge (TypeNodeId (fromIntegral source)) target role
+      | (source, outgoing) <- IntMap.toAscList (typeGraphEdges graph)
+      , (role, target) <- outgoing ]
+  ]
+
 encodeTypeNode :: TypeNode -> Encoding
 encodeTypeNode node = case node of
-  TypeData family arguments rows -> tagged 0
-    [ encodeSymbol family
-    , list encodeTypeNodeId arguments
-    , list encodeCtorRow rows
-    ]
-  TypeText -> tag 1
-  TypeInteger -> tag 2
-  TypeNatural -> tag 3
-  TypeScalar rep -> tagged 4 [encodeRep rep]
-  TypeUnconstructible reason rendered -> tagged 5
-    [encodeString reason, encodeString rendered]
+  TypeRoot domain binders rendered -> tagged 0
+    [ encodeWord (case domain of ClosedRoot -> 0; ConstructorSchemeRoot -> 1)
+    , list (encodeWord . sourceFlag) binders, encodeString rendered ]
+  TypeDeclaration identity parameters form restriction -> tagged 1
+    [ encodeSymbol identity, list (encodeWord . parameterFlag) parameters
+    , encodeDeclarationForm form
+    , encodeWord (case restriction of UnrestrictedSyntax -> 0; EffectHead -> 1) ]
+  TypeConstructorTemplate constructor -> tagged 2 [encodeConstructorId constructor]
+  TypeBound index -> tagged 3 [encodeWord32 index]
+  TypeNominalApplication -> tag 4
+  TypeApplication -> tag 5
+  TypeFunction flag -> tagged 6 [encodeWord (functionFlag flag)]
+  TypeForAll flag -> tagged 7 [encodeWord (forallFlag flag)]
+  TypeLiteral literal -> tagged 8 $ case literal of
+    NaturalTypeLiteral value -> [encodeWord 0, encodeString value]
+    SymbolTypeLiteral value -> [encodeWord 1, encodeString value]
+    CharacterTypeLiteral value -> [encodeWord 2, encodeWord (fromIntegral (fromEnum value))]
+ where
+  sourceFlag SourceSpecified = 1
+  sourceFlag SourceInferred = 2
+  parameterFlag NamedRequired = 0
+  parameterFlag NamedSpecified = 1
+  parameterFlag NamedInferred = 2
+  parameterFlag AnonymousVisible = 3
+  functionFlag TypeToType = 0
+  functionFlag TypeToConstraint = 1
+  functionFlag ConstraintToType = 2
+  functionFlag ConstraintToConstraint = 3
+  forallFlag ForAllRequired = 0
+  forallFlag ForAllSpecified = 1
+  forallFlag ForAllInferred = 2
 
-encodeCtorRow :: CtorRow -> Encoding
-encodeCtorRow row = array
-  [ encodeConstructorId (rowConstructor row)
-  , list encodeTypeNodeId (rowFields row)
+encodeDeclarationForm :: DeclarationFormF RuntimeRep -> Encoding
+encodeDeclarationForm form = case form of
+  DataDeclaration -> tag 0
+  NewtypeDeclaration arity -> tagged 1 [encodeWord32 arity]
+  TextDeclaration -> tag 2
+  IntegerDeclaration -> tag 3
+  NaturalDeclaration -> tag 4
+  ScalarDeclaration rep -> tagged 5 [encodeRep rep]
+  OpaqueDeclaration headKind reason -> tagged 6
+    [ encodeWord (case headKind of NominalConstructor -> 0; NominalFamily -> 1)
+    , encodeString reason ]
+
+encodeTypeEdge :: TypeEdgeF RuntimeRep -> Encoding
+encodeTypeEdge edge = array
+  [ encodeTypeNodeId (typeEdgeSource edge), encodeTypeNodeId (typeEdgeTarget edge)
+  , case typeEdgeRole edge of
+      TypeBinderKind index -> tagged 0 [encodeWord32 index]
+      TypeBody -> tag 1
+      TypeHead -> tag 2
+      TypeArgument index -> tagged 3 [encodeWord32 index]
+      TypeFunctionEdge -> tag 4
+      TypeApplyArgument -> tag 5
+      TypeMultiplicity -> tag 6
+      TypeDomain -> tag 7
+      TypeCodomain -> tag 8
+      TypeKind -> tag 9
+      TypeConstructor index -> tagged 10 [encodeWord32 index]
+      TypeField index rep -> tagged 11 [encodeWord32 index, encodeRep rep]
+      TypeAliasRhs -> tag 12
   ]
 
 encodeSiteRow :: SiteRow -> Encoding

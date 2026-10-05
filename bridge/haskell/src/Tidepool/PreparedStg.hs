@@ -58,7 +58,7 @@ import GHC.Types.TypeEnv (typeEnvTyCons)
 import GHC.Utils.Outputable (ppr, showSDocUnsafe, text)
 import Tidepool.EffectSchema (YieldSite)
 import Tidepool.PreparedSites (PreparedSite, SiteRejection, resolveRequestSiteTyCon)
-import Tidepool.TypePolicy (TypeGraph(..))
+import Tidepool.TypePolicy (TypeGraph, emptyTypeGraph)
 import Tidepool.FatIface
   ( ExactInterfaceFailure(..), readExactInterface
   , OwnerInterfaceContext(..), OwnerInterfaceCache, lookupOwnerInterface, cacheOwnerInterface )
@@ -92,7 +92,7 @@ unelaboratedModule guts = PreparedElaboration
   , peSitedSiblings = mempty
   , peYieldSites = []
   , pePreparedSites = []
-  , peTypeGraph = TypeGraph []
+  , peTypeGraph = emptyTypeGraph
   , peSiteRejections = []
   }
 
@@ -345,7 +345,7 @@ prepareBindingsWithScope subsetScope hscEnv thisModule location tycons optimized
     , pmSitedSiblings = siblings
     , pmYieldSites = yieldSites
     , pmPreparedSites = []
-    , pmTypeGraph = TypeGraph []
+    , pmTypeGraph = emptyTypeGraph
     , pmSiteRejections = []
     , pmRequestSiteTyCon = carrierTyCon
     }
