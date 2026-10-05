@@ -110,9 +110,9 @@ verifyModuleEvidenceProjection = do
                          site alpha 12 "alpha-one" 2 0 [2],
                          site alpha 13 "alpha-two" 3 2 []]
     , pmTypeGraph = TypePolicy.TypeGraph
-        [ TypePolicy.UnconstructibleG "first" "A"
+        [ TypePolicy.UnconstructibleG boolTy "first" "A"
         , TypePolicy.ProjectionDefectG "unreachable defect"
-        , TypePolicy.UnconstructibleG "third" "C" ]
+        , TypePolicy.UnconstructibleG addrPrimTy "third" "C" ]
     , pmSiteRejections = []
     , pmRequestSiteTyCon = Nothing
     }

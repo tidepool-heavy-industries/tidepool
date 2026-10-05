@@ -15,6 +15,8 @@ import GHC.Driver.Env (hsc_HPT)
 import Tidepool.CanonicalTypeShape
 import Tidepool.ExactHydration (freshExactState, hydrateOriginalInterfaces)
 import Tidepool.PreparedSites (requestReplyIndex)
+import Tidepool.PreparedStg (PreparedModule(..))
+import Tidepool.TypePolicy qualified as TypePolicy
 import Data.Text qualified as Text
 import System.Directory (createDirectoryIfMissing)
 import System.FilePath ((</>))
@@ -292,7 +294,7 @@ verifyOriginalReplyShapes original alpha = do
   hydrated <- hydrateOriginalInterfaces isolated (map hm_iface originalInfos)
   hydratedInfos <- mapM (\info -> maybe (ioError (userError "hydrated original interface missing")) pure
     (lookupHpt (hsc_HPT hydrated) (moduleName (mi_module (hm_iface info))))) originalInfos
-  hydratedConstructors <- pure (constructors hydratedInfos)
+  let hydratedConstructors = constructors hydratedInfos
   forM_ originalConstructors $ \constructor -> case requestReplyIndex constructor of
     Nothing -> pure ()
     Just _ -> do
@@ -303,3 +305,21 @@ verifyOriginalReplyShapes original alpha = do
       hydratedShape <- select occurrence hydratedConstructors >>= shape
       require (sourceShape == hydratedShape)
         ("same exact original interface changed reply scheme during hydration: " ++ occurrence)
+  forM_ (pprModules original) $ \prepared ->
+    forM_ (zip [0 :: Int ..] (TypePolicy.tgNodes (pmTypeGraph prepared))) $ \(index, node) ->
+      case graphType node of
+        Nothing -> pure ()
+        Just ty -> case captureGraphTypeShape closedTypeShapeScope ty of
+          Right _ -> pure ()
+          Left failure -> ioError (userError ("closed prepared shape "
+            ++ moduleNameString (moduleName (pmModule prepared)) ++ ":" ++ show index
+            ++ ": " ++ show failure))
+ where
+  graphType node = case node of
+    TypePolicy.DataG ty _ _ _ -> Just ty
+    TypePolicy.TextG ty _ -> Just ty
+    TypePolicy.IntegerG ty _ -> Just ty
+    TypePolicy.NaturalG ty _ -> Just ty
+    TypePolicy.ScalarG ty _ -> Just ty
+    TypePolicy.UnconstructibleG ty _ _ -> Just ty
+    TypePolicy.ProjectionDefectG{} -> Nothing

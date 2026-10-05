@@ -57,8 +57,8 @@ newtype TypeNodeId = TypeNodeId Word32
   deriving (Eq, Ord, Show)
 
 -- | GHC-typed evidence retained until projection assigns constructor ids.
--- The original normalized type is retained only for diagnostics/layout
--- refusal; equality authority comes from the graph edges, never its rendering.
+-- Original normalized types, including refusals, live only with preparation
+-- evidence. Renderings remain diagnostic; these values confer no authority.
 data TypeNodeG
   = DataG Type TyCon [TypeNodeId] [(DataCon, [TypeNodeId])]
   -- A spelling-selected candidate; projection authenticates its retained
@@ -67,7 +67,7 @@ data TypeNodeG
   | IntegerG Type [DataCon]
   | NaturalG Type [DataCon]
   | ScalarG Type PrimRep
-  | UnconstructibleG Text Text
+  | UnconstructibleG Type Text Text
   | ProjectionDefectG Text
 
 newtype TypeGraph = TypeGraph { tgNodes :: [TypeNodeG] }
@@ -97,7 +97,7 @@ internType = internAt 0
 
 internAt :: Int -> Type -> State TypeGraphBuilder TypeNodeId
 internAt depth original
-  | depth >= 128 = expansionLimitNode
+  | depth >= 128 = expansionLimitNode original
   | otherwise = case normalizeType [] 0 original of
       Left reason -> internRefusal original reason
       Right ty -> do
@@ -105,10 +105,10 @@ internAt depth original
         case lookupTypeMap (tgbIndex builder) ty of
           Just node -> pure node
           Nothing
-            | tgbNext builder >= 65535 -> expansionLimitNode
+            | tgbNext builder >= 65535 -> expansionLimitNode ty
             | otherwise -> do
                 let node = TypeNodeId (tgbNext builder)
-                    placeholder = UnconstructibleG "type expansion limit" (renderType ty)
+                    placeholder = UnconstructibleG ty "type expansion limit" (renderType ty)
                 put builder
                   { tgbIndex = extendTypeMap (tgbIndex builder) ty node
                   , tgbNodes = IntMap.insert (fromIntegral (tgbNext builder)) placeholder
@@ -147,7 +147,7 @@ classifyType depth ty
       LitTy{} -> pure (unsupported "unnormalized")
       _ -> pure (unsupported "unnormalized")
  where
-  unsupported reason = UnconstructibleG reason (renderType ty)
+  unsupported reason = UnconstructibleG ty reason (renderType ty)
   algebraic tc args
     | any unsupportedConstructor constructors =
         pure (unsupported "existential or constrained constructor")
@@ -163,8 +163,8 @@ classifyType depth ty
       (dataConInstOrigArgTys con args)
     pure (con, fields)
 
-expansionLimitNode :: State TypeGraphBuilder TypeNodeId
-expansionLimitNode = do
+expansionLimitNode :: Type -> State TypeGraphBuilder TypeNodeId
+expansionLimitNode original = do
   builder <- get
   case tgbExpansionLimit builder of
     Just node -> pure node
@@ -173,7 +173,7 @@ expansionLimitNode = do
           index = fromIntegral (tgbNext builder)
       put builder
         { tgbNodes = IntMap.insert index
-            (UnconstructibleG "type expansion limit" "<type expansion limit>")
+            (UnconstructibleG original "type expansion limit" "<type expansion limit>")
             (tgbNodes builder)
         , tgbNext = tgbNext builder + 1
         , tgbExpansionLimit = Just node
@@ -186,14 +186,14 @@ internRefusal ty reason = do
   case lookupTypeMap (tgbIndex builder) ty of
     Just node -> pure node
     Nothing
-      | tgbNext builder >= 65535 -> expansionLimitNode
+      | tgbNext builder >= 65535 -> expansionLimitNode ty
       | otherwise -> do
           let node = TypeNodeId (tgbNext builder)
               index = fromIntegral (tgbNext builder)
           put builder
             { tgbIndex = extendTypeMap (tgbIndex builder) ty node
             , tgbNodes = IntMap.insert index
-                (UnconstructibleG reason (renderType ty)) (tgbNodes builder)
+                (UnconstructibleG ty reason (renderType ty)) (tgbNodes builder)
             , tgbNext = tgbNext builder + 1
             }
           pure node

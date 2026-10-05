@@ -1350,7 +1350,7 @@ lowerTypeNode nodes rebase (TypePolicy.TypeNodeId raw) = case IntMap.lookup (fro
     TypePolicy.IntegerG ty constructors -> lowerLeaf ty TypeInteger constructors
     TypePolicy.NaturalG ty constructors -> lowerLeaf ty TypeNatural constructors
     TypePolicy.ScalarG _ rep -> TypeScalar <$> projectRep rep
-    TypePolicy.UnconstructibleG reason rendered ->
+    TypePolicy.UnconstructibleG _ reason rendered ->
       pure (TypeUnconstructible reason rendered)
     TypePolicy.ProjectionDefectG detail -> failRepresentation detail
  where
