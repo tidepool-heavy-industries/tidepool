@@ -1865,19 +1865,26 @@ certifyProjectedProducts :: FilePath -> String -> PreparedPipelineResult
   -> [(Module, Either ProjectionError [ProjectedGroup])]
   -> [(String,WireProgram)] -> HscEnv -> IO (Either String BS.ByteString)
 certifyProjectedProducts work label original outcomes targets env = do
-  fresh <- forM outcomes $ \(owner,projected) -> do
-    groups <- either (fail . show) pure projected
+  moduleResults <- forM outcomes $ \(owner,projected) -> do
     let name = moduleNameString (moduleName owner)
         path = work </> (label ++ "-" ++ name ++ ".hi")
-    iface <- maybe (fail "source product lost its paired actual interface") pure
-      (Map.lookup (moduleName owner) (pprProductInterfaces original))
-    writeBinIface (targetProfile (hsc_dflags env)) QuietBinIFace NormalCompression path iface
-    bytes <- BS.readFile path
-    pure (T.pack (unitString (moduleUnit owner)),T.pack name,bytes,groups)
-  let ready = Set.fromList [(T.unpack unit,T.unpack name) | (unit,name,_,_) <- fresh]
+        key = (unitString (moduleUnit owner), name)
+        interface = Map.lookup (moduleName owner) (pprProductInterfaces original)
+          >>= \iface -> if mi_module iface == owner then Just iface else Nothing
+    case interface of
+      Nothing -> pure (key, ProductMissingInterface, Nothing)
+      Just _ | Left _ <- projected -> pure (key, ProductProjectionRejected, Nothing)
+      Just iface -> do
+        groups <- either (fail . show) pure projected
+        writeBinIface (targetProfile (hsc_dflags env)) QuietBinIFace NormalCompression path iface
+        bytes <- BS.readFile path
+        pure (key, ProductReady, Just (T.pack (fst key), T.pack name, bytes, groups))
+  let fresh = [product | (_, ProductReady, Just product) <- moduleResults]
+      availability = Map.fromList [(key, status) | (key, status, _) <- moduleResults]
       evidence = (preparedFreshDependencies original) {dependencyModules =
-        [if (dependencyModuleUnit node,dependencyModuleName node) `Set.member` ready
-            then node {dependencyModuleProduct=ProductReady} else node
+        [node {dependencyModuleProduct = Map.findWithDefault
+          (dependencyModuleProduct node)
+          (dependencyModuleUnit node, dependencyModuleName node) availability}
         | node <- dependencyModules (preparedFreshDependencies original)]}
       bytes = encodeModuleProducts fresh
   originals <- newOriginalInterfaceArtifacts env (pprFinalizedModules original) [] work
