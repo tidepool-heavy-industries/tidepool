@@ -14,6 +14,7 @@ use tidepool_repr::execution_schema::{
 };
 
 mod finalized_module;
+mod retained_core;
 #[cfg(test)]
 pub(crate) use finalized_module::FINALIZATION_PROFILE;
 pub(crate) use finalized_module::{
@@ -1329,6 +1330,11 @@ fn resolve_receipt_owner_with_validation(
             if *origin == ProductOrigin::Cached && module_version.is_none() {
                 return Err(CertificationError::Mismatch(
                     "missing cached source version",
+                ));
+            }
+            if *origin == ProductOrigin::RetainedCore && module_version.is_some() {
+                return Err(CertificationError::Mismatch(
+                    "retained source version must be derived",
                 ));
             }
             if module_version
@@ -4208,7 +4214,7 @@ pub(crate) fn certify_products(
                     )
                 }
                 ProductOrigin::RetainedCore => {
-                    let admission = exact.ok_or(CertificationError::Mismatch(
+                    exact.ok_or(CertificationError::Mismatch(
                         "retained core requires exact request",
                     ))?;
                     if inherited_products.iter().any(|product| {
@@ -4239,16 +4245,9 @@ pub(crate) fn certify_products(
                         package_bytes,
                     )?;
                     let source_sha = canonical.source_sha256();
-                    let version = crate::module_candidates::exact_module_version_for_product(
-                        endpoint_identity,
-                        &admission.request.semantic_sha256,
-                        &key.0,
-                        &key.1,
-                        &source_sha,
-                        canonical.interface_bytes(),
-                        module_bytes,
-                        canonical.package_imports_bytes(),
-                    );
+                    // Local source edges are validated before assigning stable
+                    // promotion versions. This placeholder never leaves staging.
+                    let version = ModuleVersion([0; 32]);
                     fresh_modules.insert(key.clone());
                     (
                         product,
@@ -4447,6 +4446,60 @@ pub(crate) fn certify_products(
             {
                 return Err(CertificationError::Mismatch("duplicate source binder"));
             }
+        }
+    }
+    let mut promoted = BTreeMap::new();
+    for (owner, _, _, _, package_bytes, origin) in &module_bytes {
+        if *origin != ProductOrigin::RetainedCore {
+            continue;
+        }
+        let canonical = inherited_module_interfaces
+            .iter()
+            .find(|interface| interface.unit() == owner.unit && interface.module() == owner.module)
+            .ok_or(CertificationError::Mismatch("retained canonical identity"))?;
+        promoted.insert(
+            (owner.unit.clone(), owner.module.clone()),
+            retained_core::PromotedModule {
+                canonical_sha256: sha(canonical.certificate_bytes()),
+                product_sha256: owner.product_sha256,
+                package_sha256: sha(package_bytes),
+                groups: BTreeMap::new(),
+            },
+        );
+    }
+    for (origin, owner, group, imports) in &groups {
+        if *origin != ProductOrigin::RetainedCore {
+            continue;
+        }
+        let imports = imports.iter().cloned().map(|import| {
+            resolve_receipt_owner_with_validation(
+                import, &source_groups, &receipt.packages, &mut validation,
+            )
+        }).collect::<CertResult<Vec<_>>>()?;
+        promoted.get_mut(&(owner.unit.clone(), owner.module.clone()))
+            .ok_or(CertificationError::Mismatch("retained staged owner"))?
+            .groups.insert(group.original_ordinal(), imports);
+    }
+    let promotion_versions = retained_core::module_versions(&promoted, &receipt.packages)?;
+    for (owner, _, _, _, _, origin) in &mut module_bytes {
+        if *origin == ProductOrigin::RetainedCore {
+            owner.module_version = promotion_versions
+                .get(&(owner.unit.clone(), owner.module.clone()))
+                .ok_or(CertificationError::Mismatch("retained derived identity"))?.clone();
+        }
+    }
+    for (origin, owner, _, _) in &mut groups {
+        if *origin == ProductOrigin::RetainedCore {
+            owner.module_version = promotion_versions
+                .get(&(owner.unit.clone(), owner.module.clone()))
+                .ok_or(CertificationError::Mismatch("retained derived identity"))?.clone();
+        }
+    }
+    for (owner, origin) in source_groups.groups.values_mut() {
+        if *origin == ProductOrigin::RetainedCore {
+            owner.module_version = promotion_versions
+                .get(&(owner.unit.clone(), owner.module.clone()))
+                .ok_or(CertificationError::Mismatch("retained derived identity"))?.clone();
         }
     }
     let mut groups: Vec<PendingCertifiedGroup> = groups
