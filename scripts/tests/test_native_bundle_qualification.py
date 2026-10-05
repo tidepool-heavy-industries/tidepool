@@ -336,8 +336,10 @@ class CatalogSourceTests(unittest.TestCase):
              patch.object(qualification.subprocess, 'check_output', side_effect=add), \
              patch.object(qualification.subprocess, 'run', side_effect=run):
             tools.mkdir()
-            record = qualification.retain_catalog_sources(SimpleNamespace(
+            selected = qualification.retain_catalog_sources(SimpleNamespace(
                 snapshot=self.snapshot, output=self.root / 'retention', runtime_tools=tools))
+            self.assertEqual(selected, retained)
+            record = self.root / 'retention' / qualification.RETAINED_CATALOG_SOURCES
             self.assertEqual(qualification.verify_retained_catalog_sources(record, self.snapshot, tools), retained)
             self.assertGreaterEqual(sum('--verify-path' in command for command in observed), 3)
             metadata.return_value = nar | {'nar_hashes': {str(retained): 'sha256:changed'}}

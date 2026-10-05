@@ -17,18 +17,17 @@ initial selection does not cover every shipped helper.
 Retain that exact source snapshot before compiling original module products:
 
 ```sh
-python3 build/package/qualification.py retain-sources \
+CATALOG_SOURCES="$(python3 build/package/qualification.py retain-sources \
   --snapshot "$BUCK_CATALOG_SOURCES" --output "$SOURCE_RETENTION" \
-  --runtime-tools "$DECLARED_RUNTIME_TOOLS"
-python3 build/package/qualification.py select-sources \
-  --record "$SOURCE_RETENTION/share/exomonad/retained-catalog-sources.json" \
-  --snapshot "$BUCK_CATALOG_SOURCES" --runtime-tools "$DECLARED_RUNTIME_TOOLS"
+  --runtime-tools "$DECLARED_RUNTIME_TOOLS")"
 ```
 
 The same qualification owner checks the source inventory, Nix registration and
-NAR identity, and retains a GC root. `select-sources` returns the original
-canonical source root for the subsequent native action; it does not reconfigure
-the toolchain. Fixed source names and bytes give the same retained original paths
+NAR identity, and retains a GC root. The command returns the original canonical
+source root directly for the subsequent native action; it does not reconfigure
+the toolchain. `select-sources --record RECORD --snapshot SNAPSHOT --runtime-tools TOOLS`
+revalidates a previously retained selection when resuming delivery. Fixed source
+names and bytes give the same retained original paths
 across runs. The source retention record must survive until final qualification
 retains those roots. This preparation boundary alone does not establish a native
 catalog deployment; the schema, packaging and runtime selection cutover remain

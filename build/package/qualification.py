@@ -250,7 +250,7 @@ def retain_catalog_sources(args) -> Path:
         "nix_closure": closure, "gc_roots": gc_roots,
     })
     verify_retained_catalog_sources(record, source, tools)
-    return record
+    return retained
 
 
 def verify_retained_catalog_sources(record: Path, snapshot: Path, tools: Path) -> Path:
