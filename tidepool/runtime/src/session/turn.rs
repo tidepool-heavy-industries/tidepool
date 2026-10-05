@@ -2502,6 +2502,12 @@ pub fn compile_activation_preview(
         &run.output.stderr,
     )
     .map_err(|error| offer.retain_failure(temp.path(), &cmd, &run.output.stderr, error))?;
+    if offer
+        .activation_preview_unavailable(temp.path())
+        .map_err(|error| offer.retain_failure(temp.path(), &cmd, &run.output.stderr, error))?
+    {
+        return Ok(ActivationPreviewCompilation::OriginalDisplayEvidenceUnavailable);
+    }
     let result = decode_turn_output_dir(temp.path(), &offer, None)
         .map_err(|error| offer.retain_failure(temp.path(), &cmd, &run.output.stderr, error))?;
     let TurnResult::Expr { compiled, .. } = result else {
