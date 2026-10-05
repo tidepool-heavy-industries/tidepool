@@ -105,8 +105,7 @@ fn rich_library_helpers_stay_out_of_the_protocol_schema() {
 }
 
 /// The remaining decl fields: `description_text()`, `extra_imports`,
-/// `prompt_card`, `type_params`, `default_row_args`,
-/// `helpers_row_polymorphic`.
+/// `prompt_card`, `type_params`, and `default_row_args`.
 #[test]
 fn worktree_remaining_decl_fields_are_pinned() {
     let wt = worktree();
@@ -134,7 +133,6 @@ fn worktree_remaining_decl_fields_are_pinned() {
     assert!(wt.prompt_card.is_none());
     assert!(wt.type_params.is_empty());
     assert!(wt.default_row_args.is_empty());
-    assert!(wt.helpers_row_polymorphic);
 }
 
 /// Exec and Journal both have EMPTY `type_defs`, so the new

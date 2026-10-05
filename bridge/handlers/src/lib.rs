@@ -113,7 +113,7 @@ pub fn build_base_stack(
        + 'static {
     // The handler HList is generated from the single-source `base_effects!`
     // list in `tidepool-mcp` (the same sequence that drives `standard_decls`
-    // and the `type M = Eff '[…]` string). This function only maps each effect
+    // and the invocation's explicit `Eff '[…]` type). This function only maps each effect
     // name to its handler constructor.
     macro_rules! build_stack_rows {
         ($(($name:ident, $decl:ident)),* $(,)?) => {

@@ -569,7 +569,9 @@ def test_runtime_inputs(package_name, target_name, unit=False):
             and target_name in {"daemon_integration", "transaction_integration"})
         or (package_name == "tidepool" and target_name in {
             "facade_prepared_recipe_contract_test", "facade_recipe_source_capture_test",
+            "exomonad_action_surface",
         })
+        or (package_name == "tidepool-mcp" and not unit and target_name == "mcp")
     ):
         worker = True
         env.update({
@@ -597,7 +599,9 @@ def test_runtime_inputs(package_name, target_name, unit=False):
     if package_name == "tidepool-toolchain" and target_name == "prepared_fixture":
         env["TIDEPOOL_PREPARED_FIXTURE_COMPILER"] = "$(exe //tidepool/toolchain:prepared-fixture)"
         resources.append("//tidepool/toolchain:prepared-fixture")
-    if package_name == "tidepool-mcp" and target_name == "generated_surface_contracts":
+    if package_name == "tidepool" and target_name == "exomonad_action_surface":
+        env["TIDEPOOL_HASKELL_ACTORS_DIR"] = "$(location //bridge/haskell:facade_embedded_sources)/actors"
+    if package_name == "tidepool-mcp" and not unit and target_name == "mcp":
         worker = True
         env.update({
             "TIDEPOOL_EFFECTS_SOURCE_ROOT": "$(location :effects_generated)",
@@ -613,11 +617,21 @@ def test_runtime_inputs(package_name, target_name, unit=False):
         resources.append("toolchains//:rustfmt")
     if package_name == "tidepool":
         env["EXOMONAD_WORKSPACE_GITLINK"] = "$(location //build/rust:workspace_gitlink)"
+        env["EXOMONAD_WORKSPACE_GIT_BUNDLE"] = "$(location //build/rust:workspace_git_bundle)"
+        env["EXOMONAD_NIX_BIN"] = "$(location toolchains//:exomonad_runtime_tools)/bin/nix"
+        env["EXOMONAD_NIX_OFFLINE"] = "1"
         resources.append("//build/rust:workspace_gitlink")
+        resources.append("//build/rust:workspace_git_bundle")
+        resources.append("toolchains//:exomonad_runtime_tools")
     return env, sorted(set(resources)), worker
 
 
-def runtime_arguments(env, resources, worker):
+def runtime_arguments(env, resources, worker, resource_env=None):
+    env = dict(env)
+    resource_env = dict(resource_env or {})
+    for key in ("EXOMONAD_WORKSPACE_GITLINK", "EXOMONAD_WORKSPACE_GIT_BUNDLE", "EXOMONAD_NIX_BIN"):
+        if key in env:
+            resource_env[key] = env.pop(key)
     lines = []
     if env:
         lines.append("    env = {")
@@ -625,6 +639,10 @@ def runtime_arguments(env, resources, worker):
         lines.append("    },")
     if resources:
         lines.extend(["    resources = [", render_strings(resources, 8), "    ],"])
+    if resource_env:
+        lines.append("    resource_env = {")
+        lines.extend(f"        {json.dumps(key)}: {json.dumps(value)}," for key, value in sorted(resource_env.items()))
+        lines.append("    },")
     if worker:
         lines.append("    haskell_worker = True,")
     return "\n".join(lines)
@@ -877,28 +895,31 @@ def runtime_test_cases(binary):
 
 def facade_test_cases(binary):
     """Share one linked test harness while declaring inputs per execution group."""
-    process_env = {
+    process_paths = {
         "TIDEPOOL_TEST_BASH": "$(exe toolchains//:bash)",
         "TIDEPOOL_TEST_SLEEP": "$(exe toolchains//:sleep)",
         "EXOMONAD_WORKSPACE_GITLINK": "$(location //build/rust:workspace_gitlink)",
+        "EXOMONAD_WORKSPACE_GIT_BUNDLE": "$(location //build/rust:workspace_git_bundle)",
     }
-    host_env = {
-        **process_env,
+    host_paths = {
+        **process_paths,
         "EXOMONAD_EMBEDDED_ASSET_ROOT": "$(location //web:dist)/web",
         "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_deployment)",
         "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
         "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
         "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
-        "TIDEPOOL_KEEP_TEST_LOGS": "1",
+        "EXOMONAD_NIX_BIN": "$(location toolchains//:exomonad_runtime_tools)/bin/nix",
     }
-    browser_env = {
-        **host_env,
+    host_env = {"TIDEPOOL_KEEP_TEST_LOGS": "1", "EXOMONAD_NIX_OFFLINE": "1"}
+    browser_paths = {
+        **host_paths,
         "TIDEPOOL_BROWSER_DRIVER": "$(location //build/testing/browser:driver_bundle)/driver.mjs",
         "TIDEPOOL_BROWSER_NODE": "$(exe toolchains//:browser_node)",
         "PLAYWRIGHT_BROWSERS_PATH": "$(location toolchains//:playwright_browsers)",
     }
-    process_resources = ["toolchains//:test_tools_closure", "//build/rust:workspace_gitlink"]
+    process_resources = ["toolchains//:test_tools_closure", "//build/rust:workspace_gitlink", "//build/rust:workspace_git_bundle"]
     host_resources = process_resources + [
+        "toolchains//:exomonad_runtime_tools",
         "//web:dist",
         "//bridge/haskell:facade_embedded_sources",
         "//build/package:compiler_deployment",
@@ -919,35 +940,35 @@ def facade_test_cases(binary):
             "cancelled_read_retains_partial_frame_for_next_select",
             "deadline_stops_descendant_and_drains_bounded_redacted_stderr",
             "successful_leader_exit_also_stops_pipe_holding_descendant",
-        )], process_env, process_resources, False, False, 30),
+        )], {}, process_paths, process_resources, False, False, 30),
         ("facade_host_tests", [prefix + name for name in (
             "production_host_retains_http_haskell_commands_and_reconnects_without_replay",
             "host_cancellation_stops_a_real_running_haskell_cell",
             "production_host_marks_embedded_root_ready_and_retires_invalid_auth_failure",
-        )], host_env, host_resources, True, False, 600),
+        )], host_env, host_paths, host_resources, True, False, 600),
         ("facade_idle_retirement_tests", ["actor_host::embedded_idle_retirement_tests::" + name for name in (
             "committed_input_before_wake_refuses_idle_retirement_and_runs_after_release",
             "idle_claim_before_input_refuses_store_mutation_and_confirms_cleanup",
-        )], host_env, host_resources, True, False, 600),
+        )], host_env, host_paths, host_resources, True, False, 600),
         ("facade_prepared_recipe_contract_test", [
             "actor_host::recipe_checks::prepared_contract_tests::prepared_recipe_receipts_and_assertions_execute_all_eight_cases",
-        ], prepared_recipe_env, prepared_recipe_resources, True, False, 600),
+        ], prepared_recipe_env, {}, prepared_recipe_resources, True, False, 600),
         ("facade_recipe_source_capture_test", [
             "exomonad::workspace::source_capture_tests::background_command_recipe_capture_records_seven_cells_without_validating_assertions",
-        ], capture_recipe_env, capture_recipe_resources, True, False, 600),
+        ], capture_recipe_env, {}, capture_recipe_resources, True, False, 600),
         ("facade_host_raw_test", [prefix +
             "production_host_retains_http_haskell_commands_and_reconnects_without_replay"],
-         host_env, host_resources, True, False, 600),
+         host_env, host_paths, host_resources, True, False, 600),
         ("facade_late_output_test", [prefix +
             "real_host_late_output_tests::real_host_retains_one_late_haskell_output_across_compaction"],
-         host_env, host_resources, True, False, 600),
+         host_env, host_paths, host_resources, True, False, 600),
         ("facade_browser_test", [prefix +
             "production_browser_executes_resident_haskell_retries_and_controls_root"],
-         browser_env, browser_resources, True, True, 900),
-        ("tidepool_unit_tests_all", [], browser_env, browser_resources, True, False, 600),
+         host_env, browser_paths, browser_resources, True, True, 900),
+        ("tidepool_unit_tests_all", [], host_env, browser_paths, browser_resources, True, False, 600),
     ]
     rules = []
-    for name, tests, env, resources, worker, ignored, timeout in groups:
+    for name, tests, env, resource_env, resources, worker, ignored, timeout in groups:
         lines = ["tidepool_rust_test_cases(", f"    name = {json.dumps(name)},",
                  f"    binary = {json.dumps(':' + binary)},"]
         if tests:
@@ -958,7 +979,12 @@ def facade_test_cases(binary):
                       f"    test_rule_timeout_ms = {(len(tests) * timeout + 60) * 1000 if tests else 7_200_000},",
                       "    env = {"])
         lines.extend(f"        {json.dumps(key)}: {json.dumps(value)}," for key, value in env.items())
-        lines.extend(["    },", "    resources = [", render_strings(resources, 8), "    ],",
+        lines.append("    },")
+        if resource_env:
+            lines.append("    resource_env = {")
+            lines.extend(f"        {json.dumps(key)}: {json.dumps(value)}," for key, value in resource_env.items())
+            lines.append("    },")
+        lines.extend(["    resources = [", render_strings(resources, 8), "    ],",
                       f"    haskell_worker = {worker},", '    visibility = ["PUBLIC"],', ")", ""])
         rules.append("\n".join(lines))
     return "\n".join(rules)
@@ -1154,7 +1180,16 @@ tidepool_buildscript_run(
     for target in selected_tests:
         deps = dev_deps + ([":" + libraries[0]["name"]] if libraries else [])
         env, resources, worker = test_runtime_inputs(package_name, target["name"])
-        extra = runtime_arguments(env, resources, worker)
+        resource_env = {}
+        if ((package_name == "tidepool-mcp" and target["name"] == "mcp")
+                or (package_name == "tidepool" and target["name"] == "exomonad_action_surface")):
+            resource_env = env
+            env = {
+                key: resource_env.pop(key)
+                for key in ("TIDEPOOL_KEEP_TEST_LOGS", "EXOMONAD_NIX_OFFLINE")
+                if key in resource_env
+            }
+        extra = runtime_arguments(env, resources, worker, resource_env)
         if package["name"] == "tidepool-atomic-write" and target["name"] == "strict_directory":
             extra = '    env = {"TIDEPOOL_DIRECTORY_FAULT_LIBRARY": "$(location :directory_fault_shared)"},'
         if package["name"] == "tidepool-repr" and target["name"] == "repr":

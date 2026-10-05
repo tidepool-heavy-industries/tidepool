@@ -40,10 +40,67 @@ class IsolatedLibtestTests(unittest.TestCase):
                 execute.assert_not_called()
                 self.assertIn(name, errors.getvalue())
 
+    def test_declared_resources_are_absolute_for_discovery_and_execution(self):
+        assets = Path(self.tmp.name) / 'web assets'
+        assets.mkdir()
+        (assets / 'index.html').write_text('declared web resource')
+        link = Path(self.tmp.name) / 'Buck web link'
+        link.symlink_to(assets, target_is_directory=True)
+        relative = os.path.relpath(link)
+        calls = []
+        definitions = SCRIPT.with_name('defs.bzl').read_text()
+        namespace = {'sh_test': lambda **kwargs: calls.append(kwargs)}
+        exec('\n'.join(line for line in definitions.splitlines()
+                       if not line.startswith('load(')), namespace)
+        namespace['tidepool_rust_test_cases'](
+            name='resource_control', binary=':libtest',
+            exact_tests=['suite::works'], expected_count=1,
+            env={'ORDINARY_FLAG': 'relative command or flag'},
+            resource_env={'EXOMONAD_EMBEDDED_ASSET_ROOT': relative},
+        )
+        rule = calls.pop()
+        observed = []
+
+        def run(args, timeout):
+            value = os.environ['EXOMONAD_EMBEDDED_ASSET_ROOT']
+            self.assertTrue(Path(value).is_absolute())
+            self.assertTrue(Path(value).is_symlink(), 'Buck artifact link must remain selected')
+            self.assertTrue(Path(value).samefile(assets))
+            self.assertTrue(Path(value).joinpath('index.html').is_file())
+            self.assertEqual(os.environ['ORDINARY_FLAG'], 'relative command or flag')
+            observed.append(args)
+            discovered = self.discover(args)
+            if discovered is not None:
+                return discovered
+            return subprocess.CompletedProcess(args, 0,
+                'test result: ok. 1 passed; 0 failed; 0 ignored;\n', '')
+
+        with patch.dict(os.environ, rule['env']):
+            result, _, _ = self.invoke(rule['args'][1:], run)
+        self.assertEqual(result, 0)
+        self.assertEqual(len([args for args in observed if '--list' in args]), 2)
+        self.assertEqual(len([args for args in observed if '--exact' in args]), 1)
+
+    def test_missing_declared_resource_refuses_before_discovery(self):
+        for value in ('', str(Path(self.tmp.name) / 'missing web')):
+            with self.subTest(value=value), \
+                 patch.dict(os.environ, {'EXOMONAD_EMBEDDED_ASSET_ROOT': value}), \
+                 patch.object(runner, 'execute') as execute, \
+                 contextlib.redirect_stderr(io.StringIO()) as errors:
+                self.assertEqual(runner.main([str(self.binary), '--resource-env',
+                    'EXOMONAD_EMBEDDED_ASSET_ROOT']), 1)
+                execute.assert_not_called()
+                self.assertIn('declared resource', errors.getvalue())
+
     def test_delegated_command_exports_declared_inputs_and_only_test_process(self):
         record = {}
         with patch.dict(os.environ, {'TIDEPOOL_EXTRACT': '/qualified/compiler',
+                                     'TIDEPOOL_KEEP_TEST_LOGS': '1',
+                                     'TIDEPOOL_TEST_ARTIFACT_ROOT': '/retained/compiler failures',
                                      'EXOMONAD_WORKSPACE_GITLINK': '/qualified/workspace-pin',
+                                     'EXOMONAD_WORKSPACE_GIT_BUNDLE': '/qualified/workspace.bundle',
+                                     'EXOMONAD_NIX_BIN': '/declared/runtime-tools/bin/nix',
+                                     'EXOMONAD_NIX_OFFLINE': '1',
                                      'OPENAI_API_KEY': 'never-forward',
                                      'UNRELATED_VARIABLE': 'never-forward'}):
             command, unit = runner.delegated_command(
@@ -53,7 +110,13 @@ class IsolatedLibtestTests(unittest.TestCase):
         self.assertIn('--property=Delegate=yes', command)
         self.assertIn('--property=KillMode=control-group', command)
         self.assertIn('--setenv=TIDEPOOL_EXTRACT=/qualified/compiler', command)
+        self.assertIn('--setenv=TIDEPOOL_KEEP_TEST_LOGS=1', command)
+        self.assertIn('--setenv=TIDEPOOL_TEST_ARTIFACT_ROOT=/retained/compiler failures', command)
+        self.assertIn('TIDEPOOL_TEST_ARTIFACT_ROOT', record['environment_names'])
         self.assertIn('--setenv=EXOMONAD_WORKSPACE_GITLINK=/qualified/workspace-pin', command)
+        self.assertIn('--setenv=EXOMONAD_WORKSPACE_GIT_BUNDLE=/qualified/workspace.bundle', command)
+        self.assertIn('--setenv=EXOMONAD_NIX_BIN=/declared/runtime-tools/bin/nix', command)
+        self.assertIn('--setenv=EXOMONAD_NIX_OFFLINE=1', command)
         self.assertFalse(any('never-forward' in word for word in command))
         self.assertIn('--unit=' + unit, command)
         self.assertFalse(record['cleanup_confirmed'])

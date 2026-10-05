@@ -96,7 +96,10 @@ pub use machine::{
     PreparedMachineOptions, PreparedOuter, PreparedResult, PreparedResultBatch, ProgramId,
     Quiescent, ResidencyCounts, RetirementReceipt,
 };
-pub use run::{ExecutionError, ImportShapeFact, RunOptions, RunResult};
+pub use run::{
+    BatchImportContractMismatch, BatchImportSelection, ExecutionError, ImportShapeFact, RunOptions,
+    RunResult,
+};
 #[cfg(test)]
 mod apply_tests;
 mod arrays;

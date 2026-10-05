@@ -198,10 +198,6 @@ fn body(e: &Effect) -> String {
         "        default_row_args: {},\n",
         slice_literal(&dra, "        ")
     ));
-    out.push_str(&format!(
-        "        helpers_row_polymorphic: {},\n",
-        e.helpers_row_polymorphic
-    ));
     out.push_str("    }\n");
     out.push_str("}\n");
     out

@@ -89,8 +89,6 @@ pub struct Effect {
     pub type_params: &'static [TypeParam],
     /// Row arguments a compile that supplies none falls back to.
     pub default_row_args: &'static [&'static str],
-    /// Do this effect's helpers typecheck against any row carrying `Member`?
-    pub helpers_row_polymorphic: bool,
     /// Companion `import` lines this effect's helpers need beyond the fixed
     /// eval surface. These reach the eval preamble and the persistent declaration
     /// environment, NOT the generated `Tidepool.Effects` module.
@@ -1224,28 +1222,21 @@ impl Helper {
             HelperBody::NullaryLiftEither => verb.ret.clone(),
             _ => verb.result_type(),
         };
-        let sig = if eff.helpers_row_polymorphic {
-            // Free type variables beyond `effs` (ordinary Hindley-Milner
-            // polymorphism) must be forall'd
-            // explicitly, or GHC rejects the signature as referencing an
-            // out-of-scope type variable — see `free_type_vars`'s own doc.
-            let mut extra: Vec<&'static str> = Vec::new();
-            for a in &args {
-                for v in free_type_vars(a) {
-                    if !extra.contains(&v) {
-                        extra.push(v);
-                    }
-                }
-            }
-            for v in free_type_vars(&result) {
+        // Bind every free type variable in the stable Member signature.
+        let mut extra: Vec<&'static str> = Vec::new();
+        for a in &args {
+            for v in free_type_vars(a) {
                 if !extra.contains(&v) {
                     extra.push(v);
                 }
             }
-            render_member_signature_with(&extra, &args, eff.name, &result)
-        } else {
-            render_signature(&args, "M", &result)
-        };
+        }
+        for v in free_type_vars(&result) {
+            if !extra.contains(&v) {
+                extra.push(v);
+            }
+        }
+        let sig = render_member_signature_with(&extra, &args, eff.name, &result);
         out.push_str(&format!("{} :: {}\n", self.name, sig));
         match &self.body {
             HelperBody::Nullary => {

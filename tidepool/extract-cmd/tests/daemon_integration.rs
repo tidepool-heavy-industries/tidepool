@@ -805,43 +805,10 @@ fn check_f_module_memo_follows_include_roots(bin: &Path, dir: &Path, lib: &Path,
     );
 }
 
-/// (g) A module whose OWN source text is BYTE-IDENTICAL across two
-/// requests (mirroring `Tidepool.Orchestrate`, which spells only the bare
-/// `M` alias and never mentions a pinned `Finalize <T>` literally) but
-/// whose compiled MEANING depends on a fixed-name/varying-content sibling
-/// it imports (mirroring the per-window `Tidepool.Effects` shim, whose own
-/// `type M = Eff row` is exactly this shape) — daemon-shim-identity-fix's
-/// own regression, one step past what check (f) covers. Check (f)'s stale
-/// module ITSELF changed content across requests, so its own `ms_hs_hash`
-/// correctly forced a fresh compile; THIS check's stale module
-/// (`Tidepool.Companion`) never changes, so a memo hit validated by
-/// self-hash ALONE would wrongly reuse request A's compile —
-/// `companionVal`'s type frozen to request A's own `Tidepool.Shim.Pinned`
-/// expansion (`Pinned = Int`) — against request B's own target module,
-/// which declares its OWN local binding at ITS OWN fresh `Pinned`
-/// expansion (`Pinned = Bool`) and assigns `companionVal` to it. This is
-/// structurally the exact shape of the real bug: `Tidepool.Orchestrate`'s
-/// `paginateTrunc :: Int -> Value -> M Value` (`M` a type SYNONYM, exactly
-/// like `Pinned` here) got frozen against a stale `Finalize Int` row while
-/// the target's own `paginateResult :: Int -> Value -> M Value` used a
-/// fresh `Finalize KyotoResult` row — `paginateResult = paginateTrunc`
-/// failed with `Couldn't match type 'Int' with 'KyotoResult' / Expected:
-/// Int -> Value -> M Value / Actual: Int -> Value -> M Value`, the exact
-/// signature this lane's own bisection observed.
-///
-/// Routed through a SESSION-BOUND reference turn (mirroring check (c)'s
-/// bind/reference pattern), not a plain `--target` compile: the real
-/// repro's failing compile is a session-scoped turn
-/// (`isSessionScopeActive`), which selects `sessionVariant`'s
-/// `OptimizeEveryModule` tier — the tier that compiles every non-deferred
-/// home module (including `Tidepool.Companion`/`Tidepool.Orchestrate`,
-/// neither the target nor a `Val`-importer) through THIS module's own
-/// per-module loop rather than leaving it to `load'` alone. A plain
-/// `normalVariant`/`OptimizeCoreReachable` compile does not reproduce this —
-/// its target's own fresh typecheck resolves `Tidepool.Companion` from the
-/// ambient, already-correctly-recompiled-by-`load'` HPT, so only the
-/// session tier's own extra per-module pass exercises the
-/// stale-memo-front hazard this fixture pins.
+/// An unchanged companion module imports an explicitly authored type alias
+/// whose meaning changes between requests. The session-bound turn must reject
+/// reuse based only on the companion's source hash and compile against the
+/// current alias and target type.
 fn check_g_shim_dependent_module_warm_second_request(
     bin: &Path,
     dir: &Path,
@@ -853,9 +820,7 @@ fn check_g_shim_dependent_module_warm_second_request(
     fs::create_dir_all(a_inc.join("Tidepool")).unwrap();
     fs::create_dir_all(b_inc.join("Tidepool")).unwrap();
 
-    // The per-window "shim": fixed module NAME, a type SYNONYM (mirroring
-    // `Tidepool.Effects`'s own `type M = Eff row`) whose RHS is pinned
-    // differently per request.
+    // One authored alias module name resolves to different types per request.
     fs::write(
         a_inc.join("Tidepool/Shim.hs"),
         "module Tidepool.Shim (Pinned) where\ntype Pinned = Int\n",
@@ -867,8 +832,7 @@ fn check_g_shim_dependent_module_warm_second_request(
     )
     .unwrap();
 
-    // The dependent module: BYTE-IDENTICAL in both include dirs (mirroring
-    // `Tidepool.Orchestrate`'s own source never mentioning the pin) —
+    // The dependent module is byte-identical in both include directories —
     // `companionVal`'s type is frozen to whatever `Pinned` expanded to AT
     // THIS MODULE'S OWN compile time, only resolving to a different
     // expansion because it lives alongside a different `Tidepool/Shim.hs`

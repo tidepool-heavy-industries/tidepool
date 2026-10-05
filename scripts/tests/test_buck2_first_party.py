@@ -501,6 +501,23 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
                              for dependency in arguments.get("deps", []) + list(arguments.get("named_deps", {}).values())))
         self.assertIn("src/lib.rs", groups["tidepool_sources"])
 
+    def test_facade_action_surface_keeps_nix_policy_out_of_path_resources(self):
+        metadata = json.loads(self.metadata.read_text())
+        facade = next(package for package in metadata["packages"] if package["name"] == "tidepool")
+        facade["targets"].append({
+            "name": "exomonad_action_surface", "kind": ["test"], "edition": "2021",
+            "src_path": str(self.root / "bridge/facade/tests/exomonad_action_surface.rs"),
+        })
+        self.metadata.write_text(json.dumps(metadata))
+        self.write("bridge/facade/tests/exomonad_action_surface.rs", "#[test] fn row() {}\n")
+        result = self.generate("--package", "tidepool", "--no-default-features", "tidepool")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        group = self.rule("bridge/facade", "exomonad_action_surface", "tidepool_rust_isolated_test")
+        self.assertEqual(group["env"], {"TIDEPOOL_KEEP_TEST_LOGS": "1", "EXOMONAD_NIX_OFFLINE": "1"})
+        self.assertNotIn("EXOMONAD_NIX_OFFLINE", group["resource_env"])
+        self.assertEqual(group["resource_env"]["EXOMONAD_NIX_BIN"],
+                         "$(location toolchains//:exomonad_runtime_tools)/bin/nix")
+
     def test_facade_unit_root_uses_embedded_profile_support_and_browser_resources(self):
         metadata = json.loads(self.metadata.read_text())
         facade = next(package for package in metadata["packages"] if package["name"] == "tidepool")
@@ -553,20 +570,23 @@ const REVIEW_PROMPT: &str = include_str!("../../../exomonad/examples/workspace/.
             self.assertEqual(cases[name]["jobs"], 1)
         process = cases["facade_process_tests"]
         self.assertEqual(process["expected_count"], 6)
-        self.assertEqual(process["env"]["TIDEPOOL_TEST_BASH"], "$(exe toolchains//:bash)")
-        self.assertEqual(process["env"]["TIDEPOOL_TEST_SLEEP"], "$(exe toolchains//:sleep)")
+        self.assertEqual(process["resource_env"]["TIDEPOOL_TEST_BASH"], "$(exe toolchains//:bash)")
+        self.assertEqual(process["resource_env"]["TIDEPOOL_TEST_SLEEP"], "$(exe toolchains//:sleep)")
         for heavyweight in ("TIDEPOOL_EXTRACT", "TIDEPOOL_BROWSER", "PLAYWRIGHT_BROWSERS_PATH"):
-            self.assertNotIn(heavyweight, process["env"])
+            self.assertNotIn(heavyweight, process["resource_env"])
         for browser_resource in ("//web:dist", "toolchains//:playwright_browsers",
                                  "//build/testing/browser:driver_bundle"):
             self.assertNotIn(browser_resource, process["resources"])
         host = cases["facade_host_tests"]
         self.assertEqual(host["expected_count"], 3)
         self.assertIs(host["haskell_worker"], True)
-        self.assertIn("TIDEPOOL_EXTRACT_WORKER", host["env"])
-        self.assertEqual(host["env"]["TIDEPOOL_PRELUDE_DIR"], "$(location //bridge/haskell:facade_embedded_sources)/lib")
+        self.assertIn("TIDEPOOL_EXTRACT_WORKER", host["resource_env"])
+        self.assertEqual(host["resource_env"]["TIDEPOOL_PRELUDE_DIR"], "$(location //bridge/haskell:facade_embedded_sources)/lib")
+        self.assertEqual(host["env"], {"TIDEPOOL_KEEP_TEST_LOGS": "1", "EXOMONAD_NIX_OFFLINE": "1"})
+        self.assertEqual(host["resource_env"]["EXOMONAD_NIX_BIN"], "$(location toolchains//:exomonad_runtime_tools)/bin/nix")
+        self.assertIn("toolchains//:exomonad_runtime_tools", host["resources"])
         for browser_variable in ("TIDEPOOL_BROWSER_DRIVER", "PLAYWRIGHT_BROWSERS_PATH"):
-            self.assertNotIn(browser_variable, host["env"])
+            self.assertNotIn(browser_variable, host["resource_env"])
         for browser_resource in ("toolchains//:playwright_browsers", "//build/testing/browser:driver_bundle"):
             self.assertNotIn(browser_resource, host["resources"])
         raw_host = cases["facade_host_raw_test"]
@@ -574,19 +594,19 @@ const REVIEW_PROMPT: &str = include_str!("../../../exomonad/examples/workspace/.
             "actor_host::m1_host_tests::production_host_retains_http_haskell_commands_and_reconnects_without_replay",
         ])
         self.assertEqual(raw_host["expected_count"], 1)
-        self.assertEqual(raw_host["env"]["TIDEPOOL_EXTRACT_WORKER"], "$(exe //bridge/haskell:tidepool_extract_bin)")
-        self.assertEqual(raw_host["env"]["EXOMONAD_EMBEDDED_ASSET_ROOT"], "$(location //web:dist)/web")
+        self.assertEqual(raw_host["resource_env"]["TIDEPOOL_EXTRACT_WORKER"], "$(exe //bridge/haskell:tidepool_extract_bin)")
+        self.assertEqual(raw_host["resource_env"]["EXOMONAD_EMBEDDED_ASSET_ROOT"], "$(location //web:dist)/web")
         for resource in ("//bridge/haskell:facade_embedded_sources", "//web:dist", "toolchains//:test_tools_closure"):
             self.assertIn(resource, raw_host["resources"])
-        self.assertNotIn("TIDEPOOL_BROWSER_DRIVER", raw_host["env"])
+        self.assertNotIn("TIDEPOOL_BROWSER_DRIVER", raw_host["resource_env"])
         self.assertEqual(cases["facade_late_output_test"]["expected_count"], 1)
         browser = cases["facade_browser_test"]
         self.assertEqual(browser["expected_count"], 1)
         self.assertIs(browser["ignored"], True)
-        self.assertEqual(browser["env"]["EXOMONAD_EMBEDDED_ASSET_ROOT"], "$(location //web:dist)/web")
-        self.assertEqual(browser["env"]["TIDEPOOL_BROWSER_DRIVER"], "$(location //build/testing/browser:driver_bundle)/driver.mjs")
-        self.assertEqual(browser["env"]["TIDEPOOL_BROWSER_NODE"], "$(exe toolchains//:browser_node)")
-        self.assertEqual(browser["env"]["PLAYWRIGHT_BROWSERS_PATH"], "$(location toolchains//:playwright_browsers)")
+        self.assertEqual(browser["resource_env"]["EXOMONAD_EMBEDDED_ASSET_ROOT"], "$(location //web:dist)/web")
+        self.assertEqual(browser["resource_env"]["TIDEPOOL_BROWSER_DRIVER"], "$(location //build/testing/browser:driver_bundle)/driver.mjs")
+        self.assertEqual(browser["resource_env"]["TIDEPOOL_BROWSER_NODE"], "$(exe toolchains//:browser_node)")
+        self.assertEqual(browser["resource_env"]["PLAYWRIGHT_BROWSERS_PATH"], "$(location toolchains//:playwright_browsers)")
         self.assertIn("toolchains//:browser_test_closure", browser["resources"])
         self.assertFalse(any("codex-shoal-protocol" in dependency
                              for _, arguments in facade_buck.values()

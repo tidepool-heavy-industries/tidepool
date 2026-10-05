@@ -1189,7 +1189,7 @@ fn ready_source_sha(
             row.unit == unit
                 && row.module == module
                 && !row.boot
-                && row.product == ProductAvailability::Ready
+                && row.product.has_native_product()
         })
         .collect();
     let [module] = matching.as_slice() else {

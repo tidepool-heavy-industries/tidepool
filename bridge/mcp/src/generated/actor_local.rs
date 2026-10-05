@@ -30,6 +30,5 @@ pub fn actor_local_decl() -> crate::EffectDecl {
         default_row_args: &[
             "Maybe",
         ],
-        helpers_row_polymorphic: true,
     }
 }

@@ -49,8 +49,11 @@ tests = testGroup "source-boot"
   , testCase "exact to ordinary transition" $ exactToOrdinary
   , testCase "checked value imports" $ checkedValueImports
   , testCase "loaded exact metadata" $ exactLoadedMetadata
+  , testCase "exact transaction reuse" $ exactTransactionReuse
+  , testCase "exact legacy value isolation" $ exactLegacyValueIsolation
   , testCase "quasiquote codegen transition" $ quasiQuoteCodegenTransition
   , testCase "package inputs" $ withTiming packageInputs
+  , testCase "session native body demand" sessionNativeBodyDemand
   , testCase "selected home instance edges" $ selectedHomeInstanceEdges
   , testCase "ordered resolution paths" $ resolutionPaths
   , testCase "original package cohort" $ withEffects $ \effects -> withScratch (originalPackageCohort effects)

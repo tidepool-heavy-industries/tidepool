@@ -1,9 +1,10 @@
-"""Exercise the Buck runner boundary with stub tools, without starting Buck or Nix."""
+"""Exercise retained-generation launch without starting Buck, Nix or a shell."""
 
 import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -19,93 +20,226 @@ class BuckRunnerTests(unittest.TestCase):
         self.addCleanup(self.storage.cleanup)
         self.root = Path(self.storage.name) / "checkout with spaces"
         (self.root / "scripts").mkdir(parents=True)
-        shutil.copyfile(SCRIPT, self.root / "scripts/buck2-run.sh")
+        for script in ("buck2-run.sh", "toolchain-inputs.sh"):
+            shutil.copyfile(SCRIPT.parent / script, self.root / "scripts" / script)
+        self.git = shutil.which("git")
+        self.git_command("init", "-q")
+        (self.root / "flake.nix").write_text("pinned toolchain\n")
+        self.commit("flake.nix")
         self.tools = self.root / "tools"
         self.tools.mkdir()
-        self.action_tools = self.root / "action tools"
+        # Launcher bootstrap receives only its declared Bash/coreutils inputs.
+        # Optional host utilities must not hide a missing action dependency.
+        self.bootstrap_tools = self.root / "bootstrap tools"
+        self.bootstrap_tools.mkdir()
+        for name in ("bash", "cat", "dirname", "id", "readlink"):
+            executable = shutil.which(name)
+            self.assertIsNotNone(executable, f"declared {name} executable")
+            (self.bootstrap_tools / name).symlink_to(executable)
+        self.buck_output = self.root / "outputs/buck"
+        (self.buck_output / "bin").mkdir(parents=True)
+        self.action_output = self.root / "outputs/action tools"
+        self.action_output.mkdir()
+        # Real declared utilities only serve the stub's Git/config checks.
+        self.action_tools = self.action_output / "bin"
         self.action_tools.mkdir()
+        (self.action_tools / "git").symlink_to(shutil.which("git"))
         self.shell_log = self.root / "dev-shell.log"
         self.buck_log = self.root / "buck.json"
-        self.config = self.root / ".buckconfig.local"
-        self.config.write_text(f"[nix]\naction_path = {self.action_tools}\n")
         self.program(self.tools / "mountpoint", 'exit "$MOUNT_EXIT"')
-        self.program(
-            self.root / "scripts/dev-shell.sh",
-            'printf "%s\\n" "$@" > "$DEV_SHELL_LOG"\nexec "$@"',
-        )
-        buck = self.tools / "buck2"
-        buck.write_text(f"""#!{sys.executable}
-import json, os, sys
+        self.program(self.root / "scripts/dev-shell.sh", 'echo invoked > "$DEV_SHELL_LOG"; exit 96')
+        self.program(self.tools / "nix", 'echo invoked > "$DEV_SHELL_LOG"; exit 97')
+        self.program(self.tools / "buck2", "exit 95")
+        self.buck = self.buck_output / "bin/buck2"
+        self.buck.write_text(f"""#!{sys.executable}
+import json, os, signal, sys
 from pathlib import Path
 Path(os.environ["BUCK_LOG"]).write_text(json.dumps({{
-    "args": sys.argv[1:],
-    "cwd": os.getcwd(),
-    "path": os.environ["PATH"],
-    "shell": os.environ.get("TIDEPOOL_BUCK_SHELL"),
+    "args": sys.argv[1:], "cwd": os.getcwd(), "path": os.environ["PATH"],
+    "pid": os.getpid(), "cgroup": Path('/proc/self/cgroup').read_text(),
 }}))
+if os.environ.get('BUCK_SIGNAL'):
+    os.kill(os.getpid(), signal.SIGTERM)
+sys.exit(int(os.environ.get('BUCK_EXIT', '0')))
 """)
-        buck.chmod(0o755)
-        self.program(self.action_tools / "buck2", "exit 95")
+        self.buck.chmod(0o755)
+        self.generation = self.root / ".buck2-toolchains/generations/generation.test"
+        (self.generation / "roots").mkdir(parents=True)
+        self.selection = "git+file:///project?rev=" + "1" * 40 + "#default"
+        tree = subprocess.check_output(
+            ["bash", "-c", 'source scripts/toolchain-inputs.sh; toolchain_input_tree'],
+            cwd=self.root, text=True,
+        ).strip()
+        (self.generation / "owner").write_text(
+            f"checkout={self.root}\nuid={os.getuid()}\nselection={self.selection}\nselection_mode=checkout\ntoolchain_tree={tree}\n"
+        )
+        (self.generation / "status").write_text("configured\n")
+        records = []
+        for name, output in (("buck-buck2", self.buck_output), ("buck-test-git", self.action_output)):
+            root = self.generation / "roots" / name
+            root.symlink_to(output)
+            records.append(f"{name}\t{self.selection.split('#')[0]}#packages.test.{name}\t{output}\t{root}\n")
+        (self.generation / "outputs.tsv").write_text("".join(records))
+        self.config = self.root / ".buckconfig.local"
+        self.write_config(f"buck2 = {self.buck}\ngit = {self.action_tools}/git\naction_path = {self.action_tools}\n")
         self.env = dict(os.environ)
         self.env.pop("TIDEPOOL_BUCK_SHELL", None)
         self.env.update(
-            PATH=str(self.tools) + os.pathsep + self.env["PATH"],
-            MOUNT_EXIT="0",
-            DEV_SHELL_LOG=str(self.shell_log),
-            BUCK_LOG=str(self.buck_log),
+            PATH=str(self.tools) + os.pathsep + str(self.bootstrap_tools), MOUNT_EXIT="0",
+            DEV_SHELL_LOG=str(self.shell_log), BUCK_LOG=str(self.buck_log),
         )
 
+    def git_command(self, *args):
+        return subprocess.run([self.git, "-C", str(self.root), *args], check=True, capture_output=True)
+
+    def commit(self, path):
+        self.git_command("add", path)
+        self.git_command("-c", "user.name=test", "-c", "user.email=test@invalid", "commit", "-qm", "source")
+
+    def write_config(self, values):
+        content = f"# Retained toolchain generation: {self.generation}\n[nix]\n{values}"
+        self.config.write_text(content)
+        (self.generation / "config").write_text(content)
+
     def program(self, path, body):
-        path.write_text("#!/usr/bin/env bash\nset -euo pipefail\n" + body + "\n")
+        path.write_text(f"#!{shutil.which('bash')}\nset -euo pipefail\n" + body + "\n")
         path.chmod(0o755)
 
     def run_runner(self, *args, **environment):
-        return subprocess.run(
-            ["bash", str(self.root / "scripts/buck2-run.sh"), *args],
-            cwd="/",
-            env=dict(self.env, **environment),
-            text=True,
-            capture_output=True,
-        )
+        with subprocess.Popen(
+            ["bash", str(self.root / "scripts/buck2-run.sh"), *args], cwd="/",
+            env=dict(self.env, **environment), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        ) as process:
+            self.launch_pid = process.pid
+            stdout, stderr = process.communicate()
+            return subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
 
     def assert_no_shell_or_buck(self):
         self.assertFalse(self.shell_log.exists())
         self.assertFalse(self.buck_log.exists())
 
-    def test_missing_mount_fails_before_entering_dev_shell(self):
+    def assert_refused(self, message):
+        result = self.run_runner("build", "//pkg:target", TIDEPOOL_BUCK_SHELL="ready")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn(message, result.stderr)
+        self.assert_no_shell_or_buck()
+
+    def test_missing_mount_fails_before_launch(self):
         result = self.run_runner("build", "//pkg:target", MOUNT_EXIT="1")
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn("Buck requires the per-checkout buck-out bind mount", result.stderr)
         self.assert_no_shell_or_buck()
 
-    def test_missing_config_fails_before_entering_dev_shell(self):
+    def test_missing_config_fails_before_launch(self):
         self.config.unlink()
         result = self.run_runner("build", "//pkg:target")
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn("Run scripts/buck2-configure.sh first", result.stderr)
         self.assert_no_shell_or_buck()
 
-    def test_valid_setup_forwards_arguments_and_declared_action_path(self):
+    def test_configured_launch_preserves_arguments_cwd_pid_cgroup_and_path(self):
         args = ["build", "--local-only", "-c", "remote.enabled=false", "//pkg:target", "with spaces", ""]
         result = self.run_runner(*args)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(
-            self.shell_log.read_text().splitlines(),
-            ["env", "TIDEPOOL_BUCK_SHELL=ready", "bash", "scripts/buck2-run.sh", *args],
-        )
+        self.assertFalse(self.shell_log.exists())
         self.assertEqual(json.loads(self.buck_log.read_text()), {
-            "args": args,
-            "cwd": str(self.root),
-            "path": f"{self.action_tools}:/run/current-system/sw/bin",
-            "shell": "ready",
+            "args": args, "cwd": str(self.root),
+            "path": f"{self.action_tools}:/run/current-system/sw/bin", "pid": self.launch_pid,
+            "cgroup": Path("/proc/self/cgroup").read_text(),
         })
 
-    def test_ready_shell_preserves_explicit_remote_arguments(self):
+    def test_ready_marker_does_not_change_explicit_remote_arguments(self):
         args = ["test", "--remote-only", "-c", "remote.enabled=true", "//pkg:target"]
         result = self.run_runner(*args, TIDEPOOL_BUCK_SHELL="ready")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(self.shell_log.exists())
         self.assertEqual(json.loads(self.buck_log.read_text())["args"], args)
+
+    def test_buck_exit_status_and_signal_are_preserved(self):
+        result = self.run_runner("build", BUCK_EXIT="37")
+        self.assertEqual(result.returncode, 37, result.stderr)
+        result = self.run_runner("build", BUCK_SIGNAL="1")
+        self.assertEqual(result.returncode, -signal.SIGTERM, result.stderr)
+
+    def test_legacy_config_requires_explicit_preparation(self):
+        self.config.write_text("[nix]\naction_path = /somewhere\n")
+        self.assert_refused("missing retained generation")
+
+    def test_generation_status_and_published_copy_are_checked(self):
+        (self.generation / "status").write_text("failed\n")
+        self.assert_refused("generation was not configured")
+        (self.generation / "status").write_text("configured\n")
+        self.config.write_text(self.config.read_text() + "# changed\n")
+        self.assert_refused("published configuration changed")
+
+    def test_published_copy_compares_exact_bytes_including_trailing_newlines(self):
+        original = self.config.read_bytes()
+        for suffix in (b"\n", b"\n\n", b"\0", b"\0\n"):
+            with self.subTest(suffix=suffix):
+                self.config.write_bytes(original + suffix)
+                self.assert_refused("published configuration changed")
+        self.config.write_bytes(original.rstrip(b"\n"))
+        self.assert_refused("published configuration changed")
+        self.config.write_bytes(original)
+        result = self.run_runner("build")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_checkout_and_user_ownership_are_checked(self):
+        owner = self.generation / "owner"
+        owner.write_text(owner.read_text().replace(f"uid={os.getuid()}", "uid=invalid"))
+        self.assert_refused("another checkout or user")
+
+    def test_root_unavailability_and_mismatch_are_checked(self):
+        root = self.generation / "roots/buck-buck2"
+        root.unlink()
+        self.assert_refused("retained output buck-buck2")
+        root.symlink_to(self.action_output)
+        self.assert_refused("retained output buck-buck2")
+
+    def test_missing_buck_does_not_fall_back_to_ambient_executable(self):
+        self.buck.unlink()
+        self.assert_refused("Buck executable does not match")
+
+    def test_unrooted_and_empty_action_path_are_refused(self):
+        for path in (str(self.tools), str(self.action_tools) + ":", ":" + str(self.action_tools)):
+            with self.subTest(path=path):
+                self.write_config(f"buck2 = {self.buck}\ngit = {self.action_tools}/git\naction_path = {path}\n")
+                self.assert_refused("action PATH")
+
+    def test_selection_reference_is_checked(self):
+        roster = self.generation / "outputs.tsv"
+        roster.write_text(roster.read_text().replace("1" * 40, "2" * 40))
+        self.assert_refused("output selection")
+
+    def test_changed_toolchain_pin_requires_reconfiguration(self):
+        (self.root / "flake.nix").write_text("new toolchain\n")
+        self.assert_refused("changed toolchain inputs")
+        self.commit("flake.nix")
+        self.assert_refused("changed toolchain input pin")
+
+    def test_explicit_selection_ignores_dirty_and_changed_local_toolchain_inputs(self):
+        owner = self.generation / "owner"
+        owner.write_text(owner.read_text().replace("selection_mode=checkout", "selection_mode=explicit"))
+        (self.root / "flake.nix").write_text("uncommitted local experiment\n")
+        result = self.run_runner("build")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.shell_log.exists())
+        self.commit("flake.nix")
+        result = self.run_runner("build")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(self.buck_log.read_text())["args"], ["build"])
+
+    def test_missing_selection_mode_requires_configuration(self):
+        owner = self.generation / "owner"
+        owner.write_text(owner.read_text().replace("selection_mode=checkout\n", ""))
+        self.assert_refused("generation selection mode")
+
+    def test_unrelated_source_commit_reuses_exact_generation(self):
+        (self.root / "program.rs").write_text("source change\n")
+        self.commit("program.rs")
+        result = self.run_runner("build")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.shell_log.exists())
 
 
 if __name__ == "__main__":

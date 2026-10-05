@@ -6,6 +6,8 @@ module Tidepool.ModuleCandidates
   , CandidateModuleInterface, candidateCertificatePath, candidateCertificateSha256
   , candidateCoreDescriptor
   , CandidateExecutionSource, candidateExecutionSources, candidateOriginalIdentity
+  , CapturedCandidateManifest, captureCandidateManifest, candidateManifestSha256
+  , readCapturedModuleCandidatesWithGraphs
   , readModuleCandidates, readModuleCandidatesWithGraphs ) where
 
 import Codec.CBOR.Decoding
@@ -17,6 +19,7 @@ import Control.Monad (forM_, replicateM, unless, when)
 import Data.Char (isHexDigit)
 import Data.List (stripPrefix)
 import qualified Data.ByteString as BS
+import qualified Crypto.Hash.SHA256 as SHA256
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.Set as Set
 import qualified Data.Map.Strict as Map
@@ -112,23 +115,45 @@ maxCandidates = 128
 readModuleCandidates :: FilePath -> IO (Either String [ModuleCandidate])
 readModuleCandidates = readModuleCandidatesWithGraphs []
 
+-- The envelope is captured once. Its fingerprint and later candidate admission
+-- consume these same bounded bytes, including when the source file changes.
+data CapturedCandidateManifest = CapturedCandidateManifest FilePath BS.ByteString
+
+candidateManifestSha256 :: CapturedCandidateManifest -> BS.ByteString
+candidateManifestSha256 (CapturedCandidateManifest _ bytes) = SHA256.hash bytes
+
+captureCandidateManifest :: FilePath -> IO (Either String CapturedCandidateManifest)
+captureCandidateManifest path = do
+  captured <- try (withBinaryFile path ReadMode $ \handle ->
+    BS.hGet handle (fromInteger maxManifestBytes + 1))
+    :: IO (Either IOException BS.ByteString)
+  pure $ case captured of
+    Left failure -> Left (show failure)
+    Right bytes | toInteger (BS.length bytes) > maxManifestBytes ->
+      Left "candidate manifest exceeds four MiB"
+    Right bytes -> Right (CapturedCandidateManifest path bytes)
+
 -- Exact-scope graphs have already passed their digest and producer checks.
 -- Their inventory closes provenance; it does not grant lexical admission.
 readModuleCandidatesWithGraphs
   :: [ExecutionSourceGraph] -> FilePath -> IO (Either String [ModuleCandidate])
 readModuleCandidatesWithGraphs exactGraphs path = do
+  captured <- captureCandidateManifest path
+  case captured of
+    Left reason -> pure (Left reason)
+    Right manifest -> readCapturedModuleCandidatesWithGraphs exactGraphs manifest
+
+readCapturedModuleCandidatesWithGraphs
+  :: [ExecutionSourceGraph] -> CapturedCandidateManifest -> IO (Either String [ModuleCandidate])
+readCapturedModuleCandidatesWithGraphs exactGraphs (CapturedCandidateManifest path bytes) = do
   result <- try (do
-    bytes <- withBinaryFile path ReadMode $ \handle ->
-      BS.hGet handle (fromInteger maxManifestBytes + 1)
-    if toInteger (BS.length bytes) > maxManifestBytes
-      then pure (Left "candidate manifest exceeds four MiB")
-      else case deserialiseFromBytes decodeManifest (BL.fromStrict bytes) of
-        Left failure -> pure (Left (show failure))
-        Right (remaining, (candidates, descriptors, references, producer))
-          | BL.null remaining -> do
-              graphs <- readExecutionSourceGraphs path exactGraphs descriptors
-              pure (attachExecutionSources exactGraphs graphs references producer candidates)
-          | otherwise -> pure (Left "candidate manifest has trailing bytes"))
+    case deserialiseFromBytes decodeManifest (BL.fromStrict bytes) of
+      Left failure -> pure (Left (show failure))
+      Right (remaining, (candidates, descriptors, references, producer))
+        | BL.null remaining -> do
+            graphs <- readExecutionSourceGraphs path exactGraphs descriptors
+            pure (attachExecutionSources exactGraphs graphs references producer candidates)
+        | otherwise -> pure (Left "candidate manifest has trailing bytes"))
     :: IO (Either IOException (Either String [ModuleCandidate]))
   pure $ case result of
     Left failure -> Left (show failure)

@@ -26,6 +26,7 @@ import System.IO (hPutStrLn, stderr, stdin, stdout, hSetBinaryMode, hSetEncoding
 
 import GHC (moduleName, moduleNameString, moduleUnit, mkModuleName, mkModule)
 import GHC.Driver.Session (DynFlags)
+import GHC.Tc.Types (tcg_mod)
 import GHC.Unit.Module.ModIface (mi_module)
 import GHC.Unit.Types (unitString, stringToUnit)
 import GHC.Core (Bind(..), CoreBind)
@@ -78,7 +79,8 @@ import Tidepool.PreparedStg
 import Tidepool.PreparedRecovery
   ( RecoveryFailure, RecoveredClosure(..), newPreparedRecoveryWithPackageRoots
   , preparedRecoveryClosure, growPreparedRecovery )
-import Tidepool.ModuleCandidates (ModuleCandidate(..), candidateExecutionSources)
+import Tidepool.ModuleCandidates
+  ( ModuleCandidate(..), CandidateGroup(..), candidateExecutionSources )
 import Tidepool.CompileInput (writeCompileInputProof)
 import Tidepool.CertifiedProducts (resolvePackageGlobal, homeInterfaceUsageOwners)
 import Tidepool.FinalizedModuleArtifacts
@@ -106,7 +108,7 @@ import Tidepool.CheckedAdmission
 import Tidepool.CheckedRecipe
   ( checkedDisplayRecipe, checkedProgramDisplayRecipe, writeCheckedDisplayReceipt
   , checkedItemCompilePurpose, checkedRecipeSource, replaceRecipeMarker, writeCheckedItemReceipt )
-import Tidepool.ExtractUtil (capitalize, shaHex, trySynchronous)
+import Tidepool.ExtractUtil (shaHex, trySynchronous)
 import Tidepool.WorkerDiagnostics
   ( throwCellSplitError, sourceFailureDiagnostics, reportDiags, reportDiagsWithWarnings )
 import Tidepool.ExtractRequest (RequestShapeError(..), validateRequestShape, WorkerRequest(..), workerRequestFromArgv, workerRequestFlag)
@@ -424,7 +426,7 @@ processFile compiler caches timing args path = do
           targets@(_ : _) -> targets
           [] -> maybe [] pure mTarget
     originalInterfaces <- newOriginalInterfaceArtifacts hscEnv (pprFinalizedModules prepared) (retainedOriginalInterfaces prepared) outDir
-    (preparedArtifacts, productContext) <- prepareArtifacts originalInterfaces caches path prepared preparedTargets
+    (preparedArtifacts, productContext) <- prepareArtifacts originalInterfaces caches prepared preparedTargets
       (standardAuxiliaryRoots binds) (requestRetainedGenerations args) []
     if null preparedArtifacts
       then ioError (userError "prepared extraction requires --target or --targets")
@@ -453,21 +455,21 @@ data PreparedArtifact = PreparedArtifact
 
 -- Project before writing artifacts so the shared constructor
 -- table includes exactly the GHC constructors admitted by prepared execution.
-prepareArtifacts :: OriginalInterfaceArtifacts -> RecoveryCaches -> FilePath -> PreparedPipelineResult
+prepareArtifacts :: OriginalInterfaceArtifacts -> RecoveryCaches -> PreparedPipelineResult
   -> [String] -> [String] -> Map.Map SymbolIdentity Word64 -> [HostBindingRepresentation]
   -> IO ([PreparedArtifact], Maybe PreparedModuleProducts)
-prepareArtifacts _ _ _ _ [] _ _ _ = pure ([], Nothing)
-prepareArtifacts originalInterfaces caches input prepared targets@(firstTarget : _) auxiliaryRoots retainedGenerations hostBindings = do
+prepareArtifacts _ _ _ [] _ _ _ = pure ([], Nothing)
+prepareArtifacts originalInterfaces caches prepared targets@(firstTarget : _) auxiliaryRoots retainedGenerations hostBindings = do
   timing <- readTimingEnabled
-  let hscEnv = prHscEnv (pprPipelineResult prepared)
+  let result = pprPipelineResult prepared
+      hscEnv = prHscEnv result
       interfaces = pprProductInterfaces prepared
       modules = pprModules prepared
       candidates = pprAcceptedCandidates prepared
       exactScope = compilationScope <$> preparedExactCompilation prepared
-  source <- readFile input
-  let targetModule = fromMaybe (capitalize (takeBaseName input)) (extractModuleName source)
-      matching = [prepared | prepared <- modules,
-        moduleNameString (moduleName (pmModule prepared)) == targetModule]
+      targetModule = tcg_mod (prTargetTcGblEnv result)
+      matching = [preparedModule | preparedModule <- modules,
+        pmModule preparedModule == targetModule]
   preparedModule <- case matching of
     [value] -> pure value
     values -> ioError (userError ("prepared target module selection was not unique: " ++ show (length values)))
@@ -478,6 +480,11 @@ prepareArtifacts originalInterfaces caches input prepared targets@(firstTarget :
   let contextFor target = firstContext
         { projectionEntry = (projectionEntry firstContext) {symbolOccurrence = T.pack target} }
   let exactProducts = maybe [] scopeProducts exactScope
+      externalOriginalBinders = Set.fromList
+        ([binder | product <- exactProducts, group <- originalGroups product
+          , binder <- originalBinders group]
+         ++ [binder | candidate <- candidates, group <- candidateGroups candidate
+          , binder <- candidateGroupBinders group])
       certifiedHomes = Set.fromList
         ([(candidateUnit candidate, candidateModule candidate) | candidate <- candidates]
          ++ [(originalUnit originalProduct, originalModule originalProduct) | originalProduct <- exactProducts])
@@ -485,7 +492,8 @@ prepareArtifacts originalInterfaces caches input prepared targets@(firstTarget :
         [(originalUnit originalProduct, originalModule originalProduct,
           [(originalOrdinal group, originalBinders group, originalGlobals group)
            | group <- originalGroups originalProduct]) | originalProduct <- exactProducts]
-      products = projectOriginalHomeModuleProducts hscEnv interfaces (contextFor firstTarget) modules
+      products = projectOriginalHomeModuleProducts hscEnv interfaces
+        (contextFor firstTarget) externalOriginalBinders modules
       originalProducts =
         [(unitString (moduleUnit owner), moduleNameString (moduleName owner),
           either (Left . show) Right outcome)
@@ -914,7 +922,7 @@ compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb binde
           attempted <- try (compileTurn protected spliced modName modulePath)
           case attempted of
             Right prepared ->
-              return (index, spliced, modulePath, prepared)
+              return (index, spliced, prepared)
             Left err@(_ :: SomeException) -> case (sourceFailureDiagnostics err, rest) of
               (Just _, _ : _) | not (isJust admitted || isJust display) -> compileVariants (index + 1) rest
               _               -> throwIO err
@@ -922,7 +930,7 @@ compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb binde
         && (selector /= SBind || length (sbBinders sb) /= 1 || length matching /= 1)
       then fail "activation requires one prepared bind template"
       else pure ()
-    (variant, spliced, compiledPath, prepared) <- compileVariants (0 :: Int) matching
+    (variant, spliced, prepared) <- compileVariants (0 :: Int) matching
     let rawResult = pprPipelineResult prepared
         result = if requestCell args && isJust display then rawResult
           { prResultType = prResultType rawResult >>= \ty -> case splitFunTy_maybe ty of
@@ -941,7 +949,7 @@ compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb binde
           _ -> []
     sessionBindings <- prepareSessionBindings boundNames result
     originalInterfaces <- newOriginalInterfaceArtifacts hscEnv (pprFinalizedModules prepared) (retainedOriginalInterfaces prepared) outDir
-    (preparedArtifacts, productContext) <- prepareArtifacts originalInterfaces caches compiledPath prepared
+    (preparedArtifacts, productContext) <- prepareArtifacts originalInterfaces caches prepared
       [preparedScaffoldTargetName] (standardAuxiliaryRoots binds)
       (requestRetainedGenerations args) (sessionBindingRepresentations sessionBindings)
     when (maybe False ((== HostActivationInput) . itemPurpose) admitted) $ do
@@ -1456,7 +1464,7 @@ prepareOriginalCellDeclaration compiler caches args template outDir scope exact 
       binds = prBinds result
   inventory <- certifyPlannedDeclaration original environment >>= either fail pure
   originalInterfaces <- newOriginalInterfaceArtifacts environment (pprFinalizedModules prepared) (retainedOriginalInterfaces prepared) directory
-  (artifacts, productContext) <- prepareArtifacts originalInterfaces caches sourcePath prepared
+  (artifacts, productContext) <- prepareArtifacts originalInterfaces caches prepared
     ["__result"] [] (requestRetainedGenerations args) []
   writePreparedSidecars SeparateYieldSites directory binds (prTyCons result)
     Nothing (map T.pack (prWarnings result)) artifacts

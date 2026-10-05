@@ -74,35 +74,14 @@ fn all_declaration_names_and_order_are_explicit() {
 }
 
 // ---------------------------------------------------------------------------
-// Golden plumbing — mirrors bridged_records.rs
+// Immutable compile-time goldens
 // ---------------------------------------------------------------------------
 
-fn golden_path(name: &str) -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/goldens/protocol")
-        .join(name)
-}
-
-fn assert_matches_golden(name: &str, generated: &str) {
-    let path = golden_path(name);
-    let regen = std::env::var_os("TIDEPOOL_REGEN_PROTOCOL_GOLDENS").is_some();
-    let current = std::fs::read_to_string(&path).ok();
-    if regen || current.is_none() {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).unwrap();
-        }
-        std::fs::write(&path, generated).unwrap();
-        if current.as_deref() != Some(generated) && !regen {
-            panic!("wrote missing/updated {} — re-run the test", path.display());
-        }
-        return;
-    }
+fn assert_matches_golden(name: &str, generated: &str, committed: &str) {
     assert_eq!(
-        current.unwrap(),
-        generated,
-        "committed {} is stale vs the generated artifact — regenerate with \
-         TIDEPOOL_REGEN_PROTOCOL_GOLDENS=1 cargo test -p tidepool-mcp --test mcp protocol_goldens::",
-        path.display()
+        committed, generated,
+        "committed {name} is stale vs the generated artifact; review the contract \
+         change and update its owning golden source"
     );
 }
 
@@ -117,15 +96,6 @@ fn write_blob(out: &mut String, label: &str, value: &str) {
     out.push_str(&format!("-- end {label} --\n\n"));
 }
 
-#[test]
-fn effects_shim_module_standard_golden_matches_committed_file() {
-    let generated = tidepool_mcp::effects_shim_module_source(
-        &tidepool_mcp::standard_decls(),
-        &tidepool_mcp::RowArgs::default(),
-    );
-    assert_matches_golden("effects_shim_module.standard.hs", &generated);
-}
-
 // ---------------------------------------------------------------------------
 // The derived tool-description effects index over the standard row.
 // ---------------------------------------------------------------------------
@@ -133,7 +103,11 @@ fn effects_shim_module_standard_golden_matches_committed_file() {
 #[test]
 fn tool_description_effects_index_golden_matches_committed_file() {
     let generated = tidepool_mcp::describe_effects_index(&tidepool_mcp::standard_decls());
-    assert_matches_golden("tool_description.effects_index.txt", &generated);
+    assert_matches_golden(
+        "tool_description.effects_index.txt",
+        &generated,
+        include_str!("goldens/protocol/tool_description.effects_index.txt"),
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -197,7 +171,7 @@ fn hardcoded_pins_survive_a_blind_regen() {
 // Import-gating pin: the generated eval-module text (both the
 // statement/evaluation module's `build_preamble` and the declaration module's
 // `session_decl_module_env`) is a content-addressed compile-cache key
-// (`ensure_effects_module_at`) — a single changed byte invalidates every
+// (`ensure_effects_module`) — a single changed byte invalidates every
 // cached compile for every user. Byte-exact golden files over the FULL
 // generated text (pragmas + imports + paginate alias, not a hand-reassembled
 // approximation) so a refactor of the import-gating machinery cannot
@@ -223,7 +197,7 @@ fn env_text(env: &tidepool_runtime::session::ModuleEnv) -> String {
 /// Renders `build_preamble` and `session_decl_module_env`'s output for one
 /// effect row into a single length-prefixed blob and diffs it against one
 /// golden.
-fn check_import_gating(golden_name: &str, effects: &[EffectDecl]) {
+fn check_import_gating(golden_name: &str, effects: &[EffectDecl], committed: &str) {
     let mut out = String::new();
     write_blob(
         &mut out,
@@ -235,12 +209,16 @@ fn check_import_gating(golden_name: &str, effects: &[EffectDecl]) {
         "session_decl_module_env",
         &env_text(&tidepool_mcp::session_decl_module_env(effects, false)),
     );
-    assert_matches_golden(&format!("import_gating.{golden_name}.txt"), &out);
+    assert_matches_golden(&format!("import_gating.{golden_name}.txt"), &out, committed);
 }
 
 #[test]
 fn import_gating_standard_row_golden_matches_committed_file() {
-    check_import_gating("standard_row", &tidepool_mcp::standard_decls());
+    check_import_gating(
+        "standard_row",
+        &tidepool_mcp::standard_decls(),
+        include_str!("goldens/protocol/import_gating.standard_row.txt"),
+    );
 }
 
 #[test]
@@ -249,7 +227,11 @@ fn import_gating_actor_local_row_golden_matches_committed_file() {
         tidepool_mcp::askuser_decl(),
         tidepool_mcp::actor_local_decl(),
     ];
-    check_import_gating("actor_local_row", &effects);
+    check_import_gating(
+        "actor_local_row",
+        &effects,
+        include_str!("goldens/protocol/import_gating.actor_local_row.txt"),
+    );
 }
 
 #[test]
@@ -258,22 +240,30 @@ fn import_gating_agent_session_row_golden_matches_committed_file() {
         tidepool_mcp::agent_session_decl(),
         tidepool_mcp::askuser_decl(),
     ];
-    check_import_gating("agent_session_row", &effects);
+    check_import_gating(
+        "agent_session_row",
+        &effects,
+        include_str!("goldens/protocol/import_gating.agent_session_row.txt"),
+    );
 }
 
 #[test]
 fn import_gating_no_effects_row_golden_matches_committed_file() {
-    check_import_gating("empty_row", &[]);
+    check_import_gating(
+        "empty_row",
+        &[],
+        include_str!("goldens/protocol/import_gating.empty_row.txt"),
+    );
 }
 
 /// [`tidepool_mcp::PaginateMode::Passthrough`] (what `tidepool-repl` uses)
-/// swaps only the `paginateResult` alias BODY relative to
+/// keeps pagination pure relative to
 /// [`tidepool_mcp::PaginateMode::Truncate`] — imports stay identical, and
 /// with no effects neither mode emits an alias at all. Not golden-backed: it
 /// asserts a structural relationship between two LIVE outputs, not a
 /// hand-kept literal, so there is nothing to migrate.
 #[test]
-fn passthrough_mode_swaps_only_the_paginate_alias_body() {
+fn passthrough_mode_removes_pagination_membership_constraints() {
     let decls = tidepool_mcp::standard_decls();
     let truncate = tidepool_mcp::build_preamble_non_interactive(&decls, false);
     let passthrough = tidepool_mcp::build_preamble_non_interactive_mode(
@@ -283,13 +273,15 @@ fn passthrough_mode_swaps_only_the_paginate_alias_body() {
     );
     assert_eq!(
         passthrough,
-        truncate.replacen(
-            "paginateResult = paginateTrunc\n",
-            "paginateResult _ v = pure v\n",
-            1,
-        ),
-        "PaginateMode::Passthrough must differ from Truncate only in the \
-         paginateResult alias body"
+        truncate
+            .replacen("Members '[Console, KV] effs => ", "", 1,)
+            .replacen(
+                "paginateResult = paginateTrunc\n",
+                "paginateResult _ v = pure v\n",
+                1,
+            ),
+        "PaginateMode::Passthrough changes the alias body and removes its \
+         unused membership constraints"
     );
 
     let truncate_empty = tidepool_mcp::build_preamble_non_interactive(&[], false);

@@ -37,10 +37,8 @@ fn effect_roster_shape_sentinel() {
          1. Update this sentinel's BASE_EFFECTS/INTERPOSED_TAIL to the new \
             shape — that edit IS the checklist item this test enforces; do it \
             deliberately, not blindly.\n\
-         2. Regenerate the protocol goldens (the ONE regen command, never a \
-            second one):\n\
-         \x20   TIDEPOOL_REGEN_PROTOCOL_GOLDENS=1 cargo test -p tidepool-mcp --test protocol_goldens\n\
-         \x20  then review the diff under bridge/mcp/tests/goldens/protocol/ \
+         2. Review and update the fixed protocol goldens under \
+            bridge/mcp/tests/goldens/protocol/ \
             (including the import_gating.*.txt goldens) — an unexplained change \
             there is a bug, not a refresh.\n\
          3. Confirm no hardcoded union-tag literal was introduced: \

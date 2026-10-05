@@ -19,7 +19,7 @@
 --     and contain no whitespace.  Structural only.
 --
 -- (A @[glob|...|]@ quoter is deliberately OMITTED: the name collides with the
--- eval-visible @glob :: Text -> M [Text]@ Fs verb.)
+-- eval-visible @glob :: Member FsRead effs => Text -> Eff effs [Text]@ Fs verb.)
 module Tidepool.QQ.Validate
   ( uri
   , mkValidatorQQ

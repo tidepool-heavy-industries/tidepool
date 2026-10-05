@@ -35,7 +35,6 @@ pub fn context_read_write() -> Effect {
         prompt_card: None,
         type_params: &[],
         default_row_args: &[],
-        helpers_row_polymorphic: true,
         extra_imports: &[],
         type_defs: type_defs(),
         external_types: &[],

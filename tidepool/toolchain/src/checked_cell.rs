@@ -4399,56 +4399,53 @@ mod tests {
 
     #[test]
     fn host_interface_certification_consumes_only_receipt_sealed_capture() {
+        use super::{array, hash, text, CapturedValueInterfaceOutput, Value};
+        use crate::certified_products::{
+            fixture_module_interface, fixture_source_module_interface,
+        };
+        use std::collections::BTreeMap;
+
         let owner = tidepool_repr::SessionModule::val(tidepool_repr::Generation(7));
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join(owner.relative_hi_path());
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let original =
+            fixture_module_interface([1; 32], "main", &owner.module_name(), BTreeMap::new());
+        let interface = original.interface_bytes();
+        let packages = original.package_imports_bytes();
+        let package_path = directory.path().join("package.hi");
+        std::fs::write(&package_path, b"replacement package dependency").unwrap();
+        let replacement = fixture_source_module_interface(
+            [1; 32],
+            "main",
+            &owner.module_name(),
+            [2; 32],
+            BTreeMap::new(),
+            Some(&package_path),
+        );
+        let replacement_packages = replacement.package_imports_bytes();
         let encode = |value: Value| {
             let mut bytes = Vec::new();
             ciborium::ser::into_writer(&value, &mut bytes).unwrap();
             bytes
         };
-        let interface = b"original interface";
-        let packages = encode(array([
-            text("TPPKGROOTS"),
-            text("2"),
-            array([
-                text("main"),
-                text(owner.module_name()),
-                text(hash(interface)),
-            ]),
-            array([]),
-            array([]),
-        ]));
         let requirements = encode(array([array([text("main"), text("OriginalType")])]));
-        let expected = [hash(interface), hash(&packages), hash(&requirements)];
+        let replacement_requirements =
+            encode(array([array([text("main"), text("ReplacementType")])]));
+        let expected = [hash(interface), hash(packages), hash(&requirements)];
         let seals = || expected.each_ref().map(String::as_str);
         let restore = || {
             std::fs::write(&path, interface).unwrap();
-            std::fs::write(path.with_extension("hi.packages"), &packages).unwrap();
+            std::fs::write(path.with_extension("hi.packages"), packages).unwrap();
             std::fs::write(path.with_extension("hi.requirements"), &requirements).unwrap();
         };
         restore();
         let captured = CapturedValueInterfaceOutput::capture(&path).unwrap();
         std::fs::write(&path, b"replacement interface").unwrap();
-        std::fs::write(
-            path.with_extension("hi.packages"),
-            encode(array([
-                text("TPPKGROOTS"),
-                text("2"),
-                array([
-                    text("main"),
-                    text(owner.module_name()),
-                    text(hash(b"replacement interface")),
-                ]),
-                array([]),
-                array([]),
-            ])),
-        )
-        .unwrap();
+        std::fs::write(path.with_extension("hi.packages"), replacement_packages).unwrap();
         std::fs::write(
             path.with_extension("hi.requirements"),
-            encode(array([array([text("main"), text("ReplacementType")])])),
+            &replacement_requirements,
         )
         .unwrap();
         let certified = captured.certify([1; 32], owner, Some(seals())).unwrap();
@@ -4466,34 +4463,17 @@ mod tests {
             .certify([1; 32], owner, Some(seals()))
             .is_err());
 
-        // Each component has its own receipt seal, including dependency lists
-        // that remain valid certification input after a replacement.
+        // Both typed package fixtures certify the same interface; only the
+        // dependency evidence changes. Every component has a receipt seal.
         for changed in 0..3 {
             restore();
             match changed {
                 0 => std::fs::write(&path, b"replacement interface").unwrap(),
-                1 => std::fs::write(
-                    path.with_extension("hi.packages"),
-                    encode(array([
-                        text("TPPKGROOTS"),
-                        text("2"),
-                        array([
-                            text("main"),
-                            text(owner.module_name()),
-                            text(hash(interface)),
-                        ]),
-                        array([]),
-                        array([array([
-                            text("primitive"),
-                            text("ghc-prim"),
-                            text("GHC.Prim"),
-                        ])]),
-                    ])),
-                )
-                .unwrap(),
+                1 => std::fs::write(path.with_extension("hi.packages"), replacement_packages)
+                    .unwrap(),
                 _ => std::fs::write(
                     path.with_extension("hi.requirements"),
-                    encode(array([array([text("main"), text("ReplacementType")])])),
+                    &replacement_requirements,
                 )
                 .unwrap(),
             }

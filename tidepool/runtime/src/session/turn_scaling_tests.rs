@@ -1626,6 +1626,40 @@ fn checked_cell_retained_imports_preserve_value_callable_and_generation() {
     let public = persistent.mint_scope(ScopeId::ROOT).unwrap();
     let mut resident =
         ResidentSession::from_persistent_for_test(frunk::HNil, QuietOutput, persistent);
+    std::fs::write(
+        root.path().join("SessionBodyDemandSupport.hs"),
+        include_str!("fixtures/session-body-demand-support.hs"),
+    )
+    .unwrap();
+    let support_import = SourceImports::from_specs(["qualified SessionBodyDemandSupport"]);
+    try_execute_cell_with_template_imports(
+        &mut resident,
+        public,
+        &effects,
+        &images,
+        (0, 0),
+        "session_body_demand_unused_import",
+        "pure (0 :: Int)",
+        0,
+        &ScalePublication::Ephemeral,
+        AuthorityChecks::Configured,
+        &support_import,
+    )
+    .expect("an unused selected source owner still typechecks");
+    try_execute_cell_with_template_imports(
+        &mut resident,
+        public,
+        &effects,
+        &images,
+        (0, 0),
+        "session_body_demand_later_call",
+        "if SessionBodyDemandSupport.retainedFunction 41 == 42 then pure () else error \"later source body returned the wrong value\"",
+        0,
+        &ScalePublication::Ephemeral,
+        AuthorityChecks::Configured,
+        &support_import,
+    )
+    .expect("a later checked cell prepares and executes the previously unused source body");
     execute_cell(
         &mut resident,
         public,

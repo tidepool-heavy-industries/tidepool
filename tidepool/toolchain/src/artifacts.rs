@@ -146,7 +146,9 @@ pub fn check_source(request: &SourceCheckRequest<'_>) -> Result<(), CompileError
     })?;
     diag::decode_extract_result(run.success(), &run.output.stdout, &run.output.stderr)
         .map(|_| ())
-        .map_err(|error| offer.retain_failure(directory.path(), &run.output.stderr, error))
+        .map_err(|error| {
+            offer.retain_failure(directory.path(), &command, &run.output.stderr, error)
+        })
 }
 
 /// Parse the source before reserving original module and value identities.
@@ -746,10 +748,11 @@ impl ModuleCandidateOffer {
 
     /// Execute an ordinary turn into fresh, privately owned outputs and seal
     /// input continuity before returning those outputs to a consumer.
+    /// Keep the relocated command available for completed-response diagnostics.
     pub fn execute_admitted_turn(
         &self,
         endpoint: crate::toolchain::AdmittedCompilerEndpoint,
-        mut command: ExtractCmd,
+        command: &mut ExtractCmd,
     ) -> Result<AdmittedTurnOutput, CompileError> {
         let request = tidepool_extract_cmd::ExtractRequest::decode(&command.request_bytes())
             .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
@@ -773,10 +776,10 @@ impl ModuleCandidateOffer {
         }
         let directory = tempfile::tempdir()?;
         command.relocate_turn_outputs(directory.path());
-        let run = endpoint.execute(&command).map_err(|error| {
+        let run = endpoint.execute(command).map_err(|error| {
             self.retain_execution_failure(
                 directory.path(),
-                &command,
+                command,
                 CompileError::ExtractFailed(error.to_string()),
             )
         })?;
@@ -784,7 +787,9 @@ impl ModuleCandidateOffer {
             && diag::decode_extract_result(true, &run.output.stdout, &run.output.stderr).is_ok()
         {
             self.read_admitted_turn(directory.path(), request.supports_compile_input_identity())
-                .map_err(|error| self.retain_failure(directory.path(), &run.output.stderr, error))?
+                .map_err(|error| {
+                    self.retain_failure(directory.path(), command, &run.output.stderr, error)
+                })?
         } else {
             (None, None)
         };
@@ -1433,13 +1438,15 @@ impl ModuleCandidateOffer {
 
     /// Retain this request and its selected checked inputs for diagnosis.
     /// The saved files are evidence only; they cannot issue compiler authority.
+    /// `command` is the executed request, including any owner output relocation.
     pub fn retain_failure(
         &self,
         directory: &Path,
+        command: &ExtractCmd,
         stderr: &[u8],
         error: CompileError,
     ) -> CompileError {
-        retain_compiler_failure_inner(directory, stderr, error, Some(self), None)
+        retain_compiler_failure_inner(directory, stderr, error, Some(self), command)
     }
 
     /// Preserve the typed request and selected inputs when transport fails
@@ -1450,7 +1457,7 @@ impl ModuleCandidateOffer {
         command: &ExtractCmd,
         error: CompileError,
     ) -> CompileError {
-        retain_compiler_failure_inner(directory, &[], error, Some(self), Some(command))
+        retain_compiler_failure_inner(directory, &[], error, Some(self), command)
     }
 
     fn retain_checked_inputs(&self, destination: &Path) -> std::io::Result<()> {
@@ -3228,7 +3235,7 @@ fn compile_invocation_inner(
         Err(error) => {
             return Err(match &policy {
                 CompilationPolicy::BuildAction { .. } => error,
-                _ => retain_compiler_failure(temp_dir.path(), &compiler_stderr, error),
+                _ => retain_compiler_failure(temp_dir.path(), &cmd, &compiler_stderr, error),
             });
         }
     };
@@ -3511,7 +3518,7 @@ fn compile_invocation_inner(
         result => {
             let artifacts = result.map_err(|error| match &policy {
                 CompilationPolicy::BuildAction { .. } => error,
-                _ => retain_compiler_failure(temp_dir.path(), &compiler_stderr, error),
+                _ => retain_compiler_failure(temp_dir.path(), &cmd, &compiler_stderr, error),
             })?;
             if let CompilationPolicy::BuildAction {
                 export: BuildActionExport::PreparedFixture { output },
@@ -3543,10 +3550,11 @@ fn compile_invocation_inner(
 /// original error. Call before the request's temporary directory is dropped.
 pub fn retain_compiler_failure(
     directory: &Path,
+    command: &ExtractCmd,
     stderr: &[u8],
     error: CompileError,
 ) -> CompileError {
-    retain_compiler_failure_inner(directory, stderr, error, None, None)
+    retain_compiler_failure_inner(directory, stderr, error, None, command)
 }
 
 fn retain_compiler_failure_inner(
@@ -3554,7 +3562,7 @@ fn retain_compiler_failure_inner(
     stderr: &[u8],
     error: CompileError,
     offer: Option<&ModuleCandidateOffer>,
-    command: Option<&ExtractCmd>,
+    command: &ExtractCmd,
 ) -> CompileError {
     if std::env::var("TIDEPOOL_KEEP_TEST_LOGS").as_deref() != Ok("1") {
         return error;
@@ -3577,6 +3585,14 @@ fn retain_compiler_failure_inner(
                     "{message}; compiler artifacts retained at {}",
                     retained.display()
                 )),
+                CompileError::WorkerFailure(mut diagnostics) => {
+                    diagnostics.push(diag::ExtractDiag {
+                        span: None,
+                        severity: diag::DiagnosticSeverity::Error,
+                        message: format!("compiler artifacts retained at {}", retained.display()),
+                    });
+                    CompileError::WorkerFailure(diagnostics)
+                }
                 other => other,
             }
         }
@@ -3590,7 +3606,7 @@ fn retain_compiler_failure_inner(
 fn retain_failed_compiler_artifacts(
     directory: &Path,
     offer: Option<&ModuleCandidateOffer>,
-    command: Option<&ExtractCmd>,
+    command: &ExtractCmd,
 ) -> std::io::Result<PathBuf> {
     let retained_root = match std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT") {
         Some(root) => PathBuf::from(root),
@@ -3651,18 +3667,16 @@ fn retain_failed_compiler_artifacts(
     if let Err(failure) = failure_sources::retain(retained.path(), source_retention_issues) {
         tracing::warn!(%failure, "could not retain declared compiler sources");
     }
-    if let Some(command) = command {
-        std::fs::write(
-            retained.path().join("compiler-request.bin"),
-            command.request_bytes(),
-        )?;
-        // Compiler transport uses the caller's CWD; Rust compilation owners
-        // do not change process CWD while a request is outstanding.
-        std::fs::write(
-            retained.path().join("compiler-cwd.bin"),
-            std::env::current_dir()?.as_os_str().as_encoded_bytes(),
-        )?;
-    }
+    std::fs::write(
+        retained.path().join("compiler-request.bin"),
+        command.request_bytes(),
+    )?;
+    // Compiler transport uses the caller's CWD; Rust compilation owners
+    // do not change process CWD while a request is outstanding.
+    std::fs::write(
+        retained.path().join("compiler-cwd.bin"),
+        std::env::current_dir()?.as_os_str().as_encoded_bytes(),
+    )?;
     Ok(retained.keep())
 }
 
@@ -4732,6 +4746,107 @@ mod module_product_tests {
     use std::io::Write;
 
     #[test]
+    #[serial_test::serial]
+    fn worker_failure_retains_diagnostics_and_executed_request_after_scratch_cleanup() {
+        struct RestoreEnvironment(Vec<(&'static str, Option<std::ffi::OsString>)>);
+        impl Drop for RestoreEnvironment {
+            fn drop(&mut self) {
+                for (name, value) in self.0.drain(..) {
+                    match value {
+                        Some(value) => unsafe { std::env::set_var(name, value) },
+                        None => unsafe { std::env::remove_var(name) },
+                    }
+                }
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let _restore = RestoreEnvironment(
+            ["TIDEPOOL_KEEP_TEST_LOGS", "TIDEPOOL_TEST_ARTIFACT_ROOT"]
+                .into_iter()
+                .map(|name| (name, std::env::var_os(name)))
+                .collect(),
+        );
+        unsafe {
+            std::env::set_var("TIDEPOOL_KEEP_TEST_LOGS", "1");
+            std::env::set_var("TIDEPOOL_TEST_ARTIFACT_ROOT", root.path());
+        }
+        let scratch = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let input = scratch.path().join("turn.txt");
+        let source = b"value <- pure (41 :: Int)\n";
+        std::fs::write(&input, source).unwrap();
+        std::fs::write(output.path().join("turn-attempt.hs"), source).unwrap();
+        let mut command = ExtractCmd::with_bin(
+            tidepool_extract_cmd::ResolvedExtractBin::assume_resolved("unused-worker"),
+        );
+        command
+            .input(&input)
+            .turn()
+            .turn_out(scratch.path().join("turn.cbor"))
+            .output_dir(scratch.path());
+        let before_relocation = command.request_bytes();
+        command.relocate_turn_outputs(output.path());
+        let executed_request = command.request_bytes();
+        assert_ne!(executed_request, before_relocation);
+        let stderr = format!(
+            "{}\nfull retained diagnostic tail\n",
+            "warning\n".repeat(800)
+        );
+        let error = diag::decode_extract_result(
+            false,
+            br#"{"version":2,"outcome":"worker-failure","diagnostics":[{"span":null,"severity":"error","message":"native product certification failed"}]}"#,
+            stderr.as_bytes(),
+        )
+        .unwrap_err();
+        let before = crate::classify_compile(&error);
+        let CompileError::WorkerFailure(original) = &error else {
+            panic!("worker report must retain its typed failure cause");
+        };
+        let original = original.clone();
+        let error = retain_compiler_failure(output.path(), &command, stderr.as_bytes(), error);
+        drop(output);
+        drop(scratch);
+
+        let retained = std::fs::read_dir(root.path().join("compiler-failures"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        assert_eq!(retained.len(), 1);
+        let retained = &retained[0];
+        let CompileError::WorkerFailure(diagnostics) = &error else {
+            panic!("retention must not replace the worker failure variant");
+        };
+        assert_eq!(&diagnostics[..original.len()], original.as_slice());
+        assert_eq!(diagnostics.len(), original.len() + 1);
+        assert_eq!(diagnostics.last().unwrap().span, None);
+        let after = crate::classify_compile(&error);
+        assert_eq!(after.class, before.class);
+        assert_eq!(after.phase, before.phase);
+        assert_eq!(after.cause, before.cause);
+        assert!(after.message.contains(&retained.display().to_string()));
+        assert!(!before.message.contains("full retained diagnostic tail"));
+        assert_eq!(
+            std::fs::read(retained.join("compiler.stderr")).unwrap(),
+            stderr.as_bytes()
+        );
+        assert_eq!(
+            std::fs::read(retained.join("compiler-request.bin")).unwrap(),
+            executed_request
+        );
+        assert_eq!(
+            std::fs::read(retained.join("turn-attempt.hs")).unwrap(),
+            source
+        );
+        assert_eq!(
+            std::fs::read(retained.join("compiler-cwd.bin")).unwrap(),
+            std::env::current_dir()
+                .unwrap()
+                .as_os_str()
+                .as_encoded_bytes()
+        );
+    }
+
+    #[test]
     fn failed_execution_diagnostics_preserve_typed_request_after_scratch_cleanup() {
         let scratch = tempfile::tempdir().unwrap();
         let input = scratch.path().join("CellCheck.hs");
@@ -4745,8 +4860,7 @@ mod module_product_tests {
             .output_dir(scratch.path())
             .check_source();
         let request = command.request_bytes();
-        let retained =
-            retain_failed_compiler_artifacts(scratch.path(), None, Some(&command)).unwrap();
+        let retained = retain_failed_compiler_artifacts(scratch.path(), None, &command).unwrap();
         drop(scratch);
         let captured = std::fs::read(retained.join("compiler-request.bin")).unwrap();
         assert_eq!(captured, request);

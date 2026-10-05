@@ -100,7 +100,7 @@ import Tidepool.ExecutionEncode (encodeModuleProducts)
 
 import Tidepool.ExecutionProjection
   ( ProjectionContext(..), ProjectionError(..), projectPreparedModuleGroups
-  , projectPreparedModuleProducts, projectOriginalHomeModuleProducts, preparedModuleProductOutcomes, closeUnavailableOriginalGroups, topBinders
+  , projectPreparedModuleProducts, projectOriginalHomeModuleProducts, preparedModuleProductOutcomes, closeUnavailableOriginalGroups, closeUnavailableOriginalModules, preparedTopIdentities, topBinders
   , ReferenceFact(..), preparedModuleReferenceFacts, preparedRootIdentity, projectPrepared )
 import Tidepool.ExecutionProjection (resolveTextPackageUnit)
 import Tidepool.PreparedFormatting (resolveFormattingAuthority)
@@ -141,7 +141,7 @@ import Tidepool.GhcPipeline
   , withResidentPipelineSelectedRequests )
 import Tidepool.ModuleCandidates (ModuleCandidate(..), CandidateGroup(..), CandidateGlobal(..)
   , readModuleCandidates, readModuleCandidatesWithGraphs, candidateExecutionSources, candidateOriginalIdentity
-  , candidateCoreDescriptor)
+  , candidateCoreDescriptor, captureCandidateManifest, readCapturedModuleCandidatesWithGraphs)
 import Tidepool.PackageWitness (PackageImportEvidence(..), PackageImportRoot(..), encodePackageImports, emptyPackageImports, readPackageImports, revalidatePackageImports)
 import Tidepool.PreparedStg (PreparedModule(..), PreparedCoverage(..))
 import Tidepool.FatIface (readExactInterface)
@@ -1588,6 +1588,10 @@ exactToOrdinary = withTiming $ withScratch $ \work -> do
           ++ either show (const "unexpected success") refused)
       ordinaryQuote compile
     runRequest (pure ()) $ \compile -> do
+      warmExact <- compile CheckedEnvironment Set.empty GeneralCompile
+        (Just scope {ssExactScope=Just helperPath}) (work </> "MetadataQuotedTarget.hs") [work] Nothing
+      unless (maybe False (`eqType` intTy) (crResultType warmExact)) $
+        fail "exact cancellation fixture did not first establish its reusable environment"
       cancelling <- readFile "test-source-boot/fixtures/ExecutionCancellingQuoter.hs"
       let marker = work </> "cancel-marker"
       writeFile (work </> "MetadataQuoter.hs") (T.unpack (T.replace "EXECUTION_CANCEL_MARKER" (T.pack marker) (T.pack cancelling)))
@@ -1709,8 +1713,8 @@ originalPackageProjection = withScratch $ \work -> do
         , not (isHomeUnit (hsc_home_unit env) (moduleUnit owner))]
       retained = context { projectionRetainedGenerations = Map.fromList [(identity,0) | identity <- packages] }
       executable = preparedModuleProductOutcomes (projectPreparedModuleProducts retained modules)
-      sourceProducts = preparedModuleProductOutcomes (projectOriginalHomeModuleProducts env (pprProductInterfaces original) retained modules)
-      coldProducts = preparedModuleProductOutcomes (projectOriginalHomeModuleProducts env (pprProductInterfaces original) context modules)
+      sourceProducts = preparedModuleProductOutcomes (projectOriginalHomeModuleProducts env (pprProductInterfaces original) retained mempty modules)
+      coldProducts = preparedModuleProductOutcomes (projectOriginalHomeModuleProducts env (pprProductInterfaces original) context mempty modules)
       globals outcomes = [global | (_,Right groups) <- outcomes, group <- groups
         , global <- projectedGlobals (projectedBody group)]
       packageSet = Set.fromList packages
@@ -1737,7 +1741,7 @@ originalPackageProjection = withScratch $ \work -> do
         value = SymbolIdentity "main" "Tidepool.Session.Val.G7" "value" "liveValue" Nothing
         live = retained {projectionRetainedGenerations=Map.union (Map.fromList [(home,generation),(value,generation)])
           (projectionRetainedGenerations retained)}
-        homeProducts = preparedModuleProductOutcomes (projectOriginalHomeModuleProducts env (pprProductInterfaces original) live modules)
+        homeProducts = preparedModuleProductOutcomes (projectOriginalHomeModuleProducts env (pprProductInterfaces original) live mempty modules)
     forM_ [home,value] $ \identity ->
       unless (any (\global -> globalIdentity global == identity && globalRequiredGeneration global == Just generation)
           (globals homeProducts)) $
@@ -1748,14 +1752,14 @@ originalPackageProjection = withScratch $ \work -> do
   let
       supportOwner = mkModule (moduleUnit (mi_module supportInterface)) supportName
       fallback map' = lookup supportOwner
-        (preparedModuleProductOutcomes (projectOriginalHomeModuleProducts env map' retained modules))
+        (preparedModuleProductOutcomes (projectOriginalHomeModuleProducts env map' retained mempty modules))
   unless (fallback (Map.delete supportName paired) == lookup supportOwner executable
       && fallback (Map.insert supportName
         (set_mi_module (mkModule (stringToUnit "wrong-home-unit") supportName) supportInterface) paired)
           == lookup supportOwner executable) $
     fail "missing or wrong-unit native interface granted original product purpose"
   let incomplete = [prepared {pmCoverage=ExactBodySubset} | prepared <- modules]
-      conservative = preparedModuleProductOutcomes (projectOriginalHomeModuleProducts env paired retained incomplete)
+      conservative = preparedModuleProductOutcomes (projectOriginalHomeModuleProducts env paired retained mempty incomplete)
   unless (any (isJust . globalRequiredGeneration) (globals conservative)) $
     fail "incomplete prepared coverage acquired generation-free original package requirements"
   target <- either (fail . show) pure (projectPrepared retained modules)
@@ -1816,7 +1820,7 @@ originalPackageCohort coreRoot output = do
       retained = context {projectionRetainedGenerations=Map.fromSet (const 0) packages}
       executable = preparedModuleProductOutcomes (projectPreparedModuleProducts retained modules)
       products = preparedModuleProductOutcomes
-        (projectOriginalHomeModuleProducts env (pprProductInterfaces original) retained modules)
+        (projectOriginalHomeModuleProducts env (pprProductInterfaces original) retained mempty modules)
       globals groups = [global | group <- groups, global <- projectedGlobals (projectedBody group)]
       names = ["Tidepool.Data.Time","Tidepool.FilePath","Tidepool.QQ.Fmt.Runtime","Tidepool.Prelude","Tidepool.Effects.Core"]
   forM_ names $ \name -> do
@@ -1861,19 +1865,26 @@ certifyProjectedProducts :: FilePath -> String -> PreparedPipelineResult
   -> [(Module, Either ProjectionError [ProjectedGroup])]
   -> [(String,WireProgram)] -> HscEnv -> IO (Either String BS.ByteString)
 certifyProjectedProducts work label original outcomes targets env = do
-  fresh <- forM outcomes $ \(owner,projected) -> do
-    groups <- either (fail . show) pure projected
+  moduleResults <- forM outcomes $ \(owner,projected) -> do
     let name = moduleNameString (moduleName owner)
         path = work </> (label ++ "-" ++ name ++ ".hi")
-    iface <- maybe (fail "source product lost its paired actual interface") pure
-      (Map.lookup (moduleName owner) (pprProductInterfaces original))
-    writeBinIface (targetProfile (hsc_dflags env)) QuietBinIFace NormalCompression path iface
-    bytes <- BS.readFile path
-    pure (T.pack (unitString (moduleUnit owner)),T.pack name,bytes,groups)
-  let ready = Set.fromList [(T.unpack unit,T.unpack name) | (unit,name,_,_) <- fresh]
+        key = (unitString (moduleUnit owner), name)
+        interface = Map.lookup (moduleName owner) (pprProductInterfaces original)
+          >>= \iface -> if mi_module iface == owner then Just iface else Nothing
+    case interface of
+      Nothing -> pure (key, ProductMissingInterface, Nothing)
+      Just _ | Left _ <- projected -> pure (key, ProductProjectionRejected, Nothing)
+      Just iface -> do
+        groups <- either (fail . show) pure projected
+        writeBinIface (targetProfile (hsc_dflags env)) QuietBinIFace NormalCompression path iface
+        bytes <- BS.readFile path
+        pure (key, ProductReady, Just (T.pack (fst key), T.pack name, bytes, groups))
+  let fresh = [product | (_, ProductReady, Just product) <- moduleResults]
+      availability = Map.fromList [(key, status) | (key, status, _) <- moduleResults]
       evidence = (preparedFreshDependencies original) {dependencyModules =
-        [if (dependencyModuleUnit node,dependencyModuleName node) `Set.member` ready
-            then node {dependencyModuleProduct=ProductReady} else node
+        [node {dependencyModuleProduct = Map.findWithDefault
+          (dependencyModuleProduct node)
+          (dependencyModuleUnit node, dependencyModuleName node) availability}
         | node <- dependencyModules (preparedFreshDependencies original)]}
       bytes = encodeModuleProducts fresh
   originals <- newOriginalInterfaceArtifacts env (pprFinalizedModules original) [] work
@@ -1982,20 +1993,100 @@ originalProjectionProducts = withScratch $ \work -> do
       unrelated = identity "main" "D" "unrelated"
       cycleA = identity "main" "E" "cycleA"
       cycleB = identity "main" "F" "cycleB"
+      external = identity "main" "Unavailable" "missing"
+      stranded = identity "main" "G" "stranded"
+      strandedDependent = identity "main" "H" "strandedDependent"
+      siblingGood = identity "main" "A" "siblingGood"
+      siblingConsumer = identity "main" "I" "siblingConsumer"
       owners = Map.fromList
         [(unavailable, ("A", 0)), (middle, ("B", 3)),
          (terminal, ("C", 7)), (unrelated, ("D", 2)),
-         (cycleA, ("E", 1)), (cycleB, ("F", 4))]
+         (cycleA, ("E", 1)), (cycleB, ("F", 4)),
+         (stranded, ("G", 5)), (strandedDependent, ("H", 6)),
+         (siblingGood, ("A", 1)), (siblingConsumer, ("I", 8))]
       dependencies = Map.fromList
         [ (("B", 3), Set.singleton unavailable)
         , (("C", 7), Set.singleton middle)
         , (("E", 1), Set.singleton cycleB)
         , (("F", 4), Set.singleton cycleA)
+        , (("G", 5), Set.singleton external)
+        , (("H", 6), Set.singleton stranded)
+        , (("A", 1), Set.empty)
+        , (("I", 8), Set.singleton siblingGood)
         , (("D", 2), Set.empty) ]
       blocked = closeUnavailableOriginalGroups dependencies owners
-        (Set.fromList [unavailable, cycleA])
-  unless (blocked == Set.fromList [("A", 0), ("B", 3), ("C", 7), ("E", 1), ("F", 4)]) $
+        (Set.fromList [unavailable, cycleA, external])
+      rejectedModules = closeUnavailableOriginalModules dependencies owners blocked
+  unless (blocked == Set.fromList
+      [("A", 0), ("B", 3), ("C", 7), ("E", 1), ("F", 4), ("G", 5), ("H", 6)]) $
     fail "original product closure did not handle cross-module chains, cycles and unrelated groups"
+  unless (rejectedModules == Set.fromList ["A", "B", "C", "E", "F", "G", "H", "I"]) $
+    fail "module-level rejection did not cover sibling binders and their dependants"
+  writeFile (work </> "ProjectionUnavailableProvider.hs") $ unlines
+    ["module ProjectionUnavailableProvider (missing) where", "{-# NOINLINE missing #-}", "missing :: Int -> Int", "missing x = if x == 0 then 7 else missing (x - 1)"]
+  writeFile (work </> "ProjectionOwner.hs") $ unlines
+    [ "module ProjectionOwner (bad, good) where"
+    , "import ProjectionUnavailableProvider"
+    , "{-# NOINLINE bad #-}", "bad :: Int -> Int", "bad x = missing x + 1"
+    , "{-# NOINLINE good #-}", "good :: Int -> Int", "good x = if x == 0 then 42 else good (x - 1)" ]
+  writeFile (work </> "ProjectionIndependent.hs") $ unlines
+    ["module ProjectionIndependent (safe) where", "safe :: Int", "safe = 1"]
+  writeFile (work </> "ProjectionConsumer.hs") $ unlines
+    [ "{-# OPTIONS_GHC -Wno-unused-imports #-}"
+    , "module ProjectionConsumer (usesGood) where"
+    , "import ProjectionOwner", "import ProjectionIndependent"
+    , "usesGood :: Int -> Int", "usesGood x = good x + 1" ]
+  paired <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
+    Nothing (work </> "ProjectionConsumer.hs") [work] Nothing
+  let findPrepared name = case [prepared | prepared <- pprModules paired
+        , moduleNameString (moduleName (pmModule prepared)) == name] of
+          [prepared] -> pure prepared
+          _ -> fail ("cross-module projection fixture lacks " ++ name)
+      findBinder prepared occurrence = case [identity | (binding, _) <- pmBindings prepared
+          , binder <- topBinders binding, let identity = preparedRootIdentity binder
+          , symbolOccurrence identity == T.pack occurrence] of
+        [identity] -> pure identity
+        _ -> fail ("cross-module projection fixture lacks binder " ++ occurrence)
+  consumer <- findPrepared "ProjectionConsumer"
+  ownerModule <- findPrepared "ProjectionOwner"
+  provider <- findPrepared "ProjectionUnavailableProvider"
+  independent <- findPrepared "ProjectionIndependent"
+  known <- findBinder ownerModule "good"
+  ownerBinders <- Set.fromList <$> either (fail . show) pure (preparedTopIdentities [ownerModule])
+  providerBinders <- Set.fromList <$> either (fail . show) pure (preparedTopIdentities [provider])
+  safe <- findBinder independent "safe"
+  let pairedEnv = prHscEnv (pprPipelineResult paired)
+      pairedInterfaces = pprProductInterfaces paired
+      pairedContext = ProjectionContext "test" "matched"
+        (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) Map.empty
+        known [] Nothing Nothing Nothing Nothing
+      consumerOutcome externalBinders = lookup (pmModule consumer)
+        (preparedModuleProductOutcomes (projectOriginalHomeModuleProducts pairedEnv
+          pairedInterfaces pairedContext externalBinders [consumer]))
+  case consumerOutcome mempty of
+    Just (Left (UnavailableOriginalHomeDependencies missing))
+      | not (null missing), all (`Set.member` ownerBinders) missing -> pure ()
+    other -> fail ("unowned home dependency did not fail closed: " ++ show other)
+  forM_ [("exact", ownerBinders), ("candidate", ownerBinders)] $
+      \(ownerKind, admittedBinders) ->
+        case consumerOutcome admittedBinders of
+          Just (Right groups) | not (null groups) -> pure ()
+          other -> fail (ownerKind ++ " owner did not preserve its dependent product: " ++ show other)
+  let incompleteModules = filter ((/= pmModule provider) . pmModule) (pprModules paired)
+      incompleteProducts = preparedModuleProductOutcomes
+        (projectOriginalHomeModuleProducts pairedEnv pairedInterfaces pairedContext mempty incompleteModules)
+      moduleOutcome prepared = lookup (pmModule prepared) incompleteProducts
+      rejectedByMissing prepared = case moduleOutcome prepared of
+        Just (Left (UnavailableOriginalHomeDependencies identities)) -> any (`Set.member` providerBinders) identities
+        _ -> False
+      safeOutcome = moduleOutcome independent
+  unless (rejectedByMissing ownerModule && rejectedByMissing consumer
+      && case safeOutcome of Just (Right groups) -> not (null groups); _ -> False) $
+    fail "unavailable module sibling did not reject its consumers while preserving an independent owner"
+  let safeContext = pairedContext { projectionEntry = safe }
+  safeProgram <- either (fail . show) pure (projectPrepared safeContext [independent])
+  _ <- certifyProjectedProducts work "independent-after-product-rejection" paired incompleteProducts
+    [("safe", safeProgram)] pairedEnv >>= either fail pure
   copyFile "test-source-boot/fixtures/MetadataQuoteSupport.hs" (work </> "MetadataQuoteSupport.hs")
   original <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
     Nothing (work </> "MetadataQuoteSupport.hs") [work] Nothing
@@ -2139,6 +2230,16 @@ candidateCompactInventory = withScratch $ \work -> do
       && length globalRows == length globals -> pure ()
     _ -> fail "production inventory merged complete identities or global requirements"
   decoded <- readModuleCandidates issuedPath >>= either fail pure
+  capturedOffer <- captureCandidateManifest issuedPath >>= either fail pure
+  issuedBytes <- BS.readFile issuedPath
+  BS.writeFile issuedPath (BSC.pack "changed after capture")
+  capturedDecoded <- readCapturedModuleCandidatesWithGraphs [] capturedOffer >>= either fail pure
+  unless (capturedDecoded == decoded) $
+    fail "candidate admission did not consume its captured envelope"
+  readModuleCandidates issuedPath >>= \case
+    Left _ -> pure ()
+    Right _ -> fail "candidate envelope drift was accepted by a new capture"
+  BS.writeFile issuedPath issuedBytes
   unless (map candidateGroups decoded == [groups,reverse groups]) $
     fail "compact inventory changed exact values, order or ordinal"
   firstRow <- case rows of
@@ -2835,6 +2936,127 @@ quasiQuoteCodegenTransition = withTiming $ withScratch $ \work -> do
     run >>= requireFree "after plugin refusal"
   putStrLn "quasiquote codegen: resident quote-free/real-quote/quote-free, external plugin refusal and recovery passed"
 
+exactTransactionReuse :: IO ()
+exactTransactionReuse = withTiming $ withScratch $ \work -> do
+  let fixture name = "test-source-boot/fixtures" </> name
+      target = work </> "MetadataTarget.hs"
+      installOwner = copyFile (fixture "MetadataOwner.hs") (work </> "MetadataOwner.hs")
+      frontends diagnostics = length
+        [line | line <- lines diagnostics
+        , line == "tidepool-canonical-frontend module=MetadataOwner"
+          || line == "tidepool-checked module=MetadataOwner target=False"]
+      isInt checked = maybe False (`eqType` intTy) (crResultType checked)
+  installOwner
+  copyFile (fixture "MetadataTarget.hs") target
+  scopePath <- writeGenuineEmptyMetadataScope work
+  let relocatedPath = work </> "same-empty-scope.cbor"
+      scope = emptySessionScope {ssRoot=work,ssExactScope=Just scopePath
+        ,ssIncarnation=Just "exact-transaction-reuse"}
+      relocated = scope {ssExactScope=Just relocatedPath}
+  copyFile scopePath relocatedPath
+  withResidentPipelineSelectedRequests [work] $ \runRequest -> do
+    runRequest (pure ()) $ \compile -> do
+      let check session = compile CheckedEnvironment Set.empty GeneralCompile
+            (Just session) target [work] Nothing
+      (cold,coldDiagnostics) <- captureDiagnostics (check scope)
+      unless (isInt cold && frontends coldDiagnostics == 1) $
+        fail "cold exact transaction did not compile its real source dependency"
+      (warm,warmDiagnostics) <- captureDiagnostics (check relocated)
+      unless (isInt warm && frontends warmDiagnostics == 0
+          && counterValues "transaction_reused_source_products" warmDiagnostics == [1]) $
+        fail "identical empty exact scopes repeated a dependency frontend"
+      (native,nativeDiagnostics) <- captureDiagnostics $
+        compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope)
+          target [work] Nothing
+      unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult native))
+          && frontends nativeDiagnostics == 0
+          && counterValues "transaction_reused_source_products" nativeDiagnostics == [1]
+          && Map.member (mkModuleName "MetadataOwner") (pprFinalizedModules native)) $
+        fail "check to native preparation replayed its dependency or lost original42"
+      copyFile (fixture "MetadataOwnerWithoutInstance.hs") (work </> "MetadataOwner.hs")
+      changed <- sourceFailureDiagnostics (check scope)
+      case changed of
+        Left diagnostics | any (\diagnostic -> sourceDiagnosticAt target
+            "No instance for" diagnostic && "Available Int" `isInfixOf` dMessage diagnostic) diagnostics -> pure ()
+        Left diagnostics -> fail ("changed dependency failed for another reason: " ++ show diagnostics)
+        Right _ -> fail "warm exact transaction borrowed a removed instance"
+      installOwner
+      (recovered,recoveryDiagnostics) <- captureDiagnostics (check scope)
+      unless (isInt recovered && frontends recoveryDiagnostics == 1) $
+        fail "synchronous refusal retained partial compiler products"
+    runRequest (pure ()) $ \compile -> do
+      (next,nextDiagnostics) <- captureDiagnostics $
+        compile CheckedEnvironment Set.empty GeneralCompile (Just relocated)
+          target [work] Nothing
+      unless (isInt next && frontends nextDiagnostics == 1
+          && counterValues "transaction_reused_source_products" nextDiagnostics == [0]) $
+        fail "source compiler products survived their transaction"
+  putStrLn "exact transaction reuse: check/check and check/native skip dependency work; instance drift, refusal recovery and transaction close passed"
+
+exactLegacyValueIsolation :: IO ()
+exactLegacyValueIsolation = withTiming $ withScratch $ \work -> do
+  valueOwner <- maybe (fail "invalid legacy isolation value owner") pure
+    (parseValModule "Tidepool.Session.Val.G2")
+  let fixture name = "test-source-boot/fixtures" </> name
+      alternate = work </> "alternate-values"
+      consumer = work </> "CheckedValueConsumer.hs"
+      target = work </> "LegacyValueNativeTarget.hs"
+      produce root valueFixture consumerFixture = do
+        let source = root </> "Tidepool/Session/Val/G2.hs"
+        createDirectoryIfMissing True (takeDirectory source)
+        copyFile (fixture valueFixture) source
+        copyFile (fixture consumerFixture) (root </> "CheckedValueConsumer.hs")
+        produced <- runPipelineSelected (PreparedProducts Nothing)
+          (root </> "CheckedValueConsumer.hs") [root]
+        iface <- maybe (fail "legacy value producer omitted its real interface") pure
+          (Map.lookup (mkModuleName "Tidepool.Session.Val.G2") (pprProductInterfaces produced))
+        writeBinIface (targetProfile (hsc_dflags (prHscEnv (pprPipelineResult produced))))
+          QuietBinIFace NormalCompression (sessionHiPath root valueOwner) iface
+        renameFile source (replaceExtension source "retained-source")
+        BS.readFile (sessionHiPath root valueOwner)
+  intBytes <- produce work "CheckedValueG2.hs" "CheckedValueConsumer.hs"
+  boolBytes <- produce alternate "CheckedValueG2Bool.hs" "CheckedValueBoolConsumer.hs"
+  copyFile (fixture "LegacyValueNativeTarget.hs") target
+  scopePath <- writeGenuineEmptyMetadataScope work
+  let scope = emptySessionScope {ssRoot=work,ssExactScope=Just scopePath
+        ,ssValIfaces=[valueOwner],ssIncarnation=Just "legacy-exact-isolation"}
+  base <- readExactScope scopePath >>= either fail pure
+  let value = ExactIfaceArtifact "main" "Tidepool.Session.Val.G2"
+        (sessionHiPath work valueOwner) (digest intBytes) []
+      admitted = base {scopePurpose=ExactCellPurpose
+        (CheckedCellAdmission (replicate 64 '0') (replicate 64 '0') (replicate 64 '0')
+          [] ["Tidepool.Session.Val.G2"] [] [value] Nothing AuthoredCellCheck) [work]}
+  withResidentPipelineSelected [work] $ \compile -> do
+    let native session = compile (PreparedProducts Nothing) Set.empty GeneralCompile
+          (Just session) target [work] Nothing
+        seed = do
+          (result,diagnostics) <- captureDiagnostics (native scope)
+          unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult result))
+              && Map.member (mkModuleName "CheckedValueConsumer") (pprFinalizedModules result)
+              && counterValues "transaction_reused_source_products" diagnostics == [0]) $
+            fail "legacy isolation did not compile and finalize its real native dependency"
+        refuse session = sourceFailureDiagnostics (native session) >>= \case
+          Left diagnostics | any (\diagnostic -> sourceDiagnosticAt consumer "Bool" diagnostic
+              && "Int" `isInfixOf` dMessage diagnostic) diagnostics -> pure ()
+          Left diagnostics -> fail ("changed legacy value failed for another reason: " ++ show diagnostics)
+          Right _ -> fail "exact reuse borrowed old Int dependency Core after legacy Bool injection"
+    seed
+    BS.writeFile (sessionHiPath work valueOwner) boolBytes
+    refuse scope
+    BS.writeFile (sessionHiPath work valueOwner) intBytes
+    seed
+    refuse scope {ssRoot=alternate}
+    seed
+    _ <- compile (PreparedProducts Nothing) Set.empty (CellProgramCompile GeneralCompile admitted)
+      (Just scope) target [work] Nothing
+    (authenticated,authenticatedDiagnostics) <- captureDiagnostics $
+      compile (PreparedProducts Nothing) Set.empty (CellProgramCompile GeneralCompile admitted)
+        (Just scope {ssRoot=alternate}) target [work] Nothing
+    unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult authenticated))
+        && counterValues "transaction_reused_source_products" authenticatedDiagnostics == [1]) $
+      fail "authenticated checked values lost reuse or consumed the unsealed replacement root"
+  putStrLn "exact legacy value isolation: native dependency seeds, same-root interface drift, root substitution and recovery passed"
+
 exactLoadedMetadata :: IO ()
 exactLoadedMetadata = withTiming $ withScratch $ \work -> do
   let fixture name = "test-source-boot/fixtures" </> name
@@ -2956,11 +3178,22 @@ exactLoadedMetadata = withTiming $ withScratch $ \work -> do
         ++ " executable_demand=" ++ show (counterValues "candidate_executable_required" metadataDiagnostics)
         ++ " owner_frontends=" ++ show (frontendCount "MetadataOwner" metadataDiagnostics))
       ) `finally` BS.writeFile corePath originalCore
+    copyFile (fixture "MetadataLoadedFamilyCompatible.hs") (work </> "MetadataLoadedFamily.hs")
+    compatibleFamily <- compile CheckedEnvironment Set.empty GeneralCompile (Just hiddenScope)
+      (work </> "MetadataFamilyTarget.hs") [work] Nothing
+    unless (resultType compatibleFamily == Just "Int") $
+      fail "compatible loaded and hidden exact family equations did not establish warm state"
+    install "MetadataLoadedFamily.hs"
     family <- try (compile CheckedEnvironment Set.empty GeneralCompile (Just hiddenScope)
       (work </> "MetadataFamilyTarget.hs") [work] Nothing) :: IO (Either SomeException CheckedEnvironmentResult)
     case family of
       Left failure | "retained family consistency" `isInfixOf` show failure -> pure ()
       _ -> fail "loaded metadata lost the hidden original family conflict"
+    copyFile (fixture "MetadataLoadedFamilyCompatible.hs") (work </> "MetadataLoadedFamily.hs")
+    recoveredFamily <- compile CheckedEnvironment Set.empty GeneralCompile (Just hiddenScope)
+      (work </> "MetadataFamilyTarget.hs") [work] Nothing
+    unless (resultType recoveredFamily == Just "Int") $
+      fail "family conflict retained stale source equations in the next exact preflight"
     (_, untrackedDiagnostics) <- captureDiagnostics (checked "MetadataUntrackedTarget.hs")
     unless (frontendCount "MetadataUntracked" untrackedDiagnostics == 1
         && "tidepool-checked-loaded-source module=MetadataUntracked" `elem` lines untrackedDiagnostics) $
@@ -3258,6 +3491,67 @@ packageInputs = withScratch $ \work -> do
         (pprPackageImports result)
       let inputPath = directory </> "compiler-inputs.cbor"
       readCompilerInputCodecFacts directory inputPath (directory </> "dependencies.json")
+
+sessionNativeBodyDemand :: IO ()
+sessionNativeBodyDemand = withTiming $ withScratch $ \work -> do
+  forM_ ["OptionalRoot", "OptionalSupport", "OptionalAnchor", "OptionalWarmer"] $ \name ->
+    copyFile ("test-source-boot/fixtures" </> name ++ ".hs") (work </> name ++ ".hs")
+  writeFile (work </> "OptionalRoot.hs") $ unlines
+    [ "module OptionalRoot where"
+    , "import OptionalSupport ()"
+    , "import OptionalAnchor ()"
+    , "import Tidepool.Session.Val.G2 (x)"
+    , "result :: Int"
+    , "result = x - 41"
+    ]
+  writeFile (work </> "OptionalWarmer.hs") $ unlines
+    [ "module OptionalWarmer where"
+    , "import OptionalSupport"
+    , "import OptionalAnchor"
+    , "import Tidepool.Session.Val.G2 (x)"
+    , "result :: Int"
+    , "result = if optional then anchor + x else 0"
+    ]
+  copyFile "test-source-boot/fixtures/CheckedValueConsumer.hs" (work </> "CheckedValueConsumer.hs")
+  let valueSource = work </> "Tidepool/Session/Val/G2.hs"
+  createDirectoryIfMissing True (takeDirectory valueSource)
+  copyFile "test-source-boot/fixtures/CheckedValueG2.hs" valueSource
+  valueProducer <- runPipelineSelected (PreparedProducts Nothing)
+    (work </> "CheckedValueConsumer.hs") [work]
+  valueOwner <- maybe (fail "session tier fixture omitted its value owner") pure
+    (parseValModule "Tidepool.Session.Val.G2")
+  valueIface <- maybe (fail "session tier fixture omitted its value interface") pure
+    (Map.lookup (mkModuleName "Tidepool.Session.Val.G2") (pprProductInterfaces valueProducer))
+  writeBinIface (targetProfile (hsc_dflags (prHscEnv (pprPipelineResult valueProducer))))
+    QuietBinIFace NormalCompression (sessionHiPath work valueOwner) valueIface
+  renameFile valueSource (valueSource ++ ".retained-source")
+  let scope = emptySessionScope {ssRoot=work, ssValIfaces=[valueOwner]}
+      compileTarget compile name = compile (PreparedProducts Nothing) Set.empty GeneralCompile
+        (Just scope) (work </> name) [work] Nothing
+      injectedValueOwner result = isJust (lookupHpt
+        (hsc_HPT (prHscEnv (pprPipelineResult result))) (mkModuleName "Tidepool.Session.Val.G2"))
+  withResidentPipelineSelected [work] $ \compile -> do
+    first <- compileTarget compile "OptionalRoot.hs"
+    unless (preparedNames first == ["OptionalRoot"]
+        && injectedValueOwner first
+        && fmap renderType (prResultType (pprPipelineResult first)) == Just "Int"
+        && all (`Map.member` pprFinalizedModules first)
+          (map mkModuleName ["OptionalSupport", "OptionalAnchor"])) $
+      fail ("session request prepared unrelated native bodies or skipped source finalization: "
+        ++ show (preparedNames first))
+    later <- compileTarget compile "OptionalWarmer.hs"
+    unless (all (`elem` preparedNames later) ["OptionalWarmer", "OptionalSupport", "OptionalAnchor"]
+        && injectedValueOwner later
+        && fmap renderType (prResultType (pprPipelineResult later)) == Just "Int"
+        && Map.member (mkModuleName "OptionalSupport") (pprFinalizedModules later)) $
+      fail ("later session request did not activate its newly demanded source bodies: "
+        ++ show (preparedNames later))
+    writeFile (work </> "OptionalSupport.hs") "module OptionalSupport where\noptional ::\n"
+    refused <- try (compileTarget compile "OptionalRoot.hs")
+      :: IO (Either SomeException PreparedPipelineResult)
+    unless (case refused of Left _ -> True; Right _ -> False) $
+      fail "session demand skipped invalid source in an unused imported module"
+  putStrLn "session native bodies: unused imports stay validation-only, then prepare when a later target demands them"
 
 -- Reuse real compiled owner bytes and real installed roots. Copies plus an
 -- isolated finder make mutation tests local without changing the Nix packages.

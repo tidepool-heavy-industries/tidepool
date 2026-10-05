@@ -31,10 +31,7 @@ fn main() -> ExitCode {
         ),
         (
             "Tidepool/Effects.hs",
-            tidepool_mcp::effects_shim_module_source(
-                &tidepool_mcp::all_decls(),
-                &tidepool_mcp::RowArgs::default(),
-            ),
+            tidepool_mcp::effects_facade_module_source(),
         ),
     ];
     if !expected.is_empty()

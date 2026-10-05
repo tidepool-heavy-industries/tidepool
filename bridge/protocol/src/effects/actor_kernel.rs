@@ -65,7 +65,6 @@ pub fn actor_kernel() -> Effect {
         prompt_card: None,
         type_params: &[],
         default_row_args: &[],
-        helpers_row_polymorphic: true,
         extra_imports: &["import Tidepool.Actor"],
         type_defs: vec![actor_lifecycle()],
         external_types: &[],

@@ -24,7 +24,6 @@ pub fn sleep() -> Effect {
         ]),
         type_params: &[],
         default_row_args: &[],
-        helpers_row_polymorphic: true,
         extra_imports: &["import Tidepool.Duration (Duration, milliseconds, seconds, minutes)"],
         type_defs: vec![],
         external_types: &[crate::schema::ExternalType {

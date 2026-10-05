@@ -502,7 +502,7 @@ async fn native_notebook_scheduling_preserves_effects_and_published_bindings() {
     let session = first.request.session_id.clone();
     first.cell(
         "first-sync-publication",
-        "let notebookAction = (pure (41 :: Int) :: M Int)\n\
+        "let notebookAction = (pure (41 :: Int) :: Eff effects Int)\n\
          let notebookSamples = [1, 2, 3] :: [Int]\n\
          notebookAction",
     );
@@ -515,7 +515,7 @@ async fn native_notebook_scheduling_preserves_effects_and_published_bindings() {
     following.async_cell(
         "async-publication",
         "let asyncValue = sum notebookSamples - 5 :: Int\n\
-         let asyncAction = (do { value <- notebookAction; pure (value + asyncValue) } :: M Int)\n\
+         let asyncAction = (do { value <- notebookAction; pure (value + asyncValue) } :: Eff effects Int)\n\
          asyncAction",
     );
     let following = next_round(&mut rounds).await;
@@ -526,7 +526,7 @@ async fn native_notebook_scheduling_preserves_effects_and_published_bindings() {
     );
     following.cell(
         "sync-publication",
-        "let syncAction = (do { value <- asyncAction; pure (value + 1) } :: M Int)\n\
+        "let syncAction = (do { value <- asyncAction; pure (value + 1) } :: Eff effects Int)\n\
          syncAction",
     );
     let following = next_round(&mut rounds).await;

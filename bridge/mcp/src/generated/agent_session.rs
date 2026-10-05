@@ -18,6 +18,5 @@ pub fn agent_session_decl() -> crate::EffectDecl {
         helpers: &[],
         type_params: &[],
         default_row_args: &[],
-        helpers_row_polymorphic: true,
     }
 }

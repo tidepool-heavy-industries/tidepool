@@ -96,7 +96,6 @@ pub fn commands() -> Effect {
         prompt_card: None,
         type_params: &[],
         default_row_args: &[],
-        helpers_row_polymorphic: true,
         extra_imports: &[
             "import qualified Tidepool.Command as Cmd",
             "import Tidepool.Command (bash, withMemory, Memory(..))",

@@ -2240,7 +2240,7 @@ fn settle_prepared<H: DispatchEffect<O>, O>(
     )
 }
 
-/// Apply a rooted `Int -> M a` closure to `argument` through the shared
+/// Apply a rooted `Int -> Eff effects a` closure to `argument` through the shared
 /// `__applyEntry` scaffold root instead of a turn's own settled scaffold, and
 /// finish the settled layer through [`finish_prepared`] — the prepared-route
 /// arm of [`ResidentSession::run_rooted_entry_borrowed`]. `entry` is a bare
@@ -6440,7 +6440,7 @@ where
     /// the ordinary continuation registry and can be resumed by identity in
     /// any order.
     ///
-    /// `entry` is a `ValueHandle` over a tenured `Int -> M a` closure. It is
+    /// `entry` is a `ValueHandle` over a tenured `Int -> Eff effects a` closure. It is
     /// applied through an `App(Var, Lit)` synthesis: `FINALIZED_VAR` (any
     /// `VarId` not otherwise bound in the fragment) resolves through an
     /// `ExternalEnv`-seeded slot over the entry's root, and the argument

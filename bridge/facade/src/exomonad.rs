@@ -39,6 +39,8 @@ const EXOMONAD_CONFIG: &str = ".exomonad/config.toml";
 /// `[haskell.flake_sources]` pins Haskell source outside the workspace. Set by
 /// the packaged `exomonad` wrapper and the dev shell; otherwise the one on `PATH`.
 const ENV_NIX_BIN: &str = "EXOMONAD_NIX_BIN";
+/// When present, source admission uses only already available pinned inputs.
+const ENV_NIX_OFFLINE: &str = "EXOMONAD_NIX_OFFLINE";
 
 const BOUNDARY_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 const BOUNDARY_PROBE_ERROR_LIMIT: usize = 16 * 1024;
@@ -2259,6 +2261,7 @@ fn pane_environment_from(
         "EXOMONAD_CODEX_CLOSURE",
         "EXOMONAD_NIX_STORE_BIN",
         "EXOMONAD_NIX_BIN",
+        "EXOMONAD_NIX_OFFLINE",
         "CODEX_HOME",
         "CODEX_ROLLOUT_TRACE_ROOT",
         "OPENAI_API_KEY",

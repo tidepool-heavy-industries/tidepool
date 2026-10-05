@@ -1,34 +1,73 @@
-use std::path::Path;
+use std::path::PathBuf;
 
 #[test]
-fn concurrent_selected_profiles_enforce_membership_and_preserve_shared_shim() {
-    let installed = tidepool_mcp::ensure_effects_module(&[
+fn inferred_cells_compile_without_an_implicit_row_alias() {
+    let declarations = [tidepool_mcp::console_decl()];
+    let installed = tidepool_mcp::ensure_effects_module(&declarations).unwrap();
+    let stdlib = PathBuf::from(
+        std::env::var_os("TIDEPOOL_PRELUDE_DIR")
+            .expect("TIDEPOOL_PRELUDE_DIR must name the declared Haskell library resource"),
+    );
+    let preamble = tidepool_mcp::build_notebook_preamble(&declarations, false);
+    let compile = |expression| {
+        let source = tidepool_runtime::session::assemble_opaque_expression_module(
+            &preamble,
+            "result",
+            "'[Console]",
+            expression,
+            tidepool_runtime::session::ExpressionLift::Effectful,
+        );
+        tidepool_runtime::compile_haskell(
+            &source,
+            "result",
+            &[&installed.core, &installed.orchestration, &stdlib],
+        )
+    };
+    compile("pure (41 :: Int)").expect("ordinary cells infer their selected executable row");
+    let error = compile("pure (41 :: M)").expect_err("M requires an authored declaration");
+    let tidepool_runtime::CompileError::Diagnostics(diagnostics) = error else {
+        panic!("expected a compiler name rejection, got {error:?}");
+    };
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.message.contains("Not in scope") && diagnostic.message.contains('M')
+    }));
+}
+
+#[test]
+fn concurrent_selected_profiles_enforce_membership_with_stable_vocabulary() {
+    let declarations = [
         tidepool_mcp::console_decl(),
         tidepool_mcp::context_read_write_decl(),
-    ])
-    .expect("installed effects");
-    let original = std::fs::read(installed.shim.join("Tidepool/Effects.hs")).unwrap();
-    let permitted = tidepool_mcp::ensure_selected_effects_shim("'[Exomonad.ContextReadWrite]")
-        .expect("permitted profile");
-    let forbidden = tidepool_mcp::ensure_selected_effects_shim("'[Exomonad.Console]")
-        .expect("profile without context editing");
-    assert_ne!(permitted, forbidden);
-    assert_ne!(permitted, installed.shim);
-    let stdlib = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../haskell/lib")
-        .canonicalize()
-        .unwrap();
-    let source = include_str!("fixtures/selected-effects.hs");
-    let compile = |selected: &Path| {
-        tidepool_runtime::compile_haskell(
-            source,
+    ];
+    let installed = tidepool_mcp::ensure_effects_module(&declarations).expect("installed effects");
+    let original = std::fs::read(installed.core.join("Tidepool/Effects.hs")).unwrap();
+    let stdlib = PathBuf::from(
+        std::env::var_os("TIDEPOOL_PRELUDE_DIR")
+            .expect("TIDEPOOL_PRELUDE_DIR must name the declared Haskell library resource"),
+    );
+    let preamble = tidepool_runtime::session::insert_preamble_imports(
+        &tidepool_mcp::build_notebook_preamble(&declarations, false),
+        "qualified Tidepool.Effects.Core as Core",
+    );
+    let compile = |row, expression| {
+        let mut source = tidepool_runtime::session::assemble_opaque_expression_module(
+            &preamble,
             "result",
-            &[selected, &installed.core, &installed.shim, &stdlib],
+            row,
+            expression,
+            tidepool_runtime::session::ExpressionLift::Effectful,
+        );
+        source.push('\n');
+        source.push_str(include_str!("fixtures/selected-effects.hs"));
+        tidepool_runtime::compile_haskell(
+            &source,
+            "result",
+            &[&installed.core, &installed.orchestration, &stdlib],
         )
     };
     std::thread::scope(|scope| {
-        let allowed = scope.spawn(|| compile(&permitted));
-        let denied = scope.spawn(|| compile(&forbidden));
+        let allowed = scope.spawn(|| compile("'[ContextReadWrite]", "readContext"));
+        let denied = scope.spawn(|| compile("'[Console]", "readContext"));
         allowed
             .join()
             .unwrap()
@@ -36,23 +75,27 @@ fn concurrent_selected_profiles_enforce_membership_and_preserve_shared_shim() {
         let error = denied
             .join()
             .unwrap()
-            .expect_err("profile must reject ContextReadWrite through qualified Effects.M");
+            .expect_err("Console-only row must not satisfy Member ContextReadWrite");
         assert!(
             matches!(error, tidepool_runtime::CompileError::Diagnostics(_)),
             "expected a compiler membership rejection, got {error:?}"
         );
     });
-    compile(&permitted).expect("permitted recipe survives rejected neighbor");
+    compile("'[ContextReadWrite]", "explicitAlias")
+        .expect("an explicitly authored alias is an ordinary declaration");
     assert!(matches!(
-        compile(&forbidden).expect_err("a permitted cache entry cannot grant ContextReadWrite"),
+        compile("'[Console]", "readContext")
+            .expect_err("a permitted cache entry cannot grant ContextReadWrite"),
         tidepool_runtime::CompileError::Diagnostics(_),
     ));
     assert_eq!(
-        std::fs::read(installed.shim.join("Tidepool/Effects.hs")).unwrap(),
-        original,
+        std::fs::read(installed.core.join("Tidepool/Effects.hs")).unwrap(),
+        original
     );
     assert_eq!(
-        tidepool_mcp::ensure_selected_effects_shim("'[Exomonad.ContextReadWrite]").unwrap(),
-        permitted,
+        tidepool_mcp::ensure_effects_module(&[tidepool_mcp::context_read_write_decl()])
+            .unwrap()
+            .core,
+        installed.core
     );
 }

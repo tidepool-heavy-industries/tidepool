@@ -764,7 +764,7 @@ pub struct SessionLib {
     /// Extra `--include` dirs for decl binder-extraction + candidate validation,
     /// beyond `root` and the auto-derived stdlib `lib/`. When `env` imports
     /// modules that live outside the stdlib tree — notably the generated
-    /// `Tidepool.Effects` (so a `session_def` helper can be `M`-typed and call
+    /// `Tidepool.Effects` (so a `session_def` helper can use `Member` constraints and call
     /// effect verbs) — those dirs must be here or validation fails to resolve
     /// the import. Empty by default (the pure `standalone_default` surface needs
     /// only the stdlib). Set via [`with_validation_include`](Self::with_validation_include).

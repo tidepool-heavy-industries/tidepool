@@ -18,6 +18,7 @@ import Control.Monad (unless, void)
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BSL
 import Data.Map.Strict qualified as Map
+import Data.Set qualified as Set
 import Data.Text qualified as T
 import GHC.Tc.Types (tcg_mod)
 import GHC.Unit.Module (moduleName, moduleNameString)
@@ -27,6 +28,7 @@ import Tidepool.Test.FixturePacket
   ( PacketProducer(..), newPacketDirectory, runPacketProducer )
 import Tidepool.ExactHydration (newOriginalInterfaceArtifacts)
 import Tidepool.ExecutionProjection (projectOriginalHomeModuleProducts)
+import Tidepool.ModuleCandidates (ModuleCandidate(..), CandidateGroup(..))
 import Tidepool.GhcPipeline (PreparedPipelineResult(..), PipelineResult(..))
 import Tidepool.CompilerProducts
   ( CertifiedOriginalProducts, prepareCompilerProjectionContext, retainedOriginalInterfaces
@@ -179,7 +181,10 @@ capturePacket includes packet prepared = do
       owner = tcg_mod (prTargetTcGblEnv result)
   context <- prepareCompilerProjectionContext prepared Map.empty owner "__result" [] Nothing
   let products = projectOriginalHomeModuleProducts environment
-        (pprProductInterfaces prepared) context (pprModules prepared)
+        (pprProductInterfaces prepared) context
+        (Set.fromList [binder | candidate <- pprAcceptedCandidates prepared
+          , group <- candidateGroups candidate, binder <- candidateGroupBinders group])
+        (pprModules prepared)
   originals <- newOriginalInterfaceArtifacts environment (pprFinalizedModules prepared)
     (retainedOriginalInterfaces prepared) packet
   writeCertifiedProductsKeeping includes originals packet prepared (Just products) []

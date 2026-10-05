@@ -139,6 +139,14 @@ nix_directory(
 )
 
 nix_directory(
+    name = "workspace_git_resource",
+    cp = read_root_config("nix", "coreutils") + "/cp",
+    store_path = read_root_config("nix", "workspace_git_resource", ""),
+    projected_sources = ["workspace.bundle"],
+    visibility = ["PUBLIC"],
+)
+
+nix_directory(
     name = "test_tools_closure",
     cp = read_root_config("nix", "coreutils") + "/cp",
     store_path = read_root_config("nix", "test_tools_closure"),

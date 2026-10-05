@@ -92,7 +92,7 @@ import Tidepool.Form.Wire (encodeShape, encodeShapeAnnotated)
 -- exact shapes that decode accepts. There is no second answer language.
 --
 -- A malformed submission re-presents the same form by recursion. The retry
--- is entirely here: the caller sees @M a@, never a failure to handle. (The
+-- is entirely here: the caller sees @Eff effs a@, never a failure to handle. (The
 -- driver bounds the consecutive re-presentations, so a non-interactive gate
 -- cannot spin forever.)
 askUser :: forall a effs. (DerivedForm a, Member AskUser effs) => Eff effs a

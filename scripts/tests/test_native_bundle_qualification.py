@@ -206,12 +206,16 @@ class NativeQualificationTests(unittest.TestCase):
             'TIDEPOOL_EXTRACT_NO_DAEMON': '1',
             'TIDEPOOL_EXTRACT': '/tmp/older-extract',
             'EXOMONAD_WORKSPACE_GITLINK': '/tmp/older-workspace-gitlink.json',
+            'EXOMONAD_NIX_BIN': '/tmp/hostile-nix',
+            'EXOMONAD_NIX_OFFLINE': '1',
         }):
             environment = qualification.execution_environment({'environment': {
                 'TIDEPOOL_EXTRACT': '/frozen/bin/tidepool-extract',
+                'EXOMONAD_NIX_BIN': '/frozen/runtime-tools/bin/nix',
             }})
         self.assertEqual(environment['TIDEPOOL_EXTRACT'], '/frozen/bin/tidepool-extract')
-        for key in ('TIDEPOOL_EXTRACT_DAEMON_SOCKET', 'TIDEPOOL_COMPILER_MODULES', 'TIDEPOOL_EXTRACT_NO_DAEMON', 'EXOMONAD_WORKSPACE_GITLINK'):
+        self.assertEqual(environment['EXOMONAD_NIX_BIN'], '/frozen/runtime-tools/bin/nix')
+        for key in ('TIDEPOOL_EXTRACT_DAEMON_SOCKET', 'TIDEPOOL_COMPILER_MODULES', 'TIDEPOOL_EXTRACT_NO_DAEMON', 'EXOMONAD_WORKSPACE_GITLINK', 'EXOMONAD_NIX_OFFLINE'):
             self.assertNotIn(key, environment)
 
     def test_frozen_bytes_may_not_change_and_descriptor_may_not_move(self):

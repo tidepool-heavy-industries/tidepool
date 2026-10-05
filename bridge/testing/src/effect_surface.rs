@@ -43,20 +43,25 @@ impl TestEffectSurface {
         declarations: &[EffectDecl],
         options: TestEffectSurfaceOptions,
     ) -> io::Result<Self> {
-        let dirs = tidepool_mcp::ensure_effects_module_at(declarations, &options.row_args)?;
+        let dirs = tidepool_mcp::ensure_effects_module(declarations)?;
         let mut include_paths = vec![super::eval_harness::prelude_path()];
         if options.user_library {
             include_paths.push(super::eval_harness::user_lib_dir());
         }
         include_paths.extend(dirs.include_paths());
+        let preamble = tidepool_mcp::build_preamble_with_companions(
+            declarations,
+            options.user_library,
+            options.companion_imports,
+        );
+        let preamble = tidepool_runtime::session::insert_preamble_imports(
+            &preamble,
+            &options.row_args.imports().join("\n"),
+        );
         Ok(Self {
             declarations: declarations.to_vec(),
             include_paths,
-            preamble: tidepool_mcp::build_preamble_with_companions(
-                declarations,
-                options.user_library,
-                options.companion_imports,
-            ),
+            preamble,
             row: tidepool_mcp::build_effect_stack_type_at(declarations, &options.row_args),
         })
     }
@@ -128,13 +133,9 @@ mod tests {
         .expect("parameterized surface");
 
         assert_eq!(surface.row(), "'[ActorLocal Protocol]");
-        let shim = surface
-            .include_paths()
-            .last()
-            .expect("effect surface includes its row-specific shim");
-        let source = std::fs::read_to_string(shim.join("Tidepool/Effects.hs"))
-            .expect("parameterized effect shim source");
-        assert!(source.contains("import ActorTypes"));
-        assert!(source.contains("ActorLocal Protocol"));
+        assert!(surface.preamble().contains("import ActorTypes"));
+        let vocabulary = &surface.include_paths()[1];
+        let facade = std::fs::read_to_string(vocabulary.join("Tidepool/Effects.hs")).unwrap();
+        assert_eq!(facade, tidepool_mcp::effects_facade_module_source());
     }
 }

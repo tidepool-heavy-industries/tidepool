@@ -18,7 +18,7 @@
 //!
 //! The typed surface a caller writes is `askUser @T` (`Tidepool.Form`, which
 //! derives the form from `T`'s own `Generic` representation) and `note ::
-//! Text -> M ()`; `askUserRaw`/`noteRaw` here are the raw escape hatches
+//! Member AskUser effs => Text -> Eff effs ()`; `askUserRaw`/`noteRaw` here are the raw escape hatches
 //! those build on.
 
 use crate::hs::HsType;
@@ -40,10 +40,10 @@ pub fn ask_user() -> Effect {
         // (`tidepool_mcp::askuser_decl`); the flip must not move it.
         decl_fn: "askuser_decl",
         prompt_card: Some(&[
-            "`choose :: [(Text, a)] -> M a` — labeled decision from (label, value) pairs; ",
+            "`choose :: Member AskUser effs => [(Text, a)] -> Eff effs a` — labeled decision from (label, value) pairs; ",
             "ALWAYS prefer it for a decision, the label is the only text the operator sees. ",
-            "`chooseMany :: [(Text, a)] -> M [a]` — pick a subset.\n",
-            "`askUser @T :: M T` — form derived from `T`'s own shape: a record's fields ",
+            "`chooseMany :: Member AskUser effs => [(Text, a)] -> Eff effs [a]` — pick a subset.\n",
+            "`askUser @T :: Eff effs T` — form derived from `T`'s own shape: a record's fields ",
             "become named inputs, a SUM's constructors become the choices (nullary ",
             "constructors are direct options; a payload constructor is a selectable branch ",
             "with its fields), or a primitive (`Text`/`Int`/`Bool`); a bad submission ",
@@ -55,7 +55,7 @@ pub fn ask_user() -> Effect {
             "field; a constructor with SEVERAL positional fields is rejected outright (no ",
             "names to key each input by), so record syntax is required once there is more ",
             "than one field.\n",
-            "`note \"...\" :: M ()` — non-blocking narration to the operator's feed; call it ",
+            "`note \"...\" :: Eff effs ()` — non-blocking narration to the operator's feed; call it ",
             "BEFORE presenting a form to explain what you're about to ask and why (it never ",
             "costs a turn).",
         ]),
@@ -73,16 +73,15 @@ pub fn ask_user() -> Effect {
             "  data Deploy = Deploy { service :: Text, env :: Env, replicas :: Int, note :: Maybe Text } deriving (Generic, FromJSON)\n",
             "  d <- askUser @Deploy   -- then read fields with record-dot: d.service, d.env\n",
             "For alternatives that ",
-            "exist only as runtime values, `choose :: [(Text, a)] -> M a` and ",
-            "`chooseMany :: [(Text, a)] -> M [a]` take (label, value) pairs. ",
-            "`askUserRaw :: Value -> M Value` is the raw escape hatch these are ",
-            "built on, carrying the form spec as JSON directly. `note :: Text -> M ()` ",
+            "exist only as runtime values, `choose :: Member AskUser effs => [(Text, a)] -> Eff effs a` and ",
+            "`chooseMany :: Member AskUser effs => [(Text, a)] -> Eff effs [a]` take (label, value) pairs. ",
+            "`askUserRaw :: Member AskUser effs => Value -> Eff effs Value` is the raw escape hatch these are ",
+            "built on, carrying the form spec as JSON directly. `note :: Member AskUser effs => Text -> Eff effs ()` ",
             "posts markdown-ish text to the operator's feed WITHOUT blocking — use it to ",
             "explain what you are about to ask and why, before presenting a form.",
         ],
         type_params: &[],
         default_row_args: &[],
-        helpers_row_polymorphic: true,
         extra_imports: &["import Tidepool.Form"],
         type_defs: Vec::new(),
         external_types: &[],

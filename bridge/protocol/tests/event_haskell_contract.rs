@@ -230,7 +230,6 @@ fn event_remaining_decl_fields_are_pinned() {
     assert!(ev.prompt_card.is_none());
     assert!(ev.type_params.is_empty());
     assert!(ev.default_row_args.is_empty());
-    assert!(ev.helpers_row_polymorphic);
     assert_eq!(ev.name, "RepoEvent");
     assert_eq!(ev.handler, "RepoEventHandler");
     assert_eq!(ev.handler_module, "event");

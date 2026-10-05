@@ -28,7 +28,7 @@ pub fn read_state() -> Effect {
         // (`tidepool_mcp::readstate_decl`); the flip must not move it.
         decl_fn: "readstate_decl",
         prompt_card: Some(&[
-            "`getStateJson :: M Value` — the loop's durable state as JSON, ",
+            "`getStateJson :: Member ReadState effs => Eff effs Value` — the loop's durable state as JSON, ",
             "immediately (no operator, no model round), as of this loop iteration's ",
             "START (this iteration's answer and any operator message being ingested ",
             "are not in it yet). Query it with optics, e.g. ",
@@ -37,7 +37,7 @@ pub fn read_state() -> Effect {
         ]),
         description: &[
             "Read the loop's durable state — the same value your system instructions ",
-            "render a SELECTION of — as JSON, immediately. `getStateJson :: M Value` ",
+            "render a SELECTION of — as JSON, immediately. `getStateJson :: Member ReadState effs => Eff effs Value` ",
             "returns the state as of this loop iteration's start; the current ",
             "iteration's answer (and any operator message being ingested this ",
             "iteration) are not yet in it. Use optics for ad-hoc queries and compute ",
@@ -45,7 +45,6 @@ pub fn read_state() -> Effect {
         ],
         type_params: &[],
         default_row_args: &[],
-        helpers_row_polymorphic: true,
         extra_imports: &[],
         type_defs: Vec::new(),
         external_types: &[],

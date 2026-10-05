@@ -33,7 +33,6 @@ const RECORD_DIR: &str = "module-candidates-v12";
 const RECORD_MAGIC: &[u8; 8] = b"TPCRE10\n";
 const RECORD_VERSION: u32 = 10;
 const HEADER_LIMIT: usize = 64 << 10;
-const DISCOVERY_LIMIT: usize = 512;
 const PAYLOAD_LIMIT: usize = 128 << 20;
 const PACKAGE_BUNDLE_LIMIT: usize = 16 << 20;
 // A measured 33,955,557-byte ordinary resident display graph exceeds 32 MiB.
@@ -1344,68 +1343,72 @@ fn ordinary_records(
     let include = context_paths(include)?;
     let producer_dir = record_dir(endpoint_identity);
     let started = std::time::Instant::now();
-    let mut paths = Vec::new();
     let roots = include.iter().cloned().collect::<BTreeSet<_>>();
+    let mut headers_read = 0_u64;
+    let mut header_bytes = 0_u64;
+    let mut selected: BTreeMap<(String, String), (RecordHeader, fs::File, PathBuf)> =
+        BTreeMap::new();
+    let mut ambiguous = BTreeSet::new();
     for root in &roots {
         match fs::read_dir(root_shard(&producer_dir, root)) {
             Ok(entries) => {
                 for entry in entries {
                     let path = entry.ok()?.path();
-                    if path.extension().is_some_and(|x| x == "cbor") {
-                        paths.push(path);
-                        if paths.len() > DISCOVERY_LIMIT {
-                            tracing::info!(target: "tidepool_toolchain::module_candidates", phase = "candidate_discovery_bound", limit = DISCOVERY_LIMIT, active_roots = roots.len());
-                            return None;
+                    if !path.extension().is_some_and(|x| x == "cbor") {
+                        continue;
+                    }
+                    let Ok(mut file) = fs::File::open(&path) else {
+                        continue;
+                    };
+                    let Some(header) = read_header(&mut file) else {
+                        continue;
+                    };
+                    headers_read += 1;
+                    header_bytes += file.stream_position().ok()?;
+                    if header.endpoint != endpoint_identity
+                        || (!exact_context && header.include != include)
+                        || (exact_context
+                            && !current_source_matches(&header.module, &header.source, &include))
+                    {
+                        continue;
+                    }
+                    let key = (header.unit.clone(), header.module.clone());
+                    if ambiguous.contains(&key) {
+                        continue;
+                    }
+                    if let Some((previous, _, previous_path)) = selected.get(&key) {
+                        if previous.source != header.source {
+                            selected.remove(&key);
+                            ambiguous.insert(key);
+                            continue;
+                        }
+                        // Directory order is not a preference. Preserve exact
+                        // recipe preference and the former sorted-path tie break.
+                        let previous_matches = previous.include == include;
+                        let current_matches = header.include == include;
+                        if (previous_matches && !current_matches)
+                            || (previous_matches == current_matches && previous_path <= &path)
+                        {
+                            continue;
                         }
                     }
+                    selected.insert(key, (header, file, path));
                 }
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(_) => return None,
         }
     }
-    paths.sort();
-    let mut headers_read = 0_u64;
-    let mut header_bytes = 0_u64;
-    let mut selected: BTreeMap<(String, String), (RecordHeader, fs::File)> = BTreeMap::new();
-    let mut ambiguous = BTreeSet::new();
-    for path in paths {
-        let Ok(mut file) = fs::File::open(path) else {
-            continue;
-        };
-        let Some(header) = read_header(&mut file) else {
-            continue;
-        };
-        headers_read += 1;
-        header_bytes += file.stream_position().ok()?;
-        if header.endpoint != endpoint_identity
-            || (!exact_context && header.include != include)
-            || (exact_context && !current_source_matches(&header.module, &header.source, &include))
-        {
-            continue;
-        }
-        let key = (header.unit.clone(), header.module.clone());
-        if let Some((previous, _)) = selected.get(&key) {
-            if previous.source != header.source {
-                ambiguous.insert(key);
-                continue;
-            }
-            if previous.include == include || header.include != include {
-                continue;
-            }
-        }
-        selected.insert(key, (header, file));
-    }
-    for key in ambiguous {
-        selected.remove(&key);
-    }
     if selected.len() > CANDIDATE_LIMIT {
+        tracing::info!(target: "tidepool_toolchain::module_candidates",
+            phase = "candidate_owner_bound", limit = CANDIDATE_LIMIT,
+            active_roots = roots.len(), headers_read);
         return None;
     }
     let mut record_bytes = 0_u64;
     let mut budget = shared_evidence::ReadBudget::default();
     let mut records = Vec::new();
-    for (_, (header, mut file)) in selected {
+    for (_, (header, mut file, _)) in selected {
         record_bytes += header.payload_len;
         if let Some(record) = read_record(&mut file, &header, &producer_dir, &mut budget) {
             records.push(record);
@@ -3858,7 +3861,7 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn discovery_ignores_historical_roots_and_flat_layout_but_bounds_active_shards() {
+    fn discovery_ignores_inactive_roots_and_flat_layout() {
         let cache = tempfile::tempdir().unwrap();
         let sources = tempfile::tempdir().unwrap();
         let mut record = candidate_fixture(sources.path(), "Library");
@@ -3868,7 +3871,7 @@ mod tests {
             std::env::set_var("TIDEPOOL_COMPILE_CACHE_DIR", cache.path());
         }
         let producer = record_dir(b"endpoint");
-        for n in 0..=DISCOVERY_LIMIT {
+        for n in 0..600 {
             let shard = root_shard(&producer, &cache.path().join(format!("historical-{n}")));
             fs::create_dir_all(&shard).unwrap();
             fs::write(shard.join("historical.cbor"), b"not decoded").unwrap();
@@ -3886,11 +3889,48 @@ mod tests {
             ordinary_records(b"endpoint", &include, true).unwrap().len(),
             1
         );
-        let active = root_shard(&producer, &absolute(sources.path()).unwrap());
-        for n in 0..DISCOVERY_LIMIT {
-            fs::write(active.join(format!("overflow-{n}.cbor")), b"not decoded").unwrap();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn active_history_keeps_current_candidate_and_source_refusals() {
+        let root = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let current = candidate_fixture(root.path(), "Library");
+        let historical = candidate_fixture(root.path(), "Historical");
+        let historical_bytes = encode_record(&historical).unwrap();
+        let dir = fixture_record_dir(root.path());
+        // Historical advice retains its original authenticated producer and
+        // product. Its source no longer exists in the current selection.
+        fs::remove_file(&historical.source).unwrap();
+        for n in 0..600 {
+            fs::write(dir.join(format!("historical-{n}.cbor")), &historical_bytes).unwrap();
         }
-        assert!(ordinary_records(b"endpoint", &include, true).is_none());
+        for n in 0..32 {
+            fs::write(dir.join(format!("malformed-{n}.cbor")), b"not decoded").unwrap();
+        }
+        assert!(fs::read_dir(&dir).unwrap().count() > 512);
+        let selected = select_in(root.path(), scratch.path()).unwrap();
+        assert_eq!(selected.by_owner.len(), 1);
+        let offered = &selected.by_owner[&("u".into(), "Library".into())];
+        assert_eq!(offered.owner, computed_owner(&current));
+        assert_eq!(offered.product_bytes, current.products);
+        assert_eq!(fs::read(&offered.iface_path).unwrap(), current.interface);
+
+        let shadow = tempfile::tempdir().unwrap();
+        fs::write(shadow.path().join("Library.hs"), "module Library where\n").unwrap();
+        assert!(ordinary_records(
+            b"endpoint",
+            &[shadow.path().into(), root.path().into()],
+            true,
+        )
+        .unwrap()
+        .is_empty());
+        fs::write(&current.source, "module Library where\nchanged = True\n").unwrap();
+        assert!(select_in(root.path(), scratch.path())
+            .unwrap()
+            .by_owner
+            .is_empty());
     }
 
     #[test]

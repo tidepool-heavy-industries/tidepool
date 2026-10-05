@@ -36,25 +36,29 @@ New helper signatures are row-polymorphic:
 Member SomeEffect effs => ... -> Eff effs Result
 ```
 
-Do not define helpers against the per-compile `M` alias. Effect GADTs and
+Do not define helpers against an implicit concrete row alias. Effect GADTs and
 helpers live in universal Core; a constructor that stores an effectful closure
 must existentially package that closure's row.
 
 ## Generated effects modules
 
-The generated surface has three modules across two cache layers:
+The generated effect vocabulary has three stable modules:
 
 - `Tidepool.Effects.Core`: the universal stable GADTs, records, errors, and
   row-polymorphic helpers, including interpreter-only constructors;
 - `Tidepool.Effects.Authored`: a stable facade which hides those private
   constructors while re-exporting the authored vocabulary;
-- `Tidepool.Effects`: the per-compile shim which re-exports `Authored` and
-  defines the concrete `M` row.
+- `Tidepool.Effects`: a stable authored-facing re-export of `Authored`.
 
-Persistent declarations validate against `Authored` without importing the shim.
-Their effectful signatures must use `Member` constraints; the declaration
-plane compiles authored signatures verbatim and does not expose the concrete
-per-window `M` alias.
+No effect module defines an executable row or an implicit `M`. Check and
+execution renderers pin each invocation's explicit `Eff` row; importing a
+vocabulary name never grants its effect. Persistent declarations compile
+signatures verbatim. Reusable helpers use `Member` constraints; authors may
+name an explicit row with an ordinary type alias of their own.
+
+`Tidepool.Orchestrate` remains a separate installed-cohort source module. Its
+helpers state their own row constraints; actor row selection does not replace
+its source.
 
 Records and error ADTs may be inline in `type_defs`; they land in Core and are
 nominally stable across turns. Existing `Tidepool.Records.*` modules are valid

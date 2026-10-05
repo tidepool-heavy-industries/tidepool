@@ -168,6 +168,10 @@ Haskell test fixture trees are declared filegroups copied into private scratch
 before execution. Changing a fixture does not relink its test binary. Compiler,
 browser and process resources belong to the groups that use them, so a process
 framing test does not build Chromium or start GHC.
+Native Rust wrappers declare single-path inputs in `resource_env`, separately
+from flags, commands and path lists in `env`. The counted runner makes those
+resource paths absolute against its Buck launch directory before discovery or
+execution, preserving Buck symlink paths and refusing missing resources.
 
 ## Toolchain and output setup
 
@@ -180,7 +184,8 @@ bash scripts/buck2-configure.sh
 
 Each preparation writes an ignored checkout-owned directory under
 `.buck2-toolchains/generations/`. Its `owner` records the checkout, Unix UID,
-flake selection and flags; `outputs.tsv` records each selected output's name,
+flake selection, selection mode, checkout-derived toolchain-input tree and flags;
+`outputs.tsv` records each selected output's name,
 flake reference, resolved store path and indirect GC-root link. `status` records
 preparation success or failure, and `config` retains the published configuration.
 The configuration comment and command output identify the exact generation.
@@ -195,6 +200,19 @@ while any consumer still needs them. Configuring a new generation does not
 retire old roots, and checkout roots do not replace the independent retention
 owned by a frozen native bundle's qualification descriptor. `nix build --no-link`
 provides no durable retention and is not the checkout preparation workflow.
+The pinned Buck CLI is a selected, rooted output alongside the action tools.
+`scripts/buck2-run.sh` verifies the published generation, checkout and user,
+unchanged checkout-derived toolchain-input tree, retained roots and declared
+executable/PATH, then executes that CLI directly. Ordinary native commands do not
+enter a Nix dev shell. A missing or stale generation fails with an explicit configure
+instruction; it never selects an ambient Buck or prepares tools implicitly.
+Configurations predating the rooted CLI require one admitted reconfiguration.
+The default checkout-derived selection requires committed toolchain inputs;
+unrelated source commits reuse the generation. An explicit immutable
+`TIDEPOOL_DEV_FLAKE` selection owns its tools independently of local toolchain
+edits. Resource admission remains with `swarm-build`, and the launcher preserves
+that process's cgroup and exit status.
+
 Optional test and catalog outputs are realized only when selected; ordinary
 configuration does not build catalog products or the host test GHC environment.
 

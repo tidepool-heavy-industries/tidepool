@@ -8,6 +8,7 @@ if [[ ${1:-} == --exomonad ]]; then
   shift
 fi
 source_root=$(git rev-parse --show-toplevel)
+source "$source_root/scripts/toolchain-inputs.sh"
 requested_cargo_target=${CARGO_TARGET_DIR:-}
 env_command=()
 env_assignments=()
@@ -77,11 +78,7 @@ else
     # default only needs the toolchain inputs, so pin a synthetic commit over
     # them instead of HEAD: unrelated commits then reuse the same revision
     # instead of forcing Nix to re-fetch and re-evaluate the flake every time.
-    if ! git diff --quiet HEAD -- flake.nix flake.lock rust-toolchain.toml nix; then
-      echo 'Commit changed toolchain inputs or select TIDEPOOL_DEV_FLAKE explicitly before entering the dev shell' >&2
-      exit 2
-    fi
-    tree=$(git ls-tree HEAD -- flake.nix flake.lock rust-toolchain.toml nix | git mktree)
+    tree=$(toolchain_input_tree)
     revision=$(GIT_AUTHOR_DATE='@0 +0000' GIT_COMMITTER_DATE='@0 +0000' \
       GIT_AUTHOR_NAME=dev-shell GIT_AUTHOR_EMAIL=dev-shell@invalid \
       GIT_COMMITTER_NAME=dev-shell GIT_COMMITTER_EMAIL=dev-shell@invalid \

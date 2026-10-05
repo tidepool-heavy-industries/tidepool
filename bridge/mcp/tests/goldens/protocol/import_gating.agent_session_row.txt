@@ -1,4 +1,4 @@
--- build_preamble (1434 bytes) --
+-- build_preamble (1390 bytes) --
 {-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, FlexibleContexts, FlexibleInstances, UndecidableInstances, GADTs, KindSignatures, RankNTypes, PartialTypeSignatures, ScopedTypeVariables, ExtendedDefaultRules, LambdaCase, TupleSections, MultiWayIf, RecordWildCards, NamedFieldPuns, ViewPatterns, BangPatterns, TypeApplications, BlockArguments, NumericUnderscores, MultilineStrings, DeriveFunctor, DeriveFoldable, DeriveTraversable, DeriveGeneric, DeriveAnyClass, StandaloneDeriving, QuasiQuotes, DuplicateRecordFields, OverloadedRecordDot, OverloadedLabels #-}
 module Expr where
 import Tidepool.Prelude hiding (error, note)
@@ -17,18 +17,17 @@ import qualified Tidepool.Patch as Patch
 import Control.Monad.Freer hiding (run)
 import qualified Prelude as P
 import Tidepool.Agent.Session
-import Tidepool.Internal.RequestSite (RequestSite)
 import Tidepool.Form
 import Tidepool.Orchestrate
 -- tidepool-preamble-imports-v1
 default (Int, Double, Text)
 
-paginateResult :: Int -> Value -> M Value
+paginateResult :: Int -> Value -> Eff effs Value
 paginateResult = paginateTrunc
 
 -- end build_preamble --
 
--- session_decl_module_env (1307 bytes) --
+-- session_decl_module_env (1256 bytes) --
 {-# LANGUAGE NoImplicitPrelude, NoMonomorphismRestriction, OverloadedStrings, DataKinds, TypeOperators, FlexibleContexts, FlexibleInstances, UndecidableInstances, GADTs, KindSignatures, RankNTypes, PartialTypeSignatures, ScopedTypeVariables, ExtendedDefaultRules, LambdaCase, TupleSections, MultiWayIf, RecordWildCards, NamedFieldPuns, ViewPatterns, BangPatterns, TypeApplications, BlockArguments, NumericUnderscores, MultilineStrings, DeriveFunctor, DeriveFoldable, DeriveTraversable, DeriveGeneric, DeriveAnyClass, StandaloneDeriving, QuasiQuotes, DuplicateRecordFields, OverloadedRecordDot, OverloadedLabels #-}
 import Tidepool.Prelude hiding (error, note)
 import Tidepool.Effects
@@ -46,7 +45,6 @@ import qualified Tidepool.Patch as Patch
 import Control.Monad.Freer hiding (run)
 import qualified Prelude as P
 import Tidepool.Agent.Session
-import Tidepool.Internal.RequestSite (RequestSite)
 import Tidepool.Form
 import Tidepool.Orchestrate
 -- end session_decl_module_env --

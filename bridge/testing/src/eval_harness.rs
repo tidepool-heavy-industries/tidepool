@@ -49,8 +49,8 @@ pub fn user_lib_dir() -> PathBuf {
 }
 
 /// The generated `Tidepool.Effects.Core` + `Tidepool.Effects` module dirs for
-/// the standard MCP effect set, BOTH needed on the include path (the shim's
-/// `import Tidepool.Effects.Core` resolves against the first).
+/// the standard MCP effect set: stable vocabulary and installed orchestration
+/// helpers are separate source roots.
 ///
 /// Needed on the include path when a test pulls in a `.tidepool/lib` module (or
 /// anything that `import`s the generated effects module). Wraps

@@ -46,6 +46,7 @@ def tidepool_rust_test_cases(
         timeout = 300,
         jobs = None,
         env = {},
+        resource_env = {},
         resources = [],
         haskell_worker = False,
         run_env = {},
@@ -65,6 +66,12 @@ def tidepool_rust_test_cases(
     if jobs != None and jobs <= 0:
         fail("jobs must be positive")
     args = ["$(location " + binary + ")", "--timeout", str(timeout)]
+    runtime_env = dict(env)
+    for key, path in resource_env.items():
+        if key in runtime_env:
+            fail("resource_env must not duplicate ordinary env: " + key)
+        runtime_env[key] = path
+        args.extend(["--resource-env", key])
     if jobs != None:
         args.extend(["--jobs", str(jobs)])
     for test in exact_tests:
@@ -77,7 +84,7 @@ def tidepool_rust_test_cases(
         "name": name,
         "test": "//build/rust:isolated_libtest",
         "args": args,
-        "env": _test_environment(env, haskell_worker),
+        "env": _test_environment(runtime_env, haskell_worker),
         "run_env": run_env,
         "resources": resources,
         "visibility": visibility,
@@ -95,6 +102,7 @@ def tidepool_rust_isolated_test(
         package_dir,
         version,
         env = {},
+        resource_env = {},
         compile_env = {},
         rustc_flags = [],
         haskell_worker = False,
@@ -126,6 +134,7 @@ def tidepool_rust_isolated_test(
         timeout = timeout,
         jobs = jobs,
         env = runtime_env,
+        resource_env = resource_env,
         resources = resources,
         haskell_worker = haskell_worker,
         run_env = run_env,

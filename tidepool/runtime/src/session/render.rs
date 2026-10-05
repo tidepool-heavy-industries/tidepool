@@ -934,7 +934,7 @@ impl Default for DeclLog {
 /// The import preamble the generated session module needs so user declarations
 /// type-check (the same surface evals see). Held as a parameter so the
 /// standalone Lane-A test uses a small pure surface while the full server can
-/// later pass the effects/`M`-stack preamble unchanged.
+/// later pass the stable effect preamble unchanged.
 #[derive(Clone, Debug)]
 pub struct ModuleEnv {
     /// The `{-# LANGUAGE … #-}` pragma block (one line, no trailing newline).
@@ -966,7 +966,7 @@ impl ModuleEnv {
     /// `Tidepool.Prelude` (which pulls `Control.Lens`, demanding the
     /// `with-packages` GHC) so the standalone declaration REPL compiles
     /// against the plain toolchain. The full server passes its own
-    /// effects/`M`-stack [`ModuleEnv`] instead.
+    /// stable effect [`ModuleEnv`] instead.
     #[must_use]
     pub fn standalone_default() -> ModuleEnv {
         ModuleEnv {
@@ -2117,7 +2117,10 @@ mod tests {
         let mut log = DeclLog::new();
         push_chained(
             &mut log,
-            turn("probe :: M Int\nprobe = pure 0", vec![val("probe")]),
+            turn(
+                "probe :: Eff effects Int\nprobe = pure 0",
+                vec![val("probe")],
+            ),
         );
 
         let rendered = render_module(
@@ -2125,11 +2128,14 @@ mod tests {
             Generation(1),
             &ModuleEnv {
                 pragmas: String::new(),
-                imports: vec!["import Tidepool.Effects.Core".into()],
+                imports: vec![
+                    "import Tidepool.Effects.Core".into(),
+                    "import Control.Monad.Freer (Eff)".into(),
+                ],
             },
         );
 
-        assert!(rendered.source.contains("probe :: M Int"));
+        assert!(rendered.source.contains("probe :: Eff effects Int"));
         assert!(rendered.source.contains("probe = pure 0"));
     }
 }

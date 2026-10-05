@@ -54,6 +54,12 @@ The source OID and build log add provenance; they do not replace those byte chec
 The bundled workspace Gitlink is also checked against the source HEAD's recorded
 `.exomonad/workspace` submodule. Hosted tests and the actual binary receive that
 same frozen file through `EXOMONAD_WORKSPACE_GITLINK`.
+Configuration retains the original Git objects for that recorded commit in an
+immutable Git bundle. Native scaffold tests and frozen launches receive the
+declared bundle through `EXOMONAD_WORKSPACE_GIT_BUNDLE`; qualification checks its
+commit and object closure against the Gitlink and seals the copied bundle bytes.
+Scaffolding clones those objects locally and records the public upstream URL for
+future submodule updates. Test execution requires no mutable source repository.
 
 ```sh
 python3 build/package/qualification.py freeze \
@@ -73,7 +79,10 @@ unknown executed count or zero selection cannot qualify a passing cohort.
 and `--service-slice NAME.slice` use the runner's fresh delegated user services
 inside an already admitted user slice. Reports retain these scheduling choices.
 The descriptor seals M2 watchdogs at 600 seconds, with 900 seconds for unfinished
-parent survival, later nominal publication join and checkpoint release. Checkpoint
+parent survival, later nominal publication join, checkpoint release and the selected
+coding child. The selected child case scaffolds the shipped workspace and passes a
+`Project.Work` Task from the root to a coding child through compiler admission,
+then checks the child's narrower effect row and original typed reply. Checkpoint
 release retains the issuer settlement, observer creation, original-scope read/reply
 and final cleanup in one watchdog; the measured issuer portion already took
 538 seconds before those later phases. These outer process limits
