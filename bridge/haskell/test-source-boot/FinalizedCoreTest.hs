@@ -310,12 +310,16 @@ makeViewChecks libdir work artifact bytes summary proof = runGhc (Just libdir) $
   fresh <- getSession
   interfaces <- liftIO (requireRight =<< readExactIfaceArtifacts fresh [artifact])
   admitted <- liftIO (hydrateExactScope fresh interfaces)
+  (corePath, coreSha) <- maybe (fail "canonical proof omitted its captured Core") pure
+    (admittedInterfaceCore (ModuleInterfaceAdmission proof))
   let typeDirectory = work </> "type-make-view"
       executableDirectory = work </> "executable-make-view"
-      corePath = work </> "captured.core"
       executableSummary = summary {ms_hspp_opts =
         (ms_hspp_opts summary) {backend = interpreterBackend}}
   liftIO $ do
+    issuedCore <- BS.readFile corePath
+    assert (issuedCore == bytes && hexBytes (SHA256.hash issuedCore) == coreSha)
+      "canonical codec proof did not retain its original compiler Core"
     createDirectory typeDirectory
     createDirectory executableDirectory
     removeFile corePath
