@@ -7,7 +7,7 @@
 use super::*;
 use crate::{ActorId, Incarnation};
 use proptest::prelude::*;
-use proptest::test_runner::{Config, TestCaseError, TestRunner};
+use proptest::test_runner::{Config, FileFailurePersistence, TestCaseError, TestRunner};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 
@@ -44,7 +44,9 @@ enum Action {
     Queue,
     Present,
     BeginReply,
-    FinishReply { failed: bool },
+    FinishReply {
+        failed: bool,
+    },
     Cancel,
     Deadline,
     BeginAck,
@@ -52,9 +54,21 @@ enum Action {
     RollbackAck,
     Abandon,
     Release,
-    Watch { allow_failure: bool },
-    ForgetWatch { key: usize },
-    StopTarget { failed: bool },
+    Watch {
+        dependencies: u8,
+        any: bool,
+        allow_failure: bool,
+    },
+    ObserveWatch {
+        key: usize,
+        as_owner: bool,
+    },
+    ForgetWatch {
+        key: usize,
+    },
+    StopTarget {
+        failed: bool,
+    },
     StopOwner,
 }
 
@@ -65,7 +79,13 @@ struct Operation {
     action: Action,
 }
 
-fn operation() -> impl Strategy<Value = Operation> {
+#[derive(Clone, Debug)]
+struct History {
+    target_keys: Vec<u8>,
+    operations: Vec<Operation>,
+}
+
+fn operation(request_count: usize) -> impl Strategy<Value = Operation> {
     let identity = prop_oneof![6 => Just(Identity::Exact), 1 => Just(Identity::Foreign), 2 => Just(Identity::Restarted)];
     let action = prop_oneof![
         3 => Just(Action::Queue),
@@ -79,12 +99,13 @@ fn operation() -> impl Strategy<Value = Operation> {
         1 => Just(Action::RollbackAck),
         2 => Just(Action::Abandon),
         3 => Just(Action::Release),
-        4 => any::<bool>().prop_map(|allow_failure| Action::Watch { allow_failure }),
+        4 => (1u8..(1 << request_count), any::<bool>(), any::<bool>()).prop_map(|(dependencies, any, allow_failure)| Action::Watch { dependencies, any, allow_failure }),
+        3 => (0usize..8, any::<bool>()).prop_map(|(key, as_owner)| Action::ObserveWatch { key, as_owner }),
         2 => (0usize..8).prop_map(|key| Action::ForgetWatch { key }),
         1 => any::<bool>().prop_map(|failed| Action::StopTarget { failed }),
         1 => Just(Action::StopOwner),
     ];
-    (0usize..2, identity, action).prop_map(|(request, identity, action)| Operation {
+    (0usize..request_count, identity, action).prop_map(|(request, identity, action)| Operation {
         request,
         identity,
         action,
@@ -99,92 +120,155 @@ fn exact(request: usize, action: Action) -> Operation {
     }
 }
 
-fn histories() -> impl Strategy<Value = Vec<Operation>> {
-    // These start from real reservations, exercise competing terminal transfers,
-    // and change the dependency outcomes rather than repeatedly polling one state.
-    let patterns = vec![
-        vec![
-            exact(0, Action::Queue),
-            exact(1, Action::Queue),
-            exact(0, Action::Present),
-            exact(1, Action::Present),
-            exact(
-                0,
-                Action::Watch {
-                    allow_failure: false,
-                },
-            ),
-            exact(
-                1,
-                Action::Watch {
-                    allow_failure: true,
-                },
-            ),
+fn guided(target_keys: Vec<u8>, mode: u8, failed: bool, allow_failure: bool) -> History {
+    // No mutating prefix can preempt these workflows. Parameters vary topology,
+    // transfer outcome and subscription policy; arbitrary suffixes probe reuse.
+    let mut operations = Vec::new();
+    for request in 0..target_keys.len() {
+        operations.extend([
+            exact(request, Action::Queue),
+            exact(request, Action::Present),
+        ]);
+    }
+    operations.extend([
+        exact(
+            0,
+            Action::Watch {
+                dependencies: 3,
+                any: false,
+                allow_failure,
+            },
+        ),
+        exact(
+            0,
+            Action::Watch {
+                dependencies: 3,
+                any: true,
+                allow_failure,
+            },
+        ),
+    ]);
+    match mode {
+        0 => operations.extend([
             exact(0, Action::BeginReply),
             exact(0, Action::Deadline),
-            exact(0, Action::FinishReply { failed: false }),
+            exact(0, Action::FinishReply { failed }),
             exact(1, Action::Cancel),
             exact(1, Action::BeginAck),
             exact(1, Action::FinishAck),
-            exact(0, Action::Release),
-        ],
-        vec![
+        ]),
+        1 => operations.extend([
             exact(0, Action::Cancel),
-            exact(0, Action::Queue),
-            exact(0, Action::Present),
+            exact(0, Action::Deadline),
             exact(0, Action::BeginReply),
             exact(0, Action::BeginAck),
             exact(0, Action::RollbackAck),
             exact(0, Action::BeginAck),
             exact(0, Action::FinishAck),
-            exact(
-                0,
-                Action::Watch {
-                    allow_failure: true,
-                },
-            ),
-            exact(0, Action::Release),
-        ],
-        vec![
-            exact(0, Action::Queue),
-            exact(0, Action::Present),
+            exact(1, Action::BeginReply),
+            exact(1, Action::FinishReply { failed }),
+        ]),
+        2 => operations.extend([
             exact(0, Action::Abandon),
             exact(0, Action::Release),
-            exact(0, Action::Cancel),
-            exact(0, Action::Deadline),
-            exact(0, Action::BeginAck),
-            exact(0, Action::FinishAck),
-            exact(0, Action::Release),
             exact(0, Action::BeginReply),
-        ],
-        vec![
-            exact(0, Action::Queue),
-            exact(0, Action::Present),
-            exact(0, Action::BeginReply),
-            exact(0, Action::Cancel),
-            exact(0, Action::Deadline),
-            exact(0, Action::FinishReply { failed: true }),
-            Operation {
-                request: 0,
-                identity: Identity::Foreign,
-                action: Action::Watch {
-                    allow_failure: false,
-                },
+            exact(0, Action::FinishReply { failed }),
+            exact(1, Action::BeginReply),
+            exact(1, Action::FinishReply { failed: false }),
+        ]),
+        3 => operations.extend([
+            exact(0, Action::StopTarget { failed }),
+            exact(1, Action::BeginReply),
+            exact(1, Action::FinishReply { failed: false }),
+        ]),
+        _ => unreachable!("guided mode is bounded"),
+    }
+    // Observe after settlement, with a foreign read preceding owner acknowledgement.
+    operations.extend([
+        exact(
+            0,
+            Action::ObserveWatch {
+                key: 0,
+                as_owner: false,
             },
-            exact(0, Action::Release),
-        ],
-    ];
+        ),
+        exact(
+            0,
+            Action::ObserveWatch {
+                key: 1,
+                as_owner: false,
+            },
+        ),
+        exact(
+            0,
+            Action::ObserveWatch {
+                key: 0,
+                as_owner: true,
+            },
+        ),
+        exact(
+            0,
+            Action::ObserveWatch {
+                key: 1,
+                as_owner: true,
+            },
+        ),
+        exact(0, Action::Release),
+        exact(1, Action::Release),
+        exact(
+            0,
+            Action::ObserveWatch {
+                key: 0,
+                as_owner: false,
+            },
+        ),
+        exact(0, Action::ForgetWatch { key: 0 }),
+        exact(0, Action::ForgetWatch { key: 1 }),
+    ]);
+    History {
+        target_keys,
+        operations,
+    }
+}
+
+fn histories() -> impl Strategy<Value = History> {
+    let general = proptest::collection::vec(0u8..3, 1..4).prop_flat_map(|target_keys| {
+        proptest::collection::vec(operation(target_keys.len()), 1..41).prop_map(move |operations| {
+            History {
+                target_keys: target_keys.clone(),
+                operations,
+            }
+        })
+    });
     let guided = (
-        proptest::collection::vec(operation(), 0..8),
-        proptest::sample::select(patterns),
-        proptest::collection::vec(operation(), 0..8),
+        proptest::collection::vec(0u8..3, 2..4),
+        0u8..4,
+        any::<bool>(),
+        any::<bool>(),
     )
-        .prop_map(|(mut prefix, pattern, suffix)| {
-            prefix.extend(pattern);
-            prefix.extend(suffix);
-            prefix
+        .prop_flat_map(|(topology, mode, failed, allow_failure)| {
+            let core = guided(topology, mode, failed, allow_failure);
+            // Always generate the complete valid workflow, then let standard
+            // boolean shrinking remove individual commands from its core.
+            (
+                proptest::collection::vec(proptest::bool::weighted(1.0), core.operations.len()),
+                proptest::collection::vec(operation(core.target_keys.len()), 0..8),
+            )
+                .prop_map(move |(included, suffix)| {
+                    let mut history = History {
+                        target_keys: core.target_keys.clone(),
+                        operations: core
+                            .operations
+                            .iter()
+                            .zip(included)
+                            .filter_map(|(operation, include)| include.then_some(*operation))
+                            .collect(),
+                    };
+                    history.operations.extend(suffix);
+                    history
+                })
         });
-    prop_oneof![1 => proptest::collection::vec(operation(), 1..41), 2 => guided]
+    prop_oneof![1 => general, 2 => guided]
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -252,17 +336,22 @@ impl RequestModel {
 enum WatchResult {
     Pending,
     Ready,
-    Failed(ResponseFailure),
+    Failed {
+        request: usize,
+        failure: ResponseFailure,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct WatchModel {
     id: WatchId,
     owner: ActorRef,
-    request: usize,
+    dependencies: Vec<usize>,
+    any: bool,
     allow_failure: bool,
     result: WatchResult,
     forgotten: bool,
+    observed_by_owner: bool,
 }
 
 #[derive(Default, Debug)]
@@ -279,6 +368,15 @@ struct Coverage {
     after_terminal: usize,
     watch_transitions: usize,
     settlement_notices: usize,
+    shared_target_work: usize,
+    retirement_fanout: usize,
+    multi_dependency_watches: usize,
+    owner_acknowledgements: usize,
+    foreign_terminal_observations: usize,
+    accepted_replies: usize,
+    completed_acknowledgements: usize,
+    acknowledgement_retries: usize,
+    released_responses: usize,
 }
 
 fn compare<T: std::fmt::Debug + PartialEq>(
@@ -291,20 +389,24 @@ fn compare<T: std::fmt::Debug + PartialEq>(
     Ok(())
 }
 
-fn run_history(operations: &[Operation], coverage: &mut Coverage) -> Result<(), TestCaseError> {
+fn run_history(history: &History, coverage: &mut Coverage) -> Result<(), TestCaseError> {
     let registry = RequestRegistry::default();
     let owner = ActorRef::first(ActorId(1));
-    let targets = [ActorRef::first(ActorId(2)), ActorRef::first(ActorId(3))];
-    let ids = [
-        registry.reserve(owner, targets[0]),
-        registry.reserve(owner, targets[1]),
-    ];
-    let mut requests = [RequestModel::default(), RequestModel::default()];
+    let targets: Vec<_> = history
+        .target_keys
+        .iter()
+        .map(|key| ActorRef::first(ActorId(2 + u64::from(*key))))
+        .collect();
+    let ids: Vec<_> = targets
+        .iter()
+        .map(|target| registry.reserve(owner, *target))
+        .collect();
+    let mut requests = vec![RequestModel::default(); targets.len()];
     let mut watches: Vec<WatchModel> = Vec::new();
     let mut event_sequences = BTreeMap::<ActorRef, Vec<u64>>::new();
     let mut last_sequence = BTreeMap::<ActorRef, u64>::new();
 
-    for (step, operation) in operations.iter().enumerate() {
+    for (step, operation) in history.operations.iter().enumerate() {
         let Operation {
             request: key,
             identity,
@@ -371,6 +473,7 @@ fn run_history(operations: &[Operation], coverage: &mut Coverage) -> Result<(), 
                         Err(ReplyError::CancellationRequested)
                     } else if model.delivered && !model.reply_accepted {
                         model.reply_accepted = true;
+                        coverage.accepted_replies += 1;
                         Ok(())
                     } else {
                         Err(ReplyError::Stale)
@@ -479,6 +582,7 @@ fn run_history(operations: &[Operation], coverage: &mut Coverage) -> Result<(), 
             Action::FinishAck => {
                 if !model.released && model.ack_accepted && !model.target_finished {
                     model.target_finished = true;
+                    coverage.completed_acknowledgements += 1;
                     let failure = match model.cancellation.unwrap() {
                         CancellationReason::RequesterCancelled => ResponseFailure::Cancelled,
                         CancellationReason::DeadlineExpired => ResponseFailure::DeadlineExceeded,
@@ -490,6 +594,7 @@ fn run_history(operations: &[Operation], coverage: &mut Coverage) -> Result<(), 
             Action::RollbackAck => {
                 if !model.released && model.ack_accepted && !model.target_finished {
                     model.ack_accepted = false;
+                    coverage.acknowledgement_retries += 1;
                     // A retried acknowledgement belongs to target-side execution.
                     model.delivered = true;
                 }
@@ -523,6 +628,7 @@ fn run_history(operations: &[Operation], coverage: &mut Coverage) -> Result<(), 
                         ForgetResponseOutcome::TargetStillActive
                     } else {
                         model.released = true;
+                        coverage.released_responses += 1;
                         ForgetResponseOutcome::Forgotten
                     }
                 });
@@ -535,28 +641,82 @@ fn run_history(operations: &[Operation], coverage: &mut Coverage) -> Result<(), 
                         });
                 compare(actual, expected, coverage)?;
             }
-            Action::Watch { allow_failure } => {
-                let actual = registry.register_watch_labeled(
+            Action::Watch {
+                dependencies,
+                any,
+                allow_failure,
+            } => {
+                let dependencies: Vec<_> = (0..requests.len())
+                    .filter(|key| dependencies & (1 << key) != 0)
+                    .collect();
+                let requirements: Vec<_> = dependencies
+                    .iter()
+                    .map(|key| (ids[*key], WatchRequirement::Response { allow_failure }))
+                    .collect();
+                let groups = if any {
+                    vec![requirements]
+                } else {
+                    requirements
+                        .into_iter()
+                        .map(|requirement| vec![requirement])
+                        .collect()
+                };
+                let actual = registry.register_watch_requirement_groups(
                     caller_owner,
                     "watch".into(),
-                    vec![(id, allow_failure)],
+                    groups,
                 );
-                if model.released {
+                if dependencies.iter().any(|key| requests[*key].released) {
                     compare(actual.map(|_| ()), Err(ReplyError::Stale), coverage)?;
                 } else {
                     let (watch, changed) = actual.map_err(|error| {
                         TestCaseError::fail(format!("live dependency watch refused: {error:?}"))
                     })?;
                     notices = changed;
+                    coverage.multi_dependency_watches += usize::from(dependencies.len() > 1);
                     watches.push(WatchModel {
                         id: watch,
                         owner: caller_owner,
-                        request: key,
+                        dependencies,
+                        any,
                         allow_failure,
                         result: WatchResult::Pending,
                         forgotten: false,
+                        observed_by_owner: false,
                     });
                 }
+            }
+            Action::ObserveWatch {
+                key: watch_key,
+                as_owner,
+            } => {
+                let watch = watches.get_mut(watch_key);
+                let watch_id = watch
+                    .as_ref()
+                    .map_or(WatchId(u64::MAX - watch_key as u64), |watch| watch.id);
+                let observer = if as_owner {
+                    watch.as_ref().map_or(caller_owner, |watch| watch.owner)
+                } else {
+                    ActorRef::first(ActorId(10))
+                };
+                let expected = watch.as_ref().map_or(Err(ReplyError::Stale), |watch| {
+                    watch.observation(&requests, &ids)
+                });
+                if let Some(watch) =
+                    watch.filter(|watch| !watch.forgotten && watch.result != WatchResult::Pending)
+                {
+                    if as_owner {
+                        coverage.owner_acknowledgements += usize::from(!watch.observed_by_owner);
+                        watch.observed_by_owner = true;
+                    } else {
+                        coverage.foreign_terminal_observations += 1;
+                    }
+                }
+                compare(
+                    registry.observe_watch(observer, watch_id),
+                    expected,
+                    coverage,
+                )?;
             }
             Action::ForgetWatch { key: watch_key } => {
                 let watch = watches.get_mut(watch_key);
@@ -596,14 +756,22 @@ fn run_history(operations: &[Operation], coverage: &mut Coverage) -> Result<(), 
                     },
                     summary: "target stopped".into(),
                 };
-                if identity == Identity::Exact && !model.released && !model.target_finished {
-                    model.target_finished = true;
-                    model.first_outcome(Err(if failed {
-                        ResponseFailure::TargetFailed(terminal.summary.clone())
-                    } else {
-                        ResponseFailure::TargetUnavailable
-                    }));
+                let mut changed = 0;
+                for (key, request) in requests.iter_mut().enumerate() {
+                    if targets[key] == caller_target
+                        && !request.released
+                        && !request.target_finished
+                    {
+                        request.target_finished = true;
+                        request.first_outcome(Err(if failed {
+                            ResponseFailure::TargetFailed(terminal.summary.clone())
+                        } else {
+                            ResponseFailure::TargetUnavailable
+                        }));
+                        changed += 1;
+                    }
                 }
+                coverage.retirement_fanout += usize::from(changed > 1);
                 notices = registry.actor_stopped(caller_target, &terminal);
             }
             Action::StopOwner => {
@@ -624,30 +792,56 @@ fn run_history(operations: &[Operation], coverage: &mut Coverage) -> Result<(), 
             }
         }
 
-        // A watch retains its first terminal outcome. Releasing a dependency
-        // invalidates pending/ready watches, but does not overwrite a failure
-        // already reported to its subscriber.
+        // A settled watch retains its readiness/failure. A released dependency
+        // invalidates Pending/Ready; an earlier Unavailable outcome is retained.
         let mut expected_notices = Vec::new();
         for watch in watches.iter_mut().filter(|watch| !watch.forgotten) {
-            let request = &requests[watch.request];
             let previous = watch.result.clone();
-            if request.released && !matches!(watch.result, WatchResult::Failed(_)) {
-                watch.result = WatchResult::Failed(ResponseFailure::Released);
-            } else if watch.result == WatchResult::Pending {
-                if let Some(outcome) = &request.outcome {
-                    watch.result = match outcome {
-                        Ok(()) => WatchResult::Ready,
-                        Err(_) if watch.allow_failure => WatchResult::Ready,
-                        Err(failure) => WatchResult::Failed(failure.clone()),
+            if !matches!(watch.result, WatchResult::Failed { .. }) {
+                if let Some(key) = watch
+                    .dependencies
+                    .iter()
+                    .find(|key| requests[**key].released)
+                {
+                    watch.result = WatchResult::Failed {
+                        request: *key,
+                        failure: ResponseFailure::Released,
                     };
+                } else if watch.result == WatchResult::Pending {
+                    let failure =
+                        watch
+                            .dependencies
+                            .iter()
+                            .find_map(|key| match &requests[*key].outcome {
+                                Some(Err(failure)) if !watch.allow_failure => {
+                                    Some((*key, failure.clone()))
+                                }
+                                _ => None,
+                            });
+                    if let Some((request, failure)) = failure {
+                        watch.result = WatchResult::Failed { request, failure };
+                    } else {
+                        let outcomes = watch
+                            .dependencies
+                            .iter()
+                            .map(|key| requests[*key].outcome.is_some());
+                        let ready = if watch.any {
+                            outcomes.into_iter().any(|ready| ready)
+                        } else {
+                            outcomes.into_iter().all(|ready| ready)
+                        };
+                        if ready {
+                            watch.result = WatchResult::Ready;
+                        }
+                    }
                 }
             }
             if previous != watch.result {
                 expected_notices.push((
                     watch.id,
                     watch.owner,
-                    projection(&previous, ids[watch.request]),
-                    projection(&watch.result, ids[watch.request]),
+                    projection(&previous, &ids),
+                    projection(&watch.result, &ids),
                 ));
             }
         }
@@ -700,10 +894,9 @@ fn run_history(operations: &[Operation], coverage: &mut Coverage) -> Result<(), 
             };
             if let Some(transition) = transition {
                 request.notice_claimed = true;
-                if !watches
-                    .iter()
-                    .any(|watch| !watch.forgotten && watch.owner == owner && watch.request == key)
-                {
+                if !watches.iter().any(|watch| {
+                    !watch.forgotten && watch.owner == owner && watch.dependencies.contains(&key)
+                }) {
                     expected_settlements.push((ids[key], transition));
                 }
             }
@@ -758,7 +951,9 @@ fn run_history(operations: &[Operation], coverage: &mut Coverage) -> Result<(), 
 
         for (key, request) in requests.iter().enumerate() {
             let watched = watches.iter().any(|watch| {
-                !watch.forgotten && watch.request == key && watch.result == WatchResult::Pending
+                !watch.forgotten
+                    && watch.dependencies.contains(&key)
+                    && watch.result == WatchResult::Pending
             });
             for observer in [
                 owner,
@@ -781,81 +976,70 @@ fn run_history(operations: &[Operation], coverage: &mut Coverage) -> Result<(), 
                 );
             }
             let retained_work = !request.released && !request.target_finished;
-            let current = retained_work
-                && (request.delivered || request.reply_accepted || request.ack_accepted);
-            let expected_work = (
-                if current { vec![ids[key]] } else { vec![] },
-                if retained_work && !current {
-                    vec![ids[key]]
-                } else {
-                    vec![]
-                },
-            );
-            prop_assert_eq!(
-                registry.work_for_target(targets[key]),
-                expected_work,
-                "step {} key {}",
-                step,
-                key
-            );
-            let active =
-                retained_work && (request.admitted || request.cancellation.is_some() || current);
-            prop_assert_eq!(
-                registry
-                    .active_for_target(targets[key])
-                    .into_iter()
-                    .map(|(id, _)| id)
-                    .collect::<Vec<_>>(),
-                if active { vec![ids[key]] } else { vec![] }
-            );
-            prop_assert_eq!(
-                registry.received_counts(targets[key]).0,
-                u64::from(request.admitted)
-            );
-            prop_assert!(
-                registry
-                    .work_for_target(Identity::Restarted.actor(targets[key]))
-                    .0
-                    .is_empty()
-            );
-            prop_assert!(
-                registry
-                    .work_for_target(Identity::Restarted.actor(targets[key]))
-                    .1
-                    .is_empty()
-            );
             coverage.terminal_owner_with_active_target +=
                 usize::from(retained_work && request.outcome.is_some());
         }
+        for target in targets
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>()
+        {
+            let mut current = Vec::new();
+            let mut queued = Vec::new();
+            let mut active = Vec::new();
+            let mut admitted = 0;
+            for (key, request) in requests
+                .iter()
+                .enumerate()
+                .filter(|(key, _)| targets[*key] == target)
+            {
+                admitted += u64::from(request.admitted);
+                if request.released || request.target_finished {
+                    continue;
+                }
+                let executing = request.delivered || request.reply_accepted || request.ack_accepted;
+                if executing {
+                    current.push(ids[key]);
+                } else {
+                    queued.push(ids[key]);
+                }
+                if executing || request.admitted || request.cancellation.is_some() {
+                    active.push(ids[key]);
+                }
+            }
+            coverage.shared_target_work += usize::from(active.len() > 1);
+            prop_assert_eq!(registry.work_for_target(target), (current, queued));
+            prop_assert_eq!(
+                registry
+                    .active_for_target(target)
+                    .into_iter()
+                    .map(|(id, _)| id)
+                    .collect::<Vec<_>>(),
+                active
+            );
+            prop_assert_eq!(registry.received_counts(target).0, admitted);
+            prop_assert_eq!(
+                registry.work_for_target(Identity::Restarted.actor(target)),
+                (vec![], vec![])
+            );
+        }
         for watch in &watches {
-            let expected = if watch.forgotten {
-                Err(ReplyError::Stale)
-            } else {
-                Ok(match &watch.result {
-                    WatchResult::Pending => WatchObservation::Pending(PendingProgress {
-                        actor_terminal: None,
-                        provider_turn: None,
-                        last_activity_unix_ms: None,
-                        progress_revision: None,
-                        watched: true,
-                    }),
-                    WatchResult::Ready => {
-                        WatchObservation::Ready(match &requests[watch.request].outcome {
-                            Some(Err(failure)) => vec![(ids[watch.request], failure.clone())],
-                            _ => vec![],
-                        })
-                    }
-                    WatchResult::Failed(failure) => WatchObservation::Unavailable {
-                        request: ids[watch.request],
-                        failure: failure.clone(),
-                    },
-                })
-            };
-            // Foreign observation does not acknowledge a queued owner notice.
+            // Passive checking uses a foreign observer and verifies it cannot
+            // warm owner acknowledgement; only ObserveWatch(as_owner) may do so.
+            let expected_ack = !watch.forgotten && watch.observed_by_owner;
+            prop_assert_eq!(
+                registry.watch_observed_since(watch.owner, watch.id, 0),
+                expected_ack
+            );
             prop_assert_eq!(
                 registry.observe_watch(ActorRef::first(ActorId(10)), watch.id),
-                expected
+                watch.observation(&requests, &ids)
             );
+            prop_assert_eq!(
+                registry.watch_observed_since(watch.owner, watch.id, 0),
+                expected_ack
+            );
+            prop_assert!(!registry.watch_observed_since(ActorRef::first(ActorId(10)), watch.id, 0));
             prop_assert_eq!(
                 registry.retains_watch(watch.owner, watch.id),
                 !watch.forgotten
@@ -883,12 +1067,46 @@ fn run_history(operations: &[Operation], coverage: &mut Coverage) -> Result<(), 
     Ok(())
 }
 
-fn projection(result: &WatchResult, request: RequestId) -> WatchStateProjection {
+impl WatchModel {
+    fn observation(
+        &self,
+        requests: &[RequestModel],
+        ids: &[RequestId],
+    ) -> Result<WatchObservation, ReplyError> {
+        if self.forgotten {
+            return Err(ReplyError::Stale);
+        }
+        Ok(match &self.result {
+            WatchResult::Pending => WatchObservation::Pending(PendingProgress {
+                actor_terminal: None,
+                provider_turn: None,
+                last_activity_unix_ms: None,
+                progress_revision: None,
+                watched: true,
+            }),
+            WatchResult::Ready => WatchObservation::Ready(
+                self.dependencies
+                    .iter()
+                    .filter_map(|key| match &requests[*key].outcome {
+                        Some(Err(failure)) => Some((ids[*key], failure.clone())),
+                        _ => None,
+                    })
+                    .collect(),
+            ),
+            WatchResult::Failed { request, failure } => WatchObservation::Unavailable {
+                request: ids[*request],
+                failure: failure.clone(),
+            },
+        })
+    }
+}
+
+fn projection(result: &WatchResult, ids: &[RequestId]) -> WatchStateProjection {
     match result {
         WatchResult::Pending => WatchStateProjection::Pending,
         WatchResult::Ready => WatchStateProjection::Ready,
-        WatchResult::Failed(failure) => WatchStateProjection::Unavailable {
-            request,
+        WatchResult::Failed { request, failure } => WatchStateProjection::Unavailable {
+            request: ids[*request],
             failure: failure.clone(),
         },
     }
@@ -896,19 +1114,55 @@ fn projection(result: &WatchResult, request: RequestId) -> WatchStateProjection 
 
 #[test]
 fn generated_request_lifecycle_matches_observable_model() {
-    let mut runner = TestRunner::new(Config {
-        cases: 96,
+    const REGRESSIONS: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/proptest-regressions/request-sequences.txt"
+    );
+    let mut config = Config {
         max_shrink_iters: 4_096,
-        source_file: Some(file!()),
+        source_file: Some(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/request/sequence_tests.rs"
+        )),
+        // Cargo supplies an absolute owning manifest directory; Buck supplies
+        // the declared package path relative to its checkout working directory.
+        // Neither seed persistence nor source identity uses the staged file!().
+        failure_persistence: Some(Box::new(FileFailurePersistence::Direct(REGRESSIONS))),
         test_name: Some(concat!(
             module_path!(),
             "::generated_request_lifecycle_matches_observable_model"
         )),
         ..Config::default()
-    });
+    };
+    if std::env::var_os("PROPTEST_CASES").is_none() {
+        config.cases = 96;
+    }
+    eprintln!("request sequence seed persistence: {REGRESSIONS}");
+    let mut runner = TestRunner::new(config);
+    let mut cohort = Coverage::default();
+    for topology in [vec![0, 0], vec![0, 1], vec![0, 0, 1], vec![0, 1, 2]] {
+        for mode in 0..4 {
+            for failed in [false, true] {
+                for allow_failure in [false, true] {
+                    run_history(
+                        &guided(topology.clone(), mode, failed, allow_failure),
+                        &mut cohort,
+                    )
+                    .unwrap();
+                }
+            }
+        }
+    }
+    // These lower bounds come from the explicit cohort, never a random seed.
+    assert!(cohort.shared_target_work > 0 && cohort.retirement_fanout > 0);
+    assert!(cohort.multi_dependency_watches > 0 && cohort.owner_acknowledgements > 0);
+    assert!(cohort.foreign_terminal_observations > 0 && cohort.accepted_replies > 0);
+    assert!(cohort.completed_acknowledgements > 0 && cohort.acknowledgement_retries > 0);
+    assert!(cohort.released_responses > 0 && cohort.terminal_owner_with_active_target > 0);
+    eprintln!("request deterministic cohort coverage: {cohort:#?}");
     let coverage = RefCell::new(Coverage::default());
-    let result = runner.run(&histories(), |operations| {
-        run_history(&operations, &mut coverage.borrow_mut())
+    let result = runner.run(&histories(), |history| {
+        run_history(&history, &mut coverage.borrow_mut())
     });
     eprintln!("request sequence coverage: {:#?}", coverage.borrow());
     result.unwrap();
