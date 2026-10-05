@@ -186,6 +186,7 @@ pub(super) fn assert_typed_receive_json(
     else {
         panic!("pure payload producer must complete")
     };
+    producer.observe(payload_program, pair).expect("force the genuine typed payload pair");
     let answers = producer.fields(pair, RealmId::ROOT, 2).expect("two typed payloads");
     assert!(producer.release(pair));
     let (mut engine, program) = PreparedEngine::bootstrap_with_nursery_bytes(prepared, 4096)
