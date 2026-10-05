@@ -55,7 +55,8 @@ cellProgramStateChecks = do
   assert "native authority is unchanged by output accumulation"
     (programExact final == exact && programPrologue final == prologue
       && null (programValues final) && null (programOriginals final)
-      && programOriginal final == Nothing && Map.null (programRetained final))
+      && programOriginal final == Nothing && Map.null (programRetained final)
+      && programSourceImports final == Nothing)
   assert "signature queries retain requested key order, duplicate evidence, and repeated keys"
     (signaturesFor ["expr-4","missing","pin-0","pin-0"] final
       == [signature "expr-4" "Char",signature "pin-0" "Int",signature "pin-0" "Duplicate"

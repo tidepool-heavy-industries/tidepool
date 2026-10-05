@@ -135,6 +135,7 @@ import Tidepool.HomeProducts (hydrateCandidateHomeProducts, CandidateCoreFailure
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedPipelineResult(..), PipelineResult(..), CheckedEnvironmentResult(..)
   , preparedFreshDependencies, preparedExactCompilation, preparedHomeRequirements
+  , retainProgramSourceImports, withProgramSourceImports
   , finalizedTidyGuts, FinalizedExecutionFailure(..)
   , retainedCompilerArtifactClosure, retainedCompilerInterface
   , renderType, generatedScaffoldRecipe, activationPreviewInputType, withSourceImportIntents
@@ -166,7 +167,7 @@ import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import Tidepool.CheckedCell (CheckedSignature(..), RequestTypeSignatures(..), RequestHelperRecipe(..), captureCheckedSignature, encodeCheckedSignature, decodeCheckedSignature, encodeRequestTypeSignatures
   , captureCheckedTypeWitness, sealCheckedTypeWitness, encodeCheckedTypeWitness, validateCheckedTypeWitnessBytes, rewriteCheckedAnnotations, rewriteHostInputType, rewriteRequestTypes, NativeParsedModule(..), thenNativeModule, typecheckNativeModule, typecheckNativeModuleWithDiagnostics)
 import Tidepool.TurnSource (replaceTemplateMarker, spliceTemplate)
-import Tidepool.Binders (BoundBinder(..), analyzeCellWithFlags, CellSourcePlan(..))
+import Tidepool.Binders (BoundBinder(..), analyzeCellWithFlags, defaultParserDynFlags, CellSourcePlan(..))
 import Tidepool.ExecutionSource
   ( WorkerExecutionSource(OrdinaryExecutionSource)
   , ExecutionSourceIdentity(..), ExecutionSourceOwner(..), ExecutionSourceRef(..), ExecutionSourceGraph(..), ExecutionSourceNode(..)
@@ -521,7 +522,10 @@ canonicalCurrentSource = withTiming $ withScratch $ \work -> do
         localOwner = ("main","CanonicalLocalSupport")
         localSource = work </> "CanonicalLocalSupport.hs"
         captureDirectory = work </> "local-original-capture"
-    captured <- compile (PreparedProducts Nothing) Set.empty (CellProgramCompile GeneralCompile admitted)
+    parsedLocal <- analyzeCellWithFlags (hsc_dflags (prHscEnv (pprPipelineResult original))) ""
+      "import CanonicalLocalSupport\n(1 :: Answer)" >>= either (fail . show) pure
+    let localPurpose = withSourceImportIntents (cellPlanPrologue parsedLocal) GeneralCompile
+    captured <- compile (PreparedProducts Nothing) Set.empty (CellProgramCompile localPurpose admitted)
       (Just session) localTarget includes Nothing
     createDirectory captureDirectory
     originals <- newOriginalInterfaceArtifacts (prHscEnv (pprPipelineResult captured))
@@ -546,10 +550,11 @@ canonicalCurrentSource = withTiming $ withScratch $ \work -> do
           , scopeInterfaceEvidence = Map.insert localOwner (ModuleInterfaceEvidence localProof)
               (scopeInterfaceEvidence inherited)
           , scopeLexical = scopeLexical inherited ++ [(localOwner,[("main","CanonicalDependency")])] }
-    parsedLocal <- analyzeCellWithFlags (hsc_dflags (prHscEnv (pprPipelineResult captured))) ""
-      "import CanonicalLocalSupport\n(1 :: Answer)" >>= either (fail . show) pure
-    let localPurpose = withSourceImportIntents (cellPlanPrologue parsedLocal) GeneralCompile
-        checkLocal scope = compile (PreparedProducts Nothing) Set.empty
+    completedImports <- retainProgramSourceImports Nothing captured
+      (certifiedFinalizedArtifacts emitted) selectedScope
+    unless (isNothing completedImports)
+      (fail "fresh root absorbed a prior source-selected original's current receipt")
+    let checkLocal scope = compile (PreparedProducts Nothing) Set.empty
           (CellProgramCompile localPurpose scope) (Just session) localTarget includes Nothing
         recheckLocal = checkLocal selectedScope
     selectedLocal <- recheckLocal
@@ -606,6 +611,126 @@ canonicalCurrentSource = withTiming $ withScratch $ \work -> do
     _ <- check compile purpose
     pure ()
   putStrLn "canonical current source: captured and persisted interface-only proofs, exact imports, duplicate imports, dependency/source drift and missing refusal"
+
+completedProgramSourceImports :: IO ()
+completedProgramSourceImports = withTiming $ withScratch $ \work -> do
+  forM_ ["MetadataQuoteSupport.hs","MetadataQuoter.hs","MetadataQuotedTarget.hs"] $ \name ->
+    copyFile ("test-source-boot/fixtures" </> name) (work </> name)
+  let marker = work </> "completed-original-quoter"
+      target = work </> "CompletedOriginalConsumer.hs"
+      includes = [work]
+      root = ("main","MetadataQuotedTarget")
+      hidden = ("main","MetadataHiddenQuoted")
+      targetSource imports = unlines
+        [ "{-# LANGUAGE PackageImports #-}"
+        , "module CompletedOriginalConsumer where"
+        , imports
+        , "__result :: Int"
+        , "__result = 7"
+        ]
+  quoter <- T.pack <$> readFile (work </> "MetadataQuoter.hs")
+  writeFile (work </> "MetadataQuoter.hs") (T.unpack (T.replace
+    "quoteExp = \\_ -> pure"
+    (T.pack ("quoteExp = \\_ -> runIO (appendFile " ++ show marker ++ " \"executed\\n\") >> pure"))
+    (T.replace "import MetadataQuoteSupport"
+      "import Language.Haskell.TH.Syntax (runIO)\nimport MetadataQuoteSupport" quoter)))
+  quoted <- T.pack <$> readFile (work </> "MetadataQuotedTarget.hs")
+  writeFile (work </> "MetadataHiddenQuoted.hs")
+    (T.unpack (T.replace "module MetadataQuotedTarget" "module MetadataHiddenQuoted" quoted))
+  scopePath <- writeGenuineEmptyMetadataScope work
+  base <- readExactScope scopePath >>= either fail pure
+  let admitted = base {scopePurpose=ExactCellPurpose (CheckedCellAdmission (replicate 64 '0')
+        (replicate 64 '0') (replicate 64 '0') [] [] [] [] Nothing AuthoredCellCheck) includes}
+      session = emptySessionScope {ssRoot=work,ssExactScope=Just scopePath}
+      parsedPurpose flags source = do
+        plan <- analyzeCellWithFlags flags "" source >>= either (fail . show) pure
+        pure (withSourceImportIntents (cellPlanPrologue plan) GeneralCompile)
+  writeFile target (targetSource "import MetadataQuotedTarget\nimport MetadataHiddenQuoted ()")
+  flags <- defaultParserDynFlags
+  requested <- parsedPurpose flags "import MetadataQuotedTarget\n(7 :: Int)"
+  withResidentPipelineSelected includes $ \compile -> do
+    completed <- compile (PreparedProducts Nothing) Set.empty (CellProgramCompile requested admitted)
+      (Just session) target includes Nothing
+    unless (not (dependencyCacheSafe (preparedFreshDependencies completed)))
+      (fail "instrumented arbitrary runIO quoter was treated as cache-safe")
+    let directory = work </> "completed-originals"
+    createDirectory directory
+    originals <- newOriginalInterfaceArtifacts (prHscEnv (pprPipelineResult completed))
+      (pprFinalizedModules completed) (retainedOriginalInterfaces completed) directory
+    certified <- writeCertifiedProductsKeeping includes originals directory completed Nothing []
+    let proofs = certifiedSourceOriginals certified
+        admissions = finalizedLocalAdmissions (certifiedFinalizedArtifacts certified)
+    rows <- forM (Map.keys proofs) $ \key -> do
+      admission <- maybe (fail "completed original lost finalized interface") pure (Map.lookup key admissions)
+      lexical <- either fail pure (preparedHomeRequirements completed (fst key) (snd key))
+      pure (key,localFinalizedInterface admission,lexical)
+    let retained = admitted
+          { scopeInterfaces = [row | (_,row,_) <- rows]
+          , scopeInterfaceEvidence = Map.map ModuleInterfaceEvidence proofs
+          , scopeLexical = [(key,lexical) | (key,_,lexical) <- rows] }
+    imports <- retainProgramSourceImports Nothing completed (certifiedFinalizedArtifacts certified) retained
+    unless (isJust imports) (fail "fresh authored root did not retain its completed decision")
+    initialRuns <- lines <$> readFile marker
+    unless (length initialRuns >= 2) (fail "fresh and hidden support did not execute the real quoter")
+    writeFile target (targetSource "import qualified MetadataQuotedTarget as Captured")
+    aliased <- parsedPurpose flags "import qualified MetadataQuotedTarget as Captured\n(7 :: Int)"
+    _ <- compile CheckedEnvironment Set.empty
+      (CellProgramCompile (withProgramSourceImports imports aliased) retained)
+      (Just session) target includes Nothing
+    later <- compile (PreparedProducts Nothing) Set.empty
+      (CellProgramCompile (withProgramSourceImports imports aliased) retained)
+      (Just session) target includes Nothing
+    unless (null (preparedNames later) || preparedNames later == ["CompletedOriginalConsumer"])
+      (fail "later pass rebuilt retained authored support")
+    imports' <- retainProgramSourceImports imports later (emptyFinalizedModuleArtifacts (prHscEnv (pprPipelineResult later))) retained
+    unless (imports' == imports) (fail "later pass changed the completed import decision")
+    laterRuns <- lines <$> readFile marker
+    unless (laterRuns == initialRuns) (fail "later pass reran the retained arbitrary runIO quoter")
+    requireOriginalSourceRejection "new cell cannot reuse completed original imports"
+      (ExecutionSourceUnsupported root)
+      (compile CheckedEnvironment Set.empty (CellProgramCompile aliased retained)
+        (Just session) target includes Nothing)
+    writeFile target (targetSource "import \"this\" MetadataQuotedTarget")
+    qualified <- parsedPurpose flags "{-# LANGUAGE PackageImports #-}\nimport \"this\" MetadataQuotedTarget\n(7 :: Int)"
+    requireOriginalSourceRejection "changed package qualifier requires current source"
+      (ExecutionSourceUnsupported root)
+      (compile CheckedEnvironment Set.empty
+        (CellProgramCompile (withProgramSourceImports imports qualified) retained)
+        (Just session) target includes Nothing)
+    writeFile target (targetSource "import MetadataHiddenQuoted")
+    hiddenPurpose <- parsedPurpose flags "import MetadataHiddenQuoted\n(7 :: Int)"
+    requireOriginalSourceRejection "generated hidden original has no completed authored demand"
+      (ExecutionSourceUnsupported hidden)
+      (compile CheckedEnvironment Set.empty
+        (CellProgramCompile (withProgramSourceImports imports hiddenPurpose) retained)
+        (Just session) target includes Nothing)
+    writeFile target (targetSource "import MetadataQuoter")
+    newPurpose <- parsedPurpose flags "import MetadataQuoter\n(7 :: Int)"
+    demanded <- compile (PreparedProducts Nothing) Set.empty
+      (CellProgramCompile (withProgramSourceImports imports newPurpose) retained)
+      (Just session) target includes Nothing
+    unless (maybe False (any ((== ("main","MetadataQuoter")) . firstOwner) . selectedOriginalRows)
+        (preparedExactCompilation demanded >>= compilationSourceSelection))
+      (fail "new direct import of a transitive provider lost its current-source receipt")
+    selected <- either fail pure (extendSourceSelectedOriginals
+      (preparedExactCompilation demanded >>= compilationSourceSelection) retained)
+    retainedImports <- retainProgramSourceImports imports demanded
+      (emptyFinalizedModuleArtifacts (prHscEnv (pprPipelineResult demanded))) selected
+    writeFile target (targetSource "import MetadataQuotedTarget")
+    requireOriginalSourceRejection "new selected dependency still requires its current-source receipt"
+      (ExecutionSourceUnsupported root)
+      (compile CheckedEnvironment Set.empty
+        (CellProgramCompile (withProgramSourceImports retainedImports requested) selected)
+        (Just session) target includes Nothing)
+    originalBytes <- BS.readFile (work </> "MetadataQuotedTarget.hs")
+    BS.appendFile (work </> "MetadataQuotedTarget.hs") "\n-- current source changed\n"
+    requireOriginalSourceBytesChanged "new cell rechecks changed current source" root
+      (work </> "MetadataQuotedTarget.hs") (digest originalBytes)
+      (compile CheckedEnvironment Set.empty (CellProgramCompile requested retained)
+        (Just session) target includes Nothing)
+  putStrLn "completed program imports: arbitrary runIO original retained once, alias reuse, new cell/qualifier/hidden/new-demand and current drift controls"
+  where
+    firstOwner (owner,_,_,_) = owner
 
 -- GHC owns whether an authored import contributes an interface obligation.
 -- Inspect that evidence before projecting custody; import text is never used

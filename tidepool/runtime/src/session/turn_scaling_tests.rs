@@ -1289,6 +1289,68 @@ fn following_declaration_publishes_current_source_selected_originals() {
 }
 
 #[test]
+fn same_cell_authored_import_retains_completed_quasiquote_support() {
+    tidepool_testing::eval_harness::require_extract();
+    let root = tempfile::tempdir().unwrap();
+    let marker = root.path().join("same-cell-import-quoter-runs");
+    std::fs::write(
+        root.path().join("SameCellImportQuoter.hs"),
+        include_str!("fixtures/same-cell-import-quoter.hs").replace(
+            "SAME_CELL_IMPORT_MARKER",
+            &format!("{:?}", marker.to_str().unwrap()),
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        root.path().join("SameCellImportSupport.hs"),
+        include_str!("fixtures/same-cell-import-support.hs"),
+    )
+    .unwrap();
+    let effects = TestEffectSurface::minimal(&[]).unwrap();
+    let images = Arc::new(ImageRegistry::new());
+    let lib = SessionLib::open(
+        SessionId(1008),
+        root.path(),
+        ModuleEnv::standalone_default(),
+    )
+    .unwrap()
+    .with_validation_include(effects.include_paths().to_vec());
+    let mut persistent = PersistentSession::new(Some(lib), 1024 * 1024);
+    persistent.set_image_registry(images.clone());
+    let public = persistent.mint_scope(ScopeId::ROOT).unwrap();
+    let mut resident =
+        ResidentSession::from_persistent_for_test(frunk::HNil, QuietOutput, persistent);
+    execute_cell(
+        &mut resident,
+        public,
+        &effects,
+        &images,
+        (0, 0),
+        "same_cell_authored_import",
+        include_str!("fixtures/compiled-cell-same-source-import.hs"),
+        2,
+        &ScalePublication::Ephemeral,
+    );
+    let runs = std::fs::read_to_string(&marker).unwrap();
+    assert_eq!(
+        runs.lines().count(),
+        2,
+        "the initial check and prepared original execute the quoter once each"
+    );
+    assert!(resident
+        .compile_view_in(public)
+        .unwrap()
+        .exact_declaration_context()
+        .unwrap()
+        .lexical_graph()
+        .iter()
+        .any(|node| node.owner.module == "SameCellImportSupport"));
+    assert!(resident
+        .binding_names_in(public)
+        .contains(&"sameCellOriginal".to_owned()));
+}
+
+#[test]
 fn following_cells_reprove_template_imports_of_retained_rich_originals() {
     tidepool_testing::eval_harness::require_extract();
     let root = tempfile::tempdir().unwrap();

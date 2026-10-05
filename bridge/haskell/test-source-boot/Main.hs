@@ -26,6 +26,7 @@ tests = testGroup "source-boot"
   , testCase "SOURCE boot reuse" $ withTiming (withScratch sourceBootReuseAt)
   , testCase "candidate sited siblings" $ candidateSitedSiblings
   , testCase "canonical current source" $ canonicalCurrentSource
+  , testCase "completed program source imports" $ completedProgramSourceImports
   , testCase "canonical source obligations" $ canonicalSourceObligations
   , testCase "generated scaffold imports" $ generatedScaffoldImports
   , testCase "hydrated site siblings" $ hydratedSiteSiblings
