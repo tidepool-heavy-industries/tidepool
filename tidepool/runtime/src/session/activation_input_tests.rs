@@ -1801,6 +1801,68 @@ fn assert_unpublished_input(
 }
 
 #[test]
+fn activation_input_staging_does_not_publish_a_reserved_interface() {
+    let fixture = InputFixture::compile(
+        include_str!("fixtures/activation-input-function.hs"),
+        false,
+        SessionId(1737),
+    );
+    let mut resident = fixture.fresh();
+    let (owner, interface) = parked_input_owner(&fixture, &mut resident);
+    let certificate = interface.value_interface_certificate();
+    let view = resident.compile_view_in(ScopeId::ROOT).unwrap();
+    let path = view
+        .session_root()
+        .join(certificate.owner().relative_hi_path());
+    let visibility = resident
+        .public_visibility_snapshot_in(ScopeId::ROOT)
+        .unwrap();
+    let handles = resident.value_handle_count();
+    let roots = resident.persistent_roots_count();
+    let staged = resident
+        .state
+        .stage_checked_value_interface(certificate.clone())
+        .unwrap();
+    resident
+        .state
+        .validate_staged_value_interface(&staged)
+        .unwrap();
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        certificate.bytes_owned().as_ref()
+    );
+    assert_eq!(
+        resident.compile_view_in(ScopeId::ROOT).as_ref(),
+        Some(&view)
+    );
+    assert_eq!(
+        resident
+            .public_visibility_snapshot_in(ScopeId::ROOT)
+            .as_ref(),
+        Some(&visibility)
+    );
+    assert!(resident
+        .state
+        .retained_checked_value_artifact(certificate.owner())
+        .is_none());
+    assert_eq!(resident.value_handle_count(), handles);
+    assert_eq!(resident.persistent_roots_count(), roots);
+    let foreign_root = tempfile::tempdir().unwrap();
+    let foreign = InputFixture::fresh_in(SessionId(1738), &foreign_root, &fixture.recipe);
+    assert!(matches!(
+        foreign.state.validate_staged_value_interface(&staged),
+        Err(SessionError::StaleStagedDeclaration)
+    ));
+    drop(staged);
+    assert!(
+        !path.exists(),
+        "dropping a stage cleans only its uncommitted creation"
+    );
+    mount_original(&mut resident, owner, interface);
+    assert!(path.exists());
+}
+
+#[test]
 fn activation_input_interface_staging_io_failure_precedes_root_consumption() {
     let fixture = InputFixture::compile(
         include_str!("fixtures/activation-input-function.hs"),
