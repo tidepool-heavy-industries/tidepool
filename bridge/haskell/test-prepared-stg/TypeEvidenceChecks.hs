@@ -5,13 +5,14 @@ import Control.Monad.State.Strict (runStateT, lift)
 import Data.IntMap.Strict qualified as IntMap
 import Data.Map.Strict qualified as Map
 import Data.Text qualified as Text
-import GHC.Builtin.Types (boolTy)
+import GHC.Builtin.Types (boolTy, tupleTyCon)
+import GHC.Types.Basic (Boxity(Boxed))
 import GHC.Core.Coercion (mkNomReflCo)
 import GHC.Core.Type (typeKind, mkNumLitTy)
 import GHC.Core.TyCo.Rep (Type(..))
 import Tidepool.CanonicalTypeShape (captureClosedTypeShape, TypeShapeError(..))
 import GHC.Core.DataCon (dataConName)
-import GHC.Core.TyCon (tyConDataCons)
+import GHC.Core.TyCon (tyConDataCons, tyConName)
 import GHC.Types.Name (nameOccName)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.TypeEnv (typeEnvTyCons)
@@ -109,7 +110,8 @@ runTypeEvidenceChecks directory = do
   assert (IntMap.size (typeGraphNodes (programTypes nest)) < 256
       && map (length . snd) (templates nest "Nest") == [1])
     "nonregular recursion did not remain a finite declaration template"
-  pair <- requireHead "expandingPair" "(,)" DataDeclaration
+  pair <- requireHead "expandingPair"
+    (Text.pack (occNameString (nameOccName (tyConName (tupleTyCon Boxed 2))))) DataDeclaration
   faster <- requireHead "fasterExpanding" "Nest2" DataDeclaration
   assert (IntMap.size (typeGraphNodes (programTypes pair)) < 256
       && IntMap.size (typeGraphNodes (programTypes faster)) < 256
