@@ -974,6 +974,7 @@ fn create_parent(anchor: &DirectoryAnchor, relative_path: &Path) -> Result<(), s
     let parent = relative_path.parent().unwrap_or_else(|| Path::new(""));
     anchor
         .create_dir_all(parent)
+        .map(|_| ())
         .map_err(|error| std::io::Error::new(error.source.kind(), error))
 }
 

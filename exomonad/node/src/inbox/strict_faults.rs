@@ -12,6 +12,7 @@ fn fault_child() {
     let case = std::env::var("INBOX_FAULT_CASE").unwrap();
     let arm = PathBuf::from(std::env::var("INBOX_FAULT_ARM").unwrap());
     let rows = root.join("rows/new/deep/rows.jsonl");
+    let cursor = anchor.resolve("cursor/new/deep/checkpoint").unwrap();
     let open = || {
         DurableInbox::<String, String>::open(
             &anchor,
