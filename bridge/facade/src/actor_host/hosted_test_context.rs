@@ -13,6 +13,34 @@ type HostOutcome =
     futures_util::future::Shared<futures_util::future::BoxFuture<'static, Result<(), String>>>;
 type ScenarioResult = Result<(), Box<dyn std::any::Any + Send>>;
 
+struct HostTermination {
+    result: Option<Result<(), String>>,
+    joined: Result<(), String>,
+}
+
+impl HostTermination {
+    fn into_result(self) -> Result<(), String> {
+        self.joined?;
+        self.result
+            .ok_or_else(|| "production host outcome remains unavailable".to_owned())?
+    }
+
+    fn startup_failure(self, detail: String) -> (String, CleanupOutcome) {
+        let detail = match &self.result {
+            Some(Err(error)) => format!("production host failed during startup: {error}"),
+            _ => detail,
+        };
+        let cleanup = match &self.joined {
+            Err(error) => CleanupOutcome::from_result(&Err(error.clone())),
+            Ok(()) if matches!(self.result, Some(Ok(()))) => CleanupOutcome::Confirmed,
+            // Executor termination does not acknowledge production teardown
+            // when startup returned an error before issuing the hosted context.
+            Ok(()) => CleanupOutcome::Unknown,
+        };
+        (detail, cleanup)
+    }
+}
+
 #[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
 #[serde(tag = "status", rename_all = "snake_case")]
 enum ScenarioOutcome {
@@ -536,7 +564,7 @@ impl HostedTestRuntime {
         .map_err(|error| error.to_string())?;
         runtime_directory.disable_cleanup(diagnostic_root.is_some());
         let run_root = runtime_directory.path().join("run");
-        let diagnostics = diagnostic_root.map(|root| HostedTestDiagnostics {
+        let mut diagnostics = diagnostic_root.map(|root| HostedTestDiagnostics {
             root,
             workspace: repository.path().to_path_buf(),
             run_root: run_root.clone(),
@@ -565,6 +593,11 @@ impl HostedTestRuntime {
             jev: None,
         };
         configure(&mut config);
+        if let Some(diagnostics) = &mut diagnostics {
+            diagnostics.workspace = config.workspace.clone();
+            diagnostics.run_root = config.run_root.clone();
+            diagnostics.report(&ScenarioOutcome::Unknown, &CleanupOutcome::Unknown)?;
+        }
         let lease =
             HostIncarnationLease::claim(&config.run_root).map_err(|error| error.to_string())?;
         let observer = HostTestObserver::default();
@@ -636,42 +669,22 @@ impl HostedTestRuntime {
                     Err(_) => "production startup exceeded its budget".into(),
                     Ok(Ok(_)) => unreachable!(),
                 };
-                if let Some(host_outcome) = exited_during_startup {
-                    let joined = thread
-                        .join()
-                        .map_err(|_| "production host executor panicked".to_owned());
-                    let cleanup = host_outcome.and(joined);
-                    let evidence = if let Some(diagnostics) = &diagnostics {
-                        diagnostics.report(
-                            &ScenarioOutcome::Failed {
-                                phase: ScenarioPhase::Startup,
-                                message: detail.chars().take(2048).collect(),
-                            },
-                            &CleanupOutcome::from_result(&cleanup),
-                        )
-                    } else {
-                        Ok(())
-                    };
-                    return Err(format!(
-                        "{detail}; cleanup: {cleanup:?}; evidence: {evidence:?}"
-                    ));
-                }
-                let cleanup = Self::shutdown(
-                    stop.clone(),
-                    outcome
+                let outcome: HostOutcome = match exited_during_startup {
+                    Some(result) => futures_util::future::ready(result).boxed().shared(),
+                    None => outcome
                         .map(|result| result.unwrap_or_else(|error| Err(error.to_string())))
                         .boxed()
                         .shared(),
-                    Some(thread),
-                )
-                .await;
+                };
+                let termination = Self::terminate(stop.clone(), outcome, Some(thread)).await;
+                let (detail, cleanup) = termination.startup_failure(detail);
                 let evidence = if let Some(diagnostics) = &diagnostics {
                     diagnostics.report(
                         &ScenarioOutcome::Failed {
                             phase: ScenarioPhase::Startup,
                             message: detail.chars().take(2048).collect(),
                         },
-                        &CleanupOutcome::from_result(&cleanup),
+                        &cleanup,
                     )
                 } else {
                     Ok(())
@@ -721,16 +734,35 @@ impl HostedTestRuntime {
         outcome: HostOutcome,
         thread: Option<std::thread::JoinHandle<()>>,
     ) -> Result<(), String> {
+        Self::terminate(stop, outcome, thread).await.into_result()
+    }
+
+    async fn terminate(
+        stop: watch::Sender<bool>,
+        outcome: HostOutcome,
+        thread: Option<std::thread::JoinHandle<()>>,
+    ) -> HostTermination {
         stop.send_replace(true);
-        let outcome = tokio::time::timeout(SHUTDOWN_BUDGET, outcome)
-            .await
-            .map_err(|_| "production host shutdown remains unconfirmed".to_owned())?;
-        if let Some(thread) = thread {
+        let result = match tokio::time::timeout(SHUTDOWN_BUDGET, outcome).await {
+            Ok(result) => result,
+            Err(_) => {
+                return HostTermination {
+                    result: None,
+                    joined: Err("production host shutdown remains unconfirmed".to_owned()),
+                };
+            }
+        };
+        let joined = if let Some(thread) = thread {
             thread
                 .join()
-                .map_err(|_| "production host executor panicked".to_owned())?;
+                .map_err(|_| "production host executor panicked".to_owned())
+        } else {
+            Ok(())
+        };
+        HostTermination {
+            result: Some(result),
+            joined,
         }
-        outcome
     }
 }
 
@@ -774,6 +806,96 @@ pub(super) fn cell_output_matches(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn terminated_host(panic: bool) -> (HostTermination, watch::Receiver<bool>) {
+        let (stop, stopping) = watch::channel(false);
+        let (complete, outcome) = oneshot::channel();
+        let thread = std::thread::spawn(move || {
+            complete
+                .send(Err("injected startup refusal".to_owned()))
+                .unwrap();
+            assert!(!panic, "injected executor panic");
+        });
+        let termination = HostedTestRuntime::terminate(
+            stop,
+            outcome
+                .map(|result| result.unwrap_or_else(|error| Err(error.to_string())))
+                .boxed()
+                .shared(),
+            Some(thread),
+        )
+        .await;
+        (termination, stopping)
+    }
+
+    #[tokio::test]
+    async fn startup_host_error_is_primary_after_executor_join() {
+        let (termination, stopping) = terminated_host(false).await;
+        assert!(*stopping.borrow());
+        assert!(termination.joined.is_ok());
+        let (message, cleanup) =
+            termination.startup_failure("production assembly observer closed".into());
+        assert_eq!(
+            message,
+            "production host failed during startup: injected startup refusal"
+        );
+        assert_eq!(cleanup, CleanupOutcome::Unknown);
+    }
+
+    #[tokio::test]
+    async fn production_startup_refusal_preserves_worktree_error() {
+        let files = tempfile::tempdir().unwrap();
+        let settings = super::super::test_campaign::hosted_test_settings(&files, 1);
+        let (transport, _requests) = super::super::test_campaign::hosted_script_provider();
+        let workspace = files.path().join("not-a-repository");
+        std::fs::create_dir(&workspace).unwrap();
+        let failure = match HostedTestRuntime::start_configured(&settings, &transport, |config| {
+            config.workspace = workspace.clone();
+        })
+        .await
+        {
+            Ok(_) => panic!("startup must refuse a workspace without Git ownership"),
+            Err(error) => error,
+        };
+        assert!(
+            failure.contains("production host failed during startup"),
+            "{failure}"
+        );
+        assert!(
+            failure.contains(&workspace.display().to_string()),
+            "{failure}"
+        );
+        assert!(failure.contains("cleanup: Unknown"), "{failure}");
+    }
+
+    #[tokio::test]
+    async fn startup_host_error_and_executor_failure_are_independent() {
+        let (termination, _) = terminated_host(true).await;
+        let (message, cleanup) =
+            termination.startup_failure("production assembly observer closed".into());
+        assert_eq!(
+            message,
+            "production host failed during startup: injected startup refusal"
+        );
+        assert_eq!(
+            cleanup,
+            CleanupOutcome::Failed {
+                message: "production host executor panicked".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn successful_host_acknowledges_cleanup_after_startup_observer_failure() {
+        let termination = HostTermination {
+            result: Some(Ok(())),
+            joined: Ok(()),
+        };
+        let (message, cleanup) =
+            termination.startup_failure("production assembly observer closed".into());
+        assert_eq!(message, "production assembly observer closed");
+        assert_eq!(cleanup, CleanupOutcome::Confirmed);
+    }
 
     fn diagnostics(directory: &tempfile::TempDir) -> HostedTestDiagnostics {
         HostedTestDiagnostics {
