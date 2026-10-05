@@ -32,13 +32,15 @@ import GHC.Types.Fixity (Fixity(..))
 import GHC.Driver.Session (parseDynamicFilePragma)
 import GHC.Driver.Env (hsc_HPT)
 import GHC.Unit.Home.ModInfo (lookupHpt, hm_iface)
-import GHC.Unit.Module.ModIface (mi_iface_hash)
+import GHC.Unit.Module.ModIface (mi_iface_hash, mi_mod_hash, mi_usages)
+import GHC.Unit.Module.Deps (Usage(..))
+import GHC.Utils.Fingerprint (fingerprintByteString)
 import GHC.Parser.Header (getOptions)
 import GHC.Driver.Config.Parser (initParserOpts)
 import GHC.Data.StringBuffer (stringToStringBuffer)
 import qualified GHC.Parser as Parser
 import GHC.Parser.Lexer (ParseResult(..), initParserState, unP)
-import GHC.Data.FastString (mkFastString)
+import GHC.Data.FastString (mkFastString, unpackFS)
 import GHC.Types.SrcLoc (mkRealSrcLoc)
 import GHC.Types.SourceError (SourceError)
 import Tidepool.Agent.Assignment.Internal (NameError (..), renderNameError)
@@ -846,7 +848,7 @@ untrackedCompileTimeCompilation = bracket temporary removeDirectoryRecursive $ \
     warm <- compile PreparedStg mempty GeneralCompile Nothing target [] Nothing
     warmSharing <- compilerProductSharing warm
     assertIncomplete "TemplateHaskell source, repeated" warm
-    assertPreparedEquivalent "conservative compile-time gate preserves native output" cold warm
+    assertSameInterfaceEvidenceAndPreparedShape "conservative compile-time gate preserves native output" cold warm
     assertCoreSharing "unused QuasiQuotes extension retains its tracked owner" True
       ["QuasiQuoteDependency"] coldSharing warmSharing
     assertCoreSharing "TemplateHaskell source is finalized afresh" False
@@ -858,7 +860,7 @@ untrackedCompileTimeCompilation = bracket temporary removeDirectoryRecursive $ \
     preprocessedWarm <- compile PreparedStg mempty GeneralCompile Nothing preprocessedUser [] Nothing
     preprocessedWarmSharing <- compilerProductSharing preprocessedWarm
     assertIncomplete "external preprocessor, repeated" preprocessedWarm
-    assertPreparedEquivalent "untracked external input with unchanged output" preprocessedCold preprocessedWarm
+    assertSameInterfaceEvidenceAndPreparedShape "untracked external input with unchanged output" preprocessedCold preprocessedWarm
     assertCoreSharing "untracked preprocessor input prevents native owner reuse" False
       ["PreprocessedDependency"] preprocessedColdSharing preprocessedWarmSharing
     let pureQuote label owner user = do
@@ -868,7 +870,7 @@ untrackedCompileTimeCompilation = bracket temporary removeDirectoryRecursive $ \
           repeated <- compile PreparedStg mempty GeneralCompile Nothing user [] Nothing
           repeatedSharing <- compilerProductSharing repeated
           assertComplete (label ++ ", repeated") repeated
-          assertPreparedEquivalent (label ++ " preserves output") fresh repeated
+          assertSameInterfaceEvidenceAndPreparedShape (label ++ " preserves output") fresh repeated
           assertCoreSharing (label ++ " retains canonical owner") True [owner] freshSharing repeatedSharing
           assertStgSharing (label ++ " retains prepared body") True [owner] freshSharing repeatedSharing
     pureQuote "allowlisted pure quasiquote" "LabelDependency" labelUser
@@ -880,7 +882,7 @@ untrackedCompileTimeCompilation = bracket temporary removeDirectoryRecursive $ \
     localWarm <- compile PreparedStg mempty GeneralCompile Nothing localQuoteUser [] Nothing
     localWarmSharing <- compilerProductSharing localWarm
     assertIncomplete "unlisted quasiquote, repeated" localWarm
-    assertPreparedEquivalent "unlisted quasiquote preserves native output" localCold localWarm
+    assertSameInterfaceEvidenceAndPreparedShape "unlisted quasiquote preserves native output" localCold localWarm
     assertCoreSharing "unlisted quasiquoter prevents owner reuse" False
       ["LocalQuoteDependency"] localColdSharing localWarmSharing
     let dependent = root </> "quote-input.txt"
@@ -910,18 +912,44 @@ untrackedCompileTimeCompilation = bracket temporary removeDirectoryRecursive $ \
       , "value = [uri|tracked|]"
       ]
     writeFile dependentUser $ unlines
-      [ "module DependentUser where"
+      [ "{-# LANGUAGE TemplateHaskell #-}"
+      , "module DependentUser where"
       , "import DependentQuote (value)"
-      , "result = value"
+      , "import Language.Haskell.TH (litE, stringL)"
+      , "result :: String"
+      , "result = $(if value == \"tracked\" then litE (stringL value)"
+      , "  else fail \"dependent-file quoter changed its compiled value\")"
       ]
+    originalDependentBytes <- BS.readFile dependent
     withDependentFile <- compile PreparedStg mempty GeneralCompile Nothing dependentUser [] Nothing
     assertIncomplete "allowlisted origin with a dependent file" withDependentFile
     dependentSharing <- compilerProductSharing withDependentFile
     writeFile dependent "changed tracked input"
+    changedDependentBytes <- BS.readFile dependent
     dependentWarm <- compile PreparedStg mempty GeneralCompile Nothing dependentUser [] Nothing
     dependentWarmSharing <- compilerProductSharing dependentWarm
     assertIncomplete "allowlisted origin with a changed dependent file" dependentWarm
-    assertPreparedEquivalent "dependent-file recheck preserves native output" withDependentFile dependentWarm
+    assertSamePreparedAbiAndShape "dependent-file recheck preserves ABI and typed output"
+      withDependentFile dependentWarm
+    let quoteInterface prepared = maybe (fail "dependent-file quoter lost its finalized interface")
+          (pure . hm_iface . finalizedHomeModInfo)
+          (Map.lookup (mkModuleName "DependentQuote") (pprFinalizedModules prepared))
+        dependentFingerprint interface = case
+            [usg_file_hash usage | usage@UsageFile{} <- mi_usages interface
+              , unpackFS (usg_file_path usage) == dependent] of
+          [fingerprint] -> pure fingerprint
+          _ -> fail "dependent-file quoter lost its unique actual file usage"
+    originalInterface <- quoteInterface withDependentFile
+    changedInterface <- quoteInterface dependentWarm
+    originalFingerprint <- dependentFingerprint originalInterface
+    changedFingerprint <- dependentFingerprint changedInterface
+    assertEqual "original dependent-file usage seals the actual file bytes"
+      (fingerprintByteString originalDependentBytes) originalFingerprint
+    assertEqual "rechecked dependent-file usage seals the changed file bytes"
+      (fingerprintByteString changedDependentBytes) changedFingerprint
+    when (originalFingerprint == changedFingerprint
+        || mi_iface_hash (mi_final_exts originalInterface) == mi_iface_hash (mi_final_exts changedInterface)) $
+      fail "changed dependent-file input retained stale usage or full interface evidence"
     assertCoreSharing "addDependentFile defeats pure-origin reuse" False
       ["DependentQuote"] dependentSharing dependentWarmSharing
   where
@@ -1089,7 +1117,7 @@ pathInsensitiveWitnessCompilation = bracket temporary removeDirectoryRecursive $
         fail "changed import roots did not retain their current source selections"
       unless (dependencyCacheSafe evidence && dependencySelectionComplete evidence) $
         fail "changed import roots lost complete dependency evidence"
-      assertPreparedEquivalent "path-insensitive source selection preserves output" cold warm
+      assertSameInterfaceEvidenceAndPreparedShape "path-insensitive source selection preserves output" cold warm
       assertCoreSharing "byte-identical dependencies reuse finalized owners across roots" True
         ["Dep", "Target", "Shared"] coldSharing warmSharing
       assertStgSharing "byte-identical dependencies reuse prepared bodies across roots" True
@@ -1157,7 +1185,7 @@ validationMemoCompilation = bracket temporary removeDirectoryRecursive $ \root -
       (sort (map moduleNameString (Map.keys (pprFinalizedModules cold))))
     assertEqual "reexport chain selects only executable owners" ["WarmBase", "WarmTarget"]
       (preparedOwnerNames cold)
-    assertPreparedEquivalent "validation-only chain preserves prepared target" cold warm
+    assertSameInterfaceEvidenceAndPreparedShape "validation-only chain preserves prepared target" cold warm
     assertCoreSharing "transaction retains canonical validation-only facts" True validationOwners coldSharing warmSharing
     assertStgSharing "transaction retains reachable dependency body" True ["WarmBase"] coldSharing warmSharing
     assertStgSharing "request target body is prepared afresh" False ["WarmTarget"] coldSharing warmSharing
@@ -1167,7 +1195,7 @@ validationMemoCompilation = bracket temporary removeDirectoryRecursive $ \root -
       ["MemoConsumer", "MemoProducer", "MemoTarget"] (preparedOwnerNames executableCold)
     executableWarm <- compile PreparedStg mempty GeneralCompile Nothing memoTarget [] Nothing
     executableWarmSharing <- compilerProductSharing executableWarm
-    assertPreparedEquivalent "complete cached product preserves native output" executableCold executableWarm
+    assertSameInterfaceEvidenceAndPreparedShape "complete cached product preserves native output" executableCold executableWarm
     assertCoreSharing "transaction retains executable canonical owners" True
       ["MemoProducer", "MemoFacade", "MemoConsumer"] executableColdSharing executableWarmSharing
     assertStgSharing "transaction retains executable prepared bodies" True
@@ -1179,7 +1207,7 @@ validationMemoCompilation = bracket temporary removeDirectoryRecursive $ \root -
       `finally` maybe (unsetEnv "TIDEPOOL_TEST_DROP_MEMO_INTERFACE")
                       (setEnv "TIDEPOOL_TEST_DROP_MEMO_INTERFACE") previousDrop
     regeneratedSharing <- compilerProductSharing regenerated
-    assertPreparedEquivalent "interface recovery restores paired prepared output" executableCold regenerated
+    assertSameInterfaceEvidenceAndPreparedShape "interface recovery restores paired prepared output" executableCold regenerated
     assertCoreSharing "missing retained interface regenerates its canonical owner" False
       ["MemoProducer"] executableWarmSharing regeneratedSharing
     assertStgSharing "producer interface loss regenerates producer and dependent bodies" False
@@ -1422,7 +1450,7 @@ preparedSessionLeafCompilation = bracket temporary removeDirectoryRecursive $ \r
       `finally` maybe (unsetEnv "TIDEPOOL_TEST_DROP_MEMO_INTERFACE")
                       (setEnv "TIDEPOOL_TEST_DROP_MEMO_INTERFACE") previousDrop
     regeneratedSharing <- compilerProductSharing regenerated
-    assertPreparedEquivalent "session interface recovery restores the canonical prepared product" prepared regenerated
+    assertSameInterfaceEvidenceAndPreparedShape "session interface recovery restores the canonical prepared product" prepared regenerated
     assertCoreSharing "session tier rebuilds owner with missing retained interface" False
       ["SessionUnused"] preparedSharing regeneratedSharing
     assertStgSharing "session tier rebuilds affected producer and consumer bodies" False
@@ -1611,11 +1639,24 @@ assertStgSharing label expected owners before after = forM_ owners $ \owner -> d
 preparedOwnerNames :: PreparedPipelineResult -> [String]
 preparedOwnerNames = sort . map (moduleNameString . moduleName . pmModule) . pprModules
 
-assertPreparedEquivalent :: String -> PreparedPipelineResult -> PreparedPipelineResult -> IO ()
-assertPreparedEquivalent label before after = do
+assertSameInterfaceEvidenceAndPreparedShape :: String -> PreparedPipelineResult -> PreparedPipelineResult -> IO ()
+assertSameInterfaceEvidenceAndPreparedShape label before after = do
+  assertSameInterfaceEvidence label before after
+  assertSamePreparedAbiAndShape label before after
+
+assertSameInterfaceEvidence :: String -> PreparedPipelineResult -> PreparedPipelineResult -> IO ()
+assertSameInterfaceEvidence label before after = do
   let interfaces = Map.map (mi_iface_hash . mi_final_exts . hm_iface . finalizedHomeModInfo)
         . pprFinalizedModules
-  assertEqual (label ++ ": canonical interfaces") (interfaces before) (interfaces after)
+  assertEqual (label ++ ": complete interface evidence") (interfaces before) (interfaces after)
+
+-- ABI, selected bodies and typed result shape are independent of recompilation
+-- evidence such as UsageFile. Binding counts observe inventory, not values.
+assertSamePreparedAbiAndShape :: String -> PreparedPipelineResult -> PreparedPipelineResult -> IO ()
+assertSamePreparedAbiAndShape label before after = do
+  let interfaces = Map.map (mi_mod_hash . mi_final_exts . hm_iface . finalizedHomeModInfo)
+        . pprFinalizedModules
+  assertEqual (label ++ ": module ABI") (interfaces before) (interfaces after)
   assertEqual (label ++ ": selected prepared owners") (preparedOwnerNames before) (preparedOwnerNames after)
   assertEqual (label ++ ": merged binding inventory")
     (length (prBinds (pprPipelineResult before))) (length (prBinds (pprPipelineResult after)))
@@ -1674,7 +1715,7 @@ requestMemoLifecycle root = do
           pure (result, sharing)
     (anonymous, anonymousSharing) <- fresh
     (next, nextSharing) <- fresh
-    assertPreparedEquivalent "normal request cleanup preserves output" anonymous next
+    assertSameInterfaceEvidenceAndPreparedShape "normal request cleanup preserves output" anonymous next
     assertCoreSharing "normal close releases compiler graphs" False dependencies anonymousSharing nextSharing
     failedGraphs <- newIORef Nothing
     failedRequest <- try (runRequest (pure ()) $ \compiler -> do
@@ -1687,7 +1728,7 @@ requestMemoLifecycle root = do
       Left _ -> pure ()
       Right _ -> fail "exception cleanup probe unexpectedly succeeded"
     (afterException, afterExceptionSharing) <- fresh
-    assertPreparedEquivalent "exceptional cleanup preserves output" next afterException
+    assertSameInterfaceEvidenceAndPreparedShape "exceptional cleanup preserves output" next afterException
     failedSharing <- readIORef failedGraphs >>= maybe (fail "exception probe did not reach compilation") pure
     assertCoreSharing "exceptional close releases compiler graphs" False dependencies failedSharing afterExceptionSharing
     runRequest (pure ()) $ \compiler -> do
@@ -1695,7 +1736,7 @@ requestMemoLifecycle root = do
       coldSharing <- compilerProductSharing cold
       warm <- compileIn incarnate LookupTypeCompile compiler
       warmSharing <- compilerProductSharing warm
-      assertPreparedEquivalent "purpose change preserves native prepared result" cold warm
+      assertSameInterfaceEvidenceAndPreparedShape "purpose change preserves native prepared result" cold warm
       assertCoreSharing "transaction reuses finalized dependencies" True dependencies coldSharing warmSharing
       assertStgSharing "transaction reuses prepared dependencies" True dependencies coldSharing warmSharing
       assertCoreSharing "purpose-sensitive target is fresh" False ["MemoTarget"] coldSharing warmSharing
@@ -1712,7 +1753,7 @@ requestMemoLifecycle root = do
       writeFile dependencyPath validDependency
       retry <- compileIn incarnate GeneralCompile compiler
       retrySharing <- compilerProductSharing retry
-      assertPreparedEquivalent "same-request retry restores output" cold retry
+      assertSameInterfaceEvidenceAndPreparedShape "same-request retry restores output" cold retry
       assertCoreSharing "source rejection releases graphs before retry" False dependencies coldSharing retrySharing
     (restored, restoredSharing) <- runRequest (pure ()) $ \compiler -> do
       result <- compileIn incarnate GeneralCompile compiler
@@ -1724,7 +1765,7 @@ requestMemoLifecycle root = do
       result <- compileIn incarnate GeneralCompile compiler
       sharing <- compilerProductSharing result
       pure (result, sharing)
-    assertPreparedEquivalent "fresh incarnated requests preserve prepared output" restored following
+    assertSameInterfaceEvidenceAndPreparedShape "fresh incarnated requests preserve prepared output" restored following
     assertCoreSharing "incarnation retains no graphs across requests" False dependencies restoredSharing followingSharing
 
 captureStderr :: FilePath -> String -> IO a -> IO (a, String)
