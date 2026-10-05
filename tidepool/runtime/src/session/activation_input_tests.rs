@@ -1843,7 +1843,7 @@ fn activation_preview_earlier_output_ignores_later_display_instance() {
         execution.clone(),
     );
     assert!(bound.is_empty());
-    resident.set_run_context(SessionRunContext::ROOT).unwrap();
+    // The checked output executes against the private view that admitted it.
     let later_fixture = InputFixture {
         root: tempfile::tempdir().unwrap(),
         session: fixture.session,
@@ -1856,6 +1856,7 @@ fn activation_preview_earlier_output_ignores_later_display_instance() {
     let later = resident
         .capture_activation_input(&hole, RealmId::ROOT, site)
         .unwrap();
+    resident.set_run_context(SessionRunContext::ROOT).unwrap();
     let (owner, interface) = issued_captured_input(&mut resident, earlier, recipe.clone());
     assert_eq!(
         execute_mounted_input_preview(&mut resident, owner, interface, &recipe),
