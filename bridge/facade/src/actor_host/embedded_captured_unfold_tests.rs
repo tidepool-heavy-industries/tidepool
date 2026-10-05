@@ -20,11 +20,16 @@ const TYPED_CHILD_REPLY_SETTLEMENT_BUDGET: Duration = Duration::from_secs(90);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CapturedScenario {
-    LocalActorStartup,
     Success,
     CancelWhileParked,
     FailureAfterReplies,
     ConcurrentNominalJoin,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HostedScenario {
+    LocalActorStartup,
+    Captured(CapturedScenario),
 }
 
 #[derive(Clone, Copy)]
@@ -162,7 +167,7 @@ struct CapturedHostTransport {
     parent_prefix: Mutex<Option<FrozenProviderPrefix>>,
     provider_outputs: Mutex<HashMap<OperationId, Vec<harness::item::Item>>>,
     provider_changed: watch::Sender<u64>,
-    scenario: CapturedScenario,
+    scenario: HostedScenario,
     root_origin: ConversationIdentity,
     root_round: AtomicUsize,
     operations: Mutex<HashMap<(ConversationIdentity, String), OperationId>>,
@@ -234,9 +239,8 @@ impl CapturedHostTransport {
                 1 => vec![harness::item::Item(json!({
                     "type":"custom_tool_call", "call_id":"captured-scope-setup", "name":"haskell",
                     "input":match self.scenario {
-                        CapturedScenario::LocalActorStartup | CapturedScenario::Success | CapturedScenario::CancelWhileParked => format!("{}\n{}\ndisplay True", include_str!("embedded_checkpoint_scope_setup.hs"), include_str!("embedded_captured_group_setup.hs")),
-                        CapturedScenario::FailureAfterReplies => format!("{}\n{}\ndisplay True", include_str!("embedded_checkpoint_scope_setup.hs"), include_str!("embedded_captured_group_setup.hs")),
-                        CapturedScenario::ConcurrentNominalJoin => format!("{}\n{}\n{}", include_str!("embedded_checkpoint_scope_setup.hs"), include_str!("embedded_captured_group_setup.hs"), include_str!("embedded_nominal_join_setup.hs")),
+                        HostedScenario::LocalActorStartup | HostedScenario::Captured(CapturedScenario::Success | CapturedScenario::CancelWhileParked | CapturedScenario::FailureAfterReplies) => format!("{}\n{}\ndisplay True", include_str!("embedded_checkpoint_scope_setup.hs"), include_str!("embedded_captured_group_setup.hs")),
+                        HostedScenario::Captured(CapturedScenario::ConcurrentNominalJoin) => format!("{}\n{}\n{}", include_str!("embedded_checkpoint_scope_setup.hs"), include_str!("embedded_captured_group_setup.hs"), include_str!("embedded_nominal_join_setup.hs")),
                     }
                 }))],
                 2 => {
@@ -244,26 +248,26 @@ impl CapturedHostTransport {
                     self.setup_requested.notify_one();
                     self.setup_ready.notified().await;
                     vec![haskell_call(
-                        if self.scenario == CapturedScenario::LocalActorStartup {
+                        if self.scenario == HostedScenario::LocalActorStartup {
                             LOCAL_STARTUP_CALL
                         } else {
                             PENDING_CALL
                         },
                         match self.scenario {
-                            CapturedScenario::LocalActorStartup => {
+                            HostedScenario::LocalActorStartup => {
                                 "seed <- R.call (readSeed (R.client seedStore)) ()\ngroup <- R.call (readGroup (R.client groupStore)) ()\ndisplay (case (seed, group) of (Nothing, Nothing) -> True; _ -> False)"
                             }
-                            CapturedScenario::Success | CapturedScenario::CancelWhileParked => {
+                            HostedScenario::Captured(CapturedScenario::Success | CapturedScenario::CancelWhileParked) => {
                                 include_str!("embedded_captured_unfold_and_await.hs")
                             }
-                            CapturedScenario::FailureAfterReplies => {
+                            HostedScenario::Captured(CapturedScenario::FailureAfterReplies) => {
                                 include_str!("embedded_captured_unfold_await_then_fail.hs")
                             }
-                            CapturedScenario::ConcurrentNominalJoin => {
+                            HostedScenario::Captured(CapturedScenario::ConcurrentNominalJoin) => {
                                 include_str!("embedded_nominal_join_a.hs")
                             }
                         },
-                        if self.scenario == CapturedScenario::ConcurrentNominalJoin {
+                        if self.scenario == HostedScenario::Captured(CapturedScenario::ConcurrentNominalJoin) {
                             CallMode::Asynchronous
                         } else {
                             CallMode::Blocking
@@ -373,13 +377,16 @@ impl CapturedHostTransport {
                     vec![harness::item::Item(json!({
                         "type":"custom_tool_call", "call_id":format!("captured-child-{path}"),
                         "name":"haskell", "input":match self.scenario {
-                            CapturedScenario::ConcurrentNominalJoin => "respond (m2MakeReply sessionInput)",
-                            CapturedScenario::FailureAfterReplies if ordinal >= 2 => include_str!("embedded_captured_child_reuse_nominal.hs"),
+                            HostedScenario::Captured(CapturedScenario::ConcurrentNominalJoin) => "respond (m2MakeReply sessionInput)",
+                            HostedScenario::Captured(CapturedScenario::FailureAfterReplies) if ordinal >= 2 => include_str!("embedded_captured_child_reuse_nominal.hs"),
                             _ => "respond capturedGetter",
                         }
                     }))]
                 }
-                2 if self.scenario == CapturedScenario::FailureAfterReplies && ordinal < 2 => {
+                2 if self.scenario
+                    == HostedScenario::Captured(CapturedScenario::FailureAfterReplies)
+                    && ordinal < 2 =>
+                {
                     let mut failed = self.parent_failed.subscribe();
                     while !*failed.borrow_and_update() {
                         failed.changed().await.unwrap();
@@ -389,7 +396,10 @@ impl CapturedHostTransport {
                         "name":"haskell", "input":"display (show (capturedValue, capturedGetter))"
                     }))]
                 }
-                3 if self.scenario == CapturedScenario::FailureAfterReplies && ordinal < 2 => {
+                3 if self.scenario
+                    == HostedScenario::Captured(CapturedScenario::FailureAfterReplies)
+                    && ordinal < 2 =>
+                {
                     let (prefix, incarnation) = request.session_id.rsplit_once(':').unwrap();
                     let (run, path) = prefix.rsplit_once(':').unwrap();
                     self.reads
@@ -411,7 +421,9 @@ impl CapturedHostTransport {
                         "content":[{"type":"output_text","text":"retained child scope remains usable"}]
                     }))]
                 }
-                2 if self.scenario == CapturedScenario::ConcurrentNominalJoin => {
+                2 if self.scenario
+                    == HostedScenario::Captured(CapturedScenario::ConcurrentNominalJoin) =>
+                {
                     let mut finished = self.finish_children.subscribe();
                     while !*finished.borrow_and_update() {
                         finished.changed().await.unwrap();
@@ -703,27 +715,36 @@ async fn embedded_operation(
 
 #[tokio::test]
 async fn embedded_local_actor_startup_and_calls_keep_custody_off_the_host_stack() {
-    captured_host_scenario(CapturedScenario::LocalActorStartup).await;
+    captured_host_scenario(HostedScenario::LocalActorStartup).await;
 }
 
 #[tokio::test]
 async fn embedded_captured_unfold_awaits_two_child_replies_before_parent_call_returns() {
-    captured_host_scenario(CapturedScenario::Success).await;
+    captured_host_scenario(HostedScenario::Captured(CapturedScenario::Success)).await;
 }
 
 #[tokio::test]
 async fn embedded_captured_children_and_capture_survive_failure_of_the_unfinished_parent_cell() {
-    captured_host_scenario(CapturedScenario::FailureAfterReplies).await;
+    captured_host_scenario(HostedScenario::Captured(
+        CapturedScenario::FailureAfterReplies,
+    ))
+    .await;
 }
 
 #[tokio::test]
 async fn embedded_same_root_parked_nominal_a_joins_later_b_publication() {
-    captured_host_scenario(CapturedScenario::ConcurrentNominalJoin).await;
+    captured_host_scenario(HostedScenario::Captured(
+        CapturedScenario::ConcurrentNominalJoin,
+    ))
+    .await;
 }
 
 #[tokio::test]
 async fn embedded_parked_captured_pipeline_cancellation_settles_invocation_owned_children() {
-    captured_host_scenario(CapturedScenario::CancelWhileParked).await;
+    captured_host_scenario(HostedScenario::Captured(
+        CapturedScenario::CancelWhileParked,
+    ))
+    .await;
 }
 
 async fn root_browser_projection(
@@ -806,7 +827,7 @@ async fn root_tool_call(
         .expect("scripted root Haskell operation settles")
 }
 
-async fn captured_host_scenario(scenario: CapturedScenario) {
+async fn captured_host_scenario(scenario: HostedScenario) {
     let files = tempfile::tempdir().unwrap();
     let assets = files.path().join("assets");
     std::fs::create_dir_all(&assets).unwrap();
@@ -942,54 +963,59 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
         .await
         .unwrap_or_else(|error| panic!("{error}"))
         .expect("root Engine did not request a turn after scope setup settled");
-    if scenario == CapturedScenario::LocalActorStartup {
-        let mut settlements = scheduler.operation_settlements();
-        transport.setup_ready.notify_one();
-        let operation = campaign
-            .while_root_live(
-                "started local actor calls settle",
-                tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, async {
-                    loop {
-                        let settled = settlements
-                            .recv()
-                            .await
-                            .expect("local call settlement observer");
-                        if settled.origin == root_origin && settled.call.0 == LOCAL_STARTUP_CALL {
-                            break settled;
+    let scenario = match scenario {
+        HostedScenario::Captured(scenario) => scenario,
+        HostedScenario::LocalActorStartup => {
+            let mut settlements = scheduler.operation_settlements();
+            transport.setup_ready.notify_one();
+            let operation = campaign
+                .while_root_live(
+                    "started local actor calls settle",
+                    tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, async {
+                        loop {
+                            let settled = settlements
+                                .recv()
+                                .await
+                                .expect("local call settlement observer");
+                            if settled.origin == root_origin && settled.call.0 == LOCAL_STARTUP_CALL
+                            {
+                                break settled;
+                            }
                         }
-                    }
-                }),
-            )
-            .await
-            .unwrap_or_else(|error| panic!("{error}"))
-            .expect("both started local actors answer their original typed calls");
-        assert_eq!(
-            operation,
-            transport.operation(&root_origin, LOCAL_STARTUP_CALL)
-        );
-        let result = embedded_operation(&runtime, &operation, COLD_DEBUG_CELL_SETTLEMENT_BUDGET)
-            .await
-            .expect("local actor reads return their original state");
-        assert_committed_haskell_value(&result, "True");
-        received_output(&transport, &operation).await;
-        let graph = campaign.forest.inspect_host_graph();
-        for label in ["embedded-checkpoint-seeds", "embedded-checkpoint-groups"] {
-            let local = graph
-                .iter()
-                .find(|node| node.label == label)
-                .expect("started local actor is retained by its original kernel");
-            assert_eq!(local.creator, Some(actor));
-            assert_eq!(local.supervisor_parent, Some(actor));
-            assert!(!local.model_actor);
-            assert!(local.terminal.is_none());
+                    }),
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{error}"))
+                .expect("both started local actors answer their original typed calls");
+            assert_eq!(
+                operation,
+                transport.operation(&root_origin, LOCAL_STARTUP_CALL)
+            );
+            let result =
+                embedded_operation(&runtime, &operation, COLD_DEBUG_CELL_SETTLEMENT_BUDGET)
+                    .await
+                    .expect("local actor reads return their original state");
+            assert_committed_haskell_value(&result, "True");
+            received_output(&transport, &operation).await;
+            let graph = campaign.forest.inspect_host_graph();
+            for label in ["embedded-checkpoint-seeds", "embedded-checkpoint-groups"] {
+                let local = graph
+                    .iter()
+                    .find(|node| node.label == label)
+                    .expect("started local actor is retained by its original kernel");
+                assert_eq!(local.creator, Some(actor));
+                assert_eq!(local.supervisor_parent, Some(actor));
+                assert!(!local.model_actor);
+                assert!(local.terminal.is_none());
+            }
+            assert!(transport.children.lock().is_empty());
+            finish_root(&transport, &campaign).await;
+            host.stop()
+                .await
+                .expect("production shutdown confirms local actor custody release");
+            return;
         }
-        assert!(transport.children.lock().is_empty());
-        finish_root(&transport, &campaign).await;
-        host.stop()
-            .await
-            .expect("production shutdown confirms local actor custody release");
-        return;
-    }
+    };
     // Subscribe before issuing the parent call: settlement may precede observation,
     // and Scheduler::wait refuses operations that are not admitted yet.
     let mut parent_settlements = scheduler.operation_settlements();
