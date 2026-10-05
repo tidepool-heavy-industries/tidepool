@@ -1635,6 +1635,182 @@ fn native_input_generation_retains_original_type_owner_after_source_readers_drop
     );
 }
 
+/// Compile an ordinary request whose home module owns a custom display dictionary.
+fn ordinary_home_display_fixture(session: SessionId) -> InputFixture {
+    let (root, recipe) = InputFixture::source_recipe(false);
+    let home = root.path().join("display-home");
+    std::fs::create_dir(&home).unwrap();
+    std::fs::write(
+        home.join("ActivationDisplayOriginal.hs"),
+        include_str!("fixtures/activation-input-display-original.hs"),
+    )
+    .unwrap();
+    let mut include = recipe.include.clone();
+    include.push(home);
+    let recipe = Arc::new(InputRecipe {
+        preamble: insert_preamble_imports(
+            &recipe.preamble,
+            "qualified ActivationDisplayOriginal as Original",
+        ),
+        row: recipe.row.clone(),
+        include,
+    });
+    let library = SessionLib::open(session, root.path(), ModuleEnv::standalone_default())
+        .unwrap()
+        .with_validation_include(recipe.include.clone());
+    let view = PersistentSession::new(Some(library), crate::DEFAULT_NURSERY_SIZE)
+        .compile_view_in(ScopeId::ROOT)
+        .unwrap();
+    let producer = compiled(compile_turn(
+        &view,
+        &recipe,
+        include_str!("fixtures/activation-input-opaque.hs"),
+        &[],
+    ));
+    assert_startup_origin("ordinary custom display producer", &producer, true);
+    InputFixture {
+        root,
+        session,
+        recipe,
+        producer,
+    }
+}
+
+#[test]
+fn activation_preview_executes_original_ordinary_home_custom_display_after_readers_drop() {
+    use tidepool_toolchain::activation_preview::ActivationPreviewDisposition;
+    let fixture = ordinary_home_display_fixture(SessionId(1739));
+    let mut resident = fixture.fresh();
+    let (owner, interface) = parked_input_owner(&fixture, &mut resident);
+    let mounted = mount_original(&mut resident, owner, interface);
+    let binding = mounted.binding();
+    let original_context = mounted.original_execution.clone();
+    let InputFixture {
+        root: _session_root,
+        recipe,
+        producer,
+        ..
+    } = fixture;
+    let child_home = tempfile::tempdir().unwrap();
+    std::fs::write(
+        child_home.path().join("ActivationDisplayOriginal.hs"),
+        include_str!("fixtures/activation-input-display-shadow.hs"),
+    )
+    .unwrap();
+    let mut includes = recipe.include.clone();
+    includes.pop();
+    includes.insert(0, child_home.path().to_path_buf());
+    drop(producer);
+    drop(recipe);
+    let view = resident
+        .compile_view_in(ScopeId::ROOT)
+        .unwrap()
+        .with_scoped_injection();
+    let admission = resident.admit_activation_preview(mounted, view).unwrap();
+    assert!(Arc::ptr_eq(
+        admission.exact_context().declarations(),
+        &original_context
+    ));
+    let template = turn::assemble_activation_preview_module(512);
+    let compiled = match turn::compile_activation_preview(admission, &template, 512, &includes)
+        .expect("prepare a pure display from the original ordinary compiler evidence")
+    {
+        turn::ActivationPreviewCompilation::Ready(compiled) => compiled,
+        turn::ActivationPreviewCompilation::OriginalDisplayEvidenceUnavailable => panic!(
+            "the genuine ordinary home dictionary must retain complete original instance evidence"
+        ),
+    };
+    assert_eq!(
+        compiled.proof().disposition(),
+        ActivationPreviewDisposition::Rendered
+    );
+    let ResidentOutcome::Completed { result, .. } = resident
+        .run_activation_preview(compiled)
+        .expect("execute the original custom dictionary against the original mounted heap input")
+    else {
+        panic!("a pure custom input display must complete without suspension");
+    };
+    assert_eq!(
+        result.to_json(),
+        serde_json::json!(["original task display 42", false])
+    );
+    assert!(
+        resident.state.bindings().get(binding).is_some(),
+        "preview keeps its committed input binding"
+    );
+}
+
+#[test]
+fn activation_preview_type_only_original_context_is_unavailable_before_instance_probe() {
+    use tidepool_toolchain::activation_preview::{
+        ActivationPreviewSelection, ActivationPreviewSpecification,
+    };
+    use tidepool_toolchain::declaration_join::ExactCompileContext;
+    let fixture = ordinary_home_display_fixture(SessionId(1740));
+    let mut resident = fixture.fresh();
+    let (owner, interface) = parked_input_owner(&fixture, &mut resident);
+    let mounted = mount_original(&mut resident, owner, interface);
+    let binding = mounted.binding();
+    let type_only = mounted.interface().prototype().context().clone();
+    assert!(type_only.recovery_products().is_empty());
+    assert!(type_only.lexical_graph().is_empty());
+    assert_eq!(
+        type_only.toolchain_identity_sha256(),
+        mounted.original_execution.toolchain_identity_sha256()
+    );
+    let view = resident
+        .compile_view_in(ScopeId::ROOT)
+        .unwrap()
+        .with_scoped_injection();
+    let admission = resident.admit_activation_preview(mounted, view).unwrap();
+    let mut command = tidepool_extract_cmd::ExtractCmd::new().unwrap();
+    let endpoint = tidepool_toolchain::toolchain::AdmittedCompilerEndpoint::from_bound(
+        command.bind().unwrap(),
+    )
+    .unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let submissions = tidepool_extract_cmd::extract_spawn_count();
+    let roots = resident.persistent_roots_count();
+    let visibility = resident
+        .public_visibility_snapshot_in(ScopeId::ROOT)
+        .unwrap();
+    let selected = tidepool_toolchain::artifacts::ModuleCandidateOffer::select_activation_preview(
+        &endpoint,
+        &fixture.recipe.include,
+        scratch.path(),
+        Arc::new(ExactCompileContext::new(type_only)),
+        admission.input_interface().clone(),
+        ActivationPreviewSpecification {
+            admission_digest: admission.digest(),
+            generation: admission.generation().0,
+            budget: 512,
+            template_source: turn::assemble_activation_preview_module(512),
+        },
+    )
+    .expect("genuine type-only authority may report missing original instance evidence");
+    assert!(
+        matches!(
+            selected,
+            ActivationPreviewSelection::OriginalDisplayEvidenceUnavailable
+        ),
+        "type-only evidence cannot prove Opaque or select child display code"
+    );
+    assert_eq!(
+        tidepool_extract_cmd::extract_spawn_count(),
+        submissions,
+        "no incomplete instance solver was invoked"
+    );
+    assert!(!scratch.path().join("turn.cbor").exists());
+    assert_eq!(resident.persistent_roots_count(), roots);
+    assert_eq!(
+        resident
+            .public_visibility_snapshot_in(ScopeId::ROOT)
+            .as_ref(),
+        Some(&visibility)
+    );
+    assert!(resident.state.bindings().get(binding).is_some());
+}
+
 #[test]
 fn activation_task_input_preserves_parent_action_row_across_child_facade() {
     let (root, recipe) = InputFixture::source_recipe(false);
