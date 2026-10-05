@@ -1642,6 +1642,28 @@ impl RequestRegistry {
         }
     }
 
+    /// Publish staged activation work under the same arbitration as requester
+    /// cancellation and deadline expiry. The callback must not block or await.
+    pub(crate) fn publish_presented_request<R>(
+        &self,
+        target: ActorRef,
+        request: RequestId,
+        publish: impl FnOnce() -> R,
+    ) -> Result<R, ReplyError> {
+        let state = self.state.lock();
+        let record = state.requests.get(&request).ok_or(ReplyError::Stale)?;
+        authorize_target(record, target)?;
+        match record.target_state {
+            TargetState::Presented => Ok(publish()),
+            TargetState::CancellationRequested { .. }
+            | TargetState::AcknowledgingCancellation(_) => Err(ReplyError::CancellationRequested),
+            TargetState::Closed => Err(ReplyError::AlreadySettled),
+            TargetState::Reserved | TargetState::Queued | TargetState::Settling => {
+                Err(ReplyError::Stale)
+            }
+        }
+    }
+
     pub(crate) fn begin_reply(
         &self,
         target: ActorRef,
@@ -4059,6 +4081,44 @@ mod tests {
                 failed,
                 ResponseFailure::TargetFailed("boom".into())
             )]))
+        );
+    }
+
+    #[test]
+    fn activation_publication_rechecks_cancellation_deadline_and_exact_target() {
+        let registry = RequestRegistry::default();
+        let owner = actor(1);
+        let target = actor(2);
+        let request = registry.reserve(owner, target);
+        let publish = || panic!("ineligible activation must not publish");
+        assert_eq!(
+            registry.publish_presented_request(target, request, publish),
+            Err(ReplyError::Stale)
+        );
+        registry.mark_queued(owner, target, request).unwrap();
+        registry.present(target, request).unwrap();
+        assert_eq!(
+            registry.publish_presented_request(actor(3), request, publish),
+            Err(ReplyError::Unauthorized)
+        );
+        assert_eq!(
+            registry.publish_presented_request(target, request, || 42),
+            Ok(42)
+        );
+        registry
+            .cancel_request(owner, request, CancellationReason::RequesterCancelled)
+            .unwrap();
+        assert_eq!(
+            registry.publish_presented_request(target, request, publish),
+            Err(ReplyError::CancellationRequested)
+        );
+        let deadline = registry.reserve(owner, target);
+        registry.mark_queued(owner, target, deadline).unwrap();
+        registry.present(target, deadline).unwrap();
+        registry.deadline_request(owner, deadline);
+        assert_eq!(
+            registry.publish_presented_request(target, deadline, publish),
+            Err(ReplyError::CancellationRequested)
         );
     }
 

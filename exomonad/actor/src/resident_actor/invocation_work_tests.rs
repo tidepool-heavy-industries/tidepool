@@ -185,7 +185,7 @@ pub(in crate::resident_actor) struct Fixture {
     pub(in crate::resident_actor) kernel: KernelContext,
     pub(in crate::resident_actor) environment:
         ResidentEnvironment<frunk::HNil, tidepool_mcp::CapturedOutput>,
-    deployments: mpsc::Receiver<LocalResidentDeployment>,
+    pub(in crate::resident_actor) deployments: mpsc::Receiver<LocalResidentDeployment>,
 }
 
 impl Fixture {

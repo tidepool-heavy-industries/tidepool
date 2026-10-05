@@ -1424,6 +1424,9 @@ pub struct ResidentActorWorkbench<H, O> {
     json_input: Option<serde_json::Value>,
     compilation_authority: Option<Arc<crate::resident_actor::WorkbenchCompilationAuthority>>,
     private_execution: Option<Arc<ExecutionPrivateScope>>,
+    #[cfg(test)]
+    pub(crate) activation_preview_observer:
+        Option<Arc<dyn Fn(&tidepool_runtime::session::MountedActivationInput) + Send + Sync>>,
 }
 
 enum OwnedHostPayload {
@@ -3247,6 +3250,8 @@ impl<H, O> ResidentActorWorkbench<H, O> {
             json_input: self.json_input.clone(),
             compilation_authority: self.compilation_authority.clone(),
             private_execution: self.private_execution.clone(),
+            #[cfg(test)]
+            activation_preview_observer: self.activation_preview_observer.clone(),
         }
     }
 
@@ -3269,6 +3274,8 @@ impl<H, O> ResidentActorWorkbench<H, O> {
             json_input: None,
             compilation_authority: None,
             private_execution: None,
+            #[cfg(test)]
+            activation_preview_observer: None,
         }
     }
 
@@ -4066,6 +4073,8 @@ where
                 json_input: None,
                 compilation_authority: Some(authority.clone()),
                 private_execution: None,
+                #[cfg(test)]
+                activation_preview_observer: None,
             };
             installer.access.source = source;
             let publication_resolved = resolved;
@@ -4398,6 +4407,19 @@ where
         })
     }
 
+    pub(crate) async fn retire_activation_input(
+        &self,
+        context: crate::ActorSessionContext,
+        binding: tidepool_repr::SessionVarId,
+    ) -> Result<(), ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, _, _| {
+                session.retire_binding_owner(binding);
+                Ok(())
+            })
+            .await
+    }
+
     /// Commit the original input through a fresh thin interface, then prepare
     /// its pure display against the original executable owners.
     pub(crate) async fn mount_activation_input(
@@ -4416,6 +4438,8 @@ where
         let mut source = self.access.source.clone().for_activation(&context);
         source.request_evidence = Some(input.type_evidence().clone());
 
+        #[cfg(test)]
+        let preview_observer = self.activation_preview_observer.clone();
         let preview = self
             .access
             .with_machine(context, move |session, context, _| {
@@ -4446,6 +4470,10 @@ where
                     .mount_activation_input(owner, interface)
                     .map_err(ResidentActorWorkbenchError::Resident)?;
                 let binding = mounted.binding();
+                #[cfg(test)]
+                if let Some(observer) = preview_observer {
+                    observer(&mounted);
+                }
                 let committed = |source| ResidentActorWorkbenchError::ActivationBindingCommitted {
                     binding,
                     source: Box::new(source),
@@ -11400,7 +11428,7 @@ mod tool_dispatch_tests {
 }
 
 #[cfg(test)]
-mod request_tests {
+pub(crate) mod request_tests {
     use super::*;
 
     fn fixture_include_roots(effects: &tidepool_mcp::EffectsModuleDirs) -> Vec<PathBuf> {
@@ -17130,6 +17158,36 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         Vec<tidepool_runtime::session::RuntimeActivationInput>,
         tempfile::TempDir,
     ) {
+        let (mut session, context, source, parked, root) = activation_session_fixture(configure);
+        let inputs = parked
+            .into_iter()
+            .map(|(hole, input)| {
+                let activation_id = hole.cont_id().to_owned();
+                assert!(matches!(
+                    session.abort(&activation_id, "fixture retained original input".into()),
+                    Err(ResidentError::Run(tidepool_runtime::RuntimeError::Jit(
+                        tidepool_effect::EffectError::Handler(reason)
+                    ))) if reason == "ask aborted by caller: fixture retained original input"
+                ));
+                assert!(!session.parked_holes().contains(&activation_id.as_str()));
+                input
+            })
+            .collect();
+        (session, context, source, inputs, root)
+    }
+
+    pub(crate) fn activation_session_fixture(
+        configure: impl FnOnce(&mut tidepool_runtime::session::SessionLib),
+    ) -> (
+        ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput>,
+        crate::ActorSessionContext,
+        ActorWorkbenchSource,
+        Vec<(
+            ResidentHole,
+            tidepool_runtime::session::RuntimeActivationInput,
+        )>,
+        tempfile::TempDir,
+    ) {
         use tidepool_runtime::session::{ModuleEnv, SessionLib};
         let (_, mut context, _, _) = host_mount_fixture();
         let declarations = [
@@ -17450,15 +17508,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                         .ok()
                 })
                 .expect("original authenticated input site");
-            inputs.push(input);
-            let activation_id = activation.cont_id().to_owned();
-            assert!(matches!(
-                session.abort(&activation_id, "fixture retained original input".into()),
-                Err(ResidentError::Run(tidepool_runtime::RuntimeError::Jit(
-                    tidepool_effect::EffectError::Handler(reason)
-                ))) if reason == "ask aborted by caller: fixture retained original input"
-            ));
-            assert!(!session.parked_holes().contains(&activation_id.as_str()));
+            inputs.push((activation, input));
             assert!(session.parked_holes().contains(&submission.cont_id()));
             let next = session.resume(submission, ()).unwrap();
             if request == 1 {

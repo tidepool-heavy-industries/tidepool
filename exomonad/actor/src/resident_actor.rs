@@ -16,6 +16,8 @@ mod child_launch;
 #[cfg(test)]
 mod terminal_transfer_tests;
 pub use child_initialization::ForkChildRelease;
+#[cfg(test)]
+mod activation_publication_tests;
 mod clock_wait;
 mod command_presentation;
 mod command_settlement;
@@ -2705,6 +2707,9 @@ pub struct ResidentKernelBehavior<H, O> {
     /// `taskSource` of the current request's session input, read from its
     /// rendered preview when the request was presented.
     assignment_base: Option<String>,
+    #[cfg(test)]
+    activation_preview_observer:
+        Option<Arc<dyn Fn(&tidepool_runtime::session::MountedActivationInput) + Send + Sync>>,
 }
 
 /// One admitted call owns its authority and cursor until final settlement.
@@ -3581,6 +3586,8 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             pending_fork_publications: Vec::new(),
             roster_snapshot: Mutex::new(None),
             assignment_base: None,
+            #[cfg(test)]
+            activation_preview_observer: None,
         }
     }
     fn context(&self, actor: ActorRef) -> ActorSessionContext {
@@ -7756,6 +7763,12 @@ where
                 request.type_evidence.clone(),
             )
             .with_compilation_authority(authority);
+        #[cfg(test)]
+        let workbench = {
+            let mut workbench = workbench;
+            workbench.activation_preview_observer = self.activation_preview_observer.clone();
+            workbench
+        };
         let (input_preview, reply_preview, input_binding) = workbench
             .mount_activation_input(
                 compile_context,
@@ -7765,7 +7778,7 @@ where
                 request.response.declaration_modules.clone(),
             )
             .await?;
-        self.assignment_base = status_rendering::assignment_base_from_input(&input_preview);
+        let assignment_base = status_rendering::assignment_base_from_input(&input_preview);
         let contract = crate::interactive_session::ActivationContract {
             input_type: request.input_type.clone(),
             response: request.response.clone(),
@@ -7797,13 +7810,15 @@ where
         };
         self.publish_application_surface(kernel, context, owner, bootstrap)
             .await?;
-        if let Some(installation) = installation {
-            self.commit_interactive_installation(kernel, context, installation)?;
-        }
         self.check_application_readiness(kernel, context)?;
-        kernel
-            .retained_exit()
-            .claim_before_shutdown(|| {
+        let request_id = request.request;
+        let requests = Arc::clone(&self.environment.requests);
+        let publication = requests.publish_presented_request(context.actor, request_id, || {
+            kernel.retained_exit().claim_before_shutdown(|| {
+                if let Some(installation) = installation {
+                    self.publish_interactive_installation(installation);
+                }
+                self.assignment_base = assignment_base;
                 self.outstanding_interactive = Some(OutstandingInteractive::new(
                     &request,
                     input_binding,
@@ -7852,8 +7867,22 @@ where
                 }
                 true
             })
-            .map_err(ResidentActorWorkbenchError::RetiredBeforeAdmission)?;
-        Ok(InteractivePark::Parked)
+        });
+        match publication {
+            Ok(claim) => {
+                claim.map_err(ResidentActorWorkbenchError::RetiredBeforeAdmission)?;
+                Ok(InteractivePark::Parked)
+            }
+            Err(crate::ReplyError::CancellationRequested) => {
+                workbench
+                    .retire_activation_input(context.clone(), input_binding)
+                    .await?;
+                Ok(InteractivePark::Cancelled(request_id))
+            }
+            Err(error) => Err(ResidentActorWorkbenchError::ActorProtocol(format!(
+                "request publication was rejected: {error:?}"
+            ))),
+        }
     }
 
     fn freeze_installed_source(
@@ -7897,18 +7926,22 @@ where
         kernel
             .retained_exit()
             .claim_before_shutdown(|| {
-                self.publish_installation(installation);
-                self.policy_installed = true;
-                for notice in self.deferred_child_failures.drain(..) {
-                    self.environment
-                        .deployments
-                        .try_send(LocalResidentDeployment::ChildExited { notice })
-                        .ok();
-                }
+                self.publish_interactive_installation(installation);
                 true
             })
             .map_err(ResidentActorWorkbenchError::RetiredBeforeAdmission)?;
         Ok(())
+    }
+
+    fn publish_interactive_installation(&mut self, installation: LocalResidentInstallation) {
+        self.publish_installation(installation);
+        self.policy_installed = true;
+        for notice in self.deferred_child_failures.drain(..) {
+            self.environment
+                .deployments
+                .try_send(LocalResidentDeployment::ChildExited { notice })
+                .ok();
+        }
     }
 
     async fn settle_interactive_publication(

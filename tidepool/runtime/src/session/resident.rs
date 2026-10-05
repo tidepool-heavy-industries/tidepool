@@ -4800,13 +4800,19 @@ where
     /// itself.
     pub fn retire_host_binding_owner(&mut self, session_root: &Path, binder: &BoundBinder) {
         let id = SessionVarId::from_extract(binder.var_id);
+        self.retire_binding_owner(id);
+        self.reap_evicted_stub_sources_in(session_root);
+    }
+
+    /// Retire an exact binding owner while preserving existing dependency leases.
+    pub fn retire_binding_owner(&mut self, id: SessionVarId) {
         let scope = self.state.bindings().get(id).map(|entry| entry.scope);
         self.state.retire_binding_owner(id);
         if let Some(scope) = scope {
             self.advance_public_visibility(scope);
         }
         self.hidden_host_bindings.remove(&id);
-        self.reap_evicted_stub_sources_in(session_root);
+        self.prune_binding_metadata();
     }
 
     /// The current materialized binding in `scope` carrying this exact host
