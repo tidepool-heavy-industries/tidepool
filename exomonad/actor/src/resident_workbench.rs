@@ -4763,6 +4763,15 @@ where
                     &context.haskell_effects_alias
                 };
                 let prepared = source.prepare_effectful(&snapshot.view, effects)?;
+                #[cfg(test)]
+                assert!(
+                    prepared
+                        .include
+                        .iter()
+                        .all(|root| root.is_absolute() && root.is_dir()),
+                    "prepared fixture compiler roots must be absolute existing directories: {:?}",
+                    prepared.include
+                );
                 let preamble = cell_module_preamble(
                     &prepared.preamble,
                     &snapshot.candidate_module.module_name(),
@@ -11250,9 +11259,12 @@ mod tool_dispatch_tests {
 mod request_tests {
     use super::*;
 
-    fn fixture_actor_include(prelude: &std::path::Path) -> PathBuf {
-        // The declared Haskell runtime resource contains both lib and actors.
-        // Buck's CARGO_MANIFEST_DIR identifies a package, not a runtime path.
+    fn fixture_include_roots(effects: &tidepool_mcp::EffectsModuleDirs) -> Vec<PathBuf> {
+        // Native resource locations can be relative to the runner's CWD.
+        // Resolve only the source roots selected by the owning producers.
+        let prelude = tidepool_testing::eval_harness::prelude_path()
+            .canonicalize()
+            .expect("declared stdlib sources are required");
         let actors = prelude
             .parent()
             .expect("stdlib source root has a parent")
@@ -11260,11 +11272,27 @@ mod request_tests {
             .canonicalize()
             .expect("declared actor Haskell sources are required");
         assert!(
-            actors.is_absolute() && actors.join("Tidepool/Actors/Exomonad.hs").is_file(),
-            "actor source root must be absolute and contain Tidepool.Actors.Exomonad: {}",
+            actors.join("Tidepool/Actors/Exomonad.hs").is_file(),
+            "actor source root lacks Tidepool.Actors.Exomonad: {}",
             actors.display()
         );
-        actors
+        let mut include = effects
+            .include_paths()
+            .into_iter()
+            .map(|root| {
+                root.canonicalize().unwrap_or_else(|error| {
+                    panic!("generated effect source root {}: {error}", root.display())
+                })
+            })
+            .collect::<Vec<_>>();
+        include.extend([prelude, actors]);
+        assert!(
+            include
+                .iter()
+                .all(|root| root.is_absolute() && root.is_dir()),
+            "fixture compiler roots must be absolute existing directories: {include:?}"
+        );
+        include
     }
 
     fn host_lookup_mount_fixture() -> (
@@ -11283,10 +11311,7 @@ mod request_tests {
             tidepool_mcp::lookup_decl(),
         ];
         let effects = tidepool_mcp::ensure_effects_module(&declarations).expect("actor effects");
-        let mut include = effects.include_paths().to_vec();
-        let prelude = tidepool_testing::eval_harness::prelude_path();
-        let actors = fixture_actor_include(&prelude);
-        include.extend([prelude, actors]);
+        let include = fixture_include_roots(&effects);
         let preamble = insert_preamble_imports(
             &tidepool_mcp::build_notebook_preamble(&declarations, false),
             "qualified Tidepool.Actors.Exomonad as Exomonad\nqualified Tidepool.Lookup as LookupApi",
@@ -11494,10 +11519,7 @@ mod request_tests {
             tidepool_mcp::sleep_decl(),
         ];
         let effects = tidepool_mcp::ensure_effects_module(&declarations).expect("actor effects");
-        let mut include = effects.include_paths().to_vec();
-        let prelude = tidepool_testing::eval_harness::prelude_path();
-        let actors = fixture_actor_include(&prelude);
-        include.extend([prelude, actors]);
+        let include = fixture_include_roots(&effects);
         let preamble = insert_preamble_imports(
             &tidepool_mcp::build_notebook_preamble(&declarations, false),
             "qualified Tidepool.Actors.Exomonad as Exomonad",
@@ -16771,10 +16793,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             tidepool_mcp::sleep_decl(),
         ];
         let effects = tidepool_mcp::ensure_effects_module(&declarations).unwrap();
-        let mut include = effects.include_paths().to_vec();
-        let prelude = tidepool_testing::eval_harness::prelude_path();
-        let actors = fixture_actor_include(&prelude);
-        include.extend([prelude, actors]);
+        let include = fixture_include_roots(&effects);
         let mut preamble = tidepool_mcp::build_notebook_preamble(&declarations, false);
         for import in [
             "Tidepool.Agent.Reply (Replies)",
