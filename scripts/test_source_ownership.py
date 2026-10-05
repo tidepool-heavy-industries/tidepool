@@ -108,6 +108,7 @@ TEST_ONLY_SOURCES = {
     'tidepool-toolchain': frozenset({
         'tidepool/toolchain/src/module_candidates/codec_measurement.rs',
         'tidepool/toolchain/src/module_candidates/fixture_packets.rs',
+        'tidepool/toolchain/src/module_candidates/fixture_packets/codec.rs',
         'tidepool/toolchain/src/certified_products/resume_issuer_tests.rs',
         'tidepool/toolchain/tests/fixtures/resume-issuer/ResumeCapture.hs',
         'tidepool/toolchain/tests/fixtures/deployment-module-package/Consumer.hs',

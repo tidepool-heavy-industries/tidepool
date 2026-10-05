@@ -1,6 +1,8 @@
 //! Source-boot fixture delivery through the existing certification owners.
 //! This adapter is compiled only into the owning crate's test executable.
 
+mod codec;
+
 use super::*;
 use crate::certified_products::{
     certify_products, decode_receipt_in, CertifiedProducts, ParsedModuleProducts,

@@ -3,7 +3,7 @@
 -- module never writes durable certificates or candidate/scope descriptors.
 module GenuineCandidateFixture
   ( CapturedCompilerFixture, FixtureCompilerInput(..)
-  , captureCompilerFixture, capturedPreparedNames
+  , captureCompilerFixture, capturedPreparedNames, issueCodecFixturePacket
   , writeGenuineCandidateManifestFor, writeGenuineMetadataScope
   , writeGenuineEmptyMetadataScope, writeGenuineCandidateNativeScope
   , writeGenuineCandidateLexicalScope
@@ -148,29 +148,17 @@ writeGenuineAuthoredDeclarationScope owner includes source work = do
   let Generation generation = smGen owner
   unless (smKind owner == LibMod && generation > 0 && not (null includes))
     (fail "genuine authored fixture requires a positive reserved Lib generation and source roots")
-  issuer <- lookupEnv "TIDEPOOL_CANDIDATE_FIXTURE_ISSUER" >>= maybe
-    (fail "genuine authored fixture requires the matched Rust libtest issuer") pure
   packet <- newPacketDirectory work "authored-origin-fixture"
   let text = encodeString . T.pack
       names values = encodeListLen (fromIntegral (length values)) <> foldMap text values
   BS.writeFile (packet </> "request.cbor") (toStrictByteString
     (encodeListLen 5 <> text "TPSOURCEBOOTAUTHORED2" <> encodeWord64 generation
       <> names includes <> text source <> text work))
-  bracket (lookupEnv "TIDEPOOL_CANDIDATE_FIXTURE_PACKET")
-    (maybe (unsetEnv "TIDEPOOL_CANDIDATE_FIXTURE_PACKET") (setEnv "TIDEPOOL_CANDIDATE_FIXTURE_PACKET")) $ \_ -> do
-      setEnv "TIDEPOOL_CANDIDATE_FIXTURE_PACKET" packet
-      (status, output, errors) <- readProcessWithExitCode issuer
-        ["--exact", "module_candidates::fixture_packets::source_boot_authored_declaration_packet_producer"
-        , "--ignored", "--nocapture"] ""
-      unless (status == ExitSuccess) $
-        fail ("genuine authored Rust fixture issuance failed\n" ++ take 65536 output ++ take 65536 errors)
-      putStr output
+  runPacketProducer AuthoredDeclarationProducer packet
   scopeOutput (readScopeOutput packet)
 
 writePacket :: FixtureDelivery -> Maybe CapturedCompilerFixture -> FixtureSelection -> IO FixtureOutput
 writePacket delivery input selection = do
-  issuer <- lookupEnv "TIDEPOOL_CANDIDATE_FIXTURE_ISSUER" >>= maybe
-    (fail "genuine fixture requires the matched tidepool-toolchain libtest executable in TIDEPOOL_CANDIDATE_FIXTURE_ISSUER") pure
   producer <- maybe requiredProducer (pure . capturedProducer) input
   packet <- newPacketDirectory (fixtureDeliveryRoot delivery) "candidate-delivery"
   let text = encodeString . T.pack
@@ -185,17 +173,41 @@ writePacket delivery input selection = do
       <> names includes <> names (fixtureCandidates selection) <> names (fixtureInterfaces selection)
       <> names (fixtureNativeOwners selection) <> encodeBool wantsScope
       <> text producer <> names (fixtureLexicalRoots selection) <> optional capture))
+  runPacketProducer OriginalProductsProducer packet
+  if wantsScope then readScopeOutput packet
+    else pure (CandidateManifestOutput (fixtureDeliveryRoot delivery </> "module-candidates.cbor"))
+
+-- Codec requests carry structural test data only. This transport selects the
+-- dedicated codec entry and never binds a compiler or requests capture/grants.
+issueCodecFixturePacket :: FilePath -> BS.ByteString -> IO FilePath
+issueCodecFixturePacket work request = do
+  unless (BS.length request <= 4 * 1024 * 1024) (fail "codec fixture request exceeds metadata bound")
+  packet <- newPacketDirectory work "codec-fixture"
+  BS.writeFile (packet </> "request.cbor") request
+  runPacketProducer CodecProducer packet
+  pure packet
+
+data PacketProducer = OriginalProductsProducer | AuthoredDeclarationProducer | CodecProducer
+
+packetProducerTest :: PacketProducer -> String
+packetProducerTest producer = "module_candidates::fixture_packets::" ++ case producer of
+  OriginalProductsProducer -> "source_boot_candidate_packet_producer"
+  AuthoredDeclarationProducer -> "source_boot_authored_declaration_packet_producer"
+  CodecProducer -> "codec::source_boot_codec_packet_producer"
+
+runPacketProducer :: PacketProducer -> FilePath -> IO ()
+runPacketProducer producer packet = do
+  issuer <- lookupEnv "TIDEPOOL_CANDIDATE_FIXTURE_ISSUER" >>= maybe
+    (fail "fixture packet requires the declared Rust libtest adapter") pure
   bracket (lookupEnv "TIDEPOOL_CANDIDATE_FIXTURE_PACKET")
     (maybe (unsetEnv "TIDEPOOL_CANDIDATE_FIXTURE_PACKET") (setEnv "TIDEPOOL_CANDIDATE_FIXTURE_PACKET")) $ \_ -> do
       setEnv "TIDEPOOL_CANDIDATE_FIXTURE_PACKET" packet
       (status, output, errors) <- readProcessWithExitCode issuer
-        ["--exact", "module_candidates::fixture_packets::source_boot_candidate_packet_producer"
-        , "--ignored", "--nocapture"] ""
+        ["--exact", packetProducerTest producer, "--ignored", "--nocapture"] ""
       unless (status == ExitSuccess) $
-        fail ("genuine Rust fixture issuance failed\n" ++ take 65536 output ++ take 65536 errors)
+        fail ("Rust fixture packet failed at " ++ packetProducerTest producer ++ "\n"
+          ++ take 65536 output ++ take 65536 errors)
       putStr output
-  if wantsScope then readScopeOutput packet
-    else pure (CandidateManifestOutput (fixtureDeliveryRoot delivery </> "module-candidates.cbor"))
 
 -- Select the actual checked root; projection policy and all emission belong to
 -- the same internal compiler owner used by the production worker.
