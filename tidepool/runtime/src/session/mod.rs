@@ -63,7 +63,8 @@ pub use persistent::{
 pub use admission::{
     NativeSetupAdmissionFailure, NativeSetupInputInventory, PendingHostValueWrite,
     PrivateExecutionAdmission, RuntimeCellAdmission, RuntimeCheckedItemAdmission,
-    RuntimeCheckedPrefix, RuntimeCheckedPrefixSnapshot, RuntimeLexicalScopeLease,
+    RuntimeCheckedPrefix, RuntimeCheckedPrefixSnapshot, RuntimeHostBindingAdmission,
+    RuntimeLexicalScopeLease,
 };
 pub use paired_publication::FinalExecutionIntent;
 pub use paired_publication::{
@@ -108,12 +109,12 @@ pub use facade::{
 };
 
 pub use resident::{
-    truncate_preview_at_line, CompiledActivationInput, HostBindingType, HostCarrier, HostPayload,
-    MountedActivationInput, PendingPreparedInstall, PendingPreparedMode, PreparedStartupEntry,
-    ProgramProvenance, ProgramProvenanceError, ReadyPreparedInstall, ResidentContinuationEvent,
-    ResidentError, ResidentHole, ResidentOutcome, ResidentParcel, ResidentResumeError,
-    ResidentSession, RootCustody, RuntimeActivationInput, RuntimeActivationInputAdmission,
-    RuntimeProgressPublication, SessionRunContext,
+    truncate_preview_at_line, CompiledActivationInput, HostBindingPrototype, HostBindingType,
+    HostCarrier, HostPayload, MountedActivationInput, PendingPreparedInstall, PendingPreparedMode,
+    PreparedStartupEntry, ProgramProvenance, ProgramProvenanceError, ReadyPreparedInstall,
+    ResidentContinuationEvent, ResidentError, ResidentHole, ResidentOutcome, ResidentParcel,
+    ResidentResumeError, ResidentSession, RootCustody, RuntimeActivationInput,
+    RuntimeActivationInputAdmission, RuntimeProgressPublication, SessionRunContext,
 };
 
 pub use view::{hide_preamble_exports, SessionCompileView, SourceImports};

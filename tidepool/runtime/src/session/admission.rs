@@ -98,7 +98,137 @@ pub(super) struct CertifiedPrivateValueWrite {
     identity: SymbolIdentity,
     generation: Generation,
     root_id: u64,
-    pub(super) execution: Arc<tidepool_toolchain::checked_cell::ExactCompiledItem>,
+    pub(super) proof: CertifiedPrivateValueProof,
+}
+
+#[derive(Clone)]
+pub(super) enum CertifiedPrivateValueProof {
+    Execution(Arc<tidepool_toolchain::checked_cell::ExactCompiledItem>),
+    HostInterface(Arc<tidepool_toolchain::checked_cell::ExactHostBindingInterface>),
+}
+
+impl CertifiedPrivateValueProof {
+    fn generation(&self) -> u64 {
+        match self {
+            Self::Execution(proof) => proof.generation(),
+            Self::HostInterface(proof) => proof.generation(),
+        }
+    }
+    fn same_original(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Execution(a), Self::Execution(b)) => Arc::ptr_eq(a, b),
+            (Self::HostInterface(a), Self::HostInterface(b)) => Arc::ptr_eq(a, b),
+            _ => false,
+        }
+    }
+}
+
+/// One fresh host-binding slot fenced by the owning machine and lexical view.
+/// Compiler issuance cannot consume this reservation or publish a value.
+pub struct RuntimeHostBindingAdmission {
+    owner: Arc<RuntimeAdmissionOwner>,
+    owner_epoch: u64,
+    pub(super) scope: ScopeId,
+    pub(super) session_root: PathBuf,
+    visibility: PublicVisibilitySnapshot,
+    view_digest: [u8; 32],
+    pub(super) generation: Generation,
+    pub(super) binding: String,
+    pub(super) prototype: Arc<super::resident::HostBindingPrototype>,
+    digest: [u8; 32],
+    consumed: std::sync::atomic::AtomicBool,
+}
+
+impl RuntimeHostBindingAdmission {
+    pub fn digest(&self) -> [u8; 32] {
+        self.digest
+    }
+    pub fn generation(&self) -> Generation {
+        self.generation
+    }
+    pub fn binding(&self) -> &str {
+        &self.binding
+    }
+    pub fn prototype(&self) -> &Arc<super::resident::HostBindingPrototype> {
+        &self.prototype
+    }
+}
+
+impl PersistentSession {
+    pub(super) fn admit_host_binding_interface(
+        &mut self,
+        scope: ScopeId,
+        binding: String,
+        prototype: Arc<super::resident::HostBindingPrototype>,
+    ) -> Result<Arc<RuntimeHostBindingAdmission>, SessionError> {
+        if !self.scope_tree().is_live(scope) {
+            return Err(SessionError::DeadScope(scope));
+        }
+        let generation = self.val_gen().next();
+        self.set_val_gen(generation);
+        let visibility = self
+            .public_visibility_snapshot_in(scope)
+            .ok_or(SessionError::StaleStagedDeclaration)?;
+        let view_digest = self
+            .compile_view_digest_in(scope)
+            .ok_or(SessionError::StaleStagedDeclaration)?;
+        let session_root = self
+            .compile_view_in(scope)
+            .ok_or(SessionError::StaleStagedDeclaration)?
+            .session_root()
+            .to_path_buf();
+        let owner_epoch = self.admission_owner().epoch();
+        let mut digest = blake3::Hasher::new();
+        digest.update(b"TidepoolRuntimeHostBinding1");
+        digest.update(&owner_epoch.to_le_bytes());
+        digest.update(&view_digest);
+        digest.update(&generation.0.to_le_bytes());
+        digest.update(&(binding.len() as u64).to_le_bytes());
+        digest.update(binding.as_bytes());
+        digest.update(&prototype.compiler().digest());
+        digest.update(&prototype.authority_digest());
+        Ok(Arc::new(RuntimeHostBindingAdmission {
+            owner: self.admission_owner().clone(),
+            owner_epoch,
+            scope,
+            session_root,
+            visibility,
+            view_digest,
+            generation,
+            binding,
+            prototype,
+            digest: *digest.finalize().as_bytes(),
+            consumed: std::sync::atomic::AtomicBool::new(false),
+        }))
+    }
+
+    pub(super) fn consume_host_binding_interface(
+        &self,
+        admission: &RuntimeHostBindingAdmission,
+        interface: &tidepool_toolchain::checked_cell::ExactHostBindingInterface,
+    ) -> Result<(), SessionError> {
+        if !Arc::ptr_eq(&admission.owner, self.admission_owner())
+            || admission.owner_epoch != self.admission_owner().epoch()
+            || !Arc::ptr_eq(interface.prototype(), admission.prototype.compiler())
+            || interface.admission_digest() != admission.digest
+            || interface.generation() != admission.generation.0
+            || self.public_visibility_snapshot_in(admission.scope).as_ref()
+                != Some(&admission.visibility)
+            || self.compile_view_digest_in(admission.scope) != Some(admission.view_digest)
+            || admission
+                .consumed
+                .compare_exchange(
+                    false,
+                    true,
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Acquire,
+                )
+                .is_err()
+        {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
+        Ok(())
+    }
 }
 impl CertifiedPrivateValueWrite {
     pub(super) fn matches(&self, entry: &tidepool_codegen::binding_table::BindingEntry) -> bool {
@@ -138,13 +268,39 @@ impl PendingHostValueWrite {
         binder: &super::BoundBinder,
         execution: Arc<tidepool_toolchain::checked_cell::ExactCompiledItem>,
     ) -> Result<Self, SessionError> {
+        Self::mounted_with_proof(
+            session,
+            scope,
+            binder,
+            CertifiedPrivateValueProof::Execution(execution),
+        )
+    }
+
+    pub(super) fn mounted_host_interface(
+        session: &PersistentSession,
+        scope: ScopeId,
+        binder: &super::BoundBinder,
+        interface: Arc<tidepool_toolchain::checked_cell::ExactHostBindingInterface>,
+    ) -> Result<Self, SessionError> {
+        Self::mounted_with_proof(
+            session,
+            scope,
+            binder,
+            CertifiedPrivateValueProof::HostInterface(interface),
+        )
+    }
+
+    fn mounted_with_proof(
+        session: &PersistentSession,
+        scope: ScopeId,
+        binder: &super::BoundBinder,
+        proof: CertifiedPrivateValueProof,
+    ) -> Result<Self, SessionError> {
         let id = tidepool_repr::SessionVarId::from_extract(binder.var_id);
         let entry = session
             .resolve_in(scope, &binder.name)
             .filter(|entry| {
-                entry.id == id
-                    && entry.scope == scope
-                    && entry.module.gen.0 == execution.generation()
+                entry.id == id && entry.scope == scope && entry.module.gen.0 == proof.generation()
             })
             .ok_or(SessionError::StaleStagedDeclaration)?;
         Ok(Self {
@@ -157,7 +313,7 @@ impl PendingHostValueWrite {
                 identity: entry.value.identity.clone(),
                 generation: entry.module.gen,
                 root_id: entry.value.handle.raw().0,
-                execution,
+                proof,
             },
         })
     }
@@ -181,7 +337,7 @@ impl PendingHostValueWrite {
                 || prior.identity != self.write.identity
                 || prior.generation != self.write.generation
                 || prior.root_id != self.write.root_id
-                || !Arc::ptr_eq(&prior.execution, &self.write.execution)
+                || !prior.proof.same_original(&self.write.proof)
             {
                 return Err(SessionError::StaleStagedDeclaration);
             }
@@ -934,7 +1090,7 @@ impl CheckedTurnCompletion {
                         identity: entry.value.identity.clone(),
                         generation: entry.module.gen,
                         root_id: entry.value.handle.raw().0,
-                        execution: self.execution.clone(),
+                        proof: CertifiedPrivateValueProof::Execution(self.execution.clone()),
                     },
                 ));
             }

@@ -374,8 +374,8 @@ pub struct RecoveryValueInterfaceRef {
 }
 
 impl CertifiedValueInterface {
-    /// Only the checked-cell issuer calls this after admitting the compiler's
-    /// same-transaction output and original canonical Val identity.
+    /// Checked-cell and host-interface issuers call this after admitting the
+    /// compiler's same-transaction output and original canonical Val identity.
     pub(crate) fn from_checked_compilation(
         producer: [u8; 32],
         owner: crate::declaration_join::ExactModuleIdentity,

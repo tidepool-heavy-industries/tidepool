@@ -259,13 +259,41 @@ enum HostCarrierOrigin {
         admission: Arc<super::RuntimeCheckedItemAdmission>,
         binder: BoundBinder,
     },
+    Interface {
+        admission: Arc<super::RuntimeHostBindingAdmission>,
+        binder: BoundBinder,
+        proof: Arc<tidepool_toolchain::checked_cell::ExactHostBindingInterface>,
+    },
+}
+
+/// Fixed host representation and native type evidence retained with the
+/// original checked source owner. This grants no fresh binding by itself.
+pub struct HostBindingPrototype {
+    compiler: Arc<tidepool_toolchain::checked_cell::ExactHostBindingPrototype>,
+    code: Arc<TurnCode<'static>>,
+    representation: HostRepresentation,
+    authority_digest: [u8; 32],
+    include_paths: Vec<std::path::PathBuf>,
+    _source_owner: Arc<dyn std::any::Any + Send + Sync>,
+}
+
+impl HostBindingPrototype {
+    pub fn compiler(&self) -> &Arc<tidepool_toolchain::checked_cell::ExactHostBindingPrototype> {
+        &self.compiler
+    }
+    pub fn authority_digest(&self) -> [u8; 32] {
+        self.authority_digest
+    }
+    pub fn include_paths(&self) -> &[std::path::PathBuf] {
+        &self.include_paths
+    }
 }
 
 /// Complete representation for one fixed host builder. Checked carriers retain
-/// their sealed compiler reservation and binder. Reusable carriers structurally
-/// validate generic embedding code supplied by their Rust caller.
+/// their original reservation; interface instances retain a fresh sealed host
+/// admission. Reusable carriers provide only generic embedding authority.
 pub struct HostCarrier {
-    code: TurnCode<'static>,
+    code: Arc<TurnCode<'static>>,
     representation: HostRepresentation,
     origin: HostCarrierOrigin,
 }
@@ -282,7 +310,7 @@ impl HostCarrier {
         refuse_checked_turn(&code)?;
         let (root, representation) = host_representation(binder, &code, host_type)?;
         Ok(Self {
-            code: own_host_code(code),
+            code: Arc::new(own_host_code(code)),
             representation,
             origin: HostCarrierOrigin::Reusable(HostCarrierShape {
                 tier: binder.tier,
@@ -335,7 +363,7 @@ impl HostCarrier {
         }
         let (_, representation) = host_representation(&binder, &code, expected)?;
         Ok(Self {
-            code: own_host_code(code),
+            code: Arc::new(own_host_code(code)),
             representation,
             origin: HostCarrierOrigin::Checked { admission, binder },
         })
@@ -347,8 +375,71 @@ impl HostCarrier {
     ) -> Result<(&Arc<super::RuntimeCheckedItemAdmission>, &BoundBinder), ResidentError> {
         match &self.origin {
             HostCarrierOrigin::Checked { admission, binder } => Ok((admission, binder)),
+            HostCarrierOrigin::Reusable(_) | HostCarrierOrigin::Interface { .. } => {
+                Err(ResidentError::UnsupportedCheckedTurn)
+            }
+        }
+    }
+
+    /// Preserve the original compiler-issued binding across both checked host
+    /// admission forms. Reusable generic embeddings have no such authority.
+    pub fn binding(&self) -> Result<&BoundBinder, ResidentError> {
+        match &self.origin {
+            HostCarrierOrigin::Checked { binder, .. }
+            | HostCarrierOrigin::Interface { binder, .. } => Ok(binder),
             HostCarrierOrigin::Reusable(_) => Err(ResidentError::UnsupportedCheckedTurn),
         }
+    }
+
+    pub fn session_root(&self) -> Result<&Path, ResidentError> {
+        match &self.origin {
+            HostCarrierOrigin::Checked { admission, .. } => {
+                Ok(admission.snapshot().view().session_root())
+            }
+            HostCarrierOrigin::Interface { admission, .. } => Ok(&admission.session_root),
+            HostCarrierOrigin::Reusable(_) => Err(ResidentError::UnsupportedCheckedTurn),
+        }
+    }
+
+    /// Authenticate one fresh compiler interface against its runtime reservation
+    /// and reusable original representation. No authored recipe is fabricated.
+    pub fn from_interface(
+        admission: Arc<super::RuntimeHostBindingAdmission>,
+        proof: Arc<tidepool_toolchain::checked_cell::ExactHostBindingInterface>,
+    ) -> Result<Self, ResidentError> {
+        let binder =
+            super::turn::decode_bound_binder(proof.binder()).map_err(SessionError::Compile)?;
+        if !Arc::ptr_eq(proof.prototype(), admission.prototype.compiler())
+            || proof.admission_digest() != admission.digest()
+            || proof.generation() != admission.generation().0
+            || binder.name != admission.binding()
+            || binder.module != SessionModule::val(admission.generation()).module_name()
+            || binder.var_id != session_var_id(&binder.module, &binder.name)
+            || proof.value_interface_certificate().owner()
+                != SessionModule::val(admission.generation())
+        {
+            return Err(ResidentError::UnsupportedCheckedTurn);
+        }
+        let prototype = &admission.prototype;
+        let (_, representation) = host_representation(
+            &binder,
+            &TurnCode {
+                table: std::borrow::Cow::Borrowed(prototype.code.table.as_ref()),
+                sites: std::borrow::Cow::Borrowed(prototype.code.sites.as_ref()),
+                prepared: std::borrow::Cow::Borrowed(prototype.code.prepared.as_ref()),
+                certification: std::borrow::Cow::Borrowed(prototype.code.certification.as_ref()),
+            },
+            prototype.representation.host_type(),
+        )?;
+        Ok(Self {
+            code: prototype.code.clone(),
+            representation,
+            origin: HostCarrierOrigin::Interface {
+                admission,
+                binder,
+                proof,
+            },
+        })
     }
 
     /// Borrow the immutable compiler proof without changing carrier ownership.
@@ -2433,6 +2524,9 @@ pub struct ResidentSession<H, O> {
     /// Private request carriers remain rooted for closures that captured them,
     /// but never become ordinary unqualified workbench vocabulary.
     hidden_host_bindings: HashMap<SessionVarId, ()>,
+    /// At most one exact source contract per fixed host kind. Outstanding
+    /// instances retain their superseded prototype through their admission.
+    host_binding_prototypes: Vec<Arc<HostBindingPrototype>>,
     /// The resource and lexical scopes for the next session entry. Callers
     /// sharing a machine replace this atomically at checkout boundaries.
     run_context: SessionRunContext,
@@ -2502,6 +2596,7 @@ where
             binding_provenance: HashMap::new(),
             host_text_bindings: HashMap::new(),
             hidden_host_bindings: HashMap::new(),
+            host_binding_prototypes: Vec::new(),
             run_context: SessionRunContext::ROOT,
             custody_cleanup: Arc::new(CustodyCleanup::default()),
         }
@@ -4355,12 +4450,143 @@ where
         })
     }
 
-    /// Fill the sole original checked host binder without entering its placeholder.
+    /// Retain a prototype only from this machine's original checked host mount.
+    pub fn retain_host_binding_prototype(
+        &mut self,
+        carrier: &HostCarrier,
+    ) -> Result<(), ResidentError> {
+        let (admission, _) = carrier.checked_binding()?;
+        if !admission.prefix().admission().belongs_to(&self.state) {
+            return Err(ResidentError::UnsupportedCheckedTurn);
+        }
+        let execution = carrier
+            .code
+            .certification
+            .as_ref()
+            .as_ref()
+            .and_then(|certification| certification.checked_execution())
+            .ok_or(ResidentError::UnsupportedCheckedTurn)?;
+        let compiler =
+            tidepool_toolchain::checked_cell::ExactHostBindingPrototype::from_checked(execution)
+                .map_err(SessionError::Compile)?;
+        let mut code = own_host_code(carrier.code());
+        let certification = code
+            .certification
+            .as_ref()
+            .as_ref()
+            .ok_or(ResidentError::UnsupportedCheckedTurn)?
+            .host_prototype()
+            .map_err(SessionError::Compile)?;
+        code.certification = std::borrow::Cow::Owned(Some(certification));
+        let prototype = Arc::new(HostBindingPrototype {
+            compiler,
+            code: Arc::new(code),
+            representation: carrier.representation,
+            authority_digest: admission.prefix().admission().authority_digest(),
+            include_paths: admission.prefix().admission().include_paths().to_vec(),
+            _source_owner: admission.prefix().admission().specification().clone(),
+        });
+        self.host_binding_prototypes
+            .retain(|old| old.representation.host_type() != prototype.representation.host_type());
+        self.host_binding_prototypes.push(prototype);
+        Ok(())
+    }
+
+    pub fn host_binding_prototype(
+        &self,
+        expected: HostBindingType,
+        authority_digest: [u8; 32],
+    ) -> Option<Arc<HostBindingPrototype>> {
+        self.host_binding_prototypes
+            .iter()
+            .find(|prototype| {
+                prototype.representation.host_type() == expected
+                    && prototype.authority_digest == authority_digest
+            })
+            .cloned()
+    }
+
+    pub fn admit_host_binding_interface(
+        &mut self,
+        scope: ScopeId,
+        binding: String,
+        prototype: Arc<HostBindingPrototype>,
+    ) -> Result<Arc<super::RuntimeHostBindingAdmission>, ResidentError> {
+        self.settle_dropped_custody();
+        if self.run_context.lexical_scope != scope
+            || !self
+                .host_binding_prototypes
+                .iter()
+                .any(|original| Arc::ptr_eq(original, &prototype))
+        {
+            return Err(ResidentError::UnsupportedCheckedTurn);
+        }
+        self.state
+            .admit_host_binding_interface(scope, binding, prototype)
+            .map_err(ResidentError::Session)
+    }
+
+    fn mount_host_interface_input(
+        &mut self,
+        carrier: &HostCarrier,
+        payload: HostPayload<'_>,
+    ) -> Result<super::PendingHostValueWrite, ResidentError> {
+        let HostCarrierOrigin::Interface {
+            admission,
+            binder,
+            proof,
+        } = &carrier.origin
+        else {
+            return Err(ResidentError::UnsupportedCheckedTurn);
+        };
+        if !carrier.representation.matches_payload(&payload)
+            || self.run_context.lexical_scope != admission.scope
+        {
+            return Err(ResidentError::UnsupportedCheckedTurn);
+        }
+        self.settle_dropped_custody();
+        self.validate_host_mount_geometry(admission.scope, binder, admission.generation)?;
+        self.state
+            .consume_host_binding_interface(admission, proof)?;
+        let representation = carrier.representation;
+        self.mount_host_value_with_interface_in(
+            admission.scope,
+            binder,
+            admission.generation,
+            carrier.code(),
+            ValueInterfaceSource::Checked,
+            move |engine, realm, _| representation.build(engine, realm, payload),
+        )?;
+        if let Err(error) = self
+            .state
+            .retain_checked_value_interface(proof.value_interface_certificate())
+        {
+            self.retire_host_binding_owner(&admission.session_root, binder);
+            return Err(error.into());
+        }
+        match super::PendingHostValueWrite::mounted_host_interface(
+            &self.state,
+            admission.scope,
+            binder,
+            proof.clone(),
+        ) {
+            Ok(write) => Ok(write),
+            Err(error) => {
+                self.retire_host_binding_owner(&admission.session_root, binder);
+                Err(error.into())
+            }
+        }
+    }
+
+    /// Fill the sole compiler-issued host binder without entering a placeholder.
     pub fn mount_checked_host_input(
         &mut self,
         carrier: &HostCarrier,
         payload: HostPayload<'_>,
     ) -> Result<super::PendingHostValueWrite, ResidentError> {
+        if matches!(&carrier.origin, HostCarrierOrigin::Interface { .. }) {
+            return self.mount_host_interface_input(carrier, payload);
+        }
         let (admission, binder) = carrier.checked_binding()?;
         if !carrier.representation.matches_payload(&payload) {
             return Err(ResidentError::UnsupportedCheckedTurn);
@@ -5150,7 +5376,8 @@ where
         let authenticated =
             if let Some(certification) = certification {
                 match certification.purpose() {
-                    TurnPurpose::Execution { execution, .. } => {
+                    TurnPurpose::Execution { execution, .. }
+                    | TurnPurpose::HostPrototype(execution) => {
                         if !execution.matches_target(&code.prepared) {
                             return Err(ResidentError::UnsupportedCheckedTurn);
                         }

@@ -342,15 +342,19 @@ runDeclarationOperation args manifest = do
           let generation = hostInterfaceGeneration input
               owner = SessionModule ValMod (Generation generation)
           interface <- BS.readFile (sessionHiPath (hostInterfaceRoot input) owner)
+          packages <- BS.readFile (sessionHiPath (hostInterfaceRoot input) owner ++ ".packages")
+          requirements <- BS.readFile (sessionHiPath (hostInterfaceRoot input) owner ++ ".requirements")
           BS.writeFile out (toStrictByteString $
-            encodeListLen 9 <> encodeString "TPHOSTBINDINGINTERFACERECEIPT" <> encodeString "1"
+            encodeListLen 11 <> encodeString "TPHOSTBINDINGINTERFACERECEIPT" <> encodeString "1"
             <> encodeString (T.pack (shaHex (encodeHostBindingInterface input)))
             <> encodeString (T.pack (hostInterfaceProducer input))
             <> encodeString (T.pack (hostInterfaceAdmission input))
             <> encodeWord64 generation <> encodeBoundBinder binder
             <> encodeString (T.pack (shaHex interface))
             <> encodeString (T.pack (shaHex (toStrictByteString
-              (encodeCheckedSignature (hostInterfaceSignature input))))))
+              (encodeCheckedSignature (hostInterfaceSignature input)))))
+            <> encodeString (T.pack (shaHex packages))
+            <> encodeString (T.pack (shaHex requirements)))
   reportDiags result
 
 runInspectionMode :: Compiler -> WorkerRequest -> FilePath -> IO ExitCode

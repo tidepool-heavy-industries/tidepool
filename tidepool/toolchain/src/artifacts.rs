@@ -31,6 +31,72 @@ use crate::{
 
 mod failure_sources;
 
+static HOST_BINDING_INTERFACE_REQUESTS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Process-local logical interface requests, distinct from source/native
+/// compiler requests. Like extract_spawn_count, this grants no authority.
+pub fn host_binding_interface_request_count() -> u64 {
+    HOST_BINDING_INTERFACE_REQUESTS.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Issue one fresh type-only host interface from original compiler type evidence.
+/// This session-specific artifact is never cached or compiled as authored source.
+pub fn issue_host_binding_interface(
+    prototype: Arc<crate::checked_cell::ExactHostBindingPrototype>,
+    admission: [u8; 32],
+    generation: u64,
+    binding: &str,
+    includes: &[PathBuf],
+) -> Result<Arc<crate::checked_cell::ExactHostBindingInterface>, CompileError> {
+    let _span = tracing::debug_span!("host_binding_interface", generation, binding).entered();
+    let mut command = ExtractCmd::new().map_err(|error| CompileError::Io(error.into()))?;
+    let bound = command
+        .bind()
+        .map_err(|error| CompileError::Io(extract_spawn_error(error.source)))?;
+    let endpoint = crate::toolchain::AdmittedCompilerEndpoint::from_bound(bound)
+        .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+    let offer = prototype.prepare_interface_offer(
+        endpoint.identity().producer_bytes(),
+        admission,
+        generation,
+        binding,
+    )?;
+    let root = offer
+        .request
+        .manifest
+        .parent()
+        .expect("owned interface input directory")
+        .parent()
+        .expect("owned interface directory");
+    let manifest = root.join("host-binding-interface.cbor");
+    let receipt = root.join("host-binding-interface-receipt.cbor");
+    std::fs::write(&manifest, &offer.encoded)?;
+    command
+        .input(&manifest)
+        .includes(includes)
+        .session_artifacts(&offer.request.manifest)
+        .declaration_join(&manifest)
+        .declaration_join_out(&receipt);
+    crate::paths::apply_admitted_build_products_dir(&mut command, &endpoint);
+    HOST_BINDING_INTERFACE_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let run = endpoint
+        .execute(&command)
+        .map_err(|error| CompileError::Io(extract_spawn_error(error.source)))?;
+    crate::diag::decode_extract_result(
+        run.output.status.success(),
+        &run.output.stdout,
+        &run.output.stderr,
+    )?;
+    let bytes = std::fs::read(&receipt)?;
+    if bytes.len() > 4 << 20 {
+        return Err(CompileError::ExtractFailed(
+            "host interface receipt exceeds byte bound".into(),
+        ));
+    }
+    offer.seal(&bytes)
+}
+
 // ---------------------------------------------------------------------------
 // Typed yield sites (`asks.json` on disk)
 // ---------------------------------------------------------------------------

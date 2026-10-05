@@ -2820,7 +2820,7 @@ impl ExactDeclarationContext {
         Ok(())
     }
 
-    fn admit_producer(&mut self, producer: [u8; 32]) -> Result<(), CompileError> {
+    pub(crate) fn admit_producer(&mut self, producer: [u8; 32]) -> Result<(), CompileError> {
         if producer == [0; 32] || (self.producer != [0; 32] && producer != self.producer) {
             return Err(failure("producer identity differs"));
         }

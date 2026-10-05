@@ -60,7 +60,7 @@ pub struct FinalExecutionIntent {
     write_ids: Vec<SessionVarId>,
     source_keys: Vec<SourceLeaseKey>,
     head_replacements: Vec<DeclarationHeadReplacement>,
-    _completed_values: Vec<Arc<tidepool_toolchain::checked_cell::ExactCompiledItem>>,
+    _completed_values: Vec<super::admission::CertifiedPrivateValueProof>,
     reserved: Generation,
 }
 
@@ -621,11 +621,7 @@ impl PersistentSession {
             writes,
             _completed_values: write_ids
                 .iter()
-                .filter_map(|id| {
-                    completed_values
-                        .get(id)
-                        .map(|proof| proof.execution.clone())
-                })
+                .filter_map(|id| completed_values.get(id).map(|proof| proof.proof.clone()))
                 .collect(),
             write_ids,
             source_keys,

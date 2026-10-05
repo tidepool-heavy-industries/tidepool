@@ -748,6 +748,264 @@ pub struct CheckedValueArtifact {
     directory: Arc<ValueInterfaceDirectory>,
 }
 
+/// Reusable native type authority extracted from one genuine checked host bind.
+/// It retains only the type's original interface closure, never a new binder's
+/// runtime admission or an authored execution claim.
+#[derive(Debug)]
+pub struct ExactHostBindingPrototype {
+    signature: ExactCheckedSignature,
+    original_binder: Value,
+    context: Arc<crate::declaration_context::ExactDeclarationContext>,
+    producer: [u8; 32],
+    digest: [u8; 32],
+}
+
+impl ExactHostBindingPrototype {
+    pub fn from_checked(execution: &ExactCompiledItem) -> Result<Arc<Self>, CompileError> {
+        let [signature] = execution.item().signatures() else {
+            return Err(failure(
+                "host prototype requires one original native signature",
+            ));
+        };
+        let [binder] = execution.bound_binders.as_slice() else {
+            return Err(failure("host prototype requires one original binder"));
+        };
+        let fields = row(binder, 7)?;
+        if execution.item().kind() != CheckedItemKind::Bind
+            || !matches!(string(&fields[6])?, "JsonValue" | "Text" | "CommandJob")
+            || signature.key()
+                != format!(
+                    "__tidepool_cell_pin_{}_{}",
+                    execution.item().index(),
+                    string(&fields[0])?
+                )
+        {
+            return Err(failure("host prototype lacks original host type authority"));
+        }
+        let interface = execution
+            .value_interface_certificate()
+            .ok_or_else(|| failure("host prototype lacks its original value interface"))?;
+        let names = signature
+            .names()
+            .iter()
+            .map(|name| crate::declaration_join::ExactModuleIdentity {
+                unit: name.unit.clone(),
+                module: name.module.clone(),
+            })
+            .collect::<BTreeSet<_>>();
+        let owners = interface
+            .artifact_view()
+            .interface_owners()
+            .into_iter()
+            .map(|owner| owner.owner)
+            .filter(|owner| names.contains(owner))
+            .collect::<Vec<_>>();
+        let selected = interface.artifact_view().interface_projection(&owners)?;
+        let context = Arc::new(
+            crate::declaration_context::ExactDeclarationContext::new(&[], &[], Vec::new())?
+                .extend_interface_artifacts(&selected)?,
+        );
+        let producer = execution.item.cell.producer;
+        // A package-only type still belongs to this original compiler producer.
+        let mut context = (*context).clone();
+        context.admit_producer(producer)?;
+        let context = Arc::new(context);
+        let mut encoded = Vec::new();
+        ciborium::ser::into_writer(&encode_signature(signature), &mut encoded)
+            .expect("signature encodes to memory");
+        let mut hash = Sha256::new();
+        hash.update(b"tidepool-host-binding-prototype-1");
+        hash.update(producer);
+        hash.update(context.semantic_sha256());
+        hash.update(&encoded);
+        Ok(Arc::new(Self {
+            signature: signature.clone(),
+            original_binder: binder.clone(),
+            context,
+            producer,
+            digest: hash.finalize().into(),
+        }))
+    }
+
+    pub fn digest(&self) -> [u8; 32] {
+        self.digest
+    }
+
+    pub(crate) fn prepare_interface_offer(
+        self: &Arc<Self>,
+        producer: &[u8],
+        admission: [u8; 32],
+        generation: u64,
+        binding: &str,
+    ) -> Result<HostBindingInterfaceOffer, CompileError> {
+        if admission == [0; 32]
+            || generation == 0
+            || binding.is_empty()
+            || crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(producer)
+                .sha256()
+                != self.producer
+        {
+            return Err(failure(
+                "host interface offer differs from its original producer or reservation",
+            ));
+        }
+        let directory = Arc::new(ValueInterfaceDirectory(
+            tempfile::Builder::new()
+                .prefix("tidepool-host-interface-")
+                .tempdir()?,
+        ));
+        let request = self
+            .context
+            .prepare_compilation(&directory.0.path().join("inputs"), producer)?;
+        let value = array([
+            text("TPHOSTBINDINGINTERFACE"),
+            text("1"),
+            text(hex(&self.producer)),
+            text(hex(&admission)),
+            Value::Integer(generation.into()),
+            text(binding),
+            encode_signature(&self.signature),
+            text(request.manifest.to_string_lossy()),
+            text(directory.0.path().to_string_lossy()),
+        ]);
+        let mut encoded = Vec::new();
+        ciborium::ser::into_writer(&value, &mut encoded).expect("host offer encodes to memory");
+        if encoded.len() > 4 << 20 {
+            return Err(failure("host interface offer exceeds byte bound"));
+        }
+        Ok(HostBindingInterfaceOffer {
+            prototype: self.clone(),
+            directory,
+            request,
+            encoded,
+            admission,
+            generation,
+            binding: binding.to_owned(),
+        })
+    }
+}
+
+pub(crate) struct HostBindingInterfaceOffer {
+    prototype: Arc<ExactHostBindingPrototype>,
+    directory: Arc<ValueInterfaceDirectory>,
+    pub(crate) request: crate::declaration_context::ExactCompilationRequest,
+    pub(crate) encoded: Vec<u8>,
+    admission: [u8; 32],
+    generation: u64,
+    binding: String,
+}
+
+/// One compiler-issued fresh interface. This certifies host binding identity,
+/// not execution of an authored Haskell cell or its placeholder.
+#[derive(Debug)]
+pub struct ExactHostBindingInterface {
+    prototype: Arc<ExactHostBindingPrototype>,
+    admission: [u8; 32],
+    generation: u64,
+    binder: Value,
+    interface: Arc<CheckedValueArtifact>,
+}
+
+impl ExactHostBindingInterface {
+    pub fn prototype(&self) -> &Arc<ExactHostBindingPrototype> {
+        &self.prototype
+    }
+    pub fn admission_digest(&self) -> [u8; 32] {
+        self.admission
+    }
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+    pub fn binder(&self) -> &Value {
+        &self.binder
+    }
+    pub fn value_interface_certificate(&self) -> Arc<CheckedValueArtifact> {
+        self.interface.clone()
+    }
+}
+
+impl HostBindingInterfaceOffer {
+    pub(crate) fn seal(
+        self,
+        receipt: &[u8],
+    ) -> Result<Arc<ExactHostBindingInterface>, CompileError> {
+        self.prototype
+            .context
+            .validate_artifacts(&self.request.artifacts)?;
+        let decoded = decode(receipt)?;
+        let fields = row(&decoded, 11)?;
+        let mut signature = Vec::new();
+        ciborium::ser::into_writer(&encode_signature(&self.prototype.signature), &mut signature)
+            .expect("signature encodes to memory");
+        if string(&fields[0])? != "TPHOSTBINDINGINTERFACERECEIPT"
+            || string(&fields[1])? != "1"
+            || string(&fields[2])? != hash(&self.encoded)
+            || string(&fields[3])? != hex(&self.prototype.producer)
+            || string(&fields[4])? != hex(&self.admission)
+            || fields[5] != Value::Integer(self.generation.into())
+            || string(&fields[8])? != hash(&signature)
+        {
+            return Err(failure(
+                "host interface receipt differs from its exact offer",
+            ));
+        }
+        let binder = row(&fields[6], 7)?;
+        let original = row(&self.prototype.original_binder, 7)?;
+        let owner = tidepool_repr::SessionModule::val(tidepool_repr::Generation(self.generation));
+        if string(&binder[0])? != self.binding
+            || string(&binder[2])? != owner.module_name()
+            || [3, 5, 6]
+                .into_iter()
+                .any(|index| binder[index] != original[index])
+        {
+            return Err(failure(
+                "host interface has another binder or original nominal type",
+            ));
+        }
+        let path = self.directory.0.path().join(owner.relative_hi_path());
+        let bytes: Arc<[u8]> = read(&path, 32 << 20)?.into();
+        let digest = hash(&bytes);
+        if string(&fields[7])? != digest {
+            return Err(failure("host interface bytes differ from receipt"));
+        }
+        if string(&fields[9])? != hash(&read(path.with_extension("hi.packages"), 4 << 20)?)
+            || string(&fields[10])? != hash(&read(path.with_extension("hi.requirements"), 4 << 20)?)
+        {
+            return Err(failure(
+                "host interface dependency evidence differs from receipt",
+            ));
+        }
+        let certificate = certify_value_interface(self.prototype.producer, owner, &path, &bytes)?;
+        let context = (*self.prototype.context)
+            .clone()
+            .extend_with_value_interfaces(std::slice::from_ref(&certificate), Vec::new())?;
+        let artifact_view = context
+            .artifact_view()
+            .select_roots(vec![certificate.artifact_id()])?;
+        let interface = Arc::new(CheckedValueArtifact {
+            interface: ValueInterfaceBytes {
+                owner,
+                module: owner.module_name(),
+                digest,
+                bytes,
+                path,
+            },
+            authority: (self.prototype.producer, Sha256::digest(receipt).into()),
+            certified_interface: certificate,
+            artifact_view,
+            source_lexical: Vec::new(),
+            directory: self.directory,
+        });
+        Ok(Arc::new(ExactHostBindingInterface {
+            prototype: self.prototype,
+            admission: self.admission,
+            generation: self.generation,
+            binder: fields[6].clone(),
+            interface,
+        }))
+    }
+}
+
 /// The exact checked interface bytes named by one compiler authorization.
 /// This permits their imports without making other hydrated owners lexical.
 #[derive(Clone, Default)]

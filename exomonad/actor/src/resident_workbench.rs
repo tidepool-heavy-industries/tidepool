@@ -4552,11 +4552,14 @@ where
             .map(|scope| scope.admission.clone());
         self.access
             .with_machine(context.clone(), move |session, context, _| {
-                let (reservation, original_binder) = carrier
-                    .checked_binding()
+                let original_binder = carrier
+                    .binding()
                     .map_err(ResidentActorWorkbenchError::Resident)?;
                 let binder = original_binder.clone();
-                let session_root = reservation.snapshot().view().session_root().to_path_buf();
+                let session_root = carrier
+                    .session_root()
+                    .map_err(ResidentActorWorkbenchError::Resident)?
+                    .to_path_buf();
                 let write = session
                     .mount_checked_host_input(
                         &carrier,
@@ -4622,6 +4625,57 @@ where
                     .await?
             }
         };
+        let reuse_binding = binding.clone();
+        let authority_digest = authority.authority_digest();
+        let reused = self
+            .access
+            .with_machine(context.clone(), move |session, context, _| {
+                let Some(prototype) =
+                    session.host_binding_prototype(kind.host_binding_type(), authority_digest)
+                else {
+                    return Ok(None);
+                };
+                let admission = session
+                    .admit_host_binding_interface(
+                        context.placement.lexical_scope,
+                        reuse_binding,
+                        prototype,
+                    )
+                    .map_err(ResidentActorWorkbenchError::Resident)?;
+                let lease = session.lease_bindings(&[]);
+                Ok(Some((
+                    admission,
+                    CellPreparationLease {
+                        _bindings: lease,
+                        _input: None,
+                    },
+                )))
+            })
+            .await?;
+        if let Some((admission, dependencies)) = reused {
+            let original_admission = admission.clone();
+            let cancellation = tidepool_runtime::CompilerTransactionCancellation::new();
+            let mut cancel_on_drop = CancelCompilerTransactionOnDrop(Some(cancellation.clone()));
+            let interface = crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
+                tidepool_runtime::with_compiler_transaction_cancellable(cancellation, || {
+                    let prototype = original_admission.prototype();
+                    tidepool_toolchain::artifacts::issue_host_binding_interface(
+                        prototype.compiler().clone(),
+                        original_admission.digest(),
+                        original_admission.generation().0,
+                        original_admission.binding(),
+                        prototype.include_paths(),
+                    )
+                    .map_err(ResidentActorWorkbenchError::Compile)
+                })
+            }))
+            .await
+            .map_err(ResidentActorWorkbenchError::Join)??;
+            cancel_on_drop.0 = None;
+            let carrier = HostCarrier::from_interface(admission, interface)
+                .map_err(ResidentActorWorkbenchError::Resident)?;
+            return Ok((carrier, dependencies));
+        }
         let cell = format!(
             "{binding} <- pure (({}) :: {})",
             kind.anchor(),
@@ -4653,7 +4707,7 @@ where
         let ready = items.pop().expect("one checked host item").ready;
         let reservation = self
             .access
-            .with_machine(context, move |session, _, _| {
+            .with_machine(context.clone(), move |session, _, _| {
                 session
                     .admit_checked_item(ready.prefix, ready.item)
                     .map_err(|error| {
@@ -4689,6 +4743,15 @@ where
             kind.host_binding_type(),
         )
         .map_err(ResidentActorWorkbenchError::Resident)?;
+        let carrier = self
+            .access
+            .with_machine(context, move |session, _, _| {
+                session
+                    .retain_host_binding_prototype(&carrier)
+                    .map_err(ResidentActorWorkbenchError::Resident)?;
+                Ok(carrier)
+            })
+            .await?;
         Ok((carrier, dependencies))
     }
 
@@ -11869,6 +11932,9 @@ mod request_tests {
             .execute_cell_for_test(context.clone(), "data Job = SourceJob Bool")
             .await
             .unwrap();
+        let before_second_job = tidepool_extract_cmd::extract_spawn_count();
+        let before_second_interface =
+            tidepool_toolchain::artifacts::host_binding_interface_request_count();
         let (carrier, dependencies) = workbench
             .prepare_host_input(
                 crate::ActorSessionContext {
@@ -11880,7 +11946,19 @@ mod request_tests {
             )
             .await
             .expect("retained context still admits the original checked Job type");
-        let (_, binder) = carrier.checked_binding().unwrap();
+        assert_eq!(
+            tidepool_extract_cmd::extract_spawn_count(),
+            before_second_job + 1
+        );
+        assert_eq!(
+            tidepool_toolchain::artifacts::host_binding_interface_request_count(),
+            before_second_interface + 1
+        );
+        assert!(
+            carrier.checked_binding().is_err(),
+            "fresh interface has no authored checked execution reservation"
+        );
+        let binder = carrier.binding().unwrap();
         assert_eq!(
             binder.host_authority,
             Some(HostBindingAuthority::CommandJob)
@@ -11988,6 +12066,9 @@ mod request_tests {
             .execute_cell_for_test(context.clone(), "data Text = SourceText Bool")
             .await
             .unwrap();
+        let before_second_text = tidepool_extract_cmd::extract_spawn_count();
+        let before_second_interface =
+            tidepool_toolchain::artifacts::host_binding_interface_request_count();
         let (carrier, dependencies) = workbench
             .prepare_host_input(
                 context.clone(),
@@ -11996,7 +12077,15 @@ mod request_tests {
             )
             .await
             .expect("retained context still admits the original checked Text type");
-        let (_, binder) = carrier.checked_binding().unwrap();
+        assert_eq!(
+            tidepool_extract_cmd::extract_spawn_count(),
+            before_second_text + 1
+        );
+        assert_eq!(
+            tidepool_toolchain::artifacts::host_binding_interface_request_count(),
+            before_second_interface + 1
+        );
+        let binder = carrier.binding().unwrap();
         assert_eq!(binder.host_authority, Some(HostBindingAuthority::Text));
         assert_ne!(
             tidepool_repr::SessionVarId::from_extract(binder.var_id),
@@ -12304,10 +12393,23 @@ mod request_tests {
             .await
             .unwrap();
         let execution = workbench.private_execution.as_ref().unwrap().clone();
+        workbench
+            .bind_command_job(private.clone(), "prototype job".into())
+            .await
+            .unwrap()
+            .accept()
+            .unwrap();
+        let before_interface =
+            tidepool_toolchain::artifacts::host_binding_interface_request_count();
         let mut pending = workbench
             .bind_command_job(private.clone(), "cancelled job".into())
             .await
             .unwrap();
+        assert_eq!(
+            tidepool_toolchain::artifacts::host_binding_interface_request_count(),
+            before_interface + 1,
+            "cancellation and foreign-owner acceptance cover a freshly issued interface"
+        );
         let name = pending.name().to_owned();
         // Checked mounting establishes the machine incarnation. Compare
         // cancellation against that initialized public snapshot.
@@ -13087,6 +13189,58 @@ mod request_tests {
             use tidepool_runtime::session::turn::HostBindingAuthority;
             self.access
                 .with_machine(context, move |session, context, _| {
+                    if carrier.checked_binding().is_err() {
+                        let binder = carrier.binding().unwrap();
+                        let expected = match binder.host_authority.unwrap() {
+                            HostBindingAuthority::JsonValue => HostBindingType::JSON_VALUE,
+                            HostBindingAuthority::Text => HostBindingType::TEXT,
+                            HostBindingAuthority::CommandJob => HostBindingType::COMMAND_JOB,
+                        };
+                        let residency = session.residency();
+                        assert!(carrier
+                            .code()
+                            .certification
+                            .as_ref()
+                            .as_ref()
+                            .unwrap()
+                            .checked_execution()
+                            .is_none());
+                        assert!(carrier
+                            .code()
+                            .certification
+                            .as_ref()
+                            .as_ref()
+                            .unwrap()
+                            .checked_prefix()
+                            .is_none());
+                        assert!(matches!(
+                            HostCarrier::from_compiled(binder, carrier.code(), expected),
+                            Err(ResidentError::UnsupportedCheckedTurn)
+                        ));
+                        let wrong_json = serde_json::Value::Null;
+                        let wrong = if expected == HostBindingType::JSON_VALUE {
+                            HostPayload::Text("wrong nominal payload")
+                        } else {
+                            HostPayload::Json(&wrong_json)
+                        };
+                        assert!(matches!(
+                            session.mount_checked_host_input(&carrier, wrong),
+                            Err(ResidentError::UnsupportedCheckedTurn)
+                        ));
+                        assert!(session
+                            .run_bind_with_sites(
+                                "host prototype must never execute",
+                                carrier.code(),
+                                binder,
+                                tidepool_repr::Generation(u64::MAX)
+                            )
+                            .is_err());
+                        assert_eq!(session.residency(), residency);
+                        assert!(session
+                            .current_binding_in(context.placement.lexical_scope, &binder.name)
+                            .is_none());
+                        return Ok(carrier);
+                    }
                     let (reservation, binder) = carrier.checked_binding().unwrap();
                     let before = reservation.prefix().snapshot();
                     let expected = match binder.host_authority.unwrap() {
@@ -16388,7 +16542,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             .await
             .expect("host JSON has its original checked interface");
         assert_eq!(
-            carrier.checked_binding().unwrap().1.host_authority,
+            carrier.binding().unwrap().host_authority,
             Some(tidepool_runtime::session::turn::HostBindingAuthority::JsonValue)
         );
         let carrier = workbench
@@ -16557,7 +16711,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             .prepare_host_input(context.clone(), HostCarrierKind::Json, None)
             .await
             .expect("second JSON mount authenticates retained Value and Scientific owners");
-        let (_, binder) = carrier.checked_binding().unwrap();
+        let binder = carrier.binding().unwrap();
         assert_eq!(
             binder.host_authority,
             Some(tidepool_runtime::session::turn::HostBindingAuthority::JsonValue)

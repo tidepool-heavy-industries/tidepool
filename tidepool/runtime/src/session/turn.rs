@@ -1681,6 +1681,9 @@ pub(super) enum TurnPurpose {
         prefix: Arc<super::RuntimeCheckedPrefix>,
     },
     Display(Arc<tidepool_toolchain::checked_cell::ExactCompiledDisplay>),
+    /// Immutable constructor code from an original checked host item. This
+    /// carries no runtime prefix, authored execution or fresh binding authority.
+    HostPrototype(Arc<ExactCompiledItem>),
 }
 
 impl TurnPurpose {
@@ -1768,6 +1771,21 @@ impl Default for TurnCertification {
 }
 
 impl TurnCertification {
+    pub(super) fn host_prototype(&self) -> Result<Self, CompileError> {
+        let TurnPurpose::Execution { execution, prefix } = &self.purpose else {
+            return Err(CompileError::ExtractFailed(
+                "host prototype lacks original checked ownership".into(),
+            ));
+        };
+        if prefix.admission().host_carrier().is_none() {
+            return Err(CompileError::ExtractFailed(
+                "authored execution cannot issue a host prototype".into(),
+            ));
+        }
+        let mut retained = self.clone();
+        retained.purpose = TurnPurpose::HostPrototype(execution.clone());
+        Ok(retained)
+    }
     pub(super) fn purpose(&self) -> &TurnPurpose {
         &self.purpose
     }
@@ -1812,7 +1830,9 @@ impl TurnCertification {
     pub(crate) fn validate_checked_table(&self, table: &DataConTable) -> Result<(), CompileError> {
         match &self.purpose {
             TurnPurpose::Ordinary => Ok(()),
-            TurnPurpose::Execution { execution, .. } => execution.validate_table(table),
+            TurnPurpose::Execution { execution, .. } | TurnPurpose::HostPrototype(execution) => {
+                execution.validate_table(table)
+            }
             TurnPurpose::ActivationInput { proof, .. } => proof.validate_table(table),
             TurnPurpose::Display(display) => display.validate_table(table),
         }
@@ -1826,7 +1846,7 @@ impl TurnCertification {
     ) -> Result<(), CompileError> {
         let execution = match &self.purpose {
             TurnPurpose::Ordinary => return Ok(()),
-            TurnPurpose::ActivationInput { .. } => {
+            TurnPurpose::ActivationInput { .. } | TurnPurpose::HostPrototype(_) => {
                 return Err(CompileError::ExtractFailed(
                     "host activation input requires its affine mount consumer".into(),
                 ))
@@ -3786,7 +3806,7 @@ fn decode_export_items(v: &CborValue) -> Result<Vec<ExportItem>, CompileError> {
         .collect()
 }
 
-fn decode_bound_binder(v: &CborValue) -> Result<BoundBinder, CompileError> {
+pub(super) fn decode_bound_binder(v: &CborValue) -> Result<BoundBinder, CompileError> {
     let arr = cbor_expect_array_len(v, 7, "BoundBinder")?;
     let name = cbor_expect_text(&arr[0], "BoundBinder name")?.to_string();
     let var_id = cbor_as_u64(&arr[1], "BoundBinder varId")?;
