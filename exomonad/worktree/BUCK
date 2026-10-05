@@ -155,6 +155,30 @@ tidepool_rust_isolated_test(
         "//tidepool/repr:tidepool_repr",
         ":exomonad_worktree",
     ],
+    env = {
+        "EXOMONAD_BINDING_DIRECTORY_FAULT_LIBRARY": "$(location :binding_directory_fault_shared)",
+        "EXOMONAD_JOURNAL_FAULT_LIBRARY": "$(location :journal_fault_shared)",
+    },
+    resources = [
+        ":binding_directory_fault_shared",
+        ":journal_fault_shared",
+    ],
+    visibility = ["PUBLIC"],
+)
+
+cxx_library(
+    name = "binding_directory_fault_shared",
+    srcs = ["tests/fixtures/binding_directory_fault.c"],
+    preferred_linkage = "shared",
+    linker_flags = ["-ldl"],
+    visibility = ["PUBLIC"],
+)
+
+cxx_library(
+    name = "journal_fault_shared",
+    srcs = ["tests/fixtures/journal_fault.c"],
+    preferred_linkage = "shared",
+    linker_flags = ["-ldl"],
     visibility = ["PUBLIC"],
 )
 
@@ -185,6 +209,8 @@ filegroup(
         "exomonad/worktree/tests/dirty_snapshot.rs": "tests/dirty_snapshot.rs",
         "exomonad/worktree/tests/durable_formats.rs": "tests/durable_formats.rs",
         "exomonad/worktree/tests/event_monitor.rs": "tests/event_monitor.rs",
+        "exomonad/worktree/tests/fixtures/binding_directory_fault.c": "tests/fixtures/binding_directory_fault.c",
+        "exomonad/worktree/tests/fixtures/journal_fault.c": "tests/fixtures/journal_fault.c",
         "exomonad/worktree/tests/journal_uncertainty.rs": "tests/journal_uncertainty.rs",
         "exomonad/worktree/tests/merge.rs": "tests/merge.rs",
         "exomonad/worktree/tests/mount_namespace.rs": "tests/mount_namespace.rs",

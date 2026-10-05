@@ -1100,6 +1100,9 @@ fn settling_a_released_binding_also_permits_rebind() {
 #[test]
 fn registry_open_refuses_a_root_inside_a_working_tree() {
     let repo = TestRepo::init().expect("init");
+    repo.writer()
+        .commit_file("seed.txt", "seed\n", "seed source")
+        .expect("seed source repository");
     let repo_anchor = DirectoryAnchor::open_existing(repo.path()).unwrap();
     let nested = repo.path().join("nested-registry");
     let git = GitCli::new();

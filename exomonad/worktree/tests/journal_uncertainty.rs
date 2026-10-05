@@ -2,7 +2,11 @@
 use exomonad_worktree::{
     testing::TestRepo, EventId, EventJournal, GitCli, WorktreeId, WorktreeMonitor,
 };
-use std::{fs, path::Path, process::Command};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 use tidepool_atomic_write::DirectoryAnchor;
 
 #[test]
@@ -122,20 +126,9 @@ fn monitor_fault_child() {
 fn owning_paths_poison_and_reopen_without_reusing_sequences() {
     let temp = tempfile::tempdir().unwrap();
     let storage_anchor = DirectoryAnchor::open_existing(temp.path()).unwrap();
-    let library = temp.path().join("journal-fault.so");
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "short synchronous test-fixture build"
-    )]
-    let cc = Command::new("cc")
-        .args(["-shared", "-fPIC", "-Wall", "-Werror"])
-        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/journal_fault.c"))
-        .arg("-o")
-        .arg(&library)
-        .arg("-ldl")
-        .status()
-        .unwrap();
-    assert!(cc.success());
+    let library = std::env::var_os("EXOMONAD_JOURNAL_FAULT_LIBRARY")
+        .map(PathBuf::from)
+        .expect("native test runner must supply the declared journal fault library");
     for child in ["journal_fault_child", "monitor_fault_child"] {
         for (kind, target) in [
             ("open", "new/deep"),

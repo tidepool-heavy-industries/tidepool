@@ -627,6 +627,13 @@ def test_runtime_inputs(package_name, target_name, unit=False):
     if package_name == "exomonad-node" and unit:
         env["EXOMONAD_INBOX_DIRECTORY_FAULT_LIBRARY"] = "$(location :inbox_directory_fault_shared)"
         resources.append(":inbox_directory_fault_shared")
+    if package_name == "exomonad-worktree" and not unit and target_name == "worktree":
+        for variable, name in (
+            ("EXOMONAD_BINDING_DIRECTORY_FAULT_LIBRARY", "binding_directory_fault"),
+            ("EXOMONAD_JOURNAL_FAULT_LIBRARY", "journal_fault"),
+        ):
+            env[variable] = "$(location :" + name + "_shared)"
+            resources.append(":" + name + "_shared")
     if package_name == "tidepool-protocol":
         env["RUSTFMT"] = "$(exe toolchains//:rustfmt)"
         resources.append("toolchains//:rustfmt")
@@ -1270,6 +1277,18 @@ filegroup(
         rules.append('''cxx_library(
     name = "inbox_directory_fault_shared",
     srcs = ["src/inbox/fixtures/directory_fault.c"],
+    preferred_linkage = "shared",
+    linker_flags = ["-ldl"],
+    visibility = ["PUBLIC"],
+)
+''')
+    if package["name"] == "exomonad-worktree":
+        for name in ("binding_directory_fault", "journal_fault"):
+            source = "tests/fixtures/" + name + ".c"
+            CURRENT_QUALIFICATION_SOURCES.add(source)
+            rules.append(f'''cxx_library(
+    name = "{name}_shared",
+    srcs = ["{source}"],
     preferred_linkage = "shared",
     linker_flags = ["-ldl"],
     visibility = ["PUBLIC"],

@@ -134,23 +134,9 @@ fn binding_fault_child() {
 #[test]
 fn binding_public_paths_fence_uncertain_custody_until_reopen() {
     let temp = tempfile::tempdir().unwrap();
-    let library = temp.path().join("binding-fault.so");
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "short synchronous test-fixture build"
-    )]
-    let cc = Command::new("cc")
-        .args(["-shared", "-fPIC", "-Wall", "-Werror"])
-        .arg(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("tests/fixtures/binding_directory_fault.c"),
-        )
-        .arg("-o")
-        .arg(&library)
-        .arg("-ldl")
-        .status()
-        .unwrap();
-    assert!(cc.success());
+    let library = std::env::var_os("EXOMONAD_BINDING_DIRECTORY_FAULT_LIBRARY")
+        .map(PathBuf::from)
+        .expect("native test runner must supply the declared binding fault library");
     for operation in ["bind", "settle", "transfer", "reopen"] {
         for kind in ["open", "sync"] {
             let root = temp.path().join(format!("{operation}-{kind}/new/deep"));
@@ -267,23 +253,9 @@ fn directory_admission_fault_child() {
 fn store_admission_retries_the_original_scope_before_granting_authority() {
     let temp = tempfile::tempdir().unwrap();
     let storage_anchor = DirectoryAnchor::open_existing(temp.path()).unwrap();
-    let library = temp.path().join("admission-fault.so");
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "short synchronous test-fixture build"
-    )]
-    let cc = Command::new("cc")
-        .args(["-shared", "-fPIC", "-Wall", "-Werror"])
-        .arg(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("tests/fixtures/binding_directory_fault.c"),
-        )
-        .arg("-o")
-        .arg(&library)
-        .arg("-ldl")
-        .status()
-        .unwrap();
-    assert!(cc.success());
+    let library = std::env::var_os("EXOMONAD_BINDING_DIRECTORY_FAULT_LIBRARY")
+        .map(PathBuf::from)
+        .expect("native test runner must supply the declared binding fault library");
     for store in ["registry", "binding", "journal"] {
         for kind in ["open", "sync"] {
             let storage = temp.path().join(format!("{store}-{kind}"));
