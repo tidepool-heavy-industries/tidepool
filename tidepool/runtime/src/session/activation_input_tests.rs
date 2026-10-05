@@ -1091,9 +1091,86 @@ fn resident_parcel_preserves_original_authenticated_request_across_sessions() {
         "the original selected immutable interface view survives source retirement"
     );
     let realm = destination.parked_realm(&activation).unwrap();
+    let retained_context = &original.authenticated_inputs[&site];
+    assert!(
+        retained_context.artifact_view().descriptors().is_empty(),
+        "Int -> Int input and Unit reply have no home type interfaces"
+    );
+    let certification = fixture.producer.certification.as_ref().unwrap();
+    let compiler_context = certification
+        .compile_input_identity
+        .as_ref()
+        .unwrap()
+        .original_interface_context(
+            &fixture.producer.prepared,
+            &certification.groups,
+            &certification.target_owners,
+            &certification.package_interfaces,
+            &fixture.producer.table,
+            &fixture.producer.asks,
+        )
+        .unwrap();
+    let producer = compiler_context.toolchain_identity_sha256();
+    assert_ne!(producer, [0; 32]);
+    assert_eq!(retained_context.toolchain_identity_sha256(), producer);
+    let mut repeated_provenance = (*original).clone();
+    repeated_provenance.merge(&original).unwrap();
+    assert_eq!(repeated_provenance, *original);
+    assert!(
+        !compiler_context.artifact_view().descriptors().is_empty(),
+        "the compiler proof retains its original home closure before type projection"
+    );
+    let mut conflicting = (*original).clone();
+    conflicting
+        .authenticated_inputs
+        .insert(site, compiler_context.clone());
+    assert!(
+        repeated_provenance.merge(&conflicting).is_err(),
+        "same site metadata cannot replace its retained authenticated interface context"
+    );
+    assert_eq!(
+        repeated_provenance, *original,
+        "context collision is atomic"
+    );
     let input = destination
         .capture_activation_input(&activation, realm, site)
         .unwrap();
+    let observations = destination.request_site_type_evidence(site).unwrap();
+    assert_ne!(&observations, input.type_evidence().as_ref());
+    assert_ne!(
+        observations.commitment(),
+        input.type_evidence().commitment(),
+        "request authority commitment includes original compiler authentication"
+    );
+    let repeated = observations
+        .authenticate_request_types(
+            original.sites[&site]
+                .request_type_signatures
+                .clone()
+                .unwrap(),
+            retained_context,
+        )
+        .unwrap();
+    assert_eq!(&repeated, input.type_evidence().as_ref());
+    assert_eq!(repeated.commitment(), input.type_evidence().commitment());
+    let request_context = input.type_evidence().compile_context(None).unwrap();
+    assert_eq!(
+        request_context.declarations().toolchain_identity_sha256(),
+        producer
+    );
+    assert!(request_context
+        .declarations()
+        .artifact_view()
+        .descriptors()
+        .is_empty());
+    let compile_context = input
+        .type_evidence()
+        .compile_context(Some(&compiler_context))
+        .unwrap();
+    assert_eq!(
+        compile_context.declarations().toolchain_identity_sha256(),
+        producer
+    );
     assert_eq!(input.input_type(), original.sites[&site].inputs[0].ty);
     assert!(Arc::ptr_eq(&input.custody.provenance, &parked));
     assert!(destination.discard_custody(imported));

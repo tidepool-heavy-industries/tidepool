@@ -64,7 +64,8 @@ pub struct ProgramProvenance {
     sites: BTreeMap<u64, YieldSite>,
     // Authentication follows the original compiler bundle through owned roots.
     // Public metadata construction alone cannot authorize a host input mount.
-    authenticated_inputs: BTreeMap<u64, tidepool_toolchain::artifact_inventory::ArtifactView>,
+    authenticated_inputs:
+        BTreeMap<u64, Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>>,
 }
 
 /// Detached native value with its original immutable compiler provenance.
@@ -5373,65 +5374,39 @@ where
     fn provenance_for(&self, code: &TurnCode<'_>) -> Result<Arc<ProgramProvenance>, ResidentError> {
         let mut provenance = ProgramProvenance::from_sites(&code.sites)?;
         let certification = code.certification.as_ref().as_ref();
-        let authenticated =
-            if let Some(certification) = certification {
-                match certification.purpose() {
-                    TurnPurpose::Execution { execution, .. }
-                    | TurnPurpose::HostPrototype(execution) => {
-                        if !execution.matches_target(&code.prepared) {
-                            return Err(ResidentError::UnsupportedCheckedTurn);
-                        }
-                        execution
-                            .validate_table(&code.table)
-                            .map_err(SessionError::Compile)?;
-                        execution
-                            .validate_yield_sites(&code.sites)
-                            .map_err(SessionError::Compile)?;
-                        true
-                    }
-                    TurnPurpose::Display(display) => {
-                        if !display.matches_target(&code.prepared) {
-                            return Err(ResidentError::UnsupportedCheckedTurn);
-                        }
-                        display
-                            .validate_table(&code.table)
-                            .map_err(SessionError::Compile)?;
-                        display
-                            .validate_yield_sites(&code.sites)
-                            .map_err(SessionError::Compile)?;
-                        true
-                    }
-                    TurnPurpose::ActivationInput { proof, .. } => {
-                        if !proof.matches_target(&code.prepared) {
-                            return Err(ResidentError::UnsupportedCheckedTurn);
-                        }
-                        proof
-                            .validate_table(&code.table)
-                            .map_err(SessionError::Compile)?;
-                        proof
-                            .validate_yield_sites(&code.sites)
-                            .map_err(SessionError::Compile)?;
-                        true
-                    }
-                    TurnPurpose::Ordinary => certification
-                        .compile_input_identity
-                        .as_ref()
-                        .is_some_and(|proof| {
-                            proof.matches_bundle(
-                                &code.prepared,
-                                &certification.groups,
-                                &certification.target_owners,
-                                &certification.package_interfaces,
-                                &code.table,
-                                &code.sites,
-                            )
-                        }),
+        let original_interfaces = if let Some(certification) = certification {
+            let original = match certification.purpose() {
+                TurnPurpose::Execution { execution, .. }
+                | TurnPurpose::HostPrototype(execution) => Some(
+                    execution.original_interface_context(&code.prepared, &code.table, &code.sites),
+                ),
+                TurnPurpose::Display(display) => Some(display.original_interface_context(
+                    &code.prepared,
+                    &code.table,
+                    &code.sites,
+                )),
+                TurnPurpose::ActivationInput { proof, .. } => {
+                    Some(proof.original_interface_context(&code.prepared, &code.table, &code.sites))
                 }
-            } else {
-                false
+                TurnPurpose::Ordinary => {
+                    certification.compile_input_identity.as_ref().map(|proof| {
+                        proof.original_interface_context(
+                            &code.prepared,
+                            &certification.groups,
+                            &certification.target_owners,
+                            &certification.package_interfaces,
+                            &code.table,
+                            &code.sites,
+                        )
+                    })
+                }
             };
-        if let Some(certification) = certification.filter(|_| authenticated) {
-            let descriptors = certification.artifact_view.descriptors();
+            original.transpose().map_err(SessionError::Compile)?
+        } else {
+            None
+        };
+        if let Some(original_interfaces) = original_interfaces {
+            let descriptors = original_interfaces.artifact_view().descriptors();
             let home_units = descriptors
                 .iter()
                 .map(|descriptor| descriptor.owner.unit.as_str())
@@ -5495,13 +5470,12 @@ where
                         }
                     }
                 }
-                let interfaces = certification
-                    .artifact_view
-                    .select_roots(roots.into_iter().collect())
+                let interfaces = original_interfaces
+                    .select_interface_roots(roots.into_iter().collect())
                     .map_err(SessionError::Compile)?;
                 provenance
                     .authenticated_inputs
-                    .insert(site.site, interfaces);
+                    .insert(site.site, Arc::new(interfaces));
             }
         }
         Ok(Arc::new(provenance))

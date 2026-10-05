@@ -2508,6 +2508,15 @@ fn seal_turn_outputs_inner(
         module_candidates::record_exact_context_publication_skip(fresh_products.products());
     }
     let certified_groups: Arc<[_]> = certified.groups.into();
+    let artifact_view = crate::declaration_context::certified_product_artifact_view(
+        crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(&offer.producer)
+            .sha256(),
+        &certified.recovery_products,
+        &certified.module_interfaces,
+        exact
+            .as_ref()
+            .map(|admission| admission.request.context.as_ref()),
+    )?;
     let compile_input_identity =
         if let Some((table, sites)) = identity_metadata.filter(|_| offer.exact.is_none()) {
             let input_packages = crate::compile_input::ValidatedInputPackages::read_supported(
@@ -2530,6 +2539,7 @@ fn seal_turn_outputs_inner(
                         &package_interfaces,
                         table.clone(),
                         sites.to_vec(),
+                        &artifact_view,
                     )
                 })
                 .transpose()?
@@ -2538,15 +2548,6 @@ fn seal_turn_outputs_inner(
         } else {
             None
         };
-    let artifact_view = crate::declaration_context::certified_product_artifact_view(
-        crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(&offer.producer)
-            .sha256(),
-        &certified.recovery_products,
-        &certified.module_interfaces,
-        exact
-            .as_ref()
-            .map(|admission| admission.request.context.as_ref()),
-    )?;
     let checked = if let Some(checked) = &offer.checked {
         let (context, lexical) = checked_output_context(
             offer,

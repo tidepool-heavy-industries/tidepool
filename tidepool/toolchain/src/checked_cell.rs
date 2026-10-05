@@ -1683,6 +1683,7 @@ enum CheckedExecutionAdmission {
 /// product-sealing entry point. Compiling alone makes no execution claim.
 #[derive(Debug)]
 pub struct ExactCompiledItem {
+    original_interfaces: Arc<crate::declaration_context::ExactDeclarationContext>,
     item: ExactCheckedItem,
     target: Arc<tidepool_repr::execution_schema::PreparedProgram>,
     table: tidepool_repr::DataConTable,
@@ -1704,6 +1705,15 @@ pub struct ExactCompiledActivationInput {
 }
 
 impl ExactCompiledActivationInput {
+    pub fn original_interface_context(
+        &self,
+        target: &tidepool_repr::execution_schema::PreparedProgram,
+        table: &tidepool_repr::DataConTable,
+        sites: &[crate::YieldSite],
+    ) -> Result<Arc<crate::declaration_context::ExactDeclarationContext>, CompileError> {
+        self.compiled
+            .original_interface_context(target, table, sites)
+    }
     pub fn validate_yield_sites(&self, sites: &[crate::YieldSite]) -> Result<(), CompileError> {
         self.compiled.validate_yield_sites(sites)
     }
@@ -1765,6 +1775,7 @@ impl ExactCompiledActivationInput {
 
 #[derive(Debug)]
 pub struct ExactCompiledDisplay {
+    original_interfaces: Arc<crate::declaration_context::ExactDeclarationContext>,
     capture: Arc<ExactCompiledItem>,
     target: Arc<tidepool_repr::execution_schema::PreparedProgram>,
     table: tidepool_repr::DataConTable,
@@ -1778,6 +1789,23 @@ pub struct ExactCompiledDisplay {
 }
 
 impl ExactCompiledDisplay {
+    /// Admit original type-interface custody only after validating the target,
+    /// constructor table and complete compiler-authenticated site metadata.
+    pub fn original_interface_context(
+        &self,
+        target: &tidepool_repr::execution_schema::PreparedProgram,
+        table: &tidepool_repr::DataConTable,
+        sites: &[crate::YieldSite],
+    ) -> Result<Arc<crate::declaration_context::ExactDeclarationContext>, CompileError> {
+        if !self.matches_target(target) {
+            return Err(failure(
+                "original interface context belongs to another prepared target",
+            ));
+        }
+        self.validate_table(table)?;
+        self.validate_yield_sites(sites)?;
+        Ok(self.original_interfaces.clone())
+    }
     pub fn validate_yield_sites(&self, sites: &[crate::YieldSite]) -> Result<(), CompileError> {
         if crate::artifacts::yield_sites_metadata_digest(sites)? != self.yield_sites_digest {
             return Err(failure(
@@ -1989,6 +2017,12 @@ impl CheckedDisplayOffer {
             source_lexical,
         )?;
         Ok(Arc::new(ExactCompiledDisplay {
+            original_interfaces: Arc::new(
+                crate::declaration_context::ExactDeclarationContext::from_authenticated_interfaces(
+                    self.capture.item.cell.producer,
+                    artifact_context.artifact_view(),
+                )?,
+            ),
             capture: self.capture.clone(),
             target: target.clone(),
             table: read_table(root)?,
@@ -2004,6 +2038,23 @@ impl CheckedDisplayOffer {
 }
 
 impl ExactCompiledItem {
+    /// Admit original type-interface custody only after validating the target,
+    /// constructor table and complete compiler-authenticated site metadata.
+    pub fn original_interface_context(
+        &self,
+        target: &tidepool_repr::execution_schema::PreparedProgram,
+        table: &tidepool_repr::DataConTable,
+        sites: &[crate::YieldSite],
+    ) -> Result<Arc<crate::declaration_context::ExactDeclarationContext>, CompileError> {
+        if !self.matches_target(target) {
+            return Err(failure(
+                "original interface context belongs to another prepared target",
+            ));
+        }
+        self.validate_table(table)?;
+        self.validate_yield_sites(sites)?;
+        Ok(self.original_interfaces.clone())
+    }
     pub fn validate_yield_sites(&self, sites: &[crate::YieldSite]) -> Result<(), CompileError> {
         if crate::artifacts::yield_sites_metadata_digest(sites)? != self.yield_sites_digest {
             return Err(failure(
@@ -3070,6 +3121,11 @@ impl CheckedItemOffer {
         };
         Ok((
             Arc::new(ExactCompiledItem {
+                original_interfaces: Arc::new(
+                    crate::declaration_context::ExactDeclarationContext::from_authenticated_interfaces(
+                        self.item.cell.producer, artifact_context.artifact_view(),
+                    )?,
+                ),
                 item: self.item.clone(),
                 target: target.clone(),
                 table: read_table(root)?,
