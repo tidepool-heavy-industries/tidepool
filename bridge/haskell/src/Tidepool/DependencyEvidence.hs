@@ -49,7 +49,7 @@ data DependencyModule = DependencyModule
   , dependencyModuleSource :: FilePath
   , dependencyModuleImports :: [DependencyImport]
   , dependencyModuleProduct :: ProductAvailability
-  }
+  } deriving (Eq)
 
 data ProductAvailability
   = ProductReady
@@ -85,7 +85,7 @@ data DependencyImport = DependencyImport
   , dependencyImportName :: String
   , dependencyImportBoot :: Bool
   , dependencyImportSelected :: Maybe FilePath
-  }
+  } deriving (Eq)
 
 data DependencySource = DependencySource
   { dependencySourcePath :: FilePath
@@ -98,7 +98,7 @@ data DependencyResolution = DependencyResolution
   , dependencyResolutionBoot :: Bool
   , dependencyResolutionSelected :: Maybe FilePath
   , dependencyResolutionCandidates :: [FilePath]
-  }
+  } deriving (Eq)
 
 -- Preserve home import edges when a fresh source module becomes an exact
 -- interface. Package imports have no selected source; an owner is resolved
