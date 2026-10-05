@@ -12,7 +12,7 @@ import Data.List (isInfixOf, nub, sort)
 import Data.String (fromString)
 import Data.Set qualified as Set
 import Data.Text qualified as Text
-import GHC (moduleNameString, mkModuleName, ModSummary(ms_location, ms_mod_name))
+import GHC (moduleNameString, mkModuleName, ModSummary(ms_location), ms_mod_name)
 import GHC.Driver.Env (hsc_mod_graph)
 import GHC.Unit.Module.Graph (ModuleGraphNode(..), mgModSummaries')
 import GHC.Unit.Module.ModGuts (CgGuts(..))
