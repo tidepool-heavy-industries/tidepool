@@ -17984,27 +17984,23 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             })
             .await
             .expect("initial runtime binding-root ledger");
-        let parent = workbench
-            .begin_fragment_split(
-                context.clone(),
-                source.clone(),
-                ParsedBlock {
-                    ordinal: 1,
-                    total: 1,
-                    source: "capturedValue <- pure ((+) (41 :: Int))".into(),
-                },
-                None,
+        let (binding_workbench, binding_context) = runner
+            .application_workbench()
+            .admit_private_cell_for_test(context.clone())
+            .await
+            .expect("parent checked-cell admission");
+        binding_workbench
+            .execute_cell_for_test(
+                binding_context.clone(),
+                "capturedValue <- pure ((+) (41 :: Int))",
             )
             .await
-            .expect("parent Haskell binding compiles");
-        let parent = match parent {
-            ResidentWorkbenchStep::Running { fragment, outcome } => workbench
-                .settle_item(context.clone(), *fragment, (*outcome).into())
-                .await
-                .expect("parent binding commits"),
-            step => step,
-        };
-        assert!(matches!(parent, ResidentWorkbenchStep::Committed { .. }));
+            .expect("parent checked Haskell binding commits privately");
+        binding_workbench
+            .publish_completed_cell_for_test(binding_context)
+            .await
+            .expect("certified binding publishes before checkpoint capture");
+        drop(binding_workbench);
 
         let (captured_scope, retained) = runner
             .capture_retained_context_scope(context.clone())
@@ -18093,19 +18089,34 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             }
         };
         let retire_original = async {
-            let failed = workbench
-                .begin_fragment_split(
-                    context.clone(),
-                    source.clone(),
+            let (failing_workbench, failing_context) = runner
+                .application_workbench()
+                .admit_private_cell_for_test(context.clone())
+                .await
+                .expect("failing parent checked-cell admission");
+            let failing_source = "sleep (minutes 0) >> error \"parent failed\"";
+            let (checked, prepared) = failing_workbench
+                .prepare_cell(failing_context.clone(), failing_source.into())
+                .await
+                .expect("parent failing continuation compiles with certified value inputs");
+            let PreparedCell {
+                mut items,
+                dependencies,
+            } = prepared;
+            assert_eq!(checked.items.len(), 1);
+            assert_eq!(items.len(), 1);
+            let failed = failing_workbench
+                .begin_prepared_cell_item(
+                    failing_context.clone(),
                     ParsedBlock {
                         ordinal: 1,
                         total: 1,
-                        source: "sleep (minutes 0) >> error \"parent failed\"".into(),
+                        source: checked.items[0].source.clone(),
                     },
-                    None,
+                    items.remove(0),
                 )
                 .await
-                .expect("parent failing continuation compiles");
+                .expect("parent failing continuation starts");
             let ResidentWorkbenchStep::Running { outcome, .. } = failed else {
                 panic!("parent failing continuation runs");
             };
@@ -18113,9 +18124,24 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                 panic!("parent suspends before failure");
             };
             assert!(matches!(
-                runner.resume_unit(context.clone(), hole).await,
+                runner.resume_unit(failing_context.clone(), hole).await,
                 Err(ResidentActorWorkbenchError::Delivered(_))
             ));
+            drop(dependencies);
+            assert!(failing_workbench
+                .private_execution
+                .as_ref()
+                .unwrap()
+                .decision
+                .terminate());
+            runner
+                .retire_fork_scopes(
+                    failing_context.clone(),
+                    vec![failing_context.placement.lexical_scope],
+                )
+                .await
+                .expect("failed private parent releases its unpublishable scope");
+            drop(failing_workbench);
             assert!(groups
                 .settle_checkpoints(context.actor, &boundary, false)
                 .is_empty());
@@ -18188,30 +18214,23 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             .expect("actual runtime owner drains final capsule retirement");
 
         for (index, child) in [first, second].into_iter().enumerate() {
-            let step = workbench
-                .begin_fragment_split(
-                    child.clone(),
-                    source.clone(),
-                    ParsedBlock {
-                        ordinal: 1,
-                        total: 1,
-                        source: "if capturedValue 1 == (42 :: Int) then pure () else error \"unexpected inherited value\"".into(),
-                    },
-                    None,
+            let (child_workbench, child_private) = runner
+                .application_workbench()
+                .admit_private_cell_for_test(child.clone())
+                .await
+                .expect("child checked-cell admission retains its inherited certificate");
+            child_workbench
+                .execute_cell_for_test(
+                    child_private.clone(),
+                    "if capturedValue 1 == (42 :: Int) then pure () else error \"unexpected inherited value\"",
                 )
                 .await
-                .expect("child compiles against inherited binding after final capsule release");
-            let step = match step {
-                ResidentWorkbenchStep::Running { fragment, outcome } => workbench
-                    .settle_item(child.clone(), *fragment, (*outcome).into())
-                    .await
-                    .expect("child uses independently retained binding"),
-                step => step,
-            };
-            let ResidentWorkbenchStep::Committed { output, .. } = step else {
-                panic!("child value did not commit");
-            };
-            assert!(output.starts_with("[bound observation"), "{output}");
+                .expect("child executes inherited closure after final capsule release");
+            child_workbench
+                .publish_completed_cell_for_test(child_private)
+                .await
+                .expect("child publishes checked evaluation and retires its private scope");
+            drop(child_workbench);
             workbench
                 .access
                 .with_machine(child.clone(), move |session, context, _| {
