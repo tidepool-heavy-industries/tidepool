@@ -800,10 +800,9 @@ data Console a where
 
     #[test]
     fn test_orchestration_is_pure_fn_of_effects() {
-        // The orchestration helpers no longer depend on the user_library flag —
-        // Tidepool.Orchestrate is a PURE function of the effect set (so it can be
-        // co-located + hashed with Tidepool.Effects). The bodies never appear in
-        // the expr-module preamble (imported, not spliced), regardless of library.
+        // Tidepool.Orchestrate depends on the installed handler cohort and has
+        // its own content-addressed source root. The preamble imports its bodies
+        // regardless of the user_library flag.
         let decls = standard_decls();
         assert!(!build_preamble(&decls, false).contains("runChecked"));
         assert!(!build_preamble(&decls, true).contains("runChecked"));

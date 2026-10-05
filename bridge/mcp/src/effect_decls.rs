@@ -88,8 +88,7 @@ impl RowArgs {
         m
     }
 
-    /// Add the modules the generated `Tidepool.Effects` must import for the
-    /// applied types to resolve.
+    /// Add modules to the invocation preamble so its applied row types resolve.
     #[must_use]
     pub fn importing<I, S>(mut self, modules: I) -> Self
     where
