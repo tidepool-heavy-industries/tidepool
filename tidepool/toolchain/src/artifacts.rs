@@ -2754,8 +2754,8 @@ pub(crate) fn compile_authored_products(
 
 /// Build an explicitly selected immutable source cohort at its final deployment
 /// path. The declared probe and ordered targets run under build-action isolation;
-/// only authenticated originals are exported. Schema 3 still requires final
-/// source and product paths and does not permit product-container relocation.
+/// only authenticated originals are exported. Schema 4 retains original source
+/// paths while allowing the complete product container to move unchanged.
 pub fn build_deployment_module_package(
     source_path: &Path,
     targets: &[&str],
@@ -5165,17 +5165,16 @@ mod module_product_tests {
             .unwrap()
             .expect("requires the Nix-built runtime-stdlib-products catalog");
         let source_root = package.source_root().to_owned();
-        let catalog: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(std::env::var_os(crate::toolchain::ENV_COMPILER_MODULES).unwrap())
-                .unwrap(),
-        )
-        .unwrap();
+        let catalog_path =
+            PathBuf::from(std::env::var_os(crate::toolchain::ENV_COMPILER_MODULES).unwrap());
+        let catalog: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&catalog_path).unwrap()).unwrap();
+        let root = catalog_path.parent().unwrap();
         let cohort: std::collections::BTreeSet<_> = catalog["modules"]
             .as_array()
             .unwrap()
             .iter()
             .map(|module| {
-                let root = Path::new(catalog["output_root"].as_str().unwrap());
                 let owner: serde_json::Value = serde_json::from_slice(
                     &std::fs::read(root.join(module["owner"]["path"].as_str().unwrap())).unwrap(),
                 )

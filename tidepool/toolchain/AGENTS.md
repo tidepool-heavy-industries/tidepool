@@ -32,5 +32,6 @@ It sits below `tidepool-runtime` and must not depend on runtime/session errors.
 - `build_deployment_module_package` shares build-action isolation and exports
   authenticated module records through the existing catalog owner. A declared
   probe and ordered targets select the cohort; deployment export never grants
-  runtime candidate publication. Its schema 3 source/product path contract
-  remains separate from build isolation.
+  runtime candidate publication. Schema 4 keeps original source paths and
+  proofs unchanged; product references resolve under the opened catalog's
+  canonical parent. Source retention remains the qualification owner's job.

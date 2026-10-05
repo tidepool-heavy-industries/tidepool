@@ -32,9 +32,9 @@ pub enum ModulePackageError {
     UnknownCompiler,
     #[error("module package compiler configuration: {0}")]
     CompilerConfiguration(#[source] Box<crate::toolchain::ToolchainError>),
-    #[error("module package or source root moved from its producing path")]
+    #[error("module package path is aliased or its original source root moved")]
     RootMoved,
-    #[error("module package requires final immutable Nix store source and product roots")]
+    #[error("module package requires final immutable Nix store source roots")]
     MutableRoot,
     #[error("module package source aliases another path: {}", .0.display())]
     SourceAlias(PathBuf),
@@ -101,17 +101,13 @@ fn immutable_store_path(path: &Path) -> bool {
             .all(|c| b"0123456789abcdfghijklmnpqrsvwxyz".contains(c))
 }
 
-fn require_immutable_roots(
-    policy: RootPolicy,
-    source: &Path,
-    output: &Path,
-) -> Result<(), ModulePackageError> {
+fn require_immutable_roots(policy: RootPolicy, source: &Path) -> Result<(), ModulePackageError> {
     #[cfg(test)]
     if matches!(policy, RootPolicy::Fixture) {
         return Ok(());
     }
     let _ = policy;
-    if immutable_store_path(source) && immutable_store_path(output) {
+    if immutable_store_path(source) {
         Ok(())
     } else {
         Err(ModulePackageError::MutableRoot)
@@ -119,7 +115,7 @@ fn require_immutable_roots(
 }
 
 pub(crate) fn prepare_build_roots(source: &Path, output: &Path) -> Result<(), ModulePackageError> {
-    require_immutable_roots(RootPolicy::NixStore, source, output)?;
+    require_immutable_roots(RootPolicy::NixStore, source)?;
     if absolute(source).as_deref() != Some(source) {
         return Err(ModulePackageError::RootMoved);
     }
@@ -188,7 +184,6 @@ struct ModuleFiles {
 #[serde(deny_unknown_fields)]
 struct Catalog {
     schema: u32,
-    output_root: PathBuf,
     source_root: PathBuf,
     source_files: Vec<(PathBuf, String)>,
     producer_identity: [u8; 32],
@@ -220,6 +215,7 @@ struct Owner {
 #[derive(Debug)]
 pub struct DeploymentModulePackage {
     catalog: Catalog,
+    artifact_root: PathBuf,
     catalog_identity: String,
     source_identity: String,
     records: Vec<Record>,
@@ -254,10 +250,10 @@ impl DeploymentModulePackage {
         let bytes = read(path, CATALOG_LIMIT)?;
         let catalog: Catalog = serde_json::from_slice(&bytes)
             .map_err(|_| ModulePackageError::Format("catalog JSON"))?;
-        if catalog.schema != 3 {
+        if catalog.schema != 4 {
             return Err(ModulePackageError::Format("catalog schema"));
         }
-        require_immutable_roots(policy, &catalog.source_root, &catalog.output_root)?;
+        require_immutable_roots(policy, &catalog.source_root)?;
         if catalog.producer_identity != authority.producer_identity
             || catalog.consumed_worker_identity != authority.consumed_worker_identity
             || authority.schema != 1
@@ -266,11 +262,14 @@ impl DeploymentModulePackage {
         {
             return Err(ModulePackageError::CompilerMismatch);
         }
+        let artifact_root = path
+            .parent()
+            .ok_or(ModulePackageError::RootMoved)?
+            .to_path_buf();
         if !path.is_absolute()
-            || !catalog.output_root.is_absolute()
             || !catalog.source_root.is_absolute()
-            || absolute(path).as_ref() != Some(&catalog.output_root.join("catalog.json"))
-            || absolute(&catalog.output_root).as_ref() != Some(&catalog.output_root)
+            || absolute(path).as_ref() != Some(&artifact_root.join("catalog.json"))
+            || absolute(&artifact_root).as_ref() != Some(&artifact_root)
             || absolute(&catalog.source_root).as_ref() != Some(&catalog.source_root)
         {
             return Err(ModulePackageError::RootMoved);
@@ -288,6 +287,7 @@ impl DeploymentModulePackage {
             .map_err(|_| ModulePackageError::Format("source manifest"))?);
         let mut package = Self {
             catalog,
+            artifact_root,
             catalog_identity: sha(&bytes),
             source_identity,
             records: Vec::new(),
@@ -311,7 +311,7 @@ impl DeploymentModulePackage {
         {
             return Err(ModulePackageError::Format("artifact relative path"));
         }
-        let path = self.catalog.output_root.join(&reference.path);
+        let path = self.artifact_root.join(&reference.path);
         if absolute(&path).as_ref() != Some(&path) {
             return Err(ModulePackageError::RootMoved);
         }
@@ -348,8 +348,8 @@ impl DeploymentModulePackage {
                 (
                     record,
                     super::CandidateOrigin::Deployment {
-                        interface: self.catalog.output_root.join(files.interface.path),
-                        packages: self.catalog.output_root.join(files.packages.path),
+                        interface: self.artifact_root.join(files.interface.path),
+                        packages: self.artifact_root.join(files.packages.path),
                     },
                 )
             })
@@ -448,7 +448,7 @@ impl DeploymentModulePackage {
                         "canonical artifact relative path",
                     ));
                 }
-                let path = self.catalog.output_root.join(relative);
+                let path = self.artifact_root.join(relative);
                 if absolute(&path).as_ref() != Some(&path) {
                     return Err(ModulePackageError::RootMoved);
                 }
@@ -461,7 +461,7 @@ impl DeploymentModulePackage {
                 .checked_sub(captured_bytes)
                 .ok_or(ModulePackageError::Bounds)?;
             let canonical = crate::recovery_artifacts::recover_module_interface(
-                &self.catalog.output_root,
+                &self.artifact_root,
                 reference,
                 &mut validation,
             )
@@ -548,7 +548,7 @@ impl DeploymentModulePackage {
                 &record.unit,
                 &record.module,
                 &iface_sha,
-                &self.catalog.output_root,
+                &self.artifact_root,
             )
             .map_err(|_| ModulePackageError::Format("package imports"))?;
             records.push(record);
@@ -892,7 +892,7 @@ mod tests {
     fn deployment_execution_proof_is_shared_and_advertised_corruption_refuses() {
         let fixture = Fixture::with_modules_and_execution(&["A", "B"], true);
         let catalog = fixture.catalog();
-        assert_eq!(catalog.schema, 3);
+        assert_eq!(catalog.schema, 4);
         assert_eq!(catalog.execution_graphs.len(), 1);
         assert!(catalog
             .modules
@@ -927,7 +927,7 @@ mod tests {
     fn strict_catalog_preserves_core_and_refuses_legacy_and_changed_companions() {
         let fixture = Fixture::new();
         let mut catalog = fixture.catalog();
-        assert_eq!(catalog.schema, 3);
+        assert_eq!(catalog.schema, 4);
         let core = catalog.modules[0].module_interface.core.as_ref().unwrap();
         let core_path = fixture.output.join(&core.path);
         let original = fs::read(&core_path).unwrap();
@@ -936,7 +936,7 @@ mod tests {
             matches!(fixture.load(), Err(ModulePackageError::ArtifactChanged(path)) if path == core_path)
         );
         fs::write(&core_path, original).unwrap();
-        for schema in [1, 2] {
+        for schema in [1, 2, 3] {
             catalog.schema = schema;
             fs::write(
                 fixture.output.join("catalog.json"),
@@ -972,15 +972,59 @@ mod tests {
     }
 
     #[test]
-    fn package_relocation_refuses_without_rewriting_original_paths() {
+    fn product_container_relocation_preserves_original_source_and_proof_bytes() {
         let fixture = Fixture::new();
+        let original = fixture.load().unwrap();
+        let catalog = fs::read(fixture.output.join("catalog.json")).unwrap();
         let other = fixture._root.path().join("relocated");
-        fs::create_dir(&other).unwrap();
-        fs::copy(
-            fixture.output.join("catalog.json"),
-            other.join("catalog.json"),
+        fs::rename(&fixture.output, &other).unwrap();
+        let relocated = DeploymentModulePackage::load_under(
+            &other.join("catalog.json"),
+            &fixture.authority,
+            RootPolicy::Fixture,
         )
         .unwrap();
+        assert_eq!(fs::read(other.join("catalog.json")).unwrap(), catalog);
+        assert_eq!(original.catalog_identity(), relocated.catalog_identity());
+        assert_eq!(original.source_root(), relocated.source_root());
+        let before = original.records(&[3; 32]).unwrap();
+        let after = relocated.records(&[3; 32]).unwrap();
+        assert_eq!(before[0].source, after[0].source);
+        assert_eq!(before[0].include, after[0].include);
+        assert_eq!(before[0].products, after[0].products);
+        assert_eq!(before[0].interface, after[0].interface);
+        assert_eq!(
+            before[0].original_certification,
+            after[0].original_certification
+        );
+        assert_eq!(
+            before[0].original_owner.owner(),
+            after[0].original_owner.owner()
+        );
+
+        let candidates = relocated.into_candidates(&[3; 32]).unwrap();
+        let super::super::CandidateOrigin::Deployment {
+            interface,
+            packages,
+        } = &candidates[0].1
+        else {
+            panic!("deployment candidate");
+        };
+        assert!(interface.starts_with(&other));
+        assert!(packages.starts_with(&other));
+
+        let alias = fixture._root.path().join("product-alias");
+        std::os::unix::fs::symlink(&other, &alias).unwrap();
+        assert!(matches!(
+            DeploymentModulePackage::load_under(
+                &alias.join("catalog.json"),
+                &fixture.authority,
+                RootPolicy::Fixture
+            ),
+            Err(ModulePackageError::RootMoved)
+        ));
+
+        fs::rename(&fixture.source, fixture._root.path().join("moved-sources")).unwrap();
         assert!(matches!(
             DeploymentModulePackage::load_under(
                 &other.join("catalog.json"),
@@ -1248,7 +1292,7 @@ fn export_under(
     let producer = prepared.endpoint_identity;
     let include = prepared.include;
     let evidence = prepared.evidence;
-    require_immutable_roots(policy, source_root, output_root)?;
+    require_immutable_roots(policy, source_root)?;
     if producer != authority.producer_identity {
         return Err(ModulePackageError::CompilerMismatch);
     }
@@ -1358,8 +1402,7 @@ fn export_under(
         })
         .collect::<Result<Vec<_>, _>>()?;
     let catalog = Catalog {
-        schema: 3,
-        output_root: output_root.to_owned(),
+        schema: 4,
         source_root: source_root.clone(),
         source_files: crate::cache::source_root_manifest(&source_root)
             .map_err(|e| io(&e.path, e.source))?,

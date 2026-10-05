@@ -26,19 +26,17 @@ fn packaged_cohort_executes_and_displays_without_build_inputs() {
         .expect("configured immutable module catalog");
     let source_root = package.source_root().to_owned();
     assert!(source_root.starts_with("/nix/store"));
-    let catalog: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(
-            std::env::var_os(tidepool_toolchain::toolchain::ENV_COMPILER_MODULES).unwrap(),
-        )
-        .unwrap(),
-    )
-    .unwrap();
+    let catalog_path = PathBuf::from(
+        std::env::var_os(tidepool_toolchain::toolchain::ENV_COMPILER_MODULES).unwrap(),
+    );
+    let catalog: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&catalog_path).unwrap()).unwrap();
+    let root = catalog_path.parent().unwrap();
     let cohort: BTreeSet<String> = catalog["modules"]
         .as_array()
         .unwrap()
         .iter()
         .map(|module| {
-            let root = Path::new(catalog["output_root"].as_str().unwrap());
             let owner: serde_json::Value = serde_json::from_slice(
                 &std::fs::read(root.join(module["owner"]["path"].as_str().unwrap())).unwrap(),
             )

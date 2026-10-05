@@ -84,5 +84,13 @@ Preparing those catalog records grants no runtime candidate publication.
 `--source-root` and `--output-root`. The build action supplies the configured
 frontend, worker, compiler deployment manifest and GHC libdir. The CLI removes
 inherited resident/cache selection and contains temporary files in its own
-scratch. Schema 3 still requires the final source and product roots; this build
-isolation does not establish relocatable native catalog deployment.
+scratch. Schema 4 keeps the original source root and all compiler-issued evidence
+unchanged. Product references are relative to the opened catalog's canonical
+parent, so the complete container can move without rewriting its bytes. Source
+paths cannot move or alias other paths. The source guard remains separate from
+qualification's actual Nix registration, NAR and GC-root checks. Earlier catalogs
+are rejected and must be regenerated through the matched producer.
+
+This container migration does not establish native catalog deployment. The
+native support source cohort, complete runtime source selection and final bundle
+qualification must still join before that mode is delivered.
