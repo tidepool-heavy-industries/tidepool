@@ -19,7 +19,7 @@ import Control.Monad (foldM, forM, forM_, unless, when)
 import Data.Bits (shiftR)
 import Data.ByteString qualified as BS
 import Data.Map.Strict qualified as Map
-import Data.Maybe (mapMaybe)
+import Data.Maybe (mapMaybe, isJust)
 import Data.Set qualified as Set
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
@@ -57,7 +57,9 @@ import Tidepool.ExecutionSource
   , ExecutionSourceFailure(..), executionIdentityKey, issueExecutionSourceRecipe
   , executionSourceInheritedOwners )
 import Tidepool.ExtractUtil (shaHex)
-import Tidepool.FinalizedModuleArtifacts (FinalizedModuleArtifacts, captureFinalizedModuleArtifacts)
+import Tidepool.FinalizedModuleArtifacts
+  ( FinalizedModuleArtifacts, captureFinalizedModuleArtifacts, LocalFinalizedAdmission
+  , finalizedLocalAdmissions, localFinalizedCore )
 import Tidepool.GhcPipeline
   ( PreparedPipelineResult(..), PipelineResult(..), preparedFreshDependencies, preparedExactCompilation )
 import Tidepool.ModuleCandidates (ModuleCandidate(..), candidateExecutionSources)
@@ -182,11 +184,14 @@ writeCertifiedProductsKeepingWithOriginals includes originalInterfaces outDir pr
           [((unitString (moduleUnit owner),moduleNameString (moduleName owner)),admittedOriginalProof original)
           | (owner,original) <- Map.toAscList retained]
     timing <- readTimingEnabled
-    (availability, freshProducts, productPackages) <- timeDetailPhase timing "module_products" "write_products" $
-      writeModuleProducts originalInterfaces outDir productContext
-        (pprProductInterfaces prepared) (pprPackageImports prepared)
     let dependencies = preparedFreshDependencies prepared
-        withCertified = foldr (\candidate -> Map.insert
+    finalized <- timeDetailPhase timing "module_products" "capture_finalization" $
+      captureFinalizedModuleArtifacts originalInterfaces hscEnv
+        (pprFinalizedModules prepared) (pprPackageImports prepared) dependencies outDir
+    (availability, freshProducts, productPackages) <- timeDetailPhase timing "module_products" "write_products" $
+      writeModuleProducts originalInterfaces outDir productContext (finalizedLocalAdmissions finalized)
+        (pprProductInterfaces prepared) (pprPackageImports prepared)
+    let withCertified = foldr (\candidate -> Map.insert
           (candidateUnit candidate, candidateModule candidate) ProductReady)
           availability (pprAcceptedCandidates prepared)
         withAvailability node = node
@@ -221,9 +226,7 @@ writeCertifiedProductsKeepingWithOriginals includes originalInterfaces outDir pr
       ExactExecutionSourceAvailable graph ->
         BS.writeFile (outDir </> "execution-source.cbor") (executionGraphBytes graph)
       _ -> pure ()
-    (finalized,retainedVersions) <- timeDetailPhase timing "module_products" "certify" $ do
-      finalized <- captureFinalizedModuleArtifacts originalInterfaces hscEnv
-        (pprFinalizedModules prepared) (pprPackageImports prepared) finalDependencies outDir
+    retainedVersions <- timeDetailPhase timing "module_products" "certify" $ do
       let emittedSeals = Map.fromList
             [((unit,name),(version,T.pack (shaHex iface),T.pack (shaHex native),T.pack (shaHex packages)))
             | product <- freshProducts
@@ -249,7 +252,7 @@ writeCertifiedProductsKeepingWithOriginals includes originalInterfaces outDir pr
           BS.writeFile (outDir </> "certified-products.cbor") BS.empty
           unless (null freshProducts) $ fail ("native product certification failed: " ++ reason)
           pure Map.empty
-      pure (finalized,versions)
+      pure versions
     sourceOriginals <- case preparedExactCompilation prepared of
       Nothing -> pure Map.empty
       Just compilation -> do
@@ -259,18 +262,19 @@ writeCertifiedProductsKeepingWithOriginals includes originalInterfaces outDir pr
     pure (CertifiedOriginalProducts freshProducts sourceOriginals finalized sourceRecipe retainedProofs retainedVersions)
 
 
--- A failed unrelated group is an explicit product miss, never a newly fatal
--- target compile. A complete product pairs every admitted group with the
--- skinny interface emitted by the same GHC transaction.
+-- An immutable original product needs captured finalized Core as well as its
+-- interface. Unsupported Core remains interface-only; native target projection
+-- and required global ownership still enforce their own complete contracts.
 writeModuleProducts :: OriginalInterfaceArtifacts -> FilePath -> Maybe PreparedProductContext
+  -> Map.Map (String,String) LocalFinalizedAdmission
   -> Map.Map ModuleName ModIface
   -> Map.Map ModuleName PackageImportEvidence
   -> IO (Map.Map (String, String) ProductAvailability,
          [ModuleProductEncoding], Map.Map (String,String) BS.ByteString)
-writeModuleProducts _ outDir Nothing _ _ = do
+writeModuleProducts _ outDir Nothing _ _ _ = do
   writeProductInventory outDir [] []
   pure (Map.empty, [], Map.empty)
-writeModuleProducts originalInterfaces outDir (Just (inventory,retained)) interfaces packageRoots = do
+writeModuleProducts originalInterfaces outDir (Just (inventory,retained)) finalized interfaces packageRoots = do
   timing <- readTimingEnabled
   forM_ (preparedModuleProductOmissions inventory) $ \(owner, omissions) ->
     forM_ omissions $ \omission ->
@@ -294,27 +298,14 @@ writeModuleProducts originalInterfaces outDir (Just (inventory,retained)) interf
             ++ ": " ++ show reason)
           pure (key, ProductProjectionRejected, Nothing, Nothing)
         Right groups -> do
-          bytes <- timeDetailPhase timing "module_products.interfaces" (snd key) $
-            originalInterfaceBytes originalInterfaces owner
-              >>= maybe (fail "original product interface lacks its captured artifact") pure
-          sidecar <- case Map.lookup owner retained of
-            Just original -> do
-              let (iface,path,seal) = admittedOriginalInterface original
-              captured <- BS.readFile path
-              unless (shaHex captured == seal && shaHex bytes == exactSha256 iface)
-                (fail "retained original interface or package capture changed")
-              pure captured
-            Nothing -> do
-              roots <- case Map.lookup name packageRoots of
-                Nothing -> ioError (userError
-                  ("resolved direct package import inventory missing for " ++ moduleNameString name))
-                Just selected -> pure selected
-              let iface = ExactIfaceArtifact (fst key) (snd key) "" (shaHex bytes) []
-              pure (encodePackageImports iface roots)
-          when (BS.length sidecar > 4 * 1024 * 1024) $
-            ioError (userError "direct package import witness exceeds four MiB")
-          pure (key, ProductReady, Just (prepareModuleProductEncoding (T.pack (fst key),
-            T.pack (snd key), bytes, groups)), Just sidecar)
+          canIssue <- if Map.member owner retained then pure True else case Map.lookup key finalized of
+            Nothing -> fail "fresh original product lacks its captured finalization"
+            Just original -> pure (isJust (localFinalizedCore original))
+          if not canIssue then do
+            hPutStrLn stderr ("module product unavailable: " ++ moduleNameString name
+              ++ ": finalized Core cannot issue an immutable native original")
+            pure (key, ProductInterfaceOnly, Nothing, Nothing)
+          else issue timing key name owner groups
   let products = [moduleProduct | (_, _, Just moduleProduct, _) <- outcomes]
       packageBundles =
         [(unit, moduleName', sidecar)
@@ -322,6 +313,29 @@ writeModuleProducts originalInterfaces outDir (Just (inventory,retained)) interf
   writeProductInventory outDir products packageBundles
   pure (Map.fromList [(key, status) | (key, status, _, _) <- outcomes], products,
     Map.fromList [((unit,name),bytes) | (unit,name,bytes) <- packageBundles])
+  where
+    issue timing key name owner groups = do
+      bytes <- timeDetailPhase timing "module_products.interfaces" (snd key) $
+        originalInterfaceBytes originalInterfaces owner
+          >>= maybe (fail "original product interface lacks its captured artifact") pure
+      sidecar <- case Map.lookup owner retained of
+        Just original -> do
+          let (iface,path,seal) = admittedOriginalInterface original
+          captured <- BS.readFile path
+          unless (shaHex captured == seal && shaHex bytes == exactSha256 iface)
+            (fail "retained original interface or package capture changed")
+          pure captured
+        Nothing -> do
+          roots <- case Map.lookup name packageRoots of
+            Nothing -> ioError (userError
+              ("resolved direct package import inventory missing for " ++ moduleNameString name))
+            Just selected -> pure selected
+          let iface = ExactIfaceArtifact (fst key) (snd key) "" (shaHex bytes) []
+          pure (encodePackageImports iface roots)
+      when (BS.length sidecar > 4 * 1024 * 1024) $
+        ioError (userError "direct package import witness exceeds four MiB")
+      pure (key, ProductReady, Just (prepareModuleProductEncoding (T.pack (fst key),
+        T.pack (snd key), bytes, groups)), Just sidecar)
 
 -- Interface-only captures emit the same valid inventory framing with no native
 -- rows. Product absence never prevents retaining the actual finalization.
