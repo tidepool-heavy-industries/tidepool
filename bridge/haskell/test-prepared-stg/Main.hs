@@ -507,17 +507,19 @@ writePlainConstructorEvidenceFixture dir = do
 
 strictMetadataSource :: String -> Bool -> String
 strictMetadataSource modul quoted = unlines $
-  [ "{-# LANGUAGE TypeApplications #-}" ] ++ quasiquoteLanguage quoted ++
+  [ "{-# LANGUAGE DataKinds, TypeApplications #-}" ] ++ quasiquoteLanguage quoted ++
   [ "module " ++ modul ++ " where"
   , "import StrictOwned"
   , "import Tidepool.Actor"
+  , "import Control.Monad.Freer (Eff)"
+  , "import Tidepool.Effects.Core (ActorLocal)"
   ] ++ quasiquoteBindings quoted ++
-  [ "automatic :: Maybe Automatic"
-  , "automatic = receive @Automatic \"automatic\""
-  , "noUnpack :: Maybe NoUnpack"
-  , "noUnpack = receive @NoUnpack \"nounpack\""
-  , "explicitUnpack :: Maybe ExplicitUnpack"
-  , "explicitUnpack = receive @ExplicitUnpack \"unpack\""
+  [ "automatic :: Eff '[ActorLocal Maybe] Automatic"
+  , "automatic = receive @Automatic @Maybe (\\_ -> error \"metadata handler is not invoked\")"
+  , "noUnpack :: Eff '[ActorLocal Maybe] NoUnpack"
+  , "noUnpack = receive @NoUnpack @Maybe (\\_ -> error \"metadata handler is not invoked\")"
+  , "explicitUnpack :: Eff '[ActorLocal Maybe] ExplicitUnpack"
+  , "explicitUnpack = receive @ExplicitUnpack @Maybe (\\_ -> error \"metadata handler is not invoked\")"
   ]
 
 quasiquoteLanguage :: Bool -> [String]
