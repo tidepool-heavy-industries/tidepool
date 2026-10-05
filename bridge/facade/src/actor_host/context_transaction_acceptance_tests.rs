@@ -1067,7 +1067,7 @@ async fn resident_sync_context_cancel_discards_staging_and_never_launches_childr
         actor: AgentPath("/root".into()),
         incarnation: fixture.context.actor.identity().incarnation.0.to_string(),
     };
-    let operation = tokio::time::timeout(CELL_TIMEOUT, async {
+    let waiting = async {
         loop {
             let claims = store
                 .claims(&harness::model::CallId("context-cancel".into()))
@@ -1080,6 +1080,30 @@ async fn resident_sync_context_cancel_discards_staging_and_never_launches_childr
                     call_id: claim.operation.call.0.clone(),
                     namespace: None,
                 };
+                // Store claims can precede scheduler admission. Once retained,
+                // completion is observable before terminal Store publication.
+                let scheduler = fixture.runtime.scheduler();
+                let terminal = match scheduler.invocation_completion(&claim.operation).await {
+                    Ok(Some(completion)) => Some(completion.output),
+                    Ok(None) | Err(harness::turn::JobError::UnknownCall) => {
+                        match scheduler.output(&claim.operation).await {
+                            Ok(output) => output,
+                            Err(harness::turn::JobError::UnknownCall) => None,
+                            Err(error) => {
+                                panic!("staged cell terminal observation failed: {error:?}")
+                            }
+                        }
+                    }
+                    Err(error) => panic!("staged cell completion observation failed: {error:?}"),
+                };
+                if let Some(settled) = terminal {
+                    panic!(
+                        "staged cell settled before its real Sleep wait; operation={:?}; \
+                         terminal={settled:?}; graph={:?}",
+                        claim.operation,
+                        fixture.context.forest.inspect_host_graph()
+                    );
+                }
                 if fixture
                     .context
                     .actor
@@ -1089,11 +1113,41 @@ async fn resident_sync_context_cancel_discards_staging_and_never_launches_childr
                     break claim.operation.clone();
                 }
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            tokio::select! {
+                biased;
+                round = rounds.recv() => {
+                    let round = round.expect("scripted provider closed before the staged Sleep wait");
+                    let terminal = round.request.input.iter().find(|item| {
+                        matches!(item.0["type"].as_str(),
+                            Some("custom_tool_call_output" | "function_call_output"))
+                            && item.0["call_id"] == "context-cancel"
+                    });
+                    panic!(
+                        "provider inferred before the staged cell reached its real Sleep wait; \
+                         session={}; terminal={terminal:?}; settlement={}; graph={:?}",
+                        round.request.session_id,
+                        fixture.context.cell_settlement_diagnostic("context-cancel").await,
+                        fixture.context.forest.inspect_host_graph()
+                    );
+                }
+                _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+            }
         }
-    })
+    };
+    let operation = tokio::time::timeout(
+        CELL_TIMEOUT,
+        fixture
+            .context
+            .while_root_live("the staged context-cancel Sleep wait", waiting),
+    )
     .await
-    .expect("staged cell never reached its real Sleep wait");
+    .unwrap_or_else(|_| {
+        panic!(
+            "staged cell never reached its real Sleep wait; graph={:?}",
+            fixture.context.forest.inspect_host_graph()
+        )
+    })
+    .expect("exact root exited before the staged cell reached its real Sleep wait");
     let conversation_identity = harness::model::ConversationIdentity::Embedded {
         run: identity.run,
         actor: identity.actor,
