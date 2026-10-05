@@ -2752,34 +2752,34 @@ pub(crate) fn compile_authored_products(
     )
 }
 
-/// Build an immutable source cohort at its final deployment path. The compile
-/// bypasses candidate input and memo and exports only authenticated originals.
+/// Build an explicitly selected immutable source cohort at its final deployment
+/// path. The declared probe and ordered targets run under build-action isolation;
+/// only authenticated originals are exported. Schema 3 still requires final
+/// source and product paths and does not permit product-container relocation.
 pub fn build_deployment_module_package(
+    source_path: &Path,
+    targets: &[&str],
     source_root: &Path,
+    scratch: &Path,
     output_root: &Path,
 ) -> Result<crate::toolchain::DeploymentModulePackage, CompileError> {
-    module_candidates::deployment::prepare_build_roots(source_root, output_root)?;
-    let source_root = source_root.to_owned();
+    let roots = [source_root.to_owned()];
+    validate_build_action_request(source_path, targets, &roots, scratch, output_root)?;
     let configuration = crate::toolchain::CompilerDeploymentConfiguration::from_env()
         .map_err(|e| CompileError::ExtractFailed(e.to_string()))?;
     let crate::toolchain::CompilerDeploymentConfiguration::Configured(authority) = configuration
     else {
         return Err(crate::toolchain::ModulePackageError::UnknownCompiler.into());
     };
-    let source = include_str!("../tests/fixtures/deployment-module-package/PreludePackage.hs");
-    let roots = [source_root.clone()];
-    let invocation = CompileInvocation {
-        source,
-        targets: &["packageSentinel"],
-        include: &roots,
-        fallback_module_name: "TidepoolPreludePackage",
-    };
-    compile_invocation_inner(
-        &invocation,
-        &mut |_, _, _| {},
-        CompilationPolicy::Deployment {
+    module_candidates::deployment::prepare_build_roots(source_root, output_root)?;
+    compile_build_action(
+        source_path,
+        targets,
+        &roots,
+        scratch,
+        BuildActionExport::DeploymentPackage {
             output_root,
-            source_root: &source_root,
+            source_root,
         },
     )?;
     Ok(crate::toolchain::DeploymentModulePackage::load(
@@ -2801,14 +2801,21 @@ enum CompilationPolicy<'a> {
         context: Option<Arc<crate::declaration_join::ExactDeclarationContext>>,
         admission: &'a crate::declaration_join::NativeAuthoredDeclarationAdmission,
     },
-    Deployment {
-        output_root: &'a Path,
-        source_root: &'a Path,
-    },
     BuildAction {
         source_path: &'a Path,
         scratch: &'a Path,
+        export: BuildActionExport<'a>,
+    },
+}
+
+#[derive(Clone)]
+enum BuildActionExport<'a> {
+    PreparedFixture {
         output: &'a Path,
+    },
+    DeploymentPackage {
+        output_root: &'a Path,
+        source_root: &'a Path,
     },
 }
 
@@ -2820,6 +2827,23 @@ enum CompilationPolicy<'a> {
 /// Only portable code and metadata are exported; source-bound authority stays
 /// in its original compiler transaction and is never relocated or restamped.
 pub fn build_prepared_fixture(
+    source_path: &Path,
+    targets: &[&str],
+    include: &[PathBuf],
+    scratch: &Path,
+    output: &Path,
+) -> Result<(), CompileError> {
+    validate_build_action_request(source_path, targets, include, scratch, output)?;
+    compile_build_action(
+        source_path,
+        targets,
+        include,
+        scratch,
+        BuildActionExport::PreparedFixture { output },
+    )
+}
+
+fn validate_build_action_request(
     source_path: &Path,
     targets: &[&str],
     include: &[PathBuf],
@@ -2840,7 +2864,7 @@ pub fn build_prepared_fixture(
             != targets.len()
     {
         return Err(CompileError::ExtractFailed(
-            "invalid prepared fixture target set".into(),
+            "invalid build-action target set".into(),
         ));
     }
     if !scratch.is_dir()
@@ -2849,13 +2873,23 @@ pub fn build_prepared_fixture(
         || include.iter().any(|root| !root.is_dir())
         || std::fs::canonicalize(std::env::current_dir()?)? != std::fs::canonicalize(scratch)?
     {
-        return Err(CompileError::ExtractFailed("prepared fixture requires a declared source, include roots, private scratch and absent output".into()));
+        return Err(CompileError::ExtractFailed("build action requires a declared source, include roots, private current-directory scratch and absent output".into()));
     }
+    Ok(())
+}
+
+fn compile_build_action(
+    source_path: &Path,
+    targets: &[&str],
+    include: &[PathBuf],
+    scratch: &Path,
+    export: BuildActionExport<'_>,
+) -> Result<(), CompileError> {
     let source = std::fs::read_to_string(source_path)?;
     let fallback = source_path
         .file_stem()
         .and_then(|name| name.to_str())
-        .ok_or_else(|| CompileError::ExtractFailed("fixture module filename".into()))?;
+        .ok_or_else(|| CompileError::ExtractFailed("build-action module filename".into()))?;
     let invocation = CompileInvocation {
         source: &source,
         targets,
@@ -2868,7 +2902,7 @@ pub fn build_prepared_fixture(
         CompilationPolicy::BuildAction {
             source_path,
             scratch,
-            output,
+            export,
         },
     )
     .map(|_| ())
@@ -2945,7 +2979,10 @@ fn compile_invocation_inner(
     let (session_root, exact_context, deployment_export, authored) = match &policy {
         CompilationPolicy::Runtime
         | CompilationPolicy::FreshRuntime
-        | CompilationPolicy::BuildAction { .. } => (None, None, None, None),
+        | CompilationPolicy::BuildAction {
+            export: BuildActionExport::PreparedFixture { .. },
+            ..
+        } => (None, None, None, None),
         CompilationPolicy::Exact { context } => (None, Some(context), None, None),
         CompilationPolicy::Authored {
             session_root,
@@ -2957,9 +2994,13 @@ fn compile_invocation_inner(
             None,
             Some(*admission),
         ),
-        CompilationPolicy::Deployment {
-            output_root,
-            source_root,
+        CompilationPolicy::BuildAction {
+            export:
+                BuildActionExport::DeploymentPackage {
+                    output_root,
+                    source_root,
+                },
+            ..
         } => (None, None, Some((*output_root, *source_root)), None),
     };
     let allow_candidates = matches!(&policy, CompilationPolicy::Runtime);
@@ -3324,7 +3365,8 @@ fn compile_invocation_inner(
             .collect::<Result<_, _>>()?;
         let fresh_count = fresh_products.products().len();
         let (fresh_products, publication) =
-            if !matches!(&policy, CompilationPolicy::BuildAction { .. })
+            if (!matches!(&policy, CompilationPolicy::BuildAction { .. })
+                || deployment_export.is_some())
                 && (exact_request.is_none() || deployment_export.is_some())
                 && evidence.is_some()
             {
@@ -3426,11 +3468,11 @@ fn compile_invocation_inner(
                 publication,
             )?;
         }
-        if exact_request.is_none() {
+        if exact_request.is_none() && !matches!(&policy, CompilationPolicy::BuildAction { .. }) {
             if let Some(publication) = publication {
                 module_candidates::publish_prepared(publication);
             }
-        } else {
+        } else if exact_request.is_some() {
             module_candidates::record_exact_context_publication_skip(
                 &artifacts.module_products[..fresh_count],
             );
@@ -3471,7 +3513,11 @@ fn compile_invocation_inner(
                 CompilationPolicy::BuildAction { .. } => error,
                 _ => retain_compiler_failure(temp_dir.path(), &compiler_stderr, error),
             })?;
-            if let CompilationPolicy::BuildAction { output, .. } = &policy {
+            if let CompilationPolicy::BuildAction {
+                export: BuildActionExport::PreparedFixture { output },
+                ..
+            } = &policy
+            {
                 std::fs::create_dir(output)?;
                 // Portable code has no authority to hydrate the source-bound
                 // native products or certificates from this transaction.

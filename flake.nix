@@ -451,6 +451,8 @@
           export TIDEPOOL_PRELUDE_DIR="${self.packages.${system}.runtime-stdlib-sources}/lib"
           export TIDEPOOL_GHC_LIBDIR="$(${ghcEnv}/bin/ghc --print-libdir)"
           ${self.packages.${system}.tidepool-module-package}/bin/tidepool-module-package build \
+            --source "${./tidepool/toolchain/tests/fixtures/deployment-module-package/PreludePackage.hs}" \
+            --target packageSentinel \
             --source-root "${self.packages.${system}.runtime-stdlib-sources}/lib" \
             --output-root "$out"
         '';

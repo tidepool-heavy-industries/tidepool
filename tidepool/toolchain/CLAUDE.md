@@ -70,3 +70,19 @@ contains `meta.cbor`, `<target>.prepared.cbor` and `<target>.asks.json` for ever
 target. `PreparedFixtureInfo` exposes that directory and the target artifacts.
 Test runners supply it as a runtime resource. Source-bound certificates remain
 at the original compilation paths and are discarded with action scratch.
+
+## Deployment catalog production
+
+`build_deployment_module_package` uses that same build-action compiler policy,
+with authenticated catalog export instead of portable fixture export. Its caller
+supplies a declared probe, ordered targets, source root, private current-directory
+scratch and absent output directory. Complete worker evidence and the canonical
+module-product owner admit the closed source cohort before catalog export.
+Preparing those catalog records grants no runtime candidate publication.
+
+`tidepool-module-package build` receives `--source`, repeated `--target`,
+`--source-root` and `--output-root`. The build action supplies the configured
+frontend, worker, compiler deployment manifest and GHC libdir. The CLI removes
+inherited resident/cache selection and contains temporary files in its own
+scratch. Schema 3 still requires the final source and product roots; this build
+isolation does not establish relocatable native catalog deployment.
