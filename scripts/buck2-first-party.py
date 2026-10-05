@@ -995,8 +995,6 @@ load("//build/rust:facade_build_inputs.bzl", "tidepool_facade_build_inputs")
 load("//build/rust:defs.bzl", "tidepool_rust_test_cases")
 ''')
     normal_deps, normal_named = dependency_sets(package, enabled_dependencies, forwarded_features)
-    if package_name == "tidepool-codegen":
-        normal_named["prepared_md5_native"] = ":prepared_md5_native"
     dev_deps, dev_named = dependency_sets(package, enabled_dependencies, forwarded_features, include_dev=True)
     unit_deps, unit_named = dev_deps, dev_named
     if package_name == "tidepool":
@@ -1017,6 +1015,9 @@ load("//build/rust:defs.bzl", "tidepool_rust_test_cases")
         unit_deps, unit_named = dependency_sets(
             unit_package, enabled_dependencies, forwarded_features, include_dev=True
         )
+    if package_name == "tidepool-codegen":
+        for named_dependencies in (normal_named, dev_named, unit_named):
+            named_dependencies["prepared_md5_native"] = ":prepared_md5_native"
     targets = package["targets"]
     if package_name == "tidepool":
         rules.append("""export_file(

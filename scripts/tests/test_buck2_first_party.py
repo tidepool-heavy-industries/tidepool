@@ -271,6 +271,12 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         self.assertIn("prepared_control", buck)
         self.assertIn("tidepool_codegen_unit_tests", buck)
         self.assertIn("tidepool_codegen_unit_tests_sources", groups)
+        for name in ("tidepool_codegen", "tidepool_codegen_unit_tests",
+                     "native_md5_link", "prepared_control"):
+            with self.subTest(target=name):
+                target = self.rule("tidepool/codegen", name)
+                self.assertEqual(target["named_deps"]["prepared_md5_native"],
+                                 ":prepared_md5_native")
 
     def test_protocol_roster_owns_generated_module_inputs_even_without_source_copies(self):
         self.write("tidepool/runtime/src/generated/mod.rs", "// stale source copy\n")

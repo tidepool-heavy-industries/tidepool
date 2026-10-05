@@ -262,6 +262,9 @@ tidepool_rust_isolated_test(
         "//tidepool/heap:tidepool_heap",
         "//tidepool/repr:tidepool_repr",
     ],
+    named_deps = {
+        "prepared_md5_native": ":prepared_md5_native",
+    },
     env = {
         "TIDEPOOL_FREER_RESUME_FIXTURE_DIR": "$(location //bridge/haskell:freer_resume_prepared)",
         "TIDEPOOL_FREER_RETENTION_FIXTURE_DIR": "$(location //bridge/haskell:freer_retention_prepared)",
@@ -316,6 +319,9 @@ tidepool_rust_isolated_test(
         "//tidepool/repr:tidepool_repr",
         ":tidepool_codegen",
     ],
+    named_deps = {
+        "prepared_md5_native": ":prepared_md5_native",
+    },
     visibility = ["PUBLIC"],
 )
 
@@ -363,6 +369,9 @@ tidepool_rust_isolated_test(
         "//tidepool/repr:tidepool_repr",
         ":tidepool_codegen",
     ],
+    named_deps = {
+        "prepared_md5_native": ":prepared_md5_native",
+    },
     visibility = ["PUBLIC"],
 )
 
