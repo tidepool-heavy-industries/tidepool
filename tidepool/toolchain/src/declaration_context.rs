@@ -39,7 +39,9 @@ pub struct ExactDeclarationContext {
 pub(crate) enum OriginalInstanceEnvironment {
     #[default]
     Unknown,
-    Complete,
+    Complete {
+        target: ExactModuleIdentity,
+    },
     MissingOriginalOwners(Vec<ExactModuleIdentity>),
 }
 
@@ -1168,6 +1170,7 @@ impl ExactProductAdmission<'_> {
             self.request.producer_sha256,
             artifacts,
             lexical,
+            self.source.generated_source_owner()?,
             &required.into_iter().collect::<Vec<_>>(),
         )?;
         Ok(Arc::new(context))
@@ -2576,6 +2579,7 @@ impl ExactDeclarationContext {
         producer: [u8; 32],
         artifacts: &ArtifactView,
         lexical: Vec<ExactLexicalNode>,
+        target: ExactModuleIdentity,
         required_instance_owners: &[ExactModuleIdentity],
     ) -> Result<Self, CompileError> {
         let mut context = Self::new(&[], &[], Vec::new())?;
@@ -2595,10 +2599,19 @@ impl ExactDeclarationContext {
             .iter()
             .map(|row| &row.owner)
             .collect::<BTreeSet<_>>();
+        let canonical_target = context.inventory.entries().iter().any(|entry| {
+            entry.descriptor.owner == target
+                && matches!(
+                    entry.payload,
+                    ArtifactPayload::Canonical(_) | ArtifactPayload::Original(_)
+                )
+        });
         let missing = required_instance_owners
             .iter()
+            .chain(std::iter::once(&target))
             .filter(|owner| !interfaces.contains(*owner) || !selected.contains(owner))
             .cloned()
+            .chain((!canonical_target).then_some(target.clone()))
             .chain(context.lexical.iter().flat_map(|node| {
                 std::iter::once(&node.owner)
                     .chain(node.imports.iter())
@@ -2626,13 +2639,24 @@ impl ExactDeclarationContext {
         context.original_instance_environment = if !missing.is_empty() {
             OriginalInstanceEnvironment::MissingOriginalOwners(missing)
         } else {
-            OriginalInstanceEnvironment::Complete
+            OriginalInstanceEnvironment::Complete { target }
         };
         Ok(context)
     }
 
     pub(crate) fn original_instance_environment(&self) -> &OriginalInstanceEnvironment {
         &self.original_instance_environment
+    }
+
+    /// The original compiler target owns the orphan import census in its
+    /// authenticated canonical interface. Retention alone does not grant it.
+    pub(crate) fn original_instance_target(&self) -> Result<&ExactModuleIdentity, CompileError> {
+        match &self.original_instance_environment {
+            OriginalInstanceEnvironment::Complete { target } => Ok(target),
+            _ => Err(failure(
+                "activation preview lacks its original target interface",
+            )),
+        }
     }
 
     /// Select interface custody without losing the original producer when the
@@ -2694,11 +2718,7 @@ impl ExactDeclarationContext {
     pub(crate) fn original_preview_interface_graph(
         &self,
     ) -> Result<BTreeMap<ExactModuleIdentity, TemplateInterfaceNode>, CompileError> {
-        if self.original_instance_environment != OriginalInstanceEnvironment::Complete {
-            return Err(failure(
-                "activation preview lacks its complete original instance graph",
-            ));
-        }
+        let target = self.original_instance_target()?;
         if self
             .lexical_graph()
             .iter()
@@ -2709,12 +2729,18 @@ impl ExactDeclarationContext {
             ));
         }
         self.normalize()?;
-        self.interface_graph_for_roots(
+        let graph = self.interface_graph_for_roots(
             self.lexical_graph()
                 .iter()
                 .map(|node| node.owner.clone())
                 .collect(),
-        )
+        )?;
+        if !graph.contains_key(target) {
+            return Err(failure(
+                "activation preview original target is outside its sealed graph",
+            ));
+        }
+        Ok(graph)
     }
 
     fn interface_graph_for_roots(
@@ -3013,7 +3039,7 @@ impl ExactDeclarationContext {
                 ) {
                     "2"
                 } else {
-                    "3"
+                    "4"
                 },
             ),
             text(hex(&sha2::Sha256::digest(
@@ -3079,9 +3105,10 @@ impl ExactDeclarationContext {
         ];
         match &self.original_instance_environment {
             OriginalInstanceEnvironment::Unknown => {}
-            OriginalInstanceEnvironment::Complete => {
-                fields.push(Value::Array(vec![text("original-instances-complete")]))
-            }
+            OriginalInstanceEnvironment::Complete { target } => fields.push(Value::Array(vec![
+                text("original-instances-complete"),
+                module_value(target),
+            ])),
             OriginalInstanceEnvironment::MissingOriginalOwners(owners) => {
                 fields.push(Value::Array(vec![
                     text("original-instances-missing"),
@@ -6368,15 +6395,62 @@ mod tests {
         let current = make_context(b"first interface", false);
         let changed = make_context(b"changed interface", false);
         assert!(initial.original_preview_interface_graph().is_err());
-        let original = ExactDeclarationContext::from_authenticated_execution(
+        let joined_target = ExactDeclarationContext::from_authenticated_execution(
             initial.producer,
             initial.artifact_view(),
             initial.lexical_graph().to_vec(),
+            identity("main", "CapturedInterface"),
             &[identity("main", "CapturedInterface")],
         )
         .unwrap();
+        assert!(
+            joined_target.original_instance_target().is_err(),
+            "a lexical join cannot replace the original canonical target's import census"
+        );
+        assert!(joined_target.original_preview_interface_graph().is_err());
+        let canonical_target =
+            ArtifactEntry::canonical(crate::certified_products::fixture_module_interface(
+                initial.producer,
+                "main",
+                "OriginalTarget",
+                BTreeMap::new(),
+            ));
+        let inventory = initial.inventory.inventory();
+        let retained = inventory
+            .admit(initial.artifact_view(), vec![canonical_target])
+            .unwrap();
+        let mut lexical = initial.lexical_graph().to_vec();
+        lexical.push(ExactLexicalNode {
+            owner: identity("main", "OriginalTarget"),
+            imports: vec![],
+        });
+        let original = ExactDeclarationContext::from_authenticated_execution(
+            initial.producer,
+            &retained,
+            lexical,
+            identity("main", "OriginalTarget"),
+            &[identity("main", "CapturedInterface")],
+        )
+        .unwrap();
+        assert_eq!(
+            original.original_instance_target().unwrap(),
+            &identity("main", "OriginalTarget")
+        );
+        let mut exchanged = original.clone();
+        exchanged.original_instance_environment = OriginalInstanceEnvironment::Complete {
+            target: identity("main", "OtherTarget"),
+        };
+        assert_ne!(
+            original.semantic_sha256(),
+            exchanged.semantic_sha256(),
+            "the context commitment binds the original target identity"
+        );
+        assert!(
+            exchanged.original_preview_interface_graph().is_err(),
+            "a retained graph cannot replace its missing original target"
+        );
         let original_graph = original.original_preview_interface_graph().unwrap();
-        assert_eq!(original_graph.len(), 1);
+        assert_eq!(original_graph.len(), 2);
         assert!(original
             .template_interface_graph(&["module Input where\n".to_owned()])
             .unwrap()

@@ -80,7 +80,7 @@ impl ActivationPreviewOffer {
         let baseline = self.values.baseline_authorization();
         let baseline = row(&baseline, 1)?;
         Ok(array([
-            text("host-activation-preview2"),
+            text("host-activation-preview3"),
             text(hex(&self.specification.admission_digest)),
             Value::Integer(self.specification.generation.into()),
             Value::Integer(self.specification.budget.into()),
@@ -105,6 +105,10 @@ impl ActivationPreviewOffer {
                 ])
             },
             original_interfaces,
+            {
+                let target = self.original_execution.original_instance_target()?;
+                array([text(&target.unit), text(&target.module)])
+            },
         ]))
     }
 
@@ -230,7 +234,7 @@ pub(crate) fn validate_original_display_context(
     }
     Ok(matches!(
         context.original_instance_environment(),
-        crate::declaration_context::OriginalInstanceEnvironment::Complete
+        crate::declaration_context::OriginalInstanceEnvironment::Complete { .. }
     ))
 }
 

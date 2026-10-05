@@ -678,6 +678,20 @@ pub(crate) fn seal(
         .iter()
         .map(std::path::absolute)
         .collect::<Result<Vec<_>, _>>()?;
+    let original_targets = evidence
+        .modules
+        .iter()
+        .filter(|module| !module.boot && module.source == Path::new(crate::cache::GENERATED_SOURCE))
+        .map(|module| crate::declaration_join::ExactModuleIdentity {
+            unit: module.unit.clone(),
+            module: module.module.clone(),
+        })
+        .collect::<Vec<_>>();
+    let [original_target] = original_targets.as_slice() else {
+        return Err(CompileError::ExtractFailed(
+            "original input lacks one authenticated generated target owner".into(),
+        ));
+    };
     let lexical = original_source_lexical(evidence, artifacts)?;
     let required_instance_owners = evidence
         .modules
@@ -703,6 +717,7 @@ pub(crate) fn seal(
                     .sha256(),
                 artifacts,
                 lexical,
+                original_target.clone(),
                 &required_instance_owners,
             )?,
         ),

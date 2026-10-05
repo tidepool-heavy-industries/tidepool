@@ -1977,10 +1977,14 @@ fn activation_preview_selected_original_dictionary_without_native_body_is_unavai
     .expect(
         "selected dictionary lacking native original Core has an authenticated unavailable result",
     );
-    assert!(matches!(
-        selected,
-        turn::ActivationPreviewCompilation::OriginalDisplayEvidenceUnavailable
-    ));
+    match selected {
+        turn::ActivationPreviewCompilation::OriginalDisplayEvidenceUnavailable => {},
+        turn::ActivationPreviewCompilation::Ready(compiled) => panic!(
+            "original dictionary {} has no native body, but preview returned Ready with {:?} disposition",
+            dictionary_owner.owner.module,
+            compiled.proof().disposition(),
+        ),
+    }
     assert!(
         tidepool_extract_cmd::extract_spawn_count() > submissions,
         "the actual compiler probed and selected the original dictionary"
