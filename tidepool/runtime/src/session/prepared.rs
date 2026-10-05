@@ -564,6 +564,7 @@ impl PreparedRuntimeError {
                 | ExecutionError::UnknownPreparedHandle
                 | ExecutionError::ImportShape { .. }
                 | ExecutionError::BatchSourceContract(_)
+                | ExecutionError::BatchImportContract(_)
                 | ExecutionError::DescriptorShape { .. }
                 | ExecutionError::HostIdConflict { .. }
                 | ExecutionError::ForeignExternals
@@ -4332,7 +4333,21 @@ impl PreparedEngine {
             let installed = self
                 .machine
                 .install_shared_batch_with_leases(programs, requests)
-                .map_err(PreparedRuntimeError::Install)?;
+                .map_err(|mut error| {
+                    if let ExecutionError::BatchImportContract(evidence) = &mut error {
+                        let owners = if evidence.program == demanded.len() {
+                            Some(target_owners)
+                        } else {
+                            demanded
+                                .get(evidence.program)
+                                .map(|selected| selected.group().imports())
+                        };
+                        evidence.owner = owners
+                            .and_then(|owners| owners.get(evidence.import_position))
+                            .cloned();
+                    }
+                    PreparedRuntimeError::Install(error)
+                })?;
             let target_id = *installed
                 .programs
                 .last()
@@ -7530,8 +7545,11 @@ pub(super) mod tests {
             matches!(
                 &bad_result,
                 Err(PreparedRuntimeError::Install(
-                    ExecutionError::BatchSourceContract(_)
-                ))
+                    ExecutionError::BatchImportContract(evidence)
+                )) if evidence.owner == Some(ImportOwner::Source {
+                    version: ModuleVersion([1; 32]),
+                    binder: binder("b").binder,
+                })
             ),
             "unexpected result: {:?}",
             bad_result.err().map(|error| error.to_string())
@@ -7666,8 +7684,8 @@ pub(super) mod tests {
         assert!(matches!(
             install(&mut engine, owner.clone(), target(binder.clone(), 0, true)),
             Err(PreparedRuntimeError::Install(
-                ExecutionError::BatchSourceContract(_)
-            ))
+                ExecutionError::BatchImportContract(evidence)
+            )) if evidence.owner == Some(owner.clone())
         ));
         assert_eq!(engine.residency(), before);
         let staged = install(&mut engine, owner, target(binder.clone(), 0, false)).unwrap();
@@ -8231,8 +8249,8 @@ pub(super) mod tests {
         assert!(matches!(
             install(&mut engine, &bad),
             Err(PreparedRuntimeError::Install(
-                ExecutionError::BatchSourceContract(_)
-            ))
+                ExecutionError::BatchImportContract(evidence)
+            )) if evidence.owner == Some(package_owner([9; 32]))
         ));
         assert_eq!(engine.residency(), before);
         assert!(engine.code_exports.is_empty());

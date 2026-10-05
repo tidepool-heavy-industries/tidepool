@@ -310,7 +310,13 @@ impl PreparedMachine<'_> {
                     "batch import count differs from image",
                 ));
             }
-            for (slot, origin) in candidate.image.import_slots.iter().zip(&candidate.imports) {
+            for (import_position, (slot, origin)) in candidate
+                .image
+                .import_slots
+                .iter()
+                .zip(&candidate.imports)
+                .enumerate()
+            {
                 match origin {
                     BatchImport::Source { group, binding } => {
                         let target = candidates
@@ -326,8 +332,20 @@ impl PreparedMachine<'_> {
                                 export.entry_signature.as_ref() != Some(expected)
                             })
                         {
-                            return Err(ExecutionError::BatchSourceContract(Box::new(
-                                slot.identity.clone(),
+                            return Err(ExecutionError::BatchImportContract(Box::new(
+                                super::super::BatchImportContractMismatch {
+                                    program: index,
+                                    import_position,
+                                    owner: None,
+                                    selected: super::super::BatchImportSelection::Source {
+                                        group: *group,
+                                        binding: *binding,
+                                    },
+                                    required_identity: slot.identity.clone(),
+                                    offered_identity: Some(export.identity.clone()),
+                                    required_signature: slot.entry_signature.clone(),
+                                    offered_signature: export.entry_signature.clone(),
+                                },
                             )));
                         }
                         if export.rep != slot.rep {
@@ -379,8 +397,19 @@ impl PreparedMachine<'_> {
                             .as_ref()
                             .is_some_and(|expected| entry_signature.as_ref() != Some(expected))
                         {
-                            return Err(ExecutionError::BatchSourceContract(Box::new(
-                                slot.identity.clone(),
+                            return Err(ExecutionError::BatchImportContract(Box::new(
+                                super::super::BatchImportContractMismatch {
+                                    program: index,
+                                    import_position,
+                                    owner: None,
+                                    selected: super::super::BatchImportSelection::Existing {
+                                        handle: *handle,
+                                    },
+                                    required_identity: slot.identity.clone(),
+                                    offered_identity: None,
+                                    required_signature: slot.entry_signature.clone(),
+                                    offered_signature: entry_signature.clone(),
+                                },
                             )));
                         }
                         if handle.rep != slot.rep {
@@ -1336,25 +1365,56 @@ mod tests {
             nursery_bytes: 4096,
         })
         .unwrap();
+        let result = machine.install_shared_batch(vec![
+            BatchProgram {
+                image: a,
+                imports: vec![BatchImport::Source {
+                    group: 1,
+                    binding: ValueId(0),
+                }],
+            },
+            BatchProgram {
+                image: b,
+                imports: vec![BatchImport::Source {
+                    group: 0,
+                    binding: ValueId(0),
+                }],
+            },
+        ]);
+        let Err(ExecutionError::BatchImportContract(evidence)) = result else {
+            panic!("wrong source signature must refuse the whole batch");
+        };
+        assert_eq!((evidence.program, evidence.import_position), (0, 0));
+        assert_eq!(
+            evidence.required_identity,
+            testing::identity("Fixture", "b")
+        );
+        assert_eq!(
+            evidence.offered_identity,
+            Some(evidence.required_identity.clone())
+        );
+        assert_eq!(
+            evidence.required_signature,
+            Some(Signature {
+                arguments: vec![],
+                results: ResultContract::Returns(vec![RuntimeRep::Int(64)]),
+            })
+        );
+        assert_eq!(
+            evidence.offered_signature,
+            Some(Signature {
+                arguments: vec![],
+                results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
+            })
+        );
         assert!(matches!(
-            machine.install_shared_batch(vec![
-                BatchProgram {
-                    image: a,
-                    imports: vec![BatchImport::Source {
-                        group: 1,
-                        binding: ValueId(0)
-                    }],
-                },
-                BatchProgram {
-                    image: b,
-                    imports: vec![BatchImport::Source {
-                        group: 0,
-                        binding: ValueId(0)
-                    }],
-                },
-            ]),
-            Err(ExecutionError::BatchSourceContract(_))
+            evidence.selected,
+            super::super::super::BatchImportSelection::Source {
+                group: 1,
+                binding: ValueId(0)
+            }
         ));
+        assert_eq!(evidence.owner, None);
         assert_eq!(machine.residency(), ResidencyCounts::default());
     }
 

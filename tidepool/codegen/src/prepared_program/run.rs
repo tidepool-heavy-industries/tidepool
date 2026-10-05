@@ -9,7 +9,9 @@ use std::sync::{atomic::AtomicBool, Arc};
 use tidepool_bridge::HaskellValue;
 use tidepool_heap::execution_descriptor::ObjectDescriptor;
 use tidepool_repr::execution_schema::ValueId;
-use tidepool_repr::execution_schema::{Atom, HeapRhs, RuntimeRep, SymbolIdentity, ValueRef};
+use tidepool_repr::execution_schema::{
+    Atom, HeapRhs, ImportOwner, RuntimeRep, Signature, SymbolIdentity, ValueRef,
+};
 
 pub struct RunOptions {
     pub nursery_bytes: usize,
@@ -46,6 +48,26 @@ pub enum ImportShapeFact {
     Evaluated(bool),
 }
 
+/// Exact facts observed at a refused batch import. The runtime may attach the
+/// certified import owner; these observations never authorize another owner.
+#[derive(Debug)]
+pub struct BatchImportContractMismatch {
+    pub program: usize,
+    pub import_position: usize,
+    pub owner: Option<ImportOwner>,
+    pub selected: BatchImportSelection,
+    pub required_identity: SymbolIdentity,
+    pub offered_identity: Option<SymbolIdentity>,
+    pub required_signature: Option<Signature>,
+    pub offered_signature: Option<Signature>,
+}
+
+#[derive(Debug)]
+pub enum BatchImportSelection {
+    Source { group: usize, binding: ValueId },
+    Existing { handle: super::PreparedHandle },
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ExecutionError {
     #[error("entry {0:?} is not exported by this program")]
@@ -74,6 +96,8 @@ pub enum ExecutionError {
     },
     #[error("batch source import {0:?} has a different binder identity or entry signature")]
     BatchSourceContract(Box<SymbolIdentity>),
+    #[error("batch import contract mismatch: {0:?}")]
+    BatchImportContract(Box<BatchImportContractMismatch>),
     #[error("program {0:?} is not installed on this machine")]
     UnknownProgram(ProgramId),
     /// No frame is parked under this id on this machine: never parked here,
