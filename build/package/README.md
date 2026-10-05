@@ -45,7 +45,10 @@ unknown executed count or zero selection cannot qualify a passing cohort.
 and `--service-slice NAME.slice` use the runner's fresh delegated user services
 inside an already admitted user slice. Reports retain these scheduling choices.
 The descriptor seals M2 watchdogs at 600 seconds, with 900 seconds for unfinished
-parent survival, later nominal publication join and checkpoint release. Checkpoint
+parent survival, later nominal publication join, checkpoint release and the selected
+coding child. The selected child case scaffolds the shipped workspace and passes a
+`Project.Work` Task from the root to a coding child through compiler admission,
+then checks the child's narrower effect row and original typed reply. Checkpoint
 release retains the issuer settlement, observer creation, original-scope read/reply
 and final cleanup in one watchdog; the measured issuer portion already took
 538 seconds before those later phases. These outer process limits
