@@ -1,13 +1,13 @@
-use std::path::Path;
+use std::path::PathBuf;
 
 #[test]
 fn inferred_cells_compile_without_an_implicit_row_alias() {
     let declarations = [tidepool_mcp::console_decl()];
     let installed = tidepool_mcp::ensure_effects_module(&declarations).unwrap();
-    let stdlib = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../haskell/lib")
-        .canonicalize()
-        .unwrap();
+    let stdlib = PathBuf::from(
+        std::env::var_os("TIDEPOOL_PRELUDE_DIR")
+            .expect("TIDEPOOL_PRELUDE_DIR must name the declared Haskell library resource"),
+    );
     let preamble = tidepool_mcp::build_notebook_preamble(&declarations, false);
     let compile = |expression| {
         let source = tidepool_runtime::session::assemble_opaque_expression_module(
@@ -41,10 +41,10 @@ fn concurrent_selected_profiles_enforce_membership_with_stable_vocabulary() {
     ])
     .expect("installed effects");
     let original = std::fs::read(installed.core.join("Tidepool/Effects.hs")).unwrap();
-    let stdlib = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../haskell/lib")
-        .canonicalize()
-        .unwrap();
+    let stdlib = PathBuf::from(
+        std::env::var_os("TIDEPOOL_PRELUDE_DIR")
+            .expect("TIDEPOOL_PRELUDE_DIR must name the declared Haskell library resource"),
+    );
     let preamble = include_str!("fixtures/selected-effects.hs");
     let compile = |row, expression| {
         let source = tidepool_runtime::session::assemble_opaque_expression_module(

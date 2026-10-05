@@ -31,7 +31,6 @@
 //! guards the unavoidable Haskell-source mirror.
 
 use std::collections::BTreeSet;
-use std::path::Path;
 
 use tidepool_mcp::{decl_pragmas, EVAL_PRAGMAS};
 use tidepool_runtime::session::turn::DECL_TEMPLATE_SOURCE;
@@ -163,33 +162,21 @@ fn standalone_default_tracks_decl_pragmas_modulo_no_implicit_prelude() {
 /// parse is itself a signal the mirror needs re-checking.
 #[test]
 fn haskell_harness_profile_pragma_line_matches_eval_pragmas() {
-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let harness_source = manifest_dir
-        .parent()
-        .and_then(Path::parent)
-        .expect("tidepool-mcp has a parent (repo root)")
-        .join("bridge/haskell/src/Tidepool/HarnessSource.hs");
-    let src = std::fs::read_to_string(&harness_source)
-        .unwrap_or_else(|e| panic!("read {}: {e}", harness_source.display()));
+    const HARNESS_SOURCE: &str = "bridge/haskell/src/Tidepool/HarnessSource.hs";
+    let src = include_str!("../../haskell/src/Tidepool/HarnessSource.hs");
 
     const MARKER: &str = "harnessProfilePragmaLine =";
     let after_marker = src
         .split_once(MARKER)
-        .unwrap_or_else(|| panic!("{MARKER} not found in {}", harness_source.display()))
+        .unwrap_or_else(|| panic!("{MARKER} not found in {HARNESS_SOURCE}"))
         .1;
-    let quote_start = after_marker.find('"').unwrap_or_else(|| {
-        panic!(
-            "no opening quote after {MARKER} in {}",
-            harness_source.display()
-        )
-    });
+    let quote_start = after_marker
+        .find('"')
+        .unwrap_or_else(|| panic!("no opening quote after {MARKER} in {HARNESS_SOURCE}"));
     let after_open = &after_marker[quote_start + 1..];
-    let quote_end = after_open.find('"').unwrap_or_else(|| {
-        panic!(
-            "no closing quote after {MARKER} in {}",
-            harness_source.display()
-        )
-    });
+    let quote_end = after_open
+        .find('"')
+        .unwrap_or_else(|| panic!("no closing quote after {MARKER} in {HARNESS_SOURCE}"));
     let pragma_line = &after_open[..quote_end];
 
     let eval = extension_set(EVAL_PRAGMAS);

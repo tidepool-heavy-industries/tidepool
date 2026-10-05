@@ -327,7 +327,7 @@ Key modules:
 - `Tidepool.Async`: authored concurrency;
 - `Tidepool.Worktree`, `Shell`, `Cargo`: typed operational helpers;
 - `Tidepool.Agent`: coding-agent delegation;
-- generated `Tidepool.Effects`: the effect row and verbs for a compile.
+- generated `Tidepool.Effects`: stable effect types and authored verbs.
 
 Pure reusable helpers belong in named library modules. Effect constructors and
 wire records belong in `tidepool-protocol`/`tidepool-mcp`, not handwritten

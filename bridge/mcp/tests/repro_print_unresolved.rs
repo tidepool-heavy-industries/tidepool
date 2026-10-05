@@ -7,7 +7,7 @@
 //! exact outcome (Ok value / which RuntimeError). They assert the EXPECTED-good
 //! behavior, so a reproduction shows up as a failure naming the unresolved var.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use tidepool_bridge_derive::FromHaskell;
 use tidepool_effect::dispatch::{EffectContext, EffectHandler};
@@ -15,13 +15,11 @@ use tidepool_effect::error::EffectError;
 use tidepool_mcp::CapturedOutput;
 use tidepool_runtime::compile_and_run;
 
-fn prelude_dir() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .unwrap()
-        .join("bridge/haskell/lib")
-        .leak()
+fn prelude_dir() -> PathBuf {
+    PathBuf::from(
+        std::env::var_os("TIDEPOOL_PRELUDE_DIR")
+            .expect("TIDEPOOL_PRELUDE_DIR must name the declared Haskell library resource"),
+    )
 }
 
 #[derive(FromHaskell)]
@@ -62,7 +60,7 @@ fn run(code: &str) -> (Vec<String>, Result<String, String>) {
     let dirs = tidepool_mcp::ensure_effects_module(&decls).expect("write effects module");
     let core = dirs.core.leak() as &Path;
     let orchestration = dirs.orchestration.leak() as &Path;
-    let include = [pp, core, orchestration];
+    let include = [pp.as_path(), core, orchestration];
 
     let captured = CapturedOutput::new();
     let mut handlers = frunk::hlist![ConsoleHandler];

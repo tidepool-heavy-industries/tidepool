@@ -570,6 +570,7 @@ def test_runtime_inputs(package_name, target_name, unit=False):
         or (package_name == "tidepool" and target_name in {
             "facade_prepared_recipe_contract_test", "facade_recipe_source_capture_test",
         })
+        or (package_name == "tidepool-mcp" and not unit and target_name == "mcp")
     ):
         worker = True
         env.update({
@@ -597,7 +598,7 @@ def test_runtime_inputs(package_name, target_name, unit=False):
     if package_name == "tidepool-toolchain" and target_name == "prepared_fixture":
         env["TIDEPOOL_PREPARED_FIXTURE_COMPILER"] = "$(exe //tidepool/toolchain:prepared-fixture)"
         resources.append("//tidepool/toolchain:prepared-fixture")
-    if package_name == "tidepool-mcp" and target_name == "generated_surface_contracts":
+    if package_name == "tidepool-mcp" and not unit and target_name == "mcp":
         worker = True
         env.update({
             "TIDEPOOL_EFFECTS_SOURCE_ROOT": "$(location :effects_generated)",
@@ -617,7 +618,7 @@ def test_runtime_inputs(package_name, target_name, unit=False):
     return env, sorted(set(resources)), worker
 
 
-def runtime_arguments(env, resources, worker):
+def runtime_arguments(env, resources, worker, resource_env=None):
     lines = []
     if env:
         lines.append("    env = {")
@@ -625,6 +626,10 @@ def runtime_arguments(env, resources, worker):
         lines.append("    },")
     if resources:
         lines.extend(["    resources = [", render_strings(resources, 8), "    ],"])
+    if resource_env:
+        lines.append("    resource_env = {")
+        lines.extend(f"        {json.dumps(key)}: {json.dumps(value)}," for key, value in sorted(resource_env.items()))
+        lines.append("    },")
     if worker:
         lines.append("    haskell_worker = True,")
     return "\n".join(lines)
@@ -1159,7 +1164,11 @@ tidepool_buildscript_run(
     for target in selected_tests:
         deps = dev_deps + ([":" + libraries[0]["name"]] if libraries else [])
         env, resources, worker = test_runtime_inputs(package_name, target["name"])
-        extra = runtime_arguments(env, resources, worker)
+        resource_env = {}
+        if package_name == "tidepool-mcp" and target["name"] == "mcp":
+            resource_env = env
+            env = {"TIDEPOOL_KEEP_TEST_LOGS": resource_env.pop("TIDEPOOL_KEEP_TEST_LOGS")}
+        extra = runtime_arguments(env, resources, worker, resource_env)
         if package["name"] == "tidepool-atomic-write" and target["name"] == "strict_directory":
             extra = '    env = {"TIDEPOOL_DIRECTORY_FAULT_LIBRARY": "$(location :directory_fault_shared)"},'
         if package["name"] == "tidepool-repr" and target["name"] == "repr":
