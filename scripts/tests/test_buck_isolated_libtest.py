@@ -20,6 +20,13 @@ runner = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(runner)
 
 
+def completed_process(*args, **kwargs):
+    """Test executions explicitly acknowledge their mocked envelope teardown."""
+    result = subprocess.CompletedProcess(*args, **kwargs)
+    result.cleanup_confirmed = True
+    return result
+
+
 class IsolatedLibtestTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -30,6 +37,90 @@ class IsolatedLibtestTests(unittest.TestCase):
 
     def tearDown(self):
         self.tmp.cleanup()
+
+    def test_failure_and_timeout_preserve_preexecution_case_evidence(self):
+        for timed_out in (False, True):
+            with self.subTest(timed_out=timed_out):
+                root = Path(self.tmp.name) / ('timeout-artifacts' if timed_out else 'failure-artifacts')
+                self.binary.write_text('#!' + sys.executable + '\n' +
+                    'import os, pathlib, time\n' +
+                    'root = pathlib.Path(os.environ["TIDEPOOL_TEST_ARTIFACT_ROOT"])\n' +
+                    'assert os.environ["TIDEPOOL_TEST_DIAGNOSTIC_SCOPE"] == "1"\n' +
+                    '(root / "completed-compile.txt").write_text("retained before execution")\n' +
+                    ('time.sleep(30)\n' if timed_out else
+                     'print("test result: FAILED. 0 passed; 1 failed; 0 ignored;")\nraise SystemExit(101)\n'))
+                self.binary.chmod(0o700)
+                record = {}
+                passed, _, _ = runner.run_one(str(self.binary), 'suite::runtime_failure',
+                    False, 0.5 if timed_out else 10, record, artifact_root=root)
+                self.assertFalse(passed)
+                self.assertTrue((root / 'case.json').is_file())
+                self.assertEqual((root / 'completed-compile.txt').read_text(), 'retained before execution')
+                self.assertEqual(record['status'], 'timeout' if timed_out else 'finished')
+                self.assertEqual(record['executed_test_count'], None if timed_out else 1)
+
+    def test_case_environment_isolated_and_success_removes_diagnostics(self):
+        root = Path(self.tmp.name) / 'successful-artifacts'
+        ambient = os.environ.get('TIDEPOOL_TEST_ARTIFACT_ROOT')
+        def run(args, timeout, environment=None):
+            self.assertEqual(environment['TIDEPOOL_TEST_ARTIFACT_ROOT'], str(root))
+            self.assertEqual(environment['TIDEPOOL_TEST_DIAGNOSTIC_SCOPE'], '1')
+            self.assertEqual(os.environ.get('TIDEPOOL_TEST_ARTIFACT_ROOT'), ambient)
+            (root / 'completed-compile.txt').write_text('diagnostics')
+            return completed_process(args, 0,
+                'test result: ok. 1 passed; 0 failed; 0 ignored;\n', '')
+        record = {}
+        with patch.object(runner, 'execute', side_effect=run):
+            passed, _, _ = runner.run_one(str(self.binary), 'suite::works', False,
+                10, record, artifact_root=root)
+        self.assertTrue(passed)
+        self.assertFalse(root.exists())
+        self.assertTrue(record['artifacts_removed_after_success'])
+
+    def test_owned_compiler_receives_case_root_without_changing_libtest_selection(self):
+        root = Path(self.tmp.name) / 'resident-artifacts'
+        def run(args, timeout, environment=None):
+            self.assertEqual(args, ['/declared/frontend', '--owned-daemon-run',
+                str(root / 'compiler'), '--', str(self.binary), '--exact', 'suite::works', '--nocapture'])
+            self.assertEqual(environment['TIDEPOOL_TEST_ARTIFACT_ROOT'], str(root))
+            (root / 'compiler').mkdir()
+            (root / 'compiler/owned-compiler-outcome.json').write_text(json.dumps({'cleanup': {'status': 'confirmed'}}))
+            return completed_process(args, 0,
+                'test result: ok. 1 passed; 0 failed; 0 ignored;\n', '')
+        with patch.dict(os.environ, {'TIDEPOOL_EXTRACT': '/declared/frontend'}), \
+             patch.object(runner, 'execute', side_effect=run):
+            passed, _, _ = runner.run_one(str(self.binary), 'suite::works', False,
+                10, artifact_root=root, compiler_mode='owned-resident')
+        self.assertTrue(passed)
+
+    def test_passing_libtest_with_unknown_campaign_cleanup_keeps_evidence(self):
+        root = Path(self.tmp.name) / 'unconfirmed-artifacts'
+        def run(args, timeout, environment=None):
+            campaign = root / 'hosted-campaign-1'
+            campaign.mkdir()
+            (campaign / 'hosted-outcome.json').write_text(json.dumps({
+                'scenario': {'status': 'passed'}, 'cleanup': {'status': 'unknown'}}))
+            return completed_process(args, 0,
+                'test result: ok. 1 passed; 0 failed; 0 ignored;\n', '')
+        record = {}
+        with patch.object(runner, 'execute', side_effect=run):
+            passed, _, errors = runner.run_one(str(self.binary), 'suite::works', False,
+                10, record, artifact_root=root)
+        self.assertFalse(passed)
+        self.assertEqual(record['executed_test_count'], 1)
+        self.assertEqual(record['exit_code'], 0)
+        self.assertTrue(root.exists())
+        self.assertIn('cleanup remains unknown', errors)
+
+    def test_declared_resource_paths_cross_delegation_without_exporting_ambient_state(self):
+        with patch.dict(os.environ, {'TIDEPOOL_HASKELL_ACTORS_DIR': '/declared/actors',
+                                     'DECLARED_FIXTURE': '/declared/fixture',
+                                     'UNDECLARED_FIXTURE': '/ambient/fixture'}):
+            command, _ = runner.delegated_command(['/libtest'], 10, 'app.slice', {},
+                declared_resources=('TIDEPOOL_HASKELL_ACTORS_DIR', 'DECLARED_FIXTURE'))
+        self.assertIn('--setenv=TIDEPOOL_HASKELL_ACTORS_DIR=/declared/actors', command)
+        self.assertIn('--setenv=DECLARED_FIXTURE=/declared/fixture', command)
+        self.assertFalse(any('UNDECLARED_FIXTURE' in word for word in command))
 
     def test_regeneration_modes_refuse_before_discovery_or_execution(self):
         for name in ('TIDEPOOL_REGEN_BRIDGED', 'TIDEPOOL_REGEN_PROTOCOL_GOLDENS'):
@@ -61,7 +152,7 @@ class IsolatedLibtestTests(unittest.TestCase):
         rule = calls.pop()
         observed = []
 
-        def run(args, timeout):
+        def run(args, timeout, environment=None):
             value = os.environ['EXOMONAD_EMBEDDED_ASSET_ROOT']
             self.assertTrue(Path(value).is_absolute())
             self.assertTrue(Path(value).is_symlink(), 'Buck artifact link must remain selected')
@@ -72,7 +163,7 @@ class IsolatedLibtestTests(unittest.TestCase):
             discovered = self.discover(args)
             if discovered is not None:
                 return discovered
-            return subprocess.CompletedProcess(args, 0,
+            return completed_process(args, 0,
                 'test result: ok. 1 passed; 0 failed; 0 ignored;\n', '')
 
         with patch.dict(os.environ, rule['env']):
@@ -125,7 +216,7 @@ class IsolatedLibtestTests(unittest.TestCase):
         def result(args, timeout, service_slice, service_record):
             self.assertEqual(service_slice, 'app.slice')
             service_record.update(cleanup_confirmed=False, cleanup_error='service still active')
-            return subprocess.CompletedProcess(args, 0,
+            return completed_process(args, 0,
                 'test result: ok. 1 passed; 0 failed; 0 ignored;\n', '')
         record = {}
         with patch.object(runner, 'execute', side_effect=result):
@@ -140,7 +231,7 @@ class IsolatedLibtestTests(unittest.TestCase):
     def test_delegated_launch_failure_keeps_test_execution_unknown(self):
         def refused(args, timeout, service_slice, service_record):
             service_record.update(cleanup_confirmed=True)
-            return subprocess.CompletedProcess(args, 1, '', 'service admission refused')
+            return completed_process(args, 1, '', 'service admission refused')
         record = {}
         with patch.object(runner, 'execute', side_effect=refused):
             passed, _, _ = runner.run_one(str(self.binary), 'suite::works', False,
@@ -190,7 +281,7 @@ class IsolatedLibtestTests(unittest.TestCase):
             if len(calls) == 1:
                 raise subprocess.TimeoutExpired(args, 10)
             output = 'LoadState=loaded\nActiveState=inactive\n' if 'show' in args else ''
-            return subprocess.CompletedProcess(args, 0, output, '')
+            return completed_process(args, 0, output, '')
         record = {'manager_admission': {'Id': unit, 'Transient': 'yes',
                                         'InvocationID': 'ab' * 16}}
         with patch.object(runner.subprocess, 'run', side_effect=control):
@@ -198,20 +289,20 @@ class IsolatedLibtestTests(unittest.TestCase):
         self.assertTrue(record['cleanup_confirmed'])
         self.assertEqual([args[2] for args in calls], ['stop', 'kill', 'stop', 'show'])
         self.assertTrue(all(args[-1] == unit for args in calls))
-        with patch.object(runner.subprocess, 'run', return_value=subprocess.CompletedProcess(
+        with patch.object(runner.subprocess, 'run', return_value=completed_process(
                 [], 0, 'LoadState=loaded\nActiveState=active\n', '')):
             runner.stop_delegated_service(unit, record)
         self.assertFalse(record['cleanup_confirmed'])
 
     def test_delegated_options_do_not_apply_to_discovery(self):
         calls = []
-        def run(args, timeout, service_slice=None, service_record=None):
+        def run(args, timeout, service_slice=None, service_record=None, environment=None):
             calls.append((args, service_slice))
             discovered = self.discover(args)
             if discovered is not None:
                 return discovered
             service_record.update(cleanup_confirmed=True)
-            return subprocess.CompletedProcess(args, 0,
+            return completed_process(args, 0,
                 'test result: ok. 1 passed; 0 failed; 0 ignored;\n', '')
         result, _, _ = self.invoke(['--exact', 'suite::works', '--expected-count', '1',
                                   '--delegated-service'], run)
@@ -227,19 +318,19 @@ class IsolatedLibtestTests(unittest.TestCase):
         unit = 'tidepool-libtest-late.service'
         record = {}
         def absent(args, **_kwargs):
-            return subprocess.CompletedProcess(args, 5 if 'stop' in args else 1,
+            return completed_process(args, 5 if 'stop' in args else 1,
                                                 'LoadState=not-found\nActiveState=inactive\n', '')
         with patch.object(runner.subprocess, 'run', side_effect=absent):
             runner.stop_delegated_service(unit, record)
         self.assertFalse(record['cleanup_confirmed'])
         self.assertIn('queued start', record['cleanup_error'])
         late = f'Id={unit}\nLoadState=loaded\nTransient=yes\nInvocationID={"ab" * 16}\n'
-        with patch.object(runner.subprocess, 'run', return_value=subprocess.CompletedProcess(
+        with patch.object(runner.subprocess, 'run', return_value=completed_process(
                 [], 0, late, '')):
             runner.observe_delegated_admission(unit, record, runner.threading.Event())
         self.assertEqual(record['manager_admission']['Id'], unit)
         self.assertFalse(record['cleanup_confirmed'], 'late registration requires a new exact stop')
-        with patch.object(runner.subprocess, 'run', return_value=subprocess.CompletedProcess(
+        with patch.object(runner.subprocess, 'run', return_value=completed_process(
                 [], 0, 'LoadState=loaded\nActiveState=inactive\n', '')):
             runner.stop_delegated_service(unit, record)
         self.assertTrue(record['cleanup_confirmed'])
@@ -262,7 +353,7 @@ class IsolatedLibtestTests(unittest.TestCase):
     def test_interrupted_launched_future_retains_unconfirmed_service_receipt(self):
         retained = Path(self.tmp.name) / 'interrupted'
         starts = []
-        def run(args, timeout, service_slice=None, service_record=None):
+        def run(args, timeout, service_slice=None, service_record=None, environment=None):
             discovered = self.discover(args)
             if discovered is not None:
                 return discovered
@@ -300,7 +391,7 @@ class IsolatedLibtestTests(unittest.TestCase):
 
     def test_timeout_bytes_retain_output_and_exact_cleanup_receipt(self):
         retained = Path(self.tmp.name) / 'timeout-bytes'
-        def run(args, timeout, service_slice=None, service_record=None):
+        def run(args, timeout, service_slice=None, service_record=None, environment=None):
             discovered = self.discover(args)
             if discovered is not None:
                 return discovered
@@ -328,7 +419,7 @@ class IsolatedLibtestTests(unittest.TestCase):
 
     def test_actual_failed_execution_count_is_retained_without_changing_pass_rule(self):
         record = {}
-        result = subprocess.CompletedProcess([], 101,
+        result = completed_process([], 101,
             'test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out\n', '')
         with patch.object(runner, 'execute', return_value=result):
             passed, _, _ = runner.run_one(str(self.binary), 'suite::fails', False, 2, record)
@@ -340,7 +431,7 @@ class IsolatedLibtestTests(unittest.TestCase):
 
     def test_zero_execution_and_unknown_timeout_remain_distinct(self):
         record = {}
-        result = subprocess.CompletedProcess([], 0,
+        result = completed_process([], 0,
             'test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n', '')
         with patch.object(runner, 'execute', return_value=result):
             passed, _, _ = runner.run_one(str(self.binary), 'suite::absent', False, 2, record)
@@ -365,19 +456,19 @@ class IsolatedLibtestTests(unittest.TestCase):
         if '--list' not in argv:
             return None
         if '--ignored' in argv:
-            return subprocess.CompletedProcess(argv, 0, self.ignored_tests, '')
-        return subprocess.CompletedProcess(argv, 0, self.all_tests, '')
+            return completed_process(argv, 0, self.ignored_tests, '')
+        return completed_process(argv, 0, self.all_tests, '')
 
     def test_passing_output_is_retained_with_explicit_truncation(self):
         retained = Path(self.tmp.name) / 'retained'
         payload = 'witness' * 8 + '\n'
         summary = 'test result: ok. 1 passed; 0 failed; 0 ignored;\n'
 
-        def run(argv, timeout):
+        def run(argv, timeout, environment=None):
             discovered = self.discover(argv)
             if discovered is not None:
                 return discovered
-            return subprocess.CompletedProcess(argv, 0, payload + summary, 'phase evidence')
+            return completed_process(argv, 0, payload + summary, 'phase evidence')
 
         with patch.object(runner, 'OUTPUT_LIMIT', 16):
             result, output, _ = self.invoke([
@@ -401,12 +492,12 @@ class IsolatedLibtestTests(unittest.TestCase):
     def test_exact_selection_requires_and_enforces_expected_count(self):
         calls = []
 
-        def run(argv, timeout):
+        def run(argv, timeout, environment=None):
             calls.append((argv, timeout))
             discovered = self.discover(argv)
             if discovered is not None:
                 return discovered
-            return subprocess.CompletedProcess(
+            return completed_process(
                 argv, 0, 'test result: ok. 1 passed; 0 failed; 0 ignored;\n', ''
             )
 
@@ -440,11 +531,11 @@ class IsolatedLibtestTests(unittest.TestCase):
             def shutdown(self, wait, cancel_futures):
                 self.assert_shutdown = (wait, cancel_futures)
 
-        def run(argv, timeout):
+        def run(argv, timeout, environment=None):
             discovered = self.discover(argv)
             if discovered is not None:
                 return discovered
-            return subprocess.CompletedProcess(
+            return completed_process(
                 argv, 0, 'test result: ok. 1 passed; 0 failed; 0 ignored;\n', ''
             )
 
@@ -470,13 +561,13 @@ class IsolatedLibtestTests(unittest.TestCase):
         together = threading.Barrier(2)
         launched = []
 
-        def run(argv, timeout):
+        def run(argv, timeout, environment=None):
             discovered = self.discover(argv)
             if discovered is not None:
                 return discovered
             launched.append(argv[2])
             together.wait(timeout=2)
-            return subprocess.CompletedProcess(
+            return completed_process(
                 argv, 0, 'test result: ok. 1 passed; 0 failed; 0 ignored;\n', '')
 
         result, _, errors = self.invoke(
@@ -489,7 +580,7 @@ class IsolatedLibtestTests(unittest.TestCase):
         retained = Path(self.tmp.name) / 'case-timeouts'
         limits = {}
 
-        def run(argv, timeout, service_slice=None, service_record=None):
+        def run(argv, timeout, service_slice=None, service_record=None, environment=None):
             discovered = self.discover(argv)
             if discovered is not None:
                 return discovered
@@ -497,7 +588,7 @@ class IsolatedLibtestTests(unittest.TestCase):
             self.assertIn(f'--property=RuntimeMaxSec={timeout:g}s', command)
             limits[argv[2]] = timeout
             service_record.update(cleanup_confirmed=True)
-            return subprocess.CompletedProcess(
+            return completed_process(
                 argv, 0, 'test result: ok. 1 passed; 0 failed; 0 ignored;\n', '')
 
         result, _, errors = self.invoke(
@@ -529,7 +620,7 @@ class IsolatedLibtestTests(unittest.TestCase):
     def test_case_timeout_requires_selected_exact_name_before_execution(self):
         launched = []
 
-        def run(argv, timeout):
+        def run(argv, timeout, environment=None):
             if '--list' not in argv:
                 launched.append(argv)
             return self.discover(argv)
@@ -544,7 +635,7 @@ class IsolatedLibtestTests(unittest.TestCase):
     def test_overridden_timeout_never_qualifies_a_partial_success(self):
         retained = Path(self.tmp.name) / 'overridden-timeout'
 
-        def run(argv, timeout):
+        def run(argv, timeout, environment=None):
             discovered = self.discover(argv)
             if discovered is not None:
                 return discovered
@@ -566,7 +657,7 @@ class IsolatedLibtestTests(unittest.TestCase):
     def test_zero_and_wrong_expected_counts_fail_before_execution(self):
         launched = []
 
-        def run(argv, timeout):
+        def run(argv, timeout, environment=None):
             if '--list' not in argv:
                 launched.append(argv)
             return self.discover(argv)
@@ -594,12 +685,12 @@ class IsolatedLibtestTests(unittest.TestCase):
     def test_ignored_mode_runs_exact_ignored_test_explicitly(self):
         calls = []
 
-        def run(argv, timeout):
+        def run(argv, timeout, environment=None):
             calls.append(argv)
             discovered = self.discover(argv)
             if discovered is not None:
                 return discovered
-            return subprocess.CompletedProcess(
+            return completed_process(
                 argv, 0, 'test result: ok. 1 passed; 0 failed; 0 ignored;\n', ''
             )
 
@@ -615,7 +706,7 @@ class IsolatedLibtestTests(unittest.TestCase):
     def test_ignored_test_cannot_be_selected_without_ignored_mode(self):
         launched = []
 
-        def run(argv, timeout):
+        def run(argv, timeout, environment=None):
             if '--list' not in argv:
                 launched.append(argv)
             return self.discover(argv)
@@ -628,11 +719,11 @@ class IsolatedLibtestTests(unittest.TestCase):
         self.assertEqual(launched, [])
 
     def test_wrong_libtest_summary_fails_even_with_success_exit(self):
-        def run(argv, timeout):
+        def run(argv, timeout, environment=None):
             discovered = self.discover(argv)
             if discovered is not None:
                 return discovered
-            return subprocess.CompletedProcess(
+            return completed_process(
                 argv, 0, 'test result: ok. 0 passed; 0 failed; 0 ignored;\n', ''
             )
 
@@ -647,7 +738,7 @@ class IsolatedLibtestTests(unittest.TestCase):
             discovered = self.discover(argv)
             if discovered is not None:
                 return discovered
-            return subprocess.CompletedProcess(
+            return completed_process(
                 argv,
                 0,
                 'child output: test result: ok. 1 passed; 0 failed; 0 ignored;\n'
@@ -666,7 +757,7 @@ class IsolatedLibtestTests(unittest.TestCase):
             discovered = self.discover(argv)
             if discovered is not None:
                 return discovered
-            return subprocess.CompletedProcess(
+            return completed_process(
                 argv, 101, 'test result: FAILED. 0 passed; 1 failed; 0 ignored;\n', 'panic\n'
             )
 
@@ -862,8 +953,8 @@ class IsolatedLibtestTests(unittest.TestCase):
     def test_discovery_and_ignored_inventory_are_validated(self):
         def malformed(argv, timeout):
             if '--ignored' in argv:
-                return subprocess.CompletedProcess(argv, 0, 'suite::absent: test\n', '')
-            return subprocess.CompletedProcess(argv, 0, '2 tests, 0 benchmarks\n', '')
+                return completed_process(argv, 0, 'suite::absent: test\n', '')
+            return completed_process(argv, 0, '2 tests, 0 benchmarks\n', '')
 
         result, _, errors = self.invoke([], malformed)
         self.assertEqual(result, 1)
@@ -871,8 +962,8 @@ class IsolatedLibtestTests(unittest.TestCase):
 
         def unmatched_ignored(argv, timeout):
             if '--ignored' in argv:
-                return subprocess.CompletedProcess(argv, 0, 'suite::absent: test\n', '')
-            return subprocess.CompletedProcess(argv, 0, self.all_tests, '')
+                return completed_process(argv, 0, 'suite::absent: test\n', '')
+            return completed_process(argv, 0, self.all_tests, '')
 
         result, _, errors = self.invoke([], unmatched_ignored)
         self.assertEqual(result, 1)

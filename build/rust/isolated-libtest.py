@@ -8,6 +8,7 @@ import json
 import math
 from pathlib import Path
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -56,6 +57,19 @@ def _kill_group(pgid):
         pass
 
 
+def confirm_process_group_cleanup(pgid):
+    _kill_group(pgid)
+    deadline = time.monotonic() + 5
+    while True:
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+
+
 def _register_process(process):
     global ACTIVE_PROCESS_SNAPSHOT
     with ACTIVE_PROCESSES_LOCK:
@@ -102,7 +116,7 @@ DELEGATED_ENVIRONMENT = (
     'TIDEPOOL_PRELUDE_DIR', 'TIDEPOOL_GHC_LIBDIR', 'GHC_LIBDIR',
     'TIDEPOOL_EXTRACT_RUNTIME_LIBRARIES', 'TIDEPOOL_EXTRACT_DAEMON_SOCKET',
     'TIDEPOOL_EXTRACT_DAEMON_LOG', 'TIDEPOOL_KEEP_TEST_LOGS',
-    'TIDEPOOL_TEST_ARTIFACT_ROOT',
+    'TIDEPOOL_TEST_ARTIFACT_ROOT', 'TIDEPOOL_TEST_DIAGNOSTIC_SCOPE',
     'TIDEPOOL_TEST_BASH', 'TIDEPOOL_TEST_SLEEP', 'TIDEPOOL_BROWSER_NODE',
     'TIDEPOOL_BROWSER_DRIVER', 'EXOMONAD_EMBEDDED_ASSET_ROOT',
     'EXOMONAD_WORKSPACE_GITLINK', 'EXOMONAD_WORKSPACE_GIT_BUNDLE',
@@ -112,9 +126,10 @@ DELEGATED_ENVIRONMENT = (
 )
 
 
-def delegated_command(args, timeout, service_slice, record):
+def delegated_command(args, timeout, service_slice, record, environment=None, declared_resources=()):
     unit = 'tidepool-libtest-' + uuid.uuid4().hex + '.service'
-    environment = [key for key in DELEGATED_ENVIRONMENT if key in os.environ]
+    child_environment = os.environ if environment is None else environment
+    environment_names = sorted(set(DELEGATED_ENVIRONMENT).union(declared_resources).intersection(child_environment))
     command = [
         'systemd-run', '--user', '--pipe', '--wait', '--collect',
         '--service-type=exec', '--property=Delegate=yes',
@@ -122,10 +137,10 @@ def delegated_command(args, timeout, service_slice, record):
         f'--property=RuntimeMaxSec={timeout:g}s', '--slice=' + service_slice,
         '--unit=' + unit, '--working-directory=' + os.getcwd(),
     ]
-    command.extend('--setenv=' + key + '=' + os.environ[key] for key in environment)
+    command.extend('--setenv=' + key + '=' + child_environment[key] for key in environment_names)
     command.extend(['--', *args])
     record.update(unit=unit, service_slice=service_slice,
-                  environment_names=environment, cleanup_confirmed=False)
+                  environment_names=environment_names, cleanup_confirmed=False)
     return command, unit
 
 
@@ -179,19 +194,20 @@ def stop_delegated_service(unit, record):
         record.update(cleanup_confirmed=False, cleanup_error=str(error))
 
 
-def execute(args, timeout, service_slice=None, service_record=None):
+def execute(args, timeout, service_slice=None, service_record=None, environment=None, declared_resources=()):
     """Run a command in its own process group, reaping it even after timeout."""
     if INTERRUPT_SIGNAL is not None:
         raise RunnerInterrupted(INTERRUPT_SIGNAL)
     command, unit = args, None
     if service_slice is not None:
-        command, unit = delegated_command(args, timeout, service_slice, service_record)
+        command, unit = delegated_command(args, timeout, service_slice, service_record, environment, declared_resources)
     process = subprocess.Popen(
         command,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
         start_new_session=True,
+        env=environment,
     )
     process._tidepool_delegated = unit is not None
     observer, observer_finished = None, threading.Event()
@@ -220,9 +236,11 @@ def execute(args, timeout, service_slice=None, service_record=None):
             stop_delegated_service(unit, service_record)
     # Test leaders sometimes leave a detached same-group child after a passing
     # result. The process group remains the cleanup owner through this point.
-    if unit is None:
-        _kill_group(process.pid)
-    return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
+    cleanup_confirmed = (confirm_process_group_cleanup(process.pid) if unit is None
+                         else service_record.get('cleanup_confirmed') is True)
+    result = subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
+    result.cleanup_confirmed = cleanup_confirmed
+    return result
 
 
 def names(binary, *args):
@@ -292,7 +310,11 @@ def parse_args(argv):
                         help='delegated user service slice (default: app.slice)')
     parser.add_argument('--output-dir', type=Path,
                         help='retain bounded stdout/stderr and outcome records for every test')
+    parser.add_argument('--compiler-mode', choices=('direct', 'owned-resident'), default='direct',
+                        help='select an explicitly owned compiler for each isolated test')
     options = parser.parse_args(argv)
+    if options.compiler_mode == 'owned-resident' and options.output_dir is None:
+        parser.error('--compiler-mode owned-resident requires --output-dir')
     if (len(options.resource_env) != len(set(options.resource_env))
             or any(not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', name)
                    for name in options.resource_env)):
@@ -376,22 +398,44 @@ def record_actual_counts(record, stdout, delegated=False):
             record['process_execution_count'] = 1
 
 
-def run_one(binary, name, ignored, timeout, record=None, service_slice=None):
+def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
+            artifact_root=None, compiler_mode='direct', declared_resources=()):
     args = [binary, '--exact', name, '--nocapture']
     if ignored:
         args.append('--ignored')
+    environment = None
+    if artifact_root is not None:
+        artifact_root = Path(artifact_root).absolute()
+        artifact_root.mkdir(parents=True, exist_ok=False, mode=0o700)
+        environment = dict(os.environ)
+        environment.update(TIDEPOOL_TEST_ARTIFACT_ROOT=str(artifact_root),
+                           TIDEPOOL_TEST_DIAGNOSTIC_SCOPE='1')
+        (artifact_root / 'case.json').write_text(json.dumps({
+            'test': name, 'scenario': 'running', 'cleanup': 'unconfirmed',
+            'compiler_mode': compiler_mode,
+        }, indent=2) + '\n')
+    if compiler_mode == 'owned-resident':
+        frontend = (environment or os.environ).get('TIDEPOOL_EXTRACT')
+        if artifact_root is None or not frontend:
+            raise RuntimeError('owned-resident requires a declared compiler and per-case artifact root')
+        args = [frontend, '--owned-daemon-run', str(artifact_root / 'compiler'), '--', *args]
     started = time.monotonic_ns()
     if record is not None:
         record.update(command=args, started_ns=started, exit_code=None,
                       timeout_seconds=timeout,
                       executed_test_count=None, passed_test_count=None,
                       failed_test_count=None, process_execution_count=0)
+        record.update(artifact_root=str(artifact_root) if artifact_root is not None else None,
+                      compiler_mode=compiler_mode)
     service_record = {} if service_slice is not None else None
     if record is not None and service_record is not None:
         record['delegated_service'] = service_record
     try:
-        result = (execute(args, timeout, service_slice, service_record)
-                  if service_slice is not None else execute(args, timeout))
+        execution_kwargs = {'environment': environment} if environment is not None else {}
+        if service_slice is not None and declared_resources:
+            execution_kwargs['declared_resources'] = declared_resources
+        result = (execute(args, timeout, service_slice, service_record, **execution_kwargs)
+                  if service_slice is not None else execute(args, timeout, **execution_kwargs))
     except subprocess.TimeoutExpired as error:
         if record is not None:
             record.update(status='timeout', process_execution_count=(None if service_record is not None else 1),
@@ -418,7 +462,8 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None):
         return False, f'could not start test process: {error}', ''
     if record is not None:
         record.update(status='finished', process_execution_count=(None if service_record is not None else 1),
-                      exit_code=result.returncode, elapsed_ns=time.monotonic_ns() - started)
+                      exit_code=result.returncode, elapsed_ns=time.monotonic_ns() - started,
+                      cleanup_confirmed=getattr(result, 'cleanup_confirmed', False))
     record_actual_counts(record, result.stdout, service_record is not None)
     summaries = list(RESULT.finditer(result.stdout))
     summary = summaries[-1] if summaries else None
@@ -426,11 +471,37 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None):
         result.returncode == 0
         and summary is not None
         and summary.groups() == ('1', '0', '0')
+        and getattr(result, 'cleanup_confirmed', False)
         and (service_record is None or service_record.get('cleanup_confirmed') is True)
     )
     stderr = result.stderr
     if service_record is not None and not service_record.get('cleanup_confirmed'):
         stderr += '\n' + service_record.get('cleanup_error', 'delegated cleanup is unconfirmed')
+    if not getattr(result, 'cleanup_confirmed', False):
+        stderr += '\nisolated process cleanup is unconfirmed'
+    if artifact_root is not None:
+        reports = sorted(artifact_root.glob('hosted-campaign-*/hosted-outcome.json'))
+        if compiler_mode == 'owned-resident':
+            reports.append(artifact_root / 'compiler/owned-compiler-outcome.json')
+        cleanup_reports = []
+        for report in reports:
+            try:
+                status = json.loads(report.read_text())['cleanup']['status']
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                status = 'unknown'
+                stderr += f'\ncleanup report unavailable: {report}: {error}'
+            cleanup_reports.append({'path': str(report), 'status': status})
+            if status != 'confirmed':
+                passed = False
+                stderr += f'\ncleanup remains {status}: {report}'
+        if record is not None:
+            record['cleanup_reports'] = cleanup_reports
+    if passed and artifact_root is not None:
+        # Successful scenarios have completed their own acknowledged teardown.
+        # The runner additionally confirms its enclosing process/service cleanup.
+        shutil.rmtree(artifact_root)
+        if record is not None:
+            record['artifacts_removed_after_success'] = True
     return passed, result.stdout, stderr
 
 
@@ -497,10 +568,13 @@ def main(argv=None):
             if INTERRUPT_SIGNAL is not None:
                 raise RunnerInterrupted(INTERRUPT_SIGNAL)
             record = {}
+            artifact_root = (options.output_dir / hashlib.sha256(name.encode()).hexdigest() / 'artifacts'
+                             if options.output_dir is not None else None)
             outcome = run_one(
                 options.binary, name, name in ignored_names,
                 options.case_timeouts.get(name, options.timeout), record,
                 options.service_slice if options.delegated_service else None,
+                artifact_root, options.compiler_mode, options.resource_env,
             )
             return name, outcome, record
 
@@ -509,6 +583,13 @@ def main(argv=None):
             _, (passed, output, stderr), record = outcome
             if options.output_dir is not None:
                 retain_output(options.output_dir, name, passed, output, stderr, record)
+                artifact_root = Path(record['artifact_root'])
+                if artifact_root.exists():
+                    (artifact_root / 'case.json').write_text(json.dumps({
+                        'test': name, 'passed': passed, 'execution': record,
+                        'scenario': 'failed' if record.get('failed_test_count') else record['status'],
+                        'cleanup': record.get('delegated_service', {}).get('cleanup_confirmed'),
+                    }, indent=2) + '\n')
             print(f'{"PASS" if passed else "FAIL"} {name}', flush=True)
             if not passed:
                 failures += 1
