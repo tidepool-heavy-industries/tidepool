@@ -22,6 +22,7 @@ import Data.Text qualified as T
 import Data.Word (Word32, Word64)
 import GenuineCandidateFixture (issueCodecFixturePacket)
 import System.FilePath ((</>))
+import System.IO (IOMode(ReadMode), withBinaryFile)
 import Tidepool.ExecutionSchema (SymbolIdentity(..))
 import Tidepool.CheckedCell (RequestHelperRecipe(..))
 
@@ -185,8 +186,9 @@ readFacts work operation arguments decode = do
 
 readCodecTerm :: FilePath -> IO Term
 readCodecTerm path = do
-  bytes <- BS.readFile path
-  unless (BS.length bytes <= 64 * 1024 * 1024) (fail "codec fixture exceeds observation bound")
+  let limit = 64 * 1024 * 1024
+  bytes <- withBinaryFile path ReadMode (\handle -> BS.hGet handle (limit + 1))
+  unless (BS.length bytes <= limit) (fail "codec fixture exceeds observation bound")
   case deserialiseFromBytes decodeTerm (BSL.fromStrict bytes) of
     Right (remaining,term) | BSL.null remaining -> pure term
     Left reason -> fail ("invalid codec fixture CBOR: " ++ show reason)
