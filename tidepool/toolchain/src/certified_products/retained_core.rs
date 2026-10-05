@@ -215,6 +215,44 @@ mod tests {
     }
 
     #[test]
+    fn promotion_identity_binds_transitive_inherited_native_version() {
+        let mut inherited = source("H");
+        let PendingImportOwner::Source { owner, .. } = &mut inherited else { unreachable!() };
+        owner.module_version = ModuleVersion([7; 32]);
+        let mut nodes = BTreeMap::from([
+            (key("A"), node(vec![source("B")])),
+            (key("B"), node(vec![inherited])),
+            (key("Unrelated"), node(vec![])),
+        ]);
+        let original = module_versions(&nodes, &BTreeMap::new()).unwrap();
+        let PendingImportOwner::Source { owner, .. } =
+            &mut nodes.get_mut(&key("B")).unwrap().groups.get_mut(&2).unwrap()[0]
+        else { unreachable!() };
+        owner.module_version = ModuleVersion([8; 32]);
+        let changed = module_versions(&nodes, &BTreeMap::new()).unwrap();
+        assert_ne!(changed[&key("A")], original[&key("A")]);
+        assert_ne!(changed[&key("B")], original[&key("B")]);
+        assert_eq!(changed[&key("Unrelated")], original[&key("Unrelated")]);
+        for module in ["A", "B"] {
+            let node = &nodes[&key(module)];
+            assert_eq!(node.canonical_sha256, [1; 32]);
+            assert_eq!(node.product_sha256, [2; 32]);
+            assert_eq!(node.package_sha256, [3; 32]);
+        }
+    }
+
+    #[test]
+    fn promotion_identity_preserves_zero_group_nodes() {
+        let mut empty = node(vec![]);
+        empty.groups.clear();
+        let mut nodes = BTreeMap::from([(key("A"), empty)]);
+        let original = version(&nodes);
+        assert_eq!(module_versions(&nodes, &BTreeMap::new()).unwrap().len(), 1);
+        nodes.get_mut(&key("A")).unwrap().canonical_sha256 = [9; 32];
+        assert_ne!(version(&nodes), original);
+    }
+
+    #[test]
     fn promotion_identity_binds_package_seal_path_and_retained_package_generation() {
         let identity = binder("pkg", "Package", "value");
         let package = PendingImportOwner::Package {
