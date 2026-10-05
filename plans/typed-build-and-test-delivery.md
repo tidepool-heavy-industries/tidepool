@@ -129,39 +129,131 @@ without introducing another compiler, fixture registry or test runner.
    value-interface authority from the checked-value owner instead of appending
    an unpaired interface to an exact-original inventory.
 4. **Reply type meaning versus diagnostics.**
-   `TypePolicy`/`ExecutionProjection` and runtime `session/prepared.rs` must not
-   use refusal text or pretty-printed types as semantic equality. Trace any
-   reproduced two-child mismatch from its two actual conflicting roots;
-   that failure's precise cause is still unestablished. Independently establish
-   the diagnostic-equality defect with a producer-derived regression. It needs
-   a bounded repair using
-   the existing checked-type structural encoder, with explicit constructor
-   binder scope where required. Keep closed activation witnesses, declaration
-   schemes, answer constructibility and content identity distinct. Preserve
-   global `TypeNode` content equality/hash, exact activation interface seals,
-   partial constructible branches and aggregate limits. Semantic comparison
-   and its commitment must agree within their existing domain; reachable graph
-   compatibility is not whole-table identity. Review the complete encoder,
-   decoder, equality and commitment change before a matched schema migration.
-   Do not relabel `BranchU` as a dynamic request site or drop constructor rows
-   merely to bypass the observed conflict.
+   The reproduced two-child failure compares identical physical `BranchU`
+   declarations using `Response result` versus `Response result1`. Preserve
+   original compiler type identity through projection and compare that identity,
+   rather than either diagnostic. Implement the matched repair below. Do not
+   relabel `BranchU` as a dynamic request site or drop constructor rows: custom
+   `Member`/`send` effects still require intrinsic static reply evidence.
 5. **Failure observation and delivery.**
    Hosted startup and barriers that require a live root observe the existing
    retained terminal for that exact incarnation. Independent child waits keep
    their own lifetime. An early compiler failure must retain its cause and
    cleanup result instead of waiting for the outer startup deadline. Qualify
    the focused two-child path before repeating all six expensive scenarios.
-   The next observed blocker is a native stack overflow after real child
-   admission. Compare the hosted-test thread/runtime contract with production
-   and capture a bounded native debugger backtrace from the exact frozen case.
-   Preserve stack limits during diagnosis. Repair the responsible recursion or
-   fixture divergence; a larger stack alone is not evidence of the cause.
+   Execution and local actor state now have boxed affine owners. The genuine
+   local-startup control passes at unchanged stack limits; the two-child case
+   reaches the reply conflict above without a stack abort. Retain that startup
+   regression. This does not establish captured-child or full M2 acceptance.
 
 The delivery owner alone builds, freezes and runs the candidate. Fixture
 construction/ownership, semantic scenarios, and reply identity are separate
 source parcels with explicit shared interfaces; do not fork owners over the
 same fixture file. Buck provenance, newer Harness integration and remaining
 codec cleanup can proceed as source work alongside this critical path.
+
+## Compiler evidence repair: shared contracts and application order
+
+The source baseline is `6d6bc611473bcc07bbf31a8fcef805df388821cd`.
+The genuine type-evidence leaf executed once and passed: 24 constructor schemes
+and 270 closed prepared nodes, including existing partial and recursive cases,
+with no unsupported shape findings in that fixture. This is evidence for the
+chosen bounded implementation, not proof that every possible GHC type is handled.
+Detailed logs remain outside Git in the delivery evidence directory.
+
+1. **Retain meaning at its compiler owner.**
+   `CanonicalTypeShape` owns the existing structural expression encoding.
+   `TypePolicy` and `ExecutionProjection` retain the actual original `Type` and
+   complete ordered `dataConUserTyVarBinders` telescope before information is
+   erased. A closed type and a constructor scheme are distinct sum-type cases.
+   Preserve binder kind, specificity, position, repetition and unused binders;
+   each kind may refer only to preceding binders. Exact unit/module/name
+   identities remain nominal. Printed types and names are diagnostic output.
+   Closed activation expression bytes and original interface seals do not change.
+2. **Give graph identity one owner.**
+   Replace the coarse `TypeMap` identity key with the canonical descriptor in
+   the existing graph builder. Do not add a corrective side registry or a second
+   equality algorithm. Retain reservation-before-edges for recursion and one
+   aggregate graph/work/byte budget across all roots and constructor scopes.
+   Replace the shared expansion-limit sentinel with a refusal carrying the
+   precise scoped type at that cutoff. Ordinary depth cutoffs still permit
+   other constructible branches; total budget exhaustion is a typed failure.
+   Casts/coercions outside the supported grammar fail explicitly. There is no
+   text, unknown-owner or shape-erasure fallback.
+3. **Migrate the complete wire boundary together.**
+   Rust `repr::canonical_type_shape::CanonicalTypeShape` is an opaque validated
+   value below toolchain/runtime. Factor the existing activation expression
+   validator into that owner, retaining activation's stricter policy and exact
+   seals. Prepared schema 16 carries `[5, shapeBytes, reason, rendered]` for a
+   refused type; physical ABI 9 is unchanged. Previous schema-15 refusals cannot
+   supply the missing identity and are rejected, not upgraded by inference.
+   A raw CBOR scan bounds nesting, lengths and work before allocating a generic
+   decoded value; logical type depth and binder validity are separate checks.
+   The enclosing program charges aggregate identity bytes and nodes. Update
+   producers, readers, typed fixture encoders and generated resources together.
+4. **Keep equality domains explicit.**
+   Runtime constructor/site compatibility compares reachable graphs with local
+   node IDs remapped and exact nominal constructors; refusal leaves compare
+   typed shape. `SiteTypeEvidence` equality and commitment v3 retain the whole
+   ordered table, constructor inventory, endpoints and authenticated request
+   context, excluding only diagnostic reason/rendered fields. Global `TypeNode`
+   equality/hash, wire bytes, product/content identity and native cache keys
+   remain exact, including diagnostics. Route duplicate admission, parked
+   reply authority, request-scope checks and retirement handoff through these
+   same owners. Do not introduce a diagnostic-stripping duplicate graph.
+5. **Use the same construction paths in tests.**
+   Structural codecs use current owner encoders and exhaustive typed values.
+   Semantic positives use the production projection context and genuine
+   captured compiler products. Delete incomplete callback contexts, repeated
+   original capture, handwritten positive packets and partial field walkers.
+   Share immutable captures, while each mutable case/request owns fresh scoped
+   resources. Catch only the intended failure category and assert its owner or
+   stage; unrelated I/O, cancellation and fixture failures must escape.
+   Existing string-only scaffold validation is a bounded follow-up: move its
+   closed failures into an owner-defined sum type and render at the diagnostic
+   boundary, then remove exact-message assertions for those owned failures.
+   External GHC diagnostics remain an explicit external boundary. This does
+   not authorize a general error-framework rewrite.
+
+Separate source owners implement the Haskell/shape contract, prepared wire
+boundary, runtime consumers, and fixture/negative-test migration. They agree
+the shared type and limits before editing. Root reviews their joined data flow;
+the delivery owner alone admits builds and publishes acceptance results.
+Fixture codec observations remain test-only data, never compiler capabilities.
+Source inventories come from the existing Cargo/Cabal/Buck generators.
+
+Required controls exercise the production boundary that previously failed:
+
+- In one real projected graph, alpha-renaming preserves emitted shape while
+  binder position/repetition, unused source binders, kinds and nominal owner
+  changes remain distinguishable. Two different expanding roots retain two
+  different cutoff identities. Preserve `Maybe`, `Progress` and recursive tests.
+- Hydrate the **same original** constructor interface and admit its repeated
+  reply evidence with exact certificate/interface/source seals intact. Separate
+  authored-alpha fixtures prove semantic comparison, not shared original custody.
+- A diagnostic-only change preserves semantic/site identity but changes exact
+  content identity. A shape change with identical diagnostics is rejected
+  atomically. Remapped IDs/unreachable additions preserve reachable compatibility
+  while ordered site identity still changes. Exercise equivalent-owner retirement.
+- Decode valid near-limit shapes; refuse out-of-scope indices, forward kind
+  references, unknown domain/specificity/tag, invalid nesting and aggregate
+  exhaustion. Restrict nominal family syntax to its permitted graph profile.
+- Every negative semantic scenario has a genuine valid control and a specific
+  refusal; restore the valid state and prove recovery where that is its contract.
+
+Join the complete fixture/caller/generator parcel before compiling it. Join the
+matched shape/wire/runtime parcel before rebuilding compiler products. First
+run the focused pure/codec tests and exact native type-evidence leaf, then the
+source-boot scenarios affected by the repairs. Select Tasty leaves through the
+existing `just test-native LABEL --pattern ...` / Buck `RunInfo` arguments;
+environment-only filtering is not supported. Record actual selected/executed
+counts, including unexpected extra cases, rather than inferred intent.
+
+Freeze one matched bundle and rerun the failing two-child case. Only after that
+passes run all six M2 obligations, the relevant full semantic/compiler corpus
+and matched M1 browser gate. Keep first-server delivery separate from subsequent
+general audits and performance work; the full migration still requires removal
+of every superseded positive fixture/runner path.
 
 ## Test strategy and completion requirements
 

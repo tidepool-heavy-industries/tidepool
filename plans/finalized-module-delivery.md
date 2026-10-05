@@ -59,7 +59,7 @@ establish that any gate ran or passed.
   Missing executable Core refuses demand. Current authored imports, lexical
   visibility, instances, families and fresh provider compilation retain their
   separate admission checks; loading old code cannot publish hidden names.
-- Execution schema 15 and ABI 9 carry explicit constructor reply evidence.
+- The matched execution schema carries explicit constructor reply evidence.
   `Static` identifies an ordinary reply type; only `AtSite` interprets the
   constructor's first field as an erased `RequestSite`. Its input and reply
   parameters have nominal roles. Exact constructor/site evidence authorizes
@@ -93,7 +93,7 @@ lane or multiply resident compiler heaps to fill worker slots.
    retained native root whose compiler dependencies have Core but no native
    products, planned-cell/activation certificates, native-owner shadow survival,
    retained command output, cancellation recovery and last-capture reclamation.
-2. Run focused reply and publication checks for schema 15/ABI 9: `Static` versus
+2. Run focused reply and publication checks for the matched schema: `Static` versus
    `AtSite`, malformed carriers and unknown sites, nominal input/reply mismatch,
    and exact owner selection. Exercise atomic whole-cell failure/rejection,
    cancellation and publication ordering. Progress mismatch must refuse before
