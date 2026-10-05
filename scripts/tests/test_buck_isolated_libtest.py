@@ -150,18 +150,110 @@ class IsolatedLibtestTests(unittest.TestCase):
         self.assertEqual(timing['records'][0]['fields']['physical_execution'], '73:1')
 
     def test_actual_older_compiler_span_trace_is_explicitly_unclassified(self):
-        # Three unmodified start/timing/close rows from the retained 2026-10-05
+        # Four unmodified queue/start/timing/close rows from the retained 2026-10-05
         # lookup-owned-daemon/compiler.jsonl; this producer predates layer tags.
         root = Path(self.tmp.name) / 'older-trace-artifacts'
         compiler = root / 'compiler'
         compiler.mkdir(parents=True)
         fixture = Path(__file__).with_name('fixtures') / 'compiler-span-trace.jsonl'
         (compiler / 'compiler.jsonl').write_bytes(fixture.read_bytes())
-        timing = runner.diagnostic_summaries(root)['physical_compiler_timing']
+        summary = runner.diagnostic_summaries(root)
+        timing = summary['physical_compiler_timing']
         self.assertEqual(timing['physical_request_count'], 0)
         self.assertEqual(timing['unclassified_request_records'], 3)
         self.assertEqual(timing['data_status'], 'no_identified_physical_requests')
         self.assertFalse(timing['complete'])
+        queue = summary['compiler_job_queue']
+        self.assertEqual(queue['retained_job_count'], 1)
+        self.assertEqual(queue['records'][0]['queue_ms'], 0)
+        self.assertTrue(queue['complete'])
+
+    def test_nested_owned_control_preserves_job_queue_separately_from_request_service(self):
+        root = Path(self.tmp.name) / 'nested-control-artifacts'
+        fixture = Path(__file__).with_name('fixtures') / 'compiler-span-trace.jsonl'
+        actual_queue = json.loads(fixture.read_text().splitlines()[0])
+        epoch = actual_queue['fields']['daemon_epoch']
+        def run(args, timeout, environment=None):
+            control = root / 'owned-compiler-control-73'
+            for name in ('compiler', 'failed-compiler'):
+                compiler = control / name
+                compiler.mkdir(parents=True)
+                (compiler / 'owned-compiler-outcome.json').write_text(json.dumps({
+                    'schema': 1, 'cleanup': {'status': 'confirmed'}}))
+                (compiler / 'lifecycle.json').write_text(json.dumps({
+                    'schema': 1, 'daemon_epoch': epoch, 'cleanup_confirmed': True}))
+                rows = [actual_queue, actual_queue]
+                for ordinal in (1, 2):
+                    span = {'name': 'compile_request', 'execution_layer': 'physical',
+                            'physical_execution': f'{epoch}:1:{ordinal}', 'daemon_epoch': epoch,
+                            'admission_id': 1, 'request_ordinal': ordinal}
+                    rows.append({'fields': {'message': 'close', 'time.busy': '31ns'},
+                                 'span': span, 'spans': []})
+                (compiler / 'compiler.jsonl').write_text(''.join(json.dumps(row) + '\n' for row in rows))
+            unrelated = control / 'source-tree'
+            unrelated.mkdir()
+            (unrelated / 'compiler.jsonl').write_text('not owned compiler evidence\n')
+            return completed_process(args, 0,
+                'test result: ok. 1 passed; 0 failed; 0 ignored;\n', '')
+        record = {}
+        with patch.object(runner, 'execute', side_effect=run):
+            passed, _, _ = runner.run_one(str(self.binary), 'suite::works', False,
+                10, record, artifact_root=root)
+        self.assertTrue(passed)
+        self.assertFalse(root.exists())
+        roots = record['diagnostic_summaries']['owned_compiler_roots']
+        self.assertEqual(len(roots), 2)
+        for compiler in roots:
+            self.assertEqual(compiler['role'], 'native_test_control')
+            self.assertFalse(compiler['authority'])
+            self.assertEqual(compiler['physical_compiler_timing']['physical_request_count'], 2)
+            queue = compiler['compiler_job_queue']
+            self.assertEqual(queue['observed_record_count'], 2)
+            self.assertEqual(queue['retained_job_count'], 1)
+            self.assertEqual(queue['physical_job_count'], 1)
+            self.assertEqual(queue['records'][0]['queue_ms'], 0)
+            self.assertTrue(queue['complete'])
+
+    def test_nested_owned_control_missing_queue_retains_successful_case(self):
+        root = Path(self.tmp.name) / 'missing-queue-artifacts'
+        def run(args, timeout, environment=None):
+            compiler = root / 'owned-compiler-control-73' / 'compiler'
+            compiler.mkdir(parents=True)
+            (compiler / 'owned-compiler-outcome.json').write_text(json.dumps({'cleanup': {'status': 'confirmed'}}))
+            (compiler / 'lifecycle.json').write_text(json.dumps({'daemon_epoch': 'epoch'}))
+            row = {'fields': {'message': 'close'}, 'span': {
+                'name': 'compile_request', 'execution_layer': 'physical',
+                'physical_execution': 'epoch:1:1', 'daemon_epoch': 'epoch', 'admission_id': 1}}
+            (compiler / 'compiler.jsonl').write_text(json.dumps(row) + '\n')
+            return completed_process(args, 0,
+                'test result: ok. 1 passed; 0 failed; 0 ignored;\n', '')
+        record = {}
+        with patch.object(runner, 'execute', side_effect=run):
+            passed, _, _ = runner.run_one(str(self.binary), 'suite::works', False,
+                10, record, artifact_root=root)
+        self.assertTrue(passed)
+        self.assertTrue(root.exists())
+        queue = record['diagnostic_summaries']['owned_compiler_roots'][0]['compiler_job_queue']
+        self.assertEqual(queue['physical_jobs_without_queue'], 1)
+        self.assertEqual(queue['data_status'], 'no_observed_job_queue')
+        self.assertFalse(queue['complete'])
+
+    def test_owned_control_symlink_and_incomplete_markers_do_not_discover_foreign_roots(self):
+        root = Path(self.tmp.name) / 'safe-root'
+        root.mkdir()
+        foreign = Path(self.tmp.name) / 'foreign'
+        compiler = foreign / 'compiler'
+        compiler.mkdir(parents=True)
+        (compiler / 'owned-compiler-outcome.json').write_text('{}')
+        (compiler / 'lifecycle.json').write_text('{}')
+        (root / 'owned-compiler-control-link').symlink_to(foreign, target_is_directory=True)
+        incomplete = root / 'owned-compiler-control-73' / 'compiler'
+        incomplete.mkdir(parents=True)
+        (incomplete / 'owned-compiler-outcome.json').write_text('{}')
+        summary = runner.diagnostic_summaries(root)
+        self.assertEqual(summary['owned_compiler_roots'], [])
+        self.assertTrue(any('unsafe' in issue for issue in summary['issues']))
+        self.assertTrue(any('incomplete' in issue for issue in summary['issues']))
 
     def test_span_and_span_list_physical_context_retains_timing_once_per_row(self):
         root = Path(self.tmp.name) / 'span-artifacts'

@@ -450,7 +450,10 @@ def diagnostic_summaries(artifact_root):
             data = stream.read((1 << 20) + 1)
         if len(data) > 1 << 20:
             raise ValueError('diagnostic JSON exceeds one MiB summary bound')
-        return json.loads(data)
+        value = json.loads(data)
+        if not isinstance(value, dict):
+            raise ValueError('diagnostic JSON is not an object')
+        return value
 
     summaries = {'transactions': [], 'issues': []}
     transactions = sorted(artifact_root.glob('compiler-transactions/*/transaction.json'))
@@ -468,20 +471,38 @@ def diagnostic_summaries(artifact_root):
         except (OSError, ValueError, TypeError, AttributeError) as error:
             summaries['issues'].append(f'{path}: {error}')
     summaries['transactions_truncated'] = len(transactions) > 256
-    compiler = artifact_root / 'compiler'
-    for filename, key in (('owned-compiler-outcome.json', 'owned_compiler_outcome'),
-                          ('lifecycle.json', 'owned_compiler_lifecycle')):
-        path = compiler / filename
-        if path.exists():
-            try:
-                summaries[key] = read_json(path)
-            except (OSError, ValueError, TypeError, AttributeError) as error:
-                summaries['issues'].append(f'{path}: {error}')
-    trace = compiler / 'compiler.jsonl'
-    if trace.exists():
+    def summarize_compiler(compiler):
+        result = {'path': str(compiler), 'authority': False, 'issues': []}
+        for filename, key in (('owned-compiler-outcome.json', 'owned_compiler_outcome'),
+                              ('lifecycle.json', 'owned_compiler_lifecycle')):
+            path = compiler / filename
+            if path.exists():
+                try:
+                    if path.is_symlink():
+                        raise ValueError('compiler diagnostic marker must not be a symlink')
+                    result[key] = read_json(path)
+                    if key == 'owned_compiler_outcome':
+                        cleanup = result[key].get('cleanup')
+                        result['owned_cleanup_status'] = (cleanup.get('status', 'unknown')
+                            if isinstance(cleanup, dict) else 'unknown')
+                except (OSError, ValueError, TypeError, AttributeError) as error:
+                    result['issues'].append(f'{path}: {error}')
+        if ('owned_compiler_outcome' in result) != ('owned_compiler_lifecycle' in result):
+            result['issues'].append(f'incomplete owned compiler markers: {compiler}')
+        trace = compiler / 'compiler.jsonl'
+        if not trace.exists():
+            result['physical_compiler_timing'] = {
+                'records': [], 'physical_record_count': 0, 'physical_request_count': 0,
+                'retained_record_count': 0, 'data_status': 'trace_absent', 'complete': False,
+            }
+            result['compiler_job_queue'] = {'records': [], 'data_status': 'trace_absent', 'complete': False}
+            return result
         physical, retained_bytes, examined_bytes, malformed, total = [], 0, 0, 0, 0
-        unknown, physical_requests = 0, set()
+        unknown, physical_requests, physical_jobs = 0, set(), set()
+        queued, queue_bytes, queue_rows, queue_unknown = {}, 0, 0, 0
         try:
+            if trace.is_symlink():
+                raise ValueError('compiler diagnostic trace must not be a symlink')
             with trace.open('rb') as stream:
                 while True:
                     line = stream.readline((1 << 20) + 1)
@@ -494,35 +515,105 @@ def diagnostic_summaries(artifact_root):
                     try:
                         row = json.loads(line)
                         context, request = compiler_trace_context(row)
+                        fields = row.get('fields', row)
+                        if fields.get('phase') == 'compiler_queue':
+                            queue_rows += 1
+                            epoch, admission, elapsed = (fields.get(key) for key in
+                                                         ('daemon_epoch', 'admission_id', 'queue_ms'))
+                            if (not isinstance(epoch, str) or not epoch
+                                    or type(admission) is not int or admission < 0
+                                    or type(elapsed) not in (int, float)
+                                    or not math.isfinite(elapsed) or elapsed < 0):
+                                queue_unknown += 1
+                            else:
+                                job = (epoch, admission)
+                                if job in queued:
+                                    if queued[job]['queue_ms'] != elapsed:
+                                        queue_unknown += 1
+                                elif len(queued) < 256 and queue_bytes + len(line) <= 64 << 10:
+                                    queued[job] = {'daemon_epoch': epoch, 'admission_id': admission,
+                                                   'queue_ms': elapsed, 'row': row}
+                                    queue_bytes += len(line)
+                                else:
+                                    queue_unknown += 1
                         layer = context.get('execution_layer')
                         if layer == 'physical' and context.get('physical_execution'):
                             total += 1
                             physical_requests.add(str(context['physical_execution']))
+                            if context.get('daemon_epoch') is not None and context.get('admission_id') is not None:
+                                physical_jobs.add((context['daemon_epoch'], context['admission_id']))
                             if retained_bytes + len(line) <= 256 << 10 and len(physical) < 512:
                                 physical.append({**row, 'physical_context': context})
                                 retained_bytes += len(line)
                         elif request and layer not in ('endpoint_submission', 'transaction_wrapper'):
                             unknown += 1
-                    except (ValueError, AttributeError):
+                    except (ValueError, TypeError, AttributeError):
                         malformed += 1
-        except OSError as error:
+        except (OSError, ValueError) as error:
             malformed += 1
-            summaries['issues'].append(f'{trace}: {error}')
-        summaries['physical_compiler_timing'] = {
+            result['issues'].append(f'{trace}: {error}')
+        scanned = examined_bytes <= 32 << 20 and malformed == 0
+        result['physical_compiler_timing'] = {
             'records': physical, 'physical_record_count': total,
             'physical_request_count': len(physical_requests),
             'unclassified_request_records': unknown,
             'retained_record_count': len(physical), 'malformed_lines': malformed,
             'data_status': 'observed' if total else 'no_identified_physical_requests',
-            'complete': (examined_bytes <= 32 << 20 and malformed == 0
-                         and unknown == 0 and total > 0 and total == len(physical)),
+            'complete': scanned and unknown == 0 and total > 0 and total == len(physical),
             'trace_bytes': trace.stat().st_size,
         }
-    elif transactions or (compiler / 'owned-compiler-outcome.json').exists():
-        summaries['physical_compiler_timing'] = {
-            'records': [], 'physical_record_count': 0, 'physical_request_count': 0,
-            'retained_record_count': 0, 'data_status': 'trace_absent', 'complete': False,
+        result['compiler_job_queue'] = {
+            'records': list(queued.values()), 'observed_record_count': queue_rows,
+            'retained_job_count': len(queued), 'unclassified_record_count': queue_unknown,
+            'physical_job_count': len(physical_jobs),
+            'physical_jobs_without_queue': len(physical_jobs.difference(queued)),
+            'data_status': 'observed' if queue_rows else 'no_observed_job_queue',
+            'complete': (scanned and queue_unknown == 0 and queue_rows > 0
+                         and physical_jobs.issubset(queued)),
         }
+        return result
+
+    roots = []
+    compiler = artifact_root / 'compiler'
+    if transactions or compiler.exists():
+        roots.append((compiler, 'case_compiler'))
+    # The native lifecycle control creates one immediate test-data directory.
+    # Only its immediate marker-bearing compiler children are considered; no
+    # source trees or arbitrary recursive paths become compiler roots.
+    for index, control in enumerate(artifact_root.glob('owned-compiler-control-*')):
+        if index >= 64:
+            summaries['issues'].append('owned compiler control directory bound exceeded')
+            break
+        if control.is_symlink() or not control.is_dir():
+            summaries['issues'].append(f'unsafe owned compiler control directory: {control}')
+            continue
+        for child_index, candidate in enumerate(control.iterdir()):
+            if child_index >= 32:
+                summaries['issues'].append(f'owned compiler control child bound exceeded: {control}')
+                break
+            if candidate.is_symlink() or not candidate.is_dir():
+                continue
+            markers = [(candidate / filename).is_file() for filename in
+                       ('owned-compiler-outcome.json', 'lifecycle.json')]
+            if all(markers):
+                if len(roots) < 8:
+                    roots.append((candidate, 'native_test_control'))
+                else:
+                    summaries['issues'].append('owned compiler diagnostic root bound exceeded')
+            elif any(markers):
+                summaries['issues'].append(f'incomplete owned compiler markers: {candidate}')
+    summaries['owned_compiler_roots'] = []
+    for compiler, role in roots:
+        if compiler.is_symlink():
+            summaries['issues'].append(f'unsafe compiler diagnostic directory: {compiler}')
+            continue
+        result = summarize_compiler(compiler)
+        result['role'] = role
+        summaries['owned_compiler_roots'].append(result)
+        if role == 'case_compiler':
+            summaries.update({key: value for key, value in result.items()
+                              if key not in ('path', 'authority', 'issues', 'role')})
+        summaries['issues'].extend(result['issues'])
     return summaries
 
 
@@ -631,7 +722,12 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
     summaries = record.get('diagnostic_summaries', {}) if record is not None else {}
     evidence_complete = (not summaries.get('issues')
                          and not summaries.get('transactions_truncated')
-                         and summaries.get('physical_compiler_timing', {}).get('complete', True))
+                         and summaries.get('physical_compiler_timing', {}).get('complete', True)
+                         and all(root.get('physical_compiler_timing', {}).get('complete', False)
+                                 and root.get('owned_cleanup_status', 'not_required') in ('confirmed', 'not_required')
+                                 and (not root.get('compiler_job_queue', {}).get('physical_job_count')
+                                      or root['compiler_job_queue'].get('complete', False))
+                                 for root in summaries.get('owned_compiler_roots', [])))
     if passed and artifact_root is not None and evidence_complete:
         # Successful scenarios have completed their own acknowledged teardown.
         # The runner additionally confirms its enclosing process/service cleanup.
