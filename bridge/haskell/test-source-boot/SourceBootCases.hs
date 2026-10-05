@@ -2041,9 +2041,10 @@ originalProjectionProducts = withScratch $ \work -> do
         , moduleNameString (moduleName (pmModule prepared)) == name] of
           [prepared] -> pure prepared
           _ -> fail ("cross-module projection fixture lacks " ++ name)
-      findBinder prepared occurrence = case [binder | (binding, _) <- pmBindings prepared
-          , binder <- topBinders binding, symbolOccurrence binder == occurrence] of
-        [binder] -> pure binder
+      findBinder prepared occurrence = case [identity | (binding, _) <- pmBindings prepared
+          , binder <- topBinders binding, let identity = preparedRootIdentity binder
+          , symbolOccurrence identity == T.pack occurrence] of
+        [identity] -> pure identity
         _ -> fail ("cross-module projection fixture lacks binder " ++ occurrence)
   consumer <- findPrepared "ProjectionConsumer"
   ownerModule <- findPrepared "ProjectionOwner"
