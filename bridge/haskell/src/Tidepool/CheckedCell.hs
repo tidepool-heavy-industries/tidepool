@@ -31,7 +31,7 @@ import Data.Maybe (catMaybes)
 import Numeric (showHex)
 import Control.Monad (forM, forM_, unless, replicateM)
 import Data.IORef
-import Data.List (sortOn, nub, sort)
+import Data.List (sortOn)
 import qualified Data.Text as T
 import Data.Generics (Data, cast, gmapM, mkM)
 import GHC
@@ -532,7 +532,7 @@ decodeOfferedTypeWitness bytes = do
     (deserialiseFromBytes (decodeInputStructure 0 0) (BL.fromStrict structure))
   unless (BL.null shapeRemaining && toStrictByteString shape == structure)
     (Left "canonical input structure must use canonical CBOR with no trailing bytes")
-  unless (sort (nub owners) == [(unit, owner) | (unit, owner, _) <- seals])
+  unless (Map.keys (Map.fromList [(owner, ()) | owner <- owners]) == [(unit, owner) | (unit, owner, _) <- seals])
     (Left "canonical input interface inventory differs from structure")
   pure witness
  where
