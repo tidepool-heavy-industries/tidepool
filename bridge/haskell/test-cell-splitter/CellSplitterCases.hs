@@ -912,13 +912,10 @@ untrackedCompileTimeCompilation = bracket temporary removeDirectoryRecursive $ \
       , "value = [uri|tracked|]"
       ]
     writeFile dependentUser $ unlines
-      [ "{-# LANGUAGE TemplateHaskell #-}"
-      , "module DependentUser where"
+      [ "module DependentUser where"
       , "import DependentQuote (value)"
-      , "import Language.Haskell.TH (litE, stringL)"
       , "result :: String"
-      , "result = $(if value == \"tracked\" then litE (stringL value)"
-      , "  else fail \"dependent-file quoter changed its compiled value\")"
+      , "result = value"
       ]
     originalDependentBytes <- BS.readFile dependent
     withDependentFile <- compile PreparedStg mempty GeneralCompile Nothing dependentUser [] Nothing
@@ -952,6 +949,19 @@ untrackedCompileTimeCompilation = bracket temporary removeDirectoryRecursive $ \
       fail "changed dependent-file input retained stale usage or full interface evidence"
     assertCoreSharing "addDependentFile defeats pure-origin reuse" False
       ["DependentQuote"] dependentSharing dependentWarmSharing
+    -- Observe the value only after the ordinary consumer's measured cache
+    -- checks. This splice cannot make those checks conservative on its own.
+    let valueOracle = root </> "DependentValueOracle.hs"
+    writeFile valueOracle $ unlines
+      [ "{-# LANGUAGE TemplateHaskell #-}"
+      , "module DependentValueOracle where"
+      , "import DependentQuote (value)"
+      , "import Language.Haskell.TH (litE, stringL)"
+      , "result :: String"
+      , "result = $(if value == \"tracked\" then litE (stringL value)"
+      , "  else fail \"dependent-file quoter changed its compiled value\")"
+      ]
+    void (compile PreparedStg mempty GeneralCompile Nothing valueOracle [] Nothing)
   where
     assertComplete label result = do
       let evidence = pprDependencies result
