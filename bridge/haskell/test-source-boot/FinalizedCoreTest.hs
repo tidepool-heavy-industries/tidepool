@@ -11,9 +11,7 @@ import Data.Dynamic (fromDynamic)
 import Data.IORef (newIORef, modifyIORef', readIORef)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
-import Data.Text qualified as T
-import Codec.CBOR.Encoding
-import Codec.CBOR.Write (toStrictByteString)
+import CodecFixtureSupport (CanonicalCodecInputs(..), writeCanonicalCodecFixture)
 import GHC
 import GHC.Core (Bind(..), bindersOfBinds)
 import GHC.Core.InstEnv (is_dfun)
@@ -72,7 +70,7 @@ import Tidepool.FinalizedModuleArtifacts
   ( LocalFinalizedAdmission, captureFinalizedModuleArtifacts, finalizedLocalAdmissions )
 import Tidepool.DependencyEvidence
   ( DependencyEvidence(..), DependencyModule(..), ProductAvailability(..), sourceEvidence )
-import Tidepool.ModuleCandidates (readModuleCandidates)
+import Tidepool.ModuleCandidates (ModuleCandidate(..), readModuleCandidates)
 import Tidepool.PackageWitness (emptyPackageImports, encodePackageImports)
 import Tidepool.HomeProducts
   ( CandidateCoreFailure(..), materializeCandidateCompilerView
@@ -415,40 +413,26 @@ captureLocalProof env finalized source work = do
 captureProof :: HscEnv -> ExactIfaceArtifact -> FilePath -> BS.ByteString -> FilePath
   -> IO CanonicalInterfaceProof
 captureProof env artifact source core work = do
-  sourceBytes <- BS.readFile source
-  let corePath = work </> "captured.core"
-      packagePath = work </> "captured.packages"
-      certificatePath = work </> "captured.certificate"
-      manifestPath = work </> "captured.candidates"
-      productPath = work </> "descriptor.tpmod"
-      producer = replicate 64 'a'
-      text = encodeString . T.pack
-      list values = encodeListLen (fromIntegral (length values)) <> mconcat values
-      sha = hexBytes . SHA256.hash
-      homes = map unitIdString (Set.toAscList (hsc_all_home_unit_ids env))
+  let coreInput = work </> "canonical-core-input"
+      packageInput = work </> "canonical-packages-input"
       packages = encodePackageImports artifact emptyPackageImports
-      certificate = toStrictByteString $ list
-        [text "TPFINALMODULE",encodeWord 3,text "tidepool-ghc-finalized-module-v1",text producer
-        ,list (map text homes),text (exactUnit artifact),text (exactModule artifact)
-        ,text (sha sourceBytes),text (exactSha256 artifact),text (sha packages)
-        ,text (sha core),list [],list [text "source-original",list []]]
-      candidate = list
-        (map text [exactUnit artifact,exactModule artifact,source,sha sourceBytes
-          ,exactPath artifact,exactSha256 artifact,replicate 64 '0',sha BS.empty,replicate 64 '0']
-        ++ [list [],list [],text packagePath,text (sha packages),text productPath,list []
-          ,list (map text ["module",certificatePath,sha certificate,corePath,sha core])])
-      manifest = toStrictByteString $ list
-        [text "TPMCAN",text "10",list [],list [],list [candidate],list [list [],list []],text producer]
-  BS.writeFile corePath core
-  BS.writeFile packagePath packages
-  BS.writeFile certificatePath certificate
-  BS.writeFile productPath BS.empty
-  BS.writeFile manifestPath manifest
+  BS.writeFile coreInput core
+  BS.writeFile packageInput packages
+  manifestPath <- writeCanonicalCodecFixture work CanonicalCodecInputs
+    { codecCanonicalUnit = exactUnit artifact
+    , codecCanonicalModule = exactModule artifact
+    , codecCanonicalSource = source
+    , codecCanonicalInterface = exactPath artifact
+    , codecCanonicalPackages = packageInput
+    , codecCanonicalCore = coreInput
+    , codecCanonicalHomeUnits = map unitIdString (Set.toAscList (hsc_all_home_unit_ids env))
+    }
   offered <- requireRight =<< readModuleCandidates manifestPath
   case offered of
-    [candidate'] -> requireRight =<< validateCandidateCanonicalInterfaceProof producer
-      [(artifact,packagePath,sha packages)] candidate'
-    _ -> fail "candidate Core fixture has no exact offered owner"
+    [candidate] -> requireRight =<< validateCandidateCanonicalInterfaceProof
+      (candidateProducerSha256 candidate)
+      [(artifact,candidatePackageImports candidate,candidatePackageImportsSha256 candidate)] candidate
+    _ -> fail "candidate Core codec fixture has no exact offered owner"
 
 bindingGroups :: CgGuts -> [(Bool, [String])]
 bindingGroups = map group . cg_binds

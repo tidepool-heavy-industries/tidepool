@@ -1,6 +1,6 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 module SourceBootFixtureSupport
-  ( writeExecutionScope, compactInventoryRows, hasIntResultLiteral, withTiming
+  ( writeExecutionScope, hasIntResultLiteral, withTiming
   , CapturedCompilerFixture, capturePreparedFixture, captureDiagnostics
   , acquireFixtureScratch, releaseFixtureScratch, releaseFixtureScratchAfterFailure
   , withScratchFailureEvidence
@@ -9,15 +9,12 @@ module SourceBootFixtureSupport
   , requireFailedCompilerTransaction
   , manifest, writeManifestFor, originalCompilerInput, digest, withScratch, preparedNames ) where
 
-import Codec.CBOR.Term (Term(..), encodeTerm)
-import Codec.CBOR.Write (toStrictByteString)
 import Control.Exception (SomeException, IOException, bracket, bracketOnError, finally, mask, onException, throwIO, try)
-import Control.Monad (filterM, foldM, void)
+import Control.Monad (filterM, void)
 import Crypto.Hash.SHA256 qualified as SHA
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as BSC
 import Data.List (sort)
-import Data.Map.Strict qualified as Map
 import GHC.Core qualified as Core
 import GHC.Driver.Env (HscEnv(..))
 import GHC.Driver.Session (importPaths)
@@ -102,66 +99,6 @@ requireFailedCompilerTransaction label action = do
 writeExecutionScope :: FilePath -> CapturedCompilerFixture -> [String] -> IO FilePath
 writeExecutionScope work capture lexicalNames =
   writeGenuineExecutionScope (capturedPreparedNames capture) lexicalNames work capture
-
-
-data FixtureInventory = FixtureInventory
-  { fixtureSymbols :: Map.Map BS.ByteString Int
-  , fixtureSymbolRows :: [Term]
-  , fixtureGlobals :: Map.Map BS.ByteString Int
-  , fixtureGlobalRows :: [Term]
-  }
-
-compactInventoryRows :: [Term] -> Either String (Term,Term,[Term])
-compactInventoryRows rows = do
-  (inventory,compact) <- mapFixtureInventory compactRow empty rows
-  pure (TList (reverse (fixtureSymbolRows inventory)),TList (reverse (fixtureGlobalRows inventory)),compact)
-  where
-    empty = FixtureInventory Map.empty [] Map.empty []
-    compactRow inventory (TList fields) | length fields == 16 = case drop 10 fields of
-      TList groups:_ -> do
-        (next,compact) <- mapFixtureInventory compactGroup inventory groups
-        pure (next,TList (take 10 fields ++ [TList compact] ++ drop 11 fields))
-      _ -> Left "fixture candidate lacks groups"
-    compactRow _ _ = Left "fixture candidate must have sixteen fields"
-    compactGroup inventory (TList [ordinal,TList binders,TList globals]) = do
-      (withBinders,binderRefs) <- mapFixtureInventory internFixtureSymbol inventory binders
-      (withGlobals,globalRefs) <- mapFixtureInventory internFixtureGlobal withBinders globals
-      pure (withGlobals,TList [ordinal,TList binderRefs,TList globalRefs])
-    compactGroup _ _ = Left "fixture original group must have three fields"
-
-mapFixtureInventory :: (FixtureInventory -> a -> Either String (FixtureInventory,b))
-  -> FixtureInventory -> [a] -> Either String (FixtureInventory,[b])
-mapFixtureInventory step initial values = do
-  (final,reversed) <- foldM (\(inventory,acc) value -> do
-    (next,result) <- step inventory value
-    pure (next,result:acc)) (initial,[]) values
-  pure (final,reverse reversed)
-
-internFixtureSymbol :: FixtureInventory -> Term -> Either String (FixtureInventory,Term)
-internFixtureSymbol inventory value@(TList [_,_,_,_,_]) =
-  let key = toStrictByteString (encodeTerm value)
-  in case Map.lookup key (fixtureSymbols inventory) of
-    Just index -> Right (inventory,TInt index)
-    Nothing ->
-      let index = Map.size (fixtureSymbols inventory)
-      in Right (inventory
-        { fixtureSymbols = Map.insert key index (fixtureSymbols inventory)
-        , fixtureSymbolRows = value:fixtureSymbolRows inventory },TInt index)
-internFixtureSymbol _ _ = Left "fixture symbol must have five fields"
-
-internFixtureGlobal :: FixtureInventory -> Term -> Either String (FixtureInventory,Term)
-internFixtureGlobal inventory value@(TList [identity,rep,signature,evaluated,generation]) =
-  let key = toStrictByteString (encodeTerm value)
-  in case Map.lookup key (fixtureGlobals inventory) of
-    Just index -> Right (inventory,TInt index)
-    Nothing -> do
-      (withSymbol,symbolRef) <- internFixtureSymbol inventory identity
-      let index = Map.size (fixtureGlobals withSymbol)
-      pure (withSymbol
-        { fixtureGlobals = Map.insert key index (fixtureGlobals withSymbol)
-        , fixtureGlobalRows = TList [symbolRef,rep,signature,evaluated,generation]:fixtureGlobalRows withSymbol },TInt index)
-internFixtureGlobal _ _ = Left "fixture global must have five fields"
-
 
 hasIntResultLiteral :: Integer -> [Core.CoreBind] -> Bool
 hasIntResultLiteral expected = any (\case

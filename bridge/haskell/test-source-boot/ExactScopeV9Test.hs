@@ -4,6 +4,7 @@
 -- They mutate retained evidence; this module never issues module certificates.
 module ExactScopeV9Test (exactScopeV9Checks, nativeOriginChecks, candidateCanonicalChecks) where
 
+import CodecFixtureSupport (PurposeCodecCase(..), readPurposeCodecFixture, readExpressionItemCodecFixture)
 import Codec.CBOR.Read (deserialiseFromBytes)
 import Codec.CBOR.Term (Term(..), decodeTerm, encodeTerm)
 import Codec.CBOR.Write (toStrictByteString)
@@ -154,16 +155,15 @@ exactScopeV9Checks manifest = do
 -- closure. These parsing checks do not issue executable admission receipts.
 checkedPurposeCases :: FilePath -> [Term] -> IO ()
 checkedPurposeCases manifest fields = do
-  let sha = TString (T.replicate 64 "a")
-      empty = TList []
-      paths = [takeDirectory manifest]
-      includes = TList (map (TString . T.pack) paths)
-      cell = [TString "cell-check2",sha,sha,sha,empty,empty,empty,empty,includes]
-      item = [TString "checked-item3",sha,sha,TInt 0,sha,TString "bind",empty,empty,empty,empty
-        ,TNull,TInt 1,sha,empty,TNull,TNull,empty,empty,empty,includes]
-      display = [TString "checked-display3",sha,sha,TInt 0,TString "observation",TInt 1,TInt 2,sha
-        ,TInt 32,empty,empty,empty,empty,TString "rendered",TNull,empty,empty,empty,includes]
-      inspection = [TString "inspection1",empty,empty,includes]
+  let paths = [takeDirectory manifest]
+      readPurpose purpose = readPurposeCodecFixture (takeDirectory manifest) paths purpose >>= \case
+        TList values -> pure values
+        _ -> fail "production purpose encoder returned another record"
+  cell <- readPurpose CodecCellPurpose
+  item <- readPurpose CodecItemPurpose
+  display <- readPurpose CodecDisplayPurpose
+  inspection <- readPurpose CodecInspectionPurpose
+  let empty = TList []
       acceptsCell purpose = case purpose of ExactCellPurpose _ _ -> True; _ -> False
       acceptsItem purpose = case purpose of ExactItemPurpose _ _ -> True; _ -> False
       acceptsDisplay purpose = case purpose of ExactDisplayPurpose _ _ -> True; _ -> False
@@ -186,10 +186,12 @@ checkedPurposeCases manifest fields = do
     forM_ [(ExpressionRendered,"rendered"),(ExpressionOpaque,"opaque")] $ \(presentation,presentationName) -> do
       let plan = CellExpressionPlan "__tidepool_cell_expr_0" liftPlan presentation "Int"
             [NominalHead "ghc-prim" "GHC.Types" "Int"]
-      encoded <- decode (toStrictByteString (encodeCellExpressionPlan plan))
-      let expressionPurpose value = TList (replace 14 (TString "observation")
-            (replace 10 value (replace 5 (TString "expr") item)))
-      accepted <- readCandidate manifest (envelope (expressionPurpose encoded)) >>= either fail pure
+      let expressionBytes = toStrictByteString (encodeCellExpressionPlan plan)
+      encoded <- decode expressionBytes
+      issuedExpression <- readExpressionItemCodecFixture (takeDirectory manifest) paths expressionBytes
+      issuedExpressionFields <- row 20 issuedExpression
+      let expressionPurpose value = TList (replace 10 value issuedExpressionFields)
+      accepted <- readCandidate manifest (envelope issuedExpression) >>= either fail pure
       case scopeCheckedItem accepted of
         Just admitted | itemExpressionLift admitted == Just liftName
             && itemExpressionPresentation admitted == Just presentationName -> pure ()

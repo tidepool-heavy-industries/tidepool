@@ -7,12 +7,12 @@ import ExactScopeV9Test (exactScopeV9Checks, nativeOriginChecks, candidateCanoni
 import SourceBootFixtureSupport
 
 import CandidateGraphDescriptorTest (candidateGraphDescriptorChecks)
+import CodecFixtureSupport
 import GenuineCandidateFixture
   ( writeGenuineCandidateManifestFor, writeGenuineMetadataScope, writeGenuineEmptyMetadataScope
   , writeGenuineCandidateNativeScope, writeGenuineCandidateLexicalScope, writeGenuineAuthoredDeclarationScope
   , writeGenuineExecutionScope )
 
-import Codec.CBOR.Encoding (encodeBool, encodeListLen, encodeString)
 import Codec.CBOR.Write (toStrictByteString)
 import Codec.CBOR.Read (deserialiseFromBytes)
 import Codec.CBOR.Term (Term(..), decodeTerm, encodeTerm)
@@ -186,31 +186,10 @@ counterValues name diagnostics = map parseCount matching
 counterTotal :: String -> String -> Integer
 counterTotal name = sum . counterValues name
 
-exactCompilationCacheSafety
-  :: FilePath -> BS.ByteString -> Either String (Maybe Bool)
-exactCompilationCacheSafety expectedSource bytes = do
-  (remaining, term) <- case deserialiseFromBytes decodeTerm (BSL.fromStrict bytes) of
-    Left failure -> Left ("invalid exact compilation receipt CBOR: " ++ show failure)
-    Right decoded -> Right decoded
-  unless (BSL.null remaining) (Left "exact compilation receipt has trailing CBOR bytes")
-  case term of
-    TList (TString "TPEXACTCOMPILE" : TString version : fields)
-      | version /= "3" -> Left ("unsupported exact compilation receipt schema " ++ T.unpack version)
-      | length fields /= 8 -> Left ("exact compilation receipt v3 has "
-          ++ show (length fields + 2) ++ " fields; expected 10")
-      | otherwise -> case fields of
-          [_, _, TString source, _, _, TString facts, _, _]
-            | source /= T.pack expectedSource -> Right Nothing
-            | otherwise -> Just <$> dependencyCacheSafe (T.unpack facts)
-          _ -> Left "exact compilation receipt v3 has invalid source or evidence fields"
-    _ -> Left "exact compilation receipt has an invalid tag or outer record"
-  where
-    dependencyCacheSafe facts = case stripPrefix "{\"version\":4,\"cache_safe\":" facts of
-      Nothing -> Left "exact compilation receipt has invalid dependency evidence v4 JSON"
-      Just value
-        | Just rest <- stripPrefix "false," value, not (null rest), last rest == '}' -> Right False
-        | Just rest <- stripPrefix "true," value, not (null rest), last rest == '}' -> Right True
-        | otherwise -> Left "dependency evidence v4 has no canonical cache_safe boolean"
+exactCompilationCacheSafety :: FilePath -> FilePath -> IO (Maybe Bool)
+exactCompilationCacheSafety expectedSource receipt = do
+  facts <- readReceiptCodecFacts (takeDirectory receipt) receipt
+  pure (if codecReceiptSource facts == expectedSource then Just (codecReceiptCacheSafe facts) else Nothing)
 
 -- One immutable capture supplies SOURCE SCC candidates and a separate ordinary
 -- native dependency pair. SOURCE imports cannot issue execution source recipes.
@@ -523,15 +502,11 @@ canonicalCurrentSource = withTiming $ withScratch $ \work -> do
   withResidentPipelineSelected includes $ \compile -> do
     _ <- check compile purpose
     receipts <- listDirectory (work </> ".exact-compilations")
-    receiptBytes <- BS.readFile (work </> ".exact-compilations" </> head receipts </> "receipt.cbor")
-    term <- case deserialiseFromBytes decodeTerm (BSL.fromStrict receiptBytes) of
-      Right (rest,decoded) | BSL.null rest -> pure decoded
-      _ -> fail "canonical source receipt has invalid CBOR"
-    case term of
-      TList [TString "TPEXACTCOMPILE",TString "3",_,_,_,_,_,_,_,TList [TList selected,TString _]] -> do
-        unless (length selected == 2 && all (\row -> case row of TList fields -> length fields == 5; _ -> False) selected) $
-          fail "canonical source receipt lost transitive source closure or retained a native identity"
-      _ -> fail "canonical source receipt is not the strict matched version 3"
+    let receiptPath = work </> ".exact-compilations" </> head receipts </> "receipt.cbor"
+    receiptFacts <- readReceiptCodecFacts work receiptPath
+    unless (Set.fromList (codecReceiptSourceSelected receiptFacts)
+        == Set.fromList [("main","CanonicalSource"),("main","CanonicalDependency")]) $
+      fail "canonical source receipt lost its typed transitive source-selected closure"
     -- The next authored import must consume this cell's completed original
     -- capture through the same proof used after Rust persistence.
     forM_ ["CanonicalLocalSupport.hs","CanonicalLocalConsumer.hs"] $ \name ->
@@ -1701,8 +1676,8 @@ originalPackageProjection = withScratch $ \work -> do
   coldCertificate <- certifyProjectedProducts work "cold" original coldProducts [] env >>= either fail pure
   originalOnly <- certifyProjectedProducts work "original-only" original sourceProducts [] env >>= either fail pure
   mixed <- certifyProjectedProducts work "mixed" original sourceProducts [("target",target)] env >>= either fail pure
-  let packageOwner = \case TList (TString "package":_) -> True; _ -> False
-      retainedOwner = \case TList (TString "retained-package":_) -> True; _ -> False
+  let packageOwner = \case CodecPackageOwner {} -> True; _ -> False
+      retainedOwner = \case CodecRetainedPackageOwner {} -> True; _ -> False
   coldOwners <- certificateOwners coldCertificate
   sourceOwners <- certificateOwners originalOnly
   mixedOwners <- certificateOwners mixed
@@ -1821,46 +1796,21 @@ certifyProjectedProducts work label original outcomes targets env = do
   encodeCertifiedProducts env OrdinaryExecutionSource (pprProductInterfaces original) finalized [] Nothing fresh targets evidence bytes
     (BSC.pack (renderDependencyEvidence evidence))
 
-certificateOwners :: BS.ByteString -> IO [Term]
-certificateOwners bytes = do
-  term <- either (fail . show) (pure . snd) (deserialiseFromBytes decodeTerm (BSL.fromStrict bytes))
-  case term of
-    TList [TString "TPCERT", TInt 8, _, _, _, TList rows, _, TList [TString "ordinary"], TList coordinates] ->
-      forM rows $ \case
-        TList [identity,_,_,_,TList [TString "source", TInt index, ordinal]] -> do
-          coordinate <- coordinateAt coordinates index
-          case coordinate of
-            TList [TString "source",unit,name,version] -> pure
-              (TList [TString "source",unit,name,version,ordinal,identity])
-            _ -> fail "source witness used a package coordinate"
-        TList [identity,_,_,_,TList [TString "retained", generation]] -> pure
-          (TList [TString "retained",identity,generation])
-        TList [identity,_,_,_,TList [TString "package", TInt index]] -> do
-          coordinate <- coordinateAt coordinates index
-          case coordinate of
-            TList [TString "package",unit,name,sha] -> pure
-              (TList [TString "package",unit,name,sha,identity])
-            _ -> fail "package witness used a source coordinate"
-        TList [identity,_,_,_,TList [TString "retained-package", TInt index,generation]] -> do
-          coordinate <- coordinateAt coordinates index
-          case coordinate of
-            TList [TString "package",unit,name,sha] -> pure
-              (TList [TString "retained-package",unit,name,sha,identity,generation])
-            _ -> fail "retained package witness used a source coordinate"
-        _ -> fail "original certificate global lacks its exact owner"
-    _ -> fail "original product lacks its canonical ownership certificate"
-  where
-    coordinateAt coordinates index
-      | index >= 0 && index < length coordinates = pure (coordinates !! index)
-      | otherwise = fail "original certificate owner coordinate out of range"
+certificateFacts :: BS.ByteString -> IO CertificateCodecFacts
+certificateFacts bytes = withScratch $ \work -> do
+  let path = work </> "compiler-products.cbor"
+  BS.writeFile path bytes
+  readCertificateCodecFacts work path
+
+certificateOwners :: BS.ByteString -> IO [CodecImportOwner]
+certificateOwners bytes = codecCertificateOwners <$> certificateFacts bytes
 
 verifyOriginalOnlyPackageRefusal :: FilePath -> PreparedPipelineResult
   -> [(Module, Either ProjectionError [ProjectedGroup])] -> BS.ByteString -> IO ()
 verifyOriginalOnlyPackageRefusal work original outcomes certified = do
-  term <- either (fail . show) (pure . snd) (deserialiseFromBytes decodeTerm (BSL.fromStrict certified))
-  (unit,name,path) <- case term of
-    TList [TString "TPCERT",TInt 8,_,TList [],TList (TList [TString unit,TString name,TString path,_]:_),_,_,_,_] ->
-      pure (T.unpack unit,T.unpack name,T.unpack path)
+  facts <- certificateFacts certified
+  (unit,name,path) <- case codecCertificatePackages facts of
+    (unit,name,path,_):_ | null (codecCertificateTargets facts) -> pure (unit,name,path)
     _ -> fail "original-only package requirement did not issue its own positive witness"
   let env = prHscEnv (pprPipelineResult original)
       owner = mkModule (stringToUnit unit) (mkModuleName name)
@@ -1913,38 +1863,24 @@ verifyCertifiedGroupingOrder work original = do
         }
   bytes <- encodeCertifiedProducts env OrdinaryExecutionSource (pprProductInterfaces original) (emptyFinalizedModuleArtifacts env) [candidate] Nothing
     [] [] emptyEvidence BS.empty BS.empty >>= either fail pure
-  term <- either (fail . show) (pure . snd)
-    (deserialiseFromBytes decodeTerm (BSL.fromStrict bytes))
-  case term of
-    TList [TString "TPCERT", TInt 8, TList [TList fields], TList [], TList [], TList [], _, TList [TString "ordinary"], _]
-      | length fields == 10 -> case drop 8 fields of
-          [TList groups,TList []] -> unless (map ordinal groups == [91,3]) $
-            fail "certified module grouping changed nonmonotone encounter order"
-          _ -> fail "certified module grouping omitted its exact group or interface inventory"
-    _ -> fail "certified module grouping produced an unexpected certificate envelope"
+  facts <- certificateFacts bytes
+  unless (codecCertificateModules facts == [(candidateUnit candidate,name,[91,3])]
+      && null (codecCertificateTargets facts) && null (codecCertificatePackages facts)
+      && null (codecCertificateOwners facts)) $
+    fail "certified module grouping changed nonmonotone order or acquired another inventory"
   let absent = candidate {candidateModule="MissingOriginalInterface"}
   encodeCertifiedProducts env OrdinaryExecutionSource Map.empty (emptyFinalizedModuleArtifacts env) [absent] Nothing [] [] emptyEvidence BS.empty BS.empty >>= \case
     Left _ -> pure ()
     Right _ -> fail "cached original without its exact interface acquired a certificate"
-  where
-    ordinal (TList [TInt value,TList []]) = value
-    ordinal _ = -1
 
 -- Synthetic descriptors exercise producer group framing only. This decoder
 -- does not grant them a durable certificate or compiler admission.
 structuralCandidate :: FilePath -> IO ModuleCandidate
 structuralCandidate work = do
-  let path = work </> "structural-candidate.cbor"
-      seal = TString (T.replicate 64 "a")
-      row = TList [TString "main",TString "Fixture",TString "/fixture/Source.hs",seal
-        ,TString "/fixture/Source.hi",seal,seal,seal,seal,TList [],TList []
-        ,TString "/fixture/packages",seal,TString "/fixture/products.tpmod",TList []
-        ,TList [TString "module",TString "/fixture/module.cbor",seal,TString "/fixture/Core",seal]]
-      packet = TList [TString "TPMCAN",TString "10",TList [],TList [],TList [row]
-        ,TList [TList [],TList []],seal]
-  BS.writeFile path (toStrictByteString (encodeTerm packet))
+  path <- writeCandidateCodecFixture work SingleGroupCandidateInventory
   readModuleCandidates path >>= \case
     Right [candidate] -> pure candidate
+    Left reason -> fail ("production structural candidate codec refused: " ++ reason)
     _ -> fail "structural producer-group candidate did not decode"
 
 originalProjectionProducts :: IO ()
@@ -2072,8 +2008,8 @@ candidateSitedSiblingsAt work = do
     fail "source-free sibling hydration changed the original typed suspension site"
   putStrLn "candidate typed siblings: native candidates plus fresh Unfold and source-free canonical owners retain childSited and typed sites"
 
--- The fixture encoder keys complete legacy values by their canonical CBOR.
--- Its tables therefore preserve identity fields and every global requirement.
+-- The production inventory preserves every identity field and global
+-- requirement; malformed controls mutate only the issued packet.
 candidateCompactInventory :: IO ()
 candidateCompactInventory = withScratch $ \work -> do
   let identity = SymbolIdentity "main" "Fixture" "value" "entry" Nothing
@@ -2090,12 +2026,18 @@ candidateCompactInventory = withScratch $ \work -> do
         ,plain {candidateGlobalEvaluated=True},plain {candidateGlobalGeneration=Just 0}
         ,plain {candidateGlobalGeneration=Just 7}]
       groups = [CandidateGroup 91 identities globals,CandidateGroup 3 [identity] (reverse globals)]
-      legacyRows = [fixtureCandidate "Fixture" (map groupTerm groups)
-        ,fixtureCandidate "Other" (map groupTerm (reverse groups))]
-      emptyParcel = TList [TList [],TList []]
-      envelope symbols globalTable rows = TList
-        [TString "TPMCAN",TString "10",symbols,globalTable,TList rows,emptyParcel
-        ,TString (T.replicate 64 "a")]
+  emptyPath <- writeCandidateCodecFixture work EmptyCandidateInventory
+  emptyCandidates <- readModuleCandidates emptyPath >>= either fail pure
+  unless (case emptyCandidates of [candidate] -> null (candidateGroups candidate); _ -> False) $
+    fail "production empty inventory codec added a structural group"
+  issuedPath <- writeCandidateCodecFixture work CompactCandidateInventory
+  issued <- readCodecTerm issuedPath
+  (symbols,globalTable,rows,fields) <- case issued of
+    TList values@[TString "TPMCAN",TString "10",symbols,globalTable,TList rows,_,_] ->
+      pure (symbols,globalTable,rows,values)
+    _ -> fail "production compact fixture has another candidate envelope"
+  let envelope symbolTable globals' rows' = TList (replace 2 symbolTable
+        (replace 3 globals' (replace 4 (TList rows') fields)))
       readFixture name value = do
         let path = work </> (name ++ ".cbor")
             bytes = toStrictByteString (encodeTerm value)
@@ -2106,15 +2048,18 @@ candidateCompactInventory = withScratch $ \work -> do
         Left reason | expected `isInfixOf` reason -> pure ()
                     | otherwise -> fail (name ++ " failed at the wrong bound: " ++ reason)
         Right _ -> fail ("candidate compact decoder accepted " ++ name)
-  (symbols,globalTable,rows) <- either fail pure (compactInventoryRows legacyRows)
   case (symbols,globalTable) of
     (TList symbolRows,TList globalRows) | length symbolRows == length identities
       && length globalRows == length globals -> pure ()
-    _ -> fail "fixture encoder merged complete identities or global requirements"
-  decoded <- readFixture "exact" (envelope symbols globalTable rows) >>= either fail pure
+    _ -> fail "production inventory merged complete identities or global requirements"
+  decoded <- readModuleCandidates issuedPath >>= either fail pure
   unless (map candidateGroups decoded == [groups,reverse groups]) $
-    fail "compact inventory changed exact legacy values, order or ordinal"
-  let badGroup binders globalRefs = [fixtureCandidate "Fixture" [TList [TInt 91,TList binders,TList globalRefs]]]
+    fail "compact inventory changed exact values, order or ordinal"
+  firstRow <- case rows of
+    TList row:_ | length row == 16 -> pure row
+    _ -> fail "production candidate fixture has another row layout"
+  let badGroup binders globalRefs = [TList (replace 10
+        (TList [TList [TInt 91,TList binders,TList globalRefs]]) firstRow)]
   refuse "unavailable-symbol" "unavailable" (envelope symbols globalTable (badGroup [TInt 65535] []))
   refuse "unavailable-global" "unavailable" (envelope symbols globalTable (badGroup [] [TInt 65535]))
   forM_ [("out-of-range",TInt 65536),("negative",TInt (-1))
@@ -2129,44 +2074,21 @@ candidateCompactInventory = withScratch $ \work -> do
     (envelope symbols globalTable (take 1 rows ++ take 1 rows))
   refuse "oversized-symbol-table" "table exceeds" (envelope (TList (replicate 65537 TNull)) globalTable rows)
   refuse "oversized-global-table" "table exceeds" (envelope symbols (TList (replicate 65537 TNull)) rows)
-  let largeIdentity = identity {symbolOccurrence=T.replicate 2048 "x"}
-      expandedGroup = TList [TInt 0,TList (replicate 1536 (TInt 0)),TList []]
-      largeSymbols = TList [symbolTerm largeIdentity]
-      oneLarge = [fixtureCandidate "Fixture" [expandedGroup]]
-  readFixture "expanded-within-bound" (envelope largeSymbols (TList []) oneLarge) >>= either fail (const (pure ()))
-  refuse "expanded-aggregate" "expanded candidate inventory exceeds"
-    (envelope largeSymbols (TList []) (oneLarge ++ [fixtureCandidate "Other" [expandedGroup]]))
-  refuse "unsupported6" "unsupported" (TList [TString "TPMCAN",TString "6",TList legacyRows])
-  refuse "unsupported7" "unsupported" (TList [TString "TPMCAN",TString "7",TList legacyRows,emptyParcel])
-  putStrLn "candidate compact inventory: exact legacy values/order/ordinals, complete interning, unavailable/out-of-range indices, dangling globals, duplicate owners, table/expanded bounds and unsupported6/7 passed"
+  expandedPath <- writeCandidateCodecFixture work BoundedExpandedCandidateInventory
+  _ <- readModuleCandidates expandedPath >>= either fail pure
+  expanded <- readCodecTerm expandedPath
+  expandedAggregate <- case expanded of
+    TList values@[_,_,_,_,TList [TList row],_,_] -> pure (TList
+      (replace 4 (TList [TList row,TList (replace 1 (TString "Other") row)]) values))
+    _ -> fail "production expanded-bound fixture has another candidate envelope"
+  refuse "expanded-aggregate" "expanded candidate inventory exceeds" expandedAggregate
+  -- Historical decoder refusals retain only their unsupported framing.
+  refuse "unsupported6" "unsupported" (TList [TString "TPMCAN",TString "6",TList rows])
+  refuse "unsupported7" "unsupported" (TList [TString "TPMCAN",TString "7",TList rows,fields !! 5])
+  putStrLn "candidate compact inventory: production codec values/order/ordinals, complete interning, unavailable/out-of-range indices, dangling globals, duplicate owners, table/expanded bounds and unsupported6/7 passed"
   where
-    fixtureCandidate name groups = TList
-      ([TString "main",TString name,TString "/fixture/source.hs",sha,TString "/fixture/interface.hi",sha,sha,sha,sha]
-        ++ [TList [],TList groups,TString "/fixture/packages",sha,TString "/fixture/products.tpmod"
-          ,TList [],TList [TString "module",TString "/fixture/module.cbor",proofSeal
-            ,TString "/fixture/Core",proofSeal]])
-      where
-        sha = TString (T.replicate 64 "0")
-        proofSeal = TString (T.replicate 64 "a")
-    groupTerm group = TList [TInt (fromIntegral (candidateGroupOrdinal group))
-      ,TList (map symbolTerm (candidateGroupBinders group)),TList (map globalTerm (candidateGroupGlobals group))]
-    globalTerm global = TList [symbolTerm (candidateGlobalIdentity global),repTerm (candidateGlobalRep global)
-      ,maybe TNull signatureTerm (candidateGlobalSignature global),TBool (candidateGlobalEvaluated global)
-      ,maybe TNull (TInt . fromIntegral) (candidateGlobalGeneration global)]
-    symbolTerm value = TList [TString (symbolUnit value),TString (symbolModule value),TString (symbolNamespace value)
-      ,TString (symbolOccurrence value),maybe TNull TString (symbolRecordParent value)]
-    repTerm value = TList $ case value of
-      VoidRep -> [TString "void",TInt 0]
-      LiftedRefRep -> [TString "lifted",TInt 0]
-      UnliftedRefRep -> [TString "unlifted",TInt 0]
-      AddressRep -> [TString "address",TInt 0]
-      IntRep width -> [TString "int",TInt (fromIntegral width)]
-      WordRep width -> [TString "word",TInt (fromIntegral width)]
-      FloatRep width -> [TString "float",TInt (fromIntegral width)]
-    signatureTerm value = TList [TList (map repTerm (signatureArguments value)),case signatureResults value of
-      Returns reps -> TList [TString "returns",TList (map repTerm reps)]
-      NoSuccess -> TList [TString "no_success",TList []]
-      CallerResult -> TList [TString "caller_result",TList []]]
+    replace index value fields = [if ordinal == index then value else field
+      | (ordinal,field) <- zip [0::Int ..] fields]
 
 candidateGhcLoad :: IO ()
 candidateGhcLoad = withTiming $ withScratch $ \work -> do
@@ -2380,15 +2302,14 @@ hostActivationPurposeTest destination = withScratch $ \work -> do
   original <- runPipelineSessionSelected CheckedEnvironment Set.empty GeneralCompile Nothing sourcePath [work] Nothing
   inputType <- maybe (fail "host input fixture has no inferred type") pure (crResultType original)
   capturedSignature <- captureCheckedSignature (crHscEnv original) "__tidepool_cell_pin_0_sessionInput" inputType
-  signature <- either (fail . show) (pure . snd)
-    (deserialiseFromBytes decodeTerm (BSL.fromStrict (toStrictByteString (encodeCheckedSignature capturedSignature))))
+  let signatureBytes = toStrictByteString (encodeCheckedSignature capturedSignature)
   issuedFields <- writeGenuineEmptyScopeFields work
+  authorization <- readPurposeCodecFixture work [work] (CodecHostActivationInput signatureBytes) >>= \case
+    TList values -> pure values
+    _ -> fail "production host-input purpose encoder returned another record"
   let sha = TString (T.replicate 64 "a")
       empty = TList []
       text = TString . T.pack
-      authorization = [text "host-activation-input2",sha,sha,TInt 0,sha,text "bind"
-        ,TList [text "sessionInput"],TList [TList [text "bind",sha]],empty,TList [signature]
-        ,TNull,TInt 1,sha,empty,TNull,TNull,empty,empty,empty,TList [text work]]
       -- These stage/purpose syntax checks wrap a genuinely issued immutable
       -- scope and native GHC signatures; they do not issue execution receipts.
       hostManifest auth = TList (replace 8 (TList auth) issuedFields)
@@ -2399,7 +2320,8 @@ hostActivationPurposeTest destination = withScratch $ \work -> do
   admitted <- decode authorization >>= either fail pure
   unless (fmap itemPurpose (scopeCheckedItem admitted) == Just HostActivationInput) $
     fail "host purpose lost its sealed role"
-  authored <- decode (replace 0 (text "checked-item3") authorization) >>= either fail pure
+  authoredPurpose <- readPurposeCodecFixture work [work] CodecItemPurpose
+  authored <- decodeManifest (TList (replace 8 authoredPurpose issuedFields)) >>= either fail pure
   unless (fmap itemPurpose (scopeCheckedItem authored) == Just AuthoredCheckedItem) $
     fail "ordinary purpose acquired host authority"
   forM_ [(0,text "host-activation-input1"),(3,TInt 1),(5,text "expr")
@@ -2410,27 +2332,28 @@ hostActivationPurposeTest destination = withScratch $ \work -> do
       fail ("invalid host purpose field was admitted: " ++ show index)
   _ <- decode authorization >>= either fail pure
   replySignature <- captureCheckedSignature (crHscEnv original) "request-reply" inputType
+  let requestBytes = toStrictByteString (encodeRequestTypeSignatures (RequestTypeSignatures replySignature Nothing))
   requestTerm <- either (fail . show) (pure . snd)
-    (deserialiseFromBytes decodeTerm (BSL.fromStrict (toStrictByteString
-      (encodeRequestTypeSignatures (RequestTypeSignatures replySignature Nothing)))))
+    (deserialiseFromBytes decodeTerm (BSL.fromStrict requestBytes))
   let nativeAuthorization recipe inner = [text "request-types2", requestTerm, text recipe, inner]
-  forM_ [("none",NoRequestHelpers),("actor-reply",ActorReplyHelpers)] $ \(tag,recipe) -> do
-    requestScope <- decode (nativeAuthorization tag TNull) >>= either fail pure
+  forM_ [NoRequestHelpers,ActorReplyHelpers] $ \recipe -> do
+    wrapper <- readRequestTypesCodecFixture work requestBytes recipe Nothing
+    requestScope <- decodeManifest (TList (replace 8 wrapper issuedFields)) >>= either fail pure
     unless (scopeRequestTypes requestScope == Just (recipe,RequestTypeSignatures replySignature Nothing)
         && scopePurpose requestScope == NoCheckedPurpose
         && isNothing (scopeIncludePaths requestScope))
       (fail "native request wrapper lost recipe or granted an inner purpose")
-    graphFree <- decodeManifest (TList (replace 7 TNull
-      (replace 8 (TList (nativeAuthorization tag TNull)) issuedFields))) >>= either fail pure
+    graphFree <- decodeManifest (TList (replace 7 TNull (replace 8 wrapper issuedFields))) >>= either fail pure
     unless (scopeRequestTypes graphFree == scopeRequestTypes requestScope
         && isNothing (scopeCheckedItem graphFree)
         && null (scopeExecutionGraphs graphFree) && null (scopeExecutionOwners graphFree))
       (fail "graph-free request wrapper changed native recipe authority")
-    legacy <- decodeManifest (TList [text "TPEXACTSCOPE",text "4",sha,sha,empty,empty,empty
-      ,TList (nativeAuthorization tag TNull)])
+    legacy <- decodeManifest (TList [text "TPEXACTSCOPE",text "4",sha,sha,empty,empty,empty,wrapper])
     unless (case legacy of Left reason -> "unsupported exact scope" `isInfixOf` reason; Right _ -> False)
       (fail "native request wrapper admitted a legacy scope envelope")
-    wrappedHost <- decode (nativeAuthorization tag (TList authorization)) >>= either fail pure
+    wrapped <- readRequestTypesCodecFixture work requestBytes recipe
+      (Just (toStrictByteString (encodeTerm (TList authorization))))
+    wrappedHost <- decodeManifest (TList (replace 8 wrapped issuedFields)) >>= either fail pure
     unless (fmap itemPurpose (scopeCheckedItem wrappedHost) == Just HostActivationInput
         && fmap fst (scopeRequestTypes wrappedHost) == Just recipe)
       (fail "native request wrapper lost its protected inner purpose")
@@ -2447,11 +2370,11 @@ hostActivationPurposeTest destination = withScratch $ \work -> do
     (deserialiseFromBytes decodeTerm (BSL.fromStrict (toStrictByteString (encodeCheckedSignature checkedSignature))))
   _ <- decode (replace 9 (TList [encodedSignature]) authorization) >>= either fail pure
   initialSignature <- captureCheckedSignature (crHscEnv original) "activation-input" inputType
-  initialTerm <- either (fail . show) (pure . snd)
-    (deserialiseFromBytes decodeTerm (BSL.fromStrict (toStrictByteString (encodeCheckedSignature initialSignature))))
-  let initialAuthorization = [text "host-input-check1",sha,sha,sha,TList [TList [text "bind",sha]]
-        ,empty,empty,empty,initialTerm,TList [text work]]
-      initialSource = "module HostActivationInput where\n__result :: TidepoolActivationInput\n__result = undefined\n"
+  initialAuthorization <- readPurposeCodecFixture work [work]
+    (CodecHostInputCheck (toStrictByteString (encodeCheckedSignature initialSignature))) >>= \case
+      TList values -> pure values
+      _ -> fail "production initial host-input purpose encoder returned another record"
+  let initialSource = "module HostActivationInput where\n__result :: TidepoolActivationInput\n__result = undefined\n"
       initialSession = emptySessionScope {ssRoot=work,ssExactScope=Just path}
   initialAdmitted <- decode initialAuthorization >>= either fail pure
   unless (fmap checkedCellPurpose (scopeCheckedCell initialAdmitted) == Just (HostInputCellCheck initialSignature))
@@ -2958,16 +2881,14 @@ exactLoadedMetadata = withTiming $ withScratch $ \work -> do
       fail "untracked compile-time input repeated its native frontend"
     receipts <- listDirectory (work </> ".exact-compilations")
     receiptSafety <- fmap catMaybes $ forM receipts $ \entry -> do
-      bytes' <- BS.readFile (work </> ".exact-compilations" </> entry </> "receipt.cbor")
-      either (\reason -> fail ("invalid exact compilation receipt " ++ entry ++ ": " ++ reason)) pure $
-        exactCompilationCacheSafety (work </> "MetadataUntrackedTarget.hs") bytes'
+      exactCompilationCacheSafety (work </> "MetadataUntrackedTarget.hs")
+        (work </> ".exact-compilations" </> entry </> "receipt.cbor")
     case receiptSafety of
       [cacheSafe] -> do
-        putStrLn ("untracked target receipt: schema=TPEXACTCOMPILE/3 fields=10 "
-          ++ "dependency_evidence=v4 cache_safe=" ++ show cacheSafe)
+        putStrLn ("untracked target receipt cache_safe=" ++ show cacheSafe)
         unless (not cacheSafe) $
           fail "untracked dependency receipt marked dependency evidence cache_safe=true"
-      [] -> fail "no exact compilation v2 receipt matched the untracked target source"
+      [] -> fail "no exact compilation receipt matched the untracked target source"
       _ -> fail ("multiple exact compilation receipts matched the untracked target: "
         ++ show (length receiptSafety))
   putStrLn "exact loaded metadata: parity, extension-only execution elision, source drift, quoter bytecode, hidden family and untracked input passed"
@@ -3170,11 +3091,10 @@ packageInputs = withScratch $ \work -> do
     coldBody <- proof work "cold" cold
     warmBody <- proof work "warm" warm
     verifyCollectivePackageProof work cold
-    case coldBody of
-      TList [TString "checked", TList owners, TList closure] -> do
-        let direct = Set.fromList [(unit, name) | TList [_, _, TList entries] <- owners,
-              TList [TString unit, TString name, _, _] <- entries]
-            complete = Set.fromList [(unit, name) | TList [TString unit, TString name, _, _] <- closure]
+    case fst coldBody of
+      CodecCheckedInputs owners closure -> do
+        let direct = Set.fromList (concatMap snd owners)
+            complete = Set.fromList closure
         unless (Set.size complete > Set.size direct) $
           fail "input fixture did not exercise transitive installed interface dependencies"
       _ -> fail "ordinary checked input fixture lacks a complete package proof"
@@ -3201,11 +3121,10 @@ packageInputs = withScratch $ \work -> do
           (work </> "OptionalWiredRoot.hs") [] Nothing
     wired <- wiredRoot (PreparedProducts Nothing) CertifyHomeProductsCompile
     wiredBody <- proof work "wired-fresh" wired
-    case wiredBody of
-      TList [TString "unsupported-wired", TList [TString "main", TString "OptionalWiredSupport"], _,
-          TList [TList [TString "primitive", TString unit, TString name]]]
-        | unit == T.pack (unitString (moduleUnit gHC_PRIM))
-        , name == T.pack (moduleNameString (moduleName gHC_PRIM)) -> pure ()
+    case fst wiredBody of
+      CodecUnsupportedWired "main" "OptionalWiredSupport" unit name
+        | unit == unitString (moduleUnit gHC_PRIM)
+        , name == moduleNameString (moduleName gHC_PRIM) -> pure ()
       _ -> do
         observed <- compile (PreparedProducts Nothing) Set.empty GeneralCompile Nothing
           (work </> "OptionalWiredSupport.hs") [] Nothing
@@ -3236,7 +3155,7 @@ packageInputs = withScratch $ \work -> do
     unless (null (compilerProvided imports) && any ((== "GHC.Prim.Ext") . packageModule) (packageInterfaces imports)) $
       fail "primitive extension was confused with the compiler-provided primitive"
     proof work "primitive-extension" primExt >>= \case
-      TList [TString "checked", _, _] -> pure ()
+      (CodecCheckedInputs _ _,_) -> pure ()
       _ -> fail "real primitive-extension interface did not retain a complete input proof"
   putStrLn "package inputs: cold/warm native divergence, identical checked closure, candidate roots, omission refusal and wired fresh/candidate refusal passed"
   where
@@ -3251,12 +3170,8 @@ packageInputs = withScratch $ \work -> do
       writeFile (directory </> "dependencies.json") (renderDependencyEvidence evidence)
       writeCompileInputProof directory (prHscEnv (pprPipelineResult result)) evidence
         (pprPackageImports result)
-      bytes <- BS.readFile (directory </> "compiler-inputs.cbor")
-      term <- either (fail . show) (pure . snd)
-        (deserialiseFromBytes decodeTerm (BSL.fromStrict bytes))
-      case term of
-        TList [TString "TPCINPUT", TInt 1, _, body] -> pure body
-        _ -> fail "compiler input producer returned another proof category"
+      let inputPath = directory </> "compiler-inputs.cbor"
+      readCompilerInputCodecFacts directory inputPath (directory </> "dependencies.json")
 
 -- Reuse real compiled owner bytes and real installed roots. Copies plus an
 -- isolated finder make mutation tests local without changing the Nix packages.
@@ -3521,17 +3436,16 @@ verifyRetainedPackageWitness producer evidence = do
     retainDiagnosticOracle "repeated-package-second" secondLog
     unless (first == second) $ fail "repeated package certification changed its wire evidence"
     retainByteOracle "repeated-package" first
-    repeatedTerm <- either (fail . show) (pure . snd)
-      (deserialiseFromBytes decodeTerm (BSL.fromStrict first))
-    case repeatedTerm of
-      TList [TString "TPCERT", TInt 8, TList [],
-          TList [TList [TString "target", TList references]],
-          TList _, TList globals, _, TList [TString "ordinary"], _]
+    repeatedFacts <- certificateFacts first
+    case codecCertificateTargets repeatedFacts of
+      [("target",references)]
         | length references == 1001
-            && length globals == 2 -> unless (sameRepeatedReferences references globals) $
+        , length (codecCertificateOwners repeatedFacts) == 2
+        , length (codecCertificateGlobalSeals repeatedFacts) == 2
+        , null (codecCertificateModules repeatedFacts) ->
+            unless (sameRepeatedReferences references (codecCertificateOwners repeatedFacts)) $
               fail ("repeated package witnesses lost canonical deduplication or reference indices: "
-                ++ show (take 3 references, drop 999 references,
-                  map witnessOccurrence globals))
+                ++ show (take 3 references,drop 999 references,codecCertificateOwners repeatedFacts))
       _ -> fail "repeated package witnesses lost canonical deduplication or reference indices"
     forM_ [firstLog, secondLog] $ \diagnostics -> do
       unless (count "certified_package_global_requests" diagnostics == 1001
@@ -3553,9 +3467,9 @@ verifyRetainedPackageWitness producer evidence = do
   retainByteOracle "mixed-retained" bytes
   owners <- certificateOwners bytes
   unless (any (\case
-      TList [TString "retained-package", TString "ghc-internal", TString "GHC.Internal.Base", TString packageHash, _, TInt 0] -> T.length packageHash == 64
+      CodecRetainedPackageOwner "ghc-internal" "GHC.Internal.Base" packageHash _ 0 -> length packageHash == 64
       _ -> False) owners
-      && any (\case TList [TString "retained", _, TInt 7] -> True; _ -> False) owners) $
+      && any (\case CodecRetainedOwner _ 7 -> True; _ -> False) owners) $
     fail "positive package evidence lost its lease or confused a retained home owner"
   encode [global (package { symbolModule = "Missing.Package.Owner" }) 0] >>= \case
     Left _ -> pure ()
@@ -3572,8 +3486,6 @@ verifyRetainedPackageWitness producer evidence = do
             | (index, identity) <- zip [0 :: Int ..] identities] }
       encodeProgram target = encodeCertifiedProducts producer OrdinaryExecutionSource Map.empty (emptyFinalizedModuleArtifacts producer) [] Nothing []
         [("target", target)] evidence "" ""
-      decode bytes' = either (fail . show) (pure . snd)
-        (deserialiseFromBytes decodeTerm (BSL.fromStrict bytes'))
   let wired = preparedRootIdentity (dataConWorkId intDataCon)
       identities = [package, package { symbolOccurrence = "id" },
         package { symbolOccurrence = "fmap" }, constructor, wired]
@@ -3614,14 +3526,14 @@ verifyRetainedPackageWitness producer evidence = do
       (encode (map (`global` 0) (reverse ordered)) >>= either fail pure)
     retainDiagnosticOracle "implicit-forward" forwardLog
     retainDiagnosticOracle "implicit-backward" backwardLog
-    forwardTerm <- decode forward
-    backwardTerm <- decode backward
-    restored <- case backwardTerm of
-      TList [magic, version, modules, TList [TList [name, TList references]], packages, globals, envelope, recipe, coordinates] ->
-        pure (TList [magic, version, modules, TList [TList [name, TList (reverse references)]], packages, globals, envelope, recipe, coordinates])
+    forwardFacts <- certificateFacts forward
+    backwardFacts <- certificateFacts backward
+    restored <- case codecCertificateTargets backwardFacts of
+      [(name,references)] | length references == 37 -> pure backwardFacts
+        {codecCertificateTargets=[(name,reverse references)]}
       _ -> fail "package catalog fixture lacks its target reference inventory"
-    unless (forwardTerm == restored) $
-      fail "package lookup order changed canonical witness inventory or reference order"
+    unless (forwardFacts == restored) $
+      fail "package lookup order changed canonical global seals, witnesses or reference order"
     forM_ [forwardLog, backwardLog] $ \diagnostics ->
       unless (count "certified_package_global_requests" diagnostics == 37
           && count "certified_package_owner_loads" diagnostics == 3
@@ -3647,16 +3559,16 @@ verifyRetainedPackageWitness producer evidence = do
       Right _ -> fail "standalone package lookup admitted a reexport owner or another namespace"
   localBytes <- encodeProgram (localProgram [constructor, synthetic]) >>= either fail pure
   retainByteOracle "local-package" localBytes
-  local <- decode localBytes
-  case local of
-    TList [TString "TPCERT", TInt 8, _, _, TList [TList
-      [TString "ghc-internal", TString "GHC.Internal.Stack.Types", TString _, TString sha]], TList [], _, TList [TString "ordinary"], _]
-      | T.length sha == 64 -> pure ()
-    _ -> fail "local package constructor without incoming globals lacks exact interface evidence"
-  internal <- encodeProgram (localProgram [synthetic]) >>= either fail decode
-  case internal of
-    TList [TString "TPCERT", TInt 8, _, _, TList [], TList [], _, TList [TString "ordinary"], _] -> pure ()
-    _ -> fail "noncanonical internal package helper supplied external interface authority"
+  local <- certificateFacts localBytes
+  unless (case codecCertificatePackages local of
+      [("ghc-internal","GHC.Internal.Stack.Types",_,sha)] -> length sha == 64
+      _ -> False) $
+    fail "local package constructor without incoming globals lacks exact interface evidence"
+  unless (null (codecCertificateOwners local)) $
+    fail "local package constructor added an incoming global witness"
+  internal <- encodeProgram (localProgram [synthetic]) >>= either fail certificateFacts
+  unless (null (codecCertificatePackages internal) && null (codecCertificateOwners internal)) $
+    fail "noncanonical internal package helper supplied external interface authority"
   encodeProgram ((localProgram [constructor, synthetic])
     { programGlobals = [global synthetic 0] }) >>= \case
       Left _ -> pure ()
@@ -3673,22 +3585,21 @@ verifyRetainedPackageWitness producer evidence = do
     retainDiagnosticOracle label diagnostics =
       lookupEnv "TIDEPOOL_CERTIFICATE_BYTE_ORACLE" >>= mapM_ (\prefix ->
         writeFile (prefix ++ "-" ++ label ++ ".log") diagnostics)
-    sameRepeatedReferences references globals = case (references, globals) of
-      (TInt firstIndex : rest, [firstWitness, secondWitness]) ->
-        all (== TInt firstIndex) (take 999 rest)
-          && case (drop 999 rest, witnessOccurrence firstWitness, witnessOccurrence secondWitness) of
-            ([TInt secondIndex], Just firstOccurrence, Just secondOccurrence) ->
-              secondIndex /= firstIndex
-                && occurrenceAt firstIndex firstOccurrence secondOccurrence == "map"
-                && occurrenceAt secondIndex firstOccurrence secondOccurrence == "id"
-            _ -> False
+    sameRepeatedReferences references owners = case references of
+      firstIndex:rest | length owners == 2 -> all (== firstIndex) (take 999 rest)
+        && case drop 999 rest of
+          [secondIndex] -> secondIndex /= firstIndex
+            && occurrenceAt firstIndex owners == Just "map"
+            && occurrenceAt secondIndex owners == Just "id"
+          _ -> False
       _ -> False
-    witnessOccurrence = \case
-      TList [TList [_, _, _, TString occurrence, _], _, _, _, _] -> Just occurrence
-      _ -> Nothing
-    occurrenceAt 0 firstOccurrence _ = firstOccurrence
-    occurrenceAt 1 _ secondOccurrence = secondOccurrence
-    occurrenceAt _ _ _ = ""
+    occurrenceAt index owners
+      | index >= 0 && index < length owners = Just (symbolOccurrence (case owners !! index of
+          CodecSourceOwner _ _ _ _ binder -> binder
+          CodecRetainedOwner binder _ -> binder
+          CodecPackageOwner _ _ _ binder -> binder
+          CodecRetainedPackageOwner _ _ _ binder _ -> binder))
+      | otherwise = Nothing
 
 -- A mutable installed interface exercises the same environment on successive
 -- certifications. No successful owner selection may survive into the next one.
