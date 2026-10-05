@@ -2,7 +2,7 @@ module Main (main, tests) where
 
 import Tidepool.Test.Runner (TestTree, runTests, testCase, testGroup)
 
-import Control.Exception (SomeException, bracket, evaluate, try)
+import Control.Exception (SomeException, bracket, evaluate, fromException, throwIO, try)
 import Control.Monad (unless)
 import Data.ByteString qualified as BS
 import Data.Foldable (toList)
@@ -32,9 +32,11 @@ import Tidepool.SiteClassifier
   ( SiteFailure(..), classifySiteOccurrence, isNospecVar, stripNospecSpine )
 import GHC.Unit.Types (moduleName)
 import System.Directory
-  ( createDirectory, createDirectoryIfMissing, getTemporaryDirectory, removeFile, removePathForcibly )
+  ( createDirectory, createDirectoryIfMissing, getTemporaryDirectory, makeAbsolute, removeFile, removePathForcibly )
 import System.IO (openTempFile, hClose)
-import System.FilePath ((</>))
+import System.FilePath ((</>), normalise)
+import GHC.Types.SourceError (SourceError)
+import Tidepool.DiagJson (Diag(..), DiagSeverity(..), diagsFromSourceError)
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedPipelineResult(..), CompilePurpose(..)
   , PipelineResult(..), runPipelineSelected, withResidentPipelineSelected )
@@ -738,20 +740,24 @@ assertWireSite label delivery family outcome = case outcome of
     sites -> ioError (userError (label ++ ": unexpected site evidence " ++ show sites
       ++ " in " ++ show (Schema.programTypes program)))
 
-expectFailure :: String -> IO result -> IO ()
-expectFailure label action = do
+expectAuthoredParseFailure :: String -> FilePath -> IO result -> IO ()
+expectAuthoredParseFailure label target action = do
   outcome <- try (action >> pure ()) :: IO (Either SomeException ())
   case outcome of
-    Left _ -> pure ()
-    Right _ -> ioError (userError (label ++ ": expected compiler failure"))
-
-expectFailureContaining :: String -> String -> IO result -> IO ()
-expectFailureContaining label needle action = do
-  outcome <- try (action >> pure ()) :: IO (Either SomeException ())
-  case outcome of
-    Left failure -> assert (needle `isInfixOf` show failure)
-      (label ++ ": unexpected failure: " ++ show failure)
-    Right _ -> ioError (userError (label ++ ": expected compiler failure"))
+    Left failure -> case (fromException failure :: Maybe SourceError) of
+      Nothing -> throwIO failure
+      Just sourceError -> do
+        targetPath <- normalise <$> makeAbsolute target
+        diagnosticPaths <- mapM makeAbsolute
+          [ path
+          | Diag { dFile = Just (path, _, _, _, _), dSeverity = DiagError }
+              <- diagsFromSourceError sourceError
+          ]
+        unless (targetPath `elem` map normalise diagnosticPaths) $
+          ioError (userError
+            (label ++ ": expected an authored parse diagnostic at " ++ targetPath
+              ++ ", got " ++ show (diagsFromSourceError sourceError)))
+    Right _ -> ioError (userError (label ++ ": expected authored source parse failure"))
 
 main :: IO ()
 main = runTests tests
@@ -1098,7 +1104,7 @@ fullMain = do
       writeFile dep originalDep
 
       writeFile target "module Expr where\nresult =\n"
-      expectFailure "direct prepared" $
+      expectAuthoredParseFailure "direct prepared" target $
         runPipelineSelected PreparedStg target [dir]
       writeFile target validTarget
 
@@ -1116,7 +1122,7 @@ fullMain = do
           "resident warm prepared facts differ from direct output"
 
         writeFile target "module Expr where\nresult =\n"
-        expectFailure "resident prepared" $
+        expectAuthoredParseFailure "resident prepared" target $
           compile PreparedStg mempty GeneralCompile Nothing target [] Nothing
         writeFile target validTarget
         recovered <- compile PreparedStg mempty GeneralCompile Nothing target [] Nothing
