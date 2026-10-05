@@ -459,7 +459,8 @@ async fn drive_browser(
             tokio::select! {
                 biased;
                 terminal = fixture.context.actor.terminal().wait(), if !root_retired => {
-                    if !continued || terminal.kind != exomonad_actor::ActorExitKind::Cancelled {
+                    if !continued || last_phase != "continued" || waiting.is_some()
+                        || terminal.kind != exomonad_actor::ActorExitKind::Cancelled {
                         return Err(format!(
                             "browser root exited at phase={last_phase} ({:?}): {}",
                             terminal.kind, terminal.summary,
