@@ -1114,20 +1114,9 @@ fn projection(result: &WatchResult, ids: &[RequestId]) -> WatchStateProjection {
 
 #[test]
 fn generated_request_lifecycle_matches_observable_model() {
-    const REGRESSIONS: &str = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/proptest-regressions/request-sequences.txt"
-    );
     let mut config = Config {
         max_shrink_iters: 4_096,
-        source_file: Some(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/request/sequence_tests.rs"
-        )),
-        // Cargo supplies an absolute owning manifest directory; Buck supplies
-        // the declared package path relative to its checkout working directory.
-        // Neither seed persistence nor source identity uses the staged file!().
-        failure_persistence: Some(Box::new(FileFailurePersistence::Direct(REGRESSIONS))),
+        source_file: Some(file!()),
         test_name: Some(concat!(
             module_path!(),
             "::generated_request_lifecycle_matches_observable_model"
@@ -1137,7 +1126,10 @@ fn generated_request_lifecycle_matches_observable_model() {
     if std::env::var_os("PROPTEST_CASES").is_none() {
         config.cases = 96;
     }
-    eprintln!("request sequence seed persistence: {REGRESSIONS}");
+    if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
+        config.failure_persistence = Some(Box::new(FileFailurePersistence::Direct(path)));
+        eprintln!("request sequence seed persistence: {path}");
+    }
     let mut runner = TestRunner::new(config);
     let mut cohort = Coverage::default();
     for topology in [vec![0, 0], vec![0, 1], vec![0, 0, 1], vec![0, 1, 2]] {
