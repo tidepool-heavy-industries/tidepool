@@ -201,6 +201,7 @@ impl PersistentSession {
         let owner_epoch = self.admission_owner().epoch();
         let mut digest = blake3::Hasher::new();
         digest.update(b"TidepoolRuntimeBindingInterface2");
+        digest.update(self.admission_owner().identity.as_bytes());
         digest.update(&owner_epoch.to_le_bytes());
         digest.update(&scope.0.to_le_bytes());
         digest.update(&view_digest);
