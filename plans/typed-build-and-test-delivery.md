@@ -152,102 +152,128 @@ source parcels with explicit shared interfaces; do not fork owners over the
 same fixture file. Buck provenance, newer Harness integration and remaining
 codec cleanup can proceed as source work alongside this critical path.
 
-## Compiler evidence repair: shared contracts and application order
+## Finite reply-type graph: shared contracts and application order
 
-The source baseline is `6d6bc611473bcc07bbf31a8fcef805df388821cd`.
-The genuine type-evidence leaf executed once and passed: 24 constructor schemes
-and 270 closed prepared nodes, including existing partial and recursive cases,
-with no unsupported shape findings in that fixture. This is evidence for the
-chosen bounded implementation, not proof that every possible GHC type is handled.
-Detailed logs remain outside Git in the delivery evidence directory.
+Implement from current main; the approved graph cutover starts at
+`b460cd939274659fc5e33ab5105f12a8c32bbffe`. Preserve earlier source checkpoints,
+but do not join their graph-depth/type-syntax-depth compensation as final policy.
+Ordinary recursive types already close through interned references. The remaining
+expansion comes from enumerating fully instantiated constructor fields: `Nest a`
+can lead to `Nest [a]`, `Nest [[a]]`, and indefinitely more distinct nodes.
 
-1. **Retain meaning at its compiler owner.**
-   `CanonicalTypeShape` owns the existing structural expression encoding.
-   `TypePolicy` and `ExecutionProjection` retain the actual original `Type` and
-   complete ordered `dataConUserTyVarBinders` telescope before information is
-   erased. A closed type and a constructor scheme are distinct sum-type cases.
-   Preserve binder kind, specificity, position, repetition and unused binders;
-   each kind may refer only to preceding binders. Exact unit/module/name
-   identities remain nominal. Printed types and names are diagnostic output.
-   Closed activation expression bytes and original interface seals do not change.
-2. **Give graph identity one owner.**
-   Replace the coarse `TypeMap` identity key with the canonical descriptor in
-   the existing graph builder. Do not add a corrective side registry or a second
-   equality algorithm. Retain reservation-before-edges for recursion and one
-   aggregate graph/work/byte budget across all roots and constructor scopes.
-   Replace the shared expansion-limit sentinel with a refusal carrying the
-   precise scoped type at that cutoff. Ordinary depth cutoffs still permit
-   other constructible branches; total budget exhaustion is a typed failure.
-   Casts/coercions outside the supported grammar fail explicitly. There is no
-   text, unknown-owner or shape-erasure fallback.
-3. **Migrate the complete wire boundary together.**
-   Rust `repr::canonical_type_shape::CanonicalTypeShape` is an opaque validated
-   value below toolchain/runtime. Factor the existing activation expression
-   validator into that owner, retaining activation's stricter policy and exact
-   seals. Prepared schema 16 carries `[5, shapeBytes, reason, rendered]` for a
-   refused type; physical ABI 9 is unchanged. Previous schema-15 refusals cannot
-   supply the missing identity and are rejected, not upgraded by inference.
-   A raw CBOR scan bounds nesting, lengths and work before allocating a generic
-   decoded value; logical type depth and binder validity are separate checks.
-   The enclosing program charges aggregate identity bytes and nodes. Update
-   producers, readers, typed fixture encoders and generated resources together.
-4. **Keep equality domains explicit.**
-   Runtime constructor/site compatibility compares reachable graphs with local
-   node IDs remapped and exact nominal constructors; refusal leaves compare
-   typed shape. `SiteTypeEvidence` equality and commitment v3 retain the whole
-   ordered table, constructor inventory, endpoints and authenticated request
-   context, excluding only diagnostic reason/rendered fields. Global `TypeNode`
-   equality/hash, wire bytes, product/content identity and native cache keys
-   remain exact, including diagnostics. Route duplicate admission, parked
-   reply authority, request-scope checks and retirement handoff through these
-   same owners. Do not introduce a diagnostic-stripping duplicate graph.
-5. **Use the same construction paths in tests.**
-   Structural codecs use current owner encoders and exhaustive typed values.
-   Semantic positives use the production projection context and genuine
-   captured compiler products. Delete incomplete callback contexts, repeated
-   original capture, handwritten positive packets and partial field walkers.
-   Share immutable captures, while each mutable case/request owns fresh scoped
-   resources. Catch only the intended failure category and assert its owner or
-   stage; unrelated I/O, cancellation and fixture failures must escape.
-   Existing string-only scaffold validation is a bounded follow-up: move its
-   closed failures into an owner-defined sum type and render at the diagnostic
-   boundary, then remove exact-message assertions for those owned failures.
-   External GHC diagnostics remain an explicit external boundary. This does
-   not authorize a general error-framework rewrite.
+1. **One finite semantic representation.**
+   `tidepool-repr` owns one immutable `petgraph::Graph` of nominal declarations,
+   scoped type expressions and constructor field templates. Graph relationships
+   live in typed edges with explicit roles and ordinals, not duplicated child-ID
+   vectors. Complete ordered source-constructor telescopes retain kinds,
+   visibility, repetition and unused binders. Declaration parameters have their
+   own scope. Exact unit/module/namespace/name identities remain nominal;
+   renderings are diagnostics. Declaration references may cycle. Expression-child
+   edges must be acyclic and all parameter references must be in scope.
+2. **Expose the graph; control its publication.**
+   Build and validate privately, then share each artifact's graph through `Arc`.
+   Expose `graph() -> &petgraph::Graph` so callers can use standard traversal
+   algorithms. Keep mutation unavailable after validation. Domain operations
+   interpret ordered fields, scopes, compatibility and commitments; raw graph
+   indices are local storage references, not portable identities or authority.
+   Repeated arguments require parallel edges, such as `Argument(0)` and
+   `Argument(1)` to the same node. Preserve semantic order independently of
+   arbitrary insertion order; avoid repeated per-ordinal scans of wide nodes.
+3. **Keep GHC's declarations instead of expanding possible values.**
+   The Haskell owner retains original `TyCon`/`DataCon` definitions and emits
+   parameterized `dataConOrigArgTys` templates. It establishes fixed field
+   representations from GHC's binder kinds and checks them against the physical
+   constructor declarations. The Rust decoder validates finite structure, scopes,
+   arity and paired representation facts; it does not reimplement GHC kind
+   inference or establish compiler-origin authority by decoding. Runtime selected
+   field construction retains its independent physical representation checks.
+4. **Apply substitutions only when demanded.**
+   Expected runtime types are graph expressions plus shared substitution
+   environments. A selected constructor yields field cursors; it does not expand
+   every possible descendant. Repeated parameters share the same argument
+   closure, including `Nest (a,a)`. Preserve partial `Maybe`/`Progress` replies:
+   an unavailable field does not erase valid fieldless alternatives. Keep the
+   existing effect-containing-type policy explicit. No second materialized type
+   graph or permanent instantiated-application cache is part of this change.
+5. **Separate nominal meaning from construction.**
+   Synonyms and finite newtypes remain transparent to the representation view
+   used for host construction. Preserve original nominal identity separately.
+   Guard only the operations that actually unfold aliases or normalize a view;
+   an exhausted work budget is a typed operation failure, never an invented
+   identity. Preserve existing family/GADT/existential restrictions and scalar
+   representation checks. Closed activation expression bytes, their stricter
+   grammar, and original interface seals do not change.
+6. **Decode once and migrate all consumers.**
+   Haskell emits finite graph records under the matched versioned prepared
+   schema. Rust decodes them directly into the validated graph; wire records
+   are an encoding, not another retained semantic model. Prepared definitions,
+   codegen `DefinitionFacts`, runtime `ProgramFacts`, site/request evidence and
+   snapshots share that owner. Route constructor collection, JSON declaration
+   inspection, framed-handle prefixes, installations and retirement through it.
+   Bump the owning schema and regenerate all fixtures through current producers;
+   old expanded evidence is not upgraded by reconstructing missing declarations.
+7. **Keep equality domains explicit.**
+   Rooted compatibility compares finite declarations, scoped expressions and
+   arguments independently of local table numbering; it does not enumerate
+   instantiated constructor trees or use generic graph isomorphism. Whole-site
+   identity retains the ordered inventory, endpoints and authenticated request
+   context. Exact artifact/content identity includes diagnostic bytes. Keep
+   these operations at the same graph owner; do not retain differently filtered
+   copies of the graph or use petgraph's internal serialization as a stable
+   semantic identity.
+8. **Bound actual resources and delete the old model.**
+   Charge nodes, edges, bytes and traversal work across all roots in a graph.
+   Keep actual host-value construction limits separate. Remove eager recursive
+   constructor-field instantiation, graph-depth cutoff identities, the expanded
+   `TypeNode::Data` adjacency model, and copied complete type tables in facts and
+   site evidence. Remove graph-only duplicate expression/identity byte storage
+   and owner inventories. Derived observations must use the graph; measured
+   indexing needs may be addressed later without introducing another authority.
 
-Separate source owners implement the Haskell/shape contract, prepared wire
-boundary, runtime consumers, and fixture/negative-test migration. They agree
-the shared type and limits before editing. Root reviews their joined data flow;
-the delivery owner alone admits builds and publishes acceptance results.
-Fixture codec observations remain test-only data, never compiler capabilities.
-Source inventories come from the existing Cargo/Cabal/Buck generators.
+The Rust graph owner publishes the shared typed API and validation scaffold
+before wire/runtime consumer implementation. The Haskell producer and graph
+owner agree scopes, edge roles, layout facts and wire tags together. Separate
+owners then implement the wire/fixture cutover and runtime/codegen consumption.
+Root reviews the full data flow and deletion obligations; delivery owns the
+single admitted build lane, actual metadata regeneration and acceptance.
 
 Required controls exercise the production boundary that previously failed:
 
-- In one real projected graph, alpha-renaming preserves emitted shape while
-  binder position/repetition, unused source binders, kinds and nominal owner
-  changes remain distinguishable. Two different expanding roots retain two
-  different cutoff identities. Preserve `Maybe`, `Progress` and recursive tests.
-- Hydrate the **same original** constructor interface and admit its repeated
-  reply evidence with exact certificate/interface/source seals intact. Separate
-  authored-alpha fixtures prove semantic comparison, not shared original custody.
-- A diagnostic-only change preserves semantic/site identity but changes exact
-  content identity. A shape change with identical diagnostics is rejected
-  atomically. Remapped IDs/unreachable additions preserve reachable compatibility
-  while ordered site identity still changes. Exercise equivalent-owner retirement.
-- Decode valid near-limit shapes; refuse out-of-scope indices, forward kind
-  references, unknown domain/specificity/tag, invalid nesting and aggregate
-  exhaustion. Restrict nominal family syntax to its permitted graph profile.
-- Every negative semantic scenario has a genuine valid control and a specific
-  refusal; restore the valid state and prove recovery where that is its contract.
+- In one actual compiler graph, source binder alpha-renaming preserves meaning;
+  binder positions, kinds, unused binders, phantom arguments and nominal owners
+  remain distinguishable. Hydrate and install the same original `BranchU`
+  declaration with certificate/interface/source seals intact. Authored-alpha
+  examples alone do not prove shared original custody.
+- Regular and mutual recursion close through references. Parameter-changing
+  `Nest [a]` and repeated-argument `Nest (a,a)` emit finite declarations; runtime
+  validation traverses finite chosen values with shared environments. Record
+  graph sizes and actual work, not a guessed wall-time improvement.
+- `Nothing` remains constructible when the corresponding `Just` field is a
+  function or unresolved parameter; demanding that field refuses specifically.
+  Preserve Progress branches, transparent newtypes, alias-loop refusals and
+  existing effect/family/GADT policy. Check framed-handle prefixes and scalar
+  mismatches through the actual answer visitor.
+- Remapped node IDs preserve rooted compatibility. Altered declarations or
+  layouts fail atomically. Diagnostic-only changes preserve semantic/site
+  identity but change exact content identity. Whole ordered evidence still
+  distinguishes inventory changes. Exercise equivalent-owner retirement.
+- Reject bad edge endpoints, duplicate/missing ordinals, out-of-scope or forward
+  binder references, expression cycles and actual resource exhaustion. Accept
+  valid declaration cycles and parallel argument edges. Verify standard petgraph
+  traversal through the read-only public accessor.
+- Structural tests use current typed builders/encoders. Semantic positives use
+  genuine compiler capture and admission. Negative cases first establish a valid
+  control, then assert the owned refusal category; unrelated I/O, cancellation
+  and fixture failures escape. Existing string-only scaffold error enums remain
+  a bounded follow-up, not a general error-framework rewrite.
 
-Join the complete fixture/caller/generator parcel before compiling it. Join the
-matched shape/wire/runtime parcel before rebuilding compiler products. First
-run the focused pure/codec tests and exact native type-evidence leaf, then the
-source-boot scenarios affected by the repairs. Select Tasty leaves through the
-existing `just test-native LABEL --pattern ...` / Buck `RunInfo` arguments;
-environment-only filtering is not supported. Record actual selected/executed
-counts, including unexpected extra cases, rather than inferred intent.
+Join and compile the complete graph/wire/producer/runtime cutover together.
+Run focused graph/codec/runtime tests and the native type-evidence leaf before
+rebuilding the matched release products. Independent source-boot fixture repairs
+can be qualified while the graph sources are implemented. Select native leaves
+through the existing `just test-native LABEL --pattern ...` / Buck `RunInfo`
+arguments and record actual nonzero execution counts. Source inventories and
+generated resources continue to come from the existing Cargo/Cabal/Buck owners.
 
 Freeze one matched bundle and rerun the failing two-child case. Only after that
 passes run all six M2 obligations, the relevant full semantic/compiler corpus
