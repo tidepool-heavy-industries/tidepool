@@ -913,26 +913,23 @@ mod tests {
         }
 
         fn config() -> Config {
-            // Direct source-owned persistence avoids seeds landing in Buck's
-            // disposable copied source tree. Run from the repository root;
-            // set an absolute override to retain/replay seeds with evidence.
-            // PROPTEST_CASES and PROPTEST_RNG_SEED remain available for larger
-            // runs and exact seed replay through Config::default().
+            // Explicit evidence paths take precedence over the native runner's
+            // declared source path. Cargo keeps ordinary SourceParallel
+            // persistence; neither default resolves through staged manifest paths.
+            // PROPTEST_CASES and PROPTEST_RNG_SEED remain available through
+            // Config::default() for larger runs and precise seed replay.
             static REGRESSIONS: OnceLock<String> = OnceLock::new();
-            let path = REGRESSIONS.get_or_init(|| {
-                std::env::var("TIDEPOOL_BINDING_INDEX_REGRESSIONS").unwrap_or_else(|_| {
-                    concat!(
-                        env!("CARGO_MANIFEST_DIR"),
-                        "/proptest-regressions/binding_index.txt"
-                    )
-                    .to_owned()
-                })
-            });
-            Config {
+            let mut config = Config {
                 max_shrink_iters: 4096,
-                failure_persistence: Some(Box::new(FileFailurePersistence::Direct(path))),
                 ..Config::default()
+            };
+            if let Ok(path) = std::env::var("TIDEPOOL_BINDING_INDEX_REGRESSIONS") {
+                let path = REGRESSIONS.get_or_init(|| path);
+                config.failure_persistence = Some(Box::new(FileFailurePersistence::Direct(path)));
+            } else if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
+                config.failure_persistence = Some(Box::new(FileFailurePersistence::Direct(path)));
             }
+            config
         }
 
         proptest! {
