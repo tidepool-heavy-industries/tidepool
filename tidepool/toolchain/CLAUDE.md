@@ -70,3 +70,46 @@ contains `meta.cbor`, `<target>.prepared.cbor` and `<target>.asks.json` for ever
 target. `PreparedFixtureInfo` exposes that directory and the target artifacts.
 Test runners supply it as a runtime resource. Source-bound certificates remain
 at the original compilation paths and are discarded with action scratch.
+
+## Deployment catalog production
+
+`build_deployment_module_package` uses that same build-action compiler policy,
+with authenticated catalog export instead of portable fixture export. Its caller
+supplies the snapshot’s `TidepoolCatalog.hs` probe, ordered targets, retained
+snapshot root, private current-directory scratch and absent output directory. Complete worker evidence and the canonical
+module-product owner admit the closed source cohort before catalog export.
+Preparing those catalog records grants no runtime candidate publication.
+
+`tidepool-module-package build` receives `--source`, repeated `--target`,
+`--source-root` and `--output-root`. The build action supplies the configured
+frontend, worker, compiler deployment manifest and GHC libdir. The CLI removes
+inherited resident/cache selection and contains temporary files in its own
+scratch. Schema 4 records `source_selection` with the canonical retained snapshot,
+ordered `StableEffects`, `Stdlib`, `Actors`, and `Jev` roles, and the complete
+Haskell source manifest including the probe. These roles resolve to `effects`,
+`lib`, `actors`, and `jev/core`; each directory must exist, without source aliases.
+The worker include list must equal these roots in order, and every catalog source
+and home dependency must belong to their union. Source selection is checked again
+after compilation before exporting compiler-issued evidence unchanged. Product
+references are relative to the opened catalog's canonical parent, so the complete container can move without rewriting its bytes. Source
+paths cannot move or alias other paths. The source guard remains separate from
+qualification's actual Nix registration, NAR and GC-root checks. Earlier catalogs
+are rejected and must be regenerated through the matched producer.
+
+`configured_module_source_selection` shares catalog schema, compiler authority,
+source manifest and alias validation without hydrating native products. Candidate
+admission loads the full package and validates every proof and the complete cohort.
+Actual Nix registration, NAR, retention and final bundle qualification remain the
+qualification owner’s independent checks.
+
+`tidepool-module-package inspect` uses the same declared snapshot, probe, targets,
+direct configured endpoint and build-action source guards as `build`. It writes
+`catalog-inventory.json` only after actual product certification, with canonical
+interfaces and optional Core, native owners, native group counts, and each
+worker module’s `ProductAvailability`. It publishes no catalog or candidates.
+`request.json`, `invocation.json`, and `outcome.json` preserve source and producer
+identity, the ordered roots, and refusal stage. Both CLI scratch and the recursive
+compiler transaction under `output-root/raw` are retained, including stdout,
+stderr, build products and dependency evidence. Raw worker flags in a refusal
+report remain explicitly unadmitted; missing canonical counts are not zeroes.
+Inspection has no internal wall timeout; its execution owner supplies one.

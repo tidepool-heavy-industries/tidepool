@@ -11,11 +11,13 @@ module Main (main, tests) where
 
 import Control.Monad (unless, void)
 import Tidepool.Test.Runner
-import Control.Monad.Freer (Eff, Member, interpret, interpretM, run, runM)
+import Control.Monad.Freer (Member, interpret, interpretM, run, runM)
+import Control.Monad.Freer.Internal (Eff (..), qApp)
 import qualified Control.Monad.Freer.State as State
 import Control.Exception (ErrorCall, Exception, throw, throwIO, try)
 import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.Text (Text)
+import Data.OpenUnion (decomp)
 import qualified Data.Text as Text
 import qualified Jev.Operators as J
 import Project.AssumptionWatch (watchIncorporatedBaseline)
@@ -23,8 +25,9 @@ import Project.ParallelInvestigate
 import Project.SlowCommandWatch (SlowHandler, SlowObservation (..))
 import Exomonad.Contrib.Types (Incorporation)
 import Tidepool.Actors.Exomonad (Actor, AgentRef, GitOid, Response)
+import qualified Tidepool.Actors.Internal.ExomonadDriver as Root
 import qualified Tidepool.Command as Cmd
-import Tidepool.Effects.Core (Commands (..), Jev, CommandObservation (..))
+import Tidepool.Effects.Core (AgentSession (..), ActorLocal (..), Commands (..), Jev, CommandObservation (..))
 import Tidepool.Command.Types (Job (..))
 
 -- A parent can retain the pending child's baseline while running two exact,
@@ -340,10 +343,27 @@ nativeContracts = do
   assert "native protocol failures escape the checked-command ErrorCall catch"
     (case protocol of { Left UnexpectedFiniteEffect -> True; _ -> False })
 
+rootDriverContract :: IO ()
+rootDriverContract = case Root.rootDriver of
+  Val () -> error "resident root exited before attaching its session"
+  E first continuation -> case decomp first of
+    Left _ -> error "resident root did not attach its session first"
+    Right (AgentAttachWith initialUser) -> do
+      assert "resident root attaches without inventing a user message" (initialUser == Nothing)
+      case qApp continuation () of
+        Val () -> error "resident root exited instead of waiting for its mailbox"
+        E second _ -> case decomp second of
+          Right _ -> error "resident root requested another session operation before its mailbox"
+          Left local -> case decomp local of
+            Right (ActorReceiveWith _ _) -> pure ()
+            _ -> error "resident root did not retain its typed local mailbox continuation"
+    Right _ -> error "resident root requested a different session operation"
+
 tests :: TestTree
 tests = testGroup "automation-helper contract"
   [ testCase "typed selection and bounded probe planning" planningContracts
   , testCase "generated command admission identity and failure isolation" nativeContracts
+  , testCase "resident root session attachment and typed mailbox continuation" rootDriverContract
   ]
 
 main :: IO ()

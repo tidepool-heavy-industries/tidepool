@@ -74,23 +74,52 @@ pub fn ensure_effects_module(effects: &[EffectDecl]) -> std::io::Result<EffectsM
     })
 }
 
-/// Materialize the universal stable effect vocabulary and authored facades.
+/// Select the deployed stable vocabulary or materialize it for development.
 pub fn ensure_effects_core_module() -> std::io::Result<PathBuf> {
     write_core_module(&effects_core_module_source())
 }
 
-/// Recreate an owned vocabulary source root through the same materializer.
+/// Retain deployed vocabulary paths after comparing the genuine production sources.
 pub fn write_core_module(core_src: &str) -> std::io::Result<PathBuf> {
     let authored = effects_authored_module_source();
     let facade = effects_facade_module_source();
-    write_module_dir(
-        "tidepool-effects-core",
-        &[
-            ("Effects/Core.hs", core_src),
-            ("Effects/Authored.hs", &authored),
-            ("Effects.hs", &facade),
-        ],
-    )
+    let files = [
+        ("Effects/Core.hs", core_src),
+        ("Effects/Authored.hs", authored.as_str()),
+        ("Effects.hs", facade.as_str()),
+    ];
+    if let Some(selection) = tidepool_toolchain::toolchain::configured_module_source_selection()
+        .map_err(std::io::Error::other)?
+    {
+        if core_src != effects_core_module_source() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "configured catalog requires this build's genuine stable Core source",
+            ));
+        }
+        return select_deployed_core_module(&selection, &files);
+    }
+    write_module_dir("tidepool-effects-core", &files)
+}
+
+fn select_deployed_core_module(
+    selection: &tidepool_toolchain::toolchain::NativeCatalogSourceSelection,
+    files: &[(&str, &str); 3],
+) -> std::io::Result<PathBuf> {
+    let root = selection.root(tidepool_toolchain::toolchain::NativeSourceRole::StableEffects);
+    for (relative, expected) in files {
+        let path = root.join("Tidepool").join(relative);
+        if std::fs::read(&path)? != expected.as_bytes() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "deployed stable effect source differs from this build: {}",
+                    path.display()
+                ),
+            ));
+        }
+    }
+    Ok(root)
 }
 
 /// Installed orchestration helpers keep their existing cohort-dependent bodies.
@@ -271,6 +300,61 @@ impl tidepool_runtime::session::OutputSink for CapturedOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deployed_core_retains_original_sources_and_refuses_changed_or_missing_bytes() {
+        use tidepool_toolchain::toolchain::{NativeCatalogSourceSelection, NativeSourceRole};
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().join("effects");
+        let core = effects_core_module_source();
+        let authored = effects_authored_module_source();
+        let facade = effects_facade_module_source();
+        let files = [
+            ("Effects/Core.hs", core.as_str()),
+            ("Effects/Authored.hs", authored.as_str()),
+            ("Effects.hs", facade.as_str()),
+        ];
+        for (relative, source) in files {
+            let path = root.join("Tidepool").join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, source).unwrap();
+        }
+        let selection = NativeCatalogSourceSelection {
+            snapshot_root: fixture.path().to_path_buf(),
+            roles: NativeSourceRole::ORDERED,
+            source_files: tidepool_toolchain::cache::source_root_manifest(fixture.path()).unwrap(),
+        };
+        let manifest = selection.source_files.clone();
+        assert_eq!(
+            select_deployed_core_module(&selection, &files).unwrap(),
+            root
+        );
+        assert_eq!(
+            tidepool_toolchain::cache::source_root_manifest(fixture.path()).unwrap(),
+            manifest
+        );
+        for (relative, source) in files {
+            let path = root.join("Tidepool").join(relative);
+            std::fs::write(&path, "changed").unwrap();
+            assert_eq!(
+                select_deployed_core_module(&selection, &files)
+                    .unwrap_err()
+                    .kind(),
+                std::io::ErrorKind::InvalidData
+            );
+            std::fs::remove_file(&path).unwrap();
+            assert_eq!(
+                select_deployed_core_module(&selection, &files)
+                    .unwrap_err()
+                    .kind(),
+                std::io::ErrorKind::NotFound
+            );
+            std::fs::write(path, source).unwrap();
+        }
+        let mut changed = files;
+        changed[0].1 = "caller changed Core";
+        assert!(select_deployed_core_module(&selection, &changed).is_err());
+    }
 
     /// Core module + facade module + orchestrate module + preamble concatenated:
     /// content assertions that predate the importable-module split (and the

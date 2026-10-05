@@ -6,7 +6,7 @@ load("@prelude//toolchains:python.bzl", "system_python_bootstrap_toolchain")
 load("@prelude//toolchains:remote_test_execution.bzl", "remote_test_execution_toolchain")
 load("@prelude//tests:test_toolchain.bzl", "noop_test_toolchain")
 load("@root//bridge/haskell:components.bzl", "JEV_SOURCE_PATHS")
-load(":tidepool.bzl", "nix_directory", "nix_haskell_toolchain", "nix_rust_toolchain", "nix_tool")
+load(":tidepool.bzl", "native_catalog_retention", "nix_directory", "nix_haskell_toolchain", "nix_rust_toolchain", "nix_tool")
 
 nix_rust_toolchain(
     name = "rust",
@@ -156,23 +156,22 @@ nix_directory(
 # These outputs are optional until a deployment-catalog gate is selected.
 # The copies declare resources; consumers retain their original store roots.
 nix_directory(
-    name = "runtime_stdlib_sources",
+    name = "native_catalog_source_root",
     cp = read_root_config("nix", "coreutils") + "/cp",
-    store_path = read_root_config("nix", "runtime_stdlib_sources", ""),
+    store_path = read_root_config("nix", "native_catalog_source_root", ""),
+    visibility = ["PUBLIC"],
+)
+
+native_catalog_retention(
+    name = "native_catalog_retention_record",
+    record = read_root_config("nix", "native_catalog_retention", ""),
     visibility = ["PUBLIC"],
 )
 
 nix_directory(
-    name = "runtime_stdlib_products",
+    name = "native_catalog_ghc_libdir",
     cp = read_root_config("nix", "coreutils") + "/cp",
-    store_path = read_root_config("nix", "runtime_stdlib_products", ""),
-    visibility = ["PUBLIC"],
-)
-
-nix_directory(
-    name = "runtime_stdlib_extract",
-    cp = read_root_config("nix", "coreutils") + "/cp",
-    store_path = read_root_config("nix", "runtime_stdlib_extract", ""),
+    store_path = read_root_config("nix", "ghc_libdir"),
     visibility = ["PUBLIC"],
 )
 

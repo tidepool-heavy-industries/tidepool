@@ -45,19 +45,28 @@ pub(crate) fn source_identity() -> Result<String, tidepool_toolchain::cache::Sou
 }
 
 /// Resolve a run's library roots, retaining a configured deployment's final
-/// stdlib path. A dev build refuses source bytes changed after its build.
+/// source paths. A dev build refuses source bytes changed after its build.
 pub(crate) fn runtime_source_roots(
-    deployed_stdlib: Option<&Path>,
+    deployment: Option<&tidepool_toolchain::toolchain::NativeCatalogSourceSelection>,
 ) -> Result<[PathBuf; 2], Box<dyn std::error::Error>> {
-    let stdlib = match deployed_stdlib {
-        Some(root) => root.to_path_buf(),
-        None => ensure_builtin_stdlib()?,
+    use tidepool_toolchain::toolchain::NativeSourceRole;
+    let roots = match deployment {
+        Some(selection) => [
+            selection.root(NativeSourceRole::Stdlib),
+            selection.root(NativeSourceRole::Actors),
+        ],
+        None => [ensure_builtin_stdlib()?, ensure_builtin_exomonad_haskell()?],
     };
-    let roots = [stdlib, ensure_exomonad_haskell()?];
-    if let Some(expected) = DEV_SOURCE_IDENTITY {
-        verify_dev_source_roots(&roots, expected)?;
-    }
+    let expected = runtime_capture_identity(&roots)?;
+    verify_runtime_capture(&roots, &expected)?;
     Ok(roots)
+}
+
+fn configured_runtime_sources() -> Result<Option<[PathBuf; 2]>, Box<dyn std::error::Error>> {
+    tidepool_toolchain::toolchain::configured_module_source_selection()?
+        .as_ref()
+        .map(|selection| runtime_source_roots(Some(selection)))
+        .transpose()
 }
 
 /// The capture must compare its copied bytes with the binary's fixed dev
@@ -208,8 +217,8 @@ fn materialize(
 /// Resolve the configured deployment's immutable library, or use the ordinary
 /// development overrides and embedded fallback when no catalog is configured.
 pub fn ensure_stdlib() -> Result<PathBuf, Box<dyn std::error::Error>> {
-    if let Some(package) = tidepool_toolchain::toolchain::configured_module_package()? {
-        return Ok(package.source_root().to_path_buf());
+    if let Some([stdlib, _]) = configured_runtime_sources()? {
+        return Ok(stdlib);
     }
     let fallbacks = tidepool_toolchain::toolchain::StdlibFallbacks {
         bundle: Some(ensure_builtin_stdlib()?),
@@ -227,8 +236,8 @@ pub fn ensure_stdlib() -> Result<PathBuf, Box<dyn std::error::Error>> {
 /// materialized stand-in. Run admission validates this selected checkout
 /// against the identity embedded by the dev build before capturing it.
 pub(crate) fn ensure_embedded_stdlib() -> Result<PathBuf, Box<dyn std::error::Error>> {
-    if let Some(package) = tidepool_toolchain::toolchain::configured_module_package()? {
-        return Ok(package.source_root().to_path_buf());
+    if let Some([stdlib, _]) = configured_runtime_sources()? {
+        return Ok(stdlib);
     }
     ensure_builtin_stdlib()
 }
@@ -250,6 +259,13 @@ fn ensure_builtin_stdlib() -> Result<PathBuf, Box<dyn std::error::Error>> {
 /// embedded bundle when this build carries one, otherwise the checkout's
 /// `bridge/haskell/actors` located on disk.
 pub fn ensure_exomonad_haskell() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    if let Some([_, actors]) = configured_runtime_sources()? {
+        return Ok(actors);
+    }
+    ensure_builtin_exomonad_haskell()
+}
+
+fn ensure_builtin_exomonad_haskell() -> Result<PathBuf, Box<dyn std::error::Error>> {
     if EMBEDDED_EXOMONAD_HASKELL.is_empty() {
         return locate_exomonad_haskell().ok_or_else(|| {
             "this build has no embedded Exomonad Haskell and no bridge/haskell/actors was found \

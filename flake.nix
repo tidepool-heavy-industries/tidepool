@@ -187,23 +187,9 @@
               zstd -d -c "$source" > "$out/bin/reindeer"
               chmod +x "$out/bin/reindeer"
             '';
-        tidepoolRustPlatform = pkgs.makeRustPlatform {
-          cargo = rust;
-          rustc = rust;
-        };
-        # Cargo and browser assets consume one hash-verified harness tree.
-        # The lockfile must select its exact revision; unrelated workspace
-        # submodules are not inputs to either package.
-        matchedCargoDeps = import ./nix/matched-cargo-deps.nix {
-          rustPlatform = tidepoolRustPlatform;
-          inherit (pkgs) fetchgit;
-          harnessSource = harnessWeb;
-          lockFile = ./Cargo.lock;
-        };
-        # One Haskell package universe for both development and the deployed
-        # extractor. The worker loads Tidepool modules at runtime, so a bare
-        # compiler is not a usable development toolchain even when it can
-        # compile the worker executable itself.
+        # One Haskell package universe for development and native worker actions.
+        # The worker loads Tidepool modules at runtime, so a bare compiler is
+        # insufficient even when it can compile the worker executable itself.
         hsPkgs = pkgs.haskell.packages.ghc912.override {
           overrides = self': super': {
             mkDerivation =
@@ -267,7 +253,6 @@
           '';
           passthru.sourceRevision = "2aa685129aa4da4b3ec637abcf17666f087b93c8";
         };
-        exomonadSource = pkgs.lib.cleanSource ./.;
       in
       {
         devShells.default = pkgs.mkShell {
@@ -324,207 +309,7 @@
           '';
         };
 
-        packages.tidepool-extract =
-          let
-            # The overlay already wires patchedGhc into pkgs.haskell.packages.ghc912,
-            # so this package set has fat interfaces AND rebuilds all deps from source.
-            #
-            # freer-simple 1.2.1.2 needs a patch for GHC 9.12: MonadBase instance
-            # requires explicit Applicative+Monad constraints due to superclass changes.
-            # Every library package must be built with fat interface flags so that
-            # mi_extra_decls is populated. Without this, the fat interface fallback
-            # hits the PIT panic for non-boot-library packages (containers, aeson, etc.).
-            # Fidelity tests exercise the worker protocol directly. The build
-            # sandbox has no cabal, so point their worker override at the
-            # executable this same derivation just produced.
-            harness =
-              pkgs.haskell.lib.overrideCabal (hsPkgs.callCabal2nix "tidepool-extract" ./bridge/haskell { })
-                (old: {
-                  configureFlags = (old.configureFlags or [ ]) ++ [ "--enable-optimization=2" ];
-                  buildFlags = (old.buildFlags or [ ]) ++ [ "--verbose" ];
-                  preCheck = (old.preCheck or "") + ''
-                    export TIDEPOOL_EXTRACT_WORKER="$PWD/dist/build/tidepool-extract-bin/tidepool-extract-bin"
-                    # Test suites (prepared-stg-pipeline-test, extract-fidelity-test,
-                    # …) drive the extractor pipeline over fixture Haskell source that
-                    # is compiled by discovering GHC on PATH at runtime (bridge/haskell/
-                    # CLAUDE.md's toolchain resolution), the same mechanism the
-                    # deployed `tidepool-extract` wrapper uses via ghcEnv on PATH. Since
-                    # e50831879, site-fixtures/Core.hs imports the real
-                    # `Control.Monad.Freer` (freer-simple) instead of a local stub, so
-                    # that runtime-discovered GHC must have freer-simple (and the rest
-                    # of ghcEnv's extra package set) in its package db, not just the
-                    # bare compiler `hsPkgs` builds this derivation with.
-                    export PATH="${ghcEnv}/bin:$PATH"
-                  '';
-                });
-            # Built from the workspace source with the workspace lockfile, the
-            # same way `exomonad-unwrapped` is, so every in-workspace
-            # convention (inherited lints, parity tests that read the Haskell
-            # sources) holds here too and the deploy cannot drift from what
-            # `just verify` checked.
-            frontend = tidepoolRustPlatform.buildRustPackage {
-              pname = "tidepool-extract-frontend";
-              version = "0.1.0";
-              src = exomonadSource;
-              cargoDeps = matchedCargoDeps;
-              cargoBuildFlags = [
-                "-p"
-                "tidepool-extract-cmd"
-              ];
-              cargoInstallFlags = [
-                "-p"
-                "tidepool-extract-cmd"
-              ];
-              # The daemon integration test needs the separately packaged GHC
-              # worker; the final wrapper is exercised by the repository battery.
-              cargoTestFlags = [
-                "-p"
-                "tidepool-extract-cmd"
-                "--lib"
-              ];
-              nativeBuildInputs = [ pkgs.pkg-config ];
-              buildInputs = [ pkgs.openssl ];
-            };
-          in
-          pkgs.runCommand "tidepool-extract" { nativeBuildInputs = [ pkgs.makeWrapper ]; } ''
-            mkdir -p "$out/bin" "$out/share/exomonad"
-            makeWrapper ${frontend}/bin/tidepool-extract "$out/bin/tidepool-extract" \
-              --prefix PATH : ${ghcEnv}/bin \
-              --set TIDEPOOL_EXTRACT_WORKER ${harness}/bin/tidepool-extract-bin
-            # Exomonad locates the pair before retaining the frontend for a run.
-            ln -s ${harness}/bin/tidepool-extract-bin "$out/bin/tidepool-extract-bin"
-            TIDEPOOL_EXTRACT_WORKER=${harness}/bin/tidepool-extract-bin \
-              TIDEPOOL_GHC_LIBDIR="$(${ghcEnv}/bin/ghc --print-libdir)" \
-              ${frontend}/bin/tidepool-extract --compiler-deployment-manifest \
-                "$out/share/exomonad/compiler-deployment.json"
-          '';
-
-        # Keep the source tree and its compiled products as distinct immutable
-        # outputs. The module packager must consume the exact extractor/worker
-        # pair above, and its product root must remain at its final Nix store
-        # path because that path is pinned into the catalog.
-        packages.runtime-stdlib-sources = pkgs.runCommand "tidepool-runtime-stdlib-sources" { } ''
-          mkdir -p "$out/lib"
-          cp -a ${
-            pkgs.lib.cleanSourceWith {
-              src = ./bridge/haskell/lib;
-              filter =
-                path: type:
-                if type == "directory" then
-                  builtins.baseNameOf path != "Prelude_cbor"
-                else
-                  type == "regular" && pkgs.lib.hasSuffix ".hs" path;
-            }
-          }/. "$out/lib/"
-        '';
-
-        packages.tidepool-module-package = tidepoolRustPlatform.buildRustPackage {
-          pname = "tidepool-module-package";
-          version = "0.1.0";
-          src = exomonadSource;
-          cargoDeps = matchedCargoDeps;
-          cargoBuildFlags = [
-            "-p"
-            "tidepool-toolchain"
-            "--bin"
-            "tidepool-module-package"
-          ];
-          cargoInstallFlags = [
-            "-p"
-            "tidepool-toolchain"
-            "--bin"
-            "tidepool-module-package"
-          ];
-          doCheck = false;
-          nativeBuildInputs = [ pkgs.pkg-config ];
-          buildInputs = [ pkgs.openssl ];
-        };
-
-        packages.runtime-stdlib-products = pkgs.runCommand "tidepool-runtime-stdlib-products" { } ''
-          export TIDEPOOL_EXTRACT="${self.packages.${system}.tidepool-extract}/bin/tidepool-extract"
-          export TIDEPOOL_EXTRACT_WORKER="${
-            self.packages.${system}.tidepool-extract
-          }/bin/tidepool-extract-bin"
-          export TIDEPOOL_COMPILER_DEPLOYMENT="${
-            self.packages.${system}.tidepool-extract
-          }/share/exomonad/compiler-deployment.json"
-          export TIDEPOOL_PRELUDE_DIR="${self.packages.${system}.runtime-stdlib-sources}/lib"
-          export TIDEPOOL_GHC_LIBDIR="$(${ghcEnv}/bin/ghc --print-libdir)"
-          ${self.packages.${system}.tidepool-module-package}/bin/tidepool-module-package build \
-            --source-root "${self.packages.${system}.runtime-stdlib-sources}/lib" \
-            --output-root "$out"
-        '';
-
         packages.exomonad-embedded-assets = embeddedWebAssets;
-
-        packages.exomonad-unwrapped = tidepoolRustPlatform.buildRustPackage {
-          pname = "exomonad-unwrapped";
-          version = "0.1.0";
-          src = exomonadSource;
-          cargoDeps = matchedCargoDeps;
-          cargoBuildFlags = [
-            "-p"
-            "tidepool"
-            "--bin"
-            "exomonad"
-            "--bin"
-            "exomonad-view-helper"
-          ];
-          cargoInstallFlags = [
-            "-p"
-            "tidepool"
-            "--bin"
-            "exomonad"
-            "--bin"
-            "exomonad-view-helper"
-          ];
-          doCheck = false;
-          nativeBuildInputs = [ pkgs.pkg-config ];
-          buildInputs = [ pkgs.openssl ];
-          # Nix-built binaries carry no checkout to read bridge/haskell from at
-          # runtime, so this release build must embed it (see build.rs).
-          TIDEPOOL_EMBED_HASKELL = "1";
-        };
-
-        packages.exomonad = pkgs.symlinkJoin {
-          name = "exomonad";
-          paths = [
-            self.packages.${system}.exomonad-unwrapped
-            embeddedWebAssets
-          ];
-          nativeBuildInputs = [ pkgs.makeWrapper ];
-          postBuild = ''
-            wrapProgram "$out/bin/exomonad" \
-              --prefix PATH : ${
-                pkgs.lib.makeBinPath (
-                  [
-                    self.packages.${system}.tidepool-extract
-                    pkgs.bubblewrap
-                    pkgs.coreutils
-                    pkgs.git
-                    pkgs.tmux
-                  ]
-                  ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.systemd ]
-                )
-              } \
-              --set TIDEPOOL_EXTRACT "${self.packages.${system}.tidepool-extract}/bin/tidepool-extract" \
-              --set TIDEPOOL_COMPILER_DEPLOYMENT "${
-                self.packages.${system}.tidepool-extract
-              }/share/exomonad/compiler-deployment.json" \
-              --set TIDEPOOL_PRELUDE_DIR "${self.packages.${system}.runtime-stdlib-sources}/lib" \
-              --set TIDEPOOL_COMPILER_MODULES "${
-                self.packages.${system}.runtime-stdlib-products
-              }/catalog.json" \
-              --set EXOMONAD_NIX_BIN "${pkgs.nix}/bin/nix" \
-              --set EXOMONAD_EMBEDDED_ASSET_ROOT "${embeddedWebAssets}/share/exomonad/web"
-          '';
-        };
-
-        apps.exomonad = flake-utils.lib.mkApp {
-          drv = self.packages.${system}.exomonad;
-        };
-
-        packages.default = self.packages.${system}.tidepool-extract;
 
         packages.buck-rust = rust;
         packages.buck-buck2 = buck2Release;
@@ -588,6 +373,7 @@
             pkgs.bubblewrap
             pkgs.tmux
             pkgs.nix
+            pkgs.python3
           ]
           ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.systemd pkgs.util-linux ];
         };
@@ -688,16 +474,11 @@
             touch $out
           '';
 
-          # Covers extractor construction as part of `nix flake check`.
-          tidepool-extract = self.packages.${system}.tidepool-extract;
-
           embedded-web-provenance = pkgs.runCommand "embedded-web-provenance" { } ''
             ${pkgs.python3}/bin/python3 ${./scripts/embedded_web_provenance.py} --self-test --check --root ${./.}
             test -s ${embeddedWebAssets}/share/exomonad/web/index.html
             touch "$out"
           '';
-
-          exomonad = self.packages.${system}.exomonad;
         };
       }
     );

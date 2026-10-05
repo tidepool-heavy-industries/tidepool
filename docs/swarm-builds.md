@@ -152,8 +152,10 @@ Additional focused execution targets include:
 | `//bridge/facade:facade_browser_test` | One explicitly selected ignored Chromium journey |
 | `//bridge/haskell:planned_declaration` | Original declaration/interface authority suite |
 | `//bridge/haskell:source_boot_product_reuse` | SOURCE/boot product reuse and invalidation suite |
-| `//build/package:matched_runtime_smoke` | Assembled CLI, worker protocol and asset checks |
-| `//build/package/worker-compile-smoke:packaged_worker_compile` | Packaged worker compiles a declared Haskell fixture |
+
+Bundle process checks and executed acceptance belong to the central native
+qualification owner; see `build/package/README.md` for its frozen descriptor and
+report commands.
 
 Target availability is not a passing acceptance result. In particular, the
 real host/browser gates remain subject to the evidence ledger. Runtime and
@@ -250,59 +252,21 @@ does not establish the six production M2 gates or M1 browser acceptance.
 Source declarations and their actual executed qualification remain separate
 in the delivery evidence ledger.
 
-The optional `matched_runtime_bundle` owns separate Nix catalog products.
-Native source-backed configuration selects `.#buck-exomonad-runtime-tools`
-independently of `--runtime-stdlib`; configure prepares and roots it before
-bundle actions. Both modes preserve separately installed stock Codex and its
-credential owner; neither builds or packages credentials.
+Nix supplies pinned tools, source bytes and third-party browser assets. Native
+project actions build the frontend, worker, module packager, host and catalog.
+Configuration prepares and roots `.#buck-exomonad-runtime-tools`, including the
+Python required by the native entrypoint, before bundle actions. Stock Codex and
+its credentials retain their separately installed owner.
 
-The matched runtime bundle includes `share/exomonad/compiler-deployment.json`,
-generated from that bundle's frontend, worker, and pinned GHC library directory
-before any compiler endpoint is observed. The Nix `exomonad` package points
-`TIDEPOOL_COMPILER_DEPLOYMENT` at the same manifest packaged with
-`tidepool-extract`. Local `just` workflows generate
-`target/compiler-deployment.json` from the selected frontend/worker pair and
-export its absolute path; an explicit `TIDEPOOL_COMPILER_DEPLOYMENT` must name
-an absolute path to a readable nonempty manifest and is left intact. Runtime
-admission then checks configured producer and worker digests before binding,
-with endpoint identity retained as a separate observation. The producer
-identity binds the selected worker path, so Buck tests consume the canonical
-`matched_runtime_bundle` output path. If that bundle is copied elsewhere, its
-manifest must be regenerated there from the copied frontend, worker, and same
-GHC library directory before use; the Buck bundle does not promise path-free
-relocation.
-
-The Nix `runtime-stdlib-sources` and `runtime-stdlib-products` packages produce
-the immutable source and original product inputs for the shipped Prelude
-cohort. `tidepool-module-package` is the producing CLI; the product derivation
-runs `tidepool-module-package build --source-root SOURCE/lib --output-root OUT`
-with the same configured compiler deployment as `exomonad`. Source and product
-roots must be their final canonical Nix store paths. The version 1 catalog
-does not support moving either tree or redirecting source files through aliases.
-Development and authored source roots retain their existing capture policy.
-
-`exomonad` selects the optional catalog with `TIDEPOOL_COMPILER_MODULES`.
-The existing toolchain candidate owner validates its configured producer and
-worker, complete source manifest, and per-module `owner.json`, `products.cbor`,
-`skinny.hi`, `packages.cbor`, and `dependencies.json` files. Original product
-bytes and module versions are preserved. The generated catalog's schema is
-owned by `tidepool/toolchain/src/module_candidates/deployment.rs`; original
-TPMOD payloads are admitted by the production execution-schema reader. The
-producing CLI validates its completed catalog through that same owner. These
-generated package resources are separate from the checked-in TPSTG fixtures.
-
-The first producer requires an original product for every home source reached
-from `Tidepool.Prelude`. A missing product refuses with its module and compiler
-availability status. At runtime, current ordered source resolution, package
-witnesses, GHC interface checks, and candidate closure admission still determine
-reuse. A valid candidate shadowed by authored code can fall back to fresh
-compilation; invalid configured catalogs refuse at package source or candidate
-selection. Sealed exact contexts use their own admitted artifacts, and the
-package producer bypasses configured candidate input. The first package builds the
-cohort in one action and exposes independent module files. It does not claim
-independent build actions per module. Buck's copying `nix_directory` rule cannot
-relocate this catalog; consuming the original store roots requires declared
-resources that preserve those roots.
+Catalog source retention, production and bundle qualification use the central
+owner in `build/package/qualification.py`. Its native catalog source selection
+contains the ordered effects, stdlib, actor and Jev roots plus the declared probe.
+The producer admits original products from the matched compiler action; the
+qualifier independently checks retained Nix source provenance and the frozen
+bundle contract. Original source paths remain fixed while the complete product
+container can move unchanged. See `build/package/README.md` for the exact source
+retention, production, freeze and qualification commands. Compilation, diagnostic
+inventory and self-consistency checks do not establish executed acceptance.
 
 `buck-out` must be a bind mount of a per-checkout directory on `/srv/build`; a
 symlink is not supported. Check `findmnt --mountpoint "$PWD/buck-out"` before

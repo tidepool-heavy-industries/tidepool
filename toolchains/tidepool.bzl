@@ -105,6 +105,22 @@ nix_directory = rule(
     },
 )
 
+def _native_catalog_retention_impl(ctx):
+    if not ctx.attrs.record:
+        fail("select retained native catalog source evidence before building the catalog")
+    record = json.decode(ctx.attrs.record)
+    if type(record) != "dict" or record.get("kind") != "native-catalog-source-retention":
+        fail("native catalog retention must be the qualification owner's exact JSON record")
+    output = ctx.actions.write_json("retained-catalog-sources.json", record)
+    return [DefaultInfo(default_output = output)]
+
+# The complete record bytes are an action input. Its original evidence pathname
+# alone is never treated as the declared retention record.
+native_catalog_retention = rule(
+    impl = _native_catalog_retention_impl,
+    attrs = {"record": attrs.string()},
+)
+
 
 def _checked_harness_source_impl(ctx):
     if bool(ctx.attrs.source) == bool(ctx.attrs.store_path):

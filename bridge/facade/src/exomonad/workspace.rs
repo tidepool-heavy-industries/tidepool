@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use tidepool_toolchain::toolchain::{NativeCatalogSourceSelection, NativeSourceRole};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -70,24 +71,24 @@ pub(crate) struct PromptConfig {
     pub files: BTreeMap<String, PathBuf>,
 }
 
-/// A deployed standard library keeps its final immutable source location.
+/// Deployed libraries retain one ordered original source selection.
 /// The catalog identity authenticates its compiler and original module products;
 /// this record pins the run's selection and grants no native value authority.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct DeploymentSourceRoot {
+struct DeploymentSources {
     version: u32,
-    root: PathBuf,
+    sources: NativeCatalogSourceSelection,
     source_pin: String,
     producer_identity: [u8; 32],
     catalog_identity: String,
 }
 
-impl DeploymentSourceRoot {
+impl DeploymentSources {
     fn from_package(package: &tidepool_toolchain::toolchain::DeploymentModulePackage) -> Self {
         Self {
             version: 1,
-            root: package.source_root().to_path_buf(),
+            sources: package.source_selection().clone(),
             source_pin: package.source_identity().to_owned(),
             producer_identity: *package.producer_identity(),
             catalog_identity: package.catalog_identity().to_owned(),
@@ -97,28 +98,40 @@ impl DeploymentSourceRoot {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum RuntimeStdlib {
-    Captured { root: PathBuf },
-    Deployment { selection: DeploymentSourceRoot },
+enum RuntimeLibraries {
+    Captured { stdlib: PathBuf, actors: PathBuf },
+    Deployment { selection: DeploymentSources },
 }
 
-impl Default for RuntimeStdlib {
+impl Default for RuntimeLibraries {
     fn default() -> Self {
         Self::Captured {
-            root: PathBuf::new(),
+            stdlib: PathBuf::new(),
+            actors: PathBuf::new(),
         }
     }
 }
 
-impl RuntimeStdlib {
-    fn root(&self) -> &Path {
+impl RuntimeLibraries {
+    fn stdlib(&self) -> PathBuf {
         match self {
-            Self::Captured { root } => root,
-            Self::Deployment { selection } => &selection.root,
+            Self::Captured { stdlib, .. } => stdlib.clone(),
+            Self::Deployment { selection } => selection.sources.root(NativeSourceRole::Stdlib),
         }
     }
 
-    fn deployment(&self) -> Option<&DeploymentSourceRoot> {
+    fn actors(&self) -> PathBuf {
+        match self {
+            Self::Captured { actors, .. } => actors.clone(),
+            Self::Deployment { selection } => selection.sources.root(NativeSourceRole::Actors),
+        }
+    }
+
+    fn roots(&self) -> [PathBuf; 2] {
+        [self.stdlib(), self.actors()]
+    }
+
+    fn deployment(&self) -> Option<&DeploymentSources> {
         match self {
             Self::Captured { .. } => None,
             Self::Deployment { selection } => Some(selection),
@@ -149,9 +162,7 @@ pub struct FrozenWorkspace {
     #[serde(default)]
     core_identity: String,
     #[serde(default)]
-    runtime_stdlib: RuntimeStdlib,
-    #[serde(default)]
-    runtime_actors: PathBuf,
+    runtime_libraries: RuntimeLibraries,
     /// Detect added Haskell modules as well as edits to recorded files.
     #[serde(default)]
     runtime_capture_identity: String,
@@ -161,20 +172,20 @@ impl FrozenWorkspace {
     pub(crate) fn load(workspace: &Path, run_root: &Path) -> Result<Self> {
         let deployment = tidepool_toolchain::toolchain::configured_module_package()?
             .as_ref()
-            .map(DeploymentSourceRoot::from_package);
+            .map(DeploymentSources::from_package);
         Self::load_with_deployment(workspace, run_root, deployment)
     }
 
     fn load_with_deployment(
         workspace: &Path,
         run_root: &Path,
-        deployment: Option<DeploymentSourceRoot>,
+        deployment: Option<DeploymentSources>,
     ) -> Result<Self> {
         if deployment
             .as_ref()
             .is_some_and(|selection| selection.version != 1)
         {
-            return Err("unsupported standard library deployment source format".into());
+            return Err("unsupported runtime library deployment source format".into());
         }
         let directory = run_root.join("workspace");
         let manifest = directory.join("selection.json");
@@ -184,7 +195,7 @@ impl FrozenWorkspace {
                 return Err("frozen workspace uses obsolete [haskell] tools; migrate to spec = 'Module.agentSpec' with agentSpec = defaultSpec { specTools = yourTools }, then start a new run".into());
             }
             let frozen: Self = serde_json::from_value(selection)?;
-            if frozen.version != 3 {
+            if frozen.version != 4 {
                 return Err("unsupported frozen workspace format; start a new run".into());
             }
             if frozen.library_identity != crate::haskell_sources::source_identity()? {
@@ -198,27 +209,33 @@ impl FrozenWorkspace {
                         .into(),
                 );
             }
-            if frozen.runtime_stdlib.deployment() != deployment.as_ref() {
-                return Err("frozen standard library deployment changed; start a new swarm".into());
+            if frozen.runtime_libraries.deployment() != deployment.as_ref() {
+                return Err("frozen runtime library deployment changed; start a new swarm".into());
             }
             let capture_root = directory.canonicalize()?;
-            let mut captures = vec![(frozen.runtime_actors.as_path(), "Tidepool/Check.hs")];
-            if let RuntimeStdlib::Captured { root } = &frozen.runtime_stdlib {
-                captures.push((root.as_path(), "Tidepool/Prelude.hs"));
-            }
-            for (root, sentinel) in captures {
-                if !root.canonicalize()?.starts_with(&capture_root)
-                    || !root.join(sentinel).is_file()
+            let runtime_roots = frozen.runtime_libraries.roots();
+            if let RuntimeLibraries::Captured { .. } = &frozen.runtime_libraries {
+                for (root, sentinel) in runtime_roots
+                    .iter()
+                    .zip(["Tidepool/Prelude.hs", "Tidepool/Check.hs"])
                 {
-                    return Err("frozen runtime library is outside its run capture".into());
+                    if !root.canonicalize()?.starts_with(&capture_root)
+                        || !root.join(sentinel).is_file()
+                    {
+                        return Err("frozen runtime library is outside its run capture".into());
+                    }
                 }
             }
+            if let Some(selection) = frozen.runtime_libraries.deployment() {
+                verify_deployment_sources(selection)?;
+            }
+            crate::haskell_sources::verify_runtime_capture(
+                &runtime_roots,
+                &frozen.runtime_capture_identity,
+            )?;
             let captured_identity = tidepool_toolchain::cache::source_roots_identity(
                 crate::haskell_sources::DEV_SOURCE_DOMAIN,
-                &[
-                    frozen.runtime_stdlib.root().to_path_buf(),
-                    frozen.runtime_actors.clone(),
-                ],
+                &runtime_roots,
             )?;
             if captured_identity != frozen.runtime_capture_identity {
                 return Err("frozen runtime library source changed".into());
@@ -241,9 +258,7 @@ impl FrozenWorkspace {
         }
         let base = workspace.join(".exomonad");
         let runtime_sources = crate::haskell_sources::runtime_source_roots(
-            deployment
-                .as_ref()
-                .map(|selection| selection.root.as_path()),
+            deployment.as_ref().map(|selection| &selection.sources),
         )?;
         let runtime_identity = crate::haskell_sources::runtime_capture_identity(&runtime_sources)?;
         std::fs::create_dir_all(&directory)?;
@@ -258,7 +273,7 @@ impl FrozenWorkspace {
             capture_sources(source, &relative, &directory, &mut files)?;
             include.push(directory.join(relative));
         }
-        let (runtime_stdlib, runtime_actors) = capture_selected_runtime_libraries(
+        let runtime_libraries = capture_selected_runtime_libraries(
             &runtime_sources,
             &runtime_identity,
             deployment,
@@ -347,7 +362,7 @@ impl FrozenWorkspace {
             &config_text,
             &library_identity,
             &core_identity,
-            runtime_stdlib.deployment(),
+            runtime_libraries.deployment(),
             &prompts,
             logical_files,
         ))?)
@@ -377,7 +392,7 @@ impl FrozenWorkspace {
         );
         include.push(directory.join("resources"));
         let frozen = Self {
-            version: 3,
+            version: 4,
             identity,
             include,
             modules: config.haskell.modules,
@@ -389,8 +404,7 @@ impl FrozenWorkspace {
             config: config_text,
             library_identity,
             core_identity,
-            runtime_stdlib,
-            runtime_actors,
+            runtime_libraries,
             runtime_capture_identity: runtime_identity,
         };
         tidepool_atomic_write::write_durable(&manifest, &serde_json::to_vec_pretty(&frozen)?)?;
@@ -401,12 +415,18 @@ impl FrozenWorkspace {
         &self.identity
     }
 
-    pub(crate) fn runtime_stdlib(&self) -> &Path {
-        self.runtime_stdlib.root()
+    pub(crate) fn runtime_stdlib(&self) -> PathBuf {
+        self.runtime_libraries.stdlib()
     }
 
-    pub(crate) fn runtime_actors(&self) -> &Path {
-        &self.runtime_actors
+    pub(crate) fn runtime_actors(&self) -> PathBuf {
+        self.runtime_libraries.actors()
+    }
+
+    pub(crate) fn runtime_catalog_roots(&self) -> Option<Vec<PathBuf>> {
+        self.runtime_libraries
+            .deployment()
+            .map(|selection| selection.sources.include_roots())
     }
 
     /// This run's verified capture of the workspace's source roots, in search
@@ -848,37 +868,55 @@ pub(super) fn capture_sources(
 fn capture_selected_runtime_libraries(
     sources: &[PathBuf; 2],
     expected_identity: &str,
-    deployment: Option<DeploymentSourceRoot>,
+    deployment: Option<DeploymentSources>,
     directory: &Path,
     capture: uuid::Uuid,
     files: &mut BTreeMap<PathBuf, String>,
-) -> Result<(RuntimeStdlib, PathBuf)> {
+) -> Result<RuntimeLibraries> {
     let Some(selection) = deployment else {
-        let captured =
+        let [stdlib, actors] =
             capture_runtime_libraries(sources, expected_identity, directory, capture, files)?;
-        return Ok((
-            RuntimeStdlib::Captured {
-                root: captured[0].clone(),
-            },
-            captured[1].clone(),
-        ));
+        return Ok(RuntimeLibraries::Captured { stdlib, actors });
     };
-    if selection.version != 1 || selection.root != sources[0].canonicalize()? {
-        return Err("unsupported or relocated standard library deployment".into());
+    verify_deployment_sources(&selection)?;
+    let selected = [
+        selection.sources.root(NativeSourceRole::Stdlib),
+        selection.sources.root(NativeSourceRole::Actors),
+    ];
+    if selected != [sources[0].canonicalize()?, sources[1].canonicalize()?] {
+        return Err("relocated runtime library deployment".into());
     }
-    let relative = PathBuf::from(format!("libraries/{capture}/actors"));
-    capture_sources(&sources[1], &relative, directory, files)?;
-    let actors = directory.join(relative);
-    let selected = [selection.root.clone(), actors.clone()];
-    let captured_identity = tidepool_toolchain::cache::source_roots_identity(
+    let selected_identity = tidepool_toolchain::cache::source_roots_identity(
         crate::haskell_sources::DEV_SOURCE_DOMAIN,
         &selected,
     )?;
-    if captured_identity != expected_identity {
+    if selected_identity != expected_identity {
         return Err("runtime Haskell library changed during run capture".into());
     }
     crate::haskell_sources::verify_runtime_capture(&selected, expected_identity)?;
-    Ok((RuntimeStdlib::Deployment { selection }, actors))
+    Ok(RuntimeLibraries::Deployment { selection })
+}
+
+fn verify_deployment_sources(selection: &DeploymentSources) -> Result<()> {
+    if selection.version != 1
+        || selection.sources.roles != NativeSourceRole::ORDERED
+        || selection.sources.snapshot_root.canonicalize()? != selection.sources.snapshot_root
+    {
+        return Err("unsupported or relocated runtime library deployment".into());
+    }
+    for root in selection.sources.include_roots() {
+        if !root.is_dir() || root.canonicalize()? != root {
+            return Err("missing or aliased runtime library deployment root".into());
+        }
+    }
+    // Inspect before hashing so source aliases cannot enter a retained selection.
+    inspect_sources(&selection.sources.snapshot_root)?;
+    if tidepool_toolchain::cache::source_root_manifest(&selection.sources.snapshot_root)?
+        != selection.sources.source_files
+    {
+        return Err("runtime library deployment source changed".into());
+    }
+    Ok(())
 }
 
 /// Inspect the same files and enforce the same source-tree policy as capture,
@@ -988,19 +1026,34 @@ mod tests {
 
     // Workspace tests supply a private selection mirror. Production constructs
     // that mirror only from the toolchain's admitted immutable module package.
-    fn deployment_fixture() -> (tempfile::TempDir, DeploymentSourceRoot) {
+    fn deployment_fixture() -> (tempfile::TempDir, DeploymentSources) {
         let fixture = tempfile::tempdir().unwrap();
         let sources = crate::haskell_sources::runtime_source_roots(None).unwrap();
         capture_sources(
             &sources[0],
-            Path::new("stdlib"),
+            Path::new("lib"),
             fixture.path(),
             &mut BTreeMap::new(),
         )
         .unwrap();
-        let selection = DeploymentSourceRoot {
+        capture_sources(
+            &sources[1],
+            Path::new("actors"),
+            fixture.path(),
+            &mut BTreeMap::new(),
+        )
+        .unwrap();
+        for role in NativeSourceRole::ORDERED {
+            std::fs::create_dir_all(fixture.path().join(role.relative_root())).unwrap();
+        }
+        let selection = DeploymentSources {
             version: 1,
-            root: fixture.path().join("stdlib").canonicalize().unwrap(),
+            sources: NativeCatalogSourceSelection {
+                snapshot_root: fixture.path().canonicalize().unwrap(),
+                roles: NativeSourceRole::ORDERED,
+                source_files: tidepool_toolchain::cache::source_root_manifest(fixture.path())
+                    .unwrap(),
+            },
             source_pin: "fixture-source".into(),
             producer_identity: [7; 32],
             catalog_identity: "fixture-catalog".into(),
@@ -1016,7 +1069,7 @@ mod tests {
     }
 
     #[test]
-    fn deployed_stdlib_retains_final_root_without_run_copy() {
+    fn deployed_libraries_retain_original_roots_without_run_copy() {
         let (_fixture, selection) = deployment_fixture();
         let project = deployment_project("[defaults]\nmodel = 'gpt-6-sol'\n");
         let first = tempfile::tempdir().unwrap();
@@ -1027,13 +1080,15 @@ mod tests {
             Some(selection.clone()),
         )
         .unwrap();
-        assert_eq!(frozen.runtime_stdlib(), selection.root);
-        assert!(frozen.runtime_actors().starts_with(first.path()));
-        for capture in std::fs::read_dir(first.path().join("workspace/libraries")).unwrap() {
-            let capture = capture.unwrap().path();
-            assert!(!capture.join("stdlib").exists());
-            assert!(capture.join("actors/Tidepool/Check.hs").is_file());
-        }
+        assert_eq!(
+            frozen.runtime_stdlib(),
+            selection.sources.root(NativeSourceRole::Stdlib)
+        );
+        assert_eq!(
+            frozen.runtime_actors(),
+            selection.sources.root(NativeSourceRole::Actors)
+        );
+        assert!(!first.path().join("workspace/libraries").exists());
         let identical = FrozenWorkspace::load_with_deployment(
             project.path(),
             second.path(),
@@ -1056,28 +1111,30 @@ mod tests {
             .unwrap();
         let manifest = run.path().join("workspace/selection.json");
         let admitted = std::fs::read(&manifest).unwrap();
-        let prelude = selection.root.join("Tidepool/Prelude.hs");
+        let prelude = selection
+            .sources
+            .root(NativeSourceRole::Stdlib)
+            .join("Tidepool/Prelude.hs");
         let original = std::fs::read(&prelude).unwrap();
         std::fs::write(&prelude, "module Tidepool.Prelude where\n").unwrap();
-        assert!(
-            FrozenWorkspace::load_with_deployment(
-                project.path(),
-                run.path(),
-                Some(selection.clone())
-            )
-            .is_err()
-        );
+        assert!(FrozenWorkspace::load_with_deployment(
+            project.path(),
+            run.path(),
+            Some(selection.clone())
+        )
+        .is_err());
         std::fs::write(&prelude, original).unwrap();
-        let extra = selection.root.join("Tidepool/DeploymentExtra.hs");
+        let extra = selection
+            .sources
+            .root(NativeSourceRole::Stdlib)
+            .join("Tidepool/DeploymentExtra.hs");
         std::fs::write(&extra, "module Tidepool.DeploymentExtra where\n").unwrap();
-        assert!(
-            FrozenWorkspace::load_with_deployment(
-                project.path(),
-                run.path(),
-                Some(selection.clone())
-            )
-            .is_err()
-        );
+        assert!(FrozenWorkspace::load_with_deployment(
+            project.path(),
+            run.path(),
+            Some(selection.clone())
+        )
+        .is_err());
         std::fs::remove_file(extra).unwrap();
         std::fs::remove_file(prelude).unwrap();
         assert!(
@@ -1085,6 +1142,36 @@ mod tests {
                 .is_err()
         );
         assert_eq!(std::fs::read(manifest).unwrap(), admitted);
+    }
+
+    #[test]
+    fn deployed_actor_changes_and_aliases_refuse_without_copying_sources() {
+        let (fixture, selection) = deployment_fixture();
+        let project = deployment_project("[defaults]\nmodel = 'gpt-6-sol'\n");
+        let run = tempfile::tempdir().unwrap();
+        FrozenWorkspace::load_with_deployment(project.path(), run.path(), Some(selection.clone()))
+            .unwrap();
+        let manifest = run.path().join("workspace/selection.json");
+        let admitted = std::fs::read(&manifest).unwrap();
+        let actors = selection.sources.root(NativeSourceRole::Actors);
+        let sentinel = actors.join("Tidepool/Check.hs");
+        let original = std::fs::read(&sentinel).unwrap();
+        std::fs::write(&sentinel, "changed actor source").unwrap();
+        assert!(FrozenWorkspace::load_with_deployment(
+            project.path(),
+            run.path(),
+            Some(selection.clone())
+        )
+        .is_err());
+        std::fs::write(&sentinel, original).unwrap();
+        std::fs::rename(&actors, fixture.path().join("original-actors")).unwrap();
+        std::os::unix::fs::symlink(fixture.path().join("original-actors"), &actors).unwrap();
+        assert!(
+            FrozenWorkspace::load_with_deployment(project.path(), run.path(), Some(selection))
+                .is_err()
+        );
+        assert_eq!(std::fs::read(manifest).unwrap(), admitted);
+        assert!(!run.path().join("workspace/libraries").exists());
     }
 
     #[test]
@@ -1096,17 +1183,26 @@ mod tests {
             .unwrap();
         let manifest = run.path().join("workspace/selection.json");
         let admitted = std::fs::read(&manifest).unwrap();
-        let mut changed = vec![selection.clone(); 5];
+        let mut changed = vec![selection.clone(); 7];
         changed[0].version = 2;
         changed[1].source_pin.push_str("-changed");
         changed[2].producer_identity[0] ^= 1;
         changed[3].catalog_identity.push_str("-changed");
-        changed[4].root = selection.root.parent().unwrap().join("relocated");
+        changed[4].sources.snapshot_root = selection
+            .sources
+            .snapshot_root
+            .parent()
+            .unwrap()
+            .join("relocated");
+        changed[5].sources.roles.swap(0, 1);
+        changed[6].sources.source_files[0].1.push_str("-changed");
         for selection in changed {
-            assert!(
-                FrozenWorkspace::load_with_deployment(project.path(), run.path(), Some(selection))
-                    .is_err()
-            );
+            assert!(FrozenWorkspace::load_with_deployment(
+                project.path(),
+                run.path(),
+                Some(selection)
+            )
+            .is_err());
             assert_eq!(std::fs::read(&manifest).unwrap(), admitted);
         }
         assert!(FrozenWorkspace::load_with_deployment(project.path(), run.path(), None).is_err());
@@ -1117,11 +1213,9 @@ mod tests {
         let error =
             FrozenWorkspace::load_with_deployment(project.path(), run.path(), Some(selection))
                 .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("unsupported frozen workspace format")
-        );
+        assert!(error
+            .to_string()
+            .contains("unsupported frozen workspace format"));
         assert_eq!(std::fs::read(manifest).unwrap(), old);
     }
 
@@ -1151,11 +1245,9 @@ mod tests {
             .find_map(|root| std::fs::read_to_string(root.join("Project/Shared.hs")).ok())
             .unwrap();
         assert!(winner.contains("value = 1"));
-        assert!(
-            std::fs::read_to_string(roots[1].join("Project/Shared.hs"))
-                .unwrap()
-                .contains("value = 2")
-        );
+        assert!(std::fs::read_to_string(roots[1].join("Project/Shared.hs"))
+            .unwrap()
+            .contains("value = 2"));
         assert!(frozen.include.last().unwrap().ends_with("resources"));
     }
 
@@ -1223,7 +1315,7 @@ mod tests {
     }
 
     #[test]
-    fn frozen_v2_spec_selection_accepts_null_tools_and_rejects_obsolete_tools() {
+    fn frozen_spec_selection_accepts_null_tools_and_rejects_obsolete_tools() {
         let project = tempfile::tempdir().unwrap();
         let run = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(project.path().join(".exomonad")).unwrap();
@@ -1236,7 +1328,7 @@ mod tests {
         let manifest = run.path().join("workspace/selection.json");
         let mut selection: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
-        assert_eq!(selection["version"], 2);
+        assert_eq!(selection["version"], 4);
         selection["tools"] = serde_json::Value::Null;
         std::fs::write(&manifest, serde_json::to_vec(&selection).unwrap()).unwrap();
         let retained = FrozenWorkspace::load(project.path(), run.path()).unwrap();
@@ -1269,7 +1361,10 @@ mod tests {
         let mut selection: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
         selection["version"] = serde_json::json!(1);
-        selection.as_object_mut().unwrap().remove("runtime_stdlib");
+        selection
+            .as_object_mut()
+            .unwrap()
+            .remove("runtime_libraries");
         selection.as_object_mut().unwrap().remove("runtime_actors");
         selection
             .as_object_mut()
@@ -1278,11 +1373,9 @@ mod tests {
         selection.as_object_mut().unwrap().remove("core_identity");
         std::fs::write(&manifest, serde_json::to_vec(&selection).unwrap()).unwrap();
         let error = FrozenWorkspace::load(project.path(), run.path()).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("unsupported frozen workspace format")
-        );
+        assert!(error
+            .to_string()
+            .contains("unsupported frozen workspace format"));
     }
 
     #[test]
@@ -1350,12 +1443,10 @@ mod tests {
                 .contains("New")
         );
         std::fs::write(frozen.include[0].join("Project/Types.hs"), "tampered").unwrap();
-        assert!(
-            FrozenWorkspace::load(project.path(), first.path())
-                .unwrap_err()
-                .to_string()
-                .contains("frozen workspace input changed")
-        );
+        assert!(FrozenWorkspace::load(project.path(), first.path())
+            .unwrap_err()
+            .to_string()
+            .contains("frozen workspace input changed"));
     }
 
     #[test]
@@ -1610,14 +1701,12 @@ mod tests {
         )
         .unwrap();
         for argv in [&["init", "-q"][..], &["add", "-A"][..]] {
-            assert!(
-                std::process::Command::new("git")
-                    .args(argv)
-                    .current_dir(project)
-                    .status()
-                    .unwrap()
-                    .success()
-            );
+            assert!(std::process::Command::new("git")
+                .args(argv)
+                .current_dir(project)
+                .status()
+                .unwrap()
+                .success());
         }
     }
 

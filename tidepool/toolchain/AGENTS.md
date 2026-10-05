@@ -29,3 +29,9 @@ It sits below `tidepool-runtime` and must not depend on runtime/session errors.
   uses the configured direct compiler, and has no runtime cache authority.
   Export portable prepared programs and metadata only; source-bound compiler
   certificates never move into fixture resources or get restamped.
+- `build_deployment_module_package` shares build-action isolation and exports
+  authenticated module records through the existing catalog owner. A declared
+  probe and ordered targets select the cohort; deployment export never grants
+  runtime candidate publication. Schema 4 keeps original source paths and
+  proofs unchanged; product references resolve under the opened catalog's
+  canonical parent. Source retention remains the qualification owner's job.

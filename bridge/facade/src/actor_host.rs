@@ -2636,7 +2636,12 @@ pub(crate) fn validate_workspace_program(
     inputs: &crate::exomonad::workspace::FrozenWorkspace,
     run_root: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    compile_driver(inputs.runtime_actors(), Some(inputs), run_root, None)?;
+    compile_driver(
+        inputs.runtime_actors().as_path(),
+        Some(inputs),
+        run_root,
+        None,
+    )?;
     Ok(())
 }
 
@@ -2685,7 +2690,12 @@ pub(crate) fn spec_effect_preflight(
     let DriverSources {
         mut preamble,
         include,
-    } = driver_sources(workspace.runtime_actors(), Some(workspace), run_root, None)?;
+    } = driver_sources(
+        workspace.runtime_actors().as_path(),
+        Some(workspace),
+        run_root,
+        None,
+    )?;
     preamble = insert_preamble_imports(&preamble, "qualified Tidepool.Effects.Core");
     preamble = insert_preamble_imports(&preamble, "qualified Tidepool.Agent.Contract");
     preamble = insert_preamble_imports(&preamble, &format!("qualified {module}"));
@@ -2863,16 +2873,30 @@ fn driver_sources(
 ) -> Result<DriverSources, Box<dyn std::error::Error>> {
     let declarations = exomonad_effect_declarations();
     let effects = tidepool_mcp::ensure_effects_module(&declarations)?;
-    let mut include = effects.include_paths().to_vec();
-    include.push(
-        inputs
-            .map(|inputs| inputs.runtime_actors().to_path_buf())
-            .unwrap_or_else(|| haskell_root.to_path_buf()),
-    );
-    include.push(match inputs {
-        Some(inputs) => inputs.runtime_stdlib().to_path_buf(),
-        None => crate::haskell_sources::ensure_embedded_stdlib()?,
-    });
+    let deployment_roots = match inputs {
+        Some(inputs) => inputs.runtime_catalog_roots(),
+        None => tidepool_toolchain::toolchain::configured_module_source_selection()?
+            .map(|selection| selection.include_roots()),
+    };
+    let mut include = if let Some(mut roots) = deployment_roots {
+        if roots.first() != Some(&effects.core) {
+            return Err("frozen stable effect source selection changed".into());
+        }
+        roots.push(effects.orchestration.clone());
+        roots
+    } else {
+        let mut roots = effects.include_paths().to_vec();
+        roots.push(
+            inputs
+                .map(|inputs| inputs.runtime_actors())
+                .unwrap_or_else(|| haskell_root.to_path_buf()),
+        );
+        roots.push(match inputs {
+            Some(inputs) => inputs.runtime_stdlib(),
+            None => crate::haskell_sources::ensure_embedded_stdlib()?,
+        });
+        roots
+    };
     let mut preamble = insert_preamble_imports(
         &tidepool_mcp::build_notebook_preamble_with_companions_hiding(
             &declarations,

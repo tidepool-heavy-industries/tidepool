@@ -1,9 +1,38 @@
-load("@prelude//:rules.bzl", "export_file", "filegroup", "genrule", "sh_test")
+load("@prelude//:rules.bzl", "export_file", "filegroup", "genrule")
 load(":runtime_shared_libraries.bzl", "tidepool_runtime_shared_libraries")
-load("//build:native_profile.bzl", "selected_native_profile")
+load(":native_catalog.bzl", "native_catalog", "native_catalog_sources", "native_runtime_bundle")
+load("//bridge/haskell:components.bzl", "NATIVE_CATALOG_COHORT")
 
 export_file(name = "qualification_script", src = "qualification.py", visibility = ["PUBLIC"])
 export_file(name = "native_entrypoint", src = "native-entrypoint.sh", visibility = ["PUBLIC"])
+
+native_catalog_sources(
+    name = "native_catalog_sources",
+    cohort = NATIVE_CATALOG_COHORT,
+    sources = "//bridge/haskell:facade_embedded_sources",
+    effects = "//bridge/mcp:effects_generated",
+    jev_sources = "toolchains//:jev_sources",
+    visibility = ["PUBLIC"],
+)
+
+native_catalog(
+    name = "native_catalog",
+    snapshot = ":native_catalog_sources",
+    source_root = read_root_config("nix", "native_catalog_source_root", ""),
+    declared_source_root = "toolchains//:native_catalog_source_root",
+    retention_record = "toolchains//:native_catalog_retention_record",
+    retention_record_origin = read_root_config("nix", "native_catalog_retention_record", ""),
+    runtime_tools = "toolchains//:exomonad_runtime_tools",
+    runtime_tools_root = read_root_config("nix", "exomonad_runtime_tools", ""),
+    producer = "//tidepool/toolchain:tidepool-module-package",
+    frontend = "//tidepool/extract-cmd:tidepool-extract",
+    worker = "//bridge/haskell:tidepool_extract_bin",
+    deployment = ":compiler_deployment",
+    ghc_libdir = read_root_config("nix", "ghc_libdir"),
+    declared_ghc_libdir = "toolchains//:native_catalog_ghc_libdir",
+    libraries = ":tidepool_extract_runtime_libraries",
+    visibility = ["PUBLIC"],
+)
 
 filegroup(
     name = "qualification_inputs",
@@ -74,206 +103,7 @@ cp "$PWD/$(location root//:embedded_web_provenance_script)" "$SOURCE/scripts/emb
 
 # Native compiler bytes travel with the host; the selected final bundle path
 # supplies deployment provenance when its frontend generates the manifest.
-genrule(
-    name = "native_runtime_bundle",
-    srcs = [
-        "//bridge/facade:exomonad",
-        "//bridge/facade:exomonad-view-helper",
-        "//bridge/facade:tidepool_unit_tests",
-        "//tidepool/extract-cmd:tidepool-extract",
-        "//bridge/haskell:tidepool_extract_bin",
-        "//bridge/haskell:facade_embedded_sources",
-        "//web:dist",
-        ":embedded_web_provenance",
-        ":tidepool_extract_runtime_libraries",
-        ":qualification_script",
-        ":native_entrypoint",
-        "toolchains//:exomonad_runtime_tools",
-        "//build/rust:native_qualification_sources",
-        "//build/rust:workspace_gitlink",
-        "//build/rust:workspace_git_bundle",
-    ],
-    out = ".",
-    env = {
-        "PACKAGE_GHC_LIBDIR": read_root_config("nix", "ghc_libdir"),
-        "PACKAGE_RUNTIME_TOOLS": read_root_config("nix", "exomonad_runtime_tools", ""),
-        "PACKAGE_NATIVE_PROFILE": selected_native_profile(),
-    },
-    bash = """set -euo pipefail
-"$(exe toolchains//:python)" "$PWD/$(location :qualification_script)" assemble \
-  --output "$PWD/$OUT" \
-  --host "$PWD/$(location //bridge/facade:exomonad)" \
-  --view-helper "$PWD/$(location //bridge/facade:exomonad-view-helper)" \
-  --libtest "$PWD/$(location //bridge/facade:tidepool_unit_tests)" \
-  --build-sources "$PWD/$(location //build/rust:native_qualification_sources)" \
-  --workspace-gitlink "$PWD/$(location //build/rust:workspace_gitlink)" \
-  --workspace-git-bundle "$PWD/$(location //build/rust:workspace_git_bundle)" \
-  --frontend "$PWD/$(location //tidepool/extract-cmd:tidepool-extract)" \
-  --worker "$PWD/$(location //bridge/haskell:tidepool_extract_bin)" \
-  --sources "$PWD/$(location //bridge/haskell:facade_embedded_sources)" \
-  --assets "$PWD/$(location //web:dist)" \
-  --libraries "$PWD/$(location :tidepool_extract_runtime_libraries)" \
-  --harness-revision "$PWD/$(location :embedded_web_provenance)" \
-  --runtime-tools "$PACKAGE_RUNTIME_TOOLS" --ghc-libdir "$PACKAGE_GHC_LIBDIR" \
-  --entrypoint-template "$PWD/$(location :native_entrypoint)" \
-  --profile "$PACKAGE_NATIVE_PROFILE"
-""",
-    visibility = ["PUBLIC"],
-)
 
-# Assemble the Buck host and browser with one immutable Nix compiler deployment.
-# Nix remains the installed closure owner; Buck's native compiler pair is kept
-# separately by :compiler_deployment for development and focused tests.
-genrule(
-    name = "matched_runtime_bundle",
-    srcs = [
-        "//bridge/facade:exomonad",
-        "//bridge/facade:exomonad-view-helper",
-        "//web:dist",
-        ":embedded_web_provenance",
-        ":runtime_stdlib_deployment",
-        "toolchains//:runtime_stdlib_sources",
-        "toolchains//:runtime_stdlib_products",
-        "toolchains//:runtime_stdlib_extract",
-        "toolchains//:exomonad_runtime_tools",
-    ],
-    out = ".",
-    env = {
-        "PACKAGE_RUNTIME_TOOLS": read_root_config("nix", "exomonad_runtime_tools", ""),
-    },
-    bash = """set -euo pipefail
-OUTPUT="$PWD/$OUT"
-mkdir -p "$OUTPUT/bin" "$OUTPUT/share/exomonad/web"
-cp -a "$PWD/$(location //bridge/facade:exomonad)" "$OUTPUT/bin/exomonad-unwrapped"
-cp -a "$PWD/$(location //bridge/facade:exomonad-view-helper)" "$OUTPUT/bin/exomonad-view-helper"
-cp -a "$PWD/$(location :runtime_stdlib_deployment)" "$OUTPUT/share/exomonad/runtime-stdlib-deployment.json"
-"$(exe toolchains//:python)" - "$OUTPUT" "$PACKAGE_RUNTIME_TOOLS" <<'PY'
-import json
-import shlex
-import sys
-from pathlib import Path
+native_runtime_bundle(name = "native_runtime_bundle", catalog_backed = False)
 
-output, tools = sys.argv[1:]
-bash = str(Path(tools) / "bin/bash")
-coreutils = str(Path(tools) / "bin")
-root = Path(output)
-deployment = json.loads((root / "share/exomonad/runtime-stdlib-deployment.json").read_text())
-sources, products, extract, ghc_libdir = (Path(deployment[key]) for key in ("sources", "products", "extract", "ghc_libdir"))
-resources = {
-    "bin/tidepool-extract": extract / "bin/tidepool-extract",
-    "bin/tidepool-extract-bin": extract / "bin/tidepool-extract-bin",
-    "share/exomonad/compiler-deployment.json": extract / "share/exomonad/compiler-deployment.json",
-    "share/exomonad/catalog.json": products / "catalog.json",
-    "share/exomonad/stdlib": sources / "lib",
-    "share/exomonad/runtime-tools": Path(tools),
-}
-for name, target in resources.items():
-    if not target.exists():
-        raise SystemExit(f"Materialize the matched Nix deployment before assembling the package: {target}")
-    (root / name).symlink_to(target)
-if not ghc_libdir.is_dir():
-    raise SystemExit(f"Materialize the deployment GHC closure: {ghc_libdir}")
-(root / "share/exomonad/ghc-libdir.txt").write_text(str(ghc_libdir) + "\\n")
-environment = {
-    "TIDEPOOL_EXTRACT": extract / "bin/tidepool-extract",
-    "TIDEPOOL_EXTRACT_WORKER": extract / "bin/tidepool-extract-bin",
-    "TIDEPOOL_COMPILER_DEPLOYMENT": extract / "share/exomonad/compiler-deployment.json",
-    "TIDEPOOL_COMPILER_MODULES": products / "catalog.json",
-    "TIDEPOOL_PRELUDE_DIR": sources / "lib",
-    "TIDEPOOL_GHC_LIBDIR": ghc_libdir,
-    "PATH": str(Path(tools) / "bin") + ":" + str(extract / "bin"),
-}
-lines = ["#!" + bash, "set -euo pipefail",
-    'PACKAGE_BIN=$(cd -- "$(' + shlex.quote(coreutils + "/dirname") + ' -- "$0")" && pwd)']
-lines.extend("export " + key + "=" + shlex.quote(str(value)) for key, value in environment.items())
-lines.extend([
-    'export EXOMONAD_EMBEDDED_ASSET_ROOT="$PACKAGE_BIN/../share/exomonad/web"',
-    'unset TIDEPOOL_EXTRACT_DAEMON_SOCKET',
-    'exec "$PACKAGE_BIN/exomonad-unwrapped" "$@"',
-])
-wrapper = root / "bin/exomonad"
-wrapper.write_text("\\n".join(lines) + "\\n")
-wrapper.chmod(0o755)
-PY
-WEB="$PWD/$(location //web:dist)"
-cp -a "$WEB/web/." "$OUTPUT/share/exomonad/web/"
-cp -a "$PWD/$(location :embedded_web_provenance)" "$OUTPUT/share/exomonad/harness-source-revision.txt"
-""",
-    visibility = ["PUBLIC"],
-)
-
-sh_test(
-    name = "matched_runtime_smoke",
-    test = "smoke.sh",
-    args = [
-        "$(location :matched_runtime_bundle)",
-        "$(exe toolchains//:python)",
-    ],
-    resources = [
-        ":matched_runtime_bundle",
-        "toolchains//:runtime_stdlib_sources",
-        "toolchains//:runtime_stdlib_products",
-        "toolchains//:runtime_stdlib_extract",
-        "toolchains//:exomonad_runtime_tools",
-    ],
-    env = {
-        "PATH": read_root_config("nix", "bash").rsplit("/", 1)[0],
-    },
-    visibility = ["PUBLIC"],
-)
-
-# The descriptor retains canonical roots. The resource copies declare the
-# consumed immutable bytes and are never substituted for catalog identities.
-genrule(
-    name = "runtime_stdlib_deployment",
-    srcs = [
-        "toolchains//:runtime_stdlib_sources",
-        "toolchains//:runtime_stdlib_products",
-        "toolchains//:runtime_stdlib_extract",
-    ],
-    out = "deployment.json",
-    env = {
-        "SOURCES": read_root_config("nix", "runtime_stdlib_sources", ""),
-        "PRODUCTS": read_root_config("nix", "runtime_stdlib_products", ""),
-        "EXTRACT": read_root_config("nix", "runtime_stdlib_extract", ""),
-        "GHC_LIBDIR": read_root_config("nix", "runtime_stdlib_ghc_libdir", ""),
-    },
-    bash = """set -euo pipefail
-"$(exe toolchains//:python)" - "$OUT" "$SOURCES" "$PRODUCTS" "$EXTRACT" "$GHC_LIBDIR" <<'PY'
-import json
-import sys
-from pathlib import Path
-keys = ("sources", "products", "extract", "ghc_libdir")
-roots = dict(zip(keys, sys.argv[2:]))
-if any(not root.startswith("/nix/store/") for root in roots.values()):
-    raise SystemExit("Materialize the pinned runtime-stdlib package outputs and rerun scripts/buck2-configure.sh")
-Path(sys.argv[1]).write_text(json.dumps(roots, sort_keys=True) + "\\n")
-PY
-""",
-    visibility = ["PUBLIC"],
-)
-
-sh_test(
-    name = "packaged_catalog_native",
-    test = "packaged-catalog-consumer.sh",
-    args = [
-        "$(location :runtime_stdlib_deployment)",
-        "$(location //bridge/facade:tidepool_unit_tests)",
-        "$(exe toolchains//:bubblewrap)",
-        "$(location //build/rust:isolated_libtest_source)",
-        "$(exe toolchains//:python)",
-        "$(location :matched_runtime_bundle)",
-    ],
-    resources = [
-        ":runtime_stdlib_deployment",
-        ":matched_runtime_bundle",
-        "toolchains//:exomonad_runtime_tools",
-        "//bridge/facade:tidepool_unit_tests",
-        "//build/rust:isolated_libtest_source",
-        "toolchains//:runtime_stdlib_sources",
-        "toolchains//:runtime_stdlib_products",
-        "toolchains//:runtime_stdlib_extract",
-    ],
-    test_rule_timeout_ms = 660000,
-    visibility = ["PUBLIC"],
-)
+native_runtime_bundle(name = "native_catalog_runtime_bundle", catalog_backed = True)
