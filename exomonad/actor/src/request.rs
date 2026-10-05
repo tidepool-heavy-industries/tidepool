@@ -1,3 +1,6 @@
+#[cfg(test)]
+mod sequence_tests;
+
 mod invocation;
 pub(crate) mod routes;
 pub(crate) mod sources;

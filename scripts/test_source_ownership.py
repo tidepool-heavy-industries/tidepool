@@ -50,6 +50,7 @@ TEST_ONLY_SOURCES = {
         'bridge/facade/src/actor_host/m1_warm_cell_workloads.json',
     }),
     'exomonad-actor': frozenset({
+        'exomonad/actor/src/request/sequence_tests.rs',
         'exomonad/actor/src/resident_actor/capture_workspace_child.hs',
         'exomonad/actor/src/resident_actor/captured_readers_parent.hs',
         'exomonad/actor/src/resident_actor/captured_reader_reuse.hs',

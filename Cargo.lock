@@ -1078,6 +1078,7 @@ dependencies = [
  "frunk",
  "futures-util",
  "parking_lot",
+ "proptest",
  "ractor",
  "serde",
  "serde_json",
