@@ -11250,6 +11250,23 @@ mod tool_dispatch_tests {
 mod request_tests {
     use super::*;
 
+    fn fixture_actor_include(prelude: &std::path::Path) -> PathBuf {
+        // The declared Haskell runtime resource contains both lib and actors.
+        // Buck's CARGO_MANIFEST_DIR identifies a package, not a runtime path.
+        let actors = prelude
+            .parent()
+            .expect("stdlib source root has a parent")
+            .join("actors")
+            .canonicalize()
+            .expect("declared actor Haskell sources are required");
+        assert!(
+            actors.is_absolute() && actors.join("Tidepool/Actors/Exomonad.hs").is_file(),
+            "actor source root must be absolute and contain Tidepool.Actors.Exomonad: {}",
+            actors.display()
+        );
+        actors
+    }
+
     fn host_lookup_mount_fixture() -> (
         ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput>,
         crate::ActorSessionContext,
@@ -11267,8 +11284,9 @@ mod request_tests {
         ];
         let effects = tidepool_mcp::ensure_effects_module(&declarations).expect("actor effects");
         let mut include = effects.include_paths().to_vec();
-        include.push(tidepool_testing::eval_harness::prelude_path());
-        include.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../bridge/haskell/actors"));
+        let prelude = tidepool_testing::eval_harness::prelude_path();
+        let actors = fixture_actor_include(&prelude);
+        include.extend([prelude, actors]);
         let preamble = insert_preamble_imports(
             &tidepool_mcp::build_notebook_preamble(&declarations, false),
             "qualified Tidepool.Actors.Exomonad as Exomonad\nqualified Tidepool.Lookup as LookupApi",
@@ -11477,8 +11495,9 @@ mod request_tests {
         ];
         let effects = tidepool_mcp::ensure_effects_module(&declarations).expect("actor effects");
         let mut include = effects.include_paths().to_vec();
-        include.push(tidepool_testing::eval_harness::prelude_path());
-        include.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../bridge/haskell/actors"));
+        let prelude = tidepool_testing::eval_harness::prelude_path();
+        let actors = fixture_actor_include(&prelude);
+        include.extend([prelude, actors]);
         let preamble = insert_preamble_imports(
             &tidepool_mcp::build_notebook_preamble(&declarations, false),
             "qualified Tidepool.Actors.Exomonad as Exomonad",
@@ -16753,8 +16772,9 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         ];
         let effects = tidepool_mcp::ensure_effects_module(&declarations).unwrap();
         let mut include = effects.include_paths().to_vec();
-        include.push(tidepool_testing::eval_harness::prelude_path());
-        include.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../bridge/haskell/actors"));
+        let prelude = tidepool_testing::eval_harness::prelude_path();
+        let actors = fixture_actor_include(&prelude);
+        include.extend([prelude, actors]);
         let mut preamble = tidepool_mcp::build_notebook_preamble(&declarations, false);
         for import in [
             "Tidepool.Agent.Reply (Replies)",
