@@ -76,7 +76,7 @@ import Tidepool.ExecutionSchema
 import qualified Tidepool.ExecutionSchema as Execution
 import qualified Tidepool.EffectSchema
 import Tidepool.PreparedStg
-  ( PreparedModule, pmModule, pmYieldSites, PreparedBodyCache, newPreparedBodyCache
+  ( pmModule, pmYieldSites, PreparedBodyCache, newPreparedBodyCache
   , evictPreparedBodyMatching )
 import Tidepool.PreparedRecovery
   ( RecoveryFailure, RecoveredClosure(..), newPreparedRecoveryWithPackageRoots

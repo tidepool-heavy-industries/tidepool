@@ -471,7 +471,7 @@ projectPreparedModuleGroupOutcomesFor purpose context prepared selection =
     projectOne ordinal (binding, _) = do
       let onlyGroup = filterPreparedBindings (\(selected,_) ->
             map (getKey . varUnique) (topBinders selected) == map (getKey . varUnique) (topBinders binding)) prepared
-      refuseUnelaboratedIntrinsics context [prepared] [onlyGroup]
+      refuseUnelaboratedIntrinsics [prepared] [onlyGroup]
       case [ srMessage rejection
            | rejection <- selectOwnedEvidence (topBinders binding)
                (evidenceRejectionsByOwner evidenceIndex)
@@ -559,7 +559,7 @@ projectPreparedWithHostBindings hostBindings context modules topIdentityMap = do
       -- module set (so a same-name internal identity cannot borrow home-module
       -- standing from the retained one), but nothing here recovers its body.
       projectable = map (dropRetainedTops context) modules
-  refuseUnelaboratedIntrinsics context modules projectable
+  refuseUnelaboratedIntrinsics modules projectable
   ((bindingGroups, programTypes, programSites, programConstructorReplies, programJsonLayout), final) <- runStateT
     (do evidence <- lift (traverse preparedEvidence projectable)
         validatePreparedEvidence context projectable evidence
@@ -782,9 +782,9 @@ data ReferenceFact = ReferenceFact
 -- Compiler surface definitions are placeholders. Only the elaborator's
 -- admitted sites may execute; a surviving surface Name is never ordinary code.
 refuseUnelaboratedIntrinsics
-  :: ProjectionContext -> [PreparedModule] -> [PreparedModule]
+  :: [PreparedModule] -> [PreparedModule]
   -> Either ProjectionError ()
-refuseUnelaboratedIntrinsics _ admitted selected = case
+refuseUnelaboratedIntrinsics admitted selected = case
     [ binder | prepared <- selected
       , (binding,_) <- pmBindings prepared
       , binder <- topBinders binding ++ preparedReferencedIds

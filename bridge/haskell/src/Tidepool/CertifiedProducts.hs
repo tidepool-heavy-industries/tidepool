@@ -134,7 +134,7 @@ encodeCertifiedProducts
   -> [(String, WireProgram)]
   -> DependencyEvidence -> BS.ByteString -> BS.ByteString
   -> IO (Either String BS.ByteString)
-encodeCertifiedProducts env sourceRecipe interfaces finalized cached exact fresh targets evidence productBytes evidenceBytes = do
+encodeCertifiedProducts env sourceRecipe interfaces finalized cached exact fresh targets evidence productBytes evidenceBytes =
   encodeCertifiedProductsWithOriginals Map.empty env sourceRecipe interfaces finalized cached exact fresh targets evidence productBytes evidenceBytes
 
 encodeCertifiedProductsWithOriginals

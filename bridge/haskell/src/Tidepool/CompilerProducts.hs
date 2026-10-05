@@ -168,7 +168,7 @@ retainedOriginalInterfaces prepared =
 writeCertifiedProductsKeeping
   :: [FilePath] -> OriginalInterfaceArtifacts -> FilePath -> PreparedPipelineResult -> Maybe PreparedModuleProducts
   -> [(String, WireProgram)] -> IO CertifiedOriginalProducts
-writeCertifiedProductsKeeping includes originalInterfaces outDir prepared productContext targets = do
+writeCertifiedProductsKeeping includes originalInterfaces outDir prepared productContext targets =
   writeCertifiedProductsKeepingWithOriginals includes originalInterfaces outDir prepared
     (fmap (\products -> (products,Map.empty)) productContext) targets
 
