@@ -6,7 +6,7 @@
 module Tidepool.CompilerProducts
   ( CertifiedOriginalProducts, certifiedOriginalProducts, certifiedFinalizedArtifacts
   , certifiedSourceOriginals, certifiedExecutionSource, writeCertifiedProductsKeeping, retainedOriginalInterfaces
-  , certifiedRetainedOriginals, PreparedProductContext, prepareOriginalProducts
+  , certifiedRetainedOriginals, certifiedRetainedNativeVersions, PreparedProductContext, prepareOriginalProducts
   , writeCertifiedProductsKeepingWithOriginals
   , prepareCompilerProjectionContext, exactProgramProductVersionFromDigest
   ) where
@@ -34,7 +34,7 @@ import System.Directory (canonicalizePath, doesPathExist, makeAbsolute)
 import System.FilePath (normalise, (</>))
 import System.IO (hPutStrLn, stderr)
 import System.Info qualified as SystemInfo
-import Tidepool.CertifiedProducts (encodeCertifiedProductsWithOriginals)
+import Tidepool.CertifiedProducts (encodeCertifiedProductsWithOriginals, sourceProductSha256)
 import Tidepool.DependencyEvidence
 import Tidepool.ExactHydration
   ( OriginalInterfaceArtifacts, ExactIfaceArtifact(..), originalInterfaceBytes )
@@ -115,6 +115,7 @@ data CertifiedOriginalProducts = CertifiedOriginalProducts
   , certifiedFinalizedArtifacts :: FinalizedModuleArtifacts
   , certifiedExecutionSource :: WorkerExecutionSource
   , certifiedRetainedOriginals :: Map.Map (String,String) CanonicalInterfaceProof
+  , certifiedRetainedNativeVersions :: Map.Map (String,String) String
   }
 
 type PreparedProductContext = (PreparedModuleProducts, Map.Map Module AdmittedFinalizedOriginal)
@@ -181,7 +182,7 @@ writeCertifiedProductsKeepingWithOriginals includes originalInterfaces outDir pr
           [((unitString (moduleUnit owner),moduleNameString (moduleName owner)),admittedOriginalProof original)
           | (owner,original) <- Map.toAscList retained]
     timing <- readTimingEnabled
-    (availability, freshProducts) <- timeDetailPhase timing "module_products" "write_products" $
+    (availability, freshProducts, productPackages) <- timeDetailPhase timing "module_products" "write_products" $
       writeModuleProducts originalInterfaces outDir productContext
         (pprProductInterfaces prepared) (pprPackageImports prepared)
     let dependencies = preparedFreshDependencies prepared
@@ -220,27 +221,42 @@ writeCertifiedProductsKeepingWithOriginals includes originalInterfaces outDir pr
       ExactExecutionSourceAvailable graph ->
         BS.writeFile (outDir </> "execution-source.cbor") (executionGraphBytes graph)
       _ -> pure ()
-    finalized <- timeDetailPhase timing "module_products" "certify" $ do
+    (finalized,retainedVersions) <- timeDetailPhase timing "module_products" "certify" $ do
       finalized <- captureFinalizedModuleArtifacts originalInterfaces hscEnv
         (pprFinalizedModules prepared) (pprPackageImports prepared) finalDependencies outDir
-      certified <- encodeCertifiedProductsWithOriginals retainedProofs hscEnv sourceRecipe (pprProductInterfaces prepared) finalized (pprAcceptedCandidates prepared)
+      let emittedSeals = Map.fromList
+            [((unit,name),(version,T.pack (shaHex iface),T.pack (shaHex native),T.pack (shaHex packages)))
+            | product <- freshProducts
+            , let (unit,name,iface,_) = moduleProductInput product
+            , let native = moduleProductBytes product
+            , Just packages <- [Map.lookup (T.unpack unit,T.unpack name) productPackages]
+            , let version = case (Map.lookup (T.unpack unit,T.unpack name) retainedProofs,
+                    compilationScope <$> preparedExactCompilation prepared) of
+                    (Nothing,Just scope) -> maybe "" (T.pack . (\source ->
+                      exactProgramProductVersionFromDigest scope (T.unpack unit) (T.unpack name)
+                        (T.unpack source) iface native packages)) (sourceProductSha256 finalDependencies (T.unpack unit) (T.unpack name))
+                    _ -> ""]
+      certified <- encodeCertifiedProductsWithOriginals retainedProofs emittedSeals hscEnv sourceRecipe (pprProductInterfaces prepared) finalized (pprAcceptedCandidates prepared)
         (compilationScope <$> preparedExactCompilation prepared)
         (map moduleProductInput freshProducts) targets
         finalDependencies productBytes evidenceBytes
-      case certified of
-        Right bytes -> BS.writeFile (outDir </> "certified-products.cbor") bytes
+      versions <- case certified of
+        Right (bytes,versions) -> do
+          BS.writeFile (outDir </> "certified-products.cbor") bytes
+          pure versions
         Left reason -> do
           hPutStrLn stderr ("product certification unavailable: " ++ reason)
           BS.writeFile (outDir </> "certified-products.cbor") BS.empty
           unless (null freshProducts) $ fail ("native product certification failed: " ++ reason)
-      pure finalized
+          pure Map.empty
+      pure (finalized,versions)
     sourceOriginals <- case preparedExactCompilation prepared of
       Nothing -> pure Map.empty
       Just compilation -> do
         let owner = tcg_mod (prTargetTcGblEnv (pprPipelineResult prepared))
         captureFinalizedSourceOriginals compilation (pprAcceptedCandidates prepared)
           (unitString (moduleUnit owner),moduleNameString (moduleName owner)) finalized finalDependencies
-    pure (CertifiedOriginalProducts freshProducts sourceOriginals finalized sourceRecipe retainedProofs)
+    pure (CertifiedOriginalProducts freshProducts sourceOriginals finalized sourceRecipe retainedProofs retainedVersions)
 
 
 -- A failed unrelated group is an explicit product miss, never a newly fatal
@@ -250,10 +266,10 @@ writeModuleProducts :: OriginalInterfaceArtifacts -> FilePath -> Maybe PreparedP
   -> Map.Map ModuleName ModIface
   -> Map.Map ModuleName PackageImportEvidence
   -> IO (Map.Map (String, String) ProductAvailability,
-         [ModuleProductEncoding])
+         [ModuleProductEncoding], Map.Map (String,String) BS.ByteString)
 writeModuleProducts _ outDir Nothing _ _ = do
   writeProductInventory outDir [] []
-  pure (Map.empty, [])
+  pure (Map.empty, [], Map.empty)
 writeModuleProducts originalInterfaces outDir (Just (inventory,retained)) interfaces packageRoots = do
   timing <- readTimingEnabled
   forM_ (preparedModuleProductOmissions inventory) $ \(owner, omissions) ->
@@ -304,7 +320,8 @@ writeModuleProducts originalInterfaces outDir (Just (inventory,retained)) interf
         [(unit, moduleName', sidecar)
         | ((unit, moduleName'), _, Just _, Just sidecar) <- outcomes]
   writeProductInventory outDir products packageBundles
-  pure (Map.fromList [(key, status) | (key, status, _, _) <- outcomes], products)
+  pure (Map.fromList [(key, status) | (key, status, _, _) <- outcomes], products,
+    Map.fromList [((unit,name),bytes) | (unit,name,bytes) <- packageBundles])
 
 -- Interface-only captures emit the same valid inventory framing with no native
 -- rows. Product absence never prevents retaining the actual finalization.

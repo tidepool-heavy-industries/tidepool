@@ -64,7 +64,7 @@ import Tidepool.GhcPipeline
 import Tidepool.ExecutionEncode (encodeWireProgram, moduleProductInput, moduleProductBytes)
 import Tidepool.CompilerProducts
   ( CertifiedOriginalProducts, certifiedOriginalProducts, certifiedFinalizedArtifacts, certifiedSourceOriginals, certifiedExecutionSource
-  , certifiedRetainedOriginals, PreparedProductContext, prepareOriginalProducts
+  , certifiedRetainedOriginals, certifiedRetainedNativeVersions, PreparedProductContext, prepareOriginalProducts
   , retainedOriginalInterfaces, writeCertifiedProductsKeepingWithOriginals, prepareCompilerProjectionContext
   , exactProgramProductVersionFromDigest )
 import Tidepool.ExecutionProjection (ProjectionContext(..), ProjectionError(..), prepareProjectionWithReachability, projectSelectedWithHostBindings, preparedModuleProductOutcomes, preparedRootIdentity)
@@ -1772,11 +1772,14 @@ retainProgramProducts directory prepared certified target initial = do
       packageBytes <- BS.readFile packagesPath
       unless (shaHex packageBytes == packagesSha)
         (fail "supporting native package capture changed")
+      let productBytes = moduleProductBytes originalProduct
+      version <- case Map.lookup key (certifiedRetainedOriginals certified) of
+        Just _ -> maybe (fail "retained native product lacks its certified demand graph identity") pure
+          (Map.lookup key (certifiedRetainedNativeVersions certified))
+        Nothing -> pure (exactProgramProductVersionFromDigest scope unit owner sourceDigest interfaceBytes productBytes packageBytes)
       let stem = directory </> "retained-original-" ++ show index
           productPath = stem ++ ".product.cbor"
-          productBytes = moduleProductBytes originalProduct
-          original = ExactProduct unit owner
-            (exactProgramProductVersionFromDigest scope unit owner sourceDigest interfaceBytes productBytes packageBytes)
+          original = ExactProduct unit owner version
             (shaHex interfaceBytes) (shaHex productBytes) productPath
             (map originalGroupFromProjected groups)
       BS.writeFile productPath productBytes

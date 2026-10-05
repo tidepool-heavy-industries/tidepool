@@ -2,7 +2,7 @@
 
 module Tidepool.CertifiedProducts
   ( encodeCertifiedProducts, encodeCertifiedProductsWithOriginals
-  , resolvePackageGlobal, homeInterfaceUsageOwners ) where
+  , resolvePackageGlobal, homeInterfaceUsageOwners, sourceProductSha256 ) where
 
 import Prelude hiding (product)
 import Codec.CBOR.Encoding
@@ -14,12 +14,14 @@ import Control.Monad (forM, when)
 import qualified Crypto.Hash.SHA256 as SHA256
 import qualified Data.ByteString as BS
 import Data.Foldable (fold)
+import Data.Bits (shiftR)
 import Data.List (find, mapAccumL)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (catMaybes)
 import qualified Data.Set as Set
 import Data.IORef (IORef, newIORef, modifyIORef', readIORef)
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
 import Data.Word (Word64)
 import GHC.Driver.Env (HscEnv, hsc_all_home_unit_ids)
 import GHC.Unit.Module (Module, ModuleName, mkModule, mkModuleName, moduleUnit, moduleName)
@@ -60,7 +62,7 @@ import Tidepool.FinalizedModuleArtifacts
   ( FinalizedModuleArtifacts, encodeFinalizedModuleArtifacts, finalizedInterfaceSeals )
 import Tidepool.Timing (readTimingEnabled, emitCount)
 
-data ProductOrigin = FreshProduct | CachedProduct | RetainedCoreProduct
+data ProductOrigin = FreshProduct | CachedProduct | RetainedCoreProduct deriving (Eq)
 
 renderProductOrigin :: ProductOrigin -> T.Text
 renderProductOrigin FreshProduct = "fresh"
@@ -135,16 +137,17 @@ encodeCertifiedProducts
   -> DependencyEvidence -> BS.ByteString -> BS.ByteString
   -> IO (Either String BS.ByteString)
 encodeCertifiedProducts env sourceRecipe interfaces finalized cached exact fresh targets evidence productBytes evidenceBytes =
-  encodeCertifiedProductsWithOriginals Map.empty env sourceRecipe interfaces finalized cached exact fresh targets evidence productBytes evidenceBytes
+  fmap (fmap fst) (encodeCertifiedProductsWithOriginals Map.empty Map.empty env sourceRecipe interfaces finalized cached exact fresh targets evidence productBytes evidenceBytes)
 
 encodeCertifiedProductsWithOriginals
   :: Map.Map (String,String) CanonicalInterfaceProof
+  -> Map.Map (T.Text,T.Text) (T.Text,T.Text,T.Text,T.Text)
   -> HscEnv -> WorkerExecutionSource -> Map.Map ModuleName ModIface -> FinalizedModuleArtifacts -> [ModuleCandidate] -> Maybe ExactScope
   -> [(T.Text, T.Text, BS.ByteString, [ProjectedGroup])]
   -> [(String, WireProgram)]
   -> DependencyEvidence -> BS.ByteString -> BS.ByteString
-  -> IO (Either String BS.ByteString)
-encodeCertifiedProductsWithOriginals retained env sourceRecipe interfaces finalized cached exact fresh targets evidence productBytes evidenceBytes = do
+  -> IO (Either String (BS.ByteString, Map.Map (String,String) String))
+encodeCertifiedProductsWithOriginals retained emittedSeals env sourceRecipe interfaces finalized cached exact fresh targets evidence productBytes evidenceBytes = do
   packageRef <- newIORef []
   timing <- readTimingEnabled
   (resolvePackage, resolutionCounts) <- newPackageGlobalResolver timing env
@@ -154,7 +157,7 @@ encodeCertifiedProductsWithOriginals retained env sourceRecipe interfaces finali
         [ do
             let original = Map.lookup (T.unpack unit,T.unpack name) retained
             sourceSha <- case original of
-              Nothing -> sourceHash evidence (T.unpack unit) (T.unpack name)
+              Nothing -> sourceProductSha256 evidence (T.unpack unit) (T.unpack name)
               Just proof -> Just (T.pack (canonicalSourceSha256 proof))
             groups <- traverse freshGroup projected
             pure Product
@@ -319,12 +322,14 @@ encodeCertifiedProductsWithOriginals retained env sourceRecipe interfaces finali
                   , encodeString (T.pack path), encodeString sha]
                 | ((unit, name), options) <- Map.toList packages
                 , (path, sha) <- Set.toList options ]
-          pure (Right (toStrictByteString (array
+          pure $ do
+            versions <- retainedNativeVersions emittedSeals exact cached packages moduleRows
+            Right (toStrictByteString (array
             [encodeString "TPCERT", encodeWord 9
             , list id encodedModules, list id encodedTargets
             , list id encodedPackages, list (encodeWitness coordinateIndices) globalWitnesses
             , encodeFinalizedModuleArtifacts finalized, encodeWorkerExecutionSource sourceRecipe
-            , list encodeCoordinate coordinates])))
+            , list encodeCoordinate coordinates]), versions)
   where
     internWitness :: Map.Map GlobalWitness Word -> GlobalWitness
       -> (Map.Map GlobalWitness Word, Word)
@@ -334,6 +339,79 @@ encodeCertifiedProductsWithOriginals retained env sourceRecipe interfaces finali
         let index = fromIntegral (Map.size indices)
         in (Map.insert witness index indices, index)
     third (_, _, value) = value
+
+-- Native identity binds the finite graph actually retained for this owner.
+-- Promoted edges name nodes rather than recursively derived versions, so cycles
+-- remain finite and unrelated request scope cannot change native authority.
+retainedNativeVersions
+  :: Map.Map (T.Text,T.Text) (T.Text,T.Text,T.Text,T.Text)
+  -> Maybe ExactScope -> [ModuleCandidate]
+  -> Map.Map (T.Text,T.Text) (Set.Set (FilePath,T.Text))
+  -> [(Product,CandidateGroup,[GlobalWitness])]
+  -> Either String (Map.Map (String,String) String)
+retainedNativeVersions emitted exact cached packages rows = do
+  versions <- forM (Map.keys promoted) $ \root -> do
+    reachable <- closure Set.empty [root]
+    nodes <- traverse encodeNode (Set.toAscList reachable)
+    let graph = toStrictByteString (list id nodes)
+        (unit,name) = root
+        framed bytes = BS.pack [fromIntegral ((fromIntegral (BS.length bytes) :: Word64) `shiftR` shift)
+          | shift <- [56,48..0]] <> bytes
+        version = digest (BS.concat (map framed
+          ["retained-core-home-v1",TE.encodeUtf8 unit,TE.encodeUtf8 name,graph]))
+    pure ((T.unpack unit,T.unpack name),T.unpack version)
+  pure (Map.fromList versions)
+  where
+    key product = (productUnit product,productModule product)
+    promoted = Map.fromList [(key product,product) | (product,_,_) <- rows
+      , productOrigin product == RetainedCoreProduct]
+    groups = Map.fromListWith Map.union
+      [(key product,Map.singleton (candidateGroupOrdinal group) witnesses)
+      | (product,group,witnesses) <- rows]
+    seals = Map.unions [emitted,Map.fromList
+      [((T.pack (candidateUnit candidate),T.pack (candidateModule candidate)),
+        (T.pack (candidateModuleVersion candidate),T.pack (candidateInterfaceSha256 candidate),
+         T.pack (candidateProductSha256 candidate),T.pack (candidatePackageImportsSha256 candidate)))
+      | candidate <- cached],Map.fromList
+      [((T.pack (originalUnit product),T.pack (originalModule product)),
+        (T.pack (originalVersion product),T.pack (originalIfaceSha256 product),
+         T.pack (originalProductSha256 product),""))
+      | scope <- maybe [] pure exact,product <- scopeProducts scope]]
+    lookupSeal owner = maybe (Left "native demand graph lacks an actual source owner seal") Right (Map.lookup owner seals)
+    closure visited [] = Right visited
+    closure visited (owner:pending)
+      | owner `Set.member` visited = closure visited pending
+      | otherwise = case Map.lookup owner groups of
+          Nothing -> Left "native demand graph lacks a promoted group inventory"
+          Just owned -> closure (Set.insert owner visited)
+            ([dependency | witnesses <- Map.elems owned,(_,_,_,_,SourceOwner unit name _ _) <- witnesses
+              , let dependency = (unit,name),Map.member dependency promoted] ++ pending)
+    encodeNode owner@(unit,name) = do
+      product <- maybe (Left "native demand graph lacks a promoted canonical proof") Right (Map.lookup owner promoted)
+      (_,_,nativeSha,packageSha) <- lookupSeal owner
+      owned <- maybe (Left "native demand graph lacks retained groups") Right (Map.lookup owner groups)
+      encodedGroups <- forM (Map.toAscList owned) $ \(ordinal,witnesses) -> do
+        edges <- traverse encodeEdge witnesses
+        pure (array [encodeWord ordinal,list id edges])
+      pure (array [encodeString unit,encodeString name,encodeString (productEvidenceSha product),
+        encodeString nativeSha,encodeString packageSha,list id encodedGroups])
+    encodeEdge (identity,_,_,_,owner) = case owner of
+      SourceOwner unit name _ ordinal
+        | Map.member (unit,name) promoted -> Right (array
+            [encodeString "local-source",encodeString unit,encodeString name,encodeWord ordinal,encodeIdentity identity])
+        | otherwise -> do
+            (version,ifaceSha,nativeSha,_) <- lookupSeal (unit,name)
+            pure (array [encodeString "source",array (map encodeString [unit,name,version,ifaceSha,nativeSha]),
+              encodeWord ordinal,encodeIdentity identity])
+      RetainedOwner generation -> Right (array
+        [encodeString "retained",encodeIdentity identity,encodeWord64 generation])
+      PackageOwner unit name sha generation -> do
+        path <- case Map.lookup (unit,name) packages of
+          Just options | [(selected,selectedSha)] <- Set.toAscList options,selectedSha == sha -> Right selected
+          _ -> Left "native demand graph lacks an exact package path seal"
+        pure (array ([encodeString (maybe "package" (const "retained-package") generation),
+          encodeString unit,encodeString name,encodeString sha,encodeIdentity identity]
+          ++ maybe [] (pure . encodeWord64) generation ++ [encodeString (T.pack path)]))
 
 -- A locally emitted package value may have no incoming global edge. Its exact
 -- defining interface must still be retained before it is offered to later
@@ -394,8 +472,8 @@ at values index = case drop index values of
   value : _ -> Just value
   [] -> Nothing
 
-sourceHash :: DependencyEvidence -> String -> String -> Maybe T.Text
-sourceHash evidence unit name = do
+sourceProductSha256 :: DependencyEvidence -> String -> String -> Maybe T.Text
+sourceProductSha256 evidence unit name = do
   node <- find (\item -> dependencyModuleUnit item == unit
     && dependencyModuleName item == name
     && not (dependencyModuleBoot item)
