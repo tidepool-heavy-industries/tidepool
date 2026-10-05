@@ -1,3 +1,5 @@
+{-# LANGUAGE PackageImports #-}
+
 -- | Runtime half of the Suite.hs prepared-corpus oracle generator.
 --
 -- Each renderer corresponds to exactly one arm of @compare_values@ in
@@ -35,7 +37,7 @@ module SuiteOracleRender
 import Control.Exception (Exception, throw)
 import Data.Char (ord)
 import Data.List (intercalate)
-import qualified Data.Text as T
+import qualified "text" Data.Text as T
 import Numeric (showHex)
 
 -- | One manifest expectation key, resolved against Suite's own scope.
