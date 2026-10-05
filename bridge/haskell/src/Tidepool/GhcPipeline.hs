@@ -12,6 +12,7 @@ module Tidepool.GhcPipeline
   , generatedScaffoldRecipe
   , FinalizedModule, finalizedHomeModInfo, finalizedTidyGuts
   , FinalizedExecutionFailure(..)
+  , RetainedCompilerArtifact, retainedCompilerInterface, retainedCompilerArtifactClosure
     -- * Bound-value type analysis
   , stripMonadHead, isClosureType, renderType
   , splitTupleType
@@ -3918,19 +3919,24 @@ data ExactExecutionPlan = ExactExecutionPlan
   , executionLinkGraph :: ModuleGraph
   }
 
--- Close only compiler execution demand. Every edge is an already admitted
--- canonical interface seal; no native reachability, source path or candidate
--- ordering can manufacture a missing compiler owner.
-retainedCompilerClosure
-  :: FilePath -> HscEnv -> ExactScope -> [(ExactIfaceArtifact, ModIface)]
-  -> [(String, String)] -> Either FinalizedExecutionFailure [RetainedCompilerModule]
-retainedCompilerClosure directory env scope interfaces roots = do
+-- Canonical interface/Core selection is independent of optional source replay
+-- recipes. Dependencies are selected only through admitted interface seals.
+data RetainedCompilerArtifact = RetainedCompilerArtifact
+  { retainedCompilerInterface :: ExactIfaceArtifact
+  , retainedArtifactAdmission :: CanonicalInterfaceAdmission
+  , retainedArtifactDependencies :: [ExactIfaceArtifact]
+  }
+
+retainedCompilerArtifactClosure
+  :: ExactScope -> [ExactIfaceArtifact] -> [(String, String)]
+  -> Either FinalizedExecutionFailure [RetainedCompilerArtifact]
+retainedCompilerArtifactClosure scope interfaces roots = do
   (_, modules) <- foldM (visit Set.empty) (Set.empty, []) roots
   pure (reverse modules)
   where
     admissions = scopeSourceOriginalInterfaces scope
     artifacts = Map.fromList [((exactUnit artifact, exactModule artifact), artifact)
-      | (artifact, _) <- interfaces]
+      | artifact <- interfaces]
     visit active state@(completed, _) key
       | isReservedSessionModuleName (snd key) = Left (FinalizedExecutionOwnerMissing key)
       | key `Set.member` active = Left (FinalizedExecutionCycle key)
@@ -3939,20 +3945,35 @@ retainedCompilerClosure directory env scope interfaces roots = do
           admission <- maybe (Left (FinalizedExecutionOwnerMissing key)) Right (Map.lookup key admissions)
           artifact <- maybe (Left (FinalizedExecutionOwnerMissing key)) Right (Map.lookup key artifacts)
           let requirements = Map.toAscList (admittedInterfaceRequirements admission)
-          dependencyKeys <- forM requirements $ \(required, seal) -> case Map.lookup required artifacts of
-            Just dependency | exactSha256 dependency == seal ->
-              Right (mkNodeKey (ModuleNode [] (exactInterfaceSummary env dependency)))
+          dependencyArtifacts <- forM requirements $ \(required, seal) -> case Map.lookup required artifacts of
+            Just dependency | exactSha256 dependency == seal -> Right dependency
             _ -> Left (FinalizedExecutionDependencyMismatch key required)
           (closed, dependencies) <- foldM (visit (Set.insert key active)) state (map fst requirements)
-          let index = Set.size closed
-              summary = exactInterfaceSummary env artifact
-              prefix = directory </> ("retained-" ++ show index)
-              location = (ms_location summary)
-                { ml_hi_file = prefix ++ ".hi", ml_dyn_hi_file = prefix ++ ".dyn_hi"
-                , ml_obj_file = prefix ++ ".o", ml_dyn_obj_file = prefix ++ ".dyn_o"
-                , ml_hie_file = prefix ++ ".hie" }
-              selected = RetainedCompilerModule artifact admission (summary {ms_location = location}) dependencyKeys
+          let selected = RetainedCompilerArtifact artifact admission dependencyArtifacts
           pure (Set.insert key closed, selected : dependencies)
+
+-- Close only compiler execution demand. Every edge is an already admitted
+-- canonical interface seal; no native reachability, source path or candidate
+-- ordering can manufacture a missing compiler owner.
+retainedCompilerClosure
+  :: FilePath -> HscEnv -> ExactScope -> [(ExactIfaceArtifact, ModIface)]
+  -> [(String, String)] -> Either FinalizedExecutionFailure [RetainedCompilerModule]
+retainedCompilerClosure directory env scope interfaces roots = do
+  selected <- retainedCompilerArtifactClosure scope (map fst interfaces) roots
+  pure [stage index artifact | (index, artifact) <- zip [0 :: Int ..] selected]
+  where
+    stage index selected =
+      let artifact = retainedCompilerInterface selected
+          summary = exactInterfaceSummary env artifact
+          prefix = directory </> ("retained-" ++ show index)
+          location = (ms_location summary)
+            { ml_hi_file = prefix ++ ".hi", ml_dyn_hi_file = prefix ++ ".dyn_hi"
+            , ml_obj_file = prefix ++ ".o", ml_dyn_obj_file = prefix ++ ".dyn_o"
+            , ml_hie_file = prefix ++ ".hie" }
+          dependencyKeys = [mkNodeKey (ModuleNode [] (exactInterfaceSummary env dependency))
+            | dependency <- retainedArtifactDependencies selected]
+      in RetainedCompilerModule artifact (retainedArtifactAdmission selected)
+          (summary {ms_location = location}) dependencyKeys
 
 
 -- Linker hooks and diagnostic collectors belong to one cycle. Restore both

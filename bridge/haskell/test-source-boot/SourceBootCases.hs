@@ -133,6 +133,7 @@ import Tidepool.HomeProducts (hydrateCandidateHomeProducts, CandidateCoreFailure
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedPipelineResult(..), PipelineResult(..), CheckedEnvironmentResult(..)
   , finalizedTidyGuts, FinalizedExecutionFailure(..)
+  , retainedCompilerArtifactClosure, retainedCompilerInterface
   , renderType, generatedScaffoldRecipe, activationPreviewInputType, withSourceImportIntents
   , CompilePurpose(..), runPipelineSelected, runPipelineSessionSelected, withResidentPipelineSelected
   , withResidentPipelineSelectedRequests )
@@ -1363,9 +1364,39 @@ exactExecutionUnrelatedInstance getFixture = withExecutionInstanceFixture getFix
         target = work </> "ExecutionExplicitOrphanTarget.hs"
     exact <- maybe (fail "instance fixture omitted its issued scope") readExactScope (ssExactScope scope)
       >>= either fail pure
-    expectedOriginals <- either (fail . show) pure (executionSourceClosure
-      (scopeExecutionGraphs exact) (scopeExecutionOwners exact) (scopeExecutionNativeOwners exact)
-      [("main","ExecutionSealedQuoter")])
+    let sealedOwner = ("main","ExecutionSealedQuoter")
+        expectedOwners = Set.fromList [("main",owner)
+          | owner <- ["ExecutionClass","ExecutionHiddenOrphan","ExecutionSealedQuoter"]]
+    -- The consumed target retains canonical Core authority, but has no optional
+    -- source replay recipe. Bytecode demand follows canonical interface seals.
+    case executionSourceClosure (scopeExecutionGraphs exact) (scopeExecutionOwners exact)
+        (scopeExecutionNativeOwners exact) [sealedOwner] of
+      Left (ExecutionSourceMissing owner) | owner == sealedOwner -> pure ()
+      Left reason -> fail ("sealed target source replay refused for another reason: " ++ show reason)
+      Right _ -> fail "consumed sealed target unexpectedly received a source replay recipe"
+    expectedOriginals <- either (fail . show) pure (retainedCompilerArtifactClosure exact
+      [artifact | (artifact,_,_) <- scopeInterfaces exact] [sealedOwner])
+    let actualOwners = Set.fromList [(exactUnit artifact,exactModule artifact)
+          | selected <- expectedOriginals, let artifact = retainedCompilerInterface selected]
+        proofs = scopeModuleInterfaceProofs exact
+        hasCore owner = isJust (Map.lookup owner proofs >>= canonicalCoreArtifact)
+        environment = prHscEnv (pprPipelineResult explicit)
+        hasBytecode (unit,owner) = case lookupHpt (hsc_HPT environment) (mkModuleName owner) of
+          Just home -> mi_module (hm_iface home) == mkModule (stringToUnit unit) (mkModuleName owner)
+            && isJust (homeMod_bytecode (hm_linkable home))
+          Nothing -> False
+    unless (actualOwners == expectedOwners && all hasCore (Set.toList actualOwners)
+        && all hasBytecode (Set.toList expectedOwners)) $
+      fail ("sealed canonical execution closure lost its admitted owners, Core or loaded bytecode: "
+        ++ show actualOwners)
+    let orphanOwner = ("main","ExecutionHiddenOrphan")
+        withoutOrphan = [artifact | (artifact,_,_) <- scopeInterfaces exact
+          , (exactUnit artifact,exactModule artifact) /= orphanOwner]
+    case retainedCompilerArtifactClosure exact withoutOrphan [sealedOwner] of
+      Left (FinalizedExecutionDependencyMismatch owner dependency)
+        | owner == sealedOwner, dependency == orphanOwner -> pure ()
+      Left reason -> fail ("missing canonical orphan refused for another reason: " ++ show reason)
+      Right _ -> fail "canonical bytecode selection bypassed its exact orphan dependency seal"
     (rejected,diagnostics) <- captureDiagnostics (sourceFailureDiagnostics
       (compile CheckedEnvironment Set.empty GeneralCompile (Just scope) target [work] Nothing))
     case rejected of
