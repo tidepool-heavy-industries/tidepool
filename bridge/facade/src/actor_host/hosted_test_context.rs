@@ -25,7 +25,12 @@ impl HostTermination {
             .ok_or_else(|| "production host outcome remains unavailable".to_owned())?
     }
 
-    fn startup_failure(self, detail: String, assembly_observed: bool) -> (String, CleanupOutcome) {
+    fn startup_failure(
+        self,
+        detail: String,
+        assembly_observed: bool,
+        owner_admission: HostOwnerAdmission,
+    ) -> (String, CleanupOutcome) {
         if assembly_observed {
             return (detail, CleanupOutcome::from_result(&self.into_result()));
         }
@@ -36,6 +41,16 @@ impl HostTermination {
         let cleanup = match &self.joined {
             Err(error) => CleanupOutcome::from_result(&Err(error.clone())),
             Ok(()) if matches!(self.result, Some(Ok(()))) => CleanupOutcome::Confirmed,
+            Ok(())
+                if owner_admission == HostOwnerAdmission::NotAdmitted
+                    && matches!(self.result, Some(Err(_))) =>
+            {
+                CleanupOutcome::NotStarted {
+                    domain: CleanupDomain::HostRuntime,
+                    owner_admission,
+                    executor_joined: true,
+                }
+            }
             // Executor termination does not acknowledge production teardown
             // when startup returned an error before issuing the hosted context.
             Ok(()) => CleanupOutcome::Unknown,
@@ -67,7 +82,27 @@ enum ScenarioPhase {
 enum CleanupOutcome {
     Unknown,
     Confirmed,
-    Failed { message: String },
+    NotStarted {
+        domain: CleanupDomain,
+        owner_admission: HostOwnerAdmission,
+        executor_joined: bool,
+    },
+    Failed {
+        message: String,
+    },
+}
+
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum CleanupDomain {
+    HostRuntime,
+}
+
+#[derive(Clone, Copy, Debug, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum HostOwnerAdmission {
+    NotAdmitted,
+    Admitted,
 }
 
 impl CleanupOutcome {
@@ -239,6 +274,7 @@ pub(super) struct HostTestHooks {
     pub(super) assembled: Option<oneshot::Sender<HostedActorContext>>,
     pub(super) stopping: watch::Receiver<bool>,
     pub(super) transport: Option<HostTransportFactory>,
+    pub(super) owner_admission: Arc<Mutex<HostOwnerAdmission>>,
 }
 
 /// These handles are issued by the production assembly after durable startup.
@@ -610,11 +646,13 @@ impl HostedTestRuntime {
         let observer = HostTestObserver::default();
         let (assembled, mut assembly) = oneshot::channel();
         let (stop, stopping) = watch::channel(false);
+        let owner_admission = Arc::new(Mutex::new(HostOwnerAdmission::NotAdmitted));
         let hooks = HostTestHooks {
             observer,
             assembled: Some(assembled),
             stopping,
             transport: transport_factory,
+            owner_admission: Arc::clone(&owner_admission),
         };
         let (ready, mut readiness) = mpsc::unbounded_channel();
         let (complete, mut outcome) = oneshot::channel();
@@ -686,7 +724,8 @@ impl HostedTestRuntime {
                         .shared(),
                 };
                 let termination = Self::terminate(stop.clone(), outcome, Some(thread)).await;
-                let (detail, cleanup) = termination.startup_failure(detail, assembly_observed);
+                let (detail, cleanup) =
+                    termination.startup_failure(detail, assembly_observed, *owner_admission.lock());
                 let evidence = if let Some(diagnostics) = &diagnostics {
                     diagnostics.report(
                         &ScenarioOutcome::Failed {
@@ -842,13 +881,81 @@ mod tests {
         let (termination, stopping) = terminated_host(false).await;
         assert!(*stopping.borrow());
         assert!(termination.joined.is_ok());
-        let (message, cleanup) =
-            termination.startup_failure("production assembly observer closed".into(), false);
+        let (message, cleanup) = termination.startup_failure(
+            "production assembly observer closed".into(),
+            false,
+            HostOwnerAdmission::Admitted,
+        );
         assert_eq!(
             message,
             "production host failed during startup: injected startup refusal"
         );
         assert_eq!(cleanup, CleanupOutcome::Unknown);
+    }
+
+    #[tokio::test]
+    async fn joined_startup_refusal_before_owner_admission_never_claims_cleanup() {
+        let (termination, stopping) = terminated_host(false).await;
+        assert!(*stopping.borrow());
+        let (_, cleanup) = termination.startup_failure(
+            "production assembly observer closed".into(),
+            false,
+            HostOwnerAdmission::NotAdmitted,
+        );
+        assert_eq!(
+            cleanup,
+            CleanupOutcome::NotStarted {
+                domain: CleanupDomain::HostRuntime,
+                owner_admission: HostOwnerAdmission::NotAdmitted,
+                executor_joined: true,
+            }
+        );
+        let directory = tempfile::tempdir().unwrap();
+        diagnostics(&directory)
+            .report(
+                &ScenarioOutcome::Failed {
+                    phase: ScenarioPhase::Startup,
+                    message: "refused".into(),
+                },
+                &cleanup,
+            )
+            .unwrap();
+        let report = report(&directory);
+        assert_eq!(report["cleanup"]["status"], "not_started");
+        assert_eq!(report["cleanup"]["domain"], "host_runtime");
+        assert_eq!(report["cleanup"]["owner_admission"], "not_admitted");
+        assert_eq!(report["cleanup"]["executor_joined"], true);
+    }
+
+    #[test]
+    fn owner_admission_precedes_partial_worktree_resource_creation() {
+        let files = tempfile::tempdir().unwrap();
+        let run_directory = tidepool_atomic_write::DirectoryAnchor::open_existing(files.path())
+            .unwrap()
+            .child("exomonad/runs/run")
+            .unwrap();
+        run_directory.create_dir_all("").unwrap();
+        let repository = exomonad_worktree::testing::TestRepo::init().unwrap();
+        let root = actor_worktree_storage_root(repository.path(), run_directory.path()).unwrap();
+        std::fs::create_dir_all(root.parent().unwrap()).unwrap();
+        std::fs::write(&root, "obstruct resource directory").unwrap();
+        let mut admitted = false;
+        assert!(
+            actor_worktree_resources(repository.path(), &run_directory, || admitted = true)
+                .is_err()
+        );
+        assert!(
+            admitted,
+            "partial resource construction must cross the admission fence"
+        );
+        let mut admitted = false;
+        assert!(
+            actor_worktree_resources(files.path(), &run_directory, || admitted = true).is_err()
+        );
+        assert!(
+            !admitted,
+            "Git ownership refusal must precede resource admission"
+        );
     }
 
     #[tokio::test]
@@ -874,14 +981,17 @@ mod tests {
             failure.contains(&workspace.display().to_string()),
             "{failure}"
         );
-        assert!(failure.contains("cleanup: Unknown"), "{failure}");
+        assert!(failure.contains("cleanup: NotStarted"), "{failure}");
     }
 
     #[tokio::test]
     async fn startup_host_error_and_executor_failure_are_independent() {
         let (termination, _) = terminated_host(true).await;
-        let (message, cleanup) =
-            termination.startup_failure("production assembly observer closed".into(), false);
+        let (message, cleanup) = termination.startup_failure(
+            "production assembly observer closed".into(),
+            false,
+            HostOwnerAdmission::Admitted,
+        );
         assert_eq!(
             message,
             "production host failed during startup: injected startup refusal"
@@ -900,8 +1010,11 @@ mod tests {
             result: Some(Ok(())),
             joined: Ok(()),
         };
-        let (message, cleanup) =
-            termination.startup_failure("production assembly observer closed".into(), false);
+        let (message, cleanup) = termination.startup_failure(
+            "production assembly observer closed".into(),
+            false,
+            HostOwnerAdmission::Admitted,
+        );
         assert_eq!(message, "production assembly observer closed");
         assert_eq!(cleanup, CleanupOutcome::Confirmed);
     }
@@ -912,8 +1025,11 @@ mod tests {
             result: Some(Err("injected production cleanup failure".into())),
             joined: Ok(()),
         };
-        let (message, cleanup) =
-            termination.startup_failure("injected readiness failure".into(), true);
+        let (message, cleanup) = termination.startup_failure(
+            "injected readiness failure".into(),
+            true,
+            HostOwnerAdmission::Admitted,
+        );
         assert_eq!(message, "injected readiness failure");
         assert_eq!(
             cleanup,

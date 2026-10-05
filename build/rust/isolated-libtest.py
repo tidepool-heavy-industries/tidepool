@@ -710,6 +710,7 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
         stderr += '\n' + service_record.get('cleanup_error', 'delegated cleanup is unconfirmed')
     if not getattr(result, 'cleanup_confirmed', False):
         stderr += '\nisolated process cleanup is unconfirmed'
+    hosted_runtime_not_started = False
     if artifact_root is not None:
         reports = sorted(artifact_root.glob('hosted-campaign-*/hosted-outcome.json'))
         if compiler_mode == 'owned-resident':
@@ -717,12 +718,30 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
         cleanup_reports = []
         for report in reports:
             try:
-                status = json.loads(report.read_text())['cleanup']['status']
-            except (OSError, ValueError, KeyError, TypeError) as error:
+                outcome = json.loads(report.read_text())
+                status = outcome['cleanup']['status']
+                # This is a host-runtime admission fact, not a teardown receipt.
+                # The passing libtest and enclosing process/service cleanup are
+                # still mandatory; retain the original refusal evidence below.
+                not_started = (
+                    report.name == 'hosted-outcome.json'
+                    and outcome.get('schema') == 1
+                    and outcome.get('scenario', {}).get('status') == 'failed'
+                    and outcome.get('scenario', {}).get('phase') == 'startup'
+                    and outcome['cleanup'].get('executor_joined') is True
+                    and outcome['cleanup'] == {
+                        'status': 'not_started', 'domain': 'host_runtime',
+                        'owner_admission': 'not_admitted', 'executor_joined': True,
+                    }
+                )
+            except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
                 status = 'unknown'
+                not_started = False
                 stderr += f'\ncleanup report unavailable: {report}: {error}'
-            cleanup_reports.append({'path': str(report), 'status': status})
-            if status != 'confirmed':
+            cleanup_reports.append({'path': str(report), 'status': status,
+                                    'host_runtime_not_started': not_started})
+            hosted_runtime_not_started |= not_started
+            if status != 'confirmed' and not not_started:
                 passed = False
                 stderr += f'\ncleanup remains {status}: {report}'
         if record is not None:
@@ -740,7 +759,7 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
                                  and (not root.get('compiler_job_queue', {}).get('physical_job_count')
                                       or root['compiler_job_queue'].get('complete', False))
                                  for root in summaries.get('owned_compiler_roots', [])))
-    if passed and artifact_root is not None and evidence_complete:
+    if passed and artifact_root is not None and evidence_complete and not hosted_runtime_not_started:
         # Successful scenarios have completed their own acknowledged teardown.
         # The runner additionally confirms its enclosing process/service cleanup.
         shutil.rmtree(artifact_root)

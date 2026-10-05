@@ -112,6 +112,45 @@ class IsolatedLibtestTests(unittest.TestCase):
         self.assertTrue(root.exists())
         self.assertIn('cleanup remains unknown', errors)
 
+    def test_startup_non_admission_is_distinct_from_host_or_process_cleanup(self):
+        valid = {
+            'schema': 1,
+            'scenario': {'status': 'failed', 'phase': 'startup'},
+            'cleanup': {'status': 'not_started', 'domain': 'host_runtime',
+                        'owner_admission': 'not_admitted', 'executor_joined': True},
+        }
+        controls = [
+            ('observed refusal', {}, True, 0, True),
+            ('admitted host', {'owner_admission': 'admitted'}, True, 0, False),
+            ('executor not joined', {'executor_joined': False}, True, 0, False),
+            ('executor evidence not boolean', {'executor_joined': 1}, True, 0, False),
+            ('foreign domain', {'domain': 'compiler'}, True, 0, False),
+            ('unknown teardown', {'status': 'unknown'}, True, 0, False),
+            ('process cleanup unknown', {}, False, 0, False),
+            ('test failed', {}, True, 101, False),
+        ]
+        for index, (label, changes, process_cleanup, exit_code, expected) in enumerate(controls):
+            with self.subTest(label=label):
+                root = Path(self.tmp.name) / f'refusal-{index}'
+                outcome = json.loads(json.dumps(valid))
+                outcome['cleanup'].update(changes)
+                def run(args, timeout, environment=None):
+                    campaign = root / 'hosted-campaign-1'
+                    campaign.mkdir()
+                    (campaign / 'hosted-outcome.json').write_text(json.dumps(outcome))
+                    result = completed_process(args, exit_code,
+                        'test result: ok. 1 passed; 0 failed; 0 ignored;\n', '')
+                    result.cleanup_confirmed = process_cleanup
+                    return result
+                record = {}
+                with patch.object(runner, 'execute', side_effect=run):
+                    passed, _, _ = runner.run_one(str(self.binary), 'suite::refusal', False,
+                        10, record, artifact_root=root)
+                self.assertEqual(passed, expected)
+                self.assertTrue(root.exists())
+                self.assertNotIn('artifacts_removed_after_success', record)
+                self.assertEqual(record['cleanup_reports'][0]['status'], outcome['cleanup']['status'])
+
     def test_declared_resource_paths_cross_delegation_without_exporting_ambient_state(self):
         with patch.dict(os.environ, {'TIDEPOOL_HASKELL_ACTORS_DIR': '/declared/actors',
                                      'DECLARED_FIXTURE': '/declared/fixture',

@@ -1774,10 +1774,21 @@ async fn run_owned(
     config.run_directory.create_dir_all("")?;
     let workspace = config.workspace.clone();
     let resource_run_directory = config.run_directory.clone();
+    #[cfg(test)]
+    let owner_admission = test_hooks
+        .as_ref()
+        .map(|hooks| Arc::clone(&hooks.owner_admission));
     let (worktrees, bindings, worktree_directory) =
         tidepool_runtime::spawn_blocking_in_span(move || {
             tracing::info_span!(target: "tidepool::actor_host::startup", "worktree_resources")
-                .in_scope(|| actor_worktree_resources(&workspace, &resource_run_directory))
+                .in_scope(|| {
+                    actor_worktree_resources(&workspace, &resource_run_directory, || {
+                        #[cfg(test)]
+                        if let Some(admission) = owner_admission {
+                            *admission.lock() = hosted_test_context::HostOwnerAdmission::Admitted;
+                        }
+                    })
+                })
         })
         .await??;
     let bindings = Arc::new(Mutex::new(bindings));
@@ -2417,6 +2428,7 @@ async fn await_applications(
 fn actor_worktree_resources(
     workspace: &Path,
     run_directory: &tidepool_atomic_write::DirectoryAnchor,
+    admit_runtime_owners: impl FnOnce(),
 ) -> Result<
     (
         WorktreeManager,
@@ -2425,6 +2437,12 @@ fn actor_worktree_resources(
     ),
     exomonad_worktree::WorktreeError,
 > {
+    let git = admitted_workspace_git(workspace)?;
+    // The hosted-runtime domain begins before any worktree registry, service,
+    // actor or task can be constructed, including partially failed construction.
+    // Diagnostic directories and the RAII incarnation lease precede this domain;
+    // no runtime admission is a storage-reclamation or daemon-cleanup receipt.
+    admit_runtime_owners();
     let root = actor_worktree_storage_root(workspace, run_directory.path())?;
     let family = root.parent().and_then(Path::parent).ok_or_else(|| {
         exomonad_worktree::WorktreeError::StorageFailure {
@@ -2466,7 +2484,7 @@ fn actor_worktree_resources(
             detail: error.source.to_string(),
         }
     })?;
-    let (worktrees, bindings) = actor_worktree_resources_at(&directory, workspace)?;
+    let (worktrees, bindings) = actor_worktree_resources_with_git(&directory, workspace, git)?;
     Ok((worktrees, bindings, directory))
 }
 
@@ -2624,23 +2642,29 @@ fn legacy_has_meaningful_state(root: &Path) -> Result<bool, exomonad_worktree::W
     Ok(false)
 }
 
+#[cfg(test)]
 fn actor_worktree_resources_at(
     directory: &tidepool_atomic_write::DirectoryAnchor,
     workspace: &Path,
 ) -> Result<(WorktreeManager, BindingTable), exomonad_worktree::WorktreeError> {
-    let root = directory.path();
+    let git = admitted_workspace_git(workspace)?;
+    actor_worktree_resources_with_git(directory, workspace, git)
+}
+
+fn admitted_workspace_git(workspace: &Path) -> Result<GitCli, exomonad_worktree::WorktreeError> {
     let git = GitCli::new();
-    // The root actor writes its own runtime state (journal, logs) directly
-    // into `workspace` — it is not admitted through `prepare()` the way a
-    // fork's checkout is, so nothing else on this path installs the
-    // exclusion that keeps that state from registering as a dirty source.
-    // This is the one place every caller that builds a `WorktreeManager`
-    // over a source repository passes through, so it is where the exclusion
-    // belongs rather than in each caller (a launcher, a scaffold, a test
-    // harness) remembering to call it separately. `ensure_exomonad_local_exclude`
-    // is idempotent, so a caller upstream that already installed it (real
-    // `exomonad` launches do, via `exomonad.rs`) pays only a no-op write check.
+    // Every WorktreeManager over a source repository admits Git ownership and
+    // its local runtime exclusions before constructing registry resources.
     git.ensure_exomonad_local_exclude(workspace)?;
+    Ok(git)
+}
+
+fn actor_worktree_resources_with_git(
+    directory: &tidepool_atomic_write::DirectoryAnchor,
+    workspace: &Path,
+    git: GitCli,
+) -> Result<(WorktreeManager, BindingTable), exomonad_worktree::WorktreeError> {
+    let root = directory.path();
     let registry = WorktreeRegistry::open(directory, "registry")?;
     let worktree_root = root.join("worktrees");
     // The root's own allocation directory exists before ANY launch: a mount
