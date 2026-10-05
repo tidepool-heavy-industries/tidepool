@@ -10811,21 +10811,30 @@ pub(super) mod tests {
             node: TypeNodeId(0),
         };
         let id = park_attested_fixture(&mut engine, owner, reply);
-        assert!(matches!(
-            engine.resume_with_structural_answer(
-                id,
-                &HaskellValue::Con(
-                    DataConId(79),
-                    vec![HaskellValue::Con(DataConId(78), vec![])]
-                ),
-                &table
+        let roots = engine.persistent_roots_count();
+        let failure = match engine.resume_with_structural_answer(
+            id,
+            &HaskellValue::Con(
+                DataConId(79),
+                vec![HaskellValue::Con(DataConId(78), vec![])],
             ),
-            Err(PreparedRuntimeError::AnswerConstructor {
-                host_id: DataConId(79),
-                ..
-            })
-        ));
+            &table,
+        ) {
+            Err(failure) => failure,
+            Ok(_) => panic!("Just demands a value for its universally quantified field"),
+        };
+        assert!(
+            matches!(
+                &failure,
+                PreparedRuntimeError::AnswerUnconstructible {
+                    site: ReplyTarget::Static(DataConId(77)),
+                    reason,
+                } if reason == &tidepool_repr::type_graph::ConstructionRefusal::Polymorphic.to_string()
+            ),
+            "{failure:?}"
+        );
         assert_eq!(engine.parked_count(), 1);
+        assert_eq!(engine.persistent_roots_count(), roots);
         let (programs, machine) = (&engine.programs, &mut engine.machine);
         let mut builder = machine.managed_builder().unwrap();
         let node = build_structural_node(
