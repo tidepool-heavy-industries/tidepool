@@ -36,10 +36,11 @@ import System.Exit (ExitCode(..))
 import System.Process (proc, readCreateProcessWithExitCode)
 import Tidepool.ExecutionProjection
   ( ProjectionContext(..), ProjectionError(..), preparedTargetReferences
-  , preparedTopIdentities, projectPreparedTarget )
+  , preparedTopIdentities, projectPreparedTarget, prepareProjection
+  , projectSelectedCandidateWithHostBindings, candidateGlobals, finalizePreparedCandidate )
 import Tidepool.ExecutionSchema
   ( Architecture(..), Alternative(..), Atom(..), Endianness(..), Expr(..), Group(..)
-  , HeapBinding(..), HeapRhs(..), JoinBinding(..), OperationDecl(..)
+  , HeapBinding(..), HeapRhs(..), GlobalDecl(..), JoinBinding(..), OperationDecl(..)
   , OperationId(..), OperationIdentity(..), ResultContract(..), RuntimeRep(..)
   , Signature(..), SignatureId(..), SymbolIdentity(..), TargetDescriptor(..)
   , TopBinding(..), ValueRef(..), WireProgram(..) )
@@ -510,10 +511,28 @@ assertRecoveredKindRep root = do
     Left (RecoveredEntryContractMismatch symbol Nothing True (Just (Signature [] (Returns [LiftedRefRep]))) False)
       | symbol == krepEntry -> pure ()
     result -> fail ("unresolved constructor did not refuse its exact final entry contract: " ++ show result)
+  partialSelection <- either (fail . show) pure (prepareProjection krepContext [partial])
+  partialCandidate <- either (fail . show) pure
+    (projectSelectedCandidateWithHostBindings [] partialSelection)
+  assert (any ((== Text.pack "krep$*1") . symbolOccurrence . globalIdentity)
+      (candidateGlobals partialCandidate))
+    "provisional candidate hid the strict sibling needed by package-root discovery"
+  case finalizePreparedCandidate partialCandidate of
+    Left (RecoveredEntryContractMismatch symbol Nothing True
+        (Just (Signature [] (Returns [LiftedRefRep]))) False)
+      | symbol == krepEntry -> pure ()
+    result -> fail ("provisional candidate did not retain its exact entry refusal: " ++ show result)
   complete <- either (fail . ("completed constructor projection failed: " ++) . show) pure
     (projectPreparedTarget krepContext modules)
   assert (any (isEmittedConstructor krepEntry) (concatMap groupItems (programBindings complete)))
     "completed recovery did not emit the selected constructor"
+  completeSelection <- either (fail . show) pure (prepareProjection krepContext modules)
+  completeCandidate <- either (fail . show) pure
+    (projectSelectedCandidateWithHostBindings [] completeSelection)
+  (finalized, _) <- either (fail . ("completed candidate finalization failed: " ++) . show) pure
+    (finalizePreparedCandidate completeCandidate)
+  assert (any (isEmittedConstructor krepEntry) (concatMap groupItems (programBindings finalized)))
+    "completed candidate did not finalize the selected constructor"
   case projectPreparedTarget (krepContext
       { projectionRetainedGenerations = singletonRetained krepEntry }) [partial] of
     Left (MissingPreparedEntry symbol) | symbol == krepEntry -> pure ()
