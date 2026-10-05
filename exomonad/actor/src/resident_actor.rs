@@ -2710,8 +2710,15 @@ pub struct ResidentKernelBehavior<H, O> {
     /// rendered preview when the request was presented.
     assignment_base: Option<String>,
     #[cfg(test)]
-    activation_preview_observer:
-        Option<Arc<dyn Fn(&tidepool_runtime::session::MountedActivationInput) + Send + Sync>>,
+    activation_preview_observer: Option<
+        Arc<
+            dyn Fn(
+                    &tidepool_runtime::session::MountedActivationInput,
+                ) -> Result<(), ResidentActorWorkbenchError>
+                + Send
+                + Sync,
+        >,
+    >,
 }
 
 /// One admitted call owns its authority and cursor until final settlement.
@@ -7775,7 +7782,7 @@ where
             workbench.activation_preview_observer = self.activation_preview_observer.clone();
             workbench
         };
-        let (input_preview, reply_preview, input_binding) = workbench
+        let mounted = workbench
             .mount_activation_input(
                 compile_context,
                 input,
@@ -7783,7 +7790,27 @@ where
                 request.response.declaration.clone(),
                 request.response.declaration_modules.clone(),
             )
-            .await?;
+            .await;
+        let (input_preview, reply_preview, input_binding) = match mounted {
+            Ok(mounted) => mounted,
+            Err(error) => {
+                let binding = match &error {
+                    ResidentActorWorkbenchError::ActivationBindingCommitted { binding, .. } => {
+                        Some(*binding)
+                    }
+                    _ => None,
+                };
+                drop(workbench);
+                drop(prepared_installation);
+                return match binding {
+                    Some(binding) => {
+                        self.retire_unpublished_activation_input(context, binding, Err(error))
+                            .await
+                    }
+                    None => Err(error),
+                };
+            }
+        };
         let result = async {
             let assignment_base = status_rendering::assignment_base_from_input(&input_preview);
             let contract = crate::interactive_session::ActivationContract {
@@ -7893,19 +7920,31 @@ where
             // Preview authority may borrow a newly staged installation. Release
             // it before retiring the input and its queued implementation leases.
             drop(workbench);
-            if let Err(cleanup) = self
-                .environment
-                .runner
-                .application_workbench()
-                .retire_activation_input(context.clone(), input_binding)
-                .await
-            {
-                return Err(ResidentActorWorkbenchError::ActivationPublicationCleanup {
-                    binding: input_binding,
-                    primary: result.err().map(Box::new),
-                    cleanup: Box::new(cleanup),
-                });
-            }
+            return self
+                .retire_unpublished_activation_input(context, input_binding, result)
+                .await;
+        }
+        result
+    }
+
+    async fn retire_unpublished_activation_input(
+        &self,
+        context: &ActorSessionContext,
+        binding: tidepool_repr::SessionVarId,
+        result: Result<InteractivePark, ResidentActorWorkbenchError>,
+    ) -> Result<InteractivePark, ResidentActorWorkbenchError> {
+        if let Err(cleanup) = self
+            .environment
+            .runner
+            .application_workbench()
+            .retire_activation_input(context.clone(), binding)
+            .await
+        {
+            return Err(ResidentActorWorkbenchError::ActivationPublicationCleanup {
+                binding,
+                primary: result.err().map(Box::new),
+                cleanup: Box::new(cleanup),
+            });
         }
         result
     }

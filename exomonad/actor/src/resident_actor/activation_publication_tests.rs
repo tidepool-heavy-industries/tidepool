@@ -20,11 +20,17 @@ async fn actor_retirement_during_original_preview_retires_unpublished_input() {
     interrupt_during_preview(false, Interruption::ActorRetirement, false).await;
 }
 
+#[tokio::test]
+async fn fatal_original_preview_retires_input_and_staged_tool_installation() {
+    interrupt_during_preview(false, Interruption::FatalPreview, true).await;
+}
+
 #[derive(Clone, Copy)]
 enum Interruption {
     Cancellation,
     TerminalRequest,
     ActorRetirement,
+    FatalPreview,
 }
 
 async fn interrupt_during_preview(
@@ -90,34 +96,51 @@ async fn interrupt_during_preview(
             displays: Default::default(),
         },
     );
-    let prepared =
-        (!already_installed && !genuine_preparation).then(|| PreparedInteractivePublication {
-            owner,
+    let genuine_installation = if matches!(interruption, Interruption::FatalPreview) {
+        Some(
+            behavior
+                .prepare_interactive_policy(&fixture.kernel, &context, None)
+                .await
+                .unwrap(),
+        )
+    } else {
+        None
+    };
+    let prepared = genuine_installation
+        .map(|installation| PreparedInteractivePublication {
+            owner: owner.clone(),
             bootstrap: None,
-            installation: LocalResidentInstallation {
-                prepared_tools: None,
-                actor: fixture.actor.clone(),
-                label: descriptor.label().into(),
-                policy: Arc::new(crate::ResidentInteractivePolicy::local(
-                    fixture.actor.clone(),
-                )),
-                initial_user_message: None,
-                launch_worktrees: Vec::new(),
-                worktree_custody: None,
-                effective_role: descriptor.effective_role().clone(),
-                fork_effort: None,
-                model: None,
-                instructions: None,
-                creator: None,
-                fork_boundary: None,
-                checkpoint: None,
-                checkpoint_attachment: None,
-                supervisor_parent: None,
-                context_parent: None,
-                fork_group: None,
-                fork_gate: None,
-                runtime_observation: behavior.runtime_observation.clone(),
-            },
+            installation,
+        })
+        .or_else(|| {
+            (!already_installed && !genuine_preparation).then(|| PreparedInteractivePublication {
+                owner,
+                bootstrap: None,
+                installation: LocalResidentInstallation {
+                    prepared_tools: None,
+                    actor: fixture.actor.clone(),
+                    label: descriptor.label().into(),
+                    policy: Arc::new(crate::ResidentInteractivePolicy::local(
+                        fixture.actor.clone(),
+                    )),
+                    initial_user_message: None,
+                    launch_worktrees: Vec::new(),
+                    worktree_custody: None,
+                    effective_role: descriptor.effective_role().clone(),
+                    fork_effort: None,
+                    model: None,
+                    instructions: None,
+                    creator: None,
+                    fork_boundary: None,
+                    checkpoint: None,
+                    checkpoint_attachment: None,
+                    supervisor_parent: None,
+                    context_parent: None,
+                    fork_group: None,
+                    fork_gate: None,
+                    runtime_observation: behavior.runtime_observation.clone(),
+                },
+            })
         });
     let (entered, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
     let (release, release_rx) = std::sync::mpsc::channel();
@@ -136,6 +159,15 @@ async fn interrupt_during_preview(
             .lock()
             .recv_timeout(std::time::Duration::from_secs(60))
             .expect("test must release original preview");
+        if matches!(interruption, Interruption::FatalPreview) {
+            return Err(ResidentActorWorkbenchError::InputCompilation {
+                stage: crate::resident_workbench::ActivationCompileStage::Preview,
+                error: tidepool_runtime::CompileError::ExtractFailed(
+                    "injected fatal preview boundary".into(),
+                ),
+            });
+        }
+        Ok(())
     }));
     let cancellation = async {
         let mounted = entered_rx.recv().await.expect("original input mounted");
@@ -162,6 +194,7 @@ async fn interrupt_during_preview(
                     },
                 );
             }
+            Interruption::FatalPreview => {}
             Interruption::ActorRetirement => {
                 fixture
                     .kernel
@@ -201,6 +234,23 @@ async fn interrupt_during_preview(
             parked,
             Err(ResidentActorWorkbenchError::RetiredBeforeAdmission(_))
         )),
+        Interruption::FatalPreview => {
+            let Err(ResidentActorWorkbenchError::ActivationBindingCommitted {
+                binding: actual,
+                source,
+            }) = parked
+            else {
+                panic!("fatal preview must preserve its committed binding and original error")
+            };
+            assert_eq!(actual, binding);
+            assert!(matches!(
+                *source,
+                ResidentActorWorkbenchError::InputCompilation {
+                    stage: crate::resident_workbench::ActivationCompileStage::Preview,
+                    error: tidepool_runtime::CompileError::ExtractFailed(_),
+                }
+            ));
+        }
     }
     assert!(fixture.deployments.try_recv().is_err());
     if genuine_preparation {

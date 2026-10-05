@@ -1425,8 +1425,15 @@ pub struct ResidentActorWorkbench<H, O> {
     compilation_authority: Option<Arc<crate::resident_actor::WorkbenchCompilationAuthority>>,
     private_execution: Option<Arc<ExecutionPrivateScope>>,
     #[cfg(test)]
-    pub(crate) activation_preview_observer:
-        Option<Arc<dyn Fn(&tidepool_runtime::session::MountedActivationInput) + Send + Sync>>,
+    pub(crate) activation_preview_observer: Option<
+        Arc<
+            dyn Fn(
+                    &tidepool_runtime::session::MountedActivationInput,
+                ) -> Result<(), ResidentActorWorkbenchError>
+                + Send
+                + Sync,
+        >,
+    >,
 }
 
 enum OwnedHostPayload {
@@ -4484,14 +4491,14 @@ where
                     .mount_activation_input(owner, interface)
                     .map_err(ResidentActorWorkbenchError::Resident)?;
                 let binding = mounted.binding();
-                #[cfg(test)]
-                if let Some(observer) = preview_observer {
-                    observer(&mounted);
-                }
                 let committed = |source| ResidentActorWorkbenchError::ActivationBindingCommitted {
                     binding,
                     source: Box::new(source),
                 };
+                #[cfg(test)]
+                if let Some(observer) = preview_observer {
+                    observer(&mounted).map_err(committed)?;
+                }
                 let view = actor_compile_view(session, context, &source).map_err(committed)?;
                 let prepared = source.prepare(&view);
                 let admission = session
