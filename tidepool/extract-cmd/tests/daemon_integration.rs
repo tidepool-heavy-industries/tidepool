@@ -1315,3 +1315,139 @@ fn producer_identity_survives_independent_daemon_boots() {
     drop(daemon_a);
     drop(daemon_b);
 }
+
+#[test]
+fn owned_compiler_case_preserves_isolation_and_confirms_cleanup() {
+    let (bin, _) = daemon_toolchain();
+    let root = std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join(format!("owned-compiler-control-{}", std::process::id()));
+    fs::create_dir(&root).expect("fresh control evidence root");
+    let compiler = root.join("compiler");
+    let output = Command::new(&bin)
+        .args([
+            OsString::from("--owned-daemon-run"),
+            compiler.clone().into_os_string(),
+            OsString::from("--"),
+        ])
+        .arg(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "owned_compiler_case_child",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env("TIDEPOOL_OWNED_COMPILER_CONTROL_ROOT", &root)
+        .env_remove(tidepool_extract_cmd::DAEMON_SOCKET_ENV)
+        .env_remove(tidepool_extract_cmd::REQUIRED_DAEMON_ENDPOINT_ENV)
+        .env_remove("TIDEPOOL_EXTRACT_NO_DAEMON")
+        .output()
+        .expect("owned compiler frontend launches");
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value =
+        serde_json::from_slice(&fs::read(compiler.join("lifecycle.json")).unwrap()).unwrap();
+    assert_eq!(report["cleanup_confirmed"], true);
+    assert!(!compiler.join("cache").exists());
+    let outcome: serde_json::Value =
+        serde_json::from_slice(&fs::read(compiler.join("owned-compiler-outcome.json")).unwrap())
+            .unwrap();
+    assert_eq!(outcome["cleanup"]["status"], "confirmed");
+    let refused = Command::new(&bin)
+        .args([
+            OsString::from("--owned-daemon-run"),
+            root.join("refused").into_os_string(),
+            OsString::from("--"),
+        ])
+        .arg(std::env::current_exe().unwrap())
+        .env(
+            tidepool_extract_cmd::DAEMON_SOCKET_ENV,
+            "/tmp/unowned-compiler.sock",
+        )
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(!root.join("refused").exists());
+}
+
+#[test]
+#[ignore = "private child of the owned compiler lifecycle acceptance case"]
+fn owned_compiler_case_child() {
+    let root = PathBuf::from(
+        std::env::var_os("TIDEPOOL_OWNED_COMPILER_CONTROL_ROOT").expect("owned control parent"),
+    );
+    let bin = compiler_inputs::require_compiler_executables();
+    let lib = stdlib_lib_dir();
+    let expected = ExtractCmd::new()
+        .unwrap()
+        .bind()
+        .unwrap()
+        .identity()
+        .clone();
+    assert_eq!(
+        std::env::var(tidepool_extract_cmd::REQUIRED_DAEMON_ENDPOINT_ENV).unwrap(),
+        expected.to_hex()
+    );
+    let source = root.join("OwnedControl.hs");
+    let first = "module OwnedControl where\nimport Tidepool.Prelude\nresult :: Int\nresult = 41\n";
+    let second = "module OwnedControl where\nimport Tidepool.Prelude\ndata PrivateB = PrivateB deriving Show\nresult :: Int\nresult = 42\n";
+    let mut original = None;
+    for (index, text) in [first, first, second, first].into_iter().enumerate() {
+        fs::write(&source, text).unwrap();
+        let out = root.join(format!("request-{index}"));
+        let mut command = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved(&bin));
+        command
+            .input(&source)
+            .output_dir(&out)
+            .target("result")
+            .include(&lib);
+        let bound = command.bind().unwrap();
+        assert_eq!(bound.identity(), &expected);
+        let result = bound.execute(&command).unwrap();
+        assert!(
+            result.success(),
+            "{}",
+            String::from_utf8_lossy(&result.output.stderr)
+        );
+        let program = fs::read(out.join("result.prepared.cbor")).unwrap();
+        if index == 0 {
+            original = Some(program);
+        } else if index == 2 {
+            assert_ne!(original.as_ref().unwrap(), &program);
+        } else {
+            assert_eq!(original.as_ref().unwrap(), &program);
+        }
+    }
+    fs::write(&source, "module OwnedControl where\nimport Tidepool.Prelude\nresult :: PrivateB\nresult = PrivateB\n").unwrap();
+    let mut denied = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved(&bin));
+    denied
+        .input(&source)
+        .output_dir(root.join("denied"))
+        .target("result")
+        .include(&lib);
+    let result = denied.bind().unwrap().execute(&denied).unwrap();
+    assert!(
+        !result.success(),
+        "a previous request's private declaration leaked"
+    );
+    let stopped = Command::new(&bin)
+        .args(["--stop-daemon", "--socket"])
+        .arg(std::env::var_os(tidepool_extract_cmd::DAEMON_SOCKET_ENV).unwrap())
+        .status()
+        .unwrap();
+    assert!(stopped.success());
+    let error = ExtractCmd::new()
+        .unwrap()
+        .bind()
+        .err()
+        .expect("owned mode cannot fall back after stop");
+    assert!(error
+        .source
+        .to_string()
+        .contains("direct fallback is forbidden"));
+}

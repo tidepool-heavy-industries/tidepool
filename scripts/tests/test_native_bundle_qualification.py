@@ -110,9 +110,10 @@ class NativeQualificationTests(unittest.TestCase):
                              [f'{name}=900' for name in sorted([qualification.M2_SURVIVAL_TEST, qualification.M2_NOMINAL_JOIN_TEST, qualification.M2_CHECKPOINT_RELEASE_TEST, qualification.M2_SELECTED_CODING_TEST])])
             self.assertEqual(report['scheduling'], {
                 'jobs': 4, 'effective_jobs': 4, 'delegated_service': True,
-                'service_slice': 'tidepool-completion-build.slice', 'timeout_seconds': 600,
+                'service_slice': 'tidepool-completion-build.slice', 'compiler_mode': 'direct', 'timeout_seconds': 600,
                 'case_timeout_seconds': {name: 900 for name in [qualification.M2_SURVIVAL_TEST, qualification.M2_NOMINAL_JOIN_TEST, qualification.M2_CHECKPOINT_RELEASE_TEST, qualification.M2_SELECTED_CODING_TEST]}})
             self.assertEqual(report['executed_test_count'], 7)
+            self.assertEqual(command[command.index('--compiler-mode') + 1], 'direct')
             self.assertTrue(report['completed'])
 
     def test_invalid_run_scheduling_refuses_before_verification_or_launch(self):

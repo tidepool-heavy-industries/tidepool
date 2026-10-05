@@ -117,7 +117,72 @@ pub struct ExtractRequest {
     fields: Vec<Field>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RequestMode {
+    ActivationPreview,
+    DeclarationInterface,
+    CellPlan,
+    CheckSource,
+    CellProgram,
+    Classify,
+    Inspection,
+    Turn,
+    Source,
+}
+
+impl std::fmt::Display for RequestMode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::ActivationPreview => "activation_preview",
+            Self::DeclarationInterface => "declaration_interface",
+            Self::CellPlan => "cell_plan",
+            Self::CheckSource => "check_source",
+            Self::CellProgram => "cell_program",
+            Self::Classify => "classify",
+            Self::Inspection => "inspection",
+            Self::Turn => "turn",
+            Self::Source => "source",
+        })
+    }
+}
+
 impl ExtractRequest {
+    /// Diagnostic mode selected from typed fields, without reparsing rendered flags.
+    pub(crate) fn mode(&self) -> RequestMode {
+        let has = |predicate: fn(&Field) -> bool| self.fields.iter().any(predicate);
+        if has(|field| matches!(field, Field::DeclarationJoin(_))) {
+            RequestMode::DeclarationInterface
+        } else if has(|field| matches!(field, Field::ActivationPreview)) {
+            RequestMode::ActivationPreview
+        } else if has(|field| matches!(field, Field::CheckSource)) {
+            RequestMode::CheckSource
+        } else if has(|field| matches!(field, Field::CellPlan)) {
+            RequestMode::CellPlan
+        } else if has(|field| matches!(field, Field::Cell)) {
+            RequestMode::CellProgram
+        } else if has(|field| matches!(field, Field::Classify)) {
+            RequestMode::Classify
+        } else if has(|field| {
+            matches!(
+                field,
+                Field::InspectType(_)
+                    | Field::InspectInfo(_)
+                    | Field::InspectBrowse(_)
+                    | Field::InspectBrowseExpanded(_)
+                    | Field::InspectScopeBrowse
+                    | Field::InspectSearch(_)
+                    | Field::InspectStructuredInfo(_)
+                    | Field::InspectStructuredType(_)
+            )
+        }) {
+            RequestMode::Inspection
+        } else if has(|field| matches!(field, Field::Turn)) {
+            RequestMode::Turn
+        } else {
+            RequestMode::Source
+        }
+    }
+
     /// Parse the human CLI into the same typed request used by
     /// library callers. Unknown options and missing/invalid values are usage
     /// errors; they are never reinterpreted as source paths.
@@ -1096,6 +1161,24 @@ impl std::error::Error for CliError {}
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn diagnostic_mode_preserves_dispatch_precedence_and_wire_roundtrip() {
+        use super::{ExtractRequest, RequestMode};
+        let request = ExtractRequest::from_cli(&[
+            "--turn".into(),
+            "--activation-preview".into(),
+            "input.hs".into(),
+        ])
+        .unwrap();
+        assert_eq!(request.mode(), RequestMode::ActivationPreview);
+        let planned = ExtractRequest::from_cli(&["--cell-plan".into(), "input.hs".into()]).unwrap();
+        assert_eq!(planned.mode(), RequestMode::CellPlan);
+        assert_eq!(
+            ExtractRequest::decode(&planned.encode()).unwrap().mode(),
+            RequestMode::CellPlan
+        );
+    }
+
     use super::*;
 
     #[test]

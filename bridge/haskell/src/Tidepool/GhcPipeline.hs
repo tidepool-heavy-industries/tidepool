@@ -2985,6 +2985,8 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           liftIO (emitPhase timing "lowering" totalLoweringMs)
           summaryT1 <- monotonicTime
           liftIO $ do
+            frontCount <- readIORef frontCountRef
+            backCount <- readIORef backCountRef
             moduleTimes <- readIORef moduleMsRef
             interfaceTotal <- readIORef interfaceMsRef
             moduleInterfaces <- readIORef moduleInterfaceMsRef
@@ -2992,7 +2994,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                 topInterfaces = take 3 (sortOn (negate . snd) (Map.toList moduleInterfaces))
             emitPhase timing "module_interface" interfaceTotal
             emitCompileSummary (length summaries) (elapsedMs sessionT0 summaryT1)
-              totalTcMs totalLoweringMs interfaceTotal topModules topInterfaces
+              totalTcMs totalLoweringMs interfaceTotal frontCount backCount (Map.size moduleInterfaces) topModules topInterfaces
             emitModuleTiming timing (sortOn (negate . snd) (Map.toList moduleTimes))
               (sortOn (negate . snd) (Map.toList moduleInterfaces))
           -- Diagnostic-only (see 'dsMsRef'/'c2cMsRef' haddock above): NOT part of

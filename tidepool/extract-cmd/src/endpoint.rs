@@ -13,6 +13,9 @@ use std::time::Instant;
 
 use crate::{daemon, process, ExtractCmd, ExtractRun, SpawnError};
 
+static PHYSICAL_REQUEST_SEQUENCE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(1);
+
 pub(crate) const BOUND_ENDPOINT_FLAG: &str = "--compiler-endpoint-v1";
 pub(crate) const IDENTITY_MAGIC: &[u8; 8] = b"TPCID002";
 
@@ -361,9 +364,24 @@ impl CompilerEndpoint {
     }
 
     fn bind_unscoped(cmd: &ExtractCmd) -> Result<Self, SpawnError> {
+        let required = std::env::var_os(crate::REQUIRED_DAEMON_ENDPOINT_ENV);
         if let Some(socket) = std::env::var_os(crate::DAEMON_SOCKET_ENV) {
             let socket = PathBuf::from(socket);
             if let Ok(binding) = daemon::preflight(&socket) {
+                let identity = CompilerIdentity::daemon(
+                    binding.producer,
+                    binding.consumed_worker,
+                    binding.epoch,
+                );
+                if required
+                    .as_ref()
+                    .is_some_and(|expected| expected != &OsString::from(identity.to_hex()))
+                {
+                    return Err(SpawnError::not_submitted(
+                        &socket,
+                        io::Error::other("required compiler daemon epoch or producer changed"),
+                    ));
+                }
                 return Ok(Self {
                     identity: CompilerIdentity::daemon(
                         binding.producer,
@@ -376,6 +394,14 @@ impl CompilerEndpoint {
                     },
                 });
             }
+        }
+        if required.is_some() {
+            return Err(SpawnError::not_submitted(
+                &cmd.program,
+                io::Error::other(
+                    "required owned compiler daemon is unavailable; direct fallback is forbidden",
+                ),
+            ));
         }
         Self::bind_direct(cmd)
     }
@@ -551,9 +577,21 @@ impl CompilerEndpoint {
             .map_err(|source| SpawnError::not_submitted("current directory", source))?;
         // Both sides retain the same input digest. Daemon acceptance adds
         // an exact invocation identity in the transport-owned request event.
+        let physical_execution = if matches!(self.transport, Transport::Scoped) {
+            None
+        } else {
+            Some(format!(
+                "{}:{}",
+                std::process::id(),
+                PHYSICAL_REQUEST_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ))
+        };
         let span = tracing::info_span!(
             "compile_request",
             compile_request = %daemon::compile_request_correlation(&cwd, &cmd.request.worker_argv()),
+            request_mode = %cmd.request.mode(),
+            execution_layer = if matches!(self.transport, Transport::Scoped) { "transaction_wrapper" } else { "physical" },
+            physical_execution = physical_execution.as_deref(),
             transport = self.transport.name(),
             producer = %self.identity.producer_hex(),
             endpoint = %self.identity,
@@ -786,6 +824,9 @@ impl CompilerTransaction {
         let span = tracing::info_span!(
             "compile_request",
             compile_request = %daemon::compile_request_correlation(&cwd, &cmd.request.worker_argv()),
+            request_mode = %cmd.request.mode(),
+            execution_layer = "physical",
+            physical_execution = %format!("{}:{}", std::process::id(), PHYSICAL_REQUEST_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)),
             transport = match transport {
                 TransactionTransport::Direct(_) => "direct",
                 TransactionTransport::Daemon { .. } => "daemon",

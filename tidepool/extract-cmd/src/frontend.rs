@@ -17,6 +17,9 @@ pub fn run(args: Vec<OsString>) -> Result<u8, FrontendError> {
     if args.is_empty() {
         return Err(FrontendError::Usage(USAGE.to_owned()));
     }
+    if args.first().is_some_and(|arg| arg == "--owned-daemon-run") {
+        return owned_daemon_run(&args[1..]);
+    }
     if args.first().is_some_and(|arg| arg == "--daemon") {
         let config = parse_daemon(&args[1..])?;
         // Named binding: dropping the guard would close the trace appender's
@@ -82,6 +85,220 @@ pub fn run(args: Vec<OsString>) -> Result<u8, FrontendError> {
     let status = command.status().map_err(FrontendError::Io)?;
     build_products.cleanup();
     Ok(exit_code(status))
+}
+
+struct OwnedSocketDirectory(PathBuf);
+
+impl OwnedSocketDirectory {
+    fn create() -> io::Result<Self> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        for _ in 0..32 {
+            let path = PathBuf::from(format!(
+                "/tmp/tp-owned-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            use std::os::unix::fs::DirBuilderExt;
+            match std::fs::DirBuilder::new().mode(0o700).create(&path) {
+                Ok(()) => {
+                    return Ok(Self(path));
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Err(io::Error::other(
+            "owned compiler socket namespace exhausted",
+        ))
+    }
+}
+
+impl Drop for OwnedSocketDirectory {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir(&self.0);
+    }
+}
+
+struct OwnedDaemonChild(std::process::Child);
+
+impl Drop for OwnedDaemonChild {
+    fn drop(&mut self) {
+        if self.0.try_wait().ok().flatten().is_none() {
+            let _ = self.0.kill();
+        }
+        let _ = self.0.wait();
+    }
+}
+
+/// Qualify one isolated process against its own exact persistent compiler.
+/// The frontend owns all process edges; test helpers do not launch compilers.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "bounded synchronous owned compiler readiness and acknowledged shutdown"
+)]
+fn owned_daemon_run(args: &[OsString]) -> Result<u8, FrontendError> {
+    let [root, separator, program, child_args @ ..] = args else {
+        return Err(FrontendError::Usage(
+            "--owned-daemon-run ROOT -- PROGRAM [ARGS]".into(),
+        ));
+    };
+    if separator != "--" {
+        return Err(FrontendError::Usage(
+            "owned daemon requires an explicit command separator".into(),
+        ));
+    }
+    for key in [
+        crate::DAEMON_SOCKET_ENV,
+        crate::REQUIRED_DAEMON_ENDPOINT_ENV,
+        "TIDEPOOL_EXTRACT_NO_DAEMON",
+    ] {
+        if std::env::var_os(key).is_some() {
+            return Err(FrontendError::Usage(format!(
+                "owned daemon refuses inherited {key}"
+            )));
+        }
+    }
+    let frontend = std::env::current_exe().map_err(FrontendError::Io)?;
+    let selected = crate::resolve_bin().map_err(|error| FrontendError::Io(error.into()))?;
+    if !same_file_path(&frontend, &selected.path)
+        || std::env::var_os("TIDEPOOL_EXTRACT").is_none()
+        || std::env::var_os("TIDEPOOL_COMPILER_DEPLOYMENT").is_none()
+        || std::env::var_os(WORKER_ENV).is_none()
+    {
+        return Err(FrontendError::Usage(
+            "owned daemon requires its explicitly selected frontend, worker and deployment".into(),
+        ));
+    }
+    let direct = crate::ExtractCmd::new()
+        .map_err(|error| FrontendError::Io(error.into()))?
+        .bind_direct()
+        .map_err(|error| FrontendError::Io(error.source))?;
+    let expected = direct.identity().clone();
+    drop(direct);
+    let root = Path::new(root);
+    if !root.is_absolute() {
+        return Err(FrontendError::Usage(
+            "owned daemon root must be absolute and fresh".into(),
+        ));
+    }
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(root)
+        .map_err(FrontendError::Io)?;
+    let outcome_path = root.join("owned-compiler-outcome.json");
+    atomic_write_manifest(
+        &outcome_path,
+        b"{\"schema\":1,\"cleanup\":{\"status\":\"unconfirmed\"}}\n",
+    )
+    .map_err(FrontendError::Io)?;
+    let cache = root.join("cache");
+    std::fs::create_dir(&cache).map_err(FrontendError::Io)?;
+    // Keep the socket within Unix path bounds independently of a long evidence path.
+    let socket_directory = OwnedSocketDirectory::create().map_err(FrontendError::Io)?;
+    let socket = socket_directory.0.join("compiler.sock");
+    let daemon_log = File::create(root.join("daemon.stderr.log")).map_err(FrontendError::Io)?;
+    let arguments = crate::persistent_daemon_arguments(
+        &socket,
+        &root.join("compiler.jsonl"),
+        "isolated-qualification",
+        1,
+        Some(crate::SESSION_WORKER_RSS_CEILING_MB),
+    );
+    let mut command = crate::process::command(&frontend);
+    command
+        .args(&arguments)
+        .env("TIDEPOOL_TIMING", "1")
+        .env("XDG_CACHE_HOME", &cache)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(daemon_log));
+    let mut daemon = OwnedDaemonChild(command.spawn().map_err(FrontendError::Io)?);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let binding = loop {
+        if let Some(status) = daemon.0.try_wait().map_err(FrontendError::Io)? {
+            return Err(FrontendError::Daemon(format!(
+                "owned compiler exited before readiness: {status}"
+            )));
+        }
+        if let Ok(binding) = daemon::preflight(&socket) {
+            break binding;
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(FrontendError::Daemon(
+                "owned compiler readiness timed out; direct fallback forbidden".into(),
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    };
+    let identity =
+        crate::CompilerIdentity::daemon(binding.producer, binding.consumed_worker, binding.epoch);
+    if identity.producer_bytes() != expected.producer_bytes()
+        || identity.consumed_worker_bytes() != expected.consumed_worker_bytes()
+    {
+        return Err(FrontendError::Daemon(
+            "owned compiler differs from selected direct producer".into(),
+        ));
+    }
+    let report = root.join("lifecycle.json");
+    let daemon_pid = daemon.0.id();
+    let write_report = |confirmed: bool, code: Option<u8>| {
+        atomic_write_manifest(&report, format!(
+            "{{\"schema\":1,\"producer\":{},\"endpoint\":{},\"daemon_epoch\":{},\"daemon_pid\":{},\"cleanup_confirmed\":{},\"exit_code\":{}}}\n",
+            json_string(&identity.producer_hex()), json_string(&identity.to_hex()),
+            json_string(&crate::endpoint::hex(&binding.epoch)), daemon_pid, confirmed,
+            code.map_or("null".into(), |value| value.to_string())
+        ).as_bytes()).map_err(FrontendError::Io)
+    };
+    write_report(false, None)?;
+    let mut descendants =
+        crate::process::descendant_snapshot(daemon_pid).map_err(FrontendError::Io)?;
+    let child = crate::process::command(program)
+        .args(child_args)
+        .env(crate::DAEMON_SOCKET_ENV, &socket)
+        .env(crate::REQUIRED_DAEMON_ENDPOINT_ENV, identity.to_hex())
+        .env("TIDEPOOL_TIMING", "1")
+        .env("XDG_CACHE_HOME", &cache)
+        .status()
+        .map_err(FrontendError::Io);
+    descendants.extend(crate::process::descendant_snapshot(daemon_pid).map_err(FrontendError::Io)?);
+    daemon::request_stop(&socket).map_err(|error| FrontendError::Daemon(error.to_string()))?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let stopped = loop {
+        if let Some(status) = daemon.0.try_wait().map_err(FrontendError::Io)? {
+            break status;
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(FrontendError::Daemon(
+                "owned compiler shutdown remains unconfirmed".into(),
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    };
+    if !stopped.success() || socket.exists() {
+        return Err(FrontendError::Daemon(format!(
+            "owned compiler cleanup remains unconfirmed: {stopped}"
+        )));
+    }
+    for (pid, start) in descendants {
+        if crate::process::process_start_ticks(pid).map_err(FrontendError::Io)? == Some(start) {
+            return Err(FrontendError::Daemon(format!(
+                "owned compiler descendant {pid} remains live or unreaped"
+            )));
+        }
+    }
+    let code = exit_code(child?);
+    if code == 0 {
+        std::fs::remove_dir_all(&cache).map_err(FrontendError::Io)?;
+    }
+    write_report(true, Some(code))?;
+    atomic_write_manifest(
+        &outcome_path,
+        b"{\"schema\":1,\"cleanup\":{\"status\":\"confirmed\"}}\n",
+    )
+    .map_err(FrontendError::Io)?;
+    Ok(code)
 }
 
 fn connect(args: &[OsString]) -> Result<u8, FrontendError> {
@@ -762,6 +979,33 @@ mod tests {
             Some(value) => std::env::set_var(WORKER_ENV, value),
             None => std::env::remove_var(WORKER_ENV),
         }
+    }
+
+    #[test]
+    fn owned_compiler_requires_an_explicit_child_command() {
+        assert!(matches!(
+            owned_daemon_run(&[]),
+            Err(FrontendError::Usage(_))
+        ));
+        assert!(matches!(
+            owned_daemon_run(&["/tmp/fresh".into(), "--other".into(), "test".into()]),
+            Err(FrontendError::Usage(_))
+        ));
+    }
+
+    #[test]
+    fn shared_persistent_command_keeps_production_worker_limits() {
+        let arguments = crate::persistent_daemon_arguments(
+            Path::new("/tmp/owned.sock"),
+            Path::new("/tmp/compiler.jsonl"),
+            "case",
+            1,
+            Some(7168),
+        );
+        let configuration = parse_daemon(&arguments[1..]).unwrap();
+        assert!(configuration.persistent);
+        assert_eq!(configuration.workers, Some(1));
+        assert_eq!(configuration.rss_ceiling_mb, Some(7168));
     }
 
     #[test]

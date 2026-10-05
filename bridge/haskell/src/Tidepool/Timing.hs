@@ -151,15 +151,19 @@ elapsedMs t0 t1 = round ((t1 - t0) * 1000)
 -- Distinct wire prefix (@tidepool-compile-summary@, not @tidepool-timing @)
 -- so 'ExtractTiming::parse' on the Rust side (which matches the
 -- @tidepool-timing \<space\>@ prefix only) never sees or misparses this line.
-emitCompileSummary :: Int -> Integer -> Integer -> Integer -> Integer
+emitCompileSummary :: Int -> Integer -> Integer -> Integer -> Integer -> Int -> Int -> Int
   -> [(String, Integer)] -> [(String, Integer)] -> IO ()
-emitCompileSummary moduleCount wallMs typecheckMs loweringMs interfaceMs topModules topInterfaces =
+emitCompileSummary moduleCount wallMs typecheckMs loweringMs interfaceMs frontCount backCount interfaceCount topModules topInterfaces =
   hPutStrLn stderr $
     "tidepool-compile-summary modules=" ++ show moduleCount
     ++ " wall_ms=" ++ show wallMs
     ++ " typecheck_ms=" ++ show typecheckMs
     ++ " lowering_ms=" ++ show loweringMs
     ++ " interface_ms=" ++ show interfaceMs
+    ++ " phase_coverage=deferred_modules"
+    ++ " typecheck_modules=" ++ show frontCount
+    ++ " lowering_modules=" ++ show backCount
+    ++ " interface_modules=" ++ show interfaceCount
     ++ " top=" ++ intercalate "," [ name ++ ":" ++ show ms | (name, ms) <- topModules ]
     ++ " interface_top=" ++ intercalate "," [ name ++ ":" ++ show ms | (name, ms) <- topInterfaces ]
 

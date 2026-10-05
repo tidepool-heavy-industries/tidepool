@@ -34,7 +34,7 @@ M2_TESTS = [
 M1_TESTS = ["actor_host::m1_host_tests::production_browser_executes_resident_haskell_retries_and_controls_root"]
 DESCRIPTOR = "share/exomonad/qualification.json"
 UNSET_ENVIRONMENT = (
-    "TIDEPOOL_EXTRACT_DAEMON_SOCKET", "TIDEPOOL_COMPILER_MODULES",
+    "TIDEPOOL_EXTRACT_DAEMON_SOCKET", "TIDEPOOL_EXTRACT_REQUIRED_DAEMON_ENDPOINT", "TIDEPOOL_COMPILER_MODULES",
     "TIDEPOOL_COMPILER_DEPLOYMENT", "TIDEPOOL_EXTRACT_WORKER",
     "TIDEPOOL_EXTRACT", "TIDEPOOL_PRELUDE_DIR", "TIDEPOOL_GHC_LIBDIR",
     "EXOMONAD_EMBEDDED_ASSET_ROOT", "EXOMONAD_WORKSPACE_GITLINK", "EXOMONAD_WORKSPACE_GIT_BUNDLE", "EXOMONAD_NIX_BIN", "EXOMONAD_NIX_OFFLINE", "LD_LIBRARY_PATH", "TIDEPOOL_EXTRACT_NO_DAEMON",
@@ -875,7 +875,7 @@ def run_cohort(args) -> int:
     output.mkdir(parents=True, exist_ok=False, mode=0o700)
     command = [sys.executable, descriptor["programs"]["runner"], descriptor["programs"]["libtest"],
                "--expected-count", str(cohort["expected_count"]), "--jobs", str(args.jobs), "--timeout", str(cohort["timeout"]),
-               "--output-dir", str(output / "tests")]
+               "--output-dir", str(output / "tests"), "--compiler-mode", getattr(args, "compiler_mode", "direct")]
     for name, timeout in sorted(cohort.get("case_timeouts", {}).items()):
         command.extend(["--case-timeout", f"{name}={timeout}"])
     if args.delegated_service:
@@ -897,6 +897,7 @@ def run_cohort(args) -> int:
               "command": command, "exit_code": code, "runner_exit_code": result.returncode,
               "scheduling": {"jobs": args.jobs, "effective_jobs": min(args.jobs, cohort["expected_count"]),
                              "delegated_service": args.delegated_service, "service_slice": service_slice,
+                             "compiler_mode": getattr(args, "compiler_mode", "direct"),
                              "timeout_seconds": cohort["timeout"], "case_timeout_seconds": cohort.get("case_timeouts", {})},
               "elapsed_ns": time.monotonic_ns() - started, "expected_count": cohort["expected_count"],
               "executed_test_count": sum((record.get("execution") or {}).get("executed_test_count") or 0 for record in records),
@@ -1019,6 +1020,8 @@ def main(argv=None) -> int:
     run.add_argument("--output", required=True, type=Path)
     run.add_argument("--jobs", type=int, default=1,
                      help="maximum concurrent test processes (default: 1)")
+    run.add_argument("--compiler-mode", choices=("direct", "owned-resident"), default="direct",
+                     help="isolated per-case compiler lifecycle (default: direct)")
     run.add_argument("--delegated-service", action="store_true",
                      help="run each test in the isolated runner's delegated user service")
     run.add_argument("--service-slice",

@@ -369,7 +369,7 @@ impl ExtractTiming {
 pub const COMPILE_SUMMARY_PREFIX: &str = "tidepool-compile-summary ";
 
 /// One extract invocation's default-on compile summary — module count, whole
-/// compile wall time, the typecheck/lowering/interface phase totals (always computed
+/// compile wall time, the deferred typecheck/lowering/interface phase totals (computed
 /// regardless of [`TIMING_ENV`] — see `GhcPipeline.hs`'s `tcMsRef`/
 /// `loweringMsRef`), and the top-3 modules by wall time. Parsed out of a fresh
 /// compile's stderr; absent on a memo hit (no extract process ran) or a hard
@@ -381,6 +381,11 @@ pub struct CompileSummary {
     pub typecheck_ms: u64,
     pub lowering_ms: u64,
     pub interface_ms: u64,
+    /// The deferred frontend/back end counters exclude GHC load captures.
+    /// Absent counts in older diagnostics do not establish phase coverage.
+    pub typecheck_modules: Option<u32>,
+    pub lowering_modules: Option<u32>,
+    pub interface_modules: Option<u32>,
     /// `(module, ms)` pairs, up to 3, in descending wall-time order.
     pub top: Vec<(String, u64)>,
     /// Interface-only `(module, ms)` pairs, up to 3, in descending order.
@@ -401,6 +406,9 @@ impl CompileSummary {
             let mut typecheck_ms = None;
             let mut lowering_ms = None;
             let mut interface_ms = None;
+            let mut typecheck_modules = None;
+            let mut lowering_modules = None;
+            let mut interface_modules = None;
             let mut top = Vec::new();
             let mut interface_top = Vec::new();
             for field in rest.split_whitespace() {
@@ -414,6 +422,12 @@ impl CompileSummary {
                     lowering_ms = v.parse::<u64>().ok();
                 } else if let Some(v) = field.strip_prefix("interface_ms=") {
                     interface_ms = v.parse::<u64>().ok();
+                } else if let Some(v) = field.strip_prefix("typecheck_modules=") {
+                    typecheck_modules = v.parse::<u32>().ok();
+                } else if let Some(v) = field.strip_prefix("lowering_modules=") {
+                    lowering_modules = v.parse::<u32>().ok();
+                } else if let Some(v) = field.strip_prefix("interface_modules=") {
+                    interface_modules = v.parse::<u32>().ok();
                 } else if let Some(v) = field.strip_prefix("top=") {
                     top = v
                         .split(',')
@@ -448,6 +462,9 @@ impl CompileSummary {
                     typecheck_ms,
                     lowering_ms,
                     interface_ms,
+                    typecheck_modules,
+                    lowering_modules,
+                    interface_modules,
                     top,
                     interface_top,
                 });
@@ -565,9 +582,14 @@ pub fn log_compile_summary(summary: &CompileSummary) {
         target: "tidepool_runtime::compile",
         modules = summary.modules,
         wall_ms = summary.wall_ms,
-        typecheck_ms = summary.typecheck_ms,
-        lowering_ms = summary.lowering_ms,
-        interface_ms = summary.interface_ms,
+        partial_typecheck_ms = summary.typecheck_ms,
+        partial_lowering_ms = summary.lowering_ms,
+        partial_interface_ms = summary.interface_ms,
+        typecheck_modules = summary.typecheck_modules,
+        lowering_modules = summary.lowering_modules,
+        interface_modules = summary.interface_modules,
+        whole_phase_totals_available = false,
+        phase_coverage = "deferred_modules",
         top = %top,
         interface_top = %interface_top,
         "compile summary"
@@ -664,6 +686,16 @@ tidepool-timing phase=ghc_load ms=4533\n";
             classify_stage_name(PHASE_TYPECHECK),
             extract_stage_name(PHASE_TYPECHECK)
         );
+    }
+
+    #[test]
+    fn compile_summary_preserves_measured_zero_and_missing_coverage() {
+        let legacy = CompileSummary::parse("tidepool-compile-summary modules=1 wall_ms=10 typecheck_ms=0 lowering_ms=0 interface_ms=0 top= interface_top=").unwrap();
+        assert_eq!(legacy.typecheck_ms, 0);
+        assert_eq!(legacy.typecheck_modules, None);
+        let measured = CompileSummary::parse("tidepool-compile-summary modules=1 wall_ms=10 typecheck_ms=0 lowering_ms=0 interface_ms=0 phase_coverage=deferred_modules typecheck_modules=1 lowering_modules=1 interface_modules=1 top= interface_top=").unwrap();
+        assert_eq!(measured.typecheck_ms, 0);
+        assert_eq!(measured.typecheck_modules, Some(1));
     }
 
     #[test]

@@ -57,6 +57,59 @@ pub(crate) fn kill_process(pid: u32) -> io::Result<()> {
     }
 }
 
+/// Fence the currently owned descendant tree before an orderly daemon stop.
+/// PID reuse after reap cannot turn an unrelated process into our descendant.
+pub(crate) fn descendant_snapshot(pid: u32) -> io::Result<Vec<(u32, u64)>> {
+    let mut pending = vec![pid];
+    let mut snapshot = Vec::new();
+    while let Some(parent) = pending.pop() {
+        let tasks = match std::fs::read_dir(format!("/proc/{parent}/task")) {
+            Ok(tasks) => tasks,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        let mut children = std::collections::BTreeSet::new();
+        for task in tasks {
+            let path = task?.path().join("children");
+            let contents = match std::fs::read_to_string(path) {
+                Ok(contents) => contents,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
+            children.extend(contents.split_whitespace().map(str::to_owned));
+        }
+        for child in children {
+            let child = child
+                .parse::<u32>()
+                .map_err(|_| io::Error::other("invalid owned descendant PID"))?;
+            if let Some(start) = process_start_ticks(child)? {
+                snapshot.push((child, start));
+                pending.push(child);
+                if snapshot.len() > 1024 {
+                    return Err(io::Error::other(
+                        "owned compiler descendant snapshot exceeds bound",
+                    ));
+                }
+            }
+        }
+    }
+    Ok(snapshot)
+}
+
+pub(crate) fn process_start_ticks(pid: u32) -> io::Result<Option<u64>> {
+    let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(stat) => stat,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let start = stat
+        .rsplit_once(") ")
+        .and_then(|(_, fields)| fields.split_whitespace().nth(19))
+        .and_then(|field| field.parse().ok())
+        .ok_or_else(|| io::Error::other("invalid owned descendant start ticks"))?;
+    Ok(Some(start))
+}
+
 /// Arm the current frontend/daemon process to die if its launcher disappears.
 ///
 /// Linux clears `PDEATHSIG` across `fork`, so this is deliberately paired

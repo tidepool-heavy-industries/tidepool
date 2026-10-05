@@ -64,6 +64,41 @@ pub const DEFAULT_BIN: &str = "tidepool-extract";
 
 /// Environment variable selecting a resident compiler daemon socket.
 pub const DAEMON_SOCKET_ENV: &str = "TIDEPOOL_EXTRACT_DAEMON_SOCKET";
+/// An explicitly owned campaign binds every request to this exact daemon identity.
+pub const REQUIRED_DAEMON_ENDPOINT_ENV: &str = "TIDEPOOL_EXTRACT_REQUIRED_DAEMON_ENDPOINT";
+/// Per-worker rotation ceiling for the production session's default single worker.
+pub const SESSION_WORKER_RSS_CEILING_MB: u64 = 7 * 1024;
+
+/// Shared persistent daemon command for production and isolated qualification.
+pub fn persistent_daemon_arguments(
+    socket: &Path,
+    log: &Path,
+    run_id: &str,
+    workers: usize,
+    rss_ceiling_mb: Option<u64>,
+) -> Vec<OsString> {
+    let mut args = vec![
+        "--daemon".into(),
+        "--socket".into(),
+        socket.as_os_str().to_owned(),
+        "--persistent".into(),
+        "--workers".into(),
+        workers.to_string().into(),
+    ];
+    if let Some(ceiling) = rss_ceiling_mb {
+        args.extend([
+            OsString::from("--rss-ceiling-mb"),
+            ceiling.to_string().into(),
+        ]);
+    }
+    args.extend([
+        OsString::from("--run-id"),
+        run_id.into(),
+        OsString::from("--log-path"),
+        log.as_os_str().to_owned(),
+    ]);
+    args
+}
 
 /// Process-global count of compiler invocations submitted through a bound
 /// endpoint. Tests asserting on it require process isolation.

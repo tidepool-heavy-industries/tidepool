@@ -112,7 +112,7 @@ const DEFAULT_WORKER_COUNT: usize = 3;
 /// budget divided by a fixed `DEFAULT_WORKER_COUNT` of 3, on a box where only
 /// ~20 GiB was actually available, produced three ~3.2 GiB slots and a
 /// worker replaced on almost every request).
-const WARM_WORKER_MB: u64 = 7 * 1024;
+const WARM_WORKER_MB: u64 = crate::SESSION_WORKER_RSS_CEILING_MB;
 /// Total resident-worker RSS budget a `--persistent` daemon sizes its worker
 /// pool from. The worker *count* is derived from this budget, not fixed:
 /// `worker_count_from_budget` picks as many `WARM_WORKER_MB` slots as the

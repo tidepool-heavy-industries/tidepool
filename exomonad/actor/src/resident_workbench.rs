@@ -3995,6 +3995,7 @@ where
         'a,
         Result<ResidentWorkbenchTools, ResidentActorWorkbenchError>,
     > {
+        let span = tracing::info_span!(target: "exomonad_actor::workbench_phase", "agent_spec_prepare", actor = %context.actor, install);
         Box::pin(async move {
             let source_support = self.access.source.installed_effect_support().to_vec();
             let observer = self.access.handler_effect_support.clone();
@@ -4250,7 +4251,7 @@ where
             }
             drop(dependencies);
             publication
-        })
+        }.instrument(span))
     }
 
     /// Apply the retained handler with invocation data. No source compiler is involved.
@@ -4434,6 +4435,7 @@ where
 
     /// Commit the original input through a fresh thin interface, then prepare
     /// its pure display against the original executable owners.
+    #[tracing::instrument(target = "exomonad_actor::workbench_phase", name = "activation_input_prepare", skip_all, fields(actor = %context.actor))]
     pub(crate) async fn mount_activation_input(
         &self,
         context: crate::ActorSessionContext,
@@ -4881,6 +4883,7 @@ where
         .await
     }
 
+    #[tracing::instrument(target = "exomonad_actor::workbench_phase", name = "cell_prepare", skip_all, fields(actor = %context.actor, source_bytes = cell_source.len()))]
     async fn prepare_checked_host_cell(
         &self,
         context: crate::ActorSessionContext,

@@ -293,7 +293,10 @@ impl Default for CompilerConfig {
     fn default() -> Self {
         Self {
             workers: std::num::NonZeroUsize::new(1).unwrap(),
-            rss_ceiling_mb: std::num::NonZeroU64::new(7168).unwrap(),
+            rss_ceiling_mb: std::num::NonZeroU64::new(
+                tidepool_extract_cmd::SESSION_WORKER_RSS_CEILING_MB,
+            )
+            .unwrap(),
         }
     }
 }
@@ -1311,20 +1314,16 @@ fn compiler_daemon_launch(
         window_name: "Compiler".into(),
         cwd: workspace.into(),
         program,
-        args: vec![
-            "--daemon".into(),
-            "--socket".into(),
-            socket.display().to_string(),
-            "--persistent".into(),
-            "--workers".into(),
-            compiler.workers.to_string(),
-            "--rss-ceiling-mb".into(),
-            compiler.rss_ceiling_mb.to_string(),
-            "--run-id".into(),
-            run_id.into(),
-            "--log-path".into(),
-            log_path.display().to_string(),
-        ],
+        args: tidepool_extract_cmd::persistent_daemon_arguments(
+            socket,
+            log_path,
+            run_id,
+            compiler.workers.get(),
+            Some(compiler.rss_ceiling_mb.get()),
+        )
+        .into_iter()
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect(),
         environment,
         unset_environment,
     }
