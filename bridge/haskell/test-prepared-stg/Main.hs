@@ -487,7 +487,7 @@ verifyProjectionInterning dir = do
   strictPlain <- writePlainConstructorEvidenceFixture dir
   effects <- getEnv "TIDEPOOL_TEST_EFFECTS_DIR"
   strictPlainResult <- runPipelineSelected PreparedStg strictPlain
-    [dir, "test/prepared-stg", "lib", effects]
+    [dir, "lib", effects]
   verifyRepeatedConstructorEvidence strictPlainResult
   putStrLn "projection interning: deterministic bytes and 16 constructor-conflict paths passed"
 
@@ -515,11 +515,11 @@ strictMetadataSource modul quoted = unlines $
   , "import Tidepool.Effects.Core (ActorLocal)"
   ] ++ quasiquoteBindings quoted ++
   [ "automatic :: Eff '[ActorLocal Maybe] Automatic"
-  , "automatic = receive @Automatic @Maybe (\\_ -> error \"metadata handler is not invoked\")"
+  , "automatic = receive @Automatic @Maybe (\\_ -> let handler = handler in handler)"
   , "noUnpack :: Eff '[ActorLocal Maybe] NoUnpack"
-  , "noUnpack = receive @NoUnpack @Maybe (\\_ -> error \"metadata handler is not invoked\")"
+  , "noUnpack = receive @NoUnpack @Maybe (\\_ -> let handler = handler in handler)"
   , "explicitUnpack :: Eff '[ActorLocal Maybe] ExplicitUnpack"
-  , "explicitUnpack = receive @ExplicitUnpack @Maybe (\\_ -> error \"metadata handler is not invoked\")"
+  , "explicitUnpack = receive @ExplicitUnpack @Maybe (\\_ -> let handler = handler in handler)"
   ]
 
 quasiquoteLanguage :: Bool -> [String]
@@ -565,12 +565,14 @@ verifyConstructorRepresentations dir = do
     ])
   writeFile scientificMetadataPlain (scientificMetadataSource "ScientificMetadataPlain" False)
   writeFile scientificMetadataQuoted (scientificMetadataSource "ScientificMetadataQuoted" True)
-  strictPlainResult <- runPipelineSelected PreparedStg strictPlain [dir, "test/prepared-stg", "lib"]
-  strictQuotedResult <- runPipelineSelected PreparedStg strictQuoted [dir, "lib"]
-  scientificPlainResult <- runPipelineSelected PreparedStg scientificPlain [dir, "lib"]
-  scientificQuotedResult <- runPipelineSelected PreparedStg scientificQuoted [dir, "lib"]
-  scientificMetadataPlainResult <- runPipelineSelected PreparedStg scientificMetadataPlain [dir, "lib"]
-  scientificMetadataQuotedResult <- runPipelineSelected PreparedStg scientificMetadataQuoted [dir, "lib"]
+  effects <- getEnv "TIDEPOOL_TEST_EFFECTS_DIR"
+  let includes = [dir, "lib", effects]
+  strictPlainResult <- runPipelineSelected PreparedStg strictPlain includes
+  strictQuotedResult <- runPipelineSelected PreparedStg strictQuoted includes
+  scientificPlainResult <- runPipelineSelected PreparedStg scientificPlain includes
+  scientificQuotedResult <- runPipelineSelected PreparedStg scientificQuoted includes
+  scientificMetadataPlainResult <- runPipelineSelected PreparedStg scientificMetadataPlain includes
+  scientificMetadataQuotedResult <- runPipelineSelected PreparedStg scientificMetadataQuoted includes
   assertMetadataReps "Automatic" strictPlainResult strictQuotedResult
     ["IntRep"]
   assertMetadataReps "NoUnpack" strictPlainResult strictQuotedResult
@@ -593,13 +595,15 @@ verifyConstructorRepresentations dir = do
       ++ show (Schema.constructorFieldReps plainDecl))
  where
   scientificMetadataSource modul quoted = unlines $
-    [ "{-# LANGUAGE TypeApplications #-}" ] ++ quasiquoteLanguage quoted ++
+    [ "{-# LANGUAGE DataKinds, TypeApplications #-}" ] ++ quasiquoteLanguage quoted ++
     [ "module " ++ modul ++ " where"
     , "import Tidepool.Aeson.Value (Value)"
     , "import Tidepool.Actor"
+    , "import Control.Monad.Freer (Eff)"
+    , "import Tidepool.Effects.Core (ActorLocal)"
     ] ++ quasiquoteBindings quoted ++
-    [ "result :: Maybe Value"
-    , "result = receive @Value \"scientific\""
+    [ "result :: Eff '[ActorLocal Maybe] Value"
+    , "result = receive @Value @Maybe (\\_ -> let handler = handler in handler)"
     ]
   assertMetadataReps occurrence plain quoted expected = do
     let plainReps = typeGraphReps occurrence plain
