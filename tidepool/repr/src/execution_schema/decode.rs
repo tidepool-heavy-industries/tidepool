@@ -1,4 +1,4 @@
-use super::{DecodeLimits, ParseError, PreparedProgram, ProgramRequirements};
+use super::{DecodeLimits, OperationBudget, ParseError, PreparedProgram, ProgramRequirements};
 
 /// Decode and validate one prepared execution artifact.
 ///
@@ -9,7 +9,8 @@ pub fn parse_program(
     requirements: &ProgramRequirements,
     limits: DecodeLimits,
 ) -> Result<PreparedProgram, ParseError> {
-    let wire = super::codec::decode_wire(bytes, limits)?;
-    super::validation::validate_program(&wire, requirements, limits)?;
+    let mut budget = OperationBudget::new(limits.max_work);
+    let wire = super::codec::decode_wire(bytes, limits, &mut budget)?;
+    super::validation::validate_program_with_budget(&wire, requirements, limits, &mut budget)?;
     Ok(super::prepared_from_validated(wire))
 }

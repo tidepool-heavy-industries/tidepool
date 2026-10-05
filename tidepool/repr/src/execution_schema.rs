@@ -1275,8 +1275,19 @@ pub fn parse_projected_group(
     requirements: &ProgramRequirements,
     limits: DecodeLimits,
 ) -> Result<ProjectedGroup, ParseError> {
-    let (original_ordinal, binders, definitions) = codec::decode_group_wire(bytes, limits)?;
-    validation::validate_group(&definitions, requirements, limits)?;
+    let mut budget = OperationBudget::new(limits.max_work);
+    parse_projected_group_with_budget(bytes, requirements, limits, &mut budget)
+}
+
+fn parse_projected_group_with_budget(
+    bytes: &[u8],
+    requirements: &ProgramRequirements,
+    limits: DecodeLimits,
+    budget: &mut OperationBudget,
+) -> Result<ProjectedGroup, ParseError> {
+    let (original_ordinal, binders, definitions) = codec::decode_group_wire(bytes, limits, budget)?;
+    validation::validate_group_with_budget(&definitions, requirements, limits, budget)?;
+    budget.charge(binders.len())?;
     let unique: std::collections::BTreeSet<_> = binders.iter().collect();
     if unique.len() != binders.len() {
         return Err(ParseError::DuplicateDefinition(
@@ -1309,7 +1320,7 @@ pub fn parse_module_products(
     requirements: &ProgramRequirements,
     limits: DecodeLimits,
 ) -> Result<Vec<RawModuleProduct>, ParseError> {
-    parse_module_products_inner(bytes, requirements, limits, |_| Ok(()))
+    parse_module_products_inner(bytes, requirements, limits, |_, _, _| Ok(()))
 }
 
 /// Decode products and normalize each singleton sidecar from the same bounded
@@ -1321,16 +1332,20 @@ pub fn parse_module_products_with_framing(
     limits: DecodeLimits,
 ) -> Result<(Vec<RawModuleProduct>, Vec<Vec<u8>>), ParseError> {
     let mut sidecars = Vec::new();
-    let products = parse_module_products_inner(bytes, requirements, limits, |row| {
-        let mut singleton = Vec::new();
-        ciborium::ser::into_writer(&("TPMOD", 1u64, [row]), &mut singleton)
-            .map_err(|error| ParseError::Malformed(format!("module product framing: {error}")))?;
-        if singleton.len() > limits.max_bytes {
-            return Err(ParseError::LimitExceeded("module product framing"));
-        }
-        sidecars.push(singleton);
-        Ok(())
-    })?;
+    let products =
+        parse_module_products_inner(bytes, requirements, limits, |row, framing_work, budget| {
+            // Reserve this row's items and payload copies before framing allocates.
+            budget.charge(framing_work)?;
+            let mut singleton = Vec::new();
+            ciborium::ser::into_writer(&("TPMOD", 1u64, [row]), &mut singleton).map_err(
+                |error| ParseError::Malformed(format!("module product framing: {error}")),
+            )?;
+            if singleton.len() > limits.max_bytes {
+                return Err(ParseError::LimitExceeded("module product framing"));
+            }
+            sidecars.push(singleton);
+            Ok(())
+        })?;
     Ok((products, sidecars))
 }
 
@@ -1338,11 +1353,16 @@ fn parse_module_products_inner(
     bytes: &[u8],
     requirements: &ProgramRequirements,
     limits: DecodeLimits,
-    mut normalized_row: impl FnMut(&ciborium::value::Value) -> Result<(), ParseError>,
+    mut normalized_row: impl FnMut(
+        &ciborium::value::Value,
+        usize,
+        &mut OperationBudget,
+    ) -> Result<(), ParseError>,
 ) -> Result<Vec<RawModuleProduct>, ParseError> {
     use ciborium::value::Value;
 
-    let Value::Array(header) = codec::decode_value(bytes, limits)? else {
+    let mut budget = OperationBudget::new(limits.max_work);
+    let Value::Array(header) = codec::decode_value(bytes, limits, &mut budget)? else {
         return Err(ParseError::Malformed(
             "module products require an array".into(),
         ));
@@ -1363,6 +1383,7 @@ fn parse_module_products_inner(
     if modules.len() > limits.max_table_entries {
         return Err(ParseError::LimitExceeded("module products"));
     }
+    budget.charge(modules.len())?;
     let mut seen_modules = std::collections::BTreeSet::new();
     let mut output = Vec::with_capacity(modules.len());
     for module in modules {
@@ -1388,6 +1409,11 @@ fn parse_module_products_inner(
                 "invalid module product identity or interface".into(),
             ));
         }
+        let identity_bytes = unit
+            .len()
+            .checked_add(name.len())
+            .ok_or(ParseError::LimitExceeded("work"))?;
+        budget.charge(identity_bytes)?;
         if !seen_modules.insert((unit.clone(), name.clone())) {
             return Err(ParseError::DuplicateDefinition(format!(
                 "module {unit}:{name}"
@@ -1396,22 +1422,35 @@ fn parse_module_products_inner(
         if groups.len() > limits.max_table_entries {
             return Err(ParseError::LimitExceeded("projected groups"));
         }
+        budget.charge(groups.len())?;
         let mut seen_ordinals = std::collections::BTreeSet::new();
         let mut seen_binders = std::collections::BTreeSet::new();
         let mut projected = Vec::with_capacity(groups.len());
+        // A singleton TPMOD envelope/row has nine fixed CBOR items plus five
+        // magic bytes; each opaque group adds one item and its byte payload.
+        let mut framing_work = identity_bytes
+            .checked_add(interface.len())
+            .and_then(|work| work.checked_add(14))
+            .and_then(|work| work.checked_add(groups.len()))
+            .ok_or(ParseError::LimitExceeded("work"))?;
         for group in groups {
             let Value::Bytes(group_bytes) = group else {
                 return Err(ParseError::Malformed(
                     "projected group requires bytes".into(),
                 ));
             };
-            let parsed = parse_projected_group(group_bytes, requirements, limits)?;
+            framing_work = framing_work
+                .checked_add(group_bytes.len())
+                .ok_or(ParseError::LimitExceeded("work"))?;
+            let parsed =
+                parse_projected_group_with_budget(group_bytes, requirements, limits, &mut budget)?;
             if !seen_ordinals.insert(parsed.original_ordinal()) {
                 return Err(ParseError::DuplicateDefinition(
                     "original group ordinal".into(),
                 ));
             }
             for binder in parsed.binders() {
+                budget.charge_symbol_copy(binder)?;
                 if binder.unit != *unit
                     || binder.module != *name
                     || !seen_binders.insert(binder.clone())
@@ -1423,7 +1462,12 @@ fn parse_module_products_inner(
             }
             projected.push(parsed);
         }
-        normalized_row(module)?;
+        normalized_row(module, framing_work, &mut budget)?;
+        budget.charge(
+            identity_bytes
+                .checked_add(interface.len())
+                .ok_or(ParseError::LimitExceeded("work"))?,
+        )?;
         output.push(RawModuleProduct {
             unit: unit.clone(),
             module: name.clone(),
@@ -1516,6 +1560,9 @@ pub enum LinkError {
 pub fn encode_type_graph_value(graph: &TypeGraph) -> ciborium::value::Value {
     codec::encode_type_graph_value(graph)
 }
+
+mod budget;
+use budget::OperationBudget;
 
 mod codec;
 mod decode;

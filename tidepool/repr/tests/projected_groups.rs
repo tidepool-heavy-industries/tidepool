@@ -325,3 +325,89 @@ fn large_projected_group_membership_preserves_identity_duplicates_and_limits() {
         matches!(parse_projected_group(&encode(&group), &requirements, DecodeLimits::default()), Err(ParseError::InvalidReference(detail)) if detail.ends_with("is absent"))
     );
 }
+
+#[test]
+fn module_product_groups_share_one_operation_work_budget() {
+    let row = |module: &str| {
+        let mut wire = testing::wire_program();
+        match &mut wire.bindings[0] {
+            Group::NonRecursive(top) => top.identity.module = module.into(),
+            Group::Recursive(_) => unreachable!(),
+        }
+        let group = testing::projected_group(wire, 0).unwrap();
+        Value::Array(vec![
+            Value::Text("fixture".into()),
+            Value::Text(module.into()),
+            Value::Bytes(vec![1]),
+            Value::Array(vec![Value::Bytes(
+                tidepool_test_data::prepared_encode::encode_projected_group(&group),
+            )]),
+        ])
+    };
+    let encode = |rows: &[Value]| {
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&("TPMOD", 1u64, rows), &mut bytes).unwrap();
+        bytes
+    };
+    let required = requirements();
+    let first = row("First");
+    let second = row("Second");
+    let first_bytes = encode(std::slice::from_ref(&first));
+    let second_bytes = encode(std::slice::from_ref(&second));
+    let combined = encode(&[first, second]);
+    let minimum = |bytes: &[u8]| {
+        let mut low = 0;
+        let mut high = DecodeLimits::default().max_work;
+        parse_module_products(bytes, &required, DecodeLimits::default()).unwrap();
+        while low < high {
+            let middle = low + (high - low) / 2;
+            let limits = DecodeLimits {
+                max_work: middle,
+                ..DecodeLimits::default()
+            };
+            match parse_module_products(bytes, &required, limits) {
+                Ok(_) => high = middle,
+                Err(ParseError::LimitExceeded("work")) => low = middle + 1,
+                Err(error) => panic!("budget control failed for another reason: {error}"),
+            }
+        }
+        low
+    };
+    let limit = minimum(&first_bytes).max(minimum(&second_bytes));
+    let limits = DecodeLimits {
+        max_work: limit,
+        ..DecodeLimits::default()
+    };
+    parse_module_products(&first_bytes, &required, limits).unwrap();
+    parse_module_products(&second_bytes, &required, limits).unwrap();
+    assert_eq!(
+        parse_module_products(&combined, &required, limits),
+        Err(ParseError::LimitExceeded("work"))
+    );
+    let combined_limit = minimum(&combined);
+    let products = parse_module_products(
+        &combined,
+        &required,
+        DecodeLimits {
+            max_work: combined_limit,
+            ..DecodeLimits::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        parse_module_products_with_framing(
+            &combined,
+            &required,
+            DecodeLimits {
+                max_work: combined_limit,
+                ..DecodeLimits::default()
+            }
+        ),
+        Err(ParseError::LimitExceeded("work")),
+    );
+    let (_, frames) =
+        parse_module_products_with_framing(&combined, &required, DecodeLimits::default()).unwrap();
+    assert_eq!(frames.len(), 2);
+    assert_eq!(products.len(), 2);
+    assert!(products.iter().all(|product| product.groups.len() == 1));
+}

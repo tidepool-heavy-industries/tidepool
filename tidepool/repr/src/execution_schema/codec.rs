@@ -12,10 +12,10 @@ use ciborium::value::Value;
 use super::{
     Alternative, AlternativePattern, Architecture, Atom, CaseKind, CheckedLayout, ConstructorDecl,
     ConstructorId, ConstructorReply, DecodeLimits, Endianness, Expr, ExprFrame, FieldLayout,
-    GlobalDecl, GlobalId, Group, HeapBinding, HeapRhs, JoinBinding, JoinId, OperationDecl,
-    OperationId, ParseError, ProgramDefinitions, ProgramEnvelope, RuntimeRep, ScalarLiteral,
-    Signature, SignatureId, SiteDelivery, SiteRow, SymbolIdentity, TargetDescriptor, TopBinding,
-    TypeNode, TypeNodeId, UpdatePolicy, ValueId, ValueRef, WireProgram,
+    GlobalDecl, GlobalId, Group, HeapBinding, HeapRhs, JoinBinding, JoinId, OperationBudget,
+    OperationDecl, OperationId, ParseError, ProgramDefinitions, ProgramEnvelope, RuntimeRep,
+    ScalarLiteral, Signature, SignatureId, SiteDelivery, SiteRow, SymbolIdentity, TargetDescriptor,
+    TopBinding, TypeNode, TypeNodeId, UpdatePolicy, ValueId, ValueRef, WireProgram,
 };
 
 pub(super) fn type_graph_error(error: TypeGraphError) -> ParseError {
@@ -211,9 +211,13 @@ const MAX_CONTAINER_NESTING: usize = 32;
 
 /// Decode only the closed flat CBOR grammar into an unpublished wire value.
 /// Semantic validation and construction publication remain in `decode`.
-pub(super) fn decode_wire(bytes: &[u8], limits: DecodeLimits) -> Result<WireProgram, ParseError> {
-    let value = decode_value(bytes, limits)?;
-    Decoder::new(limits).program(&value)
+pub(super) fn decode_wire(
+    bytes: &[u8],
+    limits: DecodeLimits,
+    budget: &mut OperationBudget,
+) -> Result<WireProgram, ParseError> {
+    let value = decode_value(bytes, limits, budget)?;
+    Decoder::new(limits, budget).program(&value)
 }
 
 /// Decode an entry-free original STG group using the same bounded table and
@@ -221,8 +225,9 @@ pub(super) fn decode_wire(bytes: &[u8], limits: DecodeLimits) -> Result<WireProg
 pub(super) fn decode_group_wire(
     bytes: &[u8],
     limits: DecodeLimits,
+    budget: &mut OperationBudget,
 ) -> Result<(u32, Vec<SymbolIdentity>, ProgramDefinitions), ParseError> {
-    let Value::Array(fields) = decode_value(bytes, limits)? else {
+    let Value::Array(fields) = decode_value(bytes, limits, budget)? else {
         return Err(malformed("projected group", "array"));
     };
     if fields.len() != 19 || text_raw(&fields[0], "group magic")? != "TPGRP" {
@@ -236,7 +241,7 @@ pub(super) fn decode_group_wire(
         ));
     }
     let ordinal = u32_value(&fields[2], "original group ordinal")?;
-    let mut decoder = Decoder::new(limits);
+    let mut decoder = Decoder::new(limits, budget);
     let binders = decoder.list(&fields[3], true, |this, value| this.symbol(value))?;
     if binders.is_empty() {
         return Err(ParseError::Malformed(
@@ -263,14 +268,18 @@ pub(super) fn decode_group_wire(
     Ok((ordinal, binders, definitions))
 }
 
-pub(super) fn decode_value(bytes: &[u8], limits: DecodeLimits) -> Result<Value, ParseError> {
+pub(super) fn decode_value(
+    bytes: &[u8],
+    limits: DecodeLimits,
+    budget: &mut OperationBudget,
+) -> Result<Value, ParseError> {
     if bytes.len() > limits.max_bytes {
         return Err(ParseError::ByteLimit {
             limit: limits.max_bytes,
             actual: bytes.len(),
         });
     }
-    let consumed = scan_item(bytes, limits.max_work)?;
+    let consumed = scan_item(bytes, budget)?;
     if consumed != bytes.len() {
         return Err(ParseError::TrailingBytes);
     }
@@ -293,22 +302,16 @@ pub(super) fn decode_value(bytes: &[u8], limits: DecodeLimits) -> Result<Value, 
 
 /// Walk one complete CBOR item, rejecting indefinite containers before
 /// `ciborium::Value` erases that distinction.
-fn scan_item(bytes: &[u8], max_work: usize) -> Result<usize, ParseError> {
+fn scan_item(bytes: &[u8], budget: &mut OperationBudget) -> Result<usize, ParseError> {
     let mut remaining = vec![1_u64];
     let mut offset = 0_usize;
-    let mut work = 0_usize;
     while let Some(items) = remaining.last_mut() {
         if *items == 0 {
             remaining.pop();
             continue;
         }
         *items -= 1;
-        work = work
-            .checked_add(1)
-            .ok_or(ParseError::LimitExceeded("work"))?;
-        if work > max_work {
-            return Err(ParseError::LimitExceeded("work"));
-        }
+        budget.charge(1)?;
         let initial = *bytes.get(offset).ok_or(ParseError::Truncated)?;
         let major = initial >> 5;
         let additional = initial & 0x1f;
@@ -324,6 +327,10 @@ fn scan_item(bytes: &[u8], max_work: usize) -> Result<usize, ParseError> {
         let children = match major {
             0 | 1 | 7 => 0,
             2 | 3 => {
+                // Reserve raw Value payload copies before ciborium allocates.
+                budget.charge(
+                    usize::try_from(argument).map_err(|_| ParseError::LimitExceeded("work"))?,
+                )?;
                 offset = offset
                     .checked_add(
                         usize::try_from(argument).map_err(|_| ParseError::LimitExceeded("work"))?,
@@ -382,34 +389,27 @@ fn cbor_argument(bytes: &[u8], offset: usize, additional: u8) -> Result<(u64, us
     }
 }
 
-struct Decoder {
+struct Decoder<'a> {
     limits: DecodeLimits,
     nodes: usize,
     tables: usize,
     strings: usize,
-    work: usize,
+    budget: &'a mut OperationBudget,
 }
 
-impl Decoder {
-    fn new(limits: DecodeLimits) -> Self {
+impl<'a> Decoder<'a> {
+    fn new(limits: DecodeLimits, budget: &'a mut OperationBudget) -> Self {
         Self {
             limits,
             nodes: 0,
             tables: 0,
             strings: 0,
-            work: 0,
+            budget,
         }
     }
 
     fn charge(&mut self, amount: usize) -> Result<(), ParseError> {
-        self.work = self
-            .work
-            .checked_add(amount)
-            .ok_or(ParseError::LimitExceeded("work"))?;
-        if self.work > self.limits.max_work {
-            return Err(ParseError::LimitExceeded("work"));
-        }
-        Ok(())
+        self.budget.charge(amount)
     }
 
     fn node(&mut self) -> Result<(), ParseError> {
@@ -556,7 +556,7 @@ impl Decoder {
             );
         }
         let mut limits = GraphLimits::from(self.limits);
-        limits.max_work = self.limits.max_work.saturating_sub(self.work);
+        limits.max_work = self.budget.remaining();
         let (graph, used_work) =
             TypeGraph::validate_with_work(graph, constructors, limits).map_err(type_graph_error)?;
         self.charge(used_work)?;
@@ -817,11 +817,11 @@ impl Decoder {
             }),
             (2, 2) => {
                 let constructor = ConstructorId(u32_value(&fields[1], "template constructor ID")?);
-                let identity = constructors
-                    .get(constructor.0 as usize)
-                    .ok_or_else(|| ParseError::InvalidReference("template constructor ID".into()))?
-                    .identity
-                    .clone();
+                let physical = constructors.get(constructor.0 as usize).ok_or_else(|| {
+                    ParseError::InvalidReference("template constructor ID".into())
+                })?;
+                self.budget.charge_symbol_copy(&physical.identity)?;
+                let identity = physical.identity.clone();
                 Ok(TypeNode::ConstructorTemplate {
                     constructor,
                     identity,
@@ -1423,12 +1423,13 @@ mod tests {
         let (_, used_work) =
             TypeGraph::validate_with_work(graph.graph().clone(), &[], GraphLimits::default())
                 .unwrap();
-        let mut decoder = Decoder::new(DecodeLimits::default());
+        let mut budget = OperationBudget::new(DecodeLimits::default().max_work);
+        let mut decoder = Decoder::new(DecodeLimits::default(), &mut budget);
         decoder
             .type_graph(&encode_type_graph_value(&graph), &[])
             .unwrap();
-        assert!(decoder.work >= used_work);
-        decoder.limits.max_work = decoder.work;
+        assert!(decoder.budget.spent() >= used_work);
+        decoder.budget.charge(decoder.budget.remaining()).unwrap();
         assert_eq!(
             decoder.sites(&Value::Array(vec![Value::Array(vec![])])),
             Err(ParseError::LimitExceeded("work"))
@@ -1540,7 +1541,12 @@ mod tests {
             .stack_size(256 * 1024)
             .spawn(|| {
                 let bytes = deep_program(20_000);
-                let wire = decode_wire(&bytes, DecodeLimits::default()).unwrap();
+                let wire = decode_wire(
+                    &bytes,
+                    DecodeLimits::default(),
+                    &mut OperationBudget::new(DecodeLimits::default().max_work),
+                )
+                .unwrap();
                 let requirements = super::super::ProgramRequirements {
                     schema_version: super::super::SCHEMA_VERSION,
                     projection_profile: wire.envelope.projection_profile.clone(),
@@ -1568,19 +1574,23 @@ mod tests {
         let mut bytes = vec![0x81; 100_000];
         bytes.push(0);
         assert!(matches!(
-            decode_wire(&bytes, DecodeLimits::default()),
+            decode_wire(
+                &bytes,
+                DecodeLimits::default(),
+                &mut OperationBudget::new(DecodeLimits::default().max_work)
+            ),
             Err(ParseError::Malformed(_))
         ));
         assert!(matches!(
-            scan_item(&[0x9f, 0xff], 10),
+            scan_item(&[0x9f, 0xff], &mut OperationBudget::new(10)),
             Err(ParseError::Malformed(_))
         ));
         assert!(matches!(
-            scan_item(&[0x82, 0], 10),
+            scan_item(&[0x82, 0], &mut OperationBudget::new(10)),
             Err(ParseError::Truncated)
         ));
         assert!(matches!(
-            scan_item(&[0x82, 0, 0], 2),
+            scan_item(&[0x82, 0, 0], &mut OperationBudget::new(2)),
             Err(ParseError::LimitExceeded("work"))
         ));
     }
@@ -1591,7 +1601,8 @@ mod tests {
 
     #[test]
     fn null_address_and_managed_rubbish_have_distinct_wire_forms() {
-        let mut decoder = Decoder::new(DecodeLimits::default());
+        let mut budget = OperationBudget::new(DecodeLimits::default().max_work);
+        let mut decoder = Decoder::new(DecodeLimits::default(), &mut budget);
         let null = Value::Array(vec![number(1), Value::Array(vec![number(5)])]);
         let rubbish = Value::Array(vec![number(3), Value::Array(vec![number(1)])]);
         assert_eq!(
@@ -1608,7 +1619,8 @@ mod tests {
 
     #[test]
     fn retired_character_scalar_tag_is_not_decoded() {
-        let mut decoder = Decoder::new(DecodeLimits::default());
+        let mut budget = OperationBudget::new(DecodeLimits::default().max_work);
+        let mut decoder = Decoder::new(DecodeLimits::default(), &mut budget);
         assert!(matches!(
             decoder.scalar(&Value::Array(vec![number(3), number(65)])),
             Err(ParseError::InvalidTag(3))
@@ -1617,7 +1629,8 @@ mod tests {
 
     #[test]
     fn rubbish_wire_representation_is_explicit_and_required() {
-        let mut decoder = Decoder::new(DecodeLimits::default());
+        let mut budget = OperationBudget::new(DecodeLimits::default().max_work);
+        let mut decoder = Decoder::new(DecodeLimits::default(), &mut budget);
         for (wire_rep, rep) in [
             (vec![number(2)], RuntimeRep::UnliftedRef),
             (vec![number(3)], RuntimeRep::Address),
@@ -1635,7 +1648,8 @@ mod tests {
 
     #[test]
     fn json_layout_codec_requires_all_named_roles() {
-        let mut decoder = Decoder::new(DecodeLimits::default());
+        let mut budget = OperationBudget::new(DecodeLimits::default().max_work);
+        let mut decoder = Decoder::new(DecodeLimits::default(), &mut budget);
         let complete = Value::Array((0_u8..18).map(number).collect());
         let layout = decoder.json_layout(&complete).unwrap();
         assert_eq!(layout.object, ConstructorId(0));
@@ -1646,5 +1660,121 @@ mod tests {
             decoder.json_layout(&short),
             Err(ParseError::Malformed(_))
         ));
+    }
+}
+
+#[cfg(test)]
+mod operation_budget_tests {
+    use super::super::ProgramRequirements;
+    use super::*;
+
+    fn fixture() -> (Vec<u8>, ProgramRequirements) {
+        let mut wire = super::super::testing::wire_program();
+        wire.types = tidepool_test_data::prepared::closed_type_graph(
+            super::super::testing::identity("Types", "Text"),
+            DeclarationForm::Text,
+        );
+        let requirements = ProgramRequirements {
+            schema_version: wire.envelope.schema_version,
+            projection_profile: wire.envelope.projection_profile.clone(),
+            toolchain: wire.envelope.toolchain.clone(),
+            execution_abi_version: wire.envelope.execution_abi_version,
+            target: wire.envelope.target.clone(),
+        };
+        (
+            tidepool_test_data::prepared_encode::encode_wire_program(&wire),
+            requirements,
+        )
+    }
+
+    #[test]
+    fn byte_entry_budget_spans_raw_decode_graph_freeze_and_semantic_validation() {
+        let (bytes, requirements) = fixture();
+        let limits = DecodeLimits::default();
+        let mut raw = OperationBudget::new(limits.max_work);
+        let value = decode_value(&bytes, limits, &mut raw).unwrap();
+        let mut typed = OperationBudget::new(limits.max_work);
+        let wire = Decoder::new(limits, &mut typed).program(&value).unwrap();
+        let mut semantic = OperationBudget::new(limits.max_work);
+        super::super::validation::validate_program_with_budget(
+            &wire,
+            &requirements,
+            limits,
+            &mut semantic,
+        )
+        .unwrap();
+        let phase_limit = raw.spent().max(typed.spent()).max(semantic.spent());
+        let total = raw.spent() + typed.spent() + semantic.spent();
+        assert!(total > phase_limit);
+        let per_phase = DecodeLimits {
+            max_work: phase_limit,
+            ..limits
+        };
+        decode_value(&bytes, per_phase, &mut OperationBudget::new(phase_limit)).unwrap();
+        Decoder::new(per_phase, &mut OperationBudget::new(phase_limit))
+            .program(&value)
+            .unwrap();
+        super::super::validation::validate_program(&wire, &requirements, per_phase).unwrap();
+        assert_eq!(
+            super::super::parse_program(&bytes, &requirements, per_phase),
+            Err(ParseError::LimitExceeded("work")),
+        );
+        super::super::parse_program(
+            &bytes,
+            &requirements,
+            DecodeLimits {
+                max_work: total,
+                ..limits
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn physical_template_identity_copy_is_admitted_before_clone() {
+        let mut constructors = tidepool_test_data::prepared::constructor_program().constructors;
+        constructors[0].identity.occurrence = "X".repeat(4096);
+        let identity = &constructors[0].identity;
+        let copy_bytes = [
+            &identity.unit,
+            &identity.module,
+            &identity.namespace,
+            &identity.occurrence,
+        ]
+        .into_iter()
+        .chain(identity.record_parent.iter())
+        .map(|text| text.len())
+        .sum::<usize>();
+        let template = Value::Array(vec![Value::Integer(2.into()), Value::Integer(0.into())]);
+        let mut budget = OperationBudget::new(copy_bytes - 1);
+        let mut decoder = Decoder::new(DecodeLimits::default(), &mut budget);
+        assert_eq!(
+            decoder.type_node(&template, &constructors),
+            Err(ParseError::LimitExceeded("work"))
+        );
+        assert_eq!(decoder.budget.spent(), 0);
+        let mut budget = OperationBudget::new(copy_bytes);
+        let mut decoder = Decoder::new(DecodeLimits::default(), &mut budget);
+        assert!(
+            matches!(decoder.type_node(&template, &constructors).unwrap(),
+            TypeNode::ConstructorTemplate { identity: copied, .. } if copied == *identity)
+        );
+        assert_eq!(decoder.budget.spent(), copy_bytes);
+
+        // The second physical ID refuses before it could consume another copy.
+        let duplicate = Value::Array(vec![
+            Value::Integer(1.into()),
+            Value::Array(vec![template.clone(), template]),
+            Value::Array(vec![]),
+        ]);
+        let mut budget = OperationBudget::new(copy_bytes + 2);
+        let mut decoder = Decoder::new(DecodeLimits::default(), &mut budget);
+        assert_eq!(
+            decoder.type_graph(&duplicate, &constructors),
+            Err(ParseError::DuplicateDefinition(
+                "type constructor template".into()
+            ))
+        );
+        assert_eq!(decoder.budget.spent(), copy_bytes + 2);
     }
 }

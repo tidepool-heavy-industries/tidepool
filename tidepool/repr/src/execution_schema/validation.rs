@@ -3,9 +3,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::{
     Alternative, AlternativePattern, Atom, CaseKind, CheckedLayout, ConstructorDecl, ConstructorId,
     ConstructorReply, DecodeLimits, DefinitionsView, Expr, ExprFrame, GlobalId, Group, HeapBinding,
-    HeapRhs, JoinBinding, JoinId, OperationId, ParseError, ProgramDefinitions, ProgramRequirements,
-    ResultContract, RuntimeRep, ScalarLiteral, SignatureId, SymbolIdentity, TypeNode, TypeNodeId,
-    ValueId, ValueRef, WireProgram, EXECUTION_ABI_VERSION, SCHEMA_VERSION,
+    HeapRhs, JoinBinding, JoinId, OperationBudget, OperationId, ParseError, ProgramDefinitions,
+    ProgramRequirements, ResultContract, RuntimeRep, ScalarLiteral, SignatureId, SymbolIdentity,
+    TypeNode, TypeNodeId, ValueId, ValueRef, WireProgram, EXECUTION_ABI_VERSION, SCHEMA_VERSION,
 };
 use recursion::{try_expand_and_collapse, MappableFrame, PartiallyApplied};
 use std::{cell::RefCell, rc::Rc};
@@ -1267,7 +1267,17 @@ pub(super) fn validate_program(
     requirements: &ProgramRequirements,
     limits: DecodeLimits,
 ) -> Result<(), ParseError> {
-    Validator::new(wire, limits).validate(requirements)
+    let mut budget = OperationBudget::new(limits.max_work);
+    validate_program_with_budget(wire, requirements, limits, &mut budget)
+}
+
+pub(super) fn validate_program_with_budget(
+    wire: &WireProgram,
+    requirements: &ProgramRequirements,
+    limits: DecodeLimits,
+    budget: &mut OperationBudget,
+) -> Result<(), ParseError> {
+    Validator::new(wire, limits, budget).validate(requirements)
 }
 
 pub(super) fn validate_group(
@@ -1275,36 +1285,50 @@ pub(super) fn validate_group(
     requirements: &ProgramRequirements,
     limits: DecodeLimits,
 ) -> Result<(), ParseError> {
-    Validator::new_group(definitions, limits).validate(requirements)
+    let mut budget = OperationBudget::new(limits.max_work);
+    validate_group_with_budget(definitions, requirements, limits, &mut budget)
+}
+
+pub(super) fn validate_group_with_budget(
+    definitions: &ProgramDefinitions,
+    requirements: &ProgramRequirements,
+    limits: DecodeLimits,
+    budget: &mut OperationBudget,
+) -> Result<(), ParseError> {
+    Validator::new_group(definitions, limits, budget).validate(requirements)
 }
 
 struct Validator<'a> {
     wire: DefinitionsView<'a>,
     entry: Option<ValueId>,
     limits: DecodeLimits,
-    work: usize,
+    budget: &'a mut OperationBudget,
     top_values: BTreeSet<ValueId>,
     defined_values: BTreeSet<ValueId>,
 }
 
 impl<'a> Validator<'a> {
-    fn new(wire: &'a WireProgram, limits: DecodeLimits) -> Self {
+    fn new(wire: &'a WireProgram, limits: DecodeLimits, budget: &'a mut OperationBudget) -> Self {
         Self {
             wire: wire.into(),
             entry: Some(wire.entry),
             limits,
-            work: 0,
+            budget,
             top_values: BTreeSet::new(),
             defined_values: BTreeSet::new(),
         }
     }
 
-    fn new_group(definitions: &'a ProgramDefinitions, limits: DecodeLimits) -> Self {
+    fn new_group(
+        definitions: &'a ProgramDefinitions,
+        limits: DecodeLimits,
+        budget: &'a mut OperationBudget,
+    ) -> Self {
         Self {
             wire: definitions.into(),
             entry: None,
             limits,
-            work: 0,
+            budget,
             top_values: BTreeSet::new(),
             defined_values: BTreeSet::new(),
         }
@@ -1694,7 +1718,7 @@ impl<'a> Validator<'a> {
 
     fn check_type_nodes(&mut self) -> Result<(), ParseError> {
         let mut limits = crate::type_graph::GraphLimits::from(self.limits);
-        limits.max_work = self.limits.max_work.saturating_sub(self.work);
+        limits.max_work = self.budget.remaining();
         let used_work = self
             .wire
             .types
@@ -2412,14 +2436,7 @@ impl<'a> Validator<'a> {
     }
 
     fn bump_work(&mut self, amount: usize) -> Result<(), ParseError> {
-        self.work = self
-            .work
-            .checked_add(amount)
-            .ok_or(ParseError::LimitExceeded("work"))?;
-        if self.work > self.limits.max_work {
-            return Err(ParseError::LimitExceeded("work"));
-        }
-        Ok(())
+        self.budget.charge(amount)
     }
 }
 
@@ -2509,7 +2526,8 @@ mod tests {
     #[test]
     fn json_operations_require_program_layout_evidence() {
         let program = valid_program();
-        let mut validator = Validator::new(&program, DecodeLimits::default());
+        let mut budget = OperationBudget::new(DecodeLimits::default().max_work);
+        let mut validator = Validator::new(&program, DecodeLimits::default(), &mut budget);
         let encode = super::super::OperationIdentity::JsonEncode;
         assert!(matches!(
             validator.check_operation_identity(&encode),
@@ -3188,8 +3206,8 @@ mod tests {
         program.constructors = vec![empty_constructor("Request", 1, 1)];
         program.constructor_replies =
             vec![(ConstructorId(0), ConstructorReply::Static(TypeNodeId(0)))];
-        let mut validator = Validator::new(&program, DecodeLimits::default());
-        validator.limits.max_work = 0;
+        let mut budget = OperationBudget::new(0);
+        let mut validator = Validator::new(&program, DecodeLimits::default(), &mut budget);
         assert_eq!(
             validator.check_constructor_replies(),
             Err(ParseError::LimitExceeded("work"))
