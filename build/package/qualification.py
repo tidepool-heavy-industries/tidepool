@@ -16,11 +16,13 @@ import sys
 import time
 import tomllib
 
+M2_SURVIVAL_TEST = "actor_host::embedded_captured_unfold_tests::embedded_captured_children_and_capture_survive_failure_of_the_unfinished_parent_cell"
+M2_NOMINAL_JOIN_TEST = "actor_host::embedded_captured_unfold_tests::embedded_same_root_parked_nominal_a_joins_later_b_publication"
 M2_TESTS = [
     "actor_host::embedded_captured_unfold_tests::admitted_cell_late_type_error_has_no_effect_or_publication_on_retry",
     "actor_host::embedded_captured_unfold_tests::embedded_captured_unfold_awaits_two_child_replies_before_parent_call_returns",
-    "actor_host::embedded_captured_unfold_tests::embedded_captured_children_and_capture_survive_failure_of_the_unfinished_parent_cell",
-    "actor_host::embedded_captured_unfold_tests::embedded_same_root_parked_nominal_a_joins_later_b_publication",
+    M2_SURVIVAL_TEST,
+    M2_NOMINAL_JOIN_TEST,
     "actor_host::embedded_captured_unfold_tests::embedded_parked_captured_pipeline_cancellation_settles_invocation_owned_children",
     "actor_host::embedded_checkpoint_release_tests::released_checkpoint_keeps_an_admitted_childs_hosted_context",
 ]
@@ -50,7 +52,8 @@ def programs(root: Path) -> dict:
 
 
 def cohorts() -> dict:
-    return {"m2": {"tests": M2_TESTS, "expected_count": 6, "ignored": False, "timeout": 600},
+    return {"m2": {"tests": M2_TESTS, "expected_count": 6, "ignored": False, "timeout": 600,
+                   "case_timeouts": {M2_SURVIVAL_TEST: 900, M2_NOMINAL_JOIN_TEST: 900}},
             "m1": {"tests": M1_TESTS, "expected_count": 1, "ignored": True, "timeout": 900}}
 
 
@@ -463,13 +466,24 @@ def verify(path: Path) -> dict:
 
 
 def run_cohort(args) -> int:
+    if args.jobs <= 0:
+        raise ValueError("--jobs must be positive")
+    if args.service_slice is not None and not args.delegated_service:
+        raise ValueError("--service-slice requires --delegated-service")
+    service_slice = (args.service_slice or "app.slice") if args.delegated_service else None
+    if service_slice is not None and not re.fullmatch(r"[A-Za-z0-9_.@:-]+\.slice", service_slice):
+        raise ValueError("--service-slice must name one systemd slice")
     descriptor = verify(args.descriptor.absolute())
     cohort = descriptor["cohorts"][args.cohort]
     output = args.output.absolute()
     output.mkdir(parents=True, exist_ok=False, mode=0o700)
     command = [sys.executable, descriptor["programs"]["runner"], descriptor["programs"]["libtest"],
-               "--expected-count", str(cohort["expected_count"]), "--jobs", "1", "--timeout", str(cohort["timeout"]),
+               "--expected-count", str(cohort["expected_count"]), "--jobs", str(args.jobs), "--timeout", str(cohort["timeout"]),
                "--output-dir", str(output / "tests")]
+    for name, timeout in sorted(cohort.get("case_timeouts", {}).items()):
+        command.extend(["--case-timeout", f"{name}={timeout}"])
+    if args.delegated_service:
+        command.extend(["--delegated-service", "--service-slice", service_slice])
     for name in cohort["tests"]:
         command.extend(["--exact", name])
     if cohort["ignored"]:
@@ -485,6 +499,9 @@ def run_cohort(args) -> int:
               "source_oid": descriptor["source_oid"], "harness_revision": descriptor["harness_revision"],
               "profile": descriptor["profile"], "stdlib_mode": descriptor["stdlib_mode"], "cohort": args.cohort,
               "command": command, "exit_code": code, "runner_exit_code": result.returncode,
+              "scheduling": {"jobs": args.jobs, "effective_jobs": min(args.jobs, cohort["expected_count"]),
+                             "delegated_service": args.delegated_service, "service_slice": service_slice,
+                             "timeout_seconds": cohort["timeout"], "case_timeout_seconds": cohort.get("case_timeouts", {})},
               "elapsed_ns": time.monotonic_ns() - started, "expected_count": cohort["expected_count"],
               "executed_test_count": sum((record.get("execution") or {}).get("executed_test_count") or 0 for record in records),
               "unknown_execution_count": sum((record.get("execution") or {}).get("executed_test_count") is None for record in records),
@@ -547,6 +564,12 @@ def main(argv=None) -> int:
     run.add_argument("descriptor", type=Path)
     run.add_argument("--cohort", required=True, choices=("m2", "m1"))
     run.add_argument("--output", required=True, type=Path)
+    run.add_argument("--jobs", type=int, default=1,
+                     help="maximum concurrent test processes (default: 1)")
+    run.add_argument("--delegated-service", action="store_true",
+                     help="run each test in the isolated runner's delegated user service")
+    run.add_argument("--service-slice",
+                     help="delegated user service slice (default: app.slice)")
     live = commands.add_parser("exec")
     live.add_argument("descriptor", type=Path)
     live.add_argument("--report", required=True, type=Path)

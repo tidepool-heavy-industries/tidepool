@@ -1,5 +1,7 @@
 """Artifact mutation and runtime selection checks for native qualification."""
 import importlib.util
+import contextlib
+import io
 import json
 import os
 from pathlib import Path
@@ -16,6 +18,61 @@ SPEC.loader.exec_module(qualification)
 
 
 class NativeQualificationTests(unittest.TestCase):
+    def test_run_forwards_scheduling_and_sealed_watchdogs_and_records_them(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            descriptor_path = root / 'qualification.json'
+            descriptor_path.write_text('sealed descriptor')
+            descriptor = {'programs': {'runner': '/frozen/runner', 'libtest': '/frozen/libtest'},
+                          'cohorts': qualification.cohorts(), 'environment': {},
+                          'source_oid': 'a' * 40, 'harness_revision': 'b' * 40,
+                          'profile': 'fast-dev', 'stdlib_mode': 'source-backed'}
+
+            def execute(command, **kwargs):
+                tests = root / 'evidence/tests'
+                tests.mkdir()
+                cohort = descriptor['cohorts']['m2']
+                for index, name in enumerate(cohort['tests']):
+                    qualification.write_json(tests / f'{index}.json', {
+                        'test': name, 'passed': True,
+                        'execution': {'executed_test_count': 1, 'exit_code': 0}})
+                self.assertEqual(kwargs['env'], qualification.execution_environment(descriptor))
+                return subprocess.CompletedProcess(command, 0)
+
+            with patch.object(qualification, 'verify', return_value=descriptor), \
+                 patch.object(qualification.subprocess, 'run', side_effect=execute):
+                code = qualification.main(['run', str(descriptor_path), '--cohort', 'm2',
+                    '--output', str(root / 'evidence'), '--jobs', '4', '--delegated-service',
+                    '--service-slice', 'tidepool-completion-build.slice'])
+            self.assertEqual(code, 0)
+            report = json.loads((root / 'evidence/report.json').read_text())
+            command = report['command']
+            self.assertEqual(command[command.index('--jobs') + 1], '4')
+            self.assertIn('--delegated-service', command)
+            self.assertEqual(command[command.index('--service-slice') + 1], 'tidepool-completion-build.slice')
+            self.assertEqual([command[index + 1] for index, value in enumerate(command) if value == '--exact'], qualification.M2_TESTS)
+            self.assertEqual([command[index + 1] for index, value in enumerate(command) if value == '--case-timeout'],
+                             [f'{name}=900' for name in sorted(qualification.M2_TESTS[2:4])])
+            self.assertEqual(report['scheduling'], {
+                'jobs': 4, 'effective_jobs': 4, 'delegated_service': True,
+                'service_slice': 'tidepool-completion-build.slice', 'timeout_seconds': 600,
+                'case_timeout_seconds': {name: 900 for name in qualification.M2_TESTS[2:4]}})
+            self.assertEqual(report['executed_test_count'], 6)
+            self.assertTrue(report['completed'])
+
+    def test_invalid_run_scheduling_refuses_before_verification_or_launch(self):
+        invalid = (['--jobs', '0'], ['--jobs', '-1'], ['--service-slice', 'app.slice'],
+                   ['--delegated-service', '--service-slice', '../unsafe.slice'],
+                   ['--delegated-service', '--service-slice', 'not-a-slice'])
+        for options in invalid:
+            with self.subTest(options=options), patch.object(qualification, 'verify') as verify, \
+                 patch.object(qualification.subprocess, 'run') as execute, \
+                 contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(qualification.main(['run', '/missing/descriptor', '--cohort', 'm2',
+                                                     '--output', '/missing/evidence', *options]), 1)
+            verify.assert_not_called()
+            execute.assert_not_called()
+
     def test_shared_execution_provider_records_actual_process_and_declared_environment(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

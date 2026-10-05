@@ -5,6 +5,7 @@ from concurrent.futures import FIRST_COMPLETED, wait
 import os
 import hashlib
 import json
+import math
 from pathlib import Path
 import re
 import signal
@@ -258,6 +259,10 @@ def parse_args(argv):
         help=f'maximum seconds per test process (default: {DEFAULT_TIMEOUT})',
     )
     parser.add_argument(
+        '--case-timeout', action='append', default=[], metavar='NAME=SECONDS',
+        help='override the timeout of a selected exact test name; may be repeated',
+    )
+    parser.add_argument(
         '--jobs', type=int,
         help='maximum concurrent test processes (focused selection defaults to 1)',
     )
@@ -274,8 +279,21 @@ def parse_args(argv):
         options.service_slice = options.service_slice or 'app.slice'
         if not re.fullmatch(r'[A-Za-z0-9_.@:-]+\.slice', options.service_slice):
             parser.error('--service-slice must name one systemd slice')
-    if options.timeout <= 0:
-        parser.error('--timeout must be positive')
+    if not math.isfinite(options.timeout) or options.timeout <= 0:
+        parser.error('--timeout must be positive and finite')
+    case_timeouts = {}
+    for override in options.case_timeout:
+        name, separator, value = override.partition('=')
+        try:
+            seconds = float(value)
+        except ValueError:
+            parser.error('--case-timeout must be NAME=SECONDS with positive finite seconds')
+        if not name or not separator or not math.isfinite(seconds) or seconds <= 0:
+            parser.error('--case-timeout must be NAME=SECONDS with positive finite seconds')
+        if name in case_timeouts:
+            parser.error('--case-timeout names must be unique')
+        case_timeouts[name] = seconds
+    options.case_timeouts = case_timeouts
     if options.jobs is not None and options.jobs <= 0:
         parser.error('--jobs must be positive')
     if options.expected_count is not None and options.expected_count <= 0:
@@ -313,6 +331,9 @@ def select_tests(all_names, ignored_names, options):
         raise RuntimeError(
             f'expected {options.expected_count} selected tests, discovered {len(selected)}'
         )
+    unknown_timeouts = sorted(set(options.case_timeouts) - set(selected))
+    if unknown_timeouts:
+        raise RuntimeError(f'case timeout names are not selected: {unknown_timeouts!r}')
     return selected
 
 
@@ -338,6 +359,7 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None):
     started = time.monotonic_ns()
     if record is not None:
         record.update(command=args, started_ns=started, exit_code=None,
+                      timeout_seconds=timeout,
                       executed_test_count=None, passed_test_count=None,
                       failed_test_count=None, process_execution_count=0)
     service_record = {} if service_slice is not None else None
@@ -451,7 +473,8 @@ def main(argv=None):
                 raise RunnerInterrupted(INTERRUPT_SIGNAL)
             record = {}
             outcome = run_one(
-                options.binary, name, name in ignored_names, options.timeout, record,
+                options.binary, name, name in ignored_names,
+                options.case_timeouts.get(name, options.timeout), record,
                 options.service_slice if options.delegated_service else None,
             )
             return name, outcome, record

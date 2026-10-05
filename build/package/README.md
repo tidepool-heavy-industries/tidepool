@@ -41,14 +41,24 @@ Use the one resulting descriptor for both cohorts. The existing isolated libtest
 runner executes each test in a fresh bounded process. Reports retain exact
 names, actual counts, exit status, elapsed time and bounded stdout/stderr. An
 unknown executed count or zero selection cannot qualify a passing cohort.
+`run --jobs N` selects bounded concurrency (default one); `--delegated-service`
+and `--service-slice NAME.slice` use the runner's fresh delegated user services
+inside an already admitted user slice. Reports retain these scheduling choices.
+The descriptor seals M2 watchdogs at 600 seconds, with 900 seconds for unfinished
+parent survival and later nominal publication join. These outer process limits
+preserve the tests' internal phase and cancellation assertions.
 
 ```sh
 DESCRIPTOR="$FINAL_BUNDLE/share/exomonad/qualification.json"
 python3 "$FINAL_BUNDLE/share/exomonad/qualification.py" run "$DESCRIPTOR" \
-  --cohort m2 --output "$M2_EVIDENCE"
+  --cohort m2 --output "$M2_EVIDENCE" --jobs 3 \
+  --delegated-service --service-slice "$ADMITTED_USER_SLICE"
 python3 "$FINAL_BUNDLE/share/exomonad/qualification.py" run "$DESCRIPTOR" \
   --cohort m1 --output "$M1_EVIDENCE"
 ```
+
+For the parallel command, `ADMITTED_USER_SLICE` names an existing user slice
+whose resource bounds have been checked for the chosen concurrency.
 
 Launch the same package bytes for the actual recursive live smoke. `exec`
 verifies the descriptor and runtime dependencies, supplies the same environment,

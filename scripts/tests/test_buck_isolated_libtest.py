@@ -9,6 +9,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import patch
@@ -401,6 +402,103 @@ class IsolatedLibtestTests(unittest.TestCase):
             )
         self.assertEqual(result, 0)
         self.assertEqual(workers, [2])
+
+    def test_jobs_execute_distinct_cases_concurrently(self):
+        together = threading.Barrier(2)
+        launched = []
+
+        def run(argv, timeout):
+            discovered = self.discover(argv)
+            if discovered is not None:
+                return discovered
+            launched.append(argv[2])
+            together.wait(timeout=2)
+            return subprocess.CompletedProcess(
+                argv, 0, 'test result: ok. 1 passed; 0 failed; 0 ignored;\n', '')
+
+        result, _, errors = self.invoke(
+            ['--exact', 'suite::works', '--exact', 'suite::also_works',
+             '--expected-count', '2', '--jobs', '2'], run)
+        self.assertEqual(result, 0, errors)
+        self.assertCountEqual(launched, ['suite::works', 'suite::also_works'])
+
+    def test_case_timeouts_apply_to_process_and_delegated_watchdog_and_receipt(self):
+        retained = Path(self.tmp.name) / 'case-timeouts'
+        limits = {}
+
+        def run(argv, timeout, service_slice=None, service_record=None):
+            discovered = self.discover(argv)
+            if discovered is not None:
+                return discovered
+            command, _ = runner.delegated_command(argv, timeout, service_slice, service_record)
+            self.assertIn(f'--property=RuntimeMaxSec={timeout:g}s', command)
+            limits[argv[2]] = timeout
+            service_record.update(cleanup_confirmed=True)
+            return subprocess.CompletedProcess(
+                argv, 0, 'test result: ok. 1 passed; 0 failed; 0 ignored;\n', '')
+
+        result, _, errors = self.invoke(
+            ['--exact', 'suite::works', '--exact', 'suite::also_works',
+             '--expected-count', '2', '--timeout', '600',
+             '--case-timeout', 'suite::works=900', '--delegated-service',
+             '--output-dir', str(retained)], run)
+        self.assertEqual(result, 0, errors)
+        self.assertEqual(limits, {'suite::works': 900, 'suite::also_works': 600})
+        records = [json.loads(path.read_text()) for path in retained.glob('*.json')]
+        self.assertEqual({record['test']: record['execution']['timeout_seconds'] for record in records}, limits)
+
+    def test_invalid_case_timeouts_and_nonfinite_default_refuse_before_discovery(self):
+        invalid = [
+            ['--case-timeout', value] for value in
+            ('missing-separator', '=12', 'suite::works=no', 'suite::works=0',
+             'suite::works=-1', 'suite::works=nan', 'suite::works=inf')
+        ]
+        invalid.extend([
+            ['--case-timeout', 'suite::works=1', '--case-timeout', 'suite::works=2'],
+            ['--timeout', 'nan'], ['--timeout', 'inf'],
+        ])
+        for arguments in invalid:
+            with self.subTest(arguments=arguments), patch.object(runner, 'execute') as execute, \
+                 contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                runner.main([str(self.binary), *arguments])
+            execute.assert_not_called()
+
+    def test_case_timeout_requires_selected_exact_name_before_execution(self):
+        launched = []
+
+        def run(argv, timeout):
+            if '--list' not in argv:
+                launched.append(argv)
+            return self.discover(argv)
+
+        result, _, errors = self.invoke(
+            ['--exact', 'suite::works', '--expected-count', '1',
+             '--case-timeout', 'suite::also_works=900'], run)
+        self.assertEqual(result, 1)
+        self.assertIn('case timeout names are not selected', errors)
+        self.assertEqual(launched, [])
+
+    def test_overridden_timeout_never_qualifies_a_partial_success(self):
+        retained = Path(self.tmp.name) / 'overridden-timeout'
+
+        def run(argv, timeout):
+            discovered = self.discover(argv)
+            if discovered is not None:
+                return discovered
+            self.assertEqual(timeout, 900)
+            raise subprocess.TimeoutExpired(argv, timeout,
+                output='test result: ok. 1 passed; 0 failed; 0 ignored;\n')
+
+        result, _, _ = self.invoke(
+            ['--exact', 'suite::works', '--expected-count', '1',
+             '--case-timeout', 'suite::works=900', '--output-dir', str(retained)], run)
+        self.assertEqual(result, 1)
+        record = json.loads(next(retained.glob('*.json')).read_text())
+        self.assertFalse(record['passed'])
+        self.assertEqual(record['execution']['timeout_seconds'], 900)
+        self.assertEqual(record['execution']['status'], 'timeout')
+        self.assertEqual(record['execution']['executed_test_count'], 1)
+        self.assertIsNone(record['execution']['exit_code'])
 
     def test_zero_and_wrong_expected_counts_fail_before_execution(self):
         launched = []
