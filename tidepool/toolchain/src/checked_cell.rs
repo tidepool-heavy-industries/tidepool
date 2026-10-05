@@ -2032,59 +2032,6 @@ pub(crate) struct CheckedDisplayOffer {
     pub(crate) is_program: bool,
 }
 
-fn original_checked_execution_context(
-    producer: [u8; 32],
-    artifact_context: &crate::declaration_context::ExactDeclarationContext,
-    source_lexical: &[crate::declaration_join::ExactLexicalNode],
-) -> Result<Arc<crate::declaration_context::ExactDeclarationContext>, CompileError> {
-    let roots = source_lexical
-        .iter()
-        .map(|node| node.owner.clone())
-        .collect::<Vec<_>>();
-    let missing_inherited = match artifact_context.original_instance_environment() {
-        crate::declaration_context::OriginalInstanceEnvironment::MissingOriginalOwners(owners) => {
-            owners.as_slice()
-        }
-        _ => &[],
-    };
-    let required_instance_owners = roots
-        .iter()
-        .cloned()
-        .chain(
-            artifact_context
-                .lexical_graph()
-                .iter()
-                .map(|node| node.owner.clone()),
-        )
-        .chain(missing_inherited.iter().cloned())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    let imports = source_lexical
-        .iter()
-        .map(|node| (node.owner.clone(), node.imports.clone()))
-        .collect();
-    let lexical = crate::declaration_join::source_lexical_surface(
-        &roots,
-        &imports,
-        artifact_context.lexical_graph(),
-        &artifact_context
-            .artifact_view()
-            .source_implementation_roles(),
-    )?
-    .lexical;
-    Ok(Arc::new(
-        crate::declaration_context::ExactDeclarationContext::from_authenticated_execution(
-            producer,
-            artifact_context.artifact_view(),
-            lexical,
-            crate::declaration_context::OriginalInstanceOwnerCensus::CheckedSupport(
-                &required_instance_owners,
-            ),
-        )?,
-    ))
-}
-
 impl CheckedDisplayOffer {
     pub(crate) fn authorization(
         &self,
@@ -2132,6 +2079,7 @@ impl CheckedDisplayOffer {
         }))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn seal(
         &self,
         root: &Path,
@@ -2140,6 +2088,7 @@ impl CheckedDisplayOffer {
         target: &Arc<tidepool_repr::execution_schema::PreparedProgram>,
         artifact_context: &Arc<crate::declaration_context::ExactDeclarationContext>,
         source_lexical: &[crate::declaration_join::ExactLexicalNode],
+        original_execution: Arc<crate::declaration_context::ExactDeclarationContext>,
     ) -> Result<Arc<ExactCompiledDisplay>, CompileError> {
         let receipt = decode(&read(root.join("checked-display.cbor"), 4 * 1024 * 1024)?)?;
         let fields = row(&receipt, 8)?;
@@ -2205,11 +2154,7 @@ impl CheckedDisplayOffer {
                     artifact_context.artifact_view(),
                 )?,
             ),
-            original_execution: original_checked_execution_context(
-                self.capture.item.cell.producer,
-                artifact_context,
-                source_lexical,
-            )?,
+            original_execution,
             capture: self.capture.clone(),
             target: target.clone(),
             table: read_table(root)?,
@@ -3130,6 +3075,7 @@ impl CheckedItemOffer {
         }
         Ok(())
     }
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn seal(
         &self,
         root: &Path,
@@ -3138,6 +3084,7 @@ impl CheckedItemOffer {
         target: &Arc<tidepool_repr::execution_schema::PreparedProgram>,
         artifact_context: &Arc<crate::declaration_context::ExactDeclarationContext>,
         source_lexical: &[crate::declaration_join::ExactLexicalNode],
+        original_execution: Arc<crate::declaration_context::ExactDeclarationContext>,
     ) -> Result<Arc<ExactCompiledItem>, CompileError> {
         let receipt = decode(&read(root.join("checked-item.cbor"), 4 * 1024 * 1024)?)?;
         let fields = row(&receipt, 8)?;
@@ -3218,11 +3165,7 @@ impl CheckedItemOffer {
                     artifact_context.artifact_view(),
                 )?,
             ),
-            original_execution: original_checked_execution_context(
-                self.item.cell.producer,
-                artifact_context,
-                source_lexical,
-            )?,
+            original_execution,
             item: self.item.clone(),
             target: target.clone(),
             table: read_table(root)?,

@@ -43,14 +43,6 @@ pub(crate) enum OriginalInstanceEnvironment {
     MissingOriginalOwners(Vec<ExactModuleIdentity>),
 }
 
-/// The ordinary input proof retains its complete consumed-source census.
-/// Checked support selection alone is narrower and cannot prove the absence
-/// of instances in the full originally consumed interface environment.
-pub(crate) enum OriginalInstanceOwnerCensus<'a> {
-    ConsumedSource(&'a [ExactModuleIdentity]),
-    CheckedSupport(&'a [ExactModuleIdentity]),
-}
-
 /// Trusted source recipe associated with request-local native type custody.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum RequestHelperRecipe {
@@ -995,6 +987,28 @@ pub(crate) fn consumed_source_home_imports(
 }
 
 impl ExactSourceAdmission {
+    /// from_worker binds GENERATED_SOURCE to this receipt's hash-verified
+    /// source witness. Resolve its exact unit/module without parsing text.
+    pub(crate) fn generated_source_owner(&self) -> Result<ExactModuleIdentity, CompileError> {
+        let owners = self
+            .evidence
+            .modules
+            .iter()
+            .filter(|node| {
+                !node.boot
+                    && (node.source == Path::new(crate::cache::GENERATED_SOURCE)
+                        || node.source == self.witness.source_path())
+            })
+            .map(|node| identity(&node.unit, &node.module))
+            .collect::<Vec<_>>();
+        match owners.as_slice() {
+            [owner] => Ok(owner.clone()),
+            _ => Err(failure(
+                "generated source lacks one authenticated consumed owner",
+            )),
+        }
+    }
+
     pub(crate) fn home_imports(
         &self,
     ) -> Result<BTreeMap<ExactModuleIdentity, Vec<ExactModuleIdentity>>, CompileError> {
@@ -1027,6 +1041,52 @@ impl ExactSourceAdmission {
             ));
         }
         Ok(())
+    }
+}
+
+impl ExactProductAdmission<'_> {
+    /// Retain the full consumed original interface graph before native support
+    /// selection. Generated owners remain in this private execution evidence.
+    pub(crate) fn original_execution_context(
+        &self,
+        artifacts: &ArtifactView,
+    ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
+        let imports = self.source.home_imports()?;
+        let inherited = self.request.context.as_ref();
+        let lexical = compose_lexical_nodes(
+            inherited
+                .lexical_graph()
+                .iter()
+                .cloned()
+                .chain(imports.iter().map(|(owner, imports)| ExactLexicalNode {
+                    owner: owner.clone(),
+                    imports: imports.clone(),
+                }))
+                .collect::<Vec<_>>()
+                .iter(),
+        )?;
+        let mut required = imports
+            .keys()
+            .cloned()
+            .chain(
+                inherited
+                    .lexical_graph()
+                    .iter()
+                    .map(|node| node.owner.clone()),
+            )
+            .collect::<BTreeSet<_>>();
+        if let OriginalInstanceEnvironment::MissingOriginalOwners(owners) =
+            inherited.original_instance_environment()
+        {
+            required.extend(owners.iter().cloned());
+        }
+        let context = ExactDeclarationContext::from_authenticated_execution(
+            self.request.producer_sha256,
+            artifacts,
+            lexical,
+            &required.into_iter().collect::<Vec<_>>(),
+        )?;
+        Ok(Arc::new(context))
     }
 }
 
@@ -2419,12 +2479,8 @@ impl ExactDeclarationContext {
         producer: [u8; 32],
         artifacts: &ArtifactView,
         lexical: Vec<ExactLexicalNode>,
-        census: OriginalInstanceOwnerCensus<'_>,
+        required_instance_owners: &[ExactModuleIdentity],
     ) -> Result<Self, CompileError> {
-        let (required_instance_owners, complete_census) = match census {
-            OriginalInstanceOwnerCensus::ConsumedSource(owners) => (owners, true),
-            OriginalInstanceOwnerCensus::CheckedSupport(owners) => (owners, false),
-        };
         let mut context = Self::new(&[], &[], Vec::new())?;
         context.admit_producer(producer)?;
         for descriptor in artifacts.descriptors() {
@@ -2472,10 +2528,8 @@ impl ExactDeclarationContext {
         context.normalize()?;
         context.original_instance_environment = if !missing.is_empty() {
             OriginalInstanceEnvironment::MissingOriginalOwners(missing)
-        } else if complete_census {
-            OriginalInstanceEnvironment::Complete
         } else {
-            OriginalInstanceEnvironment::Unknown
+            OriginalInstanceEnvironment::Complete
         };
         Ok(context)
     }

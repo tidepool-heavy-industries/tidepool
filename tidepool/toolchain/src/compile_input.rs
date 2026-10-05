@@ -34,6 +34,12 @@ pub struct SealedCompileInputIdentity {
 }
 
 impl SealedCompileInputIdentity {
+    pub(crate) fn issued_original_execution(
+        &self,
+    ) -> Arc<crate::declaration_context::ExactDeclarationContext> {
+        self.original_execution.clone()
+    }
+
     /// Versioned serialization for source-continuity intent. This string alone
     /// is not executable authority and cannot reconstruct the private proof.
     pub fn compile_input_identity(&self) -> &str {
@@ -697,9 +703,7 @@ pub(crate) fn seal(
                     .sha256(),
                 artifacts,
                 lexical,
-                crate::declaration_context::OriginalInstanceOwnerCensus::ConsumedSource(
-                    &required_instance_owners,
-                ),
+                &required_instance_owners,
             )?,
         ),
         target: prepared.clone(),

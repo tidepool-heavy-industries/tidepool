@@ -1828,6 +1828,15 @@ impl ModuleCandidateOffer {
                 &output.target,
                 &context,
                 program_request.program_source_lexical(),
+                output
+                    .products
+                    .as_ref()
+                    .and_then(|products| products.original_execution.clone())
+                    .ok_or_else(|| {
+                        CompileError::ExtractFailed(
+                            "program output lacks original execution evidence".into(),
+                        )
+                    })?,
             )?;
             let mut next = completed.append(native.clone())?;
             let display =
@@ -1852,6 +1861,15 @@ impl ModuleCandidateOffer {
                         &output.target,
                         &context,
                         program_request.program_source_lexical(),
+                        output
+                            .products
+                            .as_ref()
+                            .and_then(|products| products.original_execution.clone())
+                            .ok_or_else(|| {
+                                CompileError::ExtractFailed(
+                                    "program display lacks original execution evidence".into(),
+                                )
+                            })?,
                     )?;
                     next = next.append_display(proof.clone())?;
                     Some(proof)
@@ -1946,16 +1964,32 @@ impl ModuleCandidateOffer {
         output: &ProgramNativeOutput,
         admissions: &[crate::declaration_context::ExactSourceAdmission],
     ) -> Result<Arc<crate::declaration_join::ExactDeclarationContext>, CompileError> {
-        let module = extract_module_name(&output.source).ok_or_else(|| {
-            CompileError::ExtractFailed("program support output has no target owner".into())
-        })?;
+        let generated = admissions
+            .iter()
+            .filter(|admission| {
+                admission
+                    .witness
+                    .matches_source(admission.witness.source_path(), &output.source)
+            })
+            .map(|admission| admission.generated_source_owner())
+            .collect::<Result<Vec<_>, _>>()?;
+        let generated = match generated.as_slice() {
+            [owner] => owner,
+            _ => {
+                return Err(CompileError::ExtractFailed(
+                    "program support lacks one authenticated generated source owner".into(),
+                ))
+            }
+        };
         let support = output
             .products
             .as_ref()
             .expect("program output was sealed")
             .recovery_products
             .iter()
-            .filter(|product| product.owner().module != module)
+            .filter(|product| {
+                product.owner().unit != generated.unit || product.owner().module != generated.module
+            })
             .cloned()
             .collect::<Vec<_>>();
         request.admit_program_support(context, &support, admissions)
@@ -2259,6 +2293,9 @@ impl NativeTurnOutput {
 
 #[derive(Debug)]
 pub struct SealedTurnProducts {
+    // Issued for this exact output before support selection; later program
+    // items cannot enlarge an earlier item's original instance environment.
+    original_execution: Option<Arc<crate::declaration_context::ExactDeclarationContext>>,
     pub artifact_view: crate::artifact_inventory::ArtifactView,
     pub compile_input_identity: Option<Arc<SealedCompileInputIdentity>>,
     pub certified_groups: Arc<[certified_products::PendingCertifiedGroup]>,
@@ -2579,6 +2616,12 @@ fn seal_turn_outputs_inner(
         } else {
             None
         };
+    let original_execution = match exact.as_ref() {
+        Some(admission) => Some(admission.original_execution_context(&artifact_view)?),
+        None => compile_input_identity
+            .as_ref()
+            .map(|proof| proof.issued_original_execution()),
+    };
     let checked = if let Some(checked) = &offer.checked {
         let (context, lexical) = checked_output_context(
             offer,
@@ -2586,7 +2629,6 @@ fn seal_turn_outputs_inner(
             exact_source
                 .as_ref()
                 .expect("checked output has exact source"),
-            source,
         )?;
         Some(match checked {
             NativeCheckedOffer::ActivationPreview(preview) => {
@@ -2616,6 +2658,9 @@ fn seal_turn_outputs_inner(
                     prepared,
                     &context,
                     &lexical,
+                    original_execution
+                        .clone()
+                        .expect("checked output has full original execution evidence"),
                 )?,
             ),
             NativeCheckedOffer::Item(item) => {
@@ -2624,14 +2669,19 @@ fn seal_turn_outputs_inner(
                     .as_ref()
                     .expect("checked offer has exact scope")
                     .request_sha256;
-                CheckedNativeProof::Execution(item.seal(
-                    output_dir,
-                    request_sha256,
-                    source,
-                    prepared,
-                    &context,
-                    &lexical,
-                )?)
+                CheckedNativeProof::Execution(
+                    item.seal(
+                        output_dir,
+                        request_sha256,
+                        source,
+                        prepared,
+                        &context,
+                        &lexical,
+                        original_execution
+                            .clone()
+                            .expect("checked output has full original execution evidence"),
+                    )?,
+                )
             }
         })
     } else {
@@ -2639,6 +2689,7 @@ fn seal_turn_outputs_inner(
     };
     Ok(Some(SealedTurnProducts {
         artifact_view,
+        original_execution,
         compile_input_identity,
         checked,
         certified_groups,
@@ -2652,7 +2703,6 @@ fn checked_output_context(
     offer: &ModuleCandidateOffer,
     products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
     source_admission: &crate::declaration_context::ExactSourceAdmission,
-    source: &str,
 ) -> Result<
     (
         Arc<crate::declaration_join::ExactDeclarationContext>,
@@ -2663,12 +2713,12 @@ fn checked_output_context(
     let exact = offer.exact.as_ref().ok_or_else(|| {
         CompileError::ExtractFailed("checked output lacks current exact context".into())
     })?;
-    let module = extract_module_name(source).ok_or_else(|| {
-        CompileError::ExtractFailed("checked output lacks original source module".into())
-    })?;
+    let generated = source_admission.generated_source_owner()?;
     let support = products
         .iter()
-        .filter(|product| product.owner().module != module)
+        .filter(|product| {
+            product.owner().unit != generated.unit || product.owner().module != generated.module
+        })
         .cloned()
         .collect::<Vec<_>>();
     let mut request = exact.clone();
