@@ -18,13 +18,14 @@ import tomllib
 
 M2_SURVIVAL_TEST = "actor_host::embedded_captured_unfold_tests::embedded_captured_children_and_capture_survive_failure_of_the_unfinished_parent_cell"
 M2_NOMINAL_JOIN_TEST = "actor_host::embedded_captured_unfold_tests::embedded_same_root_parked_nominal_a_joins_later_b_publication"
+M2_CHECKPOINT_RELEASE_TEST = "actor_host::embedded_checkpoint_release_tests::released_checkpoint_keeps_an_admitted_childs_hosted_context"
 M2_TESTS = [
     "actor_host::embedded_captured_unfold_tests::admitted_cell_late_type_error_has_no_effect_or_publication_on_retry",
     "actor_host::embedded_captured_unfold_tests::embedded_captured_unfold_awaits_two_child_replies_before_parent_call_returns",
     M2_SURVIVAL_TEST,
     M2_NOMINAL_JOIN_TEST,
     "actor_host::embedded_captured_unfold_tests::embedded_parked_captured_pipeline_cancellation_settles_invocation_owned_children",
-    "actor_host::embedded_checkpoint_release_tests::released_checkpoint_keeps_an_admitted_childs_hosted_context",
+    M2_CHECKPOINT_RELEASE_TEST,
 ]
 M1_TESTS = ["actor_host::m1_host_tests::production_browser_executes_resident_haskell_retries_and_controls_root"]
 DESCRIPTOR = "share/exomonad/qualification.json"
@@ -53,7 +54,8 @@ def programs(root: Path) -> dict:
 
 def cohorts() -> dict:
     return {"m2": {"tests": M2_TESTS, "expected_count": 6, "ignored": False, "timeout": 600,
-                   "case_timeouts": {M2_SURVIVAL_TEST: 900, M2_NOMINAL_JOIN_TEST: 900}},
+                   "case_timeouts": {M2_SURVIVAL_TEST: 900, M2_NOMINAL_JOIN_TEST: 900,
+                                     M2_CHECKPOINT_RELEASE_TEST: 900}},
             "m1": {"tests": M1_TESTS, "expected_count": 1, "ignored": True, "timeout": 900}}
 
 

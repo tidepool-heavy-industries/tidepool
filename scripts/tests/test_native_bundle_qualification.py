@@ -52,11 +52,11 @@ class NativeQualificationTests(unittest.TestCase):
             self.assertEqual(command[command.index('--service-slice') + 1], 'tidepool-completion-build.slice')
             self.assertEqual([command[index + 1] for index, value in enumerate(command) if value == '--exact'], qualification.M2_TESTS)
             self.assertEqual([command[index + 1] for index, value in enumerate(command) if value == '--case-timeout'],
-                             [f'{name}=900' for name in sorted(qualification.M2_TESTS[2:4])])
+                             [f'{name}=900' for name in sorted([qualification.M2_SURVIVAL_TEST, qualification.M2_NOMINAL_JOIN_TEST, qualification.M2_CHECKPOINT_RELEASE_TEST])])
             self.assertEqual(report['scheduling'], {
                 'jobs': 4, 'effective_jobs': 4, 'delegated_service': True,
                 'service_slice': 'tidepool-completion-build.slice', 'timeout_seconds': 600,
-                'case_timeout_seconds': {name: 900 for name in qualification.M2_TESTS[2:4]}})
+                'case_timeout_seconds': {name: 900 for name in [qualification.M2_SURVIVAL_TEST, qualification.M2_NOMINAL_JOIN_TEST, qualification.M2_CHECKPOINT_RELEASE_TEST]}})
             self.assertEqual(report['executed_test_count'], 6)
             self.assertTrue(report['completed'])
 
