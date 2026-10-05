@@ -2970,6 +2970,15 @@ data CandidateAdmissionReason
   | CandidateCanonicalProof | CandidateProducerUnavailable | CandidateAccepted
   deriving (Eq, Ord, Show)
 
+-- Keep the underlying refusal distinct from the coarse admission category.
+-- Rendering is diagnostic only; candidate eligibility consumes this typed result.
+data CandidateExecutionProofFailure
+  = CandidateExecutionProducerMismatch String [(String, String)]
+  | CandidateExecutionGraphBudget
+  | CandidateExecutionReferenceBudget Int
+  | CandidateExecutionSourceFailure ExecutionSourceFailure
+  deriving (Eq, Show)
+
 certifyModuleCandidates
   :: FilePath -> Maybe String -> Maybe ExactScope -> Set.Set ModuleName -> FilePath -> ModuleGraph -> FilePath
   -> Ghc (Map.Map ModuleName AdmittedSourceCandidate)
@@ -3087,14 +3096,26 @@ certifyModuleCandidates compilerViewDirectory expectedProducer exactScope source
                   in ordinary expected == ordinary actual
                     && actualOriginals == Map.keysSet (provenOriginals candidate)
                 _ -> False
-          graphInventoryMatches =
-            let producerMatches = case exactScope of
-                  Nothing -> True
-                  Just scope -> all ((== scopeProducerSha256 scope) . executionGraphProducer) combinedGraphs
-            in producerMatches && executionSourceGraphsFit combinedGraphs
-              && length combinedReferences <= 4096
-          candidateExecutionMatches candidate = graphInventoryMatches
-            && either (const False) (const True) (candidateProof candidate)
+          graphInventoryProof = do
+            case exactScope of
+              Nothing -> Right ()
+              Just scope ->
+                let mismatches = [(executionGraphSha256 graph',executionGraphProducer graph')
+                      | graph' <- combinedGraphs
+                      , executionGraphProducer graph' /= scopeProducerSha256 scope]
+                in unless (null mismatches) (Left (CandidateExecutionProducerMismatch
+                     (scopeProducerSha256 scope) mismatches))
+            unless (executionSourceGraphsFit combinedGraphs) (Left CandidateExecutionGraphBudget)
+            unless (length combinedReferences <= 4096)
+              (Left (CandidateExecutionReferenceBudget (length combinedReferences)))
+          candidateExecutionProof candidate = do
+            graphInventoryProof
+            either (Left . CandidateExecutionSourceFailure) Right (candidateProof candidate)
+          candidateExecutionMatches candidate =
+            either (const False) (const True) (candidateExecutionProof candidate)
+          admissionDetail candidate CandidateExecutionProof =
+            either (Just . show) (const Nothing) (candidateExecutionProof candidate)
+          admissionDetail _ _ = Nothing
           candidateDependencyQualifier CandidateUnqualified = DependencyUnqualified
           candidateDependencyQualifier (CandidateThisUnit unit) = DependencyThisUnit unit
           candidateDependencyQualifier (CandidateOtherUnit unit) = DependencyOtherUnit unit
@@ -3114,7 +3135,7 @@ certifyModuleCandidates compilerViewDirectory expectedProducer exactScope source
                       || any candidateImportBoot (candidateImports candidate)), CandidateExecutionBoot)
                 , (gopt Opt_Pp (ms_hspp_opts summary), CandidatePreprocessor) ]
               , rejected] of
-              reason : _ -> recordCandidate candidate reason Nothing >> pure Nothing
+              reason : _ -> recordCandidate candidate reason (admissionDetail candidate reason) >> pure Nothing
               [] -> do
                 source <- liftIO $ traverse canonicalizePath
                   (ml_hs_file (ms_location summary))
