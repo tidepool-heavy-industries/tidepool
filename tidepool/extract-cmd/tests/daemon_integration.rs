@@ -1361,6 +1361,10 @@ fn owned_compiler_case_preserves_isolation_and_confirms_cleanup() {
     let report: serde_json::Value =
         serde_json::from_slice(&fs::read(compiler.join("lifecycle.json")).unwrap()).unwrap();
     assert_eq!(report["cleanup_confirmed"], true);
+    assert!(!Path::new(report["socket_path"].as_str().unwrap())
+        .parent()
+        .unwrap()
+        .exists());
     assert!(!compiler.join("cache").exists());
     assert!(!poison.exists(), "inherited cache override was consumed");
     let outcome: serde_json::Value =

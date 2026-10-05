@@ -90,6 +90,12 @@ pub fn run(args: Vec<OsString>) -> Result<u8, FrontendError> {
 struct OwnedSocketDirectory(PathBuf);
 
 impl OwnedSocketDirectory {
+    fn cleanup(&self) -> io::Result<()> {
+        // The daemon retains its lock inode by design. This namespace has one
+        // owner and can be retired only after that daemon and its children reap.
+        std::fs::remove_dir_all(&self.0)
+    }
+
     fn create() -> io::Result<Self> {
         use std::sync::atomic::{AtomicU64, Ordering};
         static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -248,9 +254,9 @@ fn owned_daemon_run(args: &[OsString]) -> Result<u8, FrontendError> {
     let daemon_pid = daemon.0.id();
     let write_report = |confirmed: bool, code: Option<u8>| {
         atomic_write_manifest(&report, format!(
-            "{{\"schema\":1,\"producer\":{},\"endpoint\":{},\"daemon_epoch\":{},\"daemon_pid\":{},\"cleanup_confirmed\":{},\"exit_code\":{}}}\n",
+            "{{\"schema\":1,\"producer\":{},\"endpoint\":{},\"daemon_epoch\":{},\"daemon_pid\":{},\"socket_path\":{},\"cleanup_confirmed\":{},\"exit_code\":{}}}\n",
             json_string(&identity.producer_hex()), json_string(&identity.to_hex()),
-            json_string(&crate::endpoint::hex(&binding.epoch)), daemon_pid, confirmed,
+            json_string(&crate::endpoint::hex(&binding.epoch)), daemon_pid, json_string(&socket.display().to_string()), confirmed,
             code.map_or("null".into(), |value| value.to_string())
         ).as_bytes()).map_err(FrontendError::Io)
     };
@@ -294,6 +300,7 @@ fn owned_daemon_run(args: &[OsString]) -> Result<u8, FrontendError> {
             )));
         }
     }
+    socket_directory.cleanup().map_err(FrontendError::Io)?;
     let code = exit_code(child?);
     if code == 0 {
         std::fs::remove_dir_all(&cache).map_err(FrontendError::Io)?;
