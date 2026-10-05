@@ -35,8 +35,7 @@ class BuckRunnerTests(unittest.TestCase):
         # Real declared utilities only serve the stub's Git/config checks.
         self.action_tools = self.action_output / "bin"
         self.action_tools.mkdir()
-        for name in ("git", "sed", "awk"):
-            (self.action_tools / name).symlink_to(shutil.which(name))
+        (self.action_tools / "git").symlink_to(shutil.which("git"))
         self.shell_log = self.root / "dev-shell.log"
         self.buck_log = self.root / "buck.json"
         self.program(self.tools / "mountpoint", 'exit "$MOUNT_EXIT"')
@@ -64,7 +63,7 @@ sys.exit(int(os.environ.get('BUCK_EXIT', '0')))
             cwd=self.root, text=True,
         ).strip()
         (self.generation / "owner").write_text(
-            f"checkout={self.root}\nuid={os.getuid()}\nselection={self.selection}\ntoolchain_tree={tree}\n"
+            f"checkout={self.root}\nuid={os.getuid()}\nselection={self.selection}\nselection_mode=checkout\ntoolchain_tree={tree}\n"
         )
         (self.generation / "status").write_text("configured\n")
         records = []
@@ -197,6 +196,23 @@ sys.exit(int(os.environ.get('BUCK_EXIT', '0')))
         self.assert_refused("changed toolchain inputs")
         self.commit("flake.nix")
         self.assert_refused("changed toolchain input pin")
+
+    def test_explicit_selection_ignores_dirty_and_changed_local_toolchain_inputs(self):
+        owner = self.generation / "owner"
+        owner.write_text(owner.read_text().replace("selection_mode=checkout", "selection_mode=explicit"))
+        (self.root / "flake.nix").write_text("uncommitted local experiment\n")
+        result = self.run_runner("build")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.shell_log.exists())
+        self.commit("flake.nix")
+        result = self.run_runner("build")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(self.buck_log.read_text())["args"], ["build"])
+
+    def test_missing_selection_mode_requires_configuration(self):
+        owner = self.generation / "owner"
+        owner.write_text(owner.read_text().replace("selection_mode=checkout\n", ""))
+        self.assert_refused("generation selection mode")
 
     def test_unrelated_source_commit_reuses_exact_generation(self):
         (self.root / "program.rs").write_text("source change\n")

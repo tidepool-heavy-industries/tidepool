@@ -10,13 +10,19 @@ refuse() {
 }
 # The published copy and its retained output records jointly own this launch.
 # No Nix evaluation or shell marker supplies an alternative executable.
-generation=$(sed -n 's/^# Retained toolchain generation: //p' .buckconfig.local)
+record_value() {
+  local prefix=$1 path=$2 line
+  while IFS= read -r line || [[ -n $line ]]; do
+    [[ $line != "$prefix"* ]] || printf '%s\n' "${line#"$prefix"}"
+  done < "$path"
+}
+generation=$(record_value '# Retained toolchain generation: ' .buckconfig.local)
 [[ $generation == "$PWD/.buck2-toolchains/generations/"generation.* &&
    -d $generation && -f $generation/status && -f $generation/config &&
    -f $generation/owner && -s $generation/outputs.tsv ]] || refuse 'missing retained generation'
 [[ $(cat "$generation/status") == configured ]] || refuse 'generation was not configured'
 cmp -s .buckconfig.local "$generation/config" || refuse 'published configuration changed'
-owner_value() { sed -n "s/^$1=//p" "$generation/owner"; }
+owner_value() { record_value "$1=" "$generation/owner"; }
 [[ $(owner_value checkout) == "$PWD" && $(owner_value uid) == "$(id -u)" ]] || refuse 'generation belongs to another checkout or user'
 selection=$(owner_value selection)
 flake_source=${selection%#*}
@@ -24,7 +30,7 @@ case "$flake_source" in
   git+*\?*rev=*|/nix/store/*) ;;
   *) refuse 'unpinned flake selection' ;;
 esac
-config_value() { awk -F ' = ' -v key="$1" '$1 == key {print $2}' .buckconfig.local; }
+config_value() { record_value "$1 = " .buckconfig.local; }
 buck_bin=$(config_value buck2)
 action_path=$(config_value action_path)
 [[ -n $buck_bin && -n $action_path ]] || refuse 'missing configured Buck executable or action PATH'
@@ -56,7 +62,13 @@ done
 export PATH="$action_path:/run/current-system/sw/bin"
 git_bin=$(config_value git)
 [[ -n $git_output && $git_bin == "$git_output/bin/git" && -x $git_bin ]] || refuse 'configured Git executable is unavailable'
-source scripts/toolchain-inputs.sh
-current_tree=$(toolchain_input_tree "$git_bin") || refuse 'changed toolchain inputs'
-[[ $(owner_value toolchain_tree) == "$current_tree" ]] || refuse 'changed toolchain input pin'
+case $(owner_value selection_mode) in
+  checkout)
+    source scripts/toolchain-inputs.sh
+    current_tree=$(toolchain_input_tree "$git_bin") || refuse 'changed toolchain inputs'
+    [[ $(owner_value toolchain_tree) == "$current_tree" ]] || refuse 'changed toolchain input pin'
+    ;;
+  explicit) ;;
+  *) refuse 'missing generation selection mode' ;;
+esac
 exec "$buck_bin" "$@"

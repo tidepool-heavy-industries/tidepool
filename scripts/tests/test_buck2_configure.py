@@ -113,10 +113,22 @@ else:
 
     def test_uncommitted_toolchain_input_refuses_before_nix(self):
         (self.root / "flake.nix").write_text("changed toolchain\n")
-        result = self.run_configure()
+        revision = subprocess.check_output(["git", "-C", str(self.root), "rev-parse", "HEAD"], text=True).strip()
+        result = self.run_configure(extra_env={
+            "TIDEPOOL_DEV_FLAKE": "", "TIDEPOOL_DEV_SHELL": f"git+file://{self.root}?rev={revision}#default",
+        })
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertIn("Commit changed toolchain inputs", result.stderr)
         self.assertFalse(self.log.exists())
+
+    def test_explicit_immutable_selection_allows_local_toolchain_edits(self):
+        (self.root / "flake.nix").write_text("uncommitted local experiment\n")
+        result = self.run_configure()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        generation = next((self.root / ".buck2-toolchains/generations").iterdir())
+        self.assertIn("selection_mode=explicit\n", (generation / "owner").read_text())
+        self.assertIn("toolchain_tree=\n", (generation / "owner").read_text())
+        self.assertIn(PIN, (generation / "owner").read_text())
 
     def test_inherited_default_shell_cannot_capture_a_new_pin_as_old_tools(self):
         revision = subprocess.check_output(["git", "-C", str(self.root), "rev-parse", "HEAD"], text=True).strip()
@@ -136,6 +148,8 @@ else:
             "TIDEPOOL_DEV_FLAKE": "", "TIDEPOOL_DEV_SHELL": f"git+file://{self.root}?rev={revision}#default",
         })
         self.assertEqual(result.returncode, 0, result.stderr)
+        generation = next((self.root / ".buck2-toolchains/generations").iterdir())
+        self.assertIn("selection_mode=checkout\n", (generation / "owner").read_text())
 
     def test_missing_prepared_buck_preserves_prior_configuration(self):
         (self.root / ".buckconfig.local").write_text("previous configuration\n")

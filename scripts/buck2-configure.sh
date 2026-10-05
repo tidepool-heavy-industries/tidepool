@@ -44,13 +44,16 @@ case "$flake_source" in
   git+*\?*rev=*|/nix/store/*) ;;
   *) echo 'Configuration requires a revision-pinned Git flake or immutable store path' >&2; exit 2 ;;
 esac
-source scripts/toolchain-inputs.sh
-toolchain_tree=$(toolchain_input_tree)
 # An inherited default shell can outlive a committed pin change. Its selection
 # must still represent the checkout inputs unless an immutable override was
 # explicitly selected through the dev-shell owner.
+selection_mode=explicit
+toolchain_tree=
 local_flake_prefix="git+file://$PWD?rev="
 if [[ -z ${TIDEPOOL_DEV_FLAKE:-} && $flake_source == "$local_flake_prefix"* ]]; then
+  selection_mode=checkout
+  source scripts/toolchain-inputs.sh
+  toolchain_tree=$(toolchain_input_tree)
   selected_revision=${flake_source#"$local_flake_prefix"}
   selected_revision=${selected_revision%%&*}
   selected_tree=$(toolchain_input_tree git "$selected_revision")
@@ -67,8 +70,8 @@ mkdir -p "$PWD/.buck2-toolchains/generations"
 generation=$(mktemp -d "$PWD/.buck2-toolchains/generations/generation.XXXXXXXX")
 mkdir "$generation/roots"
 : > "$generation/outputs.tsv"
-printf 'checkout=%s\nuid=%s\nselection=%s\ntests=%s\nruntime_stdlib=%s\ntoolchain_tree=%s\n' \
-  "$PWD" "$(id -u)" "$TIDEPOOL_DEV_SHELL" "$test_toolchain" "$runtime_stdlib" "$toolchain_tree" > "$generation/owner"
+printf 'checkout=%s\nuid=%s\nselection=%s\nselection_mode=%s\ntests=%s\nruntime_stdlib=%s\ntoolchain_tree=%s\n' \
+  "$PWD" "$(id -u)" "$TIDEPOOL_DEV_SHELL" "$selection_mode" "$test_toolchain" "$runtime_stdlib" "$toolchain_tree" > "$generation/owner"
 printf 'preparing\n' > "$generation/status"
 tmp_config=
 finish_preparation() {
