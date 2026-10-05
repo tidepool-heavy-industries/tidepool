@@ -1893,7 +1893,7 @@ fn select_records_inner(
             packages: &package_imports_path,
             packages_sha256: &sha(&selected.package_imports_bytes),
             product: &product_path,
-            canonical_requirements: canonical.requirements().keys().cloned().collect(),
+            canonical_requirements: canonical.requirements(),
             certificate: &scratch.join(&canonical_reference.certificate_path),
             certificate_sha256: &canonical_reference.certificate_sha256,
             core: &scratch.join(&core_reference.path),
@@ -1992,7 +1992,7 @@ struct CandidateManifestRow<'a> {
     packages: &'a Path,
     packages_sha256: &'a str,
     product: &'a Path,
-    canonical_requirements: Vec<(String, String)>,
+    canonical_requirements: &'a BTreeMap<(String, String), [u8; 32]>,
     certificate: &'a Path,
     certificate_sha256: &'a [u8; 32],
     core: &'a Path,
@@ -2018,8 +2018,10 @@ fn candidate_manifest_row(row: CandidateManifestRow<'_>) -> Value {
         path(row.product),
         Value::Array(
             row.canonical_requirements
-                .into_iter()
-                .map(|(unit, module)| Value::Array(vec![Value::Text(unit), Value::Text(module)]))
+                .keys()
+                .map(|(unit, module)| {
+                    Value::Array(vec![Value::Text(unit.clone()), Value::Text(module.clone())])
+                })
                 .collect(),
         ),
         Value::Array(vec![
