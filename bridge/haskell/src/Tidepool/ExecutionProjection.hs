@@ -9,7 +9,7 @@ module Tidepool.ExecutionProjection
   , PreparedModuleProducts, OriginalGroupOmission(..), OriginalGroupOmissionReason(..)
   , projectPreparedModuleProducts, projectOriginalHomeModuleProducts
   , preparedModuleProductOutcomes, preparedModuleProductOmissions
-  , closeUnavailableOriginalGroups
+  , closeUnavailableOriginalGroups, closeUnavailableOriginalModules
   , PreparedProjection
   , prepareProjection
   , prepareProjectionWithReachability
@@ -314,9 +314,12 @@ projectOriginalHomeModuleProducts env interfaces context externalBinders modules
         unavailableHomeReferences
       blocked = closeUnavailableOriginalGroups dependencies groupOwners
         (Set.union failedBinders unavailableHomeReferences)
-      unavailableOwners = Set.fromList
+      initialUnavailableOwners = Set.fromList
         [ owner | (owner, _) <- Set.toList blockedHome
         , isJust (Map.lookup owner rowsByOwner) ]
+      unavailableOwners = closeUnavailableOriginalModules dependencies groupOwners
+        (Set.fromList [(owner, ordinal) | owner <- Set.toList initialUnavailableOwners
+          , (symbol, (owner', ordinal)) <- Map.toList groupOwners, owner' == owner])
       finish prepared = case purpose prepared of
         ExecutableTarget -> (pmModule prepared,
           projectPreparedModuleGroupsFor ExecutableTarget context prepared Nothing, [])
@@ -394,6 +397,27 @@ closeUnavailableOriginalGroups dependencies owners unavailable = go (Set.toList 
             [Map.findWithDefault Set.empty symbol dependants | symbol <- Set.toList referenced]
           fresh = next `Set.difference` blocked
       in go (Set.toList fresh ++ pending) (blocked `Set.union` fresh)
+
+-- A module-level product is atomic. Once one of its groups makes the module
+-- unavailable, consumers of any sibling binder must also miss that owner.
+closeUnavailableOriginalModules
+  :: (Ord owner, Ord ordinal)
+  => Map (owner, ordinal) (Set SymbolIdentity)
+  -> Map SymbolIdentity (owner, ordinal)
+  -> Set (owner, ordinal)
+  -> Set owner
+closeUnavailableOriginalModules dependencies owners initial = go initialModules
+  where
+    initialModules = Set.fromList [owner | (owner, _) <- Set.toList initial]
+    bindersByModule = Map.fromListWith Set.union
+      [(owner, Set.singleton symbol) | (symbol, (owner, _)) <- Map.toList owners]
+    go modules =
+      let unavailable = Set.unions
+            [Map.findWithDefault Set.empty owner bindersByModule | owner <- Set.toList modules]
+          blocked = closeUnavailableOriginalGroups dependencies owners unavailable
+          dependentModules = Set.fromList [owner | (owner, _) <- Set.toList blocked]
+          expanded = modules `Set.union` dependentModules
+      in if expanded == modules then modules else go expanded
 
 projectPreparedModuleGroupsSelected :: ProjectionContext -> PreparedModule
   -> Maybe (Set Word32) -> Either ProjectionError [ProjectedGroup]

@@ -100,7 +100,7 @@ import Tidepool.ExecutionEncode (encodeModuleProducts)
 
 import Tidepool.ExecutionProjection
   ( ProjectionContext(..), ProjectionError(..), projectPreparedModuleGroups
-  , projectPreparedModuleProducts, projectOriginalHomeModuleProducts, preparedModuleProductOutcomes, closeUnavailableOriginalGroups, topBinders
+  , projectPreparedModuleProducts, projectOriginalHomeModuleProducts, preparedModuleProductOutcomes, closeUnavailableOriginalGroups, closeUnavailableOriginalModules, topBinders
   , ReferenceFact(..), preparedModuleReferenceFacts, preparedRootIdentity, projectPrepared )
 import Tidepool.ExecutionProjection (resolveTextPackageUnit)
 import Tidepool.PreparedFormatting (resolveFormattingAuthority)
@@ -1989,11 +1989,14 @@ originalProjectionProducts = withScratch $ \work -> do
       external = identity "main" "Unavailable" "missing"
       stranded = identity "main" "G" "stranded"
       strandedDependent = identity "main" "H" "strandedDependent"
+      siblingGood = identity "main" "A" "siblingGood"
+      siblingConsumer = identity "main" "I" "siblingConsumer"
       owners = Map.fromList
         [(unavailable, ("A", 0)), (middle, ("B", 3)),
          (terminal, ("C", 7)), (unrelated, ("D", 2)),
          (cycleA, ("E", 1)), (cycleB, ("F", 4)),
-         (stranded, ("G", 5)), (strandedDependent, ("H", 6))]
+         (stranded, ("G", 5)), (strandedDependent, ("H", 6)),
+         (siblingGood, ("A", 1)), (siblingConsumer, ("I", 8))]
       dependencies = Map.fromList
         [ (("B", 3), Set.singleton unavailable)
         , (("C", 7), Set.singleton middle)
@@ -2001,12 +2004,17 @@ originalProjectionProducts = withScratch $ \work -> do
         , (("F", 4), Set.singleton cycleA)
         , (("G", 5), Set.singleton external)
         , (("H", 6), Set.singleton stranded)
+        , (("A", 1), Set.empty)
+        , (("I", 8), Set.singleton siblingGood)
         , (("D", 2), Set.empty) ]
       blocked = closeUnavailableOriginalGroups dependencies owners
         (Set.fromList [unavailable, cycleA, external])
+      rejectedModules = closeUnavailableOriginalModules dependencies owners blocked
   unless (blocked == Set.fromList
       [("A", 0), ("B", 3), ("C", 7), ("E", 1), ("F", 4), ("G", 5), ("H", 6)]) $
     fail "original product closure did not handle cross-module chains, cycles and unrelated groups"
+  unless (rejectedModules == Set.fromList ["A", "B", "C", "E", "F", "G", "H", "I"]) $
+    fail "module-level rejection did not cover sibling binders and their dependants"
   writeFile (work </> "ProjectionOwner.hs") $ unlines
     ["module ProjectionOwner (known) where", "known :: Int", "known = 42"]
   writeFile (work </> "ProjectionConsumer.hs") $ unlines
