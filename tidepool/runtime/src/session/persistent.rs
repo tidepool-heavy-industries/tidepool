@@ -6,8 +6,13 @@
 //! entry may resume it from a fresh evaluation thread.
 
 use std::collections::{BTreeMap, HashMap};
+use std::io::Write;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::sync::{atomic::AtomicBool, Arc};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 use tidepool_codegen::binding_table::{
     BindingEntry, BindingScopeWitness, BindingTable, BindingTipId, SourceLeaseKey,
@@ -123,6 +128,84 @@ pub struct DurablePublicBootstrap {
     owner: RecoveryPublicOwner,
     initial: super::PublicVisibilitySnapshot,
     surface: super::recovery::RecoveryPublicSurface,
+}
+
+/// The exact checked interface prepared before a host value enters the heap.
+/// Dropping an uncommitted token reaps only the file this staging operation created.
+pub(super) struct StagedCheckedValueInterface {
+    interface: Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>,
+    owner: Arc<super::admission::RuntimeAdmissionOwner>,
+    owner_epoch: u64,
+    library: Option<(uuid::Uuid, super::SessionId, PathBuf)>,
+    module: SessionModule,
+    created: Option<StagedInterfaceFile>,
+}
+
+static_assertions::assert_not_impl_any!(StagedCheckedValueInterface: Clone, Copy);
+
+impl StagedCheckedValueInterface {
+    pub(super) fn module(&self) -> SessionModule {
+        self.module
+    }
+}
+
+struct StagedInterfaceFile {
+    path: PathBuf,
+    file: std::fs::File,
+    committed: bool,
+}
+
+impl Drop for StagedInterfaceFile {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        // An unrelated replacement must survive cleanup of the original creation.
+        if let (Ok(owned), Ok(current)) =
+            (self.file.metadata(), std::fs::symlink_metadata(&self.path))
+        {
+            if owned.dev() == current.dev() && owned.ino() == current.ino() {
+                let _ = std::fs::remove_file(&self.path);
+            }
+        }
+    }
+}
+
+fn stage_interface_file(
+    path: PathBuf,
+    bytes: &[u8],
+) -> std::io::Result<Option<StagedInterfaceFile>> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
+        Ok(file) => {
+            let mut creation = StagedInterfaceFile {
+                path,
+                file,
+                committed: false,
+            };
+            creation.file.write_all(bytes)?;
+            Ok(Some(creation))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            if std::fs::read(&path)?.as_slice() != bytes {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "original checked interface conflicts with {}",
+                        path.display()
+                    ),
+                ));
+            }
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// The resident-session substrate: one live [`PreparedEngine`]
@@ -354,48 +437,90 @@ impl PersistentSession {
     pub fn has_lib(&self) -> bool {
         self.lib.is_some()
     }
-    pub(super) fn retain_checked_value_interface(
-        &mut self,
+    pub(super) fn stage_checked_value_interface(
+        &self,
         interface: Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>,
-    ) -> Result<(), SessionError> {
-        if interface.owner() != SessionModule::val(interface.owner().gen())
+    ) -> Result<StagedCheckedValueInterface, SessionError> {
+        let module = interface.owner();
+        if module != SessionModule::val(module.gen())
             || !self.binding_index.accepts_value_interface(&interface)
         {
             return Err(SessionError::StaleStagedDeclaration);
         }
-        if self
-            .binding_index
-            .is_module_live(&interface.owner().module_name())
+        let library = self
+            .lib
+            .as_ref()
+            .map(|lib| (lib.compile_view_identity, lib.id, lib.root.clone()));
+        let created = match &library {
+            Some((_, _, root)) => stage_interface_file(
+                root.join(module.relative_hi_path()),
+                interface.bytes_owned(),
+            )?,
+            None => None,
+        };
+        Ok(StagedCheckedValueInterface {
+            interface,
+            owner: self.admission_owner().clone(),
+            owner_epoch: self.admission_owner().epoch(),
+            library,
+            module,
+            created,
+        })
+    }
+
+    /// Recheck an off-checkout stage without publishing it into compiler views.
+    pub(super) fn validate_staged_value_interface(
+        &self,
+        staged: &StagedCheckedValueInterface,
+    ) -> Result<(), SessionError> {
+        let library = self
+            .lib
+            .as_ref()
+            .map(|lib| (lib.compile_view_identity, lib.id, lib.root.clone()));
+        if !Arc::ptr_eq(&staged.owner, self.admission_owner())
+            || staged.owner_epoch != self.admission_owner().epoch()
+            || staged.library != library
+            || staged.module != staged.interface.owner()
+            || staged.module != SessionModule::val(staged.module.gen())
+            || !self
+                .binding_index
+                .accepts_value_interface(&staged.interface)
         {
-            if let Some(lib) = &self.lib {
-                // Ordinary startup compilation reads the session include tree.
-                // Publish the original checked bytes before committing retention.
-                let path = lib.root.join(interface.owner().relative_hi_path());
-                match std::fs::read(&path) {
-                    Ok(existing) if existing.as_slice() == interface.bytes_owned().as_ref() => {}
-                    Ok(_) => {
-                        return Err(SessionError::Io(std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            format!(
-                                "original checked interface conflicts with {}",
-                                path.display()
-                            ),
-                        )))
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                        std::fs::create_dir_all(path.parent().expect("session interface parent"))?;
-                        tidepool_atomic_write::write_best_effort(&path, interface.bytes_owned())
-                            .map_err(|error| SessionError::Io(error.source))?;
-                    }
-                    Err(error) => return Err(SessionError::Io(error)),
-                }
-            }
+            return Err(SessionError::StaleStagedDeclaration);
         }
-        let retained = self.binding_index.retain_value_interface(interface);
-        debug_assert!(
-            retained,
-            "interface retention was checked before publication"
-        );
+        Ok(())
+    }
+
+    /// The binding owner validated this token immediately before its native
+    /// write under exclusive checkout. Commit has no IO or recoverable failure.
+    pub(super) fn commit_staged_value_interface(
+        &mut self,
+        mut staged: StagedCheckedValueInterface,
+    ) {
+        self.binding_index.commit_value_interface(staged.interface);
+        if let Some(created) = &mut staged.created {
+            created.committed = true;
+        }
+    }
+
+    pub(super) fn retain_checked_value_interface(
+        &mut self,
+        interface: Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>,
+    ) -> Result<(), SessionError> {
+        let module = interface.owner();
+        if module != SessionModule::val(module.gen())
+            || !self.binding_index.accepts_value_interface(&interface)
+        {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
+        // Ordinary completion may settle type evidence before any root is bound.
+        // That evidence belongs to its checked snapshot, not the live include tree.
+        if !self.binding_index.is_module_live(&module.module_name()) {
+            return Ok(());
+        }
+        let staged = self.stage_checked_value_interface(interface)?;
+        self.validate_staged_value_interface(&staged)?;
+        self.commit_staged_value_interface(staged);
         Ok(())
     }
 
@@ -1026,6 +1151,16 @@ impl PersistentSession {
             engine.set_invocation_cancel(cancel.clone());
         }
         std::mem::replace(&mut self.invocation_cancel, cancel)
+    }
+
+    pub(super) fn mount_cancelled(&mut self, realm: RealmId) -> bool {
+        self.invocation_cancel
+            .as_ref()
+            .is_some_and(|cancel| cancel.load(Ordering::Acquire))
+            || self
+                .machine
+                .as_mut()
+                .is_some_and(|engine| engine.cancel_handle(realm).is_cancelled())
     }
 
     /// The prepared engine, once the first prepared turn has installed it.
@@ -3564,6 +3699,111 @@ pub struct ScopeRetirement {
     pub bindings_retired: usize,
     /// Persistent GC roots deregistered — the sole-owner subset of the above.
     pub roots_released: usize,
+}
+
+#[cfg(test)]
+mod staged_interface_tests {
+    use super::*;
+
+    #[test]
+    fn uncommitted_interface_creation_is_removed_on_drop() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root
+            .path()
+            .join(SessionModule::val(Generation(411)).relative_hi_path());
+        let staged = stage_interface_file(path.clone(), b"checked interface").unwrap();
+        assert!(staged.is_some());
+        assert_eq!(std::fs::read(&path).unwrap(), b"checked interface");
+        drop(staged);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn committed_interface_creation_survives_drop() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("checked.hi");
+        let mut staged = stage_interface_file(path.clone(), b"checked interface")
+            .unwrap()
+            .unwrap();
+        staged.committed = true;
+        drop(staged);
+        assert_eq!(std::fs::read(path).unwrap(), b"checked interface");
+    }
+
+    #[test]
+    fn identical_preexisting_interface_is_preserved_without_cleanup_lease() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("checked.hi");
+        std::fs::write(&path, b"checked interface").unwrap();
+        let before = std::fs::metadata(&path).unwrap().ino();
+        let staged = stage_interface_file(path.clone(), b"checked interface").unwrap();
+        assert!(staged.is_none());
+        drop(staged);
+        assert_eq!(std::fs::metadata(&path).unwrap().ino(), before);
+        assert_eq!(std::fs::read(path).unwrap(), b"checked interface");
+    }
+
+    #[test]
+    fn conflicting_preexisting_interface_is_rejected_and_preserved() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("checked.hi");
+        std::fs::write(&path, b"original immutable interface").unwrap();
+        let error = stage_interface_file(path.clone(), b"different interface")
+            .err()
+            .unwrap();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(
+            std::fs::read(path).unwrap(),
+            b"original immutable interface"
+        );
+    }
+
+    #[test]
+    fn interface_staging_rejects_blocked_directory_before_creating_file() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = root.path().join("not-a-directory");
+        std::fs::write(&parent, b"blocker").unwrap();
+        let path = parent.join("checked.hi");
+        assert!(stage_interface_file(path.clone(), b"checked interface").is_err());
+        assert!(!path.exists());
+        assert_eq!(std::fs::read(parent).unwrap(), b"blocker");
+    }
+
+    #[test]
+    fn interface_cleanup_preserves_replacement_file() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("checked.hi");
+        let staged = stage_interface_file(path.clone(), b"checked interface").unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, b"replacement").unwrap();
+        drop(staged);
+        assert_eq!(std::fs::read(path).unwrap(), b"replacement");
+    }
+
+    #[test]
+    fn mount_cancellation_observes_invocation_before_bootstrap_and_exact_realm() {
+        let mut session = PersistentSession::new(None, 1024 * 1024);
+        let realm = RealmId::fresh();
+        let other = RealmId::fresh();
+        let invocation = Arc::new(AtomicBool::new(false));
+        session.replace_invocation_cancel(Some(invocation.clone()));
+        assert!(!session.mount_cancelled(realm));
+        invocation.store(true, Ordering::Release);
+        assert!(session.mount_cancelled(realm));
+        invocation.store(false, Ordering::Release);
+        let entry =
+            super::super::prepared::tests::rooted_publication_fixture(&mut session, "value", 412);
+        session.bind(entry).unwrap();
+        session
+            .prepared_mut()
+            .unwrap()
+            .cancel_handle(realm)
+            .cancel();
+        assert!(session.mount_cancelled(realm));
+        assert!(!session.mount_cancelled(other));
+        invocation.store(true, Ordering::Release);
+        assert!(session.mount_cancelled(other));
+    }
 }
 
 #[cfg(test)]

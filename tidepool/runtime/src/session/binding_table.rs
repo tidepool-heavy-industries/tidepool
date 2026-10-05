@@ -135,6 +135,19 @@ impl BindingIndex {
         true
     }
 
+    /// The binding transaction validated this original certificate before its
+    /// native write. Retention is an in-memory part of that same commit.
+    pub(super) fn commit_value_interface(
+        &mut self,
+        interface: Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>,
+    ) {
+        let name = interface.owner().module_name();
+        debug_assert!(self.is_module_live(&name));
+        debug_assert!(self.accepts_value_interface(&interface));
+        self.value_interfaces
+            .insert(name, RetainedValueInterface::Certified(interface));
+    }
+
     pub(super) fn accepts_value_interface(
         &self,
         interface: &Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>,
