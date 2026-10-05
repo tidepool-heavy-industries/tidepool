@@ -182,6 +182,11 @@ class ComponentProjectionTests(unittest.TestCase):
         }})
         self.assertNotIn("Tidepool.Effects", cohort["modules"])
         self.assertNotIn("dependencies", cohort)
+        helper["modules"].append("Tidepool.Effects")
+        _, roster = G.normalized_components(self.metadata(tests=[helper]))
+        with self.assertRaisesRegex(ValueError, "invocation-specific effects shim"):
+            G.native_catalog_cohort(roster)
+        helper["modules"].pop()
         helper["source_dirs"].append("test")
         helper["modules"].append("Negative")
         _, roster = G.normalized_components(self.metadata(tests=[helper]))

@@ -225,6 +225,8 @@ def native_catalog_cohort(roster):
     modules = sorted(set(component.modules) | (EFFECTS - {"Tidepool.Effects"}))
     selected = {}
     for module in modules:
+        if module == "Tidepool.Effects":
+            raise ValueError("the invocation-specific effects shim cannot enter the fixed catalog cohort")
         path, target = source(module, component.source_dirs)
         if module in EFFECTS:
             selected[module] = "effects/" + path

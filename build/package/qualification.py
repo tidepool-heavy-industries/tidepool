@@ -153,7 +153,8 @@ def catalog_source_inventory(root: Path) -> dict:
 
 def catalog_source_metadata(root: Path) -> dict:
     metadata = json.loads((root / CATALOG_SOURCE_METADATA).read_text())
-    if (set(metadata) != {"schema", "kind", "component", "modules", "roots", "probe", "targets"}
+    if (not isinstance(metadata, dict)
+            or set(metadata) != {"schema", "kind", "component", "modules", "roots", "probe", "targets"}
             or metadata["schema"] != 1 or metadata["kind"] != "native-catalog-source-snapshot"
             or metadata["roots"] != CATALOG_SOURCE_ROOTS
             or metadata["probe"] != "TidepoolCatalog.hs" or metadata["targets"] != ["catalogSentinel"]
@@ -187,7 +188,8 @@ def catalog_probe(modules: dict) -> str:
 def snapshot_catalog_sources(args) -> None:
     """Buck owns the source projection and generators; qualification owns bytes."""
     cohort = json.loads(args.cohort.read_text())
-    if set(cohort) != {"component", "modules"} or not isinstance(cohort["modules"], dict):
+    if (not isinstance(cohort, dict) or set(cohort) != {"component", "modules"}
+            or not isinstance(cohort["modules"], dict)):
         raise ValueError("invalid metadata-derived catalog cohort")
     root = args.output.absolute()
     root.mkdir(parents=True, exist_ok=False)
@@ -254,7 +256,8 @@ def retain_catalog_sources(args) -> Path:
 def verify_retained_catalog_sources(record: Path, snapshot: Path, tools: Path) -> Path:
     """Return the original compiler root only after current retention checks."""
     value = json.loads(record.read_text())
-    if (set(value) != {"schema", "kind", "original_root", "inventory", "inventory_sha256", "nix_closure", "gc_roots"}
+    if (not isinstance(value, dict)
+            or set(value) != {"schema", "kind", "original_root", "inventory", "inventory_sha256", "nix_closure", "gc_roots"}
             or value["schema"] != 1 or value["kind"] != "native-catalog-source-retention"):
         raise ValueError("unsupported retained catalog sources")
     original = Path(value["original_root"])
