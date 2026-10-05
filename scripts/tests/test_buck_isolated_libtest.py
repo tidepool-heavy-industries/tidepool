@@ -149,6 +149,64 @@ class IsolatedLibtestTests(unittest.TestCase):
         self.assertEqual(timing['physical_record_count'], 1)
         self.assertEqual(timing['records'][0]['fields']['physical_execution'], '73:1')
 
+    def test_actual_older_compiler_span_trace_is_explicitly_unclassified(self):
+        # Three unmodified start/timing/close rows from the retained 2026-10-05
+        # lookup-owned-daemon/compiler.jsonl; this producer predates layer tags.
+        root = Path(self.tmp.name) / 'older-trace-artifacts'
+        compiler = root / 'compiler'
+        compiler.mkdir(parents=True)
+        fixture = Path(__file__).with_name('fixtures') / 'compiler-span-trace.jsonl'
+        (compiler / 'compiler.jsonl').write_bytes(fixture.read_bytes())
+        timing = runner.diagnostic_summaries(root)['physical_compiler_timing']
+        self.assertEqual(timing['physical_request_count'], 0)
+        self.assertEqual(timing['unclassified_request_records'], 3)
+        self.assertEqual(timing['data_status'], 'no_identified_physical_requests')
+        self.assertFalse(timing['complete'])
+
+    def test_span_and_span_list_physical_context_retains_timing_once_per_row(self):
+        root = Path(self.tmp.name) / 'span-artifacts'
+        compiler = root / 'compiler'
+        compiler.mkdir(parents=True)
+        physical = {'name': 'compile_request', 'execution_layer': 'physical',
+                    'physical_execution': 'epoch:1:2', 'request_mode': 'compile'}
+        rows = [
+            {'fields': {'message': 'compiler timing', 'line': 'wall_ns=31'},
+             'spans': [physical, {'name': 'worker_detail'}]},
+            {'fields': {'message': 'close', 'time.busy': '31ns'},
+             'span': physical, 'spans': []},
+            {'fields': {'message': 'wrapper event'}, 'span': {
+                'name': 'compile_request', 'execution_layer': 'transaction_wrapper'}},
+        ]
+        (compiler / 'compiler.jsonl').write_text(''.join(json.dumps(row) + '\n' for row in rows))
+        timing = runner.diagnostic_summaries(root)['physical_compiler_timing']
+        self.assertTrue(timing['complete'])
+        self.assertEqual(timing['physical_record_count'], 2)
+        self.assertEqual(timing['physical_request_count'], 1)
+        self.assertEqual(timing['records'][0]['physical_context']['request_mode'], 'compile')
+        self.assertEqual(timing['records'][1]['fields']['time.busy'], '31ns')
+
+    def test_zero_or_missing_compiler_timing_retains_successful_case_scratch(self):
+        for trace in (None, [], [{'fields': {'message': 'daemon ready'}}]):
+            with self.subTest(trace=trace):
+                root = Path(self.tmp.name) / ('absent' if trace is None else 'trace-' + str(len(trace)))
+                def run(args, timeout, environment=None):
+                    compiler = root / 'compiler'
+                    compiler.mkdir()
+                    (compiler / 'owned-compiler-outcome.json').write_text(json.dumps({'cleanup': {'status': 'confirmed'}}))
+                    if trace is not None:
+                        (compiler / 'compiler.jsonl').write_text(''.join(json.dumps(row) + '\n' for row in trace))
+                    return completed_process(args, 0,
+                        'test result: ok. 1 passed; 0 failed; 0 ignored;\n', '')
+                record = {}
+                with patch.object(runner, 'execute', side_effect=run):
+                    passed, _, _ = runner.run_one(str(self.binary), 'suite::works', False,
+                        10, record, artifact_root=root)
+                self.assertTrue(passed)
+                self.assertTrue(root.exists())
+                timing = record['diagnostic_summaries']['physical_compiler_timing']
+                self.assertFalse(timing['complete'])
+                self.assertEqual(timing['data_status'], 'trace_absent' if trace is None else 'no_identified_physical_requests')
+
     def test_regeneration_modes_refuse_before_discovery_or_execution(self):
         for name in ('TIDEPOOL_REGEN_BRIDGED', 'TIDEPOOL_REGEN_PROTOCOL_GOLDENS'):
             with self.subTest(name=name), patch.dict(os.environ, {name: '1'}), \

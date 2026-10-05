@@ -398,6 +398,27 @@ def record_actual_counts(record, stdout, delegated=False):
             record['process_execution_count'] = 1
 
 
+def compiler_trace_context(row):
+    """Resolve tracing's nearest request context without counting span copies."""
+    if not isinstance(row, dict):
+        raise ValueError('compiler trace row is not an object')
+    contexts = row.get('spans', [])
+    if not isinstance(contexts, list):
+        raise ValueError('compiler trace spans are not a list')
+    contexts = [*contexts, row.get('span', {}), row.get('fields', row)]
+    merged = {}
+    request = False
+    for context in contexts:
+        if not isinstance(context, dict):
+            raise ValueError('compiler trace context is not an object')
+        request |= context.get('name') == 'compile_request' or 'compile_request' in context
+        for key in ('execution_layer', 'physical_execution', 'request_mode',
+                    'compile_request', 'daemon_epoch', 'admission_id', 'request_ordinal'):
+            if key in context:
+                merged[key] = context[key]
+    return merged, request
+
+
 def diagnostic_summaries(artifact_root):
     """Keep bounded compiler outcome/timing evidence after success scratch removal."""
     def read_json(path):
@@ -435,6 +456,7 @@ def diagnostic_summaries(artifact_root):
     trace = compiler / 'compiler.jsonl'
     if trace.exists():
         physical, retained_bytes, examined_bytes, malformed, total = [], 0, 0, 0, 0
+        unknown, physical_requests = 0, set()
         try:
             with trace.open('rb') as stream:
                 while True:
@@ -447,12 +469,16 @@ def diagnostic_summaries(artifact_root):
                         break
                     try:
                         row = json.loads(line)
-                        fields = row.get('fields', row)
-                        if fields.get('execution_layer') == 'physical':
+                        context, request = compiler_trace_context(row)
+                        layer = context.get('execution_layer')
+                        if layer == 'physical' and context.get('physical_execution'):
                             total += 1
+                            physical_requests.add(str(context['physical_execution']))
                             if retained_bytes + len(line) <= 256 << 10 and len(physical) < 512:
-                                physical.append(row)
+                                physical.append({**row, 'physical_context': context})
                                 retained_bytes += len(line)
+                        elif request and layer not in ('endpoint_submission', 'transaction_wrapper'):
+                            unknown += 1
                     except (ValueError, AttributeError):
                         malformed += 1
         except OSError as error:
@@ -460,9 +486,18 @@ def diagnostic_summaries(artifact_root):
             summaries['issues'].append(f'{trace}: {error}')
         summaries['physical_compiler_timing'] = {
             'records': physical, 'physical_record_count': total,
+            'physical_request_count': len(physical_requests),
+            'unclassified_request_records': unknown,
             'retained_record_count': len(physical), 'malformed_lines': malformed,
-            'complete': examined_bytes <= 32 << 20 and malformed == 0 and total == len(physical),
+            'data_status': 'observed' if total else 'no_identified_physical_requests',
+            'complete': (examined_bytes <= 32 << 20 and malformed == 0
+                         and unknown == 0 and total > 0 and total == len(physical)),
             'trace_bytes': trace.stat().st_size,
+        }
+    elif transactions or (compiler / 'owned-compiler-outcome.json').exists():
+        summaries['physical_compiler_timing'] = {
+            'records': [], 'physical_record_count': 0, 'physical_request_count': 0,
+            'retained_record_count': 0, 'data_status': 'trace_absent', 'complete': False,
         }
     return summaries
 
