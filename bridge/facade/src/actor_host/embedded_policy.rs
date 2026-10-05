@@ -164,11 +164,29 @@ impl EmbeddedPolicySnapshot {
     }
 
     pub(super) fn implementation(&self, name: &str) -> Option<exomonad_tool::ToolImplementation> {
-        self.policy
-            .tools()
-            .iter()
-            .find(|tool| tool.name() == name)
-            .map(HostedTool::implementation)
+        self.declaration(name).map(HostedTool::implementation)
+    }
+
+    fn declaration(&self, name: &str) -> Option<&HostedTool> {
+        self.policy.tools().iter().find(|tool| tool.name() == name)
+    }
+
+    pub(super) fn context_read_write(&self, name: &str) -> Result<bool, ResidentToolError> {
+        let Some(tool) = self.declaration(name) else {
+            return Ok(false);
+        };
+        if !tool
+            .effect_keys()
+            .contains(&exomonad_tool::ToolEffectKey::ContextReadWrite)
+        {
+            return Ok(false);
+        }
+        if tool.scheduling() != exomonad_tool::ToolScheduling::BeforeNextInference {
+            return Err(ResidentToolError::InvalidInvocation(
+                "ContextReadWrite requires synchronous tool scheduling".into(),
+            ));
+        }
+        Ok(true)
     }
 
     pub(super) async fn cancel(
@@ -322,6 +340,72 @@ mod tests {
             None,
             Some("embedded".into()),
         )
+    }
+
+    #[test]
+    fn installed_context_authority_follows_pinned_effects_and_schedule() {
+        use exomonad_tool::{ToolEffectKey, ToolImplementation, ToolScheduling};
+        let tool = |name: &str, schedule, effect_keys| {
+            HostedTool::Custom(CustomToolDeclaration {
+                name: name.into(),
+                description: "Selected notebook".into(),
+                schedule,
+                implementation: ToolImplementation::HaskellCell,
+                effect_keys,
+            })
+        };
+        let actor = exomonad_actor::ActorRef::first(exomonad_actor::ActorId(7));
+        let ordinary = EmbeddedPolicyInstallation::new(
+            actor,
+            policy_with_tools(
+                "ordinary",
+                vec![tool(
+                    "unusual-notebook",
+                    ToolScheduling::BeforeNextInference,
+                    vec![],
+                )],
+            ),
+        )
+        .request_snapshot()
+        .unwrap();
+        let curation = EmbeddedPolicyInstallation::new(
+            actor,
+            policy_with_tools(
+                "curation",
+                vec![tool(
+                    "unusual-notebook",
+                    ToolScheduling::BeforeNextInference,
+                    vec![ToolEffectKey::ContextReadWrite],
+                )],
+            ),
+        )
+        .request_snapshot()
+        .unwrap();
+        assert!(!ordinary.context_read_write("unusual-notebook").unwrap());
+        assert!(curation.context_read_write("unusual-notebook").unwrap());
+        assert!(!curation.context_read_write("haskell_sync").unwrap());
+        assert!(!ordinary.context_read_write("unusual-notebook").unwrap());
+        let asynchronous = EmbeddedPolicyInstallation::new(
+            actor,
+            policy_with_tools(
+                "async",
+                vec![
+                    tool("ordinary-async", ToolScheduling::Async, vec![]),
+                    tool(
+                        "invalid-curation",
+                        ToolScheduling::Async,
+                        vec![ToolEffectKey::ContextReadWrite],
+                    ),
+                ],
+            ),
+        )
+        .request_snapshot()
+        .unwrap();
+        assert!(!asynchronous.context_read_write("ordinary-async").unwrap());
+        assert!(matches!(
+            asynchronous.context_read_write("invalid-curation"),
+            Err(ResidentToolError::InvalidInvocation(_))
+        ));
     }
 
     #[test]

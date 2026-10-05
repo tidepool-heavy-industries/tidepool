@@ -1047,18 +1047,26 @@ impl Provider for EmbeddedDispatcher {
         input: harness::item::ToolInput,
         context: CallContext,
     ) -> ProviderCompletion {
-        let binding = match context.context.as_ref() {
+        let snapshot = match checked_context_snapshot(&context) {
+            Ok(snapshot) => snapshot,
+            Err(error) => return unavailable_context_completion(JobOutput::Completed(Err(error))),
+        };
+        let context_read_write = match self.snapshot.context_read_write(name) {
+            Ok(admitted) => admitted,
+            Err(error) => {
+                return unavailable_context_completion(JobOutput::Completed(Err(
+                    provider_tool_error(error).into_tool_failure(),
+                )));
+            }
+        };
+        if context_read_write && snapshot.is_none() {
+            return unavailable_context_completion(JobOutput::Completed(Err(
+                "ContextReadWrite requires an exact synchronous context snapshot".into(),
+            )));
+        }
+        let binding = match snapshot.filter(|_| context_read_write) {
             Some(snapshot) => {
-                let Some(operation) = context.operation.as_ref() else {
-                    return unavailable_context_completion(JobOutput::Completed(Err(
-                        "context dispatch requires an exact operation".into(),
-                    )));
-                };
-                if &snapshot.operation != operation {
-                    return unavailable_context_completion(JobOutput::Completed(Err(
-                        "context snapshot belongs to another operation".into(),
-                    )));
-                }
+                let operation = &snapshot.operation;
                 let invocation = match self.context(operation) {
                     Ok(invocation) => invocation,
                     Err(error) => {
@@ -1082,6 +1090,18 @@ impl Provider for EmbeddedDispatcher {
             }
             None => None,
         };
+        if let Some(snapshot) = snapshot.filter(|_| !context_read_write) {
+            // A synchronous prefix needs exact completion evidence for the
+            // scheduler's native-completion race, without mutation authority.
+            if let Err(error) = context
+                .completion
+                .register(&snapshot.operation, Arc::new(UneditedInvocationCompletion))
+            {
+                return unavailable_context_completion(JobOutput::Completed(Err(error
+                    .to_string()
+                    .into())));
+            }
+        }
         let arguments = match input {
             harness::item::ToolInput::Function(arguments) => ToolArguments::Structured(arguments),
             harness::item::ToolInput::Custom(source) => ToolArguments::Raw(source),
@@ -1131,11 +1151,7 @@ impl Provider for EmbeddedDispatcher {
         } else {
             JobOutput::Completed(result)
         };
-        ProviderCompletion {
-            full_success: matches!(&output, JobOutput::Completed(Ok(_))),
-            output,
-            context: harness::provider::ContextDisposition::Unedited,
-        }
+        UneditedInvocationCompletion::project(output)
     }
 
     async fn call(&self, _: &str, _: Value) -> Result<Value, ProviderError> {
@@ -1162,6 +1178,40 @@ impl Provider for EmbeddedDispatcher {
     ) -> Result<Value, ProviderError> {
         self.dispatch(name, ToolArguments::Raw(input), context, None)
             .await
+    }
+}
+
+fn checked_context_snapshot(
+    context: &CallContext,
+) -> Result<Option<&harness::context::ContextSnapshot>, ToolFailure> {
+    let Some(snapshot) = context.context.as_ref() else {
+        return Ok(None);
+    };
+    let operation = context
+        .operation
+        .as_ref()
+        .ok_or_else(|| ToolFailure::from("context dispatch requires an exact operation"))?;
+    if &snapshot.operation != operation {
+        return Err("context snapshot belongs to another operation".into());
+    }
+    Ok(Some(snapshot))
+}
+
+struct UneditedInvocationCompletion;
+
+impl UneditedInvocationCompletion {
+    fn project(output: JobOutput) -> ProviderCompletion {
+        ProviderCompletion {
+            full_success: matches!(&output, JobOutput::Completed(Ok(_))),
+            output,
+            context: harness::provider::ContextDisposition::Unedited,
+        }
+    }
+}
+
+impl InvocationCompletionSource for UneditedInvocationCompletion {
+    fn completion(&self, output: JobOutput) -> Option<ProviderCompletion> {
+        Some(Self::project(output))
     }
 }
 
@@ -1233,6 +1283,187 @@ mod cancellation_receipt_tests;
 #[cfg(test)]
 mod round_control_tests {
     use super::*;
+
+    fn readonly_snapshot() -> harness::context::ContextSnapshot {
+        use harness::{
+            item::Item,
+            model::{CallId, RequestId},
+            store::Usage,
+        };
+        let store = Store::memory().unwrap();
+        let head = RequestId("root".into());
+        store.write_request(&head, None, "/root", &[
+            Item(json!({"type":"message", "role":"user", "content":"checkpoint prefix"})),
+            Item(json!({"type":"custom_tool_call", "call_id":"call", "name":"notebook", "input":"display True"})),
+        ], Usage::default()).unwrap();
+        let operation = store.claim(&CallId("call".into()), &head).unwrap();
+        store.begin_context(&operation, &head).unwrap()
+    }
+
+    #[test]
+    fn readonly_checkpoint_snapshot_requires_its_exact_operation() {
+        let snapshot = readonly_snapshot();
+        let operation = snapshot.operation.clone();
+        let (mut context, _) = CallContext::detached_for_test(
+            JobHandle("probe".into()),
+            operation.call.clone(),
+            operation.origin.actor().clone(),
+        );
+        assert!(checked_context_snapshot(&context).unwrap().is_none());
+        context.context = Some(snapshot);
+        assert!(checked_context_snapshot(&context).is_err());
+        context.operation = Some(operation.clone());
+        assert!(std::ptr::eq(
+            checked_context_snapshot(&context).unwrap().unwrap(),
+            context.context.as_ref().unwrap()
+        ));
+        context.operation.as_mut().unwrap().request.0 = "foreign-request".into();
+        assert!(checked_context_snapshot(&context).is_err());
+        context.operation = Some(operation);
+        context.operation.as_mut().unwrap().call.0 = "foreign-call".into();
+        assert!(checked_context_snapshot(&context).is_err());
+    }
+
+    #[test]
+    fn unedited_invocation_completion_preserves_terminal_categories() {
+        let outputs = [
+            JobOutput::Completed(Ok(json!({"value":42}))),
+            JobOutput::Completed(Err("failed".into())),
+            JobOutput::Cancelled,
+            JobOutput::CancelledWithReceipt(Ok(json!({"cancelled":true}))),
+            JobOutput::CancelledWithReceipt(Err("abort failed".into())),
+            JobOutput::Interrupted,
+            JobOutput::CancellationUnconfirmed("owner unavailable".into()),
+        ];
+        for output in outputs {
+            let normal = UneditedInvocationCompletion::project(output.clone());
+            let raced = UneditedInvocationCompletion
+                .completion(output.clone())
+                .unwrap();
+            assert_eq!(normal.output, output);
+            assert_eq!(raced.output, output);
+            assert_eq!(
+                normal.full_success,
+                matches!(output, JobOutput::Completed(Ok(_)))
+            );
+            assert_eq!(raced.full_success, normal.full_success);
+            assert_eq!(
+                normal.context,
+                harness::provider::ContextDisposition::Unedited
+            );
+            assert_eq!(raced.context, normal.context);
+        }
+    }
+
+    #[tokio::test]
+    async fn readonly_sync_completion_survives_native_terminal_before_provider_waiter() {
+        struct Probe {
+            started: tokio::sync::Notify,
+            release: tokio::sync::Notify,
+            operation: OperationId,
+        }
+        #[async_trait::async_trait]
+        impl Provider for Probe {
+            fn tools(&self) -> Vec<Value> {
+                Vec::new()
+            }
+            fn cancellation_owner(&self) -> Option<Arc<dyn CancellationOwner>> {
+                Some(Arc::new(NativeCompleted(self.operation.clone())))
+            }
+            async fn call(&self, _: &str, _: Value) -> Result<Value, ProviderError> {
+                unreachable!("the scheduler supplies an exact call context")
+            }
+            async fn complete_call(
+                &self,
+                _: &str,
+                _: harness::item::ToolInput,
+                context: CallContext,
+            ) -> ProviderCompletion {
+                let snapshot = checked_context_snapshot(&context).unwrap().unwrap();
+                let mut foreign = snapshot.operation.clone();
+                foreign.call.0 = "foreign".into();
+                assert_eq!(
+                    context
+                        .completion
+                        .register(&foreign, Arc::new(UneditedInvocationCompletion)),
+                    Err(harness::provider::CompletionRegistrationError::ForeignOperation)
+                );
+                context
+                    .completion
+                    .register(&snapshot.operation, Arc::new(UneditedInvocationCompletion))
+                    .unwrap();
+                assert_eq!(
+                    context
+                        .completion
+                        .register(&snapshot.operation, Arc::new(UneditedInvocationCompletion)),
+                    Err(harness::provider::CompletionRegistrationError::AlreadyRegistered)
+                );
+                self.started.notify_one();
+                self.release.notified().await;
+                UneditedInvocationCompletion::project(JobOutput::Completed(Ok(
+                    json!({"native":42}),
+                )))
+            }
+        }
+        struct NativeCompleted(OperationId);
+        #[async_trait::async_trait]
+        impl CancellationOwner for NativeCompleted {
+            async fn cancel(
+                &self,
+                operation: &OperationId,
+                _: &JobHandle,
+            ) -> CancellationAcknowledgment {
+                assert_eq!(operation, &self.0);
+                CancellationAcknowledgment::Completed(Ok(json!({"native":42})))
+            }
+        }
+        let snapshot = readonly_snapshot();
+        let operation = snapshot.operation.clone();
+        let provider = Arc::new(Probe {
+            started: Default::default(),
+            release: Default::default(),
+            operation: operation.clone(),
+        });
+        let scheduler = JobScheduler::new(1).unwrap();
+        scheduler
+            .queue_operation(
+                provider.clone(),
+                operation.clone(),
+                operation.origin.actor().clone(),
+                Some(operation.request.clone()),
+                "notebook".into(),
+                harness::item::ToolInput::Custom("display True".into()),
+            )
+            .await
+            .unwrap();
+        scheduler
+            .release_operation(&operation, Some(snapshot))
+            .await
+            .unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            provider.started.notified(),
+        )
+        .await
+        .unwrap();
+        let settlement = scheduler.cancel(&operation).await.unwrap().unwrap();
+        assert_eq!(
+            settlement.output,
+            JobOutput::Completed(Ok(json!({"native":42})))
+        );
+        let completion = scheduler
+            .invocation_completion(&operation)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(completion.output, settlement.output);
+        assert!(completion.full_success);
+        assert_eq!(
+            completion.context,
+            harness::provider::ContextDisposition::Unedited
+        );
+        provider.release.notify_one();
+    }
 
     #[test]
     fn missing_context_terminal_metadata_refuses_publication() {

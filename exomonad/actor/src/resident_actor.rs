@@ -3270,6 +3270,28 @@ enum WorkbenchPreflight {
     Admitted(WorkbenchAdmission),
 }
 
+fn admit_context_authority(
+    actor: ActorRef,
+    selected: Option<&exomonad_tool::HostedTool>,
+    invocation: Option<&exomonad_tool::ToolInvocationContext>,
+) -> Result<(), KernelInvocationFailure> {
+    if selected.is_none_or(|tool| {
+        tool.scheduling() != exomonad_tool::ToolScheduling::BeforeNextInference
+            || !tool
+                .effect_keys()
+                .contains(&exomonad_tool::ToolEffectKey::ContextReadWrite)
+    }) || invocation.is_none_or(|invocation| invocation.model_operation().is_none())
+    {
+        return Err(KernelInvocationFailure::Rejected {
+            receipts: Vec::new(),
+            actor,
+            detail: "context authority requires an exact synchronous ContextReadWrite invocation"
+                .into(),
+        });
+    }
+    Ok(())
+}
+
 // Hosted groups retain provider completion custody. Direct executions and
 // resident handlers publish committed admissions before continuing.
 #[derive(Clone)]
@@ -3708,19 +3730,12 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 };
             }
         }
-        if invocation.context_binding.is_some()
-            && (selected_tool.as_ref().is_none_or(|tool| {
-                tool.scheduling() != exomonad_tool::ToolScheduling::BeforeNextInference
-            }) || invocation_key
-                .as_ref()
-                .is_none_or(|key| key.invocation().model_operation().is_none()))
-        {
-            return Err(KernelInvocationFailure::Rejected {
-                receipts: Vec::new(),
+        if invocation.context_binding.is_some() {
+            admit_context_authority(
                 actor,
-                detail: "context authority requires an exact synchronous provider invocation"
-                    .into(),
-            });
+                selected_tool.as_ref(),
+                invocation_key.as_ref().map(|key| key.invocation()),
+            )?;
         }
         if let Some(execution) = request.execution_id() {
             match self.workbench_executions.lock().lookup(
@@ -15503,6 +15518,55 @@ mod tests {
         workbench_failure_after_operations, workbench_failure_after_unit, workbench_response,
         ChildExitObservations,
     };
+
+    #[test]
+    fn native_context_authority_requires_explicit_effect_and_exact_sync_invocation() {
+        use exomonad_tool::{
+            CustomToolDeclaration, HostedTool, ToolEffectKey, ToolImplementation,
+            ToolInvocationContext, ToolScheduling,
+        };
+        let actor = crate::ActorRef::first(crate::ActorId(8));
+        let mut declaration = CustomToolDeclaration {
+            name: "ordinary-notebook".into(),
+            description: "Selected notebook".into(),
+            schedule: ToolScheduling::BeforeNextInference,
+            implementation: ToolImplementation::HaskellCell,
+            effect_keys: Vec::new(),
+        };
+        let exact = ToolInvocationContext::external(
+            "thread".into(),
+            "request".into(),
+            "call".into(),
+            Some("call".into()),
+            None,
+        );
+        let direct = ToolInvocationContext::external(
+            "thread".into(),
+            "request".into(),
+            "call".into(),
+            None,
+            None,
+        );
+        let rejected = |tool: Option<&HostedTool>, invocation: Option<&ToolInvocationContext>| {
+            assert!(matches!(
+                super::admit_context_authority(actor, tool, invocation),
+                Err(crate::KernelInvocationFailure::Rejected { actor: rejected, .. })
+                    if rejected == actor
+            ));
+        };
+        rejected(None, Some(&exact));
+        rejected(Some(&HostedTool::Custom(declaration.clone())), Some(&exact));
+        declaration
+            .effect_keys
+            .push(ToolEffectKey::ContextReadWrite);
+        declaration.name = "explicit-curation".into();
+        let curation = HostedTool::Custom(declaration.clone());
+        assert!(super::admit_context_authority(actor, Some(&curation), Some(&exact)).is_ok());
+        rejected(Some(&curation), None);
+        rejected(Some(&curation), Some(&direct));
+        declaration.schedule = ToolScheduling::Async;
+        rejected(Some(&HostedTool::Custom(declaration)), Some(&exact));
+    }
 
     #[test]
     fn checkpoint_answer_remains_delivered_when_resumed_computation_fails() {
