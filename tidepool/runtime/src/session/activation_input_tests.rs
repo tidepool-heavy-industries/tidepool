@@ -531,10 +531,18 @@ fn mount_original(
 ) -> MountedActivationInput {
     let scope = resident.run_context().lexical_scope;
     let original_provenance = owner.input.custody.provenance.clone();
+    let original_handle = owner.input.custody.handle.unwrap();
+    let original_root = resident
+        .state
+        .require_prepared()
+        .unwrap()
+        .handle_slot(original_handle)
+        .unwrap();
     let reservation = owner.reservation().clone();
     let certificate = interface.value_interface_certificate();
     let handles = resident.value_handle_count();
     let roots = resident.persistent_roots_count();
+    let custody = resident.outstanding_custody();
     let codegen = resident.codegen_totals();
     let mounted = resident
         .mount_activation_input(owner, interface.clone())
@@ -543,8 +551,22 @@ fn mount_original(
         .binding_names_in(scope)
         .iter()
         .any(|name| name == "sessionInput"));
-    assert_eq!(resident.value_handle_count(), handles - 1);
-    assert_eq!(resident.persistent_roots_count(), roots + 1);
+    assert_eq!(resident.value_handle_count(), handles);
+    assert_eq!(resident.persistent_roots_count(), roots);
+    assert_eq!(resident.outstanding_custody(), custody - 1);
+    let entry = resident.state.bindings().get(mounted.binding()).unwrap();
+    assert_eq!(entry.value.handle.raw(), original_handle);
+    assert_eq!(entry.value.root.addr(), original_root.addr());
+    assert_eq!(
+        resident
+            .state
+            .require_prepared()
+            .unwrap()
+            .handle_slot(original_handle)
+            .unwrap()
+            .addr(),
+        original_root.addr(),
+    );
     assert_eq!(
         resident.codegen_totals(),
         codegen,
@@ -2302,8 +2324,8 @@ fn activation_input_committed_binding_owns_interface_and_scope_releases_root_onc
             ..SessionRunContext::ROOT
         })
         .unwrap();
-    let roots = resident.persistent_roots_count();
     let (owner, interface) = parked_input_owner(&fixture, &mut resident);
+    let roots = resident.persistent_roots_count() - 1;
     let certificate = interface.value_interface_certificate();
     let certificate_lease = Arc::downgrade(&certificate);
     let prototype_lease = Arc::downgrade(interface.prototype());
