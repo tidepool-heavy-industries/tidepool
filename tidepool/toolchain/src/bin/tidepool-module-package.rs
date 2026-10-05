@@ -1,5 +1,21 @@
 use std::path::PathBuf;
 
+#[derive(Clone, Copy)]
+enum Mode {
+    Build,
+    Inspect,
+}
+
+impl Mode {
+    fn parse(value: Option<&std::ffi::OsStr>) -> Result<Self, &'static str> {
+        match value.and_then(std::ffi::OsStr::to_str) {
+            Some("build") => Ok(Self::Build),
+            Some("inspect") => Ok(Self::Inspect),
+            _ => Err("usage: tidepool-module-package (build|inspect) --source ABS --target NAME [--target NAME] --source-root SNAPSHOT_ABS --output-root ABS"),
+        }
+    }
+}
+
 #[derive(Default)]
 struct Arguments {
     source: Option<PathBuf>,
@@ -17,11 +33,7 @@ fn main() {
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut input = std::env::args_os().skip(1);
-    if input.next().as_deref() != Some(std::ffi::OsStr::new("build")) {
-        return Err(
-            "usage: tidepool-module-package build --source ABS --target NAME [--target NAME] --source-root SNAPSHOT_ABS --output-root ABS".into(),
-        );
-    }
+    let mode = Mode::parse(input.next().as_deref())?;
     let mut args = Arguments::default();
     while let Some(flag) = input.next() {
         let flag = flag.to_str().ok_or("non-UTF-8 argument flag")?;
@@ -64,7 +76,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             .ok_or_else(|| format!("module package build requires {name}"))
     })
     .collect::<Result<Vec<_>, _>>()?;
-    let scratch = tempfile::tempdir_in(std::env::current_dir()?)?;
+    let mut scratch = tempfile::tempdir_in(std::env::current_dir()?)?;
+    if matches!(mode, Mode::Inspect) {
+        scratch.disable_cleanup(true);
+        eprintln!(
+            "catalog inspection retains scratch {} and output {}",
+            scratch.path().display(),
+            output_root.display()
+        );
+    }
     // This binary owns the process and has not started any threads.
     unsafe {
         let inherited = std::env::vars_os()
@@ -85,13 +105,27 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     std::env::set_current_dir(scratch.path())?;
     let targets = args.targets.iter().map(String::as_str).collect::<Vec<_>>();
-    let package = tidepool_toolchain::artifacts::build_deployment_module_package(
-        &source,
-        &targets,
-        &source_root,
-        scratch.path(),
-        &output_root,
-    )?;
-    println!("{}", package.catalog_identity());
+    match mode {
+        Mode::Build => {
+            let package = tidepool_toolchain::artifacts::build_deployment_module_package(
+                &source,
+                &targets,
+                &source_root,
+                scratch.path(),
+                &output_root,
+            )?;
+            println!("{}", package.catalog_identity());
+        }
+        Mode::Inspect => {
+            let report = tidepool_toolchain::artifacts::inspect_deployment_module_package(
+                &source,
+                &targets,
+                &source_root,
+                scratch.path(),
+                &output_root,
+            )?;
+            println!("{}", report.display());
+        }
+    }
     Ok(())
 }

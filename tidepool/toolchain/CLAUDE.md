@@ -101,3 +101,15 @@ source manifest and alias validation without hydrating native products. Candidat
 admission loads the full package and validates every proof and the complete cohort.
 Actual Nix registration, NAR, retention and final bundle qualification remain the
 qualification owner’s independent checks.
+
+`tidepool-module-package inspect` uses the same declared snapshot, probe, targets,
+direct configured endpoint and build-action source guards as `build`. It writes
+`catalog-inventory.json` only after actual product certification, with canonical
+interfaces and optional Core, native owners, native group counts, and each
+worker module’s `ProductAvailability`. It publishes no catalog or candidates.
+`request.json`, `invocation.json`, and `outcome.json` preserve source and producer
+identity, the ordered roots, and refusal stage. Both CLI scratch and the recursive
+compiler transaction under `output-root/raw` are retained, including stdout,
+stderr, build products and dependency evidence. Raw worker flags in a refusal
+report remain explicitly unadmitted; missing canonical counts are not zeroes.
+Inspection has no internal wall timeout; its execution owner supplies one.

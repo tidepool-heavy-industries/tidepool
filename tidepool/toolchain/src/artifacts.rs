@@ -29,6 +29,7 @@ use crate::{
     timing, CompileError,
 };
 
+mod catalog_inventory;
 mod failure_sources;
 
 static HOST_BINDING_INTERFACE_REQUESTS: std::sync::atomic::AtomicU64 =
@@ -2770,25 +2771,12 @@ pub fn build_deployment_module_package(
     scratch: &Path,
     output_root: &Path,
 ) -> Result<crate::toolchain::DeploymentModulePackage, CompileError> {
-    let source_selection =
-        module_candidates::deployment::prepare_build_roots(source_root, output_root)?;
-    if source_path != source_selection.snapshot_root.join("TidepoolCatalog.hs") {
-        return Err(
-            crate::toolchain::ModulePackageError::Format("native catalog probe path").into(),
-        );
-    }
-    let roots = source_selection.include_roots();
-    validate_build_action_request(source_path, targets, &roots, scratch, output_root)?;
-    let configuration = crate::toolchain::CompilerDeploymentConfiguration::from_env()
-        .map_err(|e| CompileError::ExtractFailed(e.to_string()))?;
-    let crate::toolchain::CompilerDeploymentConfiguration::Configured(authority) = configuration
-    else {
-        return Err(crate::toolchain::ModulePackageError::UnknownCompiler.into());
-    };
+    let (authority, source_selection) =
+        prepare_deployment_module_action(source_path, targets, source_root, scratch, output_root)?;
     compile_build_action(
         source_path,
         targets,
-        &roots,
+        &source_selection.include_roots(),
         scratch,
         BuildActionExport::DeploymentPackage {
             output_root,
@@ -2799,6 +2787,75 @@ pub fn build_deployment_module_package(
         &output_root.join("catalog.json"),
         &authority,
     )?)
+}
+
+/// Inspect actual compiler capabilities without publishing a deployment catalog.
+/// Both successful and refused transactions retain their original raw outputs.
+pub fn inspect_deployment_module_package(
+    source_path: &Path,
+    targets: &[&str],
+    source_root: &Path,
+    scratch: &Path,
+    output_root: &Path,
+) -> Result<PathBuf, CompileError> {
+    let (_, source_selection) =
+        prepare_deployment_module_action(source_path, targets, source_root, scratch, output_root)?;
+    catalog_inventory::request(
+        output_root,
+        source_path,
+        targets,
+        scratch,
+        &source_selection,
+    )?;
+    let result = compile_build_action(
+        source_path,
+        targets,
+        &source_selection.include_roots(),
+        scratch,
+        BuildActionExport::CatalogInventory {
+            output_root,
+            source_selection: &source_selection,
+        },
+    );
+    let report = catalog_inventory::outcome(output_root, &result)?;
+    result?;
+    Ok(report)
+}
+
+fn prepare_deployment_module_action(
+    source_path: &Path,
+    targets: &[&str],
+    source_root: &Path,
+    scratch: &Path,
+    output_root: &Path,
+) -> Result<
+    (
+        crate::toolchain::CompilerDeploymentAuthority,
+        module_candidates::deployment::NativeCatalogSourceSelection,
+    ),
+    CompileError,
+> {
+    let source_selection =
+        module_candidates::deployment::prepare_build_roots(source_root, output_root)?;
+    if source_path != source_selection.snapshot_root.join("TidepoolCatalog.hs") {
+        return Err(
+            crate::toolchain::ModulePackageError::Format("native catalog probe path").into(),
+        );
+    }
+    validate_build_action_request(
+        source_path,
+        targets,
+        &source_selection.include_roots(),
+        scratch,
+        output_root,
+    )?;
+    let configuration = crate::toolchain::CompilerDeploymentConfiguration::from_env()
+        .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+    let crate::toolchain::CompilerDeploymentConfiguration::Configured(authority) = configuration
+    else {
+        return Err(crate::toolchain::ModulePackageError::UnknownCompiler.into());
+    };
+    Ok((authority, source_selection))
 }
 
 /// Authority selected by the compilation owner, independently of cache hints.
@@ -2827,6 +2884,10 @@ enum BuildActionExport<'a> {
         output: &'a Path,
     },
     DeploymentPackage {
+        output_root: &'a Path,
+        source_selection: &'a module_candidates::deployment::NativeCatalogSourceSelection,
+    },
+    CatalogInventory {
         output_root: &'a Path,
         source_selection: &'a module_candidates::deployment::NativeCatalogSourceSelection,
     },
@@ -2993,7 +3054,8 @@ fn compile_invocation_inner(
         CompilationPolicy::Runtime
         | CompilationPolicy::FreshRuntime
         | CompilationPolicy::BuildAction {
-            export: BuildActionExport::PreparedFixture { .. },
+            export:
+                BuildActionExport::PreparedFixture { .. } | BuildActionExport::CatalogInventory { .. },
             ..
         } => (None, None, None, None),
         CompilationPolicy::Exact { context } => (None, Some(context), None, None),
@@ -3016,11 +3078,33 @@ fn compile_invocation_inner(
             ..
         } => (None, None, Some((*output_root, *source_selection)), None),
     };
+    let inventory_export = match &policy {
+        CompilationPolicy::BuildAction {
+            export:
+                BuildActionExport::CatalogInventory {
+                    output_root,
+                    source_selection,
+                },
+            ..
+        } => Some((*output_root, *source_selection)),
+        _ => None,
+    };
     let allow_candidates = matches!(&policy, CompilationPolicy::Runtime);
-    let temp_dir = match &policy {
+    let mut temp_dir = match &policy {
+        CompilationPolicy::BuildAction {
+            export: BuildActionExport::CatalogInventory { output_root, .. },
+            ..
+        } => {
+            let raw = output_root.join("raw");
+            std::fs::create_dir(&raw)?;
+            TempDir::new_in(raw)?
+        }
         CompilationPolicy::BuildAction { scratch, .. } => TempDir::new_in(scratch)?,
         _ => TempDir::new()?,
     };
+    if inventory_export.is_some() {
+        temp_dir.disable_cleanup(true);
+    }
     // GHC derives the module name from the filename (capitalize(basename));
     // see `CompileInvocation::fallback_module_name`'s doc for why this
     // differs per lane.
@@ -3043,7 +3127,7 @@ fn compile_invocation_inner(
     if let Some(root) = session_root {
         cmd.session_root(root).certify_home_products();
     }
-    if deployment_export.is_some() {
+    if deployment_export.is_some() || inventory_export.is_some() {
         cmd.certify_home_products();
     }
     let exact_request = if let Some(context) = exact_context {
@@ -3085,6 +3169,16 @@ fn compile_invocation_inner(
                 _ => cmd.bind(),
             }
             .map_err(CompileAttemptError::Endpoint)?;
+            if let Some((output, _)) = inventory_export {
+                catalog_inventory::endpoint(
+                    output,
+                    endpoint.identity().producer_bytes(),
+                    &cmd.argv(),
+                    temp_dir.path(),
+                    catalog_inventory::Phase::CompilerDeploymentAdmission,
+                )
+                .map_err(CompileAttemptError::Diagnostic)?;
+            }
             let deployment = crate::toolchain::admit_bound_endpoint(&endpoint)
                 .map_err(CompileAttemptError::Deployment)?;
             match &policy {
@@ -3163,6 +3257,16 @@ fn compile_invocation_inner(
             }
             let producer = endpoint.identity().producer_bytes().to_vec();
 
+            if let Some((output, _)) = inventory_export {
+                catalog_inventory::endpoint(
+                    output,
+                    &producer,
+                    &cmd.argv(),
+                    temp_dir.path(),
+                    catalog_inventory::Phase::CompilerExecution,
+                )
+                .map_err(CompileAttemptError::Diagnostic)?;
+            }
             endpoint
                 .execute(&cmd)
                 .map(|run| {
@@ -3214,6 +3318,18 @@ fn compile_invocation_inner(
         "extract spawn"
     );
 
+    if let Some((output, _)) = inventory_export {
+        std::fs::write(temp_dir.path().join("compiler.stdout"), &run.output.stdout)?;
+        std::fs::write(temp_dir.path().join("compiler.stderr"), &run.output.stderr)?;
+        std::fs::write(
+            temp_dir.path().join("compiler-status.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "success": run.output.status.success(), "exit_code": run.output.status.code(),
+            }))
+            .map_err(|error| CompileError::ExtractFailed(error.to_string()))?,
+        )?;
+        catalog_inventory::phase(output, catalog_inventory::Phase::CompilerOutputDecode)?;
+    }
     let compiler_stderr = run.output.stderr.clone();
     let extracted = extract_and_read(
         run,
@@ -3253,6 +3369,9 @@ fn compile_invocation_inner(
         let evidence_bytes = std::fs::read(temp_dir.path().join("dependencies.json"))?;
         let package_bundle_bytes =
             std::fs::read(temp_dir.path().join("module-package-imports.cbor"))?;
+        if let Some((output, _)) = inventory_export {
+            catalog_inventory::phase(output, catalog_inventory::Phase::SourceEvidenceValidation)?;
+        }
         if matches!(&policy, CompilationPolicy::BuildAction { .. }) {
             validate_prepared_fixture_sources(&evidence_bytes, &input_path, inv.include)?;
         }
@@ -3275,8 +3394,16 @@ fn compile_invocation_inner(
                 cache::DependencyEvidence::from_worker(&evidence_bytes, &input_path, inv.source)
             }
         };
+        if let Some((output, _)) = inventory_export {
+            catalog_inventory::phase(output, catalog_inventory::Phase::ProductCertification)?;
+        }
         let receipt_bytes = std::fs::read(temp_dir.path().join("certified-products.cbor"))?;
         if receipt_bytes.is_empty() {
+            if inventory_export.is_some() {
+                return Err(CompileError::ExtractFailed(
+                    "catalog inventory product certificate unavailable".into(),
+                ));
+            }
             if exact_request.is_some() {
                 return Err(CompileError::ExtractFailed(
                     "exact compile product certificate unavailable".into(),
@@ -3340,6 +3467,9 @@ fn compile_invocation_inner(
                 authored,
             )
             .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+            if let Some((output, selection)) = inventory_export {
+                catalog_inventory::inventory(output, selection, valid, &certified)?;
+            }
             ensure_ready_module_inventory(&receipt.modules, valid)?;
             certified
         } else {
@@ -3860,6 +3990,7 @@ enum CompileAttemptError {
     Endpoint(tidepool_extract_cmd::SpawnError),
     Deployment(crate::toolchain::ToolchainError),
     ModulePackage(crate::toolchain::ModulePackageError),
+    Diagnostic(CompileError),
 }
 impl CompileAttemptError {
     fn into_compile_error(self) -> CompileError {
@@ -3867,6 +3998,7 @@ impl CompileAttemptError {
             Self::Endpoint(error) => CompileError::Io(extract_spawn_error(error.source)),
             Self::Deployment(error) => CompileError::ExtractFailed(error.to_string()),
             Self::ModulePackage(error) => CompileError::ModulePackage(error),
+            Self::Diagnostic(error) => error,
         }
     }
 }
