@@ -51,9 +51,20 @@ interfaceRequirements = [[requiredUnit, requiredModule, interfaceSHA], ...]
 Requirements come from the actual finalized `ModIface.mi_usages`, including
 interface-only home imports. They are sorted unique exact seals; source SHA or
 ABI equality cannot replace them. Source SHA comes from consumed source evidence
-for the same exact owner. Native receipt owners must match their finalized row
-and have captured Core. `null` expressly has no source-free recovery input;
+for the same exact owner. Fresh native receipt owners must match their finalized
+row and have captured Core. A `retained-core` native row instead requires an
+admitted exact canonical original with its original certificate and captured
+Core; it cannot issue a current source row or source execution recipe. `null` expressly has no source-free recovery input;
 later native demand refuses instead of compiling from source.
+
+Retained native versions use the `retained-core-home-v1` domain and the finite
+reachable graph of actual retained groups. Each node binds the original canonical
+certificate, singleton native product and package sidecar digests. Local promoted
+edges name nodes and original ordinals; external native edges bind complete
+resolved owners, while retained and package edges bind their generations and
+exact selected interface seals. Sorted node traversal handles cycles and excludes
+unrelated request context. Haskell and Rust derive this identity independently
+from existing validated witnesses; it creates no additional authority store.
 
 Paths name distinct captured files beneath the worker output directory. No
 absolute, parent, current-directory, symlink or aliased payload path is admitted.
