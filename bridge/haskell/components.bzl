@@ -447,7 +447,8 @@ def declare_haskell_components():
         "ExactScopeV9Test.hs": "test-source-boot/ExactScopeV9Test.hs",
         "CandidateGraphDescriptorTest.hs": "test-source-boot/CandidateGraphDescriptorTest.hs",
         "CandidateExecutionSourcesTest.hs": "test-source-boot/CandidateExecutionSourcesTest.hs",
-        "SourceBootFixtureSupport.hs": "test-source-boot/SourceBootFixtureSupport.hs"
+        "SourceBootFixtureSupport.hs": "test-source-boot/SourceBootFixtureSupport.hs",
+        "CodecFixtureSupport.hs": "test-source-boot/CodecFixtureSupport.hs"
     },
         deps = [
         ":tidepool_extract_internal"
@@ -2843,7 +2844,8 @@ def declare_haskell_components():
         "ExactScopeV9Test.hs": "test-source-boot/ExactScopeV9Test.hs",
         "CandidateGraphDescriptorTest.hs": "test-source-boot/CandidateGraphDescriptorTest.hs",
         "CandidateExecutionSourcesTest.hs": "test-source-boot/CandidateExecutionSourcesTest.hs",
-        "SourceBootFixtureSupport.hs": "test-source-boot/SourceBootFixtureSupport.hs"
+        "SourceBootFixtureSupport.hs": "test-source-boot/SourceBootFixtureSupport.hs",
+        "CodecFixtureSupport.hs": "test-source-boot/CodecFixtureSupport.hs"
     },
         deps = [
         ":tidepool_extract_internal"
@@ -3002,6 +3004,7 @@ def declare_haskell_components():
         "lib/Tidepool/Worktree.hs": "lib/Tidepool/Worktree.hs",
         "test-source-boot/CandidateExecutionSourcesTest.hs": "test-source-boot/CandidateExecutionSourcesTest.hs",
         "test-source-boot/CandidateGraphDescriptorTest.hs": "test-source-boot/CandidateGraphDescriptorTest.hs",
+        "test-source-boot/CodecFixtureSupport.hs": "test-source-boot/CodecFixtureSupport.hs",
         "test-source-boot/ExactScopeV9Test.hs": "test-source-boot/ExactScopeV9Test.hs",
         "test-source-boot/ExecutionSourceBenchmarkMain.hs": "test-source-boot/ExecutionSourceBenchmarkMain.hs",
         "test-source-boot/ExecutionSourceDecodeTest.hs": "test-source-boot/ExecutionSourceDecodeTest.hs",
