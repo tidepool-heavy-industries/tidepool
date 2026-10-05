@@ -150,7 +150,6 @@ enum CodecOperation {
     ReceiptFacts,
     CertificateFacts,
     InputFacts,
-    CanonicalModule,
     Purpose,
     RequestTypes,
     ExpressionPurpose,
@@ -191,21 +190,11 @@ fn deserialize_bytes<'de, D: serde::Deserializer<'de>>(
     }
     deserializer.deserialize_byte_buf(Bytes)
 }
-struct CanonicalInputs {
-    unit: String,
-    module: String,
-    source: PathBuf,
-    interface: PathBuf,
-    packages: PathBuf,
-    core: PathBuf,
-    home_units: Vec<String>,
-}
 enum CodecRequest {
     Candidate(CandidateCase),
     ReceiptFacts(PathBuf),
     CertificateFacts(PathBuf),
     InputFacts(PathBuf, PathBuf),
-    CanonicalModule(CanonicalInputs),
     Purpose(PurposeCase, Vec<PathBuf>, Option<NativeBytes>),
     RequestTypes(NativeBytes, HelperRecipe, Option<NativeBytes>),
     ExpressionPurpose(Vec<PathBuf>, NativeBytes),
@@ -262,19 +251,6 @@ fn packet_request(root: &Path) -> CodecRequest {
             let (proof, evidence) = decode_arguments(&arguments, 2);
             CodecRequest::InputFacts(proof, evidence)
         }
-        CodecOperation::CanonicalModule => {
-            let (unit, module, source, interface, packages, core, home_units) =
-                decode_arguments(&arguments, 7);
-            CodecRequest::CanonicalModule(CanonicalInputs {
-                unit,
-                module,
-                source,
-                interface,
-                packages,
-                core,
-                home_units,
-            })
-        }
         CodecOperation::Purpose => {
             let (case, includes, signature) = decode_arguments(&arguments, 3);
             CodecRequest::Purpose(case, includes, signature)
@@ -310,7 +286,6 @@ fn source_boot_codec_packet_producer() {
         CodecRequest::InputFacts(proof, evidence) => {
             input_facts(&root, absolute_path(&proof), absolute_path(&evidence))
         }
-        CodecRequest::CanonicalModule(inputs) => canonical_module(&root, inputs),
         CodecRequest::Purpose(case, includes, signature) => {
             purpose(&root, case, &includes, signature)
         }
@@ -629,111 +604,6 @@ fn input_facts(root: &Path, proof: &Path, evidence_path: &Path) {
         Err(failure) => panic!("production compiler input decoder refused: {failure}"),
     };
     write_facts(root, "input_facts", &facts);
-}
-
-fn canonical_module(root: &Path, inputs: CanonicalInputs) {
-    use crate::certified_products::{
-        CapturedArtifactDescriptor, FinalizationEnvelope, FinalizedModuleReceipt,
-    };
-    let CanonicalInputs {
-        unit,
-        module,
-        source,
-        interface,
-        packages,
-        core,
-        home_units,
-    } = inputs;
-    let unit = unit.as_str();
-    let module = module.as_str();
-    assert!(!unit.is_empty() && !module.is_empty(), "canonical owner");
-    let packages = bounded_bytes(&packages, MANIFEST_LIMIT);
-    let core = bounded_bytes(&core, 8 * MANIFEST_LIMIT);
-    let home_units = home_units.into_iter().collect::<BTreeSet<_>>();
-    assert!(
-        !home_units.is_empty()
-            && home_units.len() <= 128
-            && home_units.iter().all(|u| !u.is_empty()),
-        "home unit bound"
-    );
-    let source_sha = Sha256::digest(bounded_bytes(&source, 32 * MANIFEST_LIMIT)).into();
-    let interface_bytes = bounded_bytes(&interface, 16 * MANIFEST_LIMIT);
-    let interface_sha = Sha256::digest(&interface_bytes).into();
-    let descriptor = |path: &str, bytes: &[u8]| CapturedArtifactDescriptor {
-        relative_path: path.into(),
-        sha256: Sha256::digest(bytes).into(),
-        bytes: bytes.len() as u64,
-    };
-    let receipt = FinalizedModuleReceipt {
-        unit: unit.into(),
-        module: module.into(),
-        source_sha256: source_sha,
-        interface: CapturedArtifactDescriptor {
-            relative_path: "module.hi".into(),
-            sha256: interface_sha,
-            bytes: interface_bytes.len() as u64,
-        },
-        package_imports: descriptor("captured.packages", &packages),
-        core: Some(descriptor("captured.core", &core)),
-        interface_requirements: BTreeMap::new(),
-    };
-    let certificate = crate::certified_products::fixture_canonical_certificate(
-        [0xaa; 32],
-        &FinalizationEnvelope {
-            profile: crate::certified_products::FINALIZATION_PROFILE.into(),
-            home_units,
-            modules: BTreeMap::new(),
-        },
-        &receipt,
-    )
-    .expect("canonical owner encoder");
-    let core_path = root.join("captured.core");
-    let package_path = root.join("captured.packages");
-    let certificate_path = root.join("captured.certificate");
-    let product = root.join("descriptor.tpmod");
-    for (path, bytes) in [
-        (&core_path, core.as_slice()),
-        (&package_path, packages.as_slice()),
-        (&certificate_path, certificate.as_slice()),
-        (&product, [].as_slice()),
-    ] {
-        tidepool_atomic_write::write_best_effort(path, bytes).unwrap();
-    }
-    let row = candidate_manifest_row(CandidateManifestRow {
-        unit,
-        module,
-        source: &source,
-        source_sha256: &hex(&source_sha),
-        interface: &interface,
-        interface_sha256: &hex(&interface_sha),
-        module_version: &"0".repeat(64),
-        product_sha256: &sha(&[]),
-        evidence_sha256: &"0".repeat(64),
-        imports: vec![],
-        groups: Value::Array(vec![]),
-        packages: &package_path,
-        packages_sha256: &sha(&packages),
-        product: &product,
-        canonical_requirements: &BTreeMap::new(),
-        certificate: &certificate_path,
-        certificate_sha256: &Sha256::digest(&certificate).into(),
-        core: &core_path,
-        core_sha256: &Sha256::digest(&core).into(),
-    });
-    let mut bytes = vec![];
-    ciborium::ser::into_writer(
-        &candidate_manifest_value(
-            Value::Array(vec![]),
-            Value::Array(vec![]),
-            vec![row],
-            vec![],
-            vec![],
-            &"a".repeat(64),
-        ),
-        &mut bytes,
-    )
-    .unwrap();
-    tidepool_atomic_write::write_best_effort(&root.join("module-candidates.cbor"), &bytes).unwrap();
 }
 
 fn purpose(root: &Path, case: PurposeCase, includes: &[PathBuf], signature: Option<NativeBytes>) {

@@ -9280,20 +9280,3 @@ pub(crate) mod tests {
         }
     }
 }
-
-/// Encode structural canonical certificate data without issuing an interface capability.
-#[cfg(test)]
-pub(crate) fn fixture_canonical_certificate(
-    producer: [u8; 32],
-    envelope: &FinalizationEnvelope,
-    module: &FinalizedModuleReceipt,
-) -> CertResult<Vec<u8>> {
-    finalized_module::canonical_certificate(
-        producer,
-        envelope,
-        module,
-        &CanonicalOrigin::SourceOriginal {
-            imports: Arc::from([]),
-        },
-    )
-}

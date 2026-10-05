@@ -3,7 +3,7 @@
 -- module never writes durable certificates or candidate/scope descriptors.
 module Tidepool.Test.GenuineCandidate
   ( CapturedCompilerFixture, FixtureCompilerInput(..)
-  , captureCompilerFixture, capturedPreparedNames
+  , captureCompilerFixture, capturedPreparedNames, capturedCertifiedProducts
   , writeGenuineCandidateManifestFor, writeGenuineMetadataScope
   , writeGenuineEmptyMetadataScope, writeGenuineCandidateNativeScope
   , writeGenuineCandidateLexicalScope
@@ -29,7 +29,8 @@ import Tidepool.ExactHydration (newOriginalInterfaceArtifacts)
 import Tidepool.ExecutionProjection (projectOriginalHomeModuleProducts)
 import Tidepool.GhcPipeline (PreparedPipelineResult(..), PipelineResult(..))
 import Tidepool.CompilerProducts
-  ( prepareCompilerProjectionContext, retainedOriginalInterfaces, writeCertifiedProductsKeeping )
+  ( CertifiedOriginalProducts, prepareCompilerProjectionContext, retainedOriginalInterfaces
+  , writeCertifiedProductsKeeping )
 import Tidepool.PreparedStg (PreparedModule(..))
 import Tidepool.Session (Generation(..), SessionModule(..), SessionModuleKind(..))
 
@@ -41,11 +42,14 @@ data FixtureCompilerInput = FixtureCompilerInput
   , fixtureIncludeRoots :: [FilePath]
   }
 
+-- The emission result and all its paths belong to this immutable capture's
+-- work root. Deliveries retain it and allocate independent request directories.
 data CapturedCompilerFixture = CapturedCompilerFixture
   { capturedInput :: FixtureCompilerInput
   , capturedPacket :: FilePath
   , capturedProducer :: String
   , capturedModuleNames :: [String]
+  , capturedCertifiedProducts :: CertifiedOriginalProducts
   }
 
 data FixtureSelection = FixtureSelection
@@ -68,9 +72,10 @@ captureCompilerFixture input prepared = do
   producer <- requiredProducer
   packet <- newPacketDirectory (fixtureWorkRoot input) "compiler-original"
   BS.readFile (fixtureSourcePath input) >>= BS.writeFile (packet </> "original-source.hs")
-  capturePacket (fixtureIncludeRoots input) packet prepared
+  products <- capturePacket (fixtureIncludeRoots input) packet prepared
   pure CapturedCompilerFixture
     { capturedInput = input, capturedPacket = packet, capturedProducer = producer
+    , capturedCertifiedProducts = products
     , capturedModuleNames = map (moduleNameString . moduleName . pmModule) (pprModules prepared) }
 
 capturedPreparedNames :: CapturedCompilerFixture -> [String]
@@ -167,7 +172,7 @@ writePacket delivery input selection = do
 
 -- Select the actual checked root; projection policy and all emission belong to
 -- the same internal compiler owner used by the production worker.
-capturePacket :: [FilePath] -> FilePath -> PreparedPipelineResult -> IO ()
+capturePacket :: [FilePath] -> FilePath -> PreparedPipelineResult -> IO CertifiedOriginalProducts
 capturePacket includes packet prepared = do
   let result = pprPipelineResult prepared
       environment = prHscEnv result
@@ -177,4 +182,4 @@ capturePacket includes packet prepared = do
         (pprProductInterfaces prepared) context (pprModules prepared)
   originals <- newOriginalInterfaceArtifacts environment (pprFinalizedModules prepared)
     (retainedOriginalInterfaces prepared) packet
-  void (writeCertifiedProductsKeeping includes originals packet prepared (Just products) [])
+  writeCertifiedProductsKeeping includes originals packet prepared (Just products) []

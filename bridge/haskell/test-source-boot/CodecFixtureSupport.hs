@@ -2,7 +2,6 @@
 -- This adapter has no compiler capture or execution-admission operation.
 module CodecFixtureSupport
   ( CandidateCodecCase(..), writeCandidateCodecFixture
-  , CanonicalCodecInputs(..), writeCanonicalCodecFixture
   , PurposeCodecCase(..), readPurposeCodecFixture, readRequestTypesCodecFixture, readExpressionItemCodecFixture
   , ReceiptCodecFacts(..), readReceiptCodecFacts
   , CodecImportOwner(..), CertificateCodecFacts(..), readCertificateCodecFacts
@@ -26,25 +25,6 @@ import System.FilePath ((</>))
 import System.IO (IOMode(ReadMode), withBinaryFile)
 import Tidepool.ExecutionSchema (SymbolIdentity(..))
 import Tidepool.CheckedCell (RequestHelperRecipe(..))
-
-data CanonicalCodecInputs = CanonicalCodecInputs
-  { codecCanonicalUnit :: String
-  , codecCanonicalModule :: String
-  , codecCanonicalSource :: FilePath
-  , codecCanonicalInterface :: FilePath
-  , codecCanonicalPackages :: FilePath
-  , codecCanonicalCore :: FilePath
-  , codecCanonicalHomeUnits :: [String]
-  }
-
-writeCanonicalCodecFixture :: FilePath -> CanonicalCodecInputs -> IO FilePath
-writeCanonicalCodecFixture work inputs = do
-  packet <- codecRequest work "canonical_module"
-    [ text (codecCanonicalUnit inputs), text (codecCanonicalModule inputs)
-    , text (codecCanonicalSource inputs), text (codecCanonicalInterface inputs)
-    , text (codecCanonicalPackages inputs), text (codecCanonicalCore inputs)
-    , TList (map text (codecCanonicalHomeUnits inputs)) ]
-  pure (packet </> "module-candidates.cbor")
 
 data PurposeCodecCase
   = CodecCellPurpose

@@ -309,26 +309,30 @@ executed named cases, internal assertions and end-to-end acceptance separate
 in reports. Preserve existing broad integration/corpus requirements; do not
 turn every local repair into a full-cohort rerun.
 
-Complete the already approved removal of duplicated positive wire builders:
+The duplicated positive inventory and receipt builders have been removed.
+`candidateCompactInventory`/`structuralCandidate` consume the production Rust
+inventory and manifest codecs; `FixtureInventory`/`compactInventoryRows` are
+absent. Purpose payloads use their owning encoders. `exactCompilationCacheSafety`
+consumes typed facts from the complete production receipt reader. Preserve
+these codec-only bounds/collision controls and deliberate malformed or historical
+rejection bytes; they do not issue compiler authority.
 
-- Replace `candidateCompactInventory`/`structuralCandidate` manual packets and
-  `FixtureInventory`/`compactInventoryRows` with codec-only scenarios emitted
-  by the existing Rust inventory/manifest owner. Keep the Haskell reader under
-  test and preserve bounds/collision controls.
-- Replace `FinalizedCoreTest.captureProof` positive certificate/candidate
-  encodings and numeric-position positive purpose payloads with owning
-  encoders. Any claim about authenticated admission uses genuine certification
-  and protected reservations, not synthetic codec data.
-- Remove `exactCompilationCacheSafety`'s partial CBOR/JSON parser and semantic
-  certificate/compile-input field walkers. The existing production readers
-  provide the facts; raw layout inspection remains only for codec tests.
-- Retain deliberate malformed and historical-version rejection cases. Their
-  invalid bytes are the subject of the test, never a positive fixture format.
+The remaining finalized-Core authority gap is repaired in source:
+`FinalizedCoreTest` compiles one original through the production pipeline,
+retains its `CertifiedOriginalProducts` in the opaque genuine capture, and
+uses Rust certification plus production exact-scope reading for independent
+request deliveries. Local admission comes from that same original emission.
+The synthetic `canonical_module` operation, `CanonicalCodecInputs`, and sole
+`fixture_canonical_certificate` factory are deleted. Raw Core codec refusals
+remain separate from authenticated cold hydration, direct bytecode and GHC make
+execution.
 
-These deletions remain full-migration obligations. If a first-delivery gate
-relies on synthetic authority or a partial validator, repair that gate before
-using it as acceptance evidence. No additional general audit or performance
-campaign blocks the first qualified server.
+Finalized-Core acceptance remains unqualified until its named native case runs
+against the matched compiler/frontend. This fixture gate does not block the
+separate genuine frozen M2 path. Any first-delivery claim that depends on
+synthetic authority or a partial validator must be repaired before acceptance;
+no additional general audit or performance campaign blocks the first qualified
+server.
 
 ## First delivery gate
 

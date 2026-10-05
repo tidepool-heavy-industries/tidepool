@@ -11,18 +11,16 @@ import Data.Dynamic (fromDynamic)
 import Data.IORef (newIORef, modifyIORef', readIORef)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
-import CodecFixtureSupport (CanonicalCodecInputs(..), writeCanonicalCodecFixture)
 import GHC
 import GHC.Core (Bind(..), bindersOfBinds)
 import GHC.Core.InstEnv (is_dfun)
 import GHC.Core.TyCo.Compare (eqType)
 import GHC.Core.TyCon (tyConName)
-import GHC.Core.Opt.Pipeline (core2core)
 import GHC.Cmm.CLabel (mkInitializerStubLabel)
 import GHC.Data.FastString (fsLit)
 import GHC.Types.ForeignStubs (ForeignStubs(..), CHeader(..), CStub(..))
 import GHC.Utils.Outputable qualified as Outputable
-import GHC.Driver.Main (hscTidy, loadIfaceByteCode)
+import GHC.Driver.Main (loadIfaceByteCode)
 import GHC.Driver.Make (load')
 import GHC.Driver.Pipeline.Execute (runPhase)
 import GHC.Driver.Pipeline.Phases (TPhase(..), PhaseHook(..))
@@ -30,25 +28,22 @@ import GHC.Driver.Hooks (runPhaseHook)
 import GHC.ByteCode.Types (CompiledByteCode(..))
 import GHC.Data.FlatBag (elemsFlatBag)
 import GHC.Linker.Types (linkableModule, linkableParts, linkablePartAllBCOs)
-import GHC.Driver.Session (targetProfile, updOptLevel)
 import GHC.Fingerprint.Type (Fingerprint(..))
-import GHC.Iface.Binary (CompressionIFace(..), TraceBinIFace(..), writeBinIface)
-import GHC.Iface.Make (mkIfaceTc)
 import GHC.Types.Name (getOccString)
 import GHC.Types.SptEntry (SptEntry(..))
 import GHC.Types.TypeEnv (lookupTypeEnv)
 import GHC.Types.Var (varName)
-import GHC.Unit.Home.ModInfo (HomeModInfo(..), HomeModLinkable(..), emptyHomeModInfoLinkable, justBytecode, addToHpt, lookupHpt)
+import GHC.Unit.Home.ModInfo (HomeModInfo(..), HomeModLinkable(..), justBytecode, addToHpt, lookupHpt)
 import GHC.Unit.Module.ModDetails (md_types)
 import GHC.Unit.Module.ModGuts (CgGuts(..))
 import GHC.Unit.Module.ModIface
-  ( ModIfaceBackend(..), mi_iface_hash, set_mi_extra_decls
+  ( ModIfaceBackend(..), mi_iface_hash
   , set_mi_usages, set_mi_final_exts, set_mi_module )
 import GHC.Unit.Module.Deps (Usage(..))
-import GHC.Unit.Module.Graph (ModuleGraphNode(..))
-import GHC.Unit.Types (unitString, unitIdString, toUnitId, stringToUnit, GenWithIsBoot(..))
+import GHC.Unit.Module.Graph (ModuleGraphNode(..), mgModSummaries')
+import GHC.Unit.Types (unitString, toUnitId, stringToUnit, GenWithIsBoot(..))
 import GHC.Unit.Finder (addHomeModuleToFinder)
-import GHC.Driver.Env (HscEnv(..), hsc_HPT, hscUpdateHPT, hsc_dflags, hsc_all_home_unit_ids, hsc_home_unit)
+import GHC.Driver.Env (HscEnv(..), hsc_HPT, hscUpdateHPT, hsc_dflags, hsc_home_unit)
 import GHC.Types.Error (mkUnknownDiagnostic)
 import GHC.ForeignSrcLang (ForeignSrcLang(..))
 import Numeric (showHex)
@@ -58,20 +53,22 @@ import System.Directory
 import System.FilePath ((</>))
 import System.IO (hClose, openTempFile)
 import Tidepool.ExactHydration
-  ( ExactIfaceArtifact(..), readExactIfaceArtifacts, hydrateExactScope
-  , newOriginalInterfaceArtifacts )
+  ( ExactIfaceArtifact(..), readExactIfaceArtifacts, hydrateExactScope )
 import Tidepool.ExtractUtil (getLibdir)
 import Tidepool.FinalizedCore
 import Tidepool.FinalizedModule (FinalizedModule(..))
 import Tidepool.ExactScope
   ( CanonicalInterfaceProof, CanonicalInterfaceAdmission(..), admittedInterfaceCore
-  , validateCandidateCanonicalInterfaceProof )
-import Tidepool.FinalizedModuleArtifacts
-  ( LocalFinalizedAdmission, captureFinalizedModuleArtifacts, finalizedLocalAdmissions )
-import Tidepool.DependencyEvidence
-  ( DependencyEvidence(..), DependencyModule(..), ProductAvailability(..), sourceEvidence )
-import Tidepool.ModuleCandidates (ModuleCandidate(..), readModuleCandidates)
-import Tidepool.PackageWitness (emptyPackageImports, encodePackageImports)
+  , ExactScope(..), readExactScope, scopeModuleInterfaceProofs
+  , canonicalCertificateSha256 )
+import Tidepool.FinalizedModuleArtifacts (finalizedLocalAdmissions)
+import Tidepool.CompilerProducts (certifiedFinalizedArtifacts)
+import Tidepool.GhcPipeline
+  ( PreparedPipelineResult(..), PipelineResult(..), PipelineSelection(..)
+  , CompilePurpose(..), runPipelineSessionSelected )
+import Tidepool.Test.GenuineCandidate
+  ( FixtureCompilerInput(..), captureCompilerFixture, capturedCertifiedProducts
+  , writeGenuineMetadataScope )
 import Tidepool.HomeProducts
   ( CandidateCoreFailure(..), materializeCandidateCompilerView
   , admittedCompilerInterface, validateAdmittedInterfaceRequirements
@@ -84,69 +81,85 @@ import Tidepool.PreparedStg (PreparedModule(..), prepareModule, unelaboratedModu
 finalizedCoreChecks :: IO ()
 finalizedCoreChecks = bracket scratch removeDirectoryRecursive $ \work -> do
   let source = work </> "FinalizedCoreFixture.hs"
-      interfacePath = work </> "captured-skinny.hi"
   copyFile "test-source-boot/fixtures/FinalizedCoreFixture.hs" source
   libdir <- getLibdir
-  (artifact, bytes, summary, proof, localProof, groups, tyconNames, instanceNames, packages) <- runGhc (Just libdir) $ do
-    configure work
-    target <- guessTarget source Nothing Nothing
-    setTargets [target]
-    _ <- depanal [] False
-    summary <- getModSummary (mkModuleName "FinalizedCoreFixture")
-    parsed <- parseModule summary
-    typed <- typecheckModule parsed
-    desugared <- desugarModule typed
-    env <- getSession
-    simplified <- liftIO (core2core env (dm_core_module desugared))
-    (guts, details) <- liftIO (hscTidy env simplified)
-    let (tcg, _) = tm_internals_ typed
-    interface <- liftIO (mkIfaceTc env Sf_None details summary (Just (cg_binds guts)) tcg)
-    let home = HomeModInfo (set_mi_extra_decls Nothing interface) details emptyHomeModInfoLinkable
-        finalized = FinalizedModule home guts
-    liftIO $ do
-      bytes <- requireRight =<< captureFinalizedCore env finalized work
-      let emptyStubs = ForeignStubs (CHeader Outputable.empty) (CStub Outputable.empty [] [])
-          initializer = mkInitializerStubLabel (cg_module guts) (fsLit "canonical_test_init")
-          nonemptyStubs =
-            [ForeignStubs (CHeader (Outputable.text "extern void canonical_test(void);")) (CStub Outputable.empty [] [])
-            ,ForeignStubs (CHeader Outputable.empty) (CStub (Outputable.text "void canonical_test(void) {}") [] [])
-            ,ForeignStubs (CHeader Outputable.empty) (CStub Outputable.empty [initializer] [])
-            ,ForeignStubs (CHeader Outputable.empty) (CStub Outputable.empty [] [initializer])]
-      emptyCapture <- requireRight =<< captureFinalizedCore env
-        finalized {finalizedTidyGuts = guts {cg_foreign = emptyStubs}} work
-      assert (emptyCapture == bytes) "semantically empty GHC foreign stubs changed canonical Core"
-      forM_ nonemptyStubs $ \stubs -> do
-        refusal <- captureFinalizedCore env
-          finalized {finalizedTidyGuts = guts {cg_foreign = stubs}} work
-        assert (case refusal of Left (FinalizedCoreUnsupported ForeignExportStubs) -> True; _ -> False)
-          "nonempty foreign header/body/initializer/finalizer was discarded"
-      forM_ (take 1 (bindersOfBinds (cg_binds guts))) $ \binder -> do
-        refusal <- captureFinalizedCore env
-          finalized { finalizedTidyGuts = guts
-            { cg_spt_entries = [SptEntry binder (Fingerprint 1 2)] } } work
-        assert (case refusal of Left (FinalizedCoreUnsupported StaticPointerEntries) -> True; _ -> False)
-          "static-pointer metadata was discarded instead of explicitly refused"
-      refusal <- captureFinalizedCore env
-        finalized { finalizedTidyGuts = guts
-          { cg_foreign_files = [(LangC, work </> "unavailable.c")] } } work
-      assert (case refusal of Left (FinalizedCoreUnsupported ForeignSourceFiles) -> True; _ -> False)
-        "foreign source metadata was discarded instead of explicitly refused"
-      writeBinIface (targetProfile (hsc_dflags env)) QuietBinIFace NormalCompression
-        interfacePath (hm_iface home)
-      interfaceBytes <- BS.readFile interfacePath
-      let owner = cg_module guts
-          artifact = ExactIfaceArtifact (unitString (moduleUnit owner))
-            "FinalizedCoreFixture" interfacePath (hexBytes (SHA256.hash interfaceBytes)) []
-      proof <- captureProof env artifact source bytes work
-      localProof <- captureLocalProof env finalized source work
-      pure (artifact, bytes, summary {ms_hspp_buf = Nothing}, proof, localProof, bindingGroups guts,
-        map (getOccString . tyConName) (cg_tycons guts),
-        map (getOccString . is_dfun) (finalizedCoreSiteInstances finalized), cg_dep_pkgs guts)
+  prepared <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
+    Nothing source [work] Nothing
+  let env = prHscEnv (pprPipelineResult prepared)
+      name = mkModuleName "FinalizedCoreFixture"
+  finalized <- maybe (fail "compiler omitted its completed original finalization") pure
+    (Map.lookup name (pprFinalizedModules prepared))
+  summary <- case [item {ms_hspp_buf = Nothing}
+      | ModuleNode _ item <- mgModSummaries' (hsc_mod_graph env), ms_mod_name item == name] of
+    [item] -> pure item
+    _ -> fail "compiler omitted its original module summary"
+  capture <- captureCompilerFixture (FixtureCompilerInput work source [work]) prepared
+  scopePath <- writeGenuineMetadataScope work ["FinalizedCoreFixture"] capture
+  scope <- requireRight =<< readExactScope scopePath
+  let guts = finalizedTidyGuts finalized
+      owner = cg_module guts
+      key = (unitString (moduleUnit owner), moduleNameString name)
+      groups = bindingGroups guts
+      tyconNames = map (getOccString . tyConName) (cg_tycons guts)
+      instanceNames = map (getOccString . is_dfun) (finalizedCoreSiteInstances finalized)
+      packages = cg_dep_pkgs guts
+  proof <- maybe (fail "Rust admission omitted its canonical original proof") pure
+    (Map.lookup key (scopeModuleInterfaceProofs scope))
+  artifact <- case [item | (item,_,_) <- scopeInterfaces scope
+      , (exactUnit item,exactModule item) == key] of
+    [item] -> pure item
+    _ -> fail "Rust admission omitted its exact original interface"
+  localProof <- maybe (fail "completed capture omitted its local original admission") pure
+    (Map.lookup key (finalizedLocalAdmissions
+      (certifiedFinalizedArtifacts (capturedCertifiedProducts capture))))
+  (corePath,coreSha) <- maybe (fail "Rust admission omitted its sealed original Core") pure
+    (admittedInterfaceCore (ModuleInterfaceAdmission proof))
+  bytes <- BS.readFile corePath
+  assert (hexBytes (SHA256.hash bytes) == coreSha) "issued Core seal changed before consumption"
+  rawBytes <- requireRight =<< captureFinalizedCore env finalized work
+  assert (bytes == rawBytes) "certification did not retain the original finalized Core bytes"
+  let emptyStubs = ForeignStubs (CHeader Outputable.empty) (CStub Outputable.empty [] [])
+      initializer = mkInitializerStubLabel (cg_module guts) (fsLit "canonical_test_init")
+      nonemptyStubs =
+        [ForeignStubs (CHeader (Outputable.text "extern void canonical_test(void);")) (CStub Outputable.empty [] [])
+        ,ForeignStubs (CHeader Outputable.empty) (CStub (Outputable.text "void canonical_test(void) {}") [] [])
+        ,ForeignStubs (CHeader Outputable.empty) (CStub Outputable.empty [initializer] [])
+        ,ForeignStubs (CHeader Outputable.empty) (CStub Outputable.empty [] [initializer])]
+  emptyCapture <- requireRight =<< captureFinalizedCore env
+    finalized {finalizedTidyGuts = guts {cg_foreign = emptyStubs}} work
+  assert (emptyCapture == bytes) "semantically empty GHC foreign stubs changed canonical Core"
+  forM_ nonemptyStubs $ \stubs -> do
+    refusal <- captureFinalizedCore env
+      finalized {finalizedTidyGuts = guts {cg_foreign = stubs}} work
+    assert (case refusal of Left (FinalizedCoreUnsupported ForeignExportStubs) -> True; _ -> False)
+      "nonempty foreign header/body/initializer/finalizer was discarded"
+  forM_ (take 1 (bindersOfBinds (cg_binds guts))) $ \binder -> do
+    refusal <- captureFinalizedCore env
+      finalized { finalizedTidyGuts = guts
+        { cg_spt_entries = [SptEntry binder (Fingerprint 1 2)] } } work
+    assert (case refusal of Left (FinalizedCoreUnsupported StaticPointerEntries) -> True; _ -> False)
+      "static-pointer metadata was discarded instead of explicitly refused"
+  refusal <- captureFinalizedCore env
+    finalized { finalizedTidyGuts = guts
+      { cg_foreign_files = [(LangC, work </> "unavailable.c")] } } work
+  assert (case refusal of Left (FinalizedCoreUnsupported ForeignSourceFiles) -> True; _ -> False)
+    "foreign source metadata was discarded instead of explicitly refused"
+  -- A second request receives the same immutable capture without compiling it.
+  -- The make view and direct hydration then own independent scope deliveries.
+  makeScopePath <- writeGenuineMetadataScope work ["FinalizedCoreFixture"] capture
+  assert (makeScopePath /= scopePath) "repeated consumption reused a mutable request scope"
+  makeScope <- requireRight =<< readExactScope makeScopePath
+  makeProof <- maybe (fail "second Rust admission omitted its original proof") pure
+    (Map.lookup key (scopeModuleInterfaceProofs makeScope))
+  assert (canonicalCertificateSha256 makeProof == canonicalCertificateSha256 proof)
+    "independent delivery changed the original canonical identity"
   removeFile source
   exists <- doesFileExist source
   assert (not exists) "source-free roundtrip kept its source"
   runGhc (Just libdir) $ do
-    configure work
+    _ <- setSessionDynFlags (ms_hspp_opts summary)
+      { backend = noBackend, ghcLink = NoLink, importPaths = [work]
+      , hiDir = Just work, objectDir = Just work }
     empty <- getSession
     interfaces <- liftIO (requireRight =<< readExactIfaceArtifacts empty [artifact])
     env <- liftIO (hydrateExactScope empty interfaces)
@@ -230,15 +243,9 @@ finalizedCoreChecks = bracket scratch removeDirectoryRecursive $ \work -> do
       assert (case malformed of Left FinalizedCoreDecodeFailure{} -> True; _ -> False)
         "truncated canonical companion did not fail closed"
   directBytecodeChecks libdir work artifact summary (LocalInterfaceAdmission localProof)
-  makeViewChecks libdir work artifact bytes summary proof
+  makeViewChecks libdir work artifact bytes summary makeProof
   putStrLn "finalized Core: executed one case; source-free STG, direct bytecode and GHC make execution with zero module frontends; staged type-only/Core views, durable interface, native requirements, Core seal and unsupported metadata checked"
   where
-    configure work = do
-      flags <- getSessionDynFlags
-      _ <- setSessionDynFlags (updOptLevel 2 flags)
-        { backend = noBackend, ghcLink = NoLink, importPaths = [work]
-        , hiDir = Just work, objectDir = Just work }
-      pure ()
     scratch = do
       root <- getTemporaryDirectory
       (path, handle) <- openTempFile root "tidepool-finalized-core"
@@ -299,7 +306,7 @@ directBytecodeChecks libdir work artifact summary proof = runGhc (Just libdir) $
     assert (not present) "direct bytecode restored original source"
 
 -- This qualifies GHC's make handoff using a genuine finalized pair and the
--- fixture's structural certificate, independently of Rust certificate issuance.
+-- Rust-issued canonical proof from the same immutable compiler capture.
 makeViewChecks :: FilePath -> FilePath -> ExactIfaceArtifact -> BS.ByteString
   -> ModSummary -> CanonicalInterfaceProof -> IO ()
 makeViewChecks libdir work artifact bytes summary proof = runGhc (Just libdir) $ do
@@ -319,7 +326,7 @@ makeViewChecks libdir work artifact bytes summary proof = runGhc (Just libdir) $
   liftIO $ do
     issuedCore <- BS.readFile corePath
     assert (issuedCore == bytes && hexBytes (SHA256.hash issuedCore) == coreSha)
-      "canonical codec proof did not retain its original compiler Core"
+      "canonical proof did not retain its original compiler Core"
     createDirectory typeDirectory
     createDirectory executableDirectory
     removeFile corePath
@@ -392,51 +399,6 @@ makeViewChecks libdir work artifact bytes summary proof = runGhc (Just libdir) $
       liftIO $ assert (count == 0) "staged make view invoked a module frontend"
       setSession env {hsc_hooks = hsc_hooks admitted}
       pure (home,frontends)
-
--- Local authority comes from the same completed GHC finalization capture.
--- This isolates Core attachment with a structural package/source fixture;
--- complete import receipt issuance belongs to the genuine pipeline tests.
-captureLocalProof :: HscEnv -> FinalizedModule -> FilePath -> FilePath
-  -> IO LocalFinalizedAdmission
-captureLocalProof env finalized source work = do
-  sourceProof <- sourceEvidence source
-  let owner = mi_module (hm_iface (finalizedHomeModInfo finalized))
-      name = moduleName owner
-      key = (unitString (moduleUnit owner),moduleNameString name)
-      originals = Map.singleton name finalized
-      evidence = DependencyEvidence True True [sourceProof] [] []
-        [DependencyModule (fst key) (snd key) False source [] ProductReady]
-  interfaces <- newOriginalInterfaceArtifacts env originals [] work
-  captured <- captureFinalizedModuleArtifacts interfaces env originals
-    (Map.singleton name emptyPackageImports) evidence work
-  maybe (fail "completed finalization did not issue its local admission") pure
-    (Map.lookup key (finalizedLocalAdmissions captured))
-
--- The structural certificate exercises the matched decoder/validator with
--- compiler-produced interface/Core bytes; it does not prove Rust issuance.
-captureProof :: HscEnv -> ExactIfaceArtifact -> FilePath -> BS.ByteString -> FilePath
-  -> IO CanonicalInterfaceProof
-captureProof env artifact source core work = do
-  let coreInput = work </> "canonical-core-input"
-      packageInput = work </> "canonical-packages-input"
-      packages = encodePackageImports artifact emptyPackageImports
-  BS.writeFile coreInput core
-  BS.writeFile packageInput packages
-  manifestPath <- writeCanonicalCodecFixture work CanonicalCodecInputs
-    { codecCanonicalUnit = exactUnit artifact
-    , codecCanonicalModule = exactModule artifact
-    , codecCanonicalSource = source
-    , codecCanonicalInterface = exactPath artifact
-    , codecCanonicalPackages = packageInput
-    , codecCanonicalCore = coreInput
-    , codecCanonicalHomeUnits = map unitIdString (Set.toAscList (hsc_all_home_unit_ids env))
-    }
-  offered <- requireRight =<< readModuleCandidates manifestPath
-  case offered of
-    [candidate] -> requireRight =<< validateCandidateCanonicalInterfaceProof
-      (candidateProducerSha256 candidate)
-      [(artifact,candidatePackageImports candidate,candidatePackageImportsSha256 candidate)] candidate
-    _ -> fail "candidate Core codec fixture has no exact offered owner"
 
 bindingGroups :: CgGuts -> [(Bool, [String])]
 bindingGroups = map group . cg_binds
