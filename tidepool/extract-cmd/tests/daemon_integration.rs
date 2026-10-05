@@ -1367,6 +1367,35 @@ fn owned_compiler_case_preserves_isolation_and_confirms_cleanup() {
         serde_json::from_slice(&fs::read(compiler.join("owned-compiler-outcome.json")).unwrap())
             .unwrap();
     assert_eq!(outcome["cleanup"]["status"], "confirmed");
+    let failed_compiler = root.join("failed-compiler");
+    let failed = Command::new(&bin)
+        .arg("--owned-daemon-run")
+        .arg(&failed_compiler)
+        .arg("--")
+        .arg(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "owned_compiler_case_child",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env("TIDEPOOL_OWNED_COMPILER_CONTROL_ROOT", &root)
+        .env("TIDEPOOL_OWNED_COMPILER_CONTROL_FAIL", "1")
+        .env_remove(tidepool_extract_cmd::DAEMON_SOCKET_ENV)
+        .env_remove(tidepool_extract_cmd::REQUIRED_DAEMON_ENDPOINT_ENV)
+        .env_remove("TIDEPOOL_EXTRACT_NO_DAEMON")
+        .output()
+        .unwrap();
+    assert_eq!(failed.status.code(), Some(101));
+    let failed_outcome: serde_json::Value = serde_json::from_slice(
+        &fs::read(failed_compiler.join("owned-compiler-outcome.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(failed_outcome["cleanup"]["status"], "confirmed");
+    assert!(
+        failed_compiler.join("cache").exists(),
+        "failed child diagnostics must be retained"
+    );
     let refused = Command::new(&bin)
         .args([
             OsString::from("--owned-daemon-run"),
@@ -1394,6 +1423,19 @@ fn owned_compiler_case_child() {
     let root = PathBuf::from(
         std::env::var_os("TIDEPOOL_OWNED_COMPILER_CONTROL_ROOT").expect("owned control parent"),
     );
+    assert!(
+        std::env::var_os("TIDEPOOL_OWNED_COMPILER_CONTROL_FAIL").is_none(),
+        "intentional owned compiler child failure"
+    );
+    if std::env::var_os("TIDEPOOL_OWNED_COMPILER_CONTROL_WAIT").is_some() {
+        fs::write(
+            root.join("owned-child-ready"),
+            std::process::id().to_string(),
+        )
+        .unwrap();
+        std::thread::sleep(Duration::from_secs(600));
+        panic!("outer timeout control did not stop the owned child");
+    }
     let bin = compiler_inputs::require_compiler_executables();
     let lib = stdlib_lib_dir();
     let cache = root.join("compiler/cache");
@@ -1418,8 +1460,8 @@ fn owned_compiler_case_child() {
         expected.to_hex()
     );
     let source = root.join("OwnedControl.hs");
-    let first = "module OwnedControl where\nimport Tidepool.Prelude\nresult :: Int\nresult = 41\n";
-    let second = "module OwnedControl where\nimport Tidepool.Prelude\ndata PrivateB = PrivateB deriving Show\nresult :: Int\nresult = 42\n";
+    let first = "module OwnedControl where\nimport Tidepool.Prelude\ndata InstanceProbe = InstanceProbe\nresult :: Int\nresult = 41\n";
+    let second = "module OwnedControl where\nimport Tidepool.Prelude\ndata InstanceProbe = InstanceProbe deriving Show\ndata PrivateB = PrivateB deriving Show\nresult :: Int\nresult = 42\n";
     let mut original = None;
     for (index, text) in [first, first, second, first].into_iter().enumerate() {
         fs::write(&source, text).unwrap();
@@ -1476,6 +1518,22 @@ fn owned_compiler_case_child() {
     assert!(
         !result.success(),
         "a previous request's private declaration leaked"
+    );
+    fs::write(&source, "module OwnedControl where\nimport Tidepool.Prelude\ndata InstanceProbe = InstanceProbe\nresult :: String\nresult = show InstanceProbe\n").unwrap();
+    let mut denied_instance = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved(&bin));
+    denied_instance
+        .input(&source)
+        .output_dir(root.join("denied-instance"))
+        .target("result")
+        .include(&lib);
+    assert!(
+        !denied_instance
+            .bind()
+            .unwrap()
+            .execute(&denied_instance)
+            .unwrap()
+            .success(),
+        "a previous request's Show instance leaked"
     );
     let stopped = Command::new(&bin)
         .args(["--stop-daemon", "--socket"])
