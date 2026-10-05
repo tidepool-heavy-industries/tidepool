@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use crate::error::WorktreeError;
 use crate::id::WorktreeId;
 use crate::storage::{storage_failure, DurableJsonDir};
+use tidepool_atomic_write::DirectoryAnchor;
 
 const OWNER_LOCK_FILE: &str = ".owner.lock";
 
@@ -339,24 +340,28 @@ impl BindingTable {
             .map(|entry| entry.binding.worktree())
     }
 
-    /// Open (creating if absent) a binding table rooted at `root`, loading
-    /// every persisted binding into memory.
+    /// Establish a binding table below the caller's stable storage boundary,
+    /// loading every persisted binding into memory.
     ///
     /// SINGLE-OWNER: refuses (typed, loud) when another live `BindingTable` —
-    /// in this process or any other — already owns `root`. Isolation is
+    /// in this process or any other — already owns the binding directory. Isolation is
     /// enforced from in-memory state, so one owning table per root is a
     /// correctness precondition, not a deployment nicety.
-    pub fn open(root: impl AsRef<Path>) -> Result<Self, WorktreeError> {
-        Self::open_with_timeout(root, std::time::Duration::ZERO)
+    pub fn open(
+        anchor: &DirectoryAnchor,
+        relative: impl AsRef<Path>,
+    ) -> Result<Self, WorktreeError> {
+        Self::open_with_timeout(anchor, relative, std::time::Duration::ZERO)
     }
 
     /// Wait for the existing owner to release its lock, without replacing it.
     pub fn open_with_timeout(
-        root: impl AsRef<Path>,
+        anchor: &DirectoryAnchor,
+        relative: impl AsRef<Path>,
         timeout: std::time::Duration,
     ) -> Result<Self, WorktreeError> {
-        let root = root.as_ref().to_path_buf();
-        let dir = DurableJsonDir::open(&root)?;
+        let dir = DurableJsonDir::open(anchor, relative)?;
+        let root = dir.dir();
 
         let lock_path = root.join(OWNER_LOCK_FILE);
         let owner_lock = fs::OpenOptions::new()
@@ -559,16 +564,17 @@ mod tests {
     #[test]
     fn a_retained_row_from_another_run_is_not_custody_for_the_same_actor() {
         let dir = tempfile::tempdir().unwrap();
+        let dir_anchor = DirectoryAnchor::open_existing(dir.path()).unwrap();
         let tree = WorktreeId::from_raw("wt-retained");
         let previous_run = AgentRef::exact_actor("run-a", 2, 1);
 
-        let mut table = BindingTable::open(dir.path()).unwrap();
+        let mut table = BindingTable::open(&dir_anchor, "").unwrap();
         // Bound, then dropped WITHOUT settling: the degraded-cleanup shape.
         let _retained = table.bind(&tree, &previous_run, 1).unwrap();
         drop(_retained);
         drop(table);
 
-        let table = BindingTable::open(dir.path()).unwrap();
+        let table = BindingTable::open(&dir_anchor, "").unwrap();
         assert_eq!(
             table.active_for_agent(&previous_run),
             Some(&tree),
@@ -589,15 +595,16 @@ mod tests {
     #[test]
     fn recovery_transfers_loaded_custody_and_can_reclaim_its_published_row() {
         let dir = tempfile::tempdir().unwrap();
+        let dir_anchor = DirectoryAnchor::open_existing(dir.path()).unwrap();
         let tree = WorktreeId::from_raw("wt-recovery");
         let predecessor = AgentRef::exact_actor("run", 2, 1);
         let successor = AgentRef::exact_actor("run", 2, 2);
 
-        let mut table = BindingTable::open(dir.path()).unwrap();
+        let mut table = BindingTable::open(&dir_anchor, "").unwrap();
         drop(table.bind(&tree, &predecessor, 1).unwrap());
         drop(table);
 
-        let mut table = BindingTable::open(dir.path()).unwrap();
+        let mut table = BindingTable::open(&dir_anchor, "").unwrap();
         let recovered = table
             .recover_active(&tree, &predecessor, &successor, 2)
             .unwrap();
@@ -605,7 +612,7 @@ mod tests {
         drop(recovered);
         drop(table);
 
-        let mut table = BindingTable::open(dir.path()).unwrap();
+        let mut table = BindingTable::open(&dir_anchor, "").unwrap();
         let reclaimed = table
             .recover_active(&tree, &predecessor, &successor, 3)
             .unwrap();
@@ -616,15 +623,16 @@ mod tests {
     #[test]
     fn recovery_rejects_a_different_durable_holder() {
         let dir = tempfile::tempdir().unwrap();
+        let dir_anchor = DirectoryAnchor::open_existing(dir.path()).unwrap();
         let tree = WorktreeId::from_raw("wt-busy");
         let holder = AgentRef::exact_actor("run", 3, 1);
         let predecessor = AgentRef::exact_actor("run", 2, 1);
         let successor = AgentRef::exact_actor("run", 2, 2);
-        let mut table = BindingTable::open(dir.path()).unwrap();
+        let mut table = BindingTable::open(&dir_anchor, "").unwrap();
         drop(table.bind(&tree, &holder, 1).unwrap());
         drop(table);
 
-        let mut table = BindingTable::open(dir.path()).unwrap();
+        let mut table = BindingTable::open(&dir_anchor, "").unwrap();
         assert!(matches!(
             table.recover_active(&tree, &predecessor, &successor, 2),
             Err(WorktreeError::WorktreeBusy { holder: actual, .. }) if actual == holder.to_string()

@@ -27,6 +27,7 @@ use crate::error::WorktreeError;
 use crate::git::{inspect, GitCli};
 use crate::id::{BranchName, GitOid, GitRef, WorktreeId};
 use crate::storage::{storage_failure, DurableJsonDir};
+use tidepool_atomic_write::DirectoryAnchor;
 
 /// Directory under the registry root holding one JSON file per worktree id.
 const RECORDS_DIR: &str = "records";
@@ -226,26 +227,24 @@ pub struct WorktreeRegistry {
 }
 
 impl WorktreeRegistry {
-    /// Open (creating if absent) a registry rooted at `root`.
-    ///
-    /// The caller chooses the root, and tests point it at a temp dir. There is
-    /// no implicit global default here on purpose: a hardcoded `$HOME` path
-    /// would make every test either share state or need an env override.
-    ///
-    /// Refuses a root that resolves inside ANY git working tree with
-    /// [`WorktreeError::InvalidRegistryRoot`]. `open` takes only `root`, not a
-    /// specific source repository, so the check cannot be "is this the tree we
-    /// were told not to dirty" — it is necessarily the broader "is this inside
-    /// a working tree at all", which is a strictly safer reading of the
-    /// never-dirty-the-source invariant.
-    pub fn open(root: impl AsRef<Path>) -> Result<Self, WorktreeError> {
-        let root = root.as_ref().to_path_buf();
+    /// Establish a registry below the caller's stable project-storage boundary.
+    /// Refuse roots inside any Git working tree before creating directories.
+    pub fn open(
+        anchor: &DirectoryAnchor,
+        relative: impl AsRef<Path>,
+    ) -> Result<Self, WorktreeError> {
+        let relative = relative.as_ref();
+        let root = anchor
+            .resolve(relative)
+            .map_err(|e| storage_failure(&e.path, e.source))?;
         let git = GitCli::new();
-        let canonical_root = validate_external_root(&git, &root)?;
-        fs::create_dir_all(&canonical_root).map_err(|e| storage_failure(&canonical_root, e))?;
-
-        let records = DurableJsonDir::open(canonical_root.join(RECORDS_DIR))?;
-        let retained = DurableJsonDir::open(canonical_root.join(RETAINED_DIR))?;
+        validate_external_root(&git, &root)?;
+        let registry_anchor = anchor
+            .child(relative)
+            .map_err(|e| storage_failure(&e.path, e.source))?;
+        let canonical_root = registry_anchor.path().to_path_buf();
+        let records = DurableJsonDir::open(&registry_anchor, RECORDS_DIR)?;
+        let retained = DurableJsonDir::open(&registry_anchor, RETAINED_DIR)?;
 
         let registry = Self {
             root: canonical_root,

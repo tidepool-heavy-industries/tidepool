@@ -9,6 +9,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use tidepool_atomic_write::DirectoryAnchor;
 
 use exomonad_worktree::snapshot::snapshot_source;
 use exomonad_worktree::testing::{fingerprint, TestRepo};
@@ -527,7 +528,8 @@ fn manager_level_dirty_create_captures_through_a_nonexistent_index_dir() {
     std::fs::write(repo.path().join("tracked.txt"), "dirtied\n").expect("dirty the tree");
 
     let base = tempfile::TempDir::new().expect("tempdir");
-    let registry = WorktreeRegistry::open(base.path().join("registry")).expect("open registry");
+    let base_anchor = DirectoryAnchor::open_existing(base.path()).unwrap();
+    let registry = WorktreeRegistry::open(&base_anchor, "registry").expect("open registry");
     let manager = WorktreeManager::new(
         GitCli::new(),
         registry,
@@ -604,7 +606,8 @@ fn ref_source_ignores_dirty_policy_and_never_snapshots() {
 
     let run_with_policy = |policy: DirtyPolicy, label: &str| {
         let base = tempfile::TempDir::new().expect("tempdir");
-        let registry = WorktreeRegistry::open(base.path().join("registry")).expect("open registry");
+        let base_anchor = DirectoryAnchor::open_existing(base.path()).unwrap();
+        let registry = WorktreeRegistry::open(&base_anchor, "registry").expect("open registry");
         let manager = WorktreeManager::new(
             GitCli::new(),
             registry,

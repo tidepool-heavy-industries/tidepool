@@ -32,6 +32,7 @@ use crate::id::EventId;
 use crate::journal_version::{self, MIGRATIONS};
 use crate::monitor::RepositoryEvent;
 use crate::storage::{now_ms, storage_failure};
+use tidepool_atomic_write::DirectoryAnchor;
 
 /// A journalled row. `cursor` is the position AFTER this row — a subscription
 /// registering now stores the current end and only ever reads forward.
@@ -91,14 +92,26 @@ fn ladder_err_to_worktree_err(e: version_ladder::LadderError, path: &Path) -> Wo
 }
 
 impl EventJournal {
-    pub fn open(path: impl AsRef<Path>) -> Result<Self, WorktreeError> {
-        let path = path.as_ref().to_path_buf();
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                tidepool_atomic_write::create_dir_all_durable(parent)
-                    .map_err(|e| storage_failure(&e.path, e.source))?;
-            }
+    /// Open a journal below an established storage boundary, confirming its
+    /// parent hierarchy before admitting the exclusive writer.
+    pub fn open(
+        anchor: &DirectoryAnchor,
+        relative: impl AsRef<Path>,
+    ) -> Result<Self, WorktreeError> {
+        let relative = relative.as_ref();
+        let path = anchor
+            .resolve(relative)
+            .map_err(|e| storage_failure(&e.path, e.source))?;
+        if relative.file_name().is_none() {
+            return Err(storage_failure(
+                relative,
+                "journal path requires a filename",
+            ));
         }
+        let parent = relative.parent().unwrap_or_else(|| Path::new(""));
+        anchor
+            .create_dir_all(parent)
+            .map_err(|e| storage_failure(&e.path, e.source))?;
         let lock_path = path.with_extension("owner.lock");
         let owner_lock = OpenOptions::new()
             .create(true)
@@ -312,6 +325,19 @@ mod version_tests {
     use crate::id::{GitOid, WorktreeId};
     use crate::monitor::{HeadChangeKind, HeadChangeReceipt};
 
+    #[test]
+    fn missing_filename_cannot_create_an_owner_lock_outside_the_anchor() {
+        let dir = tempfile::tempdir().unwrap();
+        let anchor = DirectoryAnchor::open_existing(dir.path()).unwrap();
+        let lock = anchor.path().with_extension("owner.lock");
+        assert!(!lock.exists());
+        for relative in ["", "."] {
+            assert!(EventJournal::open(&anchor, relative).is_err());
+        }
+        assert!(!lock.exists());
+        assert_eq!(std::fs::read_dir(anchor.path()).unwrap().count(), 0);
+    }
+
     fn sample_event() -> RepositoryEvent {
         RepositoryEvent::HeadChanged(HeadChangeReceipt {
             worktree: WorktreeId::from_raw("wt-version-test"),
@@ -328,12 +354,13 @@ mod version_tests {
     #[test]
     fn fresh_journal_gets_exactly_one_header_line() {
         let dir = tempfile::tempdir().unwrap();
+        let dir_anchor = DirectoryAnchor::open_existing(dir.path()).unwrap();
         let path = dir.path().join("events.jsonl");
 
-        let mut journal = EventJournal::open(&path).unwrap();
+        let mut journal = EventJournal::open(&dir_anchor, "events.jsonl").unwrap();
         journal.append(&[sample_event()], EventId(1)).unwrap();
         drop(journal);
-        let mut journal = EventJournal::open(&path).unwrap();
+        let mut journal = EventJournal::open(&dir_anchor, "events.jsonl").unwrap();
         journal.append(&[sample_event()], EventId(2)).unwrap();
         drop(journal);
 
@@ -353,10 +380,12 @@ mod version_tests {
     #[test]
     fn empty_file_is_reinitialized_with_a_complete_current_header() {
         let dir = tempfile::tempdir().unwrap();
+        let dir_anchor = DirectoryAnchor::open_existing(dir.path()).unwrap();
         let path = dir.path().join("events.jsonl");
         std::fs::File::create(&path).unwrap();
 
-        let journal = EventJournal::open(&path).expect("empty initialization remnant recovers");
+        let journal = EventJournal::open(&dir_anchor, "events.jsonl")
+            .expect("empty initialization remnant recovers");
         assert_eq!(journal.end_cursor(), 0);
         drop(journal);
 
@@ -364,7 +393,7 @@ mod version_tests {
             std::fs::read_to_string(&path).unwrap(),
             format!("{{\"version\":{}}}\n", journal_version::CURRENT)
         );
-        EventJournal::open(&path).expect("reinitialized journal reopens");
+        EventJournal::open(&dir_anchor, "events.jsonl").expect("reinitialized journal reopens");
     }
 
     /// An unstamped event-per-row journal cannot be truthfully reconstructed
@@ -372,10 +401,12 @@ mod version_tests {
     #[test]
     fn unstamped_legacy_journal_is_below_the_v2_floor() {
         let dir = tempfile::tempdir().unwrap();
+        let dir_anchor = DirectoryAnchor::open_existing(dir.path()).unwrap();
         let path = dir.path().join("events.jsonl");
         std::fs::write(&path, "{\"cursor\":1,\"event_id\":1}\n").unwrap();
 
-        let err = EventJournal::open(&path).expect_err("legacy journal must be rejected");
+        let err = EventJournal::open(&dir_anchor, "events.jsonl")
+            .expect_err("legacy journal must be rejected");
         assert!(matches!(
             err,
             WorktreeError::JournalBelowFloor {
@@ -390,10 +421,12 @@ mod version_tests {
     #[test]
     fn future_version_header_is_a_typed_rejection() {
         let dir = tempfile::tempdir().unwrap();
+        let dir_anchor = DirectoryAnchor::open_existing(dir.path()).unwrap();
         let path = dir.path().join("events.jsonl");
         std::fs::write(&path, "{\"version\":9999}\n").unwrap();
 
-        let err = EventJournal::open(&path).expect_err("a future version must be refused");
+        let err = EventJournal::open(&dir_anchor, "events.jsonl")
+            .expect_err("a future version must be refused");
         assert!(
             matches!(err, WorktreeError::JournalFutureVersion { found: 9999, .. }),
             "expected JournalFutureVersion, got {err:?}"

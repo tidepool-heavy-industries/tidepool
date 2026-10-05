@@ -12,6 +12,7 @@
 //! quietly returns one of those instead.
 
 use std::path::Path;
+use tidepool_atomic_write::DirectoryAnchor;
 
 use exomonad_worktree::testing::TestRepo;
 use exomonad_worktree::{
@@ -19,7 +20,8 @@ use exomonad_worktree::{
 };
 
 fn manager_over(repo: &TestRepo, base: &Path) -> WorktreeManager {
-    let registry = WorktreeRegistry::open(base.join("registry")).expect("open registry");
+    let base_anchor = DirectoryAnchor::open_existing(base).unwrap();
+    let registry = WorktreeRegistry::open(&base_anchor, "registry").expect("open registry");
     WorktreeManager::new(GitCli::new(), registry, base.join("worktrees"), repo.path())
 }
 
@@ -120,7 +122,8 @@ fn worktree_head_reflects_movement_the_monitor_never_reconciled() {
     // deliberately never called — the exact gap between one resident
     // loop iteration unregistering its handlers and the next re-registering them.
     let journal_dir = tempfile::TempDir::new().expect("journal tempdir");
-    let journal = EventJournal::open(journal_dir.path().join("events.jsonl")).expect("journal");
+    let journal_dir_anchor = DirectoryAnchor::open_existing(journal_dir.path()).unwrap();
+    let journal = EventJournal::open(&journal_dir_anchor, "events.jsonl").expect("journal");
     let mut monitor = exomonad_worktree::WorktreeMonitor::new(GitCli::new(), journal);
     monitor
         .register(handle.id().clone(), handle.cwd().to_path_buf())
@@ -139,7 +142,7 @@ fn worktree_head_reflects_movement_the_monitor_never_reconciled() {
 
     drop(monitor);
     let unread_journal =
-        EventJournal::open(journal_dir.path().join("events.jsonl")).expect("reopen journal");
+        EventJournal::open(&journal_dir_anchor, "events.jsonl").expect("reopen journal");
     assert!(
         unread_journal.since(0).is_empty(),
         "the monitor never reconciled, so nothing was journalled — worktree_head's answer \

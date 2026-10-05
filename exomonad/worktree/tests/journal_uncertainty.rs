@@ -3,6 +3,7 @@ use exomonad_worktree::{
     testing::TestRepo, EventId, EventJournal, GitCli, WorktreeId, WorktreeMonitor,
 };
 use std::{fs, path::Path, process::Command};
+use tidepool_atomic_write::DirectoryAnchor;
 
 #[test]
 fn journal_fault_child() {
@@ -10,9 +11,10 @@ fn journal_fault_child() {
         return;
     };
     let root = Path::new(&root);
+    let anchor = DirectoryAnchor::open_existing(root).unwrap();
     let path = root.join("new/deep/events.jsonl");
     let armed = root.join("armed");
-    let mut journal = EventJournal::open(&path).unwrap();
+    let mut journal = EventJournal::open(&anchor, "new/deep/events.jsonl").unwrap();
     journal.append(&[], EventId(1)).unwrap();
     fs::write(&armed, "armed").unwrap();
     assert!(journal.append(&[], EventId(2)).is_err());
@@ -37,17 +39,17 @@ fn journal_fault_child() {
         "poison refuses writes even after fault clears"
     );
     assert!(
-        EventJournal::open(&path).is_err(),
+        EventJournal::open(&anchor, "new/deep/events.jsonl").is_err(),
         "uncertain writer retains lock"
     );
     drop(journal);
     fs::write(&armed, "armed").unwrap();
     assert!(
-        EventJournal::open(&path).is_err(),
+        EventJournal::open(&anchor, "new/deep/events.jsonl").is_err(),
         "reopen must confirm persistence"
     );
     fs::remove_file(&armed).unwrap();
-    let mut recovered = EventJournal::open(&path).unwrap();
+    let mut recovered = EventJournal::open(&anchor, "new/deep/events.jsonl").unwrap();
     assert_eq!(recovered.end_cursor(), 2);
     assert_eq!(recovered.append(&[], EventId(3)).unwrap(), 3);
     assert_eq!(
@@ -66,11 +68,12 @@ fn monitor_fault_child() {
         return;
     };
     let root = Path::new(&root);
+    let anchor = DirectoryAnchor::open_existing(root).unwrap();
     let path = root.join("new/deep/events.jsonl");
     let repo = TestRepo::init().unwrap();
     repo.writer().commit_empty("initial").unwrap();
     let id = WorktreeId::from_raw("wt-uncertainty");
-    let journal = EventJournal::open(&path).unwrap();
+    let journal = EventJournal::open(&anchor, "new/deep/events.jsonl").unwrap();
     let mut monitor = WorktreeMonitor::new(GitCli::new(), journal);
     monitor
         .register(id.clone(), repo.path().to_path_buf())
@@ -88,7 +91,10 @@ fn monitor_fault_child() {
         .is_err());
     assert_eq!(fs::read(&path).unwrap(), uncertain);
     drop(monitor);
-    let mut monitor = WorktreeMonitor::new(GitCli::new(), EventJournal::open(&path).unwrap());
+    let mut monitor = WorktreeMonitor::new(
+        GitCli::new(),
+        EventJournal::open(&anchor, "new/deep/events.jsonl").unwrap(),
+    );
     monitor
         .register(id.clone(), repo.path().to_path_buf())
         .unwrap();
@@ -101,7 +107,7 @@ fn monitor_fault_child() {
     assert!(!events.is_empty());
     assert!(events.iter().all(|event| event.event_id == EventId(2)));
     drop(monitor);
-    let journal = EventJournal::open(&path).unwrap();
+    let journal = EventJournal::open(&anchor, "new/deep/events.jsonl").unwrap();
     assert_eq!(
         journal
             .since(0)
@@ -115,6 +121,7 @@ fn monitor_fault_child() {
 #[test]
 fn owning_paths_poison_and_reopen_without_reusing_sequences() {
     let temp = tempfile::tempdir().unwrap();
+    let storage_anchor = DirectoryAnchor::open_existing(temp.path()).unwrap();
     let library = temp.path().join("journal-fault.so");
     #[allow(
         clippy::disallowed_methods,
@@ -138,7 +145,9 @@ fn owning_paths_poison_and_reopen_without_reusing_sequences() {
             let root = temp
                 .path()
                 .join(format!("{child}-{kind}-{}", target.replace('/', "-")));
-            fs::create_dir(&root).unwrap();
+            storage_anchor
+                .child(format!("{child}-{kind}-{}", target.replace('/', "-")))
+                .unwrap();
             let log = root.join("hits");
             let qualified = format!("journal_uncertainty::{child}");
             #[allow(

@@ -7,6 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::error::WorktreeError;
 use crate::id::WorktreeId;
+use tidepool_atomic_write::DirectoryAnchor;
 
 /// Current time as Unix epoch milliseconds.
 ///
@@ -45,10 +46,13 @@ pub struct DurableJsonDir {
 }
 
 impl DurableJsonDir {
-    /// Open (creating if absent) a JSON-file directory rooted at `dir`.
-    pub fn open(dir: impl AsRef<Path>) -> Result<Self, WorktreeError> {
-        let dir = dir.as_ref().to_path_buf();
-        tidepool_atomic_write::create_dir_all_durable(&dir)
+    /// Establish a JSON-file directory below the caller's stable storage boundary.
+    pub fn open(
+        anchor: &DirectoryAnchor,
+        relative: impl AsRef<Path>,
+    ) -> Result<Self, WorktreeError> {
+        let dir = anchor
+            .create_dir_all(relative)
             .map_err(|e| storage_failure(&e.path, e.source))?;
         Ok(Self { dir })
     }

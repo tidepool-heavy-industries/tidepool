@@ -2,6 +2,7 @@
 
 use std::path::Path;
 use std::path::PathBuf;
+use tidepool_atomic_write::DirectoryAnchor;
 
 use exomonad_worktree::testing::TestRepo;
 use exomonad_worktree::{
@@ -10,7 +11,8 @@ use exomonad_worktree::{
 };
 
 fn manager_over(repo: &TestRepo, base: &Path) -> WorktreeManager {
-    let registry = WorktreeRegistry::open(base.join("registry")).expect("open registry");
+    let base_anchor = DirectoryAnchor::open_existing(base).unwrap();
+    let registry = WorktreeRegistry::open(&base_anchor, "registry").expect("open registry");
     WorktreeManager::new(GitCli::new(), registry, base.join("worktrees"), repo.path())
 }
 

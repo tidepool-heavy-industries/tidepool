@@ -3,6 +3,7 @@
 use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
+use tidepool_atomic_write::DirectoryAnchor;
 
 use exomonad_worktree::{
     BranchName, GitCli, GitOid, WorktreeId, WorktreeManager, WorktreeOrigin, WorktreeReceipt,
@@ -12,6 +13,7 @@ use exomonad_worktree::{
 #[test]
 fn mounted_descriptor_requires_exact_stable_rotation_before_recovery() {
     let storage = tempfile::tempdir().unwrap();
+    let storage_anchor = DirectoryAnchor::open_existing(storage.path()).unwrap();
     let root = storage.path();
     let base = root.join("worktrees/.resources/run/root/source/base");
     let old_upper = root.join("worktrees/.resources/run/child/source/upper");
@@ -20,7 +22,7 @@ fn mounted_descriptor_requires_exact_stable_rotation_before_recovery() {
         fs::create_dir_all(path).unwrap();
     }
     fs::write(old_upper.join("dirty"), "preserved").unwrap();
-    let registry = WorktreeRegistry::open(root.join("registry")).unwrap();
+    let registry = WorktreeRegistry::open(&storage_anchor, "registry").unwrap();
     let id = WorktreeId::from_raw("wt-live");
     let cwd = root.join("worktrees/wt-live");
     fs::create_dir_all(&cwd).unwrap();
@@ -61,7 +63,7 @@ fn mounted_descriptor_requires_exact_stable_rotation_before_recovery() {
     );
     // A restart sees the same ambiguous descriptor and cannot infer the
     // winner from directory presence.
-    let reopened = WorktreeRegistry::open(root.join("registry")).unwrap();
+    let reopened = WorktreeRegistry::open(&storage_anchor, "registry").unwrap();
     let manager = WorktreeManager::new(
         GitCli::new(),
         reopened.clone(),
@@ -102,12 +104,13 @@ fn allocated_bytes(root: &Path) -> u64 {
 #[test]
 fn interrupted_admission_keeps_provisional_descriptor_layers() {
     let storage = tempfile::tempdir().unwrap();
+    let storage_anchor = DirectoryAnchor::open_existing(storage.path()).unwrap();
     let root = storage.path();
     let base = root.join("worktrees/.resources/run/root/source/base");
     let upper = root.join("worktrees/.resources/run/child/source/upper");
     fs::create_dir_all(&base).unwrap();
     fs::create_dir_all(&upper).unwrap();
-    let registry = WorktreeRegistry::open(root.join("registry")).unwrap();
+    let registry = WorktreeRegistry::open(&storage_anchor, "registry").unwrap();
     let receipt = WorktreeReceipt {
         worktree_id: WorktreeId::from_raw("wt-admission"),
         cwd: root.join("worktrees/wt-admission"),
@@ -124,7 +127,7 @@ fn interrupted_admission_keeps_provisional_descriptor_layers() {
     registry
         .put_retained_manifest(&receipt, vec![base.clone(), upper.clone()])
         .unwrap();
-    let reopened = WorktreeRegistry::open(root.join("registry")).unwrap();
+    let reopened = WorktreeRegistry::open(&storage_anchor, "registry").unwrap();
     assert_eq!(
         reopened.source_layer_references().unwrap().unwrap(),
         [base, upper].into_iter().collect()
@@ -138,11 +141,12 @@ fn interrupted_admission_keeps_provisional_descriptor_layers() {
 #[test]
 fn many_tiny_retained_uppers_reference_one_large_base() {
     let storage = tempfile::tempdir().unwrap();
+    let storage_anchor = DirectoryAnchor::open_existing(storage.path()).unwrap();
     let root = storage.path();
     let base = root.join("worktrees/.resources/run/root/source/base");
     fs::create_dir_all(&base).unwrap();
     fs::write(base.join("large"), vec![b'x'; 1024 * 1024]).unwrap();
-    let registry = WorktreeRegistry::open(root.join("registry")).unwrap();
+    let registry = WorktreeRegistry::open(&storage_anchor, "registry").unwrap();
     let mut receipts = Vec::new();
     for number in 0..16 {
         let id = WorktreeId::from_raw(format!("wt-tiny-{number}"));
@@ -186,7 +190,7 @@ fn many_tiny_retained_uppers_reference_one_large_base() {
         registry.put(receipt).unwrap();
     }
     fs::remove_dir_all(&base).unwrap();
-    let reopened = WorktreeRegistry::open(root.join("registry")).unwrap();
+    let reopened = WorktreeRegistry::open(&storage_anchor, "registry").unwrap();
     assert!(reopened
         .source_layer_references()
         .unwrap()

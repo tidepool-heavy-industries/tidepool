@@ -16,6 +16,7 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use tidepool_atomic_write::DirectoryAnchor;
 
 use exomonad_worktree::testing::TestRepo;
 use exomonad_worktree::{
@@ -83,10 +84,12 @@ fn find_file_containing(root: &Path, needle: &str) -> PathBuf {
 #[test]
 fn registry_open_reports_typed_failure_when_a_file_blocks_the_root() {
     let base = tempfile::TempDir::new().expect("tempdir");
+    let base_anchor = DirectoryAnchor::open_existing(base.path()).unwrap();
     let blocker = base.path().join("registry-root");
     fs::write(&blocker, b"not a directory").expect("write blocking file");
 
-    let err = WorktreeRegistry::open(&blocker).expect_err("a file cannot become a directory");
+    let err = WorktreeRegistry::open(&base_anchor, "registry-root")
+        .expect_err("a file cannot become a directory");
     match err {
         WorktreeError::StorageFailure { path, detail } => {
             assert_eq!(path, blocker, "the failure must name the root itself");
@@ -99,8 +102,9 @@ fn registry_open_reports_typed_failure_when_a_file_blocks_the_root() {
 #[test]
 fn registry_put_reports_typed_failure_when_the_records_dir_is_read_only() {
     let base = tempfile::TempDir::new().expect("tempdir");
+    let base_anchor = DirectoryAnchor::open_existing(base.path()).unwrap();
     let root = base.path().join("registry");
-    let registry = WorktreeRegistry::open(&root).expect("open registry");
+    let registry = WorktreeRegistry::open(&base_anchor, "registry").expect("open registry");
     let records_dir = registry.root().join("records");
 
     make_read_only(&records_dir);
@@ -130,7 +134,8 @@ fn registry_put_reports_typed_failure_when_the_records_dir_is_read_only() {
 #[test]
 fn registry_get_reports_typed_failure_for_a_corrupt_record() {
     let base = tempfile::TempDir::new().expect("tempdir");
-    let registry = WorktreeRegistry::open(base.path().join("registry")).expect("open registry");
+    let base_anchor = DirectoryAnchor::open_existing(base.path()).unwrap();
+    let registry = WorktreeRegistry::open(&base_anchor, "registry").expect("open registry");
     let id = WorktreeId::from_raw("wt-corrupt-get");
     registry.put(&minimal_receipt(&id)).expect("put fixture");
 
@@ -155,7 +160,8 @@ fn registry_get_reports_typed_failure_for_a_corrupt_record() {
 #[test]
 fn registry_list_reports_typed_failure_for_a_corrupt_record() {
     let base = tempfile::TempDir::new().expect("tempdir");
-    let registry = WorktreeRegistry::open(base.path().join("registry")).expect("open registry");
+    let base_anchor = DirectoryAnchor::open_existing(base.path()).unwrap();
+    let registry = WorktreeRegistry::open(&base_anchor, "registry").expect("open registry");
     let id = WorktreeId::from_raw("wt-corrupt-list");
     registry.put(&minimal_receipt(&id)).expect("put fixture");
 
@@ -179,10 +185,12 @@ fn registry_list_reports_typed_failure_for_a_corrupt_record() {
 #[test]
 fn binding_open_reports_typed_failure_when_a_file_blocks_the_root() {
     let base = tempfile::TempDir::new().expect("tempdir");
+    let base_anchor = DirectoryAnchor::open_existing(base.path()).unwrap();
     let blocker = base.path().join("bindings-root");
     fs::write(&blocker, b"not a directory").expect("write blocking file");
 
-    let err = BindingTable::open(&blocker).expect_err("a file cannot become a directory");
+    let err = BindingTable::open(&base_anchor, "bindings-root")
+        .expect_err("a file cannot become a directory");
     match err {
         WorktreeError::StorageFailure { path, detail } => {
             assert_eq!(path, blocker);
@@ -195,8 +203,9 @@ fn binding_open_reports_typed_failure_when_a_file_blocks_the_root() {
 #[test]
 fn binding_bind_reports_typed_failure_when_the_root_is_read_only() {
     let base = tempfile::TempDir::new().expect("tempdir");
+    let base_anchor = DirectoryAnchor::open_existing(base.path()).unwrap();
     let root = base.path().join("bindings");
-    let mut table = BindingTable::open(&root).expect("open bindings");
+    let mut table = BindingTable::open(&base_anchor, "bindings").expect("open bindings");
 
     make_read_only(&root);
     let worktree = WorktreeId::from_raw("wt-bind-perm-test");
@@ -226,9 +235,10 @@ fn binding_bind_reports_typed_failure_when_the_root_is_read_only() {
 #[test]
 fn binding_open_reports_typed_failure_for_a_corrupt_record() {
     let base = tempfile::TempDir::new().expect("tempdir");
+    let base_anchor = DirectoryAnchor::open_existing(base.path()).unwrap();
     let root = base.path().join("bindings");
     {
-        let mut table = BindingTable::open(&root).expect("open bindings");
+        let mut table = BindingTable::open(&base_anchor, "bindings").expect("open bindings");
         table
             .bind(
                 &WorktreeId::from_raw("wt-bind-corrupt"),
@@ -241,7 +251,8 @@ fn binding_open_reports_typed_failure_for_a_corrupt_record() {
     let record_path = find_file_containing(&root, "wt-bind-corrupt");
     fs::write(&record_path, b"[ not valid json").expect("corrupt the record");
 
-    let err = BindingTable::open(&root).expect_err("a corrupt binding record must not deserialize");
+    let err = BindingTable::open(&base_anchor, "bindings")
+        .expect_err("a corrupt binding record must not deserialize");
     match err {
         WorktreeError::StorageFailure { path, detail } => {
             assert_eq!(path, record_path);
@@ -258,11 +269,12 @@ fn binding_open_reports_typed_failure_for_a_corrupt_record() {
 #[test]
 fn journal_open_reports_typed_failure_when_a_file_blocks_the_directory() {
     let base = tempfile::TempDir::new().expect("tempdir");
+    let base_anchor = DirectoryAnchor::open_existing(base.path()).unwrap();
     let blocker = base.path().join("journal-dir");
     fs::write(&blocker, b"not a directory").expect("write blocking file");
-    let journal_path = blocker.join("events.jsonl");
 
-    let err = EventJournal::open(&journal_path).expect_err("a file cannot become a directory");
+    let err = EventJournal::open(&base_anchor, "journal-dir/events.jsonl")
+        .expect_err("a file cannot become a directory");
     match err {
         WorktreeError::StorageFailure { path, detail } => {
             assert_eq!(
@@ -278,9 +290,11 @@ fn journal_open_reports_typed_failure_when_a_file_blocks_the_directory() {
 #[test]
 fn journal_append_reports_typed_failure_when_its_directory_is_gone() {
     let base = tempfile::TempDir::new().expect("tempdir");
+    let base_anchor = DirectoryAnchor::open_existing(base.path()).unwrap();
     let dir = base.path().join("journal-dir");
     let journal_path = dir.join("events.jsonl");
-    let mut journal = EventJournal::open(&journal_path).expect("open journal");
+    let mut journal =
+        EventJournal::open(&base_anchor, "journal-dir/events.jsonl").expect("open journal");
 
     // The directory disappearing out from under an open handle is a stand-in
     // for "the volume holding it went away" — a fault a resident with many
@@ -320,10 +334,11 @@ fn create_reports_typed_failure_when_a_file_blocks_the_worktree_root() {
         .expect("commit");
 
     let base = tempfile::TempDir::new().expect("tempdir");
+    let base_anchor = DirectoryAnchor::open_existing(base.path()).unwrap();
     let worktree_root = base.path().join("worktrees");
     fs::write(&worktree_root, b"not a directory").expect("write blocking file");
 
-    let registry = WorktreeRegistry::open(base.path().join("registry")).expect("open registry");
+    let registry = WorktreeRegistry::open(&base_anchor, "registry").expect("open registry");
     let manager = WorktreeManager::new(GitCli::new(), registry, worktree_root.clone(), repo.path());
 
     let err = manager
@@ -350,6 +365,7 @@ fn create_rejects_nested_and_symlink_worktree_roots_before_mkdir() {
         .commit_file("a.txt", "one", "first")
         .expect("commit");
     let base = tempfile::TempDir::new().expect("tempdir");
+    let base_anchor = DirectoryAnchor::open_existing(base.path()).unwrap();
     let nested = repo.path().join("absent/deep/worktrees");
     let nested_target = repo.path().join("alias-target");
     fs::create_dir(&nested_target).expect("nested target");
@@ -362,7 +378,7 @@ fn create_rejects_nested_and_symlink_worktree_roots_before_mkdir() {
     repo.git()
         .try_run(repo.path(), &["commit", "-m", "seed nested root fixture"])
         .expect("commit symlink fixture");
-    let registry = WorktreeRegistry::open(base.path().join("registry")).expect("registry");
+    let registry = WorktreeRegistry::open(&base_anchor, "registry").expect("registry");
     let git = GitCli::new();
     let before = git
         .try_run(repo.path(), &["status", "--porcelain"])
@@ -400,9 +416,10 @@ fn create_rejects_nested_and_symlink_worktree_roots_before_mkdir() {
 #[test]
 fn journal_malformed_middle_row_fails_loudly_rather_than_being_skipped() {
     let base = tempfile::TempDir::new().expect("tempdir");
+    let base_anchor = DirectoryAnchor::open_existing(base.path()).unwrap();
     let path = base.path().join("events.jsonl");
 
-    let mut journal = EventJournal::open(&path).expect("open");
+    let mut journal = EventJournal::open(&base_anchor, "events.jsonl").expect("open");
     let ev = RepositoryEvent::HeadChanged(HeadChangeReceipt {
         worktree: WorktreeId::from_raw("wt-mid"),
         old_head: None,
@@ -429,7 +446,7 @@ fn journal_malformed_middle_row_fails_loudly_rather_than_being_skipped() {
     lines[1] = "{ this is not valid json".to_string();
     fs::write(&path, format!("{}\n", lines.join("\n"))).expect("write corrupted journal");
 
-    match EventJournal::open(&path) {
+    match EventJournal::open(&base_anchor, "events.jsonl") {
         Err(WorktreeError::StorageFailure { path: p, detail }) => {
             assert_eq!(p, path, "the failure names the journal file");
             // `journal.rs` itself (not the underlying jsonl reader's incidental
@@ -461,9 +478,10 @@ fn journal_malformed_middle_row_fails_loudly_rather_than_being_skipped() {
 #[test]
 fn journal_torn_final_row_is_still_tolerated_after_the_middle_row_fix() {
     let base = tempfile::TempDir::new().expect("tempdir");
+    let base_anchor = DirectoryAnchor::open_existing(base.path()).unwrap();
     let path = base.path().join("events.jsonl");
 
-    let mut journal = EventJournal::open(&path).expect("open");
+    let mut journal = EventJournal::open(&base_anchor, "events.jsonl").expect("open");
     let ev = RepositoryEvent::HeadChanged(HeadChangeReceipt {
         worktree: WorktreeId::from_raw("wt-tail"),
         old_head: None,
@@ -478,7 +496,8 @@ fn journal_torn_final_row_is_still_tolerated_after_the_middle_row_fix() {
     let text = fs::read_to_string(&path).expect("read journal");
     fs::write(&path, format!("{text}{{ torn")).expect("append torn final row");
 
-    let reopened = EventJournal::open(&path).expect("a torn FINAL row stays recoverable");
+    let reopened = EventJournal::open(&base_anchor, "events.jsonl")
+        .expect("a torn FINAL row stays recoverable");
     assert_eq!(
         reopened.since(0).len(),
         1,
@@ -490,8 +509,9 @@ fn journal_torn_final_row_is_still_tolerated_after_the_middle_row_fix() {
 #[test]
 fn binding_failed_bind_persist_requires_reopen() {
     let base = tempfile::TempDir::new().expect("tempdir");
+    let base_anchor = DirectoryAnchor::open_existing(base.path()).unwrap();
     let root = base.path().join("bindings");
-    let mut table = BindingTable::open(&root).expect("open bindings");
+    let mut table = BindingTable::open(&base_anchor, "bindings").expect("open bindings");
 
     make_read_only(&root);
     let worktree = WorktreeId::from_raw("wt-uncertain");
@@ -506,7 +526,8 @@ fn binding_failed_bind_persist_requires_reopen() {
             assert!(table.bind(&worktree, &agent, 2000).is_err());
             drop(table);
             // Chmod stopped publication before rename; authoritative disk has no row.
-            let mut table = BindingTable::open(&root).expect("reopen after fault clears");
+            let mut table =
+                BindingTable::open(&base_anchor, "bindings").expect("reopen after fault clears");
             table
                 .bind(&worktree, &agent, 2000)
                 .expect("fresh bind after reconciliation");
@@ -525,8 +546,9 @@ fn binding_failed_bind_persist_requires_reopen() {
 #[test]
 fn binding_failed_settle_persist_requires_reopen() {
     let base = tempfile::TempDir::new().expect("tempdir");
+    let base_anchor = DirectoryAnchor::open_existing(base.path()).unwrap();
     let root = base.path().join("bindings");
-    let mut table = BindingTable::open(&root).expect("open bindings");
+    let mut table = BindingTable::open(&base_anchor, "bindings").expect("open bindings");
 
     let worktree = WorktreeId::from_raw("wt-settle-uncertain");
     let agent = AgentRef::from_raw("agent-a");
@@ -542,7 +564,8 @@ fn binding_failed_settle_persist_requires_reopen() {
             assert!(table.active_for_agent(&agent).is_none());
             assert!(table.bind(&worktree, &agent, 2000).is_err());
             drop(table);
-            let mut table = BindingTable::open(&root).expect("reopen retained disk state");
+            let mut table =
+                BindingTable::open(&base_anchor, "bindings").expect("reopen retained disk state");
             assert_eq!(
                 table.current(&worktree).expect("retained Active").agent(),
                 &agent

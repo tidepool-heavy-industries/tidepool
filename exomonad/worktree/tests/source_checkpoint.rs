@@ -1,5 +1,6 @@
 use std::ffi::OsString;
 use std::fs;
+use tidepool_atomic_write::DirectoryAnchor;
 
 use exomonad_worktree::testing::TestRepo;
 use exomonad_worktree::{
@@ -334,9 +335,10 @@ fn failed_workspace_initialization_retains_a_provisional_checkout() {
     let source_index = git.try_run(repo.path(), &["ls-files", "--stage"]).unwrap();
 
     let storage = tempfile::tempdir().expect("storage directory");
+    let storage_anchor = DirectoryAnchor::open_existing(storage.path()).unwrap();
     let manager = WorktreeManager::new(
         GitCli::new(),
-        WorktreeRegistry::open(storage.path().join("registry")).expect("registry"),
+        WorktreeRegistry::open(&storage_anchor, "registry").expect("registry"),
         storage.path().join("worktrees"),
         repo.path(),
     );

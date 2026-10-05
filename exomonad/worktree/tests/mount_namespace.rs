@@ -2,6 +2,7 @@
 
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
+use tidepool_atomic_write::DirectoryAnchor;
 
 use exomonad_node::MountNamespace;
 use exomonad_worktree::git::inspect;
@@ -31,10 +32,11 @@ fn completed_checkout_uses_its_launch_view_and_requires_reattachment_on_reopen()
         .commit_file("file", "before\n", "seed")
         .unwrap();
     let storage = tempfile::tempdir().unwrap();
+    let storage_anchor = DirectoryAnchor::open_existing(storage.path()).unwrap();
     let root = storage.path();
     let manager = WorktreeManager::new(
         repository.git().clone(),
-        WorktreeRegistry::open(root.join("registry")).unwrap(),
+        WorktreeRegistry::open(&storage_anchor, "registry").unwrap(),
         root.join("managed"),
         repository.path(),
     );
@@ -104,7 +106,7 @@ fn completed_checkout_uses_its_launch_view_and_requires_reattachment_on_reopen()
     assert!(observed.working_state.changes.unstaged.is_empty());
     let reopened = WorktreeManager::new(
         repository.git().clone(),
-        WorktreeRegistry::open(root.join("registry")).unwrap(),
+        WorktreeRegistry::open(&storage_anchor, "registry").unwrap(),
         root.join("managed"),
         repository.path(),
     );
@@ -174,7 +176,7 @@ fn completed_checkout_uses_its_launch_view_and_requires_reattachment_on_reopen()
     );
     let after_restart = WorktreeManager::new(
         repository.git().clone(),
-        WorktreeRegistry::open(root.join("registry")).unwrap(),
+        WorktreeRegistry::open(&storage_anchor, "registry").unwrap(),
         root.join("managed"),
         repository.path(),
     );
@@ -210,6 +212,7 @@ fn host_git_observes_and_commits_the_actual_mounted_worktree() {
         .try_run(repository.path(), &["rev-parse", "HEAD"])
         .unwrap();
     let storage = tempfile::tempdir().unwrap();
+    let storage_anchor = DirectoryAnchor::open_existing(storage.path()).unwrap();
     for name in ["base", "upper", "work"] {
         std::fs::create_dir(storage.path().join(name)).unwrap();
     }
@@ -234,7 +237,7 @@ fn host_git_observes_and_commits_the_actual_mounted_worktree() {
     std::fs::copy(view.join(".git"), upper.join(".git")).unwrap();
     let git_dir = inspect::git_dir(git, &view).unwrap();
     std::fs::remove_file(view.join(".git")).unwrap();
-    let registry = WorktreeRegistry::open(storage.path().join("registry")).unwrap();
+    let registry = WorktreeRegistry::open(&storage_anchor, "registry").unwrap();
     let id = WorktreeId::from_raw("mounted-child");
     registry
         .put(&WorktreeReceipt {
@@ -445,9 +448,10 @@ fn activation_replaces_only_the_expected_preparation_view() {
         .commit_file("file", "seed", "seed")
         .unwrap();
     let storage = tempfile::tempdir().unwrap();
+    let storage_anchor = DirectoryAnchor::open_existing(storage.path()).unwrap();
     let manager = WorktreeManager::new(
         repository.git().clone(),
-        WorktreeRegistry::open(storage.path().join("registry")).unwrap(),
+        WorktreeRegistry::open(&storage_anchor, "registry").unwrap(),
         storage.path().join("managed"),
         repository.path(),
     );

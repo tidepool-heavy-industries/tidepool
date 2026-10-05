@@ -1,6 +1,7 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tidepool_atomic_write::DirectoryAnchor;
 
 use parking_lot::{Mutex, RwLock};
 
@@ -50,11 +51,12 @@ impl WorktreeHandler {
         Self { manager }
     }
 
-    /// `registry_root` and `worktree_root` must live OUTSIDE `source_repository`
+    /// The registry and `worktree_root` must live OUTSIDE `source_repository`
     /// — see `exomonad/worktree/CLAUDE.md`'s "never dirty the source" rule.
     /// Fallible because opening the durable registry is (`WorktreeRegistry::open`).
     pub fn new(
-        registry_root: PathBuf,
+        storage: &DirectoryAnchor,
+        registry_relative: impl AsRef<Path>,
         worktree_root: PathBuf,
         source_repository: PathBuf,
     ) -> Result<Self, DomainWorktreeError> {
@@ -70,7 +72,7 @@ impl WorktreeHandler {
                 detail: "worktree_root must be valid UTF-8".to_string(),
             });
         }
-        let registry = WorktreeRegistry::open(&registry_root)?;
+        let registry = WorktreeRegistry::open(storage, registry_relative)?;
         Ok(Self {
             manager: WorktreeManager::new(
                 GitCli::new(),
@@ -1229,7 +1231,8 @@ mod tests {
     #[test]
     fn actor_worktree_authority_is_exact_to_resource_and_incarnation() {
         let storage = tempfile::tempdir().unwrap();
-        let bindings = Arc::new(Mutex::new(BindingTable::open(storage.path()).unwrap()));
+        let storage_anchor = DirectoryAnchor::open_existing(storage.path()).unwrap();
+        let bindings = Arc::new(Mutex::new(BindingTable::open(&storage_anchor, "").unwrap()));
         let authority = ActorWorktreeAuthority::new("run-1", Arc::clone(&bindings));
         let root = tidepool_repr::PrincipalId::new(1, 1);
         let worker = tidepool_repr::PrincipalId::new(2, 3);
@@ -1265,7 +1268,8 @@ mod tests {
             .commit_file("README.md", "seed\n", "seed")
             .unwrap();
         let storage = tempfile::tempdir().unwrap();
-        let registry = WorktreeRegistry::open(storage.path().join("registry")).unwrap();
+        let storage_anchor = DirectoryAnchor::open_existing(storage.path()).unwrap();
+        let registry = WorktreeRegistry::open(&storage_anchor, "registry").unwrap();
         let manager = WorktreeManager::new(
             GitCli::new(),
             registry,
@@ -1273,7 +1277,7 @@ mod tests {
             repository.path(),
         );
         let bindings = Arc::new(Mutex::new(
-            BindingTable::open(storage.path().join("bindings")).unwrap(),
+            BindingTable::open(&storage_anchor, "bindings").unwrap(),
         ));
         let authority = ActorWorktreeAuthority::new("run-1", Arc::clone(&bindings));
         let root = tidepool_repr::PrincipalId::new(1, 1);
@@ -1570,7 +1574,8 @@ mod tests {
             .commit_file("README.md", "seed\n", "seed")
             .unwrap();
         let storage = tempfile::tempdir().unwrap();
-        let registry = WorktreeRegistry::open(storage.path().join("registry")).unwrap();
+        let storage_anchor = DirectoryAnchor::open_existing(storage.path()).unwrap();
+        let registry = WorktreeRegistry::open(&storage_anchor, "registry").unwrap();
         let manager = WorktreeManager::new(
             GitCli::new(),
             registry,
@@ -1620,12 +1625,14 @@ mod tests {
 
         let registry_dir = tempfile::tempdir().unwrap();
         let source_dir = tempfile::tempdir().unwrap();
+        let storage = DirectoryAnchor::open_existing(registry_dir.path()).unwrap();
         // `0x80` alone is not a valid UTF-8 lead byte.
         let bad_name = OsString::from_vec(vec![b'w', b't', 0x80]);
         let bad_root = registry_dir.path().join(PathBuf::from(bad_name));
 
         match WorktreeHandler::new(
-            registry_dir.path().to_path_buf(),
+            &storage,
+            "registry",
             bad_root,
             source_dir.path().to_path_buf(),
         ) {

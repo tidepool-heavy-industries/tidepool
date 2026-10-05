@@ -12,6 +12,7 @@
 //! worktree too.
 
 use std::path::PathBuf;
+use tidepool_atomic_write::DirectoryAnchor;
 
 use exomonad_worktree::testing::TestRepo;
 use exomonad_worktree::{
@@ -22,8 +23,9 @@ use exomonad_worktree::{
 /// A fresh journal path inside its own temp dir, and a monitor over it.
 fn open_monitor() -> (WorktreeMonitor, PathBuf, tempfile::TempDir) {
     let journal_dir = tempfile::TempDir::new().expect("create journal temp dir");
+    let journal_dir_anchor = DirectoryAnchor::open_existing(journal_dir.path()).unwrap();
     let journal_path = journal_dir.path().join("events.jsonl");
-    let journal = EventJournal::open(&journal_path).expect("open journal");
+    let journal = EventJournal::open(&journal_dir_anchor, "events.jsonl").expect("open journal");
     (
         WorktreeMonitor::new(GitCli::new(), journal),
         journal_path,
@@ -87,6 +89,7 @@ fn commit_yields_commit_and_head_changed_sharing_one_event_id() {
     w.commit_file("a.txt", "one", "first").expect("commit");
 
     let (mut monitor, _journal_path, _tmp) = open_monitor();
+    let _tmp_anchor = DirectoryAnchor::open_existing(_tmp.path()).unwrap();
     let id = wt("w1");
     monitor
         .register(id.clone(), repo.path().to_path_buf())
@@ -126,7 +129,7 @@ fn commit_yields_commit_and_head_changed_sharing_one_event_id() {
     // returned Observed values above) — the journal is what a restart
     // diagnosis reads, so it must agree with what the caller was handed.
     drop(monitor);
-    let entries = EventJournal::open(&_journal_path)
+    let entries = EventJournal::open(&_tmp_anchor, "events.jsonl")
         .expect("reopen journal")
         .since(0);
     let ids: Vec<_> = entries
@@ -436,6 +439,7 @@ fn fresh_subscription_sees_none_of_the_prior_rows() {
     w.commit_file("a.txt", "one", "first").expect("commit");
 
     let (mut monitor, journal_path, _tmp) = open_monitor();
+    let _tmp_anchor = DirectoryAnchor::open_existing(_tmp.path()).unwrap();
     let id = wt("w1");
     monitor
         .register(id.clone(), repo.path().to_path_buf())
@@ -447,10 +451,10 @@ fn fresh_subscription_sees_none_of_the_prior_rows() {
 
     // A handler subscribes NOW: it stores the journal's current end.
     drop(monitor);
-    let subscribed_at = EventJournal::open(&journal_path)
+    let subscribed_at = EventJournal::open(&_tmp_anchor, "events.jsonl")
         .expect("reopen journal")
         .end_cursor();
-    let journal = EventJournal::open(&journal_path).expect("reopen writer");
+    let journal = EventJournal::open(&_tmp_anchor, "events.jsonl").expect("reopen writer");
     let mut monitor = WorktreeMonitor::new(GitCli::new(), journal);
     monitor
         .register(id.clone(), repo.path().to_path_buf())
@@ -461,7 +465,7 @@ fn fresh_subscription_sees_none_of_the_prior_rows() {
     assert!(!later_events.is_empty());
 
     drop(monitor);
-    let visible = EventJournal::open(&journal_path)
+    let visible = EventJournal::open(&_tmp_anchor, "events.jsonl")
         .expect("reopen journal")
         .since(subscribed_at);
 
@@ -487,6 +491,7 @@ fn journal_survives_restart_and_skips_a_torn_final_row() {
     w.commit_file("a.txt", "one", "first").expect("commit");
 
     let (mut monitor, journal_path, _tmp) = open_monitor();
+    let _tmp_anchor = DirectoryAnchor::open_existing(_tmp.path()).unwrap();
     let id = wt("w1");
     monitor
         .register(id.clone(), repo.path().to_path_buf())
@@ -498,7 +503,7 @@ fn journal_survives_restart_and_skips_a_torn_final_row() {
     assert!(!events.is_empty());
     drop(monitor);
 
-    let before_restart = EventJournal::open(&journal_path)
+    let before_restart = EventJournal::open(&_tmp_anchor, "events.jsonl")
         .expect("reopen journal")
         .since(0);
     assert_eq!(before_restart.len(), 1, "one reconcile is one batch");
@@ -515,7 +520,8 @@ fn journal_survives_restart_and_skips_a_torn_final_row() {
         // No trailing newline / closing brace: a torn write.
     }
 
-    let reopened = EventJournal::open(&journal_path).expect("reopen journal after tear");
+    let reopened =
+        EventJournal::open(&_tmp_anchor, "events.jsonl").expect("reopen journal after tear");
     let recovered = reopened.since(0);
     assert_eq!(
         recovered.len(),
@@ -528,12 +534,15 @@ fn journal_survives_restart_and_skips_a_torn_final_row() {
 #[test]
 fn concurrent_journal_writer_is_rejected_while_owner_lives() {
     let journal_dir = tempfile::TempDir::new().expect("create journal temp dir");
-    let journal_path = journal_dir.path().join("events.jsonl");
-    let owner = EventJournal::open(&journal_path).expect("first owner");
-    let err = EventJournal::open(&journal_path).expect_err("second writer must be refused");
+    let journal_dir_anchor = DirectoryAnchor::open_existing(journal_dir.path()).unwrap();
+
+    let owner = EventJournal::open(&journal_dir_anchor, "events.jsonl").expect("first owner");
+    let err = EventJournal::open(&journal_dir_anchor, "events.jsonl")
+        .expect_err("second writer must be refused");
     assert!(format!("{err}").contains("exactly one lifetime-owned writer"));
     drop(owner);
-    EventJournal::open(&journal_path).expect("lock is released when owner drops");
+    EventJournal::open(&journal_dir_anchor, "events.jsonl")
+        .expect("lock is released when owner drops");
 }
 
 #[test]
@@ -655,6 +664,7 @@ fn reconcile_returned_event_id_matches_the_journalled_event_id_for_that_pass() {
     w.commit_file("a.txt", "one", "first").expect("commit");
 
     let (mut monitor, journal_path, _tmp) = open_monitor();
+    let _tmp_anchor = DirectoryAnchor::open_existing(_tmp.path()).unwrap();
     let id = wt("w1");
     monitor
         .register(id.clone(), repo.path().to_path_buf())
@@ -682,7 +692,7 @@ fn reconcile_returned_event_id_matches_the_journalled_event_id_for_that_pass() {
     );
 
     drop(monitor);
-    let entries = EventJournal::open(&journal_path)
+    let entries = EventJournal::open(&_tmp_anchor, "events.jsonl")
         .expect("reopen journal")
         .since(0);
     let journalled_under_second_id: Vec<_> =
@@ -716,6 +726,7 @@ fn journal_append_after_torn_row_recovery_keeps_the_journal_openable() {
     w.commit_file("a.txt", "one", "first").expect("commit");
 
     let (mut monitor, journal_path, _tmp) = open_monitor();
+    let _tmp_anchor = DirectoryAnchor::open_existing(_tmp.path()).unwrap();
     let id = wt("w1");
     monitor
         .register(id.clone(), repo.path().to_path_buf())
@@ -734,7 +745,7 @@ fn journal_append_after_torn_row_recovery_keeps_the_journal_openable() {
         write!(file, "{{\"cursor\":999,\"event_id\"").expect("write torn row");
     }
 
-    let mut repaired = EventJournal::open(&journal_path).expect("reopen after tear");
+    let mut repaired = EventJournal::open(&_tmp_anchor, "events.jsonl").expect("reopen after tear");
     let survivors = repaired.since(0);
     let sample = survivors
         .last()
@@ -745,7 +756,7 @@ fn journal_append_after_torn_row_recovery_keeps_the_journal_openable() {
         .expect("append after repair");
     drop(repaired);
 
-    let reopened = EventJournal::open(&journal_path)
+    let reopened = EventJournal::open(&_tmp_anchor, "events.jsonl")
         .expect("append-after-tear must not corrupt the journal for the next open");
     assert_eq!(
         reopened.since(0).len(),
@@ -763,6 +774,7 @@ fn reconciliation_batch_survives_restart_with_one_shared_event_id() {
     let w = repo.writer();
     w.commit_file("a.txt", "one", "first").expect("commit");
     let (mut monitor, journal_path, _tmp) = open_monitor();
+    let _tmp_anchor = DirectoryAnchor::open_existing(_tmp.path()).unwrap();
     let id = wt("w1");
     monitor
         .register(id.clone(), repo.path().to_path_buf())
@@ -774,7 +786,9 @@ fn reconciliation_batch_survives_restart_with_one_shared_event_id() {
     assert!(observed.iter().all(|event| event.event_id == shared_id));
     drop(monitor);
 
-    let recovered = EventJournal::open(&journal_path).expect("restart").since(0);
+    let recovered = EventJournal::open(&_tmp_anchor, "events.jsonl")
+        .expect("restart")
+        .since(0);
     assert_eq!(recovered.len(), 1, "one reconciliation is one row");
     assert_eq!(recovered[0].event_id, shared_id);
     assert_eq!(recovered[0].events.len(), 2);
@@ -796,6 +810,7 @@ fn detached_baseline_survives_restart_and_reports_reattachment() {
         .trimmed()
         .to_string();
     let (mut monitor, journal_path, _scratch) = open_monitor();
+    let _scratch_anchor = DirectoryAnchor::open_existing(_scratch.path()).unwrap();
     let id = wt("detached");
     monitor
         .register(id.clone(), repo.path().to_path_buf())
@@ -807,8 +822,10 @@ fn detached_baseline_survives_restart_and_reports_reattachment() {
     assert_eq!(head_changed(&events)[0].kind, HeadChangeKind::Switched);
     assert_eq!(head_changed(&events)[0].branch, None);
     drop(monitor);
-    let mut monitor =
-        WorktreeMonitor::new(GitCli::new(), EventJournal::open(journal_path).unwrap());
+    let mut monitor = WorktreeMonitor::new(
+        GitCli::new(),
+        EventJournal::open(&_scratch_anchor, "events.jsonl").unwrap(),
+    );
     monitor
         .register(id.clone(), repo.path().to_path_buf())
         .unwrap();

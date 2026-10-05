@@ -7,6 +7,7 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use tidepool_atomic_write::DirectoryAnchor;
 
 use exomonad_worktree::git::inspect;
 use exomonad_worktree::testing::{fingerprint, TestRepo};
@@ -18,7 +19,8 @@ use exomonad_worktree::{
 use tidepool_repr::ActorPath;
 
 fn manager_over(repo: &TestRepo, base: &Path) -> WorktreeManager {
-    let registry = WorktreeRegistry::open(base.join("registry")).expect("open registry");
+    let base_anchor = DirectoryAnchor::open_existing(base).unwrap();
+    let registry = WorktreeRegistry::open(&base_anchor, "registry").expect("open registry");
     WorktreeManager::new(GitCli::new(), registry, base.join("worktrees"), repo.path())
 }
 
@@ -221,9 +223,10 @@ fn created_worktree_initializes_submodules_at_the_recorded_gitlink() {
         .expect("read recorded workspace gitlink");
 
     let base = tempfile::TempDir::new().expect("tempdir");
+    let base_anchor = DirectoryAnchor::open_existing(base.path()).unwrap();
     // Test-only transport permission for the local fixture URL. Production
     // worktree creation does not broaden Git's protocol policy.
-    let registry = WorktreeRegistry::open(base.path().join("registry")).expect("open registry");
+    let registry = WorktreeRegistry::open(&base_anchor, "registry").expect("open registry");
     let git = GitCli::new().with_env("GIT_ALLOW_PROTOCOL", "file:https:ssh:git");
     let child = WorktreeManager::new(git, registry, base.path().join("worktrees"), repo.path())
         .create(&WorktreeSpec::from_current_repository("workspace-child"))
@@ -313,9 +316,10 @@ fn inherited_source_prepares_private_authored_workspace_before_mount() {
         .expect("checkpoint authored config");
 
     let storage = tempfile::TempDir::new().expect("tempdir");
+    let storage_anchor = DirectoryAnchor::open_existing(storage.path()).unwrap();
     let manager = WorktreeManager::new(
         GitCli::new(),
-        WorktreeRegistry::open(storage.path().join("registry")).expect("open registry"),
+        WorktreeRegistry::open(&storage_anchor, "registry").expect("open registry"),
         storage.path().join("worktrees"),
         repo.path(),
     );
@@ -423,7 +427,8 @@ fn created_worktree_fetches_an_unpublished_workspace_commit_from_its_parent() {
         .expect("read upstream URL");
 
     let base = tempfile::TempDir::new().expect("tempdir");
-    let registry = WorktreeRegistry::open(base.path().join("registry")).expect("open registry");
+    let base_anchor = DirectoryAnchor::open_existing(base.path()).unwrap();
+    let registry = WorktreeRegistry::open(&base_anchor, "registry").expect("open registry");
     // Parent-local transport must work with ordinary production Git policy;
     // the child cannot fetch this commit from the upstream URL.
     let git = GitCli::new();
@@ -1031,7 +1036,8 @@ fn dirty_summary_is_empty_and_sorted_on_a_clean_repository() {
 #[test]
 fn binding_refuses_second_agent_and_permits_rebind_after_settle() {
     let base = tempfile::TempDir::new().expect("tempdir");
-    let mut table = BindingTable::open(base.path().join("bindings")).expect("open bindings");
+    let base_anchor = DirectoryAnchor::open_existing(base.path()).unwrap();
+    let mut table = BindingTable::open(&base_anchor, "bindings").expect("open bindings");
 
     let worktree = WorktreeId::from_raw("wt-test");
     let agent_a = AgentRef::from_raw("agent-a");
@@ -1066,14 +1072,15 @@ fn binding_refuses_second_agent_and_permits_rebind_after_settle() {
     // The first owner must be gone first — the table is SINGLE-OWNER (a live
     // second owner is refused), so a restart is drop-then-reopen.
     drop(table);
-    let fresh = BindingTable::open(base.path().join("bindings")).expect("reopen bindings");
+    let fresh = BindingTable::open(&base_anchor, "bindings").expect("reopen bindings");
     assert_eq!(fresh.current(&worktree).expect("current").agent(), &agent_b);
 }
 
 #[test]
 fn settling_a_released_binding_also_permits_rebind() {
     let base = tempfile::TempDir::new().expect("tempdir");
-    let mut table = BindingTable::open(base.path().join("bindings")).expect("open bindings");
+    let base_anchor = DirectoryAnchor::open_existing(base.path()).unwrap();
+    let mut table = BindingTable::open(&base_anchor, "bindings").expect("open bindings");
 
     let worktree = WorktreeId::from_raw("wt-release-test");
     let agent_a = AgentRef::from_raw("agent-a");
@@ -1093,11 +1100,12 @@ fn settling_a_released_binding_also_permits_rebind() {
 #[test]
 fn registry_open_refuses_a_root_inside_a_working_tree() {
     let repo = TestRepo::init().expect("init");
+    let repo_anchor = DirectoryAnchor::open_existing(repo.path()).unwrap();
     let nested = repo.path().join("nested-registry");
     let git = GitCli::new();
     let before = capture_state(&git, repo.path());
 
-    match WorktreeRegistry::open(&nested) {
+    match WorktreeRegistry::open(&repo_anchor, "nested-registry") {
         Err(WorktreeError::InvalidRegistryRoot { root, inside }) => {
             assert!(
                 root.ends_with("nested-registry"),
@@ -1120,6 +1128,7 @@ fn registry_open_refuses_a_root_inside_a_working_tree() {
 #[test]
 fn registry_open_rejects_nested_and_symlink_roots_before_creating_them() {
     let repo = TestRepo::init().expect("init");
+    let repo_anchor = DirectoryAnchor::open_existing(repo.path()).unwrap();
     repo.writer()
         .commit_file("seed.txt", "seed\n", "seed source")
         .expect("seed source repository");
@@ -1129,12 +1138,10 @@ fn registry_open_rejects_nested_and_symlink_roots_before_creating_them() {
     std::os::unix::fs::symlink(&nested_target, &alias).expect("symlink");
     let git = GitCli::new();
     let before = capture_state(&git, repo.path());
-    for path in [
-        repo.path().join("absent/deep/registry"),
-        alias.join("registry"),
-    ] {
+    for relative in ["absent/deep/registry", "alias/registry"] {
+        let path = repo.path().join(relative);
         assert!(matches!(
-            WorktreeRegistry::open(&path),
+            WorktreeRegistry::open(&repo_anchor, relative),
             Err(WorktreeError::InvalidRegistryRoot { .. })
         ));
         assert!(!path.exists());
@@ -1144,22 +1151,24 @@ fn registry_open_rejects_nested_and_symlink_roots_before_creating_them() {
 
 #[cfg(unix)]
 #[test]
-fn registry_open_uses_os_symlink_parent_traversal_and_allows_missing_external_root() {
+fn registry_open_rejects_parent_traversal_and_allows_missing_external_root() {
     let repo = TestRepo::init().expect("init");
+    let repo_anchor = DirectoryAnchor::open_existing(repo.path()).unwrap();
     let nested_target = repo.path().join("nested-target");
     std::fs::create_dir(&nested_target).expect("nested target");
     let alias = repo.path().join("alias");
     std::os::unix::fs::symlink(&nested_target, &alias).expect("symlink");
-    let traversed = alias.join("../rejected-registry");
     assert!(matches!(
-        WorktreeRegistry::open(&traversed),
-        Err(WorktreeError::InvalidRegistryRoot { .. })
+        WorktreeRegistry::open(&repo_anchor, "alias/../rejected-registry"),
+        Err(WorktreeError::StorageFailure { .. })
     ));
     assert!(!repo.path().join("rejected-registry").exists());
 
     let external = tempfile::TempDir::new().expect("external root");
+    let external_anchor = DirectoryAnchor::open_existing(external.path()).unwrap();
     let outside = external.path().join("new/deep/registry");
-    let registry = WorktreeRegistry::open(&outside).expect("missing external root is valid");
+    let registry = WorktreeRegistry::open(&external_anchor, "new/deep/registry")
+        .expect("missing external root is valid");
     assert_eq!(
         registry.root(),
         outside.canonicalize().expect("canonical root")
@@ -1220,6 +1229,7 @@ fn inherited_git_config_environment_is_scrubbed_in_child_process() {
 #[test]
 fn registry_open_refuses_a_root_it_cannot_even_check_for_nesting() {
     let base = tempfile::TempDir::new().expect("tempdir");
+    let base_anchor = DirectoryAnchor::open_existing(base.path()).unwrap();
     let root = base.path().join("corrupt-git-root");
     std::fs::create_dir_all(&root).expect("mkdir");
     // A `.git` that exists but is not a valid gitfile pointer or repository
@@ -1228,7 +1238,7 @@ fn registry_open_refuses_a_root_it_cannot_even_check_for_nesting() {
     // nesting" the way a genuine non-repository is.
     std::fs::write(root.join(".git"), "not a real gitfile pointer\n").expect("write garbage .git");
 
-    match WorktreeRegistry::open(&root) {
+    match WorktreeRegistry::open(&base_anchor, "corrupt-git-root") {
         Err(WorktreeError::GitFailure(receipt)) => {
             assert!(
                 receipt.cwd.ends_with("corrupt-git-root"),
@@ -1249,17 +1259,17 @@ fn registry_open_refuses_a_root_it_cannot_even_check_for_nesting() {
 fn binding_table_refuses_a_second_live_owner_over_one_root() {
     use exomonad_worktree::BindingTable;
     let base = tempfile::TempDir::new().expect("tempdir");
-    let root = base.path().join("bindings");
+    let base_anchor = DirectoryAnchor::open_existing(base.path()).unwrap();
 
-    let first = BindingTable::open(&root).expect("first owner opens");
-    let second = BindingTable::open(&root);
+    let first = BindingTable::open(&base_anchor, "bindings").expect("first owner opens");
+    let second = BindingTable::open(&base_anchor, "bindings");
     assert!(
         matches!(second, Err(WorktreeError::StorageFailure { .. })),
         "a second live owner must be refused, got {second:?}"
     );
 
     drop(first);
-    BindingTable::open(&root).expect("the root is free once the owner drops");
+    BindingTable::open(&base_anchor, "bindings").expect("the root is free once the owner drops");
 }
 
 #[test]
@@ -1277,8 +1287,9 @@ fn binding_owner_probe_leaves_an_absent_root_absent() {
 #[test]
 fn binding_owner_probe_observes_lifetime_lock_and_release() {
     let base = tempfile::TempDir::new().unwrap();
+    let base_anchor = DirectoryAnchor::open_existing(base.path()).unwrap();
     let root = base.path().join("bindings");
-    let owner = BindingTable::open(&root).unwrap();
+    let owner = BindingTable::open(&base_anchor, "bindings").unwrap();
 
     assert!(BindingTable::has_live_owner(&root).unwrap());
     drop(owner);
@@ -1319,17 +1330,22 @@ fn binding_table_waits_for_release_without_stealing_live_ownership() {
     use exomonad_worktree::BindingTable;
     use std::time::Duration;
     let base = tempfile::TempDir::new().unwrap();
-    let root = base.path().join("bindings");
-    let first = BindingTable::open(&root).unwrap();
-    assert!(BindingTable::open_with_timeout(&root, Duration::from_millis(20)).is_err());
+    let base_anchor = DirectoryAnchor::open_existing(base.path()).unwrap();
+
+    let first = BindingTable::open(&base_anchor, "bindings").unwrap();
+    assert!(
+        BindingTable::open_with_timeout(&base_anchor, "bindings", Duration::from_millis(20))
+            .is_err()
+    );
     let release = std::thread::spawn(move || {
         #[allow(clippy::disallowed_methods, reason = "sync test thread, not async")]
         std::thread::sleep(Duration::from_millis(50));
         drop(first);
     });
-    let second = BindingTable::open_with_timeout(&root, Duration::from_secs(2)).unwrap();
+    let second =
+        BindingTable::open_with_timeout(&base_anchor, "bindings", Duration::from_secs(2)).unwrap();
     release.join().unwrap();
-    assert!(BindingTable::open(&root).is_err());
+    assert!(BindingTable::open(&base_anchor, "bindings").is_err());
     drop(second);
-    BindingTable::open(&root).unwrap();
+    BindingTable::open(&base_anchor, "bindings").unwrap();
 }

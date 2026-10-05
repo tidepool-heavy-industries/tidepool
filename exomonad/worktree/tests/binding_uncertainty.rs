@@ -1,6 +1,9 @@
 #![cfg(target_os = "linux")]
-use exomonad_worktree::{AgentRef, BindingTable, WorktreeError, WorktreeId};
+use exomonad_worktree::{
+    AgentRef, BindingTable, EventJournal, WorktreeError, WorktreeId, WorktreeRegistry,
+};
 use std::{fs, path::PathBuf, process::Command};
+use tidepool_atomic_write::DirectoryAnchor;
 
 #[test]
 fn binding_fault_child() {
@@ -8,9 +11,12 @@ fn binding_fault_child() {
         return;
     };
     let root = PathBuf::from(root);
+    let storage = PathBuf::from(std::env::var("BIND_STORAGE_ROOT").unwrap());
+    let anchor = DirectoryAnchor::open_existing(&storage).unwrap();
+    let relative = root.strip_prefix(&storage).unwrap();
     let arm = PathBuf::from(std::env::var("BIND_FAULT_ARM").unwrap());
     let operation = std::env::var("BIND_OPERATION").unwrap();
-    let mut table = BindingTable::open(&root).unwrap();
+    let mut table = BindingTable::open(&anchor, relative).unwrap();
     let id = WorktreeId::from_raw("wt-one");
     let other = WorktreeId::from_raw("wt-other");
     let agent = AgentRef::from_raw("agent-one");
@@ -18,9 +24,10 @@ fn binding_fault_child() {
         let lease = table.bind(&id, &agent, 1).unwrap();
         drop(table);
         fs::write(&arm, "armed").unwrap();
-        BindingTable::open(&root).expect_err("loaded row must sync before authorizing custody");
+        BindingTable::open(&anchor, relative)
+            .expect_err("loaded row must sync before authorizing custody");
         fs::remove_file(&arm).unwrap();
-        let mut reopened = BindingTable::open(&root).unwrap();
+        let mut reopened = BindingTable::open(&anchor, relative).unwrap();
         assert!(reopened.current(&id).is_some());
         lease
             .release(&mut reopened)
@@ -90,11 +97,11 @@ fn binding_fault_child() {
     ));
     assert_eq!(fs::read(&path).unwrap(), before);
     assert!(
-        BindingTable::open(&root).is_err(),
+        BindingTable::open(&anchor, relative).is_err(),
         "poison retains exclusive lock"
     );
     drop(table);
-    let mut table = BindingTable::open(&root).unwrap();
+    let mut table = BindingTable::open(&anchor, relative).unwrap();
     if operation == "bind" || operation == "transfer" {
         assert!(table.current(&id).is_some());
         assert!(matches!(
@@ -166,6 +173,7 @@ fn binding_public_paths_fence_uncertain_custody_until_reopen() {
                 ])
                 .env("LD_PRELOAD", &library)
                 .env("BIND_ROOT", &root)
+                .env("BIND_STORAGE_ROOT", temp.path())
                 .env("BIND_FAULT_PATH", &target)
                 .env("BIND_FAULT_LOG", &log)
                 .env("BIND_FAULT_ARM", &arm)
@@ -183,6 +191,133 @@ fn binding_public_paths_fence_uncertain_custody_until_reopen() {
                 fs::read_to_string(&log).unwrap(),
                 "hit\n",
                 "exactly one injected directory failure"
+            );
+        }
+    }
+}
+
+#[test]
+fn directory_admission_fault_child() {
+    let Ok(storage) = std::env::var("BIND_STORAGE_ROOT") else {
+        return;
+    };
+    let storage = PathBuf::from(storage);
+    let anchor = DirectoryAnchor::open_existing(&storage).unwrap();
+    let relative = "new/deep";
+    let root = storage.join(relative);
+    let arm = PathBuf::from(std::env::var("BIND_FAULT_ARM").unwrap());
+    let fault = PathBuf::from(std::env::var("BIND_FAULT_PATH").unwrap());
+    let store = std::env::var("BIND_STORE").unwrap();
+    fs::write(&arm, "armed").unwrap();
+    for _ in 0..2 {
+        let error = match store.as_str() {
+            "registry" => WorktreeRegistry::open(&anchor, relative).unwrap_err(),
+            "binding" => BindingTable::open(&anchor, relative).unwrap_err(),
+            "journal" => EventJournal::open(&anchor, "new/deep/events.jsonl").unwrap_err(),
+            _ => panic!("unknown store fixture"),
+        };
+        assert!(matches!(error, WorktreeError::StorageFailure { path, .. } if path == fault));
+        assert!(
+            root.is_dir(),
+            "failed confirmation leaves a visible directory"
+        );
+        assert!(
+            !root.join("records").exists(),
+            "registry cannot derive child stores"
+        );
+        assert!(
+            !root.join(".owner.lock").exists(),
+            "binding admission cannot acquire its lock"
+        );
+        assert!(
+            !root.join("events.owner.lock").exists(),
+            "journal admission cannot acquire its lock"
+        );
+        assert!(
+            !root.join("events.jsonl").exists(),
+            "journal initialization cannot publish"
+        );
+    }
+    fs::remove_file(&arm).unwrap();
+    match store.as_str() {
+        "registry" => {
+            let registry = WorktreeRegistry::open(&anchor, relative).unwrap();
+            assert_eq!(registry.root(), root);
+            assert!(root.join("records").is_dir());
+            assert!(root.join("retained-views").is_dir());
+        }
+        "binding" => {
+            let mut table = BindingTable::open(&anchor, relative).unwrap();
+            let id = WorktreeId::from_raw("wt-admitted");
+            let lease = table.bind(&id, &AgentRef::from_raw("agent"), 1).unwrap();
+            lease.complete(&mut table).unwrap();
+        }
+        "journal" => {
+            let mut journal = EventJournal::open(&anchor, "new/deep/events.jsonl").unwrap();
+            assert_eq!(
+                journal.append(&[], exomonad_worktree::EventId(1)).unwrap(),
+                1
+            );
+        }
+        _ => panic!("unknown store fixture"),
+    }
+}
+
+#[test]
+fn store_admission_retries_the_original_scope_before_granting_authority() {
+    let temp = tempfile::tempdir().unwrap();
+    let storage_anchor = DirectoryAnchor::open_existing(temp.path()).unwrap();
+    let library = temp.path().join("admission-fault.so");
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "short synchronous test-fixture build"
+    )]
+    let cc = Command::new("cc")
+        .args(["-shared", "-fPIC", "-Wall", "-Werror"])
+        .arg(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/binding_directory_fault.c"),
+        )
+        .arg("-o")
+        .arg(&library)
+        .arg("-ldl")
+        .status()
+        .unwrap();
+    assert!(cc.success());
+    for store in ["registry", "binding", "journal"] {
+        for kind in ["open", "sync"] {
+            let storage = temp.path().join(format!("{store}-{kind}"));
+            storage_anchor.child(format!("{store}-{kind}")).unwrap();
+            let log = storage.join("hits");
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "short synchronous test-fixture spawn"
+            )]
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "binding_uncertainty::directory_admission_fault_child",
+                    "--nocapture",
+                ])
+                .env("LD_PRELOAD", &library)
+                .env("BIND_STORAGE_ROOT", &storage)
+                .env("BIND_FAULT_PATH", storage.join("new"))
+                .env("BIND_FAULT_LOG", &log)
+                .env("BIND_FAULT_ARM", storage.join("armed"))
+                .env("BIND_FAULT_KIND", kind)
+                .env("BIND_STORE", store)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{store}/{kind}: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                fs::read_to_string(log).unwrap(),
+                "hit\nhit\n",
+                "visible ancestry must be reconfirmed on each retry"
             );
         }
     }

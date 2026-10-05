@@ -109,6 +109,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
+use tidepool_atomic_write::DirectoryAnchor;
 
 use exomonad_worktree::storage::now_ms;
 use tidepool_bridge_effects::{
@@ -3308,10 +3309,12 @@ mod tests {
         tempfile::TempDir,
     ) {
         let registry_dir = tempfile::tempdir().unwrap();
-        let registry = exomonad_worktree::WorktreeRegistry::open(registry_dir.path()).unwrap();
+        let registry_dir_anchor = DirectoryAnchor::open_existing(registry_dir.path()).unwrap();
+        let registry = exomonad_worktree::WorktreeRegistry::open(&registry_dir_anchor, "").unwrap();
         let journal_dir = tempfile::tempdir().unwrap();
+        let journal_dir_anchor = DirectoryAnchor::open_existing(journal_dir.path()).unwrap();
         let journal =
-            exomonad_worktree::EventJournal::open(journal_dir.path().join("events.jsonl")).unwrap();
+            exomonad_worktree::EventJournal::open(&journal_dir_anchor, "events.jsonl").unwrap();
         let monitor =
             exomonad_worktree::WorktreeMonitor::new(exomonad_worktree::GitCli::new(), journal);
         (registry, monitor, registry_dir, journal_dir)

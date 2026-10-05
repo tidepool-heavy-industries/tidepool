@@ -3,6 +3,7 @@
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
+use tidepool_atomic_write::DirectoryAnchor;
 
 use exomonad_node::{
     MountNamespace, OverlayRotation, OverlayRotationOutcome, ProcessInvocation,
@@ -127,6 +128,7 @@ fn source_and_build_fork_preserves_git_state_and_cargo_freshness() {
     git.try_run(repository.path(), &["commit", "-qm", "seed"])
         .unwrap();
     let storage = tempfile::tempdir().unwrap();
+    let storage_anchor = DirectoryAnchor::open_existing(storage.path()).unwrap();
     let root = storage.path();
     let source_root = root.join("worktrees/.resources/run/source");
     std::fs::create_dir_all(&source_root).unwrap();
@@ -257,7 +259,7 @@ fn source_and_build_fork_preserves_git_state_and_cargo_freshness() {
     let original_index = std::fs::read(parent_admin.join("index")).unwrap();
     let manager = WorktreeManager::new(
         parent_git.clone(),
-        WorktreeRegistry::open(root.join("registry")).unwrap(),
+        WorktreeRegistry::open(&storage_anchor, "registry").unwrap(),
         root.join("managed"),
         view.clone(),
     );
@@ -352,7 +354,7 @@ fn source_and_build_fork_preserves_git_state_and_cargo_freshness() {
         .any(|row| row.receipt.worktree_id == *handle.id() && row.present));
     let reopened = WorktreeManager::new(
         exomonad_worktree::GitCli::new(),
-        WorktreeRegistry::open(root.join("registry")).unwrap(),
+        WorktreeRegistry::open(&storage_anchor, "registry").unwrap(),
         root.join("managed"),
         repository.path(),
     );
