@@ -1510,7 +1510,10 @@ impl Default for DecodeLimits {
             max_nodes: 1 << 20,
             max_table_entries: 1 << 18,
             max_string_bytes: 1 << 20,
-            max_work: 1 << 24,
+            // Emergency ceiling for aggregate visits and copied bytes across
+            // all module products and validation passes, not a memory limit.
+            // Byte, table, node and depth checks remain independent.
+            max_work: 4 << 30,
             max_type_nodes: 1 << 18,
             max_sites: 1 << 18,
         }

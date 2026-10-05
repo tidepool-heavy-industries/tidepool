@@ -108,6 +108,43 @@ fn module_framing_normalizes_outer_widths_and_preserves_opaque_group_bytes() {
 }
 
 #[test]
+fn large_module_product_fits_default_work_ceiling_within_admitted_bytes() {
+    let (group, requirements, entry) = fixture();
+    let interface_len = 20 << 20;
+    let row = Value::Array(vec![
+        Value::Text(entry.unit),
+        Value::Text(entry.module),
+        Value::Bytes(vec![0x5a; interface_len]),
+        Value::Array(vec![Value::Bytes(group)]),
+    ]);
+    let mut bytes = Vec::new();
+    ciborium::ser::into_writer(&("TPMOD", 1u64, [&row]), &mut bytes).unwrap();
+    let limits = DecodeLimits {
+        max_bytes: 64 << 20,
+        ..DecodeLimits::default()
+    };
+    let (products, frames) =
+        parse_module_products_with_framing(&bytes, &requirements, limits).unwrap();
+    assert_eq!(products.len(), 1);
+    assert_eq!(products[0].groups.len(), 1);
+    assert_eq!(products[0].interface.len(), interface_len);
+    assert!(products[0].interface.iter().all(|byte| *byte == 0x5a));
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0], bytes);
+    assert!(matches!(
+        parse_module_products_with_framing(
+            &bytes,
+            &requirements,
+            DecodeLimits {
+                max_bytes: bytes.len() - 1,
+                ..limits
+            },
+        ),
+        Err(ParseError::ByteLimit { .. }),
+    ));
+}
+
+#[test]
 fn entry_free_group_preserves_ordinal_without_executable_admission() {
     let (bytes, requirements, entry) = fixture();
     let group = parse_projected_group(&bytes, &requirements, DecodeLimits::default()).unwrap();
