@@ -17229,6 +17229,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         let mut preamble = tidepool_mcp::build_notebook_preamble(&declarations, false);
         for import in [
             "Tidepool.Agent.Reply (Replies)",
+            "Tidepool.Agent.Watch (Watches)",
             "Tidepool.Agent.Ref (AgentProtocol(..))",
             "qualified Tidepool.Agent.Ref as Ref",
             "qualified Tidepool.Actors.Internal.Agent as Agents",
