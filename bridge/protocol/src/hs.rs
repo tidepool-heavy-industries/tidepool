@@ -192,7 +192,7 @@ impl HsType {
 /// argument, which still needs parenthesizing there (see
 /// [`HsType::render_arrow_left`]'s doc); `result` is rendered as a
 /// type-application argument, because it is applied to `head` (`Exec`, or the
-/// `M` alias in a helper signature).
+/// `Eff effs` in a helper signature).
 #[must_use]
 pub fn render_signature(args: &[HsType], head: &str, result: &HsType) -> String {
     let mut out = String::new();
@@ -208,8 +208,8 @@ pub fn render_signature(args: &[HsType], head: &str, result: &HsType) -> String 
 
 /// Render a row-polymorphic curried Haskell signature: `forall effs. Member
 /// <effect> effs => A -> B -> Eff effs <result>`. Generated helpers use this
-/// shape so their bodies live in universal `Tidepool.Effects.Core`; `M`
-/// remains an actor-local shim alias.
+/// shape so their bodies live in stable `Tidepool.Effects.Core` without an
+/// invocation-specific effect-row alias.
 #[must_use]
 pub fn render_member_signature(args: &[HsType], effect: &str, result: &HsType) -> String {
     render_member_signature_with(&[], args, effect, result)

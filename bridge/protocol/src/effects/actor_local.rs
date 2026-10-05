@@ -31,7 +31,6 @@ pub fn actor_local() -> Effect {
         prompt_card: None,
         type_params: TYPE_PARAMS,
         default_row_args: &["Maybe"],
-        helpers_row_polymorphic: true,
         extra_imports: &["import Tidepool.Actor"],
         type_defs: vec![TypeDef {
             name: "ActorInputOrigin",

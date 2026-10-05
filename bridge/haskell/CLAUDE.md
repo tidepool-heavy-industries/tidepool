@@ -378,8 +378,10 @@ the model provider and parses its JSON response.
 - Topological recovery can only recover bindings whose dependencies are
   available through prepared recovery or accepted session modules.
 - Session-generated modules require the universal Authored module pair
-  plus a per-incarnation row shim. Persisted contracts normalize `M` to the
-  exact concrete row; GHC then enforces compatibility at use sites.
+  and stable effect vocabulary. Helpers use `Member` constraints and `Eff`
+  rows; no implicit `M` alias is generated. Authors may define explicit aliases.
+  Persisted contracts expand effect-row aliases, and GHC enforces compatibility
+  at use sites.
 - The resident worker is single-threaded and changes process CWD per request;
   parallel request execution would require a different isolation model.
 

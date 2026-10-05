@@ -407,7 +407,7 @@ preparedResumeTargetName = "__resume"
 -- | The scaffold-reserved generic apply entry a prepared turn admits beside
 -- 'preparedResumeTargetName':
 -- @__applyEntry f n = settle (f (I# n))@, the entry the host enters to apply
--- a rooted @Int -> M a@ closure to a bare unboxed argument (actor program
+-- a rooted @Int -> Eff effects a@ closure to a bare unboxed argument (actor program
 -- start, shutdown hooks, actor source, and green-thread bodies) without a
 -- Core fragment to compile it into. Polymorphic in the settled result, so it
 -- is not admitted as auxiliary-root evidence

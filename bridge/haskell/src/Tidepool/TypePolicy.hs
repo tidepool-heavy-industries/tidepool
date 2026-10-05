@@ -522,7 +522,7 @@ rootNominalHeadOfType ty = go body
 
 -- | Replace effect-row aliases with their exact underlying @Eff '[...]@ type.
 --
--- Per-incarnation aliases such as @M@ are convenient authored syntax but are
+-- Authored aliases such as @M@ are convenient syntax but are
 -- the wrong persisted contract: a later compilation could resolve the same
 -- spelling to a different row. We therefore expand a synonym only when its
 -- fully expanded meaning contains freer-simple's @Eff@. Ordinary domain

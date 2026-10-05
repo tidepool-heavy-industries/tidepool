@@ -79,7 +79,7 @@ async fn expansion_fences_immediate_handler_before_callback_input() {
         )
         .unwrap();
     let view = actor_compile_view(&session, &context, &source).unwrap();
-    let prepared = source.prepare_effectful(&view, surface.row()).unwrap();
+    let prepared = source.prepare(&view);
     let templates =
         resident_workbench_templates(&prepared.preamble, surface.row(), &prepared.imports);
     let include = prepared

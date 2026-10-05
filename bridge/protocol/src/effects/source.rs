@@ -62,7 +62,6 @@ pub fn source() -> Effect {
         prompt_card: None,
         type_params: &[],
         default_row_args: &[],
-        helpers_row_polymorphic: true,
         extra_imports: &[],
         type_defs: vec![
             TypeDef {

@@ -199,19 +199,6 @@ macro_rules! ty_param_names {
 }
 pub(crate) use ty_param_names;
 
-/// Render an optional `helpers_row_polymorphic <bool>` grammar token to its
-/// `bool` value, defaulting to `false` when the definition omits the clause
-/// entirely.
-macro_rules! opt_bool_or_false {
-    () => {
-        false
-    };
-    ($b:tt) => {
-        $b
-    };
-}
-pub(crate) use opt_bool_or_false;
-
 /// Render an optional `prompt_card [...]` grammar token to
 /// [`crate::EffectDecl::prompt_card`]'s `Option<&'static str>`, defaulting to
 /// `None` when the definition omits the clause (every effect whose
@@ -381,7 +368,6 @@ macro_rules! effect_decl_projection {
         req $req:ident,
         decl_fn $decl_fn:ident,
         $(prompt_card $pc:tt,)?
-        $(helpers_row_polymorphic $hrp:tt,)?
         description $desc:tt,
         type_defs $td:tt,
         errors $errname:ident $evariants:tt,
@@ -396,7 +382,6 @@ macro_rules! effect_decl_projection {
             decl_fn $decl_fn,
             type_params [] default_row_args [],
             $(prompt_card $pc,)?
-            $(helpers_row_polymorphic $hrp,)?
             description $desc,
             type_defs $td,
             errors $errname $evariants,
@@ -421,7 +406,6 @@ macro_rules! effect_decl_projection {
         decl_fn $decl_fn:ident,
         type_params $tps:tt default_row_args [$($dra:literal),* $(,)?],
         $(prompt_card $pc:tt,)?
-        $(helpers_row_polymorphic $hrp:tt,)?
         description [$($desc:literal),* $(,)?],
         type_defs [$($td:literal),* $(,)?],
         errors $errname:ident [
@@ -458,7 +442,6 @@ macro_rules! effect_decl_projection {
                 helpers: &[ $( crate::effect_defs::helper_text!($helper) ),* ],
                 type_params: crate::effect_defs::ty_param_names!($tps),
                 default_row_args: &[ $($dra),* ],
-                helpers_row_polymorphic: crate::effect_defs::opt_bool_or_false!($($hrp)?),
             }
         }
     };
@@ -473,7 +456,6 @@ macro_rules! effect_decl_projection {
         req $req:ident,
         decl_fn $decl_fn:ident,
         $(prompt_card $pc:tt,)?
-        $(helpers_row_polymorphic $hrp:tt,)?
         description $desc:tt,
         type_defs $td:tt,
         $(errors $errname:ident $evariants:tt,)?
@@ -487,7 +469,6 @@ macro_rules! effect_decl_projection {
             decl_fn $decl_fn,
             type_params [] default_row_args [],
             $(prompt_card $pc,)?
-            $(helpers_row_polymorphic $hrp,)?
             description $desc,
             type_defs $td,
             $(errors $errname $evariants,)?
@@ -502,7 +483,6 @@ macro_rules! effect_decl_projection {
         decl_fn $decl_fn:ident,
         type_params $tps:tt default_row_args [$($dra:literal),* $(,)?],
         $(prompt_card $pc:tt,)?
-        $(helpers_row_polymorphic $hrp:tt,)?
         description [$($desc:literal),* $(,)?],
         type_defs [$($td:literal),* $(,)?],
         $(errors $errname:ident [
@@ -537,7 +517,6 @@ macro_rules! effect_decl_projection {
                 helpers: &[ $( crate::effect_defs::helper_text!($helper) ),* ],
                 type_params: crate::effect_defs::ty_param_names!($tps),
                 default_row_args: &[ $($dra),* ],
-                helpers_row_polymorphic: crate::effect_defs::opt_bool_or_false!($($hrp)?),
             }
         }
     };
@@ -559,7 +538,6 @@ macro_rules! console_effect_def {
             handler ConsoleHandler,
             req ConsoleReq,
             decl_fn console_decl,
-            helpers_row_polymorphic true,
             description ["Print text output."],
             type_defs [],
             verbs [
@@ -602,7 +580,6 @@ macro_rules! time_effect_def {
             handler TimeHandler,
             req TimeReq,
             decl_fn time_decl,
-            helpers_row_polymorphic true,
             description [
                 "UTC wall-clock access (epoch milliseconds). ",
                 "`getCurrentTime` returns an opaque `UTCTime` value. ",
@@ -645,15 +622,14 @@ macro_rules! entropy_effect_def {
             handler EntropyHandler,
             req EntropyReq,
             decl_fn entropy_decl,
-            helpers_row_polymorphic true,
             description [
                 "Randomness. Seeded, deterministic generation is pure Haskell — no effect ",
                 "needed: `mkStdGen :: Int -> StdGen`, `randomR :: (a, a) -> StdGen -> (a, ",
                 "StdGen)`, `randoms :: StdGen -> [a]`, `split :: StdGen -> (StdGen, StdGen)` ",
                 "(Int and Double instances; each `randomR` draw stays within the given ",
                 "bounds, inclusive; the same seed always replays the same sequence). For ",
-                "non-deterministic values seeded from OS entropy: `newStdGen :: M StdGen` and ",
-                "`randomRIO :: (a, a) -> M a`, e.g. `n <- randomRIO (1 :: Int, 100)`.",
+                "non-deterministic values seeded from OS entropy: `newStdGen :: Member Entropy effects => Eff effects StdGen` and ",
+                "`randomRIO :: Member Entropy effects => (a, a) -> Eff effects a`, e.g. `n <- randomRIO (1 :: Int, 100)`.",
             ],
             type_defs [],
             verbs [
@@ -682,7 +658,6 @@ macro_rules! meta_effect_def {
             handler MetaHandler,
             req MetaReq,
             decl_fn meta_decl,
-            helpers_row_polymorphic true,
             description [
                 "Self-mirror for the runtime. Query constructors, primops, effects, diagnostics.",
             ],
@@ -751,7 +726,6 @@ macro_rules! http_effect_def {
             handler HttpHandler,
             req HttpReq,
             decl_fn http_decl,
-            helpers_row_polymorphic true,
             description [
                 "JSON I/O. Fetch JSON from HTTP endpoints (returns Value). ",
                 "Parsing JSON Text is PURE — `eitherDecode` (aeson-style, ",
@@ -809,7 +783,6 @@ macro_rules! git_effect_def {
             handler GitHandler,
             req GitReq,
             decl_fn git_decl,
-            helpers_row_polymorphic true,
             description [
                 "Read-only git repository queries. Returns typed records parsed Rust-side ",
                 "from machine-format git output — no text-splitting needed. ",
@@ -902,7 +875,6 @@ macro_rules! ask_effect_def {
             handler AskHandler,
             req AskReq,
             decl_fn ask_decl,
-            helpers_row_polymorphic true,
             description [
                 "Suspend execution and ask the calling agent a STRUCTURED question. ",
                 "`ask schema prompt` carries the schema as JSON Schema in the suspension ",
@@ -967,7 +939,6 @@ macro_rules! llm_effect_def {
             handler LlmHandler,
             req LlmReq,
             decl_fn llm_decl,
-            helpers_row_polymorphic true,
             description [
                 "Call an LLM for classification, extraction, or judgment. ",
                 "`llm schema prompt` requests schema-constrained JSON from the provider ",
@@ -1023,7 +994,6 @@ macro_rules! kv_effect_def {
             handler KvHandler,
             req KvReq,
             decl_fn kv_decl,
-            helpers_row_polymorphic true,
             description [
                 "Persistent key-value store. State survives across calls within one server session. ",
                 "Key convention: use slash-delimited namespaces (e.g. \"agent-42/foo\") to avoid ",
@@ -1135,7 +1105,6 @@ macro_rules! fs_read_effect_def {
             req FsReadReq,
             decl_fn fs_read_decl,
             // Every helper below is Member-polymorphic.
-            helpers_row_polymorphic true,
             description ["Read files and filesystem metadata (sandboxed to server working directory)."],
             // `FileRead` and `FsError` are pre-schema domain types already
             // exported by `Tidepool.Records.Stable`; `stable_errors true`
@@ -1229,7 +1198,6 @@ macro_rules! fs_write_effect_def {
             handler FsWriteHandler,
             req FsWriteReq,
             decl_fn fs_write_decl,
-            helpers_row_polymorphic true,
             description ["Mutate files (sandboxed to server working directory)."],
             type_defs [],
             errors FsError [

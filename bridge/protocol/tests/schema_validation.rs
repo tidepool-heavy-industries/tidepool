@@ -103,7 +103,6 @@ fn exec_contract_text_is_pinned() {
     assert!(exec.prompt_card.is_none());
     assert!(exec.type_params.is_empty());
     assert!(exec.default_row_args.is_empty());
-    assert!(exec.helpers_row_polymorphic);
 }
 
 /// The same independent pin as [`exec_contract_text_is_pinned`], for Journal.
@@ -160,5 +159,4 @@ fn journal_contract_text_is_pinned() {
     assert!(journal.prompt_card.is_none());
     assert!(journal.type_params.is_empty());
     assert!(journal.default_row_args.is_empty());
-    assert!(journal.helpers_row_polymorphic);
 }

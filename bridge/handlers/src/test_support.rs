@@ -46,7 +46,7 @@ pub(crate) fn jit_eval(code: &[&str]) -> serde_json::Value {
         tidepool_mcp::ensure_effects_module(&tidepool_mcp::standard_decls()).unwrap();
     let mut include_paths: Vec<&std::path::Path> = vec![include.as_path()];
     include_paths.push(effects_dirs.core.as_path());
-    include_paths.push(effects_dirs.shim.as_path());
+    include_paths.push(effects_dirs.orchestration.as_path());
     let kv_path = std::env::temp_dir().join("tidepool_jit_test_kv.json");
     let cwd = repo_root();
     let captured = CapturedOutput::new();

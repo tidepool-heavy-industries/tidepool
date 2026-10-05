@@ -646,7 +646,7 @@ pub const PREPARED_RESUME_TARGET: &str = "__resume";
 /// on the worker side): `__applyEntry f n = settle (f (I# n))`, the entry
 /// `ResidentSession::run_rooted_entry`/`run_rooted_entry_borrowed`
 /// (`tidepool/runtime/src/session/resident.rs`) enters to apply a rooted
-/// `Int -> M a` closure to a bare unboxed argument — actor program start,
+/// `Int -> Eff effects a` closure to a bare unboxed argument — actor program start,
 /// shutdown hooks, actor source, and
 /// green-thread bodies all cross this entry on the prepared route. Because
 /// `settle` is polymorphic in the settled computation's effect row and

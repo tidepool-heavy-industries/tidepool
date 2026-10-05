@@ -111,7 +111,7 @@ mod tests {
         let include_paths: Vec<&std::path::Path> = vec![
             include.as_path(),
             effects_dir.core.as_path(),
-            effects_dir.shim.as_path(),
+            effects_dir.orchestration.as_path(),
         ];
         let kv_path = std::env::temp_dir().join("tidepool_entropy_family_kv.json");
         let cwd = repo_root();

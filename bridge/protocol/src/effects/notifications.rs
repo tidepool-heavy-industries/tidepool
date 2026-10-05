@@ -42,7 +42,7 @@ pub fn notifications() -> Effect {
         name: "Notifications", authored_surface: crate::schema::AuthoredSurface::OPAQUE,
         handler: "NotificationsDecodeHandler", handler_module: "notifications", req_enum: "NotificationsReq", decl_fn: "notifications_decl",
         description: &["One-way actor notifications with inbox-backed delivery observations; no typed response obligation."], prompt_card: None,
-        type_params: &[], default_row_args: &[], helpers_row_polymorphic: true, extra_imports: &[],
+        type_params: &[], default_row_args: &[], extra_imports: &[],
         type_defs: vec![
             sum("NotificationError", vec![variant("NotificationUnauthorized", vec![]), variant("NotificationUnavailable", vec![]), variant("NotificationInvalidReceipt", vec![]), variant("NotificationAdmissionUnconfirmed", vec![HsType::Text]), variant("NotificationStorageFailure", vec![HsType::Text])]),
             sum("NotificationState", vec![variant("NotificationAccepted", vec![]), variant("NotificationPresented", vec![]), variant("NotificationUnconfirmed", vec![])]),

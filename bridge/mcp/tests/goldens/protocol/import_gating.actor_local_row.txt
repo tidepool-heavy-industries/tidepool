@@ -1,4 +1,4 @@
--- build_preamble (1426 bytes) --
+-- build_preamble (1433 bytes) --
 {-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, FlexibleContexts, FlexibleInstances, UndecidableInstances, GADTs, KindSignatures, RankNTypes, PartialTypeSignatures, ScopedTypeVariables, ExtendedDefaultRules, LambdaCase, TupleSections, MultiWayIf, RecordWildCards, NamedFieldPuns, ViewPatterns, BangPatterns, TypeApplications, BlockArguments, NumericUnderscores, MultilineStrings, DeriveFunctor, DeriveFoldable, DeriveTraversable, DeriveGeneric, DeriveAnyClass, StandaloneDeriving, QuasiQuotes, DuplicateRecordFields, OverloadedRecordDot, OverloadedLabels #-}
 module Expr where
 import Tidepool.Prelude hiding (error, note)
@@ -23,7 +23,7 @@ import Tidepool.Orchestrate
 -- tidepool-preamble-imports-v1
 default (Int, Double, Text)
 
-paginateResult :: Int -> Value -> M Value
+paginateResult :: Int -> Value -> Eff effs Value
 paginateResult = paginateTrunc
 
 -- end build_preamble --

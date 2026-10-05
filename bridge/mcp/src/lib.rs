@@ -37,64 +37,27 @@ use std::sync::Arc;
 // Templating
 // ---------------------------------------------------------------------------
 
-/// The two include roots a compile needs to see the whole effect surface —
-/// returned together because they are cache-addressed SEPARATELY and both
-/// must be on the include path (GHC resolves `Tidepool.Effects`'s authored
-/// facade, and that facade resolves Core, against the `core` root).
-///
-/// **`core` is the universal stable half**: every compile resolves the same
-/// content-addressed effect vocabulary. The narrow shim row controls which
-/// effects are executable.
-///
-/// **`shim` is the per-window half**: content-addressed on the ROW (which
-/// effects are actually in `type M`) and any [`RowArgs`] type application —
-/// small, and it is the only dir that changes when a protocol's applied
-/// type changes between windows.
+/// Stable effect vocabulary and installed orchestration source roots.
+/// Executable rows are explicit checked invocation inputs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EffectsModuleDirs {
-    /// Include root holding universal `Tidepool/Effects/Core.hs` and its
-    /// model-authored `Tidepool/Effects/Authored.hs` facade.
+    /// Universal Core and both stable authored-facing facades.
     pub core: PathBuf,
-    /// Include root holding `Tidepool/Effects.hs` (the shim) and
-    /// `Tidepool/Orchestrate.hs` — row-keyed.
-    pub shim: PathBuf,
+    /// Helpers selected by the installed handler cohort, independent of the
+    /// invoking actor's selected row.
+    pub orchestration: PathBuf,
 }
 
 impl EffectsModuleDirs {
-    /// Both roots, in the order a GHC include-path search would want them
-    /// (core first: the shim's authored-facade import resolves against it,
-    /// though GHC's own search order does not require this).
     #[must_use]
     pub fn include_paths(&self) -> [PathBuf; 2] {
-        [self.core.clone(), self.shim.clone()]
+        [self.core.clone(), self.orchestration.clone()]
     }
 }
 
-/// Write universal `Tidepool/Effects/Core.hs`, its authored facade, and
-/// `Tidepool/Effects.hs` + `Tidepool/Orchestrate.hs` (row-keyed) into their two
-/// content-addressed directories and return both (see [`EffectsModuleDirs`]).
-/// Idempotent: each path is keyed on its own module source(s), so distinct
-/// rows coexist and repeat startups reuse the same dirs.
-/// Re-callable per eval (see [`write_core_module`]/[`write_shim_module`]) to
-/// self-heal if a dir is reaped.
+/// Materialize stable vocabulary and the installed cohort's orchestration
+/// helpers. Every root is content-addressed and can be recreated after reap.
 pub fn ensure_effects_module(effects: &[EffectDecl]) -> std::io::Result<EffectsModuleDirs> {
-    ensure_effects_module_at(effects, &RowArgs::default())
-}
-
-/// [`ensure_effects_module`] with the row's parameterized effects applied to
-/// explicit type arguments, such as `ActorLocal Protocol`.
-/// The shim dir stays content-addressed on ITS generated source (which
-/// includes the applied types + their imports) — so two answer types get two
-/// shim dirs, and neither can be served the other's module — while the core
-/// dir stays whatever this same `effects` vocabulary always resolves to.
-///
-/// Both dirs hold SOURCE ONLY (no `.hi`/`.o`), and a harness turn compile is
-/// uncached, so an edit to an author module named in `row` is picked up on the
-/// next compile: there is no compiled artifact for its hash to have to cover.
-pub fn ensure_effects_module_at(
-    effects: &[EffectDecl],
-    row: &RowArgs,
-) -> std::io::Result<EffectsModuleDirs> {
     let vocabulary = all_decls();
     for effect in effects {
         assert!(
@@ -105,82 +68,43 @@ pub fn ensure_effects_module_at(
             effect.type_name
         );
     }
-    let core = ensure_effects_core_module()?;
-    let shim = ensure_effects_shim_module(effects, row)?;
-    Ok(EffectsModuleDirs { core, shim })
+    Ok(EffectsModuleDirs {
+        core: ensure_effects_core_module()?,
+        orchestration: ensure_orchestrate_module(effects)?,
+    })
 }
 
-/// Write the universal stable Core module and authored facade into their own
-/// content-addressed dir. The persistent declaration environment imports the facade but never
-/// the per-window shim, so it can materialize this pair without minting a
-/// throwaway row-keyed dir.
+/// Materialize the universal stable effect vocabulary and authored facades.
 pub fn ensure_effects_core_module() -> std::io::Result<PathBuf> {
     write_core_module(&effects_core_module_source())
 }
 
-/// Like [`ensure_effects_core_module`] but takes the already-rendered source
-/// text directly — the self-heal path (a server holding onto its own
-/// generated sources to re-materialize them if the staging dir is reaped)
-/// calls this instead of re-deriving the universal text each time.
+/// Recreate an owned vocabulary source root through the same materializer.
 pub fn write_core_module(core_src: &str) -> std::io::Result<PathBuf> {
     let authored = effects_authored_module_source();
+    let facade = effects_facade_module_source();
     write_module_dir(
         "tidepool-effects-core",
         &[
             ("Effects/Core.hs", core_src),
             ("Effects/Authored.hs", &authored),
+            ("Effects.hs", &facade),
         ],
     )
 }
 
-/// Write just the per-window shim (`Tidepool/Effects.hs` +
-/// `Tidepool/Orchestrate.hs`) into its own content-addressed dir and return
-/// it, WITHOUT touching Core. For a caller that already holds a stable Core
-/// dir and only needs to re-materialize the small per-row half —
-/// [`ensure_effects_module_at`] would also recompute (a cheap,
-/// content-addressed cache hit, but still a hash + lock) Core's dir every
-/// call, which this skips entirely.
-pub fn ensure_effects_shim_module(
-    row_effects: &[EffectDecl],
-    row: &RowArgs,
-) -> std::io::Result<PathBuf> {
-    write_shim_module(
-        &effects_shim_module_source(row_effects, row),
-        &orchestrate_module_source(row_effects),
-    )
+/// Installed orchestration helpers keep their existing cohort-dependent bodies.
+pub fn ensure_orchestrate_module(effects: &[EffectDecl]) -> std::io::Result<PathBuf> {
+    write_orchestrate_module(&orchestrate_module_source(effects))
 }
 
-/// Like [`ensure_effects_shim_module`] but takes the already-rendered source
-/// texts directly — the self-heal path calls this instead of re-deriving them
-/// from `row_effects`/`row` each time.
-pub fn write_shim_module(shim_src: &str, orchestrate_src: &str) -> std::io::Result<PathBuf> {
-    write_module_dir(
-        "tidepool-effects",
-        &[
-            ("Effects.hs", shim_src),
-            ("Orchestrate.hs", orchestrate_src),
-        ],
-    )
-}
-
-/// Materialize an immutable invocation-specific `Tidepool.Effects.M` shim.
-/// Put this root ahead of the installed handler shim in the compiler include
-/// list. The existing artifact recipe then binds the selected root and the
-/// worker's dependency evidence binds its exact source bytes. Orchestration
-/// support continues to resolve from the installed handler shim.
-pub fn ensure_selected_effects_shim(effect_stack: &str) -> std::io::Result<PathBuf> {
-    write_module_dir(
-        "tidepool-selected-effects",
-        &[(
-            "Effects.hs",
-            &selected_effects_shim_module_source(effect_stack),
-        )],
-    )
+pub fn write_orchestrate_module(source: &str) -> std::io::Result<PathBuf> {
+    write_module_dir("tidepool-orchestrate", &[("Orchestrate.hs", source)])
 }
 
 /// Process-level write-through cache for the content-addressed generated-module
 /// directories, keyed on `(dir prefix, content hash)` — the prefix keeps the
-/// core dir's cache entries from colliding with the shim dir's (or any future
+/// core dir's cache entries from colliding with the orchestration dir's (or any future
 /// caller's) even on a coincidental hash match across independent content.
 ///
 /// Serializes concurrent writes within one process: the first call for a given
@@ -203,7 +127,7 @@ fn generated_module_write_cache(
 /// include root whose `Tidepool/` subtree holds every file). The dir hash
 /// covers every source TOGETHER, so a change to any one busts the whole dir —
 /// co-location means a caller that needs several files generated from the same
-/// inputs (e.g. the shim + orchestrate module, both keyed on the same row)
+/// inputs (e.g. Core and its stable authored facades)
 /// gets them for free, no extra include path to thread through.
 ///
 /// `dir_prefix` names the staging-dir family (`"tidepool-effects-core"`,
@@ -348,14 +272,14 @@ impl tidepool_runtime::session::OutputSink for CapturedOutput {
 mod tests {
     use super::*;
 
-    /// Core module + shim module + orchestrate module + preamble concatenated:
+    /// Core module + facade module + orchestrate module + preamble concatenated:
     /// content assertions that predate the importable-module split (and the
-    /// later Core/shim split) check against the union of all generated
+    /// stable vocabulary split) check against the union of all generated
     /// sources the eval sees. NOT compilable as one file (two `module`
     /// headers) — `.contains()` assertions only.
     fn generated_sources(effects: &[EffectDecl], user_library: bool) -> String {
         let mut s = effects_core_module_source();
-        s.push_str(&effects_shim_module_source(effects, &RowArgs::default()));
+        s.push_str(&effects_facade_module_source());
         s.push_str(&orchestrate_module_source(effects));
         s.push_str(&build_preamble(effects, user_library));
         s
@@ -437,7 +361,6 @@ mod tests {
                 type_params: &[],
                 default_row_args: &[],
                 prompt_card: None,
-                helpers_row_polymorphic: false,
             },
             EffectDecl {
                 type_name: "KV",
@@ -452,7 +375,6 @@ mod tests {
                 type_params: &[],
                 default_row_args: &[],
                 prompt_card: None,
-                helpers_row_polymorphic: false,
             },
         ];
         let preamble = generated_sources(&effects, false);
@@ -506,7 +428,6 @@ mod tests {
             type_params: &[],
             default_row_args: &[],
             prompt_card: None,
-            helpers_row_polymorphic: false,
         }];
         let preamble = build_preamble(&effects, false);
         let stack = build_effect_stack_type(&effects);
@@ -538,7 +459,6 @@ mod tests {
             type_params: &[],
             default_row_args: &[],
             prompt_card: None,
-            helpers_row_polymorphic: false,
         }];
         let preamble = build_preamble(&effects, false);
         let stack = build_effect_stack_type(&effects);
@@ -730,9 +650,10 @@ data Console a where
         let preamble = generated_sources(&decls, false);
         assert!(preamble.contains("data Ask a where"));
         assert!(preamble.contains("  AskWith :: Text -> Value -> Ask Value"));
-        assert!(preamble.contains(
-            "type M = Eff '[Console, KV, FsRead, FsWrite, Http, Exec, Llm, Git, Time, Entropy, Ask]"
-        ));
+        assert_eq!(
+            build_effect_stack_type(&decls),
+            "'[Console, KV, FsRead, FsWrite, Http, Exec, Llm, Git, Time, Entropy, Ask]"
+        );
     }
 
     #[test]
@@ -977,7 +898,6 @@ data Console a where
             type_params: &[],
             default_row_args: &[],
             prompt_card: None,
-            helpers_row_polymorphic: false,
         }];
         let preamble = build_preamble(&effects, false);
         let stack = build_effect_stack_type(&effects);
@@ -1012,76 +932,38 @@ data Console a where
         assert!(http.constructors.iter().any(|c| c.contains("HttpGet")));
     }
 
-    /// Snapshot test: blake3 of a fixed pair of strings must produce the same
-    /// hash in every process. If DefaultHasher (randomly seeded) were
-    /// accidentally reintroduced, this assertion fails because the computed
-    /// hash won't match the stable blake3 value baked into the expected dir
-    /// name.
     #[test]
     fn test_effects_hash_is_deterministic_across_calls() {
-        let eff = "module Tidepool.Effects where\n-- sentinel\n";
-        let orch = "module Tidepool.Orchestrate where\n-- sentinel\n";
-        let dir1 = write_shim_module(eff, orch).unwrap();
-        let dir2 = write_shim_module(eff, orch).unwrap();
+        let source = "module Tidepool.Orchestrate where\n-- sentinel\n";
+        let first = write_orchestrate_module(source).unwrap();
+        let second = write_orchestrate_module(source).unwrap();
+        assert_eq!(first, second);
+        let expected_hash = content_hash_hex(&[source.as_bytes()]);
         assert_eq!(
-            dir1, dir2,
-            "same source must yield same content-addressed dir"
+            first.file_name().unwrap().to_str().unwrap(),
+            format!("tidepool-orchestrate-{expected_hash}")
         );
-        // Verify the dir name encodes the known blake3 hash of BOTH sources
-        // (changing either busts the dir).
-        let expected_hash = content_hash_hex(&[eff.as_bytes(), orch.as_bytes()]);
-        let expected_suffix = format!("tidepool-effects-{expected_hash}");
-        let dir_name = dir1.file_name().unwrap().to_str().unwrap();
-        assert_eq!(
-            dir_name, expected_suffix,
-            "dir name must be the stable blake3 hash of both sources; got {dir_name}"
-        );
-        // A change to the orchestrate source alone busts the dir.
-        let dir3 = write_shim_module(eff, "module Tidepool.Orchestrate where\n-- other\n").unwrap();
-        assert_ne!(dir1, dir3, "orchestrate change must bust the dir");
-        std::fs::remove_dir_all(&dir1).ok();
-        std::fs::remove_dir_all(&dir3).ok();
+        let changed =
+            write_orchestrate_module("module Tidepool.Orchestrate where\n-- other\n").unwrap();
+        assert_ne!(first, changed);
+        std::fs::remove_dir_all(first).ok();
+        std::fs::remove_dir_all(changed).ok();
     }
 
     #[test]
     fn test_effects_module_self_heals_after_reap() {
-        // Unique source → unique content-addressed dir, so this can't collide
-        // with a real effect stack or a parallel test. Cleans up after.
-        let eff = format!(
-            "module Tidepool.Effects where\n-- probe {}\n",
-            std::process::id()
-        );
-        let orch = format!(
+        let source = format!(
             "module Tidepool.Orchestrate where\n-- probe {}\n",
             std::process::id()
         );
-        let dir = write_shim_module(&eff, &orch).unwrap();
-        let module = dir.join("Tidepool").join("Effects.hs");
-        let orch_module = dir.join("Tidepool").join("Orchestrate.hs");
-        assert!(module.exists(), "effects module written on first call");
-        assert!(
-            orch_module.exists(),
-            "orchestrate module written on first call"
-        );
-        // Staged off $TMPDIR — the macOS-reaped location we moved away from
-        // (unless neither XDG_CACHE_HOME nor HOME is set, the last-resort case).
-        if std::env::var_os("HOME").is_some() || std::env::var_os("XDG_CACHE_HOME").is_some() {
-            assert!(
-                !dir.starts_with(std::env::temp_dir()),
-                "effects module should not stage under $TMPDIR"
-            );
-        }
-        // Simulate the OS reaping the staging dir mid-session.
-        std::fs::remove_dir_all(&dir).unwrap();
-        assert!(!module.exists());
-        // The per-eval self-heal recreates both at the same content-addressed path.
-        let dir2 = write_shim_module(&eff, &orch).unwrap();
-        assert_eq!(dir, dir2, "content-addressed path is stable across calls");
-        assert!(module.exists(), "effects self-healed after reap");
-        assert!(orch_module.exists(), "orchestrate self-healed after reap");
-        assert_eq!(std::fs::read_to_string(&module).unwrap(), eff);
-        assert_eq!(std::fs::read_to_string(&orch_module).unwrap(), orch);
-        std::fs::remove_dir_all(&dir).ok();
+        let directory = write_orchestrate_module(&source).unwrap();
+        let module = directory.join("Tidepool/Orchestrate.hs");
+        assert_eq!(std::fs::read_to_string(&module).unwrap(), source);
+        std::fs::remove_dir_all(&directory).unwrap();
+        let recreated = write_orchestrate_module(&source).unwrap();
+        assert_eq!(directory, recreated);
+        assert_eq!(std::fs::read_to_string(&module).unwrap(), source);
+        std::fs::remove_dir_all(directory).ok();
     }
 
     #[test]

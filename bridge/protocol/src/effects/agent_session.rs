@@ -27,7 +27,6 @@ pub fn agent_session() -> Effect {
         ]),
         type_params: &[],
         default_row_args: &[],
-        helpers_row_polymorphic: true,
         extra_imports: &["import Tidepool.Agent.Session"],
         type_defs: Vec::new(),
         external_types: &[crate::schema::ExternalType {

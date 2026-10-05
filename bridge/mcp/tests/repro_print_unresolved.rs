@@ -61,8 +61,8 @@ fn run(code: &str) -> (Vec<String>, Result<String, String>) {
     let pp = prelude_dir();
     let dirs = tidepool_mcp::ensure_effects_module(&decls).expect("write effects module");
     let core = dirs.core.leak() as &Path;
-    let shim = dirs.shim.leak() as &Path;
-    let include = [pp, core, shim];
+    let orchestration = dirs.orchestration.leak() as &Path;
+    let include = [pp, core, orchestration];
 
     let captured = CapturedOutput::new();
     let mut handlers = frunk::hlist![ConsoleHandler];
@@ -90,7 +90,8 @@ fn pure_only_ok() {
 /// when the continuation is an `error`.
 #[test]
 fn print_then_error_resolves() {
-    let (out, r) = run(r#"send (Print (T.pack "MARK")) >> (error (T.pack "boom") :: M Int)"#);
+    let (out, r) =
+        run(r#"send (Print (T.pack "MARK")) >> (error (T.pack "boom") :: Eff '[Console] Int)"#);
     // Expect a Haskell error (NOT an unresolved-variable), with the marker captured.
     match &r {
         Err(e) => {

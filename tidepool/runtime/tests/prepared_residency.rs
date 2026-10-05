@@ -297,8 +297,8 @@ fn structural_resume_classifies_rejection_and_consumed_failure() {
     ));
     assert!(notebook.session.parked_holes().is_empty());
 
-    let failure =
-        notebook.prepare_expression("say \"pause\" >> (error \"after response\" :: M Int)");
+    let failure = notebook
+        .prepare_expression("say \"pause\" >> (error \"after response\" :: Eff '[Console] Int)");
     let ResidentOutcome::Suspended { hole, .. } = notebook
         .session
         .run_with_sites("consumed_response", failure.code())
@@ -366,7 +366,8 @@ fn custody_resume_classifies_rejected_frame_and_consumed_failure() {
         ResidentOutcome::Completed { .. }
     ));
 
-    let failure = notebook.prepare_expression("say \"pause\" >> (error \"after handle\" :: M Int)");
+    let failure = notebook
+        .prepare_expression("say \"pause\" >> (error \"after handle\" :: Eff '[Console] Int)");
     let ResidentOutcome::Suspended { hole, .. } = notebook
         .session
         .run_with_sites("consumed_handle", failure.code())

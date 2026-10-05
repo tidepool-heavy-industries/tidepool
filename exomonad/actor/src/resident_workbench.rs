@@ -363,19 +363,6 @@ impl ActorWorkbenchSource {
         }
     }
 
-    fn prepare_effectful(
-        &self,
-        scope: &crate::ActorCompileView,
-        effects: &str,
-    ) -> Result<WorkbenchCompilation, ResidentActorWorkbenchError> {
-        let mut prepared = self.prepare(scope);
-        let shim = tidepool_mcp::ensure_selected_effects_shim(effects).map_err(|error| {
-            ResidentActorWorkbenchError::ActorProtocol(format!("selected effect profile: {error}"))
-        })?;
-        prepared.include.insert(0, shim);
-        Ok(prepared)
-    }
-
     #[must_use]
     pub fn new(preamble: impl Into<Arc<str>>, base_include: Vec<PathBuf>) -> Self {
         Self {
@@ -4388,7 +4375,7 @@ where
                 use tidepool_runtime::session::turn::{check_activation_input, compile_activation_input};
                 reject_activation_declaration(session, context.placement.lexical_scope)?;
                 let view = actor_compile_view(session, context, &source)?;
-                let prepared = source.prepare_effectful(&view, &context.haskell_effects_alias)?;
+                let prepared = source.prepare(&view);
                 let preamble = insert_preamble_imports(&prepared.preamble, &prepared.imports);
                 let candidate = session.next_declaration_module().ok_or_else(|| {
                     ResidentActorWorkbenchError::InputMount("activation has no declaration plane".into())
@@ -4825,7 +4812,7 @@ where
                 } else {
                     &context.haskell_effects_alias
                 };
-                let prepared = source.prepare_effectful(&snapshot.view, effects)?;
+                let prepared = source.prepare(&snapshot.view);
                 #[cfg(test)]
                 assert!(
                     prepared
@@ -5084,8 +5071,7 @@ where
                         &source,
                         tidepool_runtime::session::NameScope::Current,
                     );
-                    let prepared =
-                        source.prepare_effectful(&view, &context.haskell_effects_alias)?;
+                    let prepared = source.prepare(&view);
                     let mut answer = crate::lookup::execute(
                         request,
                         provenance.fingerprint,
@@ -5137,7 +5123,7 @@ where
             .await?;
 
         let effects_alias = context.haskell_effects_alias.clone();
-        let prepared = source.prepare_effectful(&view, &effects_alias)?;
+        let prepared = source.prepare(&view);
         let source_layer_revision = crate::agent_spec::layer_revision(&context.source_layer);
         let mut answer = if crate::lookup::requires_inspection(
             &request,
@@ -5249,8 +5235,7 @@ where
         self.access
             .with_machine(context, move |session, context, _| {
                 let fresh_view = actor_compile_view(session, context, &revalidate_source)?;
-                let fresh_prepared = revalidate_source
-                    .prepare_effectful(&fresh_view, &context.haskell_effects_alias)?;
+                let fresh_prepared = revalidate_source.prepare(&fresh_view);
                 let source_revision_unchanged =
                     crate::agent_spec::layer_revision(&context.source_layer)
                         == source_layer_revision;
@@ -5556,7 +5541,6 @@ where
             },
         };
         let compiler_source = source.clone();
-        let effects = context.haskell_effects_alias.clone();
         self.access
             .log_include_roots_if_changed(context.placement.session, &context.source_layer);
         let inspection_span = tracing::info_span!(
@@ -5572,9 +5556,7 @@ where
             let _entered = inspection_span.enter();
             spawn_blocking_in_span(move || {
                 let inputs = inputs?;
-                let prepared = compiler_source
-                    .prepare_effectful(&compile_view, &effects)
-                    .map_err(|error| error.to_string())?;
+                let prepared = compiler_source.prepare(&compile_view);
                 let include = prepared
                     .include
                     .iter()
@@ -5758,7 +5740,7 @@ fn compile_fragment_off_checkout(
     effect_stack: &str,
     block: &ParsedBlock,
 ) -> Result<CompiledBlock, ResidentActorWorkbenchError> {
-    let prepared = source.prepare_effectful(&snapshot.view, effect_stack)?;
+    let prepared = source.prepare(&snapshot.view);
     let mut templates =
         resident_workbench_templates(&prepared.preamble, effect_stack, &prepared.imports);
     let include_refs: Vec<_> = prepared.include.iter().map(PathBuf::as_path).collect();
@@ -10315,7 +10297,7 @@ fn compile_host_binding_off_checkout(
     retained_imports: &[(SymbolIdentity, u64)],
 ) -> Result<(BoundBinder, CompiledTurn), ResidentActorWorkbenchError> {
     let view = view.clone().with_workbench_imports(&imports);
-    let prepared = source.prepare_effectful(&view, effects)?;
+    let prepared = source.prepare(&view);
     let templates = resident_workbench_templates(&prepared.preamble, effects, &prepared.imports);
     let include: Vec<_> = prepared.include.iter().map(PathBuf::as_path).collect();
     let retained_anchor = format!("__tidepoolCarrierAnchor{generation}");
@@ -10732,7 +10714,7 @@ fn compile_block_off_checkout(
     retained: &[(SymbolIdentity, u64)],
     visible_names: &[String],
 ) -> Result<CompiledBlock, ResidentActorWorkbenchError> {
-    let mut prepared = source.prepare_effectful(&compile_view, effect_stack)?;
+    let mut prepared = source.prepare(&compile_view);
     if let Some(prologue) = prologue {
         prepared.preamble = prepared.preamble.replacen(
             "\nmodule ",
@@ -10947,13 +10929,7 @@ where
     let inputs = session
         .capture_inspection_inputs(compile_view.session_view())
         .map_err(|error| ResidentActorWorkbenchError::Resident(ResidentError::Session(error)))?;
-    inspect_compile_view(
-        &compile_view,
-        &inputs,
-        source,
-        queries,
-        Some(&context.haskell_effects_alias),
-    )
+    inspect_compile_view(&compile_view, &inputs, source, queries)
 }
 
 fn inspect_compile_view(
@@ -10961,15 +10937,11 @@ fn inspect_compile_view(
     inputs: &tidepool_runtime::session::AdmittedInspectionInputs,
     source: &ActorWorkbenchSource,
     queries: &[InspectionQuery],
-    effects: Option<&str>,
 ) -> Result<
     Vec<Result<tidepool_runtime::session::InspectionResult, String>>,
     ResidentActorWorkbenchError,
 > {
-    let prepared = match effects {
-        Some(effects) => source.prepare_effectful(compile_view, effects)?,
-        None => source.prepare(compile_view),
-    };
+    let prepared = source.prepare(compile_view);
     let include_refs = prepared
         .include
         .iter()
@@ -13617,7 +13589,7 @@ mod request_tests {
                     .map_err(|error| {
                         ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
                     })?;
-                let prepared = source.prepare_effectful(&view, &context.haskell_effects_alias)?;
+                let prepared = source.prepare(&view);
                 Ok((view, inputs, prepared))
             })
             .await
@@ -13760,8 +13732,7 @@ mod request_tests {
                     .map_err(|error| {
                         ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
                     })?;
-                let prepared =
-                    inspection_source.prepare_effectful(&view, &context.haskell_effects_alias)?;
+                let prepared = inspection_source.prepare(&view);
                 Ok((view, inputs, prepared))
             })
             .await
@@ -14098,7 +14069,7 @@ mod request_tests {
                     .map_err(|error| {
                         ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
                     })?;
-                let prepared = source.prepare_effectful(&view, &context.haskell_effects_alias)?;
+                let prepared = source.prepare(&view);
                 Ok((view, inputs, prepared))
             })
             .await
@@ -14171,7 +14142,7 @@ mod request_tests {
                     .map_err(|error| {
                         ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
                     })?;
-                let prepared = source.prepare_effectful(&view, &context.haskell_effects_alias)?;
+                let prepared = source.prepare(&view);
                 Ok((view, inputs, prepared))
             })
             .await
@@ -17103,9 +17074,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             .unwrap();
         let source = ActorWorkbenchSource::new(preamble, include);
         let view = actor_compile_view(&session, &context, &source).unwrap();
-        let prepared = source
-            .prepare_effectful(&view, &context.haskell_effects_alias)
-            .unwrap();
+        let prepared = source.prepare(&view);
         let templates = resident_workbench_templates(
             &prepared.preamble,
             &context.haskell_effects_alias,
@@ -17163,9 +17132,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             CellSnapshotAdmission::PrivateExecution(&execution),
         )
         .unwrap();
-        let prepared = receiver_source
-            .prepare_effectful(&snapshot.view, &private_context.haskell_effects_alias)
-            .unwrap();
+        let prepared = receiver_source.prepare(&snapshot.view);
         let preamble =
             cell_module_preamble(&prepared.preamble, &snapshot.candidate_module.module_name())
                 .unwrap();
@@ -17409,12 +17376,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         let view = session.compile_view_for_execution(&execution).unwrap();
         let mut private_context = context.clone();
         private_context.placement.lexical_scope = execution.private_scope();
-        let prepared = source
-            .prepare_effectful(
-                &private_context.compile_view(view.clone()).unwrap(),
-                &private_context.haskell_effects_alias,
-            )
-            .unwrap();
+        let prepared = source.prepare(&private_context.compile_view(view.clone()).unwrap());
         let template = resident_cell_check_template(
             &prepared.preamble,
             &context.haskell_effects_alias,

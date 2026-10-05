@@ -4,4 +4,4 @@ shown <- do
   first <- display (Text.replicate 5000 "v")
   second <- display ("second" :: Text)
   pure (first, second)
-error "deliberate failure after displays" :: M ()
+error "deliberate failure after displays" :: Eff effects ()

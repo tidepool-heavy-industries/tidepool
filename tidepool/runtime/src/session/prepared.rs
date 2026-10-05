@@ -4743,7 +4743,7 @@ impl PreparedEngine {
             .map(|(id, _)| *id)
     }
 
-    /// Apply a rooted `Int -> M a` closure `f` to `argument` through the
+    /// Apply a rooted `Int -> Eff effects a` closure `f` to `argument` through the
     /// hosting program's `__applyEntry` root and finish the settled layer as
     /// far as reading its `Done`/`Suspended` shape — the caller
     /// ([`crate::session::resident::ResidentSession::run_rooted_entry_borrowed`])

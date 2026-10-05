@@ -117,15 +117,6 @@ fn write_blob(out: &mut String, label: &str, value: &str) {
     out.push_str(&format!("-- end {label} --\n\n"));
 }
 
-#[test]
-fn effects_shim_module_standard_golden_matches_committed_file() {
-    let generated = tidepool_mcp::effects_shim_module_source(
-        &tidepool_mcp::standard_decls(),
-        &tidepool_mcp::RowArgs::default(),
-    );
-    assert_matches_golden("effects_shim_module.standard.hs", &generated);
-}
-
 // ---------------------------------------------------------------------------
 // The derived tool-description effects index over the standard row.
 // ---------------------------------------------------------------------------
@@ -197,7 +188,7 @@ fn hardcoded_pins_survive_a_blind_regen() {
 // Import-gating pin: the generated eval-module text (both the
 // statement/evaluation module's `build_preamble` and the declaration module's
 // `session_decl_module_env`) is a content-addressed compile-cache key
-// (`ensure_effects_module_at`) — a single changed byte invalidates every
+// (`ensure_effects_module`) — a single changed byte invalidates every
 // cached compile for every user. Byte-exact golden files over the FULL
 // generated text (pragmas + imports + paginate alias, not a hand-reassembled
 // approximation) so a refactor of the import-gating machinery cannot
@@ -267,13 +258,13 @@ fn import_gating_no_effects_row_golden_matches_committed_file() {
 }
 
 /// [`tidepool_mcp::PaginateMode::Passthrough`] (what `tidepool-repl` uses)
-/// swaps only the `paginateResult` alias BODY relative to
+/// keeps pagination pure relative to
 /// [`tidepool_mcp::PaginateMode::Truncate`] — imports stay identical, and
 /// with no effects neither mode emits an alias at all. Not golden-backed: it
 /// asserts a structural relationship between two LIVE outputs, not a
 /// hand-kept literal, so there is nothing to migrate.
 #[test]
-fn passthrough_mode_swaps_only_the_paginate_alias_body() {
+fn passthrough_mode_removes_pagination_membership_constraints() {
     let decls = tidepool_mcp::standard_decls();
     let truncate = tidepool_mcp::build_preamble_non_interactive(&decls, false);
     let passthrough = tidepool_mcp::build_preamble_non_interactive_mode(
@@ -283,13 +274,15 @@ fn passthrough_mode_swaps_only_the_paginate_alias_body() {
     );
     assert_eq!(
         passthrough,
-        truncate.replacen(
-            "paginateResult = paginateTrunc\n",
-            "paginateResult _ v = pure v\n",
-            1,
-        ),
-        "PaginateMode::Passthrough must differ from Truncate only in the \
-         paginateResult alias body"
+        truncate
+            .replacen("Members '[Console, KV] effs => ", "", 1,)
+            .replacen(
+                "paginateResult = paginateTrunc\n",
+                "paginateResult _ v = pure v\n",
+                1,
+            ),
+        "PaginateMode::Passthrough changes the alias body and removes its \
+         unused membership constraints"
     );
 
     let truncate_empty = tidepool_mcp::build_preamble_non_interactive(&[], false);

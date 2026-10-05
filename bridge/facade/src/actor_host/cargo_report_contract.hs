@@ -4,7 +4,7 @@ module CargoReportContract where
 
 import Control.Monad.Freer (Eff, Member)
 import qualified Tidepool.Cargo as Cargo
-import Tidepool.Effects (Exec, ExecError (..), M)
+import Tidepool.Effects (Exec, ExecError (..))
 
 cargoCheckInOpenRow :: Member Exec effects => Eff effects (Either Cargo.CargoError Cargo.CargoReport)
 cargoCheckInOpenRow = Cargo.cargoCheck []
@@ -12,7 +12,7 @@ cargoCheckInOpenRow = Cargo.cargoCheck []
 cargoClippyInOpenRow :: Member Exec effects => Eff effects (Either Cargo.CargoError Cargo.CargoReport)
 cargoClippyInOpenRow = Cargo.cargoClippy []
 
-result :: M (Bool, Bool, Bool, Bool)
+result :: Member Exec effects => Eff effects (Bool, Bool, Bool, Bool)
 result = do
   nonzero <- cargoCheckInOpenRow
   malformedZero <- cargoClippyInOpenRow

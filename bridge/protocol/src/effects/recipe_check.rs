@@ -49,7 +49,6 @@ pub fn recipe_check() -> Effect {
         prompt_card: None,
         type_params: &[],
         default_row_args: &[],
-        helpers_row_polymorphic: true,
         extra_imports: &[],
         type_defs: vec![],
         external_types: &[],

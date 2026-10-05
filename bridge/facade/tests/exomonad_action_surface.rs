@@ -39,23 +39,37 @@ fn exomonad_include_paths() -> Vec<PathBuf> {
 }
 
 #[test]
-fn node_mailboxes_compile_with_opaque_ids() {
+fn parameterized_invocation_row_keeps_external_nominal_owner_imports() {
+    use tidepool_testing::effect_surface::{TestEffectSurface, TestEffectSurfaceOptions};
+
     eval_harness::require_extract();
-    let effects = tidepool_mcp::ensure_effects_module(&[
-        tidepool_mcp::worktree_decl(),
-        tidepool_mcp::event_decl(),
-        tidepool_mcp::green_decl(),
-    ])
-    .expect("materialize Node effects");
-    let mut include = effects.include_paths().to_vec();
-    include.push(eval_harness::prelude_path());
-    let refs = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
-    compile_haskell(
-        include_str!("exomonad_action_surface/node_mailbox_surface.hs"),
-        "result",
-        &refs,
+    let protocol = tempfile::tempdir().unwrap();
+    std::fs::write(
+        protocol.path().join("ExternalRowProtocol.hs"),
+        include_str!("exomonad_action_surface/ExternalRowProtocol.hs"),
     )
-    .expect("Node mailboxes use the generated opaque MailboxId surface");
+    .unwrap();
+    let declarations = [tidepool_mcp::actor_local_decl()];
+    let surface = TestEffectSurface::with_options(
+        &declarations,
+        TestEffectSurfaceOptions {
+            row_args: tidepool_mcp::RowArgs::at("ActorLocal", ["ExternalRowProtocol.Protocol"])
+                .importing(["qualified ExternalRowProtocol"]),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let mut includes = surface.include_path_refs();
+    includes.push(protocol.path());
+    let source = tidepool_runtime::session::assemble_opaque_expression_module(
+        surface.preamble(),
+        "result",
+        surface.row(),
+        "pure (41 :: Int)",
+        tidepool_runtime::session::ExpressionLift::Effectful,
+    );
+    compile_haskell(&source, "result", &includes)
+        .expect("the explicit invocation row resolves its external nominal protocol owner");
 }
 
 #[test]
@@ -66,10 +80,7 @@ fn reusable_event_and_async_helpers_compile_with_narrow_rows() {
         tidepool_mcp::green_decl(),
     ])
     .expect("materialize reusable helper vocabulary");
-    let mut include =
-        vec![tidepool_mcp::ensure_selected_effects_shim("'[]")
-            .expect("materialize empty selected row")];
-    include.extend_from_slice(&effects.include_paths());
+    let mut include = effects.include_paths().to_vec();
     include.push(eval_harness::prelude_path());
     let refs = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
 

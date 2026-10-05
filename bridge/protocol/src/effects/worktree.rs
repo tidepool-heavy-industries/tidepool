@@ -99,7 +99,6 @@ pub fn worktree() -> Effect {
         prompt_card: None,
         type_params: &[],
         default_row_args: &[],
-        helpers_row_polymorphic: true,
         // Rich authored helpers are defined in the library module. A row
         // carrying Worktree imports that module, while generated helpers are
         // re-exported from the same place so each name has one public origin.

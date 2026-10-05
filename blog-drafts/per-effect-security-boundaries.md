@@ -100,7 +100,7 @@ security post.)
   lands at "Tidepool's bet" (¶3) and is stated plainly only at the end of the
   three-bullet spine.
 - Concrete before/after: a real bash disaster (unset-var `rm -rf`) vs the same
-  intent as an `M`-program hitting the Fs sandbox.
+  intent as an `Eff` program hitting the Fs sandbox.
 - Numbers for the fluency claim: eval-vs-bash token counts from the track-2
   optimization-loop rounds.
 - Honest-limits section: handler quality is the TCB; `Exec` grants reopen the

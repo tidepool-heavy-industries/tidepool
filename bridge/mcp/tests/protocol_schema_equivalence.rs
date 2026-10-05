@@ -18,7 +18,6 @@ fn assert_decl_matches_schema(decl: &tidepool_mcp::EffectDecl, eff: &tidepool_pr
         helpers,
         type_params,
         default_row_args,
-        helpers_row_polymorphic,
     } = decl;
 
     assert_eq!(*type_name, eff.name, "type_name");
@@ -53,10 +52,6 @@ fn assert_decl_matches_schema(decl: &tidepool_mcp::EffectDecl, eff: &tidepool_pr
         default_row_args.to_vec(),
         eff.default_row_args.to_vec(),
         "default_row_args"
-    );
-    assert_eq!(
-        *helpers_row_polymorphic, eff.helpers_row_polymorphic,
-        "helpers_row_polymorphic"
     );
 }
 
@@ -145,7 +140,7 @@ fn read_state_decl_matches_the_schema_exactly() {
 /// Written to run BEFORE the flip, against the still-hand-written
 /// `green_effect_def!` macro — see the module doc. The widest of the four:
 /// `HelperBody::IntDecode` (`asyncStatus`) and `HelperBody::AsyncSpawnBody`
-/// (`asyncSpawn`, the one helper in this whole schema fixed to concrete `M`
+/// (`asyncSpawn`, which existentially packages the spawned body’s row
 /// rather than `Eff effs`) both make their first and only real appearance
 /// here.
 #[test]

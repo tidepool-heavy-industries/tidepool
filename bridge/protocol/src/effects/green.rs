@@ -70,7 +70,6 @@ pub fn green() -> Effect {
         ]),
         type_params: &[],
         default_row_args: &[],
-        helpers_row_polymorphic: true,
         extra_imports: &["import Tidepool.Async"],
         type_defs: vec![TypeDef {
             name: "AsyncStatus",
@@ -117,7 +116,7 @@ pub fn green() -> Effect {
                         name: "body",
                         // The body row is existential: construction chooses
                         // the caller's row, while the generated Core GADT stays
-                        // independent of every per-window `M` synonym.
+                        // independent of any authored effect-row synonym.
                         ty: HsType::func(
                             HsType::Int,
                             HsType::app(

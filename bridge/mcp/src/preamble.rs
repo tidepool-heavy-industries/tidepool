@@ -22,7 +22,7 @@ pub use tidepool_runtime::session::{PREAMBLE_DEFAULT_DECL, PREAMBLE_IMPORT_MARKE
 
 /// The canonical ordered import lines shared by the eval `Expr` module and the
 /// session decl modules — the SINGLE source of truth for the eval vocabulary
-/// (`M`, the effect verbs from `Tidepool.Effects`, the `Tidepool.Prelude`
+/// (the effect verbs from `Tidepool.Effects`, the `Tidepool.Prelude`
 /// shadows, and the `T.`/`Map.`/`L.`/`Set.`/… qualified namespaces). Excludes
 /// the `module Expr where` header and the `default` decl (those are eval-module
 /// scaffolding, not imports). `user_library` inserts `import Library` — eval
@@ -31,7 +31,7 @@ pub use tidepool_runtime::session::{PREAMBLE_DEFAULT_DECL, PREAMBLE_IMPORT_MARKE
 ///
 /// `hide_note`: also hide Prelude's `note` (`Control.Error.Util`'s `a ->
 /// Maybe b -> Either a b`) from the unqualified surface — set exactly when
-/// `AskUser` is in the compiling row, since `Tidepool.Form.note :: Text -> M
+/// `AskUser` is in the compiling row, since `Tidepool.Form.note :: Member AskUser effects => Text -> Eff effects
 /// ()` (the display-channel helper, auto-imported alongside `askUser`/
 /// `choose` whenever `AskUser` is present — see `extra_imports_for!`)
 /// otherwise collides with it (`Ambiguous occurrence`). `false` everywhere
@@ -64,7 +64,7 @@ impl PreludeHides {
 fn eval_import_lines(user_library: bool, hides: PreludeHides) -> Vec<&'static str> {
     let mut v = vec![
         hides.prelude_import(),
-        // Effect GADTs, `M`, the `error` shadow, and the send-wrapper helpers
+        // Effect GADTs, the `error` shadow, and the send-wrapper helpers
         // live in the generated Tidepool.Effects module so library AND session
         // decl modules can import the SAME types and define effectful verbs.
         "import Tidepool.Effects",
@@ -189,23 +189,10 @@ pub fn session_decl_module_env_hiding(
 
 /// The [`ModuleEnv`] for persistent authored declarations.
 ///
-/// This excludes the per-window `Tidepool.Effects` shim, whose `M` alias
-/// varies with the active interpreter, and imports the stable
-/// `Tidepool.Effects.Authored` facade instead. Persistent effectful helpers
-/// must therefore state their real row-polymorphic contract with `Member`
-/// constraints. Their source is compiled exactly as authored; the declaration
-/// module never rewrites or discards type signatures.
-///
-/// Effect companion imports (`Tidepool.Form` etc.) are still excluded, since
-/// they depend on the shim's row being genuinely present. Everything else —
-/// `Tidepool.Prelude` (unqualified `Text`, `object`, the pure vocabulary every
-/// turn has ambient), the qualified namespaces, Aeson — stays, so a decl a
-/// model authors in turn-module scope validates under the SAME names a real
-/// turn has. The lens-free [`ModuleEnv::standalone_default`] is NOT a
-/// substitute: it has no Prelude, so `data X = X Text` failed to validate
-/// even though `Text` is ambient in every turn (companion dogfood,
-/// 2026-08-14 — a fatal boot-class bug before the retry fix that landed with
-/// this env).
+/// Persistent effectful helpers state their row contract with `Member`
+/// constraints. All effect facades are stable vocabulary; declarations compile
+/// authored signatures verbatim, including any explicitly authored aliases.
+/// Companion imports remain explicit for this declaration surface.
 #[must_use]
 pub fn pure_decl_module_env() -> ModuleEnv {
     let mut imports: Vec<String> = eval_import_lines(false, PreludeHides::default())
@@ -320,7 +307,6 @@ pub fn orchestrate_module_source(effects: &[EffectDecl]) -> String {
     out.push_str("module Tidepool.Orchestrate where\n");
     out.push_str("import Tidepool.Prelude hiding (error)\n");
     out.push_str("import Tidepool.Effects.Authored\n");
-    // Use stable vocabulary rather than the invocation's concrete M alias.
     // Each helper declares only the effects its body performs.
     out.push_str("import Control.Monad.Freer hiding (run)\n");
     out.push_str("import qualified Tidepool.Data.Text as T\n");
@@ -544,11 +530,7 @@ pub fn orchestrate_module_source(effects: &[EffectDecl]) -> String {
         // paginateTrunc. Console variant emits a note (needs putStrLn); the
         // pure variant truncates silently when there is no Console.
         if has_console {
-            let constraints = if has_kv {
-                "Members '[Console, KV] effs"
-            } else {
-                "Member Console effs"
-            };
+            let constraints = truncation_constraints(has_console, has_kv).unwrap();
             out.push_str(&format!(
                 "paginateTrunc :: {constraints} => Int -> Value -> Eff effs Value\n"
             ));
@@ -723,18 +705,38 @@ fn companion_import(import: &'static str, has_source_effect: bool) -> &'static s
     }
 }
 
+// Shared by the installed truncation helper and its invocation-local alias.
+fn truncation_constraints(console: bool, kv: bool) -> Option<&'static str> {
+    match (console, kv) {
+        (true, true) => Some("Members '[Console, KV] effs"),
+        (true, false) => Some("Member Console effs"),
+        (false, _) => None,
+    }
+}
+
 /// Emit the mode-selected `paginateResult` alias into the eval expr module.
 /// `Tidepool.Orchestrate` exports `paginateInteractive` and/or `paginateTrunc`;
 /// the result wrapper in `eval_prep.rs` calls `paginateResult`, so the expr
 /// module aliases one of them by mode (or, for [`PaginateMode::Passthrough`],
 /// binds a local pass-through instead of aliasing an `Orchestrate` export).
-/// Emitted only when the stack has effects — `M`/`paginateResult` are
-/// otherwise unused.
+/// Emitted only for effectful evaluation. The helper keeps its own minimum
+/// row contract; the invocation renderer pins the actual executable row.
 fn paginate_alias(out: &mut String, effects: &[EffectDecl], mode: PaginateMode) {
     if effects.is_empty() {
         return;
     }
-    out.push_str("paginateResult :: Int -> Value -> M Value\n");
+    let has = |name| effects.iter().any(|effect| effect.type_name == name);
+    let constraints = match mode {
+        PaginateMode::Interactive if has("Ask") => Some("Member Ask effs"),
+        PaginateMode::Interactive | PaginateMode::Truncate => {
+            truncation_constraints(has("Console"), has("KV"))
+        }
+        PaginateMode::Passthrough => None,
+    };
+    let context = constraints.map_or(String::new(), |constraints| format!("{constraints} => "));
+    out.push_str(&format!(
+        "paginateResult :: {context}Int -> Value -> Eff effs Value\n"
+    ));
     match mode {
         PaginateMode::Passthrough => {
             out.push_str("paginateResult _ v = pure v\n");
@@ -1119,18 +1121,27 @@ mod vocab_tests {
     fn notebook_preamble_omits_eval_pagination_without_changing_imports() {
         let effects = [crate::ask_decl()];
         let notebook = build_notebook_preamble(&effects, true);
-        for (mode, pagination) in [
+        for (mode, context, pagination) in [
             (
                 PaginateMode::Interactive,
+                "Member Ask effs => ",
                 "paginateResult = paginateInteractive\n\n",
             ),
-            (PaginateMode::Truncate, "paginateResult = paginateTrunc\n\n"),
-            (PaginateMode::Passthrough, "paginateResult _ v = pure v\n\n"),
+            (
+                PaginateMode::Truncate,
+                "",
+                "paginateResult = paginateTrunc\n\n",
+            ),
+            (
+                PaginateMode::Passthrough,
+                "",
+                "paginateResult _ v = pure v\n\n",
+            ),
         ] {
             let eval = build_preamble_non_interactive_mode(&effects, true, mode);
             assert_eq!(
                 eval,
-                format!("{notebook}paginateResult :: Int -> Value -> M Value\n{pagination}")
+                format!("{notebook}paginateResult :: {context}Int -> Value -> Eff effs Value\n{pagination}")
             );
         }
         assert!(!notebook.contains("paginateResult"));
@@ -1157,7 +1168,7 @@ mod vocab_tests {
         assert!(!notebook.contains("paginateResult"));
         assert_eq!(
             preamble.strip_prefix(&notebook),
-            Some("paginateResult :: Int -> Value -> M Value\npaginateResult = paginateTrunc\n\n")
+            Some("paginateResult :: Int -> Value -> Eff effs Value\npaginateResult = paginateTrunc\n\n")
         );
 
         let declarations =
