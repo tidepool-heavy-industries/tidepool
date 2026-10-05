@@ -13,6 +13,7 @@ import shlex
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 import tomllib
 
@@ -35,7 +36,7 @@ UNSET_ENVIRONMENT = (
     "TIDEPOOL_EXTRACT_DAEMON_SOCKET", "TIDEPOOL_COMPILER_MODULES",
     "TIDEPOOL_COMPILER_DEPLOYMENT", "TIDEPOOL_EXTRACT_WORKER",
     "TIDEPOOL_EXTRACT", "TIDEPOOL_PRELUDE_DIR", "TIDEPOOL_GHC_LIBDIR",
-    "EXOMONAD_EMBEDDED_ASSET_ROOT", "EXOMONAD_WORKSPACE_GITLINK", "LD_LIBRARY_PATH", "TIDEPOOL_EXTRACT_NO_DAEMON",
+    "EXOMONAD_EMBEDDED_ASSET_ROOT", "EXOMONAD_WORKSPACE_GITLINK", "EXOMONAD_WORKSPACE_GIT_BUNDLE", "LD_LIBRARY_PATH", "TIDEPOOL_EXTRACT_NO_DAEMON",
 )
 ARTIFACT_TARGETS = {
     "bin/exomonad-unwrapped": "//bridge/facade:exomonad",
@@ -209,6 +210,24 @@ def verify_workspace_gitlink(source: Path, path: Path) -> dict:
     return record
 
 
+def verify_workspace_bundle(bundle: Path, record: dict, git: Path) -> None:
+    heads = subprocess.check_output([str(git), "bundle", "list-heads", str(bundle)], text=True)
+    if heads != f'{record["revision"]} HEAD\n{record["revision"]} refs/heads/workspace\n':
+        raise ValueError("workspace Git bundle differs from its exact recorded Gitlink")
+    # Import into an empty repository to reject prerequisite-only or damaged
+    # bundles. Git verifies the original commit and all reachable object hashes.
+    with tempfile.TemporaryDirectory(prefix="qualify-workspace-git-") as temporary:
+        repository = Path(temporary) / "workspace.git"
+        subprocess.run([str(git), "-c", "protocol.file.allow=always", "clone", "--quiet",
+                        "--bare", "--", str(bundle), str(repository)], check=True)
+        actual = subprocess.check_output([str(git), "-C", str(repository), "rev-parse",
+                                          "refs/heads/workspace^{commit}"], text=True).strip()
+        if actual != record["revision"]:
+            raise ValueError("workspace bundle contains a different commit object")
+        subprocess.run([str(git), "-C", str(repository), "fsck", "--no-dangling"], check=True,
+                       stdout=subprocess.DEVNULL)
+
+
 def native_environment(root: Path) -> dict:
     ghc = (root / "share/exomonad/ghc-libdir.txt").read_text().strip()
     tools = (root / "share/exomonad/runtime-tools").resolve(strict=True)
@@ -220,6 +239,7 @@ def native_environment(root: Path) -> dict:
         "TIDEPOOL_GHC_LIBDIR": ghc,
         "EXOMONAD_EMBEDDED_ASSET_ROOT": str(root / "share/exomonad/web"),
         "EXOMONAD_WORKSPACE_GITLINK": str(root / "share/exomonad/workspace-gitlink.json"),
+        "EXOMONAD_WORKSPACE_GIT_BUNDLE": str(root / "share/exomonad/workspace.bundle"),
         "LD_LIBRARY_PATH": str(root / "lib/tidepool"),
         "PATH": str(tools / "bin") + ":" + str(root / "bin"),
         "TIDEPOOL_KEEP_TEST_LOGS": "1",
@@ -299,7 +319,9 @@ def assemble(args) -> None:
         shutil.copy2(source.resolve(strict=True), root / "lib/tidepool" / source.name)
     shutil.copy2(args.harness_revision, shared / "harness-source-revision.txt")
     shutil.copy2(args.workspace_gitlink, shared / "workspace-gitlink.json")
+    shutil.copy2(args.workspace_git_bundle, shared / "workspace.bundle")
     tools, ghc = nix_path(args.runtime_tools), nix_path(args.ghc_libdir)
+    verify_workspace_bundle(shared / "workspace.bundle", workspace_gitlink(shared / "workspace-gitlink.json"), tools / "bin/git")
     (shared / "runtime-tools").symlink_to(tools)
     (shared / "ghc-libdir.txt").write_text(str(ghc) + "\n")
     wrapper = root / "bin/exomonad"
@@ -334,6 +356,8 @@ def freeze(args) -> Path:
         raise ValueError("qualification requires the native source-backed bundle")
     verify_build_contract(source, args.bundle, contract, args.expect_profile)
     recorded_workspace = verify_workspace_gitlink(source, args.bundle / "share/exomonad/workspace-gitlink.json")
+    verify_workspace_bundle(args.bundle / "share/exomonad/workspace.bundle", recorded_workspace,
+                            (args.bundle / "share/exomonad/runtime-tools").resolve(strict=True) / "bin/git")
     haskell_sources = declared_haskell_sources(source, args.bundle)
     lock = tomllib.loads((source / "Cargo.lock").read_text())
     harness = [row for row in lock["package"] if row["name"] == "harness"]
@@ -553,7 +577,7 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     stage = commands.add_parser("assemble")
-    for key in ("output", "host", "view-helper", "frontend", "worker", "libtest", "build-sources", "workspace-gitlink", "sources", "assets", "libraries", "harness-revision", "runtime-tools", "ghc-libdir", "entrypoint-template"):
+    for key in ("output", "host", "view-helper", "frontend", "worker", "libtest", "build-sources", "workspace-gitlink", "workspace-git-bundle", "sources", "assets", "libraries", "harness-revision", "runtime-tools", "ghc-libdir", "entrypoint-template"):
         stage.add_argument("--" + key, required=True, type=Path)
     stage.add_argument("--profile", required=True, choices=("fast-dev", "debug", "production"))
     frozen = commands.add_parser("freeze")

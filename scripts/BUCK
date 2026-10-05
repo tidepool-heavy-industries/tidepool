@@ -23,7 +23,24 @@ native_source_snapshot(
         ("//:operator_test_sources", ""),
         ("//bridge/haskell:main_acceptance_script_tree", ""),
         ("//build/rust:qualification_inputs", ""),
+        ("//build/package:qualification_inputs", ""),
     ],
+)
+
+sh_test(
+    name = "workspace_git_resource_tests",
+    test = "run-unittests.sh",
+    args = ["scripts.tests.test_workspace_git_resource"],
+    env = {
+        "TIDEPOOL_TEST_PYTHON": "$(exe toolchains//:python)",
+        "TIDEPOOL_SCRIPT_TEST_ROOT": "$(location :script_test_resources)",
+        "EXOMONAD_WORKSPACE_GIT_BUNDLE": "$(location //build/rust:workspace_git_bundle)",
+        "EXOMONAD_WORKSPACE_GITLINK": "$(location //build/rust:workspace_gitlink)",
+        "TIDEPOOL_SCRIPT_RESOURCE_ENV": "EXOMONAD_WORKSPACE_GIT_BUNDLE EXOMONAD_WORKSPACE_GITLINK",
+        "PATH": read_root_config("nix", "action_path"),
+    },
+    resources = [":script_test_resources", "//build/rust:workspace_git_bundle", "//build/rust:workspace_gitlink", "toolchains//:python", "toolchains//:test_tools_closure"],
+    visibility = ["PUBLIC"],
 )
 
 sh_test(

@@ -20,6 +20,12 @@ class ConfigureRuntimeStdlibTests(unittest.TestCase):
         (self.root / "scripts").mkdir()
         shutil.copyfile(SCRIPT, self.root / "scripts/buck2-configure.sh")
         shutil.copyfile(SCRIPT.parent / "toolchain-inputs.sh", self.root / "scripts/toolchain-inputs.sh")
+        (self.root / "scripts/workspace-git-resource.py").write_text("""import os, pathlib, sys
+if os.environ.get('TEST_WORKSPACE_FAILURE'):
+    sys.exit('workspace resource refused')
+pathlib.Path(sys.argv[sys.argv.index('--output') + 1]).mkdir()
+print('1' * 40)
+""")
         (self.root / "flake.nix").write_text("pinned toolchain\n")
         subprocess.run(["git", "init", "-q", str(self.root)], check=True)
         subprocess.run(["git", "-C", str(self.root), "add", "flake.nix"], check=True)
@@ -30,6 +36,15 @@ class ConfigureRuntimeStdlibTests(unittest.TestCase):
         self.capture.mkdir()
         self.log = self.root / "nix.log"
         self.executable("mountpoint", "#!/bin/sh\nexit 0\n")
+        self.executable("nix-store", f"""#!{sys.executable}
+import json, os, sys
+from pathlib import Path
+args = sys.argv[1:]
+root = args[args.index('--add-root') + 1]
+Path(root).symlink_to(args[-1])
+with open(os.environ['TEST_NIX_LOG'], 'a') as log:
+    log.write(json.dumps(['store-root', root, args[-1]]) + '\\n')
+""")
         self.outputs = self.root / "outputs"
         self.executable("ghc", '#!/bin/sh\necho "$TEST_GHC_ROOT/lib"\n')
         self.executable("nix", f"""#!{sys.executable}
@@ -66,6 +81,10 @@ elif args[0] == 'path-info':
     if not Path(args[-1]).is_dir():
         sys.exit('output unavailable')
     print(args[-1])
+elif args[:2] == ['store', 'add-path']:
+    target = Path(os.environ['TEST_OUTPUTS']) / args[args.index('--name') + 1]
+    target.mkdir(parents=True, exist_ok=True)
+    print(target)
 else:
     print(output(args[-1].split('.')[-2]))
 """)
@@ -229,14 +248,23 @@ else:
         records = [line.split("\t") for line in (generation / "outputs.tsv").read_text().splitlines()]
         calls = [json.loads(line) for line in self.log.read_text().splitlines()]
         evaluated = {call[-1].removesuffix(".outPath") for call in calls if call[0] == "eval" and "--impure" not in call}
-        self.assertEqual({reference for _, reference, _, _ in records}, evaluated)
-        self.assertEqual(len(records), len(evaluated))
-        for _, reference, output, root in records:
+        packages = [row for row in records if not row[1].startswith('gitlink:')]
+        resources = [row for row in records if row[1].startswith('gitlink:')]
+        self.assertEqual({reference for _, reference, _, _ in packages}, evaluated)
+        self.assertEqual(len(packages), len(evaluated))
+        self.assertEqual(len(resources), 1)
+        for _, reference, output, root in packages:
             self.assertTrue(Path(root).is_symlink())
             self.assertEqual(str(Path(root).resolve()), output)
             self.assertTrue(any(call[0] == "build" and call[-1] == reference and
                                 call[call.index("--out-link") + 1] == root for call in calls))
             self.assertIn(["path-info", "--", output], calls)
+        name, reference, output, root = resources[0]
+        self.assertEqual(name, 'workspace-git-resource')
+        self.assertEqual(reference, 'gitlink:' + '1' * 40)
+        self.assertEqual(str(Path(root).resolve()), output)
+        self.assertIn(['store-root', root, output], calls)
+        self.assertIn('workspace_git_resource = ' + output, (generation / 'config').read_text())
         self.assertEqual((generation / "status").read_text(), "configured\n")
         self.assertEqual((generation / "config").read_bytes(), (self.root / ".buckconfig.local").read_bytes())
         self.assertIn(str(generation), result.stdout)
@@ -279,6 +307,12 @@ else:
         generation, = self.generations()
         self.assertIn("buck-browser-npm-cache", (generation / "outputs.tsv").read_text())
         self.assertTrue((generation / "roots/buck-ghc").is_symlink())
+
+    def test_workspace_refusal_preserves_configuration_and_failed_generation(self):
+        (self.root / ".buckconfig.local").write_text("previous configuration\n")
+        result = self.run_configure(extra_env={"TEST_WORKSPACE_FAILURE": "1"})
+        self.assert_failed_generation_preserves_config(result)
+        self.assertIn("workspace resource refused", result.stderr)
 
     def test_wrong_root_refuses_configuration(self):
         (self.root / ".buckconfig.local").write_text("previous configuration\n")

@@ -614,11 +614,18 @@ def test_runtime_inputs(package_name, target_name, unit=False):
         resources.append("toolchains//:rustfmt")
     if package_name == "tidepool":
         env["EXOMONAD_WORKSPACE_GITLINK"] = "$(location //build/rust:workspace_gitlink)"
+        env["EXOMONAD_WORKSPACE_GIT_BUNDLE"] = "$(location //build/rust:workspace_git_bundle)"
         resources.append("//build/rust:workspace_gitlink")
+        resources.append("//build/rust:workspace_git_bundle")
     return env, sorted(set(resources)), worker
 
 
 def runtime_arguments(env, resources, worker, resource_env=None):
+    env = dict(env)
+    resource_env = dict(resource_env or {})
+    for key in ("EXOMONAD_WORKSPACE_GITLINK", "EXOMONAD_WORKSPACE_GIT_BUNDLE"):
+        if key in env:
+            resource_env[key] = env.pop(key)
     lines = []
     if env:
         lines.append("    env = {")
@@ -886,6 +893,7 @@ def facade_test_cases(binary):
         "TIDEPOOL_TEST_BASH": "$(exe toolchains//:bash)",
         "TIDEPOOL_TEST_SLEEP": "$(exe toolchains//:sleep)",
         "EXOMONAD_WORKSPACE_GITLINK": "$(location //build/rust:workspace_gitlink)",
+        "EXOMONAD_WORKSPACE_GIT_BUNDLE": "$(location //build/rust:workspace_git_bundle)",
     }
     host_paths = {
         **process_paths,
@@ -902,7 +910,7 @@ def facade_test_cases(binary):
         "TIDEPOOL_BROWSER_NODE": "$(exe toolchains//:browser_node)",
         "PLAYWRIGHT_BROWSERS_PATH": "$(location toolchains//:playwright_browsers)",
     }
-    process_resources = ["toolchains//:test_tools_closure", "//build/rust:workspace_gitlink"]
+    process_resources = ["toolchains//:test_tools_closure", "//build/rust:workspace_gitlink", "//build/rust:workspace_git_bundle"]
     host_resources = process_resources + [
         "//web:dist",
         "//bridge/haskell:facade_embedded_sources",

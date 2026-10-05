@@ -147,6 +147,13 @@ tar_path="$(output_path tar)"
 gzip="$(output_path gzip)"
 python="$(output_path python)"
 bubblewrap="$(output_path bubblewrap)"
+workspace_revision=$("$python/bin/python3" scripts/workspace-git-resource.py \
+  --source-root "$PWD" --output "$generation/workspace-git-resource" --git "$git_path/bin/git")
+workspace_git_resource=$(nix store add-path --name "exomonad-workspace-$workspace_revision" "$generation/workspace-git-resource")
+nix-store --add-root "$generation/roots/workspace-git-resource" --indirect --realise "$workspace_git_resource" >/dev/null
+printf 'workspace-git-resource\tgitlink:%s\t%s\t%s\n' \
+  "$workspace_revision" \
+  "$workspace_git_resource" "$generation/roots/workspace-git-resource" >> "$generation/outputs.tsv"
 runtime_stdlib_sources=
 runtime_stdlib_products=
 runtime_stdlib_extract=
@@ -212,6 +219,7 @@ browser_test_closure = $browser_test_closure
 test_tools = $test_tools
 test_tools_closure = $test_tools_closure
 matched_harness_source = $matched_harness_source
+workspace_git_resource = $workspace_git_resource
 git = $git_path/bin/git
 bash = $bash_path/bin/bash
 coreutils = $coreutils/bin

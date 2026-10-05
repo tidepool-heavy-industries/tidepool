@@ -162,7 +162,7 @@ fn emit_scaffold_package(repository: PathBuf) {
         jev_dsl_url(&example_flake)
     ));
     out.push_str(&format!(
-        "#[cfg_attr(test, allow(dead_code))]\npub(crate) static DEFAULT_WORKSPACE_URL: &str = {:?};\n",
+        "pub(crate) static DEFAULT_WORKSPACE_URL: &str = {:?};\n",
         "https://github.com/tidepool-heavy-industries/exomonad-default-workspace.git"
     ));
 

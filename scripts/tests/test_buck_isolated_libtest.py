@@ -98,6 +98,7 @@ class IsolatedLibtestTests(unittest.TestCase):
                                      'TIDEPOOL_KEEP_TEST_LOGS': '1',
                                      'TIDEPOOL_TEST_ARTIFACT_ROOT': '/retained/compiler failures',
                                      'EXOMONAD_WORKSPACE_GITLINK': '/qualified/workspace-pin',
+                                     'EXOMONAD_WORKSPACE_GIT_BUNDLE': '/qualified/workspace.bundle',
                                      'OPENAI_API_KEY': 'never-forward',
                                      'UNRELATED_VARIABLE': 'never-forward'}):
             command, unit = runner.delegated_command(
@@ -111,6 +112,7 @@ class IsolatedLibtestTests(unittest.TestCase):
         self.assertIn('--setenv=TIDEPOOL_TEST_ARTIFACT_ROOT=/retained/compiler failures', command)
         self.assertIn('TIDEPOOL_TEST_ARTIFACT_ROOT', record['environment_names'])
         self.assertIn('--setenv=EXOMONAD_WORKSPACE_GITLINK=/qualified/workspace-pin', command)
+        self.assertIn('--setenv=EXOMONAD_WORKSPACE_GIT_BUNDLE=/qualified/workspace.bundle', command)
         self.assertFalse(any('never-forward' in word for word in command))
         self.assertIn('--unit=' + unit, command)
         self.assertFalse(record['cleanup_confirmed'])

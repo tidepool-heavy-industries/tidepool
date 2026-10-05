@@ -26,6 +26,12 @@ The source OID and build log add provenance; they do not replace those byte chec
 The bundled workspace Gitlink is also checked against the source HEAD's recorded
 `.exomonad/workspace` submodule. Hosted tests and the actual binary receive that
 same frozen file through `EXOMONAD_WORKSPACE_GITLINK`.
+Configuration retains the original Git objects for that recorded commit in an
+immutable Git bundle. Native scaffold tests and frozen launches receive the
+declared bundle through `EXOMONAD_WORKSPACE_GIT_BUNDLE`; qualification checks its
+commit and object closure against the Gitlink and seals the copied bundle bytes.
+Scaffolding clones those objects locally and records the public upstream URL for
+future submodule updates. Test execution requires no mutable source repository.
 
 ```sh
 python3 build/package/qualification.py freeze \

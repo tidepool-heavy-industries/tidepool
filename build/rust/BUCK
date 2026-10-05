@@ -24,6 +24,7 @@ export_file(
 
 export_file(name = "source_snapshot_driver", src = "source_snapshot.py", visibility = ["PUBLIC"])
 export_file(name = "workspace_gitlink", src = "//:workspace_gitlink", visibility = ["PUBLIC"])
+export_file(name = "workspace_git_bundle", src = "toolchains//:workspace_git_resource[workspace_bundle]", visibility = ["PUBLIC"])
 
 native_source_snapshot(
     name = "native_qualification_sources",

@@ -12,8 +12,8 @@ use exomonad_worktree::GitCli;
 include!(concat!(env!("OUT_DIR"), "/scaffold_package.rs"));
 
 // Keep this in step with this repository's .exomonad/workspace gitlink.
-// `exomonad new` pulls the source from DEFAULT_WORKSPACE_URL, but must install
-// the commit this release compiled and checked, even if the remote advances.
+// Both the qualified Git bundle and DEFAULT_WORKSPACE_URL must install the
+// commit this release compiled and checked, even if the remote advances.
 pub(super) const DEFAULT_WORKSPACE_REV: &str = "36aa9b90c95016ae65be224a3095df02bcc8c462";
 
 /// The configuration `exomonad new` writes. Its modules, recipes, model aliases
@@ -396,31 +396,80 @@ fn skill_links(workspace: &Path) -> Result<Vec<(PathBuf, PathBuf)>, Box<dyn std:
 }
 
 fn add_default_workspace(git: &GitCli, workspace: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    #[cfg(test)]
-    let source_url = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../.exomonad/workspace")
-        .canonicalize()?;
-    #[cfg(not(test))]
-    let source_url = std::path::PathBuf::from(DEFAULT_WORKSPACE_URL);
-    let source_url = source_url.to_string_lossy();
-    git.try_run(
-        workspace,
-        &[
-            "-c",
-            "protocol.file.allow=always",
-            "submodule",
-            "add",
-            "--name",
-            "exomonad-workspace",
-            &source_url,
-            ".exomonad/workspace",
-        ],
-    )?;
+    let bundle = std::env::var_os("EXOMONAD_WORKSPACE_GIT_BUNDLE").map(PathBuf::from);
+    let source_url = workspace_source_url(git, workspace, bundle.as_deref())?;
+    let mut arguments = Vec::new();
+    if bundle.is_some() {
+        // File transport is admitted only for the verified declared bundle.
+        arguments.extend(["-c", "protocol.file.allow=always"]);
+    }
+    arguments.extend([
+        "submodule",
+        "add",
+        "--name",
+        "exomonad-workspace",
+        &source_url,
+        ".exomonad/workspace",
+    ]);
+    git.try_run(workspace, &arguments)?;
     git.try_run(
         &workspace.join(".exomonad/workspace"),
         &["checkout", "--detach", DEFAULT_WORKSPACE_REV],
     )?;
+    if bundle.is_some() {
+        // New projects retain the public upstream URL after the offline clone.
+        git.try_run(
+            workspace,
+            &[
+                "config",
+                "-f",
+                ".gitmodules",
+                "submodule.exomonad-workspace.url",
+                DEFAULT_WORKSPACE_URL,
+            ],
+        )?;
+        git.try_run(
+            workspace,
+            &["submodule", "sync", "--", ".exomonad/workspace"],
+        )?;
+    }
     git.try_run(workspace, &["add", "--", ".exomonad/workspace"])?;
+    Ok(())
+}
+
+fn workspace_source_url(
+    git: &GitCli,
+    workspace: &Path,
+    bundle: Option<&Path>,
+) -> Result<String, Box<dyn std::error::Error>> {
+    match bundle {
+        Some(bundle) => {
+            let bundle = bundle.canonicalize()?;
+            verify_workspace_bundle(git, workspace, &bundle, DEFAULT_WORKSPACE_REV)?;
+            Ok(bundle.to_string_lossy().into_owned())
+        }
+        None => Ok(DEFAULT_WORKSPACE_URL.to_owned()),
+    }
+}
+
+fn verify_workspace_bundle(
+    git: &GitCli,
+    workspace: &Path,
+    bundle: &Path,
+    expected_revision: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let bundle = bundle.to_string_lossy();
+    let heads = git.try_read(workspace, &["bundle", "list-heads", &bundle])?;
+    if heads.trimmed()
+        != format!("{expected_revision} HEAD\n{expected_revision} refs/heads/workspace")
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "declared workspace Git bundle differs from the release's pinned commit",
+        )
+        .into());
+    }
+    git.try_read(workspace, &["bundle", "verify", &bundle])?;
     Ok(())
 }
 
@@ -467,7 +516,94 @@ pub(super) fn project_flake_hint(workspace: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::DEFAULT_WORKSPACE_REV;
+    use super::{
+        add_default_workspace, verify_workspace_bundle, workspace_source_url,
+        DEFAULT_WORKSPACE_REV, DEFAULT_WORKSPACE_URL,
+    };
+    use exomonad_worktree::GitCli;
+
+    #[test]
+    fn declared_workspace_bundle_scaffolds_the_original_pin_and_public_upstream() {
+        assert!(
+            std::env::var_os("EXOMONAD_WORKSPACE_GIT_BUNDLE").is_some(),
+            "native scaffold proof requires its declared bundle"
+        );
+        let workspace = tempfile::tempdir().expect("temporary workspace");
+        let git = GitCli::default();
+        git.init_repository(workspace.path(), &["--quiet"])
+            .expect("initialize workspace");
+        add_default_workspace(&git, workspace.path())
+            .expect("scaffold from original pinned objects");
+        let source = workspace.path().join(".exomonad/workspace");
+        assert_eq!(
+            git.try_read(&source, &["rev-parse", "HEAD"])
+                .expect("workspace commit")
+                .trimmed(),
+            DEFAULT_WORKSPACE_REV
+        );
+        assert_eq!(
+            git.try_read(
+                workspace.path(),
+                &[
+                    "config",
+                    "-f",
+                    ".gitmodules",
+                    "submodule.exomonad-workspace.url"
+                ]
+            )
+            .expect("public source URL")
+            .trimmed(),
+            DEFAULT_WORKSPACE_URL
+        );
+        assert_eq!(
+            git.try_read(&source, &["remote", "get-url", "origin"])
+                .expect("public origin")
+                .trimmed(),
+            DEFAULT_WORKSPACE_URL
+        );
+    }
+
+    #[test]
+    fn missing_declared_workspace_bundle_refuses_instead_of_using_remote() {
+        let workspace = tempfile::tempdir().expect("temporary workspace");
+        let error = workspace_source_url(
+            &GitCli::default(),
+            workspace.path(),
+            Some(&workspace.path().join("missing.bundle")),
+        )
+        .expect_err("a declared resource must exist");
+        assert_eq!(
+            error
+                .downcast_ref::<std::io::Error>()
+                .expect("missing file error")
+                .kind(),
+            std::io::ErrorKind::NotFound
+        );
+        assert!(!workspace.path().join(".gitmodules").exists());
+    }
+
+    #[test]
+    fn declared_workspace_bundle_refuses_a_different_gitlink() {
+        let workspace = tempfile::tempdir().expect("temporary workspace");
+        let git = GitCli::default();
+        git.init_repository(workspace.path(), &["--quiet"])
+            .expect("initialize workspace");
+        let bundle = std::env::var_os("EXOMONAD_WORKSPACE_GIT_BUNDLE")
+            .map(std::path::PathBuf::from)
+            .expect("declared native workspace bundle");
+        verify_workspace_bundle(&git, workspace.path(), &bundle, DEFAULT_WORKSPACE_REV)
+            .expect("the declared resource contains the real pinned commit");
+        let error = verify_workspace_bundle(&git, workspace.path(), &bundle, &"0".repeat(40))
+            .expect_err("a different pin must refuse");
+        assert_eq!(
+            error
+                .downcast_ref::<std::io::Error>()
+                .expect("pin mismatch error")
+                .kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        assert!(!workspace.path().join(".gitmodules").exists());
+    }
 
     /// The source generator verifies this declared descriptor against the
     /// source index. Test execution does not require a Git checkout.
