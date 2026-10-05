@@ -28,6 +28,14 @@ class BuckRunnerTests(unittest.TestCase):
         self.commit("flake.nix")
         self.tools = self.root / "tools"
         self.tools.mkdir()
+        # Launcher bootstrap receives only its declared Bash/coreutils inputs.
+        # Optional host utilities must not hide a missing action dependency.
+        self.bootstrap_tools = self.root / "bootstrap tools"
+        self.bootstrap_tools.mkdir()
+        for name in ("bash", "cat", "dirname", "id", "readlink"):
+            executable = shutil.which(name)
+            self.assertIsNotNone(executable, f"declared {name} executable")
+            (self.bootstrap_tools / name).symlink_to(executable)
         self.buck_output = self.root / "outputs/buck"
         (self.buck_output / "bin").mkdir(parents=True)
         self.action_output = self.root / "outputs/action tools"
@@ -77,7 +85,7 @@ sys.exit(int(os.environ.get('BUCK_EXIT', '0')))
         self.env = dict(os.environ)
         self.env.pop("TIDEPOOL_BUCK_SHELL", None)
         self.env.update(
-            PATH=str(self.tools) + os.pathsep + self.env["PATH"], MOUNT_EXIT="0",
+            PATH=str(self.tools) + os.pathsep + str(self.bootstrap_tools), MOUNT_EXIT="0",
             DEV_SHELL_LOG=str(self.shell_log), BUCK_LOG=str(self.buck_log),
         )
 
@@ -163,6 +171,18 @@ sys.exit(int(os.environ.get('BUCK_EXIT', '0')))
         (self.generation / "status").write_text("configured\n")
         self.config.write_text(self.config.read_text() + "# changed\n")
         self.assert_refused("published configuration changed")
+
+    def test_published_copy_compares_exact_bytes_including_trailing_newlines(self):
+        original = self.config.read_bytes()
+        for suffix in (b"\n", b"\n\n", b"\0", b"\0\n"):
+            with self.subTest(suffix=suffix):
+                self.config.write_bytes(original + suffix)
+                self.assert_refused("published configuration changed")
+        self.config.write_bytes(original.rstrip(b"\n"))
+        self.assert_refused("published configuration changed")
+        self.config.write_bytes(original)
+        result = self.run_runner("build")
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_checkout_and_user_ownership_are_checked(self):
         owner = self.generation / "owner"

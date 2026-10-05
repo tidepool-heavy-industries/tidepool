@@ -16,12 +16,32 @@ record_value() {
     [[ $line != "$prefix"* ]] || printf '%s\n' "${line#"$prefix"}"
   done < "$path"
 }
+same_file_bytes() {
+  local left_fd right_fd left right left_status right_status result=0
+  exec {left_fd}< "$1" || return 1
+  exec {right_fd}< "$2" || { exec {left_fd}<&-; return 1; }
+  # NUL-delimited reads retain newlines; matching read status also compares
+  # each NUL delimiter and the final EOF without storing NUL in a Bash string.
+  while :; do
+    left_status=0 right_status=0
+    IFS= read -r -d '' left <&"$left_fd" || left_status=$?
+    IFS= read -r -d '' right <&"$right_fd" || right_status=$?
+    if [[ $left != "$right" || $left_status != "$right_status" ]]; then
+      result=1
+      break
+    fi
+    [[ $left_status == 0 ]] || break
+  done
+  exec {left_fd}<&-
+  exec {right_fd}<&-
+  return "$result"
+}
 generation=$(record_value '# Retained toolchain generation: ' .buckconfig.local)
 [[ $generation == "$PWD/.buck2-toolchains/generations/"generation.* &&
    -d $generation && -f $generation/status && -f $generation/config &&
    -f $generation/owner && -s $generation/outputs.tsv ]] || refuse 'missing retained generation'
 [[ $(cat "$generation/status") == configured ]] || refuse 'generation was not configured'
-cmp -s .buckconfig.local "$generation/config" || refuse 'published configuration changed'
+same_file_bytes .buckconfig.local "$generation/config" || refuse 'published configuration changed'
 owner_value() { record_value "$1=" "$generation/owner"; }
 [[ $(owner_value checkout) == "$PWD" && $(owner_value uid) == "$(id -u)" ]] || refuse 'generation belongs to another checkout or user'
 selection=$(owner_value selection)
