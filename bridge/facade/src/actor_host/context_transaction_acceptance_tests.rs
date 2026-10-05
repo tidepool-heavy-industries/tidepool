@@ -600,6 +600,11 @@ async fn resident_sync_native_trim_preserves_reasoning_and_deferred_child_bindin
     );
     let parent = next_round(&mut rounds).await;
     assert!(parent.is_root());
+    let setup_output = successful_output(&parent.request, "native-trim-setup");
+    assert!(
+        test_campaign::explicit_display_text(&setup_output).ends_with("native-trim-result-tail"),
+        "the full native trim result must be explicitly emitted: {setup_output}"
+    );
     let original_output = retained_output_item(&parent.request.input, "native-trim-setup").clone();
     let original_output_hash = raw_request_history(&fixture, &parent.request)
         .into_iter()
@@ -877,7 +882,12 @@ async fn resident_sync_context_failure_keeps_prefix_model_and_defers_children() 
         include_str!("fixtures/context_acceptance_setup.hs"),
     );
     let parent = next_round(&mut rounds).await;
-    successful_output(&parent.request, "context-setup");
+    let setup_output = successful_output(&parent.request, "context-setup");
+    assert_eq!(
+        test_campaign::explicit_display_text(&setup_output),
+        "context-setup-retained-result",
+        "staging trims the setup cell's genuine native output"
+    );
     let original_setup = retained_output_item(&parent.request.input, "context-setup").clone();
     let before = root_context_state(&fixture);
     parent.cell_with_reasoning(
@@ -1055,7 +1065,12 @@ async fn resident_sync_context_cancel_discards_staging_and_never_launches_childr
         include_str!("fixtures/context_acceptance_setup.hs"),
     );
     let parent = next_round(&mut rounds).await;
-    successful_output(&parent.request, "context-setup");
+    let setup_output = successful_output(&parent.request, "context-setup");
+    assert_eq!(
+        test_campaign::explicit_display_text(&setup_output),
+        "context-setup-retained-result",
+        "staging trims the setup cell's genuine native output"
+    );
     let original_setup = retained_output_item(&parent.request.input, "context-setup").clone();
     parent.cell_with_reasoning(
         "context-cancel",
