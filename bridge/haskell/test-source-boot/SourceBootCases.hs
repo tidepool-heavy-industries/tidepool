@@ -2015,22 +2015,36 @@ originalProjectionProducts = withScratch $ \work -> do
     fail "original product closure did not handle cross-module chains, cycles and unrelated groups"
   unless (rejectedModules == Set.fromList ["A", "B", "C", "E", "F", "G", "H", "I"]) $
     fail "module-level rejection did not cover sibling binders and their dependants"
+  writeFile (work </> "ProjectionUnavailableProvider.hs") $ unlines
+    ["module ProjectionUnavailableProvider (missing) where", "missing :: Int", "missing = 7"]
   writeFile (work </> "ProjectionOwner.hs") $ unlines
-    ["module ProjectionOwner (known) where", "known :: Int", "known = 42"]
+    [ "module ProjectionOwner (bad, good) where"
+    , "import ProjectionUnavailableProvider"
+    , "bad :: Int", "bad = missing", "good :: Int", "good = 42" ]
+  writeFile (work </> "ProjectionIndependent.hs") $ unlines
+    ["module ProjectionIndependent (safe) where", "safe :: Int", "safe = 1"]
   writeFile (work </> "ProjectionConsumer.hs") $ unlines
-    ["module ProjectionConsumer (usesKnown) where", "import ProjectionOwner", "usesKnown = known + 1"]
+    [ "{-# OPTIONS_GHC -Wno-unused-imports #-}"
+    , "module ProjectionConsumer (usesGood) where"
+    , "import ProjectionOwner", "import ProjectionIndependent"
+    , "usesGood = good + 1" ]
   paired <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
     Nothing (work </> "ProjectionConsumer.hs") [work] Nothing
-  consumer <- case [prepared | prepared <- pprModules paired
-      , moduleNameString (moduleName (pmModule prepared)) == "ProjectionConsumer"] of
-    [prepared] -> pure prepared
-    _ -> fail "cross-module projection fixture lacks its consumer module"
-  known <- case [binder | prepared <- pprModules paired
-      , moduleNameString (moduleName (pmModule prepared)) == "ProjectionOwner"
-      , (binding, _) <- pmBindings prepared, binder <- topBinders binding
-      , symbolOccurrence binder == "known"] of
-    [binder] -> pure binder
-    _ -> fail "cross-module projection fixture lacks its exact imported owner"
+  let findPrepared name = case [prepared | prepared <- pprModules paired
+        , moduleNameString (moduleName (pmModule prepared)) == name] of
+          [prepared] -> pure prepared
+          _ -> fail ("cross-module projection fixture lacks " ++ name)
+      findBinder prepared occurrence = case [binder | (binding, _) <- pmBindings prepared
+          , binder <- topBinders binding, symbolOccurrence binder == occurrence] of
+        [binder] -> pure binder
+        _ -> fail ("cross-module projection fixture lacks binder " ++ occurrence)
+  consumer <- findPrepared "ProjectionConsumer"
+  ownerModule <- findPrepared "ProjectionOwner"
+  provider <- findPrepared "ProjectionUnavailableProvider"
+  independent <- findPrepared "ProjectionIndependent"
+  known <- findBinder ownerModule "good"
+  missing <- findBinder provider "missing"
+  safe <- findBinder independent "safe"
   let pairedEnv = prHscEnv (pprPipelineResult paired)
       pairedInterfaces = pprProductInterfaces paired
       pairedContext = ProjectionContext "test" "matched"
@@ -2047,6 +2061,21 @@ originalProjectionProducts = withScratch $ \work -> do
         case consumerOutcome ownerBinders of
           Just (Right groups) | not (null groups) -> pure ()
           other -> fail (ownerKind ++ " owner did not preserve its dependent product: " ++ show other)
+  let incompleteModules = filter ((/= pmModule provider) . pmModule) (pprModules paired)
+      incompleteProducts = preparedModuleProductOutcomes
+        (projectOriginalHomeModuleProducts pairedEnv pairedInterfaces pairedContext mempty incompleteModules)
+      moduleOutcome prepared = lookup (pmModule prepared) incompleteProducts
+      rejectedByMissing prepared = case moduleOutcome prepared of
+        Just (Left (UnavailableOriginalHomeDependencies identities)) -> missing `elem` identities
+        _ -> False
+      safeOutcome = moduleOutcome independent
+  unless (rejectedByMissing ownerModule && rejectedByMissing consumer
+      && case safeOutcome of Just (Right groups) -> not (null groups); _ -> False) $
+    fail "unavailable module sibling did not reject its consumers while preserving an independent owner"
+  let safeContext = pairedContext { projectionEntry = safe }
+  safeProgram <- either (fail . show) pure (projectPrepared safeContext [independent])
+  _ <- certifyProjectedProducts work "independent-after-product-rejection" paired incompleteProducts
+    [("safe", safeProgram)] pairedEnv >>= either fail pure
   copyFile "test-source-boot/fixtures/MetadataQuoteSupport.hs" (work </> "MetadataQuoteSupport.hs")
   original <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
     Nothing (work </> "MetadataQuoteSupport.hs") [work] Nothing
