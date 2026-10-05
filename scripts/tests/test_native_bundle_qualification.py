@@ -74,6 +74,11 @@ class NativeQualificationTests(unittest.TestCase):
                     query.assert_not_called()
 
     def test_run_forwards_scheduling_and_sealed_watchdogs_and_records_them(self):
+        for compiler_mode in ('direct', 'owned-resident'):
+            with self.subTest(compiler_mode=compiler_mode):
+                self.assert_run_scheduling(compiler_mode)
+
+    def assert_run_scheduling(self, compiler_mode):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             descriptor_path = root / 'qualification.json'
@@ -98,7 +103,7 @@ class NativeQualificationTests(unittest.TestCase):
                  patch.object(qualification.subprocess, 'run', side_effect=execute):
                 code = qualification.main(['run', str(descriptor_path), '--cohort', 'm2',
                     '--output', str(root / 'evidence'), '--jobs', '4', '--delegated-service',
-                    '--service-slice', 'tidepool-completion-build.slice'])
+                    '--service-slice', 'tidepool-completion-build.slice', '--compiler-mode', compiler_mode])
             self.assertEqual(code, 0)
             report = json.loads((root / 'evidence/report.json').read_text())
             command = report['command']
@@ -110,10 +115,10 @@ class NativeQualificationTests(unittest.TestCase):
                              [f'{name}=900' for name in sorted([qualification.M2_SURVIVAL_TEST, qualification.M2_NOMINAL_JOIN_TEST, qualification.M2_CHECKPOINT_RELEASE_TEST, qualification.M2_SELECTED_CODING_TEST])])
             self.assertEqual(report['scheduling'], {
                 'jobs': 4, 'effective_jobs': 4, 'delegated_service': True,
-                'service_slice': 'tidepool-completion-build.slice', 'compiler_mode': 'direct', 'timeout_seconds': 600,
+                'service_slice': 'tidepool-completion-build.slice', 'compiler_mode': compiler_mode, 'timeout_seconds': 600,
                 'case_timeout_seconds': {name: 900 for name in [qualification.M2_SURVIVAL_TEST, qualification.M2_NOMINAL_JOIN_TEST, qualification.M2_CHECKPOINT_RELEASE_TEST, qualification.M2_SELECTED_CODING_TEST]}})
+            self.assertEqual(command[command.index('--compiler-mode') + 1], compiler_mode)
             self.assertEqual(report['executed_test_count'], 7)
-            self.assertEqual(command[command.index('--compiler-mode') + 1], 'direct')
             self.assertTrue(report['completed'])
 
     def test_invalid_run_scheduling_refuses_before_verification_or_launch(self):
