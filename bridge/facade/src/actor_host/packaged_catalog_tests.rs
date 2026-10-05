@@ -24,8 +24,21 @@ fn packaged_cohort_executes_and_displays_without_build_inputs() {
     let package = tidepool_toolchain::toolchain::configured_module_package()
         .unwrap()
         .expect("configured immutable module catalog");
-    let source_root = package.source_root().to_owned();
-    assert!(source_root.starts_with("/nix/store"));
+    let selection = package.source_selection();
+    assert!(selection.snapshot_root.starts_with("/nix/store"));
+    let source_roots = selection.include_roots();
+    assert_eq!(
+        tidepool_mcp::ensure_effects_core_module().unwrap(),
+        selection.root(tidepool_toolchain::toolchain::NativeSourceRole::StableEffects),
+    );
+    assert_eq!(
+        crate::haskell_sources::ensure_exomonad_haskell().unwrap(),
+        selection.root(tidepool_toolchain::toolchain::NativeSourceRole::Actors),
+    );
+    assert_eq!(
+        crate::haskell_sources::ensure_embedded_stdlib().unwrap(),
+        selection.root(tidepool_toolchain::toolchain::NativeSourceRole::Stdlib),
+    );
     let catalog_path = PathBuf::from(
         std::env::var_os(tidepool_toolchain::toolchain::ENV_COMPILER_MODULES).unwrap(),
     );
@@ -45,49 +58,69 @@ fn packaged_cohort_executes_and_displays_without_build_inputs() {
         })
         .collect();
 
-    let source = tidepool_runtime::session::assemble_expression_module(
-        "{-# LANGUAGE DataKinds, FlexibleContexts, FlexibleInstances, MultiParamTypeClasses, NoImplicitPrelude, TypeOperators, UndecidableInstances #-}\nmodule PackagedCatalogDisplay where\nimport Tidepool.Prelude\nimport Control.Monad.Freer (Eff)\n",
+    for (name, row, imported_row) in [
+        (
+            "PackagedCatalogRootDisplay",
+            "RootEffects",
+            "Tidepool.Actors.Internal.ExomonadDriver",
+        ),
+        (
+            "PackagedCatalogCodingDisplay",
+            "CodingEffects",
+            "Tidepool.Actors.Role",
+        ),
+    ] {
+        let source = tidepool_runtime::session::assemble_expression_module(
+        &format!("{{-# LANGUAGE DataKinds, FlexibleContexts, FlexibleInstances, MultiParamTypeClasses, NoImplicitPrelude, TypeOperators, UndecidableInstances #-}}\nmodule {name} where\nimport Tidepool.Prelude\nimport Control.Monad.Freer (Eff)\nimport {imported_row} ({row})\n"),
         "result",
-        "'[]",
+        row,
         "show (length (sort [41, 2, 3]) + 39 :: Int)",
         tidepool_runtime::session::ExpressionLift::Pure,
     );
-    let target = tidepool_runtime::session::PREPARED_SCAFFOLD_TARGET;
-    let mut compiled =
-        tidepool_runtime::compile_targets(&source, &[target], &[source_root], |_, _, _| {})
-            .expect("package-backed expression compilation");
-    let cached: BTreeSet<_> = compiled
-        .certified_groups
-        .iter()
-        .filter(|group| group.origin() == ProductOrigin::Cached)
-        .map(|group| group.owner().module.clone())
-        .collect();
-    assert!(cached.contains("Tidepool.Prelude"));
-    assert!(cached.contains("Tidepool.Render"));
-    assert!(cached.contains("Tidepool.FilePath"));
-    assert!(compiled.certified_groups.iter().all(|group| {
-        !cohort.contains(&group.owner().module) || group.origin() == ProductOrigin::Cached
-    }));
-    let prepared = compiled
-        .targets
-        .remove(target)
-        .unwrap()
-        .prepared
-        .into_prepared();
-    let value = tidepool_runtime::run_prepared_program(
-        prepared,
-        &compiled.table,
-        tidepool_runtime::DEFAULT_NURSERY_SIZE,
-        &mut frunk::HNil,
-        &(),
-        |_| {},
-    )
-    .expect("actual native execution of the package-backed target");
-    let displayed = tidepool_runtime::value_to_json(&value, &compiled.table, 0);
-    assert_eq!(displayed, serde_json::json!("42"));
-    eprintln!(
-        "deployment catalog {}: {} cached owners; native display {displayed}",
+        let target = tidepool_runtime::session::PREPARED_SCAFFOLD_TARGET;
+        let mut compiled =
+            tidepool_runtime::compile_targets(&source, &[target], &source_roots, |_, _, _| {})
+                .expect("package-backed expression compilation");
+        let cached: BTreeSet<_> = compiled
+            .certified_groups
+            .iter()
+            .filter(|group| group.origin() == ProductOrigin::Cached)
+            .map(|group| group.owner().module.clone())
+            .collect();
+        assert!(cached.contains("Tidepool.Prelude"));
+        assert!(cached.contains("Tidepool.Render"));
+        assert!(cached.contains("Tidepool.FilePath"));
+        assert!(cached.contains(imported_row));
+        assert!(cached.contains("Tidepool.Effects.Core"));
+        let replayed = compiled
+            .certified_groups
+            .iter()
+            .filter(|group| {
+                cohort.contains(&group.owner().module) && group.origin() == ProductOrigin::Fresh
+            })
+            .count();
+        assert_eq!(replayed, 0, "catalog owners must not be re-extracted");
+        let prepared = compiled
+            .targets
+            .remove(target)
+            .unwrap()
+            .prepared
+            .into_prepared();
+        let value = tidepool_runtime::run_prepared_program(
+            prepared,
+            &compiled.table,
+            tidepool_runtime::DEFAULT_NURSERY_SIZE,
+            &mut frunk::HNil,
+            &(),
+            |_| {},
+        )
+        .expect("actual native execution of the package-backed target");
+        let displayed = tidepool_runtime::value_to_json(&value, &compiled.table, 0);
+        assert_eq!(displayed, serde_json::json!("42"));
+        eprintln!(
+        "deployment catalog {}: {row}: {} cached owners, {replayed} re-extracted; native display {displayed}",
         package.catalog_identity(),
         cached.len(),
     );
+    }
 }
