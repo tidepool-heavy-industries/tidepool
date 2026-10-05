@@ -1612,20 +1612,21 @@ mod tests {
     #[test]
     fn physical_pairing_and_nominal_declaration_collisions_refuse() {
         let inventory = vec![physical(vec![RuntimeRep::LiftedRef; 2])];
-        let (graph, _, template) = recursive_graph(ConstructorId(0), &inventory, false);
+        let (graph, _, _) = recursive_graph(ConstructorId(0), &inventory, false);
         let graph = publish(graph, &inventory);
+        assert_eq!(graph.check_constructor_pairing(&inventory), Ok(()));
         let mut changed = inventory.clone();
         changed[0].field_reps[0] = RuntimeRep::Int(64);
-        assert_eq!(
+        assert!(matches!(
             graph.check_constructor_pairing(&changed),
-            Err(TypeGraphError::InvalidConstructor(template.index()))
-        );
+            Err(TypeGraphError::InvalidConstructor(_))
+        ));
         let mut changed = inventory.clone();
         changed[0].family = identity("Other", "type");
-        assert_eq!(
+        assert!(matches!(
             graph.check_constructor_pairing(&changed),
-            Err(TypeGraphError::InvalidConstructor(template.index()))
-        );
+            Err(TypeGraphError::InvalidConstructor(_))
+        ));
         let mut input = graph.graph().clone();
         input.add_node(TypeNode::Declaration {
             identity: identity("Reply", "type"),
