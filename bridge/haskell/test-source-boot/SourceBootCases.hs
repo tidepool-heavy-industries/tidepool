@@ -1713,8 +1713,8 @@ originalPackageProjection = withScratch $ \work -> do
         , not (isHomeUnit (hsc_home_unit env) (moduleUnit owner))]
       retained = context { projectionRetainedGenerations = Map.fromList [(identity,0) | identity <- packages] }
       executable = preparedModuleProductOutcomes (projectPreparedModuleProducts retained modules)
-      sourceProducts = preparedModuleProductOutcomes (projectOriginalHomeModuleProducts env (pprProductInterfaces original) retained modules)
-      coldProducts = preparedModuleProductOutcomes (projectOriginalHomeModuleProducts env (pprProductInterfaces original) context modules)
+      sourceProducts = preparedModuleProductOutcomes (projectOriginalHomeModuleProducts env (pprProductInterfaces original) retained mempty modules)
+      coldProducts = preparedModuleProductOutcomes (projectOriginalHomeModuleProducts env (pprProductInterfaces original) context mempty modules)
       globals outcomes = [global | (_,Right groups) <- outcomes, group <- groups
         , global <- projectedGlobals (projectedBody group)]
       packageSet = Set.fromList packages
@@ -1741,7 +1741,7 @@ originalPackageProjection = withScratch $ \work -> do
         value = SymbolIdentity "main" "Tidepool.Session.Val.G7" "value" "liveValue" Nothing
         live = retained {projectionRetainedGenerations=Map.union (Map.fromList [(home,generation),(value,generation)])
           (projectionRetainedGenerations retained)}
-        homeProducts = preparedModuleProductOutcomes (projectOriginalHomeModuleProducts env (pprProductInterfaces original) live modules)
+        homeProducts = preparedModuleProductOutcomes (projectOriginalHomeModuleProducts env (pprProductInterfaces original) live mempty modules)
     forM_ [home,value] $ \identity ->
       unless (any (\global -> globalIdentity global == identity && globalRequiredGeneration global == Just generation)
           (globals homeProducts)) $
@@ -1752,14 +1752,14 @@ originalPackageProjection = withScratch $ \work -> do
   let
       supportOwner = mkModule (moduleUnit (mi_module supportInterface)) supportName
       fallback map' = lookup supportOwner
-        (preparedModuleProductOutcomes (projectOriginalHomeModuleProducts env map' retained modules))
+        (preparedModuleProductOutcomes (projectOriginalHomeModuleProducts env map' retained mempty modules))
   unless (fallback (Map.delete supportName paired) == lookup supportOwner executable
       && fallback (Map.insert supportName
         (set_mi_module (mkModule (stringToUnit "wrong-home-unit") supportName) supportInterface) paired)
           == lookup supportOwner executable) $
     fail "missing or wrong-unit native interface granted original product purpose"
   let incomplete = [prepared {pmCoverage=ExactBodySubset} | prepared <- modules]
-      conservative = preparedModuleProductOutcomes (projectOriginalHomeModuleProducts env paired retained incomplete)
+      conservative = preparedModuleProductOutcomes (projectOriginalHomeModuleProducts env paired retained mempty incomplete)
   unless (any (isJust . globalRequiredGeneration) (globals conservative)) $
     fail "incomplete prepared coverage acquired generation-free original package requirements"
   target <- either (fail . show) pure (projectPrepared retained modules)
@@ -1820,7 +1820,7 @@ originalPackageCohort coreRoot output = do
       retained = context {projectionRetainedGenerations=Map.fromSet (const 0) packages}
       executable = preparedModuleProductOutcomes (projectPreparedModuleProducts retained modules)
       products = preparedModuleProductOutcomes
-        (projectOriginalHomeModuleProducts env (pprProductInterfaces original) retained modules)
+        (projectOriginalHomeModuleProducts env (pprProductInterfaces original) retained mempty modules)
       globals groups = [global | group <- groups, global <- projectedGlobals (projectedBody group)]
       names = ["Tidepool.Data.Time","Tidepool.FilePath","Tidepool.QQ.Fmt.Runtime","Tidepool.Prelude","Tidepool.Effects.Core"]
   forM_ names $ \name -> do
@@ -1986,20 +1986,59 @@ originalProjectionProducts = withScratch $ \work -> do
       unrelated = identity "main" "D" "unrelated"
       cycleA = identity "main" "E" "cycleA"
       cycleB = identity "main" "F" "cycleB"
+      external = identity "main" "Unavailable" "missing"
+      stranded = identity "main" "G" "stranded"
+      strandedDependent = identity "main" "H" "strandedDependent"
       owners = Map.fromList
         [(unavailable, ("A", 0)), (middle, ("B", 3)),
          (terminal, ("C", 7)), (unrelated, ("D", 2)),
-         (cycleA, ("E", 1)), (cycleB, ("F", 4))]
+         (cycleA, ("E", 1)), (cycleB, ("F", 4)),
+         (stranded, ("G", 5)), (strandedDependent, ("H", 6))]
       dependencies = Map.fromList
         [ (("B", 3), Set.singleton unavailable)
         , (("C", 7), Set.singleton middle)
         , (("E", 1), Set.singleton cycleB)
         , (("F", 4), Set.singleton cycleA)
+        , (("G", 5), Set.singleton external)
+        , (("H", 6), Set.singleton stranded)
         , (("D", 2), Set.empty) ]
       blocked = closeUnavailableOriginalGroups dependencies owners
-        (Set.fromList [unavailable, cycleA])
-  unless (blocked == Set.fromList [("A", 0), ("B", 3), ("C", 7), ("E", 1), ("F", 4)]) $
+        (Set.fromList [unavailable, cycleA, external])
+  unless (blocked == Set.fromList
+      [("A", 0), ("B", 3), ("C", 7), ("E", 1), ("F", 4), ("G", 5), ("H", 6)]) $
     fail "original product closure did not handle cross-module chains, cycles and unrelated groups"
+  writeFile (work </> "ProjectionOwner.hs") $ unlines
+    ["module ProjectionOwner (known) where", "known :: Int", "known = 42"]
+  writeFile (work </> "ProjectionConsumer.hs") $ unlines
+    ["module ProjectionConsumer (usesKnown) where", "import ProjectionOwner", "usesKnown = known + 1"]
+  paired <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
+    Nothing (work </> "ProjectionConsumer.hs") [work] Nothing
+  consumer <- case [prepared | prepared <- pprModules paired
+      , moduleNameString (moduleName (pmModule prepared)) == "ProjectionConsumer"] of
+    [prepared] -> pure prepared
+    _ -> fail "cross-module projection fixture lacks its consumer module"
+  known <- case [binder | prepared <- pprModules paired
+      , moduleNameString (moduleName (pmModule prepared)) == "ProjectionOwner"
+      , (binding, _) <- pmBindings prepared, binder <- topBinders binding
+      , symbolOccurrence binder == "known"] of
+    [binder] -> pure binder
+    _ -> fail "cross-module projection fixture lacks its exact imported owner"
+  let pairedEnv = prHscEnv (pprPipelineResult paired)
+      pairedInterfaces = pprProductInterfaces paired
+      pairedContext = ProjectionContext "test" "matched"
+        (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) Map.empty
+        known [] Nothing Nothing Nothing Nothing
+      consumerOutcome externalBinders = lookup (pmModule consumer)
+        (preparedModuleProductOutcomes (projectOriginalHomeModuleProducts pairedEnv
+          pairedInterfaces pairedContext externalBinders [consumer]))
+  case consumerOutcome mempty of
+    Just (Left (UnavailableOriginalHomeDependencies [missing])) | missing == known -> pure ()
+    other -> fail ("unowned home dependency did not fail closed: " ++ show other)
+  forM_ [("exact", Set.singleton known), ("candidate", Set.singleton known)] $
+      \(ownerKind, ownerBinders) ->
+        case consumerOutcome ownerBinders of
+          Just (Right groups) | not (null groups) -> pure ()
+          other -> fail (ownerKind ++ " owner did not preserve its dependent product: " ++ show other)
   copyFile "test-source-boot/fixtures/MetadataQuoteSupport.hs" (work </> "MetadataQuoteSupport.hs")
   original <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
     Nothing (work </> "MetadataQuoteSupport.hs") [work] Nothing

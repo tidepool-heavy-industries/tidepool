@@ -324,7 +324,7 @@ verifyOriginalProductCatalogue work = do
           >>= projectSelected
         pure program
       products = projectOriginalHomeModuleProducts (prHscEnv (pprPipelineResult result))
-        (pprProductInterfaces result) context (pprModules result)
+        (pprProductInterfaces result) context mempty (pprModules result)
       fresh =
         [ (unitString (moduleUnit owner), moduleNameString (moduleName owner),
             either (Left . show) Right groups)

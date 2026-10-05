@@ -66,8 +66,7 @@ import GHC.Core.TyCo.Compare (eqType)
 import GHC.Core.TyCon qualified as GHC
 import GHC.Data.FastString (fsLit, unpackFS)
 import GHC.Driver.Env.Types (HscEnv, hsc_unit_env)
-import GHC.Driver.Env (hsc_home_unit)
-import GHC.Unit.Home (isHomeUnit)
+import GHC.Driver.Env (hsc_all_home_unit_ids)
 import GHC.Float (castDoubleToWord64, castFloatToWord32)
 import GHC.Stg.Syntax
 import GHC.Stg.Syntax qualified as Stg
@@ -91,12 +90,12 @@ import GHC.Types.Var.Env (VarEnv, emptyVarEnv, extendVarEnv, lookupVarEnv)
 import GHC.Types.Var.Set (dVarSetElems, isEmptyVarSet)
 import GHC.Unit.Env (ue_units)
 import GHC.Unit.Info (PackageName(..))
-import GHC.Unit.Module (ModuleName, mkModuleName, moduleName, moduleNameString, moduleUnit)
+import GHC.Unit.Module (ModuleName, mkModule, mkModuleName, moduleName, moduleNameString, moduleUnit)
 import GHC.Unit.Module.ModIface (ModIface, mi_module)
 import GHC.Unit.Finder (FindResult(..), findImportedModule)
 import GHC.Types.PkgQual (PkgQual(OtherPkg))
 import GHC.Unit.State (lookupPackageName)
-import GHC.Unit.Types (Module, Unit, unitString)
+import GHC.Unit.Types (Module, Unit, stringToUnit, toUnitId, unitString)
 import GHC.Utils.Outputable (ppr, showSDocUnsafe)
 import Tidepool.ExecutionIR (topBindingReferenceUniques, topBindingReferences)
 import Tidepool.ExecutionSchema
@@ -145,6 +144,7 @@ data ProjectionError
   | DeferredFunctionSignatureMismatch SymbolIdentity Signature (Maybe Signature)
   | UnsupportedPrimitiveCall Text Signature
   | UnsupportedForeignCall Text Signature
+  | UnavailableOriginalHomeDependencies [SymbolIdentity]
   -- | A typed site in a reachable top cannot carry concrete evidence. This
   -- is a source error, reported with the compiler's own guidance.
   | RejectedTypedSite Text
@@ -264,11 +264,10 @@ projectPreparedModuleProducts context modules = PreparedModuleProducts
 -- own original issuance. Package globals are sealed later against their exact
 -- canonical defining interfaces; executable targets keep their live imports.
 projectOriginalHomeModuleProducts :: HscEnv -> Map ModuleName ModIface
-  -> ProjectionContext -> [PreparedModule]
+  -> ProjectionContext -> Set SymbolIdentity -> [PreparedModule]
   -> PreparedModuleProducts
-projectOriginalHomeModuleProducts env interfaces context modules =
-  let home = hsc_home_unit env
-      isHome owner = isHomeUnit home (moduleUnit owner)
+projectOriginalHomeModuleProducts env interfaces context externalBinders modules =
+  let isHome owner = toUnitId (moduleUnit owner) `Set.member` hsc_all_home_unit_ids env
       purpose prepared
         | pmCoverage prepared == CompleteSourceModule && isHome (pmModule prepared)
         , Just interface <- Map.lookup (moduleName (pmModule prepared)) interfaces
@@ -294,6 +293,7 @@ projectOriginalHomeModuleProducts env interfaces context modules =
         | (_, outcomes) <- originalRows
         , (_, symbols, Left _) <- outcomes
         , symbol <- symbols ]
+      knownBinders = Set.union externalBinders (Map.keysSet groupOwners)
       dependencies = Map.fromList
         [ ((pmModule prepared, projectedOriginalOrdinal projected),
             Set.fromList
@@ -302,10 +302,28 @@ projectOriginalHomeModuleProducts env interfaces context modules =
               , globalRequiredGeneration global == Nothing ])
         | (prepared, outcomes) <- originalRows
         , (_, _, Right projected) <- outcomes ]
-      blocked = closeUnavailableOriginalGroups dependencies groupOwners failedBinders
+      unavailableHomeReferences = Set.fromList
+        [ globalIdentity global
+        | (prepared, outcomes) <- originalRows
+        , (_, _, Right projected) <- outcomes
+        , global <- projectedGlobals (projectedBody projected)
+        , globalRequiredGeneration global == Nothing
+        , isHome (symbolOwner (globalIdentity global))
+        , globalIdentity global `Set.notMember` knownBinders ]
+      blockedHome = closeUnavailableOriginalGroups dependencies groupOwners
+        unavailableHomeReferences
+      blocked = closeUnavailableOriginalGroups dependencies groupOwners
+        (Set.union failedBinders unavailableHomeReferences)
+      unavailableOwners = Set.fromList
+        [ owner | (owner, _) <- Set.toList blockedHome
+        , isJust (Map.lookup owner rowsByOwner) ]
       finish prepared = case purpose prepared of
         ExecutableTarget -> (pmModule prepared,
           projectPreparedModuleGroupsFor ExecutableTarget context prepared Nothing, [])
+        OriginalHomeProduct _
+          | pmModule prepared `Set.member` unavailableOwners ->
+            (pmModule prepared,
+              Left (UnavailableOriginalHomeDependencies (Set.toAscList unavailableHomeReferences)), [])
         OriginalHomeProduct _ ->
           let outcomes = Map.findWithDefault [] (pmModule prepared) rowsByOwner
               failed =
@@ -335,6 +353,11 @@ projectOriginalHomeModuleProducts env interfaces context modules =
     maybeOwnedBy Nothing _ = False
     maybeOwnedBy (Just owner) blocked' = owner `Set.member` blocked'
 
+symbolOwner :: SymbolIdentity -> Module
+symbolOwner identity = mkModule
+  (stringToUnit (T.unpack (symbolUnit identity)))
+  (mkModuleName (T.unpack (symbolModule identity)))
+
 preparedModuleProductOutcomes :: PreparedModuleProducts
   -> [(Module, Either ProjectionError [ProjectedGroup])]
 preparedModuleProductOutcomes (PreparedModuleProducts outcomes) =
@@ -359,7 +382,11 @@ closeUnavailableOriginalGroups dependencies owners unavailable = go (Set.toList 
       , symbol <- Set.toList symbols ]
     symbolsByGroup = Map.fromListWith Set.union
       [(group, Set.singleton symbol) | (symbol, group) <- Map.toList owners]
-    initial = Set.fromList (mapMaybe (`Map.lookup` owners) (Set.toList unavailable))
+    initial = Set.union
+      (Set.fromList (mapMaybe (`Map.lookup` owners) (Set.toList unavailable)))
+      (Set.fromList
+        [group | (group, symbols) <- Map.toList dependencies
+        , not (Set.null (symbols `Set.intersection` unavailable))])
     go [] blocked = blocked
     go (group : pending) blocked =
       let referenced = Map.findWithDefault Set.empty group symbolsByGroup

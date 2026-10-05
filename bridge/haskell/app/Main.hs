@@ -79,7 +79,8 @@ import Tidepool.PreparedStg
 import Tidepool.PreparedRecovery
   ( RecoveryFailure, RecoveredClosure(..), newPreparedRecoveryWithPackageRoots
   , preparedRecoveryClosure, growPreparedRecovery )
-import Tidepool.ModuleCandidates (ModuleCandidate(..), candidateExecutionSources)
+import Tidepool.ModuleCandidates
+  ( ModuleCandidate(..), CandidateGroup(..), candidateExecutionSources )
 import Tidepool.CompileInput (writeCompileInputProof)
 import Tidepool.CertifiedProducts (resolvePackageGlobal, homeInterfaceUsageOwners)
 import Tidepool.FinalizedModuleArtifacts
@@ -479,6 +480,11 @@ prepareArtifacts originalInterfaces caches prepared targets@(firstTarget : _) au
   let contextFor target = firstContext
         { projectionEntry = (projectionEntry firstContext) {symbolOccurrence = T.pack target} }
   let exactProducts = maybe [] scopeProducts exactScope
+      externalOriginalBinders = Set.fromList
+        ([binder | product <- exactProducts, group <- originalGroups product
+          , binder <- originalBinders group]
+         ++ [binder | candidate <- candidates, group <- candidateGroups candidate
+          , binder <- candidateGroupBinders group])
       certifiedHomes = Set.fromList
         ([(candidateUnit candidate, candidateModule candidate) | candidate <- candidates]
          ++ [(originalUnit originalProduct, originalModule originalProduct) | originalProduct <- exactProducts])
@@ -486,7 +492,8 @@ prepareArtifacts originalInterfaces caches prepared targets@(firstTarget : _) au
         [(originalUnit originalProduct, originalModule originalProduct,
           [(originalOrdinal group, originalBinders group, originalGlobals group)
            | group <- originalGroups originalProduct]) | originalProduct <- exactProducts]
-      products = projectOriginalHomeModuleProducts hscEnv interfaces (contextFor firstTarget) modules
+      products = projectOriginalHomeModuleProducts hscEnv interfaces
+        (contextFor firstTarget) externalOriginalBinders modules
       originalProducts =
         [(unitString (moduleUnit owner), moduleNameString (moduleName owner),
           either (Left . show) Right outcome)

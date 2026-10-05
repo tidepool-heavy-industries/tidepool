@@ -62,7 +62,7 @@ progressBoundaryChecks effects = bracket scratch removeDirectoryRecursive $ \wor
         [] Nothing Nothing Nothing Nothing
       products = projectOriginalHomeModuleProducts
         (prHscEnv (pprPipelineResult result)) (pprProductInterfaces result)
-        context (pprModules result)
+        context mempty (pprModules result)
       originalRefusals =
         [refusal | (owner, refusals) <- preparedModuleProductOmissions products, refusal <- refusals
         , owner == pmModule prepared]
@@ -159,7 +159,7 @@ retainWatchReplyEvidence work result = do
         relevant owner = moduleNameString (moduleName owner) `elem`
           ["Tidepool.Agent.Watch.Internal", "WatchReplyEvidence"]
         products = projectOriginalHomeModuleProducts environment (pprProductInterfaces result)
-          (context "registerSingle") (pprModules result)
+          (context "registerSingle") mempty (pprModules result)
         outcomes = [(owner, outcome) | (owner, outcome) <- preparedModuleProductOutcomes products, relevant owner]
 
     writeFile (work </> "reply-evidence.txt") (unlines
