@@ -4,12 +4,15 @@ module SourceBootFixtureSupport
   , CapturedCompilerFixture, capturePreparedFixture, captureDiagnostics
   , acquireFixtureScratch, releaseFixtureScratch, releaseFixtureScratchAfterFailure
   , withScratchFailureEvidence
+  , requireOriginalSourceRejection, requireOriginalSourceBytesChanged
+  , requireSourceSelectionInput, requireUserError
+  , requireFailedCompilerTransaction
   , manifest, writeManifestFor, originalCompilerInput, digest, withScratch, preparedNames ) where
 
 import Codec.CBOR.Term (Term(..), encodeTerm)
 import Codec.CBOR.Write (toStrictByteString)
-import Control.Exception (SomeException, bracket, bracketOnError, finally, mask, onException, throwIO, try)
-import Control.Monad (filterM, foldM)
+import Control.Exception (SomeException, IOException, bracket, bracketOnError, finally, mask, onException, throwIO, try)
+import Control.Monad (filterM, foldM, void)
 import Crypto.Hash.SHA256 qualified as SHA
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as BSC
@@ -29,15 +32,18 @@ import GenuineCandidateFixture
 import Numeric (showHex)
 import System.Directory
   ( getTemporaryDirectory, removeFile, createDirectory, removeDirectoryRecursive
-  , listDirectory, doesDirectoryExist, doesFileExist, pathIsSymbolicLink, removePathForcibly )
+  , listDirectory, doesDirectoryExist, doesFileExist, pathIsSymbolicLink, removePathForcibly, canonicalizePath )
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.FilePath ((</>), makeRelative)
 import System.IO
   ( openTempFile, hClose, hFlush, hPutStr, hPutStrLn, hSeek, hFileSize, withBinaryFile
   , IOMode(ReadMode), SeekMode(AbsoluteSeek), stderr )
+import System.IO.Error (isUserError, ioeGetErrorString)
 import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 import Tidepool.DependencyEvidence (DependencyEvidence(..), DependencyModule(..))
-import Tidepool.GhcPipeline (PreparedPipelineResult(..), PipelineResult(..))
+import Tidepool.GhcPipeline (PreparedPipelineResult(..), PipelineResult(..), CompilerTransactionFailure(..))
+import Tidepool.DiagJson (InputRejection(..))
+import Tidepool.ExecutionSource (ExecutionSourceFailure(..), ExecutionSourceValidationStage(..))
 import Tidepool.PreparedStg (PreparedModule(..))
 
 capturePreparedFixture :: FilePath -> PreparedPipelineResult -> IO CapturedCompilerFixture
@@ -47,6 +53,51 @@ capturePreparedFixture work prepared = do
     (captureCompilerFixture (FixtureCompilerInput work source roots) prepared)
   hPutStr stderr diagnostics
   pure capture
+
+-- Refusal assertions catch only the owning category. Unexpected source,
+-- filesystem, process and cancellation failures keep their original exception.
+requireOriginalSourceRejection :: String -> ExecutionSourceFailure -> IO a -> IO ()
+requireOriginalSourceRejection label expected action = do
+  result <- try (void action)
+  case result of
+    Left (OriginalSourceSelectionRejected actual) | actual == expected -> pure ()
+    Left failure -> throwIO failure
+    Right () -> fail (label ++ ": expected original source refusal " ++ show expected)
+
+requireOriginalSourceBytesChanged :: String -> (String,String) -> FilePath -> String -> IO a -> IO ()
+requireOriginalSourceBytesChanged label owner path originalSha action = do
+  canonical <- canonicalizePath path
+  currentSha <- digest <$> BS.readFile canonical
+  requireOriginalSourceRejection label
+    (ExecutionSourceChangedDuring owner (OriginalSourceBytesChanged canonical originalSha currentSha)) action
+
+-- The source-selection boundary currently wraps a String-returning authority
+-- API's userError in InputRejection. Match that exact owner diagnostic.
+requireSourceSelectionInput :: String -> String -> IO a -> IO ()
+requireSourceSelectionInput label diagnostic action = do
+  result <- try (void action)
+  case result of
+    Left (OriginalSourceSelectionInputUnavailable actual)
+      | actual == show (userError diagnostic) -> pure ()
+    Left failure -> throwIO failure
+    Right () -> fail (label ++ ": expected source-selection diagnostic " ++ diagnostic)
+
+requireUserError :: String -> String -> IO a -> IO ()
+requireUserError label diagnostic action = do
+  result <- try (void action)
+  case result of
+    Left (failure :: IOException)
+      | isUserError failure && ioeGetErrorString failure == diagnostic -> pure ()
+      | otherwise -> throwIO failure
+    Right () -> fail (label ++ ": expected owner diagnostic " ++ diagnostic)
+
+requireFailedCompilerTransaction :: String -> IO a -> IO ()
+requireFailedCompilerTransaction label action = do
+  result <- try (void action)
+  case result of
+    Left CompilerTransactionFailed -> pure ()
+    Left failure -> throwIO failure
+    Right () -> fail (label ++ ": cancelled compiler transaction remained usable")
 
 writeExecutionScope :: FilePath -> CapturedCompilerFixture -> [String] -> IO FilePath
 writeExecutionScope work capture lexicalNames =

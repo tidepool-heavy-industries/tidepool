@@ -20,6 +20,7 @@ module Tidepool.GhcPipeline
   , GeneratedInstanceRecipe, generatedInstanceRecipe, cellGeneratedInstanceRecipe
   , withGeneratedInstanceRecovery
     -- * Resident session
+  , CompilerTransactionFailure(..)
   , withResidentPipelineSelected
   , withResidentPipelineSelectedRequests
   , withExactInterfaceTransaction

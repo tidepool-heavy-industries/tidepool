@@ -599,30 +599,28 @@ canonicalCurrentSource = withTiming $ withScratch $ \work -> do
     unless (either (const True) (const False) wrongOwnerProof) $
       fail "captured source original authorized another exact module owner"
     copyFile "test-source-boot/fixtures/CanonicalDependencyChanged.hs" (work </> "CanonicalDependency.hs")
-    localDependencyDrift <- try (void recheckLocal) :: IO (Either SomeException ())
-    unless (either (const True) (const False) localDependencyDrift) $
-      fail "captured source original accepted changed retained import closure"
+    requireOriginalSourceBytesChanged "captured source retained import closure"
+      ("main","CanonicalDependency") (work </> "CanonicalDependency.hs") (digest dependencyBytes) recheckLocal
     BS.writeFile (work </> "CanonicalDependency.hs") dependencyBytes
     _ <- recheckLocal
     localBytes <- BS.readFile localSource
     BS.appendFile localSource "\n-- changed original source\n"
-    localDrift <- try (void recheckLocal) :: IO (Either SomeException ())
-    unless (either (const True) (const False) localDrift) $
-      fail "captured source original accepted later source drift"
+    requireOriginalSourceBytesChanged "captured source later drift"
+      localOwner localSource (digest localBytes) recheckLocal
     BS.writeFile localSource localBytes
     _ <- recheckLocal
     copyFile "test-source-boot/fixtures/CanonicalDependencyChanged.hs" (work </> "CanonicalDependency.hs")
-    changedDependency <- try (void (check compile purpose)) :: IO (Either SomeException ())
-    unless (either (const True) (const False) changedDependency) $
-      fail "canonical current-source selection accepted changed admitted dependency"
+    requireOriginalSourceBytesChanged "canonical current-source admitted dependency"
+      ("main","CanonicalDependency") (work </> "CanonicalDependency.hs") (digest dependencyBytes)
+      (check compile purpose)
     BS.writeFile (work </> "CanonicalDependency.hs") dependencyBytes
     _ <- check compile purpose
     BS.writeFile owner "module CanonicalSource where\ntype Answer = Bool\n"
-    drift <- try (void (check compile purpose)) :: IO (Either SomeException ())
-    unless (either (const True) (const False) drift) $ fail "canonical current-source selection accepted changed source"
+    requireOriginalSourceBytesChanged "canonical current-source drift"
+      ("main","CanonicalSource") owner (digest originalBytes) (check compile purpose)
     removeFile owner
-    missing <- try (void (check compile purpose)) :: IO (Either SomeException ())
-    unless (either (const True) (const False) missing) $ fail "canonical current-source selection accepted missing source"
+    requireOriginalSourceRejection "canonical current-source missing original"
+      (ExecutionSourceUnavailable ("main","CanonicalSource")) (check compile purpose)
     BS.writeFile owner originalBytes
     _ <- check compile purpose
     pure ()
@@ -675,9 +673,10 @@ canonicalSourceObligations = withTiming $ withScratch $ \work -> do
   withResidentPipelineSelected includes $ \compile -> do
     _ <- check compile
     copyFile "test-source-boot/fixtures/CanonicalUnusedDependencyChanged.hs" dependency
-    result <- try (void (check compile)) :: IO (Either SomeException ())
-    unless (either (const required) (const (not required)) result) $
-      fail "current source import ignored GHC's actual retained versus fresh obligation"
+    if required
+      then requireOriginalSourceBytesChanged "current source retained obligation"
+        dependencyKey dependency (digest originalBytes) (check compile)
+      else void (check compile)
     ordinary <- compile (PreparedProducts Nothing) Set.empty GeneralCompile
       Nothing consumer includes Nothing
     changedSource <- sourceEvidence dependency
@@ -713,13 +712,17 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
   protected <- readFile target
   recipe <- generatedScaffoldRecipe [] protected protected target "Expr" >>= either fail pure
   let purpose = GeneratedScaffoldCompile recipe (CheckedItemCompile [] Nothing [])
-      requireRejected label action = do
-        result <- try (void action) :: IO (Either SomeException ())
-        case result of
-          Left reason -> do
-            let detail = show reason
-            putStrLn ("scaffold refused " ++ label ++ ": " ++ take 512 detail)
-          Right _ -> fail ("scaffold authority accepted " ++ label)
+      supportOwner = ("main","Tidepool.Internal.Resume")
+      requireHiddenSource label = requireOriginalSourceRejection label (ExecutionSourceUnavailable supportOwner)
+      neighborDiagnostic scopePath = do
+        retained <- readExactScope scopePath >>= either fail pure
+        artifact <- case [iface | (iface,_,_) <- scopeInterfaces retained
+            , (exactUnit iface,exactModule iface) == supportOwner] of
+          [iface] -> pure iface
+          _ -> fail "scaffold neighbor fixture lost its support interface"
+        pure $ if any (/= supportOwner) (exactRequirements artifact)
+          then "generated scaffold support requires another home implementation owner"
+          else "generated scaffold support imports home orphan or family witnesses"
   withResidentPipelineSelected includes $ \compile -> do
     admitted <- compile (PreparedProducts Nothing) Set.empty purpose (Just hidden) target [] Nothing
     unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult admitted))) $
@@ -737,23 +740,25 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
     let extra = unlines (take 5 (lines protected) ++ ["import Tidepool.Internal.Resume"] ++ drop 5 (lines protected))
     writeFile target extra
     duplicate <- generatedScaffoldRecipe [] protected extra target "Expr" >>= either fail pure
-    requireRejected "additional authored hidden import" $
+    requireHiddenSource "additional authored hidden import" $
       compile (PreparedProducts Nothing) Set.empty (GeneratedScaffoldCompile duplicate GeneralCompile)
         (Just hidden) target [] Nothing
     writeFile target (protected ++ "\ntampered = 0 :: Int\n")
-    requireRejected "changed rendered target" $
+    requireUserError "changed rendered target"
+      "generated scaffold target differs from its protected recipe" $
       compile (PreparedProducts Nothing) Set.empty purpose (Just hidden) target [] Nothing
     writeFile target protected
     copyFile "test-source-boot/fixtures/GeneratedScaffoldHelper.hs" (work </> "GeneratedScaffoldHelper.hs")
     let helperTarget = unlines (take 5 (lines protected) ++ ["import GeneratedScaffoldHelper"] ++ drop 5 (lines protected))
     writeFile target helperTarget
     helperRecipe <- generatedScaffoldRecipe [] protected helperTarget target "Expr" >>= either fail pure
-    requireRejected "fresh helper importing hidden support" $
+    requireHiddenSource "fresh helper importing hidden support" $
       compile (PreparedProducts Nothing) Set.empty (GeneratedScaffoldCompile helperRecipe GeneralCompile)
         (Just hidden) target [] Nothing
     writeFile target ("{-# LINE 100 \"authored.hs\" #-}\n" ++ protected)
     lineRecipe <- generatedScaffoldRecipe [] protected ("{-# LINE 100 \"authored.hs\" #-}\n" ++ protected) target "Expr" >>= either fail pure
-    requireRejected "logical LINE import location differs from protected occurrence" $
+    requireSourceSelectionInput "logical LINE import location differs from protected occurrence"
+      "generated scaffold import occurrence differs from its protected recipe" $
       compile (PreparedProducts Nothing) Set.empty (GeneratedScaffoldCompile lineRecipe GeneralCompile)
         (Just hidden) target [] Nothing
     writeFile target protected
@@ -777,12 +782,14 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
     interfaceOnly <- compile (PreparedProducts Nothing) Set.empty capturedPurpose (Just hidden) target [] Nothing
     unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult interfaceOnly))) $
       fail "initial template interface changed the native result"
-    requireRejected "template interface cannot replace paired native owner" $
+    requireSourceSelectionInput "template interface cannot replace paired native owner"
+      "generated scaffold lacks one paired original native owner" $
       compile (PreparedProducts Nothing) Set.empty
         (CellProgramCompile capturedPurpose admittedScope {scopeProducts=[]}) (Just hidden) target [] Nothing
     wrongSeal <- generatedScaffoldRecipe [templateInterface {templateInterfaceSha256=replicate 64 'f'}]
       withTemplate withTemplate target "Expr" >>= either fail pure
-    requireRejected "changed initial template interface seal" $
+    requireSourceSelectionInput "changed initial template interface seal"
+      "checked template graph interface seal changed" $
       compile (PreparedProducts Nothing) Set.empty (GeneratedScaffoldCompile wrongSeal GeneralCompile)
         (Just hidden) target [] Nothing
     let secondImport = unlines (take 5 (lines withTemplate)
@@ -790,11 +797,12 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
     writeFile target secondImport
     secondRecipe <- generatedScaffoldRecipe [templateInterface] withTemplate secondImport target "Expr"
       >>= either fail pure
-    requireRejected "authored second import beside permitted initial template import" $
+    requireHiddenSource "authored second import beside permitted initial template import" $
       compile (PreparedProducts Nothing) Set.empty (GeneratedScaffoldCompile secondRecipe GeneralCompile)
         (Just hidden) target [] Nothing
     writeFile target (withTemplate ++ "\ntamperedTemplateTarget = 0 :: Int\n")
-    requireRejected "same owner with changed template target bytes" $
+    requireUserError "same owner with changed template target bytes"
+      "generated scaffold target differs from its protected recipe" $
       compile (PreparedProducts Nothing) Set.empty capturedPurpose (Just hidden) target [] Nothing
     writeFile target protected
     forM_ ["Bind","Display"] $ \name -> do
@@ -806,13 +814,15 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
       checked <- compile (PreparedProducts Nothing) Set.empty wrapped (Just hidden) generatedPath [] Nothing
       unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult checked))) $
         fail ("generated " ++ name ++ " lost its settled result or CellProgram wrapper")
-    requireRejected "missing paired original native owner" $
+    requireSourceSelectionInput "missing paired original native owner"
+      "generated scaffold lacks one paired original native owner" $
       compile (PreparedProducts Nothing) Set.empty
         (CellProgramCompile purpose admittedScope {scopeProducts=[]}) (Just hidden) target [] Nothing
     let alteredOwner product' = product' {originalIfaceSha256=replicate 64 'f'}
     -- A product with another paired interface cannot grant scaffold authority.
     let differentScope = admittedScope {scopeProducts=map alteredOwner (scopeProducts admittedScope)}
-    requireRejected "wrong paired original interface identity" $
+    requireSourceSelectionInput "wrong paired original interface identity"
+      "generated scaffold lacks one paired original native owner" $
       compile (PreparedProducts Nothing) Set.empty (CellProgramCompile purpose differentScope)
         (Just hidden) target [] Nothing
     supportText <- BSC.unpack <$> BS.readFile supportPath
@@ -822,7 +832,8 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
       Nothing capturePath [] Nothing
     missingExportFixture <- capturePreparedFixture work missingExport
     missingExportPath <- writeGenuineCandidateNativeScope [] (originalOwners missingExport) work missingExportFixture
-    requireRejected "missing actual resumeLifted export" $
+    requireSourceSelectionInput "missing actual resumeLifted export"
+      "generated scaffold support has another export owner" $
       compile (PreparedProducts Nothing) Set.empty purpose
         (Just hidden {ssExactScope=Just missingExportPath}) target [] Nothing
     forM_ ["ExecutionClass.hs","ExecutionHiddenOrphan.hs"] $ \name ->
@@ -834,7 +845,8 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
       Nothing capturePath [] Nothing
     neighborFixture <- capturePreparedFixture work hiddenNeighbor
     neighborPath <- writeGenuineCandidateNativeScope [] (originalOwners hiddenNeighbor) work neighborFixture
-    requireRejected "hidden orphan neighbor through scaffold support" $
+    orphanDiagnostic <- neighborDiagnostic neighborPath
+    requireSourceSelectionInput "hidden orphan neighbor through scaffold support" orphanDiagnostic $
       compile (PreparedProducts Nothing) Set.empty purpose
         (Just hidden {ssExactScope=Just neighborPath}) target [] Nothing
     copyFile "test-source-boot/fixtures/MetadataHiddenFamily.hs" (work </> "MetadataHiddenFamily.hs")
@@ -845,14 +857,20 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
       Nothing capturePath [] Nothing
     familyFixture <- capturePreparedFixture work hiddenFamily
     familyPath <- writeGenuineCandidateNativeScope [] (originalOwners hiddenFamily) work familyFixture
-    requireRejected "hidden family neighbor through scaffold support" $
+    familyDiagnostic <- neighborDiagnostic familyPath
+    requireSourceSelectionInput "hidden family neighbor through scaffold support" familyDiagnostic $
       compile (PreparedProducts Nothing) Set.empty purpose
         (Just hidden {ssExactScope=Just familyPath}) target [] Nothing
     writeFile supportPath supportText
     let metadataPath = work </> "CellCheck.hs"
     copyFile "test-source-boot/fixtures/GeneratedScaffoldMetadata.hs" metadataPath
-    requireRejected "generated alias in authored metadata" $
+    metadata <- sourceFailureDiagnostics $
       compile CheckedEnvironment Set.empty GeneralCompile (Just hidden) metadataPath [] Nothing
+    case metadata of
+      Left diagnostics | any (\diagnostic -> sourceDiagnosticAt metadataPath "Not in scope" diagnostic
+          && "TidepoolResume.settle" `isInfixOf` dMessage diagnostic) diagnostics -> pure ()
+      Left diagnostics -> fail ("authored metadata alias had another source failure: " ++ show diagnostics)
+      Right _ -> fail "authored metadata acquired the generated scaffold alias"
     -- A current source implementation uses ordinary source admission, not the
     -- generated edge exception. It must not require a retained exact product.
     cold <- compile (PreparedProducts Nothing) Set.empty purpose Nothing target [] Nothing
@@ -1192,10 +1210,9 @@ exactRetainedQuoter = withTiming $ withScratch $ \work -> do
           Left reason -> fromException reason == Just ThreadKilled
           Right () -> False) $
         fail "execution cancellation did not reach the scoped splice linker"
-      terminal <- try (timeout 1000000 (compile CheckedEnvironment Set.empty GeneralCompile
-        (Just scope) target [work] Nothing)) :: IO (Either SomeException (Maybe CheckedEnvironmentResult))
-      unless (case terminal of Left _ -> True; _ -> False) $
-        fail "cancelled compiler callback remained usable"
+      requireFailedCompilerTransaction "retained exact quoter cancellation" $
+        timeout 1000000 (compile CheckedEnvironment Set.empty GeneralCompile
+          (Just scope) target [work] Nothing)
     runRequest (pure ()) $ \compile -> do
       copyFile "test-source-boot/fixtures/MetadataQuoter.hs" quoterPath
       (recovered,diagnostics) <- captureDiagnostics $
@@ -1517,11 +1534,9 @@ exactToOrdinary = withTiming $ withScratch $ \work -> do
         (Just scope {ssExactScope=Just helperPath}) (work </> "MetadataQuotedTarget.hs") [work] Nothing)
       started <- doesFileExist marker
       unless (isNothing cancelled && started) (fail "exact cancellation did not reach the real quoter")
-      terminal <- try (timeout 1000000 (compile CheckedEnvironment Set.empty GeneralCompile
-        (Just scope {ssExactScope=Just helperPath}) (work </> "MetadataQuotedTarget.hs") [work] Nothing))
-        :: IO (Either SomeException (Maybe CheckedEnvironmentResult))
-      unless (case terminal of Left _ -> True; Right _ -> False) $
-        fail "cancelled compiler callback remained usable"
+      requireFailedCompilerTransaction "exact to ordinary cancellation" $
+        timeout 1000000 (compile CheckedEnvironment Set.empty GeneralCompile
+          (Just scope {ssExactScope=Just helperPath}) (work </> "MetadataQuotedTarget.hs") [work] Nothing)
     runRequest (pure ()) $ \compile -> do
       copyFile "test-source-boot/fixtures/MetadataQuoter.hs" (work </> "MetadataQuoter.hs")
       copyFile "test-source-boot/fixtures/MetadataQuoteSupportChanged.hs" (work </> "MetadataQuoteSupport.hs")
@@ -2858,9 +2873,11 @@ exactLoadedMetadata = withTiming $ withScratch $ \work -> do
         && not (executableOwner (prHscEnv (pprPipelineResult extensionNative)))) $
       fail "extension-only native compilation changed its result or retained dependency execution"
     copyFile (fixture "MetadataOwnerWithoutInstance.hs") (work </> "MetadataOwner.hs")
-    changed <- try (checked "MetadataTarget.hs") :: IO (Either SomeException CheckedEnvironmentResult)
+    changed <- sourceFailureDiagnostics (checked "MetadataTarget.hs")
     case changed of
-      Left _ -> pure ()
+      Left diagnostics | any (\diagnostic -> sourceDiagnosticAt (work </> "MetadataTarget.hs")
+          "No instance for" diagnostic && "Available Int" `isInfixOf` dMessage diagnostic) diagnostics -> pure ()
+      Left diagnostics -> fail ("instance removal had another source failure: " ++ show diagnostics)
       Right _ -> fail "fresh exact scope reused the previous source instance"
     install "MetadataOwner.hs"
     recovered <- checked "MetadataTarget.hs"
@@ -3177,10 +3194,9 @@ packageInputs = withScratch $ \work -> do
       fail "accepted candidate lost its checked direct package inputs"
     let incomplete = reused { pprPackageImports = Map.delete (mkModuleName "OptionalSupport")
           (pprPackageImports reused) }
-    refused <- try (proof work "missing-owner" incomplete) :: IO (Either SomeException Term)
-    case refused of
-      Left _ -> pure ()
-      Right _ -> fail "compiler input issuer accepted missing candidate package roots"
+    requireUserError "compiler input missing candidate package owner"
+      "compiler input proof lacks complete checked package-import owners"
+      (proof work "missing-owner" incomplete)
     let wiredRoot selection purpose = compile selection Set.empty purpose Nothing
           (work </> "OptionalWiredRoot.hs") [] Nothing
     wired <- wiredRoot (PreparedProducts Nothing) CertifyHomeProductsCompile
