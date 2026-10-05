@@ -3,6 +3,7 @@
 
 use super::*;
 use proptest::prelude::*;
+use std::sync::Arc;
 
 #[derive(Clone, Debug)]
 struct Family {
@@ -381,7 +382,7 @@ proptest! {
         second = remap(&second, seed);
         second.node(TypeNode::Literal(TypeLiteral::Symbol("disconnected".into())));
         let expected = relation(&first, &second);
-        prop_assert_eq!(expected[first.root][second.root], change == 0 || (change == 3 && expected[first.root][second.root]));
+        if change <= 2 { prop_assert_eq!(expected[first.root][second.root], change == 0); }
         if change <= 2 { prop_assert_eq!(expected[first.declaration][second.declaration], change != 1); }
         let a = first.publish();
         let b = second.publish();
@@ -401,4 +402,299 @@ proptest! {
         prop_assert!(a.rooted_identity_eq(TypeNodeId::new(first.root), &c, TypeNodeId::new(copied.root), &mut TypeWorkBudget::new(1_000_000))?);
         prop_assert!(a.declaration_identity_eq(TypeNodeId::new(first.declaration), &c, TypeNodeId::new(copied.declaration), &mut TypeWorkBudget::new(1_000_000))?);
     }
+
+    #[test]
+    fn publication_orders_edges_and_preserves_content_evidence_contract(
+        families in cases(), seed in any::<u64>(),
+    ) {
+        let mut model = build(&families);
+        let opaque = model.node(TypeNode::Declaration {
+            identity: tests::identity("DisconnectedOpaque", "type"),
+            parameters: Vec::new(),
+            form: DeclarationForm::Opaque { head_kind: NominalHeadKind::Family, reason: "diagnostic".into() },
+            restriction: SyntaxRestriction::None,
+        });
+        let (first, work) = TypeGraph::validate_with_work(model.storage(), &model.inventory, GraphLimits::default())?;
+        let expected = model.adjacency();
+        for (node, edges) in expected.iter().enumerate() {
+            let actual: Vec<_> = first.ordered_edges(TypeNodeId::new(node))
+                .map(|edge| (*edge.weight(), edge.target().index())).collect();
+            prop_assert_eq!(&actual, edges);
+        }
+        let mut reordered = model.clone();
+        permute(&mut reordered.edges, seed);
+        let second = reordered.publish();
+        prop_assert!(first.content_eq(&second));
+        prop_assert!(first.evidence_eq(&second));
+        prop_assert_eq!(commitment(&first, false), commitment(&second, false));
+        prop_assert_eq!(commitment(&first, true), commitment(&second, true));
+        // The reported validation cost includes canonicalization. Its exact
+        // boundary must admit the same input and refuse one work unit less.
+        prop_assert!(TypeGraph::validate(model.storage(), &model.inventory, GraphLimits { max_work: work, ..GraphLimits::default() }).is_ok());
+        prop_assert_eq!(TypeGraph::validate(model.storage(), &model.inventory, GraphLimits { max_work: work - 1, ..GraphLimits::default() }), Err(TypeGraphError::Limit("work")));
+        if let TypeNode::Root { rendered, .. } = &mut reordered.nodes[model.root] { rendered.push_str(" changed"); }
+        if let TypeNode::Declaration { form: DeclarationForm::Opaque { reason, .. }, .. } = &mut reordered.nodes[opaque] { reason.push_str(" changed"); }
+        let diagnostics = reordered.publish();
+        prop_assert!(!first.content_eq(&diagnostics));
+        prop_assert!(first.evidence_eq(&diagnostics));
+        prop_assert_ne!(commitment(&first, false), commitment(&diagnostics, false));
+        prop_assert_eq!(commitment(&first, true), commitment(&diagnostics, true));
+        prop_assert!(first.rooted_identity_eq(TypeNodeId::new(model.root), &diagnostics, TypeNodeId::new(model.root), &mut TypeWorkBudget::new(1_000_000))?);
+        let mut budget = TypeWorkBudget::new(1_000_000);
+        prop_assert!(first.rooted_identity_eq(TypeNodeId::new(model.root), &first, TypeNodeId::new(model.root), &mut budget)?);
+        let spent = budget.spent();
+        prop_assert!(first.rooted_identity_eq(TypeNodeId::new(model.root), &first, TypeNodeId::new(model.root), &mut TypeWorkBudget::new(spent))?);
+        prop_assert_eq!(first.rooted_identity_eq(TypeNodeId::new(model.root), &first, TypeNodeId::new(model.root), &mut TypeWorkBudget::new(spent - 1)), Err(TypeGraphError::TraversalWork));
+    }
+
+    #[test]
+    fn constructor_pairing_refuses_single_inventory_defects(
+        families in cases(), selected in any::<u16>(), defect in 0_u8..7,
+    ) {
+        let model = build(&families);
+        let graph = model.publish();
+        let original = model.inventory.clone();
+        let mut changed = original.clone();
+        let physical = &mut changed[selected as usize % original.len()];
+        match defect {
+            0 => physical.identity.occurrence.push_str("Wrong"),
+            1 => physical.family.occurrence.push_str("Wrong"),
+            2 => physical.result_rep = RuntimeRep::Void,
+            3 => physical.tag = 0,
+            4 => physical.family_size += 1,
+            5 => physical.field_reps.push(RuntimeRep::LiftedRef),
+            _ => {
+                if let Some(rep) = physical.field_reps.first_mut() {
+                    *rep = if *rep == RuntimeRep::Int(64) { RuntimeRep::LiftedRef } else { RuntimeRep::Int(64) };
+                } else {
+                    physical.field_reps.push(RuntimeRep::LiftedRef);
+                }
+            }
+        }
+        prop_assert!(matches!(graph.check_constructor_pairing(&changed), Err(TypeGraphError::InvalidConstructor(_))));
+        prop_assert!(matches!(TypeGraph::validate(model.storage(), &changed, GraphLimits::default()), Err(TypeGraphError::InvalidConstructor(_))));
+        // Refusal and repeated inventory checks leave the frozen owner intact.
+        prop_assert_eq!(graph.check_constructor_pairing(&original), Ok(()));
+        let work = graph.check_constructor_pairing_with_work(&original, GraphLimits::default())?;
+        prop_assert_eq!(graph.check_constructor_pairing_with_work(&original, GraphLimits { max_work: work, ..GraphLimits::default() })?, work);
+        prop_assert_eq!(graph.check_constructor_pairing_with_work(&original, GraphLimits { max_work: work - 1, ..GraphLimits::default() }), Err(TypeGraphError::Limit("work")));
+    }
+
+    #[test]
+    fn single_expression_or_scope_defects_refuse(families in cases(), defect in 0_u8..4) {
+        let mut model = build(&families);
+        let expected = match defect {
+            0 => {
+                model.publish();
+                model.edge(model.root, model.argument, TypeEdge::Body);
+                TypeGraphError::InvalidCardinality(model.root)
+            }
+            1 => {
+                model.publish();
+                model.edges.retain(|&(source, _, role)| source != model.root || role != TypeEdge::Body);
+                TypeGraphError::InvalidCardinality(model.root)
+            }
+            2 => {
+                let application = model.node(TypeNode::Application);
+                model.edge(application, model.argument, TypeEdge::Function);
+                model.edge(application, model.argument, TypeEdge::ApplyArgument);
+                model.publish();
+                let edge = model.edges.iter_mut().find(|(source, _, role)| *source == application && *role == TypeEdge::ApplyArgument).unwrap();
+                edge.1 = application;
+                TypeGraphError::ExpressionCycle
+            }
+            _ => {
+                let bound = model.node(TypeNode::Bound(0));
+                let kind = model.node(TypeNode::Literal(TypeLiteral::Symbol("kind".into())));
+                let open = model.node(TypeNode::Root {
+                    domain: RootDomain::ConstructorScheme,
+                    binders: vec![SourceBinderFlag::Specified],
+                    rendered: "open bound".into(),
+                });
+                model.edge(open, kind, TypeEdge::BinderKind(0));
+                model.edge(open, bound, TypeEdge::Body);
+                model.publish();
+                // The same bound expression was valid under the open root;
+                // sharing it under the closed root must independently refuse.
+                let edge = model.edges.iter_mut().find(|(source, _, role)| *source == model.root && *role == TypeEdge::Body).unwrap();
+                edge.1 = bound;
+                TypeGraphError::InvalidScope(model.root)
+            }
+        };
+        prop_assert_eq!(TypeGraph::validate(model.storage(), &model.inventory, GraphLimits::default()), Err(expected));
+    }
+
+    #[test]
+    fn cursor_clone_read_and_augmentation_retain_frozen_graph(families in cases()) {
+        let model = build(&families);
+        let owner = Arc::new(model.publish());
+        let before = commitment(&owner, false);
+        let root = crate::execution_schema::TypeNodeId(model.root as u32);
+        let cursor = owner.open_root(root, &mut TypeWorkBudget::new(1_000_000))?;
+        let cloned = cursor.clone();
+        prop_assert!(Arc::ptr_eq(cursor.owner(), cloned.owner()));
+        prop_assert_eq!(cursor.expression(), cloned.expression());
+        prop_assert_eq!(cursor.rendered(), cloned.rendered());
+        let TypeView::Data(data) = cloned.view(&mut TypeWorkBudget::new(1_000_000))? else {
+            return Err(TestCaseError::fail("saturated data root must yield a data view"));
+        };
+        prop_assert_eq!(data.family(), &model.inventory[0].family);
+        prop_assert_eq!(data.argument_count(), families[0].parameters.len());
+        let expected_ids: Vec<_> = (0..families[0].constructors.len()).map(|i| ConstructorId(i as u32)).collect();
+        prop_assert_eq!(data.constructors().collect::<Vec<_>>(), expected_ids);
+        for constructor in data.constructors() {
+            let fields = data.fields(constructor, &mut TypeWorkBudget::new(1_000_000))?.unwrap();
+            let template = model.nodes.iter().position(|node| matches!(node, TypeNode::ConstructorTemplate { constructor: id, .. } if *id == constructor)).unwrap();
+            let expected = &model.adjacency()[template];
+            prop_assert_eq!(fields.len(), expected.len());
+            for (field, &(_, target)) in fields.iter().zip(expected) {
+                prop_assert_eq!(field.expression().index(), target);
+                prop_assert!(Arc::ptr_eq(field.owner(), &owner));
+                let field_clone = field.clone();
+                let view = field_clone.view(&mut TypeWorkBudget::new(1_000_000))?;
+                let actual = view_class(&view);
+                let expected = match model.nodes[target] {
+                    TypeNode::NominalApplication => 0,
+                    TypeNode::Function(_) => 1,
+                    TypeNode::ForAll(_) => 2,
+                    // Bound arguments resolve to root literals; applying a
+                    // literal also remains unnormalized, not constructible.
+                    TypeNode::Bound(_) | TypeNode::Application => 3,
+                    _ => unreachable!("generator field shape"),
+                };
+                prop_assert_eq!(actual, expected);
+                if let TypeView::Data(nested) = view {
+                    // One more generation exercises composed environments and
+                    // regular/nonregular recursion without expanding a tree.
+                    for nested_constructor in nested.constructors() {
+                        let nested_fields = nested.fields(nested_constructor, &mut TypeWorkBudget::new(1_000_000))?.unwrap();
+                        prop_assert_eq!(nested_fields.len(), model.inventory[nested_constructor.0 as usize].field_reps.len());
+                        for nested_field in nested_fields {
+                            let _ = nested_field.view(&mut TypeWorkBudget::new(1_000_000))?;
+                            prop_assert!(Arc::ptr_eq(nested_field.owner(), &owner));
+                        }
+                    }
+                }
+            }
+        }
+        prop_assert!(data.fields(ConstructorId(model.inventory.len() as u32), &mut TypeWorkBudget::new(1_000_000))?.is_none());
+        prop_assert_eq!(commitment(&owner, false), before);
+        let mut augmented = model.clone();
+        augmented.node(TypeNode::Literal(TypeLiteral::Symbol("later disconnected expression".into())));
+        let new_owner = Arc::new(augmented.publish());
+        prop_assert_eq!(owner.graph().node_count(), model.nodes.len());
+        prop_assert_eq!(new_owner.graph().node_count(), model.nodes.len() + 1);
+        prop_assert!(owner.rooted_identity_eq(TypeNodeId::new(model.root), &new_owner, TypeNodeId::new(model.root), &mut TypeWorkBudget::new(1_000_000))?);
+        prop_assert!(matches!(cursor.view(&mut TypeWorkBudget::new(1_000_000))?, TypeView::Data(_)));
+    }
+}
+
+fn commitment(graph: &TypeGraph, evidence: bool) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    if evidence {
+        graph.write_evidence(|part| bytes.extend_from_slice(part));
+    } else {
+        graph.write_content(|part| bytes.extend_from_slice(part));
+    }
+    bytes
+}
+
+fn view_class(view: &TypeView) -> u8 {
+    match view {
+        TypeView::Data(_) => 0,
+        TypeView::Unconstructible(ConstructionRefusal::Function) => 1,
+        TypeView::Unconstructible(ConstructionRefusal::Polymorphic) => 2,
+        TypeView::Unconstructible(ConstructionRefusal::Unnormalized) => 3,
+        _ => 4,
+    }
+}
+
+#[test]
+fn generated_topology_distribution_and_shrinking_are_observable() {
+    use proptest::strategy::ValueTree;
+    use proptest::test_runner::{RngAlgorithm, TestRng, TestRunner};
+
+    let mut runner = TestRunner::new_with_rng(
+        ProptestConfig {
+            failure_persistence: None,
+            ..ProptestConfig::default()
+        },
+        TestRng::from_seed(RngAlgorithm::ChaCha, &[42; 32]),
+    );
+    let strategy = cases();
+    let mut family_counts = [0_usize; 4];
+    let mut field_shapes = [0_usize; 5];
+    let mut field_counts = [0_usize; 4];
+    let mut parameter_flags = [0_usize; 4];
+    let mut reps = [0_usize; 3];
+    let mut cyclic = 0;
+    let mut diamonds = 0;
+    let mut disconnected = 0;
+    let mut copied_larger = 0;
+    let mut largest = 0;
+    for _ in 0..256 {
+        let families = strategy.new_tree(&mut runner).unwrap().current();
+        family_counts[families.len()] += 1;
+        for family in &families {
+            for &parameter in &family.parameters {
+                parameter_flags[parameter as usize] += 1;
+            }
+            for fields in &family.constructors {
+                field_counts[fields.len()] += 1;
+                for &field in fields {
+                    field_shapes[field as usize % 5] += 1;
+                    reps[field as usize % 3] += 1;
+                }
+            }
+        }
+        let model = build(&families);
+        largest = largest.max(model.nodes.len());
+        let edges = model.adjacency();
+        diamonds += usize::from(edges.iter().any(|edges| {
+            edges
+                .iter()
+                .enumerate()
+                .any(|(i, (_, target))| edges[i + 1..].iter().any(|(_, other)| target == other))
+        }));
+        // Finite edge-list reachability detects cycles through declarations;
+        // expression-only cycles are independently rejected by publication.
+        let mut reachable = vec![vec![false; model.nodes.len()]; model.nodes.len()];
+        for &(source, target, _) in &model.edges {
+            reachable[source][target] = true;
+        }
+        for middle in 0..model.nodes.len() {
+            for source in 0..model.nodes.len() {
+                for target in 0..model.nodes.len() {
+                    let via_middle = reachable[source][middle] && reachable[middle][target];
+                    reachable[source][target] |= via_middle;
+                }
+            }
+        }
+        cyclic += usize::from((0..model.nodes.len()).any(|i| reachable[i][i]));
+        disconnected += usize::from(
+            (0..model.nodes.len()).any(|i| i != model.root && !reachable[model.root][i]),
+        );
+        copied_larger += usize::from(copy_expressions(&model).nodes.len() > model.nodes.len());
+    }
+    let mut shrinking = strategy.new_tree(&mut runner).unwrap();
+    let mut shrink_steps = 0;
+    while shrinking.simplify() {
+        shrink_steps += 1;
+        assert!(
+            shrink_steps < 4096,
+            "bounded configuration must finish shrinking"
+        );
+    }
+    let minimal = shrinking.current();
+    eprintln!("type graph coverage: samples=256 families={family_counts:?} field_shapes={field_shapes:?} field_counts={field_counts:?} parameter_flags={parameter_flags:?} reps={reps:?} cycles={cyclic} diamonds={diamonds} disconnected={disconnected} copied_larger={copied_larger} max_nodes={largest} shrink_steps={shrink_steps} minimal={minimal:?}");
+    assert!(family_counts[1..].iter().all(|&count| count >= 16));
+    assert!(field_shapes.iter().all(|&count| count >= 32));
+    assert!(field_counts.iter().all(|&count| count >= 32));
+    assert!(parameter_flags.iter().all(|&count| count >= 32));
+    assert!(reps.iter().all(|&count| count >= 32));
+    assert!(cyclic >= 16 && diamonds >= 64 && disconnected >= 32 && copied_larger >= 64);
+    assert!(shrink_steps > 0);
+    assert_eq!(minimal.len(), 1);
+    assert_eq!(minimal[0].parameters, vec![0]);
+    assert_eq!(minimal[0].constructors, vec![Vec::<u8>::new()]);
 }
