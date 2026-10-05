@@ -10,7 +10,11 @@
               needing the launcher"
 )]
 #![cfg(target_os = "linux")]
-use std::{fs, path::{Path, PathBuf}, process::Command};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 #[test]
 fn fault_child() {
@@ -38,7 +42,27 @@ fn fault_child() {
             }
         }
         "best" => tidepool_atomic_write::write_best_effort(&root.join("value"), b"new"),
-        "mkdir" => tidepool_atomic_write::create_dir_all_durable(&root.join("new/deep")),
+        "mkdir" | "mkdir-retry" => {
+            let anchor = tidepool_atomic_write::DirectoryAnchor::open_existing(root).unwrap();
+            if operation == "mkdir-retry" {
+                let error = anchor.create_dir_all("new/deep").unwrap_err();
+                assert_eq!(error.path, root);
+                assert!(root.join("new/deep").is_dir());
+            }
+            anchor.create_dir_all("new/deep").map(|_| ())
+        }
+        "scope" => {
+            let ancestor = root.parent().unwrap();
+            assert_eq!(
+                fs::File::open(ancestor).unwrap_err().kind(),
+                std::io::ErrorKind::PermissionDenied
+            );
+            fs::remove_file(std::env::var_os("FAULT_LOG").unwrap()).unwrap();
+            tidepool_atomic_write::DirectoryAnchor::open_existing(root)
+                .unwrap()
+                .create_dir_all("new/deep")
+                .map(|_| ())
+        }
         _ => panic!("unknown operation"),
     };
     assert_eq!(
@@ -46,7 +70,7 @@ fn fault_child() {
         std::env::var("FAULT_EXPECT_OK").unwrap() == "yes",
         "{result:?}"
     );
-    if operation == "mkdir" {
+    if operation.starts_with("mkdir") || operation == "scope" {
         assert!(root.join("new/deep").is_dir());
     } else {
         assert_eq!(fs::read(root.join("value")).unwrap(), b"new");
@@ -60,8 +84,8 @@ fn strict_directory_faults_are_reported_after_visible_publication() {
         .map(PathBuf::from)
         .unwrap_or_else(|| {
             let library = temp.path().join("fault.so");
-            let source = Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("tests/fixtures/directory_fault.c");
+            let source =
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/directory_fault.c");
             assert!(Command::new("cc")
                 .args(["-shared", "-fPIC", "-Wall", "-Werror"])
                 .arg(source)
@@ -80,6 +104,7 @@ fn strict_directory_faults_are_reported_after_visible_publication() {
         ("best", "sync", true, false),
         ("mkdir", "sync", false, true),
         ("mkdir", "trace", true, true),
+        ("mkdir-retry", "sync-once", true, true),
     ]
     .into_iter()
     .enumerate()
@@ -108,9 +133,75 @@ fn strict_directory_faults_are_reported_after_visible_publication() {
         if hits {
             assert!(!fs::read(&log).unwrap().is_empty());
         }
-        if operation == "mkdir" {
-            tidepool_atomic_write::create_dir_all_durable(&root.join("new/deep")).unwrap();
+        if operation.starts_with("mkdir") {
+            let retry_log = temp.path().join(format!("retry-{index}"));
+            let retry = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "fault_child", "--nocapture"])
+                .env("LD_PRELOAD", &library)
+                .env("FAULT_ROOT", &root)
+                .env("FAULT_LOG", &retry_log)
+                .env("FAULT_OPERATION", "mkdir")
+                .env("FAULT_KIND", "trace")
+                .env("FAULT_EXPECT_OK", "yes")
+                .output()
+                .unwrap();
+            assert!(
+                retry.status.success(),
+                "{}",
+                String::from_utf8_lossy(&retry.stderr)
+            );
+            assert_eq!(
+                fs::read_to_string(retry_log).unwrap(),
+                format!(
+                    "{}\n{}\n{}\n",
+                    root.join("new/deep").display(),
+                    root.join("new").display(),
+                    root.display()
+                )
+            );
         }
+        if operation == "mkdir" && kind == "trace" {
+            assert_eq!(
+                fs::read_to_string(log).unwrap(),
+                format!(
+                    "{}\n{}\n{}\n",
+                    root.join("new/deep").display(),
+                    root.join("new").display(),
+                    root.display()
+                )
+            );
+        }
+    }
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let ancestor = temp.path().join("traversal-only");
+        let root = ancestor.join("owned-root");
+        fs::create_dir_all(&root).unwrap();
+        fs::set_permissions(&ancestor, fs::Permissions::from_mode(0o111)).unwrap();
+        let log = temp.path().join("ancestor-open");
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "fault_child", "--nocapture"])
+            .env("LD_PRELOAD", &library)
+            .env("FAULT_PATH", &ancestor)
+            .env("FAULT_ROOT", &root)
+            .env("FAULT_LOG", &log)
+            .env("FAULT_OPERATION", "scope")
+            .env("FAULT_KIND", "open-denied")
+            .env("FAULT_EXPECT_OK", "yes")
+            .output()
+            .unwrap();
+        fs::set_permissions(&ancestor, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(
+            output.status.success(),
+            "{} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !log.exists(),
+            "operation opened an ancestor above its anchor"
+        );
+        assert!(root.join("new/deep").is_dir());
     }
     assert!(tidepool_atomic_write::write_durable(&temp.path().join("absent/value"), b"x").is_err());
     assert!(!temp.path().join("absent").exists());

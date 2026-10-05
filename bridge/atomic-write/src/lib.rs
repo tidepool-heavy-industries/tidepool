@@ -235,10 +235,12 @@ fn open_directory(path: &Path) -> Result<std::fs::File, WriteError> {
 }
 
 fn sync_directory(path: &Path) -> Result<(), WriteError> {
-    open_directory(path)?.sync_all().map_err(|source| WriteError {
-        path: path.to_path_buf(),
-        source,
-    })
+    open_directory(path)?
+        .sync_all()
+        .map_err(|source| WriteError {
+            path: path.to_path_buf(),
+            source,
+        })
 }
 
 /// An existing, durably established directory that bounds directory creation.
@@ -358,6 +360,41 @@ mod tests {
             .unwrap()
             .downcast_ref::<WriteError>()
             .is_some());
+    }
+
+    #[test]
+    fn directory_anchor_requires_an_existing_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let absent = root.path().join("absent");
+        let error = DirectoryAnchor::open_existing(&absent).unwrap_err();
+        assert_eq!(error.path, absent);
+        assert_eq!(error.source.kind(), std::io::ErrorKind::NotFound);
+        assert!(!absent.exists());
+        let file = root.path().join("file");
+        std::fs::write(&file, b"value").unwrap();
+        let error = DirectoryAnchor::open_existing(&file).unwrap_err();
+        assert_eq!(error.path, file);
+        assert_eq!(error.source.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn directory_anchor_rejects_escaping_paths_before_creation() {
+        let root = tempfile::tempdir().unwrap();
+        let anchor = DirectoryAnchor::open_existing(root.path()).unwrap();
+        for relative in [
+            Path::new("new/../escaped"),
+            Path::new("../escaped"),
+            root.path(),
+        ] {
+            let error = anchor.create_dir_all(relative).unwrap_err();
+            assert_eq!(error.source.kind(), std::io::ErrorKind::InvalidInput);
+        }
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+        assert_eq!(anchor.create_dir_all("").unwrap(), anchor.path());
+        assert_eq!(
+            anchor.create_dir_all("./new/deep").unwrap(),
+            anchor.path().join("new/deep")
+        );
     }
 
     #[test]

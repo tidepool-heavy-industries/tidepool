@@ -11,9 +11,9 @@ the target, so a reader — this process's own next boot, or a concurrent one
 
 ## What's here
 
-Two functions, two durability tiers (`src/lib.rs`):
+Publication and directory durability primitives (`src/lib.rs`):
 
-- `write_durable(path, bytes)` — file fsync + best-effort parent-directory
+- `write_durable(path, bytes)` — file fsync + strict parent-directory
   fsync, so the rename itself survives a crash. Use for state a restart must
   be able to trust: registry rows, leases, checkpoints, toolchain stamps.
 - `write_best_effort(path, bytes)` — no fsync at all; only the rename's
@@ -26,31 +26,26 @@ Two functions, two durability tiers (`src/lib.rs`):
   the parent-directory sync. Callers must serialize writes to that target
   through confirmation. Existing `write_durable` callers keep their API.
 
-Both use `tempfile::NamedTempFile` for the temp file itself, which picks a
-unique name per call — no caller needs to invent its own, and no caller can
-collide with a sibling writer racing on the same target path. `WriteError`
-names the path the failing step actually touched (the target's directory if
-the temp file itself couldn't be created there, the target path for every
-later step), because "the write failed" naming a directory when the target
-file was never reached is a worse diagnostic than naming the real site.
+- `write_durable_new(path, bytes)` — durable exclusive creation. It reports
+  whether this caller published the file or another publisher already owns its
+  name. Both outcomes confirm the parent-directory sync; an error can follow a
+  visible publication.
+- `DirectoryAnchor::open_existing(root)` — open a stable domain directory whose
+  own parent link the owner has already durably established. It never creates
+  the root. `anchor.create_dir_all(relative)` rejects absolute and parent paths,
+  creates the hierarchy, then syncs the full leaf-to-anchor chain, including
+  existing directories on every retry. It never opens ancestors above the
+  anchor. A failed creation must be retried from the same stable boundary.
 
-Deliberately **not** here: `std::fs::hard_link`-based exclusive-claim writes
-(an ordinary rename overwrites; a hard link fails loud when the target
-already exists) — that's a different primitive for a different job, kept
-with its one caller rather than folded in here.
+Publication uses `tempfile::NamedTempFile` for unique same-directory temporary
+files. `WriteError` names the path touched by the failed operation, including
+parent-directory open or sync after publication. Directory errors are never
+suppressed. The anchor scopes durability; it does not confer filesystem access
+or replace the owner's concurrency and symlink-target preconditions.
 
 ## How to change it
 
 This crate is intentionally tiny and dependency-light (`tempfile` only).
-Adding a third durability tier or a new failure mode should stay in this
-shape: one function per tier, `WriteError` naming the actual failing path.
-If a caller needs something this crate doesn't provide (e.g. an exclusive
-hard-link claim), that's a signal it wants a different primitive, not an
-argument to widen this one — see "Deliberately not here" above.
-
-## Where the rationale lives
-
-The crate's own `src/lib.rs` module doc has the full six-caller history and
-the fsync-tier reasoning; there is no separate plan document for this crate
-specifically. `tidepool/runtime/CLAUDE.md`'s compile-cache section documents
-a caller in detail (the compile cache).
+Keep durability and publication ordering in this owner. Callers select the
+stable storage domain and serialize mutations; they must not infer an anchor
+from whichever ancestor happens to exist after an uncertain creation.
