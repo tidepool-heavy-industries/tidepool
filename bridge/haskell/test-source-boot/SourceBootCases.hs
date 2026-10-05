@@ -1327,11 +1327,11 @@ exactExecutionTransitiveInstance :: IO ExecutionInstanceFixture -> IO ()
 exactExecutionTransitiveInstance getFixture = withExecutionInstanceFixture getFixture $ \work scope _ -> do
   result <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope)
     (work </> "ExecutionFreshTarget.hs") [work] Nothing
-  unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult result))
-      && any (\node -> dependencyModuleName node == "ExecutionFreshQuoter"
+  requireInstanceQuoterResult "transitive orphan" result
+  unless (any (\node -> dependencyModuleName node == "ExecutionFreshQuoter"
         && any ((== "ExecutionSealedQuoter") . dependencyImportName) (dependencyModuleImports node))
         (dependencyModules (pprDependencies result))) $
-    fail "fresh provider lost its real transitive import or GHC's orphan instance"
+    fail "fresh provider lost its real transitive orphan import"
 
 exactExecutionUnrelatedInstance :: IO ExecutionInstanceFixture -> IO ()
 exactExecutionUnrelatedInstance getFixture = withExecutionInstanceFixture getFixture $ \work scope _ ->
@@ -1345,8 +1345,7 @@ exactExecutionUnrelatedInstance getFixture = withExecutionInstanceFixture getFix
       let oracleTarget = oracle </> "ExecutionExplicitOrphanTarget.hs"
           oracleProvider = oracle </> "ExecutionExplicitOrphanQuoter.hs"
       ordinary <- runPipelineSelected (PreparedProducts Nothing) oracleTarget [oracle]
-      unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult ordinary))) $
-        fail "ordinary GHC explicit-import control changed its result"
+      requireInstanceQuoterResult "ordinary explicit orphan import" ordinary
       writeUnrelatedProvider work oracleProvider
       refused <- sourceFailureDiagnostics (runPipelineSelected (PreparedProducts Nothing) oracleTarget [oracle])
       case refused of
@@ -1358,11 +1357,11 @@ exactExecutionUnrelatedInstance getFixture = withExecutionInstanceFixture getFix
     -- while the target demands bytecode from the sealed original quoter.
     explicit <- compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope)
       (work </> "ExecutionExplicitOrphanTarget.hs") [work] Nothing
-    unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult explicit))
-        && any (\node -> dependencyModuleName node == "ExecutionExplicitOrphanQuoter"
+    requireInstanceQuoterResult "exact explicit orphan import" explicit
+    unless (any (\node -> dependencyModuleName node == "ExecutionExplicitOrphanQuoter"
           && any ((== "ExecutionHiddenOrphan") . dependencyImportName) (dependencyModuleImports node))
           (dependencyModules (pprDependencies explicit))) $
-      fail "explicit orphan-import control lost its actual edge or dictionary"
+      fail "explicit orphan-import control lost its actual import edge"
     -- Use the same provider module in both observations. This makes the
     -- missing import the sole source difference and exercises warm isolation.
     writeUnrelatedProvider work (work </> "ExecutionExplicitOrphanQuoter.hs")
@@ -1386,8 +1385,16 @@ exactExecutionUnrelatedInstance getFixture = withExecutionInstanceFixture getFix
       fail "unrelated-provider refusal leaked its execution environment"
     copyFile "test-source-boot/fixtures/ExecutionExplicitOrphanQuoter.hs" provider
     recovered <- compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope) target [work] Nothing
-    unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult recovered))) $
-      fail "restored explicit orphan import did not recover after rejection"
+    requireInstanceQuoterResult "restored explicit orphan import" recovered
+
+-- These provider fixtures check the actual dictionary result inside quoteExp.
+-- GHC must execute that check to produce the Int expression; floated Core
+-- bindings and target optimization do not define the source-visibility oracle.
+requireInstanceQuoterResult :: String -> PreparedPipelineResult -> IO ()
+requireInstanceQuoterResult label prepared = do
+  let result = pprPipelineResult prepared
+  unless (maybe False (`eqType` intTy) (prResultType result)) $
+    fail (label ++ ": checked quoter expression did not retain its GHC Int type")
 
 exactExecutionClassInstance :: IO ExecutionInstanceFixture -> IO ()
 exactExecutionClassInstance getFixture = withExecutionInstanceFixture getFixture $ \work _ scope ->
