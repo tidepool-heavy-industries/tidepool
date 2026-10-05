@@ -9321,13 +9321,17 @@ pub(super) mod tests {
             (7, 4, TypeEdge::Head),
             (8, 5, TypeEdge::Head),
         ];
-        for (ordinal, constructor) in (1..=6).enumerate() {
+        for constructor in 1..=6 {
             let template = nodes.len() as u32;
             nodes.push(TypeNode::ConstructorTemplate {
                 constructor: ConstructorId(constructor),
                 identity: wire.constructors[constructor as usize].identity.clone(),
             });
-            edges.push((3, template, TypeEdge::Constructor(ordinal as u32)));
+            edges.push((
+                3,
+                template,
+                TypeEdge::Constructor(wire.constructors[constructor as usize].tag),
+            ));
             if constructor != 6 {
                 edges.push((
                     template,
@@ -9345,7 +9349,7 @@ pub(super) mod tests {
             identity: wire.constructors[22].identity.clone(),
         });
         edges.extend([
-            (5, framed, TypeEdge::Constructor(0)),
+            (5, framed, TypeEdge::Constructor(wire.constructors[22].tag)),
             (
                 framed,
                 7,
@@ -10256,7 +10260,7 @@ pub(super) mod tests {
                 (4, 2, TypeEdge::Head),
                 (5, 3, TypeEdge::Head),
                 (5, 4, TypeEdge::Argument(0)),
-                (3, 6, TypeEdge::Constructor(0)),
+                (3, 6, TypeEdge::Constructor(constructor.tag)),
                 (
                     6,
                     7,
@@ -10780,8 +10784,8 @@ pub(super) mod tests {
                 (3, 1, TypeEdge::Head),
                 (3, 4, TypeEdge::Argument(0)),
                 (5, 2, TypeEdge::Head),
-                (1, 6, TypeEdge::Constructor(0)),
-                (1, 7, TypeEdge::Constructor(1)),
+                (1, 6, TypeEdge::Constructor(wire.constructors[1].tag)),
+                (1, 7, TypeEdge::Constructor(wire.constructors[2].tag)),
                 (
                     7,
                     4,
