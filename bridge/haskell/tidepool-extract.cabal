@@ -3,6 +3,7 @@ name:          tidepool-extract
 version:       0.1.0.0
 build-type:    Simple
 extra-source-files:
+  test/Suite.hs
   lib/Tidepool/Aeson/Scientific.hs
   lib/Tidepool/Aeson/Value.hs
   lib/Tidepool/Command/Types.hs
