@@ -88,7 +88,10 @@ impl InputFixture {
         .expect("minimal real AgentSession surface");
         let root = tempfile::tempdir().unwrap();
         let mut include = effects.include_paths().to_vec();
-        include.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../bridge/haskell/actors"));
+        include.push(PathBuf::from(
+            std::env::var_os("TIDEPOOL_HASKELL_ACTORS_DIR")
+                .expect("TIDEPOOL_HASKELL_ACTORS_DIR must name the declared actor source resource"),
+        ));
         let mut preamble = effects.preamble().to_owned();
         for import in [
             "Tidepool.Agent.Reply (Replies)",

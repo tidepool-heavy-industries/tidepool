@@ -701,6 +701,10 @@ source = "git+https://example.invalid/tokio-tungstenite?rev=aaaaaaaaaaaaaaaaaaaa
             "bridge/haskell/src/Tidepool/Session.hs",
         )
         self.rule("tidepool/runtime", "tidepool_runtime_unit_tests", "tidepool_rust_binary")
+        unit = self.rule("tidepool/runtime", "tidepool_runtime_unit_tests_all", "tidepool_rust_test_cases")
+        self.assertEqual(unit["env"]["TIDEPOOL_HASKELL_ACTORS_DIR"],
+                         "$(location //bridge/haskell:facade_embedded_sources)/actors")
+        self.assertIn("//bridge/haskell:facade_embedded_sources", unit["resources"])
         admission = self.rule("tidepool/runtime", "runtime_admission_tests", "tidepool_rust_test_cases")
         self.assertEqual(admission["binary"], ":tidepool_runtime_unit_tests")
         self.assertEqual(admission["expected_count"], 3)

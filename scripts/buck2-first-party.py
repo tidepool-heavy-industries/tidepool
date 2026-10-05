@@ -584,6 +584,8 @@ def test_runtime_inputs(package_name, target_name, unit=False):
             "TIDEPOOL_KEEP_TEST_LOGS": "1",
         })
         resources.extend(["//build/package:compiler_deployment", "//bridge/haskell:facade_embedded_sources", "//build/package:tidepool_extract_runtime_libraries"])
+    if package_name == "tidepool-runtime" and unit:
+        env["TIDEPOOL_HASKELL_ACTORS_DIR"] = "$(location //bridge/haskell:facade_embedded_sources)/actors"
     if package_name == "tidepool-extract-cmd" and target_name == "daemon_integration":
         env["TIDEPOOL_RETAINED_IMPORT_FIXTURE_DIR"] = "$(location //bridge/haskell:retained_import_test_sources)"
         resources.append("//bridge/haskell:retained_import_test_sources")
