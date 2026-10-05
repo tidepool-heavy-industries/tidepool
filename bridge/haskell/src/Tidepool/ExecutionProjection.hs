@@ -16,6 +16,8 @@ module Tidepool.ExecutionProjection
   , prepareProjectionWithReachability
   , projectSelected
   , projectSelectedWithHostBindings
+  , PreparedCandidate, projectSelectedCandidateWithHostBindings
+  , candidateGlobals, finalizePreparedCandidate
   , preparedTopIdentities
   , preparedTargetReferences
   , ReferenceFact(..)
@@ -162,6 +164,8 @@ data ProjectionPurpose
   = ExecutableTarget
   | OriginalHomeProduct (Module -> Bool)
 
+data EntryContractAdmission = FinalEntryContracts | DeferredEntryContracts
+
 data PState = PState
   { nextValue :: Word32, nextJoin :: Word32
   , values :: VarEnv ValueId, joins :: VarEnv JoinId
@@ -190,6 +194,8 @@ data PState = PState
   -- Tops outside the group currently being projected become explicit imports.
   , externalizedTops :: Set SymbolIdentity
   , projectionPurpose :: ProjectionPurpose
+  , entryContractAdmission :: EntryContractAdmission
+  , entryContractFailures :: [ProjectionError]
   }
 
 type P a = StateT PState (Either ProjectionError) a
@@ -232,7 +238,7 @@ projectLiteralAtomForTest :: TargetDescriptor -> Literal -> Either ProjectionErr
 projectLiteralAtomForTest machine literal = evalStateT (projectLiteralAtom literal)
   (PState 0 0 emptyVarEnv emptyVarEnv emptyVarEnv emptyVarEnv Map.empty [] Map.empty
     0 0 0 0 emptyVarEnv Seq.empty Seq.empty Seq.empty Map.empty Map.empty Seq.empty Seq.empty Map.empty
-    machine Map.empty Set.empty Nothing Nothing Nothing Nothing Set.empty ExecutableTarget)
+    machine Map.empty Set.empty Nothing Nothing Nothing Nothing Set.empty ExecutableTarget FinalEntryContracts [])
 
 projectPrepared :: ProjectionContext -> [PreparedModule] -> Either ProjectionError WireProgram
 projectPrepared _ [] = Left (UnsupportedPreparedShape "execution program has no modules")
@@ -490,7 +496,7 @@ projectPreparedModuleGroupOutcomesFor purpose context prepared selection =
             (if pmCoverage prepared == CompleteSourceModule
               then Set.singleton owner else Set.empty)
             (projectionFormattingAuthority context) (projectionTimeAuthority context)
-            (projectionJsonAuthority context) (projectionTextUnit context) outside purpose
+            (projectionJsonAuthority context) (projectionTextUnit context) outside purpose FinalEntryContracts []
       evidence <- selectPreparedEvidence evidenceIndex (topBinders binding)
       ((groups, types, sites, verbSites, jsonLayout), final) <- runStateT
         (do validatePreparedEvidence context [onlyGroup] [evidence] []
@@ -543,7 +549,25 @@ projectPreparedWithTopSymbols = projectPreparedWithHostBindings []
 projectPreparedWithHostBindings :: [HostBindingRepresentation] -> ProjectionContext
   -> [PreparedModule] -> VarEnv SymbolIdentity
   -> Either ProjectionError (WireProgram, [DataCon])
-projectPreparedWithHostBindings hostBindings context modules topIdentityMap = do
+projectPreparedWithHostBindings hostBindings context modules topIdentityMap =
+  projectPreparedCandidateWithHostBindings hostBindings context modules topIdentityMap
+    >>= finalizePreparedCandidate
+
+-- The candidate keeps its entry checks paired with the exact emitted program.
+-- Package recovery may inspect globals, but cannot publish an unchecked body.
+data PreparedCandidate = PreparedCandidate WireProgram [DataCon] [ProjectionError]
+
+candidateGlobals :: PreparedCandidate -> [GlobalDecl]
+candidateGlobals (PreparedCandidate program _ _) = programGlobals program
+
+finalizePreparedCandidate :: PreparedCandidate -> Either ProjectionError (WireProgram, [DataCon])
+finalizePreparedCandidate (PreparedCandidate program constructors failures) = case failures of
+  failure : _ -> Left failure
+  [] -> Right (program, constructors)
+
+projectPreparedCandidateWithHostBindings :: [HostBindingRepresentation] -> ProjectionContext
+  -> [PreparedModule] -> VarEnv SymbolIdentity -> Either ProjectionError PreparedCandidate
+projectPreparedCandidateWithHostBindings hostBindings context modules topIdentityMap = do
   boundJsonAuthority <- foldM admitJsonAuthority (projectionJsonAuthority context)
     (mapMaybe hostBindingRepresentationJsonAuthority hostBindings)
   let initial = PState 0 0 emptyVarEnv emptyVarEnv emptyVarEnv topIdentityMap Map.empty [] Map.empty
@@ -555,7 +579,7 @@ projectPreparedWithHostBindings hostBindings context modules topIdentityMap = do
         (projectionFormattingAuthority context) (projectionTimeAuthority context)
         boundJsonAuthority
         (projectionTextUnit context)
-        Set.empty ExecutableTarget
+        Set.empty ExecutableTarget DeferredEntryContracts []
       -- An executable import's own top-level definition is never walked:
       -- 'homeModules'/'topIdentityMap' above still see the real, unfiltered
       -- module set (so a same-name internal identity cannot borrow home-module
@@ -599,7 +623,8 @@ projectPreparedWithHostBindings hostBindings context modules topIdentityMap = do
         , programConstructorReplies = programConstructorReplies
         , programJsonLayout = programJsonLayout
         }
-  pure (program, map fst (toList (constructors final)))
+  pure (PreparedCandidate program (map fst (toList (constructors final)))
+    (reverse (entryContractFailures final)))
   where
     admitJsonAuthority Nothing authority = pure (Just authority)
     admitJsonAuthority (Just selected) authority
@@ -732,6 +757,13 @@ projectSelectedWithHostBindings :: [HostBindingRepresentation] -> PreparedProjec
   -> Either ProjectionError (WireProgram, [DataCon])
 projectSelectedWithHostBindings bindings (PreparedProjection context selected identities) =
   projectPreparedWithHostBindings bindings context selected identities
+
+-- Original native groups can add package roots after executable projection.
+-- Only finalization of the candidate admits the captured entry contracts.
+projectSelectedCandidateWithHostBindings :: [HostBindingRepresentation] -> PreparedProjection
+  -> Either ProjectionError PreparedCandidate
+projectSelectedCandidateWithHostBindings bindings (PreparedProjection context selected identities) =
+  projectPreparedCandidateWithHostBindings bindings context selected identities
 
 -- | The per-module, round-invariant part of 'preparedTargetReferences'.
 --
@@ -1743,8 +1775,13 @@ validateExpectedEntry prepared binder rhs = do
       unless (entryMatches
           && (not requiresEvaluated || evaluated)) $ do
         symbol <- topIdentity binder
-        lift (Left (RecoveredEntryContractMismatch symbol
-          required requiresEvaluated offered evaluated))
+        let failure = RecoveredEntryContractMismatch symbol
+              required requiresEvaluated offered evaluated
+        admission <- gets entryContractAdmission
+        case admission of
+          FinalEntryContracts -> lift (Left failure)
+          DeferredEntryContracts -> modify' (\current -> current
+            { entryContractFailures = failure : entryContractFailures current })
 
 formattingSpecFor :: Id -> P (Maybe FormattingSpec)
 formattingSpecFor binder = do

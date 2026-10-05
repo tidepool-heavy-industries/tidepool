@@ -67,7 +67,7 @@ import Tidepool.CompilerProducts
   , certifiedRetainedOriginals, certifiedRetainedNativeVersions, PreparedProductContext, prepareOriginalProducts
   , retainedOriginalInterfaces, writeCertifiedProductsKeepingWithOriginals, prepareCompilerProjectionContext
   , exactProgramProductVersionFromDigest )
-import Tidepool.ExecutionProjection (ProjectionContext(..), ProjectionError(..), prepareProjectionWithReachability, projectSelectedWithHostBindings, preparedModuleProductOutcomes, preparedRootIdentity)
+import Tidepool.ExecutionProjection (ProjectionContext(..), ProjectionError(..), prepareProjectionWithReachability, projectSelectedCandidateWithHostBindings, candidateGlobals, finalizePreparedCandidate, preparedModuleProductOutcomes, preparedRootIdentity)
 import Tidepool.HostBindingAuthority
   ( HostBindingRepresentation, hostBindingRepresentationJsonAuthority )
 import Tidepool.ExecutionSchema
@@ -624,12 +624,14 @@ prepareArtifactsWithProjection project originalInterfaces caches prepared target
           selected <- timePhase timing "prepared_project" $
             project (prepareProjectionWithReachability finalContext
               (closureModules recovered) (closureReachability recovered))
-          (program, constructors) <- project (projectSelectedWithHostBindings hostBindings selected)
+          candidate <- project (projectSelectedCandidateWithHostBindings hostBindings selected)
           required <- either (ioError . userError) pure
-            (originalPackageGlobals (programGlobals program))
+            (originalPackageGlobals (candidateGlobals candidate))
           let nextRoots = Set.toAscList (Set.fromList (roots ++ required))
           if nextRoots == roots
-            then pure (recovered, program, constructors, roots)
+            then do
+              (program, constructors) <- project (finalizePreparedCandidate candidate)
+              pure (recovered, program, constructors, roots)
             else do
               packageRoots <- forM nextRoots $ \identity -> do
                 (identifier, _) <- resolvePackageGlobal hscEnv identity >>= either (ioError . userError) pure
