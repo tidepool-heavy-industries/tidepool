@@ -676,10 +676,7 @@ async fn resident_sync_native_trim_preserves_reasoning_and_deferred_child_bindin
             );
         } else {
             let output = successful_output_items(&raw, "native-trim-child");
-            assert_eq!(
-                output["items"].as_array().unwrap().last().unwrap()["output"],
-                "43"
-            );
+            assert_eq!(test_campaign::explicit_display_text(&output), "43");
             children_committed += 1;
             round.finish();
         }
@@ -749,10 +746,7 @@ async fn resident_sync_notes_commit_before_deferred_children_and_child_model_swi
             assert!(has_user_text(&round.request, "child-curated"));
             assert!(has_user_text(&round.request, "parent-curated"));
             assert!(has_user_text(&round.request, "parent-original"));
-            assert_eq!(
-                output["items"].as_array().unwrap().last().unwrap()["output"],
-                "43"
-            );
+            assert_eq!(test_campaign::explicit_display_text(&output), "43");
             children_committed += 1;
             round.finish();
         }

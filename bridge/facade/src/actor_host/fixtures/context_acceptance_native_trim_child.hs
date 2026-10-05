@@ -1,1 +1,1 @@
-pure (curatedHelper retainedValue)
+display (curatedHelper retainedValue)
