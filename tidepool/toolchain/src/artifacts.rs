@@ -3326,6 +3326,7 @@ fn compile_invocation_inner(
                                         Vec::new(),
                                         Some(&evidence),
                                         None,
+                                        None,
                                         &mut on_stage,
                                     )
                                 })
@@ -3532,6 +3533,7 @@ fn compile_invocation_inner(
                 Vec::new(),
                 evidence.as_ref(),
                 None,
+                None,
                 &mut *on_stage,
             )?;
             ensure_no_uncertified_globals(&artifacts)?;
@@ -3585,6 +3587,7 @@ fn compile_invocation_inner(
                 groups: Vec::new(),
                 recovery_products: Vec::new(),
                 module_interfaces: Vec::new(),
+                retained_core_products: Default::default(),
             }
         };
         let extra_products: Vec<_> = cached_receipts
@@ -3639,6 +3642,7 @@ fn compile_invocation_inner(
             extra_products,
             evidence.as_ref(),
             exact_request.as_ref(),
+            Some(&certified.retained_core_products),
             &mut on_stage,
         )?;
         if valid_evidence.is_none() {
@@ -4449,6 +4453,7 @@ fn assemble_with_products(
     certified_cached: Vec<RawModuleProduct>,
     evidence: Option<&cache::DependencyEvidence>,
     exact: Option<&crate::declaration_context::ExactCompilationRequest>,
+    certified_retained: Option<&certified_products::CertifiedRetainedCoreProducts>,
     on_stage: impl FnMut(&str, Duration, u64),
 ) -> Result<CompiledArtifacts, CompileError> {
     let mut artifacts = assemble(meta_bytes, raw, on_stage)?;
@@ -4486,6 +4491,10 @@ fn assemble_with_products(
                             .and_then(|groups| groups.get(&group.original_ordinal()))
                             .is_some_and(|original| *original == group)
                     })
+            } else if let Some(admitted) = certified_retained
+                .and_then(|proof| proof.matches_emitted(product))
+            {
+                admitted
             } else {
                 evidence.modules.iter().any(|module| {
                     !module.boot
@@ -4496,7 +4505,7 @@ fn assemble_with_products(
             };
             if !emitted.insert((&product.unit, &product.module)) || !admitted {
                 return Err(CompileError::ExtractFailed(format!(
-                    "module product {}:{} lacks a unique fresh graph or protected original inventory",
+                    "module product {}:{} lacks a unique fresh graph, protected original inventory or certified Core promotion",
                     product.unit, product.module
                 )));
             }
@@ -5216,6 +5225,7 @@ mod module_product_tests {
             Vec::new(),
             Some(&assembly_evidence(&["A", "B"])),
             None,
+            None,
             |_, _, _| {},
         )
         .unwrap();
@@ -5251,6 +5261,7 @@ mod module_product_tests {
             vec![cached],
             Some(&assembly_evidence(&["Fresh", "Cached"])),
             None,
+            None,
             |_, _, _| {},
         )
         .unwrap();
@@ -5277,6 +5288,7 @@ mod module_product_tests {
             cached,
             Some(&assembly_evidence(&["Cached"])),
             None,
+            None,
             |_, _, _| {},
         )
         .unwrap();
@@ -5292,6 +5304,7 @@ mod module_product_tests {
             Vec::new(),
             Some(&assembly_evidence(&[])),
             None,
+            None,
             |_, _, _| {}
         )
         .unwrap()
@@ -5304,6 +5317,7 @@ mod module_product_tests {
             vec![assembly_product("Owner", &[1])],
             Some(&assembly_evidence(&["Owner"])),
             None,
+            None,
             |_, _, _| {}
         )
         .is_err());
@@ -5314,9 +5328,25 @@ mod module_product_tests {
             Vec::new(),
             Some(&assembly_evidence(&["Owner"])),
             None,
+            None,
             |_, _, _| {}
         )
         .is_err());
+    }
+
+    #[test]
+    fn retained_core_assembly_requires_certifier_proof() {
+        let proof = certified_products::CertifiedRetainedCoreProducts::default();
+        assert!(assemble_with_products(
+            &product_metadata(),
+            &[],
+            vec![assembly_product("Retained", &[0])],
+            Vec::new(),
+            Some(&assembly_evidence(&[])),
+            None,
+            Some(&proof),
+            |_, _, _| {},
+        ).is_err());
     }
 
     #[test]
@@ -5355,6 +5385,7 @@ mod module_product_tests {
             fresh,
             Vec::new(),
             Some(&assembly_evidence(&["First", "Second"])),
+            None,
             None,
             |_, _, _| {},
         )

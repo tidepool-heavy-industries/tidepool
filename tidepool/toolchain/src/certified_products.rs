@@ -274,6 +274,28 @@ pub(crate) struct CertifiedProducts {
     pub groups: Vec<PendingCertifiedGroup>,
     pub recovery_products: Vec<crate::recovery_artifacts::CertifiedRecoveryProduct>,
     pub module_interfaces: Vec<CertifiedModuleInterface>,
+    pub retained_core_products: CertifiedRetainedCoreProducts,
+}
+
+/// Assembly authority issued only after complete native promotion certification.
+/// Empty values carry no authority; the nonempty inventory remains private.
+#[derive(Default)]
+pub(crate) struct CertifiedRetainedCoreProducts {
+    products: BTreeMap<(String, String), crate::recovery_artifacts::CertifiedRecoveryProduct>,
+}
+
+impl CertifiedRetainedCoreProducts {
+    pub(crate) fn matches_emitted(&self, emitted: &RawModuleProduct) -> Option<bool> {
+        let product = self.products.get(&(emitted.unit.clone(), emitted.module.clone()))?;
+        Some(product.original_native().is_some_and(|native| {
+            native.matches_original(product)
+                && emitted.interface == product.interface_bytes()
+                && emitted.groups.len() == native.groups.len()
+                && emitted.groups.iter().zip(native.groups.iter()).all(|(emitted, original)| {
+                    emitted == original.group()
+                })
+        }))
+    }
 }
 
 impl PendingCertifiedGroup {
@@ -4776,6 +4798,16 @@ pub(crate) fn certify_products(
                 "certified original module attribution");
         }
     }
+    let retained_core_products = CertifiedRetainedCoreProducts {
+        products: receipt.modules.iter()
+            .filter(|module| module.origin == ProductOrigin::RetainedCore)
+            .map(|module| {
+                let product = recovery_products.iter().find(|product| {
+                    product.owner().unit == module.unit && product.owner().module == module.module
+                }).ok_or(CertificationError::Mismatch("certified retained assembly owner"))?;
+                Ok(((module.unit.clone(), module.module.clone()), product.clone()))
+            }).collect::<CertResult<_>>()?,
+    };
     if let Some(admission) = exact {
         groups.extend(admission.request.groups.iter().cloned());
         recovery_products.extend(
@@ -4803,6 +4835,7 @@ pub(crate) fn certify_products(
         groups,
         recovery_products,
         module_interfaces,
+        retained_core_products,
     })
 }
 
