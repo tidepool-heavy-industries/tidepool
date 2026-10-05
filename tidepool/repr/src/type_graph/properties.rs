@@ -621,7 +621,7 @@ fn generated_topology_distribution_and_shrinking_are_observable() {
         },
         TestRng::from_seed(RngAlgorithm::ChaCha, &[42; 32]),
     );
-    let strategy = cases();
+    let strategy = (cases(), cases(), 0_u8..4);
     let mut family_counts = [0_usize; 4];
     let mut field_shapes = [0_usize; 5];
     let mut field_counts = [0_usize; 4];
@@ -632,8 +632,12 @@ fn generated_topology_distribution_and_shrinking_are_observable() {
     let mut disconnected = 0;
     let mut copied_larger = 0;
     let mut largest = 0;
+    let mut identity_modes = [0_usize; 4];
+    let mut root_outcomes = [0_usize; 2];
+    let mut declaration_outcomes = [0_usize; 2];
     for _ in 0..256 {
-        let families = strategy.new_tree(&mut runner).unwrap().current();
+        let (families, other_families, mode) = strategy.new_tree(&mut runner).unwrap().current();
+        identity_modes[mode as usize] += 1;
         family_counts[families.len()] += 1;
         for family in &families {
             for &parameter in &family.parameters {
@@ -648,6 +652,25 @@ fn generated_topology_distribution_and_shrinking_are_observable() {
             }
         }
         let model = build(&families);
+        let mut other = if mode == 3 {
+            build(&other_families)
+        } else {
+            model.clone()
+        };
+        match mode {
+            1 => {
+                if let TypeNode::Declaration { restriction, .. } =
+                    &mut other.nodes[model.declaration]
+                {
+                    *restriction = SyntaxRestriction::EffectHead;
+                }
+            }
+            2 => other.nodes[model.argument] = TypeNode::Literal(TypeLiteral::Natural("99".into())),
+            _ => {}
+        }
+        let related = relation(&model, &other);
+        root_outcomes[usize::from(related[model.root][other.root])] += 1;
+        declaration_outcomes[usize::from(related[model.declaration][other.declaration])] += 1;
         largest = largest.max(model.nodes.len());
         let edges = model.adjacency();
         diamonds += usize::from(edges.iter().any(|edges| {
@@ -676,7 +699,7 @@ fn generated_topology_distribution_and_shrinking_are_observable() {
         );
         copied_larger += usize::from(copy_expressions(&model).nodes.len() > model.nodes.len());
     }
-    let mut shrinking = strategy.new_tree(&mut runner).unwrap();
+    let mut shrinking = cases().new_tree(&mut runner).unwrap();
     let mut shrink_steps = 0;
     while shrinking.simplify() {
         shrink_steps += 1;
@@ -686,12 +709,15 @@ fn generated_topology_distribution_and_shrinking_are_observable() {
         );
     }
     let minimal = shrinking.current();
-    eprintln!("type graph coverage: samples=256 families={family_counts:?} field_shapes={field_shapes:?} field_counts={field_counts:?} parameter_flags={parameter_flags:?} reps={reps:?} cycles={cyclic} diamonds={diamonds} disconnected={disconnected} copied_larger={copied_larger} max_nodes={largest} shrink_steps={shrink_steps} minimal={minimal:?}");
+    eprintln!("type graph coverage: samples=256 families={family_counts:?} field_shapes={field_shapes:?} field_counts={field_counts:?} parameter_flags={parameter_flags:?} reps={reps:?} identity_modes={identity_modes:?} root_outcomes_false_true={root_outcomes:?} declaration_outcomes_false_true={declaration_outcomes:?} cycles={cyclic} diamonds={diamonds} disconnected={disconnected} copied_larger={copied_larger} max_nodes={largest} shrink_steps={shrink_steps} minimal={minimal:?}");
     assert!(family_counts[1..].iter().all(|&count| count >= 16));
     assert!(field_shapes.iter().all(|&count| count >= 32));
     assert!(field_counts.iter().all(|&count| count >= 32));
     assert!(parameter_flags.iter().all(|&count| count >= 32));
     assert!(reps.iter().all(|&count| count >= 32));
+    assert!(identity_modes.iter().all(|&count| count >= 16));
+    assert!(root_outcomes.iter().all(|&count| count >= 16));
+    assert!(declaration_outcomes.iter().all(|&count| count >= 16));
     assert!(cyclic >= 16 && diamonds >= 64 && disconnected >= 32 && copied_larger >= 64);
     assert!(shrink_steps > 0);
     assert_eq!(minimal.len(), 1);
