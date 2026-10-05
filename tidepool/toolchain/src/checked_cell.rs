@@ -2032,6 +2032,37 @@ pub(crate) struct CheckedDisplayOffer {
     pub(crate) is_program: bool,
 }
 
+fn original_checked_execution_context(
+    producer: [u8; 32],
+    artifact_context: &crate::declaration_context::ExactDeclarationContext,
+    source_lexical: &[crate::declaration_join::ExactLexicalNode],
+) -> Result<Arc<crate::declaration_context::ExactDeclarationContext>, CompileError> {
+    let roots = source_lexical
+        .iter()
+        .map(|node| node.owner.clone())
+        .collect::<Vec<_>>();
+    let imports = source_lexical
+        .iter()
+        .map(|node| (node.owner.clone(), node.imports.clone()))
+        .collect();
+    let lexical = crate::declaration_join::source_lexical_surface(
+        &roots,
+        &imports,
+        artifact_context.lexical_graph(),
+        &artifact_context
+            .artifact_view()
+            .source_implementation_roles(),
+    )?
+    .lexical;
+    Ok(Arc::new(
+        crate::declaration_context::ExactDeclarationContext::from_authenticated_execution(
+            producer,
+            artifact_context.artifact_view(),
+            lexical,
+        )?,
+    ))
+}
+
 impl CheckedDisplayOffer {
     pub(crate) fn authorization(
         &self,
@@ -2152,13 +2183,11 @@ impl CheckedDisplayOffer {
                     artifact_context.artifact_view(),
                 )?,
             ),
-            original_execution: Arc::new(
-                crate::declaration_context::ExactDeclarationContext::from_authenticated_execution(
-                    self.capture.item.cell.producer,
-                    artifact_context.artifact_view(),
-                    artifact_context.lexical_graph().to_vec(),
-                )?,
-            ),
+            original_execution: original_checked_execution_context(
+                self.capture.item.cell.producer,
+                artifact_context,
+                source_lexical,
+            )?,
             capture: self.capture.clone(),
             target: target.clone(),
             table: read_table(root)?,

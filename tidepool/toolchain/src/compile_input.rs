@@ -595,6 +595,31 @@ fn input_identity(
     ))
 }
 
+fn original_source_lexical(
+    evidence: &DependencyEvidence,
+    artifacts: &crate::artifact_inventory::ArtifactView,
+) -> Result<Vec<crate::declaration_join::ExactLexicalNode>, CompileError> {
+    let imports =
+        crate::declaration_context::consumed_source_home_imports(evidence, &BTreeMap::new())?;
+    // Presence does not select an owner. These roots were actually compiled
+    // under this original input proof and retain its exact source adjacency.
+    let roots = artifacts
+        .descriptors()
+        .into_iter()
+        .map(|descriptor| descriptor.owner)
+        .filter(|owner| imports.contains_key(owner))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    Ok(crate::declaration_join::source_lexical_surface(
+        &roots,
+        &imports,
+        &[],
+        &artifacts.source_implementation_roles(),
+    )?
+    .lexical)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn seal(
     producer: &[u8],
@@ -647,6 +672,7 @@ pub(crate) fn seal(
         .iter()
         .map(std::path::absolute)
         .collect::<Result<Vec<_>, _>>()?;
+    let lexical = original_source_lexical(evidence, artifacts)?;
     Ok(Some(SealedCompileInputIdentity {
         identity: input_identity(producer, &include, evidence, packages, source, target)?,
         original_interfaces: Arc::new(
@@ -661,7 +687,7 @@ pub(crate) fn seal(
                 crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(producer)
                     .sha256(),
                 artifacts,
-                Vec::new(),
+                lexical,
             )?,
         ),
         target: prepared.clone(),

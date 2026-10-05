@@ -906,69 +906,78 @@ pub(crate) struct ExactProductAdmission<'a> {
     pub(crate) source: &'a ExactSourceAdmission,
 }
 
+/// Resolve home adjacency from the compiler's complete consumed-source graph.
+/// This helper carries no admission authority; its original issuer validates
+/// the evidence and interface custody before retaining the lexical surface.
+pub(crate) fn consumed_source_home_imports(
+    evidence: &crate::cache::DependencyEvidence,
+    exact_imports: &BTreeMap<ExactModuleIdentity, Vec<ExactModuleIdentity>>,
+) -> Result<BTreeMap<ExactModuleIdentity, Vec<ExactModuleIdentity>>, CompileError> {
+    let source_paths = evidence
+        .sources
+        .iter()
+        .map(|source| &source.path)
+        .collect::<BTreeSet<_>>();
+    let mut selected_owners = BTreeMap::new();
+    for node in &evidence.modules {
+        if selected_owners
+            .insert((&node.unit, &node.module, node.boot, &node.source), node)
+            .is_some()
+        {
+            return Err(failure("duplicate captured source import owner"));
+        }
+    }
+    let mut imports = BTreeMap::new();
+    for node in evidence.modules.iter().filter(|node| !node.boot) {
+        if !source_paths.contains(&node.source) {
+            return Err(failure(
+                "original source import owner lacks its captured source",
+            ));
+        }
+        let owner = identity(&node.unit, &node.module);
+        let mut requirements = exact_imports
+            .get(&owner)
+            .into_iter()
+            .flatten()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        for edge in &node.imports {
+            let Some(selected) = &edge.selected else {
+                continue;
+            };
+            if !matches!(&edge.qualifier, crate::cache::ImportQualifier::Unqualified)
+                && !matches!(&edge.qualifier,
+                        crate::cache::ImportQualifier::ThisUnit(unit) if unit == &node.unit)
+            {
+                return Err(failure("selected home import has another unit qualifier"));
+            }
+            let Some(selected_owner) =
+                selected_owners.get(&(&node.unit, &edge.module, edge.boot, selected))
+            else {
+                return Err(failure(
+                    "selected home import lacks one captured source owner",
+                ));
+            };
+            if !source_paths.contains(selected) {
+                return Err(failure("selected home import lacks its captured source"));
+            }
+            requirements.insert(identity(&selected_owner.unit, &selected_owner.module));
+        }
+        if imports
+            .insert(owner, requirements.into_iter().collect())
+            .is_some()
+        {
+            return Err(failure("duplicate original source import owner"));
+        }
+    }
+    Ok(imports)
+}
+
 impl ExactSourceAdmission {
     pub(crate) fn home_imports(
         &self,
     ) -> Result<BTreeMap<ExactModuleIdentity, Vec<ExactModuleIdentity>>, CompileError> {
-        let source_paths = self
-            .evidence
-            .sources
-            .iter()
-            .map(|source| &source.path)
-            .collect::<BTreeSet<_>>();
-        let mut selected_owners = BTreeMap::new();
-        for node in &self.evidence.modules {
-            if selected_owners
-                .insert((&node.unit, &node.module, node.boot, &node.source), node)
-                .is_some()
-            {
-                return Err(failure("duplicate captured source import owner"));
-            }
-        }
-        let mut imports = BTreeMap::new();
-        for node in self.evidence.modules.iter().filter(|node| !node.boot) {
-            if !source_paths.contains(&node.source) {
-                return Err(failure(
-                    "original source import owner lacks its captured source",
-                ));
-            }
-            let owner = identity(&node.unit, &node.module);
-            let mut requirements = self
-                .exact_imports
-                .get(&owner)
-                .into_iter()
-                .flatten()
-                .cloned()
-                .collect::<BTreeSet<_>>();
-            for edge in &node.imports {
-                let Some(selected) = &edge.selected else {
-                    continue;
-                };
-                if !matches!(&edge.qualifier, crate::cache::ImportQualifier::Unqualified)
-                    && !matches!(&edge.qualifier,
-                        crate::cache::ImportQualifier::ThisUnit(unit) if unit == &node.unit)
-                {
-                    return Err(failure("selected home import has another unit qualifier"));
-                }
-                let Some(selected_owner) =
-                    selected_owners.get(&(&node.unit, &edge.module, edge.boot, selected))
-                else {
-                    return Err(failure(
-                        "selected home import lacks one captured source owner",
-                    ));
-                };
-                if !source_paths.contains(selected) {
-                    return Err(failure("selected home import lacks its captured source"));
-                }
-                requirements.insert(identity(&selected_owner.unit, &selected_owner.module));
-            }
-            if imports
-                .insert(owner, requirements.into_iter().collect())
-                .is_some()
-            {
-                return Err(failure("duplicate original source import owner"));
-            }
-        }
+        let mut imports = consumed_source_home_imports(&self.evidence, &self.exact_imports)?;
         for (owner, original) in &self.selected_originals {
             if imports
                 .insert(owner.clone(), original.imports().to_vec())
