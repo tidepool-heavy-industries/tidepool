@@ -12,7 +12,7 @@ module AgentSpec (agentSpec) where
 import Control.Monad.Freer (Eff)
 import GHC.Generics (Generic)
 import Tidepool.Aeson.FromJSON (FromJSON)
-import Tidepool.Agent.Contract
+import Tidepool.Agent.Contract hiding (haskell)
 import qualified Tidepool.Agent.Contract as A
 
 newtype Probe = Probe { number :: Int }
