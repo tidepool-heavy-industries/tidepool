@@ -38,6 +38,7 @@ pub(crate) struct ActivationPreviewOffer {
     pub(crate) specification: ActivationPreviewSpecification,
     pub(crate) input: Arc<ExactHostBindingInterface>,
     pub(crate) values: Arc<CheckedValueInputs>,
+    pub(crate) original_execution: Arc<ExactDeclarationContext>,
 }
 
 impl ActivationPreviewOffer {
@@ -201,11 +202,7 @@ impl ActivationPreviewOffer {
                 producer,
                 artifact_context.artifact_view(),
             )?),
-            original_execution: Arc::new(ExactDeclarationContext::from_authenticated_execution(
-                producer,
-                artifact_context.artifact_view(),
-                artifact_context.lexical_graph().to_vec(),
-            )?),
+            original_execution: self.original_execution.clone(),
         }))
     }
 }
@@ -216,7 +213,7 @@ impl ActivationPreviewOffer {
 pub(crate) fn validate_original_display_context(
     input: &ExactHostBindingInterface,
     context: &ExactDeclarationContext,
-) -> Result<(), CompileError> {
+) -> Result<bool, CompileError> {
     let prototype = input.prototype();
     if prototype.producer() != context.toolchain_identity_sha256() {
         return Err(failure(
@@ -231,7 +228,10 @@ pub(crate) fn validate_original_display_context(
             "activation preview requires original live input authority",
         ));
     }
-    Ok(())
+    Ok(matches!(
+        context.original_instance_environment(),
+        crate::declaration_context::OriginalInstanceEnvironment::Complete
+    ))
 }
 
 #[derive(Debug)]

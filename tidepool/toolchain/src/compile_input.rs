@@ -673,6 +673,15 @@ pub(crate) fn seal(
         .map(std::path::absolute)
         .collect::<Result<Vec<_>, _>>()?;
     let lexical = original_source_lexical(evidence, artifacts)?;
+    let required_instance_owners = evidence
+        .modules
+        .iter()
+        .filter(|module| !module.boot)
+        .map(|module| crate::declaration_join::ExactModuleIdentity {
+            unit: module.unit.clone(),
+            module: module.module.clone(),
+        })
+        .collect::<Vec<_>>();
     Ok(Some(SealedCompileInputIdentity {
         identity: input_identity(producer, &include, evidence, packages, source, target)?,
         original_interfaces: Arc::new(
@@ -688,6 +697,7 @@ pub(crate) fn seal(
                     .sha256(),
                 artifacts,
                 lexical,
+                &required_instance_owners,
             )?,
         ),
         target: prepared.clone(),
@@ -783,6 +793,46 @@ mod tests {
                 &proof.sites,
             )
             .unwrap()
+    }
+
+    #[test]
+    fn sealed_input_missing_generated_owner_cannot_prove_absent_instances() {
+        let proof = package_context_proof(b"original compiler producer");
+        let execution = proof
+            .original_execution_context(
+                &proof.target,
+                &proof.groups,
+                &proof.target_owners,
+                &proof.package_interfaces,
+                &proof.table,
+                &proof.sites,
+            )
+            .unwrap();
+        assert_eq!(
+            execution.original_instance_environment(),
+            &crate::declaration_context::OriginalInstanceEnvironment::MissingOriginalOwners(vec![
+                crate::declaration_join::ExactModuleIdentity {
+                    unit: "main".into(),
+                    module: "Root".into()
+                },
+            ]),
+            "a consumed generated owner without its original interface is missing evidence",
+        );
+        let projected = execution.select_interface_roots(Vec::new()).unwrap();
+        assert_eq!(
+            projected.original_instance_environment(),
+            &crate::declaration_context::OriginalInstanceEnvironment::Unknown
+        );
+        assert_ne!(
+            execution.semantic_sha256(),
+            projected.semantic_sha256(),
+            "original scope completeness is part of the authenticated context commitment"
+        );
+        assert_eq!(
+            original_context(&proof).original_instance_environment(),
+            &crate::declaration_context::OriginalInstanceEnvironment::Unknown,
+            "type-only original interface custody cannot prove instance absence"
+        );
     }
 
     #[test]

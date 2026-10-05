@@ -1227,10 +1227,12 @@ impl ModuleCandidateOffer {
                 "activation preview worker differs from the original producer".into(),
             ));
         }
-        crate::activation_preview::validate_original_display_context(
+        if !crate::activation_preview::validate_original_display_context(
             &input,
             context.declarations(),
-        )?;
+        )? {
+            return Ok(ActivationPreviewSelection::OriginalDisplayEvidenceUnavailable);
+        }
         let certificate = input.value_interface_certificate();
         let values = crate::checked_cell::CheckedValueInputs::capture_checked(
             vec![(certificate.owner(), certificate.bytes_owned().clone())],
@@ -1257,6 +1259,7 @@ impl ModuleCandidateOffer {
             specification,
             input,
             values: values.clone(),
+            original_execution: context.declarations().clone(),
         };
         let templates = [offer.specification.template_source.clone()];
         let template_interfaces = Value::Array(

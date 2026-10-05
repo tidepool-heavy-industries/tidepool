@@ -2041,6 +2041,25 @@ fn original_checked_execution_context(
         .iter()
         .map(|node| node.owner.clone())
         .collect::<Vec<_>>();
+    let missing_inherited = match artifact_context.original_instance_environment() {
+        crate::declaration_context::OriginalInstanceEnvironment::MissingOriginalOwners(owners) => {
+            owners.as_slice()
+        }
+        _ => &[],
+    };
+    let required_instance_owners = roots
+        .iter()
+        .cloned()
+        .chain(
+            artifact_context
+                .lexical_graph()
+                .iter()
+                .map(|node| node.owner.clone()),
+        )
+        .chain(missing_inherited.iter().cloned())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
     let imports = source_lexical
         .iter()
         .map(|node| (node.owner.clone(), node.imports.clone()))
@@ -2059,6 +2078,7 @@ fn original_checked_execution_context(
             producer,
             artifact_context.artifact_view(),
             lexical,
+            &required_instance_owners,
         )?,
     ))
 }
@@ -3196,13 +3216,11 @@ impl CheckedItemOffer {
                     artifact_context.artifact_view(),
                 )?,
             ),
-            original_execution: Arc::new(
-                crate::declaration_context::ExactDeclarationContext::from_authenticated_execution(
-                    self.item.cell.producer,
-                    artifact_context.artifact_view(),
-                    artifact_context.lexical_graph().to_vec(),
-                )?,
-            ),
+            original_execution: original_checked_execution_context(
+                self.item.cell.producer,
+                artifact_context,
+                source_lexical,
+            )?,
             item: self.item.clone(),
             target: target.clone(),
             table: read_table(root)?,

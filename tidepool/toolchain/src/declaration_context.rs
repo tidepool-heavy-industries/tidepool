@@ -30,6 +30,17 @@ pub struct ExactDeclarationContext {
     producer: [u8; 32],
     inventory: ArtifactView,
     lexical: Vec<ExactLexicalNode>,
+    original_instance_environment: OriginalInstanceEnvironment,
+}
+
+/// Only the original compiler output proof can establish complete instance
+/// visibility. Type projections and generic declaration contexts have none.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) enum OriginalInstanceEnvironment {
+    #[default]
+    Unknown,
+    Complete,
+    MissingOriginalOwners(Vec<ExactModuleIdentity>),
 }
 
 /// Trusted source recipe associated with request-local native type custody.
@@ -473,6 +484,7 @@ impl RecoveredArtifactInventory {
     ) -> Result<Self, RecoveryInventoryError> {
         let mut context = ExactDeclarationContext {
             producer: [0; 32],
+            original_instance_environment: OriginalInstanceEnvironment::Unknown,
             inventory: ArtifactInventory::default().empty_view(),
             lexical: vec![],
         };
@@ -708,6 +720,7 @@ impl RecoveredArtifactInventory {
         let empty = inventory.empty_view();
         let mut context = ExactDeclarationContext {
             producer: self.producer,
+            original_instance_environment: OriginalInstanceEnvironment::Unknown,
             inventory: inventory.admit_shared(&empty, entries)?,
             lexical,
         };
@@ -2168,6 +2181,7 @@ impl ExactDeclarationContext {
             producer: [0; 32],
             inventory: ArtifactInventory::default().empty_view(),
             lexical: Vec::new(),
+            original_instance_environment: OriginalInstanceEnvironment::Unknown,
         }
         .extend(authored, joins, lexical)
     }
@@ -2290,6 +2304,7 @@ impl ExactDeclarationContext {
         }
         self.inventory = self.inventory.inventory().admit(&self.inventory, entries)?;
         self.lexical = lexical;
+        self.original_instance_environment = OriginalInstanceEnvironment::Unknown;
         self.normalize()?;
         Ok(self)
     }
@@ -2396,6 +2411,7 @@ impl ExactDeclarationContext {
         producer: [u8; 32],
         artifacts: &ArtifactView,
         lexical: Vec<ExactLexicalNode>,
+        required_instance_owners: &[ExactModuleIdentity],
     ) -> Result<Self, CompileError> {
         let mut context = Self::new(&[], &[], Vec::new())?;
         context.admit_producer(producer)?;
@@ -2404,8 +2420,54 @@ impl ExactDeclarationContext {
         }
         context.inventory = context.inventory.merge(artifacts)?;
         context.lexical = lexical;
+        let interfaces = context
+            .interface_owners()
+            .into_iter()
+            .map(|row| row.owner)
+            .collect::<BTreeSet<_>>();
+        let selected = context
+            .lexical
+            .iter()
+            .map(|row| &row.owner)
+            .collect::<BTreeSet<_>>();
+        let missing = required_instance_owners
+            .iter()
+            .filter(|owner| !interfaces.contains(*owner) || !selected.contains(owner))
+            .cloned()
+            .chain(context.lexical.iter().flat_map(|node| {
+                std::iter::once(&node.owner)
+                    .chain(node.imports.iter())
+                    .filter(|owner| !interfaces.contains(*owner) || !selected.contains(owner))
+                    .cloned()
+            }))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        // A consumed owner without a retained interface is explicit missing
+        // evidence, not a selected lexical interface or a negative instance
+        // result. Retain only the usable graph and commit the missing census.
+        context
+            .lexical
+            .retain(|node| interfaces.contains(&node.owner));
+        let retained = context
+            .lexical
+            .iter()
+            .map(|node| node.owner.clone())
+            .collect::<BTreeSet<_>>();
+        for node in &mut context.lexical {
+            node.imports.retain(|owner| retained.contains(owner));
+        }
         context.normalize()?;
+        context.original_instance_environment = if missing.is_empty() {
+            OriginalInstanceEnvironment::Complete
+        } else {
+            OriginalInstanceEnvironment::MissingOriginalOwners(missing)
+        };
         Ok(context)
+    }
+
+    pub(crate) fn original_instance_environment(&self) -> &OriginalInstanceEnvironment {
+        &self.original_instance_environment
     }
 
     /// Select interface custody without losing the original producer when the
@@ -2625,6 +2687,7 @@ impl ExactDeclarationContext {
         }
         self.inventory = self.inventory.inventory().admit(&self.inventory, entries)?;
         self.lexical = lexical;
+        self.original_instance_environment = OriginalInstanceEnvironment::Unknown;
         self.normalize()?;
         Ok(self)
     }
@@ -2641,6 +2704,7 @@ impl ExactDeclarationContext {
             lexical.extend_from_slice(value.source_lexical());
         }
         self.lexical = compose_lexical_nodes(&lexical)?;
+        self.original_instance_environment = OriginalInstanceEnvironment::Unknown;
         self.normalize()?;
         Ok(self)
     }
@@ -2739,9 +2803,18 @@ impl ExactDeclarationContext {
             })
             .collect::<Vec<_>>();
         native.sort_by_key(|(descriptor, _)| (&descriptor.owner, descriptor.id));
-        let value = Value::Array(vec![
+        let mut fields = vec![
             text("TPEXACTCONTEXT"),
-            text("2"),
+            text(
+                if matches!(
+                    self.original_instance_environment,
+                    OriginalInstanceEnvironment::Unknown
+                ) {
+                    "2"
+                } else {
+                    "3"
+                },
+            ),
             text(hex(&sha2::Sha256::digest(
                 serde_json::to_vec(&(metadata.descriptors(), metadata.dependencies()))
                     .expect("inventory encoding"),
@@ -2802,7 +2875,20 @@ impl ExactDeclarationContext {
                     })
                     .collect(),
             ),
-        ]);
+        ];
+        match &self.original_instance_environment {
+            OriginalInstanceEnvironment::Unknown => {}
+            OriginalInstanceEnvironment::Complete => {
+                fields.push(Value::Array(vec![text("original-instances-complete")]))
+            }
+            OriginalInstanceEnvironment::MissingOriginalOwners(owners) => {
+                fields.push(Value::Array(vec![
+                    text("original-instances-missing"),
+                    Value::Array(owners.iter().map(module_value).collect()),
+                ]))
+            }
+        }
+        let value = Value::Array(fields);
         let mut bytes = Vec::new();
         ciborium::ser::into_writer(&value, &mut bytes).expect("owned value encoding");
         sha2::Sha256::digest(bytes).into()
@@ -3879,6 +3965,7 @@ mod tests {
             .unwrap();
         let context = ExactDeclarationContext {
             producer: producer_sha256,
+            original_instance_environment: OriginalInstanceEnvironment::Unknown,
             inventory: view,
             lexical: vec![
                 ExactLexicalNode {
@@ -4437,6 +4524,7 @@ mod tests {
             .collect();
         let context = Arc::new(ExactDeclarationContext {
             producer: [7; 32],
+            original_instance_environment: OriginalInstanceEnvironment::Unknown,
             inventory: inventory
                 .admit_shared(&inventory.empty_view(), entries)
                 .unwrap(),
@@ -4795,6 +4883,7 @@ mod tests {
         let inventory = ArtifactInventory::default();
         let context = Arc::new(ExactDeclarationContext {
             producer: [7; 32],
+            original_instance_environment: OriginalInstanceEnvironment::Unknown,
             lexical: vec![],
             inventory: inventory
                 .admit_shared(
@@ -6035,6 +6124,7 @@ mod tests {
             let inventory = ArtifactInventory::default();
             Arc::new(ExactDeclarationContext {
                 producer: [7; 32],
+                original_instance_environment: OriginalInstanceEnvironment::Unknown,
                 inventory: inventory
                     .admit(
                         &inventory.empty_view(),
@@ -6147,6 +6237,7 @@ mod tests {
         let inventory = ArtifactInventory::default();
         let context = ExactDeclarationContext {
             producer: [7; 32],
+            original_instance_environment: OriginalInstanceEnvironment::Unknown,
             inventory: inventory
                 .admit_shared(
                     &inventory.empty_view(),
