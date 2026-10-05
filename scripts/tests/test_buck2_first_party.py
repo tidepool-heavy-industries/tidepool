@@ -744,6 +744,12 @@ source = "git+https://example.invalid/tokio-tungstenite?rev=aaaaaaaaaaaaaaaaaaaa
     def test_toolchain_unit_target_declares_legacy_and_v3_join_fixtures(self):
         result = self.generate()
         self.assertEqual(result.returncode, 0, result.stderr)
+        runner = self.rule("tidepool/toolchain", "tidepool_toolchain_unit_tests", "tidepool_rust_isolated_test")
+        self.assertEqual(runner['env']['TIDEPOOL_CATALOG_TEST_PYTHON'], '$(exe toolchains//:python)')
+        self.assertEqual(runner['env']['TIDEPOOL_CATALOG_QUALIFICATION_SCRIPT'],
+                         '$(location //build/package:qualification_script)')
+        self.assertIn('toolchains//:python', runner['resources'])
+        self.assertIn('//build/package:qualification_script', runner['resources'])
         _, groups = self.groups("tidepool/toolchain")
         unit = groups["tidepool_toolchain_unit_tests_sources"]
         self.assertEqual(

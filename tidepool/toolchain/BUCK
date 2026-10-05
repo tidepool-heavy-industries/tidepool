@@ -622,6 +622,8 @@ tidepool_rust_isolated_test(
     ],
     env = {
         "LD_LIBRARY_PATH": "$(location //build/package:tidepool_extract_runtime_libraries)",
+        "TIDEPOOL_CATALOG_QUALIFICATION_SCRIPT": "$(location //build/package:qualification_script)",
+        "TIDEPOOL_CATALOG_TEST_PYTHON": "$(exe toolchains//:python)",
         "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_deployment)",
         "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
         "TIDEPOOL_EXTRACT_RUNTIME_LIBRARIES": "$(location //build/package:tidepool_extract_runtime_libraries)",
@@ -632,7 +634,9 @@ tidepool_rust_isolated_test(
     resources = [
         "//bridge/haskell:facade_embedded_sources",
         "//build/package:compiler_deployment",
+        "//build/package:qualification_script",
         "//build/package:tidepool_extract_runtime_libraries",
+        "toolchains//:python",
     ],
     haskell_worker = True,
     visibility = ["PUBLIC"],
@@ -651,6 +655,8 @@ tidepool_rust_test_cases(
     test_rule_timeout_ms = 660000,
     env = {
         "LD_LIBRARY_PATH": "$(location //build/package:tidepool_extract_runtime_libraries)",
+        "TIDEPOOL_CATALOG_QUALIFICATION_SCRIPT": "$(location //build/package:qualification_script)",
+        "TIDEPOOL_CATALOG_TEST_PYTHON": "$(exe toolchains//:python)",
         "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_deployment)",
         "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
         "TIDEPOOL_EXTRACT_RUNTIME_LIBRARIES": "$(location //build/package:tidepool_extract_runtime_libraries)",
@@ -661,7 +667,9 @@ tidepool_rust_test_cases(
     resources = [
         "//bridge/haskell:facade_embedded_sources",
         "//build/package:compiler_deployment",
+        "//build/package:qualification_script",
         "//build/package:tidepool_extract_runtime_libraries",
+        "toolchains//:python",
     ],
     haskell_worker = True,
     visibility = ["PUBLIC"],

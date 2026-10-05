@@ -517,9 +517,9 @@ class CatalogSourceTests(unittest.TestCase):
 
     def selection(self, original):
         return {'snapshot_root': str(original), 'roles': qualification.NATIVE_SOURCE_ROLES,
-                'source_files': [[relative, item['sha256']] for relative, item in
+                'source_files': [{'path': relative, 'sha256': item['sha256']} for relative, item in
                     sorted(qualification.catalog_source_inventory(original).items())
-                    if item['kind'] == 'file' and relative.endswith('.hs')]}
+                    if item['kind'] == 'file' and relative.endswith(('.hs', '.hs-boot', '.lhs', '.lhs-boot'))]}
 
     def catalog_fixture(self, original, tools, record):
         bundle = self.root / 'bundle'
@@ -581,6 +581,13 @@ class CatalogSourceTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'complete source manifest'):
                 qualification.verify_native_catalog(bundle, tools)
             altered = json.loads(before)
+            altered['source_selection']['source_files'] = [
+                [file['path'], file['sha256']]
+                for file in altered['source_selection']['source_files']]
+            qualification.write_json(catalog, altered)
+            with self.assertRaisesRegex(ValueError, 'complete source manifest'):
+                qualification.verify_native_catalog(bundle, tools)
+            altered = json.loads(before)
             altered['consumed_worker_identity'][0] = 9
             qualification.write_json(catalog, altered)
             with self.assertRaisesRegex(ValueError, 'product inventory changed'):
@@ -613,8 +620,8 @@ class CatalogSourceTests(unittest.TestCase):
         with self.nix_checks(nar, [pin]), patch.object(qualification.subprocess, 'run'):
             self.assertEqual(qualification.verify_native_catalog(bundle, tools), contract['native_catalog'])
             altered = json.loads(catalog.read_text())
-            pair = altered['source_selection']['source_files'][0]
-            pair[1] = ('0' if pair[1][0] != '0' else '1') + pair[1][1:]
+            file = altered['source_selection']['source_files'][0]
+            file['sha256'] = ('0' if file['sha256'][0] != '0' else '1') + file['sha256'][1:]
             qualification.write_json(catalog, altered)
             products = qualification.native_catalog_products(catalog.parent)
             selected = {**contract['native_catalog'],

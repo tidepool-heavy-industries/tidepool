@@ -604,6 +604,10 @@ def test_runtime_inputs(package_name, target_name, unit=False):
     if package_name == "tidepool-toolchain" and target_name == "prepared_fixture":
         env["TIDEPOOL_PREPARED_FIXTURE_COMPILER"] = "$(exe //tidepool/toolchain:prepared-fixture)"
         resources.append("//tidepool/toolchain:prepared-fixture")
+    if package_name == "tidepool-toolchain" and unit:
+        env["TIDEPOOL_CATALOG_TEST_PYTHON"] = "$(exe toolchains//:python)"
+        env["TIDEPOOL_CATALOG_QUALIFICATION_SCRIPT"] = "$(location //build/package:qualification_script)"
+        resources.extend(["toolchains//:python", "//build/package:qualification_script"])
     if package_name == "tidepool" and target_name == "exomonad_action_surface":
         env["TIDEPOOL_HASKELL_ACTORS_DIR"] = "$(location //bridge/haskell:facade_embedded_sources)/actors"
     if package_name == "tidepool-mcp" and not unit and target_name == "mcp":

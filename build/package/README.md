@@ -79,10 +79,15 @@ validates their inventories and NAR/collector evidence, creates a registered
 source GC root owned by the final bundle, and seals a new retention record.
 The original retention may then be retired independently. Qualified execution
 and the native entrypoint select the frozen catalog with its original `lib`
-and actor roots. Rust catalog admission owns the BLAKE3 source manifest and
+and actor roots. Rust catalog admission owns the SHA-256 source manifest and
 module/interface validation; qualification also binds the full original source
 inventory and NAR identity. Source tests do not establish a compiled native
 catalog, M1/M2 execution or live deployment acceptance.
+
+Schema 4 source witnesses are ordered `{path, sha256}` records for `.hs`,
+`.hs-boot`, `.lhs` and `.lhs-boot` files, including the import probe. The
+unpublished tuple witness format is rejected; regenerate catalogs through the
+matched native producer. Generic source and cache identities retain BLAKE3.
 
 When catalog production refuses admission, inspect the same declared inputs
 through the existing owner. `inspect-catalog` invokes the producer's typed

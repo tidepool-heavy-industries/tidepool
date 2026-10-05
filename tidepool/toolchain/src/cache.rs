@@ -114,11 +114,21 @@ fn selected_source_manifest(
     root: &Path,
     selection: SourceSelection,
 ) -> Result<SourceRootManifest, SourceManifestError> {
-    let mut manifest = SourceRootManifest { files: Vec::new() };
+    Ok(SourceRootManifest {
+        files: selected_source_files(root, selection, blake3::hash)?,
+    })
+}
+
+fn selected_source_files<D>(
+    root: &Path,
+    selection: SourceSelection,
+    digest: impl Fn(&[u8]) -> D,
+) -> Result<Vec<(PathBuf, D)>, SourceManifestError> {
+    let mut files = Vec::new();
     let mut ancestors = std::collections::HashSet::new();
-    collect_dependency_sources(root, root, &mut manifest, &mut ancestors, selection)?;
-    manifest.files.sort_by(|(a, _), (b, _)| a.cmp(b));
-    Ok(manifest)
+    collect_dependency_sources(root, root, &mut files, &mut ancestors, selection, &digest)?;
+    files.sort_by(|(a, _), (b, _)| a.cmp(b));
+    Ok(files)
 }
 
 /// Complete content manifest for source revision identities. Every Haskell
@@ -130,6 +140,15 @@ pub fn source_root_manifest(root: &Path) -> Result<Vec<(PathBuf, String)>, Sourc
         .into_iter()
         .map(|(rel, digest)| (rel, digest.to_hex().to_string()))
         .collect())
+}
+
+/// Catalog source witnesses use SHA-256 while sharing dependency traversal.
+pub(crate) fn catalog_source_sha256_manifest(
+    root: &Path,
+) -> Result<Vec<(PathBuf, String)>, SourceManifestError> {
+    selected_source_files(root, SourceSelection::Dependencies, |bytes| {
+        hex_digest(&Sha256::digest(bytes))
+    })
 }
 
 /// Content identity for ordered source roots. Root order determines module
@@ -171,12 +190,13 @@ fn hex_digest(bytes: &[u8]) -> String {
     })
 }
 
-fn collect_dependency_sources(
+fn collect_dependency_sources<D>(
     root: &Path,
     dir: &Path,
-    out: &mut SourceRootManifest,
+    out: &mut Vec<(PathBuf, D)>,
     ancestors: &mut std::collections::HashSet<PathBuf>,
     selection: SourceSelection,
+    digest: &impl Fn(&[u8]) -> D,
 ) -> Result<(), SourceManifestError> {
     let canonical = fs::canonicalize(dir).map_err(|error| source_error(dir, error))?;
     if !ancestors.insert(canonical.clone()) {
@@ -197,17 +217,16 @@ fn collect_dependency_sources(
         }
         let metadata = fs::metadata(&path).map_err(|error| source_error(&path, error))?;
         if metadata.is_dir() {
-            collect_dependency_sources(root, &path, out, ancestors, selection)?;
+            collect_dependency_sources(root, &path, out, ancestors, selection, digest)?;
         } else if selection.includes_file(&path) {
             let bytes = fs::read(&path).map_err(|error| source_error(&path, error))?;
-            let digest = blake3::hash(&bytes);
             let rel = path.strip_prefix(root).map_err(|error| {
                 source_error(
                     &path,
                     std::io::Error::new(std::io::ErrorKind::InvalidData, error),
                 )
             })?;
-            out.files.push((rel.to_path_buf(), digest));
+            out.push((rel.to_path_buf(), digest(&bytes)));
         }
     }
     ancestors.remove(&canonical);

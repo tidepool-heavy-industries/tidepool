@@ -12,7 +12,9 @@ use super::{absolute, sha, version_hash, Record, CANDIDATE_LIMIT, RECORD_LIMIT};
 use crate::toolchain::CompilerDeploymentAuthority;
 
 mod source_selection;
-pub use source_selection::{NativeCatalogSourceSelection, NativeSourceRole};
+pub use source_selection::{
+    NativeCatalogSourceFile, NativeCatalogSourceSelection, NativeSourceRole,
+};
 
 const CATALOG_LIMIT: usize = 1 << 20;
 const TOTAL_LIMIT: usize = 128 << 20;
@@ -1140,7 +1142,7 @@ mod tests {
         assert!(selection
             .source_files
             .iter()
-            .any(|(path, _)| path == Path::new("TidepoolCatalog.hs")));
+            .any(|file| file.path == Path::new("TidepoolCatalog.hs")));
         assert_eq!(fixture.load().unwrap().records.len(), 4);
         for roles in [
             [
