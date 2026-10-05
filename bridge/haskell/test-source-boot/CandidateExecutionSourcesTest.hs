@@ -140,20 +140,44 @@ candidateExecutionSourcesTest = withTiming $ withScratch $ \work -> do
     (scopeExecutionOwners promoted) (scopeExecutionNativeOwners promoted)
     [("main","MetadataQuoter"),("main","MetadataQuoteSupport")])
   unless (length shared == 2) (fail "two roots from one original cycle lost their shared helper")
+  helperTarget <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
+    Nothing helperSource [work] Nothing
+  helperTargetFixture <- capturePreparedFixture work helperTarget
+  helperTargetScopePath <- writeExecutionScope work helperTargetFixture [helperName]
+  helperTargetScope <- readExactScope helperTargetScopePath >>= either fail pure
+  -- The consumed target retains its native/interface pair. Its generated
+  -- input does not grant the independent authored-source replay capability.
+  unless (map executionIdentityKey (scopeExecutionNativeOwners helperTargetScope) == [helperKey]
+      && null (scopeExecutionOwners helperTargetScope)
+      && null (scopeExecutionGraphs helperTargetScope)) $
+    fail ("direct helper target changed its native custody or acquired source replay"
+      ++ "\nnative=" ++ show (scopeExecutionNativeOwners helperTargetScope)
+      ++ " references=" ++ show (scopeExecutionOwners helperTargetScope))
+  case executionSourceClosure (scopeExecutionGraphs helperTargetScope)
+      (scopeExecutionOwners helperTargetScope) (scopeExecutionNativeOwners helperTargetScope) [helperKey] of
+    Left (ExecutionSourceMissing owner) | owner == helperKey -> pure ()
+    other -> fail ("direct helper target replay failed at another authority boundary: " ++ show other)
+  -- Capture an independent compilation in which the helper is an authored
+  -- dependency, then select only that helper's native and lexical authority.
   helperOriginal <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
-    Nothing (work </> "MetadataQuoteSupport.hs") [work] Nothing
+    Nothing (work </> "MetadataQuoter.hs") [work] Nothing
   helperFixture <- capturePreparedFixture work helperOriginal
-  helperScopePath <- writeExecutionScope work helperFixture ["MetadataQuoteSupport"]
+  helperScopePath <- writeGenuineExecutionScope [helperName] [helperName] work helperFixture
   helperScope <- readExactScope helperScopePath >>= either fail pure
   -- The helper's independent receipt has a different graph digest but the
   -- same exact tuple; fresh parent edges retain their own graph provenance.
-  independentlyAuthenticated <- captureDiagnostics (crossover helperScopePath)
-  requireImporter helperScopePath independentlyAuthenticated
   helperReference <- case scopeExecutionOwners helperScope of
     [value] -> pure value
-    _ -> fail "helper-only source cycle has another native owner"
-  unless (executionRefIdentity helperReference `elem` scopeExecutionNativeOwners promoted) $
-    fail "separate GHC helper source cycle did not preserve its actual native/interface pairing"
+    references -> fail ("independent helper dependency cycle lost its sole replay reference: " ++ show references)
+  unless (executionRefIdentity helperReference == originalHelper
+      && scopeExecutionNativeOwners helperScope == [originalHelper]
+      && executionRefGraph helperReference `notElem` map executionGraphSha256 (scopeExecutionGraphs promoted)) $
+    fail ("independent helper dependency capture changed its original native/interface tuple or graph"
+      ++ "\noriginal=" ++ show originalHelper
+      ++ " native=" ++ show (scopeExecutionNativeOwners helperScope)
+      ++ " reference=" ++ show helperReference)
+  independentlyAuthenticated <- captureDiagnostics (crossover helperScopePath)
+  requireImporter helperScopePath independentlyAuthenticated
   let mixedGraphs = scopeExecutionGraphs promoted ++ scopeExecutionGraphs helperScope
       mixedReferences = [if executionIdentityKey (executionRefIdentity reference) == ("main","MetadataQuoteSupport")
         then helperReference else reference | reference <- scopeExecutionOwners promoted]
