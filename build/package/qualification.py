@@ -314,13 +314,14 @@ def native_catalog_selection(catalog: Path, original: Path) -> dict:
             or selection["roles"] != NATIVE_SOURCE_ROLES):
         raise ValueError("native catalog does not select the retained ordered source roles")
     files = selection["source_files"]
-    expected = sorted(path for path, item in catalog_source_inventory(original).items()
-                      if item["kind"] == "file" and path.endswith(".hs"))
+    expected = [[path, item["sha256"]]
+                for path, item in sorted(catalog_source_inventory(original).items())
+                if item["kind"] == "file" and path.endswith(".hs")]
     if (not isinstance(files, list)
             or any(not isinstance(item, list) or len(item) != 2
                    or not isinstance(item[0], str) or not isinstance(item[1], str)
                    or re.fullmatch(r"[0-9a-f]{64}", item[1]) is None for item in files)
-            or [item[0] for item in files] != expected):
+            or files != expected):
         raise ValueError("native catalog source selection lacks the complete source manifest")
     return selection
 

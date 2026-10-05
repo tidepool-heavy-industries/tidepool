@@ -511,8 +511,8 @@ class CatalogSourceTests(unittest.TestCase):
 
     def selection(self, original):
         return {'snapshot_root': str(original), 'roles': qualification.NATIVE_SOURCE_ROLES,
-                'source_files': [[relative, 'b' * 64] for relative, item in
-                    qualification.catalog_source_inventory(original).items()
+                'source_files': [[relative, item['sha256']] for relative, item in
+                    sorted(qualification.catalog_source_inventory(original).items())
                     if item['kind'] == 'file' and relative.endswith('.hs')]}
 
     def catalog_fixture(self, original, tools, record):
@@ -599,6 +599,31 @@ class CatalogSourceTests(unittest.TestCase):
             self.assertEqual(catalog.read_bytes(), before)
             new_pin.unlink()
             with self.assertRaises(FileNotFoundError):
+                qualification.verify_native_catalog(bundle, tools)
+
+    def test_catalog_refuses_wrong_source_digest_even_when_bundle_envelopes_match(self):
+        original, tools, record, pin, nar = self.retained_fixture()
+        bundle, contract, catalog = self.catalog_fixture(original, tools, record)
+        with self.nix_checks(nar, [pin]), patch.object(qualification.subprocess, 'run'):
+            self.assertEqual(qualification.verify_native_catalog(bundle, tools), contract['native_catalog'])
+            altered = json.loads(catalog.read_text())
+            pair = altered['source_selection']['source_files'][0]
+            pair[1] = ('0' if pair[1][0] != '0' else '1') + pair[1][1:]
+            qualification.write_json(catalog, altered)
+            products = qualification.native_catalog_products(catalog.parent)
+            selected = {**contract['native_catalog'],
+                        'source_selection': altered['source_selection'],
+                        'catalog_sha256': qualification.sha256(catalog),
+                        'product_inventory_sha256': qualification.digest_inventory(products)}
+            receipt_path = catalog.parent / qualification.NATIVE_CATALOG_BUILD
+            receipt = json.loads(receipt_path.read_text())
+            receipt.update(selected, product_inventory=products)
+            qualification.write_json(receipt_path, receipt)
+            contract['native_catalog'] = selected
+            qualification.write_json(bundle / 'share/exomonad/native-build-contract.json', contract)
+            with self.assertRaisesRegex(ValueError, 'complete source manifest'):
+                qualification.native_catalog_selection(catalog, original)
+            with self.assertRaisesRegex(ValueError, 'complete source manifest'):
                 qualification.verify_native_catalog(bundle, tools)
 
     def test_native_action_refuses_changed_declared_snapshot_before_production(self):
