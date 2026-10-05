@@ -64,7 +64,8 @@ SHA-256 and schema-4 source selection. The roles are ordered as stable effects,
 stdlib, actors and Jev, under one original root. Producer/worker identities,
 source evidence and product metadata are copied without rewriting.
 
-The catalog-backed bundle retains those exact products and selection. Freezing
+The catalog-backed bundle retains those exact products and selection, with no
+unused stdlib or actor source copies. Freezing
 validates their inventories and NAR/collector evidence, creates a registered
 source GC root owned by the final bundle, and seals a new retention record.
 The original retention may then be retired independently. Qualified execution

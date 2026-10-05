@@ -199,6 +199,28 @@ class NativeQualificationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'tracked declared Haskell source bytes'):
                 qualification.declared_haskell_sources(source, bundle)
 
+    def test_catalog_source_provenance_checks_original_trees_without_unused_bundle_copies(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, original, bundle = root / 'source', root / 'original', root / 'bundle'
+            source.mkdir()
+            bundle.mkdir()
+            subprocess.run(['git', 'init', '-q', str(source)], check=True)
+            for relative in ('lib/Library.hs', 'actors/Actor.hs'):
+                tracked = source / 'bridge/haskell' / relative
+                retained = original / relative
+                tracked.parent.mkdir(parents=True, exist_ok=True)
+                retained.parent.mkdir(parents=True, exist_ok=True)
+                tracked.write_text('source ' + relative)
+                retained.write_bytes(tracked.read_bytes())
+            subprocess.run(['git', '-C', str(source), 'add', 'bridge'], check=True)
+            evidence = qualification.declared_haskell_sources(source, bundle, original)
+            self.assertEqual(set(evidence), {'stdlib', 'actors'})
+            self.assertFalse((bundle / 'share/exomonad/stdlib').exists())
+            (original / 'actors/Actor.hs').write_text('changed actor')
+            with self.assertRaisesRegex(ValueError, 'tracked declared Haskell source bytes'):
+                qualification.declared_haskell_sources(source, bundle, original)
+
     def test_runtime_environment_rejects_ambient_catalog_and_daemon_selection(self):
         with patch.dict(os.environ, {
             'TIDEPOOL_EXTRACT_DAEMON_SOCKET': '/tmp/unqualified.sock',

@@ -396,7 +396,7 @@ def build_native_catalog(args) -> None:
     })
 
 
-def declared_haskell_sources(source: Path, bundle: Path) -> dict:
+def declared_haskell_sources(source: Path, bundle: Path, original_sources: Path | None = None) -> dict:
     tracked = subprocess.check_output([
         "git", "-C", str(source), "ls-files", "-z", "--",
         "bridge/haskell/lib", "bridge/haskell/actors",
@@ -408,7 +408,8 @@ def declared_haskell_sources(source: Path, bundle: Path) -> dict:
             for path in tracked if path.startswith(relative + "/") and path.endswith(".hs")
             and "/Prelude_cbor/" not in path
         }
-        actual_root = bundle / "share/exomonad" / packaged
+        actual_root = (original_sources / Path(relative).name if original_sources is not None
+                       else bundle / "share/exomonad" / packaged)
         actual = {path.relative_to(actual_root).as_posix(): sha256(path)
                   for path in actual_root.rglob("*") if path.is_file()}
         if not expected or actual != expected:
@@ -568,7 +569,10 @@ def assemble(args) -> None:
                          ("tidepool-extract", args.frontend), ("tidepool-extract-bin", args.worker),
                          ("tidepool-tests", args.libtest)):
         shutil.copy2(source.resolve(strict=True), root / "bin" / name)
-    for name, source in (("stdlib", args.sources / "lib"), ("actors", args.sources / "actors"), ("web", args.assets / "web")):
+    sources = [("web", args.assets / "web")]
+    if getattr(args, "catalog", None) is None:
+        sources.extend([("stdlib", args.sources / "lib"), ("actors", args.sources / "actors")])
+    for name, source in sources:
         shutil.copytree(source, shared / name, symlinks=False)
     for source in args.libraries.iterdir():
         shutil.copy2(source.resolve(strict=True), root / "lib/tidepool" / source.name)
@@ -621,9 +625,11 @@ def freeze(args) -> Path:
     recorded_workspace = verify_workspace_gitlink(source, args.bundle / "share/exomonad/workspace-gitlink.json")
     verify_workspace_bundle(args.bundle / "share/exomonad/workspace.bundle", recorded_workspace,
                             (args.bundle / "share/exomonad/runtime-tools").resolve(strict=True) / "bin/git")
-    haskell_sources = declared_haskell_sources(source, args.bundle)
+    original_sources = None
     if contract["stdlib_mode"] == "catalog-backed":
-        verify_native_catalog(args.bundle, (args.bundle / "share/exomonad/runtime-tools").resolve(strict=True))
+        selection = verify_native_catalog(args.bundle, (args.bundle / "share/exomonad/runtime-tools").resolve(strict=True))["source_selection"]
+        original_sources = Path(selection["snapshot_root"])
+    haskell_sources = declared_haskell_sources(source, args.bundle, original_sources)
     lock = tomllib.loads((source / "Cargo.lock").read_text())
     harness = [row for row in lock["package"] if row["name"] == "harness"]
     if len(harness) != 1:
