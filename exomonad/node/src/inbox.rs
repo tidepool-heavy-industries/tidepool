@@ -13,6 +13,7 @@ use std::sync::Mutex;
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use tidepool_atomic_write::DirectoryAnchor;
 use tidepool_repr::jsonl::{self, SyncPolicy, TailPolicy};
 use tidepool_repr::version_ladder::{self, MigrationError};
 
@@ -257,9 +258,21 @@ where
     T: Clone + Serialize + DeserializeOwned,
     R: Clone + PartialEq + Serialize + DeserializeOwned,
 {
-    pub fn open(rows_path: PathBuf, cursor_path: PathBuf) -> Result<Self, InboxError> {
-        create_parent(&rows_path)?;
-        create_parent(&cursor_path)?;
+    pub fn open(
+        anchor: &DirectoryAnchor,
+        relative_rows: impl AsRef<Path>,
+        relative_cursor: impl AsRef<Path>,
+    ) -> Result<Self, InboxError> {
+        // Resolve both names before creating either parent so an invalid cursor
+        // path cannot leave a newly-created rows hierarchy behind.
+        let rows_path = anchor
+            .resolve(relative_rows.as_ref())
+            .map_err(std::io::Error::from)?;
+        let cursor_path = anchor
+            .resolve(relative_cursor.as_ref())
+            .map_err(std::io::Error::from)?;
+        create_parent(anchor, relative_rows.as_ref())?;
+        create_parent(anchor, relative_cursor.as_ref())?;
         // Reject an unsupported checkpoint before repairing any row tail.
         let (mut checkpoint, versioned) = read_cursor::<R>(&cursor_path)?;
         let rows = read_rows::<T, R>(&rows_path)?;
@@ -957,9 +970,10 @@ fn total_context_bytes<R: Serialize>(
         Ok(total + context_bytes(&receipt.context)?)
     })
 }
-fn create_parent(path: &Path) -> Result<(), std::io::Error> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    tidepool_atomic_write::create_dir_all_durable(parent)
+fn create_parent(anchor: &DirectoryAnchor, relative_path: &Path) -> Result<(), std::io::Error> {
+    let parent = relative_path.parent().unwrap_or_else(|| Path::new(""));
+    anchor
+        .create_dir_all(parent)
         .map_err(|error| std::io::Error::new(error.source.kind(), error))
 }
 

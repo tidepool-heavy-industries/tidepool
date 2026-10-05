@@ -14,6 +14,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
+use tidepool_atomic_write::DirectoryAnchor;
 use tokio::sync::watch;
 
 pub const MIB: u64 = 1024 * 1024;
@@ -487,14 +488,18 @@ impl CommandResources {
     /// Open the durable owner used by the per-user resource service.
     pub fn delegated_with_journal(
         policy: CommandResourcePolicy,
-        journal: PathBuf,
+        anchor: &DirectoryAnchor,
+        relative_journal: impl AsRef<Path>,
     ) -> std::io::Result<Arc<Self>> {
-        Self::delegated_inner(policy, Some(journal))
+        Self::delegated_inner(
+            policy,
+            Some((anchor.clone(), relative_journal.as_ref().to_path_buf())),
+        )
     }
 
     fn delegated_inner(
         policy: CommandResourcePolicy,
-        journal_path: Option<PathBuf>,
+        journal_scope: Option<(DirectoryAnchor, PathBuf)>,
     ) -> std::io::Result<Arc<Self>> {
         policy.validate().map_err(io_error)?;
         let membership = std::fs::read_to_string("/proc/self/cgroup")?;
@@ -529,8 +534,8 @@ impl CommandResources {
             policy.swap_max_bytes.to_string(),
         )?;
         std::fs::write(root.join("cgroup.subtree_control"), "+memory")?;
-        let (journal, events) = match journal_path {
-            Some(path) => Journal::open(path)?,
+        let (journal, events) = match journal_scope {
+            Some((anchor, relative_file)) => Journal::open(&anchor, relative_file)?,
             None => (Journal::ephemeral(), Vec::new()),
         };
         let owner = Arc::new(Self {
@@ -1432,7 +1437,15 @@ mod tests {
     fn owner_with_journal(root: &Path, journal_path: PathBuf) -> CommandResources {
         std::fs::create_dir_all(root).unwrap();
         let policy = policy();
-        let (journal, events) = Journal::open(journal_path).unwrap();
+        let anchor = DirectoryAnchor::open_existing(
+            journal_path.parent().expect("test journal has a parent"),
+        )
+        .unwrap();
+        let (journal, events) = Journal::open(
+            &anchor,
+            journal_path.file_name().expect("test journal has a name"),
+        )
+        .unwrap();
         let owner = CommandResources {
             root: root.to_path_buf(),
             actor_slice: root.to_path_buf(),

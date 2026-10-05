@@ -1,6 +1,7 @@
 use super::CommandResourceStatus;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use tidepool_atomic_write::DirectoryAnchor;
 use tidepool_repr::jsonl::{SyncPolicy, TailPolicy};
 
 const VERSION: u32 = 1;
@@ -74,10 +75,20 @@ impl Journal {
         }
     }
 
-    pub(super) fn open(path: PathBuf) -> std::io::Result<(Self, Vec<EventKind>)> {
-        if let Some(parent) = path.parent() {
-            tidepool_atomic_write::create_dir_all_durable(parent).map_err(std::io::Error::from)?;
-        }
+    pub(super) fn open(
+        anchor: &DirectoryAnchor,
+        relative_file: impl AsRef<Path>,
+    ) -> std::io::Result<(Self, Vec<EventKind>)> {
+        let path = anchor
+            .resolve(relative_file.as_ref())
+            .map_err(std::io::Error::from)?;
+        let parent = relative_file
+            .as_ref()
+            .parent()
+            .unwrap_or_else(|| Path::new(""));
+        anchor
+            .create_dir_all(parent)
+            .map_err(std::io::Error::from)?;
         let (rows, torn) = tidepool_repr::jsonl::read_tail(
             &path,
             |line| parse_row(line).map_err(|error| error.to_string()),
@@ -175,11 +186,17 @@ pub(super) fn allocation_path(root: &Path, allocation: &str) -> std::io::Result<
 mod tests {
     use super::*;
 
+    fn open_path(path: &Path) -> std::io::Result<(Journal, Vec<EventKind>)> {
+        let parent = path.parent().expect("test journal has a parent");
+        let anchor = DirectoryAnchor::open_existing(parent)?;
+        Journal::open(&anchor, path.file_name().expect("test journal has a name"))
+    }
+
     #[test]
     fn durable_rows_reopen_in_order_and_repair_only_a_torn_tail() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("ownership.jsonl");
-        let (mut journal, events) = Journal::open(path.clone()).unwrap();
+        let (mut journal, events) = open_path(&path).unwrap();
         assert!(events.is_empty());
         journal
             .append(EventKind::Admission {
@@ -203,7 +220,7 @@ mod tests {
             .unwrap()
             .write_all(b"{\"version\":1")
             .unwrap();
-        let (mut reopened, events) = Journal::open(path.clone()).unwrap();
+        let (mut reopened, events) = open_path(&path).unwrap();
         assert_eq!(events.len(), 2);
         reopened
             .append(EventKind::Acknowledged {
@@ -213,7 +230,7 @@ mod tests {
             })
             .unwrap();
         drop(reopened);
-        let (_, events) = Journal::open(path).unwrap();
+        let (_, events) = open_path(&path).unwrap();
         assert_eq!(events.len(), 3);
     }
 
@@ -233,7 +250,7 @@ mod tests {
     fn an_uncertain_append_fences_the_writer_until_exclusive_reopen() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("ownership.jsonl");
-        let (mut journal, _) = Journal::open(path.clone()).unwrap();
+        let (mut journal, _) = open_path(&path).unwrap();
         std::fs::create_dir(&path).unwrap();
         let event = || EventKind::Admission {
             producer: "run-a-actor-1".into(),
@@ -249,9 +266,9 @@ mod tests {
         assert!(error.to_string().contains("uncertain append"));
         assert!(std::fs::read(&path).unwrap().is_empty());
 
-        let (mut reopened, events) = Journal::open(path.clone()).unwrap();
+        let (mut reopened, events) = open_path(&path).unwrap();
         assert!(events.is_empty());
         reopened.append(event()).unwrap();
-        assert_eq!(Journal::open(path).unwrap().1.len(), 1);
+        assert_eq!(open_path(&path).unwrap().1.len(), 1);
     }
 }

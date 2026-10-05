@@ -8,11 +8,17 @@ fn fault_child() {
         return;
     };
     let root = Path::new(&root);
+    let anchor = DirectoryAnchor::open_existing(root).unwrap();
     let case = std::env::var("INBOX_FAULT_CASE").unwrap();
     let arm = PathBuf::from(std::env::var("INBOX_FAULT_ARM").unwrap());
     let rows = root.join("rows/new/deep/rows.jsonl");
-    let cursor = root.join("cursor/new/deep/checkpoint");
-    let open = || DurableInbox::<String, String>::open(rows.clone(), cursor.clone());
+    let open = || {
+        DurableInbox::<String, String>::open(
+            &anchor,
+            "rows/new/deep/rows.jsonl",
+            "cursor/new/deep/checkpoint",
+        )
+    };
     let enable = || fs::write(&arm, b"armed").unwrap();
     let disable = || fs::remove_file(&arm).unwrap();
     if case.starts_with("fresh-") {

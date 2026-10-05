@@ -1,11 +1,44 @@
 use super::*;
 
+fn open_paths<T, R>(rows: &Path, cursor: &Path) -> Result<DurableInbox<T, R>, InboxError>
+where
+    T: Clone + Serialize + DeserializeOwned,
+    R: Clone + PartialEq + Serialize + DeserializeOwned,
+{
+    let parent = rows.parent().expect("test row has a parent");
+    assert_eq!(Some(parent), cursor.parent());
+    let anchor = DirectoryAnchor::open_existing(parent).unwrap();
+    DurableInbox::open(
+        &anchor,
+        rows.file_name().expect("test row has a name"),
+        cursor.file_name().expect("test cursor has a name"),
+    )
+}
+
 fn inbox() -> (tempfile::TempDir, PathBuf, PathBuf, DurableInbox<String>) {
     let dir = tempfile::tempdir().unwrap();
     let rows = dir.path().join("inbox/rows.jsonl");
     let cursor = dir.path().join("inbox/cursor");
-    let inbox = DurableInbox::open(rows.clone(), cursor.clone()).unwrap();
+    let anchor = DirectoryAnchor::open_existing(dir.path()).unwrap();
+    anchor.create_dir_all("inbox").unwrap();
+    let inbox = DurableInbox::open(&anchor, "inbox/rows.jsonl", "inbox/cursor").unwrap();
     (dir, rows, cursor, inbox)
+}
+
+#[test]
+fn invalid_cursor_path_is_rejected_before_rows_parent_creation() {
+    let dir = tempfile::tempdir().unwrap();
+    let anchor = DirectoryAnchor::open_existing(dir.path()).unwrap();
+    assert!(DurableInbox::<String>::open(&anchor, "new/rows.jsonl", "../outside/cursor",).is_err());
+    assert!(!dir.path().join("new").exists());
+    let inbox = DurableInbox::<String>::open(&anchor, "new/rows.jsonl", "new/cursor").unwrap();
+    assert_eq!(
+        inbox
+            .publish("accepted after retry".into())
+            .unwrap()
+            .sequence,
+        1
+    );
 }
 
 #[test]
@@ -16,7 +49,7 @@ fn unacknowledged_rows_survive_reopen_and_sequences_continue() {
     inbox.acknowledge(1).unwrap();
     drop(inbox);
 
-    let reopened = DurableInbox::<String>::open(rows, cursor).unwrap();
+    let reopened = open_paths::<String, ()>(&rows, &cursor).unwrap();
     assert_eq!(reopened.cursor(), 1);
     assert_eq!(
         reopened.pending().unwrap(),
@@ -54,7 +87,7 @@ fn a_cursor_beyond_the_log_is_corruption_not_silent_message_loss() {
     drop(inbox);
     std::fs::write(&cursor, "2").unwrap();
     assert!(matches!(
-        DurableInbox::<String>::open(rows, cursor),
+        open_paths::<String, ()>(&rows, &cursor),
         Err(InboxError::Corrupt(_))
     ));
 }
@@ -69,7 +102,7 @@ fn acknowledged_prefixes_compact_without_resetting_sequence_identity() {
     assert_eq!(std::fs::read_to_string(&rows).unwrap(), "");
     drop(inbox);
 
-    let reopened = DurableInbox::<String>::open(rows, cursor).unwrap();
+    let reopened = open_paths::<String, ()>(&rows, &cursor).unwrap();
     assert_eq!(reopened.cursor(), COMPACT_ACKNOWLEDGED_ROWS);
     assert_eq!(
         reopened.publish("next".into()).unwrap().sequence,
@@ -84,16 +117,18 @@ fn legacy_numeric_cursor_migrates_on_acknowledgement() {
     let second = inbox.publish("second".into()).unwrap();
     drop(inbox);
     std::fs::write(&cursor, first.sequence.to_string()).unwrap();
-    let reopened = DurableInbox::<String>::open(rows.clone(), cursor.clone()).unwrap();
+    let reopened = open_paths::<String, ()>(&rows, &cursor).unwrap();
     assert_eq!(reopened.pending().unwrap().len(), 1);
     reopened.acknowledge(second.sequence).unwrap();
     assert!(std::fs::read_to_string(&cursor).unwrap().starts_with('{'));
     drop(reopened);
-    assert!(DurableInbox::<String>::open(rows, cursor)
-        .unwrap()
-        .pending()
-        .unwrap()
-        .is_empty());
+    assert!(
+        open_paths::<String, ()>(&rows, &cursor)
+            .unwrap()
+            .pending()
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -104,11 +139,13 @@ fn publication_watermark_survives_reopen_ack_and_compaction() {
         .unwrap()
         .unwrap();
     drop(inbox);
-    let reopened = DurableInbox::<String>::open(rows.clone(), cursor.clone()).unwrap();
-    assert!(reopened
-        .publish_latest("actor-thread".into(), 10, "replay".into())
-        .unwrap()
-        .is_none());
+    let reopened = open_paths::<String, ()>(&rows, &cursor).unwrap();
+    assert!(
+        reopened
+            .publish_latest("actor-thread".into(), 10, "replay".into())
+            .unwrap()
+            .is_none()
+    );
     assert_eq!(reopened.pending().unwrap().len(), 1);
     reopened.acknowledge(first.sequence).unwrap();
     for _ in 1..COMPACT_ACKNOWLEDGED_ROWS {
@@ -117,23 +154,31 @@ fn publication_watermark_survives_reopen_ack_and_compaction() {
     }
     assert_eq!(std::fs::read_to_string(&rows).unwrap(), "");
     drop(reopened);
-    let reopened = DurableInbox::<String>::open(rows, cursor).unwrap();
-    assert!(reopened
-        .publish_latest("actor-thread".into(), 9, "delayed".into())
-        .unwrap()
-        .is_none());
-    assert!(reopened
-        .publish_latest("actor-thread".into(), 10, "replay".into())
-        .unwrap()
-        .is_none());
-    assert!(reopened
-        .publish_latest("actor-thread".into(), 11, "new failure".into())
-        .unwrap()
-        .is_some());
-    assert!(reopened
-        .publish_latest("another-incarnation".into(), 10, "independent".into())
-        .unwrap()
-        .is_some());
+    let reopened = open_paths::<String, ()>(&rows, &cursor).unwrap();
+    assert!(
+        reopened
+            .publish_latest("actor-thread".into(), 9, "delayed".into())
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        reopened
+            .publish_latest("actor-thread".into(), 10, "replay".into())
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        reopened
+            .publish_latest("actor-thread".into(), 11, "new failure".into())
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        reopened
+            .publish_latest("another-incarnation".into(), 10, "independent".into())
+            .unwrap()
+            .is_some()
+    );
 }
 
 fn tracked() -> (
@@ -145,7 +190,8 @@ fn tracked() -> (
     let dir = tempfile::tempdir().unwrap();
     let rows = dir.path().join("rows.jsonl");
     let cursor = dir.path().join("cursor");
-    let inbox = DurableInbox::open(rows.clone(), cursor.clone()).unwrap();
+    let anchor = DirectoryAnchor::open_existing(dir.path()).unwrap();
+    let inbox = DurableInbox::open(&anchor, "rows.jsonl", "cursor").unwrap();
     (dir, rows, cursor, inbox)
 }
 
@@ -185,7 +231,7 @@ fn tracked_migration_is_opt_in_and_old_readers_reject_before_rows_are_published(
         2
     );
     drop(inbox);
-    let reopened = DurableInbox::<String, String>::open(rows, cursor).unwrap();
+    let reopened = open_paths::<String, String>(&rows, &cursor).unwrap();
     assert_eq!(phase(&reopened, row.sequence), DeliveryPhase::Accepted);
 }
 
@@ -209,7 +255,7 @@ fn pre_send_fence_survives_drop_and_reopen_and_cannot_be_retried_or_acked() {
         Err(InboxError::TrackedBarrier { .. })
     ));
     drop(inbox);
-    let reopened = DurableInbox::<String, String>::open(rows, cursor).unwrap();
+    let reopened = open_paths::<String, String>(&rows, &cursor).unwrap();
     assert_eq!(phase(&reopened, row.sequence), DeliveryPhase::Unconfirmed);
     assert!(reopened.begin_tracked_delivery(row.sequence).is_err());
     // Late, exact correlation can establish presentation without resubmitting.
@@ -245,7 +291,7 @@ fn submitted_is_not_presented_and_provenance_survives_compaction_and_reopen() {
         Err(InboxError::TrackedBarrier { .. })
     ));
     drop(inbox);
-    let reopened = DurableInbox::<String, String>::open(rows.clone(), cursor.clone()).unwrap();
+    let reopened = open_paths::<String, String>(&rows, &cursor).unwrap();
     assert_eq!(phase(&reopened, row.sequence), DeliveryPhase::Submitted);
     assert_eq!(reopened.cursor(), 0);
     reopened
@@ -257,7 +303,7 @@ fn submitted_is_not_presented_and_provenance_survives_compaction_and_reopen() {
     }
     assert_eq!(std::fs::read_to_string(&rows).unwrap(), "");
     drop(reopened);
-    let reopened = DurableInbox::<String, String>::open(rows.clone(), cursor.clone()).unwrap();
+    let reopened = open_paths::<String, String>(&rows, &cursor).unwrap();
     assert_eq!(
         reopened.observe_receipt(row.sequence).unwrap(),
         ReceiptLookup::Retained(ReceiptEvidence {
@@ -331,7 +377,7 @@ fn quota_evicts_only_acknowledged_evidence_and_old_receipts_become_unavailable()
         ReceiptLookup::Unavailable
     );
     drop(inbox);
-    let reopened = DurableInbox::<String, String>::open(rows, cursor).unwrap();
+    let reopened = open_paths::<String, String>(&rows, &cursor).unwrap();
     assert_eq!(
         reopened.observe_receipt(1).unwrap(),
         ReceiptLookup::Unavailable
@@ -386,7 +432,7 @@ fn uncertain_append_never_reuses_a_sequence_until_reopen_reconciles_the_row() {
     ));
     assert!(matches!(inbox.pending(), Err(InboxError::Poisoned)));
     drop(inbox);
-    let reopened = DurableInbox::<String, String>::open(rows, cursor).unwrap();
+    let reopened = open_paths::<String, String>(&rows, &cursor).unwrap();
     assert_eq!(lock_state(&reopened.state).pending.len(), 1);
     assert_eq!(phase(&reopened, 1), DeliveryPhase::Accepted);
     assert_eq!(reopened.publish("new".into()).unwrap().sequence, 2);
@@ -411,7 +457,7 @@ fn uncertain_fence_write_cannot_escape_as_a_send_permit() {
         Err(InboxError::Poisoned)
     ));
     drop(inbox);
-    let reopened = DurableInbox::<String, String>::open(rows, cursor).unwrap();
+    let reopened = open_paths::<String, String>(&rows, &cursor).unwrap();
     assert_eq!(phase(&reopened, row.sequence), DeliveryPhase::Unconfirmed);
     assert!(reopened.begin_tracked_delivery(row.sequence).is_err());
 }
@@ -437,17 +483,17 @@ fn future_and_malformed_checkpoints_and_provenance_disagreement_fail_closed() {
         let mut value: serde_json::Value = serde_json::from_slice(&original).unwrap();
         value["version"] = version;
         std::fs::write(&cursor, serde_json::to_vec(&value).unwrap()).unwrap();
-        assert!(DurableInbox::<String, String>::open(rows.clone(), cursor.clone()).is_err());
+        assert!(open_paths::<String, String>(&rows, &cursor).is_err());
     }
     let mut value: serde_json::Value = serde_json::from_slice(&original).unwrap();
     value["checkpoint"]["receipts"]["1"]["context"] = serde_json::json!("forged");
     std::fs::write(&cursor, serde_json::to_vec(&value).unwrap()).unwrap();
-    assert!(DurableInbox::<String, String>::open(rows.clone(), cursor.clone()).is_err());
+    assert!(open_paths::<String, String>(&rows, &cursor).is_err());
     value["checkpoint"]["receipts"]["1"]["context"] = serde_json::json!("owner");
     value["checkpoint"]["receipts"]["2"] =
         serde_json::json!({"context":"owner", "phase":"accepted"});
     std::fs::write(&cursor, serde_json::to_vec(&value).unwrap()).unwrap();
-    assert!(DurableInbox::<String, String>::open(rows, cursor).is_err());
+    assert!(open_paths::<String, String>(&rows, &cursor).is_err());
 }
 
 #[test]
@@ -495,7 +541,7 @@ fn late_terminal_negative_advances_without_claiming_presentation() {
     assert_eq!(inbox.cursor(), rejected.sequence);
     drop(inbox);
 
-    let reopened = DurableInbox::<String, String>::open(rows, cursor).unwrap();
+    let reopened = open_paths::<String, String>(&rows, &cursor).unwrap();
     assert_eq!(
         phase(&reopened, withdrawn.sequence),
         DeliveryPhase::Withdrawn
@@ -518,7 +564,7 @@ fn compacted_is_durable_terminal_no_redispatch_and_blocks_later_rows() {
 
     // A lost acknowledgement leaves InFlight on disk. Reopen converts it to
     // query-only Unconfirmed, and late native evidence settles that exact row.
-    let inbox = DurableInbox::<String, String>::open(rows.clone(), cursor.clone()).unwrap();
+    let inbox = open_paths::<String, String>(&rows, &cursor).unwrap();
     assert_eq!(
         phase(&inbox, compacted.sequence),
         DeliveryPhase::Unconfirmed
@@ -535,7 +581,7 @@ fn compacted_is_durable_terminal_no_redispatch_and_blocks_later_rows() {
     assert!(inbox.begin_tracked_delivery(later.sequence).is_err());
     drop(inbox);
 
-    let reopened = DurableInbox::<String, String>::open(rows, cursor).unwrap();
+    let reopened = open_paths::<String, String>(&rows, &cursor).unwrap();
     assert_eq!(
         phase(&reopened, compacted.sequence),
         DeliveryPhase::Compacted
@@ -582,7 +628,7 @@ fn uncertain_compacted_checkpoint_reopens_exact_terminal_fence() {
     ));
     drop(inbox);
 
-    let reopened = DurableInbox::<String, String>::open(rows, cursor).unwrap();
+    let reopened = open_paths::<String, String>(&rows, &cursor).unwrap();
     assert_eq!(phase(&reopened, row.sequence), DeliveryPhase::Compacted);
     assert_eq!(phase(&reopened, later.sequence), DeliveryPhase::Accepted);
     assert_eq!(reopened.cursor(), 0);
@@ -634,7 +680,7 @@ fn explicit_null_context_remains_tracked_after_reopen() {
     let (_dir, rows, cursor, inbox) = inbox();
     let row = inbox.publish_tracked("unit provenance".into(), ()).unwrap();
     drop(inbox);
-    let reopened = DurableInbox::<String>::open(rows, cursor).unwrap();
+    let reopened = open_paths::<String, ()>(&rows, &cursor).unwrap();
     assert_eq!(
         lock_state(&reopened.state).pending[0].receipt_context,
         Some(())
@@ -682,7 +728,7 @@ fn panicked_mutation_owner_requires_reopen_not_mutex_poison_recovery() {
         Err(InboxError::Poisoned)
     ));
     drop(inbox);
-    let reopened = DurableInbox::<String, String>::open(rows, cursor).unwrap();
+    let reopened = open_paths::<String, String>(&rows, &cursor).unwrap();
     assert_eq!(lock_state(&reopened.state).pending.len(), 1);
 }
 
@@ -700,7 +746,7 @@ fn legacy_pending_cannot_expose_tracked_payload_before_or_after_restart() {
     inbox.acknowledge(before.sequence).unwrap();
     drop(inbox.begin_tracked_delivery(row.sequence).unwrap());
     drop(inbox);
-    let reopened = DurableInbox::<String, String>::open(rows, cursor).unwrap();
+    let reopened = open_paths::<String, String>(&rows, &cursor).unwrap();
     assert!(
         matches!(reopened.pending(), Err(InboxError::TrackedBarrier { sequence }) if sequence == row.sequence)
     );
@@ -754,12 +800,14 @@ fn redelivery_keeps_payload_and_provenance_and_fences_the_retired_sequence() {
     assert_eq!(phase(&inbox, redelivered.sequence), DeliveryPhase::Accepted);
     assert_eq!(inbox.cursor(), stuck.sequence);
     assert!(inbox.begin_tracked_delivery(stuck.sequence).is_err());
-    assert!(inbox
-        .redeliver_withdrawn(stuck.sequence, &context, true)
-        .is_err());
+    assert!(
+        inbox
+            .redeliver_withdrawn(stuck.sequence, &context, true)
+            .is_err()
+    );
     drop(inbox);
 
-    let reopened = DurableInbox::<String, String>::open(rows, cursor).unwrap();
+    let reopened = open_paths::<String, String>(&rows, &cursor).unwrap();
     assert_eq!(phase(&reopened, stuck.sequence), DeliveryPhase::Withdrawn);
     assert_eq!(reopened.cursor(), stuck.sequence);
     assert_eq!(
@@ -795,7 +843,7 @@ fn redelivery_after_a_lost_retirement_write_does_not_queue_twice() {
         .unwrap();
     drop(inbox);
 
-    let reopened = DurableInbox::<String, String>::open(rows, cursor).unwrap();
+    let reopened = open_paths::<String, String>(&rows, &cursor).unwrap();
     assert_eq!(phase(&reopened, stuck.sequence), DeliveryPhase::Unconfirmed);
     let redelivered = reopened
         .redeliver_withdrawn(stuck.sequence, &context, false)
