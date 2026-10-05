@@ -47,6 +47,7 @@ library tidepool-extract-internal
     Tidepool.CborEncode
     Tidepool.CellProgramState
     Tidepool.CheckedCell
+    Tidepool.CanonicalTypeShape
     Tidepool.CheckedAdmission
     Tidepool.CheckedRecipe
     Tidepool.CheckedPrefixImports

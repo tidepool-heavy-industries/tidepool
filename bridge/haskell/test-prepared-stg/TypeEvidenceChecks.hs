@@ -1,13 +1,28 @@
 module TypeEvidenceChecks (runTypeEvidenceChecks) where
 
-import Control.Monad (unless)
+import Control.Monad (unless, forM_)
+import Data.Map.Strict qualified as Map
+import GHC.Core.DataCon (dataConName)
+import GHC.Core.TyCon (tyConDataCons)
+import GHC.Types.Name (nameOccName)
+import GHC.Types.Name.Occurrence (occNameString)
+import GHC.Types.TypeEnv (typeEnvTyCons)
+import GHC.Unit.Home.ModInfo (HomeModInfo(..), lookupHpt)
+import GHC.Unit.Module (moduleName, moduleNameString)
+import GHC.Unit.Module.ModDetails (md_types)
+import GHC.Unit.Module.ModIface (mi_module)
+import GHC.Driver.Env (hsc_HPT)
+import Tidepool.CanonicalTypeShape
+import Tidepool.ExactHydration (freshExactState, hydrateOriginalInterfaces)
+import Tidepool.PreparedSites (requestReplyIndex)
 import Data.Text qualified as Text
 import System.Directory (createDirectoryIfMissing)
 import System.FilePath ((</>))
 import Tidepool.ExecutionProjection (ProjectionError)
 import Tidepool.ExecutionSchema
 import Tidepool.GhcPipeline
-  ( PipelineSelection(PreparedStg), PreparedPipelineResult, runPipelineSelected )
+  ( PipelineSelection(PreparedStg), PreparedPipelineResult(..), PipelineResult(..)
+  , finalizedHomeModInfo, runPipelineSelected )
 
 -- Compile once, then select each entry independently to exercise the same
 -- reachable-owner filtering used by notebook artifact production.
@@ -40,9 +55,18 @@ runTypeEvidenceChecks directory project projectWithAux = do
     , "receiveSited :: forall answer. RequestSite '[] answer -> String -> Maybe answer"
     , "receiveSited _ _ = Nothing"
     ])
-  readFile "test-prepared-stg/site-fixtures/TypeEvidence.hs" >>= writeFile target
+  fixture <- readFile "test-prepared-stg/site-fixtures/TypeEvidence.hs"
+  writeFile target fixture
   result <- runPipelineSelected PreparedStg target [directory]
+  let alphaFixture = unlines
+        [if line == "  Echo :: a -> Console a" then "  Echo :: reply -> Console reply" else line
+        | line <- lines fixture]
+  assert (length [() | line <- lines fixture, line == "  Echo :: a -> Console a"] == 1)
+    "Echo alpha control must change exactly one actual source declaration"
+  writeFile target alphaFixture
   secondResult <- runPipelineSelected PreparedStg target [directory]
+  writeFile target fixture
+  verifyOriginalReplyShapes result secondResult
   let program entry = either
         (ioError . userError . ((entry ++ ": ") ++) . show) pure (project result entry)
       answer entry = do
@@ -119,6 +143,18 @@ runTypeEvidenceChecks directory project projectWithAux = do
     other -> ioError (userError ("Fetch reply is not data evidence: " ++ show other))
   echoWire <- program "echoRequest"
   echoNode <- verbAnswer echoWire "Echo"
+  alphaEchoWire <- either (ioError . userError . show) pure (project secondResult "echoRequest")
+  alphaEchoNode <- verbAnswer alphaEchoWire "Echo"
+  assert (case (echoNode, alphaEchoNode) of
+    (TypeUnconstructible reason first, TypeUnconstructible otherReason second) ->
+      reason == otherReason && first /= second
+    _ -> False)
+    "actual original binder alpha-renaming did not exercise differing refusal diagnostics"
+  let echoDeclaration wire = [declaration | declaration <- programConstructors wire
+        , symbolModule (constructorIdentity declaration) == "TypeEvidence"
+        , symbolOccurrence (constructorIdentity declaration) == "Echo"]
+  assert (echoDeclaration echoWire == echoDeclaration alphaEchoWire)
+    "binder alpha-renaming changed the constructor's physical declaration"
   assert (isRefusal echoNode) "an open reply index acquired structural construction authority"
   functionWire <- program "functionRequest"
   functionNode <- verbAnswer functionWire "FunctionReply"
@@ -211,3 +247,59 @@ runTypeEvidenceChecks directory project projectWithAux = do
   verbAnswerFrom wire moduleName occurrence = case replyFor wire moduleName occurrence of
     [StaticReply node] -> pure (nodeAt wire node)
     other -> ioError (userError (occurrence ++ ": expected one intrinsic static reply, got " ++ show other))
+
+-- Compare genuine source DataCons and their exact original interface hydration.
+-- Alpha-renamed source is a separate compiler result, not admitted as the same
+-- original module; the equality here is solely schematic type semantics.
+verifyOriginalReplyShapes :: PreparedPipelineResult -> PreparedPipelineResult -> IO ()
+verifyOriginalReplyShapes original alpha = do
+  let originalInfos = map finalizedHomeModInfo (Map.elems (pprFinalizedModules original))
+      alphaInfos = map finalizedHomeModInfo (Map.elems (pprFinalizedModules alpha))
+      constructors infos = concatMap (concatMap tyConDataCons . typeEnvTyCons . md_types . hm_details)
+        [info | info <- infos, moduleNameString (moduleName (mi_module (hm_iface info))) == "TypeEvidence"]
+      originalConstructors = constructors originalInfos
+      alphaConstructors = constructors alphaInfos
+      select name values = case [constructor | constructor <- values
+          , occNameString (nameOccName (dataConName constructor)) == name] of
+        [constructor] -> pure constructor
+        _ -> ioError (userError ("missing or duplicated original constructor " ++ name))
+      shape constructor = case requestReplyIndex constructor of
+        Nothing -> ioError (userError "fixture constructor lacks intrinsic reply index")
+        Just reply -> either (ioError . userError .
+          (("original reply shape " ++ occNameString (nameOccName (dataConName constructor)) ++ ": ") ++) . show) pure
+          (captureGraphTypeShape (constructorTypeShapeScope constructor) reply)
+      require condition message = unless condition (ioError (userError message))
+  first <- select "Echo" originalConstructors >>= shape
+  second <- select "Echo" alphaConstructors >>= shape
+  require (first == second) "original source binder alpha-renaming changed schematic identity"
+  unitConstructor <- select "OnlyInt" originalConstructors
+  schematicInt <- shape unitConstructor
+  closedInt <- case requestReplyIndex unitConstructor of
+    Just reply -> either (ioError . userError . show) pure
+      (captureGraphTypeShape closedTypeShapeScope reply)
+    Nothing -> ioError (userError "closed/scheme fixture lacks reply")
+  require (canonicalShapeExpressionBytes schematicInt == canonicalShapeExpressionBytes closedInt
+    && schematicInt /= closedInt)
+    "constructor scheme and closed-type domains were conflated"
+  firstScope <- select "FirstScope" originalConstructors >>= shape
+  secondScope <- select "SecondScope" originalConstructors >>= shape
+  require (firstScope /= secondScope) "same-spelled reply variable lost its original binder position"
+  repeated <- select "RepeatedScope" originalConstructors >>= shape
+  distinct <- select "DistinctScope" originalConstructors >>= shape
+  require (repeated /= distinct) "schematic reply lost variable repetition"
+  let env = prHscEnv (pprPipelineResult original)
+  isolated <- freshExactState env
+  hydrated <- hydrateOriginalInterfaces isolated (map hm_iface originalInfos)
+  hydratedInfos <- mapM (\info -> maybe (ioError (userError "hydrated original interface missing")) pure
+    (lookupHpt (hsc_HPT hydrated) (moduleName (mi_module (hm_iface info))))) originalInfos
+  hydratedConstructors <- pure (constructors hydratedInfos)
+  forM_ originalConstructors $ \constructor -> case requestReplyIndex constructor of
+    Nothing -> pure ()
+    Just _ -> do
+      let occurrence = occNameString (nameOccName (dataConName constructor))
+      -- This census fails with the exact unsupported shape rather than
+      -- silently promoting a cast/coercion refusal during schema migration.
+      sourceShape <- shape constructor
+      hydratedShape <- select occurrence hydratedConstructors >>= shape
+      require (sourceShape == hydratedShape)
+        ("same exact original interface changed reply scheme during hydration: " ++ occurrence)

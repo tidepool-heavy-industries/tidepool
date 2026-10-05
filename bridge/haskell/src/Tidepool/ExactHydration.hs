@@ -7,7 +7,7 @@ module Tidepool.ExactHydration
   , ExactIfaceArtifact(..)
   , freshExactState
   , readExactIfaceArtifacts
-  , hydrateExactScope, exactInterfaceSummary
+  , hydrateExactScope, hydrateOriginalInterfaces, exactInterfaceSummary
   , exactHomeInstancesFor, withExactHomeInstances
   , CheckedValueImportAuthority
   , noCheckedValueImports
@@ -640,12 +640,17 @@ withCapturedIface timing owner bytes consume = do
 -- resolve each other's original Names while typechecking their details.
 hydrateExactScope
   :: HscEnv -> [(ExactIfaceArtifact, ModIface)] -> IO HscEnv
-hydrateExactScope env loaded = do
+hydrateExactScope env loaded = hydrateOriginalInterfaces env (map snd loaded)
+
+-- Typechecking original compiler interfaces is shared by exact hydration and
+-- producer semantic checks. This issues GHC details, not admitted authority.
+hydrateOriginalInterfaces :: HscEnv -> [ModIface] -> IO HscEnv
+hydrateOriginalInterfaces env loaded = do
   timing <- readTimingEnabled
   timeDetailPhase timing "exact_scope" "hydrate" $ do
     details <- fixIO $ \recursiveDetails -> do
       let knotted = withDetails recursiveDetails
-      forM loaded $ \(_, iface) ->
+      forM loaded $ \iface ->
         initIfaceCheck (text "tidepool exact hydration") knotted (typecheckIface iface)
     pure (withDetails details)
   where
@@ -657,7 +662,7 @@ hydrateExactScope env loaded = do
     -- zip would demand the recursive detail spine while building the HPT;
     -- sharing a deferred head/tail split keeps the knot lazy and traversal linear.
     zipDetails [] _ = []
-    zipDetails ((_, iface) : rest) remaining =
+    zipDetails (iface : rest) remaining =
       let ~(detail, tailDetails) = splitDetails remaining
       in (iface, detail) : zipDetails rest tailDetails
     splitDetails (detail : rest) = (detail, rest)

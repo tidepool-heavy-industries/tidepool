@@ -30,6 +30,14 @@ data Progress progress
   | ProgressUpdate progress
   | ProgressClosed
 
+-- Original source forall positions distinguish schematic refusal leaves even
+-- when the two leaf Types have the same rendered occurrence.
+data ScopeReply answer where
+  FirstScope :: forall a b. a -> b -> ScopeReply a
+  SecondScope :: forall b a. a -> b -> ScopeReply a
+  RepeatedScope :: forall a b. a -> b -> ScopeReply (Either a a)
+  DistinctScope :: forall a b. a -> b -> ScopeReply (Either a b)
+
 data Alts f xs where
   (:|) :: Alts f a -> Alts f rest -> Alts f (Either a rest)
 infixr 5 :|

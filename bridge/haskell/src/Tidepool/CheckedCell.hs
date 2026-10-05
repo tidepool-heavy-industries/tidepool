@@ -14,13 +14,12 @@ module Tidepool.CheckedCell
   , rewriteCheckedAnnotations, rewriteHostInputType, rewriteRequestTypes
   ) where
 
-import Codec.CBOR.Encoding (Encoding, encodeListLen, encodeString, encodeBytes, encodeInt, encodeNull)
+import Codec.CBOR.Encoding (Encoding, encodeListLen, encodeString, encodeBytes, encodeNull)
 import qualified Codec.CBOR.Decoding as D
 import Codec.CBOR.Decoding
   ( Decoder, TokenType(TypeNull), decodeListLen, decodeString, decodeBytes
   , decodeNull, peekTokenType, peekByteOffset )
 import Codec.CBOR.Write (toStrictByteString)
-import Control.Monad.State.Strict (StateT, evalStateT, get, put, lift)
 import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
 import Tidepool.ExactHydration (OriginalInterfaceArtifacts, originalInterfaceSha256
@@ -29,11 +28,10 @@ import Data.Maybe (catMaybes)
 import Numeric (showHex)
 import Control.Monad (forM, forM_, unless, replicateM)
 import Data.IORef
-import Data.List (elemIndex, sortOn)
+import Data.List (sortOn)
 import qualified Data.Text as T
 import Data.Generics (Data, cast, gmapM, mkM)
 import GHC
-import GHC.Core.Type (coreView)
 import GHC.Core.TyCo.FVs (tyCoVarsOfType)
 import GHC.Types.Var.Set (isEmptyVarSet)
 import GHC.CoreToIface (toIfaceType)
@@ -41,11 +39,8 @@ import GHC.Iface.Syntax (IfaceDecl(..), IfaceIdDetails(..), freeNamesIfDecl)
 import GHC.Iface.Binary (putWithUserData, getWithUserData, TraceBinIFace(..), CompressionIFace(..))
 import GHC.IfaceToCore (tcIfaceDecl)
 import GHC.Utils.Binary (openBinMem, withBinBuffer, unsafeUnpackBinBuffer)
-import GHC.Core.TyCo.Rep (Type(..), TyLit(..))
-import GHC.Data.FastString (unpackFS)
-import GHC.Types.Var (VarBndr(..), ForAllTyFlag(..), Specificity(..), FunTyFlag(..), isTyVar, varType)
 import Tidepool.TypePolicy (stabilizeEffectRows, NominalHead(..))
-import GHC.Core.TyCon (tyConName)
+import Tidepool.CanonicalTypeShape (captureClosedTypeShape, canonicalShapeExpressionBytes, canonicalShapeOwners)
 import GHC.Driver.Env (lookupType, hsc_home_unit, hsc_NC, hscSetFlags)
 import GHC.Driver.Main (hscTypecheckRenameWithDiagnostics)
 import GHC.Driver.Errors.Types (GhcMessage)
@@ -482,69 +477,14 @@ instance Show CheckedTypeWitness where
   show witness = "CheckedTypeWitness " ++ show (witnessSignature witness)
 
 captureCheckedTypeWitness :: HscEnv -> Type -> IO (Maybe CheckedTypeWitness)
-captureCheckedTypeWitness env original = case evalStateT (shape 0 [] stable) (0 :: Int) of
+captureCheckedTypeWitness env original = case captureClosedTypeShape stable of
   Left _ -> pure Nothing
-  Right (encoded, owners) -> do
-    let bytes = toStrictByteString encoded
-    if BS.length bytes > 4 * 1024 * 1024 then pure Nothing else do
-      signature <- captureCheckedSignature env "activation-input" stable
-      pure (Just (CheckedTypeWitness signature bytes
-        (Map.elems (Map.fromList [(ownerIdentity owner, owner) | owner <- owners])) Nothing))
-  where
-    stable = stabilizeEffectRows original
-    ownerIdentity owner = (unitString (moduleUnit owner), moduleNameString (moduleName owner))
-    text = encodeString . T.pack
-    node :: Int -> Either String ()
-    node depth = if depth > 128 then Left "type witness depth" else Right ()
-    shape :: Int -> [TyVar] -> Type -> StateT Int (Either String) (Encoding, [Module])
-    shape depth bound ty = do
-      lift (node depth)
-      count <- get
-      if count >= 65536 then lift (Left "type witness node count") else put (count + 1)
-      case coreView ty of
-        Just expanded -> shape (depth + 1) bound expanded
-        Nothing -> case ty of
-          TyVarTy variable -> case elemIndex variable bound of
-            Just index | isTyVar variable -> pure (encodeListLen 2 <> text "bound" <> encodeInt index, [])
-            _ -> lift (Left "type witness free variable")
-          TyConApp constructor arguments
-            | isFamilyTyCon constructor -> lift (Left "type witness unresolved family")
-            | Just owner <- nameModule_maybe (tyConName constructor) -> do
-                children <- traverse (shape (depth + 1) bound) arguments
-                let name = tyConName constructor
-                    namespace = if isDataOcc (nameOccName name) then "data" else "type"
-                pure (encodeListLen 3 <> text "con"
-                  <> encodeListLen 4 <> text (unitString (moduleUnit owner))
-                  <> text (moduleNameString (moduleName owner)) <> text namespace
-                  <> text (occNameString (nameOccName name))
-                  <> encodeListLen (fromIntegral (length children)) <> foldMap fst children,
-                  owner : concatMap snd children)
-            | otherwise -> lift (Left "type witness local type Name")
-          AppTy function argument -> binary "app" [function, argument]
-          FunTy flag multiplicity argument result -> do
-            children <- traverse (shape (depth + 1) bound) [multiplicity, argument, result]
-            let tag = case flag of FTF_T_T -> 0; FTF_T_C -> 1; FTF_C_T -> 2; FTF_C_C -> 3
-            pure (encodeListLen 5 <> text "fun" <> encodeInt tag <> foldMap fst children,
-              concatMap snd children)
-          ForAllTy (Bndr variable visibility) body
-            | isTyVar variable -> do
-                (kind, kindOwners) <- shape (depth + 1) bound (varType variable)
-                (bodyShape, bodyOwners) <- shape (depth + 1) (variable : bound) body
-                let tag = case visibility of Required -> 0; Invisible SpecifiedSpec -> 1; Invisible InferredSpec -> 2
-                pure (encodeListLen 4 <> text "forall" <> encodeInt tag <> kind <> bodyShape,
-                  kindOwners ++ bodyOwners)
-            | otherwise -> lift (Left "type witness coercion binder")
-          LitTy literal -> pure (encodeListLen 3 <> text "literal" <> (case literal of
-            NumTyLit value -> text "nat" <> text (show value)
-            StrTyLit value -> text "symbol" <> text (unpackFS value)
-            CharTyLit value -> text "char" <> encodeInt (fromEnum value)), [])
-          CastTy{} -> lift (Left "type witness cast")
-          CoercionTy{} -> lift (Left "type witness coercion")
-      where
-        binary tag types = do
-          children <- traverse (shape (depth + 1) bound) types
-          pure (encodeListLen (fromIntegral (1 + length children)) <> text tag <> foldMap fst children,
-            concatMap snd children)
+  Right structure -> do
+    signature <- captureCheckedSignature env "activation-input" stable
+    pure (Just (CheckedTypeWitness signature (canonicalShapeExpressionBytes structure)
+      (canonicalShapeOwners structure) Nothing))
+ where
+  stable = stabilizeEffectRows original
 
 -- Bind interfaces from this completed transaction's original products and
 -- admitted home/package interface environment. Never infer a seal from source.
