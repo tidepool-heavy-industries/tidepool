@@ -577,20 +577,20 @@ impl CompilerEndpoint {
             .map_err(|source| SpawnError::not_submitted("current directory", source))?;
         // Both sides retain the same input digest. Daemon acceptance adds
         // an exact invocation identity in the transport-owned request event.
-        let physical_execution = if matches!(self.transport, Transport::Scoped) {
-            None
-        } else {
+        let physical_execution = if matches!(self.transport, Transport::Direct(_)) {
             Some(format!(
                 "{}:{}",
                 std::process::id(),
                 PHYSICAL_REQUEST_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             ))
+        } else {
+            None
         };
         let span = tracing::info_span!(
             "compile_request",
             compile_request = %daemon::compile_request_correlation(&cwd, &cmd.request.worker_argv()),
             request_mode = %cmd.request.mode(),
-            execution_layer = if matches!(self.transport, Transport::Scoped) { "transaction_wrapper" } else { "physical" },
+            execution_layer = match self.transport { Transport::Scoped => "transaction_wrapper", Transport::Direct(_) => "physical", Transport::Daemon { .. } => "endpoint_submission" },
             physical_execution = physical_execution.as_deref(),
             transport = self.transport.name(),
             producer = %self.identity.producer_hex(),
@@ -825,8 +825,8 @@ impl CompilerTransaction {
             "compile_request",
             compile_request = %daemon::compile_request_correlation(&cwd, &cmd.request.worker_argv()),
             request_mode = %cmd.request.mode(),
-            execution_layer = "physical",
-            physical_execution = %format!("{}:{}", std::process::id(), PHYSICAL_REQUEST_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)),
+            execution_layer = if matches!(transport, TransactionTransport::Direct(_)) { "physical" } else { "endpoint_submission" },
+            physical_execution = if matches!(transport, TransactionTransport::Direct(_)) { Some(format!("{}:{}", std::process::id(), PHYSICAL_REQUEST_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed))) } else { None }.as_deref(),
             transport = match transport {
                 TransactionTransport::Direct(_) => "direct",
                 TransactionTransport::Daemon { .. } => "daemon",

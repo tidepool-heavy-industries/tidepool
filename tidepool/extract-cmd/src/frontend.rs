@@ -201,7 +201,7 @@ fn owned_daemon_run(args: &[OsString]) -> Result<u8, FrontendError> {
     let daemon_log = File::create(root.join("daemon.stderr.log")).map_err(FrontendError::Io)?;
     let arguments = crate::persistent_daemon_arguments(
         &socket,
-        &root.join("compiler.jsonl"),
+        &root.join("compiler.log"),
         "isolated-qualification",
         1,
         Some(crate::SESSION_WORKER_RSS_CEILING_MB),
@@ -211,6 +211,9 @@ fn owned_daemon_run(args: &[OsString]) -> Result<u8, FrontendError> {
         .args(&arguments)
         .env("TIDEPOOL_TIMING", "1")
         .env("XDG_CACHE_HOME", &cache)
+        .env("TIDEPOOL_CACHE_DIR", cache.join("tidepool"))
+        .env("TIDEPOOL_COMPILE_CACHE_DIR", cache.join("artifacts"))
+        .env("TIDEPOOL_BUILD_PRODUCTS_DIR", cache.join("products"))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::from(daemon_log));
@@ -222,7 +225,7 @@ fn owned_daemon_run(args: &[OsString]) -> Result<u8, FrontendError> {
                 "owned compiler exited before readiness: {status}"
             )));
         }
-        if let Ok(binding) = daemon::preflight(&socket) {
+        if let Ok(binding) = daemon::preflight_until(&socket, deadline) {
             break binding;
         }
         if std::time::Instant::now() >= deadline {
@@ -260,6 +263,9 @@ fn owned_daemon_run(args: &[OsString]) -> Result<u8, FrontendError> {
         .env(crate::REQUIRED_DAEMON_ENDPOINT_ENV, identity.to_hex())
         .env("TIDEPOOL_TIMING", "1")
         .env("XDG_CACHE_HOME", &cache)
+        .env("TIDEPOOL_CACHE_DIR", cache.join("tidepool"))
+        .env("TIDEPOOL_COMPILE_CACHE_DIR", cache.join("artifacts"))
+        .env("TIDEPOOL_BUILD_PRODUCTS_DIR", cache.join("products"))
         .status()
         .map_err(FrontendError::Io);
     descendants.extend(crate::process::descendant_snapshot(daemon_pid).map_err(FrontendError::Io)?);

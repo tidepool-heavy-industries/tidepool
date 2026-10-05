@@ -1317,6 +1317,10 @@ fn producer_identity_survives_independent_daemon_boots() {
 }
 
 #[test]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "isolated process lifecycle acceptance control"
+)]
 fn owned_compiler_case_preserves_isolation_and_confirms_cleanup() {
     let (bin, _) = daemon_toolchain();
     let root = std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT")
@@ -1325,6 +1329,7 @@ fn owned_compiler_case_preserves_isolation_and_confirms_cleanup() {
         .join(format!("owned-compiler-control-{}", std::process::id()));
     fs::create_dir(&root).expect("fresh control evidence root");
     let compiler = root.join("compiler");
+    let poison = root.join("unowned-cache");
     let output = Command::new(&bin)
         .args([
             OsString::from("--owned-daemon-run"),
@@ -1339,6 +1344,9 @@ fn owned_compiler_case_preserves_isolation_and_confirms_cleanup() {
             "--nocapture",
         ])
         .env("TIDEPOOL_OWNED_COMPILER_CONTROL_ROOT", &root)
+        .env("TIDEPOOL_CACHE_DIR", &poison)
+        .env("TIDEPOOL_COMPILE_CACHE_DIR", &poison)
+        .env("TIDEPOOL_BUILD_PRODUCTS_DIR", &poison)
         .env_remove(tidepool_extract_cmd::DAEMON_SOCKET_ENV)
         .env_remove(tidepool_extract_cmd::REQUIRED_DAEMON_ENDPOINT_ENV)
         .env_remove("TIDEPOOL_EXTRACT_NO_DAEMON")
@@ -1354,6 +1362,7 @@ fn owned_compiler_case_preserves_isolation_and_confirms_cleanup() {
         serde_json::from_slice(&fs::read(compiler.join("lifecycle.json")).unwrap()).unwrap();
     assert_eq!(report["cleanup_confirmed"], true);
     assert!(!compiler.join("cache").exists());
+    assert!(!poison.exists(), "inherited cache override was consumed");
     let outcome: serde_json::Value =
         serde_json::from_slice(&fs::read(compiler.join("owned-compiler-outcome.json")).unwrap())
             .unwrap();
@@ -1377,12 +1386,27 @@ fn owned_compiler_case_preserves_isolation_and_confirms_cleanup() {
 
 #[test]
 #[ignore = "private child of the owned compiler lifecycle acceptance case"]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "isolated owned endpoint stop refusal control"
+)]
 fn owned_compiler_case_child() {
     let root = PathBuf::from(
         std::env::var_os("TIDEPOOL_OWNED_COMPILER_CONTROL_ROOT").expect("owned control parent"),
     );
     let bin = compiler_inputs::require_compiler_executables();
     let lib = stdlib_lib_dir();
+    let cache = root.join("compiler/cache");
+    for (name, leaf) in [
+        ("TIDEPOOL_CACHE_DIR", "tidepool"),
+        ("TIDEPOOL_COMPILE_CACHE_DIR", "artifacts"),
+        ("TIDEPOOL_BUILD_PRODUCTS_DIR", "products"),
+    ] {
+        assert_eq!(
+            PathBuf::from(std::env::var_os(name).unwrap()),
+            cache.join(leaf)
+        );
+    }
     let expected = ExtractCmd::new()
         .unwrap()
         .bind()
@@ -1415,6 +1439,24 @@ fn owned_compiler_case_child() {
             String::from_utf8_lossy(&result.output.stderr)
         );
         let program = fs::read(out.join("result.prepared.cbor")).unwrap();
+        let direct_out = root.join(format!("direct-control-{index}"));
+        let mut direct = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved(&bin));
+        direct
+            .input(&source)
+            .output_dir(&direct_out)
+            .target("result")
+            .include(&lib);
+        let direct_result = direct.bind_direct().unwrap().execute(&direct).unwrap();
+        assert!(
+            direct_result.success(),
+            "{}",
+            String::from_utf8_lossy(&direct_result.output.stderr)
+        );
+        assert_eq!(
+            program,
+            fs::read(direct_out.join("result.prepared.cbor")).unwrap(),
+            "resident and explicitly direct control differ at request {index}"
+        );
         if index == 0 {
             original = Some(program);
         } else if index == 2 {

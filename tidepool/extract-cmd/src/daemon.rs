@@ -794,28 +794,47 @@ fn explicit_refusal(stream: &mut UnixStream) -> Option<DaemonError> {
 }
 
 pub(crate) fn preflight(socket_path: &Path) -> Result<DaemonBinding, DaemonError> {
+    preflight_until(socket_path, Instant::now() + IO_TIMEOUT)
+}
+
+pub(crate) fn preflight_until(
+    socket_path: &Path,
+    deadline: Instant,
+) -> Result<DaemonBinding, DaemonError> {
     let started = Instant::now();
+    let remaining = || {
+        deadline
+            .checked_duration_since(Instant::now())
+            .filter(|duration| !duration.is_zero())
+            .ok_or_else(|| {
+                DaemonError::Io(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "compiler preflight deadline expired",
+                ))
+            })
+    };
     let mut stream = UnixStream::connect(socket_path).map_err(DaemonError::Connect)?;
     stream
-        .set_read_timeout(Some(IO_TIMEOUT))
-        .map_err(DaemonError::Io)?;
-    stream
-        .set_write_timeout(Some(IO_TIMEOUT))
+        .set_write_timeout(Some(remaining()?))
         .map_err(DaemonError::Io)?;
     stream.write_all(PREFLIGHT).map_err(DaemonError::Io)?;
-    let magic = read_exact_or_crash(&mut stream, PREFLIGHT_RESPONSE.len())?;
+    let mut reader = DeadlineReader {
+        stream: &mut stream,
+        deadline,
+    };
+    let magic = read_exact_or_crash(&mut reader, PREFLIGHT_RESPONSE.len())?;
     if magic != PREFLIGHT_RESPONSE {
         return Err(DaemonError::Protocol(
             "invalid preflight response".to_owned(),
         ));
     }
-    let producer: [u8; 32] = read_exact_or_crash(&mut stream, 32)?
+    let producer: [u8; 32] = read_exact_or_crash(&mut reader, 32)?
         .try_into()
         .map_err(|_| DaemonError::IncompleteResponse)?;
-    let consumed_worker: [u8; 32] = read_exact_or_crash(&mut stream, 32)?
+    let consumed_worker: [u8; 32] = read_exact_or_crash(&mut reader, 32)?
         .try_into()
         .map_err(|_| DaemonError::IncompleteResponse)?;
-    let epoch: [u8; 32] = read_exact_or_crash(&mut stream, 32)?
+    let epoch: [u8; 32] = read_exact_or_crash(&mut reader, 32)?
         .try_into()
         .map_err(|_| DaemonError::IncompleteResponse)?;
     tracing::info!(
@@ -1035,10 +1054,16 @@ fn service_transaction(
                         FrontendError::Daemon("compiler request ordinal exhausted".into())
                     })?);
                 let compile_request = compile_request_correlation(&cwd, &argv);
+                let request_mode = ExtractRequest::decode_worker_argv(&argv)
+                    .ok()
+                    .map(|request| request.mode());
                 let request_span = tracing::info_span!(
                     "compile_request",
                     run_id,
                     %compile_request,
+                    execution_layer = "physical",
+                    physical_execution = %format!("{}:{}:{}", hex(epoch), admission_id.0, request_ordinal.0),
+                    request_mode = request_mode.map(|mode| mode.to_string()).as_deref(),
                     admission_id = admission_id.0,
                     request_ordinal = request_ordinal.0,
                     followed_rotation = *followed_rotation,
@@ -2095,7 +2120,7 @@ impl Read for DeadlineReader<'_> {
         if remaining.is_zero() {
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
-                "rotation drain deadline",
+                "compiler transport deadline",
             ));
         }
         self.stream.set_read_timeout(Some(remaining))?;
@@ -3567,6 +3592,29 @@ tidepool-target phase=desugar module=Execute\n",
         // invent a different truncation.
         let status = ExitStatus::from_raw(encode_wait_status(-1));
         assert_eq!(status.code(), Some(255));
+    }
+
+    #[test]
+    fn preflight_stalled_peer_obeys_readiness_deadline() {
+        let socket = test_socket("preflight-deadline");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let (release, held) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut connection, _) = listener.accept().unwrap();
+            let mut request = [0u8; 8];
+            connection.read_exact(&mut request).unwrap();
+            connection.write_all(PREFLIGHT_RESPONSE).unwrap();
+            held.recv().unwrap();
+        });
+        let started = Instant::now();
+        let result = preflight_until(&socket, started + Duration::from_millis(50));
+        release.send(()).unwrap();
+        server.join().unwrap();
+        assert!(
+            matches!(result, Err(DaemonError::Io(error)) if matches!(error.kind(), io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock))
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+        std::fs::remove_file(socket).unwrap();
     }
 
     #[test]
