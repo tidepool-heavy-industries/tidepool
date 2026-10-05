@@ -3,7 +3,7 @@
 module Tidepool.CanonicalTypeShape
   ( CanonicalTypeShape, TypeShapeError(..)
   , captureClosedTypeShape, canonicalShapeExpressionBytes
-  , canonicalShapeOwners, canonicalShapeNodeCount
+  , canonicalShapeOwners
   ) where
 
 import Codec.CBOR.Encoding (Encoding, encodeListLen, encodeString, encodeInt)
@@ -39,25 +39,24 @@ data TypeShapeError
 data CanonicalTypeShape = CanonicalTypeShape
   { canonicalShapeExpressionBytes :: BS.ByteString
   , canonicalShapeOwners :: [Module]
-  , canonicalShapeNodeCount :: Int
   }
 
 instance Eq CanonicalTypeShape where
   first == second = canonicalShapeExpressionBytes first == canonicalShapeExpressionBytes second
 
 instance Show CanonicalTypeShape where
-  show value = "CanonicalTypeShape " ++ show (canonicalShapeNodeCount value)
+  show value = "CanonicalTypeShape (" ++ show (BS.length (canonicalShapeExpressionBytes value)) ++ " bytes)"
 
 -- Existing activation bytes are precisely the unwrapped closed expression.
 -- This profile continues refusing families, casts, coercions and free vars.
 captureClosedTypeShape :: Type -> Either TypeShapeError CanonicalTypeShape
 captureClosedTypeShape original = do
-  ((expression, owners), count) <- runStateT (shape 0 [] original) (0 :: Int)
+  ((expression, owners), _) <- runStateT (shape 0 [] original) (0 :: Int)
   let expressionBytes = toStrictByteString expression
   if BS.length expressionBytes > 4 * 1024 * 1024
     then Left TypeShapeByteLimit
     else Right (CanonicalTypeShape expressionBytes
-      (Map.elems (Map.fromList [(ownerIdentity owner, owner) | owner <- owners])) count)
+      (Map.elems (Map.fromList [(ownerIdentity owner, owner) | owner <- owners])))
  where
   ownerIdentity owner = (unitString (moduleUnit owner), moduleNameString (moduleName owner))
   text = encodeString . T.pack

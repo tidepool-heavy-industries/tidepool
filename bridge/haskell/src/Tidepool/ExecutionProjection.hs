@@ -1481,9 +1481,11 @@ assembleTypeGraph original = do
         (IntMap.lookup (typeNodeIndex identity) (arenaOriginals final))
   pure (graph, rebase)
  where
+  failure :: Text -> Assemble a
   failure detail = lift (Left (UnsupportedPreparedShape detail))
   completed (index, Just node) = Right (index, node)
   completed (_, Nothing) = Left (UnsupportedPreparedShape "final type arena has an incomplete reservation")
+  intern :: TypeNodeId -> Assemble TypeNodeId
   intern old = do
     work <- gets ((+ 1) . arenaWork)
     if work > 16777216 then lift (Left (TypeEvidenceIssuanceFailure TypePolicy.TypeGraphWorkLimit))
@@ -1510,6 +1512,7 @@ assembleTypeGraph original = do
           pure identity
   declarations = [(TypeNodeId (fromIntegral index), node)
     | (index, node@TypeDeclaration{}) <- IntMap.toAscList (typeGraphNodes original)]
+  reserveDeclaration :: (TypeNodeId, TypeNode) -> Assemble ()
   reserveDeclaration (old, TypeDeclaration symbol _ _ _) = do
     duplicate <- gets (Map.lookup symbol . arenaDeclarations)
     identity <- case duplicate of
@@ -1521,6 +1524,7 @@ assembleTypeGraph original = do
         pure reserved
     remember old identity
   reserveDeclaration _ = failure "final type arena declaration category mismatch"
+  completeDeclaration :: (TypeNodeId, TypeNode) -> Assemble ()
   completeDeclaration (old, node) = do
     known <- gets (IntMap.lookup (typeNodeIndex old) . arenaOriginals)
     identity <- maybe (failure "final type arena declaration has no owner") pure known
@@ -1540,6 +1544,7 @@ assembleTypeGraph original = do
     (graphOutgoing original (typeNodeIndex old))
   remember old identity = modify' (\arena -> arena
     { arenaOriginals = IntMap.insert (typeNodeIndex old) identity (arenaOriginals arena) })
+  reserve :: Assemble TypeNodeId
   reserve = do
     next <- gets arenaNext
     when (next >= 65535) (lift (Left (TypeEvidenceIssuanceFailure TypePolicy.TypeGraphNodeLimit)))
@@ -1548,6 +1553,7 @@ assembleTypeGraph original = do
       { arenaNodes = IntMap.insert (fromIntegral next) Nothing (arenaNodes arena)
       , arenaNext = next + 1 })
     pure identity
+  publish :: TypeNodeId -> TypeNode -> [(TypeEdgeRoleF RuntimeRep, TypeNodeId)] -> Assemble ()
   publish identity node edges = do
     let cost = 32 + nodeTextBytes node + length edges * 32
     bytes <- gets ((+ cost) . arenaBytes)
