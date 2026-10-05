@@ -31,7 +31,7 @@ import GHC.Types.Id (idName, idType)
 import GHC.Types.Var (varUnique)
 import GHC.Types.Unique.Set (elementOfUniqSet)
 import GHC.Types.Name (nameOccName, setNameUnique)
-import GHC.Types.Unique (mkUnique)
+import GHC.Types.Unique (mkUnique, getKey)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.Id.Make (nospecId)
 import GHC.Types.RepType (typePrimRep_maybe)
@@ -515,11 +515,11 @@ strictMetadataSource modul quoted = unlines $
   , "import Tidepool.Effects.Core (ActorLocal)"
   ] ++ quasiquoteBindings quoted ++
   [ "automatic :: Eff '[ActorLocal Maybe] Automatic"
-  , "automatic = receive @Automatic @Maybe (\\_ -> let handler = handler in handler)"
+  , "automatic = receive @Automatic @Maybe (\\_ -> error \"metadata handler is not invoked\")"
   , "noUnpack :: Eff '[ActorLocal Maybe] NoUnpack"
-  , "noUnpack = receive @NoUnpack @Maybe (\\_ -> let handler = handler in handler)"
+  , "noUnpack = receive @NoUnpack @Maybe (\\_ -> error \"metadata handler is not invoked\")"
   , "explicitUnpack :: Eff '[ActorLocal Maybe] ExplicitUnpack"
-  , "explicitUnpack = receive @ExplicitUnpack @Maybe (\\_ -> let handler = handler in handler)"
+  , "explicitUnpack = receive @ExplicitUnpack @Maybe (\\_ -> error \"metadata handler is not invoked\")"
   ]
 
 quasiquoteLanguage :: Bool -> [String]
@@ -603,7 +603,7 @@ verifyConstructorRepresentations dir = do
     , "import Tidepool.Effects.Core (ActorLocal)"
     ] ++ quasiquoteBindings quoted ++
     [ "result :: Eff '[ActorLocal Maybe] Value"
-    , "result = receive @Value @Maybe (\\_ -> let handler = handler in handler)"
+    , "result = receive @Value @Maybe (\\_ -> error \"metadata handler is not invoked\")"
     ]
   assertMetadataReps occurrence plain quoted expected = do
     let plainReps = typeGraphReps occurrence plain
@@ -722,11 +722,18 @@ verifyRepeatedConstructorEvidence result = do
           not (any (preparedRejectsIntrinsic prepared) (Projection.topBinders binding))) prepared
         | prepared <- pprModules result
         , moduleNameString (moduleName (pmModule prepared)) /= "StrictPlainMetadata"]
+      bindingKey (binding, _) = sort (map (getKey . varUnique) (Projection.topBinders binding))
+      bindingKeys = Set.fromList . map bindingKey . pmBindings
+      -- The graphs retain independent type/site evidence but share the same
+      -- genuine STG groups. Give each shared group one defining body.
+      graphInputs first second =
+        let firstGraph = graphModule "noUnpack" first
+            secondGraph = graphModule "automatic" second
+            defined = bindingKeys firstGraph
+        in [firstGraph, filterPreparedBindings
+            ((`Set.notMember` defined) . bindingKey) secondGraph]
       projectAcrossGraphs first second = Projection.projectPrepared context
-        (otherModules
-          ++ [ graphModule "noUnpack" first
-             , graphModule "automatic" second
-             ])
+        (otherModules ++ graphInputs first second)
       context = Projection.ProjectionContext
         { Projection.projectionProfile = "ghc-9.12-prepared-stg"
         , Projection.projectionToolchain = "ghc-9.12.2"
@@ -754,6 +761,9 @@ verifyRepeatedConstructorEvidence result = do
         outcome -> ioError (userError
           ("conflicting constructor evidence in separate graphs was not rejected: "
             ++ either show (const "accepted") outcome))
+  assert (not (Set.null (bindingKeys (graphModule "noUnpack" original)
+    `Set.intersection` bindingKeys (graphModule "automatic" original))))
+    "independent constructor graphs do not exercise a shared original binding group"
   _ <- either (ioError . userError . show) pure (projectAcrossGraphs original original)
   canonical <- either (ioError . userError . show) pure (project [original, original])
   repeated <- either (ioError . userError . show) pure
