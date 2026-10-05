@@ -2023,11 +2023,12 @@ originalProjectionProducts = withScratch $ \work -> do
   unless (rejectedModules == Set.fromList ["A", "B", "C", "E", "F", "G", "H", "I"]) $
     fail "module-level rejection did not cover sibling binders and their dependants"
   writeFile (work </> "ProjectionUnavailableProvider.hs") $ unlines
-    ["module ProjectionUnavailableProvider (missing) where", "missing :: Int", "missing = 7"]
+    ["module ProjectionUnavailableProvider (missing) where", "{-# NOINLINE missing #-}", "missing :: Int", "missing = 7"]
   writeFile (work </> "ProjectionOwner.hs") $ unlines
     [ "module ProjectionOwner (bad, good) where"
     , "import ProjectionUnavailableProvider"
-    , "bad :: Int", "bad = missing", "good :: Int", "good = 42" ]
+    , "{-# NOINLINE bad #-}", "bad :: Int", "bad = missing"
+    , "{-# NOINLINE good #-}", "good :: Int", "good = 42" ]
   writeFile (work </> "ProjectionIndependent.hs") $ unlines
     ["module ProjectionIndependent (safe) where", "safe :: Int", "safe = 1"]
   writeFile (work </> "ProjectionConsumer.hs") $ unlines
