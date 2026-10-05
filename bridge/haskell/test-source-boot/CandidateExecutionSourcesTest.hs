@@ -156,7 +156,8 @@ candidateExecutionSourcesTest = withTiming $ withScratch $ \work -> do
   case executionSourceClosure (scopeExecutionGraphs helperTargetScope)
       (scopeExecutionOwners helperTargetScope) (scopeExecutionNativeOwners helperTargetScope) [helperKey] of
     Left (ExecutionSourceMissing owner) | owner == helperKey -> pure ()
-    other -> fail ("direct helper target replay failed at another authority boundary: " ++ show other)
+    Left failure -> fail ("direct helper target replay failed at another authority boundary: " ++ show failure)
+    Right nodes -> fail ("direct helper target unexpectedly admitted source replay with " ++ show (length nodes) ++ " owners")
   -- Capture an independent compilation in which the helper is an authored
   -- dependency, then select only that helper's native and lexical authority.
   helperOriginal <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
