@@ -31,7 +31,7 @@ compiler-produced module counts require the native action and gate report.
 | --- | --- | ---: |
 | Stable effect direct imports | Generated effect roster | 3 |
 | Stdlib direct imports | Pinned Cabal source ownership | 53 |
-| Actor direct imports | Pinned Cabal source ownership | 7 |
+| Actor direct imports | Pinned Cabal source ownership | 8 |
 | Jev direct imports | Pinned Jev source projection | 4 |
 | Full source file inventory | Retained snapshot record | Requires retention run |
 | Compiled module closure | Native catalog producer/admission | Requires native build |
