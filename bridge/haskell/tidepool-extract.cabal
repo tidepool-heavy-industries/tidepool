@@ -861,6 +861,7 @@ test-suite automation-helper-contract
     Tidepool.Actor.Source
     Tidepool.Actors.Exomonad
     Tidepool.Actors.Internal.Agent
+    Tidepool.Actors.Internal.ExomonadDriver
     Tidepool.Actors.Observe
     Tidepool.Actors.Role
     Tidepool.Actors.Unfold
