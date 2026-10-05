@@ -14,11 +14,13 @@ use tokio::sync::Notify;
 const PENDING_CALL: &str = "captured-unfold-and-await";
 const REUSE_CALL: &str = "reuse-failed-cell-capture";
 const RESUME_INPUT: &str = "resume interrupted captured fixture";
+const LOCAL_STARTUP_CALL: &str = "read-started-local-actors";
 
 const TYPED_CHILD_REPLY_SETTLEMENT_BUDGET: Duration = Duration::from_secs(90);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CapturedScenario {
+    LocalActorStartup,
     Success,
     CancelWhileParked,
     FailureAfterReplies,
@@ -232,7 +234,7 @@ impl CapturedHostTransport {
                 1 => vec![harness::item::Item(json!({
                     "type":"custom_tool_call", "call_id":"captured-scope-setup", "name":"haskell",
                     "input":match self.scenario {
-                        CapturedScenario::Success | CapturedScenario::CancelWhileParked => format!("{}\n{}\ndisplay True", include_str!("embedded_checkpoint_scope_setup.hs"), include_str!("embedded_captured_group_setup.hs")),
+                        CapturedScenario::LocalActorStartup | CapturedScenario::Success | CapturedScenario::CancelWhileParked => format!("{}\n{}\ndisplay True", include_str!("embedded_checkpoint_scope_setup.hs"), include_str!("embedded_captured_group_setup.hs")),
                         CapturedScenario::FailureAfterReplies => format!("{}\n{}\ndisplay True", include_str!("embedded_checkpoint_scope_setup.hs"), include_str!("embedded_captured_group_setup.hs")),
                         CapturedScenario::ConcurrentNominalJoin => format!("{}\n{}\n{}", include_str!("embedded_checkpoint_scope_setup.hs"), include_str!("embedded_captured_group_setup.hs"), include_str!("embedded_nominal_join_setup.hs")),
                     }
@@ -242,8 +244,15 @@ impl CapturedHostTransport {
                     self.setup_requested.notify_one();
                     self.setup_ready.notified().await;
                     vec![haskell_call(
-                        PENDING_CALL,
+                        if self.scenario == CapturedScenario::LocalActorStartup {
+                            LOCAL_STARTUP_CALL
+                        } else {
+                            PENDING_CALL
+                        },
                         match self.scenario {
+                            CapturedScenario::LocalActorStartup => {
+                                "seed <- R.call (readSeed (R.client seedStore)) ()\ngroup <- R.call (readGroup (R.client groupStore)) ()\ndisplay (case (seed, group) of (Nothing, Nothing) -> True; _ -> False)"
+                            }
                             CapturedScenario::Success | CapturedScenario::CancelWhileParked => {
                                 include_str!("embedded_captured_unfold_and_await.hs")
                             }
@@ -693,6 +702,11 @@ async fn embedded_operation(
 }
 
 #[tokio::test]
+async fn embedded_local_actor_startup_and_calls_keep_custody_off_the_host_stack() {
+    captured_host_scenario(CapturedScenario::LocalActorStartup).await;
+}
+
+#[tokio::test]
 async fn embedded_captured_unfold_awaits_two_child_replies_before_parent_call_returns() {
     captured_host_scenario(CapturedScenario::Success).await;
 }
@@ -928,6 +942,54 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
         .await
         .unwrap_or_else(|error| panic!("{error}"))
         .expect("root Engine did not request a turn after scope setup settled");
+    if scenario == CapturedScenario::LocalActorStartup {
+        let mut settlements = scheduler.operation_settlements();
+        transport.setup_ready.notify_one();
+        let operation = campaign
+            .while_root_live(
+                "started local actor calls settle",
+                tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, async {
+                    loop {
+                        let settled = settlements
+                            .recv()
+                            .await
+                            .expect("local call settlement observer");
+                        if settled.origin == root_origin && settled.call.0 == LOCAL_STARTUP_CALL {
+                            break settled;
+                        }
+                    }
+                }),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{error}"))
+            .expect("both started local actors answer their original typed calls");
+        assert_eq!(
+            operation,
+            transport.operation(&root_origin, LOCAL_STARTUP_CALL)
+        );
+        let result = embedded_operation(&runtime, &operation, COLD_DEBUG_CELL_SETTLEMENT_BUDGET)
+            .await
+            .expect("local actor reads return their original state");
+        assert_committed_haskell_value(&result, "True");
+        received_output(&transport, &operation).await;
+        let graph = campaign.forest.inspect_host_graph();
+        for label in ["embedded-checkpoint-seeds", "embedded-checkpoint-groups"] {
+            let local = graph
+                .iter()
+                .find(|node| node.label == label)
+                .expect("started local actor is retained by its original kernel");
+            assert_eq!(local.creator, Some(actor));
+            assert_eq!(local.supervisor_parent, Some(actor));
+            assert!(!local.model_actor);
+            assert!(local.terminal.is_none());
+        }
+        assert!(transport.children.lock().is_empty());
+        finish_root(&transport, &campaign).await;
+        host.stop()
+            .await
+            .expect("production shutdown confirms local actor custody release");
+        return;
+    }
     // Subscribe before issuing the parent call: settlement may precede observation,
     // and Scheduler::wait refuses operations that are not admitted yet.
     let mut parent_settlements = scheduler.operation_settlements();

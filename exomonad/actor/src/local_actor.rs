@@ -1409,7 +1409,9 @@ where
     B: KernelBehavior,
 {
     type Msg = KernelMessage;
-    type State = LocalActorState<B>;
+    // Ractor carries startup state through its spawn and processing futures.
+    // Keep the behavior and pending-task custody in one stable allocation.
+    type State = Box<LocalActorState<B>>;
     type Arguments = LocalActorArguments<B>;
 
     async fn pre_start(
@@ -1430,7 +1432,7 @@ where
             )),
         });
         let startup_admission = arguments.startup_admission;
-        let mut state = LocalActorState {
+        let mut state = Box::new(LocalActorState {
             replacement: None,
             drain: DrainState::Open,
             mailbox_admission: arguments.mailbox_admission,
@@ -1443,7 +1445,7 @@ where
             deferred_mailbox: VecDeque::new(),
             mailbox_drain_scheduled: false,
             hosted_admission: HostedAdmission::Open,
-        };
+        });
         let child = LocalActorRef::with_identity_admission(
             state.context.myself.clone(),
             state.terminal.clone(),

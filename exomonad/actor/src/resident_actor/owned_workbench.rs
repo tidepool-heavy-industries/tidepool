@@ -256,7 +256,9 @@ impl WorkbenchPublicOwner {
 }
 
 struct OwnedExecution<H, O> {
-    state: WorkbenchExecutionState,
+    // Fenced steps transfer this allocation, including its linear boundary
+    // custody. Polling and completion must not move the full cursor by value.
+    state: Box<WorkbenchExecutionState>,
     workbench: Option<crate::ResidentActorWorkbench<H, O>>,
     private: Option<Arc<crate::resident_workbench::ExecutionPrivateScope>>,
     timing: Option<crate::call_timing::CallScope>,
@@ -820,7 +822,7 @@ where
         let owned = OwnedExecution {
             observation: self.runtime_observation.clone(),
             retirement: kernel.retained_exit(),
-            state: WorkbenchExecutionState {
+            state: Box::new(WorkbenchExecutionState {
                 effects: WorkbenchEffectState {
                     display_receipt_owner,
                     park_effects: true,
@@ -844,7 +846,7 @@ where
                 replay_request,
                 invocation,
                 cursor: WorkbenchCursor::default(),
-            },
+            }),
             workbench: Some(workbench),
             private: None,
             timing: Some(timing),

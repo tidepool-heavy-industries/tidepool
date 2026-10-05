@@ -89,7 +89,7 @@ fn execution(model: Arc<ModelOwner>) -> OwnedExecution<frunk::HNil, tidepool_mcp
     };
     let invocation_work = InvocationWork::new(context.actor, reservation_owner.clone());
     OwnedExecution {
-        state: WorkbenchExecutionState {
+        state: Box::new(WorkbenchExecutionState {
             effects: WorkbenchEffectState {
                 display_receipt_owner: None,
                 park_effects: true,
@@ -110,7 +110,7 @@ fn execution(model: Arc<ModelOwner>) -> OwnedExecution<frunk::HNil, tidepool_mcp
             replay_request: None,
             invocation: None,
             cursor: WorkbenchCursor::default(),
-        },
+        }),
         workbench: Some(workbench),
         private: None,
         timing: Some(crate::call_timing::CallScope::new("model test", 9, 1)),
