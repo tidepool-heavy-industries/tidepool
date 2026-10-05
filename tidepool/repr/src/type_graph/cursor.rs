@@ -566,7 +566,7 @@ fn weak_head(
     mut closure: Closure,
     budget: &mut TypeWorkBudget,
 ) -> Result<Option<Head>, TypeGraphError> {
-    let mut active: Vec<(TypeNodeId, Arc<[Closure]>)> = Vec::new();
+    let mut active: HashMap<TypeNodeId, Vec<Arc<[Closure]>>> = HashMap::new();
     let mut syntax = SyntaxComparer::new(graph, graph);
     loop {
         let head = resolve_head(graph, closure, budget)?;
@@ -584,16 +584,19 @@ fn weak_head(
         if head.arguments.len() < arity {
             return Ok(Some(head));
         }
-        for (previous, arguments) in &active {
-            budget.charge(1)?;
-            if *previous == declaration
-                && syntax.arguments_equal(arguments, &head.arguments, budget)?
-            {
-                return Ok(None);
+        if let Some(previous) = active.get(&declaration) {
+            for arguments in previous {
+                budget.charge(1)?;
+                if syntax.arguments_equal(arguments, &head.arguments, budget)? {
+                    return Ok(None);
+                }
             }
         }
         budget.charge(1)?;
-        active.push((declaration, head.arguments.clone()));
+        active
+            .entry(declaration)
+            .or_default()
+            .push(head.arguments.clone());
         let environment = Environment::arguments(&head.arguments[..arity], budget)?;
         let expression = child(graph, declaration, TypeEdge::AliasRhs, budget)?;
         budget.charge(head.arguments.len() - arity)?;
@@ -1552,6 +1555,34 @@ mod tests {
         assert!(graph
             .rooted_compatible(outer, &graph, direct, &mut budget)
             .unwrap());
+    }
+
+    #[test]
+    fn distinct_alias_chain_does_not_compare_unrelated_instantiation_history() {
+        let mut graph = GraphStorage::new();
+        let text = declaration(&mut graph, "Text", 0, DeclarationForm::Text);
+        let mut body = application(&mut graph, text, &[]);
+        for index in 0..1_000 {
+            let alias = declaration(
+                &mut graph,
+                &format!("Alias{index}"),
+                0,
+                DeclarationForm::Newtype { eta_arity: 0 },
+            );
+            graph.add_edge(alias, body, TypeEdge::AliasRhs);
+            body = application(&mut graph, alias, &[]);
+        }
+        let root = root(&mut graph, body, 0);
+        let graph = publish(graph, &[]);
+        let mut budget = TypeWorkBudget::new(20_000);
+        assert!(matches!(
+            graph
+                .open_root(root, &mut budget)
+                .unwrap()
+                .view(&mut budget)
+                .unwrap(),
+            TypeView::Text
+        ));
     }
 
     #[test]
