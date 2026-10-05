@@ -1774,10 +1774,20 @@ pub(crate) struct ExecutionPrivateScope {
     pub admission: Arc<tidepool_runtime::session::PrivateExecutionAdmission>,
 }
 
+#[derive(Clone)]
+pub(crate) struct PublishedForkSource {
+    pub(crate) lexical: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
+    pub(crate) session: tidepool_repr::SessionId,
+    pub(crate) public_scope: ScopeId,
+    pub(crate) public_epoch: u64,
+    pub(crate) machine_incarnation: Option<tidepool_repr::SessionId>,
+}
+
 pub(crate) enum PrivateExecutionPublication {
     Manifest {
         commit: tidepool_runtime::session::PublicManifestCommit,
         native_bindings: Vec<String>,
+        fork_source: Option<PublishedForkSource>,
     },
     Rejected {
         reason: tidepool_toolchain::declaration_join::JoinRejection,
@@ -6725,9 +6735,14 @@ where
     ) -> Result<(), ResidentActorWorkbenchError> {
         self.access
             .with_machine(context, move |session, context, _| {
-                session
-                    .validate_lexical_scope_lease(context.placement.lexical_scope, &lease)
-                    .map_err(Into::into)
+                session.validate_lexical_scope_lease(context.placement.lexical_scope, &lease)?;
+                if let Some(captured) = context.source_imports.inherited_scope()? {
+                    session.validate_initial_lexical_scope(
+                        &captured,
+                        context.placement.lexical_scope,
+                    )?;
+                }
+                Ok(())
             })
             .await
     }
@@ -6825,6 +6840,7 @@ where
         &self,
         context: crate::ActorSessionContext,
         execution: Arc<ExecutionPrivateScope>,
+        retain_fork_source: bool,
     ) -> Result<PrivateExecutionPublication, ResidentActorWorkbenchError> {
         if context.placement.lexical_scope != execution.private_scope {
             return Err(ResidentActorWorkbenchError::ActorProtocol(
@@ -6871,6 +6887,7 @@ where
                 return Ok(PrivateExecutionPublication::Manifest {
                     commit: tidepool_runtime::session::PublicManifestCommit::Cancelled,
                     native_bindings,
+                    fork_source: None,
                 });
             }
             let owner = execution.owner.clone();
@@ -6917,16 +6934,35 @@ where
             match prepared {
                 PreparedExecutionPublication::Manifest(ticket) => {
                     let decision = execution.decision.clone();
-                    let outcome = self
+                    let public_scope = execution.public_scope;
+                    let source_session = context.placement.session;
+                    let (outcome, fork_source) = self
                         .access
                         .with_machine(context.clone(), move |session, _, _| {
-                            session
+                            let outcome = session
                                 .publish_staged_public_manifest(ticket, &decision)
                                 .map_err(|error| {
-                                    ResidentActorWorkbenchError::Resident(ResidentError::Session(
-                                        error,
-                                    ))
+                                    ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                                })?;
+                            // Capture under the same checkout as the visible commit. A
+                            // later independent publication must not change this boundary.
+                            let fork_source = if retain_fork_source && matches!(outcome,
+                                tidepool_runtime::session::PublicManifestCommit::Durable
+                                | tidepool_runtime::session::PublicManifestCommit::Ephemeral
+                                | tidepool_runtime::session::PublicManifestCommit::PublishedDurabilityUnconfirmed { .. }
+                            ) {
+                                let visible = session.public_visibility_snapshot_in(public_scope).ok_or_else(|| {
+                                    ResidentActorWorkbenchError::ActorProtocol("published fork source has no public compile view".into())
+                                })?;
+                                Some(PublishedForkSource {
+                                    lexical: session.retain_lexical_scope(public_scope).map_err(ResidentActorWorkbenchError::Resident)?,
+                                    session: source_session,
+                                    public_scope,
+                                    public_epoch: visible.epoch,
+                                    machine_incarnation: visible.machine_incarnation,
                                 })
+                            } else { None };
+                            Ok((outcome, fork_source))
                         })
                         .await
                         .map_err(|error| {
@@ -6939,6 +6975,7 @@ where
                     return Ok(PrivateExecutionPublication::Manifest {
                         commit: outcome,
                         native_bindings,
+                        fork_source,
                     });
                 }
                 PreparedExecutionPublication::Rejected(rejected) => {
@@ -9543,6 +9580,34 @@ where
             .await
     }
 
+    /// Derive a mutable child from the publication's immutable final source
+    /// seed, while retaining the already admitted entry's exact dependencies.
+    pub(crate) async fn retain_deferred_child_scope(
+        &self,
+        session_id: tidepool_repr::SessionId,
+        original: ScopeId,
+        capture: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
+    ) -> Result<Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>, ResidentActorWorkbenchError>
+    {
+        self.access
+            .with_host_machine(
+                "retain-deferred-child-scope",
+                session_id,
+                None,
+                move |session, _| {
+                    session.validate_lexical_scope_lease(capture.scope(), &capture)?;
+                    let lexical = session.retain_lexical_scope(capture.scope())?;
+                    if !session.retain_scope_dependencies(original, lexical.scope()) {
+                        return Err(ResidentActorWorkbenchError::ActorProtocol(
+                            "deferred child entry dependencies were unavailable".into(),
+                        ));
+                    }
+                    Ok(lexical)
+                },
+            )
+            .await
+    }
+
     pub(crate) async fn close_realm(
         &self,
         context: crate::ActorSessionContext,
@@ -11994,12 +12059,13 @@ mod request_tests {
             .unwrap();
         let execution = workbench.private_execution.as_ref().unwrap().clone();
         let selected = workbench_runner_for_test(&workbench)
-            .publish_private_execution(private.clone(), execution)
+            .publish_private_execution(private.clone(), execution, false)
             .await
             .unwrap();
         let PrivateExecutionPublication::Manifest {
             commit,
             native_bindings,
+            ..
         } = selected
         else {
             panic!("successful cell must publish");
@@ -12042,6 +12108,151 @@ mod request_tests {
             unaccepted.accept().is_err(),
             "a sealed cell refuses late effect acceptance"
         );
+    }
+
+    #[tokio::test]
+    async fn deferred_children_use_publication_scope_after_later_independent_publication() {
+        let (machines, public, source, _root) = actor_registry_fixture();
+        let initial = ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
+        let original_child = workbench_runner_for_test(&initial)
+            .retain_fork_release_scope(public.placement.session, public.placement.lexical_scope)
+            .await
+            .unwrap();
+        let (first, private) = initial
+            .admit_private_cell_for_test(public.clone())
+            .await
+            .unwrap();
+        first
+            .execute_cell_for_test(
+                private.clone(),
+                "deferredHelper value = value + 3 :: Int\ndeferredValue <- pure (40 :: Int)",
+            )
+            .await
+            .unwrap();
+        let published = workbench_runner_for_test(&first)
+            .publish_private_execution(
+                private,
+                first.private_execution.as_ref().unwrap().clone(),
+                true,
+            )
+            .await
+            .unwrap();
+        let PrivateExecutionPublication::Manifest {
+            commit: tidepool_runtime::session::PublicManifestCommit::Ephemeral,
+            fork_source: Some(capture),
+            ..
+        } = published
+        else {
+            panic!("successful publication must retain its exact fork source")
+        };
+        let first_epoch = capture.public_epoch;
+        let capture = capture.lexical;
+        let first_value = first
+            .access
+            .with_machine(public.clone(), {
+                let capture = Arc::clone(&capture);
+                move |session, context, _| {
+                    session.validate_initial_lexical_scope(
+                        &capture,
+                        context.placement.lexical_scope,
+                    )?;
+                    assert!(session
+                        .current_decl_heads_in(capture.scope())
+                        .iter()
+                        .any(|(name, _)| name == "deferredHelper"));
+                    Ok(session
+                        .current_binding_in(capture.scope(), "deferredValue")
+                        .unwrap()
+                        .0)
+                }
+            })
+            .await
+            .unwrap();
+
+        // A later owned cell advances the same public tip before A's children
+        // release. The producer's retained boundary must still select A.
+        let (later, private) = ResidentActorWorkbench::new(machines, source, None)
+            .admit_private_cell_for_test(public.clone())
+            .await
+            .unwrap();
+        later
+            .execute_cell_for_test(
+                private.clone(),
+                "laterHelper value = value + 7 :: Int\ndeferredValue <- pure (99 :: Int)",
+            )
+            .await
+            .unwrap();
+        let later_published = workbench_runner_for_test(&later)
+            .publish_private_execution(
+                private,
+                later.private_execution.as_ref().unwrap().clone(),
+                false,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            later_published,
+            PrivateExecutionPublication::Manifest {
+                commit: tidepool_runtime::session::PublicManifestCommit::Ephemeral,
+                fork_source: None,
+                ..
+            }
+        ));
+        let runner = workbench_runner_for_test(&later);
+        let mut children = Vec::new();
+        for _ in 0..2 {
+            children.push(
+                runner
+                    .retain_deferred_child_scope(
+                        public.placement.session,
+                        original_child.scope(),
+                        Arc::clone(&capture),
+                    )
+                    .await
+                    .unwrap(),
+            );
+        }
+        assert_ne!(children[0].scope(), children[1].scope());
+        assert_ne!(children[0].scope(), capture.scope());
+        later
+            .access
+            .with_machine(public, move |session, context, _| {
+                assert!(
+                    session
+                        .public_visibility_snapshot_in(context.placement.lexical_scope)
+                        .unwrap()
+                        .epoch
+                        > first_epoch
+                );
+                assert_ne!(
+                    session
+                        .current_binding_in(context.placement.lexical_scope, "deferredValue")
+                        .unwrap()
+                        .0,
+                    first_value
+                );
+                assert!(session
+                    .validate_initial_lexical_scope(&capture, context.placement.lexical_scope)
+                    .is_err());
+                for child in children {
+                    session.validate_initial_lexical_scope(&capture, child.scope())?;
+                    assert_eq!(
+                        session
+                            .current_binding_in(child.scope(), "deferredValue")
+                            .unwrap()
+                            .0,
+                        first_value
+                    );
+                    let declarations = session.current_decl_heads_in(child.scope());
+                    assert!(declarations
+                        .iter()
+                        .any(|(name, _)| name == "deferredHelper"));
+                    assert!(!declarations.iter().any(|(name, _)| name == "laterHelper"));
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -12106,7 +12317,7 @@ mod request_tests {
         .await
         .expect("unaccepted mount guard retires its exact binding");
         let outcome = workbench_runner_for_test(&workbench)
-            .publish_private_execution(private, execution)
+            .publish_private_execution(private, execution, false)
             .await
             .unwrap();
         assert!(matches!(
@@ -12948,7 +13159,7 @@ mod request_tests {
                 .as_ref()
                 .expect("admitted private cell");
             let published = workbench_runner_for_test(self)
-                .publish_private_execution(context.clone(), Arc::clone(execution))
+                .publish_private_execution(context.clone(), Arc::clone(execution), false)
                 .await?;
             assert!(matches!(
                 published,
@@ -16099,6 +16310,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             .publish_private_execution(
                 context,
                 workbench.private_execution.as_ref().unwrap().clone(),
+                false,
             )
             .await
             .unwrap();

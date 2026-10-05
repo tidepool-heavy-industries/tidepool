@@ -232,6 +232,7 @@ where
                                 })
                                 .collect(),
                             unused_scopes: Vec::new(),
+                            inherited: Arc::new(OnceLock::new()),
                         })
                     }
                 }
@@ -491,13 +492,51 @@ where
                 .map(|record| record.descriptor.clone());
             if let (Some(admitted), Some(target)) = (admitted, kernel.resolve(child)) {
                 if target.terminal().get().is_none() {
+                    let inherited = if admitted.checkpoint_token().is_none()
+                        && admitted
+                            .source_imports()
+                            .inherited_scope()
+                            .map_err(ResidentKernelBehavior::<H, O>::failure)?
+                            .is_some()
+                    {
+                        if session != context.placement.session
+                            || admitted.creator() != Some(context.actor)
+                            || admitted.fork_boundary() != pending.boundary.as_ref()
+                            || pending.boundary.is_none()
+                        {
+                            return Err(ResidentKernelBehavior::<H, O>::failure(
+                                "deferred inherited child differs from its committed parent",
+                            ));
+                        }
+                        if pending.inherited.get().is_none() {
+                            return Err(ResidentKernelBehavior::<H, O>::failure(
+                                "deferred inherited child has no source capture from its publication",
+                            ));
+                        }
+                        pending.inherited.get().cloned()
+                    } else {
+                        None
+                    };
                     let lexical = match prepared_lexical.get() {
                         Some(lexical) => Arc::clone(lexical),
-                        None => match environment
-                            .runner
-                            .retain_fork_release_scope(session, scope)
-                            .await
-                        {
+                        None => match match &inherited {
+                            Some(capture) => {
+                                environment
+                                    .runner
+                                    .retain_deferred_child_scope(
+                                        session,
+                                        scope,
+                                        Arc::clone(capture),
+                                    )
+                                    .await
+                            }
+                            None => {
+                                environment
+                                    .runner
+                                    .retain_fork_release_scope(session, scope)
+                                    .await
+                            }
+                        } {
                             Ok(lexical) => {
                                 prepared_lexical.set(lexical).ok();
                                 Arc::clone(
@@ -517,6 +556,7 @@ where
                         pending.boundary.clone(),
                         Arc::clone(&authority),
                         lexical,
+                        inherited,
                     ) {
                         Ok(release) => release,
                         Err(error) => {

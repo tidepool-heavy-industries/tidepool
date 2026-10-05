@@ -3365,6 +3365,8 @@ struct PendingForkPublication {
     phase: PendingForkPublicationPhase,
     releases: std::collections::VecDeque<PendingForkChildRelease>,
     unused_scopes: Vec<(tidepool_repr::SessionId, tidepool_codegen::scope::ScopeId)>,
+    // Siblings and interrupted retries share one final committed source seed.
+    inherited: Arc<OnceLock<Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>>>,
 }
 
 #[derive(Clone)]
@@ -4704,6 +4706,8 @@ where
     /// returns and nothing else calls a method on a stopped behavior
     /// first, so nothing reads any of these fields again afterwards.
     fn release_session_state(&mut self) {
+        self.workbench_executions.lock().release_all_fork_sources();
+        self.pending_fork_publications.clear();
         self.descriptor.source_imports().release_capture();
         self.shutdown_hook.take();
         self.checkpoint.take();
@@ -8176,7 +8180,11 @@ where
             .take()
             .ok_or_else(|| refuse("deferred fork was already released"))?;
         let accepted_release = child_initialization::ForkChildReleaseState::released(&release);
-        let lexical = release.into_lexical();
+        let (lexical, inherited) = release.into_context();
+        if let Some(inherited) = inherited {
+            self.descriptor.source_imports().release_capture();
+            self.descriptor = self.descriptor.clone().with_source_imports(inherited);
+        }
         self.descriptor.set_lexical_scope(lexical.scope());
         self.child_scope_lease = Some(Arc::clone(&lexical));
         let context = self.context(kernel.identity());
@@ -11581,7 +11589,19 @@ where
         context: &ActorSessionContext,
         index: usize,
     ) -> Result<(), KernelBehaviorError> {
+        let source = match self.pending_fork_publications[index].boundary.as_ref() {
+            Some(boundary) => self
+                .workbench_executions
+                .lock()
+                .fork_source_at_boundary(boundary)?,
+            None => None,
+        };
         let pending = self.pending_fork_publications.remove(index);
+        if pending.inherited.get().is_none() {
+            if let Some(source) = source {
+                pending.inherited.set(source).ok();
+            }
+        }
         let (pending, result) = captured_commit::release_pending(
             self.environment.clone(),
             kernel.clone(),
@@ -12126,6 +12146,9 @@ where
                 },
             )?;
             let Some(owner) = owner else {
+                self.workbench_executions
+                    .lock()
+                    .release_fork_source(&boundary);
                 self.settled_fork_boundaries.push(boundary);
                 return Ok(());
             };
@@ -12165,6 +12188,9 @@ where
                 .map_err(Self::failure)?;
             cleanup.scopes.clear();
             owner.retain_cleanup(cleanup);
+            self.workbench_executions
+                .lock()
+                .release_fork_source(&boundary);
             self.settled_fork_boundaries.push(boundary);
             Ok(())
         })
@@ -12229,6 +12255,9 @@ where
                 .collect();
             if groups.is_empty() {
                 if !self.settled_fork_boundaries.contains(&boundary) {
+                    self.workbench_executions
+                        .lock()
+                        .release_fork_source(&boundary);
                     self.settled_fork_boundaries.push(boundary);
                 }
                 return Ok(());
@@ -12267,10 +12296,14 @@ where
                 ),
                 releases,
                 unused_scopes: Vec::new(),
+                inherited: Arc::new(OnceLock::new()),
             });
             self.finish_pending_fork_publication(kernel, &context, &boundary)
                 .await?;
             if !self.settled_fork_boundaries.contains(&boundary) {
+                self.workbench_executions
+                    .lock()
+                    .release_fork_source(&boundary);
                 self.settled_fork_boundaries.push(boundary);
             }
             Ok(())
@@ -12302,6 +12335,10 @@ where
             .clone()
             .with_lexical_scope(release.lexical().scope())
             .session_context(kernel.identity());
+        let mut context = context;
+        if let Some(inherited) = release.inherited() {
+            context.source_imports = inherited.clone();
+        }
         let runner = self.environment.runner.clone();
         let lexical = Arc::clone(release.lexical());
         Ok(crate::OwnedActorTask::new(Box::pin(async move {

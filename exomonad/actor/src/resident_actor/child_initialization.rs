@@ -92,6 +92,7 @@ pub(super) enum ForkChildReleaseState {
         admitted: ActorDescriptor,
         publication_boundary: Option<WorkbenchForkBoundary>,
         authority: Arc<crate::lineage::CommittedForkGroups>,
+        inherited: Option<crate::ActorSourceImports>,
     },
 }
 
@@ -102,6 +103,7 @@ impl ForkChildReleaseState {
             admitted: release.admitted.clone(),
             publication_boundary: release.publication_boundary.clone(),
             authority: Arc::clone(&release.authority),
+            inherited: release.inherited.clone(),
         }
     }
 
@@ -117,6 +119,7 @@ impl ForkChildReleaseState {
             admitted,
             publication_boundary,
             authority,
+            inherited,
         } = self
         else {
             return false;
@@ -132,6 +135,27 @@ impl ForkChildReleaseState {
             && same_allocation(admitted, descriptor)
             && descriptor.placement().lexical_scope == lexical.scope()
             && Arc::ptr_eq(lexical, &release.lexical)
+            && same_inherited_capture(inherited.as_ref(), release.inherited.as_ref())
+            && match inherited {
+                Some(expected) => {
+                    same_inherited_capture(Some(expected), Some(descriptor.source_imports()))
+                }
+                None => descriptor.source_imports() == admitted.source_imports(),
+            }
+    }
+}
+
+fn same_inherited_capture(
+    first: Option<&crate::ActorSourceImports>,
+    second: Option<&crate::ActorSourceImports>,
+) -> bool {
+    match (first, second) {
+        (None, None) => true,
+        (Some(first), Some(second)) => match (first.inherited_scope(), second.inherited_scope()) {
+            (Ok(Some(first)), Ok(Some(second))) => Arc::ptr_eq(&first, &second),
+            _ => false,
+        },
+        _ => false,
     }
 }
 
@@ -160,6 +184,7 @@ pub struct ForkChildRelease {
     publication_boundary: Option<WorkbenchForkBoundary>,
     authority: Arc<crate::lineage::CommittedForkGroups>,
     lexical: Arc<RuntimeLexicalScopeLease>,
+    inherited: Option<crate::ActorSourceImports>,
 }
 
 impl ForkChildRelease {
@@ -169,6 +194,7 @@ impl ForkChildRelease {
         publication_boundary: Option<WorkbenchForkBoundary>,
         authority: Arc<crate::lineage::CommittedForkGroups>,
         lexical: Arc<RuntimeLexicalScopeLease>,
+        inherited: Option<Arc<RuntimeLexicalScopeLease>>,
     ) -> Result<Self, crate::KernelBehaviorError> {
         if admitted.creator() != Some(authority.owner())
             || admitted.actor_path().is_none()
@@ -180,12 +206,32 @@ impl ForkChildRelease {
                 detail: "child release differs from its committed group allocation".into(),
             });
         }
+        if let Some(capture) = &inherited {
+            if admitted.checkpoint_token().is_some()
+                || admitted
+                    .source_imports()
+                    .inherited_scope()
+                    .map_err(|error| crate::KernelBehaviorError {
+                        detail: error.to_string(),
+                    })?
+                    .is_none()
+                || admitted.fork_boundary() != publication_boundary.as_ref()
+                || publication_boundary.is_none()
+                || capture.scope() == lexical.scope()
+            {
+                return Err(crate::KernelBehaviorError {
+                    detail: "final inherited release differs from its original context admission"
+                        .into(),
+                });
+            }
+        }
         Ok(Self {
             child,
             admitted,
             publication_boundary,
             authority,
             lexical,
+            inherited: inherited.map(crate::ActorSourceImports::from_inherited_scope),
         })
     }
 
@@ -198,8 +244,23 @@ impl ForkChildRelease {
             && descriptor.placement().lexical_scope == self.admitted.placement().lexical_scope
             && descriptor.creator() == Some(self.authority.owner())
             && same_allocation(&self.admitted, descriptor)
+            && descriptor.source_imports() == self.admitted.source_imports()
     }
 
+    pub(super) fn into_context(
+        self,
+    ) -> (
+        Arc<RuntimeLexicalScopeLease>,
+        Option<crate::ActorSourceImports>,
+    ) {
+        (self.lexical, self.inherited)
+    }
+
+    pub(super) fn inherited(&self) -> Option<&crate::ActorSourceImports> {
+        self.inherited.as_ref()
+    }
+
+    #[cfg(test)]
     pub(super) fn into_lexical(self) -> Arc<RuntimeLexicalScopeLease> {
         self.lexical
     }
@@ -263,7 +324,7 @@ pub(crate) fn scheduler_fixture(
     .with_actor_path(path)
     .with_fork_group(group);
     let release =
-        ForkChildRelease::issue(child, descriptor.clone(), None, authority, lexical).unwrap();
+        ForkChildRelease::issue(child, descriptor.clone(), None, authority, lexical, None).unwrap();
     (release, descriptor, session)
 }
 
@@ -461,6 +522,7 @@ mod tests {
             release.publication_boundary.clone(),
             Arc::clone(&release.authority),
             Arc::clone(&release.lexical),
+            None,
         )
         .unwrap();
         assert!(state.matches_replay(&exact, actor, &adopted, Some(&release.lexical)));
@@ -474,6 +536,7 @@ mod tests {
             }),
             Arc::clone(&release.authority),
             Arc::clone(&release.lexical),
+            None,
         )
         .unwrap();
         assert!(!state.matches_replay(&changed_boundary, actor, &adopted, Some(&release.lexical)));
@@ -491,6 +554,7 @@ mod tests {
             release.publication_boundary.clone(),
             Arc::clone(&foreign.authority),
             Arc::clone(&release.lexical),
+            None,
         )
         .unwrap();
         assert!(!state.matches_replay(&changed_authority, actor, &adopted, Some(&release.lexical)));
@@ -515,9 +579,111 @@ mod tests {
             release.publication_boundary.clone(),
             Arc::clone(&release.authority),
             alternate,
+            None,
         )
         .unwrap();
         assert!(!state.matches_replay(&changed_lexical, actor, &adopted, Some(&release.lexical)));
+    }
+
+    #[test]
+    fn inherited_release_pairs_distinct_source_and_child_leases_and_replays_exact_capture() {
+        let actor = ActorRef::first(ActorId(7));
+        let (original, descriptor, mut session) = scheduler_fixture(actor);
+        let boundary = WorkbenchForkBoundary::Execution {
+            actor_id: descriptor.creator().unwrap().id.0,
+            incarnation: descriptor.creator().unwrap().incarnation.0,
+            execution_id: tidepool_runtime::session::workbench::WorkbenchExecutionId::from_digest(
+                [3; 16],
+            ),
+        };
+        let admission = session
+            .retain_lexical_scope(descriptor.placement().lexical_scope)
+            .unwrap();
+        let descriptor = descriptor
+            .with_fork_boundary(Some(boundary.clone()))
+            .with_source_imports(crate::ActorSourceImports::from_inherited_scope(admission));
+        let source = session.retain_lexical_scope(ScopeId::ROOT).unwrap();
+        let lexical = session.retain_lexical_scope(source.scope()).unwrap();
+        let issue = |descriptor: ActorDescriptor, lexical, source| {
+            ForkChildRelease::issue(
+                actor,
+                descriptor,
+                Some(boundary.clone()),
+                Arc::clone(&original.authority),
+                lexical,
+                Some(source),
+            )
+        };
+        let release = issue(
+            descriptor.clone(),
+            Arc::clone(&lexical),
+            Arc::clone(&source),
+        )
+        .unwrap();
+        assert!(release.matches(actor, &descriptor));
+        assert!(!release.matches(
+            actor,
+            &descriptor.clone().with_source_imports(Default::default())
+        ));
+        assert_ne!(source.scope(), lexical.scope());
+        let sibling_lexical = session.retain_lexical_scope(source.scope()).unwrap();
+        let sibling = issue(
+            descriptor.clone(),
+            Arc::clone(&sibling_lexical),
+            Arc::clone(&source),
+        )
+        .unwrap();
+        assert_ne!(sibling.lexical.scope(), lexical.scope());
+        assert!(same_inherited_capture(
+            release.inherited(),
+            sibling.inherited()
+        ));
+        // An explicit checkpoint remains its selected capture, even when the
+        // original descriptor also carries an inherited source observation.
+        assert!(issue(
+            descriptor
+                .clone()
+                .with_checkpoint_token(Some("unadmitted-checkpoint".into())),
+            Arc::clone(&lexical),
+            Arc::clone(&source),
+        )
+        .is_err());
+        assert!(issue(descriptor.clone(), Arc::clone(&source), Arc::clone(&source)).is_err());
+        assert!(issue(
+            descriptor.clone().with_source_imports(Default::default()),
+            Arc::clone(&lexical),
+            Arc::clone(&source),
+        )
+        .is_err());
+        let state = ForkChildReleaseState::released(&release);
+        let retry = issue(
+            descriptor.clone(),
+            Arc::clone(&lexical),
+            Arc::clone(&source),
+        )
+        .unwrap();
+        let (installed, imports) = release.into_context();
+        let observed_admission = descriptor.source_imports().clone();
+        descriptor.source_imports().release_capture();
+        let installed_descriptor = descriptor
+            .clone()
+            .with_lexical_scope(installed.scope())
+            .with_source_imports(imports.unwrap());
+        assert!(observed_admission.inherited_scope().is_err());
+        assert!(Arc::ptr_eq(
+            &installed_descriptor
+                .source_imports()
+                .inherited_scope()
+                .unwrap()
+                .unwrap(),
+            &source,
+        ));
+        assert!(state.matches_replay(&retry, actor, &installed_descriptor, Some(&installed)));
+        let another = session.retain_lexical_scope(ScopeId::ROOT).unwrap();
+        let changed = installed_descriptor
+            .clone()
+            .with_source_imports(crate::ActorSourceImports::from_inherited_scope(another));
+        assert!(!state.matches_replay(&retry, actor, &changed, Some(&installed)));
     }
 
     #[test]
@@ -530,6 +696,7 @@ mod tests {
             None,
             Arc::clone(&release.authority),
             Arc::clone(&release.lexical),
+            None,
         )
         .is_err());
         assert!(ForkChildRelease::issue(
@@ -538,6 +705,7 @@ mod tests {
             None,
             Arc::clone(&release.authority),
             Arc::clone(&release.lexical),
+            None,
         )
         .is_ok());
     }
@@ -546,6 +714,8 @@ mod tests {
     fn release_owns_independent_runtime_scope_and_refuses_other_runtime_owner() {
         let actor = ActorRef::first(ActorId(7));
         let (release, descriptor, mut session) = scheduler_fixture(actor);
+        assert!(release.inherited().is_none());
+        assert!(release.matches(actor, &descriptor));
         session.retire_scope(descriptor.placement().lexical_scope);
         assert!(!session
             .scope_tree()

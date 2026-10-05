@@ -2188,6 +2188,7 @@ where
         result: Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
     ) -> OwnedWorkbenchTask<Self> {
         let runner = environment.runner.clone();
+        let capture_environment = environment.clone();
         Self::owned_step_task(
             owned,
             move |owned| {
@@ -2197,10 +2198,52 @@ where
                     .expect("publication retains original private admission")
                     .clone();
                 let context = owned.state.effects.context.clone();
+                let boundary = owned.state.effects.publication.boundary().cloned();
                 Box::pin(async move {
                     let actor = context.actor;
                     tracing::info!(target: "exomonad_actor::workbench_phase", actor = %actor, phase = "private_publish_started", "workbench phase");
-                    let published = runner.publish_private_execution(context, private).await;
+                    let children = boundary
+                        .as_ref()
+                        .map(|boundary| {
+                            capture_environment
+                                .fork_groups
+                                .ready_groups_at_boundary(actor, boundary)
+                                .into_iter()
+                                .flat_map(|(_, children)| children)
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    let retain_fork_source = {
+                        let actors = capture_environment.actors.lock();
+                        let mut needed = false;
+                        for child in children {
+                            if let Some(record) = actors
+                                .get(&child)
+                                .filter(|record| record.terminal.is_none())
+                            {
+                                let descriptor = &record.descriptor;
+                                if descriptor.creator() == Some(actor)
+                                    && descriptor.fork_boundary() == boundary.as_ref()
+                                    && descriptor.checkpoint_token().is_none()
+                                    && descriptor
+                                        .source_imports()
+                                        .inherited_scope()
+                                        .map_err(|error| {
+                                            ResidentActorWorkbenchError::ActorProtocol(
+                                                error.to_string(),
+                                            )
+                                        })?
+                                        .is_some()
+                                {
+                                    needed = true;
+                                }
+                            }
+                        }
+                        needed
+                    };
+                    let published = runner
+                        .publish_private_execution(context, private, retain_fork_source)
+                        .await;
                     tracing::info!(target: "exomonad_actor::workbench_phase", actor = %actor, phase = "private_publish_completed", "workbench phase");
                     published
                 })
@@ -2208,10 +2251,26 @@ where
             move |behavior, _kernel, owned, published| {
                 use crate::resident_workbench::PrivateExecutionPublication;
                 use tidepool_runtime::session::PublicManifestCommit;
+                if let Ok(PrivateExecutionPublication::Manifest {
+                    fork_source: Some(source),
+                    ..
+                }) = &published
+                {
+                    behavior.workbench_executions.lock().retain_fork_source(
+                        owned
+                            .state
+                            .request
+                            .execution_id()
+                            .expect("publication retains admitted execution identity"),
+                        owned.state.invocation.as_ref(),
+                        source.clone(),
+                    );
+                }
                 match published {
                     Ok(PrivateExecutionPublication::Manifest {
                         commit: PublicManifestCommit::Durable | PublicManifestCommit::Ephemeral,
                         native_bindings,
+                        ..
                     }) => Self::settle_owned_execution(
                         behavior,
                         &kernel,
@@ -2221,6 +2280,7 @@ where
                     Ok(PrivateExecutionPublication::Manifest {
                         commit: PublicManifestCommit::PublishedDurabilityUnconfirmed { detail },
                         native_bindings,
+                        ..
                     }) => Ok(WorkbenchAdvance::Park(
                         Self::confirm_owned_publication_task(
                             owned,

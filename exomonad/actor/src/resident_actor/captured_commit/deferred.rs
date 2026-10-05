@@ -21,6 +21,7 @@ pub(in crate::resident_actor) struct FinalizedDeferredCommit {
     frame: Continuation,
     readiness: Readiness,
     releases: Vec<PendingForkChildRelease>,
+    inherited: Option<Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>>,
 }
 
 pub(in crate::resident_actor) fn prepare_deferred<H, O>(
@@ -152,6 +153,7 @@ where
 {
     let PreparedDeferredScopes { frame, readiness } = prepared;
     let mut releases = Vec::new();
+    let mut inherited = None;
     let readiness = match readiness {
         Readiness::Ready(descriptors) => {
             let retained = async {
@@ -160,6 +162,35 @@ where
                     // checkpoint child waits at its gate and keeps the issuer's
                     // exact scope; it must never be reminted from the launcher.
                     if descriptor.fork_boundary().is_none() {
+                        continue;
+                    }
+                    if descriptor.checkpoint_token().is_none()
+                        && descriptor
+                            .source_imports()
+                            .inherited_scope()
+                            .map_err(|error| error.to_string())?
+                            .is_some()
+                    {
+                        if inherited.is_none() {
+                            // Direct Commit resumes this execution only after release;
+                            // retain its exact admitted context before publishing the group.
+                            inherited = Some(
+                                environment
+                                    .runner
+                                    .retain_fork_release_scope(
+                                        frame.context.placement.session,
+                                        frame.context.placement.lexical_scope,
+                                    )
+                                    .await
+                                    .map_err(|error| error.to_string())?,
+                            );
+                        }
+                        releases.push(PendingForkChildRelease {
+                            child: *child,
+                            session: descriptor.placement().session,
+                            scope: descriptor.placement().lexical_scope,
+                            lexical: Arc::new(OnceLock::new()),
+                        });
                         continue;
                     }
                     if frame.control.cancellation_requested() {
@@ -195,6 +226,7 @@ where
         frame,
         readiness,
         releases,
+        inherited,
     }
 }
 
@@ -212,6 +244,7 @@ where
         mut frame,
         readiness,
         releases,
+        inherited,
     } = finalized;
     let release = match fence(environment, kernel, parent, &frame, readiness) {
         Readiness::Interrupted => Release::Interrupted,
@@ -229,6 +262,7 @@ where
                     phase: PendingForkPublicationPhase::Committed(authority),
                     releases: releases.into(),
                     unused_scopes: Vec::new(),
+                    inherited: Arc::new(inherited.map(OnceLock::from).unwrap_or_default()),
                 })
             }
         },
