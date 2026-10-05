@@ -19,6 +19,11 @@ class ConfigureRuntimeStdlibTests(unittest.TestCase):
         self.root = Path(self.storage.name)
         (self.root / "scripts").mkdir()
         shutil.copyfile(SCRIPT, self.root / "scripts/buck2-configure.sh")
+        shutil.copyfile(SCRIPT.parent / "toolchain-inputs.sh", self.root / "scripts/toolchain-inputs.sh")
+        (self.root / "flake.nix").write_text("pinned toolchain\n")
+        subprocess.run(["git", "init", "-q", str(self.root)], check=True)
+        subprocess.run(["git", "-C", str(self.root), "add", "flake.nix"], check=True)
+        subprocess.run(["git", "-C", str(self.root), "-c", "user.name=test", "-c", "user.email=test@invalid", "commit", "-qm", "toolchain"], check=True)
         self.tools = self.root / "tools"
         self.tools.mkdir()
         self.capture = self.root / "captured-source"
@@ -39,7 +44,7 @@ def output(name):
     if name == 'buck-test-ghc':
         return Path(os.environ['TEST_TEST_GHC_ROOT'])
     if name == 'buck-python':
-        return Path(sys.executable).parent.parent
+        return Path(sys.executable).resolve().parent.parent
     return Path(os.environ['TEST_OUTPUTS']) / name
 if args[0] == 'flake':
     print(json.dumps({{'path': os.environ['TEST_SOURCE_CAPTURE']}}))
@@ -51,6 +56,10 @@ elif args[0] == 'build':
         sys.exit('selected output failed to build')
     target = output(name)
     target.mkdir(parents=True, exist_ok=True)
+    if name == 'buck-buck2' and not os.environ.get('TEST_MISSING_BUCK'):
+        (target / 'bin').mkdir(exist_ok=True)
+        (target / 'bin/buck2').write_text('#!/bin/sh\\nexit 0\\n')
+        (target / 'bin/buck2').chmod(0o755)
     link = Path(args[args.index('--out-link') + 1])
     link.symlink_to(target if os.environ.get('TEST_WRONG_ROOT') != name else target.parent)
 elif args[0] == 'path-info':
@@ -96,10 +105,49 @@ else:
             env=environment, text=True, capture_output=True,
         )
 
+    def test_unpinned_selection_refuses_before_nix(self):
+        result = self.run_configure(extra_env={"TIDEPOOL_DEV_SHELL": str(self.root) + "#default"})
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("revision-pinned", result.stderr)
+        self.assertFalse(self.log.exists())
+
+    def test_uncommitted_toolchain_input_refuses_before_nix(self):
+        (self.root / "flake.nix").write_text("changed toolchain\n")
+        result = self.run_configure()
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("Commit changed toolchain inputs", result.stderr)
+        self.assertFalse(self.log.exists())
+
+    def test_inherited_default_shell_cannot_capture_a_new_pin_as_old_tools(self):
+        revision = subprocess.check_output(["git", "-C", str(self.root), "rev-parse", "HEAD"], text=True).strip()
+        (self.root / "flake.nix").write_text("new committed toolchain\n")
+        subprocess.run(["git", "-C", str(self.root), "add", "flake.nix"], check=True)
+        subprocess.run(["git", "-C", str(self.root), "-c", "user.name=test", "-c", "user.email=test@invalid", "commit", "-qm", "new pin"], check=True)
+        result = self.run_configure(extra_env={
+            "TIDEPOOL_DEV_FLAKE": "", "TIDEPOOL_DEV_SHELL": f"git+file://{self.root}?rev={revision}#default",
+        })
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("inherited dev shell has stale toolchain inputs", result.stderr)
+        self.assertFalse(self.log.exists())
+
+    def test_matching_default_shell_selection_configures(self):
+        revision = subprocess.check_output(["git", "-C", str(self.root), "rev-parse", "HEAD"], text=True).strip()
+        result = self.run_configure(extra_env={
+            "TIDEPOOL_DEV_FLAKE": "", "TIDEPOOL_DEV_SHELL": f"git+file://{self.root}?rev={revision}#default",
+        })
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_missing_prepared_buck_preserves_prior_configuration(self):
+        (self.root / ".buckconfig.local").write_text("previous configuration\n")
+        result = self.run_configure(extra_env={"TEST_MISSING_BUCK": "1"})
+        self.assert_failed_generation_preserves_config(result)
+        self.assertIn("Prepared Buck executable is unavailable", result.stderr)
+
     def test_ordinary_configuration_does_not_capture_project_resources(self):
         result = self.run_configure()
         self.assertEqual(result.returncode, 0, result.stderr)
         text = (self.root / ".buckconfig.local").read_text()
+        self.assertIn("buck2 = " + str(self.outputs / "buck-buck2/bin/buck2"), text)
         self.assertIn("runtime_stdlib_products = \n", text)
         self.assertNotIn('"flake"', self.log.read_text())
         self.assertNotIn("runtime-stdlib-products", self.log.read_text())
@@ -179,6 +227,8 @@ else:
         self.assertEqual((generation / "config").read_bytes(), (self.root / ".buckconfig.local").read_bytes())
         self.assertIn(str(generation), result.stdout)
         self.assertIn("uid=", (generation / "owner").read_text())
+        self.assertIn("toolchain_tree=", (generation / "owner").read_text())
+        self.assertTrue((generation / "roots/buck-buck2").is_symlink())
         configured = (generation / "config").read_text()
         self.assertIn("test_tools = " + str(self.outputs / "buck-test-tools"), configured)
         self.assertTrue((generation / "roots/buck-test-tools").is_symlink())
