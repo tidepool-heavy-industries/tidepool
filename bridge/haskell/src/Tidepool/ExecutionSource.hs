@@ -422,7 +422,10 @@ walkExecutionSources graphs selection pending = Map.elems . fst <$>
       dependencyImportBoot edge,dependencyImportSelected edge)
     obligations node = mapM (\key -> do
       owner' <- suppliedOwner node key
-      pure (executionOwnerIdentity owner',executionOwnerFresh owner',executionOwnerOriginalGraph owner'))
+      -- Freshness and graph pointers locate a dependency in its issuing
+      -- transaction. The exact original is its semantic obligation; recursive
+      -- traversal authenticates each pointer and compares the child recipes.
+      pure (executionOwnerIdentity owner'))
       (executionNodeRequirements node)
     resolutionRecipe node = sort
       [(dependencyResolutionQualifier row,dependencyResolutionModule row,

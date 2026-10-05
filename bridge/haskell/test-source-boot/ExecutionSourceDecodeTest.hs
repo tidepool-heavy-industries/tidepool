@@ -11,6 +11,7 @@ import Data.ByteString.Lazy qualified as BL
 import Data.Char (ord)
 import Data.IORef (newIORef, readIORef)
 import Data.List (isInfixOf)
+import Data.Set qualified as Set
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import GHC.Clock (getMonotonicTimeNSec)
@@ -74,6 +75,7 @@ executionSourceDecodeChecks = do
   graph <- either fail pure (decode bytes)
   unless (executionGraphBytes graph == bytes) (fail "decoder changed graph bytes")
   inheritedIdentityChecks graph
+  contextualDependencyChecks
   let refuse label reason value = case decode (encode value) of
         Left actual | reason `isInfixOf` actual -> pure ()
         result -> fail (label ++ ": unexpected decoder result " ++ show result)
@@ -157,6 +159,78 @@ inheritedIdentityChecks graph = do
     unless (executionSourceInheritedOwners references originals == Left (ExecutionSourceConflicting key))
       (fail ("inherited reference admitted " ++ label))
   putStrLn ("execution source inherited identity: " ++ show (length positive + length negative) ++ " cases passed")
+
+-- Independently issued graphs can retain the same child as fresh in one
+-- transaction and inherited in another. Sharing still authenticates both
+-- original dependency recipes, including their negative search witnesses.
+contextualDependencyChecks :: IO ()
+contextualDependencyChecks = do
+  let sha = replicate 64 'a'
+      original name = ExecutionSourceIdentity "main" name sha sha sha
+      parent = original "Parent"
+      child = original "Child"
+      wrapper = original "Wrapper"
+      source = "module Expr where\nanswer = 42\n"
+      path name = "/decoder-fixture/" ++ name ++ ".hs"
+      node name imports = DependencyModule "main" name False (path name)
+        [DependencyImport DependencyUnqualified imported False (Just (path imported))
+        | imported <- imports] ProductReady
+      evidence = DependencyEvidence True True
+        (DependencySource "@generated-source" (shaHex (TE.encodeUtf8 (T.pack source)))
+          : [DependencySource (path name) sha | name <- ["Child","Parent","Wrapper"]])
+        [DependencyResolution DependencyUnqualified "Prelude" False Nothing [path "Absent"]]
+        [] [node "Child" [],node "Parent" ["Child"],node "Wrapper" ["Parent"]]
+      recipe = ExecutionSourceRecipe sha Nothing [] (path "Expr",source) evidence
+        [ExecutionSourceOwner child True Nothing,ExecutionSourceOwner parent True Nothing,
+         ExecutionSourceOwner wrapper True Nothing] [] []
+      issue value = either (fail . show) (maybe (fail "context recipe was withheld") pure)
+        (issueExecutionSourceRecipe value)
+      reference identity graph = ExecutionSourceRef identity (executionGraphSha256 graph)
+  fresh <- issue recipe
+  retained <- issue recipe {recipeOwners=
+    [ExecutionSourceOwner child False (Just (executionGraphSha256 fresh)),
+     ExecutionSourceOwner parent True Nothing,ExecutionSourceOwner wrapper True Nothing]}
+  let graphs = [fresh,retained]
+      parentRef = reference parent fresh
+      childRef = reference child fresh
+      wrapperRef = reference wrapper retained
+      refs = [parentRef,wrapperRef]
+      expectShared result = do
+        nodes <- either (fail . show) pure result
+        case [value | value <- nodes,executionNodeIdentity value == parent] of
+          [value] | executionNodeOriginalGraphs value == Set.fromList
+              (map executionGraphSha256 graphs) -> pure ()
+          _ -> fail "fresh/inherited dependency contexts lost their shared exact original"
+  expectShared (executionSourceOriginalClosure graphs refs)
+  expectShared (executionSourceOriginalClosure graphs (reverse refs))
+  expectShared (executionSourceClosure graphs [parentRef,childRef,wrapperRef]
+    [parent,child,wrapper] [("main","Parent"),("main","Wrapper")])
+  changed <- issue recipe {recipeEvidence=evidence {dependencySources=
+    [if dependencySourcePath row == path "Child"
+      then row {dependencySourceSha256=replicate 64 'b'} else row
+    | row <- dependencySources evidence]}}
+  invalid <- issue recipe {recipeOwners=
+    [ExecutionSourceOwner child False (Just (executionGraphSha256 changed)),
+     ExecutionSourceOwner parent True Nothing,ExecutionSourceOwner wrapper True Nothing]}
+  unless (case executionSourceOriginalClosure [fresh,changed,invalid]
+      [parentRef,reference wrapper invalid] of
+        Left (ExecutionSourceConflicting ("main","Child")) -> True; _ -> False)
+    (fail "context sharing discarded a changed original child source recipe")
+  unless (case executionSourceOriginalClosure [retained] [wrapperRef] of
+      Left (ExecutionSourceMissing ("main","Child")) -> True; _ -> False)
+    (fail "context sharing discarded a missing promised original child graph")
+  let changedChild = child {executionVersion=replicate 64 'b',executionNativeSha256=replicate 64 'b'}
+  changedNative <- issue recipe {recipeOwners=
+    [ExecutionSourceOwner changedChild True Nothing,ExecutionSourceOwner parent True Nothing,
+     ExecutionSourceOwner wrapper True Nothing]}
+  conflicting <- issue recipe {recipeOwners=
+    [ExecutionSourceOwner changedChild False (Just (executionGraphSha256 changedNative)),
+     ExecutionSourceOwner parent True Nothing,ExecutionSourceOwner wrapper True Nothing]}
+  forM_ [[parentRef,reference wrapper conflicting],[reference wrapper conflicting,parentRef]] $ \roots ->
+    unless (case executionSourceOriginalClosure [fresh,changedNative,conflicting] roots of
+        Left (ExecutionSourceConflicting _) -> True; _ -> False)
+      (fail "context sharing accepted the same interface with a different original child native identity")
+  putStrLn "execution source dependency contexts: 7 cases passed"
 
 -- Candidate-path fanout is independent of the number of resolution rows.
 -- These compact packets stay below the graph byte bound throughout.
