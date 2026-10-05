@@ -322,7 +322,7 @@ mod tests {
         let selection = NativeCatalogSourceSelection {
             snapshot_root: fixture.path().to_path_buf(),
             roles: NativeSourceRole::ORDERED,
-            source_files: tidepool_toolchain::cache::source_root_manifest(fixture.path()).unwrap(),
+            source_files: NativeCatalogSourceSelection::source_manifest(fixture.path()).unwrap(),
         };
         let manifest = selection.source_files.clone();
         assert_eq!(
@@ -330,7 +330,7 @@ mod tests {
             root
         );
         assert_eq!(
-            tidepool_toolchain::cache::source_root_manifest(fixture.path()).unwrap(),
+            NativeCatalogSourceSelection::source_manifest(fixture.path()).unwrap(),
             manifest
         );
         for (relative, source) in files {

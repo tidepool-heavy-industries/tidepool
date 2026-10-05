@@ -911,7 +911,7 @@ fn verify_deployment_sources(selection: &DeploymentSources) -> Result<()> {
     }
     // Inspect before hashing so source aliases cannot enter a retained selection.
     inspect_sources(&selection.sources.snapshot_root)?;
-    if tidepool_toolchain::cache::source_root_manifest(&selection.sources.snapshot_root)?
+    if NativeCatalogSourceSelection::source_manifest(&selection.sources.snapshot_root)?
         != selection.sources.source_files
     {
         return Err("runtime library deployment source changed".into());
@@ -1051,7 +1051,7 @@ mod tests {
             sources: NativeCatalogSourceSelection {
                 snapshot_root: fixture.path().canonicalize().unwrap(),
                 roles: NativeSourceRole::ORDERED,
-                source_files: tidepool_toolchain::cache::source_root_manifest(fixture.path())
+                source_files: NativeCatalogSourceSelection::source_manifest(fixture.path())
                     .unwrap(),
             },
             source_pin: "fixture-source".into(),
@@ -1195,7 +1195,9 @@ mod tests {
             .unwrap()
             .join("relocated");
         changed[5].sources.roles.swap(0, 1);
-        changed[6].sources.source_files[0].1.push_str("-changed");
+        changed[6].sources.source_files[0]
+            .sha256
+            .push_str("-changed");
         for selection in changed {
             assert!(FrozenWorkspace::load_with_deployment(
                 project.path(),

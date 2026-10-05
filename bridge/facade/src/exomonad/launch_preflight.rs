@@ -311,7 +311,7 @@ mod tests {
 
     #[test]
     fn embedded_launch_does_not_preflight_a_native_executable() {
-        let mut observation = healthy();
+        let observation = healthy();
         let lines = assess(&observation, PreflightMode::Strict);
         assert_eq!(
             lines.iter().map(|line| line.check).collect::<Vec<_>>(),

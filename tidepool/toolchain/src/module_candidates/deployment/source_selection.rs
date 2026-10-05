@@ -195,6 +195,16 @@ else:
 }
 
 impl NativeCatalogSourceSelection {
+    /// Inspect catalog source bytes using the catalog's SHA-256 witness contract.
+    pub fn source_manifest(
+        snapshot_root: &Path,
+    ) -> Result<Vec<NativeCatalogSourceFile>, crate::cache::SourceManifestError> {
+        Ok(crate::cache::catalog_source_sha256_manifest(snapshot_root)?
+            .into_iter()
+            .map(|(path, sha256)| NativeCatalogSourceFile { path, sha256 })
+            .collect())
+    }
+
     pub(crate) fn capture(snapshot_root: &Path) -> Result<Self, ModulePackageError> {
         Self::capture_under(snapshot_root, RootPolicy::NixStore)
     }
@@ -220,11 +230,8 @@ impl NativeCatalogSourceSelection {
         Ok(Self {
             snapshot_root: snapshot_root.to_owned(),
             roles: NativeSourceRole::ORDERED,
-            source_files: crate::cache::catalog_source_sha256_manifest(snapshot_root)
-                .map_err(|error| io(&error.path, error.source))?
-                .into_iter()
-                .map(|(path, sha256)| NativeCatalogSourceFile { path, sha256 })
-                .collect(),
+            source_files: Self::source_manifest(snapshot_root)
+                .map_err(|error| io(&error.path, error.source))?,
         })
     }
 
