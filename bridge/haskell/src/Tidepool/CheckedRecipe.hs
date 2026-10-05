@@ -3,7 +3,7 @@ module Tidepool.CheckedRecipe
   , checkedItemCompilePurpose, checkedRecipeSource, replaceRecipeMarker, writeCheckedItemReceipt
   ) where
 
-import Codec.CBOR.Encoding (encodeBytes, encodeListLen, encodeString, encodeWord64)
+import Codec.CBOR.Encoding (encodeListLen, encodeString, encodeWord64)
 import Codec.CBOR.Write (toStrictByteString)
 import Control.Monad (unless, when)
 import qualified Data.ByteString as BS
@@ -18,7 +18,7 @@ import System.FilePath ((</>))
 import Tidepool.CheckedAdmission (checkedDisplayBinders)
 import Tidepool.CheckedCell (CheckedSignature(..))
 import Tidepool.ExactScope
-  ( ExactScope(..), CheckedItemAdmission(..), CheckedItemPurpose(..), CheckedDisplayAdmission(..) )
+  ( ExactScope(..), CheckedItemAdmission(..), CheckedDisplayAdmission(..) )
 import Tidepool.ExtractUtil (shaHex)
 import Tidepool.GhcPipeline (CompilePurpose(..))
 import Tidepool.TurnSource
@@ -91,9 +91,7 @@ checkedRecipeAnnotations admission =
   | (index,signature) <- zip [(0::Int)..] (itemSignatures admission)]
 
 checkedItemCompilePurpose :: CheckedItemAdmission -> CompilePurpose
-checkedItemCompilePurpose admission = case itemPurpose admission of
-  AuthoredCheckedItem -> CheckedItemCompile annotations original values
-  HostActivationInput -> HostActivationInputCompile annotations original values
+checkedItemCompilePurpose admission = CheckedItemCompile annotations original values
   where
     annotations = checkedRecipeAnnotations admission
     original = itemPlannedDeclaration admission
@@ -138,16 +136,9 @@ replaceRecipeMarker marker replacement template =
 
 writeCheckedItemReceipt :: FilePath -> ExactScope -> CheckedItemAdmission -> String -> IO ()
 writeCheckedItemReceipt root scope admission source = do
-  let (file,magic,profile) = case itemPurpose admission of
-        AuthoredCheckedItem -> ("checked-item.cbor","TPEXACTITEM","tidepool-checked-recipe-2")
-        HostActivationInput -> ("activation-input.cbor","TPEXACTACTIVATIONINPUT2","tidepool-host-activation-input-2")
-      text = encodeString . T.pack
-      receipt = encodeListLen (if itemPurpose admission == HostActivationInput then 9 else 8) <> text magic
-        <> text (if itemPurpose admission == HostActivationInput then "2" else "1")
+  let text = encodeString . T.pack
+      receipt = encodeListLen 8 <> text "TPEXACTITEM" <> text "1"
         <> text (scopeRequestSha256 scope) <> text (itemAdmissionDigest admission)
         <> text (itemCellReceiptDigest admission) <> encodeWord64 (itemIndex admission)
-        <> text (shaHex (TE.encodeUtf8 (T.pack source))) <> text profile
-  witness <- case itemPurpose admission of
-    AuthoredCheckedItem -> pure mempty
-    HostActivationInput -> encodeBytes <$> BS.readFile (root </> "activation-type.cbor")
-  BS.writeFile (root </> file) (toStrictByteString (receipt <> witness))
+        <> text (shaHex (TE.encodeUtf8 (T.pack source))) <> text "tidepool-checked-recipe-2"
+  BS.writeFile (root </> "checked-item.cbor") (toStrictByteString receipt)

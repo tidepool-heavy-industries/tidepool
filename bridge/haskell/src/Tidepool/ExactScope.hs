@@ -3,6 +3,7 @@
 module Tidepool.ExactScope
   ( ExactScope(..), ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..), ExactCompilation(..), SourceSelectedOriginals(..)
   , CheckedCellAdmission(..), CheckedCellPurpose(..), CheckedItemAdmission(..), CheckedItemPurpose(..), CheckedDisplayAdmission(..)
+  , ActivationPreviewAdmission(..), ActivationPreviewInputMetadata(..), scopeActivationPreview
   , PlannedCellAdmission(..), PlannedCellSlot(..)
   , ExactInterfaceEvidence(..), CanonicalOrigin(..), CanonicalInterfaceProof, CanonicalCoreArtifact
   , CanonicalInterfaceAdmission(..), scopeCanonicalInterfaces, scopeSourceOriginalInterfaces, scopeModuleInterfaceProofs
@@ -54,7 +55,8 @@ import Tidepool.Session (Generation(..), SessionModule(..), SessionModuleKind(..
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import Tidepool.CheckedCell
   ( CheckedSignature(..), RequestTypeSignatures, RequestHelperRecipe(..), decodeCheckedSignature, decodeRequestTypeSignatures
-  , CellExpressionPlan(..), ExpressionLiftPlan(..), ExpressionPresentation(..), decodeCellExpressionPlan )
+  , CellExpressionPlan(..), ExpressionLiftPlan(..), ExpressionPresentation(..), decodeCellExpressionPlan
+  , validateCheckedTypeWitnessBytes )
 import Tidepool.ExecutionSchema
   ( SymbolIdentity(..), ProjectedGroup(..), ProjectedGroupBody(..), GlobalDecl(..) )
 import Tidepool.ModuleCandidates
@@ -105,7 +107,39 @@ data ExactScopePurpose
   | ExactItemPurpose CheckedItemAdmission [FilePath]
   | ExactDisplayPurpose CheckedDisplayAdmission [FilePath]
   | ExactInspectionPurpose [ExactIfaceArtifact] [FilePath]
+  | ExactActivationPreviewPurpose ActivationPreviewAdmission [FilePath]
   deriving (Eq, Show)
+
+-- A preview consumes the original live input's native type and mounted interface.
+-- It grants no authored item, value export, or declaration completion authority.
+data ActivationPreviewInputMetadata = ActivationPreviewInputMetadata
+  { previewInputName :: String
+  , previewInputVarId :: Word64
+  , previewInputModule :: String
+  , previewInputTier :: String
+  , previewInputTypeDisplay :: String
+  , previewInputRootHead :: Maybe (T.Text,T.Text,T.Text)
+  , previewInputHostAuthority :: Maybe String
+  } deriving (Eq, Show)
+
+data ActivationPreviewAdmission = ActivationPreviewAdmission
+  { previewAdmissionDigest :: String
+  , previewGeneration :: Word64
+  , previewBudget :: Word64
+  , previewTemplateSha256 :: String
+  , previewInputGeneration :: Word64
+  , previewInputMetadata :: ActivationPreviewInputMetadata
+  , previewInputSignature :: CheckedSignature
+  , previewInputWitness :: BS.ByteString
+  , previewInputInterface :: ExactIfaceArtifact
+  , previewTemplateInterfaces :: [CheckedTemplateInterface]
+  , previewInputPackagesSha256 :: String
+  } deriving (Eq, Show)
+
+scopeActivationPreview :: ExactScope -> Maybe ActivationPreviewAdmission
+scopeActivationPreview scope = case scopePurpose scope of
+  ExactActivationPreviewPurpose admission _ -> Just admission
+  _ -> Nothing
 
 scopeCheckedCell :: ExactScope -> Maybe CheckedCellAdmission
 scopeCheckedCell scope = case scopePurpose scope of
@@ -129,6 +163,7 @@ scopeIncludePaths scope = case scopePurpose scope of
   ExactItemPurpose _ paths -> Just paths
   ExactDisplayPurpose _ paths -> Just paths
   ExactInspectionPurpose _ paths -> Just paths
+  ExactActivationPreviewPurpose _ paths -> Just paths
 
 -- Canonical proof belongs to its exact interface row. Core is a separate
 -- compiler-input capability, never an imported declaration or native grant.
@@ -292,7 +327,7 @@ data CheckedDisplayAdmission = CheckedDisplayAdmission
   , displayTemplateInterfaces :: [CheckedTemplateInterface]
   } deriving (Eq, Show)
 
-data CheckedCellPurpose = AuthoredCellCheck | HostInputCellCheck CheckedSignature
+data CheckedCellPurpose = AuthoredCellCheck
   deriving (Eq, Show)
 
 data CheckedCellAdmission = CheckedCellAdmission
@@ -319,7 +354,7 @@ data PlannedCellAdmission = PlannedCellAdmission
   , plannedSlots :: [PlannedCellSlot]
   } deriving (Eq, Show)
 
-data CheckedItemPurpose = AuthoredCheckedItem | HostActivationInput
+data CheckedItemPurpose = AuthoredCheckedItem
   deriving (Eq, Show)
 
 data CheckedItemAdmission = CheckedItemAdmission
@@ -529,6 +564,7 @@ scopeValueInterfaces scope = case scopePurpose scope of
   ExactItemPurpose admission _ -> itemValueInterfaces admission
   ExactDisplayPurpose admission _ -> displayValueInterfaces admission
   ExactInspectionPurpose values _ -> values
+  ExactActivationPreviewPurpose admission _ -> [previewInputInterface admission]
 
 -- The exact scope separates the bounded metadata envelope from the independently
 -- bounded original graph bytes. The request hash seals each path and digest.
@@ -923,7 +959,11 @@ revalidateExactScope env scope = do
       revalidatePackageImports env (scopeInterfaces scope) >>= either fail pure
       emitCount timing ("hash_bytes.scope_revalidation." ++ scopeRequestSha256 scope) (fromIntegral (BS.length bytes))
       mapM_ (checkProduct timing) (scopeProducts scope)
-      mapM_ (checkValue timing) (scopeValueInterfaces scope))
+      mapM_ (checkValue timing) (scopeValueInterfaces scope)
+      forM_ (scopeActivationPreview scope) $ \admission -> do
+        packages <- BS.readFile (exactPath (previewInputInterface admission) ++ ".packages")
+        unless (digest packages == previewInputPackagesSha256 admission)
+          (fail "activation preview input package interface changed"))
       :: IO (Either IOException ())
     pure $ either (Left . show) Right result
   where
@@ -1116,6 +1156,38 @@ decodeScope = do
     checkedPurpose requestTypes Set.empty, descriptors, interfaceEvidence)
   where
     decodePurpose authCount purpose = case purpose of
+      "host-activation-preview1" -> do
+        unless (authCount == 12) (fail "invalid activation preview admission")
+        admissionDigest <- digestField
+        generation <- decodeWord64
+        budget <- decodeWord64
+        templateSha <- digestField
+        inputGeneration <- decodeWord64
+        array 7
+        binder <- ActivationPreviewInputMetadata <$> nonempty <*> decodeWord64 <*> nonempty
+          <*> (nonempty >>= \tier -> if tier `elem` ["ForceData","RetainOpaque"] then pure tier else fail "invalid activation input tier")
+          <*> string <*> nullable (array 3 >> (,,) <$> decodeString <*> decodeString <*> decodeString)
+          <*> nullable (nonempty >>= \authority -> if authority `elem` ["JsonValue","Text","CommandJob"]
+            then pure authority else fail "invalid activation input host authority")
+        native <- signature
+        witness <- decodeBytes
+        unless (not (BS.null witness) && BS.length witness <= 4 * 1024 * 1024)
+          (fail "activation input witness exceeds bound")
+        either fail pure (validateCheckedTypeWitnessBytes witness)
+        array 4
+        owner <- nonempty
+        interface <- ExactIfaceArtifact "main" owner <$> absolute <*> digestField <*> pure []
+        packagesSha <- digestField
+        unless (generation > 0 && inputGeneration > 0 && generation /= inputGeneration && budget <= fromIntegral (maxBound :: Int)
+            && admissionDigest /= replicate 64 '0' && signatureKey native == "activation-input"
+            && previewInputName binder == "sessionInput"
+            && previewInputModule binder == owner
+            && parseSessionModule owner == Just (SessionModule ValMod (Generation inputGeneration)))
+          (fail "invalid activation preview input identity")
+        templateInputs <- templateInterfaces
+        paths <- includePaths
+        pure (ExactActivationPreviewPurpose (ActivationPreviewAdmission admissionDigest generation budget
+          templateSha inputGeneration binder native witness interface templateInputs packagesSha) paths)
       "inspection1" -> do
         unless (authCount == 4) (fail "invalid inspection admission")
         injected <- bounded 4096 nonempty
@@ -1124,17 +1196,12 @@ decodeScope = do
         validateInterfaces injected values
         paths <- includePaths
         pure (ExactInspectionPurpose values paths)
-      tag | tag == "cell-check2" || tag == "host-input-check1" -> do
-        unless (authCount == if tag == "host-input-check1" then 10 else 9) (fail "invalid cell-check admission")
+      "cell-check2" -> do
+        unless (authCount == 9) (fail "invalid cell-check admission")
         admission <- CheckedCellAdmission <$> digestField <*> digestField <*> digestField
           <*> bounded 64 (array 2 >> (,) <$> nonempty <*> digestField)
           <*> bounded 4096 nonempty <*> bounded 4096 nonempty <*> valueInterfaces <*> pure Nothing
-          <*> (if tag == "host-input-check1" then HostInputCellCheck <$> signature else pure AuthoredCellCheck)
-        case checkedCellPurpose admission of
-          HostInputCellCheck input -> unless (signatureKey input == "activation-input"
-            && null (checkedReservedModules admission) && map fst (checkedTurnTemplates admission) == ["bind"])
-              (fail "invalid host input check admission")
-          AuthoredCellCheck -> pure ()
+          <*> pure AuthoredCellCheck
         validateInterfaces (checkedInjectedModules admission) (checkedValueInterfaces admission)
         unique "checked injected modules" (checkedInjectedModules admission)
         unique "checked reserved modules" (checkedReservedModules admission)
@@ -1159,7 +1226,7 @@ decodeScope = do
         validateInterfaces (checkedInjectedModules admission) (checkedValueInterfaces admission)
         paths <- includePaths
         pure (ExactCellPurpose admission paths)
-      tag | tag == "checked-item3" || tag == "host-activation-input2" -> do
+      "checked-item3" -> do
         unless (authCount == 20) (fail "invalid checked-item admission")
         admissionDigest <- digestField
         receiptDigest <- digestField
@@ -1198,17 +1265,8 @@ decodeScope = do
         templateInputs <- templateInterfaces
         validateInterfaces injected valueInputs
         validateValues valueImports values
-        let role = if tag == "host-activation-input2" then HostActivationInput else AuthoredCheckedItem
-        when (role == HostActivationInput) $
-          unless (index == 0 && kind == "bind" && binders == ["sessionInput"]
-              && generation > 0
-              && all (/= replicate 64 '0') [admissionDigest,receiptDigest,prefix]
-              && map fst templates == ["bind"]
-              && map signatureKey signatures == ["__tidepool_cell_pin_0_sessionInput"]
-              && liftPlan == Nothing && presentation == Nothing && observation == Nothing)
-            (fail "invalid host activation input admission")
         paths <- includePaths
-        pure (ExactItemPurpose (CheckedItemAdmission role admissionDigest receiptDigest index sourceDigest kind binders
+        pure (ExactItemPurpose (CheckedItemAdmission AuthoredCheckedItem admissionDigest receiptDigest index sourceDigest kind binders
           templates injected signatures liftPlan presentation generation prefix valueImports observation planned values valueInputs templateInputs) paths)
       "checked-display3" -> do
         unless (authCount == 19) (fail "invalid checked-display admission")
@@ -1231,6 +1289,9 @@ decodeScope = do
         paths <- includePaths
         pure (ExactDisplayPurpose admission paths)
       _ -> fail "unsupported exact compile purpose"
+    nullable decoder = do
+      token <- peekTokenType
+      if token == TypeNull then decodeNull >> pure Nothing else Just <$> decoder
     includePaths = bounded 4096 $ do
       path <- absolute
       when (T.length (T.pack path) > 65536) (fail "checked search path exceeds bound")

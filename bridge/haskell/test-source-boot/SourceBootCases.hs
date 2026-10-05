@@ -974,10 +974,21 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
           ++ ["import qualified Tidepool.Internal.Resume as AuthoredSecond"] ++ drop 5 (lines withTemplate))
     writeFile target secondImport
     secondRecipe <- generatedScaffoldRecipe [templateInterface] withTemplate secondImport target "Expr"
+    unless (case secondRecipe of Left _ -> True; Right _ -> False) $
+      fail "authored second import acquired protected template authority"
+    let qualifiedTemplate = unlines (take 5 (lines protected)
+          ++ ["import qualified Tidepool.Internal.Resume as CapturedTemplate"] ++ drop 5 (lines protected))
+    writeFile target qualifiedTemplate
+    qualifiedRecipe <- generatedScaffoldRecipe [templateInterface] qualifiedTemplate qualifiedTemplate target "Expr"
       >>= either fail pure
-    requireHiddenSource "authored second import beside permitted initial template import" $
-      compile (PreparedProducts Nothing) Set.empty (GeneratedScaffoldCompile secondRecipe GeneralCompile)
-        (Just hidden) target [] Nothing
+    qualifiedResult <- compile (PreparedProducts Nothing) Set.empty
+      (GeneratedScaffoldCompile qualifiedRecipe (CheckedItemCompile [] Nothing [])) (Just hidden) target [] Nothing
+    unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult qualifiedResult))) $
+      fail "qualified protected template changed original execution"
+    let changedAlias = T.unpack (T.replace "as CapturedTemplate" "as AuthoredAlias" (T.pack qualifiedTemplate))
+    aliasRecipe <- generatedScaffoldRecipe [templateInterface] qualifiedTemplate changedAlias target "Expr"
+    unless (case aliasRecipe of Left _ -> True; Right _ -> False) $
+      fail "changed qualified import alias retained protected template authority"
     writeFile target (withTemplate ++ "\ntamperedTemplateTarget = 0 :: Int\n")
     requireUserError "same owner with changed template target bytes"
       "generated scaffold target differs from its protected recipe" $
@@ -2817,12 +2828,12 @@ hostActivationPurposeTest destination = withScratch $ \work -> do
   writeFile sourcePath originalSource
   original <- runPipelineSessionSelected CheckedEnvironment Set.empty GeneralCompile Nothing sourcePath [work] Nothing
   inputType <- maybe (fail "host input fixture has no inferred type") pure (crResultType original)
-  capturedSignature <- captureCheckedSignature (crHscEnv original) "__tidepool_cell_pin_0_sessionInput" inputType
-  let signatureBytes = toStrictByteString (encodeCheckedSignature capturedSignature)
   issuedFields <- writeGenuineEmptyScopeFields work
-  authorization <- readPurposeCodecFixture work [work] (CodecHostActivationInput signatureBytes) >>= \case
+  authoredPurpose <- readPurposeCodecFixture work [work] CodecItemPurpose
+  authoredFields <- case authoredPurpose of
     TList values -> pure values
-    _ -> fail "production host-input purpose encoder returned another record"
+    _ -> fail "production checked-item encoder returned another record"
+  let authorization = TString "host-activation-input2" : tail authoredFields
   let sha = TString (T.replicate 64 "a")
       empty = TList []
       text = TString . T.pack
@@ -2833,20 +2844,13 @@ hostActivationPurposeTest destination = withScratch $ \work -> do
       decodeManifest manifest = BS.writeFile path (toStrictByteString (encodeTerm manifest)) >> readExactScope path
       decode = decodeManifest . hostManifest
       replace index value fields = [if ordinal == index then value else field | (ordinal,field) <- zip [0::Int ..] fields]
-  admitted <- decode authorization >>= either fail pure
-  unless (fmap itemPurpose (scopeCheckedItem admitted) == Just HostActivationInput) $
-    fail "host purpose lost its sealed role"
-  authoredPurpose <- readPurposeCodecFixture work [work] CodecItemPurpose
+  forM_ ["host-activation-input1","host-activation-input2","host-input-check1"] $ \legacy -> do
+    refused <- decode (text legacy : tail authorization)
+    unless (case refused of Left _ -> True; Right _ -> False) $
+      fail "retired authored activation purpose was admitted"
   authored <- decodeManifest (TList (replace 8 authoredPurpose issuedFields)) >>= either fail pure
   unless (fmap itemPurpose (scopeCheckedItem authored) == Just AuthoredCheckedItem) $
     fail "ordinary purpose acquired host authority"
-  forM_ [(0,text "host-activation-input1"),(3,TInt 1),(5,text "expr")
-      ,(6,TList [text "other"]),(7,TList [TList [text "expr",sha]])
-      ,(9,empty),(11,TInt 0),(12,TString (T.replicate 64 "0"))] $ \(index,value) -> do
-    refused <- decode (replace index value authorization)
-    unless (case refused of Left _ -> True; Right _ -> False) $
-      fail ("invalid host purpose field was admitted: " ++ show index)
-  _ <- decode authorization >>= either fail pure
   replySignature <- captureCheckedSignature (crHscEnv original) "request-reply" inputType
   let requestBytes = toStrictByteString (encodeRequestTypeSignatures (RequestTypeSignatures replySignature Nothing))
   requestTerm <- either (fail . show) (pure . snd)
@@ -2869,10 +2873,9 @@ hostActivationPurposeTest destination = withScratch $ \work -> do
       (fail "native request wrapper admitted a legacy scope envelope")
     wrapped <- readRequestTypesCodecFixture work requestBytes recipe
       (Just (toStrictByteString (encodeTerm (TList authorization))))
-    wrappedHost <- decodeManifest (TList (replace 8 wrapped issuedFields)) >>= either fail pure
-    unless (fmap itemPurpose (scopeCheckedItem wrappedHost) == Just HostActivationInput
-        && fmap fst (scopeRequestTypes wrappedHost) == Just recipe)
-      (fail "native request wrapper lost its protected inner purpose")
+    wrappedHost <- decodeManifest (TList (replace 8 wrapped issuedFields))
+    unless (case wrappedHost of Left _ -> True; Right _ -> False) $
+      fail "native request wrapper admitted a retired authored activation purpose"
   forM_ [[text "request-types1",requestTerm,TNull]
         ,nativeAuthorization "unknown" TNull
         ,nativeAuthorization "none" (TList [text "request-types2",requestTerm,text "none",TNull])
@@ -2881,47 +2884,12 @@ hostActivationPurposeTest destination = withScratch $ \work -> do
     refused <- decode invalid
     unless (case refused of Left _ -> True; Right _ -> False)
       (fail "native request wrapper admitted legacy, malformed or invalid inner authority")
-  let checkedSignature = capturedSignature { signaturePresentation = "presentation is not Haskell syntax !" }
-  encodedSignature <- either (fail . show) (pure . snd)
-    (deserialiseFromBytes decodeTerm (BSL.fromStrict (toStrictByteString (encodeCheckedSignature checkedSignature))))
-  _ <- decode (replace 9 (TList [encodedSignature]) authorization) >>= either fail pure
+  let checked = original
   initialSignature <- captureCheckedSignature (crHscEnv original) "activation-input" inputType
-  initialAuthorization <- readPurposeCodecFixture work [work]
-    (CodecHostInputCheck (toStrictByteString (encodeCheckedSignature initialSignature))) >>= \case
-      TList values -> pure values
-      _ -> fail "production initial host-input purpose encoder returned another record"
-  let initialSource = "module HostActivationInput where\n__result :: TidepoolActivationInput\n__result = undefined\n"
-      initialSession = emptySessionScope {ssRoot=work,ssExactScope=Just path}
-  initialAdmitted <- decode initialAuthorization >>= either fail pure
-  unless (fmap checkedCellPurpose (scopeCheckedCell initialAdmitted) == Just (HostInputCellCheck initialSignature))
-    (fail "host input check lost its original native signature")
-  writeFile sourcePath initialSource
-  initialChecked <- runPipelineSessionSelected CheckedEnvironment Set.empty (HostActivationCheck initialSignature)
-    (Just initialSession) sourcePath [work] Nothing
-  unless (maybe False (eqType inputType) (crResultType initialChecked))
-    (fail "host input first check lost the original type")
-  forM_ [replace 0 (text "cell-check2") initialAuthorization
-        ,replace 6 (TList [text "unexpected-declaration"]) initialAuthorization] $ \invalid -> do
-    refused <- decode invalid
-    unless (case refused of Left _ -> True; Right _ -> False)
-      (fail "host input check admitted authored/declaration purpose substitution")
-  _ <- decode (replace 9 (TList [encodedSignature]) authorization) >>= either fail pure
-  untypedSource <- either fail pure (replaceTemplateMarker "{{CHECKED_TYPE}}" "()" inputTemplate)
-  resultSlot <- either fail pure (replaceTemplateMarker "__result :: Int" "__result :: TidepoolActivationInput" untypedSource)
-  checkedSource <- either fail pure (replaceTemplateMarker "__activationPreview :: Int" "__activationPreview :: TidepoolActivationInput" resultSlot)
-  writeFile sourcePath checkedSource
-  let session = emptySessionScope {ssRoot=work,ssExactScope=Just path}
-      purpose = HostActivationInputCompile [("__tidepool_checked_annotation_0",
-        checkedSignature)] Nothing []
-      reject action = do
-        refused <- try (void action) :: IO (Either SomeException ())
-        unless (case refused of Left reason -> "host activation input" `isInfixOf` show reason; Right _ -> False) $
-          fail "host input compiled through an unsealed or general purpose"
-  reject (runPipelineSessionSelected CheckedEnvironment Set.empty purpose Nothing sourcePath [work] Nothing)
-  reject (runPipelineSessionSelected CheckedEnvironment Set.empty GeneralCompile (Just session) sourcePath [work] Nothing)
-  checked <- runPipelineSessionSelected CheckedEnvironment Set.empty purpose (Just session) sourcePath [work] Nothing
-  unless (fmap renderType (crResultType checked) == Just "Int") $
-    fail "host checked annotation changed the inferred input"
+  reject <- try (void (runPipelineSessionSelected CheckedEnvironment Set.empty
+    (HostActivationPreviewCompile initialSignature) Nothing sourcePath [work] Nothing)) :: IO (Either SomeException ())
+  unless (case reject of Left reason -> "sealed session admission" `isInfixOf` show reason; Right _ -> False) $
+    fail "activation preview compiled without its distinct sealed admission"
   actualInput <- either fail pure (activationPreviewInputType (crTargetTcGblEnv checked))
   originalInterfaces <- newOriginalInterfaceArtifacts (crHscEnv checked) Map.empty [] work
   let witness ty = captureCheckedTypeWitness (crHscEnv checked) ty
@@ -2934,9 +2902,9 @@ hostActivationPurposeTest destination = withScratch $ \work -> do
   mismatchedSource <- either fail pure (replaceTemplateMarker "__activationPreview :: Int" "__activationPreview :: Bool" originalSource)
   writeFile sourcePath mismatchedSource
   mismatched <- runPipelineSessionSelected CheckedEnvironment Set.empty GeneralCompile Nothing sourcePath [work] Nothing
-  unless (case activationPreviewInputType (crTargetTcGblEnv mismatched) of Left _ -> True; Right _ -> False) $
-    fail "host preview admitted another type than its checked Val binder"
-  writeFile sourcePath checkedSource
+  unless (case activationPreviewInputType (crTargetTcGblEnv mismatched) of Right ty -> eqType ty boolTy; Left _ -> False) $
+    fail "pure preview argument depended on an unrelated result binding"
+  writeFile sourcePath originalSource
   originalBytes <- sealedBytes inputType
   actualBytes <- sealedBytes actualInput
   forward <- sealedBytes (mkVisFunTyMany intTy boolTy)
@@ -2976,7 +2944,7 @@ hostActivationPurposeTest destination = withScratch $ \work -> do
       BS.writeFile (directory </> name) bytes
   unless (originalBytes == actualBytes && forward /= backward) $
     fail "canonical input witness lost original correspondence or function argument/result order"
-  putStrLn "host activation purpose: sealed payload, checked type pass and ordinary/unsealed refusals passed"
+  putStrLn "activation preview: retired purpose refusals, native argument authority and canonical witness controls passed"
 
 freshExecutionRecipeTest :: IO ()
 freshExecutionRecipeTest = withScratch $ \work -> do

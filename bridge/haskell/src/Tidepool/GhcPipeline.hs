@@ -216,7 +216,8 @@ import Tidepool.ExactHydration
   , GeneratedScaffoldRecipe, generatedScaffoldRecipe, captureGeneratedScaffoldTarget
   , noGeneratedScaffoldImports, readGeneratedScaffoldImportAuthority, permitsGeneratedScaffoldImport, installExactLexicalGraphWithScaffold )
 import Tidepool.ExactScope
-  ( ExactScope(..), ExactScopePurpose(..), ExactCompilation(..), SourceSelectedOriginals(..), extendSourceSelectedOriginals, CheckedCellAdmission(..), CheckedCellPurpose(..), CheckedItemAdmission(..), CheckedItemPurpose(..), CheckedDisplayAdmission(..), readExactScope, revalidateExactScope, scopeValueInterfaces
+  ( ExactScope(..), ExactScopePurpose(..), ExactCompilation(..), SourceSelectedOriginals(..), extendSourceSelectedOriginals, CheckedCellAdmission(..), CheckedItemAdmission(..), CheckedDisplayAdmission(..), readExactScope, revalidateExactScope, scopeValueInterfaces
+  , ActivationPreviewAdmission(..), scopeActivationPreview
   , scopeCheckedCell, scopeCheckedItem, scopeCheckedDisplay, scopeIncludePaths
   , writeExactCompilation, compilationOriginalSourceImports, scopeExecutionNativeOwners, ExactInterfaceEvidence(..), CanonicalOrigin(..), canonicalOrigin )
 import Tidepool.ExactScope
@@ -596,15 +597,12 @@ cellExpressionEvidence result = forM expressionIds $ \identifier -> do
       , "__tidepool_cell_expr_" `isPrefixOf` occurrence
       ]
 
--- The input witness comes from the independently typechecked preview binder,
--- rather than the placeholder result or a supplied rendered type.
+-- The pure preview argument carries the original native input type.
 activationPreviewInputType :: TcGblEnv -> Either String Type
 activationPreviewInputType environment = do
   preview <- unique "__activationPreview"
-  checked <- unique "__result"
   case splitFunTys preview of
-    ([Scaled _ input], _) | eqType input (stripMonadHead checked) -> Right input
-    ([Scaled _ _], _) -> Left "activation preview input differs from its checked binder type"
+    ([Scaled _ input], _) -> Right input
     _ -> Left "activation preview has no single monomorphic input argument"
   where
     unique name = case [idType identifier | identifier <- typeEnvIds (tcg_type_env environment)
@@ -1009,8 +1007,7 @@ data CycleState
 
 data CompilePurpose = GeneralCompile | LookupTypeCompile | CertifyHomeProductsCompile | OriginalDeclarationCompile
   | CheckedItemCompile [(String,CheckedSignature)] (Maybe ((String,String),String)) [CompletedValueImport]
-  | HostActivationCheck CheckedSignature
-  | HostActivationInputCompile [(String,CheckedSignature)] (Maybe ((String,String),String)) [CompletedValueImport]
+  | HostActivationPreviewCompile CheckedSignature
   | ProgramItemCompile Bool [(String,CheckedSignature)] [((String,String),String)] [CompletedValueImport]
   | PlannedDeclarationCheck PlannedDeclarationInventory ExactScope
   | CellProgramCompile CompilePurpose ExactScope
@@ -1082,14 +1079,8 @@ transformFor (CheckedItemCompile annotations original _) target env summary
           inventory <- hydratePlannedDeclarationInventory owner fingerprint env >>= either fail pure
           mapNativeModule (transformPlannedDeclarationImports inventory env) annotated
   | otherwise = pure . unannotatedModule
-transformFor (HostActivationCheck signature) target env summary
+transformFor (HostActivationPreviewCompile signature) target env summary
   | ms_mod_name summary == target = rewriteHostInputType env 1 signature
-  | otherwise = pure . unannotatedModule
-transformFor (HostActivationInputCompile annotations original values) target env summary
-  | ms_mod_name summary == target = \parsed -> do
-      signature <- hostInputSignature annotations
-      typed <- rewriteHostInputType env 2 signature parsed
-      thenNativeModule typed (transformFor (CheckedItemCompile annotations original values) target env summary)
   | otherwise = pure . unannotatedModule
 transformFor (ProgramItemCompile original annotations originals _) target env summary
   | ms_mod_name summary == target = \parsed -> do
@@ -1115,11 +1106,6 @@ transformWithCompletedValues captured purpose target env summary = case purpose 
   CellProgramCompile inner _ -> transformWithCompletedValues captured inner target env summary
   GeneratedScaffoldCompile _ inner -> transformWithCompletedValues captured inner target env summary
   GeneratedInstanceCheck _ inner -> transformWithCompletedValues captured inner target env summary
-  HostActivationInputCompile annotations original requested
-    | ms_mod_name summary == target -> \parsed -> do
-        signature <- hostInputSignature annotations
-        typed <- rewriteHostInputType env 2 signature parsed
-        thenNativeModule typed (transformWithCompletedValues captured (CheckedItemCompile annotations original requested) target env summary)
   CheckedItemCompile annotations original requested
     | ms_mod_name summary == target && not (null requested) -> \parsed -> do
         values <- maybe (fail "completed value interfaces were not installed in this request") pure captured
@@ -1138,10 +1124,6 @@ transformWithCompletedValues captured purpose target env summary = case purpose 
         selected <- mapNativeModule (transformProgramDeclarationImports inventories values env) annotated
         if original then mapNativeModule (refineParsedDeclarationImports env) selected else pure selected
   _ -> transformFor purpose target env summary
-
-hostInputSignature :: [(String, CheckedSignature)] -> IO CheckedSignature
-hostInputSignature [(_, signature)] = pure signature
-hostInputSignature _ = fail "host input recipe has no unique native signature"
 
 withNativeTypecheckRecovery :: PipelineVariant -> ModuleName -> HscEnv -> ModSummary -> ParsedModule -> IO a -> IO a
 withNativeTypecheckRecovery variant target environment summary parsed action
@@ -4251,8 +4233,7 @@ normalVariant :: CompilePurpose -> FilePath -> IO PipelineVariant
 normalVariant purpose path = do
   let effectivePurpose = originalPurpose purpose
   case effectivePurpose of
-    HostActivationInputCompile {} -> fail "host activation input requires its sealed session admission"
-    HostActivationCheck {} -> fail "host activation check requires its sealed session admission"
+    HostActivationPreviewCompile {} -> fail "activation preview requires its sealed session admission"
     _ -> pure ()
   targetModName' <- targetModuleNameFor path
   pure PipelineVariant
@@ -4751,7 +4732,6 @@ sessionVariant purpose scope path = do
   let effectivePurpose = originalPurpose purpose
       completedValues = case effectivePurpose of
         CheckedItemCompile _ _ values -> values
-        HostActivationInputCompile _ _ values -> values
         ProgramItemCompile _ _ _ values -> values
         _ -> []
   capturedExact <- traverse (\manifest -> readExactScope manifest >>= either (ioError . userError) pure)
@@ -4760,20 +4740,12 @@ sessionVariant purpose scope path = do
         PlannedDeclarationCheck _ admitted -> Just admitted
         CellProgramCompile _ admitted -> Just admitted
         _ -> capturedExact
-  let hostPurpose = case effectivePurpose of
-        HostActivationInputCompile {} -> True
-        _ -> False
-      hostAdmission = maybe False ((== Just HostActivationInput) . fmap itemPurpose . scopeCheckedItem) exact
-  unless (hostPurpose == hostAdmission)
-    (fail "host activation input has another compiler purpose")
-  let checkPurpose = case effectivePurpose of
-        HostActivationCheck signature -> Just signature
+  let previewPurpose = case effectivePurpose of
+        HostActivationPreviewCompile signature -> Just signature
         _ -> Nothing
-      checkAdmission = exact >>= scopeCheckedCell >>= \cell -> case checkedCellPurpose cell of
-        HostInputCellCheck signature -> Just signature
-        AuthoredCellCheck -> Nothing
-  unless (checkPurpose == checkAdmission)
-    (fail "host activation check has another compiler purpose")
+      previewAdmission = previewInputSignature <$> (exact >>= scopeActivationPreview)
+  unless (previewPurpose == previewAdmission)
+    (fail "activation preview has another compiler purpose")
   forM_ exact $ \admitted -> case capturedExact of
     Just original | scopeRequestSha256 original == scopeRequestSha256 admitted -> pure ()
     _ -> ioError (userError "planned declaration leaves its original compiler offer")
