@@ -322,8 +322,32 @@ candidateExecutionSourcesTest = withTiming $ withScratch $ \work -> do
     Right _ -> fail "candidate reference resolved without its authenticated original graph"
   sharedOffer <- readModuleCandidatesWithGraphs (scopeExecutionGraphs originalScope) candidatePath
     >>= either fail pure
-  unless (sharedOffer == offered) $
-    fail "authenticated exact graph inventory changed original candidate custody"
+  -- The reader retains only graphs bundled by this manifest. Scope graphs
+  -- close its unchanged references without becoming another local parcel.
+  let withoutParcel candidate = candidate {candidateExecutionSource=Nothing}
+      graphCustody graphs = Set.fromList
+        [(executionGraphSha256 graph,executionGraphBytes graph) | graph <- graphs]
+      offeredGraphs = concat [graphs | candidate <- offered
+        , Just (graphs,_) <- [candidateExecutionSources candidate]]
+  unless (map withoutParcel sharedOffer == map withoutParcel offered) $
+    fail "shared exact graph inventory changed a candidate identity, artifact, import or group"
+  candidateCustody <- readDescriptorCustody candidatePath parcel
+  scopeCustody <- readDescriptorCustody sourceScopePath allOriginals
+  unless (graphCustody candidateCustody == graphCustody offeredGraphs
+      && graphCustody scopeCustody == graphCustody (scopeExecutionGraphs originalScope)) $
+    fail "candidate or scope graph files differ from their authenticated inventory"
+  forM_ (zip offered sharedOffer) $ \(bundled,sharedCandidate) ->
+    case (candidateExecutionSources bundled,candidateExecutionSources sharedCandidate) of
+      (Just (graphs,reference),Just (sharedGraphs,sharedReference)) -> do
+        unless (reference == sharedReference && null sharedGraphs) $
+          fail ("shared candidate changed its original reference or bundled another graph: "
+            ++ show (candidateOriginalIdentity sharedCandidate,sharedReference))
+        originalFacts <- originalClosureFacts graphs reference
+        sharedFacts <- originalClosureFacts (scopeExecutionGraphs originalScope ++ sharedGraphs) sharedReference
+        unless (originalFacts == sharedFacts) $
+          fail ("shared candidate changed its authenticated source closure: "
+            ++ show (candidateOriginalIdentity sharedCandidate,sharedReference))
+      _ -> fail "shared graph fixture lost a candidate's original execution reference"
   BS.writeFile candidatePath offerBytes
   restored <- readModuleCandidates candidatePath >>= either fail pure
   unless (restored == offered) $ fail "restored production offer changed its original execution custody"
@@ -333,6 +357,23 @@ candidateExecutionSourcesTest = withTiming $ withScratch $ \work -> do
       bytes <- BS.readFile path
       either (fail . show) (pure . snd) (deserialiseFromBytes decodeTerm (BSL.fromStrict bytes))
     writeTerm path value = BS.writeFile path (toStrictByteString (encodeTerm value))
+    readDescriptorCustody manifestPath = \case
+      TList [descriptors,_] -> do
+        decoded <- case deserialiseFromBytes decodeExecutionSourceDescriptors
+            (BSL.fromStrict (toStrictByteString (encodeTerm descriptors))) of
+          Right (remaining,values) | BSL.null remaining -> pure values
+          _ -> fail "issued graph fixture has invalid production descriptors"
+        -- The production reader checks co-location, bounded file bytes and
+        -- the complete canonical graph against each advertised digest.
+        readExecutionSourceGraphs manifestPath [] decoded
+      _ -> fail "issued graph fixture has another parcel shape"
+    originalClosureFacts graphs reference = do
+      nodes <- either (fail . show) pure (executionSourceOriginalClosure graphs [reference])
+      mapM (\node -> do
+        resolutions <- either (fail . show) pure (executionNodeOriginalResolutions graphs node)
+        pure (executionNodeIdentity node,executionNodeModule node,executionNodeSourceSha256 node
+          ,executionNodeRequirements node,executionNodeOriginalGraphs node,resolutions
+          ,executionGraphSha256 (executionNodeGraph node),executionGraphBytes (executionNodeGraph node))) nodes
 
 -- These are decoder refusals around an unchanged producer-issued scope, not
 -- new executable authority. Candidate and exact scopes own separate readers.
