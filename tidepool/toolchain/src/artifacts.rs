@@ -40,7 +40,7 @@ pub fn host_binding_interface_request_count() -> u64 {
     HOST_BINDING_INTERFACE_REQUESTS.load(std::sync::atomic::Ordering::SeqCst)
 }
 
-/// Issue one fresh type-only host interface from original compiler type evidence.
+/// Issue one fresh type-only binding interface from original compiler type evidence.
 /// This session-specific artifact is never cached or compiled as authored source.
 pub fn issue_host_binding_interface(
     prototype: Arc<crate::checked_cell::ExactHostBindingPrototype>,
