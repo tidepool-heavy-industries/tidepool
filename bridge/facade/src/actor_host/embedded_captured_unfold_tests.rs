@@ -948,6 +948,38 @@ async fn captured_host_scenario(scenario: HostedScenario) {
         .await
         .unwrap_or_else(|error| panic!("{error}"))
         .expect("root Engine did not request a turn after scope setup settled");
+    let parked_baseline = if scenario
+        == HostedScenario::Captured(CapturedScenario::CancelWhileParked)
+    {
+        let graph = campaign.forest.inspect_host_graph();
+        assert_eq!(
+            graph.len(),
+            3,
+            "setup owns one root and two record services"
+        );
+        for label in ["embedded-checkpoint-seeds", "embedded-checkpoint-groups"] {
+            let record = graph.iter().find(|node| node.label == label).unwrap();
+            assert!(!record.model_actor);
+            assert!(record.terminal.is_none());
+            assert_eq!(record.creator, Some(actor));
+            assert_eq!(
+                campaign.forest.actor_session(record.actor),
+                campaign.forest.actor_session(actor)
+            );
+        }
+        // These persistent receive loops share the root machine and survive
+        // cancellation of an independent workbench invocation.
+        let parked = campaign
+            .forest
+            .measurement_snapshot()
+            .and_then(|snapshot| snapshot.parked)
+            .expect("quiescent setup retains a fresh shared-machine snapshot");
+        assert_eq!(parked, 3, "root and both record receive loops are parked");
+        eprintln!("[captured-engine] persistent root and record-service baseline: {parked} parked");
+        Some(parked)
+    } else {
+        None
+    };
     let scenario = match scenario {
         HostedScenario::Captured(scenario) => scenario,
         HostedScenario::LocalActorStartup => {
@@ -1141,6 +1173,30 @@ async fn captured_host_scenario(scenario: HostedScenario) {
         };
         assert!(campaign.actor.hosted_workbench_waiting(&native).is_some());
         assert!(scheduler.output(&pending).await.unwrap().is_none());
+        let known_children = campaign
+            .observer
+            .installations()
+            .into_iter()
+            .filter(|installation| installation.checkpoint)
+            .map(|installation| installation.actor)
+            .collect::<Vec<_>>();
+        assert_eq!(known_children.len(), 2);
+        for child in &known_children {
+            assert_eq!(
+                campaign.forest.actor_session(child.identity()),
+                campaign.forest.actor_session(actor),
+                "captured child uses the original shared machine"
+            );
+        }
+        let baseline = parked_baseline.expect("cancellation retains its persistent baseline");
+        assert_eq!(
+            campaign
+                .forest
+                .measurement_snapshot()
+                .and_then(|snapshot| snapshot.parked),
+            Some(baseline + known_children.len() + 1),
+            "both child request continuations and the original parent await are parked"
+        );
         let requested = client
             .post(format!("{api}/commands"))
             .header("Origin", &origin)
@@ -1180,14 +1236,6 @@ async fn captured_host_scenario(scenario: HostedScenario) {
             "the exact native owner must acknowledge cancellation"
         );
         durable_output(&runtime, &pending, &cancelled).await;
-        let known_children = campaign
-            .observer
-            .installations()
-            .into_iter()
-            .filter(|installation| installation.checkpoint)
-            .map(|installation| installation.actor)
-            .collect::<Vec<_>>();
-        assert_eq!(known_children.len(), 2);
         for child in &known_children {
             let terminal = child.terminal();
             tokio::time::timeout(Duration::from_secs(30), terminal.wait())
@@ -1204,7 +1252,20 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                 .forest
                 .measurement_snapshot()
                 .and_then(|snapshot| snapshot.parked),
-            Some(0)
+            Some(baseline),
+            "interrupt consumes the invocation continuations and preserves persistent receive loops"
+        );
+        let graph = campaign.forest.inspect_host_graph();
+        for label in ["embedded-checkpoint-seeds", "embedded-checkpoint-groups"] {
+            assert!(graph
+                .iter()
+                .find(|node| node.label == label)
+                .expect("persistent record service remains installed")
+                .terminal
+                .is_none());
+        }
+        eprintln!(
+            "[captured-engine] cancellation restored {baseline} persistent parked receive loops"
         );
         assert!(
             campaign.actor.terminal().get().is_none(),
@@ -1274,6 +1335,14 @@ async fn captured_host_scenario(scenario: HostedScenario) {
         host.stop()
             .await
             .expect("production shutdown confirms host and forest cleanup");
+        assert_eq!(
+            campaign
+                .forest
+                .measurement_snapshot()
+                .and_then(|snapshot| snapshot.parked),
+            Some(0),
+            "full shutdown consumes the root and record-service receive loops"
+        );
         return;
     }
     if scenario == CapturedScenario::ConcurrentNominalJoin {
