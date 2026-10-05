@@ -963,19 +963,18 @@ impl HostBindingInterfaceOffer {
             ));
         }
         let path = self.directory.0.path().join(owner.relative_hi_path());
-        let bytes: Arc<[u8]> = read(&path, 32 << 20)?.into();
+        let output = CapturedValueInterfaceOutput::capture(&path)?;
+        let bytes: Arc<[u8]> = output.interface.clone().into();
         let digest = hash(&bytes);
-        if string(&fields[7])? != digest {
-            return Err(failure("host interface bytes differ from receipt"));
-        }
-        if string(&fields[9])? != hash(&read(path.with_extension("hi.packages"), 4 << 20)?)
-            || string(&fields[10])? != hash(&read(path.with_extension("hi.requirements"), 4 << 20)?)
-        {
-            return Err(failure(
-                "host interface dependency evidence differs from receipt",
-            ));
-        }
-        let certificate = certify_value_interface(self.prototype.producer, owner, &path, &bytes)?;
+        let certificate = output.certify(
+            self.prototype.producer,
+            owner,
+            Some([
+                string(&fields[7])?,
+                string(&fields[9])?,
+                string(&fields[10])?,
+            ]),
+        )?;
         let context = (*self.prototype.context)
             .clone()
             .extend_with_value_interfaces(std::slice::from_ref(&certificate), Vec::new())?;
@@ -1301,30 +1300,75 @@ pub(crate) fn certify_value_interface(
     path: &Path,
     bytes: &[u8],
 ) -> Result<Arc<crate::recovery_artifacts::CertifiedValueInterface>, CompileError> {
-    let requirements = decode(&read(path.with_extension("hi.requirements"), 4 << 20)?)?;
-    let requirements = list(&requirements, 16384)?
-        .iter()
-        .map(|value| {
-            let fields = row(value, 2)?;
-            Ok(crate::declaration_join::ExactModuleIdentity {
-                unit: string(&fields[0])?.to_owned(),
-                module: string(&fields[1])?.to_owned(),
-            })
+    CapturedValueInterfaceOutput::with_interface(path, bytes.to_vec())?
+        .certify(producer, owner, None)
+}
+
+/// Capture the complete compiler output before interpreting or sealing any
+/// member. Certification consumes these exact owned bytes and never rereads
+/// the output paths after checking their receipt seals.
+struct CapturedValueInterfaceOutput {
+    interface: Vec<u8>,
+    packages: Vec<u8>,
+    requirements: Vec<u8>,
+}
+
+impl CapturedValueInterfaceOutput {
+    fn capture(path: &Path) -> Result<Self, CompileError> {
+        Self::with_interface(path, read(path, 32 << 20)?)
+    }
+
+    fn with_interface(path: &Path, interface: Vec<u8>) -> Result<Self, CompileError> {
+        Ok(Self {
+            interface,
+            packages: read(path.with_extension("hi.packages"), 4 << 20)?,
+            requirements: read(path.with_extension("hi.requirements"), 4 << 20)?,
         })
-        .collect::<Result<Vec<_>, CompileError>>()?;
-    Ok(Arc::new(
-        crate::recovery_artifacts::CertifiedValueInterface::from_checked_compilation(
-            producer,
-            crate::declaration_join::ExactModuleIdentity {
-                unit: "main".into(),
-                module: owner.module_name(),
-            },
-            bytes.to_vec(),
-            read(path.with_extension("hi.packages"), 4 << 20)?,
-            requirements,
-        )
-        .map_err(failure)?,
-    ))
+    }
+
+    fn certify(
+        self,
+        producer: [u8; 32],
+        owner: tidepool_repr::SessionModule,
+        receipt_seals: Option<[&str; 3]>,
+    ) -> Result<Arc<crate::recovery_artifacts::CertifiedValueInterface>, CompileError> {
+        if receipt_seals.is_some_and(|expected| {
+            expected
+                .into_iter()
+                .zip([
+                    hash(&self.interface),
+                    hash(&self.packages),
+                    hash(&self.requirements),
+                ])
+                .any(|(expected, actual)| expected != actual)
+        }) {
+            return Err(failure("host interface output differs from receipt"));
+        }
+        let requirements = decode(&self.requirements)?;
+        let requirements = list(&requirements, 16384)?
+            .iter()
+            .map(|value| {
+                let fields = row(value, 2)?;
+                Ok(crate::declaration_join::ExactModuleIdentity {
+                    unit: string(&fields[0])?.to_owned(),
+                    module: string(&fields[1])?.to_owned(),
+                })
+            })
+            .collect::<Result<Vec<_>, CompileError>>()?;
+        Ok(Arc::new(
+            crate::recovery_artifacts::CertifiedValueInterface::from_checked_compilation(
+                producer,
+                crate::declaration_join::ExactModuleIdentity {
+                    unit: "main".into(),
+                    module: owner.module_name(),
+                },
+                self.interface,
+                self.packages,
+                requirements,
+            )
+            .map_err(failure)?,
+        ))
+    }
 }
 
 #[derive(Debug)]
@@ -4351,6 +4395,116 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("cannot issue host activation authority"));
+    }
+
+    #[test]
+    fn host_interface_certification_consumes_only_receipt_sealed_capture() {
+        let owner = tidepool_repr::SessionModule::val(tidepool_repr::Generation(7));
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(owner.relative_hi_path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let encode = |value: Value| {
+            let mut bytes = Vec::new();
+            ciborium::ser::into_writer(&value, &mut bytes).unwrap();
+            bytes
+        };
+        let interface = b"original interface";
+        let packages = encode(array([
+            text("TPPKGROOTS"),
+            text("2"),
+            array([
+                text("main"),
+                text(owner.module_name()),
+                text(hash(interface)),
+            ]),
+            array([]),
+            array([]),
+        ]));
+        let requirements = encode(array([array([text("main"), text("OriginalType")])]));
+        let expected = [hash(interface), hash(&packages), hash(&requirements)];
+        let seals = || expected.each_ref().map(String::as_str);
+        let restore = || {
+            std::fs::write(&path, interface).unwrap();
+            std::fs::write(path.with_extension("hi.packages"), &packages).unwrap();
+            std::fs::write(path.with_extension("hi.requirements"), &requirements).unwrap();
+        };
+        restore();
+        let captured = CapturedValueInterfaceOutput::capture(&path).unwrap();
+        std::fs::write(&path, b"replacement interface").unwrap();
+        std::fs::write(
+            path.with_extension("hi.packages"),
+            encode(array([
+                text("TPPKGROOTS"),
+                text("2"),
+                array([
+                    text("main"),
+                    text(owner.module_name()),
+                    text(hash(b"replacement interface")),
+                ]),
+                array([]),
+                array([]),
+            ])),
+        )
+        .unwrap();
+        std::fs::write(
+            path.with_extension("hi.requirements"),
+            encode(array([array([text("main"), text("ReplacementType")])])),
+        )
+        .unwrap();
+        let certified = captured.certify([1; 32], owner, Some(seals())).unwrap();
+        assert_eq!(certified.interface().interface_bytes(), interface);
+        assert_eq!(certified.interface().package_imports_bytes(), packages);
+        assert_eq!(
+            certified.requirements(),
+            &[crate::declaration_join::ExactModuleIdentity {
+                unit: "main".into(),
+                module: "OriginalType".into(),
+            }]
+        );
+        assert!(CapturedValueInterfaceOutput::capture(&path)
+            .unwrap()
+            .certify([1; 32], owner, Some(seals()))
+            .is_err());
+
+        // Each component has its own receipt seal, including dependency lists
+        // that remain valid certification input after a replacement.
+        for changed in 0..3 {
+            restore();
+            match changed {
+                0 => std::fs::write(&path, b"replacement interface").unwrap(),
+                1 => std::fs::write(
+                    path.with_extension("hi.packages"),
+                    encode(array([
+                        text("TPPKGROOTS"),
+                        text("2"),
+                        array([
+                            text("main"),
+                            text(owner.module_name()),
+                            text(hash(interface)),
+                        ]),
+                        array([]),
+                        array([array([
+                            text("primitive"),
+                            text("ghc-prim"),
+                            text("GHC.Prim"),
+                        ])]),
+                    ])),
+                )
+                .unwrap(),
+                _ => std::fs::write(
+                    path.with_extension("hi.requirements"),
+                    encode(array([array([text("main"), text("ReplacementType")])])),
+                )
+                .unwrap(),
+            }
+            assert!(
+                CapturedValueInterfaceOutput::capture(&path)
+                    .unwrap()
+                    .certify([1; 32], owner, Some(seals()))
+                    .is_err(),
+                "changed component {changed} must not be certified by the old receipt"
+            );
+        }
     }
 
     #[test]
