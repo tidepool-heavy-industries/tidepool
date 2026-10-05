@@ -151,6 +151,30 @@ class IsolatedLibtestTests(unittest.TestCase):
                 self.assertNotIn('artifacts_removed_after_success', record)
                 self.assertEqual(record['cleanup_reports'][0]['status'], outcome['cleanup']['status'])
 
+    def test_host_runtime_non_admission_requires_integer_schema_version(self):
+        for index, schema in enumerate((True, 1.0)):
+            with self.subTest(schema=schema, type=type(schema).__name__):
+                root = Path(self.tmp.name) / f'invalid-schema-{index}'
+                def run(args, timeout, environment=None):
+                    campaign = root / 'hosted-campaign-1'
+                    campaign.mkdir()
+                    (campaign / 'hosted-outcome.json').write_text(json.dumps({
+                        'schema': schema,
+                        'scenario': {'status': 'failed', 'phase': 'startup'},
+                        'cleanup': {'status': 'not_started', 'domain': 'host_runtime',
+                                    'owner_admission': 'not_admitted', 'executor_joined': True},
+                    }))
+                    return completed_process(args, 0,
+                        'test result: ok. 1 passed; 0 failed; 0 ignored;\n', '')
+                record = {}
+                with patch.object(runner, 'execute', side_effect=run):
+                    passed, _, errors = runner.run_one(str(self.binary), 'suite::refusal',
+                        False, 10, record, artifact_root=root)
+                self.assertFalse(passed)
+                self.assertFalse(record['cleanup_reports'][0]['host_runtime_not_started'])
+                self.assertIn('cleanup remains not_started', errors)
+                self.assertTrue(root.exists())
+
     def test_standard_property_campaign_controls_cross_delegation_explicitly(self):
         campaign = {
             'PROPTEST_CASES': '4000', 'PROPTEST_RNG_SEED': '781231',

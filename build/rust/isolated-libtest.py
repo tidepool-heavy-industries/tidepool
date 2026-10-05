@@ -732,7 +732,8 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
                 # still mandatory; retain the original refusal evidence below.
                 not_started = (
                     report.name == 'hosted-outcome.json'
-                    and outcome.get('schema') == 1
+                    and type(outcome.get('schema')) is int
+                    and outcome['schema'] == 1
                     and outcome.get('scenario', {}).get('status') == 'failed'
                     and outcome.get('scenario', {}).get('phase') == 'startup'
                     and outcome['cleanup'].get('executor_joined') is True
