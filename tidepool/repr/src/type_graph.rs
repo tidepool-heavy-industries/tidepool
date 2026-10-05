@@ -156,17 +156,26 @@ impl TypeGraph {
         limits: GraphLimits,
     ) -> Result<(Self, usize), TypeGraphError> {
         let work = validate_graph(&graph, constructors, limits)?;
+        let mut budget = Budget { bytes: 0, work, limits };
         // petgraph's adjacency lists reverse insertion order. Canonicalize
         // once, preserving node indices and repeated targets at distinct slots.
-        let mut edges: Vec<_> = graph.edge_references()
-            .map(|edge| (edge.source(), edge.target(), *edge.weight())).collect();
-        edges.sort_unstable_by(|first, second| first.0.index().cmp(&second.0.index())
-            .then_with(|| second.2.cmp(&first.2)));
+        let mut edges = Vec::with_capacity(graph.edge_count());
+        for edge in graph.edge_references() {
+            budget.work(1)?;
+            edges.push((edge.source(), edge.target(), *edge.weight()));
+        }
+        let mut sort_work = 0_usize;
+        edges.sort_unstable_by(|first, second| {
+            sort_work = sort_work.saturating_add(1);
+            first.0.index().cmp(&second.0.index()).then_with(|| second.2.cmp(&first.2))
+        });
+        budget.work(sort_work)?;
         graph.clear_edges();
         for (source, target, role) in edges {
+            budget.work(1)?;
             graph.add_edge(source, target, role);
         }
-        Ok((Self { graph }, work))
+        Ok((Self { graph }, budget.work))
     }
 
     pub fn graph(&self) -> &GraphStorage {
@@ -196,15 +205,17 @@ impl TypeGraph {
                 TypeNode::ConstructorTemplate { constructor, identity } => {
                     let physical = constructors.get(constructor.0 as usize)
                         .ok_or(TypeGraphError::InvalidConstructor(node.index()))?;
-                    if identity != &physical.identity || physical.result_rep != RuntimeRep::LiftedRef
-                        || physical.field_reps.len() != self.graph.edges(node).count() {
+                    let mut field_count = 0;
+                    for _ in self.graph.edges(node) { budget.work(1)?; field_count += 1; }
+                    if !budget.identity_eq(identity, &physical.identity)? || physical.result_rep != RuntimeRep::LiftedRef
+                        || physical.field_reps.len() != field_count {
                         return Err(TypeGraphError::InvalidConstructor(node.index()));
                     }
                     let parent = self.graph.edges_directed(node, petgraph::Incoming).next()
                         .ok_or(TypeGraphError::InvalidConstructor(node.index()))?;
                     match (&self.graph[parent.source()], parent.weight()) {
                         (TypeNode::Declaration { identity, .. }, TypeEdge::Constructor(tag))
-                            if identity == &physical.family && *tag == physical.tag => {}
+                            if budget.identity_eq(identity, &physical.family)? && *tag == physical.tag => {}
                         _ => return Err(TypeGraphError::InvalidConstructor(node.index())),
                     }
                     for edge in self.ordered_edges(node) {
@@ -217,8 +228,11 @@ impl TypeGraph {
                     }
                 }
                 TypeNode::Declaration { form: DeclarationForm::Data, .. } => {
-                    let count = self.graph.edges(node).filter(|edge|
-                        matches!(edge.weight(), TypeEdge::Constructor(_))).count();
+                    let mut count = 0;
+                    for edge in self.graph.edges(node) {
+                        budget.work(1)?;
+                        if matches!(edge.weight(), TypeEdge::Constructor(_)) { count += 1; }
+                    }
                     for edge in self.ordered_edges(node) {
                         budget.work(1)?;
                         if matches!(edge.weight(), TypeEdge::Constructor(_)) {
@@ -426,15 +440,18 @@ impl TypeGraph {
 }
 
 fn evidence_metadata_work(node: &TypeNode) -> usize {
-    let identity = |name: &SymbolIdentity| name.unit.len() + name.module.len()
-        + name.namespace.len() + name.occurrence.len() + name.record_parent.as_ref().map_or(0, String::len);
     match node {
         TypeNode::Root { binders, .. } => binders.len(),
-        TypeNode::Declaration { identity: name, parameters, .. } => identity(name) + parameters.len(),
-        TypeNode::ConstructorTemplate { identity: name, .. } => identity(name),
+        TypeNode::Declaration { identity: name, parameters, .. } => symbol_work(name).saturating_add(parameters.len()),
+        TypeNode::ConstructorTemplate { identity: name, .. } => symbol_work(name),
         TypeNode::Literal(TypeLiteral::Natural(value) | TypeLiteral::Symbol(value)) => value.len(),
         _ => 1,
     }
+}
+
+fn symbol_work(name: &SymbolIdentity) -> usize {
+    [&name.unit, &name.module, &name.namespace, &name.occurrence].into_iter()
+        .chain(name.record_parent.iter()).fold(0_usize, |work, text| work.saturating_add(text.len()))
 }
 
 impl TypeEdge {
@@ -471,6 +488,10 @@ impl Budget {
         if let Some(parent) = &identity.record_parent { self.text(parent.len())?; }
         Ok(())
     }
+    fn identity_eq(&mut self, first: &SymbolIdentity, second: &SymbolIdentity) -> Result<bool, TypeGraphError> {
+        self.work(symbol_work(first).max(symbol_work(second)))?;
+        Ok(first == second)
+    }
 }
 
 fn nominal(identity: &SymbolIdentity) -> bool {
@@ -494,6 +515,7 @@ fn validate_graph(graph: &GraphStorage, constructors: &[ConstructorDecl], limits
     if graph.edge_count() > limits.max_edges { return Err(TypeGraphError::Limit("edges")); }
     let mut budget = Budget { bytes: 0, work: 0, limits };
     let mut declarations = BTreeSet::new();
+    let mut templates = BTreeSet::new();
     for node in graph.node_indices() {
         budget.work(1)?;
         let index = node.index();
@@ -507,8 +529,8 @@ fn validate_graph(graph: &GraphStorage, constructors: &[ConstructorDecl], limits
             }
             TypeNode::Declaration { identity, parameters, form, .. } => {
                 if !nominal(identity) { return Err(TypeGraphError::InvalidIdentity(index)); }
-                if !declarations.insert(identity) { return Err(TypeGraphError::DuplicateDeclaration(index)); }
                 budget.identity(identity)?;
+                if !declarations.insert(identity) { return Err(TypeGraphError::DuplicateDeclaration(index)); }
                 budget.text(parameters.len())?;
                 match form {
                     DeclarationForm::Newtype { eta_arity } if *eta_arity as usize > parameters.len() =>
@@ -520,19 +542,20 @@ fn validate_graph(graph: &GraphStorage, constructors: &[ConstructorDecl], limits
                 }
             }
             TypeNode::ConstructorTemplate { constructor, identity } => {
+                if !templates.insert(constructor.0) { return Err(TypeGraphError::InvalidConstructor(index)); }
                 let physical = constructors.get(constructor.0 as usize)
                     .ok_or(TypeGraphError::InvalidConstructor(index))?;
-                if &physical.identity != identity || physical.result_rep != RuntimeRep::LiftedRef {
+                if !budget.identity_eq(identity, &physical.identity)? || physical.result_rep != RuntimeRep::LiftedRef {
                     return Err(TypeGraphError::InvalidConstructor(index));
                 }
                 // The derived identity is not another encoded string budget.
             }
             TypeNode::Literal(TypeLiteral::Natural(value)) => {
+                budget.text(value.len())?;
                 if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit())
                     || (value != "0" && value.starts_with('0')) {
                     return Err(TypeGraphError::InvalidLiteral(index));
                 }
-                budget.text(value.len())?;
             }
             TypeNode::Literal(TypeLiteral::Symbol(value)) => budget.text(value.len())?,
             _ => {}
@@ -581,11 +604,13 @@ fn validate_graph(graph: &GraphStorage, constructors: &[ConstructorDecl], limits
         required[node.index()] = need;
     }
     for node in graph.node_indices() {
+        budget.work(1)?;
         match &graph[node] {
             TypeNode::Root { binders, .. } => check_scope(graph, node, binders.len(), &required, &mut budget)?,
             TypeNode::Declaration { parameters, form, .. } => {
                 check_scope(graph, node, parameters.len(), &required, &mut budget)?;
                 for edge in graph.edges(node) {
+                    budget.work(1)?;
                     match (edge.weight(), form) {
                         (TypeEdge::AliasRhs, DeclarationForm::Newtype { eta_arity }) => {
                             if required[edge.target().index()] > *eta_arity as usize {
@@ -740,6 +765,7 @@ fn validate_roles(graph: &GraphStorage, node: TypeNodeId, constructors: &[Constr
                 return Err(TypeGraphError::InvalidConstructor(index));
             }
             for edge in graph.edges(node) {
+                budget.work(1)?;
                 if let TypeEdge::Field { ordinal, source_rep } = edge.weight() {
                     if physical.field_reps.get(*ordinal as usize) != Some(source_rep) {
                         return Err(TypeGraphError::InvalidConstructor(index));
@@ -747,11 +773,12 @@ fn validate_roles(graph: &GraphStorage, node: TypeNodeId, constructors: &[Constr
                 }
             }
             let mut incoming = graph.edges_directed(node, petgraph::Incoming);
+            budget.work(2)?;
             let parent = incoming.next().ok_or(TypeGraphError::InvalidConstructor(index))?;
             if incoming.next().is_some() { return Err(TypeGraphError::InvalidConstructor(index)); }
             match (&graph[parent.source()], parent.weight()) {
                 (TypeNode::Declaration { identity, form: DeclarationForm::Data, .. }, TypeEdge::Constructor(tag))
-                    if identity == &physical.family && *tag == physical.tag && *tag > 0 => {}
+                    if budget.identity_eq(identity, &physical.family)? && *tag == physical.tag && *tag > 0 => {}
                 _ => return Err(TypeGraphError::InvalidConstructor(index)),
             }
             true
@@ -768,6 +795,7 @@ fn validate_roles(graph: &GraphStorage, node: TypeNodeId, constructors: &[Constr
         let mut count = 0_usize;
         let expected = slots.iter().filter(|slot| slot.0 == 10).count();
         for edge in graph.edges(node).filter(|edge| matches!(edge.weight(), TypeEdge::Constructor(_))) {
+            budget.work(1)?;
             let TypeNode::ConstructorTemplate { constructor, .. } = &graph[edge.target()] else {
                 return Err(TypeGraphError::InvalidConstructor(index));
             };
@@ -992,6 +1020,50 @@ mod tests {
     }
 
     #[test]
+    fn identical_physical_layout_does_not_hide_template_kind_or_restriction_changes() {
+        let inventory = vec![physical(vec![RuntimeRep::LiftedRef])];
+        let mut input = GraphStorage::new();
+        let root = root(&mut input, RootDomain::Closed, vec![], "Reply 0 1");
+        let declaration = input.add_node(TypeNode::Declaration {
+            identity: identity("Reply", "type"), parameters: vec![ParameterFlag::NamedRequired; 2],
+            form: DeclarationForm::Data, restriction: SyntaxRestriction::None,
+        });
+        let template = input.add_node(TypeNode::ConstructorTemplate {
+            constructor: ConstructorId(0), identity: inventory[0].identity.clone(),
+        });
+        let kind = kind(&mut input);
+        let field = input.add_node(TypeNode::Bound(0));
+        let body = input.add_node(TypeNode::NominalApplication);
+        let zero = input.add_node(TypeNode::Literal(TypeLiteral::Natural("0".into())));
+        let one = input.add_node(TypeNode::Literal(TypeLiteral::Natural("1".into())));
+        input.add_edge(root, body, TypeEdge::Body);
+        input.add_edge(body, declaration, TypeEdge::Head);
+        input.add_edge(body, zero, TypeEdge::Argument(0));
+        input.add_edge(body, one, TypeEdge::Argument(1));
+        input.add_edge(declaration, kind, TypeEdge::BinderKind(0));
+        input.add_edge(declaration, kind, TypeEdge::BinderKind(1));
+        input.add_edge(declaration, template, TypeEdge::Constructor(1));
+        input.add_edge(template, field, TypeEdge::Field { ordinal: 0, source_rep: RuntimeRep::LiftedRef });
+        let original = publish(input.clone(), &inventory);
+        for change in 0..3 {
+            let mut changed = input.clone();
+            match change {
+                0 => *changed.node_weight_mut(field).unwrap() = TypeNode::Bound(1),
+                1 => *changed.node_weight_mut(kind).unwrap() = TypeNode::Literal(TypeLiteral::Symbol("other kind".into())),
+                _ => if let TypeNode::Declaration { restriction, .. } = changed.node_weight_mut(declaration).unwrap() {
+                    *restriction = SyntaxRestriction::EffectHead;
+                },
+            }
+            let changed = publish(changed, &inventory);
+            changed.check_constructor_pairing(&inventory).unwrap();
+            assert!(!original.declaration_identity_eq(declaration, &changed, declaration,
+                &mut TypeWorkBudget::new(10_000)).unwrap());
+            assert!(!original.rooted_identity_eq(root, &changed, root,
+                &mut TypeWorkBudget::new(10_000)).unwrap());
+        }
+    }
+
+    #[test]
     fn reachable_identity_remaps_storage_and_physical_ids_but_evidence_keeps_tables() {
         let physical = physical(vec![RuntimeRep::LiftedRef; 2]);
         let first_inventory = vec![physical.clone()];
@@ -1036,6 +1108,7 @@ mod tests {
     fn freeze_normalizes_adjacency_once_and_validation_work_is_returned() {
         let inventory = vec![physical(vec![RuntimeRep::LiftedRef; 2])];
         let (first, _, _) = recursive_graph(ConstructorId(0), &inventory, false);
+        let same_input = first.clone();
         let mut second = first.clone();
         let edges: Vec<_> = second.edge_references().map(|edge| (edge.source(), edge.target(), *edge.weight())).collect();
         second.clear_edges(); for (source, target, role) in edges.into_iter().rev() { second.add_edge(source, target, role); }
@@ -1043,7 +1116,7 @@ mod tests {
         let second = publish(second, &inventory);
         assert_eq!(first, second); assert_eq!(hash(&first), hash(&second)); assert!(work > first.graph().node_count() + first.graph().edge_count());
         let limits = GraphLimits { max_work: work - 1, ..GraphLimits::default() };
-        assert_eq!(TypeGraph::validate(first.graph().clone(), &inventory, limits), Err(TypeGraphError::Limit("work")));
+        assert_eq!(TypeGraph::validate(same_input, &inventory, limits), Err(TypeGraphError::Limit("work")));
         let mut budget = TypeWorkBudget::new(0);
         let root = first.graph().node_indices().find(|node| matches!(first.graph()[*node], TypeNode::Root { .. })).unwrap();
         assert_eq!(first.rooted_identity_eq(root, &first, root, &mut budget), Err(TypeGraphError::TraversalWork));
