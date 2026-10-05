@@ -1022,61 +1022,65 @@ async fn captured_host_scenario(scenario: HostedScenario) {
 
     transport.setup_ready.notify_one();
     let mut sessions = std::collections::HashSet::new();
-    for _ in 0..2 {
-        let request = campaign.while_root_live("initial captured child provider requests", tokio::time::timeout(Duration::from_secs(120), async {
-            tokio::select! {
-                biased;
-                settled = async {
-                    loop {
-                        let operation = parent_settlements.recv().await
-                            .expect("exact parent settlement observation must remain available");
-                        if operation.origin == root_origin && operation.call.0 == PENDING_CALL {
-                            return operation;
+    campaign.while_root_live(
+        "initial captured child provider requests",
+        tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, async {
+            for _ in 0..2 {
+                let request = {
+                    tokio::select! {
+                        biased;
+                        settled = async {
+                            loop {
+                                let operation = parent_settlements.recv().await
+                                    .expect("exact parent settlement observation must remain available");
+                                if operation.origin == root_origin && operation.call.0 == PENDING_CALL {
+                                    return operation;
+                                }
+                            }
+                        } => {
+                            assert_eq!(settled, transport.operation(&root_origin, PENDING_CALL));
+                            let result = scheduler.wait(&settled).await
+                                .expect("settlement event follows admitted retained terminal output");
+                            panic!("parent settled before both captured children started: {result:?}");
                         }
+                        request = requests_rx.recv() => request,
                     }
-                } => {
-                    assert_eq!(settled, transport.operation(&root_origin, PENDING_CALL));
-                    let result = scheduler.wait(&settled).await
-                        .expect("settlement event follows admitted retained terminal output");
-                    panic!("parent settled before both captured children started: {result:?}");
-                }
-                request = requests_rx.recv() => request,
+                }.expect("captured child provider observation closed before both requests");
+                transport
+                    .parent_prefix
+                    .lock()
+                    .as_ref()
+                    .expect("original request prefix captured")
+                    .assert_inherited(&request);
+                assert!(request
+                    .input
+                    .iter()
+                    .all(|item| item.0["call_id"] != PENDING_CALL && item.0["call_id"] != REUSE_CALL));
+                let parent = transport.operation(&root_origin, PENDING_CALL);
+                assert!(
+                    runtime
+                        .store()
+                        .claims(&parent.call)
+                        .unwrap()
+                        .iter()
+                        .any(|claim| claim.operation == parent
+                            && claim.request == parent.request
+                            && claim.state == harness::store::ClaimState::Pending),
+                    "original exact parent operation settled before both children were offered replies"
+                );
+                let (prefix, incarnation) = request.session_id.rsplit_once(':').unwrap();
+                let (run, actor) = prefix.rsplit_once(':').unwrap();
+                sessions.insert(ConversationIdentity::Embedded {
+                    run: run.into(),
+                    actor: AgentPath(actor.into()),
+                    incarnation: incarnation.into(),
+                });
             }
-        }))
-        .await
-        .unwrap_or_else(|error| panic!("{error}"))
-        .expect("captured children did not start while the parent call was pending")
-        .unwrap();
-        transport
-            .parent_prefix
-            .lock()
-            .as_ref()
-            .expect("original request prefix captured")
-            .assert_inherited(&request);
-        assert!(request
-            .input
-            .iter()
-            .all(|item| item.0["call_id"] != PENDING_CALL && item.0["call_id"] != REUSE_CALL));
-        let parent = transport.operation(&root_origin, PENDING_CALL);
-        assert!(
-            runtime
-                .store()
-                .claims(&parent.call)
-                .unwrap()
-                .iter()
-                .any(|claim| claim.operation == parent
-                    && claim.request == parent.request
-                    && claim.state == harness::store::ClaimState::Pending),
-            "original exact parent operation settled before both children were offered replies"
-        );
-        let (prefix, incarnation) = request.session_id.rsplit_once(':').unwrap();
-        let (run, actor) = prefix.rsplit_once(':').unwrap();
-        sessions.insert(ConversationIdentity::Embedded {
-            run: run.into(),
-            actor: AgentPath(actor.into()),
-            incarnation: incarnation.into(),
-        });
-    }
+        }),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("{error}"))
+    .expect("both captured children did not start within their shared preparation budget while the parent call was pending");
     assert_eq!(sessions.len(), 2);
     eprintln!(
         "[captured-engine] two child provider branches ready while exact parent claim is pending"
