@@ -21,19 +21,17 @@ import Tidepool.TypePolicy qualified as TypePolicy
 import Data.Text qualified as Text
 import System.Directory (createDirectoryIfMissing)
 import System.FilePath ((</>))
-import Tidepool.ExecutionProjection (ProjectionError)
+import Tidepool.CompilerProducts (prepareCompilerProjectionContext)
+import Tidepool.ExecutionProjection (ProjectionContext(..), projectPreparedTarget)
 import Tidepool.ExecutionSchema
 import Tidepool.GhcPipeline
   ( PipelineSelection(PreparedStg), PreparedPipelineResult(..), PipelineResult(..)
   , finalizedHomeModInfo, runPipelineSelected )
 
--- Compile once, then select each entry independently to exercise the same
--- reachable-owner filtering used by notebook artifact production.
-runTypeEvidenceChecks :: FilePath
-  -> (PreparedPipelineResult -> String -> Either ProjectionError WireProgram)
-  -> (PreparedPipelineResult -> String -> [String] -> Either ProjectionError WireProgram)
-  -> IO ()
-runTypeEvidenceChecks directory project projectWithAux = do
+-- Compile the original and alpha control once each, then select entries using
+-- the same compiler authorities and reachable owners as production.
+runTypeEvidenceChecks :: FilePath -> IO ()
+runTypeEvidenceChecks directory = do
   let target = directory </> "TypeEvidence.hs"
   createDirectoryIfMissing True (directory </> "Tidepool" </> "Effects")
   writeFile (directory </> "Tidepool" </> "Effects" </> "Core.hs") (unlines
@@ -69,8 +67,17 @@ runTypeEvidenceChecks directory project projectWithAux = do
   writeFile target alphaFixture
   secondResult <- runPipelineSelected PreparedStg target [directory]
   writeFile target fixture
-  let program entry = either
-        (ioError . userError . ((entry ++ ": ") ++) . show) pure (project result entry)
+  originalContext <- contextFor result
+  alphaContext <- contextFor secondResult
+  let project context prepared entry auxiliary = projectPreparedTarget
+        (context { projectionEntry = (projectionEntry context)
+          { symbolOccurrence = Text.pack entry }
+        , projectionAuxiliaryRoots =
+            [(projectionEntry context) { symbolOccurrence = Text.pack name } | name <- auxiliary]
+        }) (pprModules prepared)
+      program entry = either
+        (ioError . userError . ((entry ++ ": ") ++) . show) pure
+        (project originalContext result entry [])
       answer entry = do
         wire <- program entry
         case programSites wire of
@@ -145,7 +152,8 @@ runTypeEvidenceChecks directory project projectWithAux = do
     other -> ioError (userError ("Fetch reply is not data evidence: " ++ show other))
   echoWire <- program "echoRequest"
   echoNode <- verbAnswer echoWire "Echo"
-  alphaEchoWire <- either (ioError . userError . show) pure (project secondResult "echoRequest")
+  alphaEchoWire <- either (ioError . userError . show) pure
+    (project alphaContext secondResult "echoRequest" [])
   alphaEchoNode <- verbAnswer alphaEchoWire "Echo"
   assert (case (echoNode, alphaEchoNode) of
     (TypeUnconstructible reason first, TypeUnconstructible otherReason second) ->
@@ -165,7 +173,8 @@ runTypeEvidenceChecks directory project projectWithAux = do
   assert (null (programConstructorReplies profileWire))
     "an effect-list witness acquired a lifted reply graph"
   firstChoices <- mapM program ["polyChoice", "polyChoiceNested"]
-  secondChoices <- mapM (\entry -> either (ioError . userError . show) pure (project secondResult entry))
+  secondChoices <- mapM (\entry -> either (ioError . userError . show) pure
+    (project alphaContext secondResult entry []))
     ["polyChoice", "polyChoiceNested"]
   mapM_ (\wire -> do
       choice <- verbAnswer wire ":|"
@@ -224,7 +233,7 @@ runTypeEvidenceChecks directory project projectWithAux = do
   -- observes an 'Either'.
   auxWire <- either
     (ioError . userError . ("auxiliaryRootDecode: " ++) . show) pure
-    (projectWithAux result "unrelated" ["auxiliaryRootDecode"])
+    (project originalContext result "unrelated" ["auxiliaryRootDecode"])
   let auxConstructorNames =
         map (symbolOccurrence . constructorIdentity) (programConstructors auxWire)
   assert (all (`elem` auxConstructorNames) ["Left", "Right"])
@@ -232,6 +241,11 @@ runTypeEvidenceChecks directory project projectWithAux = do
       ++ show auxConstructorNames)
   verifyOriginalReplyShapes result secondResult
  where
+  contextFor prepared = case
+      [pmModule modul | modul <- pprModules prepared,
+        moduleNameString (moduleName (pmModule modul)) == "TypeEvidence"] of
+    [owner] -> prepareCompilerProjectionContext prepared mempty owner "unrelated" [] Nothing
+    _ -> ioError (userError "type evidence fixture lacks its unique original module")
   assert condition message = unless condition (ioError (userError message))
   isRefusal TypeUnconstructible{} = True
   isRefusal _ = False

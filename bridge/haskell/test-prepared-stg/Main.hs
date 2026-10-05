@@ -926,9 +926,6 @@ fullMain = do
         , "marker = generationMarker"
         ])
       runTypeEvidenceChecks dir
-        (\result entry -> projectEntry result "TypeEvidence" entry mempty)
-        (\result entry auxEntries ->
-          projectEntryWithAux result "TypeEvidence" entry auxEntries mempty)
       verifyPreparedPrivateImports
       verifyConstructorRepresentations dir
       verifyJsonDependencyAuthority dir
