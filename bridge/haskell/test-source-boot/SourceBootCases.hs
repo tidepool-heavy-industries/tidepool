@@ -3259,6 +3259,44 @@ packageInputs = withScratch $ \work -> do
       let inputPath = directory </> "compiler-inputs.cbor"
       readCompilerInputCodecFacts directory inputPath (directory </> "dependencies.json")
 
+sessionNativeBodyDemand :: IO ()
+sessionNativeBodyDemand = withTiming $ withScratch $ \work -> do
+  forM_ ["OptionalRoot", "OptionalSupport", "OptionalAnchor", "OptionalWarmer"] $ \name ->
+    copyFile ("test-source-boot/fixtures" </> name ++ ".hs") (work </> name ++ ".hs")
+  copyFile "test-source-boot/fixtures/CheckedValueG2.hs" (work </> "CheckedValueG2.hs")
+  copyFile "test-source-boot/fixtures/CheckedValueConsumer.hs" (work </> "CheckedValueConsumer.hs")
+  createDirectoryIfMissing True (work </> "Tidepool/Session/Val")
+  valueProducer <- runPipelineSelected (PreparedProducts Nothing)
+    (work </> "CheckedValueConsumer.hs") [work]
+  valueOwner <- maybe (fail "session tier fixture omitted its value owner") pure
+    (parseValModule "Tidepool.Session.Val.G2")
+  valueIface <- maybe (fail "session tier fixture omitted its value interface") pure
+    (Map.lookup (mkModuleName "Tidepool.Session.Val.G2") (pprProductInterfaces valueProducer))
+  writeBinIface (targetProfile (hsc_dflags (prHscEnv (pprPipelineResult valueProducer))))
+    QuietBinIFace NormalCompression (sessionHiPath work valueOwner) valueIface
+  renameFile (work </> "CheckedValueG2.hs") (work </> "CheckedValueG2.retained-source")
+  let scope = emptySessionScope {ssRoot=work, ssValIfaces=[valueOwner]}
+      compileTarget compile name = compile (PreparedProducts Nothing) Set.empty GeneralCompile
+        (Just scope) (work </> name) [work] Nothing
+  withResidentPipelineSelected [work] $ \compile -> do
+    first <- compileTarget compile "OptionalRoot.hs"
+    unless (preparedNames first == ["OptionalRoot"]
+        && all (`Map.member` pprFinalizedModules first)
+          (map mkModuleName ["OptionalSupport", "OptionalAnchor"])) $
+      fail ("session request prepared unrelated native bodies or skipped source finalization: "
+        ++ show (preparedNames first))
+    later <- compileTarget compile "OptionalWarmer.hs"
+    unless (all (`elem` preparedNames later) ["OptionalWarmer", "OptionalSupport", "OptionalAnchor"]
+        && Map.member (mkModuleName "OptionalSupport") (pprFinalizedModules later)) $
+      fail ("later session request did not activate its newly demanded source bodies: "
+        ++ show (preparedNames later))
+    writeFile (work </> "OptionalSupport.hs") "module OptionalSupport where\noptional ::\n"
+    refused <- try (compileTarget compile "OptionalRoot.hs")
+      :: IO (Either SomeException PreparedPipelineResult)
+    unless (case refused of Left _ -> True; Right _ -> False) $
+      fail "session demand skipped invalid source in an unused imported module"
+  putStrLn "session native bodies: unused imports stay validation-only, then prepare when a later target demands them"
+
 -- Reuse real compiled owner bytes and real installed roots. Copies plus an
 -- isolated finder make mutation tests local without changing the Nix packages.
 verifyCollectivePackageProof :: FilePath -> PreparedPipelineResult -> IO ()

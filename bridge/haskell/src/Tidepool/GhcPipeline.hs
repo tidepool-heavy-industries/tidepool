@@ -741,6 +741,8 @@ data TierPolicy
 data PipelineVariant = PipelineVariant
   { pvLabel :: String
     -- ^ Prefix on this variant's own error messages.
+  , pvPurpose :: CompilePurpose
+    -- ^ Original request purpose, shared by all compile variants.
   , pvExactScope :: Maybe ExactScope
     -- ^ Admitted immutable declaration owners, independent of live values.
   , pvCompilerProducer :: Maybe CompilerProducerIdentity
@@ -760,6 +762,17 @@ candidateManifestFor :: PipelineSelection result -> Maybe FilePath
 candidateManifestFor (PreparedProducts path) = path
 candidateManifestFor (CheckedEnvironmentProducts path) = Just path
 candidateManifestFor _ = Nothing
+
+-- Body demand is a property of the request, not of whether its environment
+-- came from a session. GHC still loads and finalizes the complete selected
+-- source graph for both tiers; only the native STG handoff is demand-driven.
+nativeBodyTier :: CompilePurpose -> PipelineSelection result -> Map.Map ModuleName candidate -> TierPolicy
+nativeBodyTier purpose selection candidates
+  -- Certification and admitted candidate products promise complete native
+  -- bodies. Ordinary execution needs only the target's Core reference closure.
+  | originalPurpose purpose == CertifyHomeProductsCompile = OptimizeEveryModule
+  | isJust (candidateManifestFor selection) && not (Map.null candidates) = OptimizeEveryModule
+  | otherwise = OptimizeCoreReachable
 
 compilerProducerFor :: PipelineVariant -> Maybe String
 compilerProducerFor variant = case pvCompilerProducer variant of
@@ -953,7 +966,6 @@ data CompilePlan = CompilePlan
     -- session path injects value ifaces here, after their declaration-module
     -- dependencies have entered the HPT and before the first importer needs
     -- them.
-  , cpTier :: TierPolicy
   , cpBeforeMerge :: Ghc ()
     -- ^ Runs after the compile loop and its phase emits, before the guts are
     -- merged. The session path reports accumulated injection timing here.
@@ -1736,6 +1748,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
       Nothing -> pure Map.empty
       Just manifest -> certifyModuleCandidates compilerViewDirectory (compilerProducerFor variant) selectedExact
         sourceFreeOwners manifest modGraphRaw path
+    let bodyTier = nativeBodyTier (pvPurpose variant) selection acceptedCandidates
     -- 'ghc_setup' phase (TIDEPOOL_TIMING): 'guessTarget'/'setTargets' + this
     -- 'depanal' call, nothing else, on EVERY caller — a lone compile also
     -- includes its session bootstrap because 'runCompile' captures
@@ -1799,7 +1812,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                                    _ -> liftIO $ ioError $ userError
                                      "source-selected native candidate lacks its current GHC executable"
                            installPreparedInterface name hmi
-                 , cpTier = OptimizeEveryModule }
+                 }
     liftIO (emitCount timing "candidate_executable_required"
       (toInteger (length [() | candidate <- Map.elems acceptedCandidates
         , admittedCandidateLoading candidate == CandidateLoadForExecution])))
@@ -2491,7 +2504,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                                   , "quasiquotes=" ++ renderQuasiQuoteOrigins (moduleFactQuasiQuoteOrigins (payloadFacts (gmePayload entry))) ]) (Just entry)
                                 pure Nothing
           let interfaceUses = zipWith homeInterfaceUse summaries (homeInterfaceConsumers summaries)
-          (observations, results, preparedModules, mReachable) <- case cpTier plan of
+          (observations, results, preparedModules, mReachable) <- case bodyTier of
             OptimizeEveryModule -> do
               pairs <- forM (zip summaries interfaceUses) $ \(modSum, interfaceUse) -> do
                 cpBeforeModule plan modSum
@@ -3899,6 +3912,7 @@ normalVariant purpose path = do
   targetModName' <- targetModuleNameFor path
   pure PipelineVariant
    { pvLabel = "runPipeline"
+   , pvPurpose = purpose
    , pvExactScope = Nothing
    , pvCompilerProducer = Nothing
    , pvGeneratedScaffold = generatedRecipe purpose
@@ -3920,8 +3934,6 @@ normalVariant purpose path = do
       , cpKeepPrivateResult = effectivePurpose == OriginalDeclarationCompile
       , cpResultBinders = [scaffoldOutputBase, scaffoldTargetName]
       , cpBeforeModule = \_ -> pure ()
-      , cpTier = if effectivePurpose == CertifyHomeProductsCompile
-          then OptimizeEveryModule else OptimizeCoreReachable
       , cpBeforeMerge = pure ()
       , cpFinalEnv = id
       }
@@ -4419,6 +4431,7 @@ sessionVariant purpose scope path = do
       excludedOwners = excludedVal ++ excludedExact
   pure PipelineVariant
    { pvLabel = "runSessionPipeline"
+   , pvPurpose = purpose
    , pvExactScope = exact
    , pvCompilerProducer = Nothing
    , pvGeneratedScaffold = generatedRecipe purpose
@@ -4681,7 +4694,6 @@ sessionVariant purpose scope path = do
                     (`Set.union` Set.fromList (map renderSessionModule needed
                       ++ [mkModuleName (completedValueModule value) | captureCompleted, value <- completedValues]))
                   modifyIORef' injectMsRef (+ injectMs)
-        , cpTier = OptimizeEveryModule
         , cpBeforeMerge =
             do liftIO (readIORef injectMsRef >>= emitPhase timing "inject")
                forM_ selectedExact $ \admitted -> do

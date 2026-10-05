@@ -51,6 +51,7 @@ tests = testGroup "source-boot"
   , testCase "loaded exact metadata" $ exactLoadedMetadata
   , testCase "quasiquote codegen transition" $ quasiQuoteCodegenTransition
   , testCase "package inputs" $ withTiming packageInputs
+  , testCase "session native body demand" sessionNativeBodyDemand
   , testCase "selected home instance edges" $ selectedHomeInstanceEdges
   , testCase "ordered resolution paths" $ resolutionPaths
   , testCase "original package cohort" $ withEffects $ \effects -> withScratch (originalPackageCohort effects)
