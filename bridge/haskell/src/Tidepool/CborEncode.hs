@@ -2,6 +2,7 @@ module Tidepool.CborEncode
   ( encodeMetadata
   , encodeTurnOut
   , encodeCellOut
+  , encodeBoundBinder
   ) where
 
 import Codec.CBOR.Encoding

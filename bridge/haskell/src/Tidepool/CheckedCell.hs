@@ -4,7 +4,7 @@ module Tidepool.CheckedCell
   ( CheckedSignature(..), CheckedSignatureName(..)
   , CellExpressionPlan(..), ExpressionLiftPlan(..), ExpressionPresentation(..)
   , encodeCellExpressionPlan, decodeCellExpressionPlan
-  , captureCheckedSignature, encodeCheckedSignature, decodeCheckedSignature
+  , captureCheckedSignature, encodeCheckedSignature, decodeCheckedSignature, resolveCheckedSignature
   , RequestTypeSignatures(..), RequestHelperRecipe(..), captureRequestTypeSignatures
   , encodeRequestTypeSignatures, decodeRequestTypeSignatures, renderRequestTypeSignatures
   , CheckedTypeWitness, captureCheckedTypeWitness, sealCheckedTypeWitness

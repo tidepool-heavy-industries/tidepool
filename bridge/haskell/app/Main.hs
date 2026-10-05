@@ -93,6 +93,7 @@ import Tidepool.ExecutionSource
   , executionIdentityKey, executionSourceProspectiveReferences )
 import Tidepool.DeclarationJoin
   ( DeclarationOperation(..), readDeclarationOperation, validateDeclarationJoin
+  , HostBindingInterfaceInput(..), encodeHostBindingInterface
   , DeclarationExport(..), ExportIdentity(..), ExportNamespace(..)
   , renderDeclarationJoinOutcome, inspectDeclarationArtifacts
   , renderDeclarationInventoryOutcome )
@@ -129,17 +130,19 @@ import Tidepool.PlannedDeclaration
   , renderPlannedDeclarationInventory, plannedInterfaceFingerprint )
 import Tidepool.Session
   ( SessionScope(..), preparedScaffoldTargetName, preparedResumeTargetName
+  , SessionModule(..), SessionModuleKind(..), Generation(..)
   , preparedApplyEntryTargetName, preparedApplyValueTargetName
   , sessionHiPath, sessionModuleString )
 import Tidepool.FatIface
   ( FatIfaceCache, newFatIfaceCache, evictFatIfaceMatching, readExactInterface
   , OwnerInterfaceCache, newOwnerInterfaceCache, evictOwnerInterfaceMatching )
 import Tidepool.SessionArtifacts
-  ( prepareSessionBindings, sessionBindingRepresentations, writeSessionBindings, parseValModule )
+  ( prepareSessionBindings, sessionBindingRepresentations, writeSessionBindings, parseValModule
+  , emitHostBindingInterface )
 import Tidepool.Metadata
   ( collectDataCons, dcToMeta, mergeMetaPreserving, targetBindingHasIO
   , wiredInDataCons )
-import Tidepool.CborEncode (encodeMetadata, encodeTurnOut, encodeCellOut)
+import Tidepool.CborEncode (encodeMetadata, encodeTurnOut, encodeCellOut, encodeBoundBinder)
 import Tidepool.Timing (readTimingEnabled, timePhase, timeDetailPhase)
 import Tidepool.TurnSource
   ( extractModuleName, spliceTemplate, renderImportBinder
@@ -326,13 +329,28 @@ runDeclarationOperation args manifest = do
     out <- maybe (fail "declaration operation requires an output path") pure
       (requestDeclarationJoinOut args)
     operation <- readDeclarationOperation manifest
-    rendered <- withExactInterfaceTransaction (requestIncludes args) $ \env ->
+    withExactInterfaceTransaction (requestIncludes args) $ \env ->
       case operation of
         InspectInventory artifacts -> renderDeclarationInventoryOutcome
-          <$> inspectDeclarationArtifacts env artifacts
+          <$> inspectDeclarationArtifacts env artifacts >>= writeFile out
         ValidateJoin input -> renderDeclarationJoinOutcome
-          <$> validateDeclarationJoin env input
-    writeFile out rendered
+          <$> validateDeclarationJoin env input >>= writeFile out
+        EmitHostBindingInterface input -> do
+          binder <- emitHostBindingInterface env (hostInterfaceProducer input)
+            (hostInterfaceGeneration input) (hostInterfaceBinder input) (hostInterfaceSignature input)
+            (hostInterfaceScope input) (hostInterfaceRoot input)
+          let generation = hostInterfaceGeneration input
+              owner = SessionModule ValMod (Generation generation)
+          interface <- BS.readFile (sessionHiPath (hostInterfaceRoot input) owner)
+          BS.writeFile out (toStrictByteString $
+            encodeListLen 9 <> encodeString "TPHOSTBINDINGINTERFACERECEIPT" <> encodeString "1"
+            <> encodeString (T.pack (shaHex (encodeHostBindingInterface input)))
+            <> encodeString (T.pack (hostInterfaceProducer input))
+            <> encodeString (T.pack (hostInterfaceAdmission input))
+            <> encodeWord64 generation <> encodeBoundBinder binder
+            <> encodeString (T.pack (shaHex interface))
+            <> encodeString (T.pack (shaHex (toStrictByteString
+              (encodeCheckedSignature (hostInterfaceSignature input))))))
   reportDiags result
 
 runInspectionMode :: Compiler -> WorkerRequest -> FilePath -> IO ExitCode

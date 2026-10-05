@@ -4,10 +4,11 @@ module Tidepool.SessionArtifacts
   , prepareSessionBindings
   , sessionBindingRepresentations
   , writeSessionBindings
+  , emitHostBindingInterface
   , parseValModule
   ) where
 
-import Control.Monad (forM_)
+import Control.Monad (forM_, unless, when)
 import Control.Monad (forM)
 import Data.List (nub, isPrefixOf)
 import Data.Data (Data, Typeable, cast, gmapQ)
@@ -31,10 +32,11 @@ import GHC.Types.Name (nameModule_maybe, nameOccName)
 import GHC.Unit.Module (moduleName, moduleNameString, moduleUnit)
 import GHC.Unit.Types (unitString)
 import GHC.Unit.Home (homeUnitAsUnit)
-import GHC.Driver.Env (hsc_home_unit)
+import GHC.Driver.Env (HscEnv, hsc_home_unit)
 import GHC.Types.Name.Occurrence (OccName, mkVarOcc, occNameString)
 import Data.Word (Word64)
 import System.IO (hPutStrLn, stderr)
+import System.Directory (doesPathExist)
 
 import Tidepool.Binders (BoundBinder(..), ValueTier(..))
 import Tidepool.GhcPipeline
@@ -50,7 +52,11 @@ import Tidepool.Session
   , scaffoldTargetName, scaffoldOutputBase
   , sessionModuleString, writeSessionIface )
 import Tidepool.Session (sessionHiPath)
-import Tidepool.ExactHydration (ExactIfaceArtifact(..))
+import Tidepool.ExactHydration
+  ( ExactIfaceArtifact(..), freshExactState, readExactIfaceArtifacts, hydrateExactScope )
+import Tidepool.ExactScope
+  ( ExactScope(..), readExactScope, revalidateExactScope, scopeCanonicalInterfaces )
+import Tidepool.CheckedCell (CheckedSignature, resolveCheckedSignature)
 import Tidepool.PackageWitness (PackageImportEvidence(..), CompilerProvidedImport(..), encodePackageImports, packageImportRoot)
 import qualified Crypto.Hash.SHA256 as SHA256
 import Numeric (showHex)
@@ -96,9 +102,46 @@ mkBoundBinders names generation root result = do
 
 writeSessionBindings :: Word64 -> FilePath -> PreparedSessionBindings -> IO [BoundBinder]
 writeSessionBindings generation root (PreparedSessionBindings result bindings) = do
-  let hsc = prHscEnv result
+  fixities <- boundBinderFixities [name | (name, _, _, _) <- bindings] (prTargetTcGblEnv result)
+  writeNativeSessionBindings (prHscEnv result) generation root bindings fixities
+
+-- Only retained compiler interfaces supply the signature's original Names.
+-- This operation emits a fresh type-only value interface without compiling code.
+emitHostBindingInterface
+  :: HscEnv -> String -> Word64 -> String -> CheckedSignature -> FilePath -> FilePath
+  -> IO BoundBinder
+emitHostBindingInterface initial producer generation name signature manifest root = do
+  scope <- readExactScope manifest >>= either fail pure
+  unless (scopeProducerSha256 scope == producer) (fail "host interface producer differs from exact scope")
+  fresh <- freshExactState initial
+  revalidateExactScope fresh scope >>= either fail pure
+  let artifacts = [artifact | (artifact, _, _) <- scopeInterfaces scope]
       sessionModule = SessionModule ValMod (Generation generation)
-      bindNames = [name | (name, _, _, _) <- bindings]
+      path = sessionHiPath root sessionModule
+  unless (all ((/= sessionModuleString sessionModule) . exactModule) artifacts)
+    (fail "host interface reservation already exists in exact scope")
+  forM_ [path, path ++ ".packages", path ++ ".requirements"] $ \output -> do
+    exists <- doesPathExist output
+    when exists (fail "host interface reservation output already exists")
+  loaded <- readExactIfaceArtifacts fresh artifacts >>= either fail pure
+  hydrated <- hydrateExactScope fresh loaded
+  (ty, _) <- resolveCheckedSignature hydrated signature
+  authorities <- resolveHostBindingAuthorities [ty] hydrated (scopeCanonicalInterfaces scope)
+  representation <- maybe (fail "checked signature has no authenticated host representation") pure
+    (hostBindingRepresentationForType authorities ty)
+  binders <- writeNativeSessionBindings hydrated generation root [(name, ty, ty, Just representation)] []
+  revalidateExactScope hydrated scope >>= either fail pure
+  case binders of
+    [binder] -> pure binder
+    _ -> fail "host interface did not issue exactly one binder"
+
+writeNativeSessionBindings
+  :: HscEnv -> Word64 -> FilePath
+  -> [(String, Type, Type, Maybe HostBindingRepresentation)] -> [(OccName, Fixity)]
+  -> IO [BoundBinder]
+writeNativeSessionBindings hsc generation root bindings fixities = do
+  let
+      sessionModule = SessionModule ValMod (Generation generation)
       persistedTypes = [persisted | (_, _, persisted, _) <- bindings]
       build (name, ty, persistedType, representation) =
         let
@@ -112,7 +155,6 @@ writeSessionBindings generation root (PreparedSessionBindings result bindings) =
         in (BoundBinder name varId moduleName tier displayType rootHead hostAuthority, occurrence, persistedType)
       built = map build bindings
       binders = [binder | (binder, _, _) <- built]
-  fixities <- boundBinderFixities bindNames (prTargetTcGblEnv result)
   iface <- mkThinSessionIfaceWithFixities hsc sessionModule [(occ, ty) | (_, occ, ty) <- built] fixities
   writeSessionIface hsc root sessionModule iface
   let path = sessionHiPath root sessionModule

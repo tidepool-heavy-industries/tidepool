@@ -11,6 +11,7 @@ module Tidepool.DeclarationJoin
   , DeclarationInventory(..), DeclarationOperation(..), DeclarationInventoryOutcome(..)
   , readDeclarationOperation, encodeDeclarationInventory, inspectDeclarationArtifacts
   , renderDeclarationInventoryOutcome
+  , HostBindingInterfaceInput(..), encodeHostBindingInterface
   , renderDeclarationSelection
   ) where
 
@@ -64,6 +65,7 @@ import System.FilePath (isAbsolute, takeDirectory)
 import System.IO (openBinaryTempFile, hClose)
 import System.Posix.Files (createLink)
 import Tidepool.ExactHydration
+import Tidepool.CheckedCell (CheckedSignature, decodeCheckedSignature, encodeCheckedSignature)
 import Tidepool.Json (jsonString)
 import Tidepool.PackageWitness
   ( PackageImportRoot(..), PackageImportEvidence(..), emptyPackageImports, readPackageImports, sealPackageImports, validatePackageImportRoot )
@@ -629,7 +631,23 @@ data DeclarationInventory = DeclarationInventory
   { inventoryArtifact :: DeclarationArtifact, inventoryExports :: [DeclarationExport]
   , inventoryInstances :: InstanceInventory
   } deriving (Eq, Show)
+data HostBindingInterfaceInput = HostBindingInterfaceInput
+  { hostInterfaceProducer :: String, hostInterfaceAdmission :: String
+  , hostInterfaceGeneration :: Word64, hostInterfaceBinder :: String
+  , hostInterfaceSignature :: CheckedSignature, hostInterfaceScope :: FilePath
+  , hostInterfaceRoot :: FilePath
+  } deriving (Eq, Show)
+
+encodeHostBindingInterface :: HostBindingInterfaceInput -> BS.ByteString
+encodeHostBindingInterface input = toStrictByteString $
+  encodeListLen 9 <> wireText "TPHOSTBINDINGINTERFACE" <> wireText "1"
+  <> wireText (hostInterfaceProducer input) <> wireText (hostInterfaceAdmission input)
+  <> encodeWord64 (hostInterfaceGeneration input) <> wireText (hostInterfaceBinder input)
+  <> encodeCheckedSignature (hostInterfaceSignature input)
+  <> wireText (hostInterfaceScope input) <> wireText (hostInterfaceRoot input)
+
 data DeclarationOperation = InspectInventory [DeclarationArtifact] | ValidateJoin DeclarationJoinInput
+  | EmitHostBindingInterface HostBindingInterfaceInput
   deriving (Eq, Show)
 data DeclarationInventoryOutcome = DeclarationInventoryOutcome
   { inspectedArtifacts :: [DeclarationArtifact]
@@ -644,6 +662,12 @@ readDeclarationOperation path = do
   case deserialiseFromBytes (decodeListLen >> text) (BL.fromStrict bytes) of
     Left failure -> fail (show failure)
     Right (_, "TPDJOIN") -> ValidateJoin <$> readDeclarationJoin path
+    Right (_, "TPHOSTBINDINGINTERFACE") -> case deserialiseFromBytes decodeHostInterface (BL.fromStrict bytes) of
+      Left failure -> fail (show failure)
+      Right (remaining, input) -> do
+        unless (BL.null remaining && encodeHostBindingInterface input == bytes)
+          (fail "host interface operation must be canonical CBOR with no trailing bytes")
+        pure (EmitHostBindingInterface input)
     Right (_, "TPDINVENTORY") -> case deserialiseFromBytes decodeInventory (BL.fromStrict bytes) of
       Left failure -> fail (show failure)
       Right (remaining, artifacts) -> do
@@ -652,6 +676,18 @@ readDeclarationOperation path = do
         pure (InspectInventory artifacts)
     _ -> fail "unsupported declaration operation"
   where
+    decodeHostInterface = do
+      array 9
+      magic <- text
+      version <- text
+      unless (magic == "TPHOSTBINDINGINTERFACE" && version == "1")
+        (fail "unsupported host interface operation")
+      producer <- digest
+      admission <- digest
+      generation <- decodeWord64
+      unless (generation > 0) (fail "host interface generation must be nonzero")
+      HostBindingInterfaceInput producer admission generation <$> nonempty
+        <*> decodeCheckedSignature <*> absolutePath <*> absolutePath
     decodeInventory = do
       array 3
       magic <- text
