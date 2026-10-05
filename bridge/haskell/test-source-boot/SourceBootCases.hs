@@ -3263,9 +3263,26 @@ sessionNativeBodyDemand :: IO ()
 sessionNativeBodyDemand = withTiming $ withScratch $ \work -> do
   forM_ ["OptionalRoot", "OptionalSupport", "OptionalAnchor", "OptionalWarmer"] $ \name ->
     copyFile ("test-source-boot/fixtures" </> name ++ ".hs") (work </> name ++ ".hs")
-  copyFile "test-source-boot/fixtures/CheckedValueG2.hs" (work </> "CheckedValueG2.hs")
+  writeFile (work </> "OptionalRoot.hs") $ unlines
+    [ "module OptionalRoot where"
+    , "import OptionalSupport ()"
+    , "import OptionalAnchor ()"
+    , "import Tidepool.Session.Val.G2 (x)"
+    , "result :: Int"
+    , "result = x - 41"
+    ]
+  writeFile (work </> "OptionalWarmer.hs") $ unlines
+    [ "module OptionalWarmer where"
+    , "import OptionalSupport"
+    , "import OptionalAnchor"
+    , "import Tidepool.Session.Val.G2 (x)"
+    , "result :: Int"
+    , "result = if optional then anchor + x else 0"
+    ]
   copyFile "test-source-boot/fixtures/CheckedValueConsumer.hs" (work </> "CheckedValueConsumer.hs")
-  createDirectoryIfMissing True (work </> "Tidepool/Session/Val")
+  let valueSource = work </> "Tidepool/Session/Val/G2.hs"
+  createDirectoryIfMissing True (takeDirectory valueSource)
+  copyFile "test-source-boot/fixtures/CheckedValueG2.hs" valueSource
   valueProducer <- runPipelineSelected (PreparedProducts Nothing)
     (work </> "CheckedValueConsumer.hs") [work]
   valueOwner <- maybe (fail "session tier fixture omitted its value owner") pure
@@ -3274,19 +3291,26 @@ sessionNativeBodyDemand = withTiming $ withScratch $ \work -> do
     (Map.lookup (mkModuleName "Tidepool.Session.Val.G2") (pprProductInterfaces valueProducer))
   writeBinIface (targetProfile (hsc_dflags (prHscEnv (pprPipelineResult valueProducer))))
     QuietBinIFace NormalCompression (sessionHiPath work valueOwner) valueIface
-  renameFile (work </> "CheckedValueG2.hs") (work </> "CheckedValueG2.retained-source")
+  renameFile valueSource (valueSource ++ ".retained-source")
   let scope = emptySessionScope {ssRoot=work, ssValIfaces=[valueOwner]}
       compileTarget compile name = compile (PreparedProducts Nothing) Set.empty GeneralCompile
         (Just scope) (work </> name) [work] Nothing
   withResidentPipelineSelected [work] $ \compile -> do
     first <- compileTarget compile "OptionalRoot.hs"
+    firstValueRequirements <- either fail pure (preparedHomeRequirements first "main" "OptionalRoot")
     unless (preparedNames first == ["OptionalRoot"]
+        && firstValueRequirements == [("main", "Tidepool.Session.Val.G2")]
+        && fmap renderType (prResultType (pprPipelineResult first)) == Just "Int"
         && all (`Map.member` pprFinalizedModules first)
           (map mkModuleName ["OptionalSupport", "OptionalAnchor"])) $
       fail ("session request prepared unrelated native bodies or skipped source finalization: "
         ++ show (preparedNames first))
     later <- compileTarget compile "OptionalWarmer.hs"
+    laterValueRequirements <- either fail pure (preparedHomeRequirements later "main" "OptionalWarmer")
     unless (all (`elem` preparedNames later) ["OptionalWarmer", "OptionalSupport", "OptionalAnchor"]
+        && sort laterValueRequirements == sort
+          [("main", "OptionalAnchor"), ("main", "OptionalSupport"), ("main", "Tidepool.Session.Val.G2")]
+        && fmap renderType (prResultType (pprPipelineResult later)) == Just "Int"
         && Map.member (mkModuleName "OptionalSupport") (pprFinalizedModules later)) $
       fail ("later session request did not activate its newly demanded source bodies: "
         ++ show (preparedNames later))
