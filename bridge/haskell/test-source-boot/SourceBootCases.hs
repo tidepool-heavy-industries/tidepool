@@ -732,6 +732,78 @@ completedProgramSourceImports = withTiming $ withScratch $ \work -> do
   where
     firstOwner (owner,_,_,_) = owner
 
+completedProgramSourceImportPairing :: IO ()
+completedProgramSourceImportPairing = withTiming $ withScratch $ \work -> do
+  forM_ ["MetadataQuoteSupport.hs","MetadataQuoter.hs","MetadataQuotedTarget.hs"] $ \name ->
+    copyFile ("test-source-boot/fixtures" </> name) (work </> name)
+  let expansion = work </> "original-expansion"
+      target = work </> "PairedOriginalConsumer.hs"
+      includes = [work]
+      root = ("main","MetadataQuotedTarget")
+  quoter <- T.pack <$> readFile (work </> "MetadataQuoter.hs")
+  writeFile (work </> "MetadataQuoter.hs") (T.unpack (T.replace
+    "quoteExp = \\_ -> pure (LitE (IntegerL answerValue))"
+    (T.pack ("quoteExp = \\_ -> do\n      value <- runIO (readFile " ++ show expansion
+      ++ ")\n      pure (LitE (IntegerL (read value + answerValue - 42)))"))
+    (T.replace "import MetadataQuoteSupport"
+      "import Language.Haskell.TH.Syntax (runIO)\nimport MetadataQuoteSupport" quoter)))
+  appendFile (work </> "MetadataQuotedTarget.hs") "\n{-# NOINLINE __result #-}\n"
+  writeFile target $ unlines
+    [ "module PairedOriginalConsumer where"
+    , "import MetadataQuotedTarget ()"
+    , "__result :: Int"
+    , "__result = 7"
+    ]
+  scopePath <- writeGenuineEmptyMetadataScope work
+  base <- readExactScope scopePath >>= either fail pure
+  let admitted = base {scopePurpose=ExactCellPurpose (CheckedCellAdmission (replicate 64 '0')
+        (replicate 64 '0') (replicate 64 '0') [] [] [] [] Nothing AuthoredCellCheck) includes}
+      session = emptySessionScope {ssRoot=work,ssExactScope=Just scopePath}
+  flags <- defaultParserDynFlags
+  parsed <- analyzeCellWithFlags flags "" "import MetadataQuotedTarget\n(7 :: Int)"
+    >>= either (fail . show) pure
+  let purpose = CellProgramCompile (withSourceImportIntents (cellPlanPrologue parsed) GeneralCompile) admitted
+      prepare value = do
+        writeFile expansion (show value)
+        prepared <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty purpose
+          (Just session) target includes Nothing
+        original <- maybe (fail "pairing fixture lacks its genuine finalized quote original") pure
+          (Map.lookup (mkModuleName (snd root)) (pprFinalizedModules prepared))
+        unless (hasIntResultLiteral value (cg_binds (finalizedTidyGuts original)))
+          (fail "unchanged authored source did not produce the selected runIO expansion")
+        let directory = work </> "pairing-capture-" ++ show value
+        createDirectory directory
+        originals <- newOriginalInterfaceArtifacts (prHscEnv (pprPipelineResult prepared))
+          (pprFinalizedModules prepared) (retainedOriginalInterfaces prepared) directory
+        certified <- writeCertifiedProductsKeeping includes originals directory prepared Nothing []
+        let proofs = certifiedSourceOriginals certified
+            admissions = finalizedLocalAdmissions (certifiedFinalizedArtifacts certified)
+        rows <- forM (Map.keys proofs) $ \key -> do
+          capture <- maybe (fail "pairing fixture lost its completed finalization capture") pure
+            (Map.lookup key admissions)
+          lexical <- either fail pure (preparedHomeRequirements prepared (fst key) (snd key))
+          pure (key,localFinalizedInterface capture,lexical)
+        let retained = admitted
+              { scopeInterfaces = [row | (_,row,_) <- rows]
+              , scopeInterfaceEvidence = Map.map ModuleInterfaceEvidence proofs
+              , scopeLexical = [(key,lexical) | (key,_,lexical) <- rows] }
+        pure (prepared,certifiedFinalizedArtifacts certified,retained)
+  (first,captureA,scopeA) <- prepare 41
+  (second,captureB,scopeB) <- prepare 42
+  let sourceHashes prepared = [(dependencySourcePath source,dependencySourceSha256 source)
+        | source <- dependencySources (preparedFreshDependencies prepared)]
+  unless (sourceHashes first == sourceHashes second)
+    (fail "cross-capture negative control changed authored compiler source")
+  ownA <- retainProgramSourceImports Nothing first captureA scopeA
+  ownB <- retainProgramSourceImports Nothing second captureB scopeB
+  unless (isJust ownA && isJust ownB)
+    (fail "actual finalization object did not match its own completed capture")
+  swappedA <- retainProgramSourceImports Nothing first captureB scopeB
+  swappedB <- retainProgramSourceImports Nothing second captureA scopeA
+  unless (isNothing swappedA && isNothing swappedB)
+    (fail "same-source runIO expansions exchanged completed finalization authority")
+  putStrLn "completed program import pairing: identical source, distinct NOINLINE expansions, own capture admission and cross-capture refusal"
+
 -- GHC owns whether an authored import contributes an interface obligation.
 -- Inspect that evidence before projecting custody; import text is never used
 -- to manufacture an absent type or native dependency.

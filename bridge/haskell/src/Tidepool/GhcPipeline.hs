@@ -167,7 +167,8 @@ import Tidepool.CheckedCell (CheckedSignature, captureCheckedSignature, rewriteC
 import Tidepool.FinalizedModule (FinalizedModule(..))
 import Tidepool.FinalizedModuleArtifacts
   ( FinalizedModuleArtifacts, finalizedLocalAdmissions, localFinalizedInterface
-  , localFinalizedSourceSha256, localFinalizedRequirements, localFinalizedHomeUnits, localFinalizedCore )
+  , localFinalizedSourceSha256, localFinalizedRequirements, localFinalizedHomeUnits, localFinalizedCore
+  , matchesCapturedFinalization )
 import Tidepool.HomeProducts
   ( hydrateCandidateHomeProductsWithOriginals, materializeCandidateCompilerView, admittedCompilerInterface
   , validateCandidateInterfaceRequirements )
@@ -432,7 +433,8 @@ retainProgramSourceImports previous prepared captured retained = do
                     , [canonicalSourceSha256 canonical] ==
                         [dependencySourceSha256 source | source <- dependencySources fresh
                           , dependencySourcePath source == dependencyModuleSource node]
-                    , packageSha == hexBytes (SHA256.hash (encodePackageImports iface packages)) -> pure True
+                    , packageSha == hexBytes (SHA256.hash (encodePackageImports iface packages)) ->
+                        matchesCapturedFinalization finalized original
                   _ -> pure False
           granted <- fmap catMaybes $ forM roots $ \root@(_,key) -> case programImportClosure retained key of
             Just originals

@@ -27,6 +27,7 @@ tests = testGroup "source-boot"
   , testCase "candidate sited siblings" $ candidateSitedSiblings
   , testCase "canonical current source" $ canonicalCurrentSource
   , testCase "completed program source imports" $ completedProgramSourceImports
+  , testCase "completed program import pairing" $ completedProgramSourceImportPairing
   , testCase "canonical source obligations" $ canonicalSourceObligations
   , testCase "generated scaffold imports" $ generatedScaffoldImports
   , testCase "hydrated site siblings" $ hydratedSiteSiblings
