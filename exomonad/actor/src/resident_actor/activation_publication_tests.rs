@@ -2,15 +2,32 @@ use super::*;
 
 #[tokio::test]
 async fn cancellation_during_original_preview_refuses_initial_provider_installation() {
-    cancel_during_preview(false).await;
+    interrupt_during_preview(false, Interruption::Cancellation).await;
 }
 
 #[tokio::test]
 async fn cancellation_during_original_preview_refuses_later_request_activation() {
-    cancel_during_preview(true).await;
+    interrupt_during_preview(true, Interruption::Cancellation).await;
 }
 
-async fn cancel_during_preview(already_installed: bool) {
+#[tokio::test]
+async fn terminal_request_during_original_preview_retires_unpublished_input() {
+    interrupt_during_preview(false, Interruption::TerminalRequest).await;
+}
+
+#[tokio::test]
+async fn actor_retirement_during_original_preview_retires_unpublished_input() {
+    interrupt_during_preview(false, Interruption::ActorRetirement).await;
+}
+
+#[derive(Clone, Copy)]
+enum Interruption {
+    Cancellation,
+    TerminalRequest,
+    ActorRetirement,
+}
+
+async fn interrupt_during_preview(already_installed: bool, interruption: Interruption) {
     let mut fixture = invocation_work::tests::Fixture::start().await;
     let (mut resident, mut context, source, mut parked, _root) =
         crate::resident_workbench::request_tests::activation_session_fixture(|_| {});
@@ -116,17 +133,39 @@ async fn cancel_during_preview(already_installed: bool) {
     }));
     let cancellation = async {
         let mounted = entered_rx.recv().await.expect("original input mounted");
-        let (outcome, notification) = fixture
-            .environment
-            .requests
-            .cancel_request(
-                owner_actor,
-                request_id,
-                crate::CancellationReason::RequesterCancelled,
-            )
-            .unwrap();
-        assert_eq!(outcome, crate::CancelRequestOutcome::Requested);
-        assert_eq!(notification.unwrap().request, request_id);
+        match interruption {
+            Interruption::Cancellation => {
+                let (outcome, notification) = fixture
+                    .environment
+                    .requests
+                    .cancel_request(
+                        owner_actor,
+                        request_id,
+                        crate::CancellationReason::RequesterCancelled,
+                    )
+                    .unwrap();
+                assert_eq!(outcome, crate::CancelRequestOutcome::Requested);
+                assert_eq!(notification.unwrap().request, request_id);
+            }
+            Interruption::TerminalRequest => {
+                fixture.environment.requests.actor_stopped(
+                    context.actor,
+                    &ActorTerminal {
+                        kind: crate::ActorExitKind::Cancelled,
+                        summary: "terminal during original preview".into(),
+                    },
+                );
+            }
+            Interruption::ActorRetirement => {
+                fixture
+                    .kernel
+                    .retained_exit()
+                    .request_shutdown(ActorTerminal {
+                        kind: crate::ActorExitKind::Cancelled,
+                        summary: "retirement during original preview".into(),
+                    });
+            }
+        }
         assert!(fixture.deployments.try_recv().is_err());
         release.send(()).unwrap();
         mounted
@@ -144,7 +183,19 @@ async fn cancel_during_preview(already_installed: bool) {
         ),
         cancellation,
     );
-    assert!(matches!(parked.unwrap(), InteractivePark::Cancelled(actual) if actual == request_id));
+    match interruption {
+        Interruption::Cancellation => assert!(
+            matches!(parked.unwrap(), InteractivePark::Cancelled(actual) if actual == request_id)
+        ),
+        Interruption::TerminalRequest => assert!(matches!(
+            parked,
+            Err(ResidentActorWorkbenchError::ActorProtocol(_))
+        )),
+        Interruption::ActorRetirement => assert!(matches!(
+            parked,
+            Err(ResidentActorWorkbenchError::RetiredBeforeAdmission(_))
+        )),
+    }
     assert!(fixture.deployments.try_recv().is_err());
     assert!(behavior.outstanding_interactive.is_none());
     assert!(matches!(behavior.standing, ResidentStanding::Boot));
@@ -195,21 +246,23 @@ async fn cancel_during_preview(already_installed: bool) {
         .map(str::to_owned)
         .collect();
     machines.settle_suspended(receipt, resident, holes);
-    fixture
-        .environment
-        .requests
-        .begin_cancellation_acknowledgement(context.actor, request_id)
-        .unwrap();
-    fixture
-        .environment
-        .requests
-        .finish_cancellation_acknowledgement(request_id);
-    assert_eq!(
+    if matches!(interruption, Interruption::Cancellation) {
         fixture
             .environment
             .requests
-            .observe_reply(context.actor, request_id),
-        Ok(crate::ReplyObservation::Closed)
-    );
+            .begin_cancellation_acknowledgement(context.actor, request_id)
+            .unwrap();
+        fixture
+            .environment
+            .requests
+            .finish_cancellation_acknowledgement(request_id);
+        assert_eq!(
+            fixture
+                .environment
+                .requests
+                .observe_reply(context.actor, request_id),
+            Ok(crate::ReplyObservation::Closed)
+        );
+    }
     fixture.finish().await;
 }

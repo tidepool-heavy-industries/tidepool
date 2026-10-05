@@ -4051,7 +4051,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             ResidentStanding::Paused(_) => ("handler-paused", None),
         };
         let requests = self.environment.requests.status_for(actor);
-        let records = self.environment.actors.lock();
+        let records = self.environment.actors.lock().clone();
         let hidden_terminal_actors = records
             .iter()
             .filter(|(identity, _)| actor_can_observe(actor, **identity, &records))
@@ -4611,7 +4611,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 };
             }
         };
-        let records = self.environment.actors.lock();
+        let records = self.environment.actors.lock().clone();
         let actors = members
             .iter()
             .map(|actor| {
@@ -7778,111 +7778,124 @@ where
                 request.response.declaration_modules.clone(),
             )
             .await?;
-        let assignment_base = status_rendering::assignment_base_from_input(&input_preview);
-        let contract = crate::interactive_session::ActivationContract {
-            input_type: request.input_type.clone(),
-            response: request.response.clone(),
-            input_preview,
-            reply_preview,
-            siblings: request.siblings.clone(),
-        };
-        let request_message =
-            contract.message(request.request, request.initial_user_message.as_deref());
-        let installation = match prepared_installation {
-            Some(mut installation) => {
-                installation.initial_user_message =
-                    Some(match installation.initial_user_message.take() {
-                        Some(attachment) => format!("{attachment}\n\n{request_message}"),
-                        None => request_message.clone(),
-                    });
-                Some(installation)
-            }
-            None if !self.policy_installed => Some(
-                self.prepare_interactive_policy_from_source(
-                    kernel,
-                    context,
-                    Some(request_message.clone()),
-                    activation_source,
-                )
-                .await?,
-            ),
-            None => None,
-        };
-        self.publish_application_surface(kernel, context, owner, bootstrap)
-            .await?;
-        self.check_application_readiness(kernel, context)?;
-        let request_id = request.request;
-        let requests = Arc::clone(&self.environment.requests);
-        let publication = requests.publish_presented_request(context.actor, request_id, || {
-            kernel.retained_exit().claim_before_shutdown(|| {
-                if let Some(installation) = installation {
-                    self.publish_interactive_installation(installation);
+        let result = async {
+            let assignment_base = status_rendering::assignment_base_from_input(&input_preview);
+            let contract = crate::interactive_session::ActivationContract {
+                input_type: request.input_type.clone(),
+                response: request.response.clone(),
+                input_preview,
+                reply_preview,
+                siblings: request.siblings.clone(),
+            };
+            let request_message =
+                contract.message(request.request, request.initial_user_message.as_deref());
+            let installation = match prepared_installation {
+                Some(mut installation) => {
+                    installation.initial_user_message =
+                        Some(match installation.initial_user_message.take() {
+                            Some(attachment) => format!("{attachment}\n\n{request_message}"),
+                            None => request_message.clone(),
+                        });
+                    Some(installation)
                 }
-                self.assignment_base = assignment_base;
-                self.outstanding_interactive = Some(OutstandingInteractive::new(
-                    &request,
-                    input_binding,
-                    context.placement.lexical_scope,
-                ));
-                self.set_standing(
-                    context.actor,
-                    ResidentStanding::Interactive(
-                        crate::interactive_session::ResidentInteractiveAwait { request, hole },
-                    ),
-                );
-                let active_request = match &self.standing {
-                    ResidentStanding::Interactive(awaiting) => awaiting.request.request,
-                    _ => unreachable!(),
-                };
-                self.runtime_observation.publish_request_activation(
-                    active_request,
-                    if already_installed {
-                        self.next_activation_sequence
-                    } else {
-                        0
-                    },
-                );
-                if already_installed {
-                    let activation = crate::ResidentActivation::mounted(
+                None if !self.policy_installed => Some(
+                    self.prepare_interactive_policy_from_source(
+                        kernel,
+                        context,
+                        Some(request_message.clone()),
+                        activation_source,
+                    )
+                    .await?,
+                ),
+                None => None,
+            };
+            self.publish_application_surface(kernel, context, owner, bootstrap)
+                .await?;
+            self.check_application_readiness(kernel, context)?;
+            let request_id = request.request;
+            let requests = Arc::clone(&self.environment.requests);
+            let publication = requests.publish_presented_request(context.actor, request_id, || {
+                kernel.retained_exit().claim_before_shutdown(|| {
+                    if let Some(installation) = installation {
+                        self.publish_interactive_installation(installation);
+                    }
+                    self.assignment_base = assignment_base;
+                    self.outstanding_interactive = Some(OutstandingInteractive::new(
+                        &request,
+                        input_binding,
+                        context.placement.lexical_scope,
+                    ));
+                    self.set_standing(
                         context.actor,
-                        self.next_activation_sequence,
-                        match &self.standing {
-                            ResidentStanding::Interactive(awaiting) => awaiting.request.request,
-                            _ => unreachable!(),
-                        },
-                        contract,
-                        match &self.standing {
-                            ResidentStanding::Interactive(awaiting) => {
-                                awaiting.request.initial_user_message.as_deref()
-                            }
-                            _ => unreachable!(),
+                        ResidentStanding::Interactive(
+                            crate::interactive_session::ResidentInteractiveAwait { request, hole },
+                        ),
+                    );
+                    let active_request = match &self.standing {
+                        ResidentStanding::Interactive(awaiting) => awaiting.request.request,
+                        _ => unreachable!(),
+                    };
+                    self.runtime_observation.publish_request_activation(
+                        active_request,
+                        if already_installed {
+                            self.next_activation_sequence
+                        } else {
+                            0
                         },
                     );
-                    self.next_activation_sequence += 1;
-                    // best-effort: deployment observer channel may have no listener.
-                    self.environment
-                        .deployments
-                        .try_send(LocalResidentDeployment::SessionReady { activation })
-                        .ok();
+                    if already_installed {
+                        let activation = crate::ResidentActivation::mounted(
+                            context.actor,
+                            self.next_activation_sequence,
+                            match &self.standing {
+                                ResidentStanding::Interactive(awaiting) => awaiting.request.request,
+                                _ => unreachable!(),
+                            },
+                            contract,
+                            match &self.standing {
+                                ResidentStanding::Interactive(awaiting) => {
+                                    awaiting.request.initial_user_message.as_deref()
+                                }
+                                _ => unreachable!(),
+                            },
+                        );
+                        self.next_activation_sequence += 1;
+                        // best-effort: deployment observer channel may have no listener.
+                        self.environment
+                            .deployments
+                            .try_send(LocalResidentDeployment::SessionReady { activation })
+                            .ok();
+                    }
+                    true
+                })
+            });
+            match publication {
+                Ok(claim) => {
+                    claim.map_err(ResidentActorWorkbenchError::RetiredBeforeAdmission)?;
+                    Ok(InteractivePark::Parked)
                 }
-                true
-            })
-        });
-        match publication {
-            Ok(claim) => {
-                claim.map_err(ResidentActorWorkbenchError::RetiredBeforeAdmission)?;
-                Ok(InteractivePark::Parked)
+                Err(crate::ReplyError::CancellationRequested) => {
+                    Ok(InteractivePark::Cancelled(request_id))
+                }
+                Err(error) => Err(ResidentActorWorkbenchError::ActorProtocol(format!(
+                    "request publication was rejected: {error:?}"
+                ))),
             }
-            Err(crate::ReplyError::CancellationRequested) => {
-                workbench
-                    .retire_activation_input(context.clone(), input_binding)
-                    .await?;
-                Ok(InteractivePark::Cancelled(request_id))
-            }
-            Err(error) => Err(ResidentActorWorkbenchError::ActorProtocol(format!(
-                "request publication was rejected: {error:?}"
-            ))),
         }
+        .await;
+        if !matches!(&result, Ok(InteractivePark::Parked)) {
+            if let Err(cleanup) = workbench
+                .retire_activation_input(context.clone(), input_binding)
+                .await
+            {
+                return Err(ResidentActorWorkbenchError::ActivationPublicationCleanup {
+                    binding: input_binding,
+                    primary: result.err().map(Box::new),
+                    cleanup: Box::new(cleanup),
+                });
+            }
+        }
+        result
     }
 
     fn freeze_installed_source(
@@ -14516,7 +14529,9 @@ where
     }
 
     fn actor_graph(&self, requester: Option<ActorRef>) -> Option<Vec<ActorGraphNode>> {
-        let records = self.environment.actors.lock();
+        // Request publication may hold request state while updating actor metadata.
+        // Observation retains a snapshot before consulting that request owner.
+        let records = self.environment.actors.lock().clone();
         if requester.is_some_and(|requester| !records.contains_key(&requester)) {
             return None;
         }

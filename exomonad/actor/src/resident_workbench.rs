@@ -3424,6 +3424,12 @@ pub enum ResidentActorWorkbenchError {
         #[source]
         source: Box<ResidentActorWorkbenchError>,
     },
+    #[error("activation binding {binding:?} publication was refused ({primary:?}); binding cleanup failed: {cleanup}")]
+    ActivationPublicationCleanup {
+        binding: tidepool_repr::SessionVarId,
+        primary: Option<Box<ResidentActorWorkbenchError>>,
+        cleanup: Box<ResidentActorWorkbenchError>,
+    },
     #[error("pure activation preview suspended; parked continuation cleanup failure: {cleanup:?}")]
     ActivationPreviewSuspended { cleanup: Option<ResidentError> },
     #[error("could not inspect the saved value: {0}")]
@@ -3474,6 +3480,12 @@ impl ResidentActorWorkbenchError {
         match self {
             Self::PrivatePublication { source, .. }
             | Self::ActivationBindingCommitted { source, .. } => source.failure_diagnostic(),
+            Self::ActivationPublicationCleanup {
+                primary, cleanup, ..
+            } => primary
+                .as_ref()
+                .and_then(|error| error.failure_diagnostic())
+                .or_else(|| cleanup.failure_diagnostic()),
             Self::Compile(error) => Some(classify_compile(error)),
             Self::CellCheck(failure) => Some(classify_compile(&failure.error)),
             Self::InputCompilation { error, .. } => Some(activation_compile_diagnostic(error)),
