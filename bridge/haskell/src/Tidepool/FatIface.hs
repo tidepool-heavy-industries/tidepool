@@ -262,7 +262,7 @@ data OwnerInterfaceContext = OwnerInterfaceContext
 
 -- | Daemon-lifetime cache of an owner module's already-read-and-typechecked
 -- defining context: the 'ModLocation' 'readExactInterface' resolved it at,
--- and the 'TyCon's 'typecheckIface' produced. Recovered-body
+-- and the type constructors and defining entry Ids 'typecheckIface' produced. Recovered-body
 -- preparation ('Tidepool.PreparedStg.prepareRecoveredBodies') reads and
 -- typechecks an owner's interface at most once per cache lifetime; only
 -- successful outcomes are cached; a failure is retried on the next lookup

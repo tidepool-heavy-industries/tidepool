@@ -44,11 +44,11 @@ import Tidepool.ExecutionSchema
   , TopBinding(..), ValueRef(..), WireProgram(..) )
 import Tidepool.FatIface
   ( FatIfaceLookup(..), newFatIfaceCache, lookupFatIfaceExact
-  , newOwnerInterfaceCache, lookupOwnerInterface, evictOwnerInterfaceMatching )
+  , OwnerInterfaceContext(..), newOwnerInterfaceCache, lookupOwnerInterface, evictOwnerInterfaceMatching )
 import Tidepool.GhcPipeline
   ( PipelineSelection(PreparedStg), PreparedPipelineResult(..)
   , PipelineResult(prHscEnv), runPipelineSelected )
-import Tidepool.PreparedRecovery (RecoveredClosure(closureModules), recoverPreparedClosure)
+import Tidepool.PreparedRecovery (RecoveredClosure(closureModules, closureFailures), recoverPreparedClosure)
 import Tidepool.PreparedStg
   ( pmModule, pmBindings, RecoveredModuleFailure(..), newPreparedBodyCache, prepareModule
   , prepareRecoveredBodies, RecoveredModuleInput(..), prepareRecoveredModule )
@@ -108,11 +108,6 @@ assertRecoveredEntryContracts = do
     requested <- case [identifier | identifier <- references, occurrence identifier == "qApp"] of
       [identifier] -> pure identifier
       identifiers -> fail ("expected one genuine qApp reference, found " ++ show (length identifiers))
-    required <- case importedIdLFInfo requested of
-      LFReEntrant _ arity _ _ -> pure arity
-      _ -> fail "the genuine package qApp interface is not callable"
-    liftIO $ assert (required == 2 && idArity requested == 2)
-      "the pinned qApp interface no longer has its two-argument entry"
     cache <- liftIO newFatIfaceCache
     result <- liftIO $ lookupFatIfaceExact env cache (varName requested)
     (owner, body) <- case (nameModule_maybe (varName requested), result) of
@@ -128,6 +123,16 @@ assertRecoveredEntryContracts = do
     bodies <- liftIO newPreparedBodyCache
     recovered <- liftIO $ prepareRecoveredBodies env owners bodies owner [body]
       >>= either (fail . show) pure
+    declaring <- liftIO $ lookupOwnerInterface owners owner
+    original <- case [identifier | Just context <- [declaring], identifier <- ownerInterfaceEntries context,
+          varName identifier == varName requested] of
+      [identifier] -> pure identifier
+      _ -> fail "the production owner did not retain qApp's defining declaration"
+    required <- case importedIdLFInfo original of
+      LFReEntrant _ arity _ _ -> pure arity
+      _ -> fail "the genuine defining qApp interface is not callable"
+    liftIO $ assert (required == 2 && idArity original == 2)
+      "the pinned defining qApp interface no longer has its two-argument entry"
     liftIO $ assert (entryArity "qApp" recovered == Just (Stg.ReEntrant, required))
       "recovered qApp changed its original callable entry contract"
     let allPairs = concatMap bindPairs (cg_binds guts)
@@ -466,7 +471,7 @@ assertRecoveredKindRep root = do
     Right values -> pure values
   _ <- evaluate (length references)
   assert (any isKrepTop identities)
-    "recovered showDouble closure lost GHC.Types:krep$*"
+    ("recovered showDouble closure lost GHC.Types:krep$*: " ++ show (closureFailures closure))
   projected <- evaluate (projectPreparedTarget context modules)
   case projected of
     Left _ -> pure ()

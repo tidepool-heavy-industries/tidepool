@@ -216,7 +216,8 @@ validateRecoveredEntries entries bindings = forM_ bindings $ \(top, _) -> case t
             _ -> mismatch binder 0 (-1)
           LFCon{} -> case rhs of
             Stg.StgRhsCon{} -> pure ()
-            _ -> ioError (userError ("recovered defining constructor entry is not evaluated: " ++ showSDocUnsafe (ppr binder)))
+            _ -> ioError (userError ("recovered defining constructor entry is not evaluated: "
+              ++ showSDocUnsafe (ppr binder) ++ "; prepared RHS " ++ showSDocUnsafe (ppr rhs)))
           LFUnlifted -> case rhs of
             Stg.StgRhsCon{} -> pure ()
             _ -> ioError (userError ("recovered defining unlifted entry has a closure: " ++ showSDocUnsafe (ppr binder)))
@@ -375,7 +376,10 @@ prepareRecoveredBodiesUncached hscEnv ownerCache owner bindings = do
     loadDefiningDetails :: HscEnv -> ModIface -> IO ([TyCon], [Id])
     loadDefiningDetails env iface = do
       let doc = text "Tidepool recovered defining interface"
-      details <- initIfaceCheck doc env (typecheckIface iface)
+      -- Executable entry metadata belongs to the defining interface, even
+      -- when an -O0 caller intentionally ignores optimization pragmas.
+      let definingEnv = env { hsc_dflags = gopt_unset (hsc_dflags env) Opt_IgnoreInterfacePragmas }
+      details <- initIfaceCheck doc definingEnv (typecheckIface iface)
       pure (typeEnvTyCons (md_types details), typeEnvIds (md_types details))
 
     trySynchronous :: IO a -> IO (Either String a)
