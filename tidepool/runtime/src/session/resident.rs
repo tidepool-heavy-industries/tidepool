@@ -4108,10 +4108,16 @@ where
         &mut self,
         request: &super::prepared::SiteTypeEvidence,
         access_site: u64,
-    ) -> bool {
-        self.state
-            .prepared_mut()
-            .is_some_and(|engine| engine.request_scope_types_match(request, access_site))
+    ) -> Result<bool, PreparedRuntimeError> {
+        match self.state.prepared_mut() {
+            Some(engine) => engine
+                .request_scope_types_match(request, access_site)
+                .map_err(|source| PreparedRuntimeError::RequestScopeTypeEvidence {
+                    site: access_site,
+                    source,
+                }),
+            None => Ok(false),
+        }
     }
 
     /// Install a rooted live value under a binder GHC has already compiled,

@@ -8836,7 +8836,10 @@ where
             .with_machine(context, move |session, _, _| {
                 let refusal = match (access_site, current) {
                     (Some(access_site), Some((request, request_types, scope, input_binding))) => {
-                        if !session.request_scope_types_match(&request_types, access_site) {
+                        if !session
+                            .request_scope_types_match(&request_types, access_site)
+                            .map_err(ResidentError::Prepared)?
+                        {
                             crate::request_effect::RequestScopeRefusal::RequestTypeMismatch
                         } else {
                             let constructor = tidepool_bridge::get_qualified(

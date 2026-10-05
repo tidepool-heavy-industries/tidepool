@@ -33,10 +33,13 @@ pub use tidepool_codegen::machine::MachineDisposition;
 use tidepool_codegen::suspension::ContinuationId;
 pub use tidepool_codegen::suspension::{RealmId, ValueHandle};
 use tidepool_repr::execution_schema::{
-    link_program, CachedHomeOwner, CertifiedGroup, ConstructorReply, CtorRow, DefinitionsView,
-    GlobalId, Group, HeapRhs, ImportOwner, ImportedValue, JsonLayout, LinkError, MachineImports,
-    ParseError, PreparedProgram, RuntimeRep, Signature, SiteDelivery, SiteRow, SymbolIdentity,
-    TypeNode, TypeNodeId, ValueId,
+    link_program, CachedHomeOwner, CertifiedGroup, ConstructorReply, DefinitionsView, GlobalId,
+    Group, HeapRhs, ImportOwner, ImportedValue, JsonLayout, LinkError, MachineImports, ParseError,
+    PreparedProgram, RuntimeRep, Signature, SiteDelivery, SiteRow, SymbolIdentity, TypeNodeId,
+    ValueId,
+};
+use tidepool_repr::type_graph::{
+    DataView, GraphLimits, TypeCursor, TypeGraph, TypeGraphError, TypeView, TypeWorkBudget,
 };
 use tidepool_repr::{DataConId, DataConTable, Literal, PrincipalId, SessionVarId};
 
@@ -81,7 +84,7 @@ pub enum ConstructorReplyObservation {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReplyTypeObservation {
-    Missing,
+    Refused(TypeGraphError),
     Data {
         family: SymbolIdentity,
         argument_count: usize,
@@ -234,6 +237,14 @@ pub enum PreparedRuntimeError {
     Install(ExecutionError),
     #[error(transparent)]
     Demand(#[from] DemandError),
+    #[error("prepared type evidence refused: {0}")]
+    TypeEvidence(#[from] TypeGraphError),
+    #[error("request access site {site} type evidence refused: {source}")]
+    RequestScopeTypeEvidence {
+        site: u64,
+        #[source]
+        source: TypeGraphError,
+    },
     #[error("no exact live owner for certified import {0:?}")]
     MissingCertifiedOwner(ImportOwner),
     #[error("certified package owner {owner:?} has no exact source: {evidence:?}")]
@@ -377,6 +388,12 @@ pub enum PreparedRuntimeError {
     /// parked.
     #[error("reply {site} has an unconstructible answer type: {reason}")]
     AnswerUnconstructible { site: ReplyTarget, reason: String },
+    #[error("reply {site} type evidence refused: {source}")]
+    AnswerTypeEvidence {
+        site: ReplyTarget,
+        #[source]
+        source: TypeGraphError,
+    },
     /// Structural conversion failed at the dispatch/resume boundary. The
     /// frame stays parked and no answer root is published.
     #[error("reply {site} rejects its structural answer: {source}")]
@@ -434,6 +451,7 @@ impl PreparedRuntimeError {
             | Self::Compile(_)
             | Self::Install(_)
             | Self::Demand(_)
+            | Self::TypeEvidence(_)
             | Self::MissingCertifiedOwner(_)
             | Self::CertifiedPackageOwnerUnavailable { .. }
             | Self::MissingRetainedCertifiedOwner { .. }
@@ -468,6 +486,8 @@ impl PreparedRuntimeError {
             | Self::AnswerConstructor { .. }
             | Self::AnswerShape { .. }
             | Self::AnswerUnconstructible { .. }
+            | Self::AnswerTypeEvidence { .. }
+            | Self::RequestScopeTypeEvidence { .. }
             | Self::AnswerRejected { .. }
             | Self::UnknownHandle
             | Self::AnswerRepresentation { .. }
@@ -522,6 +542,14 @@ impl PreparedRuntimeError {
             | Self::NoApplyEntryEntry { .. }
             | Self::NoApplyValueEntry { .. }
             | Self::CrossRealmArgument { .. } => PreparedFailureKind::Rejected,
+            Self::TypeEvidence(source)
+            | Self::AnswerTypeEvidence { source, .. }
+            | Self::RequestScopeTypeEvidence { source, .. } => match source {
+                TypeGraphError::TraversalWork | TypeGraphError::Limit(_) => {
+                    PreparedFailureKind::Rejected
+                }
+                _ => PreparedFailureKind::Integrity,
+            },
             Self::Cancelled => PreparedFailureKind::Cancelled,
             Self::Compile(_) => PreparedFailureKind::Rejected,
             // A handler fault is this turn's own failure, so the machine stays reusable.
@@ -606,6 +634,11 @@ impl std::ops::Deref for ProgramFacts {
 struct EvidencePlan {
     sites: Vec<(u64, usize)>,
     constructor_replies: Vec<(DataConId, usize)>,
+}
+
+struct AdmittedProgramFacts {
+    facts: ProgramFacts,
+    plan: EvidencePlan,
 }
 
 /// Everything [`PreparedEngine::snapshot_install`] produces under a machine
@@ -784,8 +817,7 @@ pub(crate) struct CertifiedTurnInstall {
     pub groups: Vec<ProgramId>,
     pub leases: Vec<SourceInstanceLease>,
     pub domain_leases: Vec<SourceInstanceAttachment>,
-    facts: Vec<ProgramFacts>,
-    plans: Vec<EvidencePlan>,
+    admitted: Vec<AdmittedProgramFacts>,
     package_updates: BTreeMap<SymbolIdentity, [u8; 32]>,
     exports: BTreeMap<SymbolIdentity, CodeExport>,
 }
@@ -800,14 +832,30 @@ struct SiteWitness {
 /// Canonical compiler type graph for one request's input and complete reply.
 /// This travels with the activation because its originating site belongs to
 /// the requesting machine session, not the recipient's machine session.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct SiteTypeEvidence {
-    types: Vec<TypeNode>,
-    constructors: Vec<SymbolIdentity>,
+    types: Arc<TypeGraph>,
+    constructors: Arc<[(SymbolIdentity, DataConId, SymbolIdentity)]>,
     input: TypeNodeId,
     answer: TypeNodeId,
     request_context: Option<Arc<tidepool_toolchain::declaration_join::ExactCompileContext>>,
 }
+
+impl PartialEq for SiteTypeEvidence {
+    fn eq(&self, other: &Self) -> bool {
+        self.types.evidence_eq(&other.types)
+            && self.input == other.input
+            && self.answer == other.answer
+            && self.request_context == other.request_context
+            && self
+                .constructors
+                .iter()
+                .map(|(identity, _, _)| identity)
+                .eq(other.constructors.iter().map(|(identity, _, _)| identity))
+    }
+}
+
+impl Eq for SiteTypeEvidence {}
 
 /// Authenticated request types and the helper mode for one compiler admission.
 /// Keeping these together preserves authored reply authority when an admission
@@ -984,13 +1032,6 @@ impl SiteTypeEvidence {
             frame(hash, &id.0.to_le_bytes());
         }
 
-        fn constructor_id(
-            hash: &mut blake3::Hasher,
-            id: tidepool_repr::execution_schema::ConstructorId,
-        ) {
-            frame(hash, &id.0.to_le_bytes());
-        }
-
         fn identity(hash: &mut blake3::Hasher, identity: &SymbolIdentity) {
             frame(hash, identity.unit.as_bytes());
             frame(hash, identity.module.as_bytes());
@@ -1005,69 +1046,14 @@ impl SiteTypeEvidence {
             }
         }
 
-        fn runtime_rep(hash: &mut blake3::Hasher, rep: RuntimeRep) {
-            match rep {
-                RuntimeRep::Void => frame(hash, &[0]),
-                RuntimeRep::LiftedRef => frame(hash, &[1]),
-                RuntimeRep::UnliftedRef => frame(hash, &[2]),
-                RuntimeRep::Address => frame(hash, &[3]),
-                RuntimeRep::Int(width) => {
-                    frame(hash, &[4]);
-                    frame(hash, &[width]);
-                }
-                RuntimeRep::Word(width) => {
-                    frame(hash, &[5]);
-                    frame(hash, &[width]);
-                }
-                RuntimeRep::Float(width) => {
-                    frame(hash, &[6]);
-                    frame(hash, &[width]);
-                }
-            }
-        }
-
         let mut hash = blake3::Hasher::new();
         frame(&mut hash, b"Tidepool.SiteTypeEvidence");
-        frame(&mut hash, b"v2");
-        count(&mut hash, self.types.len());
-        for node in &self.types {
-            match node {
-                TypeNode::Data {
-                    family,
-                    arguments,
-                    rows,
-                } => {
-                    frame(&mut hash, &[0]);
-                    identity(&mut hash, family);
-                    count(&mut hash, arguments.len());
-                    for argument in arguments {
-                        type_node_id(&mut hash, *argument);
-                    }
-                    count(&mut hash, rows.len());
-                    for row in rows {
-                        constructor_id(&mut hash, row.constructor);
-                        count(&mut hash, row.fields.len());
-                        for field in &row.fields {
-                            type_node_id(&mut hash, *field);
-                        }
-                    }
-                }
-                TypeNode::Text => frame(&mut hash, &[1]),
-                TypeNode::Integer => frame(&mut hash, &[2]),
-                TypeNode::Natural => frame(&mut hash, &[3]),
-                TypeNode::Scalar(rep) => {
-                    frame(&mut hash, &[4]);
-                    runtime_rep(&mut hash, *rep);
-                }
-                TypeNode::Unconstructible { reason, rendered } => {
-                    frame(&mut hash, &[5]);
-                    frame(&mut hash, reason.as_bytes());
-                    frame(&mut hash, rendered.as_bytes());
-                }
-            }
-        }
+        frame(&mut hash, b"v3");
+        self.types.write_evidence(|bytes| {
+            hash.update(bytes);
+        });
         count(&mut hash, self.constructors.len());
-        for constructor in &self.constructors {
+        for (constructor, _, _) in self.constructors.iter() {
             identity(&mut hash, constructor);
         }
         type_node_id(&mut hash, self.input);
@@ -1087,27 +1073,6 @@ impl SiteTypeEvidence {
             None => frame(&mut hash, &[0]),
         }
         *hash.finalize().as_bytes()
-    }
-}
-
-trait TypeGraph {
-    fn type_node(&self, id: TypeNodeId) -> Option<&TypeNode>;
-    fn constructor_identity(
-        &self,
-        id: tidepool_repr::execution_schema::ConstructorId,
-    ) -> Option<&SymbolIdentity>;
-}
-
-impl TypeGraph for SiteTypeEvidence {
-    fn type_node(&self, id: TypeNodeId) -> Option<&TypeNode> {
-        self.types.get(id.0 as usize)
-    }
-
-    fn constructor_identity(
-        &self,
-        id: tidepool_repr::execution_schema::ConstructorId,
-    ) -> Option<&SymbolIdentity> {
-        self.constructors.get(id.0 as usize)
     }
 }
 
@@ -1233,49 +1198,58 @@ impl ProgramFacts {
         facts
     }
 
-    fn type_node(&self, id: TypeNodeId) -> Option<&TypeNode> {
-        self.types.get(id.0 as usize)
-    }
-
-    fn constructor_identity(
-        &self,
-        id: tidepool_repr::execution_schema::ConstructorId,
-    ) -> Option<&SymbolIdentity> {
-        self.constructors
-            .get(id.0 as usize)
-            .map(|(identity, _, _)| identity)
-    }
-
     fn json_layout(&self) -> Option<JsonLayout<DataConId>> {
         self.json_layout
     }
 
-    fn is_json_value_node(&self, node: TypeNodeId) -> bool {
+    fn is_json_value(
+        &self,
+        data: &DataView,
+        budget: &mut TypeWorkBudget,
+    ) -> Result<bool, TypeGraphError> {
         let Some(layout) = self.json_layout() else {
-            return false;
+            return Ok(false);
         };
-        let Some(TypeNode::Data { rows, .. }) = self.type_node(node) else {
-            return false;
-        };
-        rows.len() == 6
-            && rows
+        let expected = [
+            layout.object,
+            layout.array,
+            layout.string,
+            layout.number,
+            layout.bool_,
+            layout.null,
+        ];
+        let mut matched = [false; 6];
+        let mut count = 0;
+        for constructor in data.constructors() {
+            budget.charge(1)?;
+            let Some(index) = expected
                 .iter()
-                .any(|row| self.constructor_host_id(row.constructor) == Some(layout.object))
-            && rows
-                .iter()
-                .any(|row| self.constructor_host_id(row.constructor) == Some(layout.array))
-            && rows
-                .iter()
-                .any(|row| self.constructor_host_id(row.constructor) == Some(layout.string))
-            && rows
-                .iter()
-                .any(|row| self.constructor_host_id(row.constructor) == Some(layout.number))
-            && rows
-                .iter()
-                .any(|row| self.constructor_host_id(row.constructor) == Some(layout.bool_))
-            && rows
-                .iter()
-                .any(|row| self.constructor_host_id(row.constructor) == Some(layout.null))
+                .position(|host| self.constructor_host_id(constructor) == Some(*host))
+            else {
+                return Ok(false);
+            };
+            if matched[index] {
+                return Ok(false);
+            }
+            matched[index] = true;
+            count += 1;
+        }
+        Ok(count == 6)
+    }
+
+    fn selected_constructor(
+        &self,
+        data: &DataView,
+        host_id: DataConId,
+        budget: &mut TypeWorkBudget,
+    ) -> Result<Option<tidepool_repr::execution_schema::ConstructorId>, TypeGraphError> {
+        for constructor in data.constructors() {
+            budget.charge(1)?;
+            if self.constructor_host_id(constructor) == Some(host_id) {
+                return Ok(Some(constructor));
+            }
+        }
+        Ok(None)
     }
 
     fn constructor_host_id(
@@ -1304,31 +1278,19 @@ impl ProgramFacts {
             .then_some(selected.1)
     }
 
-    /// The declared row for `host_id` among `node`'s rows, when `node` is a
-    /// `Data` node. A framed-handle delivery validates its prefix fields
-    /// against this row the same way an ordinary answer's constructor does.
-    fn row_for(&self, node: TypeNodeId, host_id: DataConId) -> Option<&CtorRow> {
-        match self.type_node(node)? {
-            TypeNode::Data { rows, .. } => rows.iter().find(|row| {
-                self.constructors
-                    .get(row.constructor.0 as usize)
-                    .is_some_and(|(_, declared, _)| *declared == host_id)
-            }),
-            _ => None,
-        }
-    }
-}
-
-impl TypeGraph for ProgramFacts {
-    fn type_node(&self, id: TypeNodeId) -> Option<&TypeNode> {
-        ProgramFacts::type_node(self, id)
-    }
-
-    fn constructor_identity(
+    fn selected_fields(
         &self,
-        id: tidepool_repr::execution_schema::ConstructorId,
-    ) -> Option<&SymbolIdentity> {
-        ProgramFacts::constructor_identity(self, id)
+        cursor: &TypeCursor,
+        host_id: DataConId,
+        budget: &mut TypeWorkBudget,
+    ) -> Result<Option<Vec<TypeCursor>>, TypeGraphError> {
+        let TypeView::Data(data) = cursor.view(budget)? else {
+            return Ok(None);
+        };
+        let Some(constructor) = self.selected_constructor(&data, host_id, budget)? else {
+            return Ok(None);
+        };
+        data.fields(constructor, budget)
     }
 }
 
@@ -1364,9 +1326,9 @@ fn scalar_bits(rep: RuntimeRep, literal: &Literal) -> Option<[u8; 16]> {
     Some(word.to_ne_bytes())
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum StructuralExpected {
-    Node(TypeNodeId),
+    Node(TypeCursor),
     Bytes,
     Scalar(RuntimeRep),
     JsonValue,
@@ -1404,7 +1366,8 @@ impl std::fmt::Display for ReplyTarget {
 
 struct StructuralAnswerVisitor<'facts, 'builder, 'machine, 'code> {
     site: ReplyTarget,
-    root: TypeNodeId,
+    root: TypeCursor,
+    budget: TypeWorkBudget,
     facts: &'facts ProgramFacts,
     builder: &'builder mut ManagedBuilder<'machine, 'code>,
     frames: Vec<StructuralFrame>,
@@ -1459,10 +1422,10 @@ impl StructuralAnswerVisitor<'_, '_, '_, '_> {
             frame
                 .expected
                 .get(frame.fields.len())
-                .copied()
+                .cloned()
                 .ok_or_else(|| self.shape("the response emits too many constructor fields"))
         } else if self.result.is_none() {
-            Ok(StructuralExpected::Node(self.root))
+            Ok(StructuralExpected::Node(self.root.clone()))
         } else {
             Err(self.shape("the response emits more than one root"))
         }
@@ -1608,49 +1571,58 @@ impl StructuralAnswerVisitor<'_, '_, '_, '_> {
                 StructuralExpected::Node(_) => unreachable!(),
             };
         };
-        let structural_node = node;
-        let Some(node) = self.facts.type_node(structural_node) else {
-            return Err(self.shape("the site's type evidence names an undeclared node"));
-        };
-        match node {
-            TypeNode::Data { rows, .. } => {
-                if self.facts.is_json_value_node(structural_node) {
-                    let admitted = rows.iter().any(|row| {
-                        self.facts
-                            .constructors
-                            .get(row.constructor.0 as usize)
-                            .is_some_and(|(_, declared, _)| *declared == host_id)
-                    });
-                    if !admitted {
-                        return Err(self.bridge_abort(PreparedRuntimeError::AnswerConstructor {
+        let view = node.view(&mut self.budget).map_err(|source| {
+            self.bridge_abort(PreparedRuntimeError::AnswerTypeEvidence {
+                site: self.site,
+                source,
+            })
+        })?;
+        match view {
+            TypeView::Data(data) => {
+                let constructor = self
+                    .facts
+                    .selected_constructor(&data, host_id, &mut self.budget)
+                    .map_err(|source| {
+                        self.bridge_abort(PreparedRuntimeError::AnswerTypeEvidence {
                             site: self.site,
-                            host_id,
-                        }));
-                    }
-                    return self.json_value_shape(host_id);
-                }
-                let row = rows
-                    .iter()
-                    .find(|row| {
-                        self.facts
-                            .constructors
-                            .get(row.constructor.0 as usize)
-                            .is_some_and(|(_, declared, _)| *declared == host_id)
-                    })
+                            source,
+                        })
+                    })?
                     .ok_or_else(|| {
                         self.bridge_abort(PreparedRuntimeError::AnswerConstructor {
                             site: self.site,
                             host_id,
                         })
                     })?;
-                Ok(row
-                    .fields
-                    .iter()
-                    .copied()
-                    .map(StructuralExpected::Node)
-                    .collect())
+                if self
+                    .facts
+                    .is_json_value(&data, &mut self.budget)
+                    .map_err(|source| {
+                        self.bridge_abort(PreparedRuntimeError::AnswerTypeEvidence {
+                            site: self.site,
+                            source,
+                        })
+                    })?
+                {
+                    return self.json_value_shape(host_id);
+                }
+                let fields = data
+                    .fields(constructor, &mut self.budget)
+                    .map_err(|source| {
+                        self.bridge_abort(PreparedRuntimeError::AnswerTypeEvidence {
+                            site: self.site,
+                            source,
+                        })
+                    })?
+                    .ok_or_else(|| {
+                        self.bridge_abort(PreparedRuntimeError::AnswerConstructor {
+                            site: self.site,
+                            host_id,
+                        })
+                    })?;
+                Ok(fields.into_iter().map(StructuralExpected::Node).collect())
             }
-            TypeNode::Text => {
+            TypeView::Text => {
                 let text = self.facts.constructor_named(TEXT_MODULE, "Text");
                 if text != Some(host_id) {
                     return Err(self.shape("a Text answer requires the Text constructor"));
@@ -1661,7 +1633,7 @@ impl StructuralAnswerVisitor<'_, '_, '_, '_> {
                     StructuralExpected::Scalar(RuntimeRep::Int(64)),
                 ])
             }
-            TypeNode::Integer => {
+            TypeView::Integer => {
                 let is = self.facts.constructor_named(INTEGER_MODULE, "IS");
                 let ip = self.facts.constructor_named(INTEGER_MODULE, "IP");
                 let in_ = self.facts.constructor_named(INTEGER_MODULE, "IN");
@@ -1673,7 +1645,7 @@ impl StructuralAnswerVisitor<'_, '_, '_, '_> {
                     Err(self.shape("an Integer answer requires IS, IP or IN"))
                 }
             }
-            TypeNode::Natural => {
+            TypeView::Natural => {
                 let ns = self.facts.constructor_named(NATURAL_MODULE, "NS");
                 let nb = self.facts.constructor_named(NATURAL_MODULE, "NB");
                 if ns == Some(host_id) {
@@ -1684,11 +1656,11 @@ impl StructuralAnswerVisitor<'_, '_, '_, '_> {
                     Err(self.shape("a Natural answer requires NS or NB"))
                 }
             }
-            TypeNode::Scalar(_) => Err(self.shape("a scalar field requires a literal")),
-            TypeNode::Unconstructible { reason, .. } => Err(self.bridge_abort(
+            TypeView::Scalar(_) => Err(self.shape("a scalar field requires a literal")),
+            TypeView::Unconstructible(reason) => Err(self.bridge_abort(
                 PreparedRuntimeError::AnswerUnconstructible {
                     site: self.site,
-                    reason: reason.clone(),
+                    reason: reason.to_string(),
                 },
             )),
         }
@@ -1762,10 +1734,17 @@ impl HaskellVisitor for StructuralAnswerVisitor<'_, '_, '_, '_> {
 
     fn literal(&mut self, literal: Literal) -> Result<(), BridgeError> {
         let rep = match self.expected()? {
-            StructuralExpected::Node(node) => match self.facts.type_node(node) {
-                Some(TypeNode::Scalar(rep)) => *rep,
-                _ => return Err(self.shape("a literal was emitted for a constructor field")),
-            },
+            StructuralExpected::Node(node) => {
+                match node.view(&mut self.budget).map_err(|source| {
+                    self.bridge_abort(PreparedRuntimeError::AnswerTypeEvidence {
+                        site: self.site,
+                        source,
+                    })
+                })? {
+                    TypeView::Scalar(rep) => rep,
+                    _ => return Err(self.shape("a literal was emitted for a constructor field")),
+                }
+            }
             StructuralExpected::Scalar(rep) => rep,
             StructuralExpected::Bytes => {
                 return Err(self.shape("a literal was emitted for a byte-array field"))
@@ -1813,9 +1792,15 @@ fn build_structural_node(
     // program's layout, and ordinary JSON effect replies work even when the
     // session table was assembled before this program installed.
     let response_table = table.with_json_layout(facts.json_layout());
+    let mut budget = TypeWorkBudget::new(GraphLimits::default().max_work);
+    let root = facts
+        .types
+        .open_root(root, &mut budget)
+        .map_err(|source| PreparedRuntimeError::AnswerTypeEvidence { site, source })?;
     let mut visitor = StructuralAnswerVisitor {
         site,
         root,
+        budget,
         facts,
         builder,
         frames: Vec::new(),
@@ -1849,27 +1834,29 @@ fn build_framed_structural_node(
     prefix: &[Box<dyn tidepool_bridge::ToHaskell + Send>],
     handle: PreparedHandle,
     constructor: DataConId,
-    field_nodes: &[TypeNodeId],
+    field_cursors: Vec<TypeCursor>,
     table: &DataConTable,
     site: ReplyTarget,
-    root: TypeNodeId,
+    root: TypeCursor,
+    budget: TypeWorkBudget,
     facts: &ProgramFacts,
     builder: &mut ManagedBuilder<'_, '_>,
 ) -> Result<ManagedNode, PreparedRuntimeError> {
     let response_table = table.with_json_layout(facts.json_layout());
+    let fields = Vec::with_capacity(field_cursors.len());
     let mut visitor = StructuralAnswerVisitor {
         site,
         root,
+        budget,
         facts,
         builder,
         frames: vec![StructuralFrame {
             host_id: constructor,
-            expected: field_nodes
-                .iter()
-                .copied()
+            expected: field_cursors
+                .into_iter()
                 .map(StructuralExpected::Node)
                 .collect(),
-            fields: Vec::with_capacity(field_nodes.len()),
+            fields,
             counts_depth: true,
         }],
         result: None,
@@ -2047,23 +2034,19 @@ impl HaskellVisitor for ManagedMountVisitor<'_, '_, '_> {
     }
 }
 
-/// Whether two site rows from two programs carry the same evidence: the same
-/// delivery mode and structurally equal wire and input type graphs, compared
-/// by family and constructor identity with ordered arguments, never by local
-/// node or constructor numbers. Cycles (recursive types) are compared
-/// coinductively: a node pair already under comparison is taken as equal.
 fn constructor_replies_equivalent(
     a: &ProgramFacts,
     x: ConstructorReply,
     b: &ProgramFacts,
     y: ConstructorReply,
-) -> bool {
+) -> Result<bool, TypeGraphError> {
     match (x, y) {
-        (ConstructorReply::AtSite, ConstructorReply::AtSite) => true,
+        (ConstructorReply::AtSite, ConstructorReply::AtSite) => Ok(true),
         (ConstructorReply::Static(x), ConstructorReply::Static(y)) => {
-            type_nodes_equivalent(a, x, b, y, &mut BTreeSet::new())
+            let mut budget = TypeWorkBudget::new(GraphLimits::default().max_work);
+            a.types.rooted_compatible(x, &b.types, y, &mut budget)
         }
-        _ => false,
+        _ => Ok(false),
     }
 }
 
@@ -2097,31 +2080,31 @@ fn reply_conflict_evidence(
     fn observe(facts: &ProgramFacts, reply: ConstructorReply) -> ConstructorReplyObservation {
         match reply {
             ConstructorReply::AtSite => ConstructorReplyObservation::AtSite,
-            ConstructorReply::Static(node) => ConstructorReplyObservation::Static {
-                node,
-                shape: match facts.type_node(node) {
-                    None => ReplyTypeObservation::Missing,
-                    Some(TypeNode::Data {
-                        family,
-                        arguments,
-                        rows,
-                    }) => ReplyTypeObservation::Data {
-                        family: identity(family),
-                        argument_count: arguments.len(),
-                        constructor_count: rows.len(),
-                    },
-                    Some(TypeNode::Text) => ReplyTypeObservation::Text,
-                    Some(TypeNode::Integer) => ReplyTypeObservation::Integer,
-                    Some(TypeNode::Natural) => ReplyTypeObservation::Natural,
-                    Some(TypeNode::Scalar(rep)) => ReplyTypeObservation::Scalar(*rep),
-                    Some(TypeNode::Unconstructible { reason, rendered }) => {
-                        ReplyTypeObservation::Unconstructible {
-                            reason: text(reason),
-                            rendered: text(rendered),
+            ConstructorReply::Static(node) => {
+                let mut budget = TypeWorkBudget::new(256);
+                let shape = match facts.types.open_root(node, &mut budget) {
+                    Err(source) => ReplyTypeObservation::Refused(source),
+                    Ok(cursor) => match cursor.view(&mut budget) {
+                        Err(source) => ReplyTypeObservation::Refused(source),
+                        Ok(TypeView::Data(data)) => ReplyTypeObservation::Data {
+                            family: identity(data.family()),
+                            argument_count: data.argument_count(),
+                            constructor_count: data.constructors().count(),
+                        },
+                        Ok(TypeView::Text) => ReplyTypeObservation::Text,
+                        Ok(TypeView::Integer) => ReplyTypeObservation::Integer,
+                        Ok(TypeView::Natural) => ReplyTypeObservation::Natural,
+                        Ok(TypeView::Scalar(rep)) => ReplyTypeObservation::Scalar(rep),
+                        Ok(TypeView::Unconstructible(reason)) => {
+                            ReplyTypeObservation::Unconstructible {
+                                reason: text(&reason.to_string()),
+                                rendered: text(cursor.rendered()),
+                            }
                         }
-                    }
-                },
-            },
+                    },
+                };
+                ConstructorReplyObservation::Static { node, shape }
+            }
         }
     }
 
@@ -2135,74 +2118,28 @@ fn reply_conflict_evidence(
     })
 }
 
-fn sites_equivalent(a: &ProgramFacts, a_row: &SiteRow, b: &ProgramFacts, b_row: &SiteRow) -> bool {
+fn sites_equivalent(
+    a: &ProgramFacts,
+    a_row: &SiteRow,
+    b: &ProgramFacts,
+    b_row: &SiteRow,
+) -> Result<bool, TypeGraphError> {
     if a_row.delivery != b_row.delivery || a_row.inputs.len() != b_row.inputs.len() {
-        return false;
+        return Ok(false);
     }
-    let mut visited = BTreeSet::new();
-    type_nodes_equivalent(a, a_row.wire, b, b_row.wire, &mut visited)
-        && a_row
-            .inputs
-            .iter()
-            .zip(&b_row.inputs)
-            .all(|(x, y)| type_nodes_equivalent(a, *x, b, *y, &mut visited))
-}
-
-fn type_nodes_equivalent<A: TypeGraph, B: TypeGraph>(
-    a: &A,
-    a_id: TypeNodeId,
-    b: &B,
-    b_id: TypeNodeId,
-    visited: &mut BTreeSet<(u32, u32)>,
-) -> bool {
-    if !visited.insert((a_id.0, b_id.0)) {
-        return true;
+    let mut budget = TypeWorkBudget::new(GraphLimits::default().max_work);
+    if !a
+        .types
+        .rooted_compatible(a_row.wire, &b.types, b_row.wire, &mut budget)?
+    {
+        return Ok(false);
     }
-    match (a.type_node(a_id), b.type_node(b_id)) {
-        (
-            Some(TypeNode::Data {
-                family: a_family,
-                arguments: a_arguments,
-                rows: a_rows,
-            }),
-            Some(TypeNode::Data {
-                family: b_family,
-                arguments: b_arguments,
-                rows: b_rows,
-            }),
-        ) => {
-            a_family == b_family
-                && a_arguments.len() == b_arguments.len()
-                && a_rows.len() == b_rows.len()
-                && a_arguments
-                    .iter()
-                    .zip(b_arguments)
-                    .all(|(x, y)| type_nodes_equivalent(a, *x, b, *y, visited))
-                && a_rows.iter().zip(b_rows).all(|(x, y)| {
-                    a.constructor_identity(x.constructor) == b.constructor_identity(y.constructor)
-                        && x.fields.len() == y.fields.len()
-                        && x.fields
-                            .iter()
-                            .zip(&y.fields)
-                            .all(|(f, g)| type_nodes_equivalent(a, *f, b, *g, visited))
-                })
+    for (x, y) in a_row.inputs.iter().zip(&b_row.inputs) {
+        if !a.types.rooted_compatible(*x, &b.types, *y, &mut budget)? {
+            return Ok(false);
         }
-        (Some(TypeNode::Text), Some(TypeNode::Text))
-        | (Some(TypeNode::Integer), Some(TypeNode::Integer))
-        | (Some(TypeNode::Natural), Some(TypeNode::Natural)) => true,
-        (Some(TypeNode::Scalar(x)), Some(TypeNode::Scalar(y))) => x == y,
-        (
-            Some(TypeNode::Unconstructible {
-                reason: a_reason,
-                rendered: a_rendered,
-            }),
-            Some(TypeNode::Unconstructible {
-                reason: b_reason,
-                rendered: b_rendered,
-            }),
-        ) => a_reason == b_reason && a_rendered == b_rendered,
-        _ => false,
     }
+    Ok(true)
 }
 
 /// A boxed or unboxed non-negative `Int` field: the leading site argument of
@@ -2721,12 +2658,8 @@ impl PreparedEngine {
         let facts = self.programs.get(&witness.owner)?;
         let row = facts.sites.get(witness.row)?;
         Some(SiteTypeEvidence {
-            types: facts.types.clone(),
-            constructors: facts
-                .constructors
-                .iter()
-                .map(|(identity, _, _)| identity.clone())
-                .collect(),
+            types: Arc::clone(&facts.types),
+            constructors: Arc::clone(&facts.constructors),
             input: *row.inputs.first()?,
             answer: row.wire,
             request_context: None,
@@ -2735,21 +2668,33 @@ impl PreparedEngine {
 
     /// Compare the original request graph with the access site installed in
     /// this machine. The third accessor input is its complete reply evidence.
-    pub fn request_scope_types_match(&self, request: &SiteTypeEvidence, access_site: u64) -> bool {
+    pub fn request_scope_types_match(
+        &self,
+        request: &SiteTypeEvidence,
+        access_site: u64,
+    ) -> Result<bool, TypeGraphError> {
         let Some(witness) = self.sites.get(&access_site) else {
-            return false;
+            return Ok(false);
         };
         let Some(facts) = self.programs.get(&witness.owner) else {
-            return false;
+            return Ok(false);
         };
         let Some(row) = facts.sites.get(witness.row) else {
-            return false;
+            return Ok(false);
         };
         let (Some(input), Some(reply)) = (row.inputs.first(), row.inputs.get(2)) else {
-            return false;
+            return Ok(false);
         };
-        type_nodes_equivalent(request, request.input, facts, *input, &mut BTreeSet::new())
-            && type_nodes_equivalent(request, request.answer, facts, *reply, &mut BTreeSet::new())
+        let mut budget = TypeWorkBudget::new(GraphLimits::default().max_work);
+        Ok(request
+            .types
+            .rooted_compatible(request.input, &facts.types, *input, &mut budget)?
+            && request.types.rooted_compatible(
+                request.answer,
+                &facts.types,
+                *reply,
+                &mut budget,
+            )?)
     }
     /// Stream a structurally encoded host value into the resident heap. The
     /// caller supplies the compiler-authenticated constructor table for the
@@ -2964,8 +2909,8 @@ impl PreparedEngine {
                 .map_err(PreparedRuntimeError::Install)?;
         let mut engine = Self::from_machine(machine, registry);
         // The first program can conflict only with itself.
-        let plan = engine.plan_evidence(&facts)?;
-        engine.finish_program_install(program, facts, plan, exports)?;
+        let admitted = engine.admit_program_facts(facts)?;
+        engine.finish_program_install(program, admitted, exports)?;
         Ok((engine, program))
     }
 
@@ -3024,7 +2969,7 @@ impl PreparedEngine {
                 planned.push((site.site, row));
                 continue;
             };
-            if !sites_equivalent(owner_facts, owner_row, facts, site) {
+            if !sites_equivalent(owner_facts, owner_row, facts, site)? {
                 return Err(match owner {
                     Some(owner) => PreparedRuntimeError::SiteConflict {
                         site: site.site,
@@ -3062,7 +3007,7 @@ impl PreparedEngine {
                     planned.push((host_id, row));
                     continue;
                 };
-            if !constructor_replies_equivalent(owner_facts, owner_reply, facts, reply) {
+            if !constructor_replies_equivalent(owner_facts, owner_reply, facts, reply)? {
                 return Err(match owner {
                     Some(owner) => PreparedRuntimeError::ConstructorReplyConflict {
                         constructor: host_id,
@@ -3100,12 +3045,20 @@ impl PreparedEngine {
         })
     }
 
+    fn admit_program_facts(
+        &self,
+        facts: ProgramFacts,
+    ) -> Result<AdmittedProgramFacts, PreparedRuntimeError> {
+        let plan = self.plan_evidence(&facts)?;
+        Ok(AdmittedProgramFacts { facts, plan })
+    }
+
     /// Check duplicate site and verb ownership across a batch before any
     /// machine mutation. Equal evidence keeps its first planned owner.
     fn plan_batch_evidence(
         &self,
-        facts: &[ProgramFacts],
-    ) -> Result<Vec<EvidencePlan>, PreparedRuntimeError> {
+        facts: Vec<ProgramFacts>,
+    ) -> Result<Vec<AdmittedProgramFacts>, PreparedRuntimeError> {
         let mut sites = BTreeMap::<u64, (usize, usize)>::new();
         let mut verbs = BTreeMap::<DataConId, (usize, usize)>::new();
         let mut plans = Vec::with_capacity(facts.len());
@@ -3119,7 +3072,7 @@ impl PreparedEngine {
                         &facts[prior_group].sites[prior_row],
                         group_facts,
                         &group_facts.sites[row],
-                    ) {
+                    )? {
                         return Err(PreparedRuntimeError::DuplicateSite { site });
                     }
                 } else {
@@ -3136,7 +3089,7 @@ impl PreparedEngine {
                         facts[prior_group].constructor_replies[prior_row].1,
                         group_facts,
                         group_facts.constructor_replies[row].1,
-                    ) {
+                    )? {
                         return Err(PreparedRuntimeError::DuplicateConstructorReply {
                             constructor: host_id,
                             evidence: reply_conflict_evidence(
@@ -3156,7 +3109,11 @@ impl PreparedEngine {
             plan.constructor_replies = accepted_verbs;
             plans.push(plan);
         }
-        Ok(plans)
+        Ok(facts
+            .into_iter()
+            .zip(plans)
+            .map(|(facts, plan)| AdmittedProgramFacts { facts, plan })
+            .collect())
     }
 
     /// Retain exports before any session metadata or source custody publishes.
@@ -3218,8 +3175,7 @@ impl PreparedEngine {
     fn finish_program_install(
         &mut self,
         program: ProgramId,
-        facts: ProgramFacts,
-        plan: EvidencePlan,
+        admitted: AdmittedProgramFacts,
         exports: Vec<(SymbolIdentity, ValueId, Option<Signature>)>,
     ) -> Result<(), PreparedRuntimeError> {
         self.machine
@@ -3244,8 +3200,7 @@ impl PreparedEngine {
                     return Err(error);
                 }
             };
-        self.programs.insert(program, facts);
-        self.publish_evidence(program, plan);
+        self.publish_admitted_program(program, admitted);
         self.code_exports.extend(exports);
         self.installs_since_major += 1;
         Ok(())
@@ -3347,6 +3302,22 @@ impl PreparedEngine {
         self.code_exports.len()
     }
 
+    fn publish_admitted_program(
+        &mut self,
+        program: ProgramId,
+        admitted: AdmittedProgramFacts,
+    ) -> bool {
+        let added = match self.programs.entry(program) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(admitted.facts);
+                true
+            }
+            std::collections::btree_map::Entry::Occupied(_) => false,
+        };
+        self.publish_evidence(program, admitted.plan);
+        added
+    }
+
     /// Publish canonical site and constructor reply ownership together.
     fn publish_evidence(&mut self, program: ProgramId, plan: EvidencePlan) {
         let witness = |row| SiteWitness {
@@ -3388,11 +3359,11 @@ impl PreparedEngine {
         let resolve_imports_ms = lap();
         let import_count = imports.len();
         let exports = exportable_code_tops(&prepared);
-        let mut facts = ProgramFacts::of(&prepared);
+        let facts = ProgramFacts::of(&prepared);
         // Site evidence is checked before anything is compiled or published:
         // a conflicting duplicate leaves the machine, its programs and the
         // site index exactly as they were.
-        let plan = self.plan_evidence(&facts)?;
+        let mut admitted = self.admit_program_facts(facts)?;
         let evidence_ms = lap();
         let linked = link_program(prepared, &values)?;
         let link_ms = lap();
@@ -3401,7 +3372,7 @@ impl PreparedEngine {
         // image through `install_shared` and compiles nothing, so
         // `compile_ms` below also covers a registry lookup on the hit path.
         let (program, definitions) = self.compile_and_install(linked, imports)?;
-        facts.definitions = definitions;
+        admitted.facts.definitions = definitions;
         let compile_install_ms = lap();
         tracing::info!(
             target: "tidepool_runtime::prepared_install",
@@ -3413,7 +3384,7 @@ impl PreparedEngine {
             compiled_off_checkout = false,
             "prepared install"
         );
-        self.finish_program_install(program, facts, plan, exports)?;
+        self.finish_program_install(program, admitted, exports)?;
         Ok(program)
     }
 
@@ -3523,7 +3494,7 @@ impl PreparedEngine {
             .iter()
             .map(|selected| ProgramFacts::from_image(selected.image(), None))
             .collect();
-        let plans = self.plan_batch_evidence(&facts)?;
+        let admitted = self.plan_batch_evidence(facts)?;
         let mut programs = Vec::with_capacity(demanded.len());
         let mut package_updates = BTreeMap::new();
         for selected in &demanded {
@@ -3629,12 +3600,16 @@ impl PreparedEngine {
                 .expect("preflighted package export remains installed")
                 .interface_digest = Some(digest);
         }
-        for ((id, facts), plan) in ids.iter().copied().zip(facts).zip(plans) {
+        assert_eq!(
+            ids.len(),
+            admitted.len(),
+            "installed batch matches admitted definitions"
+        );
+        for (id, admitted) in ids.iter().copied().zip(admitted) {
             self.machine
                 .pin(id)
                 .expect("batch returned an installed program");
-            self.programs.insert(id, facts);
-            self.publish_evidence(id, plan);
+            self.publish_admitted_program(id, admitted);
         }
         self.installs_since_major += ids.len();
         Ok(ids)
@@ -4061,7 +4036,7 @@ impl PreparedEngine {
             if let Some(target_facts) = facts.last_mut() {
                 target_facts.settled = settled;
             }
-            let plans = self.plan_batch_evidence(&facts)?;
+            let admitted = self.plan_batch_evidence(facts)?;
             let exports = exportable_code_tops(&target.prepared);
             let mut programs = Vec::with_capacity(demanded.len() + 1);
             let mut package_updates = BTreeMap::<SymbolIdentity, [u8; 32]>::new();
@@ -4277,8 +4252,7 @@ impl PreparedEngine {
                 groups: installed.programs[..installed.programs.len() - 1].to_vec(),
                 domain_leases: installed.source_attachments,
                 leases: installed.leases,
-                facts,
-                plans,
+                admitted,
                 package_updates,
                 exports: BTreeMap::new(),
             };
@@ -4337,9 +4311,13 @@ impl PreparedEngine {
             .iter()
             .copied()
             .chain(std::iter::once(staged.target));
-        for ((id, facts), plan) in programs.zip(staged.facts).zip(staged.plans) {
-            self.programs.insert(id, facts);
-            self.publish_evidence(id, plan);
+        assert_eq!(
+            staged.groups.len() + 1,
+            staged.admitted.len(),
+            "staged batch matches admitted definitions"
+        );
+        for (id, admitted) in programs.zip(staged.admitted) {
+            self.publish_admitted_program(id, admitted);
         }
         self.installs_since_major += staged.groups.len() + 1;
         for group in staged.groups {
@@ -4468,7 +4446,7 @@ impl PreparedEngine {
         snapshot.facts.definitions = Arc::clone(compiled.definition_facts());
         // Evidence ownership can change while compilation releases checkout.
         // Replan against current installations before any native mutation.
-        let plan = self.plan_evidence(&snapshot.facts)?;
+        let admitted = self.admit_program_facts(snapshot.facts)?;
         let program = self
             .machine
             .install_shared(compiled, snapshot.imports)
@@ -4479,7 +4457,7 @@ impl PreparedEngine {
             compiled_off_checkout = true,
             "prepared install"
         );
-        self.finish_program_install(program, snapshot.facts, plan, snapshot.exports)?;
+        self.finish_program_install(program, admitted, snapshot.exports)?;
         Ok(Some(program))
     }
 
@@ -5214,14 +5192,19 @@ impl PreparedEngine {
         let owner = programs.get(&owner_id).ok_or(PreparedRuntimeError::Run(
             ExecutionError::UnknownProgram(owner_id),
         ))?;
-        let ctor_row =
-            owner
-                .row_for(wire, constructor)
-                .ok_or(PreparedRuntimeError::AnswerConstructor {
-                    site,
-                    host_id: constructor,
-                })?;
-        if ctor_row.fields.len() != prefix.len() + 1 {
+        let mut budget = TypeWorkBudget::new(GraphLimits::default().max_work);
+        let root = owner
+            .types
+            .open_root(wire, &mut budget)
+            .map_err(|source| PreparedRuntimeError::AnswerTypeEvidence { site, source })?;
+        let fields = owner
+            .selected_fields(&root, constructor, &mut budget)
+            .map_err(|source| PreparedRuntimeError::AnswerTypeEvidence { site, source })?
+            .ok_or(PreparedRuntimeError::AnswerConstructor {
+                site,
+                host_id: constructor,
+            })?;
+        if fields.len() != prefix.len() + 1 {
             return Err(PreparedRuntimeError::AnswerShape {
                 site,
                 detail: "the framed constructor's declared field count does not match the supplied prefix plus the borrowed handle field",
@@ -5237,10 +5220,11 @@ impl PreparedEngine {
             prefix,
             handle,
             constructor,
-            &ctor_row.fields,
+            fields,
             table,
             site,
-            wire,
+            root,
+            budget,
             owner,
             &mut builder,
         )?;
@@ -5482,29 +5466,24 @@ impl PreparedEngine {
             .iter()
             .map(|image| ProgramFacts::from_image(&image.image, None))
             .collect::<Vec<_>>();
-        let plans = self.plan_batch_evidence(&facts)?;
+        let admitted = self.plan_batch_evidence(facts)?;
         let imported = self
             .machine
             .import_parcel(parcel, realm)
             .map_err(PreparedRuntimeError::Run)?;
         assert_eq!(
             imported.programs.len(),
-            facts.len(),
+            admitted.len(),
             "exact parcel image report"
         );
-        for (((program, image), facts), plan) in imported.programs.into_iter().zip(facts).zip(plans)
-        {
+        for ((program, image), admitted) in imported.programs.into_iter().zip(admitted) {
             assert!(
-                Arc::ptr_eq(image.definition_facts(), &facts.definitions),
+                Arc::ptr_eq(image.definition_facts(), &admitted.facts.definitions),
                 "parcel metadata retains the same native image"
             );
-            // A repeated instance keeps its admitted entry/resume metadata.
-            if let std::collections::btree_map::Entry::Vacant(entry) = self.programs.entry(program)
-            {
-                entry.insert(facts);
+            if self.publish_admitted_program(program, admitted) {
                 self.installs_since_major += 1;
             }
-            self.publish_evidence(program, plan);
         }
         Ok((imported.value.raw(), imported.imports))
     }
@@ -5722,9 +5701,10 @@ impl PreparedEngine {
         };
         self.old_bytes = receipt.old_bytes;
         for program in &receipt.programs {
-            if let Some(facts) = self.programs.remove(program) {
-                self.retire_site_witnesses(*program, &facts);
-            }
+            self.programs.remove(program);
+        }
+        for program in &receipt.programs {
+            self.retire_site_witnesses(*program);
         }
         self.installs_since_major = 0;
         self.old_bytes_at_last_major = self.machine.old_bytes_live();
@@ -5763,9 +5743,10 @@ impl PreparedEngine {
         self.old_bytes
     }
 
-    /// Move canonical site and constructor witnesses to equivalent live
-    /// declarations, or remove them when their final owner retires.
-    fn retire_site_witnesses(&mut self, retired: ProgramId, facts: &ProgramFacts) {
+    /// Transfer immutable admitted evidence to a surviving member of its
+    /// compatibility class. Installation checked every duplicate before
+    /// publication; retirement cannot introduce another declaration.
+    fn retire_site_witnesses(&mut self, retired: ProgramId) {
         let owned: Vec<u64> = self
             .sites
             .iter()
@@ -5773,71 +5754,42 @@ impl PreparedEngine {
             .map(|(site, _)| *site)
             .collect();
         for site in owned {
-            let Some(row) = facts.sites.iter().find(|row| row.site == site) else {
-                self.sites.remove(&site);
-                continue;
-            };
-            let successor = self
-                .programs
-                .iter()
-                .find_map(|(candidate, candidate_facts)| {
-                    candidate_facts
-                        .sites
-                        .iter()
-                        .position(|candidate_row| {
-                            candidate_row.site == site
-                                && sites_equivalent(facts, row, candidate_facts, candidate_row)
-                        })
-                        .map(|row_index| (*candidate, row_index))
-                });
+            let successor = self.programs.iter().find_map(|(owner, facts)| {
+                facts
+                    .sites
+                    .iter()
+                    .position(|row| row.site == site)
+                    .map(|row| SiteWitness { owner: *owner, row })
+            });
             match successor {
-                Some((owner, row)) => {
-                    self.sites.insert(site, SiteWitness { owner, row });
+                Some(witness) => {
+                    self.sites.insert(site, witness);
                 }
                 None => {
                     self.sites.remove(&site);
                 }
             }
         }
-        let owned: Vec<(DataConId, usize)> = self
+        let owned: Vec<DataConId> = self
             .constructor_replies
             .iter()
             .filter(|(_, witness)| witness.owner == retired)
-            .map(|(host_id, witness)| (*host_id, witness.row))
+            .map(|(host, _)| *host)
             .collect();
-        for (host_id, row) in owned {
-            let Some((_, reply)) = facts.constructor_replies.get(row) else {
-                self.constructor_replies.remove(&host_id);
-                continue;
-            };
-            let successor = self
-                .programs
-                .iter()
-                .find_map(|(candidate, candidate_facts)| {
-                    candidate_facts
-                        .constructor_replies
-                        .iter()
-                        .enumerate()
-                        .find(|(_, (candidate_host, candidate_reply))| {
-                            *candidate_host == host_id
-                                && constructor_replies_equivalent(
-                                    facts,
-                                    *reply,
-                                    candidate_facts,
-                                    *candidate_reply,
-                                )
-                        })
-                        .map(|(row, _)| SiteWitness {
-                            owner: *candidate,
-                            row,
-                        })
-                });
+        for host in owned {
+            let successor = self.programs.iter().find_map(|(owner, facts)| {
+                facts
+                    .constructor_replies
+                    .iter()
+                    .position(|(candidate, _)| *candidate == host)
+                    .map(|row| SiteWitness { owner: *owner, row })
+            });
             match successor {
                 Some(witness) => {
-                    self.constructor_replies.insert(host_id, witness);
+                    self.constructor_replies.insert(host, witness);
                 }
                 None => {
-                    self.constructor_replies.remove(&host_id);
+                    self.constructor_replies.remove(&host);
                 }
             }
         }
@@ -5866,6 +5818,10 @@ pub(super) mod tests {
         testing, Atom, CheckedLayout, ConstructorDecl, ConstructorId, ExprFrame, FieldLayout,
         GlobalDecl, GlobalId, HeapBinding, ResultContract, ScalarLiteral, Signature, SignatureId,
         StorageLayout, TopBinding, UpdatePolicy, ValueRef,
+    };
+    use tidepool_repr::type_graph::{
+        DeclarationForm, ForAllFlag, NominalHeadKind, ParameterFlag, RootDomain, SourceBinderFlag,
+        SyntaxRestriction, TypeEdge, TypeLiteral, TypeNode,
     };
     use tidepool_repr::DataCon;
     use tidepool_repr::SessionModule;
@@ -9323,51 +9279,91 @@ pub(super) mod tests {
         }));
         let mut json_value_family = testing::identity("Tidepool.Aeson.Value", "Value");
         json_value_family.namespace = "type".into();
-        wire.types = vec![
-            TypeNode::Data {
-                family: json_value_family,
-                arguments: vec![],
-                rows: vec![
-                    CtorRow {
-                        constructor: ConstructorId(1),
-                        fields: vec![TypeNodeId(0)],
-                    },
-                    CtorRow {
-                        constructor: ConstructorId(2),
-                        fields: vec![TypeNodeId(0)],
-                    },
-                    CtorRow {
-                        constructor: ConstructorId(3),
-                        fields: vec![TypeNodeId(0)],
-                    },
-                    CtorRow {
-                        constructor: ConstructorId(4),
-                        fields: vec![TypeNodeId(0)],
-                    },
-                    CtorRow {
-                        constructor: ConstructorId(5),
-                        fields: vec![TypeNodeId(0)],
-                    },
-                    CtorRow {
-                        constructor: ConstructorId(6),
-                        fields: vec![],
-                    },
-                ],
+        let mut scalar_family = testing::identity("Fixture.Mount", "Int64");
+        scalar_family.namespace = "type".into();
+        let mut framed_family = testing::identity("Fixture.Mount", "Framed");
+        framed_family.namespace = "type".into();
+        let declaration = |identity, form| TypeNode::Declaration {
+            identity,
+            parameters: vec![],
+            form,
+            restriction: SyntaxRestriction::None,
+        };
+        let mut nodes = vec![
+            TypeNode::Root {
+                domain: RootDomain::Closed,
+                binders: vec![],
+                rendered: "Value".into(),
             },
-            TypeNode::Scalar(RuntimeRep::Int(64)),
-            TypeNode::Data {
-                family: {
-                    let mut family = testing::identity("Fixture.Mount", "Framed");
-                    family.namespace = "type".into();
-                    family
-                },
-                arguments: vec![],
-                rows: vec![CtorRow {
-                    constructor: ConstructorId(22),
-                    fields: vec![TypeNodeId(1), TypeNodeId(0)],
-                }],
+            TypeNode::Root {
+                domain: RootDomain::Closed,
+                binders: vec![],
+                rendered: "Int#".into(),
             },
+            TypeNode::Root {
+                domain: RootDomain::Closed,
+                binders: vec![],
+                rendered: "Framed".into(),
+            },
+            declaration(json_value_family, DeclarationForm::Data),
+            declaration(scalar_family, DeclarationForm::Scalar(RuntimeRep::Int(64))),
+            declaration(framed_family, DeclarationForm::Data),
+            TypeNode::NominalApplication,
+            TypeNode::NominalApplication,
+            TypeNode::NominalApplication,
         ];
+        let mut edges = vec![
+            (0, 6, TypeEdge::Body),
+            (1, 7, TypeEdge::Body),
+            (2, 8, TypeEdge::Body),
+            (6, 3, TypeEdge::Head),
+            (7, 4, TypeEdge::Head),
+            (8, 5, TypeEdge::Head),
+        ];
+        for (ordinal, constructor) in (1..=6).enumerate() {
+            let template = nodes.len() as u32;
+            nodes.push(TypeNode::ConstructorTemplate {
+                constructor: ConstructorId(constructor),
+                identity: wire.constructors[constructor as usize].identity.clone(),
+            });
+            edges.push((3, template, TypeEdge::Constructor(ordinal as u32)));
+            if constructor != 6 {
+                edges.push((
+                    template,
+                    6,
+                    TypeEdge::Field {
+                        ordinal: 0,
+                        source_rep: RuntimeRep::LiftedRef,
+                    },
+                ));
+            }
+        }
+        let framed = nodes.len() as u32;
+        nodes.push(TypeNode::ConstructorTemplate {
+            constructor: ConstructorId(22),
+            identity: wire.constructors[22].identity.clone(),
+        });
+        edges.extend([
+            (5, framed, TypeEdge::Constructor(0)),
+            (
+                framed,
+                7,
+                TypeEdge::Field {
+                    ordinal: 0,
+                    source_rep: RuntimeRep::Int(64),
+                },
+            ),
+            (
+                framed,
+                6,
+                TypeEdge::Field {
+                    ordinal: 1,
+                    source_rep: RuntimeRep::LiftedRef,
+                },
+            ),
+        ]);
+        wire.types = testing::type_graph(nodes, &edges, &wire.constructors)
+            .expect("JSON and framed templates");
         wire.sites = vec![
             SiteRow {
                 site: 7,
@@ -9921,9 +9917,13 @@ pub(super) mod tests {
         );
         assert!(first.discard_handle(self_root));
 
-        let (mut conflicting, _) =
-            PreparedEngine::bootstrap(typed_site_program(7, vec![TypeNode::Integer], 0, &[]))
-                .expect("different site owner");
+        let (mut conflicting, _) = PreparedEngine::bootstrap(typed_site_program(
+            7,
+            closed_reply_type(DeclarationForm::Integer),
+            0,
+            &[],
+        ))
+        .expect("different site owner");
         let before = conflicting.residency();
         assert!(matches!(
             conflicting.import_parcel(
@@ -10045,9 +10045,117 @@ pub(super) mod tests {
         assert_eq!(engine.parked_count(), 0);
     }
 
+    fn closed_reply_type(form: DeclarationForm) -> Arc<TypeGraph> {
+        testing::closed_type_graph(testing::identity("Fixture.Types", "Reply"), form)
+    }
+
+    fn polymorphic_reply_type(rendered: &str, body_is_bound: bool) -> Arc<TypeGraph> {
+        let mut kind = testing::identity("Fixture.Types", "Type");
+        kind.namespace = "type".into();
+        let mut integer = testing::identity(INTEGER_MODULE, "Integer");
+        integer.namespace = "type".into();
+        let mut nodes = vec![
+            TypeNode::Root {
+                domain: RootDomain::Closed,
+                binders: vec![],
+                rendered: rendered.into(),
+            },
+            TypeNode::ForAll(ForAllFlag::Specified),
+            TypeNode::Declaration {
+                identity: kind,
+                parameters: vec![],
+                form: DeclarationForm::Opaque {
+                    head_kind: NominalHeadKind::Constructor,
+                    reason: "kind".into(),
+                },
+                restriction: SyntaxRestriction::None,
+            },
+            TypeNode::NominalApplication,
+            TypeNode::Bound(0),
+        ];
+        let mut edges = vec![
+            (0, 1, TypeEdge::Body),
+            (1, 3, TypeEdge::Kind),
+            (1, 4, TypeEdge::Body),
+            (3, 2, TypeEdge::Head),
+        ];
+        if !body_is_bound {
+            nodes[4] = TypeNode::NominalApplication;
+            nodes.push(TypeNode::Declaration {
+                identity: integer,
+                parameters: vec![],
+                form: DeclarationForm::Integer,
+                restriction: SyntaxRestriction::None,
+            });
+            edges.push((4, 5, TypeEdge::Head));
+        }
+        testing::type_graph(nodes, &edges, &[]).expect("finite polymorphic reply type")
+    }
+
+    fn response_result_types(
+        forms: &[DeclarationForm],
+        argument: usize,
+        family: &SymbolIdentity,
+    ) -> Arc<TypeGraph> {
+        let mut nodes = (0..=forms.len())
+            .map(|_| TypeNode::Root {
+                domain: RootDomain::Closed,
+                binders: vec![],
+                rendered: "request fixture".into(),
+            })
+            .collect::<Vec<_>>();
+        let mut edges = Vec::new();
+        let mut expressions = Vec::new();
+        for (root, form) in forms.iter().enumerate() {
+            let name = match form {
+                DeclarationForm::Text => "Text",
+                DeclarationForm::Integer => "Integer",
+                DeclarationForm::Natural => "Natural",
+                _ => panic!("request fixture leaf"),
+            };
+            let mut identity = testing::identity("Fixture.Types", name);
+            identity.namespace = "type".into();
+            let declaration = nodes.len() as u32;
+            nodes.push(TypeNode::Declaration {
+                identity,
+                parameters: vec![],
+                form: form.clone(),
+                restriction: SyntaxRestriction::None,
+            });
+            let expression = nodes.len() as u32;
+            nodes.push(TypeNode::NominalApplication);
+            expressions.push(expression);
+            edges.extend([
+                (root as u32, expression, TypeEdge::Body),
+                (expression, declaration, TypeEdge::Head),
+            ]);
+        }
+        let declaration = nodes.len() as u32;
+        nodes.push(TypeNode::Declaration {
+            identity: family.clone(),
+            parameters: vec![ParameterFlag::AnonymousVisible],
+            form: DeclarationForm::Opaque {
+                head_kind: NominalHeadKind::Constructor,
+                reason: "abstract request result".into(),
+            },
+            restriction: SyntaxRestriction::None,
+        });
+        let kind = nodes.len() as u32;
+        nodes.push(TypeNode::Literal(TypeLiteral::Symbol("kind".into())));
+        let expression = nodes.len() as u32;
+        nodes.push(TypeNode::NominalApplication);
+        edges.extend([
+            (declaration, kind, TypeEdge::BinderKind(0)),
+            (forms.len() as u32, expression, TypeEdge::Body),
+            (expression, declaration, TypeEdge::Head),
+            (expression, expressions[argument], TypeEdge::Argument(0)),
+        ]);
+        testing::type_graph(nodes, &edges, &[]).expect("finite request input and reply types")
+    }
+
     /// An effect constructor with immutable static reply evidence. `revision`
     /// distinguishes native fixture images without manufacturing reply sites.
-    fn verb_program(revision: u64, reply: TypeNode) -> PreparedProgram {
+    fn verb_program(revision: u64, reply: Arc<TypeGraph>) -> PreparedProgram {
         let mut wire = testing::wire_program();
         wire.constructors = vec![ConstructorDecl {
             identity: testing::identity("Fixture.Effects", "Print"),
@@ -10065,7 +10173,7 @@ pub(super) mod tests {
             family_size: 1,
             host_id: DataConId(77),
         }];
-        wire.types = vec![reply];
+        wire.types = reply;
         if let Group::NonRecursive(top) = &mut wire.bindings[0] {
             top.identity.occurrence = format!("entry_{revision}");
         }
@@ -10076,7 +10184,7 @@ pub(super) mod tests {
 
     fn typed_site_program(
         site: u64,
-        types: Vec<TypeNode>,
+        types: Arc<TypeGraph>,
         wire: u32,
         inputs: &[u32],
     ) -> PreparedProgram {
@@ -10095,19 +10203,79 @@ pub(super) mod tests {
 
     #[test]
     fn site_type_evidence_commitment_covers_graph_and_endpoints() {
-        let evidence = SiteTypeEvidence {
-            types: vec![
-                TypeNode::Text,
-                TypeNode::Data {
-                    family: testing::identity("Fixture.Types", "Reply"),
-                    arguments: vec![TypeNodeId(0)],
-                    rows: vec![tidepool_repr::execution_schema::CtorRow {
-                        constructor: tidepool_repr::execution_schema::ConstructorId(0),
-                        fields: vec![TypeNodeId(0)],
-                    }],
+        let constructor = mount_constructor(
+            "Fixture.Types",
+            "ReplyValue",
+            "Fixture.Types",
+            "Reply",
+            170,
+            1,
+            1,
+            vec![RuntimeRep::LiftedRef],
+        );
+        let mut text = testing::identity("Fixture.Types", "Text");
+        text.namespace = "type".into();
+        let types = testing::type_graph(
+            vec![
+                TypeNode::Root {
+                    domain: RootDomain::Closed,
+                    binders: vec![],
+                    rendered: "Text".into(),
                 },
+                TypeNode::Root {
+                    domain: RootDomain::Closed,
+                    binders: vec![],
+                    rendered: "Reply Text".into(),
+                },
+                TypeNode::Declaration {
+                    identity: text,
+                    parameters: vec![],
+                    form: DeclarationForm::Text,
+                    restriction: SyntaxRestriction::None,
+                },
+                TypeNode::Declaration {
+                    identity: constructor.family.clone(),
+                    parameters: vec![ParameterFlag::AnonymousVisible],
+                    form: DeclarationForm::Data,
+                    restriction: SyntaxRestriction::None,
+                },
+                TypeNode::NominalApplication,
+                TypeNode::NominalApplication,
+                TypeNode::ConstructorTemplate {
+                    constructor: ConstructorId(0),
+                    identity: constructor.identity.clone(),
+                },
+                TypeNode::Bound(0),
+                TypeNode::Literal(TypeLiteral::Symbol("kind".into())),
             ],
-            constructors: vec![testing::identity("Fixture.Types", "ReplyValue")],
+            &[
+                (3, 8, TypeEdge::BinderKind(0)),
+                (0, 4, TypeEdge::Body),
+                (1, 5, TypeEdge::Body),
+                (4, 2, TypeEdge::Head),
+                (5, 3, TypeEdge::Head),
+                (5, 4, TypeEdge::Argument(0)),
+                (3, 6, TypeEdge::Constructor(0)),
+                (
+                    6,
+                    7,
+                    TypeEdge::Field {
+                        ordinal: 0,
+                        source_rep: RuntimeRep::LiftedRef,
+                    },
+                ),
+            ],
+            std::slice::from_ref(&constructor),
+        )
+        .expect("canonical site graph fixture");
+        let evidence = SiteTypeEvidence {
+            types,
+            constructors: vec![(
+                constructor.identity.clone(),
+                constructor.host_id,
+                constructor.family.clone(),
+            )]
+            .into(),
             input: TypeNodeId(0),
             answer: TypeNodeId(1),
             request_context: None,
@@ -10126,12 +10294,86 @@ pub(super) mod tests {
             "public type graphs cannot authenticate native request signatures"
         );
 
+        let mut renamed = evidence.clone();
+        let mut storage = renamed.types.graph().clone();
+        let TypeNode::Root { rendered, .. } =
+            &mut storage[tidepool_repr::type_graph::TypeNodeId::new(1)]
+        else {
+            panic!("fixture reply root");
+        };
+        *rendered = "diagnostic name changed".into();
+        renamed.types = Arc::new(
+            TypeGraph::validate(
+                storage,
+                std::slice::from_ref(&constructor),
+                GraphLimits::default(),
+            )
+            .expect("renamed graph preserves structural evidence"),
+        );
+        assert_eq!(evidence, renamed);
+        assert_ne!(
+            evidence.types, renamed.types,
+            "artifact content retains diagnostic bytes"
+        );
+        assert_eq!(commitment, renamed.commitment());
+        let mut relocated = evidence.clone();
+        Arc::make_mut(&mut relocated.constructors)[0].1 = DataConId(999);
+        assert_eq!(evidence, relocated);
+        assert_eq!(commitment, relocated.commitment());
+
+        let mut changed_template = evidence.clone();
+        let mut storage = changed_template.types.graph().clone();
+        let field = tidepool_repr::type_graph::TypeNodeId::new(7);
+        storage[field] = TypeNode::NominalApplication;
+        let mut integer = testing::identity(INTEGER_MODULE, "Integer");
+        integer.namespace = "type".into();
+        let declaration = storage.add_node(TypeNode::Declaration {
+            identity: integer,
+            parameters: vec![],
+            form: DeclarationForm::Integer,
+            restriction: SyntaxRestriction::None,
+        });
+        storage.add_edge(field, declaration, TypeEdge::Head);
+        changed_template.types = Arc::new(
+            TypeGraph::validate(
+                storage,
+                std::slice::from_ref(&constructor),
+                GraphLimits::default(),
+            )
+            .expect("changed finite field template"),
+        );
+        assert_ne!(evidence, changed_template);
+        assert_ne!(commitment, changed_template.commitment());
+        let mut changed_family = evidence.clone();
+        let mut storage = changed_family.types.graph().clone();
+        let mut renamed_constructor = constructor.clone();
+        renamed_constructor.family.occurrence = "OtherReply".into();
+        let TypeNode::Declaration { identity, .. } =
+            &mut storage[tidepool_repr::type_graph::TypeNodeId::new(3)]
+        else {
+            panic!("fixture nominal declaration");
+        };
+        *identity = renamed_constructor.family.clone();
+        changed_family.types = Arc::new(
+            TypeGraph::validate(
+                storage,
+                std::slice::from_ref(&renamed_constructor),
+                GraphLimits::default(),
+            )
+            .expect("changed nominal family"),
+        );
+        Arc::make_mut(&mut changed_family.constructors)[0].2 = renamed_constructor.family;
+        assert_ne!(evidence, changed_family);
+        assert_ne!(commitment, changed_family.commitment());
+
         let mut changed_endpoint = evidence.clone();
         changed_endpoint.answer = TypeNodeId(0);
         assert_ne!(commitment, changed_endpoint.commitment());
 
         let mut changed_constructor = evidence;
-        changed_constructor.constructors[0].occurrence = "OtherReplyValue".into();
+        Arc::make_mut(&mut changed_constructor.constructors)[0]
+            .0
+            .occurrence = "OtherReplyValue".into();
         assert_ne!(commitment, changed_constructor.commitment());
     }
 
@@ -10142,15 +10384,11 @@ pub(super) mod tests {
         response_family.namespace = "type".into();
         let (source, _) = PreparedEngine::bootstrap(typed_site_program(
             41,
-            vec![
-                TypeNode::Text,
-                TypeNode::Integer,
-                TypeNode::Data {
-                    family: response_family.clone(),
-                    arguments: vec![TypeNodeId(1)],
-                    rows: vec![],
-                },
-            ],
+            response_result_types(
+                &[DeclarationForm::Text, DeclarationForm::Integer],
+                1,
+                &response_family,
+            ),
             2,
             &[0],
         ))
@@ -10158,49 +10396,67 @@ pub(super) mod tests {
         let evidence = source
             .request_site_type_evidence(41)
             .expect("capture source site before crossing sessions");
+        let source_facts = &source.programs[&source.sites[&41].owner];
+        assert!(Arc::ptr_eq(&evidence.types, &source_facts.types));
+        assert!(Arc::ptr_eq(
+            &evidence.constructors,
+            &source_facts.constructors
+        ));
         let (recipient, _) = PreparedEngine::bootstrap(typed_site_program(
             42,
-            vec![
-                TypeNode::Integer,
-                TypeNode::Natural,
-                TypeNode::Text,
-                TypeNode::Data {
-                    family: response_family.clone(),
-                    arguments: vec![TypeNodeId(0)],
-                    rows: vec![],
-                },
-            ],
+            response_result_types(
+                &[
+                    DeclarationForm::Integer,
+                    DeclarationForm::Natural,
+                    DeclarationForm::Text,
+                ],
+                0,
+                &response_family,
+            ),
             1,
             &[2, 0, 3],
         ))
         .expect("install accessor in a different machine");
 
-        assert!(recipient.request_scope_types_match(&evidence, 42));
-        assert!(!recipient.request_scope_types_match(&evidence, 41));
+        assert!(recipient
+            .request_scope_types_match(&evidence, 42)
+            .expect("bounded request compatibility"));
+        assert!(!recipient
+            .request_scope_types_match(&evidence, 41)
+            .expect("bounded request compatibility"));
         let (wrong_input, _) = PreparedEngine::bootstrap(typed_site_program(
             44,
-            vec![
-                TypeNode::Integer,
-                TypeNode::Text,
-                TypeNode::Data {
-                    family: response_family,
-                    arguments: vec![TypeNodeId(0)],
-                    rows: vec![],
-                },
-            ],
+            response_result_types(
+                &[DeclarationForm::Integer, DeclarationForm::Text],
+                0,
+                &response_family,
+            ),
             0,
             &[0, 0, 2],
         ))
         .expect("install wrong-input accessor");
-        assert!(!wrong_input.request_scope_types_match(&evidence, 44));
+        assert!(!wrong_input
+            .request_scope_types_match(&evidence, 44)
+            .expect("bounded request compatibility"));
         let (wrong, _) = PreparedEngine::bootstrap(typed_site_program(
             43,
-            vec![TypeNode::Text, TypeNode::Integer],
+            testing::closed_type_roots(&[
+                (
+                    testing::identity("Fixture.Types", "Text"),
+                    DeclarationForm::Text,
+                ),
+                (
+                    testing::identity("Fixture.Types", "Integer"),
+                    DeclarationForm::Integer,
+                ),
+            ]),
             1,
             &[0, 0, 1],
         ))
         .expect("install wrong accessor");
-        assert!(!wrong.request_scope_types_match(&evidence, 43));
+        assert!(!wrong
+            .request_scope_types_match(&evidence, 43)
+            .expect("bounded request compatibility"));
     }
 
     fn attested_request_program(reply: ConstructorReply) -> PreparedProgram {
@@ -10215,10 +10471,7 @@ pub(super) mod tests {
             1,
             vec![RuntimeRep::Int(64)],
         )];
-        wire.types = vec![TypeNode::Unconstructible {
-            reason: "polymorphic".into(),
-            rendered: "a".into(),
-        }];
+        wire.types = polymorphic_reply_type("forall a. a", true);
         wire.constructor_replies = vec![(ConstructorId(0), reply)];
         wire.sites = vec![SiteRow {
             site: 41,
@@ -10458,7 +10711,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn partial_static_maybe_graph_accepts_nothing_only() {
+    fn polymorphic_static_maybe_graph_accepts_nothing_only() {
         let mut wire = testing::wire_program();
         wire.constructors = vec![
             mount_constructor("Fixture", "Request", "Fixture", "Effect", 77, 1, 1, vec![]),
@@ -10483,20 +10736,63 @@ pub(super) mod tests {
                 vec![RuntimeRep::LiftedRef],
             ),
         ];
-        wire.types = vec![
-            TypeNode::Data {
-                family: wire.constructors[1].family.clone(),
-                arguments: vec![TypeNodeId(1)],
-                rows: vec![tidepool_repr::execution_schema::CtorRow {
+        let mut kind = testing::identity("Fixture.Types", "Type");
+        kind.namespace = "type".into();
+        wire.types = testing::type_graph(
+            vec![
+                TypeNode::Root {
+                    domain: RootDomain::ConstructorScheme,
+                    binders: vec![SourceBinderFlag::Specified],
+                    rendered: "Maybe state".into(),
+                },
+                TypeNode::Declaration {
+                    identity: wire.constructors[1].family.clone(),
+                    parameters: vec![ParameterFlag::AnonymousVisible],
+                    form: DeclarationForm::Data,
+                    restriction: SyntaxRestriction::None,
+                },
+                TypeNode::Declaration {
+                    identity: kind,
+                    parameters: vec![],
+                    form: DeclarationForm::Opaque {
+                        head_kind: NominalHeadKind::Constructor,
+                        reason: "kind".into(),
+                    },
+                    restriction: SyntaxRestriction::None,
+                },
+                TypeNode::NominalApplication,
+                TypeNode::Bound(0),
+                TypeNode::NominalApplication,
+                TypeNode::ConstructorTemplate {
                     constructor: ConstructorId(1),
-                    fields: vec![],
-                }],
-            },
-            TypeNode::Unconstructible {
-                reason: "polymorphic".into(),
-                rendered: "state".into(),
-            },
-        ];
+                    identity: wire.constructors[1].identity.clone(),
+                },
+                TypeNode::ConstructorTemplate {
+                    constructor: ConstructorId(2),
+                    identity: wire.constructors[2].identity.clone(),
+                },
+            ],
+            &[
+                (0, 3, TypeEdge::Body),
+                (0, 5, TypeEdge::BinderKind(0)),
+                (1, 5, TypeEdge::BinderKind(0)),
+                (3, 1, TypeEdge::Head),
+                (3, 4, TypeEdge::Argument(0)),
+                (5, 2, TypeEdge::Head),
+                (1, 6, TypeEdge::Constructor(0)),
+                (1, 7, TypeEdge::Constructor(1)),
+                (
+                    7,
+                    4,
+                    TypeEdge::Field {
+                        ordinal: 0,
+                        source_rep: RuntimeRep::LiftedRef,
+                    },
+                ),
+            ],
+            &wire.constructors,
+        )
+        .expect("polymorphic Maybe constructor templates");
         wire.constructor_replies =
             vec![(ConstructorId(0), ConstructorReply::Static(TypeNodeId(0)))];
         let (mut engine, owner) =
@@ -10545,11 +10841,16 @@ pub(super) mod tests {
     fn programs_declaring_the_same_effect_constructor_share_one_constructor_reply_witness() {
         let site = 5;
         let (mut engine, first) =
-            PreparedEngine::bootstrap(verb_program(site, TypeNode::Text)).expect("bootstrap");
+            PreparedEngine::bootstrap(verb_program(site, closed_reply_type(DeclarationForm::Text)))
+                .expect("bootstrap");
         let bindings = BindingTable::new();
         let index = BindingIndex::new();
         let second = engine
-            .install(verb_program(site, TypeNode::Text), &bindings, &index)
+            .install(
+                verb_program(site, closed_reply_type(DeclarationForm::Text)),
+                &bindings,
+                &index,
+            )
             .expect("an equivalent duplicate is not a SiteConflict");
         assert_ne!(first, second);
         let witness = engine.constructor_replies[&DataConId(77)];
@@ -10557,7 +10858,11 @@ pub(super) mod tests {
 
         // Different static type evidence refuses before any native mutation.
         let error = engine
-            .install(verb_program(6, TypeNode::Integer), &bindings, &index)
+            .install(
+                verb_program(6, closed_reply_type(DeclarationForm::Integer)),
+                &bindings,
+                &index,
+            )
             .expect_err("a conflicting verb reply refuses the install");
         match error {
             PreparedRuntimeError::ConstructorReplyConflict {
@@ -10585,13 +10890,110 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn admitted_site_and_verb_survive_multiple_and_final_retirement() {
+        let routing = |revision| {
+            let prepared = verb_program(revision, closed_reply_type(DeclarationForm::Text));
+            let mut wire = testing::wire_from_prepared(&prepared);
+            wire.sites = vec![SiteRow {
+                site: 7,
+                origin: "Fixture.Routing".into(),
+                ordinal: 0,
+                delivery: SiteDelivery::HostAnswer,
+                wire: TypeNodeId(0),
+                inputs: vec![],
+            }];
+            testing::prepare(wire).expect("admitted routing fixture")
+        };
+        let (mut engine, first) = PreparedEngine::bootstrap(routing(101)).unwrap();
+        let bindings = BindingTable::new();
+        let index = BindingIndex::new();
+        let second = engine.install(routing(102), &bindings, &index).unwrap();
+        let third = engine.install(routing(103), &bindings, &index).unwrap();
+        assert_eq!(engine.sites[&7].owner, first);
+        assert_eq!(engine.constructor_replies[&DataConId(77)].owner, first);
+        for export in std::mem::take(&mut engine.code_exports).into_values() {
+            assert!(engine.release(export.handle));
+        }
+        assert!(engine.unpin(first));
+        assert!(engine.unpin(second));
+        engine.quiesce_and_collect_now().unwrap();
+        assert!(!engine.programs.contains_key(&first));
+        assert!(!engine.programs.contains_key(&second));
+        assert_eq!(engine.sites[&7].owner, third);
+        assert_eq!(engine.constructor_replies[&DataConId(77)].owner, third);
+        assert!(engine.unpin(third));
+        engine.quiesce_and_collect_now().unwrap();
+        assert!(!engine.programs.contains_key(&third));
+        assert!(!engine.sites.contains_key(&7));
+        assert!(!engine.constructor_replies.contains_key(&DataConId(77)));
+    }
+
+    #[test]
+    fn structural_graph_work_refusal_preserves_parked_frame_and_roots() {
+        let (mut engine, owner, parked) = park_json_fixture_request(
+            Some(ConstructorReply::Static(TypeNodeId(0))),
+            0,
+            serde_json::Value::Null,
+        );
+        let parked = parked.expect("fixture parks its authenticated request");
+        let roots = engine.persistent_roots_count();
+        let (programs, machine) = (&engine.programs, &mut engine.machine);
+        let facts = &programs[&owner];
+        let root = facts
+            .types
+            .open_root(
+                TypeNodeId(0),
+                &mut TypeWorkBudget::new(GraphLimits::default().max_work),
+            )
+            .unwrap();
+        let mut builder = machine.managed_builder().unwrap();
+        let mut visitor = StructuralAnswerVisitor {
+            site: ReplyTarget::Static(DataConId(903)),
+            root,
+            budget: TypeWorkBudget::new(0),
+            facts,
+            builder: &mut builder,
+            frames: vec![],
+            result: None,
+            failure: None,
+            depth: 0,
+        };
+        assert!(visitor.begin_constructor(DataConId(105), 0).is_err());
+        assert!(matches!(
+            visitor.failure,
+            Some(PreparedRuntimeError::AnswerTypeEvidence {
+                source: TypeGraphError::TraversalWork,
+                ..
+            })
+        ));
+        assert!(visitor.result.is_none());
+        let failure = visitor.failure.as_ref().unwrap();
+        assert_eq!(failure.kind(), PreparedFailureKind::Rejected);
+        assert_eq!(failure.stage(), PreparedFailureStage::Run);
+        drop(visitor);
+        drop(builder);
+        assert_eq!(engine.persistent_roots_count(), roots);
+        assert_eq!(engine.parked_count(), 1);
+        assert_eq!(
+            engine.parked(parked.id).unwrap().1.reply,
+            PreparedReplyEvidence::Static {
+                owner,
+                constructor: DataConId(903),
+                node: TypeNodeId(0)
+            }
+        );
+        engine.abort_parked(parked.id).unwrap();
+    }
+
+    #[test]
     fn retained_callable_and_parked_frame_preserve_static_evidence_across_collection() {
         let (mut engine, first) =
-            PreparedEngine::bootstrap(verb_program(5, TypeNode::Text)).unwrap();
+            PreparedEngine::bootstrap(verb_program(5, closed_reply_type(DeclarationForm::Text)))
+                .unwrap();
         let function = engine.machine.retain_top(first, ValueId(0)).unwrap();
         let second = engine
             .install(
-                verb_program(6, TypeNode::Text),
+                verb_program(6, closed_reply_type(DeclarationForm::Text)),
                 &BindingTable::new(),
                 &BindingIndex::new(),
             )
@@ -10662,23 +11064,24 @@ pub(super) mod tests {
     #[test]
     fn alpha_stable_polymorphic_reply_evidence_installs_without_weakening_conflicts() {
         let site = 7;
-        let stable = TypeNode::Unconstructible {
-            reason: "polymorphic".into(),
-            rendered: "a".into(),
-        };
+        let stable = polymorphic_reply_type("forall a. a", true);
         let (mut engine, first) =
             PreparedEngine::bootstrap(verb_program(site, stable.clone())).expect("bootstrap");
         let bindings = BindingTable::new();
         let index = BindingIndex::new();
         let second = engine
-            .install(verb_program(site, stable), &bindings, &index)
+            .install(
+                verb_program(
+                    site,
+                    polymorphic_reply_type("forall renamed. renamed", true),
+                ),
+                &bindings,
+                &index,
+            )
             .expect("alpha-stable polymorphic evidence is equivalent");
         assert_ne!(first, second);
 
-        let different = TypeNode::Unconstructible {
-            reason: "polymorphic".into(),
-            rendered: "a_unique".into(),
-        };
+        let different = polymorphic_reply_type("forall a. a", false);
         let error = engine
             .install(verb_program(site, different), &bindings, &index)
             .expect_err("different type evidence must remain a conflict");
@@ -10693,11 +11096,12 @@ pub(super) mod tests {
     fn off_checkout_install_reuses_code_already_installed_on_the_machine() {
         let registry = Arc::new(ImageRegistry::new());
         let (mut engine, _) =
-            PreparedEngine::bootstrap(verb_program(40, TypeNode::Text)).expect("bootstrap");
+            PreparedEngine::bootstrap(verb_program(40, closed_reply_type(DeclarationForm::Text)))
+                .expect("bootstrap");
         engine.set_image_registry(Arc::clone(&registry));
         let bindings = BindingTable::new();
         let index = BindingIndex::new();
-        let prepared = verb_program(41, TypeNode::Text);
+        let prepared = verb_program(41, closed_reply_type(DeclarationForm::Text));
         let mut snapshot = engine
             .snapshot_install(prepared.clone(), &bindings, &index)
             .expect("capture installation");
@@ -10734,11 +11138,19 @@ pub(super) mod tests {
         let index = BindingIndex::new();
         let site = 42;
         let mut snapshot = engine
-            .snapshot_install(verb_program(site, TypeNode::Text), &bindings, &index)
+            .snapshot_install(
+                verb_program(site, closed_reply_type(DeclarationForm::Text)),
+                &bindings,
+                &index,
+            )
             .unwrap();
         let compiled = PreparedEngine::compile_off_checkout(&mut snapshot).unwrap();
         let owner = engine
-            .install(verb_program(site, TypeNode::Integer), &bindings, &index)
+            .install(
+                verb_program(site, closed_reply_type(DeclarationForm::Integer)),
+                &bindings,
+                &index,
+            )
             .unwrap();
         let before = engine.residency();
         assert!(matches!(
@@ -10754,7 +11166,7 @@ pub(super) mod tests {
     #[test]
     fn off_checkout_install_restores_retired_evidence_ownership() {
         let site = 43;
-        let prepared = verb_program(site, TypeNode::Text);
+        let prepared = verb_program(site, closed_reply_type(DeclarationForm::Text));
         let (mut engine, owner) = PreparedEngine::bootstrap(prepared.clone()).unwrap();
         let bindings = BindingTable::new();
         let index = BindingIndex::new();
@@ -10780,12 +11192,16 @@ pub(super) mod tests {
     fn two_engines_sharing_one_registry_the_second_install_is_a_registry_hit() {
         let registry = Arc::new(ImageRegistry::new());
         let bootstrap_site = 30;
-        let (mut engine_a, _) =
-            PreparedEngine::bootstrap(verb_program(bootstrap_site, TypeNode::Text))
-                .expect("engine a bootstraps");
-        let (mut engine_b, _) =
-            PreparedEngine::bootstrap(verb_program(bootstrap_site, TypeNode::Text))
-                .expect("engine b bootstraps its own, independent machine");
+        let (mut engine_a, _) = PreparedEngine::bootstrap(verb_program(
+            bootstrap_site,
+            closed_reply_type(DeclarationForm::Text),
+        ))
+        .expect("engine a bootstraps");
+        let (mut engine_b, _) = PreparedEngine::bootstrap(verb_program(
+            bootstrap_site,
+            closed_reply_type(DeclarationForm::Text),
+        ))
+        .expect("engine b bootstraps its own, independent machine");
         engine_a.set_image_registry(Arc::clone(&registry));
         engine_b.set_image_registry(Arc::clone(&registry));
 
@@ -10794,7 +11210,11 @@ pub(super) mod tests {
         let shared_site = 31;
 
         engine_a
-            .install(verb_program(shared_site, TypeNode::Text), &bindings, &index)
+            .install(
+                verb_program(shared_site, closed_reply_type(DeclarationForm::Text)),
+                &bindings,
+                &index,
+            )
             .expect("engine a compiles and registers the image");
         assert_eq!(
             registry.misses(),
@@ -10804,7 +11224,11 @@ pub(super) mod tests {
         assert_eq!(registry.hits(), 0);
 
         engine_b
-            .install(verb_program(shared_site, TypeNode::Text), &bindings, &index)
+            .install(
+                verb_program(shared_site, closed_reply_type(DeclarationForm::Text)),
+                &bindings,
+                &index,
+            )
             .expect("engine b installs the same content against its own machine");
         assert_eq!(
             registry.hits(),

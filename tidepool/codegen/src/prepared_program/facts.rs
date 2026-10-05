@@ -1,10 +1,12 @@
 //! Immutable declaration evidence shared by installations of one native image.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use tidepool_repr::execution_schema::{
     ConstructorReply, DefinitionsView, Group, HeapRhs, JsonLayout, Signature, SiteRow,
-    SymbolIdentity, TypeNode, ValueId,
+    SymbolIdentity, ValueId,
 };
+use tidepool_repr::type_graph::TypeGraph;
 use tidepool_repr::DataConId;
 
 /// Declaration metadata from validated definitions. This owns no machine
@@ -12,11 +14,11 @@ use tidepool_repr::DataConId;
 pub struct DefinitionFacts {
     pub tops: BTreeMap<ValueId, (SymbolIdentity, Option<Signature>)>,
     pub sites: Vec<SiteRow>,
-    pub types: Vec<TypeNode>,
+    pub types: Arc<TypeGraph>,
     /// Exact bridge request constructor IDs paired with reply evidence.
     pub constructor_replies: Vec<(DataConId, ConstructorReply)>,
     /// Identity, bridge ID and family, indexed by the local `ConstructorId`.
-    pub constructors: Vec<(SymbolIdentity, DataConId, SymbolIdentity)>,
+    pub constructors: Arc<[(SymbolIdentity, DataConId, SymbolIdentity)]>,
     pub json_layout: Option<JsonLayout<DataConId>>,
     /// Constructor row indexes by module and occurrence. Preserve every row
     /// so runtime authority checks can reject conflicting declarations.
@@ -77,9 +79,9 @@ impl DefinitionFacts {
         Self {
             tops,
             sites,
-            types: prepared.types().to_vec(),
+            types: Arc::clone(prepared.types()),
             constructor_replies,
-            constructors,
+            constructors: constructors.into(),
             json_layout,
             by_identity,
         }
