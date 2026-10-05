@@ -172,11 +172,29 @@ against the receipt; home Names must already exist in the admitted environment.
 The canonical activation witness remains a separate semantic equality contract:
 GHC binary bytes are not a canonical type fingerprint.
 
-Host input checking carries that same original witness through the protected
-`host-input-check1` admission. The generated `TidepoolActivationInput` type slot
-is replaced with the native type before renaming; it is not an imported type
-or a new alias. The initial check and preview compilation retain separate
-purposes and independently validate the resulting input type.
+Pure activation previews use the twelve-field `host-activation-preview1`
+authorization. It seals the admission, preview generation and budget, protected
+template digest, mounted input generation and complete binder metadata, original
+native signature and canonical witness, mounted value interface/package seals,
+template interface graph, and ordered include roots. The worker compiles only
+`Input -> Eff '[] (Text, Bool)`: its single `TidepoolActivationInput` slot is
+replaced with the original native type before renaming. An opaque probe solves
+the exact `WorkbenchDisplay` constraint; a missing instance permits opaque
+output. Missing code for a selected display dependency has a separate unavailable
+result. The final input argument must match the original canonical witness.
+
+Successful preview compilation emits an expression turn and the eight-field
+`TPEXACTACTIVATIONPREVIEW1` receipt. If projection of the selected preview finds
+`UnavailableOriginalHomeDependencies`, the worker instead emits only the
+seven-field `TPEXACTACTIVATIONPREVIEWUNAVAILABLE1` result. It binds the original
+request, admission, generation, template digest and exact input witness bytes;
+no turn or executable packet is emitted. Other projection, source-loading,
+authority, and infrastructure failures remain ordinary failures. Neither
+preview result creates an input value, value interface, or authored checked
+completion. The retired `host-input-check1` and
+`host-activation-input2` purposes and activation-input receipts are rejected.
+Qualified imports from a protected template retain their exact alias and
+interface graph; changing or duplicating an import cannot inherit that authority.
 
 This is a strict internal migration. Old three-field printed signatures are
 rejected. Deploy the Rust consumer and Haskell worker together and regenerate

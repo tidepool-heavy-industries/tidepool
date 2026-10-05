@@ -214,7 +214,7 @@ data CheckedTemplateInterface = CheckedTemplateInterface
   } deriving (Eq, Show)
 
 data GeneratedScaffoldRecipe = GeneratedScaffoldRecipe FilePath String BS.ByteString Int
-  [(CheckedTemplateInterface,Int)] [CheckedTemplateInterface]
+  [(CheckedTemplateInterface,Int,Maybe String)] [CheckedTemplateInterface]
   deriving (Eq)
 
 instance Show GeneratedScaffoldRecipe where
@@ -229,12 +229,18 @@ generatedScaffoldRecipe interfaces protectedTemplate rendered path name = do
       occurrences text' = [line | (line,textLine) <- zip [1..] (lines text'), textLine == compilerImport]
       bytes = TextEncoding.encodeUtf8 (Text.pack rendered)
       templateOccurrence interface =
-        let importLine = "import " ++ templateInterfaceModule interface
-            matching text' = [line | (line,textLine) <- zip [1..] (lines text'), textLine == importLine]
+        let owner = templateInterfaceModule interface
+            importShape textLine | textLine == compilerImport = Nothing
+            importShape textLine = case words textLine of
+              ["import", name] | name == owner -> Just Nothing
+              ["import", "qualified", name, "as", alias] | name == owner -> Just (Just alias)
+              _ -> Nothing
+            matching text' = [(line,shape) | (line,textLine) <- zip [1..] (lines text')
+              , Just shape <- [importShape textLine]]
         in case (matching protectedTemplate,matching rendered) of
           ([],_) -> Right Nothing
-          ([_],[line]) -> Right (Just (interface,line))
-          _ -> Left "checked template interface import is missing or duplicated"
+          ([(_,shape)],[(line,renderedShape)]) | shape == renderedShape -> Right (Just (interface,line,shape))
+          _ -> Left "checked template interface import is missing, duplicated, or changed"
   pure $ do
     selected <- catMaybes <$> mapM templateOccurrence interfaces
     let key interface = (templateInterfaceUnit interface,templateInterfaceModule interface)
@@ -246,7 +252,7 @@ generatedScaffoldRecipe interfaces protectedTemplate rendered path name = do
               interface <- maybe (Left "checked template graph is incomplete") Right (Map.lookup owner graph)
               reachable (Map.insert owner interface seen) (templateInterfaceImports interface ++ rest)
     unless (Map.size graph == length interfaces) (Left "duplicate checked template interface")
-    closure <- reachable Map.empty (map (key . fst) selected)
+    closure <- reachable Map.empty [key interface | (interface,_,_) <- selected]
     case (occurrences protectedTemplate,occurrences rendered) of
       ([_],[line]) -> Right (GeneratedScaffoldRecipe canonical name bytes line selected closure)
       _ -> Left "generated scaffold import is missing or duplicated"
@@ -396,7 +402,7 @@ readGeneratedScaffoldImportAuthority (VerifiedExactIfaceClosure captured) native
       unless (exactSha256 artifact == templateInterfaceSha256 selected)
         (Left "checked template graph interface seal changed")
       pure (artifact,templateInterfaceImports selected)
-    templateEdges <- forM templateInterfaces $ \(selected,importLine) -> do
+    templateEdges <- forM templateInterfaces $ \(selected,importLine,qualification) -> do
       let owner = (templateInterfaceUnit selected,templateInterfaceModule selected)
           original = mkModule (stringToUnit (fst owner)) (mkModuleName (snd owner))
       unless (moduleUnit original == homeUnitAsUnit (hsc_home_unit env)
@@ -416,8 +422,11 @@ readGeneratedScaffoldImportAuthority (VerifiedExactIfaceClosure captured) native
           , getLocA (ideclName (unLoc located)) == getLoc imported] of
         [declaration] -> Right declaration
         _ -> Left "checked template parsed import differs"
-      unless (ideclQualified declaration == NotQualified && isNothing (ideclAs declaration)
-          && ideclSource declaration == NotBoot && ideclImportList declaration == Nothing
+      let sameQualification = case qualification of
+            Nothing -> ideclQualified declaration == NotQualified && isNothing (ideclAs declaration)
+            Just alias -> ideclQualified declaration == QualifiedPre
+              && fmap unLoc (ideclAs declaration) == Just (mkModuleName alias)
+      unless (sameQualification && ideclSource declaration == NotBoot && ideclImportList declaration == Nothing
           && case ideclPkgQual declaration of NoRawPkgQual -> True; _ -> False)
         (Left "checked template interface import has another shape")
       pure (ms_mod summary,fingerprint,TemplateInterfaceOwner,getLoc imported,artifact)

@@ -8,10 +8,11 @@ module Tidepool.FinalizedModuleArtifacts
   , emptyFinalizedModuleArtifacts, encodeFinalizedModuleArtifacts, finalizedInterfaceSeals
   , LocalFinalizedAdmission, finalizedLocalAdmissions
   , localFinalizedInterface, localFinalizedHomeUnits, localFinalizedSourceSha256
-  , localFinalizedRequirements, localFinalizedCore, revalidateLocalFinalizedAdmission ) where
+  , localFinalizedRequirements, localFinalizedCore, revalidateLocalFinalizedAdmission
+  , matchesCapturedFinalization ) where
 
 import Codec.CBOR.Encoding
-import Control.Exception (Exception, IOException, throwIO, try)
+import Control.Exception (Exception, IOException, evaluate, throwIO, try)
 import Control.Monad (forM, forM_, unless, when)
 import Crypto.Hash.SHA256 qualified as SHA256
 import Data.ByteString qualified as BS
@@ -28,6 +29,7 @@ import Numeric (showHex)
 import System.Directory (makeAbsolute)
 import System.FilePath ((</>), normalise, isAbsolute)
 import System.IO (IOMode(ReadMode), withBinaryFile)
+import System.Mem.StableName (StableName, makeStableName)
 
 import Tidepool.DependencyEvidence (DependencyEvidence(..), DependencyModule(..), DependencySource(..))
 import Tidepool.ExactHydration
@@ -62,9 +64,17 @@ instance Exception FinalizedArtifactFailure
 
 data CapturedPayload = CapturedPayload FilePath T.Text Int deriving (Eq, Show)
 
+-- This identity pairs in-memory consumers with the exact compiler object that
+-- issued their files. A stable name retains neither that object nor its Core.
+newtype FinalizationIdentity = FinalizationIdentity (StableName FinalizedModule)
+  deriving (Eq)
+
+instance Show FinalizationIdentity where
+  show _ = "FinalizationIdentity"
+
 data CapturedModule = CapturedModule
   T.Text T.Text T.Text CapturedPayload CapturedPayload (Maybe CapturedPayload)
-  [(T.Text,T.Text,T.Text)]
+  [(T.Text,T.Text,T.Text)] FinalizationIdentity
   deriving (Eq, Show)
 
 data CapturedModules = CapturedModules FilePath [CapturedModule]
@@ -118,6 +128,7 @@ captureFinalizedModuleArtifacts originals env finalized packages evidence direct
   forM_ (Map.keys (Map.filter ((> 1) . Set.size) selectedPackages)) $
     \(unit,name) -> throwIO (InvalidFinalizedPackage unit name)
   rows <- forM (sortOn originalKey (Map.elems finalized)) $ \original -> do
+    identity <- FinalizationIdentity <$> (evaluate original >>= makeStableName)
     let iface = hm_iface (finalizedHomeModInfo original)
         owner = mi_module iface
         unit = unitString (moduleUnit owner)
@@ -150,9 +161,9 @@ captureFinalizedModuleArtifacts originals env finalized packages evidence direct
         >>= maybe (throwIO (MissingFinalizedDependency requiredUnit requiredName)) pure
       unless (validDigest sha) $ throwIO (MissingFinalizedDependency requiredUnit requiredName)
       pure (T.pack requiredUnit,T.pack requiredName,T.pack sha)
-    pure (CapturedModule (T.pack unit) (T.pack name) source interface package core requirements)
+    pure (CapturedModule (T.pack unit) (T.pack name) source interface package core requirements identity)
   let total = sum [size iface + size packages' + maybe 0 size core
-        | CapturedModule _ _ _ iface packages' core _ <- rows]
+        | CapturedModule _ _ _ iface packages' core _ _ <- rows]
   when (total > payloadLimit) $ throwIO (FinalizedPayloadTooLarge "aggregate")
   pure (FinalizedModuleArtifacts homeUnits (Just (CapturedModules absoluteDirectory rows)))
   where
@@ -171,18 +182,18 @@ captureFinalizedModuleArtifacts originals env finalized packages evidence direct
 
 finalizedInterfaceSeals :: FinalizedModuleArtifacts -> [((T.Text,T.Text),T.Text)]
 finalizedInterfaceSeals artifacts =
-  [((unit,name),sha) | CapturedModule unit name _ (CapturedPayload _ sha _) _ _ _ <- capturedRows artifacts]
+  [((unit,name),sha) | CapturedModule unit name _ (CapturedPayload _ sha _) _ _ _ _ <- capturedRows artifacts]
 
 finalizedLocalAdmissions :: FinalizedModuleArtifacts -> Map.Map (String,String) LocalFinalizedAdmission
 finalizedLocalAdmissions (FinalizedModuleArtifacts units captured) = case captured of
   Nothing -> Map.empty
   Just (CapturedModules directory rows) -> Map.fromList
     [((T.unpack unit,T.unpack name),LocalFinalizedAdmission units directory row)
-    | row@(CapturedModule unit name _ _ _ _ _) <- rows]
+    | row@(CapturedModule unit name _ _ _ _ _ _) <- rows]
 
 localFinalizedInterface :: LocalFinalizedAdmission -> (ExactIfaceArtifact,FilePath,String)
 localFinalizedInterface admission@(LocalFinalizedAdmission _ directory
-    (CapturedModule unit name _ interface package _ _)) =
+    (CapturedModule unit name _ interface package _ _ _)) =
   ( ExactIfaceArtifact (T.unpack unit) (T.unpack name) (payloadPath directory interface)
       (payloadSha interface) (Map.keys (localFinalizedRequirements admission))
   , payloadPath directory package, payloadSha package )
@@ -191,21 +202,27 @@ localFinalizedHomeUnits :: LocalFinalizedAdmission -> Set.Set String
 localFinalizedHomeUnits (LocalFinalizedAdmission units _ _) = Set.fromList (map T.unpack units)
 
 localFinalizedSourceSha256 :: LocalFinalizedAdmission -> String
-localFinalizedSourceSha256 (LocalFinalizedAdmission _ _ (CapturedModule _ _ source _ _ _ _)) = T.unpack source
+localFinalizedSourceSha256 (LocalFinalizedAdmission _ _ (CapturedModule _ _ source _ _ _ _ _)) = T.unpack source
 
 localFinalizedRequirements :: LocalFinalizedAdmission -> Map.Map (String,String) String
-localFinalizedRequirements (LocalFinalizedAdmission _ _ (CapturedModule _ _ _ _ _ _ requirements)) =
+localFinalizedRequirements (LocalFinalizedAdmission _ _ (CapturedModule _ _ _ _ _ _ requirements _)) =
   Map.fromList [((T.unpack unit,T.unpack name),T.unpack sha) | (unit,name,sha) <- requirements]
 
 localFinalizedCore :: LocalFinalizedAdmission -> Maybe (FilePath,String)
-localFinalizedCore (LocalFinalizedAdmission _ directory (CapturedModule _ _ _ _ _ core _)) =
+localFinalizedCore (LocalFinalizedAdmission _ directory (CapturedModule _ _ _ _ _ core _ _)) =
   (\payload -> (payloadPath directory payload,payloadSha payload)) <$> core
+
+matchesCapturedFinalization :: LocalFinalizedAdmission -> FinalizedModule -> IO Bool
+matchesCapturedFinalization (LocalFinalizedAdmission _ _
+    (CapturedModule _ _ _ _ _ _ _ (FinalizationIdentity captured))) original = do
+  current <- evaluate original >>= makeStableName
+  pure (captured == current)
 
 -- Hash one bounded read of each captured file. Size/stat metadata is not proof;
 -- substitutions, truncation and growth all refuse the local admission.
 revalidateLocalFinalizedAdmission :: LocalFinalizedAdmission -> IO (Either String ())
 revalidateLocalFinalizedAdmission (LocalFinalizedAdmission _ directory
-    (CapturedModule _ _ _ interface package core _)) = do
+    (CapturedModule _ _ _ interface package core _ _)) = do
   checked <- mapM validate ((interfaceLimit,interface):(packageLimit,package)
     : maybe [] (\payload -> [(coreLimit,payload)]) core)
   pure (() <$ sequence checked)
@@ -237,7 +254,7 @@ encodeFinalizedModuleArtifacts :: FinalizedModuleArtifacts -> Encoding
 encodeFinalizedModuleArtifacts artifacts@(FinalizedModuleArtifacts units _) =
   array [encodeString "tidepool-ghc-finalized-module-v1",list encodeString units,list encodeModule (capturedRows artifacts)]
   where
-    encodeModule (CapturedModule unit name source interface package core requirements) =
+    encodeModule (CapturedModule unit name source interface package core requirements _) =
       array ([encodeString unit,encodeString name,encodeString source]
         ++ payloadFields interface ++ payloadFields package
         ++ [maybe encodeNull (array . payloadFields) core,list encodeRequirement requirements])

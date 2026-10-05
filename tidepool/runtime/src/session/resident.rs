@@ -64,8 +64,13 @@ pub struct ProgramProvenance {
     sites: BTreeMap<u64, YieldSite>,
     // Authentication follows the original compiler bundle through owned roots.
     // Public metadata construction alone cannot authorize a host input mount.
-    authenticated_inputs:
-        BTreeMap<u64, Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>>,
+    authenticated_inputs: BTreeMap<u64, AuthenticatedInputContext>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AuthenticatedInputContext {
+    types: Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>,
+    execution: Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>,
 }
 
 /// Detached native value with its original immutable compiler provenance.
@@ -774,6 +779,8 @@ pub struct RuntimeActivationInput {
     input_type: String,
     type_evidence: Arc<super::prepared::SiteTypeEvidence>,
     input_type_witness: Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>,
+    prototype: Arc<tidepool_toolchain::checked_cell::ExactHostBindingPrototype>,
+    original_execution: Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>,
     progress_type_witness: Option<Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>>,
 }
 
@@ -792,10 +799,6 @@ impl RuntimeActivationInput {
         &self,
     ) -> Option<Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>> {
         self.progress_type_witness.clone()
-    }
-
-    pub fn placeholder_source(&self) -> String {
-        "sessionInput <- pure (undefined :: TidepoolActivationInput)".into()
     }
 }
 
@@ -820,48 +823,95 @@ impl RuntimeProgressPublication {
     }
 }
 
-/// A host input compiler offer retaining the original affine value and the
-/// immutable installed source/tool owner. It cannot be executed as an
-/// authored cell; only its consuming host mount may use the compiled result.
+/// One affine original input paired with a fresh type-interface reservation.
 pub struct RuntimeActivationInputAdmission {
     input: RuntimeActivationInput,
-    pub(super) admission: Arc<super::RuntimeCellAdmission>,
-    pub(super) specification: Arc<tidepool_toolchain::checked_cell::CheckedCellSpecification>,
-    pub(super) templates: Vec<super::TurnTemplate>,
-    pub(super) compile_view_evidence: String,
+    reservation: Arc<super::RuntimeBindingInterfaceReservation>,
+    run_context: SessionRunContext,
+}
+
+impl RuntimeActivationInputAdmission {
+    pub fn reservation(&self) -> &Arc<super::RuntimeBindingInterfaceReservation> {
+        &self.reservation
+    }
 }
 
 static_assertions::assert_not_impl_any!(RuntimeActivationInputAdmission: Clone, Copy);
 
-/// Compiler output branded for one host-input mount. Its native program is
-/// preview code; its placeholder binding has no authored completion claim.
-pub struct CompiledActivationInput {
-    pub(super) admission: Arc<super::RuntimeCheckedItemAdmission>,
-    pub(super) compiled: super::turn::CompiledTurn,
-    pub(super) binder: BoundBinder,
-    pub(super) proof: Arc<tidepool_toolchain::checked_cell::ExactCompiledActivationInput>,
-}
-
-static_assertions::assert_not_impl_any!(CompiledActivationInput: Clone, Copy);
-
-/// A committed host binding retaining its one preview and source owner.
+/// A committed original live binding. Type authority does not authorize preview
+/// code; that executable is admitted separately after this mount.
 pub struct MountedActivationInput {
-    owner: Arc<super::RuntimeCellAdmission>,
-    compiled: super::turn::CompiledTurn,
-    proof: Arc<tidepool_toolchain::checked_cell::ExactCompiledActivationInput>,
+    interface: Arc<tidepool_toolchain::checked_cell::ExactHostBindingInterface>,
+    original_execution: Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>,
     binding: SessionVarId,
     scope: ScopeId,
     handle: PreparedHandle,
     visibility: super::PublicVisibilitySnapshot,
+    run_context: SessionRunContext,
 }
 
 impl MountedActivationInput {
     pub fn binding(&self) -> SessionVarId {
         self.binding
     }
+    pub fn interface(&self) -> &Arc<tidepool_toolchain::checked_cell::ExactHostBindingInterface> {
+        &self.interface
+    }
 }
 
 static_assertions::assert_not_impl_any!(MountedActivationInput: Clone, Copy);
+
+/// A pure preview is admitted only after binding. It retains original executable
+/// evidence independently of the recipient's selected authored source layer.
+pub struct RuntimeActivationPreviewAdmission {
+    owner: Arc<super::admission::RuntimeAdmissionOwner>,
+    owner_epoch: u64,
+    mounted: MountedActivationInput,
+    view: super::SessionCompileView,
+    view_digest: [u8; 32],
+    generation: Generation,
+    digest: [u8; 32],
+    exact_context: Arc<tidepool_toolchain::declaration_join::ExactCompileContext>,
+    _scope_lease: Arc<super::RuntimeLexicalScopeLease>,
+    consumed: AtomicBool,
+}
+
+impl RuntimeActivationPreviewAdmission {
+    pub fn view(&self) -> &super::SessionCompileView {
+        &self.view
+    }
+    pub fn digest(&self) -> [u8; 32] {
+        self.digest
+    }
+    pub fn generation(&self) -> Generation {
+        self.generation
+    }
+    pub fn input_interface(
+        &self,
+    ) -> &Arc<tidepool_toolchain::checked_cell::ExactHostBindingInterface> {
+        &self.mounted.interface
+    }
+    pub fn exact_context(&self) -> &Arc<tidepool_toolchain::declaration_join::ExactCompileContext> {
+        &self.exact_context
+    }
+}
+
+/// One protected executable prepared for the original committed input.
+pub struct CompiledActivationPreview {
+    pub(super) admission: Arc<RuntimeActivationPreviewAdmission>,
+    pub(super) compiled: super::turn::CompiledTurn,
+    pub(super) proof: Arc<tidepool_toolchain::activation_preview::ExactCompiledActivationPreview>,
+}
+
+impl CompiledActivationPreview {
+    pub fn proof(
+        &self,
+    ) -> &Arc<tidepool_toolchain::activation_preview::ExactCompiledActivationPreview> {
+        &self.proof
+    }
+}
+
+static_assertions::assert_not_impl_any!(CompiledActivationPreview: Clone, Copy);
 
 impl RootCustody {
     /// Wrap a handle minted by the resident session.
@@ -1367,7 +1417,7 @@ pub enum ResidentError {
         #[source]
         source: Box<ResidentError>,
     },
-    #[error("activation input {binding:?} is mounted but its original interface retention failed: {source}")]
+    #[error("activation input {binding:?} is mounted but subsequent preparation failed: {source}")]
     ActivationMountCommitted {
         binding: SessionVarId,
         #[source]
@@ -1535,9 +1585,11 @@ mod failure_layer_tests {
     }
 }
 
-#[derive(Clone, Copy)]
 enum ValueInterfaceSource {
+    /// Ordinary checked settlement retains the interface in its deferred prefix.
     Checked,
+    /// Checked native mounts commit this owned certificate with the binding.
+    Staged(super::persistent::StagedCheckedValueInterface),
     LegacyDisk,
 }
 
@@ -1661,7 +1713,7 @@ fn checked_turn_plan(
     let Some(certification) = certification else {
         return Ok(None);
     };
-    if certification.checked_activation_input().is_some() {
+    if certification.checked_activation_preview().is_some() {
         return Err(ResidentError::UnsupportedCheckedTurn);
     }
     certification
@@ -2744,89 +2796,48 @@ where
         )
     }
 
-    /// Seal one activation's original native input and protected compiler
-    /// recipe under its existing lexical scope. The source lease is retained
-    /// by the admission for the entire compile, mount and preview operation.
+    /// Reserve a fresh interface for one original input. No authored cell or
+    /// prepared program is needed to bind the already rooted heap value.
     pub fn admit_activation_input_in(
         &mut self,
         scope: ScopeId,
         input: RuntimeActivationInput,
-        preamble: &str,
-        effect_stack: &str,
-        preview_budget: usize,
-        cell_template: String,
-        retained_source: Arc<dyn std::any::Any + Send + Sync>,
-        authority_digest: [u8; 32],
-        include_paths: Vec<PathBuf>,
-        compile_view_evidence: String,
-        compile_inputs: Option<super::prepared::RuntimeCompileInputs>,
     ) -> Result<RuntimeActivationInputAdmission, ResidentError> {
         self.settle_dropped_custody();
         if !Arc::ptr_eq(&input.custody.cleanup.0, &self.custody_cleanup) {
             return Err(ResidentError::ForeignCustody);
         }
-        let raw = input
-            .custody
-            .handle
-            .ok_or(ResidentError::InvalidActivationInput { site: input.site })?;
-        if self
-            .state
-            .prepared_mut()
-            .and_then(|engine| engine.prepared_handle_of(raw))
-            .is_none()
+        let invalid = || ResidentError::InvalidActivationInput { site: input.site };
+        let raw = input.custody.handle.ok_or_else(invalid)?;
+        if self.run_context.lexical_scope != scope
+            || self
+                .state
+                .require_prepared()?
+                .prepared_handle_of(raw)
+                .is_none()
         {
-            return Err(ResidentError::InvalidActivationInput { site: input.site });
+            return Err(invalid());
         }
-        let turn_template =
-            super::turn::assemble_checked_activation_module(preamble, effect_stack, preview_budget);
-        let injected_modules = self
-            .state
-            .compile_view_in(scope)
-            .ok_or(SessionError::DeadScope(scope))?
-            .with_scoped_injection()
-            .injected_module_names();
-        let specification = Arc::new(tidepool_toolchain::checked_cell::CheckedCellSpecification {
-            admission_digest: [0; 32],
-            cell_source: input.placeholder_source(),
-            template_source: cell_template,
-            turn_templates: vec![("bind".into(), turn_template)],
-            injected_modules,
-            reserved_declaration_modules: Vec::new(),
-        });
         let mut digest = blake3::Hasher::new();
-        let mut frame = |bytes: &[u8]| {
-            digest.update(&(bytes.len() as u64).to_le_bytes());
-            digest.update(bytes);
-        };
-        frame(b"TidepoolActivationInput1");
-        frame(&raw.0.to_le_bytes());
-        frame(&input.site.to_le_bytes());
-        frame(input.input_type.as_bytes());
-        frame(&input.type_evidence.commitment());
-        frame(&input.input_type_witness.commitment());
-        frame(&input.input_type_witness.metadata_digest());
-        let input_commitment = *digest.finalize().as_bytes();
-        let admission = self.state.admit_host_activation_cell_in(
+        digest.update(b"TidepoolOriginalLiveInput2");
+        digest.update(&raw.0.to_le_bytes());
+        digest.update(&input.site.to_le_bytes());
+        digest.update(&input.type_evidence.commitment());
+        digest.update(&input.input_type_witness.commitment());
+        digest.update(&input.input_type_witness.metadata_digest());
+        digest.update(&self.run_context.resource_scope.0.to_le_bytes());
+        digest.update(&self.run_context.principal.identity.to_le_bytes());
+        digest.update(&self.run_context.principal.incarnation.to_le_bytes());
+        let reservation = self.state.admit_binding_interface(
             scope,
-            input_commitment,
-            input.input_type_witness.clone(),
-            input.type_evidence.clone(),
-            retained_source,
-            specification.specification_digest(),
-            authority_digest,
-            include_paths,
-            compile_inputs,
+            "sessionInput".into(),
+            input.prototype.clone(),
+            *digest.finalize().as_bytes(),
         )?;
-        let templates = vec![super::TurnTemplate {
-            kind: super::TemplateSelector::Bind,
-            source: specification.turn_templates[0].1.clone(),
-        }];
         Ok(RuntimeActivationInputAdmission {
             input,
-            admission,
-            specification,
-            templates,
-            compile_view_evidence,
+            reservation,
+            run_context: self.run_context,
         })
     }
 
@@ -2855,34 +2866,6 @@ where
             expected,
             compile_inputs,
         )
-    }
-
-    pub fn admit_activation_input_item(
-        &mut self,
-        owner: &RuntimeActivationInputAdmission,
-        checked: &super::CellCheck,
-    ) -> Result<Arc<super::RuntimeCheckedItemAdmission>, ResidentError> {
-        let invalid = || ResidentError::InvalidActivationInput {
-            site: owner.input.site,
-        };
-        if checked
-            .admission()
-            .is_none_or(|admission| !Arc::ptr_eq(admission, &owner.admission))
-            || checked.items.len() != 1
-        {
-            return Err(invalid());
-        }
-        let item = checked.checked_item(0).map_err(SessionError::Compile)?;
-        if item.kind() != tidepool_toolchain::checked_cell::CheckedItemKind::Bind
-            || item.binders() != ["sessionInput"]
-            || item.source() != owner.input.placeholder_source()
-        {
-            return Err(invalid());
-        }
-        let prefix = self
-            .state
-            .begin_checked_prefix(owner.admission.clone(), item.clone())?;
-        Ok(self.state.admit_checked_item(prefix, item)?)
     }
 
     pub fn begin_durable_private_execution(
@@ -3846,7 +3829,13 @@ where
         let type_evidence = self
             .request_site_type_evidence(site)
             .ok_or_else(invalid)?
-            .authenticate_request_types(signatures, interfaces)
+            .authenticate_request_types(signatures, &interfaces.types)
+            .map_err(SessionError::Compile)?;
+        let prototype =
+            tidepool_toolchain::checked_cell::ExactHostBindingPrototype::from_original_input(
+                input_type_witness.clone(),
+                interfaces.types.clone(),
+            )
             .map_err(SessionError::Compile)?;
         let custody = self
             .live_payload_handle_owned_by(hole.cont_id(), realm)?
@@ -3857,6 +3846,8 @@ where
             input_type,
             type_evidence: Arc::new(type_evidence),
             input_type_witness: Arc::new(input_type_witness),
+            prototype,
+            original_execution: interfaces.execution.clone(),
             progress_type_witness,
         })
     }
@@ -4210,86 +4201,52 @@ where
         }
     }
 
-    /// Install a rooted live value under a binder GHC has already compiled,
-    /// without evaluating a throwaway placeholder of that type.
-    ///
-    /// `run_turn` writes the binder's thin `Val.G<gen>` interface and returns
-    /// its exact identity. This operation joins that type-module identity to a
-    /// same-typed in-heap value supplied under affine custody. It is the mount
-    /// path for actor inputs and messages: the authoritative value already
-    /// exists, so running `undefined`, a guessed inhabitant, or a second copy
-    /// merely to create the binding would be both wasteful and semantically
-    /// wrong.
-    ///
-    /// Validation and table merge happen before ownership transfers. On
-    /// success ownership transfers from the handle registry to the scoped
-    /// persistent binding store exactly once.
+    /// Bind the original rooted input under its fresh compiler type interface.
+    /// All filesystem work precedes the affine reservation/root consumption.
     pub fn mount_activation_input(
         &mut self,
         owner: RuntimeActivationInputAdmission,
-        compiled: CompiledActivationInput,
+        interface: Arc<tidepool_toolchain::checked_cell::ExactHostBindingInterface>,
     ) -> Result<MountedActivationInput, ResidentError> {
         self.settle_dropped_custody();
-        let scope = owner.admission.visibility().scope;
-        let generation = compiled.admission.generation();
+        let reservation = &owner.reservation;
+        let scope = reservation.scope;
+        let generation = reservation.generation;
         let invalid = || ResidentError::InvalidActivationInput {
             site: owner.input.site,
         };
         if !Arc::ptr_eq(&owner.input.custody.cleanup.0, &self.custody_cleanup) {
             return Err(ResidentError::ForeignCustody);
         }
-        if !owner.admission.belongs_to(&self.state)
-            || self.run_context.lexical_scope != scope
-            || !Arc::ptr_eq(compiled.admission.prefix().admission(), &owner.admission)
-            || compiled.proof.item() != compiled.admission.item()
-            || compiled.proof.generation() != generation.0
-            || !compiled.proof.matches_target(&compiled.compiled.prepared)
-            || compiled.binder.name != "sessionInput"
-            || compiled.binder.module != SessionModule::val(generation).module_name()
+        self.state
+            .validate_binding_interface(reservation, &interface)?;
+        if self.run_context != owner.run_context
+            || interface.purpose()
+                != tidepool_toolchain::checked_cell::BindingInterfacePurpose::OriginalLiveInput
+            || !Arc::ptr_eq(interface.prototype(), &owner.input.prototype)
         {
             return Err(invalid());
         }
-        let certification = compiled
-            .compiled
-            .certification
-            .as_ref()
-            .ok_or_else(invalid)?;
-        if certification
-            .checked_activation_input()
-            .is_none_or(|proof| !Arc::ptr_eq(proof, &compiled.proof))
-            || certification
-                .checked_prefix()
-                .is_none_or(|prefix| !Arc::ptr_eq(prefix, compiled.admission.prefix()))
+        let witnessed = interface.original_input_type().ok_or_else(invalid)?;
+        if owner.input.input_type_witness.as_ref() != witnessed
+            || owner.input.input_type_witness.metadata_digest() != witnessed.metadata_digest()
         {
-            return Err(invalid());
-        }
-        if owner.input.input_type_witness.as_ref() != compiled.proof.input_type_witness() {
             return Err(ResidentError::ActivationInputTypeMismatch {
                 site: owner.input.site,
                 original: owner.input.input_type_witness.commitment(),
-                compiled: compiled.proof.input_type_witness().commitment(),
+                compiled: witnessed.commitment(),
             });
         }
-        compiled
-            .proof
-            .validate_yield_sites(&compiled.compiled.asks)
-            .map_err(SessionError::Compile)?;
-        compiled
-            .proof
-            .validate_table(&compiled.compiled.table)
-            .map_err(SessionError::Compile)?;
-        compiled
-            .proof
-            .validate_bound_binders(&[super::turn::encode_bound_binder_authority(&compiled.binder)])
-            .map_err(SessionError::Compile)?;
-        let interface = compiled
-            .proof
-            .value_interface_certificate()
-            .ok_or_else(invalid)?;
-        if interface.owner() != SessionModule::val(generation) {
+        let binder =
+            super::turn::decode_bound_binder(interface.binder()).map_err(SessionError::Compile)?;
+        if binder.name != reservation.binding
+            || binder.module != SessionModule::val(generation).module_name()
+            || binder.var_id != session_var_id(&binder.module, &binder.name)
+            || binder.host_authority.is_some()
+        {
             return Err(invalid());
         }
-        let binding = SessionVarId::from_extract(compiled.binder.var_id);
+        let binding = SessionVarId::from_extract(binder.var_id);
         self.state.validate_new_binding_ids([binding])?;
         let raw = owner.input.custody.handle.ok_or_else(invalid)?;
         let handle = self
@@ -4297,28 +4254,36 @@ where
             .require_prepared()?
             .prepared_handle_of(raw)
             .ok_or_else(invalid)?;
+        if self
+            .state
+            .require_prepared()?
+            .hosting_program(handle)
+            .is_none()
+        {
+            return Err(invalid());
+        }
+        let staged = self
+            .state
+            .stage_checked_value_interface(interface.value_interface_certificate())?;
+        self.state.validate_staged_value_interface(&staged)?;
+        // Epoch fencing does not observe invocation or resource cancellation.
+        // A cancellation after transfer is handled by the existing child scope.
+        if self.state.mount_cancelled(self.run_context.resource_scope) {
+            return Err(PreparedRuntimeError::Cancelled.into());
+        }
         self.state
-            .merge_table(&compiled.compiled.table)
-            .map_err(ResidentError::TableCollision)?;
-        self.state
-            .consume_host_activation_reservation(&compiled.admission, &compiled.proof)?;
+            .consume_binding_interface(reservation, &interface)?;
         self.mount_compiled_binding_prepared(
             scope,
-            &compiled.binder,
+            &binder,
             generation,
             owner.input.custody,
-            ValueInterfaceSource::Checked,
+            ValueInterfaceSource::Staged(staged),
         )
         .map_err(|source| ResidentError::ActivationInputConsumed {
             binding,
             source: Box::new(source),
         })?;
-        self.state
-            .retain_checked_value_interface(interface)
-            .map_err(|source| ResidentError::ActivationMountCommitted {
-                binding,
-                source: Box::new(source.into()),
-            })?;
         let visibility = self
             .state
             .public_visibility_snapshot_in(scope)
@@ -4327,13 +4292,13 @@ where
                 source: Box::new(SessionError::DeadScope(scope).into()),
             })?;
         Ok(MountedActivationInput {
-            owner: owner.admission,
-            compiled: compiled.compiled,
-            proof: compiled.proof,
+            interface,
+            original_execution: owner.input.original_execution,
             binding,
             scope,
             handle,
             visibility,
+            run_context: self.run_context,
         })
     }
 
@@ -4547,6 +4512,13 @@ where
         }
         self.settle_dropped_custody();
         self.validate_host_mount_geometry(admission.scope, binder, admission.generation)?;
+        let staged = self
+            .state
+            .stage_checked_value_interface(proof.value_interface_certificate())?;
+        self.state.validate_staged_value_interface(&staged)?;
+        if self.state.mount_cancelled(self.run_context.resource_scope) {
+            return Err(PreparedRuntimeError::Cancelled.into());
+        }
         self.state
             .consume_host_binding_interface(admission, proof)?;
         let representation = carrier.representation;
@@ -4555,16 +4527,9 @@ where
             binder,
             admission.generation,
             carrier.code(),
-            ValueInterfaceSource::Checked,
+            ValueInterfaceSource::Staged(staged),
             move |engine, realm, _| representation.build(engine, realm, payload),
         )?;
-        if let Err(error) = self
-            .state
-            .retain_checked_value_interface(proof.value_interface_certificate())
-        {
-            self.retire_host_binding_owner(&admission.session_root, binder);
-            return Err(error.into());
-        }
         match super::PendingHostValueWrite::mounted_host_interface(
             &self.state,
             admission.scope,
@@ -4610,6 +4575,11 @@ where
             .value_interface_certificate()
             .ok_or(ResidentError::UnsupportedCheckedTurn)?;
         let session_root = admission.snapshot().view().session_root().to_path_buf();
+        let staged = self.state.stage_checked_value_interface(interface)?;
+        self.state.validate_staged_value_interface(&staged)?;
+        if self.state.mount_cancelled(self.run_context.resource_scope) {
+            return Err(PreparedRuntimeError::Cancelled.into());
+        }
         self.state.consume_host_carrier_reservation(
             admission,
             execution,
@@ -4623,13 +4593,9 @@ where
             binder,
             generation,
             carrier.code(),
-            ValueInterfaceSource::Checked,
+            ValueInterfaceSource::Staged(staged),
             move |engine, realm, _| representation.build(engine, realm, payload),
         )?;
-        if let Err(error) = self.state.retain_checked_value_interface(interface) {
-            self.retire_host_binding_owner(&session_root, binder);
-            return Err(error.into());
-        }
         match super::PendingHostValueWrite::mounted(&self.state, scope, binder, execution) {
             Ok(write) => Ok(write),
             Err(error) => {
@@ -5385,7 +5351,7 @@ where
                     &code.table,
                     &code.sites,
                 )),
-                TurnPurpose::ActivationInput { proof, .. } => {
+                TurnPurpose::ActivationPreview(proof) => {
                     Some(proof.original_interface_context(&code.prepared, &code.table, &code.sites))
                 }
                 TurnPurpose::Ordinary => {
@@ -5405,7 +5371,40 @@ where
         } else {
             None
         };
+        let original_execution = if let Some(certification) = certification {
+            let original = match certification.purpose() {
+                TurnPurpose::Execution { execution, .. }
+                | TurnPurpose::HostPrototype(execution) => Some(
+                    execution.original_execution_context(&code.prepared, &code.table, &code.sites),
+                ),
+                TurnPurpose::Display(display) => Some(display.original_execution_context(
+                    &code.prepared,
+                    &code.table,
+                    &code.sites,
+                )),
+                TurnPurpose::ActivationPreview(proof) => {
+                    Some(proof.original_execution_context(&code.prepared, &code.table, &code.sites))
+                }
+                TurnPurpose::Ordinary => {
+                    certification.compile_input_identity.as_ref().map(|proof| {
+                        proof.original_execution_context(
+                            &code.prepared,
+                            &certification.groups,
+                            &certification.target_owners,
+                            &certification.package_interfaces,
+                            &code.table,
+                            &code.sites,
+                        )
+                    })
+                }
+            };
+            original.transpose().map_err(SessionError::Compile)?
+        } else {
+            None
+        };
         if let Some(original_interfaces) = original_interfaces {
+            let original_execution =
+                original_execution.ok_or(ResidentError::UnsupportedCheckedTurn)?;
             let descriptors = original_interfaces.artifact_view().descriptors();
             let home_units = descriptors
                 .iter()
@@ -5473,9 +5472,13 @@ where
                 let interfaces = original_interfaces
                     .select_interface_roots(roots.into_iter().collect())
                     .map_err(SessionError::Compile)?;
-                provenance
-                    .authenticated_inputs
-                    .insert(site.site, Arc::new(interfaces));
+                provenance.authenticated_inputs.insert(
+                    site.site,
+                    AuthenticatedInputContext {
+                        types: Arc::new(interfaces),
+                        execution: original_execution.clone(),
+                    },
+                );
             }
         }
         Ok(Arc::new(provenance))
@@ -5524,15 +5527,11 @@ where
         self.run_prepared_with_argument(code, PreparedTurnMode::Value, Some(*handle))
     }
 
-    /// Evaluate only the protected preview of this exact committed host input.
-    /// Its placeholder has no authored start or completion to settle.
-    pub fn run_activation_preview(
-        &mut self,
-        mounted: MountedActivationInput,
-    ) -> Result<ResidentOutcome, ResidentError> {
-        if !mounted.owner.belongs_to(&self.state)
-            || !mounted.owner.is_host_activation()
-            || self.run_context.lexical_scope != mounted.scope
+    fn validate_mounted_activation_input(
+        &self,
+        mounted: &MountedActivationInput,
+    ) -> Result<(), ResidentError> {
+        if self.run_context != mounted.run_context
             || self
                 .state
                 .public_visibility_snapshot_in(mounted.scope)
@@ -5543,30 +5542,135 @@ where
                 .bindings()
                 .get(mounted.binding)
                 .is_none_or(|entry| {
-                    entry.scope != mounted.scope || entry.value.handle != mounted.handle
+                    entry.scope != mounted.scope
+                        || entry.value.handle != mounted.handle
+                        || entry.module != mounted.interface.value_interface_certificate().owner()
                 })
-            || !mounted.proof.matches_target(&mounted.compiled.prepared)
-            || mounted
-                .compiled
-                .certification
-                .as_ref()
-                .is_none_or(|certification| {
-                    certification
-                        .checked_activation_input()
-                        .is_none_or(|proof| !Arc::ptr_eq(proof, &mounted.proof))
+            || self
+                .state
+                .retained_checked_value_artifact(
+                    mounted.interface.value_interface_certificate().owner(),
+                )
+                .is_none_or(|artifact| {
+                    !Arc::ptr_eq(artifact, &mounted.interface.value_interface_certificate())
                 })
         {
             return Err(ResidentError::ActivationPreviewRefused {
                 binding: mounted.binding,
             });
         }
-        mounted
+        Ok(())
+    }
+
+    /// Capture the exact postmount view while preserving the original code owner.
+    pub fn admit_activation_preview(
+        &mut self,
+        mounted: MountedActivationInput,
+        view: super::SessionCompileView,
+    ) -> Result<Arc<RuntimeActivationPreviewAdmission>, ResidentError> {
+        self.settle_dropped_custody();
+        self.validate_mounted_activation_input(&mounted)?;
+        let current = self
+            .state
+            .compile_view_in(mounted.scope)
+            .ok_or(SessionError::DeadScope(mounted.scope))?;
+        if view.session() != current.session()
+            || view.lexical_scope() != mounted.scope
+            || view.session_root() != current.session_root()
+            || view.reachable_values() != current.reachable_values()
+        {
+            return Err(ResidentError::ActivationPreviewRefused {
+                binding: mounted.binding,
+            });
+        }
+        let view_digest = self
+            .state
+            .compile_view_digest_in(mounted.scope)
+            .ok_or(SessionError::DeadScope(mounted.scope))?;
+        let generation = self.state.val_gen().next();
+        self.state.set_val_gen(generation);
+        let exact_context = Arc::new(
+            tidepool_toolchain::declaration_join::ExactCompileContext::new(
+                mounted.original_execution.clone(),
+            ),
+        );
+        let owner_epoch = self.state.admission_owner().epoch();
+        let mut hash = blake3::Hasher::new();
+        hash.update(b"TidepoolActivationPreview1");
+        hash.update(&owner_epoch.to_le_bytes());
+        hash.update(&view_digest);
+        hash.update(&generation.0.to_le_bytes());
+        hash.update(&mounted.binding.raw().to_le_bytes());
+        hash.update(&mounted.interface.admission_digest());
+        hash.update(&mounted.original_execution.semantic_sha256());
+        hash.update(&mounted.run_context.principal.identity.to_le_bytes());
+        hash.update(&mounted.run_context.principal.incarnation.to_le_bytes());
+        hash.update(&mounted.run_context.resource_scope.0.to_le_bytes());
+        let scope_lease = self.state.retain_lexical_scope(mounted.scope)?;
+        Ok(Arc::new(RuntimeActivationPreviewAdmission {
+            owner: self.state.admission_owner().clone(),
+            owner_epoch,
+            mounted,
+            view,
+            view_digest,
+            generation,
+            digest: *hash.finalize().as_bytes(),
+            exact_context,
+            _scope_lease: scope_lease,
+            consumed: AtomicBool::new(false),
+        }))
+    }
+
+    /// Run only a sealed pure preview of this exact original committed root.
+    pub fn run_activation_preview(
+        &mut self,
+        compiled: CompiledActivationPreview,
+    ) -> Result<ResidentOutcome, ResidentError> {
+        self.settle_dropped_custody();
+        let admission = &compiled.admission;
+        let mounted = &admission.mounted;
+        self.validate_mounted_activation_input(mounted)?;
+        if !Arc::ptr_eq(&admission.owner, self.state.admission_owner())
+            || admission.owner_epoch != self.state.admission_owner().epoch()
+            || self.state.compile_view_digest_in(mounted.scope) != Some(admission.view_digest)
+            || compiled.proof.admission_digest() != admission.digest
+            || compiled.proof.generation() != admission.generation.0
+            || !Arc::ptr_eq(compiled.proof.input_interface(), &mounted.interface)
+            || !compiled.proof.matches_target(&compiled.compiled.prepared)
+            || compiled
+                .compiled
+                .certification
+                .as_ref()
+                .is_none_or(|certification| {
+                    certification
+                        .checked_activation_preview()
+                        .is_none_or(|proof| !Arc::ptr_eq(proof, &compiled.proof))
+                })
+        {
+            return Err(ResidentError::ActivationPreviewRefused {
+                binding: mounted.binding,
+            });
+        }
+        compiled
             .proof
-            .validate_table(&mounted.compiled.table)
+            .validate_table(&compiled.compiled.table)
             .map_err(SessionError::Compile)?;
-        let provenance = self.provenance_for(&mounted.compiled.code())?;
+        compiled
+            .proof
+            .validate_yield_sites(&compiled.compiled.asks)
+            .map_err(SessionError::Compile)?;
+        if self.state.mount_cancelled(self.run_context.resource_scope) {
+            return Err(PreparedRuntimeError::Cancelled.into());
+        }
+        admission
+            .consumed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| ResidentError::ActivationPreviewRefused {
+                binding: mounted.binding,
+            })?;
+        let provenance = self.provenance_for(&compiled.compiled.code())?;
         self.run_prepared_for_purpose(
-            mounted.compiled.into_code(),
+            compiled.compiled.into_code(),
             PreparedTurnMode::Value,
             Some(mounted.handle),
             PreparedExecutionPurpose::HostActivationPreview,
@@ -6228,6 +6332,28 @@ where
         checked: Option<&CheckedTurnCompletion>,
         interface_source: ValueInterfaceSource,
     ) -> Result<(), ResidentError> {
+        if let ValueInterfaceSource::Staged(staged) = &interface_source {
+            let validated = self
+                .state
+                .validate_staged_value_interface(staged)
+                .and_then(|()| {
+                    if staged.module() != SessionModule::val(generation)
+                        || bound
+                            .iter()
+                            .any(|(binder, _)| binder.module != staged.module().module_name())
+                    {
+                        Err(SessionError::StaleStagedDeclaration)
+                    } else {
+                        Ok(())
+                    }
+                });
+            if let Err(error) = validated {
+                if let Some(engine) = self.state.prepared_mut() {
+                    engine.release_all(bound.iter().map(|(_, handle)| *handle));
+                }
+                return Err(error.into());
+            }
+        }
         let binders = bound.iter().map(|(binder, _)| *binder).collect::<Vec<_>>();
         let overlay_validation = match checked {
             Some(completion) => completion
@@ -6250,8 +6376,8 @@ where
             engine.release_all(bound.iter().map(|(_, handle)| *handle));
             return Err(SessionError::DeadScope(scope).into());
         }
-        let unit = match interface_source {
-            ValueInterfaceSource::Checked => "main".to_owned(),
+        let unit = match &interface_source {
+            ValueInterfaceSource::Checked | ValueInterfaceSource::Staged(_) => "main".to_owned(),
             ValueInterfaceSource::LegacyDisk => engine.entry_unit(program).unwrap_or_default(),
         };
         let mut roots = Vec::with_capacity(bound.len());
@@ -6301,9 +6427,14 @@ where
         }
         // Ordinary fragments retain their established filesystem interface
         // contract. Checked settlements register their sealed artifact instead.
-        if matches!(interface_source, ValueInterfaceSource::LegacyDisk) {
-            self.state
-                .mark_legacy_value_interface(SessionModule::val(generation));
+        match interface_source {
+            ValueInterfaceSource::LegacyDisk => self
+                .state
+                .mark_legacy_value_interface(SessionModule::val(generation)),
+            ValueInterfaceSource::Staged(staged) => {
+                self.state.commit_staged_value_interface(staged)
+            }
+            ValueInterfaceSource::Checked => {}
         }
         for _ in bound {
             self.advance_public_visibility(scope);

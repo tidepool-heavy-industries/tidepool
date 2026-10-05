@@ -2341,7 +2341,6 @@ impl Worker {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
-        crate::process::child_dies_with_parent(&mut command);
         let mut child = command.spawn().map_err(FrontendError::Io)?;
         let stdin = child
             .stdin

@@ -15,7 +15,7 @@ import Tidepool.Binders (StmtBinders(..), TurnKind(..))
 import Tidepool.CheckedCell (CheckedSignature(..))
 import Tidepool.ExecutionSchema (SymbolIdentity(..))
 import Tidepool.ExactScope
-  ( CheckedCellAdmission(..), CheckedCellPurpose(..), CheckedItemAdmission(..), CheckedDisplayAdmission(..) )
+  ( CheckedCellAdmission(..), CheckedItemAdmission(..), CheckedDisplayAdmission(..) )
 import Tidepool.ExtractRequest (WorkerRequest(..))
 import Tidepool.ExtractUtil (shaHex)
 
@@ -46,12 +46,6 @@ requireGeneration args = maybe (error "required argument missing: --bind-gen") p
 validateCheckedCellAdmission :: WorkerRequest -> CheckedCellAdmission -> String -> String -> IO ()
 validateCheckedCellAdmission args admission cellSource template = do
   templateDigests <- readTurnTemplateDigests args
-  case checkedCellPurpose admission of
-    HostInputCellCheck _ -> unless
-      (cellSource == "sessionInput <- pure (undefined :: TidepoolActivationInput)"
-        && null (checkedReservedModules admission) && checkedPlannedCell admission == Nothing)
-      (fail "host input check requires its original protected placeholder")
-    AuthoredCellCheck -> pure ()
   unless (shaHex (TE.encodeUtf8 (T.pack cellSource)) == checkedCellSha256 admission
       && shaHex (TE.encodeUtf8 (T.pack template)) == checkedTemplateSha256 admission
       && templateDigests == checkedTurnTemplates admission

@@ -123,9 +123,9 @@ impl CertifiedPrivateValueProof {
     }
 }
 
-/// One fresh host-binding slot fenced by the owning machine and lexical view.
-/// Compiler issuance cannot consume this reservation or publish a value.
-pub struct RuntimeHostBindingAdmission {
+/// One fresh thin-interface slot shared by original inputs and host builders.
+/// Issuance cannot consume this reservation or publish a binding.
+pub struct RuntimeBindingInterfaceReservation {
     owner: Arc<RuntimeAdmissionOwner>,
     owner_epoch: u64,
     pub(super) scope: ScopeId,
@@ -134,12 +134,12 @@ pub struct RuntimeHostBindingAdmission {
     view_digest: [u8; 32],
     pub(super) generation: Generation,
     pub(super) binding: String,
-    pub(super) prototype: Arc<super::resident::HostBindingPrototype>,
+    pub(super) prototype: Arc<tidepool_toolchain::checked_cell::ExactHostBindingPrototype>,
     digest: [u8; 32],
     consumed: std::sync::atomic::AtomicBool,
 }
 
-impl RuntimeHostBindingAdmission {
+impl RuntimeBindingInterfaceReservation {
     pub fn digest(&self) -> [u8; 32] {
         self.digest
     }
@@ -149,18 +149,39 @@ impl RuntimeHostBindingAdmission {
     pub fn binding(&self) -> &str {
         &self.binding
     }
+    pub fn prototype(&self) -> &Arc<tidepool_toolchain::checked_cell::ExactHostBindingPrototype> {
+        &self.prototype
+    }
+}
+
+/// A host builder keeps its representation and executable owner separately
+/// from the shared type-interface reservation.
+pub struct RuntimeHostBindingAdmission {
+    reservation: Arc<RuntimeBindingInterfaceReservation>,
+    pub(super) prototype: Arc<super::resident::HostBindingPrototype>,
+}
+
+impl std::ops::Deref for RuntimeHostBindingAdmission {
+    type Target = RuntimeBindingInterfaceReservation;
+    fn deref(&self) -> &Self::Target {
+        &self.reservation
+    }
+}
+
+impl RuntimeHostBindingAdmission {
     pub fn prototype(&self) -> &Arc<super::resident::HostBindingPrototype> {
         &self.prototype
     }
 }
 
 impl PersistentSession {
-    pub(super) fn admit_host_binding_interface(
+    pub(super) fn admit_binding_interface(
         &mut self,
         scope: ScopeId,
         binding: String,
-        prototype: Arc<super::resident::HostBindingPrototype>,
-    ) -> Result<Arc<RuntimeHostBindingAdmission>, SessionError> {
+        prototype: Arc<tidepool_toolchain::checked_cell::ExactHostBindingPrototype>,
+        authority_digest: [u8; 32],
+    ) -> Result<Arc<RuntimeBindingInterfaceReservation>, SessionError> {
         if !self.scope_tree().is_live(scope) {
             return Err(SessionError::DeadScope(scope));
         }
@@ -179,15 +200,17 @@ impl PersistentSession {
             .to_path_buf();
         let owner_epoch = self.admission_owner().epoch();
         let mut digest = blake3::Hasher::new();
-        digest.update(b"TidepoolRuntimeHostBinding1");
+        digest.update(b"TidepoolRuntimeBindingInterface2");
+        digest.update(self.admission_owner().identity.as_bytes());
         digest.update(&owner_epoch.to_le_bytes());
+        digest.update(&scope.0.to_le_bytes());
         digest.update(&view_digest);
         digest.update(&generation.0.to_le_bytes());
         digest.update(&(binding.len() as u64).to_le_bytes());
         digest.update(binding.as_bytes());
-        digest.update(&prototype.compiler().digest());
-        digest.update(&prototype.authority_digest());
-        Ok(Arc::new(RuntimeHostBindingAdmission {
+        digest.update(&prototype.digest());
+        digest.update(&authority_digest);
+        Ok(Arc::new(RuntimeBindingInterfaceReservation {
             owner: self.admission_owner().clone(),
             owner_epoch,
             scope,
@@ -202,32 +225,72 @@ impl PersistentSession {
         }))
     }
 
-    pub(super) fn consume_host_binding_interface(
+    pub(super) fn admit_host_binding_interface(
+        &mut self,
+        scope: ScopeId,
+        binding: String,
+        prototype: Arc<super::resident::HostBindingPrototype>,
+    ) -> Result<Arc<RuntimeHostBindingAdmission>, SessionError> {
+        let reservation = self.admit_binding_interface(
+            scope,
+            binding,
+            prototype.compiler().clone(),
+            prototype.authority_digest(),
+        )?;
+        Ok(Arc::new(RuntimeHostBindingAdmission {
+            reservation,
+            prototype,
+        }))
+    }
+
+    pub(super) fn validate_binding_interface(
         &self,
-        admission: &RuntimeHostBindingAdmission,
+        admission: &RuntimeBindingInterfaceReservation,
         interface: &tidepool_toolchain::checked_cell::ExactHostBindingInterface,
     ) -> Result<(), SessionError> {
         if !Arc::ptr_eq(&admission.owner, self.admission_owner())
             || admission.owner_epoch != self.admission_owner().epoch()
-            || !Arc::ptr_eq(interface.prototype(), admission.prototype.compiler())
+            || !Arc::ptr_eq(interface.prototype(), &admission.prototype)
             || interface.admission_digest() != admission.digest
             || interface.generation() != admission.generation.0
+            || interface.value_interface_certificate().owner()
+                != tidepool_repr::SessionModule::val(admission.generation)
             || self.public_visibility_snapshot_in(admission.scope).as_ref()
                 != Some(&admission.visibility)
             || self.compile_view_digest_in(admission.scope) != Some(admission.view_digest)
             || admission
                 .consumed
-                .compare_exchange(
-                    false,
-                    true,
-                    std::sync::atomic::Ordering::AcqRel,
-                    std::sync::atomic::Ordering::Acquire,
-                )
-                .is_err()
+                .load(std::sync::atomic::Ordering::Acquire)
         {
             return Err(SessionError::StaleStagedDeclaration);
         }
         Ok(())
+    }
+
+    pub(super) fn consume_binding_interface(
+        &self,
+        admission: &RuntimeBindingInterfaceReservation,
+        interface: &tidepool_toolchain::checked_cell::ExactHostBindingInterface,
+    ) -> Result<(), SessionError> {
+        self.validate_binding_interface(admission, interface)?;
+        admission
+            .consumed
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .map_err(|_| SessionError::StaleStagedDeclaration)?;
+        Ok(())
+    }
+
+    pub(super) fn consume_host_binding_interface(
+        &self,
+        admission: &RuntimeHostBindingAdmission,
+        interface: &tidepool_toolchain::checked_cell::ExactHostBindingInterface,
+    ) -> Result<(), SessionError> {
+        self.consume_binding_interface(&admission.reservation, interface)
     }
 }
 impl CertifiedPrivateValueWrite {
@@ -409,10 +472,6 @@ enum NativeCellPurpose {
         binding: String,
         expected: super::resident::HostBindingType,
     },
-    HostActivation {
-        input_commitment: [u8; 32],
-        input_type_witness: Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>,
-    },
 }
 
 impl NativeCellPurpose {
@@ -423,15 +482,6 @@ impl NativeCellPurpose {
                 frame(b"TidepoolHostCarrierAdmission1");
                 frame(binding.as_bytes());
                 expected.frame_authorization(frame);
-            }
-            Self::HostActivation {
-                input_commitment,
-                input_type_witness,
-            } => {
-                frame(b"TidepoolHostActivationAdmission1");
-                frame(input_commitment);
-                frame(&input_type_witness.metadata_digest());
-                frame(&input_type_witness.commitment());
             }
         }
     }
@@ -935,8 +985,7 @@ impl RuntimeCheckedPrefix {
         execution: Arc<tidepool_toolchain::checked_cell::ExactCompiledItem>,
     ) -> Result<Arc<CheckedTurnCompletion>, SessionError> {
         let mut state = self.state.lock();
-        if self.admission.is_host_activation()
-            || self.admission.host_carrier().is_some()
+        if self.admission.host_carrier().is_some()
             || !self.admission.belongs_to(session)
             || self.admission.visibility.scope != scope
             || state.in_flight.is_some()
@@ -1394,22 +1443,6 @@ impl RuntimeCellAdmission {
             _ => None,
         }
     }
-    pub(super) fn is_host_activation(&self) -> bool {
-        matches!(
-            self.native_purpose,
-            Some(NativeCellPurpose::HostActivation { .. })
-        )
-    }
-    pub(super) fn host_activation_input_witness(
-        &self,
-    ) -> Option<&Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>> {
-        match &self.native_purpose {
-            Some(NativeCellPurpose::HostActivation {
-                input_type_witness, ..
-            }) => Some(input_type_witness),
-            _ => None,
-        }
-    }
     pub fn view(&self) -> &SessionCompileView {
         &self.view
     }
@@ -1507,37 +1540,6 @@ impl PersistentSession {
         execution.validate_runtime_admission(admission.digest(), prefix.admission.digest())?;
         execution.validate_settled_native_bindings(state.snapshot.settled_native_bindings())?;
         // Mounting a host payload never executes or completes the placeholder.
-        state.reservation = None;
-        Ok(())
-    }
-
-    pub(super) fn consume_host_activation_reservation(
-        &self,
-        admission: &Arc<RuntimeCheckedItemAdmission>,
-        execution: &tidepool_toolchain::checked_cell::ExactCompiledActivationInput,
-    ) -> Result<(), SessionError> {
-        let prefix = admission.prefix();
-        let mut state = prefix.state.lock();
-        let scope = prefix.admission.visibility.scope;
-        if !prefix.admission.is_host_activation()
-            || !prefix.admission.belongs_to(self)
-            || !Arc::ptr_eq(&state.snapshot, admission.snapshot())
-            || state.in_flight.is_some()
-            || state.reservation.as_ref().is_none_or(|reservation| {
-                reservation.item != *execution.item()
-                    || reservation.generation.0 != execution.generation()
-                    || reservation.digest != admission.digest()
-            })
-            || self.public_visibility_snapshot_in(scope).as_ref()
-                != Some(&state.snapshot.visibility)
-            || self.compile_view_digest_in(scope) != Some(state.snapshot.view_digest)
-        {
-            return Err(SessionError::StaleStagedDeclaration);
-        }
-        execution.validate_runtime_admission(admission.digest(), prefix.admission.digest())?;
-        execution.validate_settled_native_bindings(state.snapshot.settled_native_bindings())?;
-        // The host transfers its original value. No placeholder was executed,
-        // and the authored compiler prefix must not claim such a completion.
         state.reservation = None;
         Ok(())
     }
@@ -2288,55 +2290,6 @@ impl PersistentSession {
         )
     }
 
-    pub(super) fn admit_host_activation_cell_in(
-        &mut self,
-        scope: ScopeId,
-        input_commitment: [u8; 32],
-        input_type_witness: Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>,
-        request_evidence: Arc<super::SiteTypeEvidence>,
-        specification: Arc<dyn Any + Send + Sync>,
-        specification_digest: [u8; 32],
-        authority_digest: [u8; 32],
-        include_paths: Vec<PathBuf>,
-        compile_inputs: Option<super::prepared::RuntimeCompileInputs>,
-    ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
-        let annotations = super::RequestCompileAnnotations::new(
-            request_evidence,
-            tidepool_toolchain::declaration_join::RequestHelperRecipe::None,
-        )
-        .map_err(SessionError::Compile)?;
-        let projections = match compile_inputs {
-            Some(inputs) => {
-                if inputs
-                    .annotations()
-                    .is_some_and(|provided| provided != &annotations)
-                {
-                    return Err(SessionError::StaleStagedDeclaration);
-                }
-                inputs.projections().to_vec()
-            }
-            None => Vec::new(),
-        };
-        let compile_inputs =
-            super::prepared::RuntimeCompileInputs::new(Some(annotations), projections)
-                .map_err(SessionError::Compile)?;
-        self.admit_cell_with_plan(
-            scope,
-            0,
-            specification,
-            specification_digest,
-            authority_digest,
-            include_paths,
-            None,
-            None,
-            Some(NativeCellPurpose::HostActivation {
-                input_commitment,
-                input_type_witness,
-            }),
-            Some(compile_inputs),
-        )
-    }
-
     fn native_setup_refusal(
         &self,
         scope: ScopeId,
@@ -2936,7 +2889,7 @@ mod tests {
     use crate::session::{ModuleEnv, SessionId, SessionLib};
 
     #[test]
-    fn host_purpose_binds_whole_native_payload_and_semantic_input_identity() {
+    fn live_input_commitment_binds_native_payload_and_semantic_input_identity() {
         use ciborium::value::Value;
         let text = |value: &str| Value::Text(value.into());
         let witness = |payload: u8, shape: &str| {
@@ -2982,15 +2935,10 @@ mod tests {
         );
         assert_ne!(original.commitment(), semantic_changed.commitment());
         let digest = |witness: Arc<_>| {
-            let purpose = NativeCellPurpose::HostActivation {
-                input_commitment: [7; 32],
-                input_type_witness: witness,
-            };
             let mut digest = blake3::Hasher::new();
-            purpose.frame_authorization(&mut |bytes| {
-                digest.update(&(bytes.len() as u64).to_le_bytes());
-                digest.update(bytes);
-            });
+            for bytes in [witness.metadata_digest(), witness.commitment()] {
+                digest.update(&bytes);
+            }
             *digest.finalize().as_bytes()
         };
         assert_ne!(digest(original.clone()), digest(payload_changed));

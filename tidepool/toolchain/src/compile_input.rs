@@ -24,6 +24,7 @@ use crate::CompileError;
 pub struct SealedCompileInputIdentity {
     identity: String,
     original_interfaces: Arc<crate::declaration_context::ExactDeclarationContext>,
+    original_execution: Arc<crate::declaration_context::ExactDeclarationContext>,
     target: Arc<PreparedProgram>,
     groups: Arc<[PendingCertifiedGroup]>,
     target_owners: Arc<[PendingImportOwner]>,
@@ -33,6 +34,12 @@ pub struct SealedCompileInputIdentity {
 }
 
 impl SealedCompileInputIdentity {
+    pub(crate) fn issued_original_execution(
+        &self,
+    ) -> Arc<crate::declaration_context::ExactDeclarationContext> {
+        self.original_execution.clone()
+    }
+
     /// Versioned serialization for source-continuity intent. This string alone
     /// is not executable authority and cannot reconstruct the private proof.
     pub fn compile_input_identity(&self) -> &str {
@@ -64,6 +71,27 @@ impl SealedCompileInputIdentity {
             ));
         }
         Ok(self.original_interfaces.clone())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn original_execution_context(
+        &self,
+        prepared: &PreparedProgram,
+        groups: &[PendingCertifiedGroup],
+        target_owners: &[PendingImportOwner],
+        package_interfaces: &CertifiedTargetPackageInterfaces,
+        table: &DataConTable,
+        yield_sites: &[YieldSite],
+    ) -> Result<Arc<crate::declaration_context::ExactDeclarationContext>, CompileError> {
+        self.original_interface_context(
+            prepared,
+            groups,
+            target_owners,
+            package_interfaces,
+            table,
+            yield_sites,
+        )?;
+        Ok(self.original_execution.clone())
     }
 
     pub fn matches_bundle(
@@ -573,6 +601,31 @@ fn input_identity(
     ))
 }
 
+fn original_source_lexical(
+    evidence: &DependencyEvidence,
+    artifacts: &crate::artifact_inventory::ArtifactView,
+) -> Result<Vec<crate::declaration_join::ExactLexicalNode>, CompileError> {
+    let imports =
+        crate::declaration_context::consumed_source_home_imports(evidence, &BTreeMap::new())?;
+    // Presence does not select an owner. These roots were actually compiled
+    // under this original input proof and retain its exact source adjacency.
+    let roots = artifacts
+        .descriptors()
+        .into_iter()
+        .map(|descriptor| descriptor.owner)
+        .filter(|owner| imports.contains_key(owner))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    Ok(crate::declaration_join::source_lexical_surface(
+        &roots,
+        &imports,
+        &[],
+        &artifacts.source_implementation_roles(),
+    )?
+    .lexical)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn seal(
     producer: &[u8],
@@ -625,6 +678,16 @@ pub(crate) fn seal(
         .iter()
         .map(std::path::absolute)
         .collect::<Result<Vec<_>, _>>()?;
+    let lexical = original_source_lexical(evidence, artifacts)?;
+    let required_instance_owners = evidence
+        .modules
+        .iter()
+        .filter(|module| !module.boot)
+        .map(|module| crate::declaration_join::ExactModuleIdentity {
+            unit: module.unit.clone(),
+            module: module.module.clone(),
+        })
+        .collect::<Vec<_>>();
     Ok(Some(SealedCompileInputIdentity {
         identity: input_identity(producer, &include, evidence, packages, source, target)?,
         original_interfaces: Arc::new(
@@ -632,6 +695,15 @@ pub(crate) fn seal(
                 crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(producer)
                     .sha256(),
                 artifacts,
+            )?,
+        ),
+        original_execution: Arc::new(
+            crate::declaration_context::ExactDeclarationContext::from_authenticated_execution(
+                crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(producer)
+                    .sha256(),
+                artifacts,
+                lexical,
+                &required_instance_owners,
             )?,
         ),
         target: prepared.clone(),
@@ -727,6 +799,46 @@ mod tests {
                 &proof.sites,
             )
             .unwrap()
+    }
+
+    #[test]
+    fn sealed_input_missing_generated_owner_cannot_prove_absent_instances() {
+        let proof = package_context_proof(b"original compiler producer");
+        let execution = proof
+            .original_execution_context(
+                &proof.target,
+                &proof.groups,
+                &proof.target_owners,
+                &proof.package_interfaces,
+                &proof.table,
+                &proof.sites,
+            )
+            .unwrap();
+        assert_eq!(
+            execution.original_instance_environment(),
+            &crate::declaration_context::OriginalInstanceEnvironment::MissingOriginalOwners(vec![
+                crate::declaration_join::ExactModuleIdentity {
+                    unit: "main".into(),
+                    module: "Root".into()
+                },
+            ]),
+            "a consumed generated owner without its original interface is missing evidence",
+        );
+        let projected = execution.select_interface_roots(Vec::new()).unwrap();
+        assert_eq!(
+            projected.original_instance_environment(),
+            &crate::declaration_context::OriginalInstanceEnvironment::Unknown
+        );
+        assert_ne!(
+            execution.semantic_sha256(),
+            projected.semantic_sha256(),
+            "original scope completeness is part of the authenticated context commitment"
+        );
+        assert_eq!(
+            original_context(&proof).original_instance_environment(),
+            &crate::declaration_context::OriginalInstanceEnvironment::Unknown,
+            "type-only original interface custody cannot prove instance absence"
+        );
     }
 
     #[test]

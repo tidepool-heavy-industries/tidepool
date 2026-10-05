@@ -79,7 +79,6 @@ pub fn run(args: Vec<OsString>) -> Result<u8, FrontendError> {
     let worker = prepare_worker()?;
     let mut command = worker.command()?;
     command.args(worker_args);
-    crate::process::child_dies_with_parent(&mut command);
     let status = command.status().map_err(FrontendError::Io)?;
     build_products.cleanup();
     Ok(exit_code(status))
@@ -364,11 +363,7 @@ fn resolve_ghc_libdir() -> Result<OsString, FrontendError> {
     if let Some(value) = std::env::var_os("TIDEPOOL_GHC_LIBDIR") {
         return Ok(value);
     }
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "short synchronous probe: `ghc --print-libdir` exits immediately and is not a long-lived child"
-    )]
-    let output = Command::new("ghc")
+    let output = crate::process::command("ghc")
         .arg("--print-libdir")
         .stdin(Stdio::null())
         .output()
@@ -979,6 +974,49 @@ fn main() {{
         std::env::remove_var(WORKER_ENV);
         std::env::remove_var("TIDEPOOL_GHC_LIBDIR");
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn protocol_probe_uses_the_owned_parent_death_contract() {
+        let work = tempfile::tempdir().unwrap();
+        let source = work.path().join("worker.rs");
+        let binary = work.path().join("worker");
+        std::fs::write(
+            &source,
+            format!(
+                r#"
+unsafe extern "C" {{
+    fn prctl(option: i32, ...) -> i32;
+}}
+fn main() {{
+    assert_eq!(std::env::args().nth(1).as_deref(), Some("{probe}"));
+    let mut signal = 0i32;
+    assert_eq!(unsafe {{ prctl(2, &mut signal as *mut i32, 0usize, 0usize, 0usize) }}, 0);
+    assert_eq!(signal, 9, "protocol probe lacks its owned parent-death signal");
+    print!("{flag}");
+}}
+"#,
+                probe = PRINT_WORKER_REQUEST_FLAG,
+                flag = WORKER_REQUEST_FLAG,
+            ),
+        )
+        .unwrap();
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "test fixture: compile a worker that checks its actual Linux parent-death signal"
+        )]
+        let status = Command::new("rustc")
+            .arg(&source)
+            .arg("-o")
+            .arg(&binary)
+            .status()
+            .unwrap();
+        assert!(status.success(), "protocol probe fixture failed to compile");
+        PreparedWorker::for_test(binary)
+            .unwrap()
+            .check_request_protocol()
+            .unwrap();
     }
 
     #[test]

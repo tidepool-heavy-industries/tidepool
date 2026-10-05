@@ -800,6 +800,12 @@ impl PartialEq for ExactHostBindingPrototype {
 impl Eq for ExactHostBindingPrototype {}
 
 impl ExactHostBindingPrototype {
+    pub fn context(&self) -> &Arc<crate::declaration_context::ExactDeclarationContext> {
+        &self.context
+    }
+    pub fn producer(&self) -> [u8; 32] {
+        self.producer
+    }
     pub fn from_checked(execution: &ExactCompiledItem) -> Result<Arc<Self>, CompileError> {
         let [signature] = execution.item().signatures() else {
             return Err(failure(
@@ -1223,6 +1229,20 @@ impl CheckedValueImportAuthority {
 
     pub(crate) fn owners(&self) -> impl Iterator<Item = (&str, &str)> {
         self.values.keys().map(|module| ("main", module.as_str()))
+    }
+
+    pub(crate) fn matches_interface(
+        &self,
+        interface: &crate::recovery_artifacts::CertifiedJoinedInterface,
+    ) -> bool {
+        interface.unit() == "main"
+            && self
+                .values
+                .get(interface.module())
+                .is_some_and(|(bytes, digest, _)| {
+                    interface.interface_bytes() == bytes.as_ref()
+                        && hash(interface.interface_bytes()) == *digest
+                })
     }
 
     pub(crate) fn validate(&self) -> Result<(), CompileError> {
@@ -1866,7 +1886,6 @@ impl CheckedSettledValues {
 enum CheckedExecutionAdmission {
     RuntimeItem([u8; 32]),
     CellProgram([u8; 32]),
-    HostActivationInput([u8; 32]),
 }
 
 /// A checked recipe and its exact prepared target, issued together by the
@@ -1874,6 +1893,7 @@ enum CheckedExecutionAdmission {
 #[derive(Debug)]
 pub struct ExactCompiledItem {
     original_interfaces: Arc<crate::declaration_context::ExactDeclarationContext>,
+    original_execution: Arc<crate::declaration_context::ExactDeclarationContext>,
     item: ExactCheckedItem,
     target: Arc<tidepool_repr::execution_schema::PreparedProgram>,
     table: tidepool_repr::DataConTable,
@@ -1886,86 +1906,10 @@ pub struct ExactCompiledItem {
     settled_values: CheckedSettledValues,
 }
 
-/// A compiler-issued host input interface and preview target. It cannot enter
-/// an authored checked prefix or settle the placeholder used to infer its type.
-#[derive(Debug)]
-pub struct ExactCompiledActivationInput {
-    compiled: Arc<ExactCompiledItem>,
-    input_type_witness: CanonicalInputTypeWitness,
-}
-
-impl ExactCompiledActivationInput {
-    pub fn original_interface_context(
-        &self,
-        target: &tidepool_repr::execution_schema::PreparedProgram,
-        table: &tidepool_repr::DataConTable,
-        sites: &[crate::YieldSite],
-    ) -> Result<Arc<crate::declaration_context::ExactDeclarationContext>, CompileError> {
-        self.compiled
-            .original_interface_context(target, table, sites)
-    }
-    pub fn validate_yield_sites(&self, sites: &[crate::YieldSite]) -> Result<(), CompileError> {
-        self.compiled.validate_yield_sites(sites)
-    }
-    pub fn input_type_witness(&self) -> &CanonicalInputTypeWitness {
-        &self.input_type_witness
-    }
-    pub fn item(&self) -> &ExactCheckedItem {
-        self.compiled.item()
-    }
-    pub fn generation(&self) -> u64 {
-        self.compiled.generation()
-    }
-    pub fn target_owned(&self) -> Arc<tidepool_repr::execution_schema::PreparedProgram> {
-        self.compiled.target_owned()
-    }
-    pub fn matches_target(
-        &self,
-        target: &tidepool_repr::execution_schema::PreparedProgram,
-    ) -> bool {
-        self.compiled.matches_target(target)
-    }
-    pub fn validate_table(&self, table: &tidepool_repr::DataConTable) -> Result<(), CompileError> {
-        self.compiled.validate_table(table)
-    }
-    pub fn validate_bound_binders(&self, bound: &[Value]) -> Result<(), CompileError> {
-        self.compiled.validate_bound_binders(bound)
-    }
-    pub fn validate_runtime_admission(
-        &self,
-        item_digest: [u8; 32],
-        cell_digest: [u8; 32],
-    ) -> Result<(), CompileError> {
-        if !matches!(self.compiled.admission, CheckedExecutionAdmission::HostActivationInput(digest)
-            if digest == item_digest && self.item().admission_digest() == cell_digest)
-        {
-            return Err(failure(
-                "compiled activation input has another protected runtime admission",
-            ));
-        }
-        Ok(())
-    }
-    pub fn value_interface_certificate(&self) -> Option<Arc<CheckedValueArtifact>> {
-        self.compiled.value_interface_certificate()
-    }
-    pub fn validate_settled_native_bindings<'a>(
-        &self,
-        actual: impl IntoIterator<
-            Item = (
-                &'a str,
-                &'a tidepool_repr::execution_schema::SymbolIdentity,
-                u64,
-                u64,
-            ),
-        >,
-    ) -> Result<(), CompileError> {
-        self.compiled.validate_settled_native_bindings(actual)
-    }
-}
-
 #[derive(Debug)]
 pub struct ExactCompiledDisplay {
     original_interfaces: Arc<crate::declaration_context::ExactDeclarationContext>,
+    original_execution: Arc<crate::declaration_context::ExactDeclarationContext>,
     capture: Arc<ExactCompiledItem>,
     target: Arc<tidepool_repr::execution_schema::PreparedProgram>,
     table: tidepool_repr::DataConTable,
@@ -1981,6 +1925,15 @@ pub struct ExactCompiledDisplay {
 impl ExactCompiledDisplay {
     /// Admit original type-interface custody only after validating the target,
     /// constructor table and complete compiler-authenticated site metadata.
+    pub fn original_execution_context(
+        &self,
+        target: &tidepool_repr::execution_schema::PreparedProgram,
+        table: &tidepool_repr::DataConTable,
+        sites: &[crate::YieldSite],
+    ) -> Result<Arc<crate::declaration_context::ExactDeclarationContext>, CompileError> {
+        self.original_interface_context(target, table, sites)?;
+        Ok(self.original_execution.clone())
+    }
     pub fn original_interface_context(
         &self,
         target: &tidepool_repr::execution_schema::PreparedProgram,
@@ -2140,6 +2093,7 @@ impl CheckedDisplayOffer {
         }))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn seal(
         &self,
         root: &Path,
@@ -2148,6 +2102,7 @@ impl CheckedDisplayOffer {
         target: &Arc<tidepool_repr::execution_schema::PreparedProgram>,
         artifact_context: &Arc<crate::declaration_context::ExactDeclarationContext>,
         source_lexical: &[crate::declaration_join::ExactLexicalNode],
+        original_execution: Arc<crate::declaration_context::ExactDeclarationContext>,
     ) -> Result<Arc<ExactCompiledDisplay>, CompileError> {
         let receipt = decode(&read(root.join("checked-display.cbor"), 4 * 1024 * 1024)?)?;
         let fields = row(&receipt, 8)?;
@@ -2210,9 +2165,10 @@ impl CheckedDisplayOffer {
             original_interfaces: Arc::new(
                 crate::declaration_context::ExactDeclarationContext::from_authenticated_interfaces(
                     self.capture.item.cell.producer,
-                    artifact_context.artifact_view(),
+                    original_execution.artifact_view(),
                 )?,
             ),
+            original_execution,
             capture: self.capture.clone(),
             target: target.clone(),
             table: read_table(root)?,
@@ -2230,6 +2186,15 @@ impl CheckedDisplayOffer {
 impl ExactCompiledItem {
     /// Admit original type-interface custody only after validating the target,
     /// constructor table and complete compiler-authenticated site metadata.
+    pub fn original_execution_context(
+        &self,
+        target: &tidepool_repr::execution_schema::PreparedProgram,
+        table: &tidepool_repr::DataConTable,
+        sites: &[crate::YieldSite],
+    ) -> Result<Arc<crate::declaration_context::ExactDeclarationContext>, CompileError> {
+        self.original_interface_context(target, table, sites)?;
+        Ok(self.original_execution.clone())
+    }
     pub fn original_interface_context(
         &self,
         target: &tidepool_repr::execution_schema::PreparedProgram,
@@ -2262,7 +2227,6 @@ impl ExactCompiledItem {
         cell_digest: [u8; 32],
     ) -> Result<(), CompileError> {
         let valid = match self.admission {
-            CheckedExecutionAdmission::HostActivationInput(_) => false,
             CheckedExecutionAdmission::RuntimeItem(digest) => digest == item_digest,
             CheckedExecutionAdmission::CellProgram(digest) => digest == cell_digest,
         };
@@ -3046,7 +3010,6 @@ impl ExactCheckedItem {
 
 #[derive(Clone, Debug)]
 pub(crate) struct CheckedItemOffer {
-    pub(crate) purpose: CheckedItemPurpose,
     pub(crate) item: ExactCheckedItem,
     pub(crate) prefix: ExactCompiledPrefix,
     pub(crate) runtime_prefix_digest: [u8; 32],
@@ -3056,33 +3019,7 @@ pub(crate) struct CheckedItemOffer {
     pub(crate) settled_values: CheckedSettledValues,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum CheckedItemPurpose {
-    Authored,
-    HostActivationInput,
-}
-
 impl CheckedItemOffer {
-    pub(crate) fn validate_activation_input(&self) -> Result<(), CompileError> {
-        if self.item.cell.item_count() != 1
-            || self.item.index() != 0
-            || self.item.kind() != CheckedItemKind::Bind
-            || self.item.binders() != ["sessionInput"]
-            || self.item.turn_templates().len() != 1
-            || self.item.turn_templates()[0].0 != "bind"
-            || self.item.signatures().len() != 1
-            || self.item.signatures()[0].key() != "__tidepool_cell_pin_0_sessionInput"
-            || self.item.admission_digest() == [0; 32]
-            || self.item.cell.receipt_digest == [0; 32]
-            || self.runtime_prefix_digest == [0; 32]
-            || self.observation_name.is_some()
-            || self.is_program
-            || self.generation == 0
-        {
-            return Err(failure("host activation input requires its one checked input binder and protected template"));
-        }
-        Ok(())
-    }
     pub(crate) fn authorization(
         &self,
         producer: &[u8],
@@ -3152,6 +3089,7 @@ impl CheckedItemOffer {
         }
         Ok(())
     }
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn seal(
         &self,
         root: &Path,
@@ -3160,87 +3098,12 @@ impl CheckedItemOffer {
         target: &Arc<tidepool_repr::execution_schema::PreparedProgram>,
         artifact_context: &Arc<crate::declaration_context::ExactDeclarationContext>,
         source_lexical: &[crate::declaration_join::ExactLexicalNode],
+        original_execution: Arc<crate::declaration_context::ExactDeclarationContext>,
     ) -> Result<Arc<ExactCompiledItem>, CompileError> {
-        if self.purpose != CheckedItemPurpose::Authored {
-            return Err(failure(
-                "host activation input cannot issue authored execution authority",
-            ));
-        }
-        self.seal_recipe(
-            root,
-            request,
-            source,
-            target,
-            artifact_context,
-            source_lexical,
-        )
-        .map(|(compiled, _)| compiled)
-    }
-
-    pub(crate) fn seal_activation_input(
-        &self,
-        root: &Path,
-        request: &str,
-        source: &str,
-        target: &Arc<tidepool_repr::execution_schema::PreparedProgram>,
-        artifact_context: &Arc<crate::declaration_context::ExactDeclarationContext>,
-        source_lexical: &[crate::declaration_join::ExactLexicalNode],
-    ) -> Result<Arc<ExactCompiledActivationInput>, CompileError> {
-        if self.purpose != CheckedItemPurpose::HostActivationInput {
-            return Err(failure(
-                "authored item cannot issue host activation authority",
-            ));
-        }
-        self.validate_activation_input()?;
-        let (compiled, witness) = self.seal_recipe(
-            root,
-            request,
-            source,
-            target,
-            artifact_context,
-            source_lexical,
-        )?;
-        Ok(Arc::new(ExactCompiledActivationInput {
-            compiled,
-            input_type_witness: witness
-                .ok_or_else(|| failure("host input lacks canonical type witness"))?,
-        }))
-    }
-
-    fn seal_recipe(
-        &self,
-        root: &Path,
-        request: &str,
-        source: &str,
-        target: &Arc<tidepool_repr::execution_schema::PreparedProgram>,
-        artifact_context: &Arc<crate::declaration_context::ExactDeclarationContext>,
-        source_lexical: &[crate::declaration_join::ExactLexicalNode],
-    ) -> Result<(Arc<ExactCompiledItem>, Option<CanonicalInputTypeWitness>), CompileError> {
-        let (file, magic, profile) = match self.purpose {
-            CheckedItemPurpose::Authored => (
-                "checked-item.cbor",
-                "TPEXACTITEM",
-                "tidepool-checked-recipe-2",
-            ),
-            CheckedItemPurpose::HostActivationInput => (
-                "activation-input.cbor",
-                "TPEXACTACTIVATIONINPUT2",
-                "tidepool-host-activation-input-2",
-            ),
-        };
-        let receipt = decode(&read(root.join(file), 4 * 1024 * 1024)?)?;
-        let host = self.purpose == CheckedItemPurpose::HostActivationInput;
-        let fields = row(&receipt, if host { 9 } else { 8 })?;
-        let input_witness = if host {
-            let Value::Bytes(bytes) = &fields[8] else {
-                return Err(failure("host input canonical type witness missing"));
-            };
-            Some(CanonicalInputTypeWitness::from_bytes(bytes)?)
-        } else {
-            None
-        };
-        if string(&fields[0])? != magic
-            || string(&fields[1])? != if host { "2" } else { "1" }
+        let receipt = decode(&read(root.join("checked-item.cbor"), 4 * 1024 * 1024)?)?;
+        let fields = row(&receipt, 8)?;
+        if string(&fields[0])? != "TPEXACTITEM"
+            || string(&fields[1])? != "1"
             || string(&fields[2])? != request
             || string(&fields[3])? != hex(&self.item.admission_digest())
             || string(&fields[4])?
@@ -3251,7 +3114,7 @@ impl CheckedItemOffer {
                 })
             || fields[5] != Value::Integer((self.item.index as u64).into())
             || string(&fields[6])? != hash(source.as_bytes())
-            || string(&fields[7])? != profile
+            || string(&fields[7])? != "tidepool-checked-recipe-2"
         {
             return Err(failure(
                 "checked-item recipe receipt differs from its same compiler offer",
@@ -3309,32 +3172,29 @@ impl CheckedItemOffer {
         } else {
             None
         };
-        Ok((
-            Arc::new(ExactCompiledItem {
-                original_interfaces: Arc::new(
-                    crate::declaration_context::ExactDeclarationContext::from_authenticated_interfaces(
-                        self.item.cell.producer, artifact_context.artifact_view(),
-                    )?,
-                ),
-                item: self.item.clone(),
-                target: target.clone(),
-                table: read_table(root)?,
-                yield_sites_digest: authenticated_sites,
-                value_interface,
-                generation: self.generation,
-                bound_binders,
-                observation_name: self.observation_name.clone(),
-                admission: if self.purpose == CheckedItemPurpose::HostActivationInput {
-                    CheckedExecutionAdmission::HostActivationInput(self.runtime_prefix_digest)
-                } else if self.is_program {
-                    CheckedExecutionAdmission::CellProgram(self.item.admission_digest())
-                } else {
-                    CheckedExecutionAdmission::RuntimeItem(self.runtime_prefix_digest)
-                },
-                settled_values: self.settled_values.clone(),
-            }),
-            input_witness,
-        ))
+        Ok(Arc::new(ExactCompiledItem {
+            original_interfaces: Arc::new(
+                crate::declaration_context::ExactDeclarationContext::from_authenticated_interfaces(
+                    self.item.cell.producer,
+                    original_execution.artifact_view(),
+                )?,
+            ),
+            original_execution,
+            item: self.item.clone(),
+            target: target.clone(),
+            table: read_table(root)?,
+            yield_sites_digest: authenticated_sites,
+            value_interface,
+            generation: self.generation,
+            bound_binders,
+            observation_name: self.observation_name.clone(),
+            admission: if self.is_program {
+                CheckedExecutionAdmission::CellProgram(self.item.admission_digest())
+            } else {
+                CheckedExecutionAdmission::RuntimeItem(self.runtime_prefix_digest)
+            },
+            settled_values: self.settled_values.clone(),
+        }))
     }
 }
 
@@ -3362,7 +3222,7 @@ fn bound_binder_identities(bound: &[Value]) -> impl Iterator<Item = (&str, u64)>
     })
 }
 
-fn read_table(root: &Path) -> Result<tidepool_repr::DataConTable, CompileError> {
+pub(crate) fn read_table(root: &Path) -> Result<tidepool_repr::DataConTable, CompileError> {
     let (table, _) =
         tidepool_repr::serial::read_metadata(&read(root.join("meta.cbor"), 32 * 1024 * 1024)?)?;
     Ok(table)
@@ -3829,16 +3689,16 @@ pub(crate) fn string(value: &Value) -> Result<&str, CompileError> {
         _ => Err(failure("invalid checked evidence text")),
     }
 }
-fn array<const N: usize>(values: [Value; N]) -> Value {
+pub(crate) fn array<const N: usize>(values: [Value; N]) -> Value {
     Value::Array(Vec::from(values))
 }
-fn text(value: impl AsRef<str>) -> Value {
+pub(crate) fn text(value: impl AsRef<str>) -> Value {
     Value::Text(value.as_ref().to_owned())
 }
 pub(crate) fn hash(bytes: &[u8]) -> String {
     hex(&Sha256::digest(bytes).into())
 }
-fn hex(bytes: &[u8; 32]) -> String {
+pub(crate) fn hex(bytes: &[u8; 32]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 fn failure(error: impl std::fmt::Display) -> CompileError {
@@ -4621,112 +4481,6 @@ mod tests {
             witness("forward-function.cbor"),
             witness("backward-function.cbor")
         );
-    }
-
-    fn activation_offer(binder: &str) -> super::CheckedItemOffer {
-        use super::*;
-        let source = "sessionInput <- pure (undefined :: Int)";
-        let cell = Arc::new(ExactCheckedCell {
-            specification: CheckedCellSpecification {
-                admission_digest: [4; 32],
-                cell_source: source.into(),
-                template_source: String::new(),
-                turn_templates: vec![("bind".into(), "protected template".into())],
-                injected_modules: Vec::new(),
-                reserved_declaration_modules: Vec::new(),
-            },
-            producer: [7; 32],
-            context: [8; 32],
-            declaration_context: Arc::new(
-                crate::declaration_context::ExactDeclarationContext::new(&[], &[], Vec::new())
-                    .unwrap(),
-            ),
-            retained_projections: Vec::new(),
-            receipt_digest: [9; 32],
-            checked_source: source.into(),
-            evidence: Vec::new(),
-            observations: Vec::new(),
-            items: vec![CheckedItem {
-                kind: CheckedItemKind::Bind,
-                source: source.into(),
-                binders: vec![binder.into()],
-                pins: Vec::new(),
-                expression: None,
-                signatures: vec![ExactCheckedSignature {
-                    key: "__tidepool_cell_pin_0_sessionInput".into(),
-                    presentation: "Int".into(),
-                    // Nonexecuting role-validation fixture, not a GHC payload.
-                    iface: vec![1].into(),
-                    names: Vec::new(),
-                }],
-            }],
-            include: Vec::new(),
-            planned_declaration: None,
-            planned_declarations: Default::default(),
-            value_inputs: CheckedValueInputs::capture_raw(Vec::new()).unwrap(),
-        });
-        let item = cell.item(0).unwrap();
-        CheckedItemOffer {
-            purpose: CheckedItemPurpose::HostActivationInput,
-            prefix: item.initial_prefix().unwrap(),
-            item,
-            runtime_prefix_digest: [6; 32],
-            generation: 1,
-            observation_name: None,
-            is_program: false,
-            settled_values: Default::default(),
-        }
-    }
-
-    #[test]
-    fn activation_role_refuses_cross_sealing_before_reading_output_files() {
-        use super::*;
-        let offer = activation_offer("sessionInput");
-        offer.validate_activation_input().unwrap();
-        assert!(activation_offer("other")
-            .validate_activation_input()
-            .is_err());
-        let prepared = Arc::new(
-            tidepool_repr::execution_schema::parse_program(
-                &tidepool_test_data::prepared_encode::encode_wire_program(
-                    &tidepool_repr::execution_schema::testing::wire_program(),
-                ),
-                &crate::prepared_artifact::production_requirements().unwrap(),
-                tidepool_repr::execution_schema::DecodeLimits::default(),
-            )
-            .unwrap(),
-        );
-        let empty = tempfile::tempdir().unwrap();
-        let artifact_context = offer.item.cell.declaration_context.clone();
-        let source_lexical = artifact_context.lexical_graph();
-        assert!(offer
-            .seal(
-                empty.path(),
-                "request",
-                "source",
-                &prepared,
-                &artifact_context,
-                source_lexical,
-            )
-            .unwrap_err()
-            .to_string()
-            .contains("cannot issue authored execution authority"));
-        let authored = CheckedItemOffer {
-            purpose: CheckedItemPurpose::Authored,
-            ..offer
-        };
-        assert!(authored
-            .seal_activation_input(
-                empty.path(),
-                "request",
-                "source",
-                &prepared,
-                &artifact_context,
-                source_lexical,
-            )
-            .unwrap_err()
-            .to_string()
-            .contains("cannot issue host activation authority"));
     }
 
     #[test]

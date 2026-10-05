@@ -5,6 +5,7 @@
 module Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedPipelineResult(..), CheckedEnvironmentResult(..)
   , PreparedDependencies, preparedFreshDependencies, preparedExactCompilation, preparedHomeRequirements
+  , ProgramSourceImports, retainProgramSourceImports, withProgramSourceImports
   , runPipelineSelected, runPipelineSessionSelected
   , runPipelineSelectedRetaining
   , CompilerProducerIdentity, captureCompilerProducerIdentity
@@ -164,6 +165,10 @@ import Tidepool.Binders (CheckedBinderPin(..), CellSourcePlan(..), SourcePrologu
 import Tidepool.CheckedCell (CheckedSignature, captureCheckedSignature, rewriteCheckedAnnotations, rewriteHostInputType, rewriteRequestTypes
   , NativeParsedModule, unannotatedModule, mapNativeModule, thenNativeModule, typecheckNativeModuleWithDiagnostics)
 import Tidepool.FinalizedModule (FinalizedModule(..))
+import Tidepool.FinalizedModuleArtifacts
+  ( FinalizedModuleArtifacts, finalizedLocalAdmissions, localFinalizedInterface
+  , localFinalizedSourceSha256, localFinalizedRequirements, localFinalizedHomeUnits, localFinalizedCore
+  , matchesCapturedFinalization )
 import Tidepool.HomeProducts
   ( hydrateCandidateHomeProductsWithOriginals, materializeCandidateCompilerView, admittedCompilerInterface
   , validateCandidateInterfaceRequirements )
@@ -211,15 +216,17 @@ import Tidepool.ExactHydration
   , GeneratedScaffoldRecipe, generatedScaffoldRecipe, captureGeneratedScaffoldTarget
   , noGeneratedScaffoldImports, readGeneratedScaffoldImportAuthority, permitsGeneratedScaffoldImport, installExactLexicalGraphWithScaffold )
 import Tidepool.ExactScope
-  ( ExactScope(..), ExactScopePurpose(..), ExactCompilation(..), SourceSelectedOriginals(..), extendSourceSelectedOriginals, CheckedCellAdmission(..), CheckedCellPurpose(..), CheckedItemAdmission(..), CheckedItemPurpose(..), CheckedDisplayAdmission(..), readExactScope, revalidateExactScope, scopeValueInterfaces
+  ( ExactScope(..), ExactScopePurpose(..), ExactCompilation(..), SourceSelectedOriginals(..), extendSourceSelectedOriginals, CheckedCellAdmission(..), CheckedItemAdmission(..), CheckedDisplayAdmission(..), readExactScope, revalidateExactScope, scopeValueInterfaces
+  , ActivationPreviewAdmission(..), scopeActivationPreview
   , scopeCheckedCell, scopeCheckedItem, scopeCheckedDisplay, scopeIncludePaths
-  , writeExactCompilation, scopeExecutionNativeOwners, ExactInterfaceEvidence(..), CanonicalOrigin(..), canonicalOrigin )
+  , writeExactCompilation, compilationOriginalSourceImports, scopeExecutionNativeOwners, ExactInterfaceEvidence(..), CanonicalOrigin(..), canonicalOrigin )
 import Tidepool.ExactScope
   ( CanonicalInterfaceProof, CanonicalInterfaceAdmission, scopeCanonicalInterfaces
   , scopeSourceOriginalInterfaces, admittedInterfaceRequirements
   , validateCandidateCanonicalInterfaceProof
   , canonicalCertificatePath, canonicalCertificateSha256, canonicalCoreArtifact
-  , canonicalCorePath, canonicalCoreSha256, scopeModuleInterfaceProofs, canonicalSourceSha256, canonicalSourceImports, isSourceOriginal )
+  , canonicalCorePath, canonicalCoreSha256, canonicalHomeUnits, canonicalRequirements
+  , scopeModuleInterfaceProofs, canonicalSourceSha256, canonicalSourceImports, isSourceOriginal )
 import Tidepool.ExecutionSource
   ( ExecutionSourceGraph(..), ExecutionSourceIdentity(..)
   , ExecutionSourceFailure(..), ExecutionSourceValidationStage(..), ExecutionSourceInterfaceReason(..)
@@ -228,7 +235,7 @@ import Tidepool.ExecutionSource
   , executionNodeIdentity, executionNodeModule, executionNodeSourceSha256, executionNodeRequirements )
 import Tidepool.PackageWitness
   ( PackageImportEvidence(..), CompilerProvidedImport(..), emptyPackageImports, packageImportRoot, readPackageImports
-  , validatePackageImportRoot )
+  , validatePackageImportRoot, encodePackageImports )
 import Tidepool.ModuleCandidates
   ( ModuleCandidate(..), CandidateImport(..), CandidateQualifier(..)
   , CapturedCandidateManifest, captureCandidateManifest, candidateManifestSha256
@@ -291,23 +298,170 @@ data PreparedPipelineResult = PreparedPipelineResult
 -- Constructors stay private so consumers cannot pair unrelated compilations.
 data PreparedDependencies
   = SourceOnly DependencyEvidence
-  | ExactScoped DependencyEvidence ExactCompilation
+  | ExactScoped DependencyEvidence ExactCompilation CompletedSourceImports
 
-preparedDependencies :: DependencyEvidence -> Maybe ExactCompilation -> PreparedDependencies
-preparedDependencies fresh Nothing = SourceOnly fresh
-preparedDependencies fresh (Just exact) = ExactScoped fresh exact
+-- Only the completed compiler pass captures which original authored requests
+-- actually resolved to fresh home roots. Generated imports cannot issue one.
+newtype CompletedSourceImports = CompletedSourceImports [(ImportIntent,(String,String))]
+
+preparedDependencies
+  :: HscEnv -> [ImportIntent] -> DependencyEvidence -> Maybe ExactCompilation
+  -> IO PreparedDependencies
+preparedDependencies _ _ fresh Nothing = pure (SourceOnly fresh)
+preparedDependencies env intents fresh (Just exact) = do
+  roots <- fmap catMaybes $ forM intents $ \intent -> case intent of
+    RetainedGeneratedImport -> pure Nothing
+    AuthoredSourceImport owner rawQualifier -> do
+      let qualifier = renameRawPkgQual (hsc_unit_env env) owner rawQualifier
+      resolved <- findImportedModule env owner qualifier
+      pure $ case resolved of
+        Found _ original
+          | let key = (unitString (moduleUnit original),moduleNameString (moduleName original))
+          , [node] <- [node | node <- dependencyModules fresh
+              , (dependencyModuleUnit node,dependencyModuleName node) == key
+              , not (dependencyModuleBoot node)]
+          , any (\selection -> dependencyResolutionQualifier selection == dependencyQualifier qualifier
+              && dependencyResolutionModule selection == moduleNameString owner
+              && not (dependencyResolutionBoot selection)
+              && dependencyResolutionSelected selection == Just (dependencyModuleSource node))
+              (dependencyResolutions fresh) -> Just (intent,key)
+        _ -> Nothing
+  pure (ExactScoped fresh exact (CompletedSourceImports (nub roots)))
 
 -- | Fresh source lookup only; retained exact imports are deliberately absent.
 preparedFreshDependencies :: PreparedPipelineResult -> DependencyEvidence
 preparedFreshDependencies prepared = case pprDependencies prepared of
   SourceOnly fresh -> fresh
-  ExactScoped fresh _ -> fresh
+  ExactScoped fresh _ _ -> fresh
 
 -- | Exact-scope evidence only; fresh source imports remain in their own view.
 preparedExactCompilation :: PreparedPipelineResult -> Maybe ExactCompilation
 preparedExactCompilation prepared = case pprDependencies prepared of
   SourceOnly _ -> Nothing
-  ExactScoped _ exact -> Just exact
+  ExactScoped _ exact _ -> Just exact
+
+-- Private, request-local reuse of completed authored import decisions. The
+-- retained original rows grant neither current-source selection nor purity.
+data ProgramSourceImports = ProgramSourceImports
+  ProgramImportIdentity [(ImportIntent,(String,String))]
+  (Map.Map (String,String) ProgramImportOriginal)
+  deriving (Eq, Show)
+
+data ProgramImportIdentity = ProgramImportIdentity String String String String [FilePath]
+  deriving (Eq, Show)
+
+data ProgramImportOriginal = ProgramImportOriginal
+  (ExactIfaceArtifact,FilePath,String) ExactInterfaceEvidence [(String,String)]
+  deriving (Eq, Show)
+
+programImportIdentity :: ExactScope -> Maybe ProgramImportIdentity
+programImportIdentity scope = do
+  admission <- scopeCheckedCell scope
+  includes <- scopeIncludePaths scope
+  pure (ProgramImportIdentity (scopeRequestSha256 scope) (scopeProducerSha256 scope)
+    (scopeSemanticSha256 scope) (checkedAdmissionDigest admission) includes)
+
+programImportOriginal :: ExactScope -> (String,String) -> Maybe ProgramImportOriginal
+programImportOriginal scope key = do
+  row <- case [row | row@(artifact,_,_) <- scopeInterfaces scope
+      , (exactUnit artifact,exactModule artifact) == key] of
+    [row] -> Just row
+    _ -> Nothing
+  proof <- Map.lookup key (scopeInterfaceEvidence scope)
+  lexical <- lookup key (scopeLexical scope)
+  pure (ProgramImportOriginal row proof lexical)
+
+validateProgramSourceImports :: ExactScope -> ProgramSourceImports -> Either String ()
+validateProgramSourceImports scope (ProgramSourceImports identity _ originals) = do
+  unless (programImportIdentity scope == Just identity)
+    (Left "completed program imports belong to another checked cell")
+  forM_ (Map.toAscList originals) $ \(key,original) ->
+    unless (programImportOriginal scope key == Just original)
+      (Left "completed program import original changed")
+
+programImportClosure :: ExactScope -> (String,String) -> Maybe (Map.Map (String,String) ProgramImportOriginal)
+programImportClosure scope root = close (Set.singleton root)
+  where
+    close selected = do
+      originals <- traverse (programImportOriginal scope) (Map.fromSet id selected)
+      let children = Set.fromList [child
+            | ProgramImportOriginal _ _ lexical <- Map.elems originals, child <- lexical]
+          grown = Set.union selected children
+      if grown == selected then Just originals else close grown
+
+-- Issue only after the completed products were retained. Existing independently
+-- lexical originals may close a fresh root, but source-selected owners still
+-- require their own current-source validation and receipt on every pass.
+retainProgramSourceImports
+  :: Maybe ProgramSourceImports -> PreparedPipelineResult -> FinalizedModuleArtifacts -> ExactScope
+  -> IO (Maybe ProgramSourceImports)
+retainProgramSourceImports previous prepared captured retained = do
+  forM_ previous (either fail pure . validateProgramSourceImports retained)
+  case pprDependencies prepared of
+    SourceOnly _ -> pure previous
+    ExactScoped _ _ (CompletedSourceImports []) -> pure previous
+    ExactScoped fresh compilation (CompletedSourceImports roots) -> do
+      let admitted = compilationScope compilation
+          env = prHscEnv (pprPipelineResult prepared)
+      case programImportIdentity admitted of
+        Nothing -> pure previous
+        Just identity -> do
+          unless (programImportIdentity retained == Just identity)
+            (fail "completed program imports leave their checked cell")
+          either fail pure =<< revalidateExactScope env retained
+          let freshNodes = Map.fromList [((dependencyModuleUnit node,dependencyModuleName node),node)
+                | node <- dependencyModules fresh, not (dependencyModuleBoot node)]
+              sourceMatches key originalRow@(ProgramImportOriginal row@(iface,_,packageSha) evidence lexical) =
+                case (Map.lookup key freshNodes, evidence) of
+                  (Nothing, _) -> pure (programImportOriginal admitted key == Just originalRow
+                    && key `Set.notMember` scopeSourceSelectedOwners admitted)
+                  (Just node, ModuleInterfaceEvidence canonical)
+                    | Just original <- Map.lookup (mkModuleName (snd key)) (pprFinalizedModules prepared)
+                    , mi_module (hm_iface (finalizedHomeModInfo original)) ==
+                        mkModule (stringToUnit (fst key)) (mkModuleName (snd key))
+                    , Just packages <- Map.lookup (mkModuleName (snd key)) (pprPackageImports prepared)
+                    , Just finalized <- Map.lookup key (finalizedLocalAdmissions captured)
+                    , localFinalizedInterface finalized == row
+                    , localFinalizedSourceSha256 finalized == canonicalSourceSha256 canonical
+                    , localFinalizedRequirements finalized == canonicalRequirements canonical
+                    , localFinalizedHomeUnits finalized == canonicalHomeUnits canonical
+                    , localFinalizedCore finalized ==
+                        fmap (\core -> (canonicalCorePath core,canonicalCoreSha256 core)) (canonicalCoreArtifact canonical)
+                    , Right imports <- compilationOriginalSourceImports compilation fresh key
+                    , canonicalSourceImports canonical == Just imports
+                    , not (any (\(_,_,boot,_) -> boot) imports)
+                    , sort lexical == sort (nub [(unit,name) | (_,name,False,Just unit) <- imports])
+                    , [canonicalSourceSha256 canonical] ==
+                        [dependencySourceSha256 source | source <- dependencySources fresh
+                          , dependencySourcePath source == dependencyModuleSource node]
+                    , packageSha == hexBytes (SHA256.hash (encodePackageImports iface packages)) ->
+                        matchesCapturedFinalization finalized original
+                  _ -> pure False
+          granted <- fmap catMaybes $ forM roots $ \root@(_,key) -> case programImportClosure retained key of
+            Just originals
+              | Map.member key freshNodes
+              , Set.null (Map.keysSet originals `Set.intersection` scopeSourceSelectedOwners retained) -> do
+                  matches <- and <$> mapM (uncurry sourceMatches) (Map.toAscList originals)
+                  pure (if matches then Just (root,originals) else Nothing)
+            _ -> pure Nothing
+          let (oldRoots,oldOriginals) = case previous of
+                Nothing -> ([],Map.empty)
+                Just (ProgramSourceImports _ requests originals) -> (requests,originals)
+              requests = nub (oldRoots ++ map fst granted)
+              originals = Map.unions (oldOriginals : map snd granted)
+          pure $ if null requests then Nothing else Just (ProgramSourceImports identity requests originals)
+
+withProgramSourceImports :: Maybe ProgramSourceImports -> CompilePurpose -> CompilePurpose
+withProgramSourceImports Nothing = id
+withProgramSourceImports (Just imports) = CompletedProgramImports imports
+
+programSourceImports :: CompilePurpose -> Maybe ProgramSourceImports
+programSourceImports (CompletedProgramImports imports _) = Just imports
+programSourceImports (ParsedImportSelection _ inner) = programSourceImports inner
+programSourceImports (GeneratedInstanceCheck _ inner) = programSourceImports inner
+programSourceImports (GeneratedScaffoldCompile _ inner) = programSourceImports inner
+programSourceImports (CellProgramCompile inner _) = programSourceImports inner
+programSourceImports _ = Nothing
 
 -- | Complete direct home imports of a fresh original, combining selected source
 -- owners with retained exact owners. Fresh SOURCE imports resolve through their
@@ -443,15 +597,12 @@ cellExpressionEvidence result = forM expressionIds $ \identifier -> do
       , "__tidepool_cell_expr_" `isPrefixOf` occurrence
       ]
 
--- The input witness comes from the independently typechecked preview binder,
--- rather than the placeholder result or a supplied rendered type.
+-- The pure preview argument carries the original native input type.
 activationPreviewInputType :: TcGblEnv -> Either String Type
 activationPreviewInputType environment = do
   preview <- unique "__activationPreview"
-  checked <- unique "__result"
   case splitFunTys preview of
-    ([Scaled _ input], _) | eqType input (stripMonadHead checked) -> Right input
-    ([Scaled _ _], _) -> Left "activation preview input differs from its checked binder type"
+    ([Scaled _ input], _) -> Right input
     _ -> Left "activation preview has no single monomorphic input argument"
   where
     unique name = case [idType identifier | identifier <- typeEnvIds (tcg_type_env environment)
@@ -856,14 +1007,14 @@ data CycleState
 
 data CompilePurpose = GeneralCompile | LookupTypeCompile | CertifyHomeProductsCompile | OriginalDeclarationCompile
   | CheckedItemCompile [(String,CheckedSignature)] (Maybe ((String,String),String)) [CompletedValueImport]
-  | HostActivationCheck CheckedSignature
-  | HostActivationInputCompile [(String,CheckedSignature)] (Maybe ((String,String),String)) [CompletedValueImport]
+  | HostActivationPreviewCompile CheckedSignature
   | ProgramItemCompile Bool [(String,CheckedSignature)] [((String,String),String)] [CompletedValueImport]
   | PlannedDeclarationCheck PlannedDeclarationInventory ExactScope
   | CellProgramCompile CompilePurpose ExactScope
   | GeneratedScaffoldCompile GeneratedScaffoldRecipe CompilePurpose
   | GeneratedInstanceCheck GeneratedInstanceRecipe CompilePurpose
   | ParsedImportSelection [ImportIntent] CompilePurpose
+  | CompletedProgramImports ProgramSourceImports CompilePurpose
   deriving (Eq, Show)
 
 -- The original parser supplies demand intent; rendered template imports and
@@ -874,6 +1025,7 @@ withSourceImportIntents prologue = ParsedImportSelection
 
 sourceImportIntents :: CompilePurpose -> [ImportIntent]
 sourceImportIntents (ParsedImportSelection intents inner) = intents ++ sourceImportIntents inner
+sourceImportIntents (CompletedProgramImports _ inner) = sourceImportIntents inner
 sourceImportIntents (GeneratedInstanceCheck _ inner) = sourceImportIntents inner
 sourceImportIntents (GeneratedScaffoldCompile _ inner) = sourceImportIntents inner
 sourceImportIntents (CellProgramCompile inner _) = sourceImportIntents inner
@@ -881,6 +1033,7 @@ sourceImportIntents _ = []
 
 generatedInstanceRecipe :: CompilePurpose -> Maybe GeneratedInstanceRecipe
 generatedInstanceRecipe (ParsedImportSelection _ inner) = generatedInstanceRecipe inner
+generatedInstanceRecipe (CompletedProgramImports _ inner) = generatedInstanceRecipe inner
 generatedInstanceRecipe (GeneratedInstanceCheck recipe _) = Just recipe
 generatedInstanceRecipe (GeneratedScaffoldCompile _ inner) = generatedInstanceRecipe inner
 generatedInstanceRecipe (CellProgramCompile inner _) = generatedInstanceRecipe inner
@@ -888,11 +1041,13 @@ generatedInstanceRecipe _ = Nothing
 
 withoutGeneratedInstanceCheck :: CompilePurpose -> CompilePurpose
 withoutGeneratedInstanceCheck (ParsedImportSelection _ inner) = withoutGeneratedInstanceCheck inner
+withoutGeneratedInstanceCheck (CompletedProgramImports _ inner) = withoutGeneratedInstanceCheck inner
 withoutGeneratedInstanceCheck (GeneratedInstanceCheck _ inner) = withoutGeneratedInstanceCheck inner
 withoutGeneratedInstanceCheck purpose = purpose
 
 generatedRecipe :: CompilePurpose -> Maybe GeneratedScaffoldRecipe
 generatedRecipe (ParsedImportSelection _ inner) = generatedRecipe inner
+generatedRecipe (CompletedProgramImports _ inner) = generatedRecipe inner
 generatedRecipe (GeneratedScaffoldCompile recipe _) = Just recipe
 generatedRecipe (CellProgramCompile inner _) = generatedRecipe inner
 generatedRecipe (GeneratedInstanceCheck _ inner) = generatedRecipe inner
@@ -900,6 +1055,7 @@ generatedRecipe _ = Nothing
 
 originalPurpose :: CompilePurpose -> CompilePurpose
 originalPurpose (ParsedImportSelection _ inner) = originalPurpose inner
+originalPurpose (CompletedProgramImports _ inner) = originalPurpose inner
 originalPurpose (GeneratedScaffoldCompile _ inner) = originalPurpose inner
 originalPurpose (CellProgramCompile inner _) = originalPurpose inner
 originalPurpose (GeneratedInstanceCheck _ inner) = originalPurpose inner
@@ -923,14 +1079,8 @@ transformFor (CheckedItemCompile annotations original _) target env summary
           inventory <- hydratePlannedDeclarationInventory owner fingerprint env >>= either fail pure
           mapNativeModule (transformPlannedDeclarationImports inventory env) annotated
   | otherwise = pure . unannotatedModule
-transformFor (HostActivationCheck signature) target env summary
+transformFor (HostActivationPreviewCompile signature) target env summary
   | ms_mod_name summary == target = rewriteHostInputType env 1 signature
-  | otherwise = pure . unannotatedModule
-transformFor (HostActivationInputCompile annotations original values) target env summary
-  | ms_mod_name summary == target = \parsed -> do
-      signature <- hostInputSignature annotations
-      typed <- rewriteHostInputType env 2 signature parsed
-      thenNativeModule typed (transformFor (CheckedItemCompile annotations original values) target env summary)
   | otherwise = pure . unannotatedModule
 transformFor (ProgramItemCompile original annotations originals _) target env summary
   | ms_mod_name summary == target = \parsed -> do
@@ -946,19 +1096,16 @@ transformFor (CellProgramCompile purpose _) target env summary = transformFor pu
 transformFor (GeneratedScaffoldCompile _ purpose) target env summary = transformFor purpose target env summary
 transformFor (GeneratedInstanceCheck _ purpose) target env summary = transformFor purpose target env summary
 transformFor (ParsedImportSelection _ purpose) target env summary = transformFor purpose target env summary
+transformFor (CompletedProgramImports _ purpose) target env summary = transformFor purpose target env summary
 
 transformWithCompletedValues :: Maybe CompletedValueImports -> CompilePurpose -> ModuleName
   -> HscEnv -> ModSummary -> ParsedModule -> IO NativeParsedModule
 transformWithCompletedValues captured purpose target env summary = case purpose of
   ParsedImportSelection _ inner -> transformWithCompletedValues captured inner target env summary
+  CompletedProgramImports _ inner -> transformWithCompletedValues captured inner target env summary
   CellProgramCompile inner _ -> transformWithCompletedValues captured inner target env summary
   GeneratedScaffoldCompile _ inner -> transformWithCompletedValues captured inner target env summary
   GeneratedInstanceCheck _ inner -> transformWithCompletedValues captured inner target env summary
-  HostActivationInputCompile annotations original requested
-    | ms_mod_name summary == target -> \parsed -> do
-        signature <- hostInputSignature annotations
-        typed <- rewriteHostInputType env 2 signature parsed
-        thenNativeModule typed (transformWithCompletedValues captured (CheckedItemCompile annotations original requested) target env summary)
   CheckedItemCompile annotations original requested
     | ms_mod_name summary == target && not (null requested) -> \parsed -> do
         values <- maybe (fail "completed value interfaces were not installed in this request") pure captured
@@ -977,10 +1124,6 @@ transformWithCompletedValues captured purpose target env summary = case purpose 
         selected <- mapNativeModule (transformProgramDeclarationImports inventories values env) annotated
         if original then mapNativeModule (refineParsedDeclarationImports env) selected else pure selected
   _ -> transformFor purpose target env summary
-
-hostInputSignature :: [(String, CheckedSignature)] -> IO CheckedSignature
-hostInputSignature [(_, signature)] = pure signature
-hostInputSignature _ = fail "host input recipe has no unique native signature"
 
 withNativeTypecheckRecovery :: PipelineVariant -> ModuleName -> HscEnv -> ModSummary -> ParsedModule -> IO a -> IO a
 withNativeTypecheckRecovery variant target environment summary parsed action
@@ -2075,7 +2218,8 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     sourceSelection <- case pvExactScope variant of
       Nothing -> pure Nothing
       Just scope -> withSourceSelectionRefusal
-        (selectCurrentSourceOriginals scope (pvSourceImportIntents variant) (pvGeneratedScaffold variant) modGraphRaw)
+        (selectCurrentSourceOriginals scope (programSourceImports (pvPurpose variant))
+          (pvSourceImportIntents variant) (pvGeneratedScaffold variant) modGraphRaw)
     selectedExact <- traverse (either (liftIO . fail) pure . extendSourceSelectedOriginals sourceSelection)
       (pvExactScope variant)
     let (freshGraph, exactImports) = sourceEvidenceGraph selectedExact modGraphRaw
@@ -3067,10 +3211,12 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     case selection of
       PreparedStg -> do
         (result, modules, dependencies, productInterfaces, finalizedModules, packageRoots) <- compileExecutable
+        capturedDependencies <- liftIO (preparedDependencies (prHscEnv result)
+          (pvSourceImportIntents variant) dependencies exactCompilation)
         pure PreparedPipelineResult
           { pprPipelineResult = result
           , pprModules = modules
-          , pprDependencies = preparedDependencies dependencies exactCompilation
+          , pprDependencies = capturedDependencies
           , pprProductInterfaces = productInterfaces
           , pprFinalizedModules = finalizedModules
           , pprPackageImports = packageRoots
@@ -3081,10 +3227,12 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
         valid <- liftIO $ revalidateAcceptedCandidates (Map.elems acceptedCandidates)
         when (not valid) $ liftIO $ ioError $ userError
           "accepted module candidate changed before artifact publication"
+        capturedDependencies <- liftIO (preparedDependencies (prHscEnv result)
+          (pvSourceImportIntents variant) dependencies exactCompilation)
         pure PreparedPipelineResult
           { pprPipelineResult = result
           , pprModules = modules
-          , pprDependencies = preparedDependencies dependencies exactCompilation
+          , pprDependencies = capturedDependencies
           , pprProductInterfaces = productInterfaces
           , pprFinalizedModules = finalizedModules
           , pprPackageImports = packageRoots
@@ -4085,8 +4233,7 @@ normalVariant :: CompilePurpose -> FilePath -> IO PipelineVariant
 normalVariant purpose path = do
   let effectivePurpose = originalPurpose purpose
   case effectivePurpose of
-    HostActivationInputCompile {} -> fail "host activation input requires its sealed session admission"
-    HostActivationCheck {} -> fail "host activation check requires its sealed session admission"
+    HostActivationPreviewCompile {} -> fail "activation preview requires its sealed session admission"
     _ -> pure ()
   targetModName' <- targetModuleNameFor path
   pure PipelineVariant
@@ -4262,10 +4409,11 @@ checkedRecipeOriginal admitted = do
 -- lexical owner. Generated imports and use of captured names keep that owner.
 -- Available retained requirements alone never create a source demand.
 selectCurrentSourceOriginals
-  :: ExactScope -> [ImportIntent] -> Maybe GeneratedScaffoldRecipe -> ModuleGraph
+  :: ExactScope -> Maybe ProgramSourceImports -> [ImportIntent] -> Maybe GeneratedScaffoldRecipe -> ModuleGraph
   -> Ghc (Maybe SourceSelectedOriginals)
-selectCurrentSourceOriginals admitted intents recipe sourceGraph = do
+selectCurrentSourceOriginals admitted completed intents recipe sourceGraph = do
   initial <- getSession
+  forM_ completed (either (liftIO . fail) pure . validateProgramSourceImports admitted)
   let home = homeUnitId (hsc_home_unit initial)
       exactOwners = Map.fromList [((exactUnit artifact,exactModule artifact),artifact)
         | (artifact,_,_) <- scopeInterfaces admitted]
@@ -4277,8 +4425,18 @@ selectCurrentSourceOriginals admitted intents recipe sourceGraph = do
         NoPkgQual -> Just (unitString home,moduleNameString (unLoc name))
         ThisPkg unit | unit == home -> Just (unitString unit,moduleNameString (unLoc name))
         _ -> Nothing
+      covered = case completed of
+        Nothing -> []
+        Just (ProgramSourceImports _ requests _) -> requests
+      covers intent@(AuthoredSourceImport owner qualifier) = any (\(request,key) ->
+        request == intent && localOwner
+          (renameRawPkgQual (hsc_unit_env initial) owner qualifier,noLoc owner) == Just key
+          && maybe False (Set.null . (`Set.intersection` scopeSourceSelectedOwners admitted) . Map.keysSet)
+            (programImportClosure admitted key)) covered
+      covers RetainedGeneratedImport = False
+      currentIntents = filter (not . covers) intents
       requestedOwners = Set.fromList
-        [key | AuthoredSourceImport owner qualifier <- intents
+        [key | AuthoredSourceImport owner qualifier <- currentIntents
         , Just key <- [localOwner (renameRawPkgQual (hsc_unit_env initial) owner qualifier, noLoc owner)]]
       freshImports = Map.fromList
         [((unitString (moduleUnit (ms_mod summary)),moduleNameString (ms_mod_name summary)),
@@ -4574,7 +4732,6 @@ sessionVariant purpose scope path = do
   let effectivePurpose = originalPurpose purpose
       completedValues = case effectivePurpose of
         CheckedItemCompile _ _ values -> values
-        HostActivationInputCompile _ _ values -> values
         ProgramItemCompile _ _ _ values -> values
         _ -> []
   capturedExact <- traverse (\manifest -> readExactScope manifest >>= either (ioError . userError) pure)
@@ -4583,20 +4740,12 @@ sessionVariant purpose scope path = do
         PlannedDeclarationCheck _ admitted -> Just admitted
         CellProgramCompile _ admitted -> Just admitted
         _ -> capturedExact
-  let hostPurpose = case effectivePurpose of
-        HostActivationInputCompile {} -> True
-        _ -> False
-      hostAdmission = maybe False ((== Just HostActivationInput) . fmap itemPurpose . scopeCheckedItem) exact
-  unless (hostPurpose == hostAdmission)
-    (fail "host activation input has another compiler purpose")
-  let checkPurpose = case effectivePurpose of
-        HostActivationCheck signature -> Just signature
+  let previewPurpose = case effectivePurpose of
+        HostActivationPreviewCompile signature -> Just signature
         _ -> Nothing
-      checkAdmission = exact >>= scopeCheckedCell >>= \cell -> case checkedCellPurpose cell of
-        HostInputCellCheck signature -> Just signature
-        AuthoredCellCheck -> Nothing
-  unless (checkPurpose == checkAdmission)
-    (fail "host activation check has another compiler purpose")
+      previewAdmission = previewInputSignature <$> (exact >>= scopeActivationPreview)
+  unless (previewPurpose == previewAdmission)
+    (fail "activation preview has another compiler purpose")
   forM_ exact $ \admitted -> case capturedExact of
     Just original | scopeRequestSha256 original == scopeRequestSha256 admitted -> pure ()
     _ -> ioError (userError "planned declaration leaves its original compiler offer")

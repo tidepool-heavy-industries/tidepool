@@ -250,11 +250,54 @@ mod failure_diagnostic_tests {
     use super::*;
 
     #[test]
+    fn activation_committed_failure_preserves_compiler_infrastructure_diagnostic() {
+        let binding = tidepool_repr::SessionVarId::from_extract(41);
+        let error = ResidentActorWorkbenchError::ActivationBindingCommitted {
+            binding,
+            source: Box::new(ResidentActorWorkbenchError::InputCompilation {
+                stage: ActivationCompileStage::Preview,
+                error: CompileError::MissingOutput(PathBuf::from("preview-receipt.cbor")),
+            }),
+        };
+        let diagnostic = error
+            .failure_diagnostic()
+            .expect("committed diagnostic retained");
+        assert_eq!(diagnostic.class, FailureClass::Infra);
+        assert_eq!(
+            diagnostic.cause,
+            Some(tidepool_toolchain::failclass::CompileFailureCause::MissingOutput),
+        );
+        let ResidentActorWorkbenchError::ActivationBindingCommitted {
+            binding: retained,
+            source,
+        } = error
+        else {
+            panic!("committed preview failure lost its disposition")
+        };
+        assert_eq!(retained, binding);
+        assert!(source.to_string().contains("preview-receipt.cbor"));
+    }
+
+    #[test]
+    fn activation_suspension_keeps_primary_and_abort_failure() {
+        let error = ResidentActorWorkbenchError::ActivationBindingCommitted {
+            binding: tidepool_repr::SessionVarId::from_extract(42),
+            source: Box::new(ResidentActorWorkbenchError::ActivationPreviewSuspended {
+                cleanup: Some(ResidentError::InvalidActivationInput { site: 43 }),
+            }),
+        };
+        let rendered = error.to_string();
+        assert!(rendered.contains("pure activation preview suspended"));
+        assert!(rendered.contains("InvalidActivationInput"));
+        assert!(rendered.contains("43"));
+    }
+
+    #[test]
     fn activation_compile_failure_keeps_stage_typed_diagnostics_and_bounded_text() {
         use tidepool_toolchain::diag::{DiagSpan, DiagnosticSeverity, ExtractDiag};
         for stage in [
-            ActivationCompileStage::Check,
-            ActivationCompileStage::Native,
+            ActivationCompileStage::Interface,
+            ActivationCompileStage::Preview,
         ] {
             let message = format!(
                 "original compiler detail\n{}\nlast compiler detail",
@@ -1578,7 +1621,7 @@ pub struct RequestWorkbenchScope {
 
 impl ActorWorkbenchSource {
     fn for_activation(mut self, context: &crate::ActorSessionContext) -> Self {
-        // Host activation checks and previews consume native input; authored
+        // Pure activation previews consume native input; authored
         // reply helpers belong to subsequent request workbench cells.
         self.request_helper_recipe =
             tidepool_toolchain::declaration_join::RequestHelperRecipe::None;
@@ -3276,15 +3319,15 @@ pub enum PrivatePublicationPhase {
 /// Compiler stage that rejected the native completion input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActivationCompileStage {
-    Check,
-    Native,
+    Interface,
+    Preview,
 }
 
 impl std::fmt::Display for ActivationCompileStage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            Self::Check => "source check",
-            Self::Native => "native compilation",
+            Self::Interface => "thin-interface issuance",
+            Self::Preview => "pure preview compilation",
         })
     }
 }
@@ -3368,6 +3411,14 @@ pub enum ResidentActorWorkbenchError {
     },
     #[error("could not mount the typed completion input: {0}")]
     InputMount(String),
+    #[error("activation binding {binding:?} committed before preview failure: {source}")]
+    ActivationBindingCommitted {
+        binding: tidepool_repr::SessionVarId,
+        #[source]
+        source: Box<ResidentActorWorkbenchError>,
+    },
+    #[error("pure activation preview suspended; parked continuation cleanup failure: {cleanup:?}")]
+    ActivationPreviewSuspended { cleanup: Option<ResidentError> },
     #[error("could not inspect the saved value: {0}")]
     Inspection(String),
     #[error("completed result observation failed: {detail}")]
@@ -3414,7 +3465,8 @@ impl ResidentActorWorkbenchError {
         &self,
     ) -> Option<tidepool_toolchain::failclass::FailureEnvelope> {
         match self {
-            Self::PrivatePublication { source, .. } => source.failure_diagnostic(),
+            Self::PrivatePublication { source, .. }
+            | Self::ActivationBindingCommitted { source, .. } => source.failure_diagnostic(),
             Self::Compile(error) => Some(classify_compile(error)),
             Self::CellCheck(failure) => Some(classify_compile(&failure.error)),
             Self::InputCompilation { error, .. } => Some(activation_compile_diagnostic(error)),
@@ -4346,8 +4398,8 @@ where
         })
     }
 
-    /// Compile the input interface and preview together, commit the input,
-    /// then render it. A failed preview leaves the mounted binding available.
+    /// Commit the original input through a fresh thin interface, then prepare
+    /// its pure display against the original executable owners.
     pub(crate) async fn mount_activation_input(
         &self,
         context: crate::ActorSessionContext,
@@ -4364,97 +4416,123 @@ where
         let mut source = self.access.source.clone().for_activation(&context);
         source.request_evidence = Some(input.type_evidence().clone());
 
-        let authority = self.compilation_authority.clone().ok_or_else(|| {
-            ResidentActorWorkbenchError::ActorProtocol(
-                "activation requires its original source authority".into(),
-            )
-        })?;
         let preview = self
             .access
             .with_machine(context, move |session, context, _| {
-                use tidepool_runtime::session::turn::{check_activation_input, compile_activation_input};
+                use tidepool_runtime::session::turn::{
+                    assemble_activation_preview_module, compile_activation_preview,
+                    ActivationPreviewCompilation,
+                };
+                use tidepool_toolchain::activation_preview::ActivationPreviewDisposition;
                 reject_activation_declaration(session, context.placement.lexical_scope)?;
-                let view = actor_compile_view(session, context, &source)?;
-                let prepared = source.prepare(&view);
-                let preamble = insert_preamble_imports(&prepared.preamble, &prepared.imports);
-                let candidate = session.next_declaration_module().ok_or_else(|| {
-                    ResidentActorWorkbenchError::InputMount("activation has no declaration plane".into())
-                })?;
-                let check_preamble = cell_module_preamble(&prepared.preamble, &candidate.module_name())?;
-                let template = resident_cell_check_template(
-                    &check_preamble,
-                    &context.haskell_effects_alias,
-                    &prepared.imports,
-                );
-                let evidence = cell_check_evidence(&view, &template, &prepared);
-                let owner = session.admit_activation_input_in(
-                    context.placement.lexical_scope,
-                    input,
-                    &preamble,
-                    &context.haskell_effects_alias,
-                    ACTIVATION_INPUT_LIMIT,
-                    template,
-                    authority.clone(),
-                    authority.authority_digest(),
-                    prepared.include,
-                    evidence,
-                    Some(view.compile_inputs().clone()),
-                ).map_err(ResidentActorWorkbenchError::Resident)?;
-                let checked = check_activation_input(&owner).map_err(|failure| {
-                    ResidentActorWorkbenchError::InputCompilation {
-                        stage: ActivationCompileStage::Check,
-                        error: failure.error,
-                    }
-                })?;
-                let item = session.admit_activation_input_item(&owner, &checked)
+                let owner = session
+                    .admit_activation_input_in(context.placement.lexical_scope, input)
                     .map_err(ResidentActorWorkbenchError::Resident)?;
-                let compiled = compile_activation_input(&owner, item).map_err(|failure| {
+                let reservation = owner.reservation();
+                let interface = tidepool_toolchain::artifacts::issue_host_binding_interface(
+                    reservation.prototype().clone(),
+                    reservation.digest(),
+                    reservation.generation().0,
+                    reservation.binding(),
+                    &source.base_include,
+                )
+                .map_err(|error| {
                     ResidentActorWorkbenchError::InputCompilation {
-                        stage: ActivationCompileStage::Native,
-                        error: failure.error,
+                        stage: ActivationCompileStage::Interface,
+                        error,
                     }
                 })?;
-                let mounted = session.mount_activation_input(owner, compiled)
+                let mounted = session
+                    .mount_activation_input(owner, interface)
                     .map_err(ResidentActorWorkbenchError::Resident)?;
                 let binding = mounted.binding();
-                let preview = match session.run_activation_preview(mounted) {
-                    Ok(ResidentOutcome::Suspended { hole, .. } | ResidentOutcome::Deferred { hole, .. }) => {
-                        if let Err(abort_error) = session
-                            .abort(hole.cont_id(), "pure activation preview suspended".into())
-                        {
-                            tracing::warn!(
-                                hole = hole.cont_id(),
-                                %abort_error,
-                                "failed to abort parked hole after pure activation preview suspended"
-                            );
-                        }
-                        return Err(ResidentActorWorkbenchError::Inspection(
-                            "pure activation preview suspended".into(),
+                let committed = |source| ResidentActorWorkbenchError::ActivationBindingCommitted {
+                    binding,
+                    source: Box::new(source),
+                };
+                let view = actor_compile_view(session, context, &source).map_err(committed)?;
+                let prepared = source.prepare(&view);
+                let admission = session
+                    .admit_activation_preview(mounted, view.session_view().clone())
+                    .map_err(|error| committed(ResidentActorWorkbenchError::Resident(error)))?;
+                let budget = ACTIVATION_INPUT_LIMIT as u64;
+                let template = assemble_activation_preview_module(budget);
+                let compiled = match compile_activation_preview(
+                    admission,
+                    &template,
+                    budget,
+                    &prepared.include,
+                ) {
+                    Ok(ActivationPreviewCompilation::Ready(compiled)) => compiled,
+                    Ok(ActivationPreviewCompilation::OriginalDisplayEvidenceUnavailable) => {
+                        let unavailable = ActivationPreviewOutcome::Unavailable(
+                            ActivationPreviewUnavailable::OriginalDisplayEvidenceUnavailable,
+                        );
+                        return Ok((unavailable, binding));
+                    }
+                    Err(failure) if matches!(failure.error, CompileError::Diagnostics(_)) => {
+                        return Ok((
+                            ActivationPreviewOutcome::Unavailable(
+                                ActivationPreviewUnavailable::Language,
+                            ),
+                            binding,
                         ));
                     }
-                    Ok(outcome) => decode_activation_observation(outcome),
-                    Err(error) if error.is_observation_budget_exhausted()
-                        || matches!(&error,
-                            ResidentError::Prepared(prepared)
-                                if matches!(prepared,
-                                    tidepool_runtime::session::PreparedRuntimeError::Run(
-                                        tidepool_codegen::prepared_program::ExecutionError::Runtime(_)
-                                    )) && prepared.kind()
-                                        == tidepool_runtime::session::PreparedFailureKind::Language
-                        ) => {
-                        Err(ResidentActorWorkbenchError::Resident(error))
+                    Err(failure) => {
+                        return Err(committed(ResidentActorWorkbenchError::InputCompilation {
+                            stage: ActivationCompileStage::Preview,
+                            error: failure.error,
+                        }))
                     }
-                    Err(error) => return Err(ResidentActorWorkbenchError::Resident(error)),
+                };
+                if compiled.proof().disposition() == ActivationPreviewDisposition::Opaque {
+                    return Ok((ActivationPreviewOutcome::Opaque, binding));
+                }
+                let preview = match session.run_activation_preview(compiled) {
+                    Ok(
+                        ResidentOutcome::Suspended { hole, .. }
+                        | ResidentOutcome::Deferred { hole, .. },
+                    ) => {
+                        let cleanup = session
+                            .abort(hole.cont_id(), "pure activation preview suspended".into())
+                            .err();
+                        return Err(committed(
+                            ResidentActorWorkbenchError::ActivationPreviewSuspended { cleanup },
+                        ));
+                    }
+                    Ok(outcome) => decode_activation_observation(outcome).map_err(committed)?,
+                    Err(error) if error.is_observation_budget_exhausted() => {
+                        ActivationPreviewOutcome::Unavailable(ActivationPreviewUnavailable::Budget)
+                    }
+                    Err(ResidentError::Prepared(prepared))
+                        if matches!(
+                            &prepared,
+                            tidepool_runtime::session::PreparedRuntimeError::Run(
+                                tidepool_codegen::prepared_program::ExecutionError::Runtime(_)
+                            )
+                        ) && prepared.kind()
+                            == tidepool_runtime::session::PreparedFailureKind::Language =>
+                    {
+                        ActivationPreviewOutcome::Unavailable(
+                            ActivationPreviewUnavailable::Language,
+                        )
+                    }
+                    Err(error) => {
+                        return Err(committed(ResidentActorWorkbenchError::Resident(error)))
+                    }
                 };
                 Ok((preview, binding))
             })
             .await?;
         let (preview, input_binding) = preview;
         let input = match preview {
-            Ok((text, omitted)) => bounded_activation_text(
+            ActivationPreviewOutcome::Rendered { text, omitted } => bounded_activation_text(
                 text, ACTIVATION_INPUT_LIMIT, omitted, "display sessionInput",
             ),
-            Err(_) => "<input rendering unavailable; use lookup for sessionInput, then select or apply the value>".into(),
+            ActivationPreviewOutcome::Opaque => "<opaque input; use lookup for sessionInput, then select or apply the value>".into(),
+            ActivationPreviewOutcome::Unavailable(reason) => format!(
+                "<input rendering unavailable ({reason}); use lookup for sessionInput, then select or apply the value>",
+            ),
         };
         let reply = match reply_declaration {
             Some(declaration) => declaration,
@@ -6589,18 +6667,41 @@ fn bounded_activation_text(
     text
 }
 
+enum ActivationPreviewOutcome {
+    Rendered { text: String, omitted: bool },
+    Opaque,
+    Unavailable(ActivationPreviewUnavailable),
+}
+
+enum ActivationPreviewUnavailable {
+    OriginalDisplayEvidenceUnavailable,
+    Budget,
+    Language,
+}
+
+impl std::fmt::Display for ActivationPreviewUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::OriginalDisplayEvidenceUnavailable => "original display evidence unavailable",
+            Self::Budget => "observation budget exhausted",
+            Self::Language => "display computation failed",
+        })
+    }
+}
+
 fn decode_activation_observation(
     outcome: ResidentOutcome,
-) -> Result<(String, bool), ResidentActorWorkbenchError> {
+) -> Result<ActivationPreviewOutcome, ResidentActorWorkbenchError> {
     match outcome {
         ResidentOutcome::Completed { result, .. } => {
             if tidepool_codegen::observation::contains_oversize_sentinel(result.value()) {
-                return Err(ResidentActorWorkbenchError::Inspection(
-                    "input preview exceeded the observation budget".into(),
+                return Ok(ActivationPreviewOutcome::Unavailable(
+                    ActivationPreviewUnavailable::Budget,
                 ));
             }
-            <(String, bool)>::from_value(result.value(), result.table())
-                .map_err(|error| ResidentActorWorkbenchError::Inspection(error.to_string()))
+            let (text, omitted) = <(String, bool)>::from_value(result.value(), result.table())
+                .map_err(|error| ResidentActorWorkbenchError::Inspection(error.to_string()))?;
+            Ok(ActivationPreviewOutcome::Rendered { text, omitted })
         }
         _ => Err(ResidentActorWorkbenchError::Inspection(
             "pure input preview unexpectedly suspended".into(),

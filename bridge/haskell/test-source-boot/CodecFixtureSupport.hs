@@ -31,8 +31,6 @@ data PurposeCodecCase
   | CodecItemPurpose
   | CodecDisplayPurpose
   | CodecInspectionPurpose
-  | CodecHostActivationInput BS.ByteString
-  | CodecHostInputCheck BS.ByteString
 
 readPurposeCodecFixture :: FilePath -> [FilePath] -> PurposeCodecCase -> IO Term
 readPurposeCodecFixture work includes purpose = do
@@ -41,8 +39,6 @@ readPurposeCodecFixture work includes purpose = do
         CodecItemPurpose -> ("item", TNull)
         CodecDisplayPurpose -> ("display", TNull)
         CodecInspectionPurpose -> ("inspection", TNull)
-        CodecHostActivationInput bytes -> ("host-activation-input", TBytes bytes)
-        CodecHostInputCheck bytes -> ("host-input-check", TBytes bytes)
   packet <- codecRequest work "purpose" [text name,TList (map text includes),signature]
   readCodecTerm (packet </> "purpose.cbor")
 
