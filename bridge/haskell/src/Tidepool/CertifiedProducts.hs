@@ -323,7 +323,7 @@ encodeCertifiedProductsWithOriginals retained emittedSeals env sourceRecipe inte
                 | ((unit, name), options) <- Map.toList packages
                 , (path, sha) <- Set.toList options ]
           pure $ do
-            versions <- retainedNativeVersions emittedSeals exact cached packages moduleRows
+            versions <- retainedNativeVersions emittedSeals exact cached packages products moduleRows
             Right (toStrictByteString (array
             [encodeString "TPCERT", encodeWord 9
             , list id encodedModules, list id encodedTargets
@@ -347,9 +347,9 @@ retainedNativeVersions
   :: Map.Map (T.Text,T.Text) (T.Text,T.Text,T.Text,T.Text)
   -> Maybe ExactScope -> [ModuleCandidate]
   -> Map.Map (T.Text,T.Text) (Set.Set (FilePath,T.Text))
-  -> [(Product,CandidateGroup,[GlobalWitness])]
+  -> [Product] -> [(Product,CandidateGroup,[GlobalWitness])]
   -> Either String (Map.Map (String,String) String)
-retainedNativeVersions emitted exact cached packages rows = do
+retainedNativeVersions emitted exact cached packages products rows = do
   versions <- forM (Map.keys promoted) $ \root -> do
     reachable <- closure Set.empty [root]
     nodes <- traverse encodeNode (Set.toAscList reachable)
@@ -363,11 +363,11 @@ retainedNativeVersions emitted exact cached packages rows = do
   pure (Map.fromList versions)
   where
     key product = (productUnit product,productModule product)
-    promoted = Map.fromList [(key product,product) | (product,_,_) <- rows
+    promoted = Map.fromList [(key product,product) | product <- products
       , productOrigin product == RetainedCoreProduct]
-    groups = Map.fromListWith Map.union
+    groups = Map.union (Map.fromListWith Map.union
       [(key product,Map.singleton (candidateGroupOrdinal group) witnesses)
-      | (product,group,witnesses) <- rows]
+      | (product,group,witnesses) <- rows]) (Map.map (const Map.empty) promoted)
     seals = Map.unions [emitted,Map.fromList
       [((T.pack (candidateUnit candidate),T.pack (candidateModule candidate)),
         (T.pack (candidateModuleVersion candidate),T.pack (candidateInterfaceSha256 candidate),
