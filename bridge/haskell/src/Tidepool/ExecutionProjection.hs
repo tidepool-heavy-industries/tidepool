@@ -106,7 +106,7 @@ import Tidepool.Identity (varId)
 import Tidepool.PreparedStg
   ( PreparedModule, PreparedCoverage(..), pmModule, pmCoverage, pmBindings
   , pmTypeGraph, pmPreparedSites, pmSiteRejections, pmRequestSiteTyCon
-  , filterPreparedBindings, preparedRejectsIntrinsic )
+  , filterPreparedBindings, preparedRejectsIntrinsic, preparedExpectedEntry )
 import Tidepool.PreparedSites (SiteRejection(..))
 import Tidepool.PreparedSites (PreparedSite(..), requestReplyIndex)
 import Tidepool.EffectSchema qualified as Effect
@@ -150,6 +150,8 @@ data ProjectionError
   | UnsupportedForeignCall Text Signature
   | UnavailableOriginalHomeDependencies [SymbolIdentity]
   | UnelaboratedCompilerIntrinsic SymbolIdentity
+  | RecoveredEntryContractMismatch SymbolIdentity
+      (Maybe Signature) Bool (Maybe Signature) Bool
   -- | A typed site in a reachable top cannot carry concrete evidence. This
   -- is a source error, reported with the compiler's own guidance.
   | RejectedTypedSite Text
@@ -1166,7 +1168,7 @@ preallocate modules = do
     allocateTop (StgTopLifted binding, _) = mapM_ allocateTopValue (bindingBinders binding) >> pure ()
 
 projectModule :: PreparedModule -> P [Group TopBinding]
-projectModule = mapM (projectTop . fst) . pmBindings
+projectModule prepared = mapM (projectTop prepared . fst) (pmBindings prepared)
 
 -- One module projection owns this immutable index. Its graph stays lazy so
 -- groups without typed sites do not force an otherwise unused full graph.
@@ -1686,17 +1688,20 @@ registerRhsEntryArity binder (StgRhsClosure _ _ _ parameters _ _) =
     { entryArities = extendVarEnv (entryArities current) binder (length parameters) })
 registerRhsEntryArity _ _ = pure ()
 
-projectTop :: CgStgTopBinding -> P (Group TopBinding)
-projectTop (StgTopStringLit binder bytes) = do
+projectTop :: PreparedModule -> CgStgTopBinding -> P (Group TopBinding)
+projectTop prepared (StgTopStringLit binder bytes) = do
   identity <- requireTopValue binder
   symbol <- topIdentity binder
+  validateExpectedEntry prepared binder (Bytes bytes)
   pure (NonRecursive (TopBinding symbol
     (HeapBinding identity (Bytes bytes))))
-projectTop (StgTopLifted (StgNonRec binder rhs)) = NonRecursive <$> projectTopPair binder rhs
-projectTop (StgTopLifted (StgRec pairs)) = Recursive <$> mapM (uncurry projectTopPair) pairs
+projectTop prepared (StgTopLifted (StgNonRec binder rhs)) =
+  NonRecursive <$> projectTopPair prepared binder rhs
+projectTop prepared (StgTopLifted (StgRec pairs)) =
+  Recursive <$> mapM (uncurry (projectTopPair prepared)) pairs
 
-projectTopPair :: Id -> CgStgRhs -> P TopBinding
-projectTopPair binder rhs = do
+projectTopPair :: PreparedModule -> Id -> CgStgRhs -> P TopBinding
+projectTopPair prepared binder rhs = do
   symbol <- topIdentity binder
   formatting <- formattingSpecFor binder
   time <- timeSpecFor binder
@@ -1709,7 +1714,31 @@ projectTopPair binder rhs = do
             Just spec -> projectTimeRhs spec rhs
             Nothing -> maybe (projectRhs binder rhs)
               (\spec -> projectFormattingRhs spec rhs) formatting
-  TopBinding symbol <$> (HeapBinding <$> requireTopValue binder <*> project)
+  projected <- project
+  validateExpectedEntry prepared binder projected
+  TopBinding symbol <$> (HeapBinding <$> requireTopValue binder <*> pure projected)
+
+-- Recovery can prepare a provisional subset before its same-owner siblings
+-- are available. Only selected emitted tops must satisfy the defining entry;
+-- expected interface facts never substitute for the body's actual ABI.
+validateExpectedEntry :: PreparedModule -> Id -> HeapRhs -> P ()
+validateExpectedEntry prepared binder rhs = case preparedExpectedEntry prepared binder of
+  Nothing -> pure ()
+  Just original -> do
+    (required, requiresEvaluated) <- importedEntry original
+    (offered, evaluated) <- case rhs of
+      Function signature _ _ _ -> (\entry -> (Just entry, True)) <$> signatureForId signature
+      Thunk signature _ _ _ -> (\entry -> (Just entry, False)) <$> signatureForId signature
+      Constructor{} -> pure (Nothing, True)
+      Bytes{} -> pure (Nothing, True)
+    let entryMatches = case importedIdLFInfo original of
+          LFUnknown{} -> True
+          _ -> offered == required
+    unless (entryMatches
+        && (not requiresEvaluated || evaluated)) $ do
+      symbol <- topIdentity binder
+      lift (Left (RecoveredEntryContractMismatch symbol
+        required requiresEvaluated offered evaluated))
 
 formattingSpecFor :: Id -> P (Maybe FormattingSpec)
 formattingSpecFor binder = do
