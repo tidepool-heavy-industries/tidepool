@@ -643,7 +643,7 @@ fn run_inspections_with_policy(
         0,
     );
     crate::diag::decode_extract_result(run.success(), &run.output.stdout, &run.output.stderr)
-        .map_err(|error| offer.retain_failure(temp.path(), &run.output.stderr, error))?;
+        .map_err(|error| offer.retain_failure(temp.path(), &command, &run.output.stderr, error))?;
     let bytes = std::fs::read(&output_path).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             CompileError::MissingOutput(output_path.clone())
@@ -753,7 +753,9 @@ fn run_inspections_with_policy(
             }
             Ok::<_, CompileError>(())
         })();
-        validated.map_err(|error| offer.retain_failure(temp.path(), &run.output.stderr, error))?;
+        validated.map_err(|error| {
+            offer.retain_failure(temp.path(), &command, &run.output.stderr, error)
+        })?;
     }
     Ok(request
         .queries

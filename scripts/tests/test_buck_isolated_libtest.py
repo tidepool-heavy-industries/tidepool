@@ -43,6 +43,8 @@ class IsolatedLibtestTests(unittest.TestCase):
     def test_delegated_command_exports_declared_inputs_and_only_test_process(self):
         record = {}
         with patch.dict(os.environ, {'TIDEPOOL_EXTRACT': '/qualified/compiler',
+                                     'TIDEPOOL_KEEP_TEST_LOGS': '1',
+                                     'TIDEPOOL_TEST_ARTIFACT_ROOT': '/retained/compiler failures',
                                      'EXOMONAD_WORKSPACE_GITLINK': '/qualified/workspace-pin',
                                      'OPENAI_API_KEY': 'never-forward',
                                      'UNRELATED_VARIABLE': 'never-forward'}):
@@ -53,6 +55,9 @@ class IsolatedLibtestTests(unittest.TestCase):
         self.assertIn('--property=Delegate=yes', command)
         self.assertIn('--property=KillMode=control-group', command)
         self.assertIn('--setenv=TIDEPOOL_EXTRACT=/qualified/compiler', command)
+        self.assertIn('--setenv=TIDEPOOL_KEEP_TEST_LOGS=1', command)
+        self.assertIn('--setenv=TIDEPOOL_TEST_ARTIFACT_ROOT=/retained/compiler failures', command)
+        self.assertIn('TIDEPOOL_TEST_ARTIFACT_ROOT', record['environment_names'])
         self.assertIn('--setenv=EXOMONAD_WORKSPACE_GITLINK=/qualified/workspace-pin', command)
         self.assertFalse(any('never-forward' in word for word in command))
         self.assertIn('--unit=' + unit, command)

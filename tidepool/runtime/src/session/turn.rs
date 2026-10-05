@@ -2738,10 +2738,12 @@ pub fn compile_cell_program_admitted(
     })?;
     let report =
         crate::diag::decode_extract_result(run.success(), &run.output.stdout, &run.output.stderr)
-            .map_err(|error| offer.retain_failure(scratch.path(), &run.output.stderr, error))?;
-    let program = offer
-        .admit_cell_program(scratch.path())
-        .map_err(|error| offer.retain_failure(scratch.path(), &run.output.stderr, error))?;
+            .map_err(|error| {
+            offer.retain_failure(scratch.path(), &command, &run.output.stderr, error)
+        })?;
+    let program = offer.admit_cell_program(scratch.path()).map_err(|error| {
+        offer.retain_failure(scratch.path(), &command, &run.output.stderr, error)
+    })?;
     let mut checked = decode_cell_out(
         program.checked_cell().observations(),
         req.cell_text,
@@ -2877,7 +2879,7 @@ fn check_cell_impl(
                     Err(error) => return Err(error.into()),
                 };
                 return Err(CellCheckFailure {
-                    error: offer.retain_failure(temp.path(), &output.stderr, error),
+                    error: offer.retain_failure(temp.path(), &cmd, &output.stderr, error),
                     items,
                 });
             }
@@ -2894,11 +2896,12 @@ fn check_cell_impl(
         // declaration before admitting the final checking source.
         let authority = offer
             .admit_checked_cell(temp.path())
-            .map_err(|error| offer.retain_failure(temp.path(), &output.stderr, error))?;
+            .map_err(|error| offer.retain_failure(temp.path(), &cmd, &output.stderr, error))?;
         if authority.checked_source() != checked.checked_source {
             return Err(offer
                 .retain_failure(
                     temp.path(),
+                    &cmd,
                     &output.stderr,
                     CompileError::ExtractFailed(
                         "checked source differs from its admitted cell authority".into(),
@@ -2927,7 +2930,8 @@ fn check_cell_impl(
             }
             Ok::<_, CompileError>(())
         })();
-        validated.map_err(|error| offer.retain_failure(temp.path(), &output.stderr, error))?;
+        validated
+            .map_err(|error| offer.retain_failure(temp.path(), &cmd, &output.stderr, error))?;
     }
     checked.warnings = report.diagnostics;
     Ok(checked)
@@ -3284,7 +3288,7 @@ fn run_turn_with_admission(
         Direct(tidepool_extract_cmd::ExtractRun),
     }
     let run = if ordinary_admitted {
-        TurnCompilerOutput::Admitted(offer.execute_admitted_turn(endpoint, cmd)?)
+        TurnCompilerOutput::Admitted(offer.execute_admitted_turn(endpoint, &mut cmd)?)
     } else {
         TurnCompilerOutput::Direct(endpoint.execute(&cmd).map_err(|error| {
             offer.retain_execution_failure(temp.path(), &cmd, map_notfound(error))
@@ -3327,7 +3331,7 @@ fn run_turn_with_admission(
     {
         let attempted_source = std::fs::read_to_string(output_dir.join("turn-attempt.hs")).ok();
         return Err(TurnFailure {
-            error: offer.retain_failure(output_dir, &output.stderr, error),
+            error: offer.retain_failure(output_dir, &cmd, &output.stderr, error),
             attempted_source,
         });
     }
@@ -3341,6 +3345,7 @@ fn run_turn_with_admission(
     let mut result = decoded.map_err(|error| TurnFailure {
         error: offer.retain_failure(
             output_dir,
+            &cmd,
             &output.stderr,
             match error {
                 CompileError::ExtractFailed(detail) if !stderr.trim().is_empty() => {
@@ -5656,11 +5661,11 @@ mod tests {
             &run.output.stdout,
             &run.output.stderr,
         ) {
-            return Err(offer.retain_failure(temp.path(), &run.output.stderr, error));
+            return Err(offer.retain_failure(temp.path(), &cmd, &run.output.stderr, error));
         }
         let cell = offer
             .admit_checked_cell(temp.path())
-            .map_err(|error| offer.retain_failure(temp.path(), &run.output.stderr, error))?;
+            .map_err(|error| offer.retain_failure(temp.path(), &cmd, &run.output.stderr, error))?;
         Ok((temp, cell.item(0)?))
     }
 
