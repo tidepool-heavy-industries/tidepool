@@ -164,6 +164,30 @@ class ComponentProjectionTests(unittest.TestCase):
         self.assertIn("remote.enabled=false", arguments)
         self.assertNotIn("runghc", arguments)
 
+    def test_catalog_projects_fixed_module_owners_without_test_packages_or_row_shim(self):
+        for relative in ("lib/Library.hs", "actors/Actor.hs", "test-support/Runner.hs"):
+            path = self.package / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("module Example where\n")
+        helper = component("native-helper-contract", "test-suite", "tests",
+                           ("lib", "actors", "test-support", "generated/effects"),
+                           ("Library", "Actor", "Runner", "Tidepool.Effects.Core"),
+                           [dependency("tasty"), dependency("text")])
+        _, roster = G.normalized_components(self.metadata(tests=[helper]))
+        cohort = G.native_catalog_cohort(roster)
+        self.assertEqual(cohort, {"component": "native-helper-contract", "modules": {
+            "Actor": "actors/Actor.hs", "Library": "lib/Library.hs",
+            "Tidepool.Effects.Authored": "effects/Tidepool/Effects/Authored.hs",
+            "Tidepool.Effects.Core": "effects/Tidepool/Effects/Core.hs",
+        }})
+        self.assertNotIn("Tidepool.Effects", cohort["modules"])
+        self.assertNotIn("dependencies", cohort)
+        helper["source_dirs"].append("test")
+        helper["modules"].append("Negative")
+        _, roster = G.normalized_components(self.metadata(tests=[helper]))
+        with self.assertRaisesRegex(ValueError, "lacks a fixed runtime source"):
+            G.native_catalog_cohort(roster)
+
 
 class FixtureInputBoundaryTests(unittest.TestCase):
     def setUp(self):

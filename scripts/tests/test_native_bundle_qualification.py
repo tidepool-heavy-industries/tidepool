@@ -7,7 +7,9 @@ import os
 from pathlib import Path
 import tempfile
 import subprocess
+import shutil
 import sys
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -247,6 +249,111 @@ class NativeQualificationTests(unittest.TestCase):
             (root / 'source.hs').symlink_to(source)
             with self.assertRaisesRegex(ValueError, 'escapes the bundle'):
                 qualification.inventory(root)
+
+
+class CatalogSourceTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        self.sources = self.root / 'sources'
+        self.effects = self.root / 'generated'
+        self.snapshot = self.root / 'snapshot'
+        self.modules = {
+            'Library': 'lib/Library.hs', 'Actor': 'actors/Actor.hs',
+            'Tidepool.Effects.Core': 'effects/Tidepool/Effects/Core.hs',
+            'Tidepool.Effects.Authored': 'effects/Tidepool/Effects/Authored.hs',
+        }
+        for relative in ('lib/Library.hs', 'actors/Actor.hs'):
+            path = self.sources / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('source ' + relative)
+        for relative in ('Tidepool/Effects/Core.hs', 'Tidepool/Effects/Authored.hs', 'Tidepool/Effects.hs'):
+            path = self.effects / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('generated ' + relative)
+        self.cohort = self.root / 'cohort.json'
+        qualification.write_json(self.cohort, {'component': 'native-helper-contract', 'modules': self.modules})
+        self.args = SimpleNamespace(sources=self.sources, effects=self.effects,
+                                    cohort=self.cohort, output=self.snapshot)
+
+    def test_snapshot_keeps_library_roles_and_uses_declared_generated_bytes(self):
+        source = self.sources / 'lib/Library.hs'
+        original = self.root / 'buck-generated-source'
+        source.rename(original)
+        source.symlink_to(original)
+        qualification.snapshot_catalog_sources(self.args)
+        self.assertFalse((self.snapshot / 'lib/Library.hs').is_symlink())
+        self.assertEqual((self.snapshot / 'lib/Library.hs').read_bytes(), original.read_bytes())
+        self.assertEqual(qualification.catalog_source_metadata(self.snapshot)['modules'], self.modules)
+        self.assertEqual((self.snapshot / 'effects/Tidepool/Effects/Core.hs').read_bytes(),
+                         (self.effects / 'Tidepool/Effects/Core.hs').read_bytes())
+        self.assertFalse((self.snapshot / 'effects/Tidepool/Effects.hs').exists())
+        self.assertEqual((self.snapshot / 'TidepoolCatalog.hs').read_text().count('import '), 4)
+        original.write_text('changed after source action')
+        self.assertNotEqual((self.snapshot / 'lib/Library.hs').read_bytes(), original.read_bytes())
+
+    def test_original_source_alias_and_cohort_probe_changes_refuse(self):
+        qualification.snapshot_catalog_sources(self.args)
+        path = self.snapshot / 'actors/Actor.hs'
+        path.unlink()
+        path.symlink_to(self.snapshot / 'lib/Library.hs')
+        with self.assertRaisesRegex(ValueError, 'without aliases'):
+            qualification.catalog_source_inventory(self.snapshot)
+        path.unlink()
+        path.write_text('actor')
+        (self.snapshot / 'TidepoolCatalog.hs').write_text('module Different where')
+        with self.assertRaisesRegex(ValueError, 'probe differs'):
+            qualification.catalog_source_metadata(self.snapshot)
+
+    def test_retention_returns_original_root_and_rechecks_nar_bytes_and_gc_root(self):
+        qualification.snapshot_catalog_sources(self.args)
+        retained = self.root / 'registered-source'
+        tools = self.root / 'nix-tools'
+        observed = []
+        nar = {'roots': [str(retained)], 'closure': [str(retained)],
+               'nar_hashes': {str(retained): 'sha256:original'}}
+
+        def add(command, **kwargs):
+            observed.append(command)
+            self.assertEqual(command[1], '--add')
+            staged = Path(command[2])
+            self.assertEqual(staged.name, 'tidepool-catalog-sources')
+            shutil.copytree(staged, retained)
+            return str(retained) + '\n'
+
+        def run(command, **kwargs):
+            observed.append(command)
+            if '--add-root' in command:
+                Path(command[command.index('--add-root') + 1]).symlink_to(retained)
+            else:
+                self.assertEqual(command[1:], ['--verify-path', str(retained)])
+            return subprocess.CompletedProcess(command, 0)
+
+        with patch.object(qualification, 'nix_path', side_effect=lambda path: path.resolve(strict=True)), \
+             patch.object(qualification, 'store_root', side_effect=lambda path: path.resolve(strict=True)), \
+             patch.object(qualification, 'nix_metadata', return_value=nar) as metadata, \
+             patch.object(qualification.subprocess, 'check_output', side_effect=add), \
+             patch.object(qualification.subprocess, 'run', side_effect=run):
+            tools.mkdir()
+            record = qualification.retain_catalog_sources(SimpleNamespace(
+                snapshot=self.snapshot, output=self.root / 'retention', runtime_tools=tools))
+            self.assertEqual(qualification.verify_retained_catalog_sources(record, self.snapshot, tools), retained)
+            self.assertGreaterEqual(sum('--verify-path' in command for command in observed), 3)
+            metadata.return_value = nar | {'nar_hashes': {str(retained): 'sha256:changed'}}
+            with self.assertRaisesRegex(ValueError, 'NAR registration changed'):
+                qualification.verify_retained_catalog_sources(record, self.snapshot, tools)
+            metadata.return_value = nar
+            source = retained / 'lib/Library.hs'
+            original = source.read_bytes()
+            source.write_text('changed source')
+            with self.assertRaisesRegex(ValueError, 'declared action snapshot'):
+                qualification.verify_retained_catalog_sources(record, self.snapshot, tools)
+            source.write_bytes(original)
+            value = json.loads(record.read_text())
+            Path(value['gc_roots'][0]['path']).unlink()
+            with self.assertRaises(FileNotFoundError):
+                qualification.verify_retained_catalog_sources(record, self.snapshot, tools)
 
 
 if __name__ == '__main__':

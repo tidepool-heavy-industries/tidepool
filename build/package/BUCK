@@ -1,9 +1,19 @@
 load("@prelude//:rules.bzl", "export_file", "filegroup", "genrule", "sh_test")
 load(":runtime_shared_libraries.bzl", "tidepool_runtime_shared_libraries")
 load("//build:native_profile.bzl", "selected_native_profile")
+load(":native_catalog.bzl", "native_catalog_sources")
+load("//bridge/haskell:components.bzl", "NATIVE_CATALOG_COHORT")
 
 export_file(name = "qualification_script", src = "qualification.py", visibility = ["PUBLIC"])
 export_file(name = "native_entrypoint", src = "native-entrypoint.sh", visibility = ["PUBLIC"])
+
+native_catalog_sources(
+    name = "native_catalog_sources",
+    cohort = NATIVE_CATALOG_COHORT,
+    sources = "//bridge/haskell:facade_embedded_sources",
+    effects = "//bridge/mcp:effects_generated",
+    visibility = ["PUBLIC"],
+)
 
 filegroup(
     name = "qualification_inputs",

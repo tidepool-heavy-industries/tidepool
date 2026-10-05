@@ -13,6 +13,7 @@ import shlex
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 import tomllib
 
@@ -44,6 +45,9 @@ ARTIFACT_TARGETS = {
 }
 EXTERNAL_INPUTS = {"TIDEPOOL_GHC_LIBDIR", "TIDEPOOL_BROWSER_NODE", "PLAYWRIGHT_BROWSERS_PATH", "runtime_tools"}
 BUILD_CONTRACT_FIELDS = ("profile", "feature_profile", "stdlib_mode", "source_inputs", "source_inputs_sha256", "artifacts")
+CATALOG_SOURCE_METADATA = "catalog-sources.json"
+CATALOG_SOURCE_ROOTS = {"effects": "effects", "stdlib": "lib", "actors": "actors"}
+RETAINED_CATALOG_SOURCES = "share/exomonad/retained-catalog-sources.json"
 
 
 def programs(root: Path) -> dict:
@@ -135,6 +139,142 @@ def pin_nix_closure(root: Path, tools: Path, selected: list[Path]) -> tuple[dict
             raise ValueError(f"Nix did not retain the requested deployment root: {target}")
         pinned.append({"path": str(target), "store_path": selected_root, "command": command, "exit_code": 0})
     return nix_metadata(tools, roots), pinned
+
+
+def catalog_source_inventory(root: Path) -> dict:
+    """Retained source names are original evidence, so aliases are forbidden."""
+    if root != root.resolve(strict=True):
+        raise ValueError("catalog sources require their canonical original path")
+    entries = inventory(root)
+    if any(item["kind"] == "symlink" for item in entries.values()):
+        raise ValueError("catalog sources must be regular files without aliases")
+    return entries
+
+
+def catalog_source_metadata(root: Path) -> dict:
+    metadata = json.loads((root / CATALOG_SOURCE_METADATA).read_text())
+    if (set(metadata) != {"schema", "kind", "component", "modules", "roots", "probe", "targets"}
+            or metadata["schema"] != 1 or metadata["kind"] != "native-catalog-source-snapshot"
+            or metadata["roots"] != CATALOG_SOURCE_ROOTS
+            or metadata["probe"] != "TidepoolCatalog.hs" or metadata["targets"] != ["catalogSentinel"]
+            or not isinstance(metadata["component"], str) or not metadata["component"]
+            or not isinstance(metadata["modules"], dict) or not metadata["modules"]):
+        raise ValueError("invalid native catalog source metadata")
+    for module, relative in metadata["modules"].items():
+        if not isinstance(module, str) or re.fullmatch(r"[A-Z][A-Za-z0-9_]*(?:\.[A-Z][A-Za-z0-9_]*)*", module) is None:
+            raise ValueError("invalid catalog module name")
+        if not isinstance(relative, str):
+            raise ValueError("invalid catalog module path")
+        path = Path(relative)
+        if (path.is_absolute() or not path.parts or path.parts[0] not in CATALOG_SOURCE_ROOTS.values()
+                or path.parts[1:] != tuple(module.split(".")[:-1]) + (module.split(".")[-1] + ".hs",)
+                or not (root / path).is_file()):
+            raise ValueError(f"catalog module lacks its declared original source: {module}")
+    for relative in CATALOG_SOURCE_ROOTS.values():
+        if not (root / relative).is_dir():
+            raise ValueError(f"missing catalog source role: {relative}")
+    if (root / metadata["probe"]).read_text() != catalog_probe(metadata["modules"]):
+        raise ValueError("catalog probe differs from its declared module cohort")
+    return metadata
+
+
+def catalog_probe(modules: dict) -> str:
+    return ("module TidepoolCatalog where\n"
+            + "".join(f"import {module} ()\n" for module in sorted(modules))
+            + "catalogSentinel :: Int\ncatalogSentinel = 0\n")
+
+
+def snapshot_catalog_sources(args) -> None:
+    """Buck owns the source projection and generators; qualification owns bytes."""
+    cohort = json.loads(args.cohort.read_text())
+    if set(cohort) != {"component", "modules"} or not isinstance(cohort["modules"], dict):
+        raise ValueError("invalid metadata-derived catalog cohort")
+    root = args.output.absolute()
+    root.mkdir(parents=True, exist_ok=False)
+    for relative in ("lib", "actors"):
+        shutil.copytree(args.sources / relative, root / relative, symlinks=False)
+    (root / "effects").mkdir()
+    for relative in cohort["modules"].values():
+        if not isinstance(relative, str):
+            raise ValueError("invalid catalog module source path")
+        path = Path(relative)
+        if path.is_absolute() or not path.parts or any(part in (".", "..") for part in path.parts):
+            raise ValueError("invalid catalog module source path")
+        if path.parts[0] == "effects":
+            destination = root / path
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(args.effects.joinpath(*path.parts[1:]), destination)
+    (root / "TidepoolCatalog.hs").write_text(catalog_probe(cohort["modules"]))
+    write_json(root / CATALOG_SOURCE_METADATA, {
+        "schema": 1, "kind": "native-catalog-source-snapshot", **cohort,
+        "roots": CATALOG_SOURCE_ROOTS, "probe": "TidepoolCatalog.hs", "targets": ["catalogSentinel"],
+    })
+    # NAR identity ignores timestamps. Fixed names and modes make the original
+    # retained path stable across actions and runs with the same complete bytes.
+    for path in root.rglob("*"):
+        path.chmod(0o755 if path.is_dir() else 0o644)
+    catalog_source_metadata(root)
+    catalog_source_inventory(root)
+
+
+def retain_catalog_sources(args) -> Path:
+    source = args.snapshot.resolve(strict=True)
+    catalog_source_metadata(source)
+    expected = catalog_source_inventory(source)
+    destination = args.output.absolute()
+    if destination != destination.resolve():
+        raise ValueError("source retention requires a canonical output path")
+    destination.mkdir(parents=True, exist_ok=False)
+    tools = nix_path(args.runtime_tools)
+    # The basename is fixed because it participates in the original store path.
+    with tempfile.TemporaryDirectory(prefix="native-catalog-", dir=destination) as temporary:
+        staged = Path(temporary) / "tidepool-catalog-sources"
+        shutil.copytree(source, staged, symlinks=False)
+        if catalog_source_inventory(staged) != expected:
+            raise ValueError("catalog snapshot changed during retention")
+        retained = Path(subprocess.check_output(
+            [str(tools / "bin/nix-store"), "--add", str(staged)], text=True, timeout=60).strip())
+    if retained != store_root(retained):
+        raise ValueError("source retention did not return one original store root")
+    subprocess.run([str(tools / "bin/nix-store"), "--verify-path", str(retained)],
+                   check=True, capture_output=True, timeout=60)
+    if catalog_source_inventory(retained) != expected:
+        raise ValueError("retained source bytes differ from the declared snapshot")
+    closure, gc_roots = pin_nix_closure(destination, tools, [retained])
+    record = destination / RETAINED_CATALOG_SOURCES
+    write_json(record, {
+        "schema": 1, "kind": "native-catalog-source-retention", "original_root": str(retained),
+        "inventory": expected, "inventory_sha256": digest_inventory(expected),
+        "nix_closure": closure, "gc_roots": gc_roots,
+    })
+    verify_retained_catalog_sources(record, source, tools)
+    return record
+
+
+def verify_retained_catalog_sources(record: Path, snapshot: Path, tools: Path) -> Path:
+    """Return the original compiler root only after current retention checks."""
+    value = json.loads(record.read_text())
+    if (set(value) != {"schema", "kind", "original_root", "inventory", "inventory_sha256", "nix_closure", "gc_roots"}
+            or value["schema"] != 1 or value["kind"] != "native-catalog-source-retention"):
+        raise ValueError("unsupported retained catalog sources")
+    original = Path(value["original_root"])
+    if original != store_root(original):
+        raise ValueError("retained catalog root moved or aliases another path")
+    catalog_source_metadata(original)
+    expected = catalog_source_inventory(snapshot.resolve(strict=True))
+    if (expected != value["inventory"] or digest_inventory(expected) != value["inventory_sha256"]
+            or catalog_source_inventory(original) != expected):
+        raise ValueError("retained catalog sources differ from the declared action snapshot")
+    executable = str(tools / "bin/nix-store")
+    subprocess.run([executable, "--verify-path", str(original)], check=True, capture_output=True, timeout=60)
+    if value["nix_closure"] != nix_metadata(tools, [str(original)]):
+        raise ValueError("retained catalog NAR registration changed")
+    pins = value["gc_roots"]
+    expected_pin = record.parent / "gc-roots" / hashlib.sha256(str(original).encode()).hexdigest()
+    if (len(pins) != 1 or pins[0]["path"] != str(expected_pin)
+            or pins[0]["store_path"] != str(original) or expected_pin.resolve(strict=True) != original):
+        raise ValueError("retained catalog source GC root is missing or changed")
+    return original
 
 
 def declared_haskell_sources(source: Path, bundle: Path) -> dict:
@@ -549,6 +689,15 @@ def launch_execution(path: Path, arguments: list[str], *, stdout=None, stderr=No
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
+    snapshot = commands.add_parser("snapshot-sources")
+    for key in ("sources", "effects", "cohort", "output"):
+        snapshot.add_argument("--" + key, required=True, type=Path)
+    retained = commands.add_parser("retain-sources")
+    for key in ("snapshot", "output", "runtime-tools"):
+        retained.add_argument("--" + key, required=True, type=Path)
+    selected = commands.add_parser("select-sources")
+    for key in ("record", "snapshot", "runtime-tools"):
+        selected.add_argument("--" + key, required=True, type=Path)
     stage = commands.add_parser("assemble")
     for key in ("output", "host", "view-helper", "frontend", "worker", "libtest", "build-sources", "workspace-gitlink", "sources", "assets", "libraries", "harness-revision", "runtime-tools", "ghc-libdir", "entrypoint-template"):
         stage.add_argument("--" + key, required=True, type=Path)
@@ -578,7 +727,13 @@ def main(argv=None) -> int:
     live.add_argument("arguments", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     try:
-        if args.command == "assemble":
+        if args.command == "snapshot-sources":
+            snapshot_catalog_sources(args)
+        elif args.command == "retain-sources":
+            print(retain_catalog_sources(args))
+        elif args.command == "select-sources":
+            print(verify_retained_catalog_sources(args.record, args.snapshot, nix_path(args.runtime_tools)))
+        elif args.command == "assemble":
             assemble(args)
         elif args.command == "freeze":
             print(freeze(args))

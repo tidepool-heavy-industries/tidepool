@@ -5,6 +5,35 @@ through the normal compiler; it does not qualify a canonical module catalog or
 durable module-cache deployment. The catalog-backed `matched_runtime_bundle`
 is a separate package mode and cannot substitute for this qualification.
 
+The native catalog migration starts with `//build/package:native_catalog_sources`.
+It snapshots the existing runtime `lib` and `actors` trees and the genuine generated
+Core/Authored pair. Its import probe is projected from the pinned Cabal
+`native-helper-contract` module metadata, excluding test source owners and adding
+Authored from the existing effect-module roster. Test dependencies and the
+invocation-specific `Tidepool.Effects` shim are not catalog inputs. The actual
+compiler's complete module closure must still pass catalog admission; this
+initial selection does not cover every shipped helper.
+
+Retain that exact source snapshot before compiling original module products:
+
+```sh
+python3 build/package/qualification.py retain-sources \
+  --snapshot "$BUCK_CATALOG_SOURCES" --output "$SOURCE_RETENTION" \
+  --runtime-tools "$DECLARED_RUNTIME_TOOLS"
+python3 build/package/qualification.py select-sources \
+  --record "$SOURCE_RETENTION/share/exomonad/retained-catalog-sources.json" \
+  --snapshot "$BUCK_CATALOG_SOURCES" --runtime-tools "$DECLARED_RUNTIME_TOOLS"
+```
+
+The same qualification owner checks the source inventory, Nix registration and
+NAR identity, and retains a GC root. `select-sources` returns the original
+canonical source root for the subsequent native action; it does not reconfigure
+the toolchain. Fixed source names and bytes give the same retained original paths
+across runs. The source retention record must survive until final qualification
+retains those roots. This preparation boundary alone does not establish a native
+catalog deployment; the schema, packaging and runtime selection cutover remain
+required before catalog-backed qualification.
+
 Build the native bundle and
 `//build/testing/browser:driver_bundle` in one selected native profile. Retain the
 actual successful build log and its argv arrays as JSON. Source must have clean

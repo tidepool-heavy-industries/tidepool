@@ -9,6 +9,34 @@ JEV_SOURCE_PATHS = [
     "core/Jev/Core/Schema.hs"
 ]
 
+NATIVE_CATALOG_COHORT = {
+    "component": "native-helper-contract",
+    "modules": {
+        "Tidepool.Aeson": "lib/Tidepool/Aeson.hs",
+        "Tidepool.Aeson.FromJSON": "lib/Tidepool/Aeson/FromJSON.hs",
+        "Tidepool.Aeson.KeyMap": "lib/Tidepool/Aeson/KeyMap.hs",
+        "Tidepool.Aeson.Lens": "lib/Tidepool/Aeson/Lens.hs",
+        "Tidepool.Aeson.Scientific": "lib/Tidepool/Aeson/Scientific.hs",
+        "Tidepool.Aeson.Value": "lib/Tidepool/Aeson/Value.hs",
+        "Tidepool.Check": "actors/Tidepool/Check.hs",
+        "Tidepool.Data.Text": "lib/Tidepool/Data/Text.hs",
+        "Tidepool.Data.Time": "lib/Tidepool/Data/Time.hs",
+        "Tidepool.Double": "lib/Tidepool/Double.hs",
+        "Tidepool.Duration": "lib/Tidepool/Duration.hs",
+        "Tidepool.Effects.Authored": "effects/Tidepool/Effects/Authored.hs",
+        "Tidepool.Effects.Core": "effects/Tidepool/Effects/Core.hs",
+        "Tidepool.FilePath": "lib/Tidepool/FilePath.hs",
+        "Tidepool.Internal.RequestSite": "lib/Tidepool/Internal/RequestSite.hs",
+        "Tidepool.Patch": "lib/Tidepool/Patch.hs",
+        "Tidepool.Prelude": "lib/Tidepool/Prelude.hs",
+        "Tidepool.QQ.Fmt.Runtime": "lib/Tidepool/QQ/Fmt/Runtime.hs",
+        "Tidepool.Records": "lib/Tidepool/Records.hs",
+        "Tidepool.Records.Bridged": "lib/Tidepool/Records/Bridged.hs",
+        "Tidepool.Records.Stable": "lib/Tidepool/Records/Stable.hs",
+        "Tidepool.Render": "lib/Tidepool/Render.hs"
+    }
+}
+
 def declare_haskell_components():
     haskell_library(
         name = "tidepool_extract_internal",
