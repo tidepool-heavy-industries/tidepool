@@ -799,3 +799,253 @@ fn check_scope(graph: &GraphStorage, node: TypeNodeId, binders: usize, required:
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::hash_map::DefaultHasher;
+    use crate::execution_schema::{CheckedLayout, FieldLayout, StorageLayout};
+
+    fn identity(occurrence: &str, namespace: &str) -> SymbolIdentity {
+        SymbolIdentity { unit: "fixture".into(), module: "FiniteTypes".into(),
+            namespace: namespace.into(), occurrence: occurrence.into(), record_parent: None }
+    }
+    fn root(graph: &mut GraphStorage, domain: RootDomain, binders: Vec<SourceBinderFlag>, rendered: &str) -> TypeNodeId {
+        graph.add_node(TypeNode::Root { domain, binders, rendered: rendered.into() })
+    }
+    fn kind(graph: &mut GraphStorage) -> TypeNodeId {
+        graph.add_node(TypeNode::Literal(TypeLiteral::Symbol("kind".into())))
+    }
+    fn publish(graph: GraphStorage, constructors: &[ConstructorDecl]) -> TypeGraph {
+        TypeGraph::validate(graph, constructors, GraphLimits::default()).unwrap()
+    }
+    fn physical(fields: Vec<RuntimeRep>) -> ConstructorDecl {
+        let target = crate::execution_schema::testing::target();
+        let storage = StorageLayout::for_reps(&target, &fields).unwrap();
+        ConstructorDecl {
+            identity: identity("ReplyValue", "data"), family: identity("Reply", "type"),
+            host_id: crate::DataConId(77), result_rep: RuntimeRep::LiftedRef,
+            strict_fields: vec![false; fields.len()],
+            layout: CheckedLayout {
+                fields: storage.fields().iter().map(|field| FieldLayout { rep: field.rep(), offset: field.offset() }).collect(),
+                alignment: storage.alignment(), payload_size: storage.payload_size(),
+                root_mask: fields.iter().map(|rep| matches!(rep, RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef)).collect(),
+            },
+            field_reps: fields, tag: 1, family_size: 1,
+        }
+    }
+
+    /// The template calls its own declaration with its formal parameter. The
+    /// same bound expression occupies two field slots; neither recursion nor
+    /// sharing allocates a graph of instantiated types.
+    fn recursive_graph(constructor: ConstructorId, inventory: &[ConstructorDecl], extra: bool)
+        -> (GraphStorage, TypeNodeId, TypeNodeId)
+    {
+        let mut graph = GraphStorage::new();
+        if extra { kind(&mut graph); }
+        let root = root(&mut graph, RootDomain::Closed, vec![], "Reply 0");
+        let declaration = graph.add_node(TypeNode::Declaration {
+            identity: identity("Reply", "type"), parameters: vec![ParameterFlag::NamedRequired],
+            form: DeclarationForm::Data, restriction: SyntaxRestriction::None,
+        });
+        let template = graph.add_node(TypeNode::ConstructorTemplate { constructor,
+            identity: inventory[constructor.0 as usize].identity.clone() });
+        let kind = kind(&mut graph);
+        let bound = graph.add_node(TypeNode::Bound(0));
+        let field = graph.add_node(TypeNode::NominalApplication);
+        let body = graph.add_node(TypeNode::NominalApplication);
+        let argument = graph.add_node(TypeNode::Literal(TypeLiteral::Natural("0".into())));
+        graph.add_edge(root, body, TypeEdge::Body);
+        graph.add_edge(declaration, kind, TypeEdge::BinderKind(0));
+        graph.add_edge(declaration, template, TypeEdge::Constructor(1));
+        graph.add_edge(template, field, TypeEdge::Field { ordinal: 0, source_rep: RuntimeRep::LiftedRef });
+        graph.add_edge(template, field, TypeEdge::Field { ordinal: 1, source_rep: RuntimeRep::LiftedRef });
+        graph.add_edge(field, declaration, TypeEdge::Head);
+        graph.add_edge(field, bound, TypeEdge::Argument(0));
+        graph.add_edge(body, declaration, TypeEdge::Head);
+        graph.add_edge(body, argument, TypeEdge::Argument(0));
+        (graph, root, template)
+    }
+
+    fn hash(graph: &TypeGraph) -> u64 {
+        let mut hash = DefaultHasher::new(); graph.hash(&mut hash); hash.finish()
+    }
+    fn evidence(graph: &TypeGraph) -> Vec<u8> {
+        let mut bytes = Vec::new(); graph.write_evidence(|part| bytes.extend_from_slice(part)); bytes
+    }
+
+    #[test]
+    fn shared_bound_expression_is_validated_at_each_scope_boundary() {
+        let mut graph = GraphStorage::new();
+        let open = root(&mut graph, RootDomain::ConstructorScheme, vec![SourceBinderFlag::Specified], "a");
+        let kind = kind(&mut graph);
+        let bound = graph.add_node(TypeNode::Bound(0));
+        graph.add_edge(open, kind, TypeEdge::BinderKind(0));
+        graph.add_edge(open, bound, TypeEdge::Body);
+        publish(graph.clone(), &[]);
+        let closed = root(&mut graph, RootDomain::Closed, vec![], "a");
+        graph.add_edge(closed, bound, TypeEdge::Body);
+        assert_eq!(TypeGraph::validate(graph, &[], GraphLimits::default()), Err(TypeGraphError::InvalidScope(closed.index())));
+    }
+
+    #[test]
+    fn binder_kinds_reject_forward_references_and_forall_extends_only_body() {
+        let mut graph = GraphStorage::new();
+        let root = root(&mut graph, RootDomain::ConstructorScheme,
+            vec![SourceBinderFlag::Specified, SourceBinderFlag::Inferred], "a");
+        let kind = kind(&mut graph);
+        let bound = graph.add_node(TypeNode::Bound(0));
+        graph.add_edge(root, kind, TypeEdge::BinderKind(0));
+        graph.add_edge(root, bound, TypeEdge::BinderKind(1));
+        graph.add_edge(root, bound, TypeEdge::Body);
+        publish(graph.clone(), &[]);
+        let edge = graph.edges(root).find(|edge| *edge.weight() == TypeEdge::BinderKind(0)).unwrap().id();
+        graph.remove_edge(edge);
+        graph.add_edge(root, bound, TypeEdge::BinderKind(0));
+        assert_eq!(TypeGraph::validate(graph, &[], GraphLimits::default()), Err(TypeGraphError::InvalidScope(root.index())));
+
+        let mut graph = GraphStorage::new();
+        let root = self::root(&mut graph, RootDomain::Closed, vec![], "forall a. a");
+        let forall = graph.add_node(TypeNode::ForAll(ForAllFlag::Specified));
+        let kind = self::kind(&mut graph);
+        let bound = graph.add_node(TypeNode::Bound(0));
+        graph.add_edge(root, forall, TypeEdge::Body);
+        graph.add_edge(forall, kind, TypeEdge::Kind);
+        graph.add_edge(forall, bound, TypeEdge::Body);
+        publish(graph.clone(), &[]);
+        let edge = graph.edges(forall).find(|edge| *edge.weight() == TypeEdge::Kind).unwrap().id();
+        graph.remove_edge(edge); graph.add_edge(forall, bound, TypeEdge::Kind);
+        assert_eq!(TypeGraph::validate(graph, &[], GraphLimits::default()), Err(TypeGraphError::InvalidScope(root.index())));
+    }
+
+    #[test]
+    fn newtype_rhs_uses_eta_prefix_instead_of_full_parameter_telescope() {
+        let mut graph = GraphStorage::new();
+        let declaration = graph.add_node(TypeNode::Declaration { identity: identity("Eta", "type"),
+            parameters: vec![ParameterFlag::NamedRequired, ParameterFlag::AnonymousVisible],
+            form: DeclarationForm::Newtype { eta_arity: 1 }, restriction: SyntaxRestriction::None });
+        let kind = kind(&mut graph);
+        let prefix = graph.add_node(TypeNode::Bound(0));
+        graph.add_edge(declaration, kind, TypeEdge::BinderKind(0));
+        graph.add_edge(declaration, kind, TypeEdge::BinderKind(1));
+        graph.add_edge(declaration, prefix, TypeEdge::AliasRhs);
+        publish(graph.clone(), &[]);
+        *graph.node_weight_mut(prefix).unwrap() = TypeNode::Bound(1);
+        assert_eq!(TypeGraph::validate(graph, &[], GraphLimits::default()), Err(TypeGraphError::InvalidScope(declaration.index())));
+    }
+
+    #[test]
+    fn recursive_templates_are_finite_but_expression_cycles_are_rejected() {
+        let inventory = vec![physical(vec![RuntimeRep::LiftedRef; 2])];
+        let (mut graph, root, template) = recursive_graph(ConstructorId(0), &inventory, false);
+        let published = publish(graph.clone(), &inventory);
+        assert!(published.rooted_identity_eq(root, &published, root, &mut TypeWorkBudget::new(10_000)).unwrap());
+        assert_eq!(published.graph().node_count(), graph.node_count());
+        let field = graph.edges(template).next().unwrap().target();
+        let edge = graph.edges(field).find(|edge| matches!(edge.weight(), TypeEdge::Argument(_))).unwrap().id();
+        graph.remove_edge(edge); graph.add_edge(field, field, TypeEdge::Argument(0));
+        assert_eq!(TypeGraph::validate(graph, &inventory, GraphLimits::default()), Err(TypeGraphError::ExpressionCycle));
+    }
+
+    #[test]
+    fn slots_ignore_field_rep_but_preserve_parallel_argument_ordinals() {
+        let inventory = vec![physical(vec![RuntimeRep::LiftedRef; 2])];
+        let (mut graph, _, template) = recursive_graph(ConstructorId(0), &inventory, false);
+        let field = graph.edges(template).next().unwrap().target();
+        graph.add_edge(template, field, TypeEdge::Field { ordinal: 0, source_rep: RuntimeRep::Int(64) });
+        assert_eq!(TypeGraph::validate(graph, &inventory, GraphLimits::default()), Err(TypeGraphError::InvalidCardinality(template.index())));
+
+        let mut graph = GraphStorage::new();
+        let root = root(&mut graph, RootDomain::Closed, vec![], "Pair 0 0");
+        let declaration = graph.add_node(TypeNode::Declaration { identity: identity("Pair", "type"),
+            parameters: vec![ParameterFlag::NamedRequired; 2], form: DeclarationForm::Opaque {
+                head_kind: NominalHeadKind::Constructor, reason: "fixture".into() }, restriction: SyntaxRestriction::None });
+        let kind = kind(&mut graph);
+        graph.add_edge(declaration, kind, TypeEdge::BinderKind(0));
+        graph.add_edge(declaration, kind, TypeEdge::BinderKind(1));
+        let application = graph.add_node(TypeNode::NominalApplication);
+        let argument = graph.add_node(TypeNode::Literal(TypeLiteral::Natural("0".into())));
+        graph.add_edge(root, application, TypeEdge::Body);
+        graph.add_edge(application, declaration, TypeEdge::Head);
+        graph.add_edge(application, argument, TypeEdge::Argument(0));
+        graph.add_edge(application, argument, TypeEdge::Argument(1));
+        let graph = publish(graph, &[]);
+        assert_eq!(graph.ordered_edges(application).map(|edge| *edge.weight()).collect::<Vec<_>>(),
+            vec![TypeEdge::Head, TypeEdge::Argument(0), TypeEdge::Argument(1)]);
+        assert_eq!(graph.graph().edges_connecting(application, argument).count(), 2);
+    }
+
+    #[test]
+    fn physical_pairing_and_nominal_declaration_collisions_refuse() {
+        let inventory = vec![physical(vec![RuntimeRep::LiftedRef; 2])];
+        let (graph, _, template) = recursive_graph(ConstructorId(0), &inventory, false);
+        let graph = publish(graph, &inventory);
+        let mut changed = inventory.clone(); changed[0].field_reps[0] = RuntimeRep::Int(64);
+        assert_eq!(graph.check_constructor_pairing(&changed), Err(TypeGraphError::InvalidConstructor(template.index())));
+        let mut changed = inventory.clone(); changed[0].family = identity("Other", "type");
+        assert_eq!(graph.check_constructor_pairing(&changed), Err(TypeGraphError::InvalidConstructor(template.index())));
+        let mut input = graph.graph().clone();
+        input.add_node(TypeNode::Declaration { identity: identity("Reply", "type"), parameters: vec![],
+            form: DeclarationForm::Opaque { head_kind: NominalHeadKind::Constructor, reason: "different".into() },
+            restriction: SyntaxRestriction::None });
+        assert!(matches!(TypeGraph::validate(input, &inventory, GraphLimits::default()), Err(TypeGraphError::DuplicateDeclaration(_))));
+    }
+
+    #[test]
+    fn reachable_identity_remaps_storage_and_physical_ids_but_evidence_keeps_tables() {
+        let physical = physical(vec![RuntimeRep::LiftedRef; 2]);
+        let first_inventory = vec![physical.clone()];
+        let (first, first_root, _) = recursive_graph(ConstructorId(0), &first_inventory, false);
+        let mut unrelated = physical.clone(); unrelated.identity = identity("Unrelated", "data");
+        unrelated.family = identity("UnrelatedFamily", "type"); unrelated.host_id = crate::DataConId(78);
+        let second_inventory = vec![unrelated, physical];
+        let (second, second_root, _) = recursive_graph(ConstructorId(1), &second_inventory, true);
+        let first = publish(first, &first_inventory); let second = publish(second, &second_inventory);
+        assert!(first.rooted_identity_eq(first_root, &second, second_root, &mut TypeWorkBudget::new(10_000)).unwrap());
+        assert!(!first.evidence_eq(&second)); assert_ne!(evidence(&first), evidence(&second)); assert_ne!(first, second);
+    }
+
+    #[test]
+    fn diagnostics_only_change_exact_content_and_not_scoped_evidence() {
+        let mut first = GraphStorage::new();
+        let root = root(&mut first, RootDomain::Closed, vec![], "F Int");
+        let declaration = first.add_node(TypeNode::Declaration { identity: identity("F", "type"), parameters: vec![],
+            form: DeclarationForm::Opaque { head_kind: NominalHeadKind::Family, reason: "type family".into() },
+            restriction: SyntaxRestriction::None });
+        let body = first.add_node(TypeNode::NominalApplication);
+        first.add_edge(root, body, TypeEdge::Body); first.add_edge(body, declaration, TypeEdge::Head);
+        let mut second = first.clone();
+        if let TypeNode::Root { rendered, .. } = second.node_weight_mut(root).unwrap() { *rendered = "F result1".into(); }
+        if let TypeNode::Declaration { form: DeclarationForm::Opaque { reason, .. }, .. } = second.node_weight_mut(declaration).unwrap() {
+            *reason = "different diagnostic".into();
+        }
+        let first = publish(first, &[]); let second = publish(second, &[]);
+        assert!(first.evidence_eq(&second)); assert_eq!(evidence(&first), evidence(&second));
+        assert_ne!(first, second); assert_ne!(hash(&first), hash(&second));
+        assert!(first.rooted_identity_eq(root, &second, root, &mut TypeWorkBudget::new(10_000)).unwrap());
+        let mut changed = second.graph().clone();
+        if let TypeNode::Declaration { form: DeclarationForm::Opaque { head_kind, .. }, .. } = changed.node_weight_mut(declaration).unwrap() {
+            *head_kind = NominalHeadKind::Constructor;
+        }
+        let changed = publish(changed, &[]);
+        assert!(!second.evidence_eq(&changed));
+        assert!(!second.rooted_identity_eq(root, &changed, root, &mut TypeWorkBudget::new(10_000)).unwrap());
+    }
+
+    #[test]
+    fn freeze_normalizes_adjacency_once_and_validation_work_is_returned() {
+        let inventory = vec![physical(vec![RuntimeRep::LiftedRef; 2])];
+        let (first, _, _) = recursive_graph(ConstructorId(0), &inventory, false);
+        let mut second = first.clone();
+        let edges: Vec<_> = second.edge_references().map(|edge| (edge.source(), edge.target(), *edge.weight())).collect();
+        second.clear_edges(); for (source, target, role) in edges.into_iter().rev() { second.add_edge(source, target, role); }
+        let (first, work) = TypeGraph::validate_with_work(first, &inventory, GraphLimits::default()).unwrap();
+        let second = publish(second, &inventory);
+        assert_eq!(first, second); assert_eq!(hash(&first), hash(&second)); assert!(work > first.graph().node_count() + first.graph().edge_count());
+        let limits = GraphLimits { max_work: work - 1, ..GraphLimits::default() };
+        assert_eq!(TypeGraph::validate(first.graph().clone(), &inventory, limits), Err(TypeGraphError::Limit("work")));
+        let mut budget = TypeWorkBudget::new(0);
+        let root = first.graph().node_indices().find(|node| matches!(first.graph()[*node], TypeNode::Root { .. })).unwrap();
+        assert_eq!(first.rooted_identity_eq(root, &first, root, &mut budget), Err(TypeGraphError::TraversalWork));
+    }
+}
