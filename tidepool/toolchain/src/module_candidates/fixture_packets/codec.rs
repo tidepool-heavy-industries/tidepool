@@ -140,80 +140,196 @@ fn candidate_fixture(case: CandidateCase) -> Value {
     candidate_manifest_value(symbols, globals, rows, vec![], vec![], &"a".repeat(64))
 }
 
-fn packet_request(root: &Path) -> (String, Vec<Value>) {
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CodecOperation {
+    CandidateEmpty,
+    CandidateStructuralGroup,
+    CandidateCompact,
+    CandidateExpandedWithinBound,
+    ReceiptFacts,
+    CertificateFacts,
+    InputFacts,
+    CanonicalModule,
+    Purpose,
+    RequestTypes,
+    ExpressionPurpose,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum PurposeCase {
+    Cell,
+    Item,
+    Display,
+    Inspection,
+    HostActivationInput,
+    HostInputCheck,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum HelperRecipe {
+    None,
+    ActorReply,
+}
+#[derive(Deserialize)]
+struct NativeBytes(#[serde(deserialize_with = "deserialize_bytes")] Vec<u8>);
+fn deserialize_bytes<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<u8>, D::Error> {
+    struct Bytes;
+    impl<'de> serde::de::Visitor<'de> for Bytes {
+        type Value = Vec<u8>;
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("original owner-encoded bytes")
+        }
+        fn visit_bytes<E: serde::de::Error>(self, bytes: &[u8]) -> Result<Self::Value, E> {
+            Ok(bytes.to_vec())
+        }
+        fn visit_byte_buf<E: serde::de::Error>(self, bytes: Vec<u8>) -> Result<Self::Value, E> {
+            Ok(bytes)
+        }
+    }
+    deserializer.deserialize_byte_buf(Bytes)
+}
+struct CanonicalInputs {
+    unit: String,
+    module: String,
+    source: PathBuf,
+    interface: PathBuf,
+    packages: PathBuf,
+    core: PathBuf,
+    home_units: Vec<String>,
+}
+enum CodecRequest {
+    Candidate(CandidateCase),
+    ReceiptFacts(PathBuf),
+    CertificateFacts(PathBuf),
+    InputFacts(PathBuf, PathBuf),
+    CanonicalModule(CanonicalInputs),
+    Purpose(PurposeCase, Vec<PathBuf>, Option<NativeBytes>),
+    RequestTypes(NativeBytes, HelperRecipe, Option<NativeBytes>),
+    ExpressionPurpose(Vec<PathBuf>, NativeBytes),
+}
+fn decode_arguments<T: serde::de::DeserializeOwned>(value: &Value, fields: usize) -> T {
+    assert_eq!(
+        value.as_array().expect("codec argument tuple").len(),
+        fields,
+        "codec argument arity"
+    );
+    value.deserialized().expect("typed codec arguments")
+}
+fn packet_request(root: &Path) -> CodecRequest {
     assert!(root.is_absolute(), "codec request root must be absolute");
-    let path = root.join("request.cbor");
-    let bytes = bounded_bytes(&path, MANIFEST_LIMIT);
-    assert!(bytes.len() <= MANIFEST_LIMIT, "codec request bound");
+    let bytes = bounded_bytes(&root.join("request.cbor"), MANIFEST_LIMIT);
     let mut cursor = std::io::Cursor::new(&bytes);
-    let request: Value = ciborium::de::from_reader_with_recursion_limit(&mut cursor, 32)
+    let value: Value = ciborium::de::from_reader_with_recursion_limit(&mut cursor, 32)
         .expect("codec request CBOR");
     assert_eq!(
         cursor.position(),
         bytes.len() as u64,
         "codec request trailing bytes"
     );
-    let request = request.as_array().expect("codec request tuple");
-    assert_eq!(request.len(), 3, "codec request fields");
     assert_eq!(
-        request[0].as_text(),
-        Some("TPCODECFIXTURE1"),
-        "codec request version"
+        value.as_array().expect("codec request tuple").len(),
+        3,
+        "codec request fields"
     );
-    (
-        request[1].as_text().expect("codec operation").into(),
-        request[2].as_array().expect("codec arguments").clone(),
-    )
+    let (version, operation, arguments): (String, CodecOperation, Value) =
+        value.deserialized().expect("typed codec request");
+    assert_eq!(version, "TPCODECFIXTURE1", "codec request version");
+    match operation {
+        CodecOperation::CandidateEmpty
+        | CodecOperation::CandidateStructuralGroup
+        | CodecOperation::CandidateCompact
+        | CodecOperation::CandidateExpandedWithinBound => {
+            let _: [String; 0] = decode_arguments(&arguments, 0);
+            CodecRequest::Candidate(match operation {
+                CodecOperation::CandidateEmpty => CandidateCase::Empty,
+                CodecOperation::CandidateStructuralGroup => CandidateCase::StructuralGroup,
+                CodecOperation::CandidateCompact => CandidateCase::Compact,
+                _ => CandidateCase::ExpandedWithinBound,
+            })
+        }
+        CodecOperation::ReceiptFacts => {
+            let [path] = decode_arguments(&arguments, 1);
+            CodecRequest::ReceiptFacts(path)
+        }
+        CodecOperation::CertificateFacts => {
+            let [path] = decode_arguments(&arguments, 1);
+            CodecRequest::CertificateFacts(path)
+        }
+        CodecOperation::InputFacts => {
+            let (proof, evidence) = decode_arguments(&arguments, 2);
+            CodecRequest::InputFacts(proof, evidence)
+        }
+        CodecOperation::CanonicalModule => {
+            let (unit, module, source, interface, packages, core, home_units) =
+                decode_arguments(&arguments, 7);
+            CodecRequest::CanonicalModule(CanonicalInputs {
+                unit,
+                module,
+                source,
+                interface,
+                packages,
+                core,
+                home_units,
+            })
+        }
+        CodecOperation::Purpose => {
+            let (case, includes, signature) = decode_arguments(&arguments, 3);
+            CodecRequest::Purpose(case, includes, signature)
+        }
+        CodecOperation::RequestTypes => {
+            let (signatures, recipe, inner) = decode_arguments(&arguments, 3);
+            CodecRequest::RequestTypes(signatures, recipe, inner)
+        }
+        CodecOperation::ExpressionPurpose => {
+            let (includes, plan) = decode_arguments(&arguments, 2);
+            CodecRequest::ExpressionPurpose(includes, plan)
+        }
+    }
 }
 
 #[test]
 #[ignore = "explicit bounded codec request from the source-boot suite"]
 fn source_boot_codec_packet_producer() {
-    let Some(root) = std::env::var_os("TIDEPOOL_CANDIDATE_FIXTURE_PACKET") else {
-        panic!("codec producer requires its private request directory");
-    };
-    let root = PathBuf::from(root);
-    let (operation, arguments) = packet_request(&root);
-    match operation.as_str() {
-        "candidate_empty"
-        | "candidate_structural_group"
-        | "candidate_compact"
-        | "candidate_expanded_within_bound" => {
-            assert!(
-                arguments.is_empty(),
-                "candidate scenario takes no arguments"
-            );
-            let case = match operation.as_str() {
-                "candidate_empty" => CandidateCase::Empty,
-                "candidate_structural_group" => CandidateCase::StructuralGroup,
-                "candidate_compact" => CandidateCase::Compact,
-                _ => CandidateCase::ExpandedWithinBound,
-            };
+    let root = PathBuf::from(
+        std::env::var_os("TIDEPOOL_CANDIDATE_FIXTURE_PACKET")
+            .expect("codec producer private request directory"),
+    );
+    match packet_request(&root) {
+        CodecRequest::Candidate(case) => {
             let mut bytes = vec![];
             ciborium::ser::into_writer(&candidate_fixture(case), &mut bytes).unwrap();
             assert!(bytes.len() <= MANIFEST_LIMIT, "candidate packet bound");
             tidepool_atomic_write::write_best_effort(&root.join("module-candidates.cbor"), &bytes)
                 .unwrap();
         }
-        "receipt_facts" => receipt_facts(&root, &arguments),
-        "certificate_facts" => certificate_facts(&root, &arguments),
-        "input_facts" => input_facts(&root, &arguments),
-        "canonical_module" => canonical_module(&root, &arguments),
-        "purpose" => purpose(&root, &arguments),
-        "request_types" => request_types(&root, &arguments),
-        "expression_purpose" => expression_purpose(&root, &arguments),
-        _ => panic!("unsupported codec operation: {operation}"),
+        CodecRequest::ReceiptFacts(path) => receipt_facts(&root, absolute_path(&path)),
+        CodecRequest::CertificateFacts(path) => certificate_facts(&root, absolute_path(&path)),
+        CodecRequest::InputFacts(proof, evidence) => {
+            input_facts(&root, absolute_path(&proof), absolute_path(&evidence))
+        }
+        CodecRequest::CanonicalModule(inputs) => canonical_module(&root, inputs),
+        CodecRequest::Purpose(case, includes, signature) => {
+            purpose(&root, case, &includes, signature)
+        }
+        CodecRequest::RequestTypes(signatures, recipe, inner) => {
+            request_types(&root, signatures, recipe, inner)
+        }
+        CodecRequest::ExpressionPurpose(includes, plan) => {
+            expression_purpose(&root, &includes, plan)
+        }
     }
 }
-
-fn argument_path(value: &Value) -> PathBuf {
-    let path = PathBuf::from(value.as_text().expect("codec path argument"));
+fn absolute_path(path: &Path) -> &Path {
     assert!(path.is_absolute(), "codec input path must be absolute");
     path
 }
+
 fn bounded_bytes(path: &Path, limit: usize) -> Vec<u8> {
     let mut bytes = Vec::new();
-    fs::File::open(path)
+    fs::File::open(absolute_path(path))
         .expect("codec input")
         .take((limit + 1) as u64)
         .read_to_end(&mut bytes)
@@ -251,11 +367,9 @@ struct ReceiptFacts {
     cache_safe: bool,
     source_selected: Vec<OwnerFact>,
 }
-fn receipt_facts(root: &Path, arguments: &[Value]) {
-    assert_eq!(arguments.len(), 1, "receipt facts arguments");
-    let receipt =
-        crate::declaration_context::read_exact_compilation_receipt(&argument_path(&arguments[0]))
-            .expect("production exact receipt decoder");
+fn receipt_facts(root: &Path, path: &Path) {
+    let receipt = crate::declaration_context::read_exact_compilation_receipt(path)
+        .expect("production exact receipt decoder");
     write_facts(
         root,
         "receipt_facts",
@@ -398,12 +512,10 @@ struct CertificateFacts {
     modules: Vec<ModuleFact>,
     targets: Vec<TargetFact>,
 }
-fn certificate_facts(root: &Path, arguments: &[Value]) {
-    assert_eq!(arguments.len(), 1, "certificate facts arguments");
-    let path = argument_path(&arguments[0]);
+fn certificate_facts(root: &Path, path: &Path) {
     let (receipt, inventory, references, global_sha256) =
         crate::certified_products::fixture_decoded_receipt(
-            &bounded_bytes(&path, MANIFEST_LIMIT),
+            &bounded_bytes(path, MANIFEST_LIMIT),
             path.parent(),
         )
         .expect("production product receipt decoder");
@@ -473,18 +585,14 @@ enum InputFacts {
         body_sha256: String,
     },
 }
-fn input_facts(root: &Path, arguments: &[Value]) {
+fn input_facts(root: &Path, proof: &Path, evidence_path: &Path) {
     use crate::compile_input::{CompileInputError, ValidatedInputPackages};
-    assert_eq!(arguments.len(), 2, "input facts arguments");
-    let evidence_bytes = bounded_bytes(&argument_path(&arguments[1]), MANIFEST_LIMIT);
+    let evidence_bytes = bounded_bytes(evidence_path, MANIFEST_LIMIT);
     let evidence: DependencyEvidence =
         serde_json::from_slice(&evidence_bytes).expect("typed dependency evidence");
-    let (result, body_sha256) = ValidatedInputPackages::fixture_read_observed(
-        &argument_path(&arguments[0]),
-        &evidence_bytes,
-        &evidence,
-    )
-    .expect("production compiler input packet decoder");
+    let (result, body_sha256) =
+        ValidatedInputPackages::fixture_read_observed(proof, &evidence_bytes, &evidence)
+            .expect("production compiler input packet decoder");
     let body_sha256 = hex(&body_sha256);
     let facts = match result {
         Ok(proof) => {
@@ -523,24 +631,25 @@ fn input_facts(root: &Path, arguments: &[Value]) {
     write_facts(root, "input_facts", &facts);
 }
 
-fn canonical_module(root: &Path, arguments: &[Value]) {
+fn canonical_module(root: &Path, inputs: CanonicalInputs) {
     use crate::certified_products::{
         CapturedArtifactDescriptor, FinalizationEnvelope, FinalizedModuleReceipt,
     };
-    assert_eq!(arguments.len(), 7, "canonical codec arguments");
-    let unit = arguments[0].as_text().expect("canonical unit");
-    let module = arguments[1].as_text().expect("canonical module");
+    let CanonicalInputs {
+        unit,
+        module,
+        source,
+        interface,
+        packages,
+        core,
+        home_units,
+    } = inputs;
+    let unit = unit.as_str();
+    let module = module.as_str();
     assert!(!unit.is_empty() && !module.is_empty(), "canonical owner");
-    let source = argument_path(&arguments[2]);
-    let interface = argument_path(&arguments[3]);
-    let packages = bounded_bytes(&argument_path(&arguments[4]), MANIFEST_LIMIT);
-    let core = bounded_bytes(&argument_path(&arguments[5]), 8 * MANIFEST_LIMIT);
-    let home_units = arguments[6]
-        .as_array()
-        .expect("canonical home units")
-        .iter()
-        .map(|value| value.as_text().expect("home unit").to_owned())
-        .collect::<BTreeSet<_>>();
+    let packages = bounded_bytes(&packages, MANIFEST_LIMIT);
+    let core = bounded_bytes(&core, 8 * MANIFEST_LIMIT);
+    let home_units = home_units.into_iter().collect::<BTreeSet<_>>();
     assert!(
         !home_units.is_empty()
             && home_units.len() <= 128
@@ -627,30 +736,18 @@ fn canonical_module(root: &Path, arguments: &[Value]) {
     tidepool_atomic_write::write_best_effort(&root.join("module-candidates.cbor"), &bytes).unwrap();
 }
 
-fn purpose(root: &Path, arguments: &[Value]) {
+fn purpose(root: &Path, case: PurposeCase, includes: &[PathBuf], signature: Option<NativeBytes>) {
     use crate::artifacts::{checked_search_authorization, CheckedPurpose};
     use crate::checked_cell::{
         encode_display_authorization, encode_item_authorization, CheckedCellSpecification,
         CheckedExpressionPresentation, CheckedItemKind, DisplayAuthorization, ItemAuthorization,
     };
-    assert_eq!(arguments.len(), 3, "purpose codec arguments");
-    let case = arguments[0].as_text().expect("purpose scenario");
-    let includes = arguments[1]
-        .as_array()
-        .expect("purpose includes")
-        .iter()
-        .map(argument_path)
-        .collect::<Vec<_>>();
-    let signature = match &arguments[2] {
-        Value::Null => None,
-        Value::Bytes(bytes) => Some(
-            crate::checked_cell::fixture_checked_signature(bytes).expect("owner signature decoder"),
-        ),
-        _ => panic!("purpose signature must be original compiler bytes or null"),
-    };
+    let signature = signature.map(|bytes| {
+        crate::checked_cell::fixture_checked_signature(&bytes.0).expect("owner signature decoder")
+    });
     let (stage, body) = match case {
-        "cell" | "host-input-check" => {
-            let host = case == "host-input-check";
+        PurposeCase::Cell | PurposeCase::HostInputCheck => {
+            let host = case == PurposeCase::HostInputCheck;
             assert_eq!(
                 signature.is_some(),
                 host,
@@ -686,8 +783,8 @@ fn purpose(root: &Path, arguments: &[Value]) {
                 .unwrap(),
             )
         }
-        "item" | "host-activation-input" => {
-            let host = case == "host-activation-input";
+        PurposeCase::Item | PurposeCase::HostActivationInput => {
+            let host = case == PurposeCase::HostActivationInput;
             assert_eq!(
                 signature.is_some(),
                 host,
@@ -733,7 +830,7 @@ fn purpose(root: &Path, arguments: &[Value]) {
                 body,
             )
         }
-        "display" => {
+        PurposeCase::Display => {
             assert!(signature.is_none(), "display has no input signature");
             (
                 CheckedPurpose::Display,
@@ -758,51 +855,46 @@ fn purpose(root: &Path, arguments: &[Value]) {
                 }),
             )
         }
-        "inspection" => {
+        PurposeCase::Inspection => {
             assert!(signature.is_none(), "inspection has no input signature");
             (
                 CheckedPurpose::Inspection,
                 crate::artifacts::fixture_inspection_authorization(),
             )
         }
-        _ => panic!("unsupported purpose codec scenario"),
     };
     let value =
-        checked_search_authorization(stage, body, &includes).expect("purpose search encoder");
+        checked_search_authorization(stage, body, includes).expect("purpose search encoder");
     let mut bytes = vec![];
     ciborium::ser::into_writer(&value, &mut bytes).unwrap();
     tidepool_atomic_write::write_best_effort(&root.join("purpose.cbor"), &bytes).unwrap();
 }
 
-fn request_types(root: &Path, arguments: &[Value]) {
+fn request_types(
+    root: &Path,
+    bytes: NativeBytes,
+    recipe: HelperRecipe,
+    inner: Option<NativeBytes>,
+) {
     use crate::declaration_context::{encode_request_authorization, RequestHelperRecipe};
-    assert_eq!(arguments.len(), 3, "request type codec arguments");
-    let bytes = arguments[0]
-        .as_bytes()
-        .expect("original request signature bytes");
-    let signatures = crate::checked_cell::RequestTypeSignatures::from_bytes(bytes)
+    let signatures = crate::checked_cell::RequestTypeSignatures::from_bytes(&bytes.0)
         .expect("owner request signature decoder");
-    let recipe = match arguments[1].as_text().expect("request helper recipe") {
-        "none" => RequestHelperRecipe::None,
-        "actor-reply" => RequestHelperRecipe::ActorReply,
-        _ => panic!("unknown request helper recipe"),
+    let recipe = match recipe {
+        HelperRecipe::None => RequestHelperRecipe::None,
+        HelperRecipe::ActorReply => RequestHelperRecipe::ActorReply,
     };
-    let purpose = match &arguments[2] {
-        Value::Null => None,
-        Value::Bytes(bytes) => {
-            assert!(bytes.len() <= MANIFEST_LIMIT, "inner purpose bound");
-            let mut cursor = std::io::Cursor::new(bytes);
-            let value = ciborium::de::from_reader_with_recursion_limit(&mut cursor, 32)
-                .expect("inner owner purpose");
-            assert_eq!(
-                cursor.position(),
-                bytes.len() as u64,
-                "inner purpose trailing bytes"
-            );
-            Some(value)
-        }
-        _ => panic!("inner owner purpose bytes or null required"),
-    };
+    let purpose = inner.map(|bytes| {
+        assert!(bytes.0.len() <= MANIFEST_LIMIT, "inner purpose bound");
+        let mut cursor = std::io::Cursor::new(&bytes.0);
+        let value = ciborium::de::from_reader_with_recursion_limit(&mut cursor, 32)
+            .expect("inner owner purpose");
+        assert_eq!(
+            cursor.position(),
+            bytes.0.len() as u64,
+            "inner purpose trailing bytes"
+        );
+        value
+    });
     let mut bytes = vec![];
     ciborium::ser::into_writer(
         &encode_request_authorization(&signatures, recipe, purpose),
@@ -812,22 +904,11 @@ fn request_types(root: &Path, arguments: &[Value]) {
     tidepool_atomic_write::write_best_effort(&root.join("purpose.cbor"), &bytes).unwrap();
 }
 
-fn expression_purpose(root: &Path, arguments: &[Value]) {
+fn expression_purpose(root: &Path, includes: &[PathBuf], plan: NativeBytes) {
     use crate::artifacts::{checked_search_authorization, CheckedPurpose};
     use crate::checked_cell::{encode_item_authorization, CheckedItemKind, ItemAuthorization};
-    assert_eq!(arguments.len(), 2, "expression purpose codec arguments");
-    let includes = arguments[0]
-        .as_array()
-        .expect("expression includes")
-        .iter()
-        .map(argument_path)
-        .collect::<Vec<_>>();
-    let expression = crate::checked_cell::fixture_expression_plan(
-        arguments[1]
-            .as_bytes()
-            .expect("compiler-owned expression plan bytes"),
-    )
-    .expect("owner reserved expression plan reader");
+    let expression = crate::checked_cell::fixture_expression_plan(&plan.0)
+        .expect("owner reserved expression plan reader");
     let body = encode_item_authorization(ItemAuthorization {
         admission: [0xaa; 32],
         receipt: [0xaa; 32],
@@ -848,7 +929,7 @@ fn expression_purpose(root: &Path, arguments: &[Value]) {
         value_interfaces: Value::Array(vec![]),
         template_interfaces: Value::Array(vec![]),
     });
-    let value = checked_search_authorization(CheckedPurpose::Item, body, &includes).unwrap();
+    let value = checked_search_authorization(CheckedPurpose::Item, body, includes).unwrap();
     let mut bytes = vec![];
     ciborium::ser::into_writer(&value, &mut bytes).unwrap();
     tidepool_atomic_write::write_best_effort(&root.join("purpose.cbor"), &bytes).unwrap();
