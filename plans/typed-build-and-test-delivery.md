@@ -337,6 +337,29 @@ synthetic authority or a partial validator must be repaired before acceptance;
 no additional general audit or performance campaign blocks the first qualified
 server.
 
+## Native stable support catalog
+
+Build the metadata-owned stable source snapshot through Buck, retain its exact
+ordered effects, library, actor and Jev roots, and inspect the complete cohort
+through the existing direct build-action compiler owner. Retain the original
+transaction on success or refusal. Measure admitted canonical interfaces,
+optional finalized Core and certified native products separately; source files
+and offered interfaces cannot stand in for compiler admission.
+
+If the actual cohort has canonical owners without native products, generalize
+the existing candidate and worker receipt owners with an explicit capability
+split. Accepted canonical reuse must be request-bound and worker-issued.
+Preserve original interface/Core/package/source checks and known home ownership;
+an unsupported demanded body must refuse. Hydrate genuine finalized Core before
+native demand selection without replaying the source frontend.
+
+Qualify the explicit native catalog bundle with real Root/Coding execution,
+exact accepted owner sets, no frontend replay, source shadowing/invalidation and
+wrong source/producer refusal. Keep installed-cohort Orchestrate compilation
+separate. Materialize the declared runtime tool closure, including Python,
+before freezing either native bundle. The current source-backed delivery remains
+independent until this catalog passes its matched qualification gates.
+
 ## First delivery gate
 
 Run finalized interface/Core reuse, source-free recovery, dependency/producer
