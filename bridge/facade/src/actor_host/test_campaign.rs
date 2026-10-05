@@ -897,7 +897,11 @@ pub(super) async fn next_hosted_script_round(
     })
     .await
     .unwrap_or_else(|_| {
-        panic!("production actor {actor:?} did not request its next scripted reply")
+        let retained_origins: Vec<_> = pending.iter().map(HostedScriptRound::origin).collect();
+        panic!(
+            "production actor {actor:?} did not request its next scripted reply; \
+             retained provider request origins: {retained_origins:?}"
+        )
     })
 }
 

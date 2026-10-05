@@ -7,6 +7,31 @@ use super::test_campaign::{
 use super::*;
 use harness::model::AgentPath;
 
+async fn attached_actor_path(host: &HostedTestRuntime, actor: ActorRef) -> AgentPath {
+    tokio::time::timeout(Duration::from_secs(120), async {
+        loop {
+            if let Some(binding) = host.context.binding(actor) {
+                if let Some(conversation) = binding.conversation() {
+                    assert!(binding.is_live());
+                    assert_eq!(conversation.identity(), binding.identity());
+                    assert_eq!(
+                        conversation.identity().run,
+                        runtime_namespace(&host.context.config.run_root)
+                    );
+                    assert_eq!(
+                        conversation.identity().incarnation,
+                        actor.incarnation.0.to_string()
+                    );
+                    return conversation.identity().actor.clone();
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("exact admitted actor attaches its real hosted conversation")
+}
+
 async fn wait_for_succeeded_provider_turn(host: &HostedTestRuntime, actor: ActorRef) {
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {
@@ -72,10 +97,7 @@ async fn released_checkpoint_keeps_an_admitted_childs_hosted_context() {
     .await
     .expect("actual issuer attaches through production readiness");
     let issuer_id = issuer.actor.identity();
-    let issuer_path = AgentPath(format!(
-        "/root/a{}_i{}",
-        issuer_id.id.0, issuer_id.incarnation.0
-    ));
+    let issuer_path = attached_actor_path(&host, issuer_id).await;
     next_hosted_script_round(&mut requests, &mut pending, &issuer_path)
         .await
         .call(
@@ -159,10 +181,15 @@ async fn released_checkpoint_keeps_an_admitted_childs_hosted_context() {
     .await
     .expect("retired issuer's genuine checkpoint admits an observer");
     let observer_id = observer.actor.identity();
-    let observer_path = AgentPath(format!(
-        "/root/a{}_i{}",
-        observer_id.id.0, observer_id.incarnation.0
-    ));
+    let observer_path = attached_actor_path(&host, observer_id).await;
+    assert_eq!(
+        observer_path,
+        AgentPath(format!(
+            "{}/a{}_i{}",
+            issuer_path.0, observer_id.id.0, observer_id.incarnation.0
+        )),
+        "the checkpoint child retains its issuer's hosted conversation ancestry"
+    );
     // Hold the observer's first real provider request while the root releases
     // the token and probes refusal. The observer already owns its exact custody.
     let observer_round =
