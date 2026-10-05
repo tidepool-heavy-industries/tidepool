@@ -136,7 +136,12 @@ mod tests {
     #[test]
     fn child_graphs_keep_independent_high_water_under_the_same_host_lease() {
         let run = tempfile::tempdir().unwrap();
-        let lease = Arc::new(HostIncarnationLease::claim(run.path()).unwrap());
+        let lease = Arc::new(
+            HostIncarnationLease::claim(
+                &tidepool_atomic_write::DirectoryAnchor::open_existing(run.path()).unwrap(),
+            )
+            .unwrap(),
+        );
         let mut root_library = library(run.path());
         attach(&mut root_library, run.path(), lease.clone()).unwrap();
         root_library
@@ -175,7 +180,12 @@ mod tests {
     fn child_graph_refuses_wrong_host_lease_and_another_session_directory() {
         let owned = tempfile::tempdir().unwrap();
         let foreign = tempfile::tempdir().unwrap();
-        let lease = Arc::new(HostIncarnationLease::claim(owned.path()).unwrap());
+        let lease = Arc::new(
+            HostIncarnationLease::claim(
+                &tidepool_atomic_write::DirectoryAnchor::open_existing(owned.path()).unwrap(),
+            )
+            .unwrap(),
+        );
         let id = tidepool_runtime::session::fresh_session_id();
         let child_root = foreign
             .path()
@@ -201,20 +211,36 @@ mod tests {
     #[test]
     fn root_graph_retains_the_actual_host_lease() {
         let run = tempfile::tempdir().unwrap();
-        let lease = Arc::new(HostIncarnationLease::claim(run.path()).unwrap());
+        let lease = Arc::new(
+            HostIncarnationLease::claim(
+                &tidepool_atomic_write::DirectoryAnchor::open_existing(run.path()).unwrap(),
+            )
+            .unwrap(),
+        );
         let mut library = library(run.path());
         attach(&mut library, run.path(), Arc::clone(&lease)).unwrap();
         drop(lease);
-        assert!(HostIncarnationLease::claim(run.path()).is_err());
+        assert!(HostIncarnationLease::claim(
+            &tidepool_atomic_write::DirectoryAnchor::open_existing(run.path()).unwrap()
+        )
+        .is_err());
         drop(library);
-        assert!(HostIncarnationLease::claim(run.path()).is_ok());
+        assert!(HostIncarnationLease::claim(
+            &tidepool_atomic_write::DirectoryAnchor::open_existing(run.path()).unwrap()
+        )
+        .is_ok());
     }
 
     #[test]
     fn root_graph_refuses_a_lease_for_another_run() {
         let owned = tempfile::tempdir().unwrap();
         let unrelated = tempfile::tempdir().unwrap();
-        let lease = Arc::new(HostIncarnationLease::claim(owned.path()).unwrap());
+        let lease = Arc::new(
+            HostIncarnationLease::claim(
+                &tidepool_atomic_write::DirectoryAnchor::open_existing(owned.path()).unwrap(),
+            )
+            .unwrap(),
+        );
         let mut library = library(unrelated.path());
         assert!(attach(&mut library, unrelated.path(), lease).is_err());
         assert!(!unrelated.path().join("root-declarations.json").exists());
@@ -226,7 +252,12 @@ mod tests {
         let path = run.path().join("root-declarations.json");
         let legacy = br#"{"version":1,"source_session":41,"turns":[]}"#;
         std::fs::write(&path, legacy).unwrap();
-        let lease = Arc::new(HostIncarnationLease::claim(run.path()).unwrap());
+        let lease = Arc::new(
+            HostIncarnationLease::claim(
+                &tidepool_atomic_write::DirectoryAnchor::open_existing(run.path()).unwrap(),
+            )
+            .unwrap(),
+        );
         let mut library = library(run.path());
         assert!(attach(&mut library, run.path(), lease).is_err());
         assert_eq!(std::fs::read(&path).unwrap(), legacy);
@@ -235,7 +266,12 @@ mod tests {
     fn cold_root_readback_requires_the_exact_persisted_actor_incarnation() {
         use tidepool_runtime::session::{PersistentSession, PublicManifestCommit};
         let run = tempfile::tempdir().unwrap();
-        let first_lease = Arc::new(HostIncarnationLease::claim(run.path()).unwrap());
+        let first_lease = Arc::new(
+            HostIncarnationLease::claim(
+                &tidepool_atomic_write::DirectoryAnchor::open_existing(run.path()).unwrap(),
+            )
+            .unwrap(),
+        );
         let first_owner =
             RecoveryPublicOwner::new(&root_path(), first_lease.incarnation().0).unwrap();
         let mut first_library = library(run.path());
@@ -255,7 +291,12 @@ mod tests {
         drop(first);
         drop(first_lease);
 
-        let successor_lease = Arc::new(HostIncarnationLease::claim(run.path()).unwrap());
+        let successor_lease = Arc::new(
+            HostIncarnationLease::claim(
+                &tidepool_atomic_write::DirectoryAnchor::open_existing(run.path()).unwrap(),
+            )
+            .unwrap(),
+        );
         let successor_owner =
             RecoveryPublicOwner::new(&root_path(), successor_lease.incarnation().0).unwrap();
         assert_ne!(first_owner, successor_owner);

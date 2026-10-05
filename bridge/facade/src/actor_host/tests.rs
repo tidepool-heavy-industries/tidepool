@@ -140,7 +140,11 @@ fn later_host_before_root_admission_creates_missing_journals() {
         actor_journal_mode(incarnation, &binding, &actors, &run).unwrap(),
         JournalOpenMode::Create
     );
-    let actor_journal = exomonad_actor::ActorRecoveryJournal::open(&actors).unwrap();
+    let actor_journal = exomonad_actor::ActorRecoveryJournal::open(
+        &tidepool_atomic_write::DirectoryAnchor::open_existing(directory.path()).unwrap(),
+        "actor-lifecycle.v2.jsonl",
+    )
+    .unwrap();
     assert!(actor_journal.records().is_empty());
     assert_eq!(
         run_journal_mode(incarnation, &binding, &run, true).unwrap(),
@@ -171,7 +175,11 @@ fn later_host_requires_missing_journals_when_prior_evidence_exists() {
         actor_journal_mode(incarnation, &binding, &actors, &run).unwrap(),
         JournalOpenMode::Resume
     );
-    assert!(exomonad_actor::ActorRecoveryJournal::open_existing(&actors).is_err());
+    assert!(exomonad_actor::ActorRecoveryJournal::open_existing(
+        &tidepool_atomic_write::DirectoryAnchor::open_existing(directory.path()).unwrap(),
+        "actor-lifecycle.v2.jsonl"
+    )
+    .is_err());
     assert_eq!(
         run_journal_mode(incarnation, &binding, &run, true).unwrap(),
         JournalOpenMode::Resume
@@ -1095,8 +1103,9 @@ async fn selected_context_child_reaches_its_supervisor_through_parent_agent() {
     assert_eq!(command.target(), root_id);
     let directory = tempfile::tempdir().unwrap();
     let inbox = ActorInbox::open(
-        directory.path().join("rows"),
-        directory.path().join("cursor"),
+        &tidepool_atomic_write::DirectoryAnchor::open_existing(directory.path()).unwrap(),
+        "rows",
+        "cursor",
     )
     .unwrap();
     let inbox_key = "supervisor-inbox";
@@ -1168,8 +1177,9 @@ async fn notification_admission_and_poll_preserve_typed_request_bindings() {
     // Distinct fresh hierarchies exercise both strict directory owners at
     // the authored notification/inbox seam; syscall denial is tested by node.
     let inbox = ActorInbox::open(
-        directory.path().join("rows-tree/deep/rows"),
-        directory.path().join("checkpoint-tree/deep/cursor"),
+        &tidepool_atomic_write::DirectoryAnchor::open_existing(directory.path()).unwrap(),
+        "rows-tree/deep/rows",
+        "checkpoint-tree/deep/cursor",
     )
     .unwrap();
     let inbox_key = "notification-test-inbox";
@@ -1257,8 +1267,9 @@ async fn notification_admission_and_poll_preserve_typed_request_bindings() {
     );
     let foreign_directory = tempfile::tempdir().unwrap();
     let foreign = ActorInbox::open(
-        foreign_directory.path().join("rows-tree/deep/rows"),
-        foreign_directory.path().join("checkpoint-tree/deep/cursor"),
+        &tidepool_atomic_write::DirectoryAnchor::open_existing(foreign_directory.path()).unwrap(),
+        "rows-tree/deep/rows",
+        "checkpoint-tree/deep/cursor",
     )
     .unwrap();
     assert_eq!(
@@ -1288,8 +1299,9 @@ async fn notification_admission_and_poll_preserve_typed_request_bindings() {
     );
     drop(inbox);
     let inbox = ActorInbox::open(
-        directory.path().join("rows-tree/deep/rows"),
-        directory.path().join("checkpoint-tree/deep/cursor"),
+        &tidepool_atomic_write::DirectoryAnchor::open_existing(directory.path()).unwrap(),
+        "rows-tree/deep/rows",
+        "checkpoint-tree/deep/cursor",
     )
     .unwrap();
     assert_eq!(
@@ -1405,8 +1417,9 @@ async fn notification_admission_and_poll_preserve_typed_request_bindings() {
     assert_eq!(command.target(), idle.actor.identity());
     let idle_directory = tempfile::tempdir().unwrap();
     let idle_inbox = ActorInbox::open(
-        idle_directory.path().join("rows-tree/deep/rows"),
-        idle_directory.path().join("checkpoint-tree/deep/cursor"),
+        &tidepool_atomic_write::DirectoryAnchor::open_existing(idle_directory.path()).unwrap(),
+        "rows-tree/deep/rows",
+        "checkpoint-tree/deep/cursor",
     )
     .unwrap();
     let row = idle_inbox
@@ -1470,8 +1483,9 @@ async fn held_native_delivery_preserves_typed_request_bindings() {
     assert_eq!(activation.id.actor(), child.actor.identity());
     let directory = tempfile::tempdir().unwrap();
     let inbox = ActorInbox::open(
-        directory.path().join("rows-tree/deep/rows"),
-        directory.path().join("checkpoint-tree/deep/cursor"),
+        &tidepool_atomic_write::DirectoryAnchor::open_existing(directory.path()).unwrap(),
+        "rows-tree/deep/rows",
+        "checkpoint-tree/deep/cursor",
     )
     .unwrap();
     let inbox_key = "held-delivery-inbox";
@@ -1560,8 +1574,9 @@ async fn lookup_during_held_native_delivery_returns_respond_signature() {
         .await;
     let directory = tempfile::tempdir().unwrap();
     let inbox = ActorInbox::open(
-        directory.path().join("rows-tree/deep/rows"),
-        directory.path().join("checkpoint-tree/deep/cursor"),
+        &tidepool_atomic_write::DirectoryAnchor::open_existing(directory.path()).unwrap(),
+        "rows-tree/deep/rows",
+        "checkpoint-tree/deep/cursor",
     )
     .unwrap();
     let inbox_key = "lookup-held-delivery-inbox";
@@ -1982,8 +1997,11 @@ fn worker_workspaces_are_distinct_linked_worktrees_in_one_git_namespace() {
         .commit_file("README.md", "source\n", "seed")
         .unwrap();
     let storage = tempfile::tempdir().unwrap();
-    let (manager, _bindings) =
-        actor_worktree_resources_at(storage.path(), repository.path()).unwrap();
+    let (manager, _bindings) = actor_worktree_resources_at(
+        &tidepool_atomic_write::DirectoryAnchor::open_existing(storage.path()).unwrap(),
+        repository.path(),
+    )
+    .unwrap();
     let first = manager
         .create(&WorktreeSpec::from_current_repository("first-worker"))
         .unwrap();
@@ -2680,8 +2698,9 @@ async fn haskell_actor_sends_normal_steering_without_a_native_session() {
     assert_eq!(command.message(), "e434: retain candidate; check digest");
     let directory = tempfile::tempdir().unwrap();
     let inbox = ActorInbox::open(
-        directory.path().join("rows"),
-        directory.path().join("cursor"),
+        &tidepool_atomic_write::DirectoryAnchor::open_existing(directory.path()).unwrap(),
+        "rows",
+        "cursor",
     )
     .unwrap();
     admit_notification(&command, "actor-message-inbox".into(), &inbox);

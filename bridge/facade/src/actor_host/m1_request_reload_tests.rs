@@ -270,8 +270,11 @@ async fn real_host_pins_typed_handler_across_reload_and_pending_compaction() {
             project.haskell.spec = Some("AgentSpec.agentSpec".into());
         });
         config.workspace_inputs = Some(
-            crate::exomonad::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
-                .unwrap(),
+            crate::exomonad::workspace::FrozenWorkspace::load(
+                &config.workspace,
+                &config.run_directory.path(),
+            )
+            .unwrap(),
         );
     })
     .await

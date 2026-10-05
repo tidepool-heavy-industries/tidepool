@@ -913,6 +913,7 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
             "the Codex backend is retired; historical runs cannot be resumed",
         ));
     }
+    let (state_boundary, state_relative) = durable_state_scope()?;
     let slice = configuration.launch.systemd_slice;
     let limits = slice.inspect().await?;
     if slice.current_membership().is_err() {
@@ -966,20 +967,19 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
             "tmux session {session_name:?} already exists; attach with `tmux attach -t {session_name}` or replace it with `exomonad init --recreate`"
         )));
     }
-    let session_root = exomonad_state_root(&workspace)
-        .join("sessions")
-        .join(&session_name);
-    std::fs::create_dir_all(&session_root)?;
+    let session_directory = tidepool_atomic_write::DirectoryAnchor::open_existing(&workspace)?
+        .child(Path::new(".exomonad/sessions").join(&session_name))?;
+    let session_root = session_directory.path();
     let root_binding_path = session_root.join("root-binding.json");
     preflight(&workspace).await?;
     let run_id = uuid::Uuid::new_v4().to_string();
     let log_path = exomonad_log_path(&workspace, &run_id);
     let compiler_log_path = exomonad_compiler_log_path(&workspace, &run_id);
-    let run_root = tidepool_toolchain::paths::state_dir()?
-        .join("exomonad")
-        .join("runs")
-        .join(&run_id);
-    ensure_private_run_root(&run_root)?;
+    let run_directory = state_boundary
+        .child(&state_relative)?
+        .child(Path::new("exomonad/runs").join(&run_id))?;
+    let run_root = run_directory.path().to_path_buf();
+    ensure_private_run_root(&run_directory)?;
     let compiler_socket = run_root.join("compiler.sock");
     std::os::unix::net::SocketAddr::from_pathname(&compiler_socket).map_err(|error| {
         runtime_error(format!(
@@ -1417,13 +1417,15 @@ async fn read_bounded_diagnostics(
 }
 
 pub async fn host(options: HostOptions) -> Result<(), Box<dyn std::error::Error>> {
-    ensure_private_run_root(&options.run_root)?;
+    // `init` establishes this root. An explicit host/recovery invocation must
+    // supply an existing durable root; it cannot adopt a partially created tree.
+    let run_directory = reopen_run_directory(&options.run_root)?;
     verify_run_backend(
         &options.run_root,
         &options.run_id,
         ExomonadBackend::Embedded,
     )?;
-    let host_incarnation = crate::actor_host::HostIncarnationLease::claim(&options.run_root)?;
+    let host_incarnation = crate::actor_host::HostIncarnationLease::claim(&run_directory)?;
     let generation = host_incarnation.incarnation().0;
     if generation > 1 {
         let mut status = RunStatus::new(
@@ -1452,7 +1454,7 @@ pub async fn host(options: HostOptions) -> Result<(), Box<dyn std::error::Error>
         host_generation = generation,
         "starting Exomonad actor host"
     );
-    let result = run_host(&options, generation, host_incarnation).await;
+    let result = run_host(&options, generation, host_incarnation, run_directory).await;
     let settled = settle_host_result(result, &options, generation);
     if let Err(error) = &settled {
         tracing::error!(run_id = %options.run_id, error = %error, "Exomonad actor host failed");
@@ -1466,8 +1468,8 @@ async fn run_host(
     options: &HostOptions,
     host_generation: u64,
     host_incarnation: crate::actor_host::HostIncarnationLease,
+    run_directory: tidepool_atomic_write::DirectoryAnchor,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    ensure_private_run_root(&options.run_root)?;
     if let Some(parent) = options.root_binding_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -1598,7 +1600,7 @@ async fn run_host(
             exomonad_executable: std::env::current_exe()?,
             workspace: options.workspace.clone(),
             haskell_root,
-            run_root: options.run_root.clone(),
+            run_directory,
             root_binding_path: options.run_root.join("root-binding.json"),
 
             embedded: configuration.launch.embedded,
@@ -1745,11 +1747,65 @@ fn recovery_lost_state(host_generation: u64) -> Vec<String> {
     ]
 }
 
-fn ensure_private_run_root(path: &Path) -> std::io::Result<()> {
+/// The configured XDG root or HOME must already exist and have a durable parent
+/// link. Creation below that explicit user-owned boundary never touches its
+/// infrastructure ancestors.
+pub(crate) fn durable_state_directory() -> std::io::Result<tidepool_atomic_write::DirectoryAnchor> {
+    let (directory, relative) = durable_state_scope()?;
+    directory.child(relative).map_err(std::io::Error::from)
+}
+
+fn durable_state_scope() -> std::io::Result<(tidepool_atomic_write::DirectoryAnchor, PathBuf)> {
+    let state = tidepool_toolchain::paths::state_dir()?;
+    durable_state_scope_from(
+        &state,
+        std::env::var_os("HOME").map(PathBuf::from),
+        std::env::var_os("XDG_STATE_HOME").map(PathBuf::from),
+    )
+}
+
+fn durable_state_scope_from(
+    state: &Path,
+    home: Option<PathBuf>,
+    xdg: Option<PathBuf>,
+) -> std::io::Result<(tidepool_atomic_write::DirectoryAnchor, PathBuf)> {
+    let (anchor, relative) = if let Some(root) = xdg {
+        (root, PathBuf::from("tidepool"))
+    } else {
+        let home = home.ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "durable state requires HOME or an established XDG_STATE_HOME",
+            )
+        })?;
+        let relative = state
+            .strip_prefix(&home)
+            .map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "state root is outside HOME",
+                )
+            })?
+            .to_path_buf();
+        (home, relative)
+    };
+    let directory = tidepool_atomic_write::DirectoryAnchor::open_existing(anchor)?;
+    Ok((directory, relative))
+}
+
+fn ensure_private_run_root(
+    directory: &tidepool_atomic_write::DirectoryAnchor,
+) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt as _;
 
-    std::fs::create_dir_all(path)?;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+    directory.create_dir_all("")?;
+    std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))
+}
+
+fn reopen_run_directory(root: &Path) -> std::io::Result<tidepool_atomic_write::DirectoryAnchor> {
+    let directory = tidepool_atomic_write::DirectoryAnchor::open_existing(root)?;
+    ensure_private_run_root(&directory)?;
+    Ok(directory)
 }
 
 fn settle_host_result(
@@ -2303,6 +2359,58 @@ mod tests {
         clippy::disallowed_methods,
         reason = "test: launches short-lived process fixtures (a disposable runner, git one-shots) directly"
     )]
+    #[test]
+    fn default_state_creation_uses_the_established_home_boundary() {
+        let home = tempfile::tempdir().unwrap();
+        let state = home.path().join(".local/state/tidepool");
+        let (boundary, relative) =
+            super::durable_state_scope_from(&state, Some(home.path().to_path_buf()), None).unwrap();
+        assert_eq!(boundary.path(), home.path().canonicalize().unwrap());
+        assert_eq!(relative, std::path::Path::new(".local/state/tidepool"));
+        assert!(!state.exists(), "scope admission does not create storage");
+        let directory = boundary.child(relative).unwrap();
+        assert_eq!(directory.path(), state.canonicalize().unwrap());
+        assert!(directory
+            .child("exomonad/runs/new-run")
+            .unwrap()
+            .path()
+            .is_dir());
+    }
+
+    #[test]
+    fn configured_state_boundary_must_exist_before_creation() {
+        let parent = tempfile::tempdir().unwrap();
+        let missing = parent.path().join("missing-state-root");
+        let error =
+            super::durable_state_scope_from(&missing.join("tidepool"), None, Some(missing.clone()))
+                .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert!(error.to_string().contains("missing-state-root"));
+        assert!(!missing.exists());
+    }
+
+    #[test]
+    fn configured_state_boundary_retries_from_the_same_established_root() {
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path().join("tidepool");
+        let (boundary, relative) =
+            super::durable_state_scope_from(&state, None, Some(root.path().to_path_buf())).unwrap();
+        std::fs::write(&state, "blocked by a file").unwrap();
+        assert!(boundary.child(&relative).is_err());
+        std::fs::remove_file(&state).unwrap();
+        let directory = boundary.child(&relative).unwrap();
+        assert_eq!(directory.path(), state.canonicalize().unwrap());
+        assert_eq!(boundary.path(), root.path().canonicalize().unwrap());
+    }
+
+    #[test]
+    fn custom_host_root_admission_refuses_missing_storage() {
+        let root = tempfile::tempdir().unwrap();
+        let missing = root.path().join("missing-run");
+        let error = super::reopen_run_directory(&missing).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert!(!missing.exists());
+    }
     #[test]
     fn selected_runner_survives_disposable_target_removal() {
         let directory = tempfile::tempdir().unwrap();

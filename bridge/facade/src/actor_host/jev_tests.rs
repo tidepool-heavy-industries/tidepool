@@ -287,8 +287,11 @@ fn lookup_enrichment_workspace(config: &mut ActorHostConfig) {
     }
     super::test_campaign::commit_workspace(&config.workspace);
     config.workspace_inputs = Some(
-        crate::exomonad::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
-            .expect("resolve lookup template and fixture"),
+        crate::exomonad::workspace::FrozenWorkspace::load(
+            &config.workspace,
+            &config.run_directory.path(),
+        )
+        .expect("resolve lookup template and fixture"),
     );
 }
 
@@ -525,8 +528,11 @@ pub(super) fn selected_shell_workspace(config: &mut ActorHostConfig) {
     }
     super::test_campaign::commit_workspace(&config.workspace);
     config.workspace_inputs = Some(
-        crate::exomonad::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
-            .expect("resolve the selected-shell template"),
+        crate::exomonad::workspace::FrozenWorkspace::load(
+            &config.workspace,
+            &config.run_directory.path(),
+        )
+        .expect("resolve the selected-shell template"),
     );
 }
 
@@ -1369,8 +1375,11 @@ fn pinned_jev_agent_spec_workspace(config: &mut ActorHostConfig) {
     // admission refuses a dirty source repository.
     super::test_campaign::commit_workspace(&config.workspace);
     config.workspace_inputs = Some(
-        crate::exomonad::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
-            .expect("resolve the combined pinned + authored Haskell source"),
+        crate::exomonad::workspace::FrozenWorkspace::load(
+            &config.workspace,
+            &config.run_directory.path(),
+        )
+        .expect("resolve the combined pinned + authored Haskell source"),
     );
 }
 
@@ -1611,8 +1620,11 @@ fn pinned_watchdog_workspace(config: &mut ActorHostConfig) {
     // admission refuses a dirty source repository.
     super::test_campaign::commit_workspace(&config.workspace);
     config.workspace_inputs = Some(
-        crate::exomonad::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
-            .expect("resolve the combined pinned + authored Haskell source"),
+        crate::exomonad::workspace::FrozenWorkspace::load(
+            &config.workspace,
+            &config.run_directory.path(),
+        )
+        .expect("resolve the combined pinned + authored Haskell source"),
     );
 }
 
@@ -1771,8 +1783,9 @@ async fn a_childs_watchdog_slot_escalates_to_its_parent() {
     );
     let directory = tempfile::tempdir().unwrap();
     let inbox = ActorInbox::open(
-        directory.path().join("rows"),
-        directory.path().join("cursor"),
+        &tidepool_atomic_write::DirectoryAnchor::open_existing(directory.path()).unwrap(),
+        "rows",
+        "cursor",
     )
     .unwrap();
     admit_notification(&command, "watchdog-inbox".into(), &inbox);

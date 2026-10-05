@@ -44,7 +44,7 @@ async fn issued_tool_snapshot_keeps_old_handler_after_spec_reload() {
             config.workspace_inputs = Some(
                 crate::exomonad::workspace::FrozenWorkspace::load(
                     &config.workspace,
-                    &config.run_root,
+                    &config.run_directory.path(),
                 )
                 .unwrap(),
             );

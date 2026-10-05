@@ -89,7 +89,7 @@ async fn authored_helpers_publish_explicitly_and_children_keep_their_inherited_r
             config.workspace_inputs = Some(
                 crate::exomonad::workspace::FrozenWorkspace::load(
                     &config.workspace,
-                    &config.run_root,
+                    &config.run_directory.path(),
                 )
                 .unwrap(),
             );
@@ -247,7 +247,7 @@ async fn a_child_with_stale_or_missing_checkout_tooling_uses_the_run_graph() {
             config.workspace_inputs = Some(
                 crate::exomonad::workspace::FrozenWorkspace::load(
                     &config.workspace,
-                    &config.run_root,
+                    &config.run_directory.path(),
                 )
                 .unwrap(),
             );
@@ -327,7 +327,7 @@ async fn a_child_without_its_own_source_cannot_republish_the_run() {
             config.workspace_inputs = Some(
                 crate::exomonad::workspace::FrozenWorkspace::load(
                     &config.workspace,
-                    &config.run_root,
+                    &config.run_directory.path(),
                 )
                 .unwrap(),
             );
@@ -406,7 +406,7 @@ async fn a_reloaded_module_reaches_later_cells_and_leaves_bindings_alone() {
             config.workspace_inputs = Some(
                 crate::exomonad::workspace::FrozenWorkspace::load(
                     &config.workspace,
-                    &config.run_root,
+                    &config.run_directory.path(),
                 )
                 .unwrap(),
             );
@@ -474,7 +474,7 @@ async fn reload_rejects_a_new_unconfigured_module_with_restart_guidance() {
             config.workspace_inputs = Some(
                 crate::exomonad::workspace::FrozenWorkspace::load(
                     &config.workspace,
-                    &config.run_root,
+                    &config.run_directory.path(),
                 )
                 .unwrap(),
             );
@@ -527,7 +527,7 @@ async fn a_rejected_reload_is_a_value_and_leaves_the_notebook_running() {
             config.workspace_inputs = Some(
                 crate::exomonad::workspace::FrozenWorkspace::load(
                     &config.workspace,
-                    &config.run_root,
+                    &config.run_directory.path(),
                 )
                 .unwrap(),
             );

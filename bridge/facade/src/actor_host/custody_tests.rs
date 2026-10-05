@@ -19,8 +19,11 @@ pub(super) fn custody_fixture() -> (
         .commit_file("README.md", "seed", "seed")
         .unwrap();
     let runtime = tempfile::tempdir().unwrap();
-    let (manager, bindings) =
-        actor_worktree_resources_at(runtime.path(), repository.path()).unwrap();
+    let (manager, bindings) = actor_worktree_resources_at(
+        &tidepool_atomic_write::DirectoryAnchor::open_existing(runtime.path()).unwrap(),
+        repository.path(),
+    )
+    .unwrap();
     let tree = manager
         .create(&exomonad_worktree::WorktreeSpec::from_current_repository(
             "custody",
@@ -1309,9 +1312,14 @@ fn resident_command_grants_allow_root_coding_and_preserve_checkout_isolation() {
 #[test]
 fn resident_commands_resolve_linked_repository_metadata_without_parent_write_grants() {
     let (_repo, runtime, linked_source, _bindings, _admission) = custody_fixture();
-    let (manager, bindings) =
-        actor_worktree_resources_at(&runtime.path().join("linked-root"), linked_source.cwd())
-            .unwrap();
+    let (manager, bindings) = actor_worktree_resources_at(
+        &tidepool_atomic_write::DirectoryAnchor::open_existing(runtime.path())
+            .unwrap()
+            .child("linked-root")
+            .unwrap(),
+        linked_source.cwd(),
+    )
+    .unwrap();
     let authority = ActorWorktreeAuthority::new("linked-root", Arc::new(Mutex::new(bindings)));
     let root = ActorRef::first(exomonad_actor::ActorId(31));
     let operator = ActorRef::first(exomonad_actor::ActorId(32));

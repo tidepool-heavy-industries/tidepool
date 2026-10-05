@@ -110,7 +110,7 @@ async fn after_tool_deadline_retires_exact_invocation_worker_and_retains_host_un
             config.workspace_inputs = Some(
                 crate::exomonad::workspace::FrozenWorkspace::load(
                     &config.workspace,
-                    &config.run_root,
+                    &config.run_directory.path(),
                 )
                 .unwrap(),
             );

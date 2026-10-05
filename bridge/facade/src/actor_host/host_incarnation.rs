@@ -64,8 +64,9 @@ impl Drop for HostRunLock {
 }
 
 impl HostIncarnationLease {
-    pub(crate) fn claim(run_root: &Path) -> io::Result<Self> {
-        fs::create_dir_all(run_root)?;
+    pub(crate) fn claim(directory: &tidepool_atomic_write::DirectoryAnchor) -> io::Result<Self> {
+        directory.create_dir_all("")?;
+        let run_root = directory.path();
         let owner_lock = HostRunLock::claim(run_root, true)?;
 
         let state_path = run_root.join("host-incarnation.json");
@@ -137,19 +138,31 @@ mod tests {
     #[test]
     fn claims_monotonically_increasing_incarnations() {
         let runtime = tempfile::tempdir().unwrap();
-        let first = HostIncarnationLease::claim(runtime.path()).unwrap();
+        let first = HostIncarnationLease::claim(
+            &tidepool_atomic_write::DirectoryAnchor::open_existing(runtime.path()).unwrap(),
+        )
+        .unwrap();
         assert_eq!(first.incarnation(), Incarnation(1));
         drop(first);
 
-        let second = HostIncarnationLease::claim(runtime.path()).unwrap();
+        let second = HostIncarnationLease::claim(
+            &tidepool_atomic_write::DirectoryAnchor::open_existing(runtime.path()).unwrap(),
+        )
+        .unwrap();
         assert_eq!(second.incarnation(), Incarnation(2));
     }
 
     #[test]
     fn refuses_a_second_live_owner() {
         let runtime = tempfile::tempdir().unwrap();
-        let _first = HostIncarnationLease::claim(runtime.path()).unwrap();
-        let error = HostIncarnationLease::claim(runtime.path()).unwrap_err();
+        let _first = HostIncarnationLease::claim(
+            &tidepool_atomic_write::DirectoryAnchor::open_existing(runtime.path()).unwrap(),
+        )
+        .unwrap();
+        let error = HostIncarnationLease::claim(
+            &tidepool_atomic_write::DirectoryAnchor::open_existing(runtime.path()).unwrap(),
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("already owns"));
     }
 
@@ -157,7 +170,10 @@ mod tests {
     fn run_ownership_cannot_authorize_another_run() {
         let first = tempfile::tempdir().unwrap();
         let second = tempfile::tempdir().unwrap();
-        let owner = HostIncarnationLease::claim(first.path()).unwrap();
+        let owner = HostIncarnationLease::claim(
+            &tidepool_atomic_write::DirectoryAnchor::open_existing(first.path()).unwrap(),
+        )
+        .unwrap();
         assert!(owner.owns_run(first.path()).unwrap());
         assert!(!owner.owns_run(second.path()).unwrap());
     }
@@ -169,7 +185,10 @@ mod tests {
         let original = br#"{"version":99,"last_incarnation":12}"#;
         fs::write(&path, original).unwrap();
 
-        let error = HostIncarnationLease::claim(runtime.path()).unwrap_err();
+        let error = HostIncarnationLease::claim(
+            &tidepool_atomic_write::DirectoryAnchor::open_existing(runtime.path()).unwrap(),
+        )
+        .unwrap_err();
         assert!(error
             .to_string()
             .contains("unsupported durable state version"));

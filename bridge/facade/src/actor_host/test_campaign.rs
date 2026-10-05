@@ -67,8 +67,11 @@ pub(super) fn configure_shell_workspace(config: &mut ActorHostConfig) {
     });
     commit_workspace(&config.workspace);
     config.workspace_inputs = Some(
-        crate::exomonad::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
-            .unwrap(),
+        crate::exomonad::workspace::FrozenWorkspace::load(
+            &config.workspace,
+            &config.run_directory.path(),
+        )
+        .unwrap(),
     );
 }
 
@@ -88,8 +91,11 @@ pub(super) fn configure_notebook_lookup_workspace(config: &mut ActorHostConfig) 
     });
     commit_workspace(&config.workspace);
     config.workspace_inputs = Some(
-        crate::exomonad::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
-            .unwrap(),
+        crate::exomonad::workspace::FrozenWorkspace::load(
+            &config.workspace,
+            &config.run_directory.path(),
+        )
+        .unwrap(),
     );
 }
 
@@ -110,8 +116,11 @@ pub(super) fn configure_notebook_jev_workspace(config: &mut ActorHostConfig) {
     });
     commit_workspace(&config.workspace);
     config.workspace_inputs = Some(
-        crate::exomonad::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
-            .unwrap(),
+        crate::exomonad::workspace::FrozenWorkspace::load(
+            &config.workspace,
+            &config.run_directory.path(),
+        )
+        .unwrap(),
     );
 }
 
@@ -457,7 +466,10 @@ impl TestCampaign {
             workspace_inputs: None,
             haskell_root: crate::haskell_sources::ensure_exomonad_haskell().unwrap(),
             workspace: repository.path().to_path_buf(),
-            run_root: runtime.path().join("run"),
+            run_directory: tidepool_atomic_write::DirectoryAnchor::open_existing(runtime.path())
+                .unwrap()
+                .child("exomonad/runs/run")
+                .unwrap(),
             root_binding_path: runtime.path().join("root-binding.json"),
 
             embedded: None,
@@ -705,8 +717,11 @@ pub(super) fn pinned_jev_workspace(config: &mut ActorHostConfig) {
     }
     commit_workspace(&config.workspace);
     config.workspace_inputs = Some(
-        crate::exomonad::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
-            .expect("resolve the pinned Haskell source"),
+        crate::exomonad::workspace::FrozenWorkspace::load(
+            &config.workspace,
+            &config.run_directory.path(),
+        )
+        .expect("resolve the pinned Haskell source"),
     );
 }
 

@@ -155,7 +155,8 @@ impl Driver {
             workspace_inputs: Some(selected),
             haskell_root,
             workspace: repository.path().to_path_buf(),
-            run_root: runtime.path().join("selection-0"),
+            run_directory: tidepool_atomic_write::DirectoryAnchor::open_existing(runtime.path())?
+                .child("selection-0")?,
             root_binding_path: runtime.path().join("unused-native-binding.json"),
 
             embedded: None,
@@ -601,11 +602,11 @@ impl Driver {
         self.pending.clear();
         self.round += 1;
         self.resource_run = format!("recipe-{}", uuid::Uuid::new_v4().simple());
-        self.config.run_root = self
-            .runtime
-            .path()
-            .join(format!("selection-{}", self.round));
-        let selected = FrozenWorkspace::load(self.repository.path(), &self.config.run_root)?;
+        self.config.run_directory =
+            tidepool_atomic_write::DirectoryAnchor::open_existing(self.runtime.path())?
+                .child(format!("selection-{}", self.round))?;
+        let selected =
+            FrozenWorkspace::load(self.repository.path(), &self.config.run_directory.path())?;
         let identity = selected.identity().to_owned();
         let defaults = selected.config()?;
         self.config.model = defaults.defaults.model;

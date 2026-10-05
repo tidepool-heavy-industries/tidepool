@@ -164,7 +164,10 @@ fn source_finalized(repository: &Path, resource: &Path) -> bool {
     if !registry_root.is_dir() {
         return false;
     }
-    let Ok(registry) = WorktreeRegistry::open(registry_root) else {
+    let Ok(directory) = tidepool_atomic_write::DirectoryAnchor::open_existing(repository) else {
+        return false;
+    };
+    let Ok(registry) = WorktreeRegistry::open(&directory, "registry") else {
         return false;
     };
     let Ok(Some(receipt)) = registry.get(&WorktreeId::from_raw(id)) else {
@@ -211,7 +214,14 @@ pub fn cleanup(
     for repository in fs::read_dir(repositories)? {
         let repository = repository?.path();
         let source_references = if repository.join("registry").is_dir() {
-            exomonad_worktree::WorktreeRegistry::open(repository.join("registry"))
+            tidepool_atomic_write::DirectoryAnchor::open_existing(&repository)
+                .map_err(|error| exomonad_worktree::WorktreeError::StorageFailure {
+                    path: error.path,
+                    detail: error.source.to_string(),
+                })
+                .and_then(|directory| {
+                    exomonad_worktree::WorktreeRegistry::open(&directory, "registry")
+                })
                 .and_then(|registry| registry.source_layer_references())
                 .map_err(|error| error.to_string())
         } else {
@@ -310,10 +320,17 @@ mod tests {
             .join("actor-worktrees/repo/worktrees/.resources")
             .join(id)
             .join("child");
-        fs::create_dir_all(&run).unwrap();
+        let directory = tidepool_atomic_write::DirectoryAnchor::open_existing(root).unwrap();
+        directory
+            .create_dir_all(run.strip_prefix(root).unwrap())
+            .unwrap();
         File::create(run.join("host-incarnation.owner.lock")).unwrap();
-        fs::create_dir_all(resource.join("build/upper")).unwrap();
-        fs::create_dir_all(resource.join("source")).unwrap();
+        directory
+            .create_dir_all(resource.join("build/upper").strip_prefix(root).unwrap())
+            .unwrap();
+        directory
+            .create_dir_all(resource.join("source").strip_prefix(root).unwrap())
+            .unwrap();
         fs::write(resource.join("build/upper/artifact"), b"build cache").unwrap();
         fs::write(resource.join("source/dirty"), b"unsaved work").unwrap();
         (run, resource.join("build"), resource.join("source/dirty"))
@@ -380,7 +397,14 @@ mod tests {
         let cwd = repository.join("worktrees").join(id);
         fs::create_dir_all(&cwd).unwrap();
         fs::write(cwd.join(".git"), "gitdir: /tmp/test\n").unwrap();
-        let registry = WorktreeRegistry::open(repository.join("registry")).unwrap();
+        let registry = WorktreeRegistry::open(
+            &tidepool_atomic_write::DirectoryAnchor::open_existing(root.path()).unwrap(),
+            repository
+                .join("registry")
+                .strip_prefix(root.path())
+                .unwrap(),
+        )
+        .unwrap();
         let receipt = WorktreeReceipt {
             worktree_id: WorktreeId::from_raw(id),
             cwd,
@@ -413,7 +437,14 @@ mod tests {
         let source = source_file.parent().unwrap();
         let resource = source.parent().unwrap();
         let repository = resource.ancestors().nth(4).unwrap();
-        let registry = WorktreeRegistry::open(repository.join("registry")).unwrap();
+        let registry = WorktreeRegistry::open(
+            &tidepool_atomic_write::DirectoryAnchor::open_existing(root.path()).unwrap(),
+            repository
+                .join("registry")
+                .strip_prefix(root.path())
+                .unwrap(),
+        )
+        .unwrap();
         let ancestor_id = WorktreeId::from_raw(resource.file_name().unwrap().to_str().unwrap());
         let ancestor_cwd = repository.join("worktrees").join(ancestor_id.as_str());
         fs::create_dir_all(&ancestor_cwd).unwrap();

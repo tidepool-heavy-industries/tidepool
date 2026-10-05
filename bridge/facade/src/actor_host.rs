@@ -491,7 +491,7 @@ pub struct ActorHostConfig {
     pub workspace_inputs: Option<crate::exomonad::workspace::FrozenWorkspace>,
     pub workspace: PathBuf,
     pub haskell_root: PathBuf,
-    pub run_root: PathBuf,
+    pub run_directory: tidepool_atomic_write::DirectoryAnchor,
     pub root_binding_path: PathBuf,
 
     pub embedded: Option<crate::exomonad::EmbeddedLaunchConfig>,
@@ -1752,7 +1752,7 @@ async fn run_with_test_transport(
     run_owned(config, readiness, host_incarnation, Some(transport), None).await
 }
 
-#[tracing::instrument(target = "tidepool::actor_host::startup", name = "host_run", skip_all, fields(run_root = %config.run_root.display()))]
+#[tracing::instrument(target = "tidepool::actor_host::startup", name = "host_run", skip_all, fields(run_root = %config.run_directory.path().display()))]
 async fn run_owned(
     config: ActorHostConfig,
     readiness: mpsc::UnboundedSender<ActorHostReadiness>,
@@ -1765,15 +1765,21 @@ async fn run_owned(
         .as_ref()
         .ok_or_else(|| runtime_error("embedded host requires [launch.embedded]"))?;
     let host_incarnation = Arc::new(host_incarnation);
-    let run_root = config.run_root.clone();
-    std::fs::create_dir_all(&run_root)?;
+    let run_root = config.run_directory.path().to_path_buf();
+    if !host_incarnation.owns_run(&run_root)? {
+        return Err(runtime_error(
+            "host incarnation belongs to another run directory",
+        ));
+    }
+    config.run_directory.create_dir_all("")?;
     let workspace = config.workspace.clone();
-    let resource_run_root = run_root.clone();
-    let (worktrees, bindings) = tidepool_runtime::spawn_blocking_in_span(move || {
-        tracing::info_span!(target: "tidepool::actor_host::startup", "worktree_resources")
-            .in_scope(|| actor_worktree_resources(&workspace, &resource_run_root))
-    })
-    .await??;
+    let resource_run_directory = config.run_directory.clone();
+    let (worktrees, bindings, worktree_directory) =
+        tidepool_runtime::spawn_blocking_in_span(move || {
+            tracing::info_span!(target: "tidepool::actor_host::startup", "worktree_resources")
+                .in_scope(|| actor_worktree_resources(&workspace, &resource_run_directory))
+        })
+        .await??;
     let bindings = Arc::new(Mutex::new(bindings));
     let worktree_authority =
         ActorWorktreeAuthority::new(runtime_namespace(&run_root), Arc::clone(&bindings));
@@ -1798,9 +1804,15 @@ async fn run_owned(
         &run_journal_path,
     )?;
     let actor_recovery = if actor_journal_mode == JournalOpenMode::Create {
-        exomonad_actor::ActorRecoveryJournal::open(actor_recovery_path)
+        exomonad_actor::ActorRecoveryJournal::open(
+            &config.run_directory,
+            "actor-lifecycle.v2.jsonl",
+        )
     } else {
-        exomonad_actor::ActorRecoveryJournal::open_existing(actor_recovery_path)
+        exomonad_actor::ActorRecoveryJournal::open_existing(
+            &config.run_directory,
+            "actor-lifecycle.v2.jsonl",
+        )
     }?;
     let prior_actor_records = actor_recovery.records();
 
@@ -1841,7 +1853,8 @@ async fn run_owned(
     };
     let (source, root, program, child_session_factory, image_registry) = compile_root(
         &config,
-        &run_root,
+        &config.run_directory,
+        &worktree_directory,
         worktrees.clone(),
         worktree_authority.clone(),
         source_layers.as_ref(),
@@ -2403,10 +2416,58 @@ async fn await_applications(
 
 fn actor_worktree_resources(
     workspace: &Path,
-    run_root: &Path,
-) -> Result<(WorktreeManager, BindingTable), exomonad_worktree::WorktreeError> {
-    let root = actor_worktree_storage_root(workspace, run_root)?;
-    actor_worktree_resources_at(&root, workspace)
+    run_directory: &tidepool_atomic_write::DirectoryAnchor,
+) -> Result<
+    (
+        WorktreeManager,
+        BindingTable,
+        tidepool_atomic_write::DirectoryAnchor,
+    ),
+    exomonad_worktree::WorktreeError,
+> {
+    let root = actor_worktree_storage_root(workspace, run_directory.path())?;
+    let family = root.parent().and_then(Path::parent).ok_or_else(|| {
+        exomonad_worktree::WorktreeError::StorageFailure {
+            path: root.clone(),
+            detail: "managed worktree root has no Exomonad family".into(),
+        }
+    })?;
+    let relative = root
+        .strip_prefix(family)
+        .map_err(|error| exomonad_worktree::WorktreeError::StorageFailure {
+            path: root.clone(),
+            detail: error.to_string(),
+        })?
+        .to_path_buf();
+    let recorded_family = run_directory
+        .path()
+        .parent()
+        .filter(|runs| runs.file_name().is_some_and(|name| name == "runs"))
+        .and_then(Path::parent)
+        .filter(|root| root.file_name().is_some_and(|name| name == "exomonad"));
+    let family = if recorded_family.is_some() {
+        // Recorded run families were established by their launch owner.
+        tidepool_atomic_write::DirectoryAnchor::open_existing(family)
+    } else {
+        crate::exomonad::durable_state_directory()
+            .and_then(|state| state.child("exomonad").map_err(std::io::Error::from))
+            .map_err(|error| tidepool_atomic_write::WriteError {
+                path: family.to_path_buf(),
+                source: error,
+            })
+    }
+    .map_err(|error| exomonad_worktree::WorktreeError::StorageFailure {
+        path: error.path,
+        detail: error.source.to_string(),
+    })?;
+    let directory = family.child(&relative).map_err(|error| {
+        exomonad_worktree::WorktreeError::StorageFailure {
+            path: error.path,
+            detail: error.source.to_string(),
+        }
+    })?;
+    let (worktrees, bindings) = actor_worktree_resources_at(&directory, workspace)?;
+    Ok((worktrees, bindings, directory))
 }
 
 pub(crate) fn ensure_actor_workspace_available(
@@ -2564,9 +2625,10 @@ fn legacy_has_meaningful_state(root: &Path) -> Result<bool, exomonad_worktree::W
 }
 
 fn actor_worktree_resources_at(
-    root: &Path,
+    directory: &tidepool_atomic_write::DirectoryAnchor,
     workspace: &Path,
 ) -> Result<(WorktreeManager, BindingTable), exomonad_worktree::WorktreeError> {
+    let root = directory.path();
     let git = GitCli::new();
     // The root actor writes its own runtime state (journal, logs) directly
     // into `workspace` — it is not admitted through `prepare()` the way a
@@ -2579,26 +2641,26 @@ fn actor_worktree_resources_at(
     // is idempotent, so a caller upstream that already installed it (real
     // `exomonad` launches do, via `exomonad.rs`) pays only a no-op write check.
     git.ensure_exomonad_local_exclude(workspace)?;
-    let registry = WorktreeRegistry::open(root.join("registry"))?;
+    let registry = WorktreeRegistry::open(directory, "registry")?;
     let worktree_root = root.join("worktrees");
     // The root's own allocation directory exists before ANY launch: a mount
     // boundary canonicalizes each writable root it is given, and the root's
     // namespace is fixed at launch, so a directory created later would be
     // unreachable to the process that needs to build in it.
-    for directory in [
-        &worktree_root,
-        &worktree_root.join(WorktreeManager::ROOT_ALLOCATION_DIR),
+    for relative in [
+        PathBuf::from("worktrees"),
+        Path::new("worktrees").join(WorktreeManager::ROOT_ALLOCATION_DIR),
     ] {
-        std::fs::create_dir_all(directory).map_err(|error| {
+        directory.create_dir_all(&relative).map_err(|error| {
             exomonad_worktree::WorktreeError::StorageFailure {
-                path: directory.clone(),
-                detail: error.to_string(),
+                path: error.path,
+                detail: error.source.to_string(),
             }
         })?;
     }
     Ok((
         WorktreeManager::new(git, registry, worktree_root, workspace),
-        BindingTable::open_with_timeout(root.join("bindings"), Duration::from_secs(10))?,
+        BindingTable::open_with_timeout(directory, "bindings", Duration::from_secs(10))?,
     ))
 }
 
@@ -3021,7 +3083,8 @@ type CompiledRoot = (
 )]
 fn compile_root(
     config: &ActorHostConfig,
-    run_root: &Path,
+    run_directory: &tidepool_atomic_write::DirectoryAnchor,
+    worktree_directory: &tidepool_atomic_write::DirectoryAnchor,
     worktrees: WorktreeManager,
     worktree_authority: ActorWorktreeAuthority,
     source: Option<&Arc<crate::exomonad::source::ExomonadSourceReload>>,
@@ -3029,6 +3092,7 @@ fn compile_root(
     run_journal_mode: JournalOpenMode,
     embedded_startup: Option<&mut embedded_recovery::EmbeddedStartupRecovery>,
 ) -> Result<CompiledRoot, Box<dyn std::error::Error>> {
+    let run_root = run_directory.path();
     let CompiledExomonadDriver {
         preamble,
         include,
@@ -3061,10 +3125,8 @@ fn compile_root(
             active_source_identity(run_root, config.workspace_inputs.is_some())?.as_deref(),
         )?;
     }
-    let event_registry = WorktreeRegistry::open(
-        actor_worktree_storage_root(&config.workspace, run_root)?.join("registry"),
-    )?;
-    let event_journal = EventJournal::open(run_root.join("repo-events.jsonl"))?;
+    let event_registry = WorktreeRegistry::open(worktree_directory, "registry")?;
+    let event_journal = EventJournal::open(run_directory, "repo-events.jsonl")?;
     let event_handler = RepoEventHandler::with_registry_namespace(
         WorktreeMonitor::new(GitCli::new(), event_journal),
         event_registry,
@@ -3526,16 +3588,19 @@ fn orient_launch_instructions(
 }
 
 fn open_embedded_actor_binding(
-    run_root: &Path,
+    run_directory: &tidepool_atomic_write::DirectoryAnchor,
     actor: ActorRef,
     actor_path: harness::model::AgentPath,
     conversation: Option<Arc<harness::embedding::Conversation>>,
 ) -> Result<embedded_harness::EmbeddedActorBinding, String> {
-    let actor_root = run_root.join(format!("{}-{}", actor.id.0, actor.incarnation.0));
-    std::fs::create_dir_all(&actor_root).map_err(|error| error.to_string())?;
+    let run_root = run_directory.path();
+    let actor_root = run_directory
+        .child(format!("{}-{}", actor.id.0, actor.incarnation.0))
+        .map_err(|error| error.to_string())?;
     let inbox = ActorInbox::open(
-        actor_root.join("embedded-notifications.jsonl"),
-        actor_root.join("embedded-notifications.cursor"),
+        &actor_root,
+        "embedded-notifications.jsonl",
+        "embedded-notifications.cursor",
     )
     .map_err(|error| error.to_string())?;
     let inbox_key = format!(

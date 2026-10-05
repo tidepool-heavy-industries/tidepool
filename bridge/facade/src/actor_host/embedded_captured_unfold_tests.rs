@@ -843,7 +843,7 @@ async fn captured_host_scenario(scenario: HostedScenario) {
         |_| {},
         move |runtime, config| {
             let root_origin = ConversationIdentity::Embedded {
-                run: runtime_namespace(&config.run_root),
+                run: runtime_namespace(&config.run_directory.path()),
                 actor: AgentPath("/root".into()),
                 incarnation: exomonad_actor::Incarnation::FIRST.0.to_string(),
             };
@@ -892,7 +892,7 @@ async fn captured_host_scenario(scenario: HostedScenario) {
     assert_eq!(
         root_origin,
         ConversationIdentity::Embedded {
-            run: runtime_namespace(&campaign.config.run_root),
+            run: runtime_namespace(&campaign.config.run_directory.path()),
             actor: AgentPath("/root".into()),
             incarnation: actor.incarnation.0.to_string(),
         }
@@ -1105,7 +1105,7 @@ async fn captured_host_scenario(scenario: HostedScenario) {
     if scenario == CapturedScenario::CancelWhileParked {
         let pending = transport.operation(&root_origin, PENDING_CALL);
         let target = harness::embedding::HostIdentity {
-            run: runtime_namespace(&campaign.config.run_root),
+            run: runtime_namespace(&campaign.config.run_directory.path()),
             actor: AgentPath("/root".into()),
             incarnation: actor.incarnation.0.to_string(),
         };
@@ -1893,7 +1893,7 @@ async fn admitted_cell_late_type_error_has_no_effect_or_publication_on_retry() {
             config.workspace_inputs = Some(
                 crate::exomonad::workspace::FrozenWorkspace::load(
                     &config.workspace,
-                    &config.run_root,
+                    &config.run_directory.path(),
                 )
                 .unwrap(),
             );
@@ -1903,7 +1903,7 @@ async fn admitted_cell_late_type_error_has_no_effect_or_publication_on_retry() {
             let transport = Arc::new(PreflightTransport {
                 runtime: runtime.clone(),
                 origin: ConversationIdentity::Embedded {
-                    run: runtime_namespace(&config.run_root),
+                    run: runtime_namespace(&config.run_directory.path()),
                     actor: AgentPath("/root".into()),
                     incarnation: exomonad_actor::Incarnation::FIRST.0.to_string(),
                 },
@@ -2044,7 +2044,7 @@ async fn admitted_cell_late_type_error_has_no_effect_or_publication_on_retry() {
         .unwrap()
         .to_owned();
     let target = harness::embedding::HostIdentity {
-        run: runtime_namespace(&host.context.config.run_root),
+        run: runtime_namespace(&host.context.config.run_directory.path()),
         actor: AgentPath("/root".into()),
         incarnation: actor.incarnation.0.to_string(),
     };

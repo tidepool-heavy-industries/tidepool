@@ -92,8 +92,11 @@ impl Fixture {
             .commit_file("README.md", "seed", "seed")
             .unwrap();
         let runtime = tempfile::tempdir().unwrap();
-        let (manager, mut bindings) =
-            actor_worktree_resources_at(runtime.path(), repo.path()).unwrap();
+        let (manager, mut bindings) = actor_worktree_resources_at(
+            &tidepool_atomic_write::DirectoryAnchor::open_existing(runtime.path()).unwrap(),
+            repo.path(),
+        )
+        .unwrap();
         let tree = manager
             .create(&exomonad_worktree::WorktreeSpec::from_current_repository(
                 "scope",

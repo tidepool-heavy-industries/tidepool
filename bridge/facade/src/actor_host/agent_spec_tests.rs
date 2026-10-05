@@ -203,7 +203,7 @@ async fn start(description: &str, answer: &str) -> TestCampaign {
             config.workspace_inputs = Some(
                 crate::exomonad::workspace::FrozenWorkspace::load(
                     &config.workspace,
-                    &config.run_root,
+                    &config.run_directory.path(),
                 )
                 .unwrap(),
             );
@@ -232,7 +232,7 @@ async fn start_with_slot(answer: &str, slot: &str) -> TestCampaign {
             config.workspace_inputs = Some(
                 crate::exomonad::workspace::FrozenWorkspace::load(
                     &config.workspace,
-                    &config.run_root,
+                    &config.run_directory.path(),
                 )
                 .unwrap(),
             );
@@ -264,7 +264,7 @@ async fn start_with_cell_slot(slot: &str) -> TestCampaign {
             config.workspace_inputs = Some(
                 crate::exomonad::workspace::FrozenWorkspace::load(
                     &config.workspace,
-                    &config.run_root,
+                    &config.run_directory.path(),
                 )
                 .unwrap(),
             );
@@ -293,7 +293,7 @@ async fn start_with_sleeping_slot(answer: &str, slot: &str) -> TestCampaign {
             config.workspace_inputs = Some(
                 crate::exomonad::workspace::FrozenWorkspace::load(
                     &config.workspace,
-                    &config.run_root,
+                    &config.run_directory.path(),
                 )
                 .unwrap(),
             );
@@ -514,7 +514,7 @@ async fn removing_only_the_slot_keeps_transitive_tool_implementation_linkable() 
             config.workspace_inputs = Some(
                 crate::exomonad::workspace::FrozenWorkspace::load(
                     &config.workspace,
-                    &config.run_root,
+                    &config.run_directory.path(),
                 )
                 .unwrap(),
             );
@@ -624,7 +624,7 @@ async fn a_workspace_without_a_spec_installs_the_empty_default() {
             config.workspace_inputs = Some(
                 crate::exomonad::workspace::FrozenWorkspace::load(
                     &config.workspace,
-                    &config.run_root,
+                    &config.run_directory.path(),
                 )
                 .unwrap(),
             );
@@ -666,7 +666,7 @@ async fn the_run_spec_module_is_installed_for_a_child_with_a_checkout() {
             config.workspace_inputs = Some(
                 crate::exomonad::workspace::FrozenWorkspace::load(
                     &config.workspace,
-                    &config.run_root,
+                    &config.run_directory.path(),
                 )
                 .unwrap(),
             );
@@ -738,7 +738,7 @@ async fn a_child_checkout_spec_edit_cannot_replace_the_run_spec() {
             config.workspace_inputs = Some(
                 crate::exomonad::workspace::FrozenWorkspace::load(
                     &config.workspace,
-                    &config.run_root,
+                    &config.run_directory.path(),
                 )
                 .unwrap(),
             );
@@ -1044,7 +1044,7 @@ async fn the_root_finds_its_spec_by_convention_with_no_key_naming_it() {
             config.workspace_inputs = Some(
                 crate::exomonad::workspace::FrozenWorkspace::load(
                     &config.workspace,
-                    &config.run_root,
+                    &config.run_directory.path(),
                 )
                 .unwrap(),
             );
@@ -1299,7 +1299,7 @@ async fn start_nested() -> TestCampaign {
             config.workspace_inputs = Some(
                 crate::exomonad::workspace::FrozenWorkspace::load(
                     &config.workspace,
-                    &config.run_root,
+                    &config.run_directory.path(),
                 )
                 .unwrap(),
             );

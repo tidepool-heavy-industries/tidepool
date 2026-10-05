@@ -254,8 +254,15 @@ attach:  tmux attach -t exomonad-<project>
 stop:    exomonad stop --run-id <run> --session exomonad-<project>
 ```
 
-`XDG_STATE_HOME` replaces `~/.local/state` when set. Run journals, retained
-executables and managed worktrees live under this durable state root; deleting
+`XDG_STATE_HOME` replaces `~/.local/state` when set. Its absolute directory must
+already exist with a durably established parent link; Exomonad creates and
+confirms storage below that boundary. Without it, the existing home directory
+owns creation of `.local/state/tidepool`. Explicit `host --run-root` and command
+resource service directories must likewise be established by their launch
+owner before startup; missing roots are refused before mutation.
+
+Run journals, retained executables and managed worktrees live under this durable
+state root; deleting
 `~/.cache` does not delete a new run. Older runs remain at their recorded cache
 paths. Use their explicit `--run-root` for host recovery or cleanup. If a
 workspace still has managed worktrees in the old cache, `exomonad init`

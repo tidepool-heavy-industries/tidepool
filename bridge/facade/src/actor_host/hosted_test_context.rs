@@ -25,7 +25,10 @@ impl HostTermination {
             .ok_or_else(|| "production host outcome remains unavailable".to_owned())?
     }
 
-    fn startup_failure(self, detail: String) -> (String, CleanupOutcome) {
+    fn startup_failure(self, detail: String, assembly_observed: bool) -> (String, CleanupOutcome) {
+        if assembly_observed {
+            return (detail, CleanupOutcome::from_result(&self.into_result()));
+        }
         let detail = match &self.result {
             Some(Err(error)) => format!("production host failed during startup: {error}"),
             _ => detail,
@@ -563,7 +566,11 @@ impl HostedTestRuntime {
         }
         .map_err(|error| error.to_string())?;
         runtime_directory.disable_cleanup(diagnostic_root.is_some());
-        let run_root = runtime_directory.path().join("run");
+        let run_directory =
+            tidepool_atomic_write::DirectoryAnchor::open_existing(runtime_directory.path())
+                .and_then(|root| root.child("exomonad/runs/run"))
+                .map_err(|error| error.to_string())?;
+        let run_root = run_directory.path().to_path_buf();
         let mut diagnostics = diagnostic_root.map(|root| HostedTestDiagnostics {
             root,
             workspace: repository.path().to_path_buf(),
@@ -583,7 +590,7 @@ impl HostedTestRuntime {
                 .map_err(|error| error.to_string())?,
             workspace: repository.path().to_path_buf(),
             root_binding_path: run_root.join("root-binding.json"),
-            run_root,
+            run_directory,
             embedded: Some(settings),
             tmux_session: "unused-hosted-acceptance".into(),
             model: "test-model".into(),
@@ -595,11 +602,11 @@ impl HostedTestRuntime {
         configure(&mut config);
         if let Some(diagnostics) = &mut diagnostics {
             diagnostics.workspace = config.workspace.clone();
-            diagnostics.run_root = config.run_root.clone();
+            diagnostics.run_root = config.run_directory.path().to_path_buf();
             diagnostics.report(&ScenarioOutcome::Unknown, &CleanupOutcome::Unknown)?;
         }
-        let lease =
-            HostIncarnationLease::claim(&config.run_root).map_err(|error| error.to_string())?;
+        let lease = HostIncarnationLease::claim(&config.run_directory)
+            .map_err(|error| error.to_string())?;
         let observer = HostTestObserver::default();
         let (assembled, mut assembly) = oneshot::channel();
         let (stop, stopping) = watch::channel(false);
@@ -631,6 +638,7 @@ impl HostedTestRuntime {
             })
             .map_err(|error| error.to_string())?;
         let mut exited_during_startup = None;
+        let mut assembly_observed = false;
         let started = tokio::time::timeout(STARTUP_BUDGET, async {
             let context = tokio::select! {
                 assembled = &mut assembly => assembled.map_err(|_| "production assembly observer closed".to_owned())?,
@@ -641,6 +649,7 @@ impl HostedTestRuntime {
                     return Err(detail);
                 },
             };
+            assembly_observed = true;
             let address = context.while_root_live("embedded readiness", async {
                 loop {
                     tokio::select! {
@@ -677,7 +686,7 @@ impl HostedTestRuntime {
                         .shared(),
                 };
                 let termination = Self::terminate(stop.clone(), outcome, Some(thread)).await;
-                let (detail, cleanup) = termination.startup_failure(detail);
+                let (detail, cleanup) = termination.startup_failure(detail, assembly_observed);
                 let evidence = if let Some(diagnostics) = &diagnostics {
                     diagnostics.report(
                         &ScenarioOutcome::Failed {
@@ -834,7 +843,7 @@ mod tests {
         assert!(*stopping.borrow());
         assert!(termination.joined.is_ok());
         let (message, cleanup) =
-            termination.startup_failure("production assembly observer closed".into());
+            termination.startup_failure("production assembly observer closed".into(), false);
         assert_eq!(
             message,
             "production host failed during startup: injected startup refusal"
@@ -872,7 +881,7 @@ mod tests {
     async fn startup_host_error_and_executor_failure_are_independent() {
         let (termination, _) = terminated_host(true).await;
         let (message, cleanup) =
-            termination.startup_failure("production assembly observer closed".into());
+            termination.startup_failure("production assembly observer closed".into(), false);
         assert_eq!(
             message,
             "production host failed during startup: injected startup refusal"
@@ -892,9 +901,26 @@ mod tests {
             joined: Ok(()),
         };
         let (message, cleanup) =
-            termination.startup_failure("production assembly observer closed".into());
+            termination.startup_failure("production assembly observer closed".into(), false);
         assert_eq!(message, "production assembly observer closed");
         assert_eq!(cleanup, CleanupOutcome::Confirmed);
+    }
+
+    #[test]
+    fn observed_assembly_preserves_primary_readiness_failure_and_cleanup_error() {
+        let termination = HostTermination {
+            result: Some(Err("injected production cleanup failure".into())),
+            joined: Ok(()),
+        };
+        let (message, cleanup) =
+            termination.startup_failure("injected readiness failure".into(), true);
+        assert_eq!(message, "injected readiness failure");
+        assert_eq!(
+            cleanup,
+            CleanupOutcome::Failed {
+                message: "injected production cleanup failure".into(),
+            }
+        );
     }
 
     fn diagnostics(directory: &tempfile::TempDir) -> HostedTestDiagnostics {

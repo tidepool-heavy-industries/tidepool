@@ -600,8 +600,11 @@ pub(super) async fn production_browser_journey() {
         });
         test_campaign::commit_workspace(&config.workspace);
         config.workspace_inputs = Some(
-            crate::exomonad::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
-                .unwrap(),
+            crate::exomonad::workspace::FrozenWorkspace::load(
+                &config.workspace,
+                &config.run_directory.path(),
+            )
+            .unwrap(),
         );
     })
     .await

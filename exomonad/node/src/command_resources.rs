@@ -491,6 +491,7 @@ impl CommandResources {
         anchor: &DirectoryAnchor,
         relative_journal: impl AsRef<Path>,
     ) -> std::io::Result<Arc<Self>> {
+        anchor.resolve(relative_journal.as_ref())?;
         Self::delegated_inner(
             policy,
             Some((anchor.clone(), relative_journal.as_ref().to_path_buf())),

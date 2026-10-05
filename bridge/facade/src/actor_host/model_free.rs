@@ -99,11 +99,12 @@ impl ModelFreeSession {
             -> Result<ResidentForest<ExomonadHandlerStack, CapturedOutput>>,
     ) -> Result<Self> {
         let session_root = Arc::new(tempfile::tempdir()?);
-        let host_incarnation = Arc::new(HostIncarnationLease::claim(session_root.path())?);
-        let (worktrees, bindings) = actor_worktree_resources_at(
-            &config.run_root.join("check-worktrees"),
-            &config.workspace,
-        )?;
+        let session_directory =
+            tidepool_atomic_write::DirectoryAnchor::open_existing(session_root.path())?;
+        let host_incarnation = Arc::new(HostIncarnationLease::claim(&session_directory)?);
+        let worktree_directory = config.run_directory.child("check-worktrees")?;
+        let (worktrees, bindings) =
+            actor_worktree_resources_at(&worktree_directory, &config.workspace)?;
         let bindings = Arc::new(Mutex::new(bindings));
         let authority = ActorWorktreeAuthority::new(
             runtime_namespace(session_root.path()),
@@ -117,7 +118,8 @@ impl ModelFreeSession {
         )?;
         let (source, root, program, child_session_factory, image_registry) = compile_root(
             config,
-            session_root.path(),
+            &session_directory,
+            &worktree_directory,
             worktrees.clone(),
             authority.clone(),
             source_layers.as_ref(),

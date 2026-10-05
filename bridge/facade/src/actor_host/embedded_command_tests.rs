@@ -1,6 +1,6 @@
 use std::sync::{
-    Arc,
     atomic::{AtomicUsize, Ordering},
+    Arc,
 };
 
 use exomonad_actor::{ActorGraphNode, ActorId, ActorRef, ActorWorkbenchPosture, Incarnation};
@@ -440,12 +440,10 @@ async fn admitted_retry_after_retirement_does_not_resolve_admit_or_wake() {
         target: command.target().clone(),
         text: "changed payload".into(),
     };
-    assert!(
-        fixture
-            .store
-            .enqueue_embedded_command(operation_id, &conflicting)
-            .is_err()
-    );
+    assert!(fixture
+        .store
+        .enqueue_embedded_command(operation_id, &conflicting)
+        .is_err());
     assert_eq!(fixture.hosts[&actor].wakes.load(Ordering::Relaxed), 1);
 }
 
@@ -563,8 +561,9 @@ async fn durable_command_drain_runs_without_a_channel_hint_and_skips_claimed_wor
     let scratch = tempfile::tempdir().unwrap();
     let inbox = Arc::new(
         ActorInbox::open(
-            scratch.path().join("inbox.jsonl"),
-            scratch.path().join("cursor.json"),
+            &tidepool_atomic_write::DirectoryAnchor::open_existing(scratch.path()).unwrap(),
+            "inbox.jsonl",
+            "cursor.json",
         )
         .unwrap(),
     );

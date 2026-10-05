@@ -13,9 +13,14 @@ async fn prepared_first_display_returns_admission_before_consumer_and_survives_f
     ] {
         let repository = exomonad_worktree::testing::TestRepo::init().unwrap();
         let run_root = tempfile::tempdir().unwrap();
-        let (manager, bindings) =
-            actor_worktree_resources_at(&run_root.path().join("worktrees"), repository.path())
-                .unwrap();
+        let (manager, bindings) = actor_worktree_resources_at(
+            &tidepool_atomic_write::DirectoryAnchor::open_existing(run_root.path())
+                .unwrap()
+                .child("worktrees")
+                .unwrap(),
+            repository.path(),
+        )
+        .unwrap();
         let authority = ActorWorktreeAuthority::new(
             runtime_namespace(run_root.path()),
             Arc::new(Mutex::new(bindings)),

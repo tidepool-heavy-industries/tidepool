@@ -215,7 +215,7 @@ fn raw_request_history(
     fixture: &HostedTestRuntime,
     request: &ResponsesRequest,
 ) -> Vec<(harness::model::RequestId, harness::item::ItemHash, Item)> {
-    let run = runtime_namespace(&fixture.context.config.run_root);
+    let run = runtime_namespace(&fixture.context.config.run_directory.path());
     let actor_and_incarnation = request
         .session_id
         .strip_prefix(&format!("{run}:"))
@@ -448,8 +448,11 @@ async fn start_with_spec_and_model(
         });
         test_campaign::commit_workspace(&config.workspace);
         config.workspace_inputs = Some(
-            crate::exomonad::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
-                .unwrap(),
+            crate::exomonad::workspace::FrozenWorkspace::load(
+                &config.workspace,
+                &config.run_directory.path(),
+            )
+            .unwrap(),
         );
     })
     .await
@@ -480,7 +483,7 @@ async fn start_with_spec_and_model(
             operation_id: harness::embedding::ClientOperationId(uuid::Uuid::new_v4()),
             command: harness::server::HostCommand::Input {
                 target: harness::embedding::HostIdentity {
-                    run: runtime_namespace(&fixture.context.config.run_root),
+                    run: runtime_namespace(&fixture.context.config.run_directory.path()),
                     actor: AgentPath("/root".into()),
                     incarnation: actor.incarnation.0.to_string(),
                 },
@@ -566,7 +569,7 @@ fn has_user_text(request: &ResponsesRequest, expected: &str) -> bool {
 fn root_context_state(fixture: &HostedTestRuntime) -> harness::context::ContextRequestState {
     let store = fixture.runtime.store();
     let identity = harness::embedding::HostIdentity {
-        run: runtime_namespace(&fixture.context.config.run_root),
+        run: runtime_namespace(&fixture.context.config.run_directory.path()),
         actor: AgentPath("/root".into()),
         incarnation: fixture.context.actor.identity().incarnation.0.to_string(),
     };
@@ -1070,7 +1073,7 @@ async fn resident_sync_context_cancel_discards_staging_and_never_launches_childr
     );
     let store = fixture.runtime.store();
     let identity = harness::embedding::HostIdentity {
-        run: runtime_namespace(&fixture.context.config.run_root),
+        run: runtime_namespace(&fixture.context.config.run_directory.path()),
         actor: AgentPath("/root".into()),
         incarnation: fixture.context.actor.identity().incarnation.0.to_string(),
     };

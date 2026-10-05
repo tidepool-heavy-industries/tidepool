@@ -4,7 +4,7 @@
 //! writers. [`append_new_line`] owns the path and syncs its directory for strict
 //! policies; [`write_line`] owns only a borrowed file and cannot establish its path.
 //! Directory creation remains explicit: durable store owners use
-//! `tidepool_atomic_write::create_dir_all_durable` before first publication.
+//! `tidepool_atomic_write::DirectoryAnchor::create_dir_all` before first publication.
 //!
 //! [`TailPolicy::Repair`] truncates an incomplete final row for a single-owner
 //! journal and completes the delimiter of a valid unterminated row.

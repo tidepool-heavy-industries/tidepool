@@ -93,8 +93,11 @@ fn configure(config: &mut ActorHostConfig) {
     });
     commit_workspace(&config.workspace);
     config.workspace_inputs = Some(
-        crate::exomonad::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
-            .unwrap(),
+        crate::exomonad::workspace::FrozenWorkspace::load(
+            &config.workspace,
+            &config.run_directory.path(),
+        )
+        .unwrap(),
     );
 }
 type HeldBinding = Arc<Mutex<Option<Arc<dyn CellModelBinding>>>>;
@@ -312,6 +315,7 @@ async fn resident_parked_model_allows_another_cell_and_cancels_without_late_prov
 #[tokio::test]
 async fn cell_model_policy_matches_admitted_embedded_alias_and_effort() {
     use exomonad_actor::{ActorPlacement, Model};
+    let storage = tempfile::tempdir().unwrap();
     let workspace = serde_json::from_value(json!({
         "include": [], "modules": [], "prompts": {}, "models": {"fast":"admitted-model"},
         "files": {}, "config": "", "library_identity": ""
@@ -326,7 +330,8 @@ async fn cell_model_policy_matches_admitted_embedded_alias_and_effort() {
         workspace_inputs: Some(workspace),
         workspace: Default::default(),
         haskell_root: Default::default(),
-        run_root: Default::default(),
+        run_directory: tidepool_atomic_write::DirectoryAnchor::open_existing(storage.path())
+            .unwrap(),
         root_binding_path: Default::default(),
 
         embedded: None,

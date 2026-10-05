@@ -237,7 +237,7 @@ async fn embedded_checkpoint_children_survive_a_later_parent_cell_failure() {
     let actor = host.context.actor.identity();
     let runtime = Arc::clone(&host.runtime);
     let root_origin = ConversationIdentity::Embedded {
-        run: runtime_namespace(&host.context.config.run_root),
+        run: runtime_namespace(&host.context.config.run_directory.path()),
         actor: AgentPath("/root".into()),
         incarnation: actor.incarnation.0.to_string(),
     };

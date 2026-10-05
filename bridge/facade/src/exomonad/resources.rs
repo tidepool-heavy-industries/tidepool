@@ -36,8 +36,13 @@ pub(super) async fn connect(
     policy.validate()?;
     let runtime = std::env::var_os("XDG_RUNTIME_DIR")
         .ok_or("XDG_RUNTIME_DIR is required for shared command resources")?;
-    let directory = PathBuf::from(runtime).join("exomonad-commands");
-    std::fs::create_dir_all(&directory)?;
+    let runtime = PathBuf::from(runtime);
+    if !runtime.is_absolute() {
+        return Err("XDG_RUNTIME_DIR must name an established absolute directory".into());
+    }
+    let directory_anchor = tidepool_atomic_write::DirectoryAnchor::open_existing(&runtime)?
+        .child("exomonad-commands")?;
+    let directory = directory_anchor.path();
     std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))?;
     let lock = std::fs::File::options()
         .create(true)
@@ -143,6 +148,9 @@ pub async fn serve(socket: PathBuf, policy: PathBuf) -> Result<()> {
     let directory = socket
         .parent()
         .ok_or("resource socket has no parent directory")?;
+    // The launcher establishes the service directory before exec. Custom
+    // endpoints must supply the same existing durable boundary.
+    let directory_anchor = tidepool_atomic_write::DirectoryAnchor::open_existing(directory)?;
     let ownership = std::fs::File::options()
         .create(true)
         .truncate(false)
@@ -152,8 +160,8 @@ pub async fn serve(socket: PathBuf, policy: PathBuf) -> Result<()> {
         std::io::Error::other(format!("another command resource owner is active: {error}"))
     })?;
     let policy: CommandResourcePolicy = toml::from_str(&std::fs::read_to_string(policy)?)?;
-    let journal = directory.join("ownership.v1.jsonl");
-    let owner = CommandResources::delegated_with_journal(policy, journal)?;
+    let owner =
+        CommandResources::delegated_with_journal(policy, &directory_anchor, "ownership.v1.jsonl")?;
     clear_stale_resource_socket(&socket)?;
     let listener = tokio::net::UnixListener::bind(socket)?;
     exomonad_node::command_resources::service::serve(listener, owner).await?;

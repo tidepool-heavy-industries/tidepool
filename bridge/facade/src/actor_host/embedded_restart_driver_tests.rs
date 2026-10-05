@@ -25,7 +25,11 @@ use tokio::sync::mpsc;
 
 fn retained_config(config: &mut ActorHostConfig, workspace: &Path, run_root: &Path) {
     config.workspace = workspace.to_path_buf();
-    config.run_root = run_root.to_path_buf();
+    config.run_directory =
+        tidepool_atomic_write::DirectoryAnchor::open_existing(run_root.parent().unwrap())
+            .unwrap()
+            .child(run_root.file_name().unwrap())
+            .unwrap();
     config.root_binding_path = run_root.join("root-binding.json");
 }
 

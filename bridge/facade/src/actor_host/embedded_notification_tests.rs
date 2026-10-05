@@ -122,7 +122,7 @@ async fn embedded_notification_handoff_retries_by_operation_and_waits_for_store_
         .unwrap();
     let conversation = Arc::clone(&embedded.conversation);
     let binding = open_embedded_actor_binding(
-        run_root,
+        &tidepool_atomic_write::DirectoryAnchor::open_existing(run_root).unwrap(),
         actor,
         harness::model::AgentPath("/root".into()),
         Some(conversation.clone()),
@@ -164,7 +164,7 @@ async fn embedded_notification_handoff_retries_by_operation_and_waits_for_store_
 
     drop(binding);
     let reloaded = open_embedded_actor_binding(
-        run_root,
+        &tidepool_atomic_write::DirectoryAnchor::open_existing(run_root).unwrap(),
         actor,
         harness::model::AgentPath("/root".into()),
         Some(conversation.clone()),

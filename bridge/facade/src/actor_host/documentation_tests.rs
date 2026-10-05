@@ -759,7 +759,7 @@ async fn record_actor_unfold_publishes_and_routes_child_reply() {
             config.workspace_inputs = Some(
                 crate::exomonad::workspace::FrozenWorkspace::load(
                     &config.workspace,
-                    &config.run_root,
+                    &config.run_directory.path(),
                 )
                 .unwrap(),
             );
@@ -2204,7 +2204,7 @@ async fn configured_modules_are_available_to_resident_declarations_from_frozen_s
             config.workspace_inputs = Some(
                 crate::exomonad::workspace::FrozenWorkspace::load(
                     &config.workspace,
-                    &config.run_root,
+                    &config.run_directory.path(),
                 )
                 .unwrap(),
             );
@@ -2300,7 +2300,7 @@ async fn workspace_campaign_with(configure: impl FnOnce(&Path)) -> TestCampaign 
             config.workspace_inputs = Some(
                 crate::exomonad::workspace::FrozenWorkspace::load(
                     &config.workspace,
-                    &config.run_root,
+                    &config.run_directory.path(),
                 )
                 .unwrap(),
             );
@@ -3539,7 +3539,7 @@ async fn work_router_queries_receipts_as_the_issuing_actor() {
             config.workspace_inputs = Some(
                 crate::exomonad::workspace::FrozenWorkspace::load(
                     &config.workspace,
-                    &config.run_root,
+                    &config.run_directory.path(),
                 )
                 .unwrap(),
             );
@@ -3594,8 +3594,9 @@ async fn work_router_queries_receipts_as_the_issuing_actor() {
     assert_eq!(message.target(), campaign.actor.identity());
     let directory = tempfile::tempdir().unwrap();
     let inbox = ActorInbox::open(
-        directory.path().join("rows"),
-        directory.path().join("cursor"),
+        &tidepool_atomic_write::DirectoryAnchor::open_existing(directory.path()).unwrap(),
+        "rows",
+        "cursor",
     )
     .unwrap();
     let key = "work-router-inbox";

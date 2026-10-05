@@ -16,7 +16,7 @@ async fn attached_actor_path(host: &HostedTestRuntime, actor: ActorRef) -> Agent
                     assert_eq!(conversation.identity(), binding.identity());
                     assert_eq!(
                         conversation.identity().run,
-                        runtime_namespace(&host.context.config.run_root)
+                        runtime_namespace(&host.context.config.run_directory.path())
                     );
                     assert_eq!(
                         conversation.identity().incarnation,

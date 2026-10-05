@@ -114,7 +114,10 @@ fn configuration(root: &Path) -> ActorHostConfig {
             crate::haskell_sources::ensure_exomonad_haskell().unwrap()
         },
         workspace: root.join("project"),
-        run_root: root.join("run"),
+        run_directory: tidepool_atomic_write::DirectoryAnchor::open_existing(root)
+            .unwrap()
+            .child("run")
+            .unwrap(),
         root_binding_path: root.join("root-binding.json"),
 
         embedded: Some(crate::exomonad::EmbeddedLaunchConfig {
@@ -153,7 +156,7 @@ fn production_recovery_process() {
         .unwrap();
     runtime.block_on(async {
         let config = configuration(&root);
-        let lease = HostIncarnationLease::claim(&config.run_root).unwrap();
+        let lease = HostIncarnationLease::claim(&config.run_directory).unwrap();
         let (ready, mut incoming) = mpsc::unbounded_channel();
         let transport: Arc<dyn harness::engine::ResponsesTransport> = Arc::new(RecoveryTransport {
             root:root.clone(), phase:phase.clone(), calls:AtomicUsize::new(0),

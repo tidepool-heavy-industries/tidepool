@@ -484,7 +484,7 @@ pub(super) async fn run_interactive_applications(
                             };
                             if embedded_binding(&application_owners, actor).is_none() {
                                 let binding = match open_embedded_actor_binding(
-                                    &launch_context.run_root,
+                                    &launch_context.config.run_directory,
                                     actor,
                                     path.clone(),
                                     None,

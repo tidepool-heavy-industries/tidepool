@@ -20,8 +20,11 @@ pub(super) fn scaffold(config: &mut super::ActorHostConfig) {
     .expect("the shipped project must scaffold successfully");
     commit_workspace(&config.workspace);
     config.workspace_inputs = Some(
-        crate::exomonad::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
-            .expect("the freshly scaffolded project's inputs must freeze"),
+        crate::exomonad::workspace::FrozenWorkspace::load(
+            &config.workspace,
+            &config.run_directory.path(),
+        )
+        .expect("the freshly scaffolded project's inputs must freeze"),
     );
 }
 

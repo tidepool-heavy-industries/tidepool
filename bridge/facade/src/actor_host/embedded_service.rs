@@ -234,8 +234,11 @@ impl EmbeddedService {
         run_root: &Path,
         settings: &EmbeddedLaunchConfig,
     ) -> Result<Self, String> {
-        let owner =
-            super::HostIncarnationLease::claim(run_root).map_err(|error| error.to_string())?;
+        let owner = super::HostIncarnationLease::claim(
+            &tidepool_atomic_write::DirectoryAnchor::open_existing(run_root)
+                .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
         Self::prepare_owned(run_root, settings, Arc::new(owner)).await
     }
 

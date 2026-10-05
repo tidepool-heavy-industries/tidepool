@@ -30,7 +30,7 @@ async fn frozen_tools_dispatch_raw_and_structured_inputs_without_workbench_bindi
             config.workspace_inputs = Some(
                 crate::exomonad::workspace::FrozenWorkspace::load(
                     &config.workspace,
-                    &config.run_root,
+                    &config.run_directory.path(),
                 )
                 .unwrap(),
             );

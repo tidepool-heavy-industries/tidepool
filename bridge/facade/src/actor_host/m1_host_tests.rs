@@ -45,7 +45,7 @@ fn browser_target(
     campaign: &super::hosted_test_context::HostedActorContext,
 ) -> harness::embedding::HostIdentity {
     harness::embedding::HostIdentity {
-        run: runtime_namespace(&campaign.config.run_root),
+        run: runtime_namespace(&campaign.config.run_directory.path()),
         actor: AgentPath("/root".into()),
         incarnation: campaign.actor.identity().incarnation.0.to_string(),
     }
