@@ -4,7 +4,38 @@
 use super::*;
 use crate::artifacts::SealedTurnProducts;
 use crate::declaration_context::{ExactProductAdmission, ExactSourceAdmission};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+
+/// Retain interfaces reachable from selected originals, including source
+/// imports with no native product. Other whole-check consumers stay transient.
+pub(super) fn authored_interface_context(
+    baseline: Option<&Arc<ExactDeclarationContext>>,
+    compiled: &crate::artifact_inventory::ArtifactView,
+    original_owners: impl IntoIterator<Item = ExactModuleIdentity>,
+    source_imports: &BTreeMap<ExactModuleIdentity, Vec<ExactModuleIdentity>>,
+) -> Result<Arc<ExactDeclarationContext>, CompileError> {
+    let mut owners = BTreeSet::new();
+    let mut pending = original_owners.into_iter().collect::<Vec<_>>();
+    while let Some(owner) = pending.pop() {
+        if owners.insert(owner.clone()) {
+            pending.extend(source_imports.get(&owner).into_iter().flatten().cloned());
+        }
+    }
+    let retained = compiled
+        .interface_owners()
+        .into_iter()
+        .map(|interface| interface.owner)
+        .filter(|owner| owners.contains(owner))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let interfaces = compiled.interface_projection(&retained)?;
+    let context = match baseline {
+        Some(context) => context.as_ref().clone(),
+        None => ExactDeclarationContext::new(&[], &[], vec![])?,
+    };
+    Ok(Arc::new(context.extend_interface_artifacts(&interfaces)?))
+}
 
 // Includes materialization, closure certification and descriptor assembly.
 // Caller inventory and final context admission remain outside this stage.
@@ -379,12 +410,13 @@ fn admit_authored_artifact_closure_inner(
         context.map_or_else(Vec::new, |context| context.joined_interfaces().to_vec());
     if let Some(context) = context {
         let inherited = context.materialize_scratch(&scratch)?;
-        artifacts.extend(
-            inherited
-                .artifacts
-                .into_iter()
-                .filter(|artifact| artifact.product.is_none()),
-        );
+        artifacts.extend(inherited.artifacts.into_iter().filter(|artifact| {
+            artifact.product.is_none()
+                && !products.iter().any(|product| {
+                    product.owner().unit == artifact.interface.unit
+                        && product.owner().module == artifact.interface.module
+                })
+        }));
     }
     Ok((
         scratch,
@@ -525,7 +557,6 @@ impl PlannedInventory {
         owner: &ExactModuleIdentity,
         interfaces: &[ExactInterfaceOwner],
     ) -> Result<(), CompileError> {
-        use std::collections::BTreeSet;
         if self.original_unit != owner.unit
             || self.original_module != owner.module
             || self.interface_fingerprint.len() != 32
@@ -634,7 +665,6 @@ pub(crate) fn certify_same_offer_planned_declaration(
     baseline: Option<&Arc<ExactDeclarationContext>>,
     inventory_json: &[u8],
 ) -> Result<CertifiedAuthoredDeclaration, CompileError> {
-    use std::collections::BTreeSet;
     let source_admission = admission.source;
     let module_name = module.module_name();
     let source_path = source_admission.witness.source_path();
@@ -741,6 +771,15 @@ pub(crate) fn certify_same_offer_planned_declaration(
             "planned original sealed product has a different declaration origin",
         ));
     }
+    let artifact_context = authored_interface_context(
+        baseline,
+        &sealed.artifact_view,
+        products.iter().map(|product| ExactModuleIdentity {
+            unit: product.owner().unit.clone(),
+            module: product.owner().module.clone(),
+        }),
+        &source_admission.home_imports()?,
+    )?;
     let (_scratch, artifacts, original_imports, source_lexical_imports, joined_interfaces) =
         admit_authored_artifact_closure(
             &products,
@@ -748,7 +787,7 @@ pub(crate) fn certify_same_offer_planned_declaration(
             toolchain_identity_sha256,
             evidence,
             Some(source_admission),
-            baseline,
+            Some(&artifact_context),
             admission.request.program_source_lexical(),
             includes,
         )?;
@@ -777,7 +816,7 @@ pub(crate) fn certify_same_offer_planned_declaration(
         &interfaces,
         &joined_interfaces,
         &sealed.artifact_view,
-        baseline.map(Arc::as_ref),
+        Some(artifact_context.as_ref()),
     )?;
     Ok(CertifiedAuthoredDeclaration {
         product: selected.clone(),
@@ -802,6 +841,189 @@ mod tests {
             unit: "main".into(),
             module: module.into(),
         }
+    }
+
+    #[test]
+    fn authored_interface_context_retains_type_only_source_closure() {
+        use crate::artifact_inventory::{ArtifactInventory, ArtifactKind};
+        use crate::certified_products::fixture_module_interface;
+
+        let root = module("Authored");
+        let source_owner = module("TypeOnlySource");
+        let dependency_owner = module("TypeDependency");
+        let admitted = BTreeMap::from([
+            (root.clone(), vec![source_owner.clone()]),
+            (source_owner, vec![dependency_owner.clone()]),
+            (dependency_owner, vec![]),
+        ]);
+        let dependency =
+            fixture_module_interface([1; 32], "main", "TypeDependency", BTreeMap::new());
+        let source = fixture_module_interface(
+            [1; 32],
+            "main",
+            "TypeOnlySource",
+            BTreeMap::from([(
+                ("main".into(), "TypeDependency".into()),
+                dependency.interface_sha256(),
+            )]),
+        );
+        let compiled = crate::declaration_context::certified_product_artifact_view(
+            [1; 32],
+            &[],
+            &[source, dependency],
+            None,
+        )
+        .unwrap();
+        let context =
+            authored_interface_context(None, &compiled, [root.clone()], &admitted).unwrap();
+        assert!(context.recovery_products().is_empty());
+        assert!(context.lexical_graph().is_empty());
+        assert!(context
+            .artifact_view()
+            .source_implementation_roles()
+            .is_empty());
+        assert!(context
+            .artifact_view()
+            .descriptors()
+            .iter()
+            .all(|descriptor| { descriptor.kind == ArtifactKind::CanonicalModuleInterface }));
+
+        let scratch = tempfile::tempdir().unwrap();
+        let artifacts = context.materialize_scratch(&scratch).unwrap().artifacts;
+        assert_eq!(artifacts.len(), 2);
+        assert!(artifacts.iter().all(|artifact| artifact.product.is_none()));
+        let source = artifacts
+            .iter()
+            .find(|artifact| artifact.interface.module == "TypeOnlySource")
+            .unwrap();
+        assert_eq!(
+            std::fs::read(&source.interface.path).unwrap(),
+            b"TypeOnlySource"
+        );
+        assert_eq!(
+            source.interface.requirements,
+            vec![("main".into(), "TypeDependency".into())]
+        );
+
+        let available = |context: &ExactDeclarationContext| {
+            context
+                .artifact_view()
+                .descriptors()
+                .into_iter()
+                .map(|descriptor| descriptor.owner)
+                .chain(std::iter::once(root.clone()))
+                .collect()
+        };
+        inherited_source_lexical_imports(
+            &root,
+            &admitted,
+            &[],
+            &BTreeMap::new(),
+            &available(&context),
+        )
+        .unwrap();
+
+        let missing = authored_interface_context(
+            None,
+            &ArtifactInventory::default().empty_view(),
+            [root.clone()],
+            &admitted,
+        )
+        .unwrap();
+        assert!(inherited_source_lexical_imports(
+            &root,
+            &admitted,
+            &[],
+            &BTreeMap::new(),
+            &available(&missing)
+        )
+        .is_err());
+        let wrong = crate::declaration_context::certified_product_artifact_view(
+            [1; 32],
+            &[],
+            &[fixture_module_interface(
+                [1; 32],
+                "other",
+                "TypeOnlySource",
+                BTreeMap::new(),
+            )],
+            None,
+        )
+        .unwrap();
+        let wrong = authored_interface_context(None, &wrong, [root.clone()], &admitted).unwrap();
+        assert!(inherited_source_lexical_imports(
+            &root,
+            &admitted,
+            &[],
+            &BTreeMap::new(),
+            &available(&wrong)
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn authored_interface_context_excludes_changed_transient_consumers() {
+        use crate::certified_products::{
+            fixture_module_interface, fixture_source_module_interface,
+        };
+
+        let original = module("Original");
+        let source_only = module("TypeOnlySource");
+        let probe = module(crate::artifacts::AUTHORED_PRODUCT_PROBE_MODULE);
+        let consumer = module("LaterWholeCheck");
+        let admitted = BTreeMap::from([
+            (original.clone(), vec![source_only.clone()]),
+            (source_only.clone(), vec![]),
+            (probe.clone(), vec![original.clone()]),
+            (consumer.clone(), vec![original.clone()]),
+        ]);
+        let offer = |source_sha256| {
+            crate::declaration_context::certified_product_artifact_view(
+                [1; 32],
+                &[],
+                &[
+                    fixture_module_interface([1; 32], "main", "Original", BTreeMap::new()),
+                    fixture_module_interface([1; 32], "main", "TypeOnlySource", BTreeMap::new()),
+                    fixture_source_module_interface(
+                        [1; 32],
+                        "main",
+                        &probe.module,
+                        source_sha256,
+                        BTreeMap::new(),
+                        None,
+                    ),
+                    fixture_source_module_interface(
+                        [1; 32],
+                        "main",
+                        &consumer.module,
+                        source_sha256,
+                        BTreeMap::new(),
+                        None,
+                    ),
+                ],
+                None,
+            )
+            .unwrap()
+        };
+        let first_offer = offer([1; 32]);
+        let second_offer = offer([2; 32]);
+        assert!(first_offer.merge(&second_offer).is_err());
+        let first =
+            authored_interface_context(None, &first_offer, [original.clone()], &admitted).unwrap();
+        let second =
+            authored_interface_context(Some(&first), &second_offer, [original.clone()], &admitted)
+                .unwrap();
+        let owners = second
+            .artifact_view()
+            .descriptors()
+            .into_iter()
+            .map(|descriptor| descriptor.owner)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(owners, BTreeSet::from([original, source_only]));
+        assert!(!owners.contains(&probe));
+        assert!(!owners.contains(&consumer));
+        assert!(second.recovery_products().is_empty());
+        assert!(second.lexical_graph().is_empty());
     }
 
     #[test]

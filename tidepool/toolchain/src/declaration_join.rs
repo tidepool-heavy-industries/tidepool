@@ -661,6 +661,21 @@ fn certify_authored_declaration_inner(
         unit: selected.owner().unit.clone(),
         module: selected.owner().module.clone(),
     };
+    let source_imports = compiled
+        .exact_source_admission
+        .as_ref()
+        .map(|admission| admission.home_imports())
+        .transpose()?
+        .unwrap_or_default();
+    let artifact_context = planned::authored_interface_context(
+        context.as_ref(),
+        &compiled.artifact_view,
+        products.iter().map(|product| ExactModuleIdentity {
+            unit: product.owner().unit.clone(),
+            module: product.owner().module.clone(),
+        }),
+        &source_imports,
+    )?;
     let (_scratch, artifacts, original_imports, source_lexical_imports, joined_interfaces) =
         planned::admit_authored_artifact_closure(
             &products,
@@ -668,7 +683,7 @@ fn certify_authored_declaration_inner(
             toolchain_identity_sha256,
             &evidence,
             compiled.exact_source_admission.as_ref(),
-            context.as_ref(),
+            Some(&artifact_context),
             &[],
             includes,
         )?;
@@ -736,7 +751,7 @@ fn certify_authored_declaration_inner(
         &interfaces,
         &joined_interfaces,
         &compiled.artifact_view,
-        context.as_deref(),
+        Some(artifact_context.as_ref()),
     )?;
     Ok(CertifiedAuthoredDeclaration {
         product: selected.clone(),
