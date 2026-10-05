@@ -505,7 +505,7 @@ assertRecoveredKindRep root = do
     (preparedTargetReferences krepContext [partial]))
     "partial constructor preparation hid its missing strict sibling"
   case projectPreparedTarget krepContext [partial] of
-    Left (RecoveredEntryContractMismatch symbol Nothing True (Just (Signature [] (Returns [Lifted]))) False)
+    Left (RecoveredEntryContractMismatch symbol Nothing True (Just (Signature [] (Returns [LiftedRefRep]))) False)
       | symbol == krepEntry -> pure ()
     result -> fail ("unresolved constructor did not refuse its exact final entry contract: " ++ show result)
   complete <- either (fail . ("completed constructor projection failed: " ++) . show) pure
