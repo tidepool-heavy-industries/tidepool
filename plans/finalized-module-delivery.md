@@ -101,12 +101,15 @@ lane or multiply resident compiler heaps to fill worker slots.
    and a later correct publication. Execute explicit-display pagination,
    settlement and Store-backed startup checks: expansion cannot compile or
    replay effects, and cancellation cannot rewrite a delivered reply.
-3. Execute the four deterministic M2 scenarios below, plus complete-cell
+3. Execute the M2 cohort selected by the frozen bundle descriptor; its exact
+   roster, count and per-case deadlines are owned by the
+   [package qualification guide](../build/package/README.md). This plan
+   summarizes the four deterministic provider scenarios below, plus complete-cell
    preflight and checkpoint release. Use the native no-Codex selection in
-   [embedded-gates.md](../bridge/facade/tests/embedded-gates.md), with six
-   executed tests and retained exact operation/publication/cleanup evidence.
-   Only `ResponsesTransport` is mocked in the four provider scenarios; Engine,
-   Scheduler, Store, dispatcher, actor, compiler and native execution are real.
+   [embedded-gates.md](../bridge/facade/tests/embedded-gates.md) and retain exact
+   operation/publication/cleanup evidence. Only `ResponsesTransport` is mocked
+   in the four provider scenarios; Engine, Scheduler, Store, dispatcher, actor,
+   compiler and native execution are real.
 
    | M2 scenario | Required behavior |
    |---|---|

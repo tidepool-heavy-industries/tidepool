@@ -111,13 +111,17 @@ argv and declared environment, stdout, stderr and final outcome, and is the prod
 directory so retained outer scratch stays with its evidence. The producer owns
 recursive compiler diagnostics under its output. Inspection requires an explicit
 producer wall limit of 600–1800 seconds. Python kills and waits for the producer
-on timeout; the extractor owns its child lifetime hooks. The startup protocol
-probe in `PreparedWorker::check_request_protocol` still requires its process
-ownership hook before full timeout cleanup can be accepted. Source tests do not
-establish descendant cleanup. Nix preflight and final retention checks have
-their existing separate limits. Complete inventories, NAR identity and actual
-GC registration are rechecked after success, refusal or timeout. A producer
-refusal and a later retention failure are recorded separately.
+on timeout; extractor launches, including the startup protocol probe in
+`PreparedWorker::check_request_protocol`, use the process owner's parent-death
+contract. `protocol_probe_uses_the_owned_parent_death_contract` checks that
+probe's signal, and `configured_child_dies_when_its_parent_exits` checks that
+an owned child exits when its parent exits. These source tests do not
+qualify cleanup of the full inspection descendant tree after a producer timeout;
+retain timeout-run evidence and confirm that descendants are gone. Nix preflight
+and final retention checks have their existing separate limits. Complete
+inventories, NAR identity and actual GC registration are rechecked after success,
+refusal or timeout. A producer refusal and a later retention failure are
+recorded separately.
 
 Build the native bundle and
 `//build/testing/browser:driver_bundle` in one selected native profile. Retain the
