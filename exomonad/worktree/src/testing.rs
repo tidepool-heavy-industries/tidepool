@@ -59,6 +59,26 @@ impl TestRepo {
     pub fn init() -> Result<Self, WorktreeError> {
         #[allow(clippy::expect_used, reason = "create temp dir")]
         let dir = tempfile::TempDir::new().expect("create temp dir");
+        Self::initialize(dir)
+    }
+
+    /// Create a real temporary repository beneath a caller-owned evidence root.
+    pub fn init_in(parent: &Path) -> Result<Self, WorktreeError> {
+        #[allow(clippy::expect_used, reason = "create temp dir")]
+        let dir = tempfile::Builder::new()
+            .prefix("workspace-")
+            .tempdir_in(parent)
+            .expect("create temp dir");
+        Self::initialize(dir)
+    }
+
+    /// Retain diagnostic inputs during unwinding until the campaign acknowledges
+    /// cleanup. The campaign runner owns deletion of scoped evidence directories.
+    pub fn disable_cleanup(&mut self, disable_cleanup: bool) {
+        self.dir.disable_cleanup(disable_cleanup);
+    }
+
+    fn initialize(dir: tempfile::TempDir) -> Result<Self, WorktreeError> {
         let git = GitCli::new();
         let path = dir.path().to_path_buf();
 

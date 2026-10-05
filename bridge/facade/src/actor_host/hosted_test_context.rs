@@ -9,6 +9,137 @@ use tokio::sync::oneshot;
 const STARTUP_BUDGET: Duration = Duration::from_secs(300);
 const SHUTDOWN_BUDGET: Duration = Duration::from_secs(60);
 
+type HostOutcome =
+    futures_util::future::Shared<futures_util::future::BoxFuture<'static, Result<(), String>>>;
+type ScenarioResult = Result<(), Box<dyn std::any::Any + Send>>;
+
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum ScenarioOutcome {
+    Unknown,
+    Passed,
+    Failed {
+        phase: ScenarioPhase,
+        message: String,
+    },
+}
+
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum ScenarioPhase {
+    Startup,
+    Scenario,
+}
+
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum CleanupOutcome {
+    Unknown,
+    Confirmed,
+    Failed { message: String },
+}
+
+impl CleanupOutcome {
+    fn from_result(result: &Result<(), String>) -> Self {
+        match result {
+            Ok(()) => Self::Confirmed,
+            Err(error) => Self::Failed {
+                message: error.chars().take(2048).collect(),
+            },
+        }
+    }
+}
+
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| payload.downcast_ref::<&str>().copied())
+        .unwrap_or("non-string panic payload")
+        .chars()
+        .take(2048)
+        .collect()
+}
+
+/// Reporting failure must never skip the production cleanup owner, or replace
+/// an assertion's original panic payload.
+async fn settle_scenario<S, C>(
+    scenario: S,
+    cleanup: C,
+    mut report: impl FnMut(&ScenarioOutcome, &CleanupOutcome) -> Result<(), String>,
+) -> (ScenarioResult, Result<(), String>, Vec<String>)
+where
+    S: std::future::Future<Output = ()>,
+    C: std::future::Future<Output = Result<(), String>>,
+{
+    let scenario = std::panic::AssertUnwindSafe(scenario).catch_unwind().await;
+    let scenario_outcome = match &scenario {
+        Ok(()) => ScenarioOutcome::Passed,
+        Err(payload) => ScenarioOutcome::Failed {
+            phase: ScenarioPhase::Scenario,
+            message: panic_message(payload.as_ref()),
+        },
+    };
+    let mut report_errors = Vec::new();
+    if let Err(error) = report(&scenario_outcome, &CleanupOutcome::Unknown) {
+        report_errors.push(error);
+    }
+    let cleanup = match std::panic::AssertUnwindSafe(cleanup).catch_unwind().await {
+        Ok(result) => result,
+        Err(payload) => Err(format!(
+            "production host cleanup panicked: {}",
+            panic_message(payload.as_ref())
+        )),
+    };
+    let cleanup_outcome = CleanupOutcome::from_result(&cleanup);
+    if let Err(error) = report(&scenario_outcome, &cleanup_outcome) {
+        report_errors.push(error);
+    }
+    (scenario, cleanup, report_errors)
+}
+
+#[derive(Clone)]
+struct HostedTestDiagnostics {
+    root: std::path::PathBuf,
+    workspace: std::path::PathBuf,
+    run_root: std::path::PathBuf,
+}
+
+impl HostedTestDiagnostics {
+    fn root_from_environment() -> Result<Option<std::path::PathBuf>, String> {
+        if std::env::var_os("TIDEPOOL_TEST_DIAGNOSTIC_SCOPE").as_deref()
+            != Some(std::ffi::OsStr::new("1"))
+        {
+            return Ok(None);
+        }
+        let root = std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT")
+            .map(std::path::PathBuf::from)
+            .ok_or_else(|| "diagnostic scope requires TIDEPOOL_TEST_ARTIFACT_ROOT".to_owned())?;
+        if !root.is_absolute() {
+            return Err("TIDEPOOL_TEST_ARTIFACT_ROOT must be absolute".into());
+        }
+        std::fs::create_dir_all(&root).map_err(|error| error.to_string())?;
+        let directory = tempfile::Builder::new()
+            .prefix("hosted-campaign-")
+            .tempdir_in(root)
+            .map_err(|error| error.to_string())?;
+        Ok(Some(directory.keep()))
+    }
+
+    fn report(&self, scenario: &ScenarioOutcome, cleanup: &CleanupOutcome) -> Result<(), String> {
+        let bytes = serde_json::to_vec_pretty(&json!({
+            "schema": 1,
+            "scenario": scenario,
+            "cleanup": cleanup,
+            "workspace": self.workspace,
+            "run_root": self.run_root,
+        }))
+        .map_err(|error| error.to_string())?;
+        tidepool_atomic_write::write_durable(&self.root.join("hosted-outcome.json"), &bytes)
+            .map_err(|error| error.to_string())
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct ObservedInstallation {
     pub(super) actor: LocalActorRef,
@@ -143,9 +274,9 @@ pub(super) struct HostedTestRuntime {
     pub(super) runtime: Arc<embedded_harness::EmbeddedHarnessRuntime>,
     pub(super) address: std::net::SocketAddr,
     stop: watch::Sender<bool>,
-    outcome:
-        futures_util::future::Shared<futures_util::future::BoxFuture<'static, Result<(), String>>>,
+    outcome: HostOutcome,
     thread: Option<std::thread::JoinHandle<()>>,
+    diagnostics: Option<HostedTestDiagnostics>,
     _repository: exomonad_worktree::testing::TestRepo,
     _runtime: tempfile::TempDir,
 }
@@ -159,6 +290,64 @@ impl Drop for HostedTestRuntime {
 }
 
 impl HostedTestRuntime {
+    /// Settle assertions and the production host independently. The run and
+    /// workspace exist under the case root before execution, so a watchdog kill
+    /// leaves its pending report and original inputs available.
+    pub(super) async fn run_scenario(
+        mut self,
+        scenario: impl for<'a> FnOnce(&'a Self) -> futures_util::future::LocalBoxFuture<'a, ()>,
+    ) {
+        let diagnostics = self.diagnostics.clone();
+        let cleanup = Self::shutdown(self.stop.clone(), self.outcome.clone(), self.thread.take());
+        let (scenario, cleanup, report_errors) = settle_scenario(
+            async { scenario(&self).await },
+            cleanup,
+            |scenario, cleanup| {
+                let Some(diagnostics) = &diagnostics else {
+                    return Ok(());
+                };
+                diagnostics.report(scenario, cleanup)?;
+                if matches!(
+                    scenario,
+                    ScenarioOutcome::Failed {
+                        phase: ScenarioPhase::Scenario,
+                        ..
+                    }
+                ) && matches!(cleanup, CleanupOutcome::Unknown)
+                {
+                    let graph = self
+                        .context
+                        .forest
+                        .inspect_host_graph()
+                        .into_iter()
+                        .take(64)
+                        .map(|node| format!("{node:?}").chars().take(2048).collect::<String>())
+                        .collect::<Vec<_>>();
+                    let bytes =
+                        serde_json::to_vec_pretty(&graph).map_err(|error| error.to_string())?;
+                    tidepool_atomic_write::write_durable(
+                        &diagnostics.root.join("host-graph-before-cleanup.json"),
+                        &bytes,
+                    )
+                    .map_err(|error| error.to_string())?;
+                }
+                Ok(())
+            },
+        )
+        .await;
+        if let Err(error) = &cleanup {
+            eprintln!("hosted campaign cleanup failed: {error}");
+        }
+        for error in &report_errors {
+            eprintln!("hosted campaign evidence failed: {error}");
+        }
+        if let Err(payload) = scenario {
+            std::panic::resume_unwind(payload);
+        }
+        cleanup.expect("production host cleanup is acknowledged");
+        assert!(report_errors.is_empty(), "{report_errors:?}");
+    }
+
     /// Admit ordinary user input through the actual attached root conversation.
     /// Startup remains idle until a scenario explicitly calls this or submits
     /// input through the browser command owner.
@@ -329,14 +518,32 @@ impl HostedTestRuntime {
         }
         settings.validate().map_err(|error| error.to_string())?;
         tidepool_testing::eval_harness::require_extract();
-        let repository =
-            exomonad_worktree::testing::TestRepo::init().map_err(|error| error.to_string())?;
+        let diagnostic_root = HostedTestDiagnostics::root_from_environment()?;
+        let mut repository = match &diagnostic_root {
+            Some(root) => exomonad_worktree::testing::TestRepo::init_in(root),
+            None => exomonad_worktree::testing::TestRepo::init(),
+        }
+        .map_err(|error| error.to_string())?;
+        repository.disable_cleanup(diagnostic_root.is_some());
         repository
             .writer()
             .commit_file("README.md", "source\n", "seed")
             .map_err(|error| error.to_string())?;
-        let runtime_directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let mut runtime_directory = match &diagnostic_root {
+            Some(root) => tempfile::Builder::new().prefix("runtime-").tempdir_in(root),
+            None => tempfile::tempdir(),
+        }
+        .map_err(|error| error.to_string())?;
+        runtime_directory.disable_cleanup(diagnostic_root.is_some());
         let run_root = runtime_directory.path().join("run");
+        let diagnostics = diagnostic_root.map(|root| HostedTestDiagnostics {
+            root,
+            workspace: repository.path().to_path_buf(),
+            run_root: run_root.clone(),
+        });
+        if let Some(diagnostics) = &diagnostics {
+            diagnostics.report(&ScenarioOutcome::Unknown, &CleanupOutcome::Unknown)?;
+        }
         let mut config = ActorHostConfig {
             systemd_slice: None,
             source_exclude: Vec::new(),
@@ -390,13 +597,15 @@ impl HostedTestRuntime {
                 let _ = complete.send(result);
             })
             .map_err(|error| error.to_string())?;
-        let mut exited_during_startup = false;
+        let mut exited_during_startup = None;
         let started = tokio::time::timeout(STARTUP_BUDGET, async {
             let context = tokio::select! {
                 assembled = &mut assembly => assembled.map_err(|_| "production assembly observer closed".to_owned())?,
                 result = &mut outcome => {
-                    exited_during_startup = true;
-                    return Err(format!("production host exited during startup: {result:?}"));
+                    let result = result.unwrap_or_else(|error| Err(error.to_string()));
+                    let detail = format!("production host exited during startup: {result:?}");
+                    exited_during_startup = Some(result);
+                    return Err(detail);
                 },
             };
             let address = context.while_root_live("embedded readiness", async {
@@ -409,8 +618,10 @@ impl HostedTestRuntime {
                             None => return Err("production readiness owner closed".into()),
                         },
                         result = &mut outcome => {
-                            exited_during_startup = true;
-                            return Err(format!("production host exited before readiness: {result:?}"));
+                            let result = result.unwrap_or_else(|error| Err(error.to_string()));
+                            let detail = format!("production host exited before readiness: {result:?}");
+                            exited_during_startup = Some(result);
+                            return Err(detail);
                         },
                     }
                 }
@@ -425,16 +636,48 @@ impl HostedTestRuntime {
                     Err(_) => "production startup exceeded its budget".into(),
                     Ok(Ok(_)) => unreachable!(),
                 };
-                if exited_during_startup {
-                    thread
+                if let Some(host_outcome) = exited_during_startup {
+                    let joined = thread
                         .join()
-                        .map_err(|_| "production host executor panicked".to_owned())?;
-                    return Err(detail);
+                        .map_err(|_| "production host executor panicked".to_owned());
+                    let cleanup = host_outcome.and(joined);
+                    let evidence = if let Some(diagnostics) = &diagnostics {
+                        diagnostics.report(
+                            &ScenarioOutcome::Failed {
+                                phase: ScenarioPhase::Startup,
+                                message: detail.chars().take(2048).collect(),
+                            },
+                            &CleanupOutcome::from_result(&cleanup),
+                        )
+                    } else {
+                        Ok(())
+                    };
+                    return Err(format!(
+                        "{detail}; cleanup: {cleanup:?}; evidence: {evidence:?}"
+                    ));
                 }
-                stop.send_replace(true);
-                let cleanup = tokio::time::timeout(SHUTDOWN_BUDGET, &mut outcome).await;
+                let cleanup = Self::shutdown(
+                    stop.clone(),
+                    outcome
+                        .map(|result| result.unwrap_or_else(|error| Err(error.to_string())))
+                        .boxed()
+                        .shared(),
+                    Some(thread),
+                )
+                .await;
+                let evidence = if let Some(diagnostics) = &diagnostics {
+                    diagnostics.report(
+                        &ScenarioOutcome::Failed {
+                            phase: ScenarioPhase::Startup,
+                            message: detail.chars().take(2048).collect(),
+                        },
+                        &CleanupOutcome::from_result(&cleanup),
+                    )
+                } else {
+                    Ok(())
+                };
                 return Err(format!(
-                    "production startup failed: {detail}; cleanup: {cleanup:?}"
+                    "production startup failed: {detail}; cleanup: {cleanup:?}; evidence: {evidence:?}"
                 ));
             }
         };
@@ -451,6 +694,7 @@ impl HostedTestRuntime {
                 .boxed()
                 .shared(),
             thread: Some(thread),
+            diagnostics,
             _repository: repository,
             _runtime: runtime_directory,
         })
@@ -461,11 +705,27 @@ impl HostedTestRuntime {
     }
 
     pub(super) async fn stop(mut self) -> Result<(), String> {
-        self.stop.send_replace(true);
-        let outcome = tokio::time::timeout(SHUTDOWN_BUDGET, self.outcome.clone())
+        let outcome =
+            Self::shutdown(self.stop.clone(), self.outcome.clone(), self.thread.take()).await;
+        if let Some(diagnostics) = &self.diagnostics {
+            diagnostics.report(
+                &ScenarioOutcome::Passed,
+                &CleanupOutcome::from_result(&outcome),
+            )?;
+        }
+        outcome
+    }
+
+    async fn shutdown(
+        stop: watch::Sender<bool>,
+        outcome: HostOutcome,
+        thread: Option<std::thread::JoinHandle<()>>,
+    ) -> Result<(), String> {
+        stop.send_replace(true);
+        let outcome = tokio::time::timeout(SHUTDOWN_BUDGET, outcome)
             .await
             .map_err(|_| "production host shutdown remains unconfirmed".to_owned())?;
-        if let Some(thread) = self.thread.take() {
+        if let Some(thread) = thread {
             thread
                 .join()
                 .map_err(|_| "production host executor panicked".to_owned())?;
@@ -509,4 +769,116 @@ pub(super) fn cell_output_matches(
                     .as_str()
                     .is_some_and(|value| value.trim() == expected)
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn diagnostics(directory: &tempfile::TempDir) -> HostedTestDiagnostics {
+        HostedTestDiagnostics {
+            root: directory.path().to_path_buf(),
+            workspace: directory.path().join("workspace"),
+            run_root: directory.path().join("run"),
+        }
+    }
+
+    fn report(directory: &tempfile::TempDir) -> serde_json::Value {
+        serde_json::from_slice(
+            &std::fs::read(directory.path().join("hosted-outcome.json")).unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn scenario_panic_waits_for_cleanup_and_preserves_original_payload() {
+        let directory = tempfile::tempdir().unwrap();
+        let diagnostics = diagnostics(&directory);
+        let (acknowledge, acknowledged) = oneshot::channel();
+        let worker = tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            acknowledge.send(()).unwrap();
+        });
+        let (scenario, cleanup, evidence) = settle_scenario(
+            async { std::panic::panic_any(37_u32) },
+            async {
+                // Scenario failure has been retained before cleanup starts.
+                assert_eq!(report(&directory)["scenario"]["status"], "failed");
+                assert_eq!(report(&directory)["cleanup"]["status"], "unknown");
+                acknowledged.await.unwrap();
+                worker.await.unwrap();
+                Ok(())
+            },
+            |scenario, cleanup| diagnostics.report(scenario, cleanup),
+        )
+        .await;
+        let payload = scenario.unwrap_err();
+        assert_eq!(payload.downcast_ref::<u32>(), Some(&37));
+        assert!(cleanup.is_ok());
+        assert!(evidence.is_empty());
+        assert_eq!(report(&directory)["scenario"]["phase"], "scenario");
+        assert_eq!(report(&directory)["cleanup"]["status"], "confirmed");
+    }
+
+    #[tokio::test]
+    async fn scenario_and_cleanup_failures_are_retained_independently() {
+        let directory = tempfile::tempdir().unwrap();
+        let diagnostics = diagnostics(&directory);
+        let (scenario, cleanup, evidence) = settle_scenario(
+            async { panic!("injected scenario failure") },
+            async { Err("injected cleanup refusal".to_owned()) },
+            |scenario, cleanup| diagnostics.report(scenario, cleanup),
+        )
+        .await;
+        assert_eq!(
+            panic_message(scenario.unwrap_err().as_ref()),
+            "injected scenario failure"
+        );
+        assert_eq!(cleanup.unwrap_err(), "injected cleanup refusal");
+        assert!(evidence.is_empty());
+        let report = report(&directory);
+        assert_eq!(report["scenario"]["status"], "failed");
+        assert_eq!(report["scenario"]["message"], "injected scenario failure");
+        assert_eq!(report["cleanup"]["status"], "failed");
+        assert_eq!(report["cleanup"]["message"], "injected cleanup refusal");
+    }
+
+    #[tokio::test]
+    async fn successful_scenario_does_not_hide_cleanup_panic() {
+        let directory = tempfile::tempdir().unwrap();
+        let diagnostics = diagnostics(&directory);
+        let (scenario, cleanup, evidence) = settle_scenario(
+            async {},
+            async { panic!("injected cleanup panic") },
+            |scenario, cleanup| diagnostics.report(scenario, cleanup),
+        )
+        .await;
+        assert!(scenario.is_ok());
+        assert_eq!(
+            cleanup.unwrap_err(),
+            "production host cleanup panicked: injected cleanup panic"
+        );
+        assert!(evidence.is_empty());
+        assert_eq!(report(&directory)["scenario"]["status"], "passed");
+        assert_eq!(report(&directory)["cleanup"]["status"], "failed");
+    }
+
+    #[tokio::test]
+    async fn evidence_failure_still_awaits_cleanup() {
+        let mut stopped = false;
+        let (scenario, cleanup, evidence) = settle_scenario(
+            async { panic!("injected scenario failure") },
+            async {
+                tokio::task::yield_now().await;
+                stopped = true;
+                Ok(())
+            },
+            |_, _| Err("injected evidence failure".into()),
+        )
+        .await;
+        assert!(scenario.is_err());
+        assert!(cleanup.is_ok());
+        assert!(stopped);
+        assert_eq!(evidence, vec!["injected evidence failure"; 2]);
+    }
 }
