@@ -558,7 +558,7 @@ pub(crate) fn checked_search_authorization(
             CheckedPurpose::Cell => "cell-check2",
             CheckedPurpose::Item => "checked-item3",
             CheckedPurpose::Display => "checked-display3",
-            CheckedPurpose::ActivationPreview => "host-activation-preview1",
+            CheckedPurpose::ActivationPreview => "host-activation-preview2",
         }
         .into(),
     );
@@ -1274,9 +1274,10 @@ impl ModuleCandidateOffer {
             original_execution: context.declarations().clone(),
         };
         let templates = [offer.specification.template_source.clone()];
-        let template_interfaces = Value::Array(
-            declarations
-                .template_interface_graph(&templates)?
+        let original_interfaces = Value::Array(
+            offer
+                .original_execution
+                .original_preview_interface_graph()?
                 .into_iter()
                 .map(|(owner, node)| {
                     Value::Array(vec![
@@ -1300,7 +1301,7 @@ impl ModuleCandidateOffer {
         );
         let authorization = checked_search_authorization(
             CheckedPurpose::ActivationPreview,
-            offer.authorization(template_interfaces)?,
+            offer.authorization(original_interfaces)?,
             include,
         )?;
         let exact = (*context)

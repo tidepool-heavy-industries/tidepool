@@ -718,7 +718,7 @@ impl RecoveredArtifactInventory {
         }
         let inventory = ArtifactInventory::default();
         let empty = inventory.empty_view();
-        let mut context = ExactDeclarationContext {
+        let context = ExactDeclarationContext {
             producer: self.producer,
             original_instance_environment: OriginalInstanceEnvironment::Unknown,
             inventory: inventory.admit_shared(&empty, entries)?,
@@ -2661,13 +2661,7 @@ impl ExactDeclarationContext {
         &self,
         templates: &[String],
     ) -> Result<BTreeMap<ExactModuleIdentity, TemplateInterfaceNode>, CompileError> {
-        let entries = self.artifact_view().entries();
-        let lexical = self
-            .lexical_graph()
-            .iter()
-            .map(|node| (&node.owner, node))
-            .collect::<BTreeMap<_, _>>();
-        let mut pending = self
+        let roots = self
             .lexical_graph()
             .iter()
             .filter(|node| {
@@ -2691,6 +2685,44 @@ impl ExactDeclarationContext {
             })
             .map(|node| node.owner.clone())
             .collect::<Vec<_>>();
+        self.interface_graph_for_roots(roots)
+    }
+
+    /// A pure preview observes every instance visible to the original request,
+    /// including orphan instances unrelated to the input's nominal type owner.
+    /// This compiler-issued context grants graph edges, never authored imports.
+    pub(crate) fn original_preview_interface_graph(
+        &self,
+    ) -> Result<BTreeMap<ExactModuleIdentity, TemplateInterfaceNode>, CompileError> {
+        if self.original_instance_environment != OriginalInstanceEnvironment::Complete {
+            return Err(failure(
+                "activation preview lacks its complete original instance graph",
+            ));
+        }
+        if self.lexical_graph().iter().any(|node| node.owner.unit != "main") {
+            return Err(failure(
+                "activation preview original graph belongs to another home unit",
+            ));
+        }
+        self.normalize()?;
+        self.interface_graph_for_roots(
+            self.lexical_graph()
+                .iter()
+                .map(|node| node.owner.clone())
+                .collect(),
+        )
+    }
+
+    fn interface_graph_for_roots(
+        &self,
+        mut pending: Vec<ExactModuleIdentity>,
+    ) -> Result<BTreeMap<ExactModuleIdentity, TemplateInterfaceNode>, CompileError> {
+        let entries = self.artifact_view().entries();
+        let lexical = self
+            .lexical_graph()
+            .iter()
+            .map(|node| (&node.owner, node))
+            .collect::<BTreeMap<_, _>>();
         let mut selected = BTreeMap::new();
         while let Some(owner) = pending.pop() {
             if selected.contains_key(&owner) {
@@ -3149,7 +3181,7 @@ impl ExactDeclarationContext {
         Ok(())
     }
 
-    fn normalize(&mut self) -> Result<(), CompileError> {
+    fn normalize(&self) -> Result<(), CompileError> {
         let interfaces = self.interface_owners();
         let owners = interfaces
             .iter()
@@ -4144,7 +4176,7 @@ mod tests {
                 },
             ],
         };
-        context.clone().normalize().unwrap();
+        context.normalize().unwrap();
         (Arc::new(context), producer)
     }
 
@@ -6331,6 +6363,28 @@ mod tests {
         let initial = make_context(b"first interface", true);
         let current = make_context(b"first interface", false);
         let changed = make_context(b"changed interface", false);
+        assert!(initial.original_preview_interface_graph().is_err());
+        let original = ExactDeclarationContext::from_authenticated_execution(
+            initial.producer,
+            initial.artifact_view(),
+            initial.lexical_graph().to_vec(),
+            &[identity("main", "CapturedInterface")],
+        )
+        .unwrap();
+        let original_graph = original.original_preview_interface_graph().unwrap();
+        assert_eq!(original_graph.len(), 1);
+        assert!(original
+            .template_interface_graph(&["module Input where\n".to_owned()])
+            .unwrap()
+            .is_empty());
+        let mut malformed = original.clone();
+        malformed.lexical[0]
+            .imports
+            .push(identity("main", "MissingOriginal"));
+        assert!(malformed.original_preview_interface_graph().is_err());
+        let mut foreign = original;
+        foreign.lexical[0].owner.unit = "foreign".into();
+        assert!(foreign.original_preview_interface_graph().is_err());
         let source = "module Expr where\nimport CapturedInterface\n";
         let authority = GeneratedScaffoldImportAuthority {
             role: GeneratedScaffoldRole::InitialTemplateInterfaces {

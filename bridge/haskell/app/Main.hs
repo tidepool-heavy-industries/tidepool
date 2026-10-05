@@ -90,7 +90,7 @@ import Tidepool.FinalizedModuleArtifacts
   , localFinalizedInterface, localFinalizedSourceSha256, localFinalizedCore )
 import Tidepool.OriginalProductRoots (requiredOriginalPackageGlobalsWithRetained)
 import Tidepool.ExactHydration (ExactIfaceArtifact(..), OriginalInterfaceArtifacts
-  , newOriginalInterfaceArtifacts, originalInterfaceBytes)
+  , newOriginalInterfaceArtifacts, originalInterfaceBytes, generatedActivationPreviewRecipe)
 import Tidepool.ExecutionSource
   ( ExecutionSourceGraph(..), ExecutionSourceIdentity(..)
   , ExecutionSourceOwner(..), ExecutionSourceRef(..), ExecutionSourceFailure(..), WorkerExecutionSource(..)
@@ -355,7 +355,7 @@ runActivationPreviewMode compiler caches args path = do
           protected <- either fail pure (renameScaffoldModuleHeader owner original)
           named <- replaceRecipeMarker "{{ACTIVATION_PREVIEW}}" body protected
           (_, moduleName', modulePath) <- writeSplicedModule outDir lastAttempt named
-          recipe <- generatedScaffoldRecipe (previewTemplateInterfaces admission) protected named modulePath moduleName' >>= either fail pure
+          recipe <- generatedActivationPreviewRecipe (previewOriginalInterfaces admission) protected named modulePath moduleName' >>= either fail pure
           pure (named, modulePath, GeneratedScaffoldCompile recipe basePurpose)
     (_, probePath, probePurpose) <- render opaque
     probe <- compiler CheckedEnvironment Set.empty probePurpose (Just (scopeFromWorkerRequest args))

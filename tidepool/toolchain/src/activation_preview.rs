@@ -70,7 +70,7 @@ impl ActivationPreviewOffer {
         Ok(())
     }
 
-    pub(crate) fn authorization(&self, template_interfaces: Value) -> Result<Value, CompileError> {
+    pub(crate) fn authorization(&self, original_interfaces: Value) -> Result<Value, CompileError> {
         self.validate()?;
         let witness = self
             .input
@@ -80,7 +80,7 @@ impl ActivationPreviewOffer {
         let baseline = self.values.baseline_authorization();
         let baseline = row(&baseline, 1)?;
         Ok(array([
-            text("host-activation-preview1"),
+            text("host-activation-preview2"),
             text(hex(&self.specification.admission_digest)),
             Value::Integer(self.specification.generation.into()),
             Value::Integer(self.specification.budget.into()),
@@ -104,7 +104,7 @@ impl ActivationPreviewOffer {
                     )),
                 ])
             },
-            template_interfaces,
+            original_interfaces,
         ]))
     }
 

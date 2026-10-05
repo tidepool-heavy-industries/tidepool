@@ -132,7 +132,7 @@ data ActivationPreviewAdmission = ActivationPreviewAdmission
   , previewInputSignature :: CheckedSignature
   , previewInputWitness :: BS.ByteString
   , previewInputInterface :: ExactIfaceArtifact
-  , previewTemplateInterfaces :: [CheckedTemplateInterface]
+  , previewOriginalInterfaces :: [CheckedTemplateInterface]
   , previewInputPackagesSha256 :: String
   } deriving (Eq, Show)
 
@@ -1156,7 +1156,7 @@ decodeScope = do
     checkedPurpose requestTypes Set.empty, descriptors, interfaceEvidence)
   where
     decodePurpose authCount purpose = case purpose of
-      "host-activation-preview1" -> do
+      "host-activation-preview2" -> do
         unless (authCount == 12) (fail "invalid activation preview admission")
         admissionDigest <- digestField
         generation <- decodeWord64
@@ -1184,10 +1184,12 @@ decodeScope = do
             && previewInputModule binder == owner
             && parseSessionModule owner == Just (SessionModule ValMod (Generation inputGeneration)))
           (fail "invalid activation preview input identity")
-        templateInputs <- templateInterfaces
+        originalInputs <- templateInterfaces
+        unless (all ((== "main") . templateInterfaceUnit) originalInputs)
+          (fail "activation preview original graph belongs to another home unit")
         paths <- includePaths
         pure (ExactActivationPreviewPurpose (ActivationPreviewAdmission admissionDigest generation budget
-          templateSha inputGeneration binder native witness interface templateInputs packagesSha) paths)
+          templateSha inputGeneration binder native witness interface originalInputs packagesSha) paths)
       "inspection1" -> do
         unless (authCount == 4) (fail "invalid inspection admission")
         injected <- bounded 4096 nonempty

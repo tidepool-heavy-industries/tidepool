@@ -172,11 +172,13 @@ against the receipt; home Names must already exist in the admitted environment.
 The canonical activation witness remains a separate semantic equality contract:
 GHC binary bytes are not a canonical type fingerprint.
 
-Pure activation previews use the twelve-field `host-activation-preview1`
+Pure activation previews use the twelve-field `host-activation-preview2`
 authorization. It seals the admission, preview generation and budget, protected
 template digest, mounted input generation and complete binder metadata, original
 native signature and canonical witness, mounted value interface/package seals,
-template interface graph, and ordered include roots. The worker compiles only
+complete original instance interface graph, and ordered include roots. Protected
+target/fingerprint edges expose that graph only to the preview's instance
+traversal; they grant no authored imports or lexical names. The worker compiles only
 `Input -> Eff '[] (Text, Bool)`: its single `TidepoolActivationInput` slot is
 replaced with the original native type before renaming. An opaque probe solves
 the exact `WorkbenchDisplay` constraint; a missing instance permits opaque
@@ -195,6 +197,8 @@ completion. The retired `host-input-check1` and
 `host-activation-input2` purposes and activation-input receipts are rejected.
 Qualified imports from a protected template retain their exact alias and
 interface graph; changing or duplicating an import cannot inherit that authority.
+The prior `host-activation-preview1` authorization is rejected; deploy the
+matched frontend and worker together.
 
 This is a strict internal migration. Old three-field printed signatures are
 rejected. Deploy the Rust consumer and Haskell worker together and regenerate
