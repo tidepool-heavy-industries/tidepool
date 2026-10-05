@@ -624,6 +624,9 @@ def test_runtime_inputs(package_name, target_name, unit=False):
             "TIDEPOOL_GHC": "$(exe toolchains//:ghc)",
         })
         resources.extend([":effects_generated", "//bridge/protocol:generated", "//bridge/haskell:facade_embedded_sources", ":generated_surface_fixtures"])
+    if package_name == "exomonad-node" and unit:
+        env["EXOMONAD_INBOX_DIRECTORY_FAULT_LIBRARY"] = "$(location :inbox_directory_fault_shared)"
+        resources.append(":inbox_directory_fault_shared")
     if package_name == "tidepool-protocol":
         env["RUSTFMT"] = "$(exe toolchains//:rustfmt)"
         resources.append("toolchains//:rustfmt")
@@ -1259,6 +1262,16 @@ filegroup(
             rules.append(f'''export_file(
     name = "activation_input_{fixture.replace("-", "_")}_fixture",
     src = "src/session/fixtures/activation-input-{fixture}.hs",
+    visibility = ["PUBLIC"],
+)
+''')
+    if package["name"] == "exomonad-node":
+        CURRENT_QUALIFICATION_SOURCES.add("src/inbox/fixtures/directory_fault.c")
+        rules.append('''cxx_library(
+    name = "inbox_directory_fault_shared",
+    srcs = ["src/inbox/fixtures/directory_fault.c"],
+    preferred_linkage = "shared",
+    linker_flags = ["-ldl"],
     visibility = ["PUBLIC"],
 )
 ''')

@@ -159,21 +159,27 @@ fn fault_child() {
 #[test]
 fn strict_inbox_faults_propagate_without_retry() {
     let temp = tempfile::tempdir().unwrap();
-    let library = temp.path().join("fault.so");
-    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/inbox/fixtures/directory_fault.c");
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "short synchronous test-fixture build"
-    )]
-    let cc = Command::new("cc")
-        .args(["-shared", "-fPIC", "-Wall", "-Werror"])
-        .arg(source)
-        .arg("-o")
-        .arg(&library)
-        .arg("-ldl")
-        .status()
-        .unwrap();
-    assert!(cc.success());
+    let library = std::env::var_os("EXOMONAD_INBOX_DIRECTORY_FAULT_LIBRARY")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let library = temp.path().join("fault.so");
+            let source =
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("src/inbox/fixtures/directory_fault.c");
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "short synchronous test-fixture build"
+            )]
+            let cc = Command::new("cc")
+                .args(["-shared", "-fPIC", "-Wall", "-Werror"])
+                .arg(source)
+                .arg("-o")
+                .arg(&library)
+                .arg("-ldl")
+                .status()
+                .unwrap();
+            assert!(cc.success());
+            library
+        });
     for (index, (case, target)) in [
         ("fresh-rows", "rows/new/deep"),
         ("fresh-cursor", "cursor/new/deep"),

@@ -128,6 +128,12 @@ tidepool_rust_isolated_test(
         "//third-party/rust:uuid",
         "//tidepool/repr:tidepool_repr",
     ],
+    env = {
+        "EXOMONAD_INBOX_DIRECTORY_FAULT_LIBRARY": "$(location :inbox_directory_fault_shared)",
+    },
+    resources = [
+        ":inbox_directory_fault_shared",
+    ],
     visibility = ["PUBLIC"],
 )
 
@@ -241,6 +247,14 @@ tidepool_rust_isolated_test(
     visibility = ["PUBLIC"],
 )
 
+cxx_library(
+    name = "inbox_directory_fault_shared",
+    srcs = ["src/inbox/fixtures/directory_fault.c"],
+    preferred_linkage = "shared",
+    linker_flags = ["-ldl"],
+    visibility = ["PUBLIC"],
+)
+
 filegroup(
     name = "native_qualification_inputs",
     srcs = {
@@ -254,6 +268,7 @@ filegroup(
         "exomonad/node/src/copy_admission.rs": "src/copy_admission.rs",
         "exomonad/node/src/host_command.rs": "src/host_command.rs",
         "exomonad/node/src/inbox.rs": "src/inbox.rs",
+        "exomonad/node/src/inbox/fixtures/directory_fault.c": "src/inbox/fixtures/directory_fault.c",
         "exomonad/node/src/inbox/strict_faults.rs": "src/inbox/strict_faults.rs",
         "exomonad/node/src/inbox/tests.rs": "src/inbox/tests.rs",
         "exomonad/node/src/lib.rs": "src/lib.rs",
