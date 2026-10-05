@@ -244,9 +244,18 @@ impl Driver {
         let mut declarations = exomonad_effect_declarations();
         declarations.push(tidepool_mcp::recipe_check_decl());
         let effects = tidepool_mcp::ensure_effects_module(&declarations)?;
-        let mut includes = effects.include_paths().to_vec();
-        includes.push(selected.runtime_actors().to_path_buf());
-        includes.push(selected.runtime_stdlib().to_path_buf());
+        let mut includes = if let Some(mut roots) = selected.runtime_catalog_roots() {
+            if roots.first() != Some(&effects.core) {
+                return Err("frozen stable effect source selection changed".into());
+            }
+            roots.push(effects.orchestration.clone());
+            roots
+        } else {
+            let mut roots = effects.include_paths().to_vec();
+            roots.push(selected.runtime_actors());
+            roots.push(selected.runtime_stdlib());
+            roots
+        };
         includes.extend(selected.include.iter().cloned());
         let refs = includes.iter().map(PathBuf::as_path).collect::<Vec<_>>();
         // Pieces, not a whole module string: `compile_and_run` assembles the
