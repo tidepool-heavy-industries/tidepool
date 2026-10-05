@@ -146,9 +146,10 @@ mod tests {
             .args(["-I", "-B", "-c"])
             .arg(
                 r#"
-import importlib.util, json, sys
+import importlib.machinery, importlib.util, json, sys
 from pathlib import Path
-spec = importlib.util.spec_from_file_location("qualification", sys.argv[1])
+loader = importlib.machinery.SourceFileLoader("qualification", sys.argv[1])
+spec = importlib.util.spec_from_loader(loader.name, loader)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 catalog, root = Path(sys.argv[2]), Path(sys.argv[3])
