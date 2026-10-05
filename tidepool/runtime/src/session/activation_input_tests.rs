@@ -1763,7 +1763,7 @@ fn activation_preview_type_only_original_context_is_unavailable_before_instance_
         .unwrap()
         .with_scoped_injection();
     let admission = resident.admit_activation_preview(mounted, view).unwrap();
-    let mut command = tidepool_extract_cmd::ExtractCmd::new().unwrap();
+    let command = tidepool_extract_cmd::ExtractCmd::new().unwrap();
     let endpoint = tidepool_toolchain::toolchain::AdmittedCompilerEndpoint::from_bound(
         command.bind().unwrap(),
     )

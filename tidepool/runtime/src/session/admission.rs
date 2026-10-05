@@ -2934,7 +2934,7 @@ mod tests {
             payload_changed.metadata_digest()
         );
         assert_ne!(original.commitment(), semantic_changed.commitment());
-        let digest = |witness: Arc<_>| {
+        let digest = |witness: Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>| {
             let mut digest = blake3::Hasher::new();
             for bytes in [witness.metadata_digest(), witness.commitment()] {
                 digest.update(&bytes);
