@@ -441,7 +441,7 @@ def declare_haskell_components():
         "Main.hs": "test-source-boot/SourceBootChildMain.hs",
         "SourceBootCases.hs": "test-source-boot/SourceBootCases.hs",
         "ExecutionSourceDecodeTest.hs": "test-source-boot/ExecutionSourceDecodeTest.hs",
-        "GenuineCandidateFixture.hs": "test-source-boot/GenuineCandidateFixture.hs",
+        "Tidepool/Test/GenuineCandidate.hs": "test-support/Tidepool/Test/GenuineCandidate.hs",
         "ProgressBoundaryTest.hs": "test-source-boot/ProgressBoundaryTest.hs",
         "FinalizedCoreTest.hs": "test-source-boot/FinalizedCoreTest.hs",
         "ExactScopeV9Test.hs": "test-source-boot/ExactScopeV9Test.hs",
@@ -854,6 +854,7 @@ def declare_haskell_components():
         "test-cell-splitter/fixtures/unreachable-compile-time/UnusedCompileTimeTarget.hs": "test-cell-splitter/fixtures/unreachable-compile-time/UnusedCompileTimeTarget.hs",
         "test-support/Tidepool/Test/CandidateCodec.hs": "test-support/Tidepool/Test/CandidateCodec.hs",
         "test-support/Tidepool/Test/FixturePacket.hs": "test-support/Tidepool/Test/FixturePacket.hs",
+        "test-support/Tidepool/Test/GenuineCandidate.hs": "test-support/Tidepool/Test/GenuineCandidate.hs",
         "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs"
     },
     )
@@ -1128,6 +1129,7 @@ def declare_haskell_components():
         "test-cell-splitter/fixtures/unreachable-compile-time/UnusedCompileTimeTarget.hs": "test-cell-splitter/fixtures/unreachable-compile-time/UnusedCompileTimeTarget.hs",
         "test-support/Tidepool/Test/CandidateCodec.hs": "test-support/Tidepool/Test/CandidateCodec.hs",
         "test-support/Tidepool/Test/FixturePacket.hs": "test-support/Tidepool/Test/FixturePacket.hs",
+        "test-support/Tidepool/Test/GenuineCandidate.hs": "test-support/Tidepool/Test/GenuineCandidate.hs",
         "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs"
     },
     )
@@ -1398,6 +1400,7 @@ def declare_haskell_components():
         "test-cell-splitter/fixtures/unreachable-compile-time/UnusedCompileTimeTarget.hs": "test-cell-splitter/fixtures/unreachable-compile-time/UnusedCompileTimeTarget.hs",
         "test-support/Tidepool/Test/CandidateCodec.hs": "test-support/Tidepool/Test/CandidateCodec.hs",
         "test-support/Tidepool/Test/FixturePacket.hs": "test-support/Tidepool/Test/FixturePacket.hs",
+        "test-support/Tidepool/Test/GenuineCandidate.hs": "test-support/Tidepool/Test/GenuineCandidate.hs",
         "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs"
     },
     )
@@ -1561,6 +1564,7 @@ def declare_haskell_components():
         "test-display-tree/DisplayTreeTest.hs": "test-display-tree/DisplayTreeTest.hs",
         "test-support/Tidepool/Test/CandidateCodec.hs": "test-support/Tidepool/Test/CandidateCodec.hs",
         "test-support/Tidepool/Test/FixturePacket.hs": "test-support/Tidepool/Test/FixturePacket.hs",
+        "test-support/Tidepool/Test/GenuineCandidate.hs": "test-support/Tidepool/Test/GenuineCandidate.hs",
         "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs"
     },
     )
@@ -1760,6 +1764,7 @@ def declare_haskell_components():
         "test/suite_cbor/meta.cbor": "test/suite_cbor/meta.cbor",
         "test-support/Tidepool/Test/CandidateCodec.hs": "test-support/Tidepool/Test/CandidateCodec.hs",
         "test-support/Tidepool/Test/FixturePacket.hs": "test-support/Tidepool/Test/FixturePacket.hs",
+        "test-support/Tidepool/Test/GenuineCandidate.hs": "test-support/Tidepool/Test/GenuineCandidate.hs",
         "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs"
     },
     )
@@ -1942,6 +1947,7 @@ def declare_haskell_components():
         "test-execution-inventory/ExecutionInventoryTest.hs": "test-execution-inventory/ExecutionInventoryTest.hs",
         "test-support/Tidepool/Test/CandidateCodec.hs": "test-support/Tidepool/Test/CandidateCodec.hs",
         "test-support/Tidepool/Test/FixturePacket.hs": "test-support/Tidepool/Test/FixturePacket.hs",
+        "test-support/Tidepool/Test/GenuineCandidate.hs": "test-support/Tidepool/Test/GenuineCandidate.hs",
         "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs"
     },
     )
@@ -2128,6 +2134,7 @@ def declare_haskell_components():
         "test-execution-schema-encode/Main.hs": "test-execution-schema-encode/Main.hs",
         "test-support/Tidepool/Test/CandidateCodec.hs": "test-support/Tidepool/Test/CandidateCodec.hs",
         "test-support/Tidepool/Test/FixturePacket.hs": "test-support/Tidepool/Test/FixturePacket.hs",
+        "test-support/Tidepool/Test/GenuineCandidate.hs": "test-support/Tidepool/Test/GenuineCandidate.hs",
         "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs"
     },
     )
@@ -2426,6 +2433,7 @@ def declare_haskell_components():
         "test-prepared-stg/time-shadow/Tidepool/Data/Time.hs": "test-prepared-stg/time-shadow/Tidepool/Data/Time.hs",
         "test-support/Tidepool/Test/CandidateCodec.hs": "test-support/Tidepool/Test/CandidateCodec.hs",
         "test-support/Tidepool/Test/FixturePacket.hs": "test-support/Tidepool/Test/FixturePacket.hs",
+        "test-support/Tidepool/Test/GenuineCandidate.hs": "test-support/Tidepool/Test/GenuineCandidate.hs",
         "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs"
     },
     )
@@ -2619,6 +2627,7 @@ def declare_haskell_components():
         "test-execution-corpus/ExecutionCorpusProducerMain.hs": "test-execution-corpus/ExecutionCorpusProducerMain.hs",
         "test-support/Tidepool/Test/CandidateCodec.hs": "test-support/Tidepool/Test/CandidateCodec.hs",
         "test-support/Tidepool/Test/FixturePacket.hs": "test-support/Tidepool/Test/FixturePacket.hs",
+        "test-support/Tidepool/Test/GenuineCandidate.hs": "test-support/Tidepool/Test/GenuineCandidate.hs",
         "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs"
     },
     )
@@ -2823,6 +2832,7 @@ def declare_haskell_components():
         "test-planned-declaration/fixtures/shadow-previous.hs": "test-planned-declaration/fixtures/shadow-previous.hs",
         "test-support/Tidepool/Test/CandidateCodec.hs": "test-support/Tidepool/Test/CandidateCodec.hs",
         "test-support/Tidepool/Test/FixturePacket.hs": "test-support/Tidepool/Test/FixturePacket.hs",
+        "test-support/Tidepool/Test/GenuineCandidate.hs": "test-support/Tidepool/Test/GenuineCandidate.hs",
         "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs"
     },
     )
@@ -2860,7 +2870,7 @@ def declare_haskell_components():
         "Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs",
         "SourceBootCases.hs": "test-source-boot/SourceBootCases.hs",
         "ExecutionSourceDecodeTest.hs": "test-source-boot/ExecutionSourceDecodeTest.hs",
-        "GenuineCandidateFixture.hs": "test-source-boot/GenuineCandidateFixture.hs",
+        "Tidepool/Test/GenuineCandidate.hs": "test-support/Tidepool/Test/GenuineCandidate.hs",
         "ProgressBoundaryTest.hs": "test-source-boot/ProgressBoundaryTest.hs",
         "FinalizedCoreTest.hs": "test-source-boot/FinalizedCoreTest.hs",
         "ExactScopeV9Test.hs": "test-source-boot/ExactScopeV9Test.hs",
@@ -3034,7 +3044,6 @@ def declare_haskell_components():
         "test-source-boot/ExecutionSourceDecodeTest.hs": "test-source-boot/ExecutionSourceDecodeTest.hs",
         "test-source-boot/ExecutionSourceSnapshotsMain.hs": "test-source-boot/ExecutionSourceSnapshotsMain.hs",
         "test-source-boot/FinalizedCoreTest.hs": "test-source-boot/FinalizedCoreTest.hs",
-        "test-source-boot/GenuineCandidateFixture.hs": "test-source-boot/GenuineCandidateFixture.hs",
         "test-source-boot/Main.hs": "test-source-boot/Main.hs",
         "test-source-boot/ProgressBoundaryTest.hs": "test-source-boot/ProgressBoundaryTest.hs",
         "test-source-boot/SourceBootCases.hs": "test-source-boot/SourceBootCases.hs",
@@ -3143,6 +3152,7 @@ def declare_haskell_components():
         "test-source-boot/fixtures/WatchReplyEvidenceWarmup.hs": "test-source-boot/fixtures/WatchReplyEvidenceWarmup.hs",
         "test-support/Tidepool/Test/CandidateCodec.hs": "test-support/Tidepool/Test/CandidateCodec.hs",
         "test-support/Tidepool/Test/FixturePacket.hs": "test-support/Tidepool/Test/FixturePacket.hs",
+        "test-support/Tidepool/Test/GenuineCandidate.hs": "test-support/Tidepool/Test/GenuineCandidate.hs",
         "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs"
     },
     )
@@ -3191,6 +3201,7 @@ def declare_haskell_components():
         "RetainedPluginTest.hs": "test-prepared-stg/RetainedPluginTest.hs",
         "TypeEvidenceChecks.hs": "test-prepared-stg/TypeEvidenceChecks.hs",
         "ModuleProductRoundtripTest.hs": "test-prepared-stg/ModuleProductRoundtripTest.hs",
+        "Tidepool/Test/GenuineCandidate.hs": "test-support/Tidepool/Test/GenuineCandidate.hs",
         "Tidepool/Test/CandidateCodec.hs": "test-support/Tidepool/Test/CandidateCodec.hs",
         "Tidepool/Test/FixturePacket.hs": "test-support/Tidepool/Test/FixturePacket.hs"
     },
@@ -3452,6 +3463,7 @@ def declare_haskell_components():
         "test-prepared-stg/time-shadow/Tidepool/Data/Time.hs": "test-prepared-stg/time-shadow/Tidepool/Data/Time.hs",
         "test-support/Tidepool/Test/CandidateCodec.hs": "test-support/Tidepool/Test/CandidateCodec.hs",
         "test-support/Tidepool/Test/FixturePacket.hs": "test-support/Tidepool/Test/FixturePacket.hs",
+        "test-support/Tidepool/Test/GenuineCandidate.hs": "test-support/Tidepool/Test/GenuineCandidate.hs",
         "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs"
     },
     )
@@ -3469,7 +3481,9 @@ def declare_haskell_components():
         ":facade_embedded_sources",
         "toolchains//:haskell_test_closure",
         "toolchains//:test_tools_closure",
-        "//tidepool/toolchain:candidate_fixture_issuer"
+        "//tidepool/toolchain:candidate_fixture_issuer",
+        "//build/package:compiler_deployment",
+        "//build/package:tidepool_extract_runtime_libraries"
     ],
         env = {
         "PATH": read_root_config("nix", "ghc_bin") + ":" + read_root_config("nix", "action_path"),
@@ -3478,7 +3492,11 @@ def declare_haskell_components():
         "TIDEPOOL_PRELUDE_DIR": "$(location :facade_embedded_sources)/lib",
         "TIDEPOOL_TEST_PYTHON": "$(exe toolchains//:python)",
         "TIDEPOOL_CANDIDATE_FIXTURE_ISSUER": "$(exe //tidepool/toolchain:candidate_fixture_issuer)",
-        "TIDEPOOL_TEST_INPUT_PATHS": "PATH:search-list TIDEPOOL_GHC_LIBDIR:directory TIDEPOOL_TEST_EFFECTS_DIR:directory TIDEPOOL_PRELUDE_DIR:directory TIDEPOOL_TEST_PYTHON:executable TIDEPOOL_CANDIDATE_FIXTURE_ISSUER:executable",
+        "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_deployment)",
+        "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
+        "TIDEPOOL_EXTRACT_WORKER": "$(exe :tidepool_extract_bin)",
+        "LD_LIBRARY_PATH": "$(location //build/package:tidepool_extract_runtime_libraries)",
+        "TIDEPOOL_TEST_INPUT_PATHS": "PATH:search-list TIDEPOOL_GHC_LIBDIR:directory TIDEPOOL_TEST_EFFECTS_DIR:directory TIDEPOOL_PRELUDE_DIR:directory TIDEPOOL_TEST_PYTHON:executable TIDEPOOL_CANDIDATE_FIXTURE_ISSUER:executable TIDEPOOL_COMPILER_DEPLOYMENT:file TIDEPOOL_EXTRACT:executable TIDEPOOL_EXTRACT_WORKER:executable LD_LIBRARY_PATH:library-search-list",
     },
         labels = ["haskell_component_suite"],
         test_rule_timeout_ms = 14400000,
@@ -3637,6 +3655,7 @@ def declare_haskell_components():
         "test-compile-input-policy/Main.hs": "test-compile-input-policy/Main.hs",
         "test-support/Tidepool/Test/CandidateCodec.hs": "test-support/Tidepool/Test/CandidateCodec.hs",
         "test-support/Tidepool/Test/FixturePacket.hs": "test-support/Tidepool/Test/FixturePacket.hs",
+        "test-support/Tidepool/Test/GenuineCandidate.hs": "test-support/Tidepool/Test/GenuineCandidate.hs",
         "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs"
     },
     )
@@ -3805,6 +3824,7 @@ def declare_haskell_components():
         "lib/Tidepool/Worktree.hs": "lib/Tidepool/Worktree.hs",
         "test-support/Tidepool/Test/CandidateCodec.hs": "test-support/Tidepool/Test/CandidateCodec.hs",
         "test-support/Tidepool/Test/FixturePacket.hs": "test-support/Tidepool/Test/FixturePacket.hs",
+        "test-support/Tidepool/Test/GenuineCandidate.hs": "test-support/Tidepool/Test/GenuineCandidate.hs",
         "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs",
         "test-swarm/SwarmSpec.hs": "test-swarm/SwarmSpec.hs",
         "test-swarm/SwarmSpecTest.hs": "test-swarm/SwarmSpecTest.hs"
@@ -4097,6 +4117,7 @@ def declare_haskell_components():
         "test-prepared-stg/time-shadow/Tidepool/Data/Time.hs": "test-prepared-stg/time-shadow/Tidepool/Data/Time.hs",
         "test-support/Tidepool/Test/CandidateCodec.hs": "test-support/Tidepool/Test/CandidateCodec.hs",
         "test-support/Tidepool/Test/FixturePacket.hs": "test-support/Tidepool/Test/FixturePacket.hs",
+        "test-support/Tidepool/Test/GenuineCandidate.hs": "test-support/Tidepool/Test/GenuineCandidate.hs",
         "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs"
     },
     )
@@ -4388,6 +4409,7 @@ def declare_haskell_components():
         "test-prepared-stg/time-shadow/Tidepool/Data/Time.hs": "test-prepared-stg/time-shadow/Tidepool/Data/Time.hs",
         "test-support/Tidepool/Test/CandidateCodec.hs": "test-support/Tidepool/Test/CandidateCodec.hs",
         "test-support/Tidepool/Test/FixturePacket.hs": "test-support/Tidepool/Test/FixturePacket.hs",
+        "test-support/Tidepool/Test/GenuineCandidate.hs": "test-support/Tidepool/Test/GenuineCandidate.hs",
         "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs"
     },
     )
@@ -4680,6 +4702,7 @@ def declare_haskell_components():
         "test-prepared-stg/time-shadow/Tidepool/Data/Time.hs": "test-prepared-stg/time-shadow/Tidepool/Data/Time.hs",
         "test-support/Tidepool/Test/CandidateCodec.hs": "test-support/Tidepool/Test/CandidateCodec.hs",
         "test-support/Tidepool/Test/FixturePacket.hs": "test-support/Tidepool/Test/FixturePacket.hs",
+        "test-support/Tidepool/Test/GenuineCandidate.hs": "test-support/Tidepool/Test/GenuineCandidate.hs",
         "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs"
     },
     )
@@ -4872,6 +4895,7 @@ def declare_haskell_components():
         "test-family-consistency/Main.hs": "test-family-consistency/Main.hs",
         "test-support/Tidepool/Test/CandidateCodec.hs": "test-support/Tidepool/Test/CandidateCodec.hs",
         "test-support/Tidepool/Test/FixturePacket.hs": "test-support/Tidepool/Test/FixturePacket.hs",
+        "test-support/Tidepool/Test/GenuineCandidate.hs": "test-support/Tidepool/Test/GenuineCandidate.hs",
         "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs"
     },
     )
@@ -5058,6 +5082,7 @@ def declare_haskell_components():
         "lib/Tidepool/Worktree.hs": "lib/Tidepool/Worktree.hs",
         "test-support/Tidepool/Test/CandidateCodec.hs": "test-support/Tidepool/Test/CandidateCodec.hs",
         "test-support/Tidepool/Test/FixturePacket.hs": "test-support/Tidepool/Test/FixturePacket.hs",
+        "test-support/Tidepool/Test/GenuineCandidate.hs": "test-support/Tidepool/Test/GenuineCandidate.hs",
         "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs",
         "test-worker-response/WorkerResponseCases.hs": "test-worker-response/WorkerResponseCases.hs",
         "test-worker-response/WorkerResponseChildMain.hs": "test-worker-response/WorkerResponseChildMain.hs",
@@ -5295,6 +5320,7 @@ def declare_haskell_components():
         "test-model-turn/Main.hs": "test-model-turn/Main.hs",
         "test-support/Tidepool/Test/CandidateCodec.hs": "test-support/Tidepool/Test/CandidateCodec.hs",
         "test-support/Tidepool/Test/FixturePacket.hs": "test-support/Tidepool/Test/FixturePacket.hs",
+        "test-support/Tidepool/Test/GenuineCandidate.hs": "test-support/Tidepool/Test/GenuineCandidate.hs",
         "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs"
     },
     )
@@ -5508,6 +5534,7 @@ def declare_haskell_components():
         "test-check/tool-profiles/UnsupportedProfile.hs": "test-check/tool-profiles/UnsupportedProfile.hs",
         "test-support/Tidepool/Test/CandidateCodec.hs": "test-support/Tidepool/Test/CandidateCodec.hs",
         "test-support/Tidepool/Test/FixturePacket.hs": "test-support/Tidepool/Test/FixturePacket.hs",
+        "test-support/Tidepool/Test/GenuineCandidate.hs": "test-support/Tidepool/Test/GenuineCandidate.hs",
         "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs"
     },
     )
@@ -5722,6 +5749,7 @@ def declare_haskell_components():
         "test-check/tool-profiles/UnsupportedProfile.hs": "test-check/tool-profiles/UnsupportedProfile.hs",
         "test-support/Tidepool/Test/CandidateCodec.hs": "test-support/Tidepool/Test/CandidateCodec.hs",
         "test-support/Tidepool/Test/FixturePacket.hs": "test-support/Tidepool/Test/FixturePacket.hs",
+        "test-support/Tidepool/Test/GenuineCandidate.hs": "test-support/Tidepool/Test/GenuineCandidate.hs",
         "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs"
     },
     )
@@ -6100,6 +6128,7 @@ def declare_haskell_components():
         "lib/Tidepool/Worktree.hs": "lib/Tidepool/Worktree.hs",
         "test-support/Tidepool/Test/CandidateCodec.hs": "test-support/Tidepool/Test/CandidateCodec.hs",
         "test-support/Tidepool/Test/FixturePacket.hs": "test-support/Tidepool/Test/FixturePacket.hs",
+        "test-support/Tidepool/Test/GenuineCandidate.hs": "test-support/Tidepool/Test/GenuineCandidate.hs",
         "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs"
     },
     )
@@ -6460,6 +6489,7 @@ def declare_haskell_components():
         "lib/Tidepool/Worktree.hs": "lib/Tidepool/Worktree.hs",
         "test-support/Tidepool/Test/CandidateCodec.hs": "test-support/Tidepool/Test/CandidateCodec.hs",
         "test-support/Tidepool/Test/FixturePacket.hs": "test-support/Tidepool/Test/FixturePacket.hs",
+        "test-support/Tidepool/Test/GenuineCandidate.hs": "test-support/Tidepool/Test/GenuineCandidate.hs",
         "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs"
     },
     )
@@ -6698,6 +6728,7 @@ def declare_haskell_components():
         "test-check/tool-profiles/UnsupportedProfile.hs": "test-check/tool-profiles/UnsupportedProfile.hs",
         "test-support/Tidepool/Test/CandidateCodec.hs": "test-support/Tidepool/Test/CandidateCodec.hs",
         "test-support/Tidepool/Test/FixturePacket.hs": "test-support/Tidepool/Test/FixturePacket.hs",
+        "test-support/Tidepool/Test/GenuineCandidate.hs": "test-support/Tidepool/Test/GenuineCandidate.hs",
         "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs"
     },
     )
@@ -6933,6 +6964,7 @@ def declare_haskell_components():
         "test-check/tool-profiles/UnsupportedProfile.hs": "test-check/tool-profiles/UnsupportedProfile.hs",
         "test-support/Tidepool/Test/CandidateCodec.hs": "test-support/Tidepool/Test/CandidateCodec.hs",
         "test-support/Tidepool/Test/FixturePacket.hs": "test-support/Tidepool/Test/FixturePacket.hs",
+        "test-support/Tidepool/Test/GenuineCandidate.hs": "test-support/Tidepool/Test/GenuineCandidate.hs",
         "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs"
     },
     )
