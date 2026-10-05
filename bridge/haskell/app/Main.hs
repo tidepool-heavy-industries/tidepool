@@ -14,7 +14,7 @@ import Codec.CBOR.Write (toStrictByteString)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Control.Exception
-  ( evaluate, try, throwIO, SomeException
+  ( evaluate, try, throwIO, SomeException, Exception
   , toException, IOException )
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.List (intercalate, nub, isPrefixOf)
@@ -381,26 +381,35 @@ runActivationPreviewMode compiler caches args path = do
       (previewInputWitness admission) sealed)
     encodedWitness <- maybe (fail "activation preview witness is unsealed") pure (encodeCheckedTypeWitness sealed)
     let witnessBytes = toStrictByteString encodedWitness
-    (artifacts, productContext) <- prepareArtifacts originalInterfaces caches prepared
-      [preparedScaffoldTargetName] (standardAuxiliaryRoots binds) Map.empty []
-    unless (all (null . paYieldSites) artifacts) (fail "pure activation preview emitted suspension sites")
-    writePreparedSidecars InlineYieldSites outDir binds (prTyCons compiled)
-      (T.pack <$> prCapturedType compiled) (map T.pack (prWarnings compiled)) artifacts
-    writePreparedArtifacts outDir artifacts
-    void $ writeCertifiedProductsKeeping (requestIncludes args) originalInterfaces outDir prepared productContext
-      [(paTarget artifact,paProgram artifact) | artifact <- artifacts]
+    projection <- try (prepareArtifactsWithProjection requirePreviewProjection
+      originalInterfaces caches prepared [preparedScaffoldTargetName]
+      (standardAuxiliaryRoots binds) Map.empty [])
+      :: IO (Either PreviewOriginalDependenciesUnavailable ([PreparedArtifact], Maybe PreparedModuleProducts))
     validateDependencyEvidence (preparedFreshDependencies prepared)
     revalidateExactScope environment exact >>= either fail pure
     templateBytes <- readTemplate
     unless (templateBytes == originalBytes) (fail "activation preview template changed during compilation")
-    outFile <- requireArg "--turn-out" (requestTurnOut args)
-    BS.writeFile outFile (encodeTurnOut (TExpr 0 (concatMap paYieldSites artifacts) (T.pack source)))
     let text = encodeString . T.pack
-    BS.writeFile (outDir </> "activation-preview.cbor") $ toStrictByteString
-      (encodeListLen 8 <> text "TPEXACTACTIVATIONPREVIEW1" <> text "1"
-        <> text (scopeRequestSha256 exact) <> text (previewAdmissionDigest admission)
-        <> encodeWord64 (previewGeneration admission) <> text (shaHex (TE.encodeUtf8 (T.pack source)))
-        <> encodeBytes witnessBytes <> text (if rendered then "rendered" else "opaque"))
+    case projection of
+      Left _ -> BS.writeFile (outDir </> "activation-preview-unavailable.cbor") $ toStrictByteString
+        (encodeListLen 7 <> text "TPEXACTACTIVATIONPREVIEWUNAVAILABLE1" <> text "1"
+          <> text (scopeRequestSha256 exact) <> text (previewAdmissionDigest admission)
+          <> encodeWord64 (previewGeneration admission) <> text (previewTemplateSha256 admission)
+          <> encodeBytes (previewInputWitness admission))
+      Right (artifacts, productContext) -> do
+        unless (all (null . paYieldSites) artifacts) (fail "pure activation preview emitted suspension sites")
+        writePreparedSidecars InlineYieldSites outDir binds (prTyCons compiled)
+          (T.pack <$> prCapturedType compiled) (map T.pack (prWarnings compiled)) artifacts
+        writePreparedArtifacts outDir artifacts
+        void $ writeCertifiedProductsKeeping (requestIncludes args) originalInterfaces outDir prepared productContext
+          [(paTarget artifact,paProgram artifact) | artifact <- artifacts]
+        outFile <- requireArg "--turn-out" (requestTurnOut args)
+        BS.writeFile outFile (encodeTurnOut (TExpr 0 (concatMap paYieldSites artifacts) (T.pack source)))
+        BS.writeFile (outDir </> "activation-preview.cbor") $ toStrictByteString
+          (encodeListLen 8 <> text "TPEXACTACTIVATIONPREVIEW1" <> text "1"
+            <> text (scopeRequestSha256 exact) <> text (previewAdmissionDigest admission)
+            <> encodeWord64 (previewGeneration admission) <> text (shaHex (TE.encodeUtf8 (T.pack source)))
+            <> encodeBytes witnessBytes <> text (if rendered then "rendered" else "opaque"))
   case result of
     Left _ -> readIORef lastAttempt >>= mapM_ (\(output, source) -> do
       void (try (writeFile output source) :: IO (Either IOException ())))
@@ -549,8 +558,15 @@ data PreparedArtifact = PreparedArtifact
 prepareArtifacts :: OriginalInterfaceArtifacts -> RecoveryCaches -> PreparedPipelineResult
   -> [String] -> [String] -> Map.Map SymbolIdentity Word64 -> [HostBindingRepresentation]
   -> IO ([PreparedArtifact], Maybe PreparedModuleProducts)
-prepareArtifacts _ _ _ [] _ _ _ = pure ([], Nothing)
-prepareArtifacts originalInterfaces caches prepared targets@(firstTarget : _) auxiliaryRoots retainedGenerations hostBindings = do
+prepareArtifacts = prepareArtifactsWithProjection requireProjection
+
+prepareArtifactsWithProjection
+  :: (forall a. Either ProjectionError a -> IO a)
+  -> OriginalInterfaceArtifacts -> RecoveryCaches -> PreparedPipelineResult
+  -> [String] -> [String] -> Map.Map SymbolIdentity Word64 -> [HostBindingRepresentation]
+  -> IO ([PreparedArtifact], Maybe PreparedModuleProducts)
+prepareArtifactsWithProjection _ _ _ _ [] _ _ _ = pure ([], Nothing)
+prepareArtifactsWithProjection project originalInterfaces caches prepared targets@(firstTarget : _) auxiliaryRoots retainedGenerations hostBindings = do
   timing <- readTimingEnabled
   let result = pprPipelineResult prepared
       hscEnv = prHscEnv result
@@ -605,9 +621,9 @@ prepareArtifacts originalInterfaces caches prepared targets@(firstTarget : _) au
               finalContext = context
                 { projectionAuxiliaryRoots = projectionAuxiliaryRoots context ++ roots }
           selected <- timePhase timing "prepared_project" $
-            requireProjection (prepareProjectionWithReachability finalContext
+            project (prepareProjectionWithReachability finalContext
               (closureModules recovered) (closureReachability recovered))
-          (program, constructors) <- requireProjection (projectSelectedWithHostBindings hostBindings selected)
+          (program, constructors) <- project (projectSelectedWithHostBindings hostBindings selected)
           required <- either (ioError . userError) pure
             (originalPackageGlobals (programGlobals program))
           let nextRoots = Set.toAscList (Set.fromList (roots ++ required))
@@ -646,6 +662,19 @@ prepareArtifacts originalInterfaces caches prepared targets@(firstTarget : _) au
       pure site { Tidepool.EffectSchema.ysInputTypeWitnesses = witnesses }
     pure (PreparedArtifact target program bytes constructors sealedSites)
   pure (artifacts, Just products)
+
+-- The pure preview boundary preserves only this chosen executable-demand
+-- failure. Every other projection, source, authority, or IO failure keeps its
+-- ordinary rejection path.
+newtype PreviewOriginalDependenciesUnavailable = PreviewOriginalDependenciesUnavailable [SymbolIdentity]
+  deriving Show
+instance Exception PreviewOriginalDependenciesUnavailable
+
+requirePreviewProjection :: Either ProjectionError a -> IO a
+requirePreviewProjection = \case
+  Left (UnavailableOriginalHomeDependencies identities) ->
+    throwIO (PreviewOriginalDependenciesUnavailable identities)
+  result -> requireProjection result
 
 requireProjection :: Either ProjectionError a -> IO a
 requireProjection = \case
