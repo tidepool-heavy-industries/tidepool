@@ -23,11 +23,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use ciborium::value::Value as CborValue;
+#[cfg(test)]
 use tempfile::TempDir;
 use tidepool_extract_cmd::{ExtractCmd, SpawnError};
 use tidepool_toolchain::artifacts::{
-    decode_turn_nominal_heads as decode_nominal_heads, decode_turn_yield_sites as decode_asks,
-    seal_turn_outputs, ModuleCandidateOffer,
+    compiler_scratch_directory, decode_turn_nominal_heads as decode_nominal_heads,
+    decode_turn_yield_sites as decode_asks, seal_turn_outputs, CompilerDiagnosticCapture,
+    ModuleCandidateOffer,
 };
 use tidepool_toolchain::certified_products::{PendingCertifiedGroup, PendingImportOwner};
 use tidepool_toolchain::checked_cell::{
@@ -2456,7 +2458,7 @@ pub fn compile_activation_preview(
     };
     let view = admission.view();
     let context = admission.exact_context().clone();
-    let temp = TempDir::new()?;
+    let temp = compiler_scratch_directory()?;
     let input_path = temp.path().join("ActivationPreviewTemplate.hs");
     std::fs::write(&input_path, template_source)?;
     let mut cmd = extract_cmd()?;
@@ -2491,9 +2493,11 @@ pub fn compile_activation_preview(
     }
     offer.apply_to(&mut cmd)?;
     crate::paths::apply_admitted_build_products_dir(&mut cmd, &endpoint);
+    let diagnostics = CompilerDiagnosticCapture::start(temp.path(), &cmd);
     let run = endpoint
         .execute(&cmd)
         .map_err(|error| offer.retain_execution_failure(temp.path(), &cmd, map_notfound(error)))?;
+    diagnostics.completed(temp.path(), &cmd, run.success(), &run.output.stderr);
     timing::log_interface_counts(&run.output.stderr);
     forward_extract_timing(&String::from_utf8_lossy(&run.output.stderr), "extract");
     crate::diag::decode_extract_result(
@@ -2608,7 +2612,7 @@ pub fn compile_cell_program_admitted(
             "complete cell compilation requires its parser reservation".into(),
         )
     })?;
-    let scratch = TempDir::new()?;
+    let scratch = compiler_scratch_directory()?;
     let cell_path = scratch.path().join("cell.txt");
     let template_path = scratch.path().join("CellCheckTemplate.hs");
     let output_path = scratch.path().join("cell.cbor");
@@ -2686,9 +2690,11 @@ pub fn compile_cell_program_admitted(
     }
     offer.apply_to(&mut command)?;
     crate::paths::apply_admitted_build_products_dir(&mut command, &endpoint);
+    let diagnostics = CompilerDiagnosticCapture::start(scratch.path(), &command);
     let run = endpoint.execute(&command).map_err(|error| {
         offer.retain_execution_failure(scratch.path(), &command, map_notfound(error))
     })?;
+    diagnostics.completed(scratch.path(), &command, run.success(), &run.output.stderr);
     let report =
         crate::diag::decode_extract_result(run.success(), &run.output.stdout, &run.output.stderr)
             .map_err(|error| {
@@ -2717,7 +2723,7 @@ fn check_cell_impl(
     admission: Option<Arc<super::RuntimeCellAdmission>>,
     admitted_templates: Option<&[TurnTemplate]>,
 ) -> Result<CellCheck, CellCheckFailure> {
-    let temp = TempDir::new()?;
+    let temp = compiler_scratch_directory()?;
     let cell_path = temp.path().join("cell.txt");
     let template_path = temp.path().join("CellCheckTemplate.hs");
     let out_path = temp.path().join("cell.cbor");
@@ -2804,10 +2810,12 @@ fn check_cell_impl(
     }
     offer.apply_to(&mut cmd)?;
     crate::paths::apply_admitted_build_products_dir(&mut cmd, &endpoint);
+    let diagnostics = CompilerDiagnosticCapture::start(temp.path(), &cmd);
     let run = endpoint
         .execute(&cmd)
         .map_err(|error| offer.retain_execution_failure(temp.path(), &cmd, map_notfound(error)))?;
     let output = &run.output;
+    diagnostics.completed(temp.path(), &cmd, run.success(), &output.stderr);
     timing::log_interface_counts(&output.stderr);
     let report =
         match crate::diag::decode_extract_result(run.success(), &output.stdout, &output.stderr) {
@@ -3097,7 +3105,7 @@ fn run_turn_with_admission(
         None => None,
     };
 
-    let temp = TempDir::new()?;
+    let temp = compiler_scratch_directory()?;
     let snapshot = checked.as_ref().map(|admission| admission.snapshot());
     let turn_path = temp.path().join("turn.txt");
     std::fs::write(&turn_path, req.turn_text)?;
@@ -3188,6 +3196,7 @@ fn run_turn_with_admission(
         Admitted(tidepool_toolchain::artifacts::AdmittedTurnOutput),
         Direct(tidepool_extract_cmd::ExtractRun),
     }
+    let diagnostics = CompilerDiagnosticCapture::start(temp.path(), &cmd);
     let run = if ordinary_admitted {
         TurnCompilerOutput::Admitted(offer.execute_admitted_turn(endpoint, &mut cmd)?)
     } else {
@@ -3201,6 +3210,7 @@ fn run_turn_with_admission(
         }
         TurnCompilerOutput::Direct(run) => (&run.output, run.elapsed, temp.path()),
     };
+    diagnostics.completed(output_dir, &cmd, output.status.success(), &output.stderr);
     timing::record_stage(
         timing::NO_NODE,
         timing::NO_ROUND,
@@ -4074,7 +4084,7 @@ pub fn classify_block(items: &[&str]) -> Result<Vec<TurnClassification>, Compile
         // obviously a no-op.
         return Ok(Vec::new());
     }
-    let temp = TempDir::new()?;
+    let temp = compiler_scratch_directory()?;
     let mut paths = Vec::with_capacity(items.len());
     for (i, item) in items.iter().enumerate() {
         let path = temp.path().join(format!("item-{i}.hs"));
@@ -4091,7 +4101,9 @@ pub fn classify_block(items: &[&str]) -> Result<Vec<TurnClassification>, Compile
 
     let endpoint = bind_extract_cmd(&cmd)?;
     crate::paths::apply_admitted_build_products_dir(&mut cmd, &endpoint);
+    let diagnostics = CompilerDiagnosticCapture::start(temp.path(), &cmd);
     let run = endpoint.execute(&cmd).map_err(map_notfound)?;
+    diagnostics.completed(temp.path(), &cmd, run.success(), &run.output.stderr);
     let output = &run.output;
     // A failed classification still cost a real subprocess spawn — attribute
     // its extract phases the same as a successful one, before the early

@@ -30,7 +30,9 @@ use crate::{
 };
 
 mod catalog_inventory;
+mod execution_diagnostics;
 mod failure_sources;
+pub use execution_diagnostics::{compiler_scratch_directory, CompilerDiagnosticCapture};
 
 static HOST_BINDING_INTERFACE_REQUESTS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
@@ -117,7 +119,7 @@ pub struct SourceCheckRequest<'a> {
 /// This operation emits no prepared or native artifacts and grants no authority
 /// to publish a mutable source graph. Diagnostics retain the selected inputs.
 pub fn check_source(request: &SourceCheckRequest<'_>) -> Result<(), CompileError> {
-    let directory = TempDir::new()?;
+    let directory = compiler_scratch_directory()?;
     let module = extract_module_name(request.source)
         .unwrap_or_else(|| request.fallback_module_name.to_owned());
     let input = directory.path().join(format!("{module}.hs"));
@@ -138,6 +140,7 @@ pub fn check_source(request: &SourceCheckRequest<'_>) -> Result<(), CompileError
     if let Some(manifest) = offer.manifest_path() {
         command.module_candidates(manifest);
     }
+    let diagnostics = CompilerDiagnosticCapture::start(directory.path(), &command);
     let run = endpoint.execute(&command).map_err(|error| {
         offer.retain_execution_failure(
             directory.path(),
@@ -145,6 +148,12 @@ pub fn check_source(request: &SourceCheckRequest<'_>) -> Result<(), CompileError
             CompileError::Io(extract_spawn_error(error.source)),
         )
     })?;
+    diagnostics.completed(
+        directory.path(),
+        &command,
+        run.success(),
+        &run.output.stderr,
+    );
     diag::decode_extract_result(run.success(), &run.output.stdout, &run.output.stderr)
         .map(|_| ())
         .map_err(|error| {
@@ -756,8 +765,9 @@ impl ModuleCandidateOffer {
                 "admitted turn recipe differs from selected offer".into(),
             ));
         }
-        let directory = tempfile::tempdir()?;
+        let directory = compiler_scratch_directory()?;
         command.relocate_turn_outputs(directory.path());
+        let diagnostics = CompilerDiagnosticCapture::start(directory.path(), command);
         let run = endpoint.execute(command).map_err(|error| {
             self.retain_execution_failure(
                 directory.path(),
@@ -765,6 +775,7 @@ impl ModuleCandidateOffer {
                 CompileError::ExtractFailed(error.to_string()),
             )
         })?;
+        diagnostics.completed(directory.path(), command, run.success(), &run.output.stderr);
         let (turn, native) = if run.success()
             && diag::decode_extract_result(true, &run.output.stdout, &run.output.stderr).is_ok()
         {
@@ -3183,7 +3194,7 @@ fn compile_invocation_inner(
             TempDir::new_in(raw)?
         }
         CompilationPolicy::BuildAction { scratch, .. } => TempDir::new_in(scratch)?,
-        _ => TempDir::new()?,
+        _ => compiler_scratch_directory()?,
     };
     if inventory_export.is_some() {
         temp_dir.disable_cleanup(true);
@@ -3350,9 +3361,11 @@ fn compile_invocation_inner(
                 )
                 .map_err(CompileAttemptError::Diagnostic)?;
             }
+            let diagnostics = CompilerDiagnosticCapture::start(temp_dir.path(), &cmd);
             endpoint
                 .execute(&cmd)
                 .map(|run| {
+                    diagnostics.completed(temp_dir.path(), &cmd, run.success(), &run.output.stderr);
                     CompileAttempt::Executed((
                         cmd,
                         run,

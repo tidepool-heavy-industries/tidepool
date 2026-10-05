@@ -168,7 +168,7 @@ pub(crate) fn parse(
     {
         return Err(CellPlanInputRejection::InjectedInventory.error());
     }
-    let scratch = tempfile::tempdir()?;
+    let scratch = crate::artifacts::compiler_scratch_directory()?;
     let source = scratch.path().join("cell.txt");
     let template = scratch.path().join("cell-template.hs");
     let output = scratch.path().join("cell-plan.cbor");
@@ -194,9 +194,11 @@ pub(crate) fn parse(
     let endpoint = crate::toolchain::AdmittedCompilerEndpoint::from_bound(endpoint)
         .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
     let producer = *endpoint.identity().producer_bytes();
+    let diagnostics = crate::artifacts::CompilerDiagnosticCapture::start(scratch.path(), &command);
     let run = endpoint
         .execute(&command)
         .map_err(|error| CompileError::Io(crate::extract_spawn_error(error.source)))?;
+    diagnostics.completed(scratch.path(), &command, run.success(), &run.output.stderr);
     crate::diag::decode_extract_result(run.success(), &run.output.stdout, &run.output.stderr)?;
     let receipt = crate::checked_cell::read(output, RECEIPT_LIMIT)?;
     admit(specification, include_paths, &producer, receipt)

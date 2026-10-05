@@ -113,3 +113,24 @@ compiler transaction under `output-root/raw` are retained, including stdout,
 stderr, build products and dependency evidence. Raw worker flags in a refusal
 report remain explicitly unadmitted; missing canonical counts are not zeroes.
 Inspection has no internal wall timeout; its execution owner supplies one.
+
+## Execution failure diagnostics
+
+The isolated libtest runner's `--output-dir` owns one fresh diagnostic root per
+case and explicitly sets `TIDEPOOL_TEST_DIAGNOSTIC_SCOPE=1`. Only that mode keeps
+original compiler scratch under the case root after successful compilation,
+through later native execution and case settlement. Requests are recorded before
+compiler execution, so timeout or hard termination preserves pending inputs.
+Ordinary production and build-action scratch retain their normal cleanup.
+
+`CompilerDiagnosticCapture` records bounded hashes and consumed-source copies
+before consumers execute; raw compiler products stay at their original paths.
+The hash walk covers at most 128 MiB, 4096 entries and depth 16; the existing
+source diagnostic owner separately bounds copied sources to 128 MiB. Reports
+mark omissions. Original outputs are the workload's compiler outputs rather
+than duplicate success copies, and are retained intact until the consuming case
+settles. Diagnostics neither authorize imports nor relocate certificates.
+
+Only the runner removes successful case evidence, after process/service cleanup
+and any hosted/owned-compiler cleanup reports are confirmed. Failure, timeout,
+interruption and unknown cleanup retain the case directory and its report.

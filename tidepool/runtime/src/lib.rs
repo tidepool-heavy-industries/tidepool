@@ -421,6 +421,72 @@ mod tests {
         assert!(!prepared.prepared().bindings().is_empty());
     }
 
+    #[test]
+    #[serial]
+    fn successful_compilation_retains_original_inputs_after_native_execution_failure() {
+        use session::prepared::{PreparedEngine, PreparedRuntimeError};
+        use tidepool_codegen::host_fns::RuntimeError as NativeError;
+        use tidepool_codegen::prepared_program::ExecutionError;
+        use tidepool_codegen::suspension::RealmId;
+
+        tidepool_testing::eval_harness::require_extract();
+        assert_eq!(
+            std::env::var("TIDEPOOL_TEST_DIAGNOSTIC_SCOPE").as_deref(),
+            Ok("1"),
+            "run this evidence control with the isolated runner's --output-dir"
+        );
+        let root = PathBuf::from(std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT").unwrap());
+        // A new authored module forces a real transaction even with a warm memo.
+        let unique = tempfile::tempdir().unwrap();
+        let module = format!(
+            "DiagnosticFailure{}",
+            unique
+                .path()
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .chars()
+                .filter(|character| character.is_ascii_alphanumeric())
+                .collect::<String>()
+        );
+        let source = format!("module {module} where\nresult :: Int\nresult = error \"diagnostic native execution failure\"\n");
+        let compiled = compile_haskell(&source, "result", &[]).expect("genuine compiler control");
+        let (mut engine, program) = PreparedEngine::bootstrap(compiled.prepared.into_prepared())
+            .expect("genuine prepared native installation");
+        let failure = engine
+            .run_settled(program, RealmId::ROOT)
+            .err()
+            .expect("the admitted program must fail during native execution");
+        assert!(
+            matches!(failure, PreparedRuntimeError::Run(ExecutionError::Runtime(ref error))
+            if matches!(error.cause, NativeError::UserError | NativeError::RaisedException
+                | NativeError::RaisedExceptionMessage(_) | NativeError::WiredInError { .. })),
+            "{failure:?}"
+        );
+        drop(engine);
+        let transaction = std::fs::read_dir(root.join("compiler-transactions"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .find(|entry| {
+                std::fs::read_to_string(entry.path().join(format!("{module}.hs")))
+                    .is_ok_and(|retained| retained == source)
+            })
+            .expect("the original source directory survives compiler return and native failure");
+        let report: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(transaction.path().join("transaction.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(report["compiler_success"], true);
+        assert_eq!(report["authority"], false);
+        assert_eq!(
+            report["original_directory"],
+            transaction.path().to_string_lossy().as_ref()
+        );
+        assert!(transaction.path().join("compiler-request.bin").is_file());
+        assert!(transaction.path().join("result.prepared.cbor").is_file());
+        assert!(transaction.path().join("consumed-sources.json").is_file());
+    }
+
     /// The extractor captures the GHC-inferred type of the eval's top
     /// expression (the `__user` binding) and threads it out as
     /// `MetaWarnings::captured_type`. A module whose `__user` is `[1,2,3] :: [Int]`
