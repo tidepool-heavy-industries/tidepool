@@ -362,8 +362,27 @@ fn copy_expressions(model: &Model) -> Model {
     result
 }
 
+fn property_config() -> ProptestConfig {
+    use proptest::test_runner::FileFailurePersistence;
+
+    let mut config = ProptestConfig::default();
+    if std::env::var_os("PROPTEST_CASES").is_none() {
+        config.cases = 128;
+    }
+    if std::env::var_os("PROPTEST_MAX_SHRINK_ITERS").is_none() {
+        config.max_shrink_iters = 4096;
+    }
+    // Buck stages source files, while the counted runner retains checkout cwd.
+    // The manifest directory names this package for both Buck and Cargo.
+    config.failure_persistence = Some(Box::new(FileFailurePersistence::Direct(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/proptest-regressions/type_graph.proptest-regressions"
+    ))));
+    config
+}
+
 proptest! {
-    #![proptest_config(ProptestConfig { cases: 128, max_shrink_iters: 4096, ..ProptestConfig::default() })]
+    #![proptest_config(property_config())]
 
     #[test]
     fn rooted_and_declaration_identity_match_independent_relation(
