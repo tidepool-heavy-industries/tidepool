@@ -118,7 +118,9 @@ assertRecoveredEntryContracts = do
           varName identifier == varName requested]
     liftIO $ case rawSelected of
       [(identifier, rhs)] -> assert (idArity identifier == 0 && manifestArity rhs == 0)
-        "qApp control did not exercise the genuine fat alias metadata loss"
+        ("qApp control did not exercise the genuine fat alias metadata loss: Id arity="
+          ++ show (idArity identifier) ++ ", manifest arity=" ++ show (manifestArity rhs)
+          ++ ", body=" ++ showSDocUnsafe (ppr rhs))
       _ -> fail "qApp fat group did not retain exactly its selected binder"
     owners <- liftIO newOwnerInterfaceCache
     bodies <- liftIO newPreparedBodyCache
