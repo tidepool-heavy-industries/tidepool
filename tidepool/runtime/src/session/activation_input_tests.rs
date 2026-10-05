@@ -1763,6 +1763,236 @@ fn activation_preview_executes_original_ordinary_home_custom_display_after_reade
 }
 
 #[test]
+fn activation_preview_package_only_input_preserves_original_producer_and_renders() {
+    let fixture = InputFixture::compile(
+        include_str!("fixtures/activation-input-package.hs"),
+        false,
+        SessionId(1741),
+    );
+    let mut resident = fixture.fresh();
+    let reservation = fixture.start(&mut resident);
+    let (_, hole) = fixture.deliver(&mut resident, reservation, 1);
+    let site = parked_site(&mut resident, &hole);
+    let input = resident
+        .capture_activation_input(&hole, RealmId::ROOT, site)
+        .unwrap();
+    let producer = input.prototype.producer();
+    assert!(input
+        .prototype
+        .context()
+        .artifact_view()
+        .descriptors()
+        .is_empty());
+    assert_ne!(producer, [0; 32]);
+    let (owner, interface) = issued_captured_input(&mut resident, input, fixture.recipe.clone());
+    assert_eq!(interface.prototype().producer(), producer);
+    assert!(interface
+        .prototype()
+        .context()
+        .artifact_view()
+        .descriptors()
+        .is_empty());
+    assert_eq!(
+        execute_mounted_input_preview(&mut resident, owner, interface, &fixture.recipe),
+        serde_json::json!(["42", false]),
+    );
+}
+
+#[test]
+fn activation_preview_earlier_output_ignores_later_display_instance() {
+    let fixture = InputFixture::compile(
+        include_str!("fixtures/activation-input-opaque.hs"),
+        true,
+        SessionId(1742),
+    );
+    let mut resident = fixture.fresh();
+    let reservation = fixture.start(&mut resident);
+    let (_, hole) = fixture.deliver(&mut resident, reservation, 1);
+    let site = parked_site(&mut resident, &hole);
+    let earlier = resident
+        .capture_activation_input(&hole, RealmId::ROOT, site)
+        .unwrap();
+    let recipe = Arc::new(InputRecipe {
+        preamble: insert_preamble_imports(
+            &insert_preamble_imports(
+                &fixture.recipe.preamble,
+                "Tidepool.Inspection.Display (Display(..), WorkbenchDisplay(..))",
+            ),
+            "qualified Data.Text as Text",
+        ),
+        row: fixture.recipe.row.clone(),
+        include: fixture.recipe.include.clone(),
+    });
+    publish_fixture_declaration(
+        &mut resident,
+        &recipe,
+        include_str!("fixtures/activation-input-later-display.hs"),
+        0,
+    );
+    let execution = Arc::new(resident.begin_private_execution(ScopeId::ROOT).unwrap());
+    resident
+        .set_run_context(SessionRunContext {
+            lexical_scope: execution.private_scope(),
+            ..SessionRunContext::ROOT
+        })
+        .unwrap();
+    let (bound, producer, _) = compile_checked_binding(
+        &mut resident,
+        &recipe,
+        include_str!("fixtures/activation-input-opaque.hs"),
+        execution.clone(),
+    );
+    assert!(bound.is_empty());
+    resident.set_run_context(SessionRunContext::ROOT).unwrap();
+    let later_fixture = InputFixture {
+        root: tempfile::tempdir().unwrap(),
+        session: fixture.session,
+        recipe: recipe.clone(),
+        producer,
+    };
+    let reservation = later_fixture.start(&mut resident);
+    let (_, hole) = later_fixture.deliver(&mut resident, reservation, 2);
+    let site = parked_site(&mut resident, &hole);
+    let later = resident
+        .capture_activation_input(&hole, RealmId::ROOT, site)
+        .unwrap();
+    let (owner, interface) = issued_captured_input(&mut resident, earlier, recipe.clone());
+    assert_eq!(
+        execute_mounted_input_preview(&mut resident, owner, interface, &recipe),
+        serde_json::json!(["<opaque>", false]),
+        "the earlier output retains its original instance environment",
+    );
+    let (owner, interface) = issued_captured_input(&mut resident, later, recipe.clone());
+    assert_eq!(
+        execute_mounted_input_preview(&mut resident, owner, interface, &recipe),
+        serde_json::json!(["later display 42", false]),
+        "the later output must actually own the added instance",
+    );
+}
+
+fn execute_mounted_input_preview(
+    resident: &mut TestSession,
+    owner: RuntimeActivationInputAdmission,
+    interface: Arc<tidepool_toolchain::checked_cell::ExactHostBindingInterface>,
+    recipe: &InputRecipe,
+) -> serde_json::Value {
+    let mounted = mount_original(resident, owner, interface);
+    let binding = mounted.binding();
+    let view = resident
+        .compile_view_in(ScopeId::ROOT)
+        .unwrap()
+        .with_scoped_injection();
+    let admission = resident.admit_activation_preview(mounted, view).unwrap();
+    let template = turn::assemble_activation_preview_module(512);
+    let compiled =
+        match turn::compile_activation_preview(admission, &template, 512, &recipe.include)
+            .expect("prepare preview against actual original compiler authority")
+        {
+            turn::ActivationPreviewCompilation::Ready(compiled) => compiled,
+            turn::ActivationPreviewCompilation::OriginalDisplayEvidenceUnavailable => {
+                panic!("complete original display environment must remain available")
+            }
+        };
+    assert_eq!(
+        compiled.proof().disposition(),
+        tidepool_toolchain::activation_preview::ActivationPreviewDisposition::Rendered,
+        "the universal Display fallback is a real renderer, not missing-instance evidence",
+    );
+    let ResidentOutcome::Completed { result, .. } =
+        resident.run_activation_preview(compiled).unwrap()
+    else {
+        panic!("pure display must complete")
+    };
+    assert!(resident.state.bindings().get(binding).is_some());
+    result.to_json()
+}
+
+#[test]
+fn activation_preview_selected_original_dictionary_without_native_body_is_unavailable() {
+    let (root, recipe) = InputFixture::source_recipe(true);
+    let home = root.path().join("home");
+    std::fs::write(
+        home.join("ActivationDisplayUnavailable.hs"),
+        include_str!("fixtures/activation-input-unavailable-display.hs"),
+    )
+    .unwrap();
+    let recipe = Arc::new(InputRecipe {
+        preamble: insert_preamble_imports(&recipe.preamble, "ActivationDisplayUnavailable ()"),
+        row: recipe.row.clone(),
+        include: recipe.include.clone(),
+    });
+    let session = SessionId(1743);
+    let library = SessionLib::open(session, root.path(), ModuleEnv::standalone_default())
+        .unwrap()
+        .with_validation_include(recipe.include.clone());
+    let view = PersistentSession::new(Some(library), crate::DEFAULT_NURSERY_SIZE)
+        .compile_view_in(ScopeId::ROOT)
+        .unwrap();
+    let producer = compiled(compile_turn(
+        &view,
+        &recipe,
+        include_str!("fixtures/activation-input-opaque.hs"),
+        &[],
+    ));
+    assert_startup_origin("unused foreign-export dictionary owner", &producer, true);
+    let fixture = InputFixture {
+        root,
+        session,
+        recipe,
+        producer,
+    };
+    let mut resident = fixture.fresh();
+    let (owner, interface) = parked_input_owner(&fixture, &mut resident);
+    let mounted = mount_original(&mut resident, owner, interface);
+    let binding = mounted.binding();
+    let dictionary_owner = mounted
+        .original_execution
+        .artifact_view()
+        .descriptors()
+        .into_iter()
+        .find(|owner| owner.owner.module == "ActivationDisplayUnavailable")
+        .expect("actual original output retains the dictionary owner's canonical interface");
+    assert_eq!(
+        dictionary_owner.kind,
+        tidepool_toolchain::artifact_inventory::ArtifactKind::CanonicalModuleInterface
+    );
+    assert!(dictionary_owner.product_sha256.is_none());
+    let view = resident
+        .compile_view_in(ScopeId::ROOT)
+        .unwrap()
+        .with_scoped_injection();
+    let admission = resident.admit_activation_preview(mounted, view).unwrap();
+    let roots = resident.persistent_roots_count();
+    let visibility = resident
+        .public_visibility_snapshot_in(ScopeId::ROOT)
+        .unwrap();
+    let submissions = tidepool_extract_cmd::extract_spawn_count();
+    let selected = turn::compile_activation_preview(
+        admission,
+        &turn::assemble_activation_preview_module(512),
+        512,
+        &fixture.recipe.include,
+    )
+    .expect(
+        "selected dictionary lacking native original Core has an authenticated unavailable result",
+    );
+    assert!(matches!(
+        selected,
+        turn::ActivationPreviewCompilation::OriginalDisplayEvidenceUnavailable
+    ));
+    assert!(
+        tidepool_extract_cmd::extract_spawn_count() > submissions,
+        "the actual compiler probed and selected the original dictionary"
+    );
+    assert_eq!(resident.persistent_roots_count(), roots);
+    assert_eq!(
+        resident.public_visibility_snapshot_in(ScopeId::ROOT),
+        Some(visibility)
+    );
+    assert!(resident.state.bindings().get(binding).is_some());
+}
+
+#[test]
 fn activation_preview_type_only_original_context_is_unavailable_before_instance_probe() {
     use tidepool_toolchain::activation_preview::{
         ActivationPreviewSelection, ActivationPreviewSpecification,
