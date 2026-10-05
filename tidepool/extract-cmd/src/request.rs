@@ -1164,17 +1164,26 @@ mod tests {
     #[test]
     fn diagnostic_mode_preserves_dispatch_precedence_and_wire_roundtrip() {
         use super::{ExtractRequest, RequestMode};
-        let request = ExtractRequest::from_cli(&[
-            "--turn".into(),
-            "--activation-preview".into(),
-            "input.hs".into(),
-        ])
-        .unwrap();
-        assert_eq!(request.mode(), RequestMode::ActivationPreview);
-        let planned = ExtractRequest::from_cli(&["--cell-plan".into(), "input.hs".into()]).unwrap();
-        assert_eq!(planned.mode(), RequestMode::CellPlan);
+        let mut command = crate::ExtractCmd::with_bin(crate::ResolvedExtractBin::assume_resolved(
+            "selected-frontend",
+        ));
+        command.input("input.hs").turn().activation_preview();
+        assert_eq!(command.request.mode(), RequestMode::ActivationPreview);
         assert_eq!(
-            ExtractRequest::decode(&planned.encode()).unwrap().mode(),
+            ExtractRequest::decode_worker_argv(&command.request.worker_argv())
+                .unwrap()
+                .mode(),
+            RequestMode::ActivationPreview
+        );
+        let mut planned = crate::ExtractCmd::with_bin(crate::ResolvedExtractBin::assume_resolved(
+            "selected-frontend",
+        ));
+        planned.input("input.hs").cell_plan();
+        assert_eq!(planned.request.mode(), RequestMode::CellPlan);
+        assert_eq!(
+            ExtractRequest::decode_worker_argv(&planned.request.worker_argv())
+                .unwrap()
+                .mode(),
             RequestMode::CellPlan
         );
     }
