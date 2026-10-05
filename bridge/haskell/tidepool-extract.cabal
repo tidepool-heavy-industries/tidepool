@@ -318,7 +318,7 @@ test-suite execution-schema-projection
   import:           tasty-tests
   type:             exitcode-stdio-1.0
   main-is:          ExecutionProjectionProbe.hs
-  hs-source-dirs:   test-prepared-stg
+  hs-source-dirs:   test-prepared-stg test
   other-modules:
     CallerResultProjectionTest
     DeferredFunctionProjectionTest
