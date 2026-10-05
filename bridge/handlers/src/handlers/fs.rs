@@ -565,7 +565,13 @@ impl FsBackend {
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."));
-        tidepool_atomic_write::create_dir_all_durable(&parent)
+        let storage = tidepool_atomic_write::DirectoryAnchor::open_existing(&self.root)
+            .map_err(|error| FsError::FsIo(error.to_string()))?;
+        let relative = parent
+            .strip_prefix(storage.path())
+            .map_err(|error| FsError::FsIo(error.to_string()))?;
+        storage
+            .create_dir_all(relative)
             .map_err(|error| FsError::FsIo(error.to_string()))?;
 
         with_dir_flock(&parent, || {
@@ -1543,7 +1549,12 @@ mod tests {
         let kv_path = std::env::temp_dir().join("tidepool_fs_readglob_family_test_kv.json");
         let handlers = frunk::hlist![
             crate::ConsoleHandler,
-            crate::KvHandler::new(kv_path),
+            crate::KvHandler::new(
+                &tidepool_atomic_write::DirectoryAnchor::open_existing(std::env::temp_dir())
+                    .unwrap(),
+                kv_path.file_name().unwrap()
+            )
+            .unwrap(),
             FsBackend::new(root),
         ];
 

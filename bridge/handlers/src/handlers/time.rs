@@ -68,7 +68,12 @@ mod tests {
     ) -> impl tidepool_effect::dispatch::DispatchEffect<CapturedOutput> {
         crate::build_base_stack(&crate::HandlerConfig {
             cwd,
-            kv_path,
+            kv_store: crate::KvHandler::new(
+                &tidepool_atomic_write::DirectoryAnchor::open_existing(std::env::temp_dir())
+                    .unwrap(),
+                kv_path.file_name().unwrap(),
+            )
+            .unwrap(),
             llm_model: "ollama:llama3.2".to_string(),
         })
     }

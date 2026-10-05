@@ -271,7 +271,12 @@ mod tests {
         let captured = CapturedOutput::new();
         let mut handlers = frunk::hlist![
             ConsoleHandler,
-            KvHandler::new(kv_path),
+            KvHandler::new(
+                &tidepool_atomic_write::DirectoryAnchor::open_existing(std::env::temp_dir())
+                    .unwrap(),
+                kv_path.file_name().unwrap()
+            )
+            .unwrap(),
             FsReadHandler::new(cwd.clone()),
             FsWriteHandler::new(cwd.clone()),
             HttpHandler,

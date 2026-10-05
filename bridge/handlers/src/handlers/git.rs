@@ -951,7 +951,12 @@ mod tests {
         let captured = CapturedOutput::new();
         let mut handlers = frunk::hlist![
             crate::ConsoleHandler,
-            crate::KvHandler::new(kv_path),
+            crate::KvHandler::new(
+                &tidepool_atomic_write::DirectoryAnchor::open_existing(std::env::temp_dir())
+                    .unwrap(),
+                kv_path.file_name().unwrap()
+            )
+            .unwrap(),
             crate::FsReadHandler::new(cwd.clone()),
             crate::FsWriteHandler::new(cwd.clone()),
             crate::HttpHandler,

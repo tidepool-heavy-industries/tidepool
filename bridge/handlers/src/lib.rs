@@ -12,7 +12,10 @@
 //! // Must be called inside a tokio runtime (LlmHandler captures Handle::current()).
 //! let cfg = HandlerConfig {
 //!     cwd: PathBuf::from("."),
-//!     kv_path: PathBuf::from(".tidepool/kv.json"),
+//!     kv_store: tidepool_handlers::KvHandler::new(
+//!         &tidepool_atomic_write::DirectoryAnchor::open_existing(".").unwrap(),
+//!         ".tidepool/kv.json",
+//!     ).unwrap(),
 //!     llm_model: "gpt-6-luna".into(),
 //! };
 //! let stack = build_base_stack(&cfg);
@@ -53,8 +56,8 @@ pub struct HandlerConfig {
     /// only — Exec itself is not filesystem-sandboxed, see
     /// `bridge/handlers/CLAUDE.md`'s Sandboxing section).
     pub cwd: PathBuf,
-    /// Path for the KV store's JSON backing file.
-    pub kv_path: PathBuf,
+    /// KV store carrying its explicit durable storage boundary.
+    pub kv_store: KvHandler,
     /// LLM model name (routed by genai: gpt-* → OpenAI, claude-* → Anthropic, etc.).
     pub llm_model: String,
 }
@@ -68,7 +71,7 @@ macro_rules! handler_for {
         ConsoleHandler
     };
     (KV,      $cfg:ident) => {
-        KvHandler::new($cfg.kv_path.clone())
+        $cfg.kv_store.clone()
     };
     (FsRead,  $cfg:ident) => {
         FsReadHandler::new($cfg.cwd.clone())

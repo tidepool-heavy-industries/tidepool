@@ -63,7 +63,11 @@ fn cargo_report_preserves_nonzero_diagnostics_and_typed_parse_errors() {
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let handlers = frunk::hlist![
         ConsoleHandler,
-        KvHandler::new(scratch.path().join("cargo-test-kv.json")),
+        KvHandler::new(
+            &tidepool_atomic_write::DirectoryAnchor::open_existing(scratch.path()).unwrap(),
+            "cargo-test-kv.json"
+        )
+        .unwrap(),
         FsReadHandler::new(scratch.path().to_path_buf()),
         FsWriteHandler::new(scratch.path().to_path_buf()),
         HttpHandler,

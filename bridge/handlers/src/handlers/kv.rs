@@ -6,11 +6,26 @@ tidepool_mcp::kv_effect_def!(crate::effect_glue::effect_rust_projection);
 #[derive(Clone)]
 pub struct KvHandler {
     path: PathBuf,
+    storage: tidepool_atomic_write::DirectoryAnchor,
+    parent: PathBuf,
 }
 
 impl KvHandler {
-    pub fn new(path: PathBuf) -> Self {
-        Self { path }
+    pub fn new(
+        storage: &tidepool_atomic_write::DirectoryAnchor,
+        relative: impl AsRef<Path>,
+    ) -> Result<Self, tidepool_atomic_write::WriteError> {
+        let relative = relative.as_ref();
+        let path = storage.resolve(relative)?;
+        let parent = relative
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .to_path_buf();
+        Ok(Self {
+            path,
+            storage: storage.clone(),
+            parent,
+        })
     }
 
     fn with_store<T>(
@@ -18,13 +33,10 @@ impl KvHandler {
         update: impl FnOnce(&mut HashMap<String, serde_json::Value>) -> Result<(T, bool), KvError>,
     ) -> Result<T, KvError> {
         let parent = self
-            .path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        tidepool_atomic_write::create_dir_all_durable(parent)
+            .storage
+            .create_dir_all(&self.parent)
             .map_err(|e| KvError::KvIo(e.to_string()))?;
-        crate::handlers::fs::with_dir_flock(parent, || {
+        crate::handlers::fs::with_dir_flock(&parent, || {
             let mut store = match std::fs::read(&self.path) {
                 Ok(bytes) => serde_json::from_slice(&bytes)
                     .map_err(|e| KvError::KvCorrupt(format!("{}: {e}", self.path.display())))?,
@@ -150,9 +162,9 @@ mod tests {
     #[test]
     fn every_handler_uses_the_current_disk_state() {
         let dir = tempdir().unwrap();
-        let path = dir.path().join("kv.json");
-        let mut first = KvHandler::new(path.clone());
-        let mut second = KvHandler::new(path.clone());
+        let storage = tidepool_atomic_write::DirectoryAnchor::open_existing(dir.path()).unwrap();
+        let mut first = KvHandler::new(&storage, "kv.json").unwrap();
+        let mut second = KvHandler::new(&storage, "kv.json").unwrap();
         first
             .kv_set(
                 "a".into(),
@@ -170,7 +182,7 @@ mod tests {
             first.kv_get("b".into()).unwrap(),
             Some(serde_json::json!(2))
         );
-        let mut isolated = KvHandler::new(dir.path().join("isolated.json"));
+        let mut isolated = KvHandler::new(&storage, "isolated.json").unwrap();
         assert!(isolated.kv_get("a".into()).unwrap().is_none());
         assert_eq!(
             first
@@ -203,9 +215,10 @@ mod tests {
     #[test]
     fn malformed_store_is_a_typed_error_and_is_preserved() {
         let dir = tempdir().unwrap();
+        let storage = tidepool_atomic_write::DirectoryAnchor::open_existing(dir.path()).unwrap();
         let path = dir.path().join("kv.json");
         std::fs::write(&path, b"{").unwrap();
-        let mut handler = KvHandler::new(path.clone());
+        let mut handler = KvHandler::new(&storage, "kv.json").unwrap();
         assert!(matches!(handler.kv_keys(), Err(KvError::KvCorrupt(_))));
         assert_eq!(std::fs::read(path).unwrap(), b"{");
     }
@@ -213,8 +226,9 @@ mod tests {
     #[test]
     fn mutation_publishes_a_complete_atomic_json_file() {
         let dir = tempdir().unwrap();
+        let storage = tidepool_atomic_write::DirectoryAnchor::open_existing(dir.path()).unwrap();
         let path = dir.path().join("kv.json");
-        let mut handler = KvHandler::new(path.clone());
+        let mut handler = KvHandler::new(&storage, "kv.json").unwrap();
         handler
             .kv_set(
                 "key".into(),
@@ -230,8 +244,8 @@ mod tests {
     #[test]
     fn prefix_listing_clearing_and_info_use_the_persisted_map() {
         let dir = tempdir().unwrap();
-        let path = dir.path().join("kv.json");
-        let mut handler = KvHandler::new(path);
+        let storage = tidepool_atomic_write::DirectoryAnchor::open_existing(dir.path()).unwrap();
+        let mut handler = KvHandler::new(&storage, "kv.json").unwrap();
         for key in ["ns/a", "ns/b", "other"] {
             handler
                 .kv_set(
@@ -257,12 +271,13 @@ mod tests {
     #[test]
     fn typed_storage_failure_is_dispatched_as_left() {
         let dir = tempdir().unwrap();
+        let storage = tidepool_atomic_write::DirectoryAnchor::open_existing(dir.path()).unwrap();
         let path = dir.path().join("kv.json");
         std::fs::write(&path, b"{").unwrap();
         let table = full_effect_test_table();
         let captured = CapturedOutput::new();
         let cx = EffectContext::with_user(&table, &captured);
-        let mut handler = KvHandler::new(path);
+        let mut handler = KvHandler::new(&storage, "kv.json").unwrap();
         let response =
             EffectHandler::handle(&mut handler, KvReq::KvGet("key".into()), &cx).unwrap();
         let value = response.to_value(&table).unwrap();
@@ -275,12 +290,13 @@ mod tests {
     #[test]
     fn successful_read_is_dispatched_as_right() {
         let dir = tempdir().unwrap();
+        let storage = tidepool_atomic_write::DirectoryAnchor::open_existing(dir.path()).unwrap();
         let path = dir.path().join("kv.json");
         std::fs::write(&path, b"{}").unwrap();
         let table = full_effect_test_table();
         let captured = CapturedOutput::new();
         let cx = EffectContext::with_user(&table, &captured);
-        let mut handler = KvHandler::new(path);
+        let mut handler = KvHandler::new(&storage, "kv.json").unwrap();
         let response = EffectHandler::handle(&mut handler, KvReq::KvKeys(), &cx).unwrap();
         let value = response.to_value(&table).unwrap();
         let HaskellValue::Con(id, _) = value else {
@@ -292,11 +308,12 @@ mod tests {
     #[test]
     fn missing_file_is_empty_and_directory_failure_is_typed() {
         let dir = tempdir().unwrap();
-        let mut handler = KvHandler::new(dir.path().join("missing/kv.json"));
+        let storage = tidepool_atomic_write::DirectoryAnchor::open_existing(dir.path()).unwrap();
+        let mut handler = KvHandler::new(&storage, "missing/kv.json").unwrap();
         assert!(handler.kv_get("x".into()).unwrap().is_none());
         let blocking_file = dir.path().join("file");
         std::fs::write(&blocking_file, b"x").unwrap();
-        let mut bad = KvHandler::new(blocking_file.join("kv.json"));
+        let mut bad = KvHandler::new(&storage, "file/kv.json").unwrap();
         assert!(matches!(
             bad.kv_set(
                 "x".into(),
@@ -315,7 +332,7 @@ mod tests {
 
         let directory = dir.path().join("directory");
         std::fs::create_dir(&directory).unwrap();
-        let mut unreadable = KvHandler::new(directory);
+        let mut unreadable = KvHandler::new(&storage, "directory").unwrap();
         assert!(matches!(
             unreadable.kv_get("x".into()),
             Err(KvError::KvIo(_))
@@ -325,8 +342,9 @@ mod tests {
     #[test]
     fn concurrent_cas_and_set_delete_preserve_fresh_updates() {
         let dir = tempdir().unwrap();
+        let storage = tidepool_atomic_write::DirectoryAnchor::open_existing(dir.path()).unwrap();
         let path = dir.path().join("kv.json");
-        let mut handler = KvHandler::new(path.clone());
+        let mut handler = KvHandler::new(&storage, "kv.json").unwrap();
         handler
             .kv_set(
                 "x".into(),
@@ -335,9 +353,9 @@ mod tests {
             .unwrap();
         let mut threads = (0..6)
             .map(|_| {
-                let path = path.clone();
+                let storage = storage.clone();
                 std::thread::spawn(move || {
-                    let mut handler = KvHandler::new(path);
+                    let mut handler = KvHandler::new(&storage, "kv.json").unwrap();
                     for _ in 0..15 {
                         loop {
                             let old = handler.kv_get("x".into()).unwrap();
@@ -362,9 +380,9 @@ mod tests {
                 })
             })
             .collect::<Vec<_>>();
-        let mutation_path = path.clone();
+        let storage = storage.clone();
         threads.push(std::thread::spawn(move || {
-            let mut handler = KvHandler::new(mutation_path);
+            let mut handler = KvHandler::new(&storage, "kv.json").unwrap();
             for n in 0..30 {
                 handler
                     .kv_set(
