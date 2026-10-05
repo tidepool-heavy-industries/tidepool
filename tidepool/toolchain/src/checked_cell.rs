@@ -158,9 +158,16 @@ impl CanonicalInputTypeWitness {
         let Value::Bytes(structure) = &fields[3] else {
             return Err(failure("canonical input witness structure"));
         };
+        let decoded_structure = decode(structure)?;
+        let mut canonical_structure = Vec::new();
+        ciborium::ser::into_writer(&decoded_structure, &mut canonical_structure)
+            .expect("input structure encodes to memory");
+        if canonical_structure != *structure {
+            return Err(failure("canonical input structure uses noncanonical CBOR"));
+        }
         let mut names = BTreeSet::new();
         let mut count = 0;
-        validate_input_type_shape(&decode(structure)?, 0, 0, &mut count, &mut names)?;
+        validate_input_type_shape(&decoded_structure, 0, 0, &mut count, &mut names)?;
         let interfaces = list(&fields[4], 65536)?
             .iter()
             .map(|value| {
@@ -4542,6 +4549,53 @@ mod tests {
         let mut trailing = bytes;
         trailing.push(0);
         assert!(CanonicalInputTypeWitness::from_bytes(&trailing).is_err());
+    }
+
+    #[test]
+    fn canonical_input_witness_refuses_noncanonical_embedded_structure() {
+        use super::*;
+        // Structural codec control only; this fixture grants no native authority.
+        let mut wire = decode(&witness_bytes(
+            array([text("literal"), text("char"), Value::Integer(0.into())]),
+            &"a".repeat(64),
+        ))
+        .unwrap();
+        let Value::Array(fields) = &mut wire else {
+            unreachable!()
+        };
+        fields[4] = array([]);
+        let Value::Bytes(canonical) = &fields[3] else {
+            unreachable!()
+        };
+        let canonical = canonical.clone();
+        let canonical_value = decode(&canonical).unwrap();
+        let encode_witness = |structure: Vec<u8>| {
+            let mut wire = wire.clone();
+            let Value::Array(fields) = &mut wire else {
+                unreachable!()
+            };
+            fields[3] = Value::Bytes(structure);
+            let mut bytes = Vec::new();
+            ciborium::into_writer(&wire, &mut bytes).unwrap();
+            bytes
+        };
+        CanonicalInputTypeWitness::from_bytes(&encode_witness(canonical.clone())).unwrap();
+        assert_eq!(canonical[0], 0x83);
+        assert_eq!(canonical.last(), Some(&0x00));
+        let mut indefinite = canonical.clone();
+        indefinite[0] = 0x9f;
+        indefinite.push(0xff);
+        let mut nonminimal = canonical;
+        nonminimal.pop();
+        nonminimal.extend_from_slice(&[0x18, 0x00]);
+        for structure in [indefinite, nonminimal] {
+            assert_eq!(decode(&structure).unwrap(), canonical_value);
+            let error =
+                CanonicalInputTypeWitness::from_bytes(&encode_witness(structure)).unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("canonical input structure uses noncanonical CBOR"));
+        }
     }
 
     #[test]
