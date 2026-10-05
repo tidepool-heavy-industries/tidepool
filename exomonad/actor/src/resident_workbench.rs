@@ -11990,11 +11990,9 @@ mod request_tests {
         workbench
             .execute_cell_for_test(
                 context.clone(),
-                &format!(
-                    include_str!("fixtures/host-job-retained.hs"),
-                    first = first,
-                    second = second
-                ),
+                &include_str!("fixtures/host-job-retained.hs")
+                    .replace("{first}", &first)
+                    .replace("{second}", &second),
             )
             .await
             .unwrap();
