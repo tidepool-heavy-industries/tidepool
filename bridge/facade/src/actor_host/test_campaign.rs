@@ -857,8 +857,12 @@ impl harness::engine::ResponsesTransport for HostedScriptProvider {
         let (reply, response) = tokio::sync::oneshot::channel();
         self.0
             .send(HostedScriptRound { request, reply })
-            .expect("script observer remains live");
-        Ok(response.await.expect("script supplies the provider reply"))
+            .map_err(|_| {
+                harness::transport::TransportError::Stream("script observer closed".into())
+            })?;
+        response.await.map_err(|_| {
+            harness::transport::TransportError::Stream("script abandoned the provider reply".into())
+        })
     }
 }
 
@@ -927,5 +931,72 @@ pub(super) fn hosted_test_settings(
         credential_file,
         context_capacity_tokens: 200_000,
         concurrent_jobs,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use harness::transport::{ResponsesRequest, TransportError};
+
+    fn request() -> ResponsesRequest {
+        ResponsesRequest {
+            input: Vec::new(),
+            instructions: String::new(),
+            tools: Default::default(),
+            tools_allowed: None,
+            model: "test-model".into(),
+            pinned_effort: harness::model::Effort::Low,
+            session_id: "test-run:/root:1".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn dropped_script_observer_returns_transport_error() {
+        let (provider, requests) = hosted_script_provider();
+        drop(requests);
+        let result = provider.create(request()).await;
+        assert!(matches!(
+            result,
+            Err(TransportError::Stream(message)) if message == "script observer closed"
+        ));
+    }
+
+    #[tokio::test]
+    async fn dropped_held_script_reply_returns_transport_error() {
+        let (provider, mut requests) = hosted_script_provider();
+        let pending = tokio::spawn(async move { provider.create(request()).await });
+        let held = requests
+            .recv()
+            .await
+            .expect("provider publishes its request");
+        drop(held);
+        let result = tokio::time::timeout(Duration::from_secs(5), pending)
+            .await
+            .expect("abandoned reply settles")
+            .expect("provider returns without panicking");
+        assert!(matches!(
+            result,
+            Err(TransportError::Stream(message)) if message == "script abandoned the provider reply"
+        ));
+    }
+
+    #[tokio::test]
+    async fn live_script_reply_still_completes_provider_request() {
+        let (provider, mut requests) = hosted_script_provider();
+        let pending = tokio::spawn(async move { provider.create(request()).await });
+        requests
+            .recv()
+            .await
+            .expect("provider publishes its request")
+            .finish();
+        let result = tokio::time::timeout(Duration::from_secs(5), pending)
+            .await
+            .expect("scripted reply settles")
+            .expect("provider returns without panicking")
+            .expect("live script reply succeeds");
+        assert_eq!(result.items.len(), 1);
+        assert_eq!(result.items[0].0["type"], "message");
+        assert_eq!(result.items[0].0["phase"], "final_answer");
     }
 }
