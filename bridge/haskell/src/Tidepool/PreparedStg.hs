@@ -6,7 +6,7 @@
 module Tidepool.PreparedStg
   ( PreparedModule, PreparedCoverage(..)
   , pmModule, pmCoverage, pmBindings, pmTagSigs, pmSitedSiblings, pmYieldSites, pmPreparedSites, pmTypeGraph, pmSiteRejections, pmRequestSiteTyCon
-  , filterPreparedBindings, preparedRejectsIntrinsic, preparedUsesSiteAuthority
+  , filterPreparedBindings, preparedRejectsIntrinsic, preparedUsesSiteAuthority, preparedExpectedEntry
   , prepareModule
   , RecoveredModuleInput(..)
   , RecoveredModuleFailure(..)
@@ -19,7 +19,7 @@ module Tidepool.PreparedStg
 import Control.Exception
   ( SomeAsyncException, SomeException, displayException, fromException
   , throwIO, try )
-import Control.Monad (unless, forM_)
+import Control.Monad (unless)
 import Control.Concurrent.MVar (MVar, modifyMVar_, newMVar, readMVar)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -33,12 +33,10 @@ import GHC.Core.Opt.Pipeline.Types (CoreToDo(CorePrep))
 import GHC.Core.Opt.Arity (etaExpand)
 import GHC.Core.TyCo.Compare (eqType)
 import GHC.Types.Id
-  ( idArity, idType, idDmdSig, idCprSig, idLFInfo_maybe, isDeadEndId
-  , setIdArity, setIdDmdSig, setIdCprSig, setIdLFInfo )
+  ( idArity, idType, idDmdSig, idCprSig
+  , setIdArity, setIdDmdSig, setIdCprSig )
 import GHC.StgToCmm.Closure (importedIdLFInfo)
 import GHC.StgToCmm.Types (LambdaFormInfo(..))
-import GHC.Types.RepType (typePrimRep_maybe)
-import GHC.Stg.Syntax qualified as Stg
 import GHC.Core.TyCon (TyCon, isDataTyCon)
 import GHC.CoreToStg (coreToStg)
 import GHC.CoreToStg.Prep (corePrepPgm)
@@ -121,6 +119,13 @@ preparedRejectsIntrinsic :: PreparedModule -> Id -> Bool
 preparedRejectsIntrinsic prepared identifier =
   varName identifier `Set.member` preparedIntrinsicNames prepared
 
+-- | A package definition's expected entry comes from its exact declaring
+-- interface. Provisional subsets may acquire stricter STG shapes as recovery
+-- admits missing siblings; only final selected emission checks this contract.
+preparedExpectedEntry :: PreparedModule -> Id -> Maybe Id
+preparedExpectedEntry prepared identifier =
+  Map.lookup (varName identifier) (preparedExpectedEntries prepared)
+
 -- | The typed census, not an empty site list, determines authority dependence.
 preparedUsesSiteAuthority :: PreparedModule -> Bool
 preparedUsesSiteAuthority = preparedAuthorityDependent
@@ -170,8 +175,7 @@ prepareRecoveredModule hscEnv input = do
   prepared <- prepareTypedBindings ExactBodySubset
     hscEnv (recoveredModule input) (recoveredLocation input)
     (recoveredTyCons input) Map.empty bindings
-  validateRecoveredEntries entries (pmBindings prepared)
-  pure prepared
+  pure prepared { preparedExpectedEntries = entries }
 
 -- Fat Core's local IdInfo is not the executable interface contract. Restore
 -- only entry-relevant fields; occurrence analyses and unfoldings still belong
@@ -191,46 +195,7 @@ restoreRecoveredEntries entries binding = case binding of
               _ -> idArity original
             metadata = setIdCprSig (setIdDmdSig (setIdArity binder arity)
               (idDmdSig original)) (idCprSig original)
-            restored = maybe metadata (setIdLFInfo metadata) (idLFInfo_maybe original)
-        pure (restored, etaExpand arity body)
-
--- Validate after unarisation: an LF entry counts physical arguments (including
--- semantic void positions), whereas etaExpand takes the original Core arity.
-validateRecoveredEntries :: Map Name Id -> [(CgStgTopBinding, IdSet)] -> IO ()
-validateRecoveredEntries entries bindings = forM_ bindings $ \(top, _) -> case top of
-  Stg.StgTopStringLit{} -> pure ()
-  Stg.StgTopLifted binding -> forM_ (pairs binding) $ \(binder, rhs) ->
-    case Map.lookup (varName binder) entries of
-      Nothing -> pure ()
-      Just original -> do
-        unless (isDeadEndId binder == isDeadEndId original) $
-          ioError (userError ("recovered defining entry changed its bottoming contract: " ++ showSDocUnsafe (ppr binder)))
-        case importedIdLFInfo original of
-          LFReEntrant _ required _ _ -> case rhs of
-            Stg.StgRhsClosure _ _ Stg.ReEntrant args _ _ -> do
-              actual <- sum <$> mapM repArity args
-              unless (required == actual) (mismatch binder required actual)
-            _ -> mismatch binder required 0
-          LFThunk{} -> case rhs of
-            Stg.StgRhsClosure _ _ update [] _ _ | update /= Stg.ReEntrant -> pure ()
-            _ -> mismatch binder 0 (-1)
-          LFCon{} -> case rhs of
-            Stg.StgRhsCon{} -> pure ()
-            _ -> ioError (userError ("recovered defining constructor entry is not evaluated: "
-              ++ showSDocUnsafe (ppr binder) ++ "; prepared RHS " ++ showSDocUnsafe (ppr rhs)))
-          LFUnlifted -> case rhs of
-            Stg.StgRhsCon{} -> pure ()
-            _ -> ioError (userError ("recovered defining unlifted entry has a closure: " ++ showSDocUnsafe (ppr binder)))
-          _ -> pure ()
-  where
-    pairs (Stg.StgNonRec binder rhs) = [(binder, rhs)]
-    pairs (Stg.StgRec items) = items
-    repArity binder = case typePrimRep_maybe (idType binder) of
-      Just reps -> pure (max 1 (length reps))
-      Nothing -> ioError (userError ("recovered entry has a runtime-polymorphic argument: " ++ showSDocUnsafe (ppr binder)))
-    mismatch binder required actual = ioError (userError
-      ("recovered defining entry ABI mismatch: " ++ showSDocUnsafe (ppr binder)
-        ++ " required arity " ++ show required ++ ", prepared arity " ++ show actual))
+        pure (metadata, etaExpand arity body)
 
 -- Both complete modules and recovered subsets elaborate before CorePrep erases types.
 prepareTypedBindings :: PreparedCoverage -> HscEnv -> Module -> ModLocation
@@ -437,4 +402,5 @@ prepareBindingsWithScope subsetScope hscEnv thisModule location tycons optimized
     , preparedRequestSiteTyCon = carrierTyCon
     , preparedAuthorityDependent = not (intrinsicFree census)
     , preparedIntrinsicNames = Set.fromList (intrinsicNames census)
+    , preparedExpectedEntries = Map.empty
     }

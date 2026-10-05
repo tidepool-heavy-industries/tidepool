@@ -38,5 +38,8 @@ data PreparedModule = PreparedModule
   , preparedRequestSiteTyCon :: Maybe TyCon
   , preparedAuthorityDependent :: Bool
   , preparedIntrinsicNames :: Set Name
+  -- | Exact package declaring Ids, separate from provisional STG shapes.
+  -- Recovery uses the latter to discover dependencies before final emission.
+  , preparedExpectedEntries :: Map Name Id
   }
 
