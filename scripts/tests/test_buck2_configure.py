@@ -12,7 +12,7 @@ SCRIPT = Path(__file__).resolve().parents[1] / "buck2-configure.sh"
 PIN = "git+file:///project?rev=" + "1" * 40 + "&submodules=1"
 
 
-class ConfigureRuntimeStdlibTests(unittest.TestCase):
+class ConfigureToolchainTests(unittest.TestCase):
     def setUp(self):
         self.storage = tempfile.TemporaryDirectory()
         self.addCleanup(self.storage.cleanup)
@@ -32,8 +32,6 @@ print('1' * 40)
         subprocess.run(["git", "-C", str(self.root), "-c", "user.name=test", "-c", "user.email=test@invalid", "commit", "-qm", "toolchain"], check=True)
         self.tools = self.root / "tools"
         self.tools.mkdir()
-        self.capture = self.root / "captured-source"
-        self.capture.mkdir()
         self.log = self.root / "nix.log"
         self.executable("mountpoint", "#!/bin/sh\nexit 0\n")
         self.executable("nix-store", f"""#!{sys.executable}
@@ -61,9 +59,7 @@ def output(name):
     if name == 'buck-python':
         return Path(sys.executable).resolve().parent.parent
     return Path(os.environ['TEST_OUTPUTS']) / name
-if args[0] == 'flake':
-    print(json.dumps({{'path': os.environ['TEST_SOURCE_CAPTURE']}}))
-elif '--impure' in args:
+if '--impure' in args:
     print('x86_64-linux')
 elif args[0] == 'build':
     name = args[-1].split('.')[-1]
@@ -114,7 +110,6 @@ else:
             TIDEPOOL_BUCK_REMOTE="false",
             TEST_NIX_LOG=str(self.log),
             TEST_OUTPUTS=str(self.outputs),
-            TEST_SOURCE_CAPTURE=str(self.capture),
             TEST_GHC_ROOT=str(self.ghc.parent),
             TEST_TEST_GHC_ROOT=str(self.test_ghc.parent),
         )
@@ -181,7 +176,7 @@ else:
         self.assertEqual(result.returncode, 0, result.stderr)
         text = (self.root / ".buckconfig.local").read_text()
         self.assertIn("buck2 = " + str(self.outputs / "buck-buck2/bin/buck2"), text)
-        self.assertIn("runtime_stdlib_products = \n", text)
+        self.assertNotIn("runtime_stdlib_", text)
         self.assertNotIn('"flake"', self.log.read_text())
         self.assertNotIn("runtime-stdlib-products", self.log.read_text())
 
@@ -205,38 +200,20 @@ else:
         self.assertEqual(result.returncode, 0, result.stderr)
         configured = (self.root / ".buckconfig.local").read_text()
         self.assertIn("exomonad_runtime_tools = " + str(self.outputs / "buck-exomonad-runtime-tools"), configured)
-        self.assertIn("runtime_stdlib_products = \n", configured)
+        self.assertNotIn("runtime_stdlib_", configured)
         calls = [json.loads(line) for line in self.log.read_text().splitlines()]
         self.assertTrue(any(call[-1].endswith("buck-exomonad-runtime-tools.outPath") for call in calls))
         self.assertFalse(any(call[0] == "flake" for call in calls))
 
-    def test_reduced_toolchain_capture_refuses_project_resource_selection(self):
+    def test_retired_project_catalog_option_refuses_before_nix_or_generation(self):
+        config = self.root / ".buckconfig.local"
+        config.write_text("previous configuration\n")
         result = self.run_configure("--runtime-stdlib")
         self.assertEqual(result.returncode, 2, result.stderr)
-        self.assertIn("reduced toolchain flake", result.stderr)
-        self.assertFalse((self.root / ".buckconfig.local").exists())
-
-    def test_project_resource_selection_records_one_pinned_source(self):
-        (self.capture / "bridge/haskell/lib").mkdir(parents=True)
-        producer = self.capture / "tidepool/toolchain/src/bin/tidepool-module-package.rs"
-        producer.parent.mkdir(parents=True)
-        producer.write_text("fn main() {}\n")
-        result = self.run_configure("--runtime-stdlib")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        text = (self.root / ".buckconfig.local").read_text()
-        self.assertIn("runtime_stdlib_sources = " + str(self.outputs / "runtime-stdlib-sources"), text)
-        self.assertIn("runtime_stdlib_products = " + str(self.outputs / "runtime-stdlib-products"), text)
-        self.assertIn("runtime_stdlib_extract = " + str(self.outputs / "tidepool-extract"), text)
-        calls = [json.loads(line) for line in self.log.read_text().splitlines()]
-        selected = [call[-1] for call in calls if call[0] == "eval" and "runtime-stdlib" in call[-1]]
-        self.assertTrue(selected)
-        self.assertTrue(all(reference.startswith(PIN + "#") for reference in selected))
-
-    def test_unpinned_worktree_cannot_supply_project_resources(self):
-        result = self.run_configure("--runtime-stdlib", pin=str(self.root))
-        self.assertEqual(result.returncode, 2, result.stderr)
-        self.assertIn("revision-pinned", result.stderr)
-        self.assertNotIn('"flake"', self.log.read_text())
+        self.assertIn("buck2-configure.sh [--tests]", result.stderr)
+        self.assertEqual(config.read_text(), "previous configuration\n")
+        self.assertFalse(self.log.exists())
+        self.assertFalse((self.root / ".buck2-toolchains").exists())
 
     def generations(self):
         return sorted((self.root / ".buck2-toolchains/generations").iterdir())

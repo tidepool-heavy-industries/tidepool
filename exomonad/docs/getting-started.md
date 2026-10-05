@@ -74,14 +74,12 @@ Use `just exomonad-run BUNDLE DESCRIPTOR REPORT COMMAND ...` for the other
 Exomonad operations described on this page. It records actual process execution;
 the report alone does not prove a live scenario's replies or cleanup.
 
-Nix also owns an isolated distribution: `nix build .#exomonad` produces
-`./result/bin/exomonad` with its matched compiler/runtime wrapper. The flake
-configures the public Cachix binary cache; availability depends on the revision.
-See the [binary cache guide](binary-cache.md) for setup and coverage details.
-Nix reuses identical inputs and builds missing outputs from source. This
-separate distribution has its own package checks; the native M1/M2 qualification
-uses the frozen Buck bundle above. Stock `codex` remains separately installed,
-with the user's authentication kept outside project and deployment artifacts.
+Nix supplies pinned toolchain and source inputs; project binaries and catalogs
+come from the native actions above. The flake configures the public Cachix cache
+for its declared outputs; availability depends on the revision. See the
+[binary cache guide](binary-cache.md) for setup and coverage details. Stock
+`codex` remains separately installed, with authentication outside project and
+deployment artifacts.
 
 ## `exomonad new`: write a workspace
 
@@ -91,9 +89,6 @@ For the frozen native bundle, from the Tidepool checkout:
 just exomonad-run "$FINAL_BUNDLE" "$DESCRIPTOR" "$NEW_REPORT" \
   new /path/to/your/project
 ```
-
-The Nix distribution exposes the same workspace command as
-`/path/to/tidepool/result/bin/exomonad new /path/to/your/project`.
 
 `exomonad new` takes an empty directory, which it makes a Git repository, or an
 existing repository that has no `.exomonad/config.toml`. It refuses, and changes

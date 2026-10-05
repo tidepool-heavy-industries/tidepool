@@ -5,14 +5,12 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 usage() {
-  printf 'Usage: scripts/buck2-configure.sh [--runtime-stdlib] [--tests]\n'
+  printf 'Usage: scripts/buck2-configure.sh [--tests]\n'
 }
 
-runtime_stdlib=false
 test_toolchain=false
 for argument in "$@"; do
   case "$argument" in
-    --runtime-stdlib) runtime_stdlib=true ;;
     --tests) test_toolchain=true ;;
     --help|-h) usage; exit 0 ;;
     *) usage >&2; exit 2 ;;
@@ -70,8 +68,8 @@ mkdir -p "$PWD/.buck2-toolchains/generations"
 generation=$(mktemp -d "$PWD/.buck2-toolchains/generations/generation.XXXXXXXX")
 mkdir "$generation/roots"
 : > "$generation/outputs.tsv"
-printf 'checkout=%s\nuid=%s\nselection=%s\nselection_mode=%s\ntests=%s\nruntime_stdlib=%s\ntoolchain_tree=%s\n' \
-  "$PWD" "$(id -u)" "$TIDEPOOL_DEV_SHELL" "$selection_mode" "$test_toolchain" "$runtime_stdlib" "$toolchain_tree" > "$generation/owner"
+printf 'checkout=%s\nuid=%s\nselection=%s\nselection_mode=%s\ntests=%s\ntoolchain_tree=%s\n' \
+  "$PWD" "$(id -u)" "$TIDEPOOL_DEV_SHELL" "$selection_mode" "$test_toolchain" "$toolchain_tree" > "$generation/owner"
 printf 'preparing\n' > "$generation/status"
 tmp_config=
 finish_preparation() {
@@ -154,31 +152,8 @@ nix-store --add-root "$generation/roots/workspace-git-resource" --indirect --rea
 printf 'workspace-git-resource\tgitlink:%s\t%s\t%s\n' \
   "$workspace_revision" \
   "$workspace_git_resource" "$generation/roots/workspace-git-resource" >> "$generation/outputs.tsv"
-runtime_stdlib_sources=
-runtime_stdlib_products=
-runtime_stdlib_extract=
-# Runtime commands are pinned tool inputs, independently of catalog products.
+# Runtime commands are pinned tool inputs, independently of native project products.
 exomonad_runtime_tools="$(output_path exomonad-runtime-tools)"
-if [[ $runtime_stdlib == true ]]; then
-  # The default shell can use a reduced toolchain-only tree. Project resources
-  # require a full committed capture, independently of mounted build outputs.
-  package_flake_source=${TIDEPOOL_DEV_FLAKE:-git+file://$PWD?rev=$(git rev-parse HEAD)\&submodules=1}
-  case "$package_flake_source" in
-    git+*\?*rev=*) ;;
-    *) echo '--runtime-stdlib requires a full revision-pinned Git project flake' >&2; exit 2 ;;
-  esac
-  captured_source=$(nix flake metadata --json --no-write-lock-file "$package_flake_source" |
-    "$python/bin/python3" -c 'import json,sys; print(json.load(sys.stdin)["path"])')
-  if [[ ! -d $captured_source/bridge/haskell/lib ||
-        ! -f $captured_source/tidepool/toolchain/src/bin/tidepool-module-package.rs ]]; then
-    echo '--runtime-stdlib requires the full project source; a reduced toolchain flake cannot supply compiler products' >&2
-    exit 2
-  fi
-  # Catalog products join this generation only when explicitly selected.
-  runtime_stdlib_sources="$(selected_output runtime-stdlib-sources "${package_flake_source}#packages.${system}.runtime-stdlib-sources")"
-  runtime_stdlib_products="$(selected_output runtime-stdlib-products "${package_flake_source}#packages.${system}.runtime-stdlib-products")"
-  runtime_stdlib_extract="$(selected_output tidepool-extract "${package_flake_source}#packages.${system}.tidepool-extract")"
-fi
 cmake="$(output_path cmake)"
 perl="$(output_path perl)"
 pkg_config="$(output_path pkg-config)"
@@ -228,10 +203,6 @@ tar = $tar_path/bin/tar
 gzip = $gzip/bin/gzip
 python = $python/bin/python3
 bubblewrap = $bubblewrap/bin/bwrap
-runtime_stdlib_sources = $runtime_stdlib_sources
-runtime_stdlib_products = $runtime_stdlib_products
-runtime_stdlib_extract = $runtime_stdlib_extract
-runtime_stdlib_ghc_libdir = $ghc_libdir
 exomonad_runtime_tools = $exomonad_runtime_tools
 cmake = $cmake/bin/cmake
 perl = $perl/bin/perl

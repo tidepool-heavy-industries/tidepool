@@ -279,13 +279,15 @@ set `TYPESAFE_API_KEY` before launching.
 ```bash
 git clone --recurse-submodules https://github.com/tidepool-heavy-industries/tidepool.git
 cd tidepool
-nix build .#exomonad
-./result/bin/exomonad --help
+# After provisioning this checkout's buck-out bind mount:
+bash scripts/buck2-configure.sh --tests
+just exomonad-build
 ```
 
-The wrapper selects the matching host, extractor, and client without
-replacing `codex` on your normal PATH. Building from source compiles both the
-GHC-side and Rust-side toolchains and can take a good while the first time.
+Nix supplies the pinned toolchains and source bytes; native Buck actions build
+the project bundle. Freeze and qualify that bundle through the
+[package guide](build/package/README.md) before launching. Stock `codex` remains
+separately installed, with authentication outside project artifacts.
 
 ### The binary cache
 
@@ -299,12 +301,14 @@ Before launching, configure the finite RAM and swap limits described in
 [getting started](exomonad/docs/getting-started.md). Exomonad defaults to
 `swarm.slice` and checks placement before running payloads.
 
-Then, from the repository you want to work on:
+From the Tidepool checkout, use the frozen bundle's final path and descriptor.
+Each operation receives its own absolute report path:
 
 ```bash
-/path/to/tidepool/result/bin/exomonad new
-/path/to/tidepool/result/bin/exomonad check --workspace .
-/path/to/tidepool/result/bin/exomonad init
+DESCRIPTOR="$FINAL_BUNDLE/share/exomonad/qualification.json"
+just exomonad-run "$FINAL_BUNDLE" "$DESCRIPTOR" "$NEW_REPORT" new /path/to/repository
+just exomonad-run "$FINAL_BUNDLE" "$DESCRIPTOR" "$CHECK_REPORT" check --workspace /path/to/repository
+just exomonad-init "$FINAL_BUNDLE" "$DESCRIPTOR" "$INIT_REPORT" --workspace /path/to/repository
 ```
 
 - `new` scaffolds a workspace package: configuration, the pinned
@@ -316,15 +320,6 @@ Then, from the repository you want to work on:
 
 Detach with `Ctrl-b d`, or use `--no-attach` and the printed connection
 information. Model and Jev calls use your accounts.
-
-From a development checkout of this repository, without a Nix build,
-`just exomonad-run -- new /path/to/repo`, `just exomonad-run -- check
---workspace /path/to/repo` and `just exomonad-init -- --workspace
-/path/to/repo` build the matched tools incrementally and run the same three
-steps against that repository; `just exomonad-harness` is the last of them
-aimed at `~/dev/exomonad-harness`. Run the binary through these recipes
-rather than bare, so it uses the extractor built beside it and not one
-installed on `PATH`.
 
 For a first task, ask the agent to investigate a real repository issue,
 retain its evidence, and save a useful investigation function. Then ask it
