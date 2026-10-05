@@ -538,7 +538,8 @@ assertRecoveredKindRep root = do
     Left (RecoveredEntryContractMismatch symbol Nothing True
         (Just (Signature [] (Returns [LiftedRefRep]))) False)
       | symbol == krepEntry -> pure ()
-    result -> fail ("provisional candidate did not retain its exact entry refusal: " ++ show result)
+    Left failure -> fail ("provisional candidate did not retain its exact entry refusal: " ++ show failure)
+    Right _ -> fail "provisional candidate admitted an unresolved constructor entry"
   complete <- either (fail . ("completed constructor projection failed: " ++) . show) pure
     (projectPreparedTarget krepContext modules)
   assert (any (isEmittedConstructor krepEntry) (concatMap groupItems (programBindings complete)))
