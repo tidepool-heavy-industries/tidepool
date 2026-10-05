@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tidepool_atomic_write::DirectoryAnchor;
 use tidepool_repr::jsonl::{SyncPolicy, TailPolicy};
 
 // V5 pins compiler-issued startup input identity. V4 raw program hashes and
@@ -536,8 +537,11 @@ impl ActorRecoveryJournal {
             .collect())
     }
 
-    pub fn open(path: impl Into<PathBuf>) -> std::io::Result<Arc<Self>> {
-        Self::open_with_mode(path.into(), false)
+    pub fn open(
+        anchor: &DirectoryAnchor,
+        relative_file: impl AsRef<Path>,
+    ) -> std::io::Result<Arc<Self>> {
+        Self::open_with_mode(anchor, relative_file.as_ref(), false)
     }
 
     /// Reopen lifecycle evidence for a later host incarnation.
@@ -545,13 +549,25 @@ impl ActorRecoveryJournal {
     /// Recovery must not silently replace a lost journal with an empty owner:
     /// that would admit a fresh root while the prior actor identities and
     /// external resources remain unaccounted for.
-    pub fn open_existing(path: impl Into<PathBuf>) -> std::io::Result<Arc<Self>> {
-        Self::open_with_mode(path.into(), true)
+    pub fn open_existing(
+        anchor: &DirectoryAnchor,
+        relative_file: impl AsRef<Path>,
+    ) -> std::io::Result<Arc<Self>> {
+        Self::open_with_mode(anchor, relative_file.as_ref(), true)
     }
 
-    fn open_with_mode(path: PathBuf, require_existing: bool) -> std::io::Result<Arc<Self>> {
-        if let Some(parent) = path.parent() {
-            tidepool_atomic_write::create_dir_all_durable(parent).map_err(std::io::Error::from)?;
+    fn open_with_mode(
+        anchor: &DirectoryAnchor,
+        relative_file: &Path,
+        require_existing: bool,
+    ) -> std::io::Result<Arc<Self>> {
+        let path = anchor
+            .resolve(relative_file)
+            .map_err(std::io::Error::from)?;
+        if let Some(parent) = relative_file.parent() {
+            anchor
+                .create_dir_all(parent)
+                .map_err(std::io::Error::from)?;
         }
         let existed = path.try_exists()?;
         if require_existing && !existed {
@@ -1265,12 +1281,13 @@ mod tests {
     #[test]
     fn embedded_application_intent_and_binding_survive_cold_reopen() {
         let directory = tempfile::tempdir().unwrap();
+        let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
         let path = directory.path().join("actors.jsonl");
         let actor = ActorRef {
             id: ActorId(7),
             incarnation: Incarnation(3),
         };
-        let journal = ActorRecoveryJournal::open(&path).unwrap();
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl").unwrap();
         journal.admit(actor, &descriptor("worker"), &[]).unwrap();
         let expected = ApplicationConversation::Embedded {
             run: "run".into(),
@@ -1285,25 +1302,31 @@ mod tests {
                 Some(expected.clone()),
             )
             .unwrap();
-        assert!(journal
-            .bind_application(actor, "fake-codex-thread".into())
-            .is_err());
+        assert!(
+            journal
+                .bind_application(actor, "fake-codex-thread".into())
+                .is_err()
+        );
         let changed = ApplicationConversation::Embedded {
             run: "run".into(),
             agent_path: "/root/a7_i3".into(),
             incarnation: "4".into(),
         };
-        assert!(journal
-            .bind_application_conversation(actor, changed)
-            .is_err());
+        assert!(
+            journal
+                .bind_application_conversation(actor, changed)
+                .is_err()
+        );
         drop(journal);
-        let journal = ActorRecoveryJournal::open_existing(&path).unwrap();
-        assert!(journal.records()[0]
-            .application
-            .as_ref()
-            .unwrap()
-            .conversation
-            .is_none());
+        let journal = ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl").unwrap();
+        assert!(
+            journal.records()[0]
+                .application
+                .as_ref()
+                .unwrap()
+                .conversation
+                .is_none()
+        );
         journal
             .bind_application_conversation(actor, expected.clone())
             .unwrap();
@@ -1311,7 +1334,7 @@ mod tests {
             .bind_application_conversation(actor, expected.clone())
             .unwrap();
         drop(journal);
-        let journal = ActorRecoveryJournal::open_existing(path).unwrap();
+        let journal = ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl").unwrap();
         let record = journal.records().remove(0);
         let application = record.application.unwrap();
         assert_eq!(application.intended_conversation, Some(expected.clone()));
@@ -1321,11 +1344,14 @@ mod tests {
     #[test]
     fn old_journal_versions_are_unsupported_and_remain_untouched() {
         let directory = tempfile::tempdir().unwrap();
+        let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
         for version in [1, 2, 3, 4] {
             let path = directory.path().join(format!("v{version}.jsonl"));
             let bytes = format!("{{\"version\":{version},\"sequence\":1,\"event\":\"created\"}}\n");
             std::fs::write(&path, &bytes).unwrap();
-            assert!(ActorRecoveryJournal::open_existing(&path).is_err());
+            assert!(
+                ActorRecoveryJournal::open_existing(&anchor, format!("v{version}.jsonl")).is_err()
+            );
             assert_eq!(std::fs::read(&path).unwrap(), bytes.as_bytes());
         }
     }
@@ -1333,12 +1359,13 @@ mod tests {
     #[test]
     fn cold_replay_refuses_binding_after_terminal_publication() {
         let directory = tempfile::tempdir().unwrap();
+        let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
         let path = directory.path().join("actors.jsonl");
         let actor = ActorRef {
             id: ActorId(7),
             incarnation: Incarnation(3),
         };
-        let journal = ActorRecoveryJournal::open(&path).unwrap();
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl").unwrap();
         journal.admit(actor, &descriptor("worker"), &[]).unwrap();
         journal
             .prepare_application(actor, directory.path().join("binding.json"), None)
@@ -1364,7 +1391,7 @@ mod tests {
         )
         .unwrap();
         drop(journal);
-        assert!(ActorRecoveryJournal::open_existing(path).is_err());
+        assert!(ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl").is_err());
     }
 
     fn descriptor(label: &str) -> ActorDescriptor {
@@ -1382,12 +1409,13 @@ mod tests {
     #[test]
     fn lifecycle_reopens_with_active_and_terminal_records() {
         let directory = tempfile::tempdir().unwrap();
+        let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
         let path = directory.path().join("actors.jsonl");
         let actor = ActorRef {
             id: ActorId(7),
             incarnation: Incarnation(3),
         };
-        let journal = ActorRecoveryJournal::open(&path).unwrap();
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl").unwrap();
         journal
             .admit(actor, &descriptor("worker"), &["tree-1".into()])
             .unwrap();
@@ -1397,7 +1425,7 @@ mod tests {
         for row in stored.lines() {
             parse_row(row).unwrap();
         }
-        let journal = ActorRecoveryJournal::open(&path).unwrap();
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl").unwrap();
         let records = journal.records();
         assert_eq!(records.len(), 1, "stored rows: {stored}");
         assert_eq!(records[0].admission.actor, actor);
@@ -1418,7 +1446,9 @@ mod tests {
             .retire(actor, ActorExitKind::Completed, "done".into())
             .unwrap();
         drop(journal);
-        let records = ActorRecoveryJournal::open(path).unwrap().records();
+        let records = ActorRecoveryJournal::open(&anchor, "actors.jsonl")
+            .unwrap()
+            .records();
         assert_eq!(
             records[0]
                 .application
@@ -1435,8 +1465,9 @@ mod tests {
     #[test]
     fn observed_read_leaves_a_live_journal_and_its_torn_tail_untouched() {
         let directory = tempfile::tempdir().unwrap();
+        let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
         let path = directory.path().join("actors.jsonl");
-        let journal = ActorRecoveryJournal::open(&path).unwrap();
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl").unwrap();
         journal
             .admit(ActorRef::first(ActorId(4)), &descriptor("observed"), &[])
             .unwrap();
@@ -1448,16 +1479,19 @@ mod tests {
         assert_eq!(records[0].admission.label, "observed");
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
         let missing = directory.path().join("missing.jsonl");
-        assert!(ActorRecoveryJournal::read_observed(&missing)
-            .unwrap()
-            .is_empty());
+        assert!(
+            ActorRecoveryJournal::read_observed(&missing)
+                .unwrap()
+                .is_empty()
+        );
         assert!(!missing.exists());
     }
 
     #[test]
     fn identity_reuse_with_changed_parameters_is_rejected() {
         let directory = tempfile::tempdir().unwrap();
-        let journal = ActorRecoveryJournal::open(directory.path().join("actors.jsonl")).unwrap();
+        let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl").unwrap();
         let actor = ActorRef::first(ActorId(2));
         journal.admit(actor, &descriptor("first"), &[]).unwrap();
         let error = journal
@@ -1469,21 +1503,22 @@ mod tests {
     #[test]
     fn every_application_publication_boundary_reopens_without_inventing_progress() {
         let directory = tempfile::tempdir().unwrap();
+        let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
         let path = directory.path().join("actors.jsonl");
         let binding = directory.path().join("binding.json");
         let actor = ActorRef::first(ActorId(9));
 
-        let journal = ActorRecoveryJournal::open(&path).unwrap();
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl").unwrap();
         journal.admit(actor, &descriptor("worker"), &[]).unwrap();
         drop(journal);
-        let journal = ActorRecoveryJournal::open(&path).unwrap();
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl").unwrap();
         assert!(journal.records()[0].application.is_none());
 
         journal
             .prepare_application(actor, binding.clone(), Some("source-revision".into()))
             .unwrap();
         drop(journal);
-        let journal = ActorRecoveryJournal::open(&path).unwrap();
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl").unwrap();
         let prepared = journal
             .records()
             .into_iter()
@@ -1499,7 +1534,7 @@ mod tests {
             .bind_application(actor, "conversation-9".into())
             .unwrap();
         drop(journal);
-        let journal = ActorRecoveryJournal::open(&path).unwrap();
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl").unwrap();
         assert_eq!(
             journal.records()[0]
                 .application
@@ -1515,9 +1550,10 @@ mod tests {
     #[test]
     fn recovered_host_requires_the_original_lifecycle_owner() {
         let directory = tempfile::tempdir().unwrap();
+        let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
         let missing = directory.path().join("missing.jsonl");
         assert_eq!(
-            ActorRecoveryJournal::open_existing(&missing)
+            ActorRecoveryJournal::open_existing(&anchor, "missing.jsonl")
                 .err()
                 .unwrap()
                 .kind(),
@@ -1526,16 +1562,41 @@ mod tests {
 
         let empty = directory.path().join("empty.jsonl");
         std::fs::write(&empty, b"").unwrap();
-        assert!(ActorRecoveryJournal::open_existing(&empty)
-            .err()
-            .unwrap()
-            .to_string()
-            .contains("creation marker"));
+        assert!(
+            ActorRecoveryJournal::open_existing(&anchor, "empty.jsonl")
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("creation marker")
+        );
 
         let initialized = directory.path().join("initialized.jsonl");
-        drop(ActorRecoveryJournal::open(&initialized).unwrap());
-        ActorRecoveryJournal::open_existing(&initialized).unwrap();
+        drop(ActorRecoveryJournal::open(&anchor, "initialized.jsonl").unwrap());
+        ActorRecoveryJournal::open_existing(&anchor, "initialized.jsonl").unwrap();
     }
+
+    #[test]
+    fn anchored_open_refuses_escape_before_mutation_and_retries_failed_parent_creation() {
+        let directory = tempfile::tempdir().unwrap();
+        let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
+
+        assert!(ActorRecoveryJournal::open(&anchor, "../outside/actors.jsonl").is_err());
+        assert!(!directory.path().parent().unwrap().join("outside").exists());
+        assert!(
+            ActorRecoveryJournal::open(&anchor, directory.path().join("absolute.jsonl")).is_err()
+        );
+        assert!(!directory.path().join("absolute.jsonl").exists());
+
+        let obstruction = directory.path().join("nested");
+        std::fs::write(&obstruction, b"file blocks directory creation").unwrap();
+        assert!(ActorRecoveryJournal::open(&anchor, "nested/actors.jsonl").is_err());
+        std::fs::remove_file(obstruction).unwrap();
+
+        let journal = ActorRecoveryJournal::open(&anchor, "nested/actors.jsonl").unwrap();
+        assert!(directory.path().join("nested/actors.jsonl").is_file());
+        assert_eq!(journal.records().len(), 0);
+    }
+
     fn write_manifest(
         path: &Path,
         owner: &tidepool_runtime::session::RecoveryPublicOwner,
@@ -1574,6 +1635,7 @@ mod tests {
     #[test]
     fn root_startup_admission_and_exact_intent_reopen_atomically() {
         let run = tempfile::tempdir().unwrap();
+        let anchor = DirectoryAnchor::open_existing(run.path()).unwrap();
         let path = run.path().join("actors.jsonl");
         let actor = ActorRef::first(ActorId(33));
         let root = descriptor("root")
@@ -1587,13 +1649,13 @@ mod tests {
             None,
             None,
         );
-        let journal = ActorRecoveryJournal::open(&path).unwrap();
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl").unwrap();
         journal
             .admit_with_startup(actor, &root, &[], Some(intent.clone()))
             .unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 2);
         drop(journal);
-        let journal = ActorRecoveryJournal::open_existing(&path).unwrap();
+        let journal = ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl").unwrap();
         let record = &journal.records()[0];
         assert_eq!(record.startup.as_ref(), Some(&intent));
         assert_eq!(record.application.as_ref(), Some(&intent.application()));
@@ -1603,7 +1665,7 @@ mod tests {
             .unwrap();
         drop(journal);
         assert_eq!(
-            ActorRecoveryJournal::open_existing(&path)
+            ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl")
                 .unwrap()
                 .records()[0]
                 .application
@@ -1618,7 +1680,8 @@ mod tests {
     #[test]
     fn root_successor_receipt_requires_latest_prepared_journal_and_owned_placement() {
         let run = tempfile::tempdir().unwrap();
-        let journal = ActorRecoveryJournal::open(run.path().join("actors.jsonl")).unwrap();
+        let anchor = DirectoryAnchor::open_existing(run.path()).unwrap();
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl").unwrap();
         let binding = run.path().join("binding.json");
         let manifest = run.path().join("root-declarations.json");
         std::fs::write(
@@ -1664,66 +1727,79 @@ mod tests {
         let proof = journal
             .certify_root_successor(old, placement.clone(), Some("source"), &binding)
             .unwrap();
-        assert!(proof
-            .validate_successor(
-                run.path(),
-                &old_owner,
-                placement.owner(),
-                SessionId(1),
-                ScopeId(1)
-            )
-            .unwrap());
-        assert!(proof
-            .validate_embedded_binding(
-                run.path(),
-                &initial.conversation,
-                &journal
-                    .records()
-                    .into_iter()
-                    .find(|record| record.admission.actor == next)
-                    .unwrap()
-                    .startup
-                    .unwrap()
-                    .conversation
-            )
-            .unwrap());
-        assert!(!proof
-            .validate_successor(
-                run.path(),
-                &old_owner,
-                placement.owner(),
-                SessionId(9),
-                ScopeId(1)
-            )
-            .unwrap());
-        assert!(!proof
-            .validate_successor(
-                tempfile::tempdir().unwrap().path(),
-                &old_owner,
-                placement.owner(),
-                SessionId(1),
-                ScopeId(1)
-            )
-            .unwrap());
-        assert!(journal
-            .certify_root_successor(old, placement.clone(), Some("different-source"), &binding)
-            .is_err());
+        assert!(
+            proof
+                .validate_successor(
+                    run.path(),
+                    &old_owner,
+                    placement.owner(),
+                    SessionId(1),
+                    ScopeId(1)
+                )
+                .unwrap()
+        );
+        assert!(
+            proof
+                .validate_embedded_binding(
+                    run.path(),
+                    &initial.conversation,
+                    &journal
+                        .records()
+                        .into_iter()
+                        .find(|record| record.admission.actor == next)
+                        .unwrap()
+                        .startup
+                        .unwrap()
+                        .conversation
+                )
+                .unwrap()
+        );
+        assert!(
+            !proof
+                .validate_successor(
+                    run.path(),
+                    &old_owner,
+                    placement.owner(),
+                    SessionId(9),
+                    ScopeId(1)
+                )
+                .unwrap()
+        );
+        assert!(
+            !proof
+                .validate_successor(
+                    tempfile::tempdir().unwrap().path(),
+                    &old_owner,
+                    placement.owner(),
+                    SessionId(1),
+                    ScopeId(1)
+                )
+                .unwrap()
+        );
+        assert!(
+            journal
+                .certify_root_successor(old, placement.clone(), Some("different-source"), &binding)
+                .is_err()
+        );
         write_manifest(&manifest, &old_owner, "changed", 7);
-        assert!(!proof
-            .validate_successor(
-                run.path(),
-                &old_owner,
-                placement.owner(),
-                SessionId(1),
-                ScopeId(1)
-            )
-            .unwrap());
+        assert!(
+            !proof
+                .validate_successor(
+                    run.path(),
+                    &old_owner,
+                    placement.owner(),
+                    SessionId(1),
+                    ScopeId(1)
+                )
+                .unwrap()
+        );
     }
 
     #[test]
     fn root_startup_rollforward_is_linear_and_cannot_cross_a_bound_owner() {
         let run = tempfile::tempdir().unwrap();
-        let journal = ActorRecoveryJournal::open(run.path().join("actors.jsonl")).unwrap();
+        let anchor = DirectoryAnchor::open_existing(run.path()).unwrap();
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl").unwrap();
         let binding = run.path().join("binding.json");
         let manifest = run.path().join("root-declarations.json");
         let old_owner = tidepool_runtime::session::RecoveryPublicOwner::new(
@@ -1777,9 +1853,11 @@ mod tests {
         );
         let mut changed_bootstrap = third.clone();
         changed_bootstrap.bootstrap_identity = "different-bootstrap".into();
-        assert!(journal
-            .admit_with_startup(c, &root, &[], Some(changed_bootstrap))
-            .is_err());
+        assert!(
+            journal
+                .admit_with_startup(c, &root, &[], Some(changed_bootstrap))
+                .is_err()
+        );
         let mut changed_manifest: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
         changed_manifest["public_surfaces"][0]["bindings"] =
@@ -1788,46 +1866,52 @@ mod tests {
         let mut changed_content = third.clone();
         changed_content.manifest =
             Some(RootStartupManifestPin::capture_for_owner(&manifest, &old_owner).unwrap());
-        assert!(journal
-            .admit_with_startup(c, &root, &[], Some(changed_content))
-            .is_err());
+        assert!(
+            journal
+                .admit_with_startup(c, &root, &[], Some(changed_content))
+                .is_err()
+        );
         write_manifest(&manifest, &old_owner, "revision", 0);
         journal
             .admit_with_startup(c, &root, &[], Some(third.clone()))
             .unwrap();
-        assert!(journal
-            .admit_with_startup(
-                d,
-                &root,
-                &[],
-                Some(startup_intent(
+        assert!(
+            journal
+                .admit_with_startup(
                     d,
-                    &binding,
-                    Some(b),
-                    Some(a),
-                    Some(pin.clone()),
-                    Some(initial.conversation.clone())
-                ))
-            )
-            .is_err());
+                    &root,
+                    &[],
+                    Some(startup_intent(
+                        d,
+                        &binding,
+                        Some(b),
+                        Some(a),
+                        Some(pin.clone()),
+                        Some(initial.conversation.clone())
+                    ))
+                )
+                .is_err()
+        );
         journal
             .bind_application_conversation(c, third.conversation.clone())
             .unwrap();
-        assert!(journal
-            .admit_with_startup(
-                d,
-                &root,
-                &[],
-                Some(startup_intent(
+        assert!(
+            journal
+                .admit_with_startup(
                     d,
-                    &binding,
-                    Some(c),
-                    Some(a),
-                    Some(pin.clone()),
-                    Some(initial.conversation.clone())
-                ))
-            )
-            .is_err());
+                    &root,
+                    &[],
+                    Some(startup_intent(
+                        d,
+                        &binding,
+                        Some(c),
+                        Some(a),
+                        Some(pin.clone()),
+                        Some(initial.conversation.clone())
+                    ))
+                )
+                .is_err()
+        );
         let c_owner = tidepool_runtime::session::RecoveryPublicOwner::new(
             &tidepool_repr::ActorPath::parse("root").unwrap(),
             12,
@@ -1835,22 +1919,24 @@ mod tests {
         .unwrap();
         write_manifest(&manifest, &c_owner, "new-owner-revision", 0);
         let c_pin = RootStartupManifestPin::capture_for_owner(&manifest, &c_owner).unwrap();
-        assert!(journal
-            .admit_with_startup(
-                d,
-                &root,
-                &[],
-                Some(startup_intent(
+        assert!(
+            journal
+                .admit_with_startup(
                     d,
-                    &binding,
-                    Some(c),
-                    Some(c),
-                    Some(c_pin),
-                    Some(third.conversation)
-                ))
-            )
-            .is_ok());
+                    &root,
+                    &[],
+                    Some(startup_intent(
+                        d,
+                        &binding,
+                        Some(c),
+                        Some(c),
+                        Some(c_pin),
+                        Some(third.conversation)
+                    ))
+                )
+                .is_ok()
+        );
         drop(journal);
-        ActorRecoveryJournal::open_existing(run.path().join("actors.jsonl")).unwrap();
+        ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl").unwrap();
     }
 }
