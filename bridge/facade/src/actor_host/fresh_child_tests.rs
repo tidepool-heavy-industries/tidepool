@@ -3,6 +3,126 @@ use super::test_campaign::{committed_display_text, dispatch_haskell_script, Test
 use exomonad_actor::{ActorExitKind, ActorTerminal, LocalResidentDeployment};
 use std::time::Duration;
 
+/// A workspace nominal input must keep its original identity while the selected
+/// child compiles its source closure under a narrower invocation effect row.
+#[tokio::test(flavor = "multi_thread")]
+async fn scaffolded_selected_coding_child_preserves_workspace_input_and_effect_row() {
+    use super::hosted_test_context::HostedTestRuntime;
+    use super::test_campaign::{
+        hosted_script_provider, hosted_test_settings, next_hosted_script_round,
+        COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+    };
+    use exomonad_tool::ActorEffectKey;
+
+    let files = tempfile::tempdir().unwrap();
+    let settings = hosted_test_settings(&files, 2);
+    let (provider, mut requests) = hosted_script_provider();
+    let host = HostedTestRuntime::start_configured(
+        &settings,
+        &provider,
+        super::scaffold_admission_tests::scaffold,
+    )
+    .await
+    .expect("the shipped workspace starts through its production host");
+    host.input("Pass a workspace Task to a selected coding child and return its typed candidate.")
+        .await
+        .unwrap();
+    let root_id = host.context.actor.identity();
+    let root_installation = host.context.observer.installation(root_id).await;
+    let root_notebook = root_installation
+        .tools
+        .iter()
+        .find(|tool| tool.name() == "haskell_sync")
+        .expect("root notebook");
+    assert!(root_notebook
+        .effect_keys()
+        .contains(&ActorEffectKey::Journal.into()));
+    let mut pending = std::collections::VecDeque::new();
+    let root = harness::model::AgentPath("/root".into());
+    next_hosted_script_round(&mut requests, &mut pending, &root)
+        .await
+        .call(
+            "selected-workspace-input",
+            include_str!("selected_workspace_child_setup.hs"),
+        );
+    let root_after = next_hosted_script_round(&mut requests, &mut pending, &root).await;
+    root_after.assert_committed("selected-workspace-input");
+    let (child_id, child_path) = tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, async {
+        loop {
+            if let Some(child) = host
+                .context
+                .forest
+                .inspect_host_graph()
+                .into_iter()
+                .find(|node| node.label == "typed-source/coding/worker")
+            {
+                assert!(child.terminal.is_none(), "{child:?}");
+                assert_eq!(child.creator, Some(root_id));
+                assert_eq!(child.supervisor_parent, Some(root_id));
+                assert_eq!(child.context_parent, None);
+                assert!(child.bound_worktree.is_some());
+                if let Some(binding) = host.context.binding(child.actor) {
+                    if let Some(conversation) = binding.conversation() {
+                        break (child.actor, conversation.identity().actor.clone());
+                    }
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("selected child completes typed input admission and attaches its provider");
+    let child_installation = host.context.observer.installation(child_id).await;
+    assert!(!child_installation.checkpoint);
+    assert_eq!(child_installation.context_parent, None);
+    let child_notebook = child_installation
+        .tools
+        .iter()
+        .find(|tool| tool.name() == "haskell_sync")
+        .expect("coding child notebook");
+    assert!(child_notebook
+        .effect_keys()
+        .contains(&ActorEffectKey::WorktreeAllocation.into()));
+    assert!(!child_notebook
+        .effect_keys()
+        .contains(&ActorEffectKey::Journal.into()));
+
+    next_hosted_script_round(&mut requests, &mut pending, &child_path)
+        .await
+        .call(
+            "selected-journal-refusal",
+            "import qualified Tidepool.Aeson.Value as Json\nrecord \"typed-source\" \"child\" Json.Null",
+        );
+    let child_after = next_hosted_script_round(&mut requests, &mut pending, &child_path).await;
+    child_after.assert_failure("selected-journal-refusal", "Journal");
+    let denied = child_after.settled_output("selected-journal-refusal");
+    assert_eq!(denied["status"], "rejected", "{denied}");
+    assert_eq!(denied["publication"]["status"], "notPublished", "{denied}");
+    assert_eq!(denied["publication"]["reason"], "rejected", "{denied}");
+    child_after.call(
+        "selected-typed-reply",
+        "import qualified Exomonad.Contrib.Types as Types\nrespond (Types.Produced (Types.Candidate (Types.taskSource sessionInput) [Types.obligation sessionInput] []))",
+    );
+    let child_replied = next_hosted_script_round(&mut requests, &mut pending, &child_path).await;
+    let reply = child_replied.settled_output("selected-typed-reply");
+    assert_eq!(reply["status"], "replied", "{reply}");
+    assert_eq!(reply["publication"]["status"], "published", "{reply}");
+    assert_eq!(
+        reply["items"].as_array().unwrap().last().unwrap()["terminalTransfer"],
+        "replyAccepted",
+        "{reply}"
+    );
+    child_replied.finish();
+    root_after.call(
+        "selected-original-result",
+        include_str!("selected_workspace_child_result.hs"),
+    );
+    let root_done = next_hosted_script_round(&mut requests, &mut pending, &root).await;
+    root_done.assert_value("selected-original-result", "True");
+    root_done.finish();
+    host.stop().await.unwrap();
+}
+
 /// Opt-in qualification of the dedicated-machine factory through a selected
 /// typed launch. Default campaigns and the production host share a machine.
 /// This campaign explicitly installs the root's compiled child bootstrap;

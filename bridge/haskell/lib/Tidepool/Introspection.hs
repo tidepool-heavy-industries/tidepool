@@ -27,7 +27,7 @@ module Tidepool.Introspection
   ) where
 
 import Data.Text (Text)
-import Tidepool.Effects
+import Tidepool.Effects.Authored
 
 -- | Query an unqualified name in the caller's current lexical scope.
 here :: Text -> NameQuery

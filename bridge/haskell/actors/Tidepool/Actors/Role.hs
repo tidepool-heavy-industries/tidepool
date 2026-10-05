@@ -41,7 +41,6 @@ module Tidepool.Actors.Role
 
 import Tidepool.Agent.Reply (Replies)
 import Tidepool.Agent.Watch (Watches)
-import Tidepool.Effects (Journal, RepoEvent)
 import Tidepool.Effects.Core
   ( ActorContext
   , AgentControl
@@ -54,9 +53,11 @@ import Tidepool.Effects.Core
   , BoundWorktree
   , Forks
   , Jev
+  , Journal
   , ModelCall
   , Lookup
   , Reflect
+  , RepoEvent
   , Source
   , WorktreeAllocation
   , WorktreeIntegration

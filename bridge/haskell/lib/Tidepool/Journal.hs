@@ -27,4 +27,4 @@ module Tidepool.Journal
   , trace
   ) where
 
-import Tidepool.Effects (record, trace)
+import Tidepool.Effects.Authored (record, trace)

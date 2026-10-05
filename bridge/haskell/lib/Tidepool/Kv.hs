@@ -12,7 +12,7 @@ module Tidepool.Kv
 import Prelude
 import Data.Text (Text)
 import Control.Monad.Freer (Eff, Member)
-import Tidepool.Effects (KV, KvError(..), kvGet)
+import Tidepool.Effects.Authored (KV, KvError(..), kvGet)
 import Tidepool.Aeson (FromJSON, fromJSON, resultToEither)
 
 -- | Typed KV read: look up a key and decode the stored 'Value' via its

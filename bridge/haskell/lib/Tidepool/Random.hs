@@ -26,7 +26,7 @@ import Prelude
 import Data.Bits (shiftR)
 import System.Random (StdGen, mkStdGen, split, genWord64)
 import Control.Monad.Freer (Eff, Member)
-import Tidepool.Effects (Entropy, entropySeed)
+import Tidepool.Effects.Authored (Entropy, entropySeed)
 
 -- | A type drawable from a 'StdGen'. 'randomR' draws within an inclusive
 -- range (bounds may be given in either order); 'random' draws from the

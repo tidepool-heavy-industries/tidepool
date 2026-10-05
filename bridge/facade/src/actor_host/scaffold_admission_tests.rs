@@ -12,7 +12,7 @@ use super::test_campaign::{
 };
 use std::collections::VecDeque;
 
-fn scaffold(config: &mut super::ActorHostConfig) {
+pub(super) fn scaffold(config: &mut super::ActorHostConfig) {
     crate::exomonad::new(crate::exomonad::NewOptions {
         path: Some(config.workspace.clone()),
         lock: Box::new(crate::exomonad::NixLock),

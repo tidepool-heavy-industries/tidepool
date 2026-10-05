@@ -16,4 +16,4 @@ module Tidepool.Git
   , gitShow
   ) where
 
-import Tidepool.Effects (gitLog, gitStatus, gitDiffStat, gitShow)
+import Tidepool.Effects.Authored (gitLog, gitStatus, gitDiffStat, gitShow)

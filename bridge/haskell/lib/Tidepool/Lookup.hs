@@ -9,7 +9,7 @@ module Tidepool.Lookup
   ) where
 
 import Data.Text (Text)
-import Tidepool.Effects (lookupRaw)
+import Tidepool.Effects.Authored (lookupRaw)
 import Tidepool.Effects.Core
 
 -- | Build a raw request with the default hosted lookup tool's bounded options.

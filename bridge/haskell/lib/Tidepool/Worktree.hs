@@ -146,7 +146,7 @@ import Tidepool.Command.Types (Command, withEnvironment)
 import Tidepool.Aeson (FromJSON (..), Result (..), ToJSON (..), object, withObject, withText, (.:), (.:?), (.=))
 import Tidepool.Aeson.Schema (JsonSchema (..), objectSchema)
 import Tidepool.Aeson.Value (Value (..))
-import Tidepool.Effects
+import Tidepool.Effects.Authored
   ( BranchName (..)
   , DirtyPolicy (..)
   , DirtySummary (..)
