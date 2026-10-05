@@ -220,6 +220,26 @@ fn publish_fixture_candidates(
     assert_eq!(selected.manifest_path, destination);
 }
 
+fn write_fixture_scope_output(packet: &Path, manifest: &Path) {
+    let result = Value::Array(vec![
+        Value::Text("TPSOURCEBOOTDELIVERY1".into()),
+        Value::Text(manifest.to_str().expect("UTF-8 fixture scope path").into()),
+    ]);
+    let mut bytes = Vec::new();
+    ciborium::ser::into_writer(&result, &mut bytes).unwrap();
+    fs::write(packet.join("delivery.cbor"), bytes).unwrap();
+}
+
+// TempDir::keep transfers cleanup to the Haskell scoped packet owner. Dropping
+// it here would invalidate absolute paths in the delivered scope before use.
+fn fresh_fixture_request_root(packet: &Path) -> PathBuf {
+    tempfile::Builder::new()
+        .prefix("compilation-request-")
+        .tempdir_in(packet)
+        .expect("fresh fixture compilation request")
+        .keep()
+}
+
 #[test]
 #[ignore = "requires a live matched source-boot finalization packet"]
 fn source_boot_candidate_packet_producer() {
@@ -231,8 +251,8 @@ fn source_boot_candidate_packet_producer() {
     assert!(request.len() <= MANIFEST_LIMIT);
     let request: Value = ciborium::de::from_reader(request.as_slice()).unwrap();
     let fields = request.as_array().expect("fixture request tuple");
-    assert_eq!(fields.len(), 9);
-    assert_eq!(text_field(&fields[0]), "TPSOURCEBOOTFIXTURE3");
+    assert_eq!(fields.len(), 10);
+    assert_eq!(text_field(&fields[0]), "TPSOURCEBOOTFIXTURE4");
     let (endpoint, _) = crate::toolchain::bind_extract_endpoint().unwrap();
     let producer = endpoint.identity().producer_bytes();
     assert_eq!(text_field(&fields[7]), endpoint.identity().producer_hex());
@@ -267,18 +287,22 @@ fn source_boot_candidate_packet_producer() {
         .collect::<Vec<_>>();
     assert!(
         (exact_owners.is_empty() && native_owners.is_empty() && lexical_roots.is_empty())
-            || !matches!(fields[6], Value::Null),
+            || fields[6].as_bool().expect("fixture scope selection"),
         "retained interface/native custody requires an actual delivered scope"
     );
     let context = if !matches!(fields[1], Value::Null) {
         let source_path = PathBuf::from(text_field(&fields[1]));
         assert!(source_path.is_absolute());
-        let source = fs::read_to_string(&source_path).unwrap();
-        let evidence_bytes = fs::read(packet.join("dependencies.json")).unwrap();
+        let capture = PathBuf::from(text_field(&fields[9]));
+        assert!(capture.is_absolute());
+        // Source identity stays at its original authored path. The capture
+        // supplies only the original bytes and payloads emitted at that path.
+        let source = fs::read_to_string(capture.join("original-source.hs")).unwrap();
+        let evidence_bytes = fs::read(capture.join("dependencies.json")).unwrap();
         let evidence = DependencyEvidence::from_worker(&evidence_bytes, &source_path, &source)
             .expect("actual consumed source and resolution evidence");
-        let receipt_bytes = fs::read(packet.join("certified-products.cbor")).unwrap();
-        let receipt = decode_receipt_in(&receipt_bytes, Some(&packet)).unwrap();
+        let receipt_bytes = fs::read(capture.join("certified-products.cbor")).unwrap();
+        let receipt = decode_receipt_in(&receipt_bytes, Some(&capture)).unwrap();
         assert!(
             receipt.modules.iter().all(|module| {
                 module.origin == crate::certified_products::ProductOrigin::Fresh
@@ -288,8 +312,8 @@ fn source_boot_candidate_packet_producer() {
             ),
             "fixture delivery selections cannot replace an inherited compiler request context; capture a cold original"
         );
-        let product_bytes = fs::read(packet.join("module-products.cbor")).unwrap();
-        let package_bytes = fs::read(packet.join("module-package-imports.cbor")).unwrap();
+        let product_bytes = fs::read(capture.join("module-products.cbor")).unwrap();
+        let package_bytes = fs::read(capture.join("module-package-imports.cbor")).unwrap();
         let parsed = ParsedModuleProducts::decode(&product_bytes, &package_bytes).unwrap();
         let certified = certify_products(
             None,
@@ -297,7 +321,7 @@ fn source_boot_candidate_packet_producer() {
             &parsed,
             &evidence_bytes,
             &source_path,
-            &packet,
+            &capture,
             &evidence,
             &source,
             producer,
@@ -333,18 +357,18 @@ fn source_boot_candidate_packet_producer() {
                 && native_owners.is_empty()
                 && lexical_roots.is_empty()
                 && include.is_empty()
+                && matches!(fields[9], Value::Null)
         );
         empty_fixture_scope(producer_sha)
     };
-    if !matches!(fields[6], Value::Null) {
-        let destination = PathBuf::from(text_field(&fields[6]));
-        assert!(destination.is_absolute());
-        // Graph descriptors belong beside the delivered scope. Rename only
-        // its filename so later fixture scopes can reuse the writer's name.
+    if fields[6].as_bool().expect("fixture scope selection") {
+        // The request owns every exclusively created graph and its manifest.
+        // Keep both together until Haskell consumption releases the packet.
+        let request_root = fresh_fixture_request_root(&packet);
         let scope = Arc::new(context)
-            .prepare_compilation(destination.parent().unwrap(), producer)
+            .prepare_compilation(&request_root, producer)
             .unwrap();
-        fs::rename(scope.manifest, destination).unwrap();
+        write_fixture_scope_output(&packet, &scope.manifest);
     }
     println!(
         "genuine fixture: Rust certification, full ArtifactView admission and production delivery passed"
@@ -363,7 +387,7 @@ fn source_boot_authored_declaration_packet_producer() {
     let request: Value = ciborium::de::from_reader(request.as_slice()).unwrap();
     let fields = request.as_array().expect("authored fixture request tuple");
     assert_eq!(fields.len(), 5);
-    assert_eq!(text_field(&fields[0]), "TPSOURCEBOOTAUTHORED1");
+    assert_eq!(text_field(&fields[0]), "TPSOURCEBOOTAUTHORED2");
     let generation: u64 = fields[1]
         .as_integer()
         .expect("reserved generation")
@@ -376,8 +400,9 @@ fn source_boot_authored_declaration_packet_producer() {
         .collect::<Vec<_>>();
     assert!(!include.is_empty() && include.iter().all(|path| path.is_absolute()));
     let source_path = PathBuf::from(text_field(&fields[3]));
-    let destination = PathBuf::from(text_field(&fields[4]));
-    assert!(source_path.is_absolute() && destination.is_absolute());
+    let delivery_root = PathBuf::from(text_field(&fields[4]));
+    assert!(source_path.is_absolute() && delivery_root.is_absolute());
+    assert_eq!(packet.parent().unwrap(), delivery_root);
     let source = fs::read_to_string(&source_path).unwrap();
     let module = tidepool_repr::SessionModule::lib(tidepool_repr::Generation(generation));
     let (endpoint, _) = crate::toolchain::bind_extract_endpoint().unwrap();
@@ -416,12 +441,10 @@ fn source_boot_authored_declaration_packet_producer() {
                 == crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration {
                     generation
                 }));
+    let request_root = fresh_fixture_request_root(&packet);
     let scope = Arc::new(context)
-        .prepare_compilation(
-            destination.parent().unwrap(),
-            endpoint.identity().producer_bytes(),
-        )
+        .prepare_compilation(&request_root, endpoint.identity().producer_bytes())
         .expect("production authored scope delivery with original carrier association");
-    fs::rename(scope.manifest, destination).unwrap();
+    write_fixture_scope_output(&packet, &scope.manifest);
     println!("genuine authored fixture: reserved declaration certification, origin-preserving type-only projection and production scope delivery passed");
 }

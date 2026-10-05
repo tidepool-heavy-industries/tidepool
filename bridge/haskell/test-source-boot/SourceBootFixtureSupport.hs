@@ -1,13 +1,19 @@
+{-# LANGUAGE ScopedTypeVariables #-}
 module SourceBootFixtureSupport
   ( writeExecutionScope, compactInventoryRows, hasIntResultLiteral, withTiming
+  , CapturedCompilerFixture, capturePreparedFixture, captureDiagnostics
+  , acquireFixtureScratch, releaseFixtureScratch, releaseFixtureScratchAfterFailure
+  , withScratchFailureEvidence
   , manifest, writeManifestFor, originalCompilerInput, digest, withScratch, preparedNames ) where
 
 import Codec.CBOR.Term (Term(..), encodeTerm)
 import Codec.CBOR.Write (toStrictByteString)
-import Control.Exception (bracket)
-import Control.Monad (foldM)
+import Control.Exception (SomeException, bracket, bracketOnError, finally, mask, onException, throwIO, try)
+import Control.Monad (filterM, foldM)
 import Crypto.Hash.SHA256 qualified as SHA
 import Data.ByteString qualified as BS
+import Data.ByteString.Char8 qualified as BSC
+import Data.List (sort)
 import Data.Map.Strict qualified as Map
 import GHC.Core qualified as Core
 import GHC.Driver.Env (HscEnv(..))
@@ -17,21 +23,34 @@ import GHC.Types.Literal (Literal(..), LitNumType(..))
 import GHC.Types.Name (getOccString)
 import GHC.Unit.Module (moduleName, moduleNameString, moduleUnit)
 import GHC.Unit.Types (unitString)
-import GenuineCandidateFixture (writeGenuineCandidateManifestFor, writeGenuineExecutionScope)
+import GenuineCandidateFixture
+  ( CapturedCompilerFixture, FixtureCompilerInput(..), captureCompilerFixture, capturedPreparedNames
+  , writeGenuineCandidateManifestFor, writeGenuineExecutionScope )
 import Numeric (showHex)
-import System.Directory (getTemporaryDirectory, removeFile, createDirectory, removeDirectoryRecursive)
+import System.Directory
+  ( getTemporaryDirectory, removeFile, createDirectory, removeDirectoryRecursive
+  , listDirectory, doesDirectoryExist, doesFileExist, pathIsSymbolicLink, removePathForcibly )
 import System.Environment (lookupEnv, setEnv, unsetEnv)
-import System.FilePath ((</>))
-import System.IO (openTempFile, hClose)
+import System.FilePath ((</>), makeRelative)
+import System.IO
+  ( openTempFile, hClose, hFlush, hPutStr, hPutStrLn, hSeek, hFileSize, withBinaryFile
+  , IOMode(ReadMode), SeekMode(AbsoluteSeek), stderr )
+import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 import Tidepool.DependencyEvidence (DependencyEvidence(..), DependencyModule(..))
 import Tidepool.GhcPipeline (PreparedPipelineResult(..), PipelineResult(..))
 import Tidepool.PreparedStg (PreparedModule(..))
 
-writeExecutionScope :: FilePath -> FilePath -> PreparedPipelineResult -> [String] -> IO ()
-writeExecutionScope path work original lexicalNames = do
-  (source, roots) <- originalCompilerInput original
-  let nativeOwners = map (moduleNameString . moduleName . pmModule) (pprModules original)
-  writeGenuineExecutionScope nativeOwners lexicalNames work source roots path original
+capturePreparedFixture :: FilePath -> PreparedPipelineResult -> IO CapturedCompilerFixture
+capturePreparedFixture work prepared = do
+  (source, roots) <- originalCompilerInput prepared
+  (capture, diagnostics) <- captureDiagnostics
+    (captureCompilerFixture (FixtureCompilerInput work source roots) prepared)
+  hPutStr stderr diagnostics
+  pure capture
+
+writeExecutionScope :: FilePath -> CapturedCompilerFixture -> [String] -> IO FilePath
+writeExecutionScope work capture lexicalNames =
+  writeGenuineExecutionScope (capturedPreparedNames capture) lexicalNames work capture
 
 
 data FixtureInventory = FixtureInventory
@@ -120,10 +139,8 @@ manifest :: FilePath -> FilePath
 manifest work = work </> "module-candidates.cbor"
 
 
-writeManifestFor :: [String] -> FilePath -> PreparedPipelineResult -> IO ()
-writeManifestFor names work prepared = do
-  (source, roots) <- originalCompilerInput prepared
-  writeGenuineCandidateManifestFor names work source roots prepared
+writeManifestFor :: [String] -> FilePath -> CapturedCompilerFixture -> IO ()
+writeManifestFor = writeGenuineCandidateManifestFor
 
 originalCompilerInput :: PreparedPipelineResult -> IO (FilePath, [FilePath])
 originalCompilerInput prepared = do
@@ -144,15 +161,113 @@ digest = concatMap (\byte -> let text = showHex byte ""
   in replicate (2 - length text) '0' ++ text) . BS.unpack . SHA.hash
 
 
-withScratch :: (FilePath -> IO a) -> IO a
-withScratch action = bracket
-  (do root <- getTemporaryDirectory
-      (path, handle) <- openTempFile root "tidepool-source-boot-test"
+-- Failed cases emit bounded evidence to the existing test runner's retained
+-- output. No case owns a second evidence directory or snapshots ambient caches.
+acquireFixtureScratch :: IO FilePath
+acquireFixtureScratch = do
+  root <- getTemporaryDirectory
+  bracketOnError (openTempFile root "tidepool-source-boot-test")
+    (\(path, handle) -> bestEffort (hClose handle `finally` removePathForcibly path)) $ \(path, handle) -> do
       hClose handle
       removeFile path
       createDirectory path
-      pure path)
-  removeDirectoryRecursive action
+      pure path
+
+releaseFixtureScratch :: FilePath -> IO ()
+releaseFixtureScratch = removeDirectoryRecursive
+
+releaseFixtureScratchAfterFailure :: FilePath -> IO ()
+releaseFixtureScratchAfterFailure path = do
+  bestEffort (retainScratchFailure path)
+  bestEffort (releaseFixtureScratch path)
+
+withScratch :: (FilePath -> IO a) -> IO a
+withScratch action = mask $ \restore -> do
+  path <- acquireFixtureScratch
+  outcome <- try (restore (action path))
+  case outcome of
+    Right result -> releaseFixtureScratch path >> pure result
+    Left (failure :: SomeException) -> do
+      releaseFixtureScratchAfterFailure path
+      throwIO failure
+
+withScratchFailureEvidence :: FilePath -> IO a -> IO a
+withScratchFailureEvidence path action = do
+  outcome <- try action
+  case outcome of
+    Right result -> pure result
+    Left (failure :: SomeException) -> do
+      bestEffort (retainScratchFailure path)
+      throwIO failure
+
+bestEffort :: IO () -> IO ()
+bestEffort action = do
+  _ <- try action :: IO (Either SomeException ())
+  pure ()
+
+retainScratchFailure :: FilePath -> IO ()
+retainScratchFailure root = do
+  hPutStrLn stderr "source-boot failed scratch: bounded original inputs (hex; 32 files, 8192 bytes/file, 128 entries)"
+  walk 128 32 [root]
+  where
+    walk :: Int -> Int -> [FilePath] -> IO ()
+    walk _ _ [] = pure ()
+    walk entries files _ | entries <= 0 || files <= 0 =
+      hPutStrLn stderr "source-boot failure inputs truncated at evidence bound"
+    walk entries files (path:pending) = do
+      symbolic <- pathIsSymbolicLink path
+      directory <- doesDirectoryExist path
+      file <- doesFileExist path
+      if symbolic then walk (entries-1) files pending
+      else if directory then do
+        children <- map (path </>) . take 128 . sort <$> listDirectory path
+        directories <- filterM doesDirectoryExist children
+        otherInputs <- filterM doesFileExist children
+        -- Capture packets precede loose compiler outputs within the bound.
+        walk (entries-1) files (take 32 (directories ++ otherInputs) ++ pending)
+      else if file then do
+        (size, bytes) <- withBinaryFile path ReadMode $ \handle ->
+          (,) <$> hFileSize handle <*> BS.hGet handle 8192
+        hPutStrLn stderr ("source-boot input " ++ show (makeRelative root path)
+          ++ " bytes=" ++ show size ++ " retained=" ++ show (BS.length bytes)
+          ++ " retained-sha256=" ++ digest bytes ++ " hex=" ++ bytesHex bytes)
+        walk (entries-1) (files-1) pending
+      else walk (entries-1) files pending
+    bytesHex :: BS.ByteString -> String
+    bytesHex = concatMap (\byte -> let value = showHex byte ""
+      in replicate (2-length value) '0' ++ value) . BS.unpack
+
+-- Compiler diagnostics are scoped process state. Failure replay is bounded,
+-- restores stderr first, and cannot replace the original compiler exception.
+captureDiagnostics :: IO a -> IO (a, String)
+captureDiagnostics action = mask $ \restore -> do
+  temporary <- getTemporaryDirectory
+  (path, output) <- openTempFile temporary "source-boot-diagnostics.log"
+  let cleanup = hClose output `finally` removeFile path
+      readDiagnostics = do
+        hSeek output AbsoluteSeek 0
+        size <- hFileSize output
+        bytes <- BS.hGet output (4 * 1024 * 1024)
+        pure (BSC.unpack bytes ++ if size > 4 * 1024 * 1024
+          then "\n[compiler diagnostics truncated at 4 MiB]\n" else "")
+  outcome <- try $ do
+    hFlush stderr
+    bracket (hDuplicate stderr) (bestEffort . hClose) $ \saved -> do
+      result <- try (restore (hDuplicateTo output stderr >> action))
+      let restoreStderr = hFlush stderr `finally` hDuplicateTo saved stderr
+      case result of
+        Right value -> restoreStderr >> pure value
+        Left (failure :: SomeException) -> bestEffort restoreStderr >> throwIO failure
+  case outcome of
+    Right result -> do
+      diagnostics <- readDiagnostics `onException` bestEffort cleanup
+      cleanup
+      pure (result, diagnostics)
+    Left (failure :: SomeException) -> do
+      bestEffort $ readDiagnostics >>= hPutStrLn stderr .
+        ("source-boot compiler diagnostics (bounded):\n" ++)
+      bestEffort cleanup
+      throwIO failure
 
 preparedNames :: PreparedPipelineResult -> [String]
 preparedNames = map (moduleNameString . moduleName . pmModule) . pprModules
