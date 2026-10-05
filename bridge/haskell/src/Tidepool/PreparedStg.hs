@@ -214,6 +214,12 @@ validateRecoveredEntries entries bindings = forM_ bindings $ \(top, _) -> case t
           LFThunk{} -> case rhs of
             Stg.StgRhsClosure _ _ update [] _ _ | update /= Stg.ReEntrant -> pure ()
             _ -> mismatch binder 0 (-1)
+          LFCon{} -> case rhs of
+            Stg.StgRhsCon{} -> pure ()
+            _ -> ioError (userError ("recovered defining constructor entry is not evaluated: " ++ showSDocUnsafe (ppr binder)))
+          LFUnlifted -> case rhs of
+            Stg.StgRhsCon{} -> pure ()
+            _ -> ioError (userError ("recovered defining unlifted entry has a closure: " ++ showSDocUnsafe (ppr binder)))
           _ -> pure ()
   where
     pairs (Stg.StgNonRec binder rhs) = [(binder, rhs)]

@@ -14,13 +14,17 @@ import GHC
 import GHC.Driver.Env (hsc_HPT)
 import GHC.Unit.Home.ModInfo (lookupHpt)
 import Tidepool.FinalizedModule (FinalizedModule(..))
-import GHC.Core (Bind(..), maybeUnfoldingTemplate)
+import GHC.Core (Bind(..), bindersOfBinds, maybeUnfoldingTemplate)
+import GHC.Core.Opt.Arity (manifestArity)
+import GHC.Unit.Module.ModGuts (CgGuts(..))
+import GHC.StgToCmm.Closure (importedIdLFInfo)
+import GHC.StgToCmm.Types (LambdaFormInfo(..))
 import GHC.Core.TyCo.Compare (eqType)
 import GHC.Core.Utils qualified as CoreUtils
 import GHC.Driver.Session (updOptLevel)
 import GHC.Driver.Main (hscTidy)
 import GHC.Stg.Syntax qualified as Stg
-import GHC.Types.Id (idName, realIdUnfolding)
+import GHC.Types.Id (idName, idArity, realIdUnfolding)
 import GHC.Types.Name (nameModule_maybe, nameOccName)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.Var (varName, varType)
@@ -47,7 +51,7 @@ import Tidepool.GhcPipeline
 import Tidepool.PreparedRecovery (RecoveredClosure(closureModules), recoverPreparedClosure)
 import Tidepool.PreparedStg
   ( pmModule, pmBindings, RecoveredModuleFailure(..), newPreparedBodyCache, prepareModule
-  , prepareRecoveredBodies )
+  , prepareRecoveredBodies, RecoveredModuleInput(..), prepareRecoveredModule )
 import Tidepool.Resolve
   ( BodyOrigin(..), ExactBodyLookup(..), recoverExactBody )
 
@@ -59,12 +63,100 @@ main = runTests tests
 
 tests :: TestTree
 tests = testGroup "recovered-body"
-  [ testCase "original recovered body closure" assertAllRecoveredBodies
+  [ testCase "original recovered entry contracts" assertRecoveredEntryContracts
+  , testCase "original recovered body closure" assertAllRecoveredBodies
   , testCase "owner interface cache reuse eviction and retry" $ do
       root <- getCurrentDirectory
       libdir <- trim <$> readProcessGhc ["--print-libdir"]
       assertSemigroupSubset root libdir
   ]
+
+-- Both controls use genuine finalized Core and package interface declarations.
+-- The qApp fat body loses entry metadata; a function-valued CAF must stay zero.
+assertRecoveredEntryContracts :: IO ()
+assertRecoveredEntryContracts = do
+  root <- getCurrentDirectory
+  libdir <- trim <$> readProcessGhc ["--print-libdir"]
+  runGhc (Just libdir) $ do
+    flags <- getSessionDynFlags
+    _ <- setSessionDynFlags (updOptLevel 0 flags)
+      { importPaths = [root </> "test-prepared-stg", root </> "lib"] ++ importPaths flags
+      , backend = noBackend, ghcLink = NoLink }
+    target <- guessTarget (root </> "test-prepared-stg" </> "RecoveredEntryCaller.hs") Nothing Nothing
+    setTargets [target]
+    _ <- load LoadAllTargets
+    summary <- getModSummary (mkModuleName "RecoveredEntryCaller")
+    parsed <- parseModule summary
+    typed <- typecheckModule parsed
+    desugared <- desugarModule typed
+    env <- getSession
+    (guts, _) <- liftIO $ hscTidy env (coreModule desugared)
+    home <- maybe (fail "entry fixture has no finalized home interface") pure
+      (lookupHpt (hsc_HPT env) (ms_mod_name summary))
+    prepared <- liftIO $ prepareModule env (ms_location summary) mempty (FinalizedModule home guts)
+    let context = ProjectionContext
+          { projectionProfile = Text.pack "recovered-entry-contracts"
+          , projectionToolchain = Text.pack "ghc-9.12.2"
+          , projectionTarget = TargetDescriptor X86_64 LittleEndian 64 64 (Text.pack "sysv64") []
+          , projectionRetainedGenerations = mempty
+          , projectionEntry = SymbolIdentity (Text.pack "main") (Text.pack "RecoveredEntryCaller")
+              (Text.pack "value") (Text.pack "caller") Nothing
+          , projectionAuxiliaryRoots = [], projectionFormattingAuthority = Nothing
+          , projectionTimeAuthority = Nothing, projectionJsonAuthority = Nothing
+          , projectionTextUnit = Nothing }
+        references = preparedTargetReferences context [prepared]
+    requested <- case [identifier | identifier <- references, occurrence identifier == "qApp"] of
+      [identifier] -> pure identifier
+      identifiers -> fail ("expected one genuine qApp reference, found " ++ show (length identifiers))
+    required <- case importedIdLFInfo requested of
+      LFReEntrant _ arity _ _ -> pure arity
+      _ -> fail "the genuine package qApp interface is not callable"
+    liftIO $ assert (required == 2 && idArity requested == 2)
+      "the pinned qApp interface no longer has its two-argument entry"
+    cache <- liftIO newFatIfaceCache
+    result <- liftIO $ lookupFatIfaceExact env cache (varName requested)
+    (owner, body) <- case (nameModule_maybe (varName requested), result) of
+      (Just modul, FatIfaceFound group) -> pure (modul, group)
+      _ -> fail "genuine package qApp fat Core was unavailable"
+    let rawSelected = [(identifier, rhs) | (identifier, rhs) <- bindPairs body,
+          varName identifier == varName requested]
+    liftIO $ case rawSelected of
+      [(identifier, rhs)] -> assert (idArity identifier == 0 && manifestArity rhs == 0)
+        "qApp control did not exercise the genuine fat alias metadata loss"
+      _ -> fail "qApp fat group did not retain exactly its selected binder"
+    owners <- liftIO newOwnerInterfaceCache
+    bodies <- liftIO newPreparedBodyCache
+    recovered <- liftIO $ prepareRecoveredBodies env owners bodies owner [body]
+      >>= either (fail . show) pure
+    liftIO $ assert (entryArity "qApp" recovered == Just (Stg.ReEntrant, required))
+      "recovered qApp changed its original callable entry contract"
+    let allPairs = concatMap bindPairs (cg_binds guts)
+        caf = [(identifier, rhs) | (identifier, rhs) <- allPairs, occurrence identifier == "functionResult"]
+    liftIO $ case caf of
+      [(identifier, rhs)] -> assert (idArity identifier == 0 && manifestArity rhs == 0)
+        "genuine function-result CAF control no longer has a zero-argument entry"
+      _ -> fail "expected one genuine function-result CAF"
+    subset <- liftIO $ prepareRecoveredModule env
+      (RecoveredModuleInput (cg_module guts) (ms_location summary) (cg_tycons guts)
+        (cg_binds guts) (bindersOfBinds (cg_binds guts)))
+    liftIO $ case (entryArity "functionResult" prepared, entryArity "functionResult" subset) of
+      (Just (original, 0), Just (recoveredUpdate, 0)) -> assert
+        (original /= Stg.ReEntrant && recoveredUpdate == original)
+        "the function-result CAF was eta-expanded into a callable"
+      _ -> fail "function-result CAF entry mismatch"
+  where
+    occurrence = occNameString . nameOccName . varName
+    bindPairs (NonRec binder body) = [(binder, body)]
+    bindPairs (Rec pairs) = pairs
+    entryArity wanted prepared = case
+        [ (update, length parameters)
+        | (Stg.StgTopLifted binding, _) <- pmBindings prepared
+        , (identifier, Stg.StgRhsClosure _ _ update parameters _ _) <- stgPairs binding
+        , occurrence identifier == wanted ] of
+      [entry] -> Just entry
+      _ -> Nothing
+    stgPairs (Stg.StgNonRec binder rhs) = [(binder, rhs)]
+    stgPairs (Stg.StgRec pairs) = pairs
 
 assertAllRecoveredBodies :: IO ()
 assertAllRecoveredBodies = do

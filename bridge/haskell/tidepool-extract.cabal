@@ -24,6 +24,7 @@ extra-source-files:
   test-prepared-stg/ModuleProductCatalogA.hs
   test-prepared-stg/ModuleProductCatalogB.hs
   test-prepared-stg/ReplyInternalFixture.hs
+  test-prepared-stg/RecoveredEntryCaller.hs
   test-cell-splitter/fixtures/declaration-join/*/*.hs
   test-cell-splitter/fixtures/session-fixities/*.hs
   test-cell-splitter/fixtures/quasiquote-occurrences/*.hs
