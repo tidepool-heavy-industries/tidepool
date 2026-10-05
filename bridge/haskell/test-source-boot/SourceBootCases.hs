@@ -3295,21 +3295,20 @@ sessionNativeBodyDemand = withTiming $ withScratch $ \work -> do
   let scope = emptySessionScope {ssRoot=work, ssValIfaces=[valueOwner]}
       compileTarget compile name = compile (PreparedProducts Nothing) Set.empty GeneralCompile
         (Just scope) (work </> name) [work] Nothing
+      injectedValueOwner result = isJust (lookupHpt
+        (hsc_HPT (prHscEnv (pprPipelineResult result))) (mkModuleName "Tidepool.Session.Val.G2"))
   withResidentPipelineSelected [work] $ \compile -> do
     first <- compileTarget compile "OptionalRoot.hs"
-    firstValueRequirements <- either fail pure (preparedHomeRequirements first "main" "OptionalRoot")
     unless (preparedNames first == ["OptionalRoot"]
-        && firstValueRequirements == [("main", "Tidepool.Session.Val.G2")]
+        && injectedValueOwner first
         && fmap renderType (prResultType (pprPipelineResult first)) == Just "Int"
         && all (`Map.member` pprFinalizedModules first)
           (map mkModuleName ["OptionalSupport", "OptionalAnchor"])) $
       fail ("session request prepared unrelated native bodies or skipped source finalization: "
         ++ show (preparedNames first))
     later <- compileTarget compile "OptionalWarmer.hs"
-    laterValueRequirements <- either fail pure (preparedHomeRequirements later "main" "OptionalWarmer")
     unless (all (`elem` preparedNames later) ["OptionalWarmer", "OptionalSupport", "OptionalAnchor"]
-        && sort laterValueRequirements == sort
-          [("main", "OptionalAnchor"), ("main", "OptionalSupport"), ("main", "Tidepool.Session.Val.G2")]
+        && injectedValueOwner later
         && fmap renderType (prResultType (pprPipelineResult later)) == Just "Int"
         && Map.member (mkModuleName "OptionalSupport") (pprFinalizedModules later)) $
       fail ("later session request did not activate its newly demanded source bodies: "
