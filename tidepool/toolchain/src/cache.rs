@@ -258,6 +258,27 @@ pub enum ProductAvailability {
     ProjectionRejected,
 }
 
+impl ProductAvailability {
+    /// The compiler retained an ordinary source owner and an exact interface.
+    /// Native group projection may still have been refused independently.
+    pub fn has_canonical_source_interface(self) -> bool {
+        match self {
+            Self::Ready | Self::InterfaceOnly | Self::ProjectionRejected => true,
+            Self::Boot | Self::MissingInterface => false,
+        }
+    }
+
+    /// Only a complete native product can enter execution-product admission.
+    pub fn has_native_product(self) -> bool {
+        match self {
+            Self::Ready => true,
+            Self::Boot | Self::InterfaceOnly | Self::MissingInterface | Self::ProjectionRejected => {
+                false
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModuleImportEvidence {
@@ -774,6 +795,29 @@ pub(crate) fn artifacts_store(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn product_availability_separates_native_products_from_canonical_interfaces() {
+        for availability in [
+            ProductAvailability::Ready,
+            ProductAvailability::InterfaceOnly,
+            ProductAvailability::ProjectionRejected,
+        ] {
+            assert!(availability.has_canonical_source_interface());
+        }
+        for availability in [ProductAvailability::Boot, ProductAvailability::MissingInterface] {
+            assert!(!availability.has_canonical_source_interface());
+        }
+        assert!(ProductAvailability::Ready.has_native_product());
+        for availability in [
+            ProductAvailability::Boot,
+            ProductAvailability::InterfaceOnly,
+            ProductAvailability::MissingInterface,
+            ProductAvailability::ProjectionRejected,
+        ] {
+            assert!(!availability.has_native_product());
+        }
+    }
 
     fn digest(bytes: &[u8]) -> String {
         hex_digest(&Sha256::digest(bytes))

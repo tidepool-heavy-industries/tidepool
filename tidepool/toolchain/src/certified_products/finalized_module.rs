@@ -598,10 +598,7 @@ pub(super) fn issue_interfaces(
             || !evidence.sources.iter().any(|source| {
                 source.path == node.source && source.sha256 == hex(&module.source_sha256)
             })
-            || !matches!(
-                node.product,
-                ProductAvailability::Ready | ProductAvailability::InterfaceOnly
-            )
+            || !node.product.has_canonical_source_interface()
         {
             return Err(CertificationError::Mismatch(
                 "finalized source/interface closure",
@@ -1069,7 +1066,7 @@ mod tests {
                 boot: false,
                 source,
                 imports: vec![],
-                product: ProductAvailability::InterfaceOnly,
+                product: ProductAvailability::ProjectionRejected,
             }],
             resolutions: vec![],
             packages: vec![],
@@ -1112,6 +1109,64 @@ mod tests {
         )
         .unwrap();
         assert_eq!(recovered, issued[0]);
+        let mut missing_interface = evidence.clone();
+        missing_interface.modules[0].product = ProductAvailability::MissingInterface;
+        assert!(matches!(
+            issue_interfaces(
+                &envelope,
+                root.path(),
+                [7; 32],
+                &missing_interface,
+                &BTreeMap::new(),
+                None,
+                &exact,
+                &mut PackageInterfaceValidation::default(),
+            ),
+            Err(CertificationError::Mismatch("finalized source/interface closure"))
+        ));
+        let mut changed_source = evidence.clone();
+        changed_source.sources[0].sha256 = hex(&sha(b"different source bytes"));
+        assert!(matches!(
+            issue_interfaces(
+                &envelope,
+                root.path(),
+                [7; 32],
+                &changed_source,
+                &BTreeMap::new(),
+                None,
+                &exact,
+                &mut PackageInterfaceValidation::default(),
+            ),
+            Err(CertificationError::Mismatch("finalized source/interface closure"))
+        ));
+        assert!(matches!(
+            issue_interfaces(
+                &envelope,
+                root.path(),
+                [0; 32],
+                &evidence,
+                &BTreeMap::new(),
+                None,
+                &exact,
+                &mut PackageInterfaceValidation::default(),
+            ),
+            Err(CertificationError::Mismatch("finalization producer/profile"))
+        ));
+        let mut changed_profile = envelope.clone();
+        changed_profile.profile = "unmatched profile".into();
+        assert!(matches!(
+            issue_interfaces(
+                &changed_profile,
+                root.path(),
+                [7; 32],
+                &evidence,
+                &BTreeMap::new(),
+                None,
+                &exact,
+                &mut PackageInterfaceValidation::default(),
+            ),
+            Err(CertificationError::Receipt("finalization profile"))
+        ));
         let mut old: Value = ciborium::de::from_reader(issued[0].certificate_bytes()).unwrap();
         old.as_array_mut().unwrap()[1] = Value::Integer(2.into());
         let mut bytes = Vec::new();
