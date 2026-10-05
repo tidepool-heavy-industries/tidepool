@@ -771,7 +771,10 @@ struct GeneratedScaffoldImportAuthority {
 #[derive(Clone)]
 enum GeneratedScaffoldRole {
     Native(NativeScaffoldRole),
-    InitialTemplateInterfaces(Arc<ExactDeclarationContext>),
+    InitialTemplateInterfaces {
+        producer: [u8; 32],
+        graph: Arc<BTreeMap<ExactModuleIdentity, TemplateInterfaceNode>>,
+    },
 }
 
 #[derive(Clone)]
@@ -783,6 +786,32 @@ enum NativeScaffoldRole {
 const GENERATED_RESUME_IMPORT: &str = "import qualified Tidepool.Internal.Resume as TidepoolResume";
 
 impl GeneratedScaffoldImportAuthority {
+    /// Match the virtual graph installed by the compiler from this protected
+    /// recipe. This is implementation/instance evidence, not authored imports.
+    fn original_instance_graph(&self) -> Vec<ExactLexicalNode> {
+        match &self.role {
+            GeneratedScaffoldRole::Native(native) => {
+                let owner = match native {
+                    NativeScaffoldRole::Resume(owner) => owner,
+                    NativeScaffoldRole::PlannedDeclaration(certificate) => {
+                        certificate.product().owner()
+                    }
+                };
+                vec![ExactLexicalNode {
+                    owner: identity(&owner.unit, &owner.module),
+                    imports: Vec::new(),
+                }]
+            }
+            GeneratedScaffoldRole::InitialTemplateInterfaces { graph, .. } => graph
+                .iter()
+                .map(|(owner, node)| ExactLexicalNode {
+                    owner: owner.clone(),
+                    imports: node.imports.clone(),
+                })
+                .collect(),
+        }
+    }
+
     fn permits(
         &self,
         context: &ExactDeclarationContext,
@@ -797,20 +826,16 @@ impl GeneratedScaffoldImportAuthority {
         let native =
             match &self.role {
                 GeneratedScaffoldRole::Native(native) => native,
-                GeneratedScaffoldRole::InitialTemplateInterfaces(initial) => {
+                GeneratedScaffoldRole::InitialTemplateInterfaces { producer, graph } => {
                     if target != module_source
                         || boot
                         || qualifier != "none"
-                        || initial.producer != context.producer
+                        || *producer != context.producer
                     {
                         return false;
                     }
                     let key = identity(unit, module);
-                    let Ok(selected) = initial.template_interface_graph(&self.protected_templates)
-                    else {
-                        return false;
-                    };
-                    let Some(node) = selected.get(&key) else {
+                    let Some(node) = graph.get(&key) else {
                         return false;
                     };
                     let import = format!("import {module}");
@@ -908,6 +933,8 @@ pub(crate) struct ExactSourceAdmission {
     pub(crate) evidence: crate::cache::DependencyEvidence,
     pub(crate) evidence_bytes: Vec<u8>,
     pub(crate) exact_imports: BTreeMap<ExactModuleIdentity, Vec<ExactModuleIdentity>>,
+    // Roots accepted by each retained typed protected-recipe authority.
+    scaffold_roots: BTreeMap<usize, BTreeSet<ExactModuleIdentity>>,
     pub(crate) exact_source_imports:
         BTreeMap<ExactModuleIdentity, Vec<crate::certified_products::CanonicalSourceImport>>,
     pub(crate) selected_originals:
@@ -1053,11 +1080,67 @@ impl ExactProductAdmission<'_> {
     ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
         let imports = self.source.home_imports()?;
         let inherited = self.request.context.as_ref();
+        let exact_roots = self
+            .source
+            .exact_imports
+            .values()
+            .flatten()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let mut scaffold = Vec::new();
+        for (index, authority) in self.request.generated_scaffold_imports.iter().enumerate() {
+            let graph = authority
+                .original_instance_graph()
+                .into_iter()
+                .map(|node| (node.owner.clone(), node))
+                .collect::<BTreeMap<_, _>>();
+            let mut pending = self
+                .source
+                .scaffold_roots
+                .get(&index)
+                .into_iter()
+                .flatten()
+                .cloned()
+                .collect::<Vec<_>>();
+            let mut seen = BTreeSet::new();
+            while let Some(owner) = pending.pop() {
+                if !seen.insert(owner.clone()) || imports.contains_key(&owner) {
+                    continue;
+                }
+                let node = graph
+                    .get(&owner)
+                    .ok_or_else(|| failure("protected scaffold instance graph is incomplete"))?;
+                pending.extend(node.imports.iter().cloned());
+                // A real consumed source row owns its actual adjacency; native
+                // protected scaffold leaves apply only to source-less owners.
+                scaffold.push(node.clone());
+            }
+        }
+        self.request.checked_value_imports.validate()?;
+        for (unit, module) in self.request.checked_value_imports.owners() {
+            let owner = identity(unit, module);
+            if !exact_roots.contains(&owner) || imports.contains_key(&owner) {
+                continue;
+            }
+            let retained = artifacts.entries_for_owners(std::iter::once(owner.clone()))?;
+            if let Some(entry) = retained.get(&owner) {
+                match &entry.payload {
+                    ArtifactPayload::Interface(interface, JoinedInterfaceRole::ValueInterface)
+                        if self.request.checked_value_imports.matches_interface(interface) => {
+                            // Compiler-issued thin value interfaces define no
+                            // instances. Nominal requirements are not scope edges.
+                            scaffold.push(ExactLexicalNode { owner, imports: Vec::new() });
+                        }
+                    _ => return Err(failure("checked value instance evidence differs from its exact interface authority")),
+                }
+            }
+        }
         let lexical = compose_lexical_nodes(
             inherited
                 .lexical_graph()
                 .iter()
                 .cloned()
+                .chain(scaffold.iter().cloned())
                 .chain(imports.iter().map(|(owner, imports)| ExactLexicalNode {
                     owner: owner.clone(),
                     imports: imports.clone(),
@@ -1068,6 +1151,7 @@ impl ExactProductAdmission<'_> {
         let mut required = imports
             .keys()
             .cloned()
+            .chain(scaffold.iter().map(|node| node.owner.clone()))
             .chain(
                 inherited
                     .lexical_graph()
@@ -1262,15 +1346,15 @@ impl ExactCompilationRequest {
             return Err(failure("checked template interface producer differs"));
         }
         let entries = self.context.artifact_view().entries();
-        for (owner, node) in selected {
+        for (owner, node) in &selected {
             if !entries.iter().any(|entry| {
-                entry.descriptor.owner == owner
+                entry.descriptor.owner == *owner
                     && entry.descriptor.interface_sha256 == node.interface_sha256
             }) || self
                 .context
                 .lexical_graph()
                 .iter()
-                .any(|current| current.owner == owner && current.imports != node.imports)
+                .any(|current| current.owner == *owner && current.imports != node.imports)
             {
                 return Err(failure(
                     "checked template interface differs from its initial selection",
@@ -1279,7 +1363,10 @@ impl ExactCompilationRequest {
         }
         self.generated_scaffold_imports
             .push(GeneratedScaffoldImportAuthority {
-                role: GeneratedScaffoldRole::InitialTemplateInterfaces(initial),
+                role: GeneratedScaffoldRole::InitialTemplateInterfaces {
+                    producer: initial.producer,
+                    graph: Arc::new(selected),
+                },
                 protected_templates: templates.to_vec().into(),
             });
         Ok(self)
@@ -1858,6 +1945,7 @@ impl ExactCompilationRequest {
         let mut seen = BTreeSet::new();
         let mut exact_imports = BTreeMap::new();
         let mut exact_source_imports = BTreeMap::new();
+        let mut scaffold_roots: BTreeMap<usize, BTreeSet<ExactModuleIdentity>> = BTreeMap::new();
         for module in &edges {
             let owner = (
                 module.owner.unit.as_str(),
@@ -1877,8 +1965,9 @@ impl ExactCompilationRequest {
                 let name = edge.module.as_str();
                 let boot = edge.boot;
                 let unit = edge.unit.as_str();
-                let scaffold_import = self.generated_scaffold_imports.iter().any(|authority| {
-                    evidence
+                let mut scaffold_import = false;
+                for (index, authority) in self.generated_scaffold_imports.iter().enumerate() {
+                    let permitted = evidence
                         .modules
                         .iter()
                         .find(|module| {
@@ -1905,8 +1994,15 @@ impl ExactCompilationRequest {
                                 &qualifier,
                                 boot,
                             )
-                        })
-                });
+                        });
+                    if permitted {
+                        scaffold_roots
+                            .entry(index)
+                            .or_default()
+                            .insert(identity(unit, name));
+                        scaffold_import = true;
+                    }
+                }
                 if boot
                     || !(selected.contains(&(unit, name))
                         || scaffold_import
@@ -1943,6 +2039,7 @@ impl ExactCompilationRequest {
             evidence,
             evidence_bytes,
             exact_imports,
+            scaffold_roots,
             exact_source_imports,
             selected_originals,
         })
@@ -3966,6 +4063,7 @@ mod tests {
             evidence_bytes: serde_json::to_vec(&evidence).unwrap(),
             evidence,
             exact_imports: BTreeMap::new(),
+            scaffold_roots: BTreeMap::new(),
             exact_source_imports: BTreeMap::new(),
             selected_originals: BTreeMap::new(),
         }
@@ -6058,7 +6156,12 @@ mod tests {
             false,
             &source,
         );
-        request.validate_receipt(&receipt, None, &context).unwrap();
+        let admitted = request.validate_receipt(&receipt, None, &context).unwrap();
+        assert_eq!(
+            admitted.scaffold_roots.get(&0),
+            Some(&BTreeSet::from([identity("main", &owner.module_name()),])),
+            "original scope records only the actual protected recipe root"
+        );
         let later_error = ordinary
             .validate_receipt(&receipt, None, &context)
             .err()
@@ -6140,9 +6243,21 @@ mod tests {
         let mut current = initial.as_ref().clone();
         current.lexical.clear();
         let authority = GeneratedScaffoldImportAuthority {
-            role: GeneratedScaffoldRole::InitialTemplateInterfaces(initial),
+            role: GeneratedScaffoldRole::InitialTemplateInterfaces {
+                producer: initial.producer,
+                graph: Arc::new(graph.clone()),
+            },
             protected_templates: Arc::from([template.to_owned()]),
         };
+        assert_eq!(
+            authority
+                .original_instance_graph()
+                .iter()
+                .map(|node| node.owner.clone())
+                .collect::<BTreeSet<_>>(),
+            graph.keys().cloned().collect(),
+            "protected instance scope retains the graph issued at template admission"
+        );
         let target = Path::new("/owned/Expr.hs");
         assert!(authority
             .permits(&current, template, target, target, "fixture", "Joined", "none", false));
@@ -6218,7 +6333,14 @@ mod tests {
         let changed = make_context(b"changed interface", false);
         let source = "module Expr where\nimport CapturedInterface\n";
         let authority = GeneratedScaffoldImportAuthority {
-            role: GeneratedScaffoldRole::InitialTemplateInterfaces(initial.clone()),
+            role: GeneratedScaffoldRole::InitialTemplateInterfaces {
+                producer: initial.producer,
+                graph: Arc::new(
+                    initial
+                        .template_interface_graph(&[source.to_owned()])
+                        .unwrap(),
+                ),
+            },
             protected_templates: Arc::from([source.to_owned()]),
         };
         let target = Path::new("/owned/Expr.hs");
@@ -6250,7 +6372,14 @@ mod tests {
             target
         ));
         let no_initial_selection = GeneratedScaffoldImportAuthority {
-            role: GeneratedScaffoldRole::InitialTemplateInterfaces(current.clone()),
+            role: GeneratedScaffoldRole::InitialTemplateInterfaces {
+                producer: current.producer,
+                graph: Arc::new(
+                    current
+                        .template_interface_graph(&[source.to_owned()])
+                        .unwrap(),
+                ),
+            },
             protected_templates: Arc::from([source.to_owned()]),
         };
         assert!(!no_initial_selection.permits(
@@ -6264,7 +6393,14 @@ mod tests {
             false
         ));
         let no_protected_import = GeneratedScaffoldImportAuthority {
-            role: GeneratedScaffoldRole::InitialTemplateInterfaces(initial.clone()),
+            role: GeneratedScaffoldRole::InitialTemplateInterfaces {
+                producer: initial.producer,
+                graph: Arc::new(
+                    initial
+                        .template_interface_graph(&["module Expr where\n".to_owned()])
+                        .unwrap(),
+                ),
+            },
             protected_templates: Arc::from(["module Expr where\n".to_owned()]),
         };
         assert!(!no_protected_import.permits(

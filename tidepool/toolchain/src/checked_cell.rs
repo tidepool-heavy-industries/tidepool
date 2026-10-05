@@ -1231,6 +1231,20 @@ impl CheckedValueImportAuthority {
         self.values.keys().map(|module| ("main", module.as_str()))
     }
 
+    pub(crate) fn matches_interface(
+        &self,
+        interface: &crate::recovery_artifacts::CertifiedJoinedInterface,
+    ) -> bool {
+        interface.unit() == "main"
+            && self
+                .values
+                .get(interface.module())
+                .is_some_and(|(bytes, digest, _)| {
+                    interface.interface_bytes() == bytes.as_ref()
+                        && hash(interface.interface_bytes()) == *digest
+                })
+    }
+
     pub(crate) fn validate(&self) -> Result<(), CompileError> {
         for (bytes, digest, path) in self.values.values() {
             let observed = read(path, 32 * 1024 * 1024)?;
