@@ -1,6 +1,6 @@
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
     Arc,
+    atomic::{AtomicUsize, Ordering},
 };
 
 use exomonad_actor::{ActorGraphNode, ActorId, ActorRef, ActorWorkbenchPosture, Incarnation};
@@ -440,10 +440,12 @@ async fn admitted_retry_after_retirement_does_not_resolve_admit_or_wake() {
         target: command.target().clone(),
         text: "changed payload".into(),
     };
-    assert!(fixture
-        .store
-        .enqueue_embedded_command(operation_id, &conflicting)
-        .is_err());
+    assert!(
+        fixture
+            .store
+            .enqueue_embedded_command(operation_id, &conflicting)
+            .is_err()
+    );
     assert_eq!(fixture.hosts[&actor].wakes.load(Ordering::Relaxed), 1);
 }
 
@@ -610,27 +612,6 @@ use exomonad_tool::{ToolArguments, ToolInvocation};
 async fn embedded_host_hands_out_and_executes_the_resident_command_backend() {
     let mut campaign = TestCampaign::start_with_shell().await;
 
-    let policy = campaign.root_installation.policy.clone();
-    let invocation = ToolInvocation {
-        context: None,
-        name: "bash".into(),
-        arguments: ToolArguments::Structured(serde_json::json!({
-            "cmd": "printf embedded-host-command",
-            "memory_mib": 256
-        })),
-    };
-    let execution = tokio::spawn(async move { policy.dispatch_boxed(invocation).await });
-    let request = campaign
-        .next_deployment(
-            "resident command backend",
-            Duration::from_secs(30),
-            |event| match event {
-                LocalResidentDeployment::CommandBackend(request) => Ok(request),
-                other => Err(other),
-            },
-        )
-        .await;
-    let actor = request.owner;
     let owner = exomonad_node::command_resources::CommandResources::delegated(
         exomonad_node::command_resources::CommandResourcePolicy {
             general_bytes: 512 * 1024 * 1024,
@@ -641,32 +622,91 @@ async fn embedded_host_hands_out_and_executes_the_resident_command_backend() {
     )
     .expect("the admitted test service delegates cgroups");
     let resources = exomonad_node::command_resources::CommandResourceClient::local(owner);
-    supply_resident_command_backend(
-        request,
-        &campaign.config,
-        &campaign.authority,
-        &campaign.worktrees,
-        actor,
-        Some(resources),
-    );
+    let mut bindings = Vec::new();
+    for text in ["embedded-host-command", "second-embedded-command"] {
+        let policy = campaign.root_installation.policy.clone();
+        let invocation = ToolInvocation {
+            context: None,
+            name: "bash".into(),
+            arguments: ToolArguments::Structured(serde_json::json!({
+                "cmd": format!("printf x >> command-reuse-executions; printf {text}"),
+                "memory_mib": 256
+            })),
+        };
+        let before = tidepool_extract_cmd::extract_spawn_count();
+        let execution = tokio::spawn(async move { policy.dispatch_boxed(invocation).await });
+        let request = campaign
+            .next_deployment(
+                "resident command backend",
+                super::test_campaign::COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+                |event| match event {
+                    LocalResidentDeployment::CommandBackend(request) => Ok(request),
+                    other => Err(other),
+                },
+            )
+            .await;
+        let actor = request.owner;
+        supply_resident_command_backend(
+            request,
+            &campaign.config,
+            &campaign.authority,
+            &campaign.worktrees,
+            actor,
+            Some(resources.clone()),
+        );
 
-    let result = tokio::time::timeout(Duration::from_secs(30), execution)
+        let result = tokio::time::timeout(
+            super::test_campaign::COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+            execution,
+        )
         .await
         .expect("resident command settles")
         .expect("resident command task joins")
         .expect("resident command succeeds")
         .into_json()
         .expect("structured observer receives the typed workbench response");
-    assert_eq!(result["status"], "committed", "{result}");
-    let output = result["items"][0]["output"]
-        .as_str()
-        .expect("command result is presented");
-    assert!(
-        output.contains("terminal: yes · CommandExited 0 · cleanup: clean"),
-        "{output}"
+        if !bindings.is_empty() {
+            let requests = tidepool_extract_cmd::extract_spawn_count() - before;
+            assert!(
+                requests <= 1,
+                "a new job needs only its fresh binding interface; submitted {requests} compiler requests"
+            );
+        }
+        assert_eq!(result["status"], "committed", "{result}");
+        let output = result["items"][0]["output"]
+            .as_str()
+            .expect("command result is presented");
+        assert!(
+            output.contains("terminal: yes · CommandExited 0 · cleanup: clean"),
+            "{output}"
+        );
+        assert!(output.contains(text), "{output}");
+        bindings.push(
+            result["items"][0]["installedBindings"][0]
+                .as_str()
+                .expect("each command installs a retained job")
+                .to_owned(),
+        );
+    }
+    assert_ne!(bindings[0], bindings[1]);
+    let recovered = super::command_jobs_tests::committed(
+        &campaign,
+        &format!(
+            "retainedFirst <- Cmd.readStdout {}\nretainedSecond <- Cmd.readStdout {}\ndisplay (retainedFirst == Right \"embedded-host-command\" && retainedSecond == Right \"second-embedded-command\" && {} /= {})",
+            bindings[0], bindings[1], bindings[0], bindings[1],
+        ),
+    )
+    .await;
+    assert_eq!(
+        super::test_campaign::committed_display_text(&recovered),
+        "True",
+        "a later binding preserves both independently retained command outputs"
     );
-    assert!(output.contains("stdout · bytes "), "{output}");
-    assert!(output.contains("embedded-host-command"), "{output}");
+    assert_eq!(
+        std::fs::read(campaign.config.workspace.join("command-reuse-executions")).unwrap(),
+        b"xx",
+        "recovering the two jobs must not rerun either command"
+    );
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }

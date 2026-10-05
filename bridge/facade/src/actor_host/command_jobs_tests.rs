@@ -196,10 +196,62 @@ async fn structured_bash_uses_compiled_handler_and_shared_command_owner() {
         "script is data, including Haskell delimiters"
     );
     assert_eq!(backend.specs.lock()[0].memory, 1024 * 1024 * 1024);
-    let mut changed = invocation;
+    let mut changed = invocation.clone();
     changed.arguments = ToolArguments::Structured(serde_json::json!({"cmd":"changed"}));
     assert!(policy.dispatch_json_boxed(changed).await.is_err());
-    committed(&campaign, "40 + 2 :: Int").await;
+
+    let second_invocation = ToolInvocation {
+        name: "bash".into(),
+        arguments: ToolArguments::Structured(serde_json::json!({"cmd":"printf second-result"})),
+        context: Some(ToolInvocationContext::external(
+            "raw-thread".into(),
+            "raw-next-turn".into(),
+            "raw-second".into(),
+            Some("raw-second".into()),
+            None,
+        )),
+    };
+    let before_second = tidepool_extract_cmd::extract_spawn_count();
+    let second = tokio::spawn(policy.dispatch_json_boxed(second_invocation.clone()));
+    let second_backend = TestCommands::completed("second-result");
+    backend_request(&mut campaign)
+        .await
+        .supply(Ok(second_backend.clone()));
+    let second_receipt = second.await.unwrap().unwrap();
+    let second_compiles = tidepool_extract_cmd::extract_spawn_count() - before_second;
+    assert!(
+        second_compiles <= 1,
+        "a distinct job may issue its fresh binding interface, but must reuse the checked Job type; submitted {second_compiles} compiler requests"
+    );
+    assert_eq!(second_receipt["status"], "committed", "{second_receipt}");
+    let second_binding = second_receipt["items"][0]["installedBindings"][0]
+        .as_str()
+        .expect("the second job has its own retained binding");
+    assert_ne!(binding, second_binding);
+
+    let before_replays = tidepool_extract_cmd::extract_spawn_count();
+    for (call, original) in [(invocation, &receipt), (second_invocation, &second_receipt)] {
+        assert_eq!(
+            &policy.dispatch_json_boxed(call).await.unwrap(),
+            original,
+            "replay retains the original receipt even after another job was bound"
+        );
+    }
+    assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before_replays);
+    let recovered = committed(
+        &campaign,
+        &format!(
+            "retainedFirst <- Cmd.readStdout {binding}\nretainedSecond <- Cmd.readStdout {second_binding}\ndisplay (retainedFirst == Right \"result\" && retainedSecond == Right \"second-result\" && {binding} /= {second_binding})"
+        ),
+    )
+    .await;
+    assert_eq!(
+        super::test_campaign::committed_display_text(&recovered),
+        "True",
+        "each distinct binding must keep its own job and retained output"
+    );
+    assert_eq!(backend.executions(), 1);
+    assert_eq!(second_backend.executions(), 1);
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
