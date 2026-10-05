@@ -330,35 +330,29 @@ impl OverlayResourceLease {
     }
 
     pub(super) fn allocate_path(
-        path: PathBuf,
+        storage_root: &tidepool_atomic_write::DirectoryAnchor,
+        relative: impl AsRef<Path>,
         inherited: Option<OverlaySnapshot>,
     ) -> io::Result<Self> {
-        // Exclusive creation is required even when the prior launch is uncertain.
-        let parent = path.parent().ok_or_else(|| {
-            io::Error::new(
+        let relative = relative.as_ref();
+        let path = storage_root.resolve(relative)?;
+        if relative.file_name().is_none() {
+            return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "overlay resource has no parent",
-            )
-        })?;
-        let name = path
-            .file_name()
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "overlay resource has no directory name",
-                )
-            })?
-            .to_owned();
-        tidepool_atomic_write::create_dir_all_durable(parent)?;
-        let parent = parent.canonicalize()?;
-        let path = parent.join(name);
-        // Exclusive on purpose, and never `create_dir_all`: a directory that
-        // already exists under this key was retained by an earlier owner, and
+                "overlay resource has no directory name",
+            ));
+        }
+        // Exclusive creation is required even when the prior launch is uncertain.
+        let parent =
+            storage_root.create_dir_all(relative.parent().unwrap_or_else(|| Path::new("")))?;
+        // Claim the name exclusively before confirming durability: a directory
+        // already existing under this key was retained by an earlier owner, and
         // adopting it as a fresh lease would skip the delete-before-retry
         // fence. Failing here forces the caller to prove ownership or clean up
         // before the name is reused.
         std::fs::create_dir(&path)?;
-        tidepool_atomic_write::sync_parent_directory(&path)?;
+        // Keep the original stable boundary until this new root is confirmed.
+        let storage_anchor = storage_root.child(relative)?;
         let storage = Arc::new(OverlayStorage {
             root: parent.to_path_buf(),
             path,
@@ -371,7 +365,7 @@ impl OverlayResourceLease {
             Some(snapshot) => snapshot.layers.to_vec(),
             None => {
                 let base = storage.path.join("base");
-                std::fs::create_dir(&base)?;
+                storage_anchor.create_dir_all("base")?;
                 vec![OverlayLayer {
                     path: base,
                     storage: storage.clone(),
@@ -380,9 +374,8 @@ impl OverlayResourceLease {
         };
         let upper = storage.path.join("upper");
         let work = storage.path.join("work");
-        std::fs::create_dir(&upper)?;
-        std::fs::create_dir(&work)?;
-        std::fs::File::open(&storage.path)?.sync_all()?;
+        storage_anchor.create_dir_all("upper")?;
+        storage_anchor.create_dir_all("work")?;
         let empty_upper = Some(SourceStamp::from(&std::fs::symlink_metadata(&upper)?));
         let custody = CustodyGuard {
             dependencies: std::iter::once(storage.clone())
@@ -655,9 +648,13 @@ impl OverlayResourceLease {
         let next = generation.path();
         let upper = next.join("upper");
         let work = next.join("work");
-        std::fs::create_dir(&upper)?;
-        std::fs::create_dir(&work)?;
-        tidepool_atomic_write::create_dir_all_durable(next)?;
+        let storage_anchor =
+            tidepool_atomic_write::DirectoryAnchor::open_existing(&self.storage.path)?;
+        let relative = next
+            .strip_prefix(storage_anchor.path())
+            .map_err(io::Error::other)?;
+        storage_anchor.create_dir_all(relative.join("upper"))?;
+        storage_anchor.create_dir_all(relative.join("work"))?;
         let mut frozen = self.layers.clone();
         frozen.push(OverlayLayer {
             path: self.upper.clone(),
@@ -1278,16 +1275,16 @@ mod tests {
     #[tokio::test]
     async fn artifact_inspection_reports_owned_upper_and_inherited_lower() {
         let directory = tempfile::tempdir().unwrap();
-        let parent =
-            OverlayResourceLease::allocate_path(directory.path().join("parent"), None).unwrap();
+        let storage_root =
+            tidepool_atomic_write::DirectoryAnchor::open_existing(directory.path()).unwrap();
+        let parent = OverlayResourceLease::allocate_path(&storage_root, "parent", None).unwrap();
         std::fs::create_dir_all(parent.layers[0].path.join("cargo")).unwrap();
         std::fs::write(parent.layers[0].path.join("cargo/result.json"), b"lower").unwrap();
         let inherited = OverlaySnapshot {
             layers: parent.layers.clone().into(),
         };
         let child =
-            OverlayResourceLease::allocate_path(directory.path().join("child"), Some(inherited))
-                .unwrap();
+            OverlayResourceLease::allocate_path(&storage_root, "child", Some(inherited)).unwrap();
         let shared = SharedOverlayResource::new(child);
         let relative = Path::new("cargo/result.json");
         let lower = shared.inspect_artifact(relative).await;
@@ -1343,8 +1340,9 @@ mod tests {
     #[tokio::test]
     async fn artifact_inspection_does_not_follow_backing_symlink() {
         let directory = tempfile::tempdir().unwrap();
-        let resource =
-            OverlayResourceLease::allocate_path(directory.path().join("build"), None).unwrap();
+        let storage_root =
+            tidepool_atomic_write::DirectoryAnchor::open_existing(directory.path()).unwrap();
+        let resource = OverlayResourceLease::allocate_path(&storage_root, "build", None).unwrap();
         std::os::unix::fs::symlink(directory.path(), resource.upper.join("outside")).unwrap();
         let shared = SharedOverlayResource::new(resource);
         assert!(matches!(
@@ -1356,11 +1354,14 @@ mod tests {
     #[tokio::test]
     async fn retired_parent_layers_survive_children_then_are_reclaimed() {
         let directory = tempfile::tempdir().unwrap();
+        let storage_root =
+            tidepool_atomic_write::DirectoryAnchor::open_existing(directory.path()).unwrap();
         let parent_path = directory.path().join("parent");
         let child_path = directory.path().join("child");
         let parent_project = directory.path().join("p");
         let child_project = directory.path().join("c");
-        let mut parent = OverlayResourceLease::allocate_path(parent_path.clone(), None).unwrap();
+        let mut parent =
+            OverlayResourceLease::allocate_path(&storage_root, "parent", None).unwrap();
         let (mut parent_worker, parent_view) = Worker::start(&mut parent, &parent_project);
         parent_worker.exchange("write");
         parent
@@ -1368,7 +1369,7 @@ mod tests {
             .unwrap();
         assert!(parent.unchanged_snapshot().unwrap().is_some());
         let mut child =
-            OverlayResourceLease::allocate_path(child_path.clone(), parent.latest_snapshot())
+            OverlayResourceLease::allocate_path(&storage_root, "child", parent.latest_snapshot())
                 .unwrap();
         assert!(child.unchanged_snapshot().unwrap().is_some());
         let (child_worker, child_view) = Worker::start(&mut child, &child_project);
@@ -1406,9 +1407,11 @@ mod tests {
     fn root_metadata_changes_prevent_snapshot_reuse() {
         use std::os::unix::fs::PermissionsExt;
         let directory = tempfile::tempdir().unwrap();
+        let storage_root =
+            tidepool_atomic_write::DirectoryAnchor::open_existing(directory.path()).unwrap();
         let project = directory.path().join("p");
         let mut resource =
-            OverlayResourceLease::allocate_path(directory.path().join("storage"), None).unwrap();
+            OverlayResourceLease::allocate_path(&storage_root, "storage", None).unwrap();
         let (mut worker, view) = Worker::start(&mut resource, &project);
         worker.exchange("write");
         resource
@@ -1422,9 +1425,12 @@ mod tests {
     #[tokio::test]
     async fn lost_descendant_custody_does_not_authorize_parent_reclamation() {
         let directory = tempfile::tempdir().unwrap();
+        let storage_root =
+            tidepool_atomic_write::DirectoryAnchor::open_existing(directory.path()).unwrap();
         let parent_path = directory.path().join("parent");
         let project = directory.path().join("project");
-        let mut parent = OverlayResourceLease::allocate_path(parent_path.clone(), None).unwrap();
+        let mut parent =
+            OverlayResourceLease::allocate_path(&storage_root, "parent", None).unwrap();
         let (mut worker, view) = Worker::start(&mut parent, &project);
         worker.exchange("write");
         parent
@@ -1515,16 +1521,18 @@ mod tests {
     #[test]
     fn source_publication_preserves_the_independent_build_mount() {
         let directory = tempfile::tempdir().unwrap();
+        let storage_root =
+            tidepool_atomic_write::DirectoryAnchor::open_existing(directory.path()).unwrap();
         let root = directory.path();
         let project = root.join("project");
         let target = project.join("target");
         std::fs::create_dir_all(&target).unwrap();
         let mut source =
-            OverlayResourceLease::allocate_path(root.join("storage/source"), None).unwrap();
+            OverlayResourceLease::allocate_path(&storage_root, "storage/source", None).unwrap();
         std::fs::create_dir(source.layers[0].path.join("target")).unwrap();
         std::fs::write(source.layers[0].path.join("file"), "before").unwrap();
         let mut build =
-            OverlayResourceLease::allocate_path(root.join("storage/build"), None).unwrap();
+            OverlayResourceLease::allocate_path(&storage_root, "storage/build", None).unwrap();
         let boundary =
             ProcessMountBoundary::new(&project, [project.clone()], [project.clone()]).unwrap();
         let boundary = source.mount(boundary, &project).unwrap();
@@ -1577,7 +1585,8 @@ mod tests {
         assert_eq!(worker.exchange("close"), "closed");
 
         let mut child_source = OverlayResourceLease::allocate_path(
-            root.join("storage/child-source"),
+            &storage_root,
+            "storage/child-source",
             source.latest_snapshot(),
         )
         .unwrap();
@@ -1605,13 +1614,15 @@ mod tests {
     #[test]
     fn allocation_retains_uncertain_process_and_refuses_reuse() {
         let directory = tempfile::tempdir().unwrap();
+        let storage_root =
+            tidepool_atomic_write::DirectoryAnchor::open_existing(directory.path()).unwrap();
         let path = directory.path().join("build");
-        let mut lease = OverlayResourceLease::allocate_path(path.clone(), None).unwrap();
+        let mut lease = OverlayResourceLease::allocate_path(&storage_root, "build", None).unwrap();
         lease.process_may_exist();
         assert!(lease.release().is_err());
         assert!(path.exists());
         assert_eq!(
-            OverlayResourceLease::allocate_path(path, None)
+            OverlayResourceLease::allocate_path(&storage_root, "build", None)
                 .unwrap_err()
                 .kind(),
             io::ErrorKind::AlreadyExists
@@ -1621,20 +1632,22 @@ mod tests {
     #[test]
     fn prelaunch_drop_retains_and_explicit_release_reclaims_exclusive_storage() {
         let directory = tempfile::tempdir().unwrap();
+        let storage_root =
+            tidepool_atomic_write::DirectoryAnchor::open_existing(directory.path()).unwrap();
         let path = directory.path().join("build");
-        drop(OverlayResourceLease::allocate_path(path.clone(), None).unwrap());
+        drop(OverlayResourceLease::allocate_path(&storage_root, "build", None).unwrap());
         assert!(path.exists());
         remove_unmounted_storage(&path).unwrap();
         assert!(!path.exists());
         let shared = SharedOverlayResource::new(
-            OverlayResourceLease::allocate_path(path.clone(), None).unwrap(),
+            OverlayResourceLease::allocate_path(&storage_root, "build", None).unwrap(),
         );
         let pending_publication = shared.clone();
         assert!(shared.release().is_err());
         assert!(path.exists());
         pending_publication.release().unwrap();
         assert!(!path.exists());
-        OverlayResourceLease::allocate_path(path.clone(), None)
+        OverlayResourceLease::allocate_path(&storage_root, "build", None)
             .unwrap()
             .release()
             .unwrap();
@@ -1647,9 +1660,11 @@ mod tests {
         use std::os::unix::fs::MetadataExt;
 
         let directory = tempfile::tempdir().unwrap();
+        let storage_root =
+            tidepool_atomic_write::DirectoryAnchor::open_existing(directory.path()).unwrap();
         let project = directory.path().join("project");
         let mut source =
-            OverlayResourceLease::allocate_path(directory.path().join("storage"), None).unwrap();
+            OverlayResourceLease::allocate_path(&storage_root, "storage", None).unwrap();
         let base = &source.layers[0].path;
         std::fs::write(base.join("kept"), "original").unwrap();
         std::fs::hard_link(base.join("kept"), base.join("linked")).unwrap();
@@ -1696,10 +1711,11 @@ mod tests {
         use std::io::{Seek, SeekFrom};
         use std::os::unix::fs::MetadataExt;
         let directory = tempfile::tempdir().unwrap();
+        let storage_root =
+            tidepool_atomic_write::DirectoryAnchor::open_existing(directory.path()).unwrap();
         let project = directory.path().join("project");
         let mut parent =
-            OverlayResourceLease::allocate_path(directory.path().join("storage/parent"), None)
-                .unwrap();
+            OverlayResourceLease::allocate_path(&storage_root, "storage/parent", None).unwrap();
         let artifact = parent.layers[0].path.join("artifact");
         std::fs::write(&artifact, vec![42u8; 1024 * 1024]).unwrap();
         std::fs::hard_link(&artifact, parent.layers[0].path.join("linked-artifact")).unwrap();
@@ -1769,10 +1785,12 @@ mod tests {
     #[test]
     fn warm_generation_survives_busy_parent_and_independent_child() {
         let directory = tempfile::tempdir().unwrap();
+        let storage_root =
+            tidepool_atomic_write::DirectoryAnchor::open_existing(directory.path()).unwrap();
         let root = directory.path();
         let project = root.join("project");
         let mut parent =
-            OverlayResourceLease::allocate_path(root.join("storage/parent"), None).unwrap();
+            OverlayResourceLease::allocate_path(&storage_root, "storage/parent", None).unwrap();
         let (mut worker, namespace) = Worker::start(&mut parent, &project);
         assert_eq!(worker.exchange("write"), "wrote");
         let outcome = parent
@@ -1830,7 +1848,7 @@ mod tests {
             layer_count + 1
         );
         let mut child =
-            OverlayResourceLease::allocate_path(root.join("storage/child"), Some(snapshot))
+            OverlayResourceLease::allocate_path(&storage_root, "storage/child", Some(snapshot))
                 .unwrap();
         assert!(
             child.latest_snapshot().is_some(),
