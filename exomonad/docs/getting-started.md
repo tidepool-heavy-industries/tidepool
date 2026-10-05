@@ -52,10 +52,11 @@ outputs before publishing `.buckconfig.local`; ambient Cargo, Cabal or compiler
 outputs do not select these artifacts.
 
 Follow [the package guide](../../build/package/README.md) to retain the actual
-build command and log, freeze the outputs at a new final path, and run its six
-M2 cases and M1 browser gate against one descriptor. Linking the bundle or
-running a help command does not qualify it. Keep the existing host until the
-same frozen binary succeeds in the recursive live scenario.
+build command and log, freeze the outputs at a new final path, and run the
+descriptor-owned M2 cohort and M1 browser gate against that descriptor. The
+descriptor supplies their exact case rosters, counts and deadlines. Linking the
+bundle or running a help command does not qualify it. Keep the existing host
+until the same frozen binary succeeds in the recursive live scenario.
 
 For the source workflow below, `FINAL_BUNDLE` is that canonical frozen path,
 and `DESCRIPTOR` is its `share/exomonad/qualification.json`. Each operation

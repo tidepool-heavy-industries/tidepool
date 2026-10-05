@@ -26,10 +26,13 @@ cannot reuse another producer's authenticated compilation inputs.
 
 ## Resource and evidence policy
 
-One expensive build, test, or experiment runs at a time. Source analysis can
-proceed in parallel. The coordinator grants each admitted unit and records its
-memory limits, owned processes, output paths, and result. Preserve live runs
-and shared services. Profiling overhead is not production latency.
+Admit builds, tests and experiments using observed process peaks, enclosing
+slice limits, owned-process boundaries and host headroom, as described in
+[`docs/swarm-builds.md`](../docs/swarm-builds.md). Source analysis can proceed
+in parallel. Retain each admission's limits, owned processes, output paths and
+result. Keep one shared compiler lane until measured accounting supports more.
+Preserve live runs and shared services. Profiling overhead is not production
+latency.
 
 Retain commands, source and artifact hashes, actual compiler flags, inputs,
 request/admission identities, profiles, cache decisions, exit status, and

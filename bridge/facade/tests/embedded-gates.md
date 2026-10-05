@@ -8,14 +8,12 @@ No live provider credentials are used.
 | Gate | Exact libtest name | Required check |
 |---|---|---|
 | M1 browser | `actor_host::m1_host_tests::production_browser_executes_resident_haskell_retries_and_controls_root` | Playwright input and real raw Haskell output, request-pinned reload/retry, interruption of the active operation, continue and root retirement. |
-| Complete-cell preflight | `actor_host::embedded_captured_unfold_tests::admitted_cell_late_type_error_has_no_effect_or_publication_on_retry` | An installed AgentSpec and admitted root reject a final type error before the first notification effect or binding publication; exact operation retry retains rejection without compiler work. |
 | Warm production cells | `actor_host::m1_host_tests::warm_cell_performance::production_engine_store_warm_display_cells_50` | Fifty source-backed displays across ten workloads through the production HTTP/Engine/Store host, exact original operations and exclusive daemon request attribution. |
 | Active cancellation | `actor_host::m1_host_tests::cancel_performance::production_engine_store_active_cancellation_50` | Fifty production interrupts of exact armed native Sleep calls, actual retained owner acknowledgment and separate durable output/round cleanup timings. |
-| M2 captured replies | `actor_host::embedded_captured_unfold_tests::embedded_captured_unfold_awaits_two_child_replies_before_parent_call_returns` | Two captured children reply while the parent call is unfinished; double release and refusal of a new child preserve already admitted context. |
-| M2 failure and reuse | `actor_host::embedded_captured_unfold_tests::embedded_captured_children_and_capture_survive_failure_of_the_unfinished_parent_cell` | The creator cell fails after both replies and publishes no names; actor-owned children and a transferred checkpoint retain its private prefix, including direct private helper execution in a third child. |
-| M2 nominal A/B join | `actor_host::embedded_captured_unfold_tests::embedded_same_root_parked_nominal_a_joins_later_b_publication` | A parks with original nominal types, B publishes nominal shadows through a real Engine tool call, and A resumes; a final Engine tool reads both published results and B's current shadow. |
-| M2 interrupt and continuation | `actor_host::embedded_captured_unfold_tests::embedded_parked_captured_pipeline_cancellation_settles_invocation_owned_children` | A browser interrupt targets the actual root round, retains `NotPublished Cancelled`, and cleans invocation-owned children while the root stays alive; durable browser input wakes the driver and a new Haskell tool call succeeds. |
-| Checkpoint release | `actor_host::embedded_checkpoint_release_tests::released_checkpoint_keeps_an_admitted_childs_hosted_context` | An admitted child retains its captured context after issuer retirement and double checkpoint release, a new child is refused, and issuer/observer cleanup records name the correct owners. |
+
+The frozen bundle descriptor owns the exact M2 case roster, count and per-case
+deadlines. Run that cohort through the [package qualification owner](../../../build/package/README.md);
+this guide describes the behaviors without duplicating its executable roster.
 
 M2 provider scenarios install the real embedded service, admitted model factory,
 conversation reader, Store and Scheduler before root admission. Only
@@ -74,10 +72,12 @@ M2 uses a named 300-second cold-debug settlement budget for its real setup,
 parent cells, post-failure reader cells and checkpoint reuse. This semantic
 budget includes whole-cell compilation, validation and native attachment;
 it makes no speed claim. Typed child reply settlement keeps its 90-second
-budget, provider branch/read observations keep 120 seconds, host readiness
-and termination keep 30 seconds, and each isolated test keeps its 600-second
-outer bound. Optimized performance acceptance remains separate, including
-its one-second p95 and ten-second cold limits.
+budget, provider branch/read observations keep 120 seconds, and host readiness
+and termination keep 30 seconds. The descriptor applies a 600-second default
+outer watchdog and 900 seconds to unfinished-parent survival, nominal
+publication join, checkpoint release and the selected coding child. Optimized
+performance acceptance remains separate, including its one-second p95 and
+ten-second cold limits.
 
 The preflight gate installs a real `AgentSpec`, then dispatches an authored cell
 through its admitted root policy. The first bind would send an observable
@@ -112,28 +112,24 @@ Retain the manifest and set `TIDEPOOL_KEEP_TEST_LOGS=1`. M1 additionally needs
 `TIDEPOOL_BROWSER_DRIVER`, and `PLAYWRIGHT_BROWSERS_PATH` from the same declared
 browser closure. M2 supplies its own minimal local HTTP assets.
 
-Run the frozen libtest with the existing bounded runner, in an admitted scope:
+Run the frozen cohorts through the descriptor owner, which supplies the exact
+roster, expected count, ignored status and per-case watchdogs to the bounded
+runner. The descriptor and command forms are documented in the
+[package guide](../../../build/package/README.md):
 
 ```sh
-python3 build/rust/isolated-libtest.py "$FACADE_TEST_BINARY" \
-  --exact actor_host::m1_host_tests::production_browser_executes_resident_haskell_retries_and_controls_root \
-  --expected-count 1 --ignored --jobs 1 --timeout 900
+python3 "$FINAL_BUNDLE/share/exomonad/qualification.py" run "$DESCRIPTOR" \
+  --cohort m1 --output "$M1_EVIDENCE"
 
-python3 build/rust/isolated-libtest.py "$FACADE_TEST_BINARY" \
-  --exact actor_host::embedded_captured_unfold_tests::admitted_cell_late_type_error_has_no_effect_or_publication_on_retry \
-  --exact actor_host::embedded_captured_unfold_tests::embedded_captured_unfold_awaits_two_child_replies_before_parent_call_returns \
-  --exact actor_host::embedded_captured_unfold_tests::embedded_captured_children_and_capture_survive_failure_of_the_unfinished_parent_cell \
-  --exact actor_host::embedded_captured_unfold_tests::embedded_same_root_parked_nominal_a_joins_later_b_publication \
-  --exact actor_host::embedded_captured_unfold_tests::embedded_parked_captured_pipeline_cancellation_settles_invocation_owned_children \
-  --exact actor_host::embedded_checkpoint_release_tests::released_checkpoint_keeps_an_admitted_childs_hosted_context \
-  --expected-count 6 --jobs 1 --timeout 600
+python3 "$FINAL_BUNDLE/share/exomonad/qualification.py" run "$DESCRIPTOR" \
+  --cohort m2 --output "$M2_EVIDENCE" --jobs 3 \
+  --delegated-service --service-slice "$ADMITTED_USER_SLICE"
 ```
 
-Select these six tests from the native host test target. The shared
-`actor_host::tests::descendants_list_the_spawn_tree_and_drop_a_retired_leaf`
-also covers creation-tree observation and leaf retirement. A fresh live recursive
-delegation smoke is separate from this finite deterministic cohort. Retain its actual descendant
-relationships, replies and cleanup evidence independently.
+Use an admitted user slice whose checked resource bounds fit the selected
+concurrency. A fresh live recursive delegation smoke is separate from this
+finite deterministic cohort. Retain its actual descendant relationships,
+replies and cleanup evidence independently.
 
 Keep each test's actual outcome, nonzero executed count, elapsed boundaries and
 cleanup separate from compilation and discovery. Replay the selected tests on

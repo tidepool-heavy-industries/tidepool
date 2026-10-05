@@ -143,7 +143,7 @@ without introducing another compiler, fixture registry or test runner.
    retained terminal for that exact incarnation. Independent child waits keep
    their own lifetime. An early compiler failure must retain its cause and
    cleanup result instead of waiting for the outer startup deadline. Qualify
-   the focused two-child path before repeating all six expensive scenarios.
+   the focused two-child path before repeating the descriptor-owned M2 cohort.
    Execution and local actor state now have boxed affine owners. The genuine
    local-startup control passes at unchanged stack limits; the two-child case
    reaches the reply conflict above without a stack abort. Retain that startup
@@ -279,10 +279,13 @@ arguments and record actual nonzero execution counts. Source inventories and
 generated resources continue to come from the existing Cargo/Cabal/Buck owners.
 
 Freeze one matched bundle and rerun the failing two-child case. Only after that
-passes run all six M2 obligations, the relevant full semantic/compiler corpus
-and matched M1 browser gate. Keep first-server delivery separate from subsequent
-general audits and performance work; the full migration still requires removal
-of every superseded positive fixture/runner path.
+passes run the descriptor-owned M2 cohort, the relevant full semantic/compiler
+corpus and matched M1 browser gate. The exact cohort and watchdogs are owned by
+the [package qualification guide](../build/package/README.md); behavioral
+acceptance is described in [embedded-gates.md](../bridge/facade/tests/embedded-gates.md).
+Keep first-server delivery separate from subsequent general audits and
+performance work; the full migration still requires removal of every superseded
+positive fixture/runner path.
 
 ## Test strategy and completion requirements
 
@@ -366,7 +369,8 @@ Run finalized interface/Core reuse, source-free recovery, dependency/producer
 drift refusals, cancellation recovery and actual parked request/resume checks.
 Run the structural compiler corpus and matched M1 browser gate.
 
-Rewrite and execute these six M2 obligations through production owners:
+Execute the descriptor-owned M2 cohort through production owners. Its behavioral
+obligations are:
 
 1. Late whole-cell type failure causes no effects/publication; exact retry
    reuses rejection; valid control executes and publishes.
@@ -379,6 +383,9 @@ Rewrite and execute these six M2 obligations through production owners:
    cleanup; durable input starts a successful later round.
 6. Checkpoint release is idempotent and refuses new admission while preserving
    an already admitted child.
+7. A scaffolded coding child receives the root's `Project.Work` Task through
+   compiler admission and returns its typed result under the child's narrower
+   effect row.
 
 Assertions use exact durable receipts, provider delivery and confirmed resource
 release, outside optional follow-up callbacks. Use barriers instead of sleeps.
