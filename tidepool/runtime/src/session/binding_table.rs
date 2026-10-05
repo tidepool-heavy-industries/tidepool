@@ -532,7 +532,6 @@ mod tests {
         use super::*;
         use proptest::prelude::*;
         use proptest::test_runner::{Config, FileFailurePersistence};
-        use std::sync::OnceLock;
 
         const IDENTITIES: u8 = 4;
         const ROOTS: usize = 3;
@@ -913,20 +912,15 @@ mod tests {
         }
 
         fn config() -> Config {
-            // Explicit evidence paths take precedence over the native runner's
-            // declared source path. Cargo keeps ordinary SourceParallel
-            // persistence; neither default resolves through staged manifest paths.
-            // PROPTEST_CASES and PROPTEST_RNG_SEED remain available through
-            // Config::default() for larger runs and precise seed replay.
-            static REGRESSIONS: OnceLock<String> = OnceLock::new();
-            let mut config = Config {
-                max_shrink_iters: 4096,
-                ..Config::default()
-            };
-            if let Ok(path) = std::env::var("TIDEPOOL_BINDING_INDEX_REGRESSIONS") {
-                let path = REGRESSIONS.get_or_init(|| path);
-                config.failure_persistence = Some(Box::new(FileFailurePersistence::Direct(path)));
-            } else if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
+            // The native runner declares a durable seed path; Cargo keeps
+            // ordinary SourceParallel persistence. Neither default resolves
+            // through staged manifest paths. Standard PROPTEST_* settings
+            // remain available for larger runs and precise seed replay.
+            let mut config = Config::default();
+            if std::env::var_os("PROPTEST_MAX_SHRINK_ITERS").is_none() {
+                config.max_shrink_iters = 4096;
+            }
+            if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
                 config.failure_persistence = Some(Box::new(FileFailurePersistence::Direct(path)));
             }
             config
