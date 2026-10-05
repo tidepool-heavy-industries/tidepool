@@ -4806,6 +4806,7 @@ where
 
     /// Retire an exact binding owner while preserving existing dependency leases.
     pub fn retire_binding_owner(&mut self, id: SessionVarId) {
+        self.settle_dropped_custody();
         let scope = self.state.bindings().get(id).map(|entry| entry.scope);
         self.state.retire_binding_owner(id);
         if let Some(scope) = scope {

@@ -2,22 +2,22 @@ use super::*;
 
 #[tokio::test]
 async fn cancellation_during_original_preview_refuses_initial_provider_installation() {
-    interrupt_during_preview(false, Interruption::Cancellation).await;
+    interrupt_during_preview(false, Interruption::Cancellation, true).await;
 }
 
 #[tokio::test]
 async fn cancellation_during_original_preview_refuses_later_request_activation() {
-    interrupt_during_preview(true, Interruption::Cancellation).await;
+    interrupt_during_preview(true, Interruption::Cancellation, false).await;
 }
 
 #[tokio::test]
 async fn terminal_request_during_original_preview_retires_unpublished_input() {
-    interrupt_during_preview(false, Interruption::TerminalRequest).await;
+    interrupt_during_preview(false, Interruption::TerminalRequest, false).await;
 }
 
 #[tokio::test]
 async fn actor_retirement_during_original_preview_retires_unpublished_input() {
-    interrupt_during_preview(false, Interruption::ActorRetirement).await;
+    interrupt_during_preview(false, Interruption::ActorRetirement, false).await;
 }
 
 #[derive(Clone, Copy)]
@@ -27,7 +27,11 @@ enum Interruption {
     ActorRetirement,
 }
 
-async fn interrupt_during_preview(already_installed: bool, interruption: Interruption) {
+async fn interrupt_during_preview(
+    already_installed: bool,
+    interruption: Interruption,
+    genuine_preparation: bool,
+) {
     let mut fixture = invocation_work::tests::Fixture::start().await;
     let (mut resident, mut context, source, mut parked, _root) =
         crate::resident_workbench::request_tests::activation_session_fixture(|_| {});
@@ -86,33 +90,35 @@ async fn interrupt_during_preview(already_installed: bool, interruption: Interru
             displays: Default::default(),
         },
     );
-    let prepared = (!already_installed).then(|| PreparedInteractivePublication {
-        owner,
-        bootstrap: None,
-        installation: LocalResidentInstallation {
-            actor: fixture.actor.clone(),
-            label: descriptor.label().into(),
-            policy: Arc::new(crate::ResidentInteractivePolicy::local(
-                fixture.actor.clone(),
-            )),
-            initial_user_message: None,
-            launch_worktrees: Vec::new(),
-            worktree_custody: None,
-            effective_role: descriptor.effective_role().clone(),
-            fork_effort: None,
-            model: None,
-            instructions: None,
-            creator: None,
-            fork_boundary: None,
-            checkpoint: None,
-            checkpoint_attachment: None,
-            supervisor_parent: None,
-            context_parent: None,
-            fork_group: None,
-            fork_gate: None,
-            runtime_observation: behavior.runtime_observation.clone(),
-        },
-    });
+    let prepared =
+        (!already_installed && !genuine_preparation).then(|| PreparedInteractivePublication {
+            owner,
+            bootstrap: None,
+            installation: LocalResidentInstallation {
+                prepared_tools: None,
+                actor: fixture.actor.clone(),
+                label: descriptor.label().into(),
+                policy: Arc::new(crate::ResidentInteractivePolicy::local(
+                    fixture.actor.clone(),
+                )),
+                initial_user_message: None,
+                launch_worktrees: Vec::new(),
+                worktree_custody: None,
+                effective_role: descriptor.effective_role().clone(),
+                fork_effort: None,
+                model: None,
+                instructions: None,
+                creator: None,
+                fork_boundary: None,
+                checkpoint: None,
+                checkpoint_attachment: None,
+                supervisor_parent: None,
+                context_parent: None,
+                fork_group: None,
+                fork_gate: None,
+                runtime_observation: behavior.runtime_observation.clone(),
+            },
+        });
     let (entered, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
     let (release, release_rx) = std::sync::mpsc::channel();
     let release_rx = Mutex::new(release_rx);
@@ -197,6 +203,13 @@ async fn interrupt_during_preview(already_installed: bool, interruption: Interru
         )),
     }
     assert!(fixture.deployments.try_recv().is_err());
+    if genuine_preparation {
+        assert_eq!(
+            behavior.spec_installs, 1,
+            "real installer completed before publication refusal"
+        );
+        assert!(behavior.installed_tools.current().is_none());
+    }
     assert!(behavior.outstanding_interactive.is_none());
     assert!(matches!(behavior.standing, ResidentStanding::Boot));
     assert!(behavior.assignment_base.is_none());

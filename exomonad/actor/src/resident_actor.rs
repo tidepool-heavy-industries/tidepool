@@ -136,6 +136,8 @@ impl<H, O> ResidentActorRoot<H, O> {
 
 #[derive(Clone)]
 pub struct LocalResidentInstallation {
+    /// Newly prepared handler custody transfers only with application publication.
+    pub(crate) prepared_tools: Option<crate::InstalledToolLease>,
     pub actor: LocalActorRef,
     pub label: String,
     pub policy: Arc<dyn ResidentToolEndpoint>,
@@ -7613,6 +7615,7 @@ where
                         let checkpoint_attachment =
                             checkpoint_attachment.or_else(|| self.inherited_host_attachment.take());
                         let installation = LocalResidentInstallation {
+                            prepared_tools: None,
                             actor,
                             label: self.descriptor.label().to_owned(),
                             policy,
@@ -7946,7 +7949,10 @@ where
         Ok(())
     }
 
-    fn publish_interactive_installation(&mut self, installation: LocalResidentInstallation) {
+    fn publish_interactive_installation(&mut self, mut installation: LocalResidentInstallation) {
+        if let Some(tools) = installation.prepared_tools.take() {
+            self.installed_tools.publish(tools);
+        }
         self.publish_installation(installation);
         self.policy_installed = true;
         for notice in self.deferred_child_failures.drain(..) {
@@ -8116,11 +8122,8 @@ where
         );
         let compiled_tools = Arc::new(compiled_tools?);
         let declarations = compiled_tools.declarations.clone();
-        self.installed_tools.publish(crate::InstalledToolLease::new(
-            context.actor,
-            source,
-            Some(compiled_tools),
-        ));
+        let prepared_tools =
+            crate::InstalledToolLease::new(context.actor, source, Some(compiled_tools));
         let policy: Arc<dyn ResidentToolEndpoint> =
             Arc::new(crate::ResidentInteractivePolicy::local_with_installation(
                 actor.clone(),
@@ -8142,6 +8145,7 @@ where
         let checkpoint_attachment =
             checkpoint_attachment.or_else(|| self.inherited_host_attachment.take());
         Ok(LocalResidentInstallation {
+            prepared_tools: Some(prepared_tools),
             actor,
             label: self.descriptor.label().to_owned(),
             policy,
