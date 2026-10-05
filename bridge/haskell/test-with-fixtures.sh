@@ -39,12 +39,17 @@ normalize_search_list() {
   done
   printf '%s' "$result"
 }
+compiler_deployment_declared=false
 read -ra path_inputs <<< "${TIDEPOOL_TEST_INPUT_PATHS:?missing declared native test input roles}"
 for input in "${path_inputs[@]}"; do
   name=${input%%:*}
   role=${input#*:}
   if [[ ! "$name" =~ ^[A-Z_][A-Z_0-9]*$ || ! -v "$name" ]]; then
     echo "missing or invalid declared native test input: $name" >&2
+    exit 2
+  fi
+  if [[ "$name" == TIDEPOOL_COMPILER_DEPLOYMENT && "$role" != file ]]; then
+    echo "compiler deployment requires its declared file role" >&2
     exit 2
   fi
   value=${!name}
@@ -61,10 +66,16 @@ for input in "${path_inputs[@]}"; do
     *) echo "invalid declared native test input role: $role" >&2; exit 2 ;;
   esac
   export "$name=$rooted"
+  if [[ "$name" == TIDEPOOL_COMPILER_DEPLOYMENT ]]; then
+    compiler_deployment_declared=true
+  fi
 done
 # Read configured authority; the Rust issuer still independently admits the
 # exact frontend/worker deployment before issuing any certificate.
-if [[ -n ${TIDEPOOL_CANDIDATE_FIXTURE_ISSUER:-} ]]; then
+# The structural codec uses the same libtest executable without compiler
+# authority. Only the validated deployment resource selects genuine issuance.
+unset TIDEPOOL_COMPILER_PRODUCER
+if [[ "$compiler_deployment_declared" == true ]]; then
   export TIDEPOOL_COMPILER_PRODUCER
   TIDEPOOL_COMPILER_PRODUCER=$("$TIDEPOOL_TEST_PYTHON" - "$TIDEPOOL_COMPILER_DEPLOYMENT" <<'PYDEPLOY'
 import json

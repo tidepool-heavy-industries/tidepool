@@ -188,7 +188,7 @@ import json, os, pathlib, sys
 names = ['DECLARED_DIRECTORY', 'DECLARED_FILE', 'DECLARED_EXECUTABLE',
          'ORDERED_SEARCH', 'ORDERED_LIBRARIES', 'SCALAR_VALUE', 'TASTY_PATTERN']
 pathlib.Path(sys.argv[1]).write_text(json.dumps(dict(
-    cwd=os.getcwd(), args=sys.argv[2:], values={name: os.environ[name] for name in names})))
+    cwd=os.getcwd(), args=sys.argv[2:], producer=os.environ.get("TIDEPOOL_COMPILER_PRODUCER"), values={name: os.environ[name] for name in names})))
 pathlib.Path('input').write_text('private mutation')
 PYPROBE
 """)
@@ -210,6 +210,8 @@ PYPROBE
         }
         # This is a runner boundary probe, independent of compiler issuance.
         self.env.pop("TIDEPOOL_CANDIDATE_FIXTURE_ISSUER", None)
+        self.env.pop("TIDEPOOL_COMPILER_DEPLOYMENT", None)
+        self.env.pop("TIDEPOOL_COMPILER_PRODUCER", None)
 
     def run_wrapper(self, env):
         return subprocess.run(['bash', str(self.wrapper), self.binary.name, self.fixtures.name,
@@ -234,6 +236,47 @@ PYPROBE
         self.assertNotEqual(record['cwd'], str(self.root))
         self.assertFalse(Path(record['cwd']).exists())
         self.assertEqual((self.fixtures / 'input').read_text(), 'immutable fixture')
+
+    def test_codec_issuer_does_not_require_or_inherit_compiler_authority(self):
+        env = self.env | {
+            "TIDEPOOL_CANDIDATE_FIXTURE_ISSUER": self.tool.name,
+            "TIDEPOOL_COMPILER_DEPLOYMENT": "undeclared ambient deployment",
+            "TIDEPOOL_COMPILER_PRODUCER": "ambient producer",
+            "TIDEPOOL_TEST_INPUT_PATHS": self.env["TIDEPOOL_TEST_INPUT_PATHS"]
+                + " TIDEPOOL_CANDIDATE_FIXTURE_ISSUER:executable",
+        }
+        result = self.run_wrapper(env)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIsNone(json.loads(self.record.read_text())["producer"])
+
+    def test_genuine_issuer_uses_declared_deployment_identity(self):
+        deployment = self.root / "compiler deployment.json"
+        deployment.write_text(json.dumps(dict(schema=1, producer_identity=list(range(32)))))
+        env = self.env | {
+            "TIDEPOOL_COMPILER_DEPLOYMENT": deployment.name,
+            "TIDEPOOL_COMPILER_PRODUCER": "ambient producer",
+            "TIDEPOOL_TEST_INPUT_PATHS": self.env["TIDEPOOL_TEST_INPUT_PATHS"]
+                + " TIDEPOOL_COMPILER_DEPLOYMENT:file",
+        }
+        result = self.run_wrapper(env)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads(self.record.read_text())["producer"], bytes(range(32)).hex())
+
+    def test_declared_genuine_deployment_missing_or_wrong_role_refuses(self):
+        for changed in [
+            {}, {"TIDEPOOL_COMPILER_DEPLOYMENT": "missing"},
+            {"TIDEPOOL_COMPILER_DEPLOYMENT": self.directory.name,
+             "TIDEPOOL_TEST_INPUT_PATHS": self.env["TIDEPOOL_TEST_INPUT_PATHS"]
+                 + " TIDEPOOL_COMPILER_DEPLOYMENT:directory"},
+        ]:
+            with self.subTest(changed=changed):
+                env = self.env | {
+                    "TIDEPOOL_TEST_INPUT_PATHS": self.env["TIDEPOOL_TEST_INPUT_PATHS"]
+                        + " TIDEPOOL_COMPILER_DEPLOYMENT:file",
+                } | changed
+                result = self.run_wrapper(env)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(self.record.exists())
 
     def test_absolute_declared_inputs_keep_their_artifact_roles(self):
         env = self.env | {
