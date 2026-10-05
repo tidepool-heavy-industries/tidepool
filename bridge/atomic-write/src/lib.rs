@@ -36,7 +36,7 @@ impl std::error::Error for WriteError {
 
 impl From<WriteError> for std::io::Error {
     fn from(e: WriteError) -> Self {
-        e.source
+        Self::new(e.source.kind(), e)
     }
 }
 
@@ -298,6 +298,22 @@ fn parent_dir(path: &Path) -> &Path {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn io_conversion_preserves_failed_path_and_error_kind() {
+        let error: std::io::Error = WriteError {
+            path: PathBuf::from("/owned/runtime"),
+            source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        }
+        .into();
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(error.to_string().contains("/owned/runtime"));
+        assert!(error
+            .get_ref()
+            .unwrap()
+            .downcast_ref::<WriteError>()
+            .is_some());
+    }
 
     #[test]
     fn write_durable_round_trips_and_overwrites() {
