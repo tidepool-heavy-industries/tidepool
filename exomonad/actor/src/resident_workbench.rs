@@ -5541,6 +5541,7 @@ where
             },
         };
         let compiler_source = source.clone();
+        let effects = context.haskell_effects_alias.clone();
         self.access
             .log_include_roots_if_changed(context.placement.session, &context.source_layer);
         let inspection_span = tracing::info_span!(
@@ -10929,7 +10930,13 @@ where
     let inputs = session
         .capture_inspection_inputs(compile_view.session_view())
         .map_err(|error| ResidentActorWorkbenchError::Resident(ResidentError::Session(error)))?;
-    inspect_compile_view(&compile_view, &inputs, source, queries)
+    inspect_compile_view(
+        &compile_view,
+        &inputs,
+        source,
+        queries,
+        &context.haskell_effects_alias,
+    )
 }
 
 fn inspect_compile_view(
@@ -10937,6 +10944,7 @@ fn inspect_compile_view(
     inputs: &tidepool_runtime::session::AdmittedInspectionInputs,
     source: &ActorWorkbenchSource,
     queries: &[InspectionQuery],
+    effects: &str,
 ) -> Result<
     Vec<Result<tidepool_runtime::session::InspectionResult, String>>,
     ResidentActorWorkbenchError,
@@ -10956,7 +10964,7 @@ fn inspect_compile_view(
             session_root: compile_view.session_root(),
             inject_modules: &prepared.injected,
             queries,
-            effects,
+            effects: Some(effects),
         },
         compile_view.session_view(),
         inputs,
