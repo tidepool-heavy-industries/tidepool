@@ -1,6 +1,7 @@
 module TypeEvidenceChecks (runTypeEvidenceChecks) where
 
-import Control.Monad (unless, forM_)
+import Control.Monad (unless)
+import Data.Maybe (mapMaybe)
 import Data.Map.Strict qualified as Map
 import GHC.Core.DataCon (dataConName)
 import GHC.Core.TyCon (tyConDataCons)
@@ -68,7 +69,6 @@ runTypeEvidenceChecks directory project projectWithAux = do
   writeFile target alphaFixture
   secondResult <- runPipelineSelected PreparedStg target [directory]
   writeFile target fixture
-  verifyOriginalReplyShapes result secondResult
   let program entry = either
         (ioError . userError . ((entry ++ ": ") ++) . show) pure (project result entry)
       answer entry = do
@@ -230,6 +230,7 @@ runTypeEvidenceChecks directory project projectWithAux = do
   assert (all (`elem` auxConstructorNames) ["Left", "Right"])
     ("admitted auxiliary root's own Either evidence is missing: "
       ++ show auxConstructorNames)
+  verifyOriginalReplyShapes result secondResult
  where
   assert condition message = unless condition (ioError (userError message))
   isRefusal TypeUnconstructible{} = True
@@ -295,25 +296,43 @@ verifyOriginalReplyShapes original alpha = do
   hydratedInfos <- mapM (\info -> maybe (ioError (userError "hydrated original interface missing")) pure
     (lookupHpt (hsc_HPT hydrated) (moduleName (mi_module (hm_iface info))))) originalInfos
   let hydratedConstructors = constructors hydratedInfos
-  forM_ originalConstructors $ \constructor -> case requestReplyIndex constructor of
-    Nothing -> pure ()
-    Just _ -> do
-      let occurrence = occNameString (nameOccName (dataConName constructor))
-      -- This census fails with the exact unsupported shape rather than
-      -- silently promoting a cast/coercion refusal during schema migration.
-      sourceShape <- shape constructor
-      hydratedShape <- select occurrence hydratedConstructors >>= shape
-      require (sourceShape == hydratedShape)
-        ("same exact original interface changed reply scheme during hydration: " ++ occurrence)
-  forM_ (pprModules original) $ \prepared ->
-    forM_ (zip [0 :: Int ..] (TypePolicy.tgNodes (pmTypeGraph prepared))) $ \(index, node) ->
-      case graphType node of
-        Nothing -> pure ()
-        Just ty -> case captureGraphTypeShape closedTypeShapeScope ty of
-          Right _ -> pure ()
-          Left failure -> ioError (userError ("closed prepared shape "
-            ++ moduleNameString (moduleName (pmModule prepared)) ++ ":" ++ show index
-            ++ ": " ++ show failure))
+  let sourceShapes =
+        [(occNameString (nameOccName (dataConName constructor)),
+          captureGraphTypeShape (constructorTypeShapeScope constructor) reply)
+        | constructor <- originalConstructors, Just reply <- [requestReplyIndex constructor]]
+      hydratedShapes =
+        Map.fromListWith (++) [(occNameString (nameOccName (dataConName constructor)),
+          [captureGraphTypeShape (constructorTypeShapeScope constructor) reply])
+        | constructor <- hydratedConstructors, Just reply <- [requestReplyIndex constructor]]
+      sourceFindings = concatMap (\(occurrence, captured) -> case captured of
+        Left failure -> [("source constructor " ++ occurrence, UnsupportedShape failure)]
+        Right value -> case Map.lookup occurrence hydratedShapes of
+          Nothing -> [("hydrated constructor " ++ occurrence, MissingHydratedReply)]
+          Just [Left failure] -> [("hydrated constructor " ++ occurrence, UnsupportedShape failure)]
+          Just [Right other] | value /= other -> [("hydrated constructor " ++ occurrence, ChangedHydratedReply)]
+          Just [_] -> []
+          Just _ -> [("hydrated constructor " ++ occurrence, DuplicateHydratedReply)]) sourceShapes
+      closedFindings =
+        [("closed prepared " ++ moduleNameString (moduleName (pmModule prepared))
+          ++ ":" ++ show index, UnsupportedShape failure)
+        | prepared <- pprModules original
+        , (index, node) <- zip [0 :: Int ..] (TypePolicy.tgNodes (pmTypeGraph prepared))
+        , Just ty <- [graphType node]
+        , Left failure <- [captureGraphTypeShape closedTypeShapeScope ty]]
+      findings = sourceFindings ++ closedFindings
+      categories = Map.fromListWith (+) [(problem, 1 :: Int) | (_, problem) <- findings]
+      closedCount = sum [length (mapMaybe graphType (TypePolicy.tgNodes (pmTypeGraph prepared)))
+        | prepared <- pprModules original]
+  putStrLn ("original reply shape census: " ++ show (length sourceShapes)
+    ++ " constructor schemes, " ++ show closedCount ++ " closed prepared nodes; "
+    ++ "alpha/scope/domain controls passed")
+  unless (null findings) $ do
+    -- Bound retained locations while counting every category across the whole
+    -- fixture. No unsupported identity becomes a production admission rule.
+    putStrLn ("original reply shape census categories: " ++ show (Map.toAscList categories))
+    mapM_ (putStrLn . ("original reply shape census finding: " ++) . show) (take 32 findings)
+    ioError (userError ("original reply shape census found " ++ show (length findings)
+      ++ " unsupported or changed identities; all categories were collected"))
  where
   graphType node = case node of
     TypePolicy.DataG ty _ _ _ -> Just ty
@@ -323,3 +342,10 @@ verifyOriginalReplyShapes original alpha = do
     TypePolicy.ScalarG ty _ -> Just ty
     TypePolicy.UnconstructibleG ty _ _ -> Just ty
     TypePolicy.ProjectionDefectG{} -> Nothing
+
+data ShapeCensusProblem
+  = UnsupportedShape TypeShapeError
+  | MissingHydratedReply
+  | ChangedHydratedReply
+  | DuplicateHydratedReply
+  deriving (Eq, Ord, Show)

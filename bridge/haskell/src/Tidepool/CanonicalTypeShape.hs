@@ -41,7 +41,7 @@ data TypeShapeError
   | TypeShapeCoercionBinder
   | TypeShapeCast
   | TypeShapeCoercion
-  deriving (Eq, Show)
+  deriving (Eq, Ord, Show)
 
 closedTypeShapeScope :: TypeShapeScope
 closedTypeShapeScope = ClosedScope
