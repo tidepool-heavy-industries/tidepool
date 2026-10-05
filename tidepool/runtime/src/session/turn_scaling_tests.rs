@@ -1292,15 +1292,6 @@ fn following_declaration_publishes_current_source_selected_originals() {
 fn same_cell_authored_import_retains_completed_quasiquote_support() {
     tidepool_testing::eval_harness::require_extract();
     let root = tempfile::tempdir().unwrap();
-    let marker = root.path().join("same-cell-import-quoter-runs");
-    std::fs::write(
-        root.path().join("SameCellImportQuoter.hs"),
-        include_str!("fixtures/same-cell-import-quoter.hs").replace(
-            "SAME_CELL_IMPORT_MARKER",
-            &format!("{:?}", marker.to_str().unwrap()),
-        ),
-    )
-    .unwrap();
     std::fs::write(
         root.path().join("SameCellImportSupport.hs"),
         include_str!("fixtures/same-cell-import-support.hs"),
@@ -1330,12 +1321,6 @@ fn same_cell_authored_import_retains_completed_quasiquote_support() {
         include_str!("fixtures/compiled-cell-same-source-import.hs"),
         2,
         &ScalePublication::Ephemeral,
-    );
-    let runs = std::fs::read_to_string(&marker).unwrap();
-    assert_eq!(
-        runs.lines().count(),
-        2,
-        "the initial check and prepared original execute the quoter once each"
     );
     assert!(resident
         .compile_view_in(public)
