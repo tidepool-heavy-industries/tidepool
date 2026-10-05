@@ -1,8 +1,6 @@
 //! Current typed data for tests of structural validation and linking.
 
-use tidepool_repr::execution_schema::{
-    testing, GlobalDecl, RuntimeRep, SignatureId, SymbolIdentity, WireProgram,
-};
+use tidepool_repr::execution_schema::{testing, GlobalDecl, RuntimeRep, SignatureId, WireProgram};
 
 /// A valid target plus a declared callable import, without compiler provenance.
 pub fn callable_import_program() -> WireProgram {
@@ -76,93 +74,14 @@ pub fn constructor_program() -> WireProgram {
     wire
 }
 
-/// Freeze structural graph fixtures through the same owning validator. This
-/// describes type metadata and cannot confer compiler or execution authority.
-pub fn type_graph(
-    nodes: Vec<tidepool_repr::type_graph::TypeNode>,
-    edges: &[(u32, u32, tidepool_repr::type_graph::TypeEdge)],
-    constructors: &[tidepool_repr::execution_schema::ConstructorDecl],
-) -> Result<
-    std::sync::Arc<tidepool_repr::type_graph::TypeGraph>,
-    tidepool_repr::type_graph::TypeGraphError,
-> {
-    use tidepool_repr::type_graph::{GraphLimits, GraphStorage, TypeGraph, TypeNodeId};
-    let mut graph = GraphStorage::with_capacity(nodes.len(), edges.len());
-    for node in nodes {
-        graph.add_node(node);
-    }
-    for &(source, target, role) in edges {
-        if let Some(invalid) = [source, target]
-            .into_iter()
-            .find(|index| *index as usize >= graph.node_count())
-        {
-            return Err(tidepool_repr::type_graph::TypeGraphError::InvalidReference(
-                invalid as usize,
-            ));
-        }
-        graph.add_edge(
-            TypeNodeId::new(source as usize),
-            TypeNodeId::new(target as usize),
-            role,
-        );
-    }
-    TypeGraph::validate(graph, constructors, GraphLimits::default()).map(std::sync::Arc::new)
-}
+pub use testing::{closed_type_graph, closed_type_roots, type_graph};
 
-/// Ordered closed nominal roots for site-routing fixtures. All endpoint IDs
-/// precede expression nodes; repeated nominal declarations share their owner.
-pub fn closed_type_roots(
-    declarations: &[(SymbolIdentity, tidepool_repr::type_graph::DeclarationForm)],
-) -> std::sync::Arc<tidepool_repr::type_graph::TypeGraph> {
-    use tidepool_repr::type_graph::{RootDomain, SyntaxRestriction, TypeEdge, TypeNode};
-    let mut nodes = declarations
-        .iter()
-        .map(|(identity, _)| TypeNode::Root {
-            domain: RootDomain::Closed,
-            binders: vec![],
-            rendered: identity.occurrence.clone(),
-        })
-        .collect::<Vec<_>>();
-    let mut edges = Vec::new();
-    let mut owners = std::collections::BTreeMap::new();
-    for (root, (identity, form)) in declarations.iter().enumerate() {
-        let mut identity = identity.clone();
-        identity.namespace = "type".into();
-        identity.record_parent = None;
-        let declaration = match owners.get(&identity) {
-            Some((original_form, node)) => {
-                assert_eq!(
-                    original_form, form,
-                    "one nominal fixture owner cannot have conflicting declarations"
-                );
-                *node
-            }
-            None => {
-                let node = nodes.len() as u32;
-                owners.insert(identity.clone(), (form.clone(), node));
-                nodes.push(TypeNode::Declaration {
-                    identity,
-                    parameters: vec![],
-                    form: form.clone(),
-                    restriction: SyntaxRestriction::None,
-                });
-                node
-            }
-        };
-        let expression = nodes.len() as u32;
-        nodes.push(TypeNode::NominalApplication);
-        edges.extend([
-            (root as u32, expression, TypeEdge::Body),
-            (expression, declaration, TypeEdge::Head),
-        ]);
-    }
-    type_graph(nodes, &edges, &[]).expect("closed structural type fixtures")
-}
-
-/// One closed nominal root for site-routing fixtures, with no physical fields.
-pub fn closed_type_graph(
-    identity: SymbolIdentity,
-    form: tidepool_repr::type_graph::DeclarationForm,
-) -> std::sync::Arc<tidepool_repr::type_graph::TypeGraph> {
-    closed_type_roots(&[(identity, form)])
+/// A current typed program with a closed Text root for reader-work controls.
+pub fn text_type_program() -> WireProgram {
+    let mut wire = testing::wire_program();
+    wire.types = closed_type_graph(
+        testing::identity("Types", "Text"),
+        tidepool_repr::type_graph::DeclarationForm::Text,
+    );
+    wire
 }

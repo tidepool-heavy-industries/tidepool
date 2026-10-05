@@ -141,6 +141,94 @@ pub fn projected_group(
     })
 }
 
+/// Freeze structural graph fixtures through the same owning validator. This
+/// describes type metadata and cannot confer compiler or execution authority.
+pub fn type_graph(
+    nodes: Vec<crate::type_graph::TypeNode>,
+    edges: &[(u32, u32, crate::type_graph::TypeEdge)],
+    constructors: &[super::ConstructorDecl],
+) -> Result<std::sync::Arc<crate::type_graph::TypeGraph>, crate::type_graph::TypeGraphError> {
+    use crate::type_graph::{GraphLimits, GraphStorage, TypeGraph, TypeNodeId};
+    let mut graph = GraphStorage::with_capacity(nodes.len(), edges.len());
+    for node in nodes {
+        graph.add_node(node);
+    }
+    for &(source, target, role) in edges {
+        if let Some(invalid) = [source, target]
+            .into_iter()
+            .find(|index| *index as usize >= graph.node_count())
+        {
+            return Err(crate::type_graph::TypeGraphError::InvalidReference(
+                invalid as usize,
+            ));
+        }
+        graph.add_edge(
+            TypeNodeId::new(source as usize),
+            TypeNodeId::new(target as usize),
+            role,
+        );
+    }
+    TypeGraph::validate(graph, constructors, GraphLimits::default()).map(std::sync::Arc::new)
+}
+
+/// Ordered closed nominal roots for site-routing fixtures. All endpoint IDs
+/// precede expression nodes; repeated nominal declarations share their owner.
+pub fn closed_type_roots(
+    declarations: &[(SymbolIdentity, crate::type_graph::DeclarationForm)],
+) -> std::sync::Arc<crate::type_graph::TypeGraph> {
+    use crate::type_graph::{RootDomain, SyntaxRestriction, TypeEdge, TypeNode};
+    let mut nodes = declarations
+        .iter()
+        .map(|(identity, _)| TypeNode::Root {
+            domain: RootDomain::Closed,
+            binders: vec![],
+            rendered: identity.occurrence.clone(),
+        })
+        .collect::<Vec<_>>();
+    let mut edges = Vec::new();
+    let mut owners = std::collections::BTreeMap::new();
+    for (root, (identity, form)) in declarations.iter().enumerate() {
+        let mut identity = identity.clone();
+        identity.namespace = "type".into();
+        identity.record_parent = None;
+        let declaration = match owners.get(&identity) {
+            Some((original_form, node)) => {
+                assert_eq!(
+                    original_form, form,
+                    "one nominal fixture owner cannot have conflicting declarations"
+                );
+                *node
+            }
+            None => {
+                let node = nodes.len() as u32;
+                owners.insert(identity.clone(), (form.clone(), node));
+                nodes.push(TypeNode::Declaration {
+                    identity,
+                    parameters: vec![],
+                    form: form.clone(),
+                    restriction: SyntaxRestriction::None,
+                });
+                node
+            }
+        };
+        let expression = nodes.len() as u32;
+        nodes.push(TypeNode::NominalApplication);
+        edges.extend([
+            (root as u32, expression, TypeEdge::Body),
+            (expression, declaration, TypeEdge::Head),
+        ]);
+    }
+    type_graph(nodes, &edges, &[]).expect("closed structural type fixtures")
+}
+
+/// One closed nominal root for site-routing fixtures, with no physical fields.
+pub fn closed_type_graph(
+    identity: SymbolIdentity,
+    form: crate::type_graph::DeclarationForm,
+) -> std::sync::Arc<crate::type_graph::TypeGraph> {
+    closed_type_roots(&[(identity, form)])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

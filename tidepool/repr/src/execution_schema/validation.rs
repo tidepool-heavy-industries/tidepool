@@ -2974,7 +2974,7 @@ mod tests {
     }
 
     fn text_graph() -> std::sync::Arc<crate::type_graph::TypeGraph> {
-        tidepool_test_data::prepared::closed_type_graph(
+        super::super::testing::closed_type_graph(
             type_identity("Text"),
             crate::type_graph::DeclarationForm::Text,
         )
@@ -2991,7 +2991,7 @@ mod tests {
             binders: vec![],
             rendered: rendered.into(),
         };
-        let graph = tidepool_test_data::prepared::type_graph(
+        let graph = super::super::testing::type_graph(
             vec![
                 root("Phantom Int#"),
                 root("Phantom Word#"),
@@ -3049,7 +3049,7 @@ mod tests {
             root_mask: vec![true],
         };
         program.constructors = vec![recursive];
-        program.types = tidepool_test_data::prepared::type_graph(
+        program.types = super::super::testing::type_graph(
             vec![
                 declaration("RecursiveFamily", DeclarationForm::Data),
                 TypeNode::NominalApplication,
@@ -3096,7 +3096,7 @@ mod tests {
             root_mask: vec![false],
         };
         program.constructors = vec![constructor];
-        program.types = tidepool_test_data::prepared::type_graph(
+        program.types = super::super::testing::type_graph(
             vec![
                 declaration("Family", DeclarationForm::Data),
                 TypeNode::ConstructorTemplate {
@@ -3164,7 +3164,7 @@ mod tests {
     #[test]
     fn constructor_replies_require_exact_constructors_nodes_and_carrier_layouts() {
         let mut program = valid_program();
-        program.types = tidepool_test_data::prepared::closed_type_graph(
+        program.types = super::super::testing::closed_type_graph(
             type_identity("Opaque"),
             crate::type_graph::DeclarationForm::Opaque {
                 head_kind: crate::type_graph::NominalHeadKind::Constructor,
@@ -3225,7 +3225,7 @@ mod tests {
         for constructor in &mut program.constructors {
             constructor.family = type_identity("Family");
         }
-        program.types = tidepool_test_data::prepared::type_graph(
+        program.types = super::super::testing::type_graph(
             vec![
                 declaration("Family", DeclarationForm::Data),
                 TypeNode::ConstructorTemplate {
@@ -3264,7 +3264,7 @@ mod tests {
     fn type_nodes_reject_non_scalar_representations() {
         use crate::type_graph::{DeclarationForm, TypeGraphError};
         assert!(matches!(
-            tidepool_test_data::prepared::type_graph(
+            super::super::testing::type_graph(
                 vec![declaration(
                     "InvalidScalar",
                     DeclarationForm::Scalar(RuntimeRep::LiftedRef)
@@ -3315,7 +3315,7 @@ mod tests {
     #[test]
     fn many_empty_declarations_validate_with_bounded_work() {
         let mut program = valid_program();
-        program.types = tidepool_test_data::prepared::type_graph(
+        program.types = super::super::testing::type_graph(
             (0..4096_u32)
                 .map(|index| {
                     declaration(

@@ -1416,7 +1416,7 @@ mod tests {
 
     #[test]
     fn graph_validation_work_remains_charged_before_later_tables() {
-        let graph = tidepool_test_data::prepared::closed_type_graph(
+        let graph = super::super::testing::closed_type_graph(
             super::super::testing::identity("Types", "Text"),
             DeclarationForm::Text,
         );
@@ -1668,12 +1668,20 @@ mod operation_budget_tests {
     use super::super::ProgramRequirements;
     use super::*;
 
-    fn fixture() -> (Vec<u8>, ProgramRequirements) {
-        let mut wire = super::super::testing::wire_program();
-        wire.types = tidepool_test_data::prepared::closed_type_graph(
-            super::super::testing::identity("Types", "Text"),
-            DeclarationForm::Text,
-        );
+    fn fixture() -> Vec<u8> {
+        tidepool_test_data::prepared_encode::encode_wire_program(
+            &tidepool_test_data::prepared::text_type_program(),
+        )
+    }
+
+    #[test]
+    fn byte_entry_budget_spans_raw_decode_graph_freeze_and_semantic_validation() {
+        let bytes = fixture();
+        let limits = DecodeLimits::default();
+        let mut raw = OperationBudget::new(limits.max_work);
+        let value = decode_value(&bytes, limits, &mut raw).unwrap();
+        let mut typed = OperationBudget::new(limits.max_work);
+        let wire = Decoder::new(limits, &mut typed).program(&value).unwrap();
         let requirements = ProgramRequirements {
             schema_version: wire.envelope.schema_version,
             projection_profile: wire.envelope.projection_profile.clone(),
@@ -1681,20 +1689,6 @@ mod operation_budget_tests {
             execution_abi_version: wire.envelope.execution_abi_version,
             target: wire.envelope.target.clone(),
         };
-        (
-            tidepool_test_data::prepared_encode::encode_wire_program(&wire),
-            requirements,
-        )
-    }
-
-    #[test]
-    fn byte_entry_budget_spans_raw_decode_graph_freeze_and_semantic_validation() {
-        let (bytes, requirements) = fixture();
-        let limits = DecodeLimits::default();
-        let mut raw = OperationBudget::new(limits.max_work);
-        let value = decode_value(&bytes, limits, &mut raw).unwrap();
-        let mut typed = OperationBudget::new(limits.max_work);
-        let wire = Decoder::new(limits, &mut typed).program(&value).unwrap();
         let mut semantic = OperationBudget::new(limits.max_work);
         super::super::validation::validate_program_with_budget(
             &wire,
@@ -1732,7 +1726,16 @@ mod operation_budget_tests {
 
     #[test]
     fn physical_template_identity_copy_is_admitted_before_clone() {
-        let mut constructors = tidepool_test_data::prepared::constructor_program().constructors;
+        let bytes = tidepool_test_data::prepared_encode::encode_wire_program(
+            &tidepool_test_data::prepared::constructor_program(),
+        );
+        let limits = DecodeLimits::default();
+        let mut budget = OperationBudget::new(limits.max_work);
+        let value = decode_value(&bytes, limits, &mut budget).unwrap();
+        let mut constructors = Decoder::new(limits, &mut budget)
+            .program(&value)
+            .unwrap()
+            .constructors;
         constructors[0].identity.occurrence = "X".repeat(4096);
         let identity = &constructors[0].identity;
         let copy_bytes = [
