@@ -9,6 +9,7 @@ import Control.Monad (unless)
 import Control.Monad.IO.Class (liftIO)
 import Control.Exception (evaluate)
 import Data.List (intercalate)
+import Data.Map.Strict qualified as Map
 import Data.Text qualified as Text
 import GHC
 import GHC.Driver.Env (hsc_HPT)
@@ -34,7 +35,7 @@ import System.FilePath ((</>))
 import System.Exit (ExitCode(..))
 import System.Process (proc, readCreateProcessWithExitCode)
 import Tidepool.ExecutionProjection
-  ( ProjectionContext(..), preparedTargetReferences
+  ( ProjectionContext(..), ProjectionError(..), preparedTargetReferences
   , preparedTopIdentities, projectPreparedTarget )
 import Tidepool.ExecutionSchema
   ( Architecture(..), Alternative(..), Atom(..), Endianness(..), Expr(..), Group(..)
@@ -51,7 +52,7 @@ import Tidepool.GhcPipeline
 import Tidepool.PreparedRecovery (RecoveredClosure(closureModules, closureFailures), recoverPreparedClosure)
 import Tidepool.PreparedStg
   ( pmModule, pmBindings, RecoveredModuleFailure(..), newPreparedBodyCache, prepareModule
-  , prepareRecoveredBodies, RecoveredModuleInput(..), prepareRecoveredModule )
+  , prepareRecoveredBodies, RecoveredModuleInput(..), prepareRecoveredModule, preparedExpectedEntry )
 import Tidepool.Resolve
   ( BodyOrigin(..), ExactBodyLookup(..), recoverExactBody )
 
@@ -472,6 +473,49 @@ assertRecoveredKindRep root = do
   _ <- evaluate (length references)
   assert (any isKrepTop identities)
     ("recovered showDouble closure lost GHC.Types:krep$*: " ++ show (closureFailures closure))
+  (owner, krep) <- case
+      [(pmModule modul, binder) | modul <- modules
+      , (Stg.StgTopLifted binding, _) <- pmBindings modul
+      , (binder, Stg.StgRhsCon{}) <- stgPairs binding
+      , moduleNameString (moduleName (pmModule modul)) == "GHC.Types"
+      , occurrence binder == "krep$*"] of
+    [value] -> pure value
+    _ -> fail "completed recovery did not preserve the genuine krep$* constructor"
+  krepEntry <- case filter isKrepTop identities of
+    [identity] -> pure identity
+    _ -> fail "completed recovery did not retain one exact krep$* identity"
+  let krepContext = context { projectionEntry = krepEntry }
+  raw <- lookupFatIfaceExact (prHscEnv pipeline) cache (varName krep)
+  group <- case raw of
+    FatIfaceFound body -> pure body
+    _ -> fail "genuine krep$* fat body was unavailable"
+  partialCache <- newPreparedBodyCache
+  partial <- prepareRecoveredBodies (prHscEnv pipeline) ownerCache partialCache owner [group]
+    >>= either (fail . show) pure
+  partialBinder <- case
+      [binder | (Stg.StgTopLifted binding, _) <- pmBindings partial
+      , (binder, Stg.StgRhsClosure _ _ update parameters _ _) <- stgPairs binding
+      , occurrence binder == "krep$*", update /= Stg.ReEntrant, null parameters] of
+    [binder] -> pure binder
+    _ -> fail "partial krep$* did not exercise the genuine strict-sibling thunk"
+  case importedIdLFInfo <$> preparedExpectedEntry partial partialBinder of
+    Just LFCon{} -> pure ()
+    _ -> fail "partial krep$* lost its exact canonical constructor expectation"
+  assert (any ((== "krep$*1") . occurrence)
+    (preparedTargetReferences krepContext [partial]))
+    "partial constructor preparation hid its missing strict sibling"
+  case projectPreparedTarget krepContext [partial] of
+    Left (RecoveredEntryContractMismatch symbol Nothing True (Just (Signature [] (Returns [Lifted]))) False)
+      | symbol == krepEntry -> pure ()
+    result -> fail ("unresolved constructor did not refuse its exact final entry contract: " ++ show result)
+  complete <- either (fail . ("completed constructor projection failed: " ++) . show) pure
+    (projectPreparedTarget krepContext modules)
+  assert (any (isEmittedConstructor krepEntry) (concatMap groupItems (programBindings complete)))
+    "completed recovery did not emit the selected constructor"
+  case projectPreparedTarget (krepContext
+      { projectionRetainedGenerations = singletonRetained krepEntry }) [partial] of
+    Left (MissingPreparedEntry symbol) | symbol == krepEntry -> pure ()
+    result -> fail ("retained constructor did not omit its body before final validation: " ++ show result)
   projected <- evaluate (projectPreparedTarget context modules)
   case projected of
     Left _ -> pure ()
@@ -481,6 +525,14 @@ assertRecoveredKindRep root = do
   where
     isKrepTop symbol = symbolModule symbol == Text.pack "GHC.Types"
       && symbolOccurrence symbol == Text.pack "krep$*"
+    occurrence = occNameString . nameOccName . varName
+    stgPairs (Stg.StgNonRec binder rhs) = [(binder, rhs)]
+    stgPairs (Stg.StgRec pairs) = pairs
+    groupItems (NonRecursive top) = [top]
+    groupItems (Recursive tops) = tops
+    isEmittedConstructor wanted (TopBinding symbol (HeapBinding _ Constructor{})) = symbol == wanted
+    isEmittedConstructor _ _ = False
+    singletonRetained identity = Map.singleton identity 1
 
 -- Representation-polymorphic error workers must never let an incompatible
 -- fat-interface body reach pre-CorePrep. This fixture records that patError has
