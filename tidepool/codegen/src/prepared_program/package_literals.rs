@@ -5,8 +5,8 @@ use super::{CompileError, CompiledProgram, DemandedImage, GlobalRefusalPhase, So
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tidepool_repr::execution_schema::{
-    CachedHomeOwner, CertifiedGroup, GlobalId, Group, HeapRhs, ImportOwner, RuntimeRep,
-    SymbolIdentity, ValueId,
+    CachedHomeOwner, CertifiedGroup, DefinitionsView, GlobalId, Group, HeapRhs, ImportOwner,
+    RuntimeRep, SymbolIdentity, ValueId,
 };
 
 #[cfg(test)]
@@ -109,21 +109,30 @@ impl GroupPackageLiterals {
         supplied: &BTreeMap<SymbolIdentity, PackageLiteral>,
         sources: &BTreeMap<SourceBinder, SourceLiteral>,
     ) -> Result<Self, CompileError> {
+        Self::select_definitions(&group.definitions(), group.imports(), supplied, sources)
+    }
+
+    pub(super) fn select_definitions(
+        definitions: &DefinitionsView<'_>,
+        owners: &[ImportOwner],
+        supplied: &BTreeMap<SymbolIdentity, PackageLiteral>,
+        sources: &BTreeMap<SourceBinder, SourceLiteral>,
+    ) -> Result<Self, CompileError> {
+        if definitions.globals().len() != owners.len() {
+            return Err(CompileError::LiteralImportCount {
+                globals: definitions.globals().len(),
+                owners: owners.len(),
+            });
+        }
         let mut selected = BTreeMap::new();
-        for (index, (declaration, owner)) in group
-            .definitions()
-            .globals()
-            .iter()
-            .zip(group.imports())
-            .enumerate()
-        {
+        for (index, (declaration, owner)) in definitions.globals().iter().zip(owners).enumerate() {
             if declaration.rep != RuntimeRep::Address {
                 continue;
             }
             let id = GlobalId(index as u32);
             let missing = || {
                 super::unsupported_global(
-                    &group.definitions(),
+                    definitions,
                     id,
                     GlobalRefusalPhase::NonReferenceRepresentation,
                 )

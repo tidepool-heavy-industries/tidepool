@@ -223,6 +223,8 @@ pub enum CompileError {
     Descriptor(#[from] tidepool_heap::execution_descriptor::DescriptorConstructionError),
     #[error("checked program lacks representation for {0:?}")]
     MissingRepresentation(ValueId),
+    #[error("literal import owner count {owners} differs from declared globals {globals}")]
+    LiteralImportCount { globals: usize, owners: usize },
     #[error("immutable package literal differs from the certified global {0:?}")]
     PackageLiteralContract(Box<tidepool_repr::execution_schema::SymbolIdentity>),
     #[error("immutable source literal differs from the certified global {0:?}")]
@@ -624,6 +626,32 @@ impl CompiledProgram {
             &mut DescriptorInterner::default(),
             &Arc::new(static_bytes::PinnedBytes::empty()),
         )
+    }
+
+    /// Specialize target imports only with storage from actual compiled original
+    /// singleton Bytes groups. The target's resolved owners bind each literal's
+    /// original binder and version; machine batch admission rechecks its producer.
+    pub fn compile_prepared_with_source_literals(
+        prepared: &PreparedProgram,
+        owners: &[tidepool_repr::execution_schema::ImportOwner],
+        sources: &BTreeMap<SourceBinder, SourceLiteral>,
+        registry: &ImageRegistry,
+    ) -> Result<Arc<Self>, CompileError> {
+        let literals = package_literals::GroupPackageLiterals::select_definitions(
+            &prepared.definitions(),
+            owners,
+            &BTreeMap::new(),
+            sources,
+        )?;
+        registry.get_or_compile_literal_prepared(prepared, &literals, || {
+            Self::compile_definitions_with_literals(
+                prepared.definitions(),
+                &mut DescriptorInterner::default(),
+                &Arc::new(static_bytes::PinnedBytes::empty()),
+                &literals,
+            )
+            .map(Arc::new)
+        })
     }
 
     /// [`Self::compile`] against `interner`: constructor identities already

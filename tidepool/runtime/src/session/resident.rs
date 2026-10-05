@@ -1680,15 +1680,9 @@ impl PendingPreparedSource {
                 registry,
                 admitted_public,
             } => {
-                let target = super::prepared::CertifiedTargetImage::compile_certified(
-                    prepared,
-                    &registry,
-                    resolved.package_interfaces.clone(),
-                )
-                .map_err(PreparedRuntimeError::Compile)?;
-                let target = target.with_source_plan(resolved.source_plan.clone());
-                let demanded =
-                    target.compile_scoped_demanded(resolved.groups.iter().cloned(), &registry)?;
+                let (target, demanded) = super::prepared::CertifiedTargetImage::compile_scoped(
+                    prepared, &resolved, &registry,
+                )?;
                 Ok(ReadyPreparedSource::Certified {
                     resolved,
                     admitted_public,
@@ -4726,16 +4720,9 @@ where
                 .state
                 .resolve_certification_in(scope, &prepared, certification)?;
             let registry = self.state.certified_image_registry();
-            let target = super::prepared::CertifiedTargetImage::compile_certified(
-                prepared,
-                &registry,
-                resolved.package_interfaces.clone(),
-            )
-            .map_err(PreparedRuntimeError::Compile)?;
-            let target = target.with_source_plan(resolved.source_plan.clone());
-            let demanded = target
-                .compile_scoped_demanded(resolved.groups, &registry)
-                .map_err(PreparedRuntimeError::from)?;
+            let (target, demanded) = super::prepared::CertifiedTargetImage::compile_scoped(
+                prepared, &resolved, &registry,
+            )?;
             self.install_certified_turn_in(
                 scope,
                 target,
@@ -5528,16 +5515,9 @@ where
                 self.state
                     .resolve_certification_in(lexical_scope, &prepared, certification)?;
             let registry = self.state.certified_image_registry();
-            let target = super::prepared::CertifiedTargetImage::compile_certified(
-                prepared,
-                &registry,
-                resolved.package_interfaces.clone(),
-            )
-            .map_err(PreparedRuntimeError::Compile)?;
-            let target = target.with_source_plan(resolved.source_plan.clone());
-            let demanded = target
-                .compile_scoped_demanded(resolved.groups, &registry)
-                .map_err(PreparedRuntimeError::from)?;
+            let (target, demanded) = super::prepared::CertifiedTargetImage::compile_scoped(
+                prepared, &resolved, &registry,
+            )?;
             self.install_certified_turn_in(
                 lexical_scope,
                 target,

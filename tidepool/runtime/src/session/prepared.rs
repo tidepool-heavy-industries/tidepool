@@ -15,6 +15,8 @@ use tidepool_toolchain::certified_products::CertifiedTargetPackageInterfaces;
 
 use super::binding_table::BindingIndex;
 use tidepool_codegen::machine_state::MachineFailure;
+#[cfg(test)]
+use tidepool_codegen::prepared_program::ScopedCertifiedGroup;
 use tidepool_codegen::prepared_program::{
     BatchImport, BatchLeaseRequest, BatchProgram, CompileError, CompiledProgram, DefinitionFacts,
     DemandError, DemandedImage, ExecutionError, ImageRegistry, ImportBindings,
@@ -22,8 +24,8 @@ use tidepool_codegen::prepared_program::{
     ParkRequest, PreparedCallOptions, PreparedFrameEvidence, PreparedHandle, PreparedInput,
     PreparedMachine, PreparedMachineOptions, PreparedOuter as CodegenPreparedOuter,
     PreparedReplyEvidence, PreparedResult, PreparedResultBatch, ProgramId, RunOptions,
-    ScopedCertifiedGroup, ScopedDemandedImage, ScopedSourceBinder, SourceBinder,
-    SourceInstanceAttachment, SourceInstanceDomain, SourceInstanceLease, MAX_ANSWER_DEPTH,
+    ScopedDemandedImage, ScopedSourceBinder, SourceBinder, SourceInstanceAttachment,
+    SourceInstanceDomain, SourceInstanceLease, SourceLiteral, MAX_ANSWER_DEPTH,
 };
 // Re-exported: callers of this module's resource-scope cancellation API
 // (`open_realm`/`cancel_handle`/`close_realm`) need both types without a
@@ -675,6 +677,39 @@ pub(crate) struct CertifiedTargetImage {
     source_plan: Option<super::persistent::ResolvedSourceDomainPlan>,
 }
 
+fn target_owners_match(prepared: &PreparedProgram, owners: &[ImportOwner]) -> bool {
+    prepared.globals().len() == owners.len()
+        && prepared
+            .globals()
+            .iter()
+            .zip(owners)
+            .all(|(declaration, owner)| match owner {
+                ImportOwner::Source { binder, .. } => {
+                    binder == &declaration.identity && declaration.required_generation.is_none()
+                }
+                ImportOwner::Retained { generation, .. } => {
+                    declaration.required_generation == Some(*generation)
+                }
+                ImportOwner::CodeExport {
+                    binder, generation, ..
+                } => {
+                    binder == &declaration.identity
+                        && declaration.required_generation == Some(*generation)
+                }
+                ImportOwner::Package {
+                    unit,
+                    module,
+                    binder,
+                    ..
+                } => {
+                    binder == &declaration.identity
+                        && &binder.unit == unit
+                        && &binder.module == module
+                        && declaration.required_generation.is_none()
+                }
+            })
+}
+
 impl CertifiedTargetImage {
     #[cfg(test)]
     pub(crate) fn compile(
@@ -688,6 +723,7 @@ impl CertifiedTargetImage {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn compile_certified(
         prepared: PreparedProgram,
         registry: &ImageRegistry,
@@ -710,12 +746,80 @@ impl CertifiedTargetImage {
         })
     }
 
-    pub(crate) fn compile_demanded(
-        &self,
-        groups: impl IntoIterator<Item = CertifiedGroup>,
+    pub(crate) fn compile_scoped(
+        prepared: PreparedProgram,
+        resolved: &super::persistent::ResolvedCertifiedTurn,
         registry: &ImageRegistry,
-    ) -> Result<Vec<DemandedImage>, DemandError> {
-        let groups = groups.into_iter().collect::<Vec<_>>();
+    ) -> Result<(Self, Vec<DemandedImage>), PreparedRuntimeError> {
+        let groups = resolved
+            .groups
+            .iter()
+            .map(|group| group.original().clone())
+            .collect();
+        let (target, compiled) = Self::compile_originals(
+            prepared,
+            &resolved.target_owners,
+            registry,
+            resolved.package_interfaces.clone(),
+            groups,
+        )?;
+        let demanded = compiled
+            .into_iter()
+            .zip(resolved.groups.iter().cloned())
+            .map(|(image, group)| {
+                ScopedDemandedImage::admit(image, group).map(ScopedDemandedImage::into_image)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((
+            target.with_source_plan(resolved.source_plan.clone()),
+            demanded,
+        ))
+    }
+
+    fn compile_originals(
+        prepared: PreparedProgram,
+        owners: &[ImportOwner],
+        registry: &ImageRegistry,
+        package_interfaces: CertifiedTargetPackageInterfaces,
+        groups: Vec<CertifiedGroup>,
+    ) -> Result<(Self, Vec<DemandedImage>), PreparedRuntimeError> {
+        if !target_owners_match(&prepared, owners) {
+            return Err(PreparedRuntimeError::CertifiedTargetOwners);
+        }
+        let (compiled, source_literals) = Self::compile_literal_producers(&groups, registry)?;
+        let image = CompiledProgram::compile_prepared_with_source_literals(
+            &prepared,
+            owners,
+            &source_literals,
+            registry,
+        )
+        .map_err(PreparedRuntimeError::Compile)?;
+        let package_literals = if package_interfaces.matches_target(&prepared) {
+            image.package_literals(|unit, module| package_interfaces.interface_digest(unit, module))
+        } else {
+            BTreeMap::new()
+        };
+        let target = Self {
+            prepared,
+            image,
+            package_interfaces,
+            package_literals,
+            source_plan: None,
+        };
+        let demanded = target.finish_demanded(groups, compiled, &source_literals, registry)?;
+        Ok((target, demanded))
+    }
+
+    fn compile_literal_producers(
+        groups: &[CertifiedGroup],
+        registry: &ImageRegistry,
+    ) -> Result<
+        (
+            Vec<Option<DemandedImage>>,
+            BTreeMap<SourceBinder, SourceLiteral>,
+        ),
+        DemandError,
+    > {
         let mut compiled = (0..groups.len()).map(|_| None).collect::<Vec<_>>();
         let mut source_literals = BTreeMap::new();
         // Original string-literal groups have no imports. Compile those
@@ -730,11 +834,7 @@ impl CertifiedTargetImage {
             if !matches!(top.binding.rhs, HeapRhs::Bytes(_)) {
                 continue;
             }
-            let image = DemandedImage::compile_with_package_literals(
-                group.clone(),
-                registry,
-                &self.package_literals,
-            )?;
+            let image = DemandedImage::compile(group.clone(), registry)?;
             for (binder, literal) in image.source_literals() {
                 if let Some(previous) = source_literals.get(&binder) {
                     if previous != &literal {
@@ -746,6 +846,16 @@ impl CertifiedTargetImage {
             }
             compiled[index] = Some(image);
         }
+        Ok((compiled, source_literals))
+    }
+
+    fn finish_demanded(
+        &self,
+        groups: Vec<CertifiedGroup>,
+        compiled: Vec<Option<DemandedImage>>,
+        source_literals: &BTreeMap<SourceBinder, SourceLiteral>,
+        registry: &ImageRegistry,
+    ) -> Result<Vec<DemandedImage>, DemandError> {
         groups
             .into_iter()
             .zip(compiled)
@@ -755,10 +865,22 @@ impl CertifiedTargetImage {
                     group,
                     registry,
                     &self.package_literals,
-                    &source_literals,
+                    source_literals,
                 ),
             })
             .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn compile_demanded(
+        &self,
+        groups: impl IntoIterator<Item = CertifiedGroup>,
+        registry: &ImageRegistry,
+    ) -> Result<Vec<DemandedImage>, DemandError> {
+        let groups = groups.into_iter().collect::<Vec<_>>();
+        tidepool_codegen::prepared_program::GroupInventory::new(&groups)?;
+        let (compiled, literals) = Self::compile_literal_producers(&groups, registry)?;
+        self.finish_demanded(groups, compiled, &literals, registry)
     }
 
     pub(crate) fn with_source_plan(
@@ -784,16 +906,19 @@ impl CertifiedTargetImage {
             }),
         }
     }
+    #[cfg(test)]
     pub(crate) fn compile_scoped_demanded(
         &self,
         groups: impl IntoIterator<Item = ScopedCertifiedGroup>,
         registry: &ImageRegistry,
     ) -> Result<Vec<DemandedImage>, DemandError> {
         let groups: Vec<_> = groups.into_iter().collect();
-        let compiled = self.compile_demanded(
-            groups.iter().map(|group| group.original().clone()),
-            registry,
-        )?;
+        let originals = groups
+            .iter()
+            .map(|group| group.original().clone())
+            .collect::<Vec<_>>();
+        let (compiled, literals) = Self::compile_literal_producers(&originals, registry)?;
+        let compiled = self.finish_demanded(originals, compiled, &literals, registry)?;
         compiled
             .into_iter()
             .zip(groups)
@@ -3789,38 +3914,8 @@ impl PreparedEngine {
         target_packages: BTreeMap<SymbolIdentity, (ValueId, [u8; 32])>,
         certified_exports: BTreeMap<SymbolIdentity, [u8; 32]>,
     ) -> Result<CertifiedTurnInstall, PreparedRuntimeError> {
-        if target.prepared.globals().len() != target_owners.len() {
+        if !target_owners_match(&target.prepared, target_owners) {
             return Err(PreparedRuntimeError::CertifiedTargetOwners);
-        }
-        for (declaration, owner) in target.prepared.globals().iter().zip(target_owners) {
-            let aligned = match owner {
-                ImportOwner::Source { binder, .. } => {
-                    binder == &declaration.identity && declaration.required_generation.is_none()
-                }
-                ImportOwner::Retained { generation, .. } => {
-                    declaration.required_generation == Some(*generation)
-                }
-                ImportOwner::CodeExport {
-                    binder, generation, ..
-                } => {
-                    binder == &declaration.identity
-                        && declaration.required_generation == Some(*generation)
-                }
-                ImportOwner::Package {
-                    unit,
-                    module,
-                    binder,
-                    ..
-                } => {
-                    binder == &declaration.identity
-                        && &binder.unit == unit
-                        && &binder.module == module
-                        && declaration.required_generation.is_none()
-                }
-            };
-            if !aligned {
-                return Err(PreparedRuntimeError::CertifiedTargetOwners);
-            }
         }
 
         let mut source = BTreeMap::<ScopedSourceBinder, (usize, ValueId)>::new();
@@ -5973,7 +6068,10 @@ pub(super) mod tests {
         );
         assert!(matches!(
             target.compile_demanded([groups[1].clone(), groups[1].clone()], &registry),
-            Err(DemandError::DuplicateBinder(_))
+            Err(DemandError::DuplicateGroup { unit, module, ordinal })
+                if unit == groups[1].owner().unit
+                    && module == groups[1].owner().module
+                    && ordinal == groups[1].original_ordinal()
         ));
     }
 
@@ -6091,6 +6189,178 @@ pub(super) mod tests {
         assert!(engine.unpin(id));
         engine.quiesce_and_collect_now().unwrap();
         assert_eq!(engine.residency(), before);
+    }
+
+    #[test]
+    fn certified_target_only_literal_preserves_custody_and_collection_without_leases() {
+        let [_, producer] = certified_source_literal_groups();
+        let groups = vec![producer];
+        let evidence = certified_source_evidence(&groups);
+        let literal = SourceBinder {
+            version: groups[0].owner().module_version.clone(),
+            binder: testing::identity("Fixture", "literal"),
+        };
+        let owners = vec![ImportOwner::Source {
+            version: literal.version.clone(),
+            binder: literal.binder.clone(),
+        }];
+        let mut wire = testing::wire_program();
+        wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::Address]);
+        wire.expressions.nodes[0] =
+            ExprFrame::Return(vec![Atom::Ref(ValueRef::Global(GlobalId(0)))]);
+        wire.globals.push(GlobalDecl {
+            identity: literal.binder.clone(),
+            rep: RuntimeRep::Address,
+            entry_signature: None,
+            required_evaluated: true,
+            required_generation: None,
+        });
+        let prepared = testing::prepare(wire).unwrap();
+        let registry = ImageRegistry::new();
+        let mut scopes = tidepool_codegen::scope::ScopeTree::new();
+        let scope = scopes.mint_isolated();
+        let bindings = BindingTable::new();
+        let selection = bindings.source_domain_selection_in(&scopes, scope).unwrap();
+        let snapshot = bindings.scope_snapshot(&scopes, scope).unwrap();
+        let (selected, inherited, roots) =
+            tidepool_codegen::prepared_program::GroupInventory::new(&groups)
+                .unwrap()
+                .seal_in_domains([literal.clone()], &selection)
+                .unwrap();
+        assert!(inherited.is_empty());
+        let resolved = super::super::persistent::ResolvedCertifiedTurn {
+            groups: selected,
+            target_owners: owners.clone(),
+            package_interfaces: CertifiedTargetPackageInterfaces::default(),
+            source_evidence: evidence.clone(),
+            inherited_needed: vec![],
+            source_plan: super::super::persistent::ResolvedSourceDomainPlan::fixture(
+                roots, selection, snapshot,
+            ),
+        };
+        let compile = || {
+            CertifiedTargetImage::compile_scoped(prepared.clone(), &resolved, &registry).unwrap()
+        };
+        let (target, demanded) = compile();
+        assert_eq!(
+            target.image.authenticated_source_literal(GlobalId(0)),
+            Some(&literal)
+        );
+        assert_eq!(demanded.len(), 1);
+        assert_eq!(demanded[0].group(), &groups[0]);
+        let (mut engine, _) =
+            PreparedEngine::bootstrap(testing::prepare(testing::wire_program()).unwrap()).unwrap();
+        let before = engine.residency();
+        for mutation in 0..6 {
+            let mut wrong = evidence.clone();
+            match mutation {
+                0 => {
+                    wrong.remove(&literal);
+                }
+                1 => wrong.get_mut(&literal).unwrap().0.product_sha256 = [9; 32],
+                2 => wrong.get_mut(&literal).unwrap().0.skinny_iface_sha256 = [9; 32],
+                3 => {
+                    wrong.get_mut(&literal).unwrap().0.module_version =
+                        tidepool_repr::execution_schema::ModuleVersion([9; 32])
+                }
+                4 => wrong.get_mut(&literal).unwrap().1 += 1,
+                5 => wrong.get_mut(&literal).unwrap().0.module = "Other".into(),
+                _ => unreachable!(),
+            }
+            let (target, demanded) = compile();
+            assert!(matches!(
+                engine.install_certified_turn(
+                    target,
+                    &owners,
+                    &wrong,
+                    demanded,
+                    &[],
+                    &BTreeMap::new(),
+                    &HashMap::new(),
+                    &bindings,
+                ),
+                Err(PreparedRuntimeError::InvalidCertifiedSourceOwner(_))
+            ));
+            assert_eq!(engine.residency(), before);
+        }
+        let installed = engine
+            .install_certified_turn(
+                target,
+                &owners,
+                &evidence,
+                demanded,
+                &[],
+                &BTreeMap::new(),
+                &HashMap::new(),
+                &bindings,
+            )
+            .unwrap();
+        assert!(installed.leases.is_empty());
+        let producer = installed.groups[0];
+        let id = engine.commit_certified_turn(installed);
+        let result = engine
+            .machine
+            .run_entry_retained(
+                id,
+                ValueId(0),
+                &[],
+                PreparedCallOptions {
+                    observation_budget: 0,
+                    collect_before_observation: true,
+                },
+                RealmId::ROOT,
+            )
+            .unwrap();
+        let [PreparedResult::Scalar(address)] = result.values.as_slice() else {
+            panic!("target returns its authenticated source address");
+        };
+        engine.quiesce_and_collect_now().unwrap();
+        assert!(!engine.programs.contains_key(&producer));
+        // SAFETY: the pinned target image owns this authenticated literal allocation.
+        let bytes = unsafe { std::slice::from_raw_parts(*address as *const u8, 11) };
+        assert_eq!(bytes, b"error\0tail\0");
+        assert!(engine.unpin(id));
+        engine.quiesce_and_collect_now().unwrap();
+        assert_eq!(engine.residency(), before);
+
+        let counts = (registry.hits(), registry.misses());
+        for requested in [vec![], vec![owners[0].clone(), owners[0].clone()]] {
+            assert!(matches!(
+                CertifiedTargetImage::compile_originals(
+                    prepared.clone(),
+                    &requested,
+                    &registry,
+                    CertifiedTargetPackageInterfaces::default(),
+                    groups.clone(),
+                ),
+                Err(PreparedRuntimeError::CertifiedTargetOwners)
+            ));
+        }
+        let wrong = [ImportOwner::Source {
+            version: literal.version.clone(),
+            binder: testing::identity("Other", "literal"),
+        }];
+        assert!(matches!(
+            CertifiedTargetImage::compile_originals(
+                prepared.clone(),
+                &wrong,
+                &registry,
+                CertifiedTargetPackageInterfaces::default(),
+                groups.clone(),
+            ),
+            Err(PreparedRuntimeError::CertifiedTargetOwners)
+        ));
+        assert_eq!((registry.hits(), registry.misses()), counts);
+        assert!(matches!(
+            CertifiedTargetImage::compile_originals(
+                prepared,
+                &owners,
+                &registry,
+                CertifiedTargetPackageInterfaces::default(),
+                vec![],
+            ),
+            Err(PreparedRuntimeError::Compile(CompileError::Unsupported(_)))
+        ));
     }
 
     #[test]

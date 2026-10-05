@@ -54,6 +54,10 @@ struct Entries {
 #[derive(Clone, Eq, Hash, PartialEq)]
 enum ImageKey {
     Program(PreparedProgram),
+    LiteralProgram(
+        PreparedProgram,
+        super::package_literals::GroupPackageLiterals,
+    ),
     Group(CertifiedGroupCode),
     LiteralGroup(
         CertifiedGroupCode,
@@ -232,6 +236,21 @@ impl ImageRegistry {
         compile: impl FnOnce() -> Result<Arc<CompiledProgram>, E>,
     ) -> Result<Arc<CompiledProgram>, E> {
         self.get_or_compile_key(ImageKey::Program(prepared.clone()), compile)
+    }
+
+    pub(super) fn get_or_compile_literal_prepared<E>(
+        &self,
+        prepared: &PreparedProgram,
+        literals: &super::package_literals::GroupPackageLiterals,
+        compile: impl FnOnce() -> Result<Arc<CompiledProgram>, E>,
+    ) -> Result<Arc<CompiledProgram>, E> {
+        if literals.iter().next().is_none() {
+            return self.get_or_compile_prepared(prepared, compile);
+        }
+        self.get_or_compile_key(
+            ImageKey::LiteralProgram(prepared.clone(), literals.clone()),
+            compile,
+        )
     }
 
     /// Share an exact worker-certified source group across concurrent native

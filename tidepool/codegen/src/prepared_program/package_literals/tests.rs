@@ -820,3 +820,176 @@ fn source_literal_batch_refuses_a_mixed_producer_with_matching_bytes_and_owner()
     assert_eq!(machine.residency(), before);
     assert!(install_source_literal(&mut machine, &consumer, &producer).is_ok());
 }
+
+fn source_literal_target(captured: bool) -> tidepool_repr::execution_schema::PreparedProgram {
+    let mut wire = group_wire(captured, true);
+    wire.globals[0].identity = source_literal_identity();
+    testing::prepare(wire).unwrap()
+}
+
+#[test]
+fn source_literal_target_executes_with_exact_batch_producer_and_no_managed_address() {
+    let registry = ImageRegistry::new();
+    let producer = source_literal_producer(literal_owner(), 1, BYTES, &registry);
+    let key = SourceBinder {
+        version: literal_owner().module_version,
+        binder: source_literal_identity(),
+    };
+    for captured in [false, true] {
+        let target = CompiledProgram::compile_prepared_with_source_literals(
+            &source_literal_target(captured),
+            &[ImportOwner::Source {
+                version: key.version.clone(),
+                binder: key.binder.clone(),
+            }],
+            &producer.source_literals(),
+            &registry,
+        )
+        .unwrap();
+        assert_eq!(target.authenticated_source_literal(GlobalId(0)), Some(&key));
+        let install = |machine: &mut PreparedMachine<'_>, producer: &DemandedImage| {
+            machine.install_shared_batch(vec![
+                BatchProgram {
+                    image: Arc::clone(&target),
+                    imports: vec![BatchImport::Source {
+                        group: 1,
+                        binding: ValueId(0),
+                    }],
+                },
+                BatchProgram {
+                    image: Arc::clone(producer.image()),
+                    imports: vec![],
+                },
+            ])
+        };
+        // Equal bytes do not substitute another original producer.
+        for difference in 0..4 {
+            let mut owner = literal_owner();
+            let mut ordinal = 1;
+            match difference {
+                0 => owner.product_sha256 = [7; 32],
+                1 => owner.skinny_iface_sha256 = [7; 32],
+                2 => owner.module_version = ModuleVersion([7; 32]),
+                _ => ordinal = 2,
+            }
+            let wrong = source_literal_producer(owner, ordinal, BYTES, &registry);
+            let mut machine = machine();
+            let before = machine.residency();
+            assert!(matches!(
+                install(&mut machine, &wrong),
+                Err(ExecutionError::BatchSourceContract(_))
+            ));
+            assert_eq!(machine.residency(), before);
+        }
+        let mut machine = machine();
+        let ids = install(&mut machine, &producer).unwrap();
+        machine.pin(ids[0]).unwrap();
+        assert_bytes(address(&mut machine, ids[0]));
+        assert!(!machine.import_slot_is_registered_root(ids[0], &key.binder));
+        machine.collect_major(machine.quiesce().unwrap()).unwrap();
+        assert_bytes(address(&mut machine, ids[0]));
+        assert!(machine.unpin(ids[0]));
+        machine.collect_major(machine.quiesce().unwrap()).unwrap();
+        assert_eq!(machine.residency().programs, 0);
+    }
+}
+
+#[test]
+fn source_literal_target_refuses_missing_version_owner_and_count_before_cache_lookup() {
+    let registry = ImageRegistry::new();
+    let producer = source_literal_producer(literal_owner(), 1, BYTES, &registry);
+    let prepared = source_literal_target(false);
+    let owners = vec![ImportOwner::Source {
+        version: literal_owner().module_version,
+        binder: source_literal_identity(),
+    }];
+    let counts = (registry.hits(), registry.misses());
+    for supplied in [BTreeMap::new(), producer.source_literals()] {
+        let mut requested = owners.clone();
+        if !supplied.is_empty() {
+            let ImportOwner::Source { version, .. } = &mut requested[0] else {
+                unreachable!()
+            };
+            *version = ModuleVersion([9; 32]);
+        }
+        assert!(matches!(
+            CompiledProgram::compile_prepared_with_source_literals(
+                &prepared, &requested, &supplied, &registry,
+            ),
+            Err(CompileError::Unsupported(
+                super::super::Unsupported::Global(_)
+            ))
+        ));
+    }
+    let mut wire = group_wire(false, true);
+    wire.globals[0].identity = testing::identity("Other", "literal");
+    assert!(matches!(
+        CompiledProgram::compile_prepared_with_source_literals(
+            &testing::prepare(wire).unwrap(),
+            &owners,
+            &producer.source_literals(),
+            &registry,
+        ),
+        Err(CompileError::SourceLiteralContract(_))
+    ));
+    for requested in [vec![], vec![owners[0].clone(), owners[0].clone()]] {
+        assert!(matches!(
+            CompiledProgram::compile_prepared_with_source_literals(
+                &prepared, &requested, &producer.source_literals(), &registry,
+            ),
+            Err(CompileError::LiteralImportCount { globals: 1, owners })
+                if owners == requested.len()
+        ));
+    }
+    assert_eq!((registry.hits(), registry.misses()), counts);
+}
+
+#[test]
+fn source_literal_target_registry_keys_keep_exact_producer_ordinal_version_and_bytes() {
+    let registry = ImageRegistry::new();
+    let prepared = source_literal_target(false);
+    let compile = |producer: &DemandedImage| {
+        CompiledProgram::compile_prepared_with_source_literals(
+            &prepared,
+            &[ImportOwner::Source {
+                version: producer.group().owner().module_version.clone(),
+                binder: source_literal_identity(),
+            }],
+            &producer.source_literals(),
+            &registry,
+        )
+        .unwrap()
+    };
+    let producer = source_literal_producer(literal_owner(), 1, BYTES, &registry);
+    let first = compile(&producer);
+    assert!(Arc::ptr_eq(&first, &compile(&producer)));
+    for difference in 0..5 {
+        let mut owner = literal_owner();
+        let mut ordinal = 1;
+        let mut bytes = BYTES;
+        match difference {
+            0 => owner.product_sha256 = [7; 32],
+            1 => owner.skinny_iface_sha256 = [7; 32],
+            2 => owner.module_version = ModuleVersion([7; 32]),
+            3 => ordinal = 2,
+            _ => bytes = b"False",
+        }
+        let different = source_literal_producer(owner, ordinal, bytes, &registry);
+        assert!(!Arc::ptr_eq(&first, &compile(&different)));
+    }
+    // A target with no literal imports retains the ordinary shared key.
+    let plain = testing::prepare(testing::wire_program()).unwrap();
+    let first = CompiledProgram::compile_prepared_with_source_literals(
+        &plain,
+        &[],
+        &BTreeMap::new(),
+        &registry,
+    )
+    .unwrap();
+    let ordinary = registry
+        .get_or_compile_prepared(&plain, || {
+            CompiledProgram::compile_prepared_definitions(&plain).map(Arc::new)
+        })
+        .unwrap();
+    assert!(Arc::ptr_eq(&first, &ordinary));
+}
