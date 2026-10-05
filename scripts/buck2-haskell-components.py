@@ -220,23 +220,29 @@ def fields_for(component, roster, package_name):
 
 
 def native_catalog_cohort(roster):
-    """Select fixed support sources; test executables/packages are not inputs."""
-    component = roster["native-helper-contract"]
-    modules = sorted(set(component.modules) | (EFFECTS - {"Tidepool.Effects"}))
+    """Project runtime source owners; compiler closure owns emitted inventory."""
     selected = {}
-    for module in modules:
-        if module == "Tidepool.Effects":
-            raise ValueError("the invocation-specific effects shim cannot enter the fixed catalog cohort")
-        path, target = source(module, component.source_dirs)
-        if module in EFFECTS:
-            selected[module] = "effects/" + path
-        elif target.startswith(("lib/", "actors/")):
-            selected[module] = target
-        elif target.startswith(("test-support/", "test-check/")):
-            continue
-        else:
-            raise ValueError(f"catalog support module lacks a fixed runtime source: {module}")
-    return {"component": component.name, "modules": selected}
+    components = set()
+    for component in roster.values():
+        for module in component.modules:
+            path, target = source(module, component.source_dirs)
+            if module in EFFECTS:
+                relative = "effects/" + path
+            elif is_jev_core(module):
+                relative = "jev/core/" + path
+            elif target.startswith(("lib/", "actors/")):
+                relative = target
+            else:
+                continue
+            previous = selected.setdefault(module, relative)
+            if previous != relative:
+                raise ValueError(f"conflicting runtime source owners for {module}")
+            components.add(component.name)
+    if not selected:
+        raise ValueError("native catalog lacks declared runtime source owners")
+    for module in EFFECTS:
+        selected[module] = "effects/" + module.replace(".", "/") + ".hs"
+    return {"components": sorted(components), "modules": dict(sorted(selected.items()))}
 
 
 def render(metadata=None):

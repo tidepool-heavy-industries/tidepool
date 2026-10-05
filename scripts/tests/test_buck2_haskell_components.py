@@ -164,7 +164,7 @@ class ComponentProjectionTests(unittest.TestCase):
         self.assertIn("remote.enabled=false", arguments)
         self.assertNotIn("runghc", arguments)
 
-    def test_catalog_projects_fixed_module_owners_without_test_packages_or_row_shim(self):
+    def test_catalog_projects_all_runtime_source_owners_without_test_packages(self):
         for relative in ("lib/Library.hs", "actors/Actor.hs", "test-support/Runner.hs"):
             path = self.package / relative
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -175,23 +175,40 @@ class ComponentProjectionTests(unittest.TestCase):
                            [dependency("tasty"), dependency("text")])
         _, roster = G.normalized_components(self.metadata(tests=[helper]))
         cohort = G.native_catalog_cohort(roster)
-        self.assertEqual(cohort, {"component": "native-helper-contract", "modules": {
+        self.assertEqual(cohort, {"components": ["native-helper-contract"], "modules": {
             "Actor": "actors/Actor.hs", "Library": "lib/Library.hs",
+            "Tidepool.Effects": "effects/Tidepool/Effects.hs",
             "Tidepool.Effects.Authored": "effects/Tidepool/Effects/Authored.hs",
             "Tidepool.Effects.Core": "effects/Tidepool/Effects/Core.hs",
         }})
-        self.assertNotIn("Tidepool.Effects", cohort["modules"])
+        self.assertIn("Tidepool.Effects", cohort["modules"])
         self.assertNotIn("dependencies", cohort)
         helper["modules"].append("Tidepool.Effects")
         _, roster = G.normalized_components(self.metadata(tests=[helper]))
-        with self.assertRaisesRegex(ValueError, "invocation-specific effects shim"):
-            G.native_catalog_cohort(roster)
+        self.assertEqual(G.native_catalog_cohort(roster), cohort)
+
         helper["modules"].pop()
         helper["source_dirs"].append("test")
         helper["modules"].append("Negative")
         _, roster = G.normalized_components(self.metadata(tests=[helper]))
-        with self.assertRaisesRegex(ValueError, "lacks a fixed runtime source"):
-            G.native_catalog_cohort(roster)
+        self.assertEqual(G.native_catalog_cohort(roster), cohort)
+
+    def test_catalog_joins_runtime_owners_across_components_with_pinned_jev(self):
+        for relative in ("lib/Library.hs", "actors/Actor.hs"):
+            path = self.package / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("module Example where\n")
+        helpers = component("native-helper-contract", "test-suite", "tests", ("lib",),
+                            ("Library",), [dependency("tasty")])
+        actors = component("actor-contract", "test-suite", "tests",
+                           ("actors", "generated/jev/core"), ("Actor", "Jev.Core.Json"),
+                           [dependency("tasty-hunit")], ghc_options=["-DTEST_ONLY"])
+        _, roster = G.normalized_components(self.metadata(tests=[helpers, actors]))
+        cohort = G.native_catalog_cohort(roster)
+        self.assertEqual(cohort["components"], ["actor-contract", "native-helper-contract"])
+        self.assertEqual(cohort["modules"]["Actor"], "actors/Actor.hs")
+        self.assertEqual(cohort["modules"]["Jev.Core.Json"], "jev/core/Jev/Core/Json.hs")
+        self.assertEqual(set(cohort), {"components", "modules"})
 
 
 class FixtureInputBoundaryTests(unittest.TestCase):
