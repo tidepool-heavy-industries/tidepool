@@ -8,6 +8,7 @@ module Tidepool.ExecutionProjection
   , projectPreparedModuleGroups, projectPreparedModuleGroupsSelected
   , PreparedModuleProducts, OriginalGroupOmission(..), OriginalGroupOmissionReason(..)
   , projectPreparedModuleProducts, projectOriginalHomeModuleProducts
+  , projectOriginalHomeModuleProductDemand
   , preparedModuleProductOutcomes, preparedModuleProductOmissions
   , closeUnavailableOriginalGroups, closeUnavailableOriginalModules
   , PreparedProjection
@@ -102,7 +103,10 @@ import Tidepool.ExecutionSchema
 import Tidepool.ExecutionSchema qualified as Schema
 import Tidepool.PreparedFacts (PreparedFacts(..), extractPreparedFacts)
 import Tidepool.Identity (varId)
-import Tidepool.PreparedStg (PreparedModule(..), PreparedCoverage(..))
+import Tidepool.PreparedStg
+  ( PreparedModule, PreparedCoverage(..), pmModule, pmCoverage, pmBindings
+  , pmTypeGraph, pmPreparedSites, pmSiteRejections, pmRequestSiteTyCon, pmTagSigs
+  , filterPreparedBindings, preparedRejectsIntrinsic )
 import Tidepool.PreparedSites (SiteRejection(..))
 import Tidepool.PreparedSites (PreparedSite(..), requestReplyIndex)
 import Tidepool.EffectSchema qualified as Effect
@@ -145,6 +149,7 @@ data ProjectionError
   | UnsupportedPrimitiveCall Text Signature
   | UnsupportedForeignCall Text Signature
   | UnavailableOriginalHomeDependencies [SymbolIdentity]
+  | UnelaboratedCompilerIntrinsic SymbolIdentity
   -- | A typed site in a reachable top cannot carry concrete evidence. This
   -- is a source error, reported with the compiler's own guidance.
   | RejectedTypedSite Text
@@ -267,6 +272,14 @@ projectOriginalHomeModuleProducts :: HscEnv -> Map ModuleName ModIface
   -> ProjectionContext -> Set SymbolIdentity -> [PreparedModule]
   -> PreparedModuleProducts
 projectOriginalHomeModuleProducts env interfaces context externalBinders modules =
+  fst (projectOriginalHomeModuleProductDemand env interfaces context externalBinders modules)
+
+-- Actual projected home globals request defining code. Canonical interfaces,
+-- lexical imports and type requirements do not supply original native groups.
+projectOriginalHomeModuleProductDemand :: HscEnv -> Map ModuleName ModIface
+  -> ProjectionContext -> Set SymbolIdentity -> [PreparedModule]
+  -> (PreparedModuleProducts, Set SymbolIdentity)
+projectOriginalHomeModuleProductDemand env interfaces context externalBinders modules =
   let isHome owner = toUnitId (moduleUnit owner) `Set.member` hsc_all_home_unit_ids env
       purpose prepared
         | pmCoverage prepared == CompleteSourceModule && isHome (pmModule prepared)
@@ -349,9 +362,9 @@ projectOriginalHomeModuleProducts env interfaces context externalBinders modules
                 | (ordinal, _, Right projected) <- outcomes
                 , (pmModule prepared, ordinal) `Set.member` blocked ]
           in (pmModule prepared, Right retained, failed ++ dependent)
-  in PreparedModuleProducts
+  in (PreparedModuleProducts
       [(owner, outcome, omissions) | prepared <- modules
-        , let (owner, outcome, omissions) = finish prepared]
+        , let (owner, outcome, omissions) = finish prepared], unavailableHomeReferences)
   where
     maybeOwnedBy Nothing _ = False
     maybeOwnedBy (Just owner) blocked' = owner `Set.member` blocked'
@@ -455,7 +468,10 @@ projectPreparedModuleGroupOutcomesFor purpose context prepared selection =
       mapMaybe (lookupVarEnv identities) (topBinders binding)
     owner = (Text.pack (unitString (moduleUnit (pmModule prepared))),
              Text.pack (moduleNameString (moduleName (pmModule prepared))))
-    projectOne ordinal item@(binding, _) = do
+    projectOne ordinal (binding, _) = do
+      let onlyGroup = filterPreparedBindings (\(selected,_) ->
+            map (getKey . varUnique) (topBinders selected) == map (getKey . varUnique) (topBinders binding)) prepared
+      refuseUnelaboratedIntrinsics context [prepared] [onlyGroup]
       case [ srMessage rejection
            | rejection <- selectOwnedEvidence (topBinders binding)
                (evidenceRejectionsByOwner evidenceIndex)
@@ -465,8 +481,7 @@ projectPreparedModuleGroupOutcomesFor purpose context prepared selection =
       binders <- traverse (\binder -> maybe
         (Left (UnsupportedPreparedShape "prepared top has no identity")) Right
         (lookupVarEnv identities binder)) (topBinders binding)
-      let onlyGroup = prepared { pmBindings = [item] }
-          outside = allSymbols `Set.difference` Set.fromList binders
+      let outside = allSymbols `Set.difference` Set.fromList binders
           initial = PState 0 0 emptyVarEnv emptyVarEnv emptyVarEnv identities
             Map.empty [] Map.empty 0 0 0 0 emptyVarEnv Seq.empty Seq.empty Seq.empty Map.empty Map.empty Seq.empty Seq.empty Map.empty
             (projectionTarget context) (projectionRetainedGenerations context)
@@ -544,6 +559,7 @@ projectPreparedWithHostBindings hostBindings context modules topIdentityMap = do
       -- module set (so a same-name internal identity cannot borrow home-module
       -- standing from the retained one), but nothing here recovers its body.
       projectable = map (dropRetainedTops context) modules
+  refuseUnelaboratedIntrinsics context modules projectable
   ((bindingGroups, programTypes, programSites, programConstructorReplies, programJsonLayout), final) <- runStateT
     (do evidence <- lift (traverse preparedEvidence projectable)
         validatePreparedEvidence context projectable evidence
@@ -682,7 +698,7 @@ prepareProjectionWithReachability _ [] _ =
   Left (UnsupportedPreparedShape "execution program has no modules")
 prepareProjectionWithReachability context modules reach =
   finishProjection context modules (buildTopIdentityMap modules)
-    [ prepared { pmBindings = filter isReachable (pmBindings prepared) }
+    [ filterPreparedBindings isReachable prepared
     | prepared <- modules
     , any isReachable (pmBindings prepared)
     ]
@@ -762,6 +778,20 @@ data ReferenceFact = ReferenceFact
   { referenceBinder :: !Id
   , referenceSymbol :: SymbolIdentity
   }
+
+-- Compiler surface definitions are placeholders. Only the elaborator's
+-- admitted sites may execute; a surviving surface Name is never ordinary code.
+refuseUnelaboratedIntrinsics
+  :: ProjectionContext -> [PreparedModule] -> [PreparedModule]
+  -> Either ProjectionError ()
+refuseUnelaboratedIntrinsics _ admitted selected = case
+    [ binder | prepared <- selected
+      , (binding,_) <- pmBindings prepared
+      , binder <- topBinders binding ++ preparedReferencedIds
+          (extractPreparedFacts (pmModule prepared) [binding])
+      , any (\owner -> preparedRejectsIntrinsic owner binder) admitted ] of
+  binder : _ -> Left (UnelaboratedCompilerIntrinsic (preparedRootIdentity binder))
+  [] -> Right ()
 
 -- | Cross-module combination for 'preparedTargetReferences': the external
 -- value references of every binding group @kept@ selects, minus the ones
@@ -964,7 +994,7 @@ registeredReplacement context binder =
 selectPreparedTarget :: ProjectionContext -> [PreparedModule]
   -> (VarEnv SymbolIdentity, [PreparedModule])
 selectPreparedTarget context modules =
-  (topIdentityMap, [ prepared { pmBindings = filter isReachable (pmBindings prepared) }
+  (topIdentityMap, [ filterPreparedBindings isReachable prepared
     | prepared <- modules
     , any isReachable (pmBindings prepared)
     ])
@@ -1042,8 +1072,7 @@ topBinders (StgTopLifted binding) = bindingBinders binding
 -- 'topSymbols'/'homeModules' are built from the unfiltered module list
 -- upstream of this filter, never from this one.
 dropRetainedTops :: ProjectionContext -> PreparedModule -> PreparedModule
-dropRetainedTops context prepared = prepared
-  { pmBindings = filter keep (pmBindings prepared) }
+dropRetainedTops context prepared = filterPreparedBindings keep prepared
   where
     keep (binding, _) = not (all (isJust . retainedGenerationOf context) (topBinders binding))
 

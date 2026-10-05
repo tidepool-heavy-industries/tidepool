@@ -64,9 +64,10 @@ import Tidepool.GhcPipeline
 import Tidepool.ExecutionEncode (encodeWireProgram, moduleProductInput, moduleProductBytes)
 import Tidepool.CompilerProducts
   ( CertifiedOriginalProducts, certifiedOriginalProducts, certifiedFinalizedArtifacts, certifiedSourceOriginals, certifiedExecutionSource
-  , retainedOriginalInterfaces, writeCertifiedProductsKeeping, prepareCompilerProjectionContext
+  , certifiedRetainedOriginals, PreparedProductContext, prepareOriginalProducts
+  , retainedOriginalInterfaces, writeCertifiedProductsKeepingWithOriginals, prepareCompilerProjectionContext
   , exactProgramProductVersionFromDigest )
-import Tidepool.ExecutionProjection (ProjectionContext(..), ProjectionError(..), prepareProjectionWithReachability, projectSelectedWithHostBindings, PreparedModuleProducts, projectOriginalHomeModuleProducts, preparedModuleProductOutcomes, preparedRootIdentity)
+import Tidepool.ExecutionProjection (ProjectionContext(..), ProjectionError(..), prepareProjectionWithReachability, projectSelectedWithHostBindings, preparedModuleProductOutcomes, preparedRootIdentity)
 import Tidepool.HostBindingAuthority
   ( HostBindingRepresentation, hostBindingRepresentationJsonAuthority )
 import Tidepool.ExecutionSchema
@@ -75,7 +76,7 @@ import Tidepool.ExecutionSchema
 import qualified Tidepool.ExecutionSchema as Execution
 import qualified Tidepool.EffectSchema
 import Tidepool.PreparedStg
-  ( PreparedModule(..), PreparedBodyCache, newPreparedBodyCache
+  ( PreparedModule, pmModule, pmYieldSites, PreparedBodyCache, newPreparedBodyCache
   , evictPreparedBodyMatching )
 import Tidepool.PreparedRecovery
   ( RecoveryFailure, RecoveredClosure(..), newPreparedRecoveryWithPackageRoots
@@ -121,7 +122,7 @@ import Tidepool.ExactScope
   , scopeCheckedCell, scopeCheckedItem, scopeCheckedDisplay, scopeIncludePaths
   , originalGroupFromProjected, originalGroupFromCandidate
   , CheckedCellAdmission(..), CheckedItemAdmission(..), CheckedItemPurpose(..), CheckedDisplayAdmission(..), PlannedCellAdmission(..), PlannedCellSlot(..)
-  , ExactInterfaceEvidence(..), validateCandidateCanonicalInterfaceProof, canonicalCertificateSha256
+  , ExactInterfaceEvidence(..), validateCandidateCanonicalInterfaceProof, canonicalCertificateSha256, canonicalSourceSha256
   , readExactScope, revalidateExactScope, extendSourceSelectedOriginals, extendExactExecutionSources, extendExactExecutionSourcesWithinBudget )
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import Tidepool.CellProgramState
@@ -384,7 +385,7 @@ runActivationPreviewMode compiler caches args path = do
     projection <- try (prepareArtifactsWithProjection requirePreviewProjection
       originalInterfaces caches prepared [preparedScaffoldTargetName]
       (standardAuxiliaryRoots binds) Map.empty [])
-      :: IO (Either PreviewOriginalDependenciesUnavailable ([PreparedArtifact], Maybe PreparedModuleProducts))
+      :: IO (Either PreviewOriginalDependenciesUnavailable ([PreparedArtifact], Maybe PreparedProductContext))
     validateDependencyEvidence (preparedFreshDependencies prepared)
     revalidateExactScope environment exact >>= either fail pure
     templateBytes <- readTemplate
@@ -401,7 +402,7 @@ runActivationPreviewMode compiler caches args path = do
         writePreparedSidecars InlineYieldSites outDir binds (prTyCons compiled)
           (T.pack <$> prCapturedType compiled) (map T.pack (prWarnings compiled)) artifacts
         writePreparedArtifacts outDir artifacts
-        void $ writeCertifiedProductsKeeping (requestIncludes args) originalInterfaces outDir prepared productContext
+        void $ writeCertifiedProductsKeepingWithOriginals (requestIncludes args) originalInterfaces outDir prepared productContext
           [(paTarget artifact,paProgram artifact) | artifact <- artifacts]
         outFile <- requireArg "--turn-out" (requestTurnOut args)
         BS.writeFile outFile (encodeTurnOut (TExpr 0 (concatMap paYieldSites artifacts) (T.pack source)))
@@ -539,10 +540,10 @@ processFile compiler caches timing args path = do
   reportDiags res
 
 writeCertifiedProducts
-  :: [FilePath] -> OriginalInterfaceArtifacts -> FilePath -> PreparedPipelineResult -> Maybe PreparedModuleProducts
+  :: [FilePath] -> OriginalInterfaceArtifacts -> FilePath -> PreparedPipelineResult -> Maybe PreparedProductContext
   -> [PreparedArtifact] -> IO ()
 writeCertifiedProducts includes originalInterfaces outDir prepared productContext preparedArtifacts =
-  void (writeCertifiedProductsKeeping includes originalInterfaces outDir prepared productContext
+  void (writeCertifiedProductsKeepingWithOriginals includes originalInterfaces outDir prepared productContext
     [(paTarget artifact, paProgram artifact) | artifact <- preparedArtifacts])
 
 data PreparedArtifact = PreparedArtifact
@@ -557,14 +558,14 @@ data PreparedArtifact = PreparedArtifact
 -- table includes exactly the GHC constructors admitted by prepared execution.
 prepareArtifacts :: OriginalInterfaceArtifacts -> RecoveryCaches -> PreparedPipelineResult
   -> [String] -> [String] -> Map.Map SymbolIdentity Word64 -> [HostBindingRepresentation]
-  -> IO ([PreparedArtifact], Maybe PreparedModuleProducts)
+  -> IO ([PreparedArtifact], Maybe PreparedProductContext)
 prepareArtifacts = prepareArtifactsWithProjection requireProjection
 
 prepareArtifactsWithProjection
   :: (forall a. Either ProjectionError a -> IO a)
   -> OriginalInterfaceArtifacts -> RecoveryCaches -> PreparedPipelineResult
   -> [String] -> [String] -> Map.Map SymbolIdentity Word64 -> [HostBindingRepresentation]
-  -> IO ([PreparedArtifact], Maybe PreparedModuleProducts)
+  -> IO ([PreparedArtifact], Maybe PreparedProductContext)
 prepareArtifactsWithProjection _ _ _ _ [] _ _ _ = pure ([], Nothing)
 prepareArtifactsWithProjection project originalInterfaces caches prepared targets@(firstTarget : _) auxiliaryRoots retainedGenerations hostBindings = do
   timing <- readTimingEnabled
@@ -599,16 +600,16 @@ prepareArtifactsWithProjection project originalInterfaces caches prepared target
         [(originalUnit originalProduct, originalModule originalProduct,
           [(originalOrdinal group, originalBinders group, originalGlobals group)
            | group <- originalGroups originalProduct]) | originalProduct <- exactProducts]
-      products = projectOriginalHomeModuleProducts hscEnv interfaces
-        (contextFor firstTarget) externalOriginalBinders modules
-      originalProducts =
+  (originalModules,productContext@(products,_)) <- timePhase timing "prepared_original_demand" $
+    prepareOriginalProducts hscEnv exactScope interfaces (contextFor firstTarget) externalOriginalBinders modules
+  let originalProducts =
         [(unitString (moduleUnit owner), moduleNameString (moduleName owner),
           either (Left . show) Right outcome)
         | (owner, outcome) <- preparedModuleProductOutcomes products]
       originalPackageGlobals = requiredOriginalPackageGlobalsWithRetained
         originalProducts candidates exactOriginals (Map.keysSet retainedGenerations)
   recover <- newPreparedRecoveryWithPackageRoots hscEnv (rcFatIface caches) (rcOwnerIface caches)
-    (rcPreparedBodies caches) certifiedHomes (contextFor firstTarget) modules []
+    (rcPreparedBodies caches) certifiedHomes (contextFor firstTarget) originalModules []
   artifacts <- forM targets $ \target -> do
     let context = contextFor target
     -- Package roots grow only from the finite exact original-group inventory.
@@ -661,7 +662,7 @@ prepareArtifactsWithProjection project originalInterfaces caches prepared target
         maybe (pure Nothing) (sealCheckedTypeWitness originalInterfaces) witness
       pure site { Tidepool.EffectSchema.ysInputTypeWitnesses = witnesses }
     pure (PreparedArtifact target program bytes constructors sealedSites)
-  pure (artifacts, Just products)
+  pure (artifacts, Just productContext)
 
 -- The pure preview boundary preserves only this chosen executable-demand
 -- failure. Every other projection, source, authority, or IO failure keeps its
@@ -1044,7 +1045,7 @@ compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb binde
     timePhase timing "prepared_sidecars" $ writePreparedSidecars InlineYieldSites outDir binds (prTyCons result) mCapturedTy warnTexts preparedArtifacts
     timePhase timing "prepared_write" $ writePreparedArtifacts outDir preparedArtifacts
     originalProducts <- timePhase timing "module_products" $
-      writeCertifiedProductsKeeping (requestIncludes args) originalInterfaces outDir prepared productContext
+      writeCertifiedProductsKeepingWithOriginals (requestIncludes args) originalInterfaces outDir prepared productContext
         [(paTarget artifact, paProgram artifact) | artifact <- preparedArtifacts]
     when (not (requestCell args) && not (requestActivationPreview args)
         && null (requestInjectVals args) && not (isJust (requestSessionArtifacts args))
@@ -1557,7 +1558,7 @@ prepareOriginalCellDeclaration compiler caches args template outDir scope exact 
   writePreparedSidecars SeparateYieldSites directory binds (prTyCons result)
     Nothing (map T.pack (prWarnings result)) artifacts
   writePreparedArtifacts directory artifacts
-  certified <- writeCertifiedProductsKeeping (requestIncludes args) originalInterfaces directory prepared productContext
+  certified <- writeCertifiedProductsKeepingWithOriginals (requestIncludes args) originalInterfaces directory prepared productContext
     [(paTarget artifact, paProgram artifact) | artifact <- artifacts]
   let products = certifiedOriginalProducts certified
   supportScope <- retainProgramProducts directory prepared certified reserved exact
@@ -1748,13 +1749,24 @@ retainProgramProducts directory prepared certified target initial = do
           owner = T.unpack ownerText
           key = (unit,owner)
       when (any (\original -> (originalUnit original,originalModule original) == key)
-          (scopeProducts scope)) (fail "fresh native product replaces an admitted original owner")
-      proof <- maybe (fail "supporting native product lacks captured finalization") pure
-        (Map.lookup key localInterfaces)
-      when (isNothing (localFinalizedCore proof))
-        (fail "supporting native product lacks finalized Core")
-      let sourceDigest = localFinalizedSourceSha256 proof
-          (interface,packagesPath,packagesSha) = localFinalizedInterface proof
+          (scopeProducts scope)) (fail "new native product replaces an admitted original owner")
+      (sourceDigest,(interface,packagesPath,packagesSha)) <- case Map.lookup key (certifiedRetainedOriginals certified) of
+        Just original -> do
+          unless (case Map.lookup key (scopeInterfaceEvidence scope) of
+              Just (ModuleInterfaceEvidence retained) ->
+                canonicalCertificateSha256 retained == canonicalCertificateSha256 original
+              _ -> False) (fail "prepared retained original changed canonical authority")
+          row <- case [row | row@(artifact,_,_) <- scopeInterfaces scope
+              , (exactUnit artifact,exactModule artifact) == key] of
+            [row] -> pure row
+            _ -> fail "prepared retained original has no unique admitted interface"
+          pure (canonicalSourceSha256 original,row)
+        Nothing -> do
+          proof <- maybe (fail "supporting native product lacks captured finalization") pure
+            (Map.lookup key localInterfaces)
+          when (isNothing (localFinalizedCore proof))
+            (fail "supporting native product lacks finalized Core")
+          pure (localFinalizedSourceSha256 proof,localFinalizedInterface proof)
       unless (exactSha256 interface == shaHex interfaceBytes)
         (fail "supporting native product differs from finalized interface")
       packageBytes <- BS.readFile packagesPath

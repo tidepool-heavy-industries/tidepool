@@ -220,7 +220,7 @@ share the native thin writer and emit no prepared products or source compilation
 
 ## Compiler-issued execution recipes
 
-`TPCERT` version 8 retains one closed source-recipe result after its finalized-module
+`TPCERT` version 9 retains one closed source-recipe result after its finalized-module
 envelope: `["ordinary"]`, `["exact-unavailable", reason]`, or
 `["exact-available", SHA]`. An available result binds the immutable
 `execution-source.cbor` in the owning compiler output directory. The descriptor
@@ -243,6 +243,18 @@ This is a strict matched worker/frontend migration. Earlier `TPCERT` versions
 are rejected. Regenerate actual source-boot candidate receipts through their
 Haskell producers and run the structural prepared corpus; existing prepared
 wire artifacts and execution-graph versions do not change.
+
+Native product origins are `fresh`, `cached`, or `retained-core`. The last is
+exact-request-only: actual projected home globals demand complete native
+preparation from the original admitted canonical interface/Core pair. It keeps
+that original certificate, source identity, package imports and dependency
+seals; it grants neither current source selection nor a source execution recipe.
+Its module row seals the original certificate in the dependency-witness field
+and the newly emitted native aggregate in the product field. Advertised corrupt
+inputs are refusals. Missing defining capability remains native unavailability.
+Fresh and retained complete originals share site elaboration and preparation;
+package body subsets retain their separate coverage and cannot issue original
+home products.
 
 ## Original interface requirements
 

@@ -1,7 +1,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 module Tidepool.CertifiedProducts
-  ( encodeCertifiedProducts, resolvePackageGlobal, homeInterfaceUsageOwners ) where
+  ( encodeCertifiedProducts, encodeCertifiedProductsWithOriginals
+  , resolvePackageGlobal, homeInterfaceUsageOwners ) where
 
 import Prelude hiding (product)
 import Codec.CBOR.Encoding
@@ -46,7 +47,8 @@ import Tidepool.ExecutionSchema
   , ResultContract(..), RuntimeRep(..), Signature(..), SignatureId(..)
   , SymbolIdentity(..), WireProgram(..) )
 import Tidepool.ExactScope
-  ( ExactScope(..), ExactProduct(..), ExactOriginalGroup(..), scopeValueInterfaces )
+  ( ExactScope(..), ExactProduct(..), ExactOriginalGroup(..), scopeValueInterfaces
+  , CanonicalInterfaceProof, canonicalCertificateSha256, canonicalSourceSha256 )
 import Tidepool.ModuleCandidates
   ( CandidateGlobal(..), CandidateGroup(..), ModuleCandidate(..) )
 import Tidepool.PackageWitness
@@ -58,8 +60,15 @@ import Tidepool.FinalizedModuleArtifacts
   ( FinalizedModuleArtifacts, encodeFinalizedModuleArtifacts, finalizedInterfaceSeals )
 import Tidepool.Timing (readTimingEnabled, emitCount)
 
+data ProductOrigin = FreshProduct | CachedProduct | RetainedCoreProduct
+
+renderProductOrigin :: ProductOrigin -> T.Text
+renderProductOrigin FreshProduct = "fresh"
+renderProductOrigin CachedProduct = "cached"
+renderProductOrigin RetainedCoreProduct = "retained-core"
+
 data Product = Product
-  { productOrigin :: T.Text
+  { productOrigin :: ProductOrigin
   , productUnit :: T.Text
   , productModule :: T.Text
   , productVersion :: Maybe T.Text
@@ -126,6 +135,16 @@ encodeCertifiedProducts
   -> DependencyEvidence -> BS.ByteString -> BS.ByteString
   -> IO (Either String BS.ByteString)
 encodeCertifiedProducts env sourceRecipe interfaces finalized cached exact fresh targets evidence productBytes evidenceBytes = do
+  encodeCertifiedProductsWithOriginals Map.empty env sourceRecipe interfaces finalized cached exact fresh targets evidence productBytes evidenceBytes
+
+encodeCertifiedProductsWithOriginals
+  :: Map.Map (String,String) CanonicalInterfaceProof
+  -> HscEnv -> WorkerExecutionSource -> Map.Map ModuleName ModIface -> FinalizedModuleArtifacts -> [ModuleCandidate] -> Maybe ExactScope
+  -> [(T.Text, T.Text, BS.ByteString, [ProjectedGroup])]
+  -> [(String, WireProgram)]
+  -> DependencyEvidence -> BS.ByteString -> BS.ByteString
+  -> IO (Either String BS.ByteString)
+encodeCertifiedProductsWithOriginals retained env sourceRecipe interfaces finalized cached exact fresh targets evidence productBytes evidenceBytes = do
   packageRef <- newIORef []
   timing <- readTimingEnabled
   (resolvePackage, resolutionCounts) <- newPackageGlobalResolver timing env
@@ -133,21 +152,24 @@ encodeCertifiedProducts env sourceRecipe interfaces finalized cached exact fresh
       freshProductSha = digest productBytes
       freshProducts = catMaybes
         [ do
-            sourceSha <- sourceHash evidence (T.unpack unit) (T.unpack name)
+            let original = Map.lookup (T.unpack unit,T.unpack name) retained
+            sourceSha <- case original of
+              Nothing -> sourceHash evidence (T.unpack unit) (T.unpack name)
+              Just proof -> Just (T.pack (canonicalSourceSha256 proof))
             groups <- traverse freshGroup projected
             pure Product
-              { productOrigin = "fresh", productUnit = unit, productModule = name
+              { productOrigin = maybe FreshProduct (const RetainedCoreProduct) original, productUnit = unit, productModule = name
               , productVersion = Nothing, productSourceSha = sourceSha
               , productIfaceSha = digest iface
               , productBytesSha = freshProductSha
-              , productEvidenceSha = freshEvidenceSha
+              , productEvidenceSha = maybe freshEvidenceSha (T.pack . canonicalCertificateSha256) original
               , productInterfaces = []
               , productGroups = groups
               }
         | (unit, name, iface, projected) <- fresh ]
       cachedProducts =
         [ Product
-          { productOrigin = "cached"
+          { productOrigin = CachedProduct
           , productUnit = T.pack (candidateUnit candidate)
           , productModule = T.pack (candidateModule candidate)
           , productVersion = Just (T.pack (candidateModuleVersion candidate))
@@ -298,7 +320,7 @@ encodeCertifiedProducts env sourceRecipe interfaces finalized cached exact fresh
                 | ((unit, name), options) <- Map.toList packages
                 , (path, sha) <- Set.toList options ]
           pure (Right (toStrictByteString (array
-            [encodeString "TPCERT", encodeWord 8
+            [encodeString "TPCERT", encodeWord 9
             , list id encodedModules, list id encodedTargets
             , list id encodedPackages, list (encodeWitness coordinateIndices) globalWitnesses
             , encodeFinalizedModuleArtifacts finalized, encodeWorkerExecutionSource sourceRecipe
@@ -596,7 +618,7 @@ canonicalPackageCandidates env owner declarations wired wanted = do
 
 encodeModule :: Product -> [(Word, [Encoding])] -> Encoding
 encodeModule product groups = array
-  [ encodeString (productOrigin product)
+  [ encodeString (renderProductOrigin (productOrigin product))
   , encodeString (productUnit product), encodeString (productModule product)
   , maybe encodeNull encodeString (productVersion product)
   , encodeString (productSourceSha product)

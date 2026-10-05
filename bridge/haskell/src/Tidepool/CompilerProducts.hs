@@ -6,11 +6,14 @@
 module Tidepool.CompilerProducts
   ( CertifiedOriginalProducts, certifiedOriginalProducts, certifiedFinalizedArtifacts
   , certifiedSourceOriginals, certifiedExecutionSource, writeCertifiedProductsKeeping, retainedOriginalInterfaces
+  , certifiedRetainedOriginals, PreparedProductContext, prepareOriginalProducts
+  , writeCertifiedProductsKeepingWithOriginals
   , prepareCompilerProjectionContext, exactProgramProductVersionFromDigest
   ) where
 
 import Codec.CBOR.Encoding
 import Codec.CBOR.Write (toStrictByteString)
+import Control.Applicative ((<|>))
 import Control.Exception (throwIO)
 import Control.Monad (foldM, forM, forM_, unless, when)
 import Data.Bits (shiftR)
@@ -22,15 +25,16 @@ import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Word (Word64)
 import GHC.Tc.Types (tcg_mod)
-import GHC.Unit.Module (Module, ModuleName, moduleName, moduleNameString, moduleUnit, mkModuleName)
+import GHC.Driver.Env (HscEnv)
+import GHC.Unit.Module (Module, ModuleName, moduleName, moduleNameString, moduleUnit, mkModuleName, mkModule)
 import GHC.Unit.Module.ModIface (ModIface, mi_module)
-import GHC.Unit.Types (unitString)
+import GHC.Unit.Types (unitString, stringToUnit)
 import Numeric (readHex)
 import System.Directory (canonicalizePath, doesPathExist, makeAbsolute)
 import System.FilePath (normalise, (</>))
 import System.IO (hPutStrLn, stderr)
 import System.Info qualified as SystemInfo
-import Tidepool.CertifiedProducts (encodeCertifiedProducts)
+import Tidepool.CertifiedProducts (encodeCertifiedProductsWithOriginals)
 import Tidepool.DependencyEvidence
 import Tidepool.ExactHydration
   ( OriginalInterfaceArtifacts, ExactIfaceArtifact(..), originalInterfaceBytes )
@@ -43,7 +47,8 @@ import Tidepool.ExecutionEncode
   , prepareModuleProductEncoding, encodeModuleProductInventory )
 import Tidepool.ExecutionProjection
   ( ProjectionContext(..), PreparedModuleProducts, OriginalGroupOmission(..)
-  , preparedModuleProductOutcomes, preparedModuleProductOmissions, resolveTextPackageUnit )
+  , preparedModuleProductOutcomes, preparedModuleProductOmissions, resolveTextPackageUnit
+  , projectOriginalHomeModuleProductDemand )
 import Tidepool.ExecutionSchema
   ( Architecture(..), Endianness(..), SymbolIdentity(..), TargetDescriptor(..), WireProgram )
 import Tidepool.ExecutionSource
@@ -60,6 +65,12 @@ import Tidepool.PackageWitness (PackageImportEvidence(..), PackageImportRoot(..)
 import Tidepool.PreparedFormatting (resolveFormattingAuthority)
 import Tidepool.PreparedJson (JsonAuthority, resolveJsonAuthorityWithCanonicalInterfaces)
 import Tidepool.PreparedTime (resolveTimeAuthority)
+import Tidepool.PreparedStg (PreparedModule, pmModule, pmSitedSiblings, prepareModule)
+import Tidepool.HomeProducts
+  ( AdmittedFinalizedOriginal, recoverAdmittedFinalizedOriginal, admittedOriginalModule
+  , admittedOriginalProof, admittedOriginalInterface, admittedOriginalLocation )
+import Tidepool.FinalizedModule (finalizedHomeModInfo)
+import GHC.Unit.Home.ModInfo (hm_iface)
 import Tidepool.Timing (readTimingEnabled, timePhase, timeDetailPhase)
 
 -- The production worker and original-product fixtures share the compiler
@@ -103,7 +114,41 @@ data CertifiedOriginalProducts = CertifiedOriginalProducts
   , certifiedSourceOriginals :: Map.Map (String,String) CanonicalInterfaceProof
   , certifiedFinalizedArtifacts :: FinalizedModuleArtifacts
   , certifiedExecutionSource :: WorkerExecutionSource
+  , certifiedRetainedOriginals :: Map.Map (String,String) CanonicalInterfaceProof
   }
+
+type PreparedProductContext = (PreparedModuleProducts, Map.Map Module AdmittedFinalizedOriginal)
+
+-- Close emitted original home globals before adjudicating unavailable owners.
+-- Each defining owner is prepared once from its admitted complete Core pair.
+prepareOriginalProducts
+  :: HscEnv -> Maybe ExactScope -> Map.Map ModuleName ModIface -> ProjectionContext
+  -> Set.Set SymbolIdentity -> [PreparedModule]
+  -> IO ([PreparedModule], PreparedProductContext)
+prepareOriginalProducts env exact interfaces context external initial = go initial Map.empty Set.empty
+  where
+    go modules admitted attempted = do
+      let selectedInterfaces = Map.union interfaces (Map.fromList
+            [(moduleName owner,hm_iface (finalizedHomeModInfo (admittedOriginalModule original)))
+            | (owner,original) <- Map.toAscList admitted])
+          (products,demands) = projectOriginalHomeModuleProductDemand env selectedInterfaces context external modules
+          definedOwners = Set.fromList (map pmModule modules)
+          pending = Set.toAscList (Set.fromList
+            [owner | identity <- Set.toAscList demands
+              , let owner = mkModule (stringToUnit (T.unpack (symbolUnit identity)))
+                    (mkModuleName (T.unpack (symbolModule identity)))
+              , owner `Set.notMember` definedOwners, owner `Set.notMember` attempted])
+      recovered <- forM pending $ \owner -> case exact of
+        Nothing -> pure Nothing
+        Just scope -> fmap (fmap (\original -> (owner,original))) (recoverAdmittedFinalizedOriginal env scope owner)
+      let originals = Map.fromList (mapMaybe id recovered)
+          siblings = Map.unions (map pmSitedSiblings modules)
+      prepared <- forM (Map.toAscList originals) $ \(_,original) ->
+        prepareModule env (admittedOriginalLocation original) siblings (admittedOriginalModule original)
+      if null prepared
+        then pure (modules,(products,admitted))
+        else go (modules ++ prepared) (Map.union admitted originals)
+          (Set.union attempted (Set.fromList pending))
 
 -- Captures come from the exact scope, including its admitted checked values,
 -- or the candidate owner. Their original bytes supply type dependency seals;
@@ -124,7 +169,18 @@ writeCertifiedProductsKeeping
   :: [FilePath] -> OriginalInterfaceArtifacts -> FilePath -> PreparedPipelineResult -> Maybe PreparedModuleProducts
   -> [(String, WireProgram)] -> IO CertifiedOriginalProducts
 writeCertifiedProductsKeeping includes originalInterfaces outDir prepared productContext targets = do
+  writeCertifiedProductsKeepingWithOriginals includes originalInterfaces outDir prepared
+    (fmap (\products -> (products,Map.empty)) productContext) targets
+
+writeCertifiedProductsKeepingWithOriginals
+  :: [FilePath] -> OriginalInterfaceArtifacts -> FilePath -> PreparedPipelineResult -> Maybe PreparedProductContext
+  -> [(String, WireProgram)] -> IO CertifiedOriginalProducts
+writeCertifiedProductsKeepingWithOriginals includes originalInterfaces outDir prepared productContext targets = do
     let hscEnv = prHscEnv (pprPipelineResult prepared)
+        retained = maybe Map.empty snd productContext
+        retainedProofs = Map.fromList
+          [((unitString (moduleUnit owner),moduleNameString (moduleName owner)),admittedOriginalProof original)
+          | (owner,original) <- Map.toAscList retained]
     timing <- readTimingEnabled
     (availability, freshProducts) <- timeDetailPhase timing "module_products" "write_products" $
       writeModuleProducts originalInterfaces outDir productContext
@@ -157,7 +213,9 @@ writeCertifiedProductsKeeping includes originalInterfaces outDir prepared produc
       pure (productBytes, evidenceBytes)
     sourceRecipe <- case preparedExactCompilation prepared of
       Nothing -> pure OrdinaryExecutionSource
-      Just compilation -> issueFreshExecutionSource includes prepared freshDependencies freshProducts
+      Just compilation -> issueFreshExecutionSource includes prepared freshDependencies
+        [product | product <- freshProducts, let (unit,name,_,_) = moduleProductInput product
+          , Map.notMember (T.unpack unit,T.unpack name) retainedProofs]
         (compilationScope compilation)
     case sourceRecipe of
       ExactExecutionSourceAvailable graph ->
@@ -166,7 +224,7 @@ writeCertifiedProductsKeeping includes originalInterfaces outDir prepared produc
     finalized <- timeDetailPhase timing "module_products" "certify" $ do
       finalized <- captureFinalizedModuleArtifacts originalInterfaces hscEnv
         (pprFinalizedModules prepared) (pprPackageImports prepared) finalDependencies outDir
-      certified <- encodeCertifiedProducts hscEnv sourceRecipe (pprProductInterfaces prepared) finalized (pprAcceptedCandidates prepared)
+      certified <- encodeCertifiedProductsWithOriginals retainedProofs hscEnv sourceRecipe (pprProductInterfaces prepared) finalized (pprAcceptedCandidates prepared)
         (compilationScope <$> preparedExactCompilation prepared)
         (map moduleProductInput freshProducts) targets
         finalDependencies productBytes evidenceBytes
@@ -183,13 +241,13 @@ writeCertifiedProductsKeeping includes originalInterfaces outDir prepared produc
         let owner = tcg_mod (prTargetTcGblEnv (pprPipelineResult prepared))
         captureFinalizedSourceOriginals compilation (pprAcceptedCandidates prepared)
           (unitString (moduleUnit owner),moduleNameString (moduleName owner)) finalized finalDependencies
-    pure (CertifiedOriginalProducts freshProducts sourceOriginals finalized sourceRecipe)
+    pure (CertifiedOriginalProducts freshProducts sourceOriginals finalized sourceRecipe retainedProofs)
 
 
 -- A failed unrelated group is an explicit product miss, never a newly fatal
 -- target compile. A complete product pairs every admitted group with the
 -- skinny interface emitted by the same GHC transaction.
-writeModuleProducts :: OriginalInterfaceArtifacts -> FilePath -> Maybe PreparedModuleProducts
+writeModuleProducts :: OriginalInterfaceArtifacts -> FilePath -> Maybe PreparedProductContext
   -> Map.Map ModuleName ModIface
   -> Map.Map ModuleName PackageImportEvidence
   -> IO (Map.Map (String, String) ProductAvailability,
@@ -197,7 +255,7 @@ writeModuleProducts :: OriginalInterfaceArtifacts -> FilePath -> Maybe PreparedM
 writeModuleProducts _ outDir Nothing _ _ = do
   writeProductInventory outDir [] []
   pure (Map.empty, [])
-writeModuleProducts originalInterfaces outDir (Just inventory) interfaces packageRoots = do
+writeModuleProducts originalInterfaces outDir (Just (inventory,retained)) interfaces packageRoots = do
   timing <- readTimingEnabled
   forM_ (preparedModuleProductOmissions inventory) $ \(owner, omissions) ->
     forM_ omissions $ \omission ->
@@ -208,7 +266,9 @@ writeModuleProducts originalInterfaces outDir (Just inventory) interfaces packag
   outcomes <- forM (preparedModuleProductOutcomes inventory) $ \(owner, outcome) -> do
     let name = moduleName owner
         key = (unitString (moduleUnit owner), moduleNameString name)
-    case Map.lookup name interfaces >>= \interface ->
+    let selectedInterface = Map.lookup owner retained >>= \original ->
+          Just (hm_iface (finalizedHomeModInfo (admittedOriginalModule original)))
+    case (selectedInterface <|> Map.lookup name interfaces) >>= \interface ->
         if mi_module interface == owner then Just interface else Nothing of
       Nothing -> do
         hPutStrLn stderr ("module product unavailable: no interface for " ++ moduleNameString name)
@@ -222,13 +282,20 @@ writeModuleProducts originalInterfaces outDir (Just inventory) interfaces packag
           bytes <- timeDetailPhase timing "module_products.interfaces" (snd key) $
             originalInterfaceBytes originalInterfaces owner
               >>= maybe (fail "original product interface lacks its captured artifact") pure
-          roots <- case Map.lookup name packageRoots of
-            Nothing -> ioError (userError
-              ("resolved direct package import inventory missing for " ++ moduleNameString name))
-            Just selected -> pure selected
-          let iface = ExactIfaceArtifact (fst key) (snd key) ""
-                (shaHex bytes) []
-              sidecar = encodePackageImports iface roots
+          sidecar <- case Map.lookup owner retained of
+            Just original -> do
+              let (iface,path,seal) = admittedOriginalInterface original
+              captured <- BS.readFile path
+              unless (shaHex captured == seal && shaHex bytes == exactSha256 iface)
+                (fail "retained original interface or package capture changed")
+              pure captured
+            Nothing -> do
+              roots <- case Map.lookup name packageRoots of
+                Nothing -> ioError (userError
+                  ("resolved direct package import inventory missing for " ++ moduleNameString name))
+                Just selected -> pure selected
+              let iface = ExactIfaceArtifact (fst key) (snd key) "" (shaHex bytes) []
+              pure (encodePackageImports iface roots)
           when (BS.length sidecar > 4 * 1024 * 1024) $
             ioError (userError "direct package import witness exceeds four MiB")
           pure (key, ProductReady, Just (prepareModuleProductEncoding (T.pack (fst key),
@@ -377,4 +444,3 @@ exactProgramProductVersionFromDigest scope unit owner sourceDigest iface product
       [(byte,"")] -> BS.cons byte (unhex rest)
       _ -> error "admitted digest is not hexadecimal"
     unhex _ = error "admitted digest is not even length"
-

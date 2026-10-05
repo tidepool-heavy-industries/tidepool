@@ -5,7 +5,10 @@ module Tidepool.HomeProducts
   ( hydrateCandidateHomeProducts, hydrateCandidateHomeProductsWithOriginals
   , CandidateCoreFailure(..), validateCandidateInterfaceRequirements
   , materializeCandidateCompilerView, materializeAdmittedCompilerView
-  , admittedCompilerInterface, validateAdmittedInterfaceRequirements ) where
+  , admittedCompilerInterface, validateAdmittedInterfaceRequirements
+  , AdmittedFinalizedOriginal, recoverAdmittedFinalizedOriginal
+  , admittedOriginalModule, admittedOriginalProof, admittedOriginalInterface
+  , admittedOriginalLocation ) where
 
 import Control.Exception
   ( Exception, SomeException, SomeAsyncException, bracket, displayException, fromException, throwIO, try )
@@ -62,15 +65,19 @@ import GHC.Unit.Module (Module, moduleName, moduleNameString, moduleUnit)
 import GHC.Unit.Types (unitString, unitIdString)
 import GHC.Utils.Outputable (ppr, renderWithContext, defaultSDocContext)
 import Tidepool.ExactHydration
-  ( ExactIfaceArtifact, freshExactState, hydrateExactScope, withExactHomeInstances )
+  ( ExactIfaceArtifact(..), freshExactState, hydrateExactScope, withExactHomeInstances
+  , exactInterfaceSummary )
 import Tidepool.CompileInputPolicy (pluginInputIssues)
 import Tidepool.FamilyConsistency (validateEnvironmentFamilies)
 import Tidepool.RetainedUnfoldings (scopeRetainedSummaryHscEnv, scopeRetainedModuleGraph)
 import Tidepool.Timing (emitCount, readTimingEnabled, timeDetailPhase)
 import Tidepool.ExactScope
-  ( CanonicalInterfaceProof, CanonicalInterfaceAdmission(..)
-  , admittedInterfaceCore, admittedInterfaceHomeUnits, admittedInterfaceRequirements )
-import Tidepool.FinalizedCore (FinalizedCoreFailure, attachFinalizedCore)
+  ( ExactScope(..), CanonicalInterfaceProof, CanonicalInterfaceAdmission(..)
+  , admittedInterfaceCore, admittedInterfaceHomeUnits, admittedInterfaceRequirements
+  , scopeModuleInterfaceProofs, canonicalOrigin, isSourceOriginal, canonicalCoreArtifact
+  , canonicalRequirements, revalidateExactScope )
+import Tidepool.FinalizedCore (FinalizedCoreFailure, attachFinalizedCore, decodeFinalizedCore)
+import Tidepool.FinalizedModule (FinalizedModule)
 import System.Directory (getModificationTime, getTemporaryDirectory, removeDirectoryRecursive)
 import System.FilePath ((</>))
 import System.Posix.Temp (mkdtemp)
@@ -85,6 +92,49 @@ data CandidateCoreFailure
   | CandidateCompilerViewUnsupportedProfile
   deriving (Eq, Show)
 instance Exception CandidateCoreFailure
+
+-- Issued only after the exact original interface/Core pair has been checked.
+-- This authorizes native preparation, not fresh source selection or a product.
+data AdmittedFinalizedOriginal = AdmittedFinalizedOriginal
+  FinalizedModule CanonicalInterfaceProof (ExactIfaceArtifact,FilePath,String) ModLocation
+
+admittedOriginalModule :: AdmittedFinalizedOriginal -> FinalizedModule
+admittedOriginalModule (AdmittedFinalizedOriginal original _ _ _) = original
+
+admittedOriginalProof :: AdmittedFinalizedOriginal -> CanonicalInterfaceProof
+admittedOriginalProof (AdmittedFinalizedOriginal _ proof _ _) = proof
+
+admittedOriginalInterface :: AdmittedFinalizedOriginal -> (ExactIfaceArtifact,FilePath,String)
+admittedOriginalInterface (AdmittedFinalizedOriginal _ _ row _) = row
+
+admittedOriginalLocation :: AdmittedFinalizedOriginal -> ModLocation
+admittedOriginalLocation (AdmittedFinalizedOriginal _ _ _ location) = location
+
+-- Absence of a defining capability remains unavailable. Advertised invalid
+-- artifacts are refusals; source lookup and frontend compilation never occur.
+recoverAdmittedFinalizedOriginal
+  :: HscEnv -> ExactScope -> Module -> IO (Maybe AdmittedFinalizedOriginal)
+recoverAdmittedFinalizedOriginal env scope owner = case Map.lookup key (scopeModuleInterfaceProofs scope) of
+  Just proof | isSourceOriginal (canonicalOrigin proof), Just _ <- canonicalCoreArtifact proof -> do
+    either (ioError . userError) pure =<< revalidateExactScope env scope
+    row@(artifact,_,_) <- case [row | row@(selected,_,_) <- scopeInterfaces scope
+        , (exactUnit selected,exactModule selected) == key] of
+      [row] -> pure row
+      _ -> throwIO CandidateCoreHomeMissing
+    let seals = Map.fromList [((exactUnit selected,exactModule selected),exactSha256 selected)
+          | (selected,_,_) <- scopeInterfaces scope]
+    unless (all (\(required,seal) -> Map.lookup required seals == Just seal)
+        (Map.toAscList (canonicalRequirements proof)))
+      (throwIO CandidateInterfaceRequirementsMismatch)
+    let admission = ModuleInterfaceAdmission proof
+        location = ms_location (exactInterfaceSummary env artifact)
+    home <- admittedHomeInterface env admission owner
+    bytes <- readAdmittedCore admission
+    original <- decodeFinalizedCore env home location bytes >>= either (throwIO . CandidateCoreDecodeFailure) pure
+    pure (Just (AdmittedFinalizedOriginal original proof row location))
+  _ -> pure Nothing
+  where
+    key = (unitString (moduleUnit owner),moduleNameString (moduleName owner))
 
 -- The producer's complete home census classifies package-form usages too.
 -- Authored source import adjacency cannot substitute for this native census.
