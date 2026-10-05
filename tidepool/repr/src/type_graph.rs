@@ -16,6 +16,8 @@ use crate::execution_schema::{
 };
 
 mod cursor;
+#[cfg(test)]
+mod properties;
 pub use cursor::{ConstructionRefusal, DataView, TypeCursor, TypeView};
 
 pub type TypeNodeId = NodeIndex<u32>;
