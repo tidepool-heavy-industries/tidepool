@@ -256,7 +256,7 @@ internDeclaration constructor = do
       mapM_ (\(index, kind) -> addEdge identity (W.TypeBinderKind (fromIntegral index)) kind)
         (zip [0 :: Int ..] kinds)
       form <- declarationForm identity constructor variables
-      let restriction = if isSpecial "Control.Monad.Freer.Internal" "Eff" constructor
+      let restriction = if isEffectHead constructor
             then W.EffectHead else W.UnrestrictedSyntax
           node = W.TypeDeclaration constructor flags form restriction
       case previous of
@@ -443,6 +443,15 @@ isForbidden tc = any (\(owner, occurrence) -> isSpecial owner occurrence tc)
   , ("Data.Set.Internal", "Set")
   , ("Tidepool.Internal.ExitCell", "ExitCell")
   ]
+
+-- The same GHC nominal predicate owns effect-row stabilization and the graph's
+-- syntax restriction. Type traversal includes forall kinds and function
+-- multiplicity, without interpreting declaration fields or diagnostic text.
+isEffectHead :: TyCon -> Bool
+isEffectHead = isSpecial "Control.Monad.Freer.Internal" "Eff"
+
+containsEff :: Type -> Bool
+containsEff = any isEffectHead . USet.nonDetEltsUniqSet . tyConsOfType
 
 definedIn :: String -> TyCon -> Bool
 definedIn expected tc = maybe False
