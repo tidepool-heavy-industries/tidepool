@@ -2699,7 +2699,11 @@ impl ExactDeclarationContext {
                 "activation preview lacks its complete original instance graph",
             ));
         }
-        if self.lexical_graph().iter().any(|node| node.owner.unit != "main") {
+        if self
+            .lexical_graph()
+            .iter()
+            .any(|node| node.owner.unit != "main")
+        {
             return Err(failure(
                 "activation preview original graph belongs to another home unit",
             ));
