@@ -2151,7 +2151,7 @@ impl CheckedDisplayOffer {
             original_interfaces: Arc::new(
                 crate::declaration_context::ExactDeclarationContext::from_authenticated_interfaces(
                     self.capture.item.cell.producer,
-                    artifact_context.artifact_view(),
+                    original_execution.artifact_view(),
                 )?,
             ),
             original_execution,
@@ -3162,7 +3162,7 @@ impl CheckedItemOffer {
             original_interfaces: Arc::new(
                 crate::declaration_context::ExactDeclarationContext::from_authenticated_interfaces(
                     self.item.cell.producer,
-                    artifact_context.artifact_view(),
+                    original_execution.artifact_view(),
                 )?,
             ),
             original_execution,
