@@ -32,9 +32,19 @@ def _test_environment(env, haskell_worker):
         env["PATH"] = read_root_config("nix", "action_path") + ":" + ghc_bin
     return env
 
+def _test_regression_environment(env, package_dir, name):
+    env = dict(env)
+    if "TIDEPOOL_PROPTEST_REGRESSIONS" in env:
+        fail("native regression path is owned by its declared test target")
+    # Buck may replace Cargo's manifest directory with the source projection.
+    # Retain replay seeds beside the declared package, outside that artifact.
+    env["TIDEPOOL_PROPTEST_REGRESSIONS"] = package_dir + "/proptest-regressions/" + name + ".txt"
+    return env
+
 def tidepool_rust_test(name, package_name, package_dir, version, env = {}, rustc_flags = [], haskell_worker = False, **kwargs):
     env = _test_environment(env, haskell_worker)
     compiler_env, flags = _common(name, package_name, package_dir, version, env, rustc_flags)
+    compiler_env = _test_regression_environment(compiler_env, package_dir, name)
     rust_test(name = name, env = compiler_env, rustc_flags = flags, **kwargs)
 
 def tidepool_rust_test_cases(
@@ -131,6 +141,7 @@ def tidepool_rust_isolated_test(
     # Runtime resources stay out of the compile action: changing a prepared
     # fixture rebuilds its producer and test execution without relinking Rust.
     compiler_env, flags = _common(name, package_name, package_dir, version, compile_env, rustc_flags)
+    compiler_env = _test_regression_environment(compiler_env, package_dir, name)
     runtime_env, _flags = _common(name, package_name, package_dir, version, env, rustc_flags)
     rust_binary(
         name = name + "_binary",

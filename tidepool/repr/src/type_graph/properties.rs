@@ -372,12 +372,9 @@ fn property_config() -> ProptestConfig {
     if std::env::var_os("PROPTEST_MAX_SHRINK_ITERS").is_none() {
         config.max_shrink_iters = 4096;
     }
-    // Buck stages source files, while the counted runner retains checkout cwd.
-    // The manifest directory names this package for both Buck and Cargo.
-    config.failure_persistence = Some(Box::new(FileFailurePersistence::Direct(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/proptest-regressions/type_graph.proptest-regressions"
-    ))));
+    if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
+        config.failure_persistence = Some(Box::new(FileFailurePersistence::Direct(path)));
+    }
     config
 }
 
