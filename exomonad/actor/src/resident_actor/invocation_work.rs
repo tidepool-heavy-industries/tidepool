@@ -588,6 +588,13 @@ impl InvocationWork {
         let (commands, workers) = tokio::join!(command_cleanup, worker_cleanup);
         cleanup.commands = commands;
         cleanup.workers = workers;
+        // Delivery and owned-worker retirement may close request targets after
+        // cancellation admission. Retain their state at the cleanup boundary.
+        for request in &mut cleanup.requests {
+            request.target = environment
+                .requests
+                .request_cleanup_state(self.owner, request.request);
+        }
         self.state.lock().cleanup = Some(cleanup.clone());
         cleanup
     }

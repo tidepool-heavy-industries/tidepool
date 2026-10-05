@@ -44,6 +44,7 @@ struct Owner {
     context: Option<tokio::sync::oneshot::Sender<KernelContext>>,
     startup_gate: Option<Arc<ShutdownGate>>,
     shutdown_gate: Option<Arc<ShutdownGate>>,
+    requests: Option<Arc<crate::request::RequestRegistry>>,
 }
 
 impl Owner {
@@ -52,6 +53,7 @@ impl Owner {
             context: Some(context),
             startup_gate: None,
             shutdown_gate: None,
+            requests: None,
         }
     }
 }
@@ -129,15 +131,19 @@ impl crate::KernelBehavior for Owner {
 
     fn shutdown<'a>(
         &'a mut self,
-        _: &'a KernelContext,
-        _: &'a ActorTerminal,
+        context: &'a KernelContext,
+        terminal: &'a ActorTerminal,
     ) -> BoxFuture<'a, Result<(), crate::KernelBehaviorError>> {
         let gate = self.shutdown_gate.clone();
+        let requests = self.requests.clone();
         Box::pin(async move {
             if let Some(gate) = gate {
                 gate.calls.fetch_add(1, Ordering::Relaxed);
                 gate.entered.add_permits(1);
                 gate.release.acquire().await.unwrap().forget();
+            }
+            if let Some(requests) = requests {
+                requests.actor_stopped(context.identity(), terminal);
             }
             Ok(())
         })
@@ -824,6 +830,7 @@ async fn interrupted_group_cleanup_retains_discovered_actor_owned_worker_for_ret
                 context: Some(send),
                 startup_gate: None,
                 shutdown_gate: Some(gate.clone()),
+                requests: None,
             },
             crate::WorkerLifetime::ActorOwned,
         )
@@ -976,6 +983,92 @@ async fn invocation_request_cleanup_retains_target_acknowledgment_without_retiri
 }
 
 #[tokio::test]
+async fn invocation_cleanup_observes_request_closure_after_owned_workers_retire() {
+    let fixture = Fixture::start().await;
+    let owner = fixture.actor.identity();
+    let work = InvocationWork::new(owner, reservation());
+    let gate = Arc::new(ShutdownGate {
+        entered: tokio::sync::Semaphore::new(0),
+        release: tokio::sync::Semaphore::new(0),
+        calls: AtomicUsize::new(0),
+    });
+    let requests = &fixture.environment.requests;
+    let mut children = Vec::new();
+    let mut pending = Vec::new();
+    for index in 0..2 {
+        let (send, receive) = tokio::sync::oneshot::channel();
+        let mut behavior = Owner::new(send);
+        behavior.requests = Some(requests.clone());
+        if index == 1 {
+            behavior.shutdown_gate = Some(gate.clone());
+        }
+        let child = fixture
+            .kernel
+            .spawn_worker_scoped(
+                None,
+                behavior,
+                crate::WorkerLifetime::InvocationOwned,
+                work.clone(),
+            )
+            .await
+            .unwrap();
+        let _context = receive.await.unwrap();
+        let target = child.identity();
+        let request = requests.reserve_for_operation(
+            owner,
+            target,
+            "owned worker request".into(),
+            false,
+            Some(work.reservation.clone()),
+        );
+        requests.mark_queued(owner, target, request).unwrap();
+        requests.present(target, request).unwrap();
+        pending.push(request);
+        children.push(child);
+    }
+
+    let mut cleanup = Box::pin(work.cleanup(&fixture.environment, &fixture.kernel));
+    tokio::time::timeout(Duration::from_secs(1), async {
+        tokio::select! {
+            result = &mut cleanup => panic!("worker retirement is still held: {result:?}"),
+            permit = gate.entered.acquire() => permit.unwrap().forget(),
+        }
+    })
+    .await
+    .unwrap();
+    assert!(work.cleanup_observation().is_none());
+    assert_eq!(
+        requests.request_cleanup_state(owner, pending[1]),
+        Ok(crate::request::RequestCleanupState::CancellationRequested {
+            reason: crate::CancellationReason::RequesterCancelled,
+            presented: true,
+        })
+    );
+    gate.release.add_permits(1);
+    let cleanup = tokio::time::timeout(Duration::from_secs(1), cleanup)
+        .await
+        .expect("responsive owned workers finish cleanup");
+    assert_eq!(cleanup.requests.len(), 2);
+    assert_eq!(cleanup.workers.len(), 2);
+    for request in &cleanup.requests {
+        assert_eq!(
+            request.cancellation,
+            Ok(crate::CancelRequestOutcome::Requested)
+        );
+        assert_eq!(
+            request.target,
+            Ok(crate::request::RequestCleanupState::TargetClosed)
+        );
+    }
+    assert_eq!(cleanup.uncertainty(), None);
+    assert_eq!(work.cleanup_observation().unwrap().uncertainty(), None);
+    for child in children {
+        assert!(child.terminal().cleanup().unwrap().is_confirmed());
+    }
+    fixture.finish().await;
+}
+
+#[tokio::test]
 async fn detached_invocation_request_survives_scope_cleanup_until_target_replies() {
     let fixture = Fixture::start().await;
     let owner = fixture.actor.identity();
@@ -1055,6 +1148,7 @@ async fn dropped_scoped_worker_start_retains_exact_kernel_and_host_cleanup_uncer
             context: Some(send),
             startup_gate: Some(gate.clone()),
             shutdown_gate: None,
+            requests: None,
         },
         crate::WorkerLifetime::InvocationOwned,
         work.clone(),
@@ -1147,6 +1241,7 @@ async fn closed_invocation_refuses_real_scoped_spawn_before_worker_initializatio
                 context: Some(send),
                 startup_gate: Some(gate.clone()),
                 shutdown_gate: None,
+                requests: None,
             },
             crate::WorkerLifetime::InvocationOwned,
             work.clone(),
@@ -1355,6 +1450,7 @@ async fn interrupted_automatic_group_abort_retains_worker_for_invocation_cleanup
                 context: Some(send),
                 startup_gate: None,
                 shutdown_gate: Some(gate.clone()),
+                requests: None,
             },
             crate::WorkerLifetime::ActorOwned,
         )
