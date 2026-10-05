@@ -816,7 +816,25 @@ data ExactEnvironmentIdentity = ExactEnvironmentIdentity
   , environmentCandidates :: CandidateOfferIdentity
   , environmentRetained :: Set.Set SymbolIdentity
   , environmentImportIntents :: [ImportIntent]
+  , environmentValueInputs :: [ModuleName]
   } deriving (Eq)
+
+-- Legacy session interfaces are read from mutable ssRoot paths outside the
+-- exact scope. Only the checked injection branch consumes verified scope bytes.
+data ExactReuseAdmission
+  = ScopeAuthenticatedValueInputs [ModuleName]
+  | UnsealedSessionValueInputs
+
+exactReuseAdmission :: ExactScope -> Maybe SessionScope -> ExactReuseAdmission
+exactReuseAdmission scope session
+  | null requested = ScopeAuthenticatedValueInputs []
+  | scopePurpose scope == NoCheckedPurpose = UnsealedSessionValueInputs
+  | all ((`Set.member` admitted) . moduleNameString) requested =
+      ScopeAuthenticatedValueInputs requested
+  | otherwise = UnsealedSessionValueInputs
+  where
+    requested = maybe [] (map renderSessionModule . ssValIfaces) session
+    admitted = Set.fromList (map exactModule (scopeValueInterfaces scope))
 
 data CandidateOfferIdentity
   = NoCandidateOffer
@@ -3848,9 +3866,9 @@ residentCompileOne producer selection cacheRef memoRef retainedRef retainedSymbo
   currentOrigin <- case pvExactScope variant of
     Just scope -> do
       workingDirectory <- liftIO getCurrentDirectory
-      pure $ case candidateOfferIdentity (candidateManifestFor selection) capturedCandidates of
-        Nothing -> IsolatedExactState
-        Just captured -> ExactState (ExactEnvironmentIdentity
+      pure $ case (exactReuseAdmission scope mscope,
+          candidateOfferIdentity (candidateManifestFor selection) capturedCandidates) of
+        (ScopeAuthenticatedValueInputs values,Just captured) -> ExactState (ExactEnvironmentIdentity
           { environmentScope=scope {scopeManifestPath=""}
           , environmentProducer=producer
           , environmentIncarnation=mscope >>= ssIncarnation
@@ -3859,7 +3877,9 @@ residentCompileOne producer selection cacheRef memoRef retainedRef retainedSymbo
           , environmentCandidates=captured
           , environmentRetained=retainedSymbols
           , environmentImportIntents=pvSourceImportIntents variant
+          , environmentValueInputs=values
           }) targetOwner
+        _ -> IsolatedExactState
     Nothing
       | exactCompileCycle selection variant -> pure IsolatedExactState
       | not (null (pvDownsweepExcludes variant)) -> pure LegacySourceFreeState

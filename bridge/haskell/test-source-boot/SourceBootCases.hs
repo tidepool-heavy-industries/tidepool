@@ -2906,6 +2906,70 @@ exactTransactionReuse = withTiming $ withScratch $ \work -> do
         fail "source compiler products survived their transaction"
   putStrLn "exact transaction reuse: check/check and check/native skip dependency work; instance drift, refusal recovery and transaction close passed"
 
+exactLegacyValueIsolation :: IO ()
+exactLegacyValueIsolation = withTiming $ withScratch $ \work -> do
+  valueOwner <- maybe (fail "invalid legacy isolation value owner") pure
+    (parseValModule "Tidepool.Session.Val.G2")
+  let fixture name = "test-source-boot/fixtures" </> name
+      alternate = work </> "alternate-values"
+      consumer = work </> "CheckedValueConsumer.hs"
+      target = work </> "LegacyValueNativeTarget.hs"
+      produce root valueFixture consumerFixture = do
+        let source = root </> "Tidepool/Session/Val/G2.hs"
+        createDirectoryIfMissing True (takeDirectory source)
+        copyFile (fixture valueFixture) source
+        copyFile (fixture consumerFixture) (root </> "CheckedValueConsumer.hs")
+        produced <- runPipelineSelected (PreparedProducts Nothing)
+          (root </> "CheckedValueConsumer.hs") [root]
+        iface <- maybe (fail "legacy value producer omitted its real interface") pure
+          (Map.lookup (mkModuleName "Tidepool.Session.Val.G2") (pprProductInterfaces produced))
+        writeBinIface (targetProfile (hsc_dflags (prHscEnv (pprPipelineResult produced))))
+          QuietBinIFace NormalCompression (sessionHiPath root valueOwner) iface
+        renameFile source (replaceExtension source "retained-source")
+        BS.readFile (sessionHiPath root valueOwner)
+  intBytes <- produce work "CheckedValueG2.hs" "CheckedValueConsumer.hs"
+  boolBytes <- produce alternate "CheckedValueG2Bool.hs" "CheckedValueBoolConsumer.hs"
+  copyFile (fixture "LegacyValueNativeTarget.hs") target
+  scopePath <- writeGenuineEmptyMetadataScope work
+  let scope = emptySessionScope {ssRoot=work,ssExactScope=Just scopePath
+        ,ssValIfaces=[valueOwner],ssIncarnation=Just "legacy-exact-isolation"}
+  base <- readExactScope scopePath >>= either fail pure
+  let value = ExactIfaceArtifact "main" "Tidepool.Session.Val.G2"
+        (sessionHiPath work valueOwner) (digest intBytes) []
+      admitted = base {scopePurpose=ExactCellPurpose
+        (CheckedCellAdmission (replicate 64 '0') (replicate 64 '0') (replicate 64 '0')
+          [] ["Tidepool.Session.Val.G2"] [] [value] Nothing AuthoredCellCheck) [work]}
+  withResidentPipelineSelected [work] $ \compile -> do
+    let native session = compile (PreparedProducts Nothing) Set.empty GeneralCompile
+          (Just session) target [work] Nothing
+        seed = do
+          (result,diagnostics) <- captureDiagnostics (native scope)
+          unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult result))
+              && Map.member (mkModuleName "CheckedValueConsumer") (pprFinalizedModules result)
+              && counterValues "transaction_reused_source_products" diagnostics == [0]) $
+            fail "legacy isolation did not compile and finalize its real native dependency"
+        refuse session = sourceFailureDiagnostics (native session) >>= \case
+          Left diagnostics | any (\diagnostic -> sourceDiagnosticAt consumer "Bool" diagnostic
+              && "Int" `isInfixOf` dMessage diagnostic) diagnostics -> pure ()
+          Left diagnostics -> fail ("changed legacy value failed for another reason: " ++ show diagnostics)
+          Right _ -> fail "exact reuse borrowed old Int dependency Core after legacy Bool injection"
+    seed
+    BS.writeFile (sessionHiPath work valueOwner) boolBytes
+    refuse scope
+    BS.writeFile (sessionHiPath work valueOwner) intBytes
+    seed
+    refuse scope {ssRoot=alternate}
+    seed
+    _ <- compile (PreparedProducts Nothing) Set.empty (CellProgramCompile GeneralCompile admitted)
+      (Just scope) target [work] Nothing
+    (authenticated,authenticatedDiagnostics) <- captureDiagnostics $
+      compile (PreparedProducts Nothing) Set.empty (CellProgramCompile GeneralCompile admitted)
+        (Just scope {ssRoot=alternate}) target [work] Nothing
+    unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult authenticated))
+        && counterValues "transaction_reused_source_products" authenticatedDiagnostics == [1]) $
+      fail "authenticated checked values lost reuse or consumed the unsealed replacement root"
+  putStrLn "exact legacy value isolation: native dependency seeds, same-root interface drift, root substitution and recovery passed"
+
 exactLoadedMetadata :: IO ()
 exactLoadedMetadata = withTiming $ withScratch $ \work -> do
   let fixture name = "test-source-boot/fixtures" </> name
