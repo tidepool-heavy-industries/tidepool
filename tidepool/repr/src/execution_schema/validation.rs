@@ -1317,7 +1317,7 @@ impl<'a> Validator<'a> {
         self.check_table_len(self.wire.constructors.len())?;
         self.check_table_len(self.wire.operations.len())?;
         self.check_table_len(self.wire.bindings.len())?;
-        if self.wire.types.len() > self.limits.max_type_nodes {
+        if self.wire.types.graph().node_count() > self.limits.max_type_nodes {
             return Err(ParseError::LimitExceeded("type nodes"));
         }
         if self.wire.sites.len() > self.limits.max_sites {
@@ -1693,102 +1693,14 @@ impl<'a> Validator<'a> {
     }
 
     fn check_type_nodes(&mut self) -> Result<(), ParseError> {
-        for index in 0..self.wire.types.len() {
-            let work = match &self.wire.types[index] {
-                TypeNode::Data {
-                    family,
-                    arguments,
-                    rows,
-                } => arguments
-                    .len()
-                    .checked_add(rows.len())
-                    .and_then(|work| {
-                        rows.iter()
-                            .try_fold(work, |work, row| work.checked_add(row.fields.len()))
-                    })
-                    .and_then(|work| {
-                        Self::symbol_text_len(family).and_then(|text| work.checked_add(text))
-                    }),
-                TypeNode::Unconstructible { reason, rendered } => {
-                    reason.len().checked_add(rendered.len())
-                }
-                TypeNode::Text | TypeNode::Integer | TypeNode::Natural | TypeNode::Scalar(_) => {
-                    Some(0)
-                }
-            }
-            .and_then(|work| work.checked_add(1))
-            .ok_or(ParseError::LimitExceeded("work"))?;
-            self.bump_work(work)?;
-            match &self.wire.types[index] {
-                TypeNode::Data {
-                    family,
-                    arguments,
-                    rows,
-                } => {
-                    self.check_symbol_shape(family)?;
-                    for argument in arguments {
-                        self.type_node(*argument)?;
-                    }
-                    let mut previous_tag = 0;
-                    for row in rows {
-                        let constructor = self.constructor(row.constructor)?;
-                        if &constructor.family != family || constructor.tag <= previous_tag {
-                            return Err(ParseError::InvalidLayout(
-                                "type node constructor family or order".into(),
-                            ));
-                        }
-                        previous_tag = constructor.tag;
-                        if constructor.result_rep != RuntimeRep::LiftedRef {
-                            return Err(ParseError::InvalidLayout(
-                                "type node constructor representation".into(),
-                            ));
-                        }
-                        if row.fields.len() != constructor.field_reps.len() {
-                            return Err(ParseError::InvalidLayout(
-                                "type node field representation".into(),
-                            ));
-                        }
-                        for (field, expected_rep) in row.fields.iter().zip(&constructor.field_reps)
-                        {
-                            match self.type_node(*field)? {
-                                TypeNode::Scalar(rep) if rep == expected_rep => {}
-                                TypeNode::Data { .. }
-                                | TypeNode::Text
-                                | TypeNode::Integer
-                                | TypeNode::Natural
-                                    if *expected_rep == RuntimeRep::LiftedRef => {}
-                                TypeNode::Unconstructible { .. } => {}
-                                _ => {
-                                    return Err(ParseError::InvalidLayout(
-                                        "type node field representation".into(),
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                }
-                TypeNode::Scalar(rep) => {
-                    self.check_rep(*rep)?;
-                    if !matches!(
-                        rep,
-                        RuntimeRep::Int(_) | RuntimeRep::Word(_) | RuntimeRep::Float(_)
-                    ) {
-                        return Err(ParseError::InvalidLayout(
-                            "type scalar representation".into(),
-                        ));
-                    }
-                }
-                TypeNode::Unconstructible { reason, rendered } => {
-                    if reason.is_empty() {
-                        return Err(ParseError::Malformed("empty unconstructible reason".into()));
-                    }
-                    self.check_text_shape(reason, true)?;
-                    self.check_text_shape(rendered, true)?;
-                }
-                TypeNode::Text | TypeNode::Integer | TypeNode::Natural => {}
-            }
-        }
-        Ok(())
+        let mut limits = crate::type_graph::GraphLimits::from(self.limits);
+        limits.max_work = self.limits.max_work.saturating_sub(self.work);
+        let used_work = self
+            .wire
+            .types
+            .check_constructor_pairing_with_work(self.wire.constructors, limits)
+            .map_err(super::codec::type_graph_error)?;
+        self.bump_work(used_work)
     }
 
     fn check_sites(&mut self) -> Result<BTreeSet<u64>, ParseError> {
@@ -1849,10 +1761,15 @@ impl<'a> Validator<'a> {
     }
 
     fn type_node(&self, id: TypeNodeId) -> Result<&TypeNode, ParseError> {
-        self.wire
+        match self
+            .wire
             .types
-            .get(id.0 as usize)
-            .ok_or_else(|| ParseError::InvalidReference(format!("type node {:?}", id)))
+            .graph()
+            .node_weight(crate::type_graph::TypeNodeId::new(id.0 as usize))
+        {
+            Some(node @ TypeNode::Root { .. }) => Ok(node),
+            _ => Err(ParseError::InvalidReference(format!("type root {:?}", id))),
+        }
     }
 
     fn check_text_shape(&self, text: &str, allow_empty: bool) -> Result<(), ParseError> {
@@ -2510,10 +2427,10 @@ impl<'a> Validator<'a> {
 mod tests {
     use super::*;
     use crate::execution_schema::{
-        Architecture, ConstructorDecl, CtorRow, Endianness, FieldLayout, HeapBinding, HeapRhs,
-        JsonLayout, OperationDecl, ProgramEnvelope, Signature, SiteDelivery, SiteRow,
-        StorageLayout, TargetDescriptor, TopBinding, TypeNode, TypeNodeId, UpdatePolicy,
-        EXECUTION_ABI_VERSION, SCHEMA_VERSION,
+        Architecture, ConstructorDecl, Endianness, FieldLayout, HeapBinding, HeapRhs, JsonLayout,
+        OperationDecl, ProgramEnvelope, Signature, SiteDelivery, SiteRow, StorageLayout,
+        TargetDescriptor, TopBinding, TypeNode, TypeNodeId, UpdatePolicy, EXECUTION_ABI_VERSION,
+        SCHEMA_VERSION,
     };
 
     fn symbol(name: &str) -> SymbolIdentity {
@@ -2582,7 +2499,7 @@ mod tests {
                 },
             })],
             entry: ValueId(0),
-            types: vec![],
+            types: std::sync::Arc::default(),
             sites: vec![],
             constructor_replies: vec![],
             json_layout: None,
@@ -3022,29 +2939,86 @@ mod tests {
         ));
     }
 
+    fn type_identity(name: &str) -> SymbolIdentity {
+        SymbolIdentity {
+            namespace: "type".into(),
+            ..symbol(name)
+        }
+    }
+
+    fn declaration(name: &str, form: crate::type_graph::DeclarationForm) -> TypeNode {
+        TypeNode::Declaration {
+            identity: type_identity(name),
+            parameters: vec![],
+            form,
+            restriction: crate::type_graph::SyntaxRestriction::None,
+        }
+    }
+
+    fn text_graph() -> std::sync::Arc<crate::type_graph::TypeGraph> {
+        tidepool_test_data::prepared::closed_type_graph(
+            type_identity("Text"),
+            crate::type_graph::DeclarationForm::Text,
+        )
+    }
+
     #[test]
     fn type_graph_keeps_phantom_arguments_distinct_and_allows_cycles() {
+        use crate::type_graph::{
+            DeclarationForm, ParameterFlag, RootDomain, SyntaxRestriction, TypeEdge, TypeLiteral,
+            TypeNodeId as NodeIndex, TypeWorkBudget,
+        };
+        let root = |rendered: &str| TypeNode::Root {
+            domain: RootDomain::Closed,
+            binders: vec![],
+            rendered: rendered.into(),
+        };
+        let graph = tidepool_test_data::prepared::type_graph(
+            vec![
+                root("Phantom Int#"),
+                root("Phantom Word#"),
+                TypeNode::Declaration {
+                    identity: type_identity("Phantom"),
+                    parameters: vec![ParameterFlag::NamedRequired],
+                    form: DeclarationForm::Data,
+                    restriction: SyntaxRestriction::None,
+                },
+                TypeNode::NominalApplication,
+                TypeNode::NominalApplication,
+                declaration("Int#", DeclarationForm::Scalar(RuntimeRep::Int(64))),
+                TypeNode::NominalApplication,
+                declaration("Word#", DeclarationForm::Scalar(RuntimeRep::Word(64))),
+                TypeNode::NominalApplication,
+                TypeNode::Literal(TypeLiteral::Symbol("Type".into())),
+            ],
+            &[
+                (0, 3, TypeEdge::Body),
+                (1, 4, TypeEdge::Body),
+                (2, 9, TypeEdge::BinderKind(0)),
+                (3, 2, TypeEdge::Head),
+                (3, 6, TypeEdge::Argument(0)),
+                (4, 2, TypeEdge::Head),
+                (4, 8, TypeEdge::Argument(0)),
+                (6, 5, TypeEdge::Head),
+                (8, 7, TypeEdge::Head),
+            ],
+            &[],
+        )
+        .unwrap();
+        assert!(!graph
+            .rooted_identity_eq(
+                NodeIndex::new(0),
+                &graph,
+                NodeIndex::new(1),
+                &mut TypeWorkBudget::new(10_000)
+            )
+            .unwrap());
         let mut program = valid_program();
-        let family = symbol("PhantomFamily");
-        program.types = vec![
-            TypeNode::Scalar(RuntimeRep::Int(64)),
-            TypeNode::Scalar(RuntimeRep::Word(64)),
-            TypeNode::Data {
-                family: family.clone(),
-                arguments: vec![TypeNodeId(0)],
-                rows: vec![],
-            },
-            TypeNode::Data {
-                family,
-                arguments: vec![TypeNodeId(1)],
-                rows: vec![],
-            },
-        ];
+        program.types = graph;
         validate_program(&program, &requirements(), DecodeLimits::default()).unwrap();
-        assert_ne!(program.types[2], program.types[3]);
 
         let mut recursive = empty_constructor("Recursive", 1, 1);
-        recursive.family = symbol("RecursiveFamily");
+        recursive.family = type_identity("RecursiveFamily");
         recursive.field_reps = vec![RuntimeRep::LiftedRef];
         recursive.strict_fields = vec![false];
         recursive.layout = CheckedLayout {
@@ -3057,31 +3031,41 @@ mod tests {
             root_mask: vec![true],
         };
         program.constructors = vec![recursive];
-        program.types = vec![TypeNode::Data {
-            family: symbol("RecursiveFamily"),
-            arguments: vec![],
-            rows: vec![CtorRow {
-                constructor: ConstructorId(0),
-                fields: vec![TypeNodeId(0)],
-            }],
-        }];
+        program.types = tidepool_test_data::prepared::type_graph(
+            vec![
+                declaration("RecursiveFamily", DeclarationForm::Data),
+                TypeNode::NominalApplication,
+                TypeNode::ConstructorTemplate {
+                    constructor: ConstructorId(0),
+                    identity: program.constructors[0].identity.clone(),
+                },
+                root("RecursiveFamily"),
+            ],
+            &[
+                (0, 2, TypeEdge::Constructor(1)),
+                (1, 0, TypeEdge::Head),
+                (
+                    2,
+                    1,
+                    TypeEdge::Field {
+                        ordinal: 0,
+                        source_rep: RuntimeRep::LiftedRef,
+                    },
+                ),
+                (3, 1, TypeEdge::Body),
+            ],
+            &program.constructors,
+        )
+        .unwrap();
         validate_program(&program, &requirements(), DecodeLimits::default()).unwrap();
     }
 
     #[test]
-    fn type_graph_rejects_bad_references_and_field_layouts() {
+    fn frozen_type_graph_rechecks_modified_field_layouts() {
+        use crate::type_graph::{DeclarationForm, TypeEdge};
         let mut program = valid_program();
-        program.types = vec![TypeNode::Data {
-            family: symbol("Family"),
-            arguments: vec![TypeNodeId(1)],
-            rows: vec![],
-        }];
-        assert!(matches!(
-            validate_program(&program, &requirements(), DecodeLimits::default()),
-            Err(ParseError::InvalidReference(detail)) if detail.contains("type node")
-        ));
-
         let mut constructor = empty_constructor("Scalar", 1, 1);
+        constructor.family = type_identity("Family");
         constructor.field_reps = vec![RuntimeRep::Int(64)];
         constructor.strict_fields = vec![false];
         constructor.layout = CheckedLayout {
@@ -3094,37 +3078,44 @@ mod tests {
             root_mask: vec![false],
         };
         program.constructors = vec![constructor];
-        program.types = vec![
-            TypeNode::Scalar(RuntimeRep::Word(64)),
-            TypeNode::Data {
-                family: symbol("Family"),
-                arguments: vec![],
-                rows: vec![CtorRow {
+        program.types = tidepool_test_data::prepared::type_graph(
+            vec![
+                declaration("Family", DeclarationForm::Data),
+                TypeNode::ConstructorTemplate {
                     constructor: ConstructorId(0),
-                    fields: vec![TypeNodeId(0)],
-                }],
-            },
-        ];
+                    identity: program.constructors[0].identity.clone(),
+                },
+                declaration("Int#", DeclarationForm::Scalar(RuntimeRep::Int(64))),
+                TypeNode::NominalApplication,
+            ],
+            &[
+                (0, 1, TypeEdge::Constructor(1)),
+                (
+                    1,
+                    3,
+                    TypeEdge::Field {
+                        ordinal: 0,
+                        source_rep: RuntimeRep::Int(64),
+                    },
+                ),
+                (3, 2, TypeEdge::Head),
+            ],
+            &program.constructors,
+        )
+        .unwrap();
+        validate_program(&program, &requirements(), DecodeLimits::default()).unwrap();
+        program.constructors[0].field_reps[0] = RuntimeRep::Word(64);
+        program.constructors[0].layout.fields[0].rep = RuntimeRep::Word(64);
         assert!(matches!(
             validate_program(&program, &requirements(), DecodeLimits::default()),
-            Err(ParseError::InvalidLayout(detail))
-                if detail == "type node field representation"
-        ));
-
-        let TypeNode::Data { rows, .. } = &mut program.types[1] else {
-            unreachable!()
-        };
-        rows[0].fields[0] = TypeNodeId(99);
-        assert!(matches!(
-            validate_program(&program, &requirements(), DecodeLimits::default()),
-            Err(ParseError::InvalidReference(detail)) if detail.contains("type node")
+            Err(ParseError::InvalidLayout(_))
         ));
     }
 
     #[test]
     fn site_rows_require_unique_ids_and_valid_type_roots() {
         let mut program = valid_program();
-        program.types = vec![TypeNode::Text];
+        program.types = text_graph();
         let site = SiteRow {
             site: 7,
             origin: "Fixture.hs:1".into(),
@@ -3148,17 +3139,20 @@ mod tests {
         program.sites[0].wire = TypeNodeId(1);
         assert!(matches!(
             validate_program(&program, &requirements(), DecodeLimits::default()),
-            Err(ParseError::InvalidReference(detail)) if detail.contains("type node")
+            Err(ParseError::InvalidReference(detail)) if detail.contains("type root")
         ));
     }
 
     #[test]
     fn constructor_replies_require_exact_constructors_nodes_and_carrier_layouts() {
         let mut program = valid_program();
-        program.types = vec![TypeNode::Unconstructible {
-            reason: "polymorphic".into(),
-            rendered: "a".into(),
-        }];
+        program.types = tidepool_test_data::prepared::closed_type_graph(
+            type_identity("Opaque"),
+            crate::type_graph::DeclarationForm::Opaque {
+                head_kind: crate::type_graph::NominalHeadKind::Constructor,
+                reason: "unsupported original".into(),
+            },
+        );
         program.constructors = vec![empty_constructor("Request", 1, 1)];
         program.constructor_replies =
             vec![(ConstructorId(0), ConstructorReply::Static(TypeNodeId(0)))];
@@ -3190,7 +3184,7 @@ mod tests {
     #[test]
     fn constructor_reply_validation_retains_work_bound() {
         let mut program = valid_program();
-        program.types = vec![TypeNode::Text];
+        program.types = text_graph();
         program.constructors = vec![empty_constructor("Request", 1, 1)];
         program.constructor_replies =
             vec![(ConstructorId(0), ConstructorReply::Static(TypeNodeId(0)))];
@@ -3203,81 +3197,71 @@ mod tests {
     }
 
     #[test]
-    fn data_type_rows_admit_partial_families_in_tag_order() {
+    fn frozen_original_constructor_templates_require_complete_inventory() {
+        use crate::type_graph::{DeclarationForm, TypeEdge};
         let mut program = valid_program();
         program.constructors = vec![
             empty_constructor("First", 1, 2),
             empty_constructor("Second", 2, 2),
         ];
-        program.types = vec![TypeNode::Data {
-            family: symbol("Family"),
-            arguments: vec![],
-            rows: vec![
-                CtorRow {
+        for constructor in &mut program.constructors {
+            constructor.family = type_identity("Family");
+        }
+        program.types = tidepool_test_data::prepared::type_graph(
+            vec![
+                declaration("Family", DeclarationForm::Data),
+                TypeNode::ConstructorTemplate {
                     constructor: ConstructorId(0),
-                    fields: vec![],
+                    identity: program.constructors[0].identity.clone(),
                 },
-                CtorRow {
+                TypeNode::ConstructorTemplate {
                     constructor: ConstructorId(1),
-                    fields: vec![],
+                    identity: program.constructors[1].identity.clone(),
                 },
             ],
-        }];
+            &[
+                (0, 1, TypeEdge::Constructor(1)),
+                (0, 2, TypeEdge::Constructor(2)),
+            ],
+            &program.constructors,
+        )
+        .unwrap();
         validate_program(&program, &requirements(), DecodeLimits::default()).unwrap();
-
+        let shared = program.clone();
+        assert!(std::sync::Arc::ptr_eq(&program.types, &shared.types));
         program.constructors[0].result_rep = RuntimeRep::UnliftedRef;
         assert!(matches!(
             validate_program(&program, &requirements(), DecodeLimits::default()),
-            Err(ParseError::InvalidLayout(detail))
-                if detail == "type node constructor representation"
+            Err(ParseError::InvalidLayout(_))
         ));
         program.constructors[0].result_rep = RuntimeRep::LiftedRef;
-
-        match &mut program.types[0] {
-            TypeNode::Data { rows, .. } => rows.swap(0, 1),
-            _ => unreachable!(),
-        }
+        program.constructors.pop();
         assert!(matches!(
             validate_program(&program, &requirements(), DecodeLimits::default()),
             Err(ParseError::InvalidLayout(_))
         ));
-        match &mut program.types[0] {
-            TypeNode::Data { rows, .. } => {
-                rows.swap(0, 1);
-                rows.remove(1);
-            }
-            _ => unreachable!(),
-        }
-        validate_program(&program, &requirements(), DecodeLimits::default()).unwrap();
-        match &mut program.types[0] {
-            TypeNode::Data { rows, .. } => rows.clear(),
-            _ => unreachable!(),
-        }
-        validate_program(&program, &requirements(), DecodeLimits::default()).unwrap();
     }
 
     #[test]
-    fn type_nodes_reject_non_scalar_representations_and_empty_refusal_reasons() {
-        let mut program = valid_program();
-        program.types = vec![TypeNode::Scalar(RuntimeRep::LiftedRef)];
+    fn type_nodes_reject_non_scalar_representations() {
+        use crate::type_graph::{DeclarationForm, TypeGraphError};
         assert!(matches!(
-            validate_program(&program, &requirements(), DecodeLimits::default()),
-            Err(ParseError::InvalidLayout(_))
-        ));
-        program.types = vec![TypeNode::Unconstructible {
-            reason: String::new(),
-            rendered: "Opaque".into(),
-        }];
-        assert!(matches!(
-            validate_program(&program, &requirements(), DecodeLimits::default()),
-            Err(ParseError::Malformed(_))
+            tidepool_test_data::prepared::type_graph(
+                vec![declaration(
+                    "InvalidScalar",
+                    DeclarationForm::Scalar(RuntimeRep::LiftedRef)
+                )],
+                &[],
+                &[]
+            ),
+            Err(TypeGraphError::InvalidRepresentation(_))
         ));
     }
 
     #[test]
     fn type_and_site_tables_have_independent_semantic_limits() {
         let mut program = valid_program();
-        program.types = vec![TypeNode::Text];
+        program.types = text_graph();
         assert_eq!(
             validate_program(
                 &program,
@@ -3311,19 +3295,21 @@ mod tests {
     }
 
     #[test]
-    fn many_empty_data_nodes_validate_with_bounded_work() {
+    fn many_empty_declarations_validate_with_bounded_work() {
         let mut program = valid_program();
-        for index in 0..4096_u32 {
-            let mut constructor = empty_constructor(&format!("Constructor{index}"), 1, 1);
-            constructor.host_id = crate::DataConId(u64::from(index) + 1);
-            constructor.family = symbol(&format!("DeclaredFamily{index}"));
-            program.constructors.push(constructor);
-            program.types.push(TypeNode::Data {
-                family: symbol(&format!("EmptyFamily{index}")),
-                arguments: vec![],
-                rows: vec![],
-            });
-        }
+        program.types = tidepool_test_data::prepared::type_graph(
+            (0..4096_u32)
+                .map(|index| {
+                    declaration(
+                        &format!("EmptyFamily{index}"),
+                        crate::type_graph::DeclarationForm::Data,
+                    )
+                })
+                .collect(),
+            &[],
+            &[],
+        )
+        .unwrap();
         validate_program(
             &program,
             &requirements(),

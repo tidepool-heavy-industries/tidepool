@@ -77,7 +77,7 @@ pub fn encode_projected_group(group: &ProjectedGroup) -> Vec<u8> {
         operations: content.operations().to_vec(),
         expressions: content.expressions().clone(),
         bindings: content.bindings().to_vec(),
-        types: content.types().to_vec(),
+        types: content.types().clone(),
         sites: content.sites().to_vec(),
         constructor_replies: content.constructor_replies().to_vec(),
         json_layout: content.json_layout().copied(),
@@ -126,7 +126,7 @@ fn definitions(
     operations: &[OperationDecl],
     expressions: &Expr,
     bindings: &[Group<TopBinding>],
-    types: &[TypeNode],
+    types: &tidepool_repr::type_graph::TypeGraph,
     sites: &[SiteRow],
     constructor_replies: &[(ConstructorId, ConstructorReply)],
     json_layout: &Option<JsonLayout>,
@@ -151,7 +151,7 @@ fn definitions(
         list(operations, operation),
         list(nodes, expression),
         list(bindings, |value| group(value, top)),
-        list(types, type_node),
+        encode_type_graph_value(types),
         list(sites, site),
         list(constructor_replies, |(id, reply)| {
             a([
@@ -270,31 +270,6 @@ fn constructor(value: &ConstructorDecl) -> Value {
         n(*family_size),
         n(host_id.0),
     ])
-}
-fn type_node(value: &TypeNode) -> Value {
-    match value {
-        TypeNode::Data {
-            family,
-            arguments,
-            rows,
-        } => a([
-            n(0_u64),
-            symbol(family),
-            list(arguments, |id| n(id.0)),
-            list(rows, |value| {
-                let CtorRow {
-                    constructor,
-                    fields,
-                } = value;
-                a([n(constructor.0), list(fields, |id| n(id.0))])
-            }),
-        ]),
-        TypeNode::Text => a([n(1_u64)]),
-        TypeNode::Integer => a([n(2_u64)]),
-        TypeNode::Natural => a([n(3_u64)]),
-        TypeNode::Scalar(value) => a([n(4_u64), rep(value)]),
-        TypeNode::Unconstructible { reason, rendered } => a([n(5_u64), s(reason), s(rendered)]),
-    }
 }
 fn site(value: &SiteRow) -> Value {
     let SiteRow {
@@ -651,24 +626,23 @@ mod tests {
             tag: 1,
             family_size: 2,
         });
-        wire.types = vec![
-            TypeNode::Data {
-                family: name.clone(),
-                arguments: vec![TypeNodeId(1)],
-                rows: vec![CtorRow {
-                    constructor: ConstructorId(0),
-                    fields: vec![TypeNodeId(2)],
-                }],
-            },
-            TypeNode::Text,
-            TypeNode::Integer,
-            TypeNode::Natural,
-            TypeNode::Scalar(RuntimeRep::Int(64)),
-            TypeNode::Unconstructible {
-                reason: "test".into(),
-                rendered: "a -> b".into(),
-            },
-        ];
+        use tidepool_repr::type_graph::{DeclarationForm, NominalHeadKind};
+        wire.types = crate::prepared::closed_type_roots(&[
+            (identity("Owner", "Text"), DeclarationForm::Text),
+            (identity("Owner", "Integer"), DeclarationForm::Integer),
+            (identity("Owner", "Natural"), DeclarationForm::Natural),
+            (
+                identity("Owner", "Int#"),
+                DeclarationForm::Scalar(RuntimeRep::Int(64)),
+            ),
+            (
+                identity("Owner", "Opaque"),
+                DeclarationForm::Opaque {
+                    head_kind: NominalHeadKind::Constructor,
+                    reason: "test".into(),
+                },
+            ),
+        ]);
         wire.sites = [
             SiteDelivery::HostAnswer,
             SiteDelivery::LiveReentry,

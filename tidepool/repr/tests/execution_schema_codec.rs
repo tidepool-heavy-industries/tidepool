@@ -1,8 +1,8 @@
 use ciborium::value::Value as Cbor;
 use tidepool_repr::execution_schema::{
-    parse_program, Architecture, ConstructorId, ConstructorReply, DecodeLimits, Endianness,
-    ParseError, ProgramRequirements, SiteDelivery, TargetDescriptor, TypeNode, TypeNodeId,
-    EXECUTION_ABI_VERSION, SCHEMA_VERSION,
+    encode_type_graph_value, parse_program, Architecture, ConstructorId, ConstructorReply,
+    DecodeLimits, Endianness, ParseError, ProgramRequirements, SiteDelivery, TargetDescriptor,
+    TypeNode, TypeNodeId, EXECUTION_ABI_VERSION, SCHEMA_VERSION,
 };
 
 fn int(value: u64) -> Cbor {
@@ -31,7 +31,7 @@ fn root(signatures: Cbor) -> Cbor {
         Cbor::Array(vec![]),
         Cbor::Array(vec![]),
         int(0),
-        Cbor::Array(vec![]),
+        encode_type_graph_value(&tidepool_repr::type_graph::TypeGraph::default()),
         Cbor::Array(vec![]),
         Cbor::Array(vec![]),
         Cbor::Array(vec![int(0)]),
@@ -435,7 +435,7 @@ fn codec_enforces_byte_and_table_limits() {
     let Cbor::Array(fields) = &mut schema_tables else {
         unreachable!()
     };
-    fields[13] = Cbor::Array(vec![Cbor::Array(vec![int(1)])]);
+    fields[13] = text_graph_value();
     fields[14] = Cbor::Array(vec![Cbor::Array(vec![
         int(1),
         Cbor::Text("site".into()),
@@ -499,78 +499,126 @@ fn scalar_program(result_rep: Cbor) -> Cbor {
     program
 }
 
+fn text_graph_value() -> Cbor {
+    encode_type_graph_value(&tidepool_test_data::prepared::closed_type_graph(
+        tidepool_repr::execution_schema::testing::identity("Types", "Text"),
+        tidepool_repr::type_graph::DeclarationForm::Text,
+    ))
+}
+
 #[test]
 fn codec_decodes_type_graph_and_site_rows() {
-    let mut program = scalar_program(Cbor::Array(vec![int(4), int(64)]));
-    let Cbor::Array(fields) = &mut program else {
-        unreachable!()
+    use tidepool_repr::execution_schema::{
+        testing, CheckedLayout, ConstructorDecl, FieldLayout, RuntimeRep, SiteRow,
     };
-    let family = Cbor::Array(vec![
-        Cbor::Text("fixture".into()),
-        Cbor::Text("Types".into()),
-        Cbor::Text("type".into()),
-        Cbor::Text("Phantom".into()),
-        Cbor::Array(vec![int(0)]),
-    ]);
-    let constructor_identity = Cbor::Array(vec![
-        Cbor::Text("fixture".into()),
-        Cbor::Text("Types".into()),
-        Cbor::Text("value".into()),
-        Cbor::Text("Recursive".into()),
-        Cbor::Array(vec![int(0)]),
-    ]);
-    fields[8] = Cbor::Array(vec![Cbor::Array(vec![
-        constructor_identity,
-        family.clone(),
-        Cbor::Array(vec![Cbor::Array(vec![int(1)])]),
-        Cbor::Array(vec![Cbor::Bool(false)]),
-        Cbor::Array(vec![
-            Cbor::Array(vec![Cbor::Array(vec![Cbor::Array(vec![int(1)]), int(0)])]),
-            int(8),
-            int(8),
-            Cbor::Array(vec![Cbor::Bool(true)]),
-        ]),
-        Cbor::Array(vec![int(1)]),
-        int(1),
-        int(1),
-        int(9001),
-    ])]);
-    fields[13] = Cbor::Array(vec![
-        Cbor::Array(vec![int(4), Cbor::Array(vec![int(4), int(64)])]),
-        Cbor::Array(vec![
-            int(0),
-            family,
-            Cbor::Array(vec![int(0)]),
-            Cbor::Array(vec![Cbor::Array(vec![int(0), Cbor::Array(vec![int(1)])])]),
-        ]),
-    ]);
-    fields[14] = Cbor::Array(
-        (0..4)
-            .map(|delivery| {
-                Cbor::Array(vec![
-                    int(41 + delivery),
-                    Cbor::Text("Types.hs:1".into()),
-                    int(delivery),
-                    int(delivery),
-                    int(1),
-                    Cbor::Array(vec![int(0)]),
-                ])
-            })
-            .collect(),
-    );
-
-    let prepared =
-        parse_program(&bytes(&program), &requirements(), DecodeLimits::default()).unwrap();
+    use tidepool_repr::type_graph::{
+        DeclarationForm, ParameterFlag, RootDomain, SyntaxRestriction, TypeEdge, TypeLiteral,
+    };
+    let mut program = testing::wire_program();
+    let nominal = |name: &str| tidepool_repr::execution_schema::SymbolIdentity {
+        namespace: "type".into(),
+        ..testing::identity("Types", name)
+    };
+    let family = nominal("Phantom");
+    program.constructors.push(ConstructorDecl {
+        identity: testing::identity("Types", "Recursive"),
+        host_id: tidepool_repr::DataConId(9001),
+        family: family.clone(),
+        field_reps: vec![RuntimeRep::LiftedRef],
+        strict_fields: vec![false],
+        layout: CheckedLayout {
+            fields: vec![FieldLayout {
+                rep: RuntimeRep::LiftedRef,
+                offset: 0,
+            }],
+            alignment: 8,
+            payload_size: 8,
+            root_mask: vec![true],
+        },
+        result_rep: RuntimeRep::LiftedRef,
+        tag: 1,
+        family_size: 1,
+    });
+    let root = |rendered: &str| TypeNode::Root {
+        domain: RootDomain::Closed,
+        binders: vec![],
+        rendered: rendered.into(),
+    };
+    program.types = tidepool_test_data::prepared::type_graph(
+        vec![
+            root("Int#"),
+            root("Phantom Int#"),
+            TypeNode::Declaration {
+                identity: nominal("Int#"),
+                parameters: vec![],
+                form: DeclarationForm::Scalar(RuntimeRep::Int(64)),
+                restriction: SyntaxRestriction::None,
+            },
+            TypeNode::NominalApplication,
+            TypeNode::Declaration {
+                identity: family,
+                parameters: vec![ParameterFlag::NamedRequired],
+                form: DeclarationForm::Data,
+                restriction: SyntaxRestriction::None,
+            },
+            TypeNode::Literal(TypeLiteral::Symbol("Type".into())),
+            TypeNode::NominalApplication,
+            TypeNode::ConstructorTemplate {
+                constructor: ConstructorId(0),
+                identity: program.constructors[0].identity.clone(),
+            },
+            TypeNode::NominalApplication,
+            TypeNode::Bound(0),
+        ],
+        &[
+            (0, 3, TypeEdge::Body),
+            (1, 6, TypeEdge::Body),
+            (3, 2, TypeEdge::Head),
+            (4, 5, TypeEdge::BinderKind(0)),
+            (4, 7, TypeEdge::Constructor(1)),
+            (6, 4, TypeEdge::Head),
+            (6, 3, TypeEdge::Argument(0)),
+            (
+                7,
+                8,
+                TypeEdge::Field {
+                    ordinal: 0,
+                    source_rep: RuntimeRep::LiftedRef,
+                },
+            ),
+            (8, 4, TypeEdge::Head),
+            (8, 9, TypeEdge::Argument(0)),
+        ],
+        &program.constructors,
+    )
+    .unwrap();
+    program.sites = [
+        SiteDelivery::HostAnswer,
+        SiteDelivery::LiveReentry,
+        SiteDelivery::ExitCellFill,
+        SiteDelivery::TerminalCapture,
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, delivery)| SiteRow {
+        site: 41 + index as u64,
+        origin: "Types.hs:1".into(),
+        ordinal: index as u64,
+        delivery,
+        wire: TypeNodeId(1),
+        inputs: vec![TypeNodeId(0)],
+    })
+    .collect();
+    let encoded = tidepool_test_data::prepared_encode::encode_wire_program(&program);
+    let prepared = parse_program(&encoded, &requirements(), DecodeLimits::default()).unwrap();
+    assert_eq!(prepared.types(), &program.types);
     assert!(matches!(
         prepared.type_node(TypeNodeId(0)),
-        Some(TypeNode::Scalar(
-            tidepool_repr::execution_schema::RuntimeRep::Int(64)
-        ))
+        Some(TypeNode::Root {
+            domain: RootDomain::Closed,
+            ..
+        })
     ));
-    let TypeNode::Data { arguments, .. } = &prepared.types()[1] else {
-        panic!("expected data type node")
-    };
-    assert_eq!(arguments, &[TypeNodeId(0)]);
     let site = prepared.site(41).unwrap();
     assert_eq!(site.delivery, SiteDelivery::HostAnswer);
     assert_eq!(site.wire, TypeNodeId(1));
@@ -585,23 +633,258 @@ fn codec_decodes_type_graph_and_site_rows() {
             SiteDelivery::HostAnswer,
             SiteDelivery::LiveReentry,
             SiteDelivery::ExitCellFill,
-            SiteDelivery::TerminalCapture,
+            SiteDelivery::TerminalCapture
         ]
     );
-
-    let Cbor::Array(fields) = &mut program else {
+    // A storage index must identify a Root, rather than its body/declaration.
+    for invalid_root in [2, 99] {
+        program.sites[0].inputs = vec![TypeNodeId(invalid_root)];
+        assert!(
+            matches!(parse_program(&tidepool_test_data::prepared_encode::encode_wire_program(&program), &requirements(), DecodeLimits::default()),
+            Err(ParseError::InvalidReference(detail)) if detail.contains("type root"))
+        );
+    }
+    let mut duplicate: Cbor = ciborium::de::from_reader(encoded.as_slice()).unwrap();
+    let Cbor::Array(fields) = &mut duplicate else {
         unreachable!()
     };
-    let Cbor::Array(sites) = &mut fields[14] else {
+    let Cbor::Array(graph) = &mut fields[13] else {
         unreachable!()
     };
-    let Cbor::Array(site) = &mut sites[0] else {
+    let Cbor::Array(nodes) = &mut graph[1] else {
         unreachable!()
     };
-    site[5] = Cbor::Array(vec![int(99)]);
+    nodes.push(nodes[7].clone());
+    assert_eq!(
+        parse_program(&bytes(&duplicate), &requirements(), DecodeLimits::default()),
+        Err(ParseError::DuplicateDefinition(
+            "type constructor template".into()
+        ))
+    );
+    let mut malformed: Cbor = ciborium::de::from_reader(encoded.as_slice()).unwrap();
+    let Cbor::Array(fields) = &mut malformed else {
+        unreachable!()
+    };
+    let Cbor::Array(graph) = &mut fields[13] else {
+        unreachable!()
+    };
+    let Cbor::Array(edges) = &mut graph[2] else {
+        unreachable!()
+    };
+    let Cbor::Array(edge) = &mut edges[0] else {
+        unreachable!()
+    };
+    edge[1] = int(99);
     assert!(matches!(
-        parse_program(&bytes(&program), &requirements(), DecodeLimits::default()),
-        Err(ParseError::InvalidReference(detail)) if detail.contains("type node")
+        parse_program(&bytes(&malformed), &requirements(), DecodeLimits::default()),
+        Err(ParseError::InvalidReference(_))
+    ));
+}
+
+#[test]
+fn finite_graph_codec_covers_scoped_syntax_and_declaration_metadata() {
+    use tidepool_repr::execution_schema::{
+        testing, CheckedLayout, ConstructorDecl, FieldLayout, RuntimeRep,
+    };
+    use tidepool_repr::type_graph::{
+        DeclarationForm, ForAllFlag, FunctionFlag, NominalHeadKind, ParameterFlag, RootDomain,
+        SourceBinderFlag, SyntaxRestriction, TypeEdge, TypeLiteral,
+    };
+    let mut program = testing::wire_program();
+    let identity = |name: &str| tidepool_repr::execution_schema::SymbolIdentity {
+        namespace: "type".into(),
+        ..testing::identity("Finite", name)
+    };
+    let declaration = |name: &str, form| TypeNode::Declaration {
+        identity: identity(name),
+        parameters: vec![],
+        form,
+        restriction: SyntaxRestriction::None,
+    };
+    program.constructors.push(ConstructorDecl {
+        identity: testing::identity("Finite", "Container"),
+        host_id: tidepool_repr::DataConId(9002),
+        family: identity("Container"),
+        field_reps: vec![RuntimeRep::Int(64)],
+        strict_fields: vec![false],
+        layout: CheckedLayout {
+            fields: vec![FieldLayout {
+                rep: RuntimeRep::Int(64),
+                offset: 0,
+            }],
+            alignment: 8,
+            payload_size: 8,
+            root_mask: vec![false],
+        },
+        result_rep: RuntimeRep::LiftedRef,
+        tag: 1,
+        family_size: 1,
+    });
+    let mut nodes = vec![
+        TypeNode::Root {
+            domain: RootDomain::Closed,
+            binders: vec![],
+            rendered: "closed application".into(),
+        },
+        TypeNode::Root {
+            domain: RootDomain::ConstructorScheme,
+            binders: vec![SourceBinderFlag::Specified, SourceBinderFlag::Inferred],
+            rendered: "source scheme".into(),
+        },
+        TypeNode::Literal(TypeLiteral::Symbol("Type".into())),
+        TypeNode::Bound(0),
+        TypeNode::ForAll(ForAllFlag::Specified),
+        TypeNode::Function(FunctionFlag::TypeToType),
+        TypeNode::Literal(TypeLiteral::Natural("1".into())),
+        TypeNode::NominalApplication,
+        TypeNode::Declaration {
+            identity: identity("Eff"),
+            parameters: vec![],
+            form: DeclarationForm::Opaque {
+                head_kind: NominalHeadKind::Constructor,
+                reason: "effect head".into(),
+            },
+            restriction: SyntaxRestriction::EffectHead,
+        },
+        TypeNode::Application,
+        TypeNode::NominalApplication,
+        TypeNode::Declaration {
+            identity: identity("EtaAlias"),
+            parameters: vec![
+                ParameterFlag::NamedRequired,
+                ParameterFlag::NamedSpecified,
+                ParameterFlag::NamedInferred,
+                ParameterFlag::AnonymousVisible,
+            ],
+            form: DeclarationForm::Newtype { eta_arity: 1 },
+            restriction: SyntaxRestriction::None,
+        },
+        TypeNode::Literal(TypeLiteral::Character('λ')),
+        TypeNode::Application,
+        TypeNode::Literal(TypeLiteral::Symbol("name".into())),
+        declaration("Container", DeclarationForm::Data),
+        TypeNode::ConstructorTemplate {
+            constructor: ConstructorId(0),
+            identity: program.constructors[0].identity.clone(),
+        },
+        TypeNode::NominalApplication,
+        TypeNode::Root {
+            domain: RootDomain::Closed,
+            binders: vec![],
+            rendered: "Container".into(),
+        },
+        declaration("Text", DeclarationForm::Text),
+        TypeNode::NominalApplication,
+        declaration("Integer", DeclarationForm::Integer),
+        TypeNode::NominalApplication,
+        declaration("Natural", DeclarationForm::Natural),
+        TypeNode::NominalApplication,
+        declaration("Int#", DeclarationForm::Scalar(RuntimeRep::Int(64))),
+        TypeNode::NominalApplication,
+        declaration(
+            "Family",
+            DeclarationForm::Opaque {
+                head_kind: NominalHeadKind::Family,
+                reason: "unsupported family".into(),
+            },
+        ),
+    ];
+    let mut edges = vec![
+        (0, 9, TypeEdge::Body),
+        (1, 2, TypeEdge::BinderKind(0)),
+        (1, 3, TypeEdge::BinderKind(1)),
+        (1, 4, TypeEdge::Body),
+        (4, 2, TypeEdge::Kind),
+        (4, 5, TypeEdge::Body),
+        (5, 6, TypeEdge::Multiplicity),
+        (5, 3, TypeEdge::Domain),
+        (5, 7, TypeEdge::Codomain),
+        (7, 8, TypeEdge::Head),
+        (9, 10, TypeEdge::Function),
+        (9, 6, TypeEdge::ApplyArgument),
+        (10, 11, TypeEdge::Head),
+        (10, 12, TypeEdge::Argument(0)),
+        (10, 6, TypeEdge::Argument(1)),
+        (10, 14, TypeEdge::Argument(2)),
+        (10, 7, TypeEdge::Argument(3)),
+        (11, 2, TypeEdge::BinderKind(0)),
+        (11, 3, TypeEdge::BinderKind(1)),
+        (11, 3, TypeEdge::BinderKind(2)),
+        (11, 3, TypeEdge::BinderKind(3)),
+        (11, 13, TypeEdge::AliasRhs),
+        (13, 3, TypeEdge::Function),
+        (13, 14, TypeEdge::ApplyArgument),
+        (15, 16, TypeEdge::Constructor(1)),
+        (
+            16,
+            26,
+            TypeEdge::Field {
+                ordinal: 0,
+                source_rep: RuntimeRep::Int(64),
+            },
+        ),
+        (17, 15, TypeEdge::Head),
+        (18, 17, TypeEdge::Body),
+        (20, 19, TypeEdge::Head),
+        (22, 21, TypeEdge::Head),
+        (24, 23, TypeEdge::Head),
+        (26, 25, TypeEdge::Head),
+    ];
+    for flag in [
+        FunctionFlag::TypeToConstraint,
+        FunctionFlag::ConstraintToType,
+        FunctionFlag::ConstraintToConstraint,
+    ] {
+        let index = nodes.len() as u32;
+        nodes.push(TypeNode::Function(flag));
+        edges.extend([
+            (index, 6, TypeEdge::Multiplicity),
+            (index, 7, TypeEdge::Domain),
+            (index, 7, TypeEdge::Codomain),
+        ]);
+    }
+    for flag in [ForAllFlag::Required, ForAllFlag::Inferred] {
+        let index = nodes.len() as u32;
+        nodes.push(TypeNode::ForAll(flag));
+        edges.extend([(index, 2, TypeEdge::Kind), (index, 3, TypeEdge::Body)]);
+    }
+    program.types =
+        tidepool_test_data::prepared::type_graph(nodes, &edges, &program.constructors).unwrap();
+    let prepared = parse_program(
+        &tidepool_test_data::prepared_encode::encode_wire_program(&program),
+        &requirements(),
+        DecodeLimits::default(),
+    )
+    .unwrap();
+    assert_eq!(prepared.types(), &program.types);
+}
+
+#[test]
+fn codec_rejects_retired_prepared_schema_and_graph_versions() {
+    let program = tidepool_repr::execution_schema::testing::wire_program();
+    let encoded = tidepool_test_data::prepared_encode::encode_wire_program(&program);
+    for version in [14, 15] {
+        let mut value: Cbor = ciborium::de::from_reader(encoded.as_slice()).unwrap();
+        let Cbor::Array(fields) = &mut value else {
+            unreachable!()
+        };
+        fields[1] = int(version);
+        assert_eq!(
+            parse_program(&bytes(&value), &requirements(), DecodeLimits::default()),
+            Err(ParseError::UnsupportedVersion(version))
+        );
+    }
+    let mut value: Cbor = ciborium::de::from_reader(encoded.as_slice()).unwrap();
+    let Cbor::Array(fields) = &mut value else {
+        unreachable!()
+    };
+    let Cbor::Array(graph) = &mut fields[13] else {
+        unreachable!()
+    };
+    graph[0] = int(0);
+    assert!(matches!(
+        parse_program(&bytes(&value), &requirements(), DecodeLimits::default()),
+        Err(ParseError::Malformed(_))
     ));
 }
 
@@ -636,7 +919,7 @@ fn codec_decodes_constructor_static_reply_without_sites() {
         int(1),
         int(9001),
     ])]);
-    fields[13] = Cbor::Array(vec![Cbor::Array(vec![int(1)])]);
+    fields[13] = text_graph_value();
     fields[15] = Cbor::Array(vec![Cbor::Array(vec![
         int(0),
         Cbor::Array(vec![int(0), int(0)]),
@@ -706,7 +989,7 @@ fn codec_admits_zero_at_site_with_valid_carrier_and_reply_graph() {
         int(1),
         int(9001),
     ])]);
-    fields[13] = Cbor::Array(vec![Cbor::Array(vec![int(1)])]);
+    fields[13] = text_graph_value();
     fields[14] = Cbor::Array(vec![Cbor::Array(vec![
         int(0),
         Cbor::Text("Effects.request".into()),
@@ -726,7 +1009,10 @@ fn codec_admits_zero_at_site_with_valid_carrier_and_reply_graph() {
         .site(0)
         .expect("zero is an ordinary declared site ID");
     assert_eq!(row.delivery, SiteDelivery::HostAnswer);
-    assert_eq!(prepared.type_node(row.wire), Some(&TypeNode::Text));
+    assert!(matches!(
+        prepared.type_node(row.wire),
+        Some(TypeNode::Root { .. })
+    ));
 
     let Cbor::Array(fields) = &mut program else {
         unreachable!()

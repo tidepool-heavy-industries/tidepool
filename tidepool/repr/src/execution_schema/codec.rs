@@ -1,15 +1,209 @@
+use crate::type_graph::{
+    DeclarationForm, ForAllFlag, FunctionFlag, GraphLimits, GraphStorage, NominalHeadKind,
+    ParameterFlag, RootDomain, SourceBinderFlag, SyntaxRestriction, TypeEdge, TypeGraph,
+    TypeGraphError, TypeLiteral,
+};
+use petgraph::visit::EdgeRef;
 use std::io::Cursor;
+use std::sync::Arc;
 
 use ciborium::value::Value;
 
 use super::{
     Alternative, AlternativePattern, Architecture, Atom, CaseKind, CheckedLayout, ConstructorDecl,
-    ConstructorId, ConstructorReply, CtorRow, DecodeLimits, Endianness, Expr, ExprFrame,
-    FieldLayout, GlobalDecl, GlobalId, Group, HeapBinding, HeapRhs, JoinBinding, JoinId,
-    OperationDecl, OperationId, ParseError, ProgramDefinitions, ProgramEnvelope, RuntimeRep,
-    ScalarLiteral, Signature, SignatureId, SiteDelivery, SiteRow, SymbolIdentity, TargetDescriptor,
-    TopBinding, TypeNode, TypeNodeId, UpdatePolicy, ValueId, ValueRef, WireProgram,
+    ConstructorId, ConstructorReply, DecodeLimits, Endianness, Expr, ExprFrame, FieldLayout,
+    GlobalDecl, GlobalId, Group, HeapBinding, HeapRhs, JoinBinding, JoinId, OperationDecl,
+    OperationId, ParseError, ProgramDefinitions, ProgramEnvelope, RuntimeRep, ScalarLiteral,
+    Signature, SignatureId, SiteDelivery, SiteRow, SymbolIdentity, TargetDescriptor, TopBinding,
+    TypeNode, TypeNodeId, UpdatePolicy, ValueId, ValueRef, WireProgram,
 };
+
+pub(super) fn type_graph_error(error: TypeGraphError) -> ParseError {
+    match error {
+        TypeGraphError::Limit(limit) => ParseError::LimitExceeded(limit),
+        TypeGraphError::TraversalWork => ParseError::LimitExceeded("work"),
+        error @ (TypeGraphError::InvalidReference(_) | TypeGraphError::NotRoot(_)) => {
+            ParseError::InvalidReference(error.to_string())
+        }
+        error @ TypeGraphError::InvalidScope(_) => ParseError::InvalidScope(error.to_string()),
+        error @ TypeGraphError::DuplicateDeclaration(_) => {
+            ParseError::DuplicateDefinition(error.to_string())
+        }
+        error @ TypeGraphError::InvalidLiteral(_) => ParseError::Malformed(error.to_string()),
+        error @ (TypeGraphError::InvalidRole(_)
+        | TypeGraphError::InvalidCardinality(_)
+        | TypeGraphError::InvalidIdentity(_)
+        | TypeGraphError::InvalidRepresentation(_)
+        | TypeGraphError::InvalidConstructor(_)
+        | TypeGraphError::ExpressionCycle) => ParseError::InvalidLayout(error.to_string()),
+    }
+}
+
+pub(super) fn encode_type_graph_value(graph: &TypeGraph) -> Value {
+    fn n(value: impl Into<u64>) -> Value {
+        Value::Integer(value.into().into())
+    }
+    fn text(value: &str) -> Value {
+        Value::Text(value.into())
+    }
+    fn a(values: impl IntoIterator<Item = Value>) -> Value {
+        Value::Array(values.into_iter().collect())
+    }
+    fn rep(value: RuntimeRep) -> Value {
+        match value {
+            RuntimeRep::Void => a([n(0_u64)]),
+            RuntimeRep::LiftedRef => a([n(1_u64)]),
+            RuntimeRep::UnliftedRef => a([n(2_u64)]),
+            RuntimeRep::Address => a([n(3_u64)]),
+            RuntimeRep::Int(bits) => a([n(4_u64), n(bits)]),
+            RuntimeRep::Word(bits) => a([n(5_u64), n(bits)]),
+            RuntimeRep::Float(bits) => a([n(6_u64), n(bits)]),
+        }
+    }
+    fn symbol(value: &SymbolIdentity) -> Value {
+        let SymbolIdentity {
+            unit,
+            module,
+            namespace,
+            occurrence,
+            record_parent,
+        } = value;
+        a([
+            text(unit),
+            text(module),
+            text(namespace),
+            text(occurrence),
+            match record_parent {
+                None => a([n(0_u64)]),
+                Some(parent) => a([n(1_u64), text(parent)]),
+            },
+        ])
+    }
+    fn form(value: &DeclarationForm) -> Value {
+        match value {
+            DeclarationForm::Data => a([n(0_u64)]),
+            DeclarationForm::Newtype { eta_arity } => a([n(1_u64), n(*eta_arity)]),
+            DeclarationForm::Text => a([n(2_u64)]),
+            DeclarationForm::Integer => a([n(3_u64)]),
+            DeclarationForm::Natural => a([n(4_u64)]),
+            DeclarationForm::Scalar(value) => a([n(5_u64), rep(*value)]),
+            DeclarationForm::Opaque { head_kind, reason } => a([
+                n(6_u64),
+                n(match head_kind {
+                    NominalHeadKind::Constructor => 0_u64,
+                    NominalHeadKind::Family => 1,
+                }),
+                text(reason),
+            ]),
+        }
+    }
+    fn node(value: &TypeNode) -> Value {
+        match value {
+            TypeNode::Root {
+                domain,
+                binders,
+                rendered,
+            } => a([
+                n(0_u64),
+                n(match domain {
+                    RootDomain::Closed => 0_u64,
+                    RootDomain::ConstructorScheme => 1,
+                }),
+                a(binders.iter().map(|flag| {
+                    n(match flag {
+                        SourceBinderFlag::Specified => 1_u64,
+                        SourceBinderFlag::Inferred => 2,
+                    })
+                })),
+                text(rendered),
+            ]),
+            TypeNode::Declaration {
+                identity,
+                parameters,
+                form: declaration,
+                restriction,
+            } => a([
+                n(1_u64),
+                symbol(identity),
+                a(parameters.iter().map(|flag| {
+                    n(match flag {
+                        ParameterFlag::NamedRequired => 0_u64,
+                        ParameterFlag::NamedSpecified => 1,
+                        ParameterFlag::NamedInferred => 2,
+                        ParameterFlag::AnonymousVisible => 3,
+                    })
+                })),
+                form(declaration),
+                n(match restriction {
+                    SyntaxRestriction::None => 0_u64,
+                    SyntaxRestriction::EffectHead => 1,
+                }),
+            ]),
+            TypeNode::ConstructorTemplate {
+                constructor,
+                identity: _,
+            } => a([n(2_u64), n(constructor.0)]),
+            TypeNode::Bound(index) => a([n(3_u64), n(*index)]),
+            TypeNode::NominalApplication => a([n(4_u64)]),
+            TypeNode::Application => a([n(5_u64)]),
+            TypeNode::Function(flag) => a([
+                n(6_u64),
+                n(match flag {
+                    FunctionFlag::TypeToType => 0_u64,
+                    FunctionFlag::TypeToConstraint => 1,
+                    FunctionFlag::ConstraintToType => 2,
+                    FunctionFlag::ConstraintToConstraint => 3,
+                }),
+            ]),
+            TypeNode::ForAll(flag) => a([
+                n(7_u64),
+                n(match flag {
+                    ForAllFlag::Required => 0_u64,
+                    ForAllFlag::Specified => 1,
+                    ForAllFlag::Inferred => 2,
+                }),
+            ]),
+            TypeNode::Literal(literal) => match literal {
+                TypeLiteral::Natural(value) => a([n(8_u64), n(0_u64), text(value)]),
+                TypeLiteral::Symbol(value) => a([n(8_u64), n(1_u64), text(value)]),
+                TypeLiteral::Character(value) => a([n(8_u64), n(2_u64), n(*value as u32)]),
+            },
+        }
+    }
+    fn role(value: TypeEdge) -> Value {
+        match value {
+            TypeEdge::BinderKind(ordinal) => a([n(0_u64), n(ordinal)]),
+            TypeEdge::Body => a([n(1_u64)]),
+            TypeEdge::Head => a([n(2_u64)]),
+            TypeEdge::Argument(ordinal) => a([n(3_u64), n(ordinal)]),
+            TypeEdge::Function => a([n(4_u64)]),
+            TypeEdge::ApplyArgument => a([n(5_u64)]),
+            TypeEdge::Multiplicity => a([n(6_u64)]),
+            TypeEdge::Domain => a([n(7_u64)]),
+            TypeEdge::Codomain => a([n(8_u64)]),
+            TypeEdge::Kind => a([n(9_u64)]),
+            TypeEdge::Constructor(tag) => a([n(10_u64), n(tag)]),
+            TypeEdge::Field {
+                ordinal,
+                source_rep,
+            } => a([n(11_u64), n(ordinal), rep(source_rep)]),
+            TypeEdge::AliasRhs => a([n(12_u64)]),
+        }
+    }
+    a([
+        n(1_u64),
+        a(graph.graph().node_weights().map(node)),
+        a(graph.graph().node_indices().flat_map(|source| {
+            graph.ordered_edges(source).map(move |edge| {
+                a([
+                    n(source.index() as u64),
+                    n(edge.target().index() as u64),
+                    role(*edge.weight()),
+                ])
+            })
+        })),
+    ])
+}
 
 // Flat schema records have bounded container nesting regardless of program
 // depth. This is a malformed-wire guard, not an expression complexity limit.
@@ -282,7 +476,7 @@ impl Decoder {
         let operations = self.list(fields[8], true, |this, value| this.operation(value))?;
         let expressions = self.expr(fields[9])?;
         let bindings = self.list(fields[10], true, |this, value| this.top_group(value))?;
-        let types = self.type_nodes(fields[11])?;
+        let types = self.type_graph(fields[11], &constructors)?;
         let sites = self.sites(fields[12])?;
         let constructor_replies = self.constructor_replies(fields[13])?;
         let json_layout = self.optional_json_layout(fields[14])?;
@@ -307,14 +501,66 @@ impl Decoder {
         })
     }
 
-    fn type_nodes(&mut self, value: &Value) -> Result<Vec<TypeNode>, ParseError> {
-        let Value::Array(values) = value else {
-            return Err(malformed("type node table", "array"));
-        };
-        if values.len() > self.limits.max_type_nodes {
+    fn type_graph(
+        &mut self,
+        value: &Value,
+        constructors: &[ConstructorDecl],
+    ) -> Result<Arc<TypeGraph>, ParseError> {
+        let fields = array(value, 3, "finite type graph")?;
+        if unsigned(&fields[0], "finite type graph version")? != 1 {
+            return Err(ParseError::Malformed(
+                "unsupported finite type graph version".into(),
+            ));
+        }
+        let nodes = fields[1]
+            .as_array()
+            .ok_or_else(|| malformed("finite type nodes", "array"))?;
+        let edges = fields[2]
+            .as_array()
+            .ok_or_else(|| malformed("finite type edges", "array"))?;
+        if nodes.len() > self.limits.max_type_nodes {
             return Err(ParseError::LimitExceeded("type nodes"));
         }
-        self.list(value, false, |this, value| this.type_node(value))
+        self.table(nodes.len())?;
+        self.table(edges.len())?;
+        let mut graph = GraphStorage::with_capacity(nodes.len(), edges.len());
+        let mut templates = std::collections::BTreeSet::new();
+        for node in nodes {
+            let fields = tagged(node, "finite type node")?;
+            if fields.len() == 2 && unsigned(&fields[0], "finite type node tag")? == 2 {
+                let constructor = ConstructorId(u32_value(&fields[1], "template constructor ID")?);
+                // Derive each original identity at most once before allocating
+                // its clone. Repeated small references cannot multiply a large
+                // physical symbol's strings before graph publication refuses it.
+                if !templates.insert(constructor) {
+                    return Err(ParseError::DuplicateDefinition(
+                        "type constructor template".into(),
+                    ));
+                }
+            }
+            graph.add_node(self.type_node(node, constructors)?);
+        }
+        for edge in edges {
+            let fields = array(edge, 3, "finite type edge")?;
+            let source = u32_value(&fields[0], "type edge source")? as usize;
+            let target = u32_value(&fields[1], "type edge target")? as usize;
+            if source >= nodes.len() || target >= nodes.len() {
+                return Err(ParseError::InvalidReference(
+                    "finite type edge endpoint".into(),
+                ));
+            }
+            graph.add_edge(
+                crate::type_graph::TypeNodeId::new(source),
+                crate::type_graph::TypeNodeId::new(target),
+                self.type_edge(&fields[2])?,
+            );
+        }
+        let mut limits = GraphLimits::from(self.limits);
+        limits.max_work = self.limits.max_work.saturating_sub(self.work);
+        let (graph, used_work) =
+            TypeGraph::validate_with_work(graph, constructors, limits).map_err(type_graph_error)?;
+        self.charge(used_work)?;
+        Ok(Arc::new(graph))
     }
 
     fn sites(&mut self, value: &Value) -> Result<Vec<SiteRow>, ParseError> {
@@ -528,38 +774,152 @@ impl Decoder {
         })
     }
 
-    fn type_node(&mut self, value: &Value) -> Result<TypeNode, ParseError> {
-        let fields = tagged(value, "type node")?;
-        let tag = unsigned(&fields[0], "type node tag")?;
+    fn type_node(
+        &mut self,
+        value: &Value,
+        constructors: &[ConstructorDecl],
+    ) -> Result<TypeNode, ParseError> {
+        let fields = tagged(value, "finite type node")?;
+        let tag = unsigned(&fields[0], "finite type node tag")?;
         match (tag, fields.len()) {
-            (0, 4) => Ok(TypeNode::Data {
-                family: self.symbol(&fields[1])?,
-                arguments: self.list(&fields[2], false, |_, value| {
-                    Ok(TypeNodeId(u32_value(value, "type argument node ID")?))
+            (0, 4) => Ok(TypeNode::Root {
+                domain: match unsigned(&fields[1], "root domain")? {
+                    0 => RootDomain::Closed,
+                    1 => RootDomain::ConstructorScheme,
+                    tag => return Err(ParseError::InvalidTag(tag)),
+                },
+                binders: self.list(&fields[2], false, |_, value| {
+                    match unsigned(value, "source binder flag")? {
+                        1 => Ok(SourceBinderFlag::Specified),
+                        2 => Ok(SourceBinderFlag::Inferred),
+                        tag => Err(ParseError::InvalidTag(tag)),
+                    }
                 })?,
-                rows: self.list(&fields[3], false, |this, value| this.ctor_row(value))?,
+                rendered: self.text(&fields[3], "rendered root type")?,
             }),
-            (1, 1) => Ok(TypeNode::Text),
-            (2, 1) => Ok(TypeNode::Integer),
-            (3, 1) => Ok(TypeNode::Natural),
-            (4, 2) => Ok(TypeNode::Scalar(self.rep(&fields[1])?)),
-            (5, 3) => Ok(TypeNode::Unconstructible {
-                reason: self.text(&fields[1], "unconstructible reason")?,
-                rendered: self.text(&fields[2], "unconstructible type")?,
+            (1, 5) => Ok(TypeNode::Declaration {
+                identity: self.symbol(&fields[1])?,
+                parameters: self.list(&fields[2], false, |_, value| {
+                    match unsigned(value, "declaration parameter flag")? {
+                        0 => Ok(ParameterFlag::NamedRequired),
+                        1 => Ok(ParameterFlag::NamedSpecified),
+                        2 => Ok(ParameterFlag::NamedInferred),
+                        3 => Ok(ParameterFlag::AnonymousVisible),
+                        tag => Err(ParseError::InvalidTag(tag)),
+                    }
+                })?,
+                form: self.declaration_form(&fields[3])?,
+                restriction: match unsigned(&fields[4], "syntax restriction")? {
+                    0 => SyntaxRestriction::None,
+                    1 => SyntaxRestriction::EffectHead,
+                    tag => return Err(ParseError::InvalidTag(tag)),
+                },
             }),
-            (0..=5, _) => Err(ParseError::Malformed("wrong type node field count".into())),
+            (2, 2) => {
+                let constructor = ConstructorId(u32_value(&fields[1], "template constructor ID")?);
+                let identity = constructors
+                    .get(constructor.0 as usize)
+                    .ok_or_else(|| ParseError::InvalidReference("template constructor ID".into()))?
+                    .identity
+                    .clone();
+                Ok(TypeNode::ConstructorTemplate {
+                    constructor,
+                    identity,
+                })
+            }
+            (3, 2) => Ok(TypeNode::Bound(u32_value(&fields[1], "bound type index")?)),
+            (4, 1) => Ok(TypeNode::NominalApplication),
+            (5, 1) => Ok(TypeNode::Application),
+            (6, 2) => Ok(TypeNode::Function(
+                match unsigned(&fields[1], "function flag")? {
+                    0 => FunctionFlag::TypeToType,
+                    1 => FunctionFlag::TypeToConstraint,
+                    2 => FunctionFlag::ConstraintToType,
+                    3 => FunctionFlag::ConstraintToConstraint,
+                    tag => return Err(ParseError::InvalidTag(tag)),
+                },
+            )),
+            (7, 2) => Ok(TypeNode::ForAll(
+                match unsigned(&fields[1], "forall flag")? {
+                    0 => ForAllFlag::Required,
+                    1 => ForAllFlag::Specified,
+                    2 => ForAllFlag::Inferred,
+                    tag => return Err(ParseError::InvalidTag(tag)),
+                },
+            )),
+            (8, 3) => Ok(TypeNode::Literal(
+                match unsigned(&fields[1], "type literal kind")? {
+                    0 => TypeLiteral::Natural(self.text(&fields[2], "natural type literal")?),
+                    1 => TypeLiteral::Symbol(self.text(&fields[2], "symbol type literal")?),
+                    2 => TypeLiteral::Character(
+                        char::from_u32(u32_value(&fields[2], "character type literal")?)
+                            .ok_or_else(|| {
+                                ParseError::Malformed("invalid character type literal".into())
+                            })?,
+                    ),
+                    tag => return Err(ParseError::InvalidTag(tag)),
+                },
+            )),
+            (0..=8, _) => Err(ParseError::Malformed(
+                "wrong finite type node field count".into(),
+            )),
             _ => Err(ParseError::InvalidTag(tag)),
         }
     }
 
-    fn ctor_row(&mut self, value: &Value) -> Result<CtorRow, ParseError> {
-        let fields = array(value, 2, "type constructor row")?;
-        Ok(CtorRow {
-            constructor: ConstructorId(u32_value(&fields[0], "type constructor ID")?),
-            fields: self.list(&fields[1], false, |_, value| {
-                Ok(TypeNodeId(u32_value(value, "type field node ID")?))
-            })?,
-        })
+    fn declaration_form(&mut self, value: &Value) -> Result<DeclarationForm, ParseError> {
+        let fields = tagged(value, "declaration form")?;
+        let tag = unsigned(&fields[0], "declaration form tag")?;
+        match (tag, fields.len()) {
+            (0, 1) => Ok(DeclarationForm::Data),
+            (1, 2) => Ok(DeclarationForm::Newtype {
+                eta_arity: u32_value(&fields[1], "newtype eta arity")?,
+            }),
+            (2, 1) => Ok(DeclarationForm::Text),
+            (3, 1) => Ok(DeclarationForm::Integer),
+            (4, 1) => Ok(DeclarationForm::Natural),
+            (5, 2) => Ok(DeclarationForm::Scalar(self.rep(&fields[1])?)),
+            (6, 3) => Ok(DeclarationForm::Opaque {
+                head_kind: match unsigned(&fields[1], "opaque head kind")? {
+                    0 => NominalHeadKind::Constructor,
+                    1 => NominalHeadKind::Family,
+                    tag => return Err(ParseError::InvalidTag(tag)),
+                },
+                reason: self.text(&fields[2], "opaque refusal reason")?,
+            }),
+            (0..=6, _) => Err(ParseError::Malformed(
+                "wrong declaration form field count".into(),
+            )),
+            _ => Err(ParseError::InvalidTag(tag)),
+        }
+    }
+
+    fn type_edge(&mut self, value: &Value) -> Result<TypeEdge, ParseError> {
+        let fields = tagged(value, "finite type edge role")?;
+        let tag = unsigned(&fields[0], "finite type edge role tag")?;
+        let ordinal = |value| u32_value(value, "finite type edge ordinal");
+        match (tag, fields.len()) {
+            (0, 2) => Ok(TypeEdge::BinderKind(ordinal(&fields[1])?)),
+            (1, 1) => Ok(TypeEdge::Body),
+            (2, 1) => Ok(TypeEdge::Head),
+            (3, 2) => Ok(TypeEdge::Argument(ordinal(&fields[1])?)),
+            (4, 1) => Ok(TypeEdge::Function),
+            (5, 1) => Ok(TypeEdge::ApplyArgument),
+            (6, 1) => Ok(TypeEdge::Multiplicity),
+            (7, 1) => Ok(TypeEdge::Domain),
+            (8, 1) => Ok(TypeEdge::Codomain),
+            (9, 1) => Ok(TypeEdge::Kind),
+            (10, 2) => Ok(TypeEdge::Constructor(ordinal(&fields[1])?)),
+            (11, 3) => Ok(TypeEdge::Field {
+                ordinal: ordinal(&fields[1])?,
+                source_rep: self.rep(&fields[2])?,
+            }),
+            (12, 1) => Ok(TypeEdge::AliasRhs),
+            (0..=12, _) => Err(ParseError::Malformed(
+                "wrong finite type edge role field count".into(),
+            )),
+            _ => Err(ParseError::InvalidTag(tag)),
+        }
     }
 
     fn site_row(&mut self, value: &Value) -> Result<SiteRow, ParseError> {
@@ -1054,6 +1414,27 @@ fn malformed(what: &str, expected: &str) -> ParseError {
 mod tests {
     use super::*;
 
+    #[test]
+    fn graph_validation_work_remains_charged_before_later_tables() {
+        let graph = tidepool_test_data::prepared::closed_type_graph(
+            super::super::testing::identity("Types", "Text"),
+            DeclarationForm::Text,
+        );
+        let (_, used_work) =
+            TypeGraph::validate_with_work(graph.graph().clone(), &[], GraphLimits::default())
+                .unwrap();
+        let mut decoder = Decoder::new(DecodeLimits::default());
+        decoder
+            .type_graph(&encode_type_graph_value(&graph), &[])
+            .unwrap();
+        assert!(decoder.work >= used_work);
+        decoder.limits.max_work = decoder.work;
+        assert_eq!(
+            decoder.sites(&Value::Array(vec![Value::Array(vec![])])),
+            Err(ParseError::LimitExceeded("work"))
+        );
+    }
+
     fn deep_program(depth: usize) -> Vec<u8> {
         let array = Value::Array;
         let n = |value: usize| Value::Integer((value as u64).into());
@@ -1126,7 +1507,7 @@ mod tests {
                 ]),
             ])]),
             n(0),
-            array(vec![]),
+            encode_type_graph_value(&TypeGraph::default()),
             array(vec![]),
             array(vec![]),
             array(vec![n(0)]),

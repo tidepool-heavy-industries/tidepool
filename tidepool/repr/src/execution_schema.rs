@@ -11,8 +11,10 @@ mod shared_content;
 use shared_content::SharedContent;
 
 use crate::session_ids::SessionVarId;
+use crate::type_graph::TypeGraph;
+pub use crate::type_graph::TypeNode;
 
-pub const SCHEMA_VERSION: u64 = 15;
+pub const SCHEMA_VERSION: u64 = 16;
 pub const EXECUTION_ABI_VERSION: u64 = 9;
 
 macro_rules! dense_id {
@@ -326,29 +328,6 @@ pub struct ConstructorDecl {
     pub tag: u32,
     /// Authoritative family cardinality, not the number of declarations in this artifact.
     pub family_size: u32,
-}
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct CtorRow {
-    pub constructor: ConstructorId,
-    pub fields: Vec<TypeNodeId>,
-}
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub enum TypeNode {
-    Data {
-        family: SymbolIdentity,
-        arguments: Vec<TypeNodeId>,
-        rows: Vec<CtorRow>,
-    },
-    Text,
-    Integer,
-    Natural,
-    Scalar(RuntimeRep),
-    Unconstructible {
-        reason: String,
-        rendered: String,
-    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -867,7 +846,7 @@ pub struct WireProgram {
     pub expressions: Expr,
     pub bindings: Vec<Group<TopBinding>>,
     pub entry: ValueId,
-    pub types: Vec<TypeNode>,
+    pub types: Arc<TypeGraph>,
     pub sites: Vec<SiteRow>,
     /// Exact request constructors paired with compiler-issued reply evidence.
     pub constructor_replies: Vec<(ConstructorId, ConstructorReply)>,
@@ -888,7 +867,7 @@ pub struct ProgramDefinitions {
     pub operations: Vec<OperationDecl>,
     pub expressions: Expr,
     pub bindings: Vec<Group<TopBinding>>,
-    pub types: Vec<TypeNode>,
+    pub types: Arc<TypeGraph>,
     pub sites: Vec<SiteRow>,
     pub constructor_replies: Vec<(ConstructorId, ConstructorReply)>,
     pub json_layout: Option<JsonLayout>,
@@ -925,7 +904,7 @@ pub struct DefinitionsView<'a> {
     operations: &'a Vec<OperationDecl>,
     expressions: &'a Expr,
     bindings: &'a Vec<Group<TopBinding>>,
-    types: &'a Vec<TypeNode>,
+    types: &'a Arc<TypeGraph>,
     sites: &'a Vec<SiteRow>,
     constructor_replies: &'a Vec<(ConstructorId, ConstructorReply)>,
     json_layout: &'a Option<JsonLayout>,
@@ -953,7 +932,7 @@ impl<'a> DefinitionsView<'a> {
     pub fn bindings(self) -> &'a [Group<TopBinding>] {
         self.bindings
     }
-    pub fn types(self) -> &'a [TypeNode] {
+    pub fn types(self) -> &'a Arc<TypeGraph> {
         self.types
     }
     pub fn sites(self) -> &'a [SiteRow] {
@@ -1033,7 +1012,7 @@ impl PreparedProgram {
     pub fn globals(&self) -> &[GlobalDecl] {
         &self.wire.globals
     }
-    pub fn types(&self) -> &[TypeNode] {
+    pub fn types(&self) -> &Arc<TypeGraph> {
         &self.wire.types
     }
     pub fn sites(&self) -> &[SiteRow] {
@@ -1049,7 +1028,10 @@ impl PreparedProgram {
         self.wire.sites.iter().find(|row| row.site == site)
     }
     pub fn type_node(&self, id: TypeNodeId) -> Option<&TypeNode> {
-        self.wire.types.get(id.0 as usize)
+        self.wire
+            .types
+            .graph()
+            .node_weight(crate::type_graph::TypeNodeId::new(id.0 as usize))
     }
 }
 
@@ -1527,6 +1509,12 @@ pub enum LinkError {
     MissingImport(SymbolIdentity),
     #[error("imported value contract mismatch for {0:?}")]
     ImportContract(SymbolIdentity),
+}
+
+/// Encode the finite type graph with the owning prepared-schema grammar.
+/// Encoding describes structural data and does not issue compiler authority.
+pub fn encode_type_graph_value(graph: &TypeGraph) -> ciborium::value::Value {
+    codec::encode_type_graph_value(graph)
 }
 
 mod codec;

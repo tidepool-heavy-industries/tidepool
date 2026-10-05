@@ -101,7 +101,7 @@ mod tests {
                 },
             })],
             entry: ValueId(0),
-            types: vec![],
+            types: std::sync::Arc::default(),
             sites: vec![],
             constructor_replies: vec![],
             json_layout: None,
