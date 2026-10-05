@@ -2023,16 +2023,16 @@ originalProjectionProducts = withScratch $ \work -> do
   unless (rejectedModules == Set.fromList ["A", "B", "C", "E", "F", "G", "H", "I"]) $
     fail "module-level rejection did not cover sibling binders and their dependants"
   writeFile (work </> "ProjectionUnavailableProvider.hs") $ unlines
-    ["module ProjectionUnavailableProvider (missing) where", "{-# NOINLINE missing #-}", "missing :: Int", "missing = 7"]
+    ["{-# OPTIONS_GHC -O0 #-}", "module ProjectionUnavailableProvider (missing) where", "{-# NOINLINE missing #-}", "missing :: Int", "missing = 7"]
   writeFile (work </> "ProjectionOwner.hs") $ unlines
-    [ "module ProjectionOwner (bad, good) where"
+    [ "{-# OPTIONS_GHC -O0 #-}", "module ProjectionOwner (bad, good) where"
     , "import ProjectionUnavailableProvider"
     , "{-# NOINLINE bad #-}", "bad :: Int", "bad = missing"
     , "{-# NOINLINE good #-}", "good :: Int", "good = 42" ]
   writeFile (work </> "ProjectionIndependent.hs") $ unlines
-    ["module ProjectionIndependent (safe) where", "safe :: Int", "safe = 1"]
+    ["{-# OPTIONS_GHC -O0 #-}", "module ProjectionIndependent (safe) where", "safe :: Int", "safe = 1"]
   writeFile (work </> "ProjectionConsumer.hs") $ unlines
-    [ "{-# OPTIONS_GHC -Wno-unused-imports #-}"
+    [ "{-# OPTIONS_GHC -O0 -Wno-unused-imports #-}"
     , "module ProjectionConsumer (usesGood) where"
     , "import ProjectionOwner", "import ProjectionIndependent"
     , "usesGood = good + 1" ]
