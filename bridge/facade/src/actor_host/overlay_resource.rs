@@ -1436,11 +1436,9 @@ mod tests {
         parent
             .publish(&view, &project.join("target"), &[], None)
             .unwrap();
-        let mut child = OverlayResourceLease::allocate_path(
-            directory.path().join("child"),
-            parent.latest_snapshot(),
-        )
-        .unwrap();
+        let mut child =
+            OverlayResourceLease::allocate_path(&storage_root, "child", parent.latest_snapshot())
+                .unwrap();
         child.process_may_exist();
         drop(child); // No exact cleanup receipt: the claim must survive the handle.
         drop(worker);

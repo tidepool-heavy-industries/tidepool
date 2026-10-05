@@ -177,7 +177,6 @@ pub(crate) fn full_effect_test_table() -> DataConTable {
         .chain(HttpError::TEST_CONSTRUCTORS)
         .chain(GitError::TEST_CONSTRUCTORS)
         .chain(LlmError::TEST_CONSTRUCTORS)
-        .chain(SpawnError::TEST_CONSTRUCTORS)
     {
         if t.get_by_name(name).is_some() {
             continue;
