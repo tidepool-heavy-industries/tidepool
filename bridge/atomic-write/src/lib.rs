@@ -7,7 +7,7 @@
 //! unpublished failure from a visible publication whose durability is unconfirmed.
 //! [`write_best_effort`] preserves atomic replacement without requiring storage sync.
 //! Neither writer creates its parent directory. Owners creating persistent storage
-//! use [`create_dir_all_durable`] before publishing entries beneath new directories.
+//! use [`DirectoryAnchor`] before publishing entries beneath new directories.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -153,7 +153,7 @@ impl StagedDurableWrite {
 /// Parent-directory open and sync failures are reported, including after rename
 /// has made the new contents visible. Use [`stage_durable`] to distinguish that
 /// post-rename case. The parent must already exist; use
-/// [`create_dir_all_durable`] when creating it.
+/// [`DirectoryAnchor::create_dir_all`] when creating it.
 pub fn write_durable(path: &Path, bytes: &[u8]) -> Result<(), WriteError> {
     stage_durable(path, bytes)?
         .publish()
@@ -210,7 +210,7 @@ pub fn sync_parent_directory(path: &Path) -> Result<(), WriteError> {
 /// Sync one existing directory, reporting unsupported operations and I/O failures.
 /// This persists its entries, not file contents or links to this directory from
 /// its own parent. The caller owns concurrent mutation and publication ordering.
-fn sync_directory(path: &Path) -> Result<(), WriteError> {
+fn open_directory(path: &Path) -> Result<std::fs::File, WriteError> {
     let directory = std::fs::File::open(path).map_err(|source| WriteError {
         path: path.to_path_buf(),
         source,
@@ -231,39 +231,84 @@ fn sync_directory(path: &Path) -> Result<(), WriteError> {
             ),
         });
     }
-    directory.sync_all().map_err(|source| WriteError {
+    Ok(directory)
+}
+
+fn sync_directory(path: &Path) -> Result<(), WriteError> {
+    open_directory(path)?.sync_all().map_err(|source| WriteError {
         path: path.to_path_buf(),
         source,
     })
 }
 
-/// Create a directory hierarchy and sync it and every ancestor on the supplied
-/// path, deepest first. This also repairs the persistence ordering on a later
-/// invocation after an earlier sync failed with already-visible directories.
+/// An existing, durably established directory that bounds directory creation.
 ///
-/// The caller must own the hierarchy against concurrent rename/removal. Existing
-/// symlink targets and their ancestry must already be durably established; this
-/// does not create symlinks or resolve a separate external target hierarchy.
-/// Errors may leave directories present but not durably confirmed. No rollback
-/// is attempted. Filesystem/platform directory-sync failures are never ignored.
-pub fn create_dir_all_durable(path: &Path) -> Result<(), WriteError> {
-    let path = if path.as_os_str().is_empty() {
-        Path::new(".")
-    } else {
-        path
-    };
-    std::fs::create_dir_all(path).map_err(|source| WriteError {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    let absolute = std::path::absolute(path).map_err(|source| WriteError {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    for directory in absolute.ancestors() {
-        sync_directory(directory)?;
+/// The owner must have established the anchor's own link from its parent before
+/// opening it. This is a durability boundary, not filesystem access authority.
+/// The owner must prevent concurrent rename/removal within the hierarchy.
+/// Existing symlink targets and their ancestry must already be durable; this
+/// does not establish a separate external target hierarchy.
+#[derive(Clone, Debug)]
+pub struct DirectoryAnchor {
+    path: PathBuf,
+}
+
+impl DirectoryAnchor {
+    /// Open an existing stable directory without creating it or syncing its
+    /// ancestors. The caller asserts its parent link is already durable.
+    pub fn open_existing(path: impl AsRef<Path>) -> Result<Self, WriteError> {
+        let requested = path.as_ref();
+        let path = std::fs::canonicalize(requested).map_err(|source| WriteError {
+            path: requested.to_path_buf(),
+            source,
+        })?;
+        open_directory(&path)?;
+        Ok(Self { path })
     }
-    Ok(())
+
+    /// The absolute directory at which durability confirmation stops.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Create a relative hierarchy and sync every directory from its leaf back
+    /// through this anchor, deepest first, even when all directories exist.
+    ///
+    /// Absolute paths and parent components are rejected before mutation. An
+    /// empty path confirms this anchor. Failures can leave visible directories
+    /// whose durability is unconfirmed; retry with the same stable anchor and
+    /// relative path. Never promote a failed creation to a new anchor.
+    /// Directory open and sync errors, including unsupported operations, are
+    /// reported without rollback or suppression.
+    pub fn create_dir_all(&self, relative: impl AsRef<Path>) -> Result<PathBuf, WriteError> {
+        let relative = relative.as_ref();
+        let mut normalized = PathBuf::new();
+        for component in relative.components() {
+            match component {
+                std::path::Component::Normal(component) => normalized.push(component),
+                std::path::Component::CurDir => {}
+                _ => {
+                    return Err(WriteError {
+                        path: relative.to_path_buf(),
+                        source: std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "directory creation requires a relative path without parent components",
+                        ),
+                    });
+                }
+            }
+        }
+        let path = self.path.join(&normalized);
+        std::fs::create_dir_all(&path).map_err(|source| WriteError {
+            path: path.clone(),
+            source,
+        })?;
+        for directory in normalized.ancestors() {
+            sync_directory(&self.path.join(directory))?;
+        }
+        Ok(path)
+    }
 }
 
 /// Write `bytes` to `path` atomically WITHOUT fsync: a uniquely-named temp
