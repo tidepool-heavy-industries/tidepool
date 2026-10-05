@@ -12,8 +12,8 @@ and `actors` trees, the genuine generated stable effect modules, and pinned Jev
 `core` sources. Its import probe is projected from source-owned modules across
 the pinned Cabal component metadata and the existing stable-effect/Jev source
 owners. Test-only source roots, test package dependencies, workspace-specific
-Orchestrate modules and the invocation-specific `Tidepool.Effects` shim are
-excluded. Production catalog admission still checks the actual compiler's
+Orchestrate modules are excluded. `Tidepool.Effects` is a stable authored
+facade and belongs to the generated support selection. Production catalog admission still checks the actual compiler's
 complete closure; direct import selection alone is not passing evidence.
 
 The current metadata projects 67 direct imports. These are source selections;
@@ -47,7 +47,7 @@ transfers retention to the final bundle.
 
 The native action consumes the current source snapshot, a declared copy of the
 original retained root, and declared retention-record bytes. Stage the exact
-selection through `scripts/buck2-configure.sh` or root Buck configuration:
+selection through root Buck configuration:
 `nix.native_catalog_source_root` is the returned original root;
 `nix.native_catalog_retention_record` is the canonical record path;
 `nix.native_catalog_retention` is that record's exact JSON value. The declared

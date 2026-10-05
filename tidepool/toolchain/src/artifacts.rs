@@ -5283,7 +5283,7 @@ mod module_product_tests {
     fn real_deployment_package_reuses_cohort_and_invalidates_source_shadow() {
         let package = crate::toolchain::configured_module_package()
             .unwrap()
-            .expect("requires the Nix-built runtime-stdlib-products catalog");
+            .expect("requires the matched native runtime catalog");
         let source_selection = package.source_selection().clone();
         let roots = source_selection.include_roots();
         let catalog_path =
