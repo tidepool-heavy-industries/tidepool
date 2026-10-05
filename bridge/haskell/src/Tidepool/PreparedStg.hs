@@ -19,6 +19,7 @@ module Tidepool.PreparedStg
 import Control.Exception
   ( SomeAsyncException, SomeException, displayException, fromException
   , throwIO, try )
+import Control.Monad (unless, forM_)
 import Control.Concurrent.MVar (MVar, modifyMVar_, newMVar, readMVar)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -29,6 +30,15 @@ import GHC.Core (CoreBind, Bind(..), bindersOfBinds)
 import GHC.Core.FVs (exprSomeFreeVars)
 import GHC.Core.Lint.Interactive (interactiveInScope)
 import GHC.Core.Opt.Pipeline.Types (CoreToDo(CorePrep))
+import GHC.Core.Opt.Arity (etaExpand)
+import GHC.Core.TyCo.Compare (eqType)
+import GHC.Types.Id
+  ( idArity, idType, idDmdSig, idCprSig, idLFInfo_maybe, isDeadEndId
+  , setIdArity, setIdDmdSig, setIdCprSig, setIdLFInfo )
+import GHC.StgToCmm.Closure (importedIdLFInfo)
+import GHC.StgToCmm.Types (LambdaFormInfo(..))
+import GHC.Types.RepType (typePrimRep_maybe)
+import GHC.Stg.Syntax qualified as Stg
 import GHC.Core.TyCon (TyCon, isDataTyCon)
 import GHC.CoreToStg (coreToStg)
 import GHC.CoreToStg.Prep (corePrepPgm)
@@ -48,13 +58,13 @@ import GHC.Types.Var.Set (IdSet, elemVarSet, mkVarSet, unionVarSets)
 import GHC.Types.Unique.Set (nonDetEltsUniqSet)
 import GHC.Types.Unique (getKey)
 import GHC.Types.Var (Id, isId, varName, varUnique)
-import GHC.Types.Name (isExternalName, nameModule_maybe)
+import GHC.Types.Name (Name, isExternalName, nameModule_maybe)
 import GHC.Unit.Types (Module)
 import GHC.Unit.Module.Location (ModLocation)
 import GHC.Unit.Module.ModIface (ModIface)
 import GHC.Unit.Module.ModDetails (md_types)
 import GHC.Unit.Module.ModGuts (CgGuts(..))
-import GHC.Types.TypeEnv (typeEnvTyCons)
+import GHC.Types.TypeEnv (typeEnvTyCons, typeEnvIds)
 import GHC.Utils.Outputable (ppr, showSDocUnsafe, text)
 import Tidepool.EffectSchema (YieldSite)
 import Tidepool.PreparedSites
@@ -130,6 +140,7 @@ data RecoveredModuleInput = RecoveredModuleInput
   , recoveredLocation :: ModLocation
   , recoveredTyCons :: [TyCon]
   , recoveredBindings :: [CoreBind]
+  , recoveredEntries :: [Id]
   }
 
 -- | Failures while acquiring the defining-module context for an exact group.
@@ -153,10 +164,66 @@ instance Show RecoveredModuleFailure where
       renderModule = showSDocUnsafe . ppr
 
 prepareRecoveredModule :: HscEnv -> RecoveredModuleInput -> IO PreparedModule
-prepareRecoveredModule hscEnv input =
-  prepareTypedBindings ExactBodySubset
+prepareRecoveredModule hscEnv input = do
+  let entries = Map.fromList [(varName identifier, identifier) | identifier <- recoveredEntries input]
+  bindings <- mapM (restoreRecoveredEntries entries) (recoveredBindings input)
+  prepared <- prepareTypedBindings ExactBodySubset
     hscEnv (recoveredModule input) (recoveredLocation input)
-    (recoveredTyCons input) Map.empty (recoveredBindings input)
+    (recoveredTyCons input) Map.empty bindings
+  validateRecoveredEntries entries (pmBindings prepared)
+  pure prepared
+
+-- Fat Core's local IdInfo is not the executable interface contract. Restore
+-- only entry-relevant fields; occurrence analyses and unfoldings still belong
+-- to the recovered body. Source arity counts Core arguments, not LF registers.
+restoreRecoveredEntries :: Map Name Id -> CoreBind -> IO CoreBind
+restoreRecoveredEntries entries binding = case binding of
+  NonRec binder body -> uncurry NonRec <$> restore (binder, body)
+  Rec pairs -> Rec <$> mapM restore pairs
+  where
+    restore pair@(binder, body) = case Map.lookup (varName binder) entries of
+      Nothing -> pure pair
+      Just original -> do
+        unless (eqType (idType binder) (idType original)) $
+          ioError (userError ("recovered defining entry type mismatch: " ++ showSDocUnsafe (ppr binder)))
+        let arity = case importedIdLFInfo original of
+              LFThunk{} -> 0
+              _ -> idArity original
+            metadata = setIdCprSig (setIdDmdSig (setIdArity binder arity)
+              (idDmdSig original)) (idCprSig original)
+            restored = maybe metadata (setIdLFInfo metadata) (idLFInfo_maybe original)
+        pure (restored, etaExpand arity body)
+
+-- Validate after unarisation: an LF entry counts physical arguments (including
+-- semantic void positions), whereas etaExpand takes the original Core arity.
+validateRecoveredEntries :: Map Name Id -> [(CgStgTopBinding, IdSet)] -> IO ()
+validateRecoveredEntries entries bindings = forM_ bindings $ \(top, _) -> case top of
+  Stg.StgTopStringLit{} -> pure ()
+  Stg.StgTopLifted binding -> forM_ (pairs binding) $ \(binder, rhs) ->
+    case Map.lookup (varName binder) entries of
+      Nothing -> pure ()
+      Just original -> do
+        unless (isDeadEndId binder == isDeadEndId original) $
+          ioError (userError ("recovered defining entry changed its bottoming contract: " ++ showSDocUnsafe (ppr binder)))
+        case importedIdLFInfo original of
+          LFReEntrant _ required _ _ -> case rhs of
+            Stg.StgRhsClosure _ _ Stg.ReEntrant args _ _ -> do
+              actual <- sum <$> mapM repArity args
+              unless (required == actual) (mismatch binder required actual)
+            _ -> mismatch binder required 0
+          LFThunk{} -> case rhs of
+            Stg.StgRhsClosure _ _ update [] _ _ | update /= Stg.ReEntrant -> pure ()
+            _ -> mismatch binder 0 (-1)
+          _ -> pure ()
+  where
+    pairs (Stg.StgNonRec binder rhs) = [(binder, rhs)]
+    pairs (Stg.StgRec items) = items
+    repArity binder = case typePrimRep_maybe (idType binder) of
+      Just reps -> pure (max 1 (length reps))
+      Nothing -> ioError (userError ("recovered entry has a runtime-polymorphic argument: " ++ showSDocUnsafe (ppr binder)))
+    mismatch binder required actual = ioError (userError
+      ("recovered defining entry ABI mismatch: " ++ showSDocUnsafe (ppr binder)
+        ++ " required arity " ++ show required ++ ", prepared arity " ++ show actual))
 
 -- Both complete modules and recovered subsets elaborate before CorePrep erases types.
 prepareTypedBindings :: PreparedCoverage -> HscEnv -> Module -> ModLocation
@@ -285,8 +352,8 @@ prepareRecoveredBodiesUncached hscEnv ownerCache owner bindings = do
           details <- trySynchronous (loadDefiningDetails hscEnv iface)
           case details of
             Left reason -> pure (Left (RecoveredModuleInterfaceFailure owner reason))
-            Right tycons -> do
-              let hit = OwnerInterfaceContext location tycons
+            Right (tycons, entries) -> do
+              let hit = OwnerInterfaceContext location tycons entries
               cacheOwnerInterface ownerCache owner hit
               pure (Right hit)
   case resolved of
@@ -294,16 +361,16 @@ prepareRecoveredBodiesUncached hscEnv ownerCache owner bindings = do
     Right context -> do
       prepared <- trySynchronous (prepareRecoveredModule hscEnv
         (RecoveredModuleInput owner (ownerInterfaceLocation context)
-          (ownerInterfaceTyCons context) bindings))
+          (ownerInterfaceTyCons context) bindings (ownerInterfaceEntries context)))
       pure $ case prepared of
         Left reason -> Left (RecoveredModulePreparationFailure owner reason)
         Right value -> Right value
   where
-    loadDefiningDetails :: HscEnv -> ModIface -> IO [TyCon]
+    loadDefiningDetails :: HscEnv -> ModIface -> IO ([TyCon], [Id])
     loadDefiningDetails env iface = do
       let doc = text "Tidepool recovered defining interface"
       details <- initIfaceCheck doc env (typecheckIface iface)
-      pure (typeEnvTyCons (md_types details))
+      pure (typeEnvTyCons (md_types details), typeEnvIds (md_types details))
 
     trySynchronous :: IO a -> IO (Either String a)
     trySynchronous action = do

@@ -18,7 +18,7 @@ import GHC.Unit.Module.Graph (ModuleGraphNode(..), mgModSummaries')
 import GHC.Unit.Module.ModGuts (CgGuts(..))
 import GHC.Unit.Home.ModInfo (HomeModInfo(hm_iface))
 import GHC.Builtin.Types (boolTy)
-import GHC.Core (Expr(..), bindersOf, flattenBinds)
+import GHC.Core (Expr(..), bindersOf, bindersOfBinds, flattenBinds)
 import GHC.Core.DataCon (dataConName, dataConRepArgTys)
 import GHC.Core.DataCon qualified as DC
 import GHC.Core.TyCon (PromDataConInfo(NoPromInfo))
@@ -854,7 +854,7 @@ recoveredFixtureInput name result = case
     [ms_location summary | ModuleNode _ summary <- mgModSummaries'
       (hsc_mod_graph (prHscEnv (pprPipelineResult result)))
     , ms_mod_name summary == mkModuleName name] of
-  [location] -> RecoveredModuleInput (cg_module guts) location (cg_tycons guts) (cg_binds guts)
+  [location] -> RecoveredModuleInput (cg_module guts) location (cg_tycons guts) (cg_binds guts) (bindersOfBinds (cg_binds guts))
   _ -> error ("missing defining fixture location " ++ name)
   where guts = finalizedTidyGuts (finalizedFixtureOwner name result)
 
@@ -933,7 +933,7 @@ verifyTypedPreparationCacheLifetime dir = do
     let env = prHscEnv (pprPipelineResult cold)
         input name = recoveredFixtureInput name cold
     mapM_ (\name -> let recovered = input name in cacheOwnerInterface owners
-        (recoveredModule recovered) (OwnerInterfaceContext (recoveredLocation recovered) (recoveredTyCons recovered)))
+        (recoveredModule recovered) (OwnerInterfaceContext (recoveredLocation recovered) (recoveredTyCons recovered) (recoveredEntries recovered)))
       ["TypedPreparationPlain", "TypedPreparationOwner"]
     request <- newPreparedBodyPreparer env owners bodies
     nextRequest <- newPreparedBodyPreparer env owners bodies

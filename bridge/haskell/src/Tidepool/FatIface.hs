@@ -18,6 +18,7 @@ import GHC.Core (CoreBind, Bind(..))
 import GHC.Core.TyCon (TyCon)
 import GHC.Driver.Env (HscEnv, hsc_NC, hsc_dflags)
 import GHC.Types.Name (Name, nameModule_maybe)
+import GHC.Types.Var (Id)
 import GHC.Types.Var (varName)
 import GHC.Unit.Types (Module, moduleUnit, moduleName, mkModule, toUnitId)
 import GHC.Unit.Module.ModIface (ModIface, mi_extra_decls)
@@ -251,11 +252,12 @@ renderReadInterfaceError failure = case failure of
       ++ ", found " ++ showSDocUnsafe (ppr actual)
 
 -- | The defining context needed after an owner's interface has been read and
--- typechecked. The original 'ModIface' is not needed for recovered-body
--- preparation and is not retained here.
+-- typechecked. Entry metadata comes from its declarations, independently of
+-- the Ids reconstructed by the optional fat Core decoder.
 data OwnerInterfaceContext = OwnerInterfaceContext
   { ownerInterfaceLocation :: ModLocation
   , ownerInterfaceTyCons :: [TyCon]
+  , ownerInterfaceEntries :: [Id]
   }
 
 -- | Daemon-lifetime cache of an owner module's already-read-and-typechecked
