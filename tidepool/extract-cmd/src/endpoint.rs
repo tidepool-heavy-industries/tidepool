@@ -396,7 +396,6 @@ impl CompilerEndpoint {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
-        process::child_dies_with_parent(&mut command);
         let mut child = command
             .spawn()
             .map_err(|source| SpawnError::not_submitted(spec.program.clone(), source))?;

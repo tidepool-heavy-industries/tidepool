@@ -23,17 +23,17 @@ unsafe extern "C" {
     fn prctl(option: std::os::raw::c_int, ...) -> std::os::raw::c_int;
 }
 
-/// Construct a `Command` for a long-lived extractor child. This is the one
-/// allowed `std::process::Command::new` call in the crate; every other site
-/// routes through it instead of constructing its own. Callers still arm the
-/// parent-death contract themselves with [`child_dies_with_parent`] once the
-/// command is otherwise configured.
+/// Construct an extractor child with the parent-death contract already armed.
+/// This is the one production `std::process::Command::new` owner in the crate;
+/// worker requests and metadata probes share the same lifecycle contract.
 #[allow(
     clippy::disallowed_methods,
     reason = "launcher: the crate's single allowed Command::new call (tidepool/extract-cmd/src/process.rs)"
 )]
 pub(crate) fn command(program: impl AsRef<std::ffi::OsStr>) -> Command {
-    Command::new(program)
+    let mut command = Command::new(program);
+    child_dies_with_parent(&mut command);
+    command
 }
 
 pub(crate) fn kill_process(pid: u32) -> io::Result<()> {
@@ -77,7 +77,7 @@ pub(crate) fn current_process_dies_with_parent() -> io::Result<()> {
 }
 
 /// Configure `command` so the spawned process dies when this process exits.
-pub(crate) fn child_dies_with_parent(command: &mut Command) {
+fn child_dies_with_parent(command: &mut Command) {
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::process::CommandExt;
@@ -339,17 +339,12 @@ mod tests {
             "1"
         );
         let pid_file = std::env::var_os(PID_FILE_ENV).expect("helper pid file is required");
-        #[allow(
-            clippy::disallowed_methods,
-            reason = "test fixture: throwaway helper child, exercises child_dies_with_parent directly"
-        )]
-        let mut command = Command::new("sleep");
+        let mut command = command("sleep");
         command
             .arg("30")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        child_dies_with_parent(&mut command);
         let child = command.spawn().expect("spawn helper child");
         std::fs::write(pid_file, child.id().to_string()).expect("write helper child pid");
         // Dropping `Child` deliberately does not wait or kill. Exiting this
