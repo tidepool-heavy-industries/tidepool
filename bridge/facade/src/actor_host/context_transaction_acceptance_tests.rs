@@ -1126,7 +1126,7 @@ async fn resident_sync_context_cancel_discards_staging_and_never_launches_childr
                         "provider inferred before the staged cell reached its real Sleep wait; \
                          session={}; terminal={terminal:?}; settlement={}; graph={:?}",
                         round.request.session_id,
-                        fixture.context.cell_settlement_diagnostic("context-cancel").await,
+                        fixture.cell_settlement_diagnostic("context-cancel").await,
                         fixture.context.forest.inspect_host_graph()
                     );
                 }
