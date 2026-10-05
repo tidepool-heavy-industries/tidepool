@@ -161,8 +161,6 @@ enum PurposeCase {
     Item,
     Display,
     Inspection,
-    HostActivationInput,
-    HostInputCheck,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -616,88 +614,51 @@ fn purpose(root: &Path, case: PurposeCase, includes: &[PathBuf], signature: Opti
         crate::checked_cell::fixture_checked_signature(&bytes.0).expect("owner signature decoder")
     });
     let (stage, body) = match case {
-        PurposeCase::Cell | PurposeCase::HostInputCheck => {
-            let host = case == PurposeCase::HostInputCheck;
-            assert_eq!(
-                signature.is_some(),
-                host,
-                "only host input check carries a native signature"
+        PurposeCase::Cell => {
+            assert!(
+                signature.is_none(),
+                "cell checking cannot carry an input signature"
             );
             (
-                if host {
-                    CheckedPurpose::HostInputCell
-                } else {
-                    CheckedPurpose::Cell
-                },
+                CheckedPurpose::Cell,
                 crate::artifacts::encode_cell_authorization(
                     &CheckedCellSpecification {
                         admission_digest: [0xaa; 32],
-                        cell_source: if host {
-                            "sessionInput <- pure (undefined :: TidepoolActivationInput)"
-                        } else {
-                            "codec cell"
-                        }
-                        .into(),
+                        cell_source: "codec cell".into(),
                         template_source: "codec template".into(),
-                        turn_templates: if host {
-                            vec![("bind".into(), "codec input template".into())]
-                        } else {
-                            vec![]
-                        },
+                        turn_templates: vec![],
                         injected_modules: vec![],
                         reserved_declaration_modules: vec![],
                     },
                     Value::Array(vec![]),
-                    signature.as_ref(),
                 )
                 .unwrap(),
             )
         }
-        PurposeCase::Item | PurposeCase::HostActivationInput => {
-            let host = case == PurposeCase::HostActivationInput;
-            assert_eq!(
-                signature.is_some(),
-                host,
-                "only host input carries a native signature"
-            );
-            let binders = if host {
-                vec!["sessionInput".into()]
-            } else {
-                vec![]
-            };
-            let templates = if host {
-                vec![("bind".into(), "codec host input template".into())]
-            } else {
-                vec![]
-            };
-            let signatures = signature.into_iter().collect::<Vec<_>>();
-            let body = encode_item_authorization(ItemAuthorization {
-                admission: [0xaa; 32],
-                receipt: [0xaa; 32],
-                index: 0,
-                source: "sessionInput <- pure 1",
-                kind: CheckedItemKind::Bind,
-                binders: &binders,
-                templates: &templates,
-                injected: &[],
-                signatures: &signatures,
-                expression: None,
-                generation: 1,
-                runtime_prefix: [0xaa; 32],
-                imports: &[],
-                observation: None,
-                planned: Value::Null,
-                settled: vec![],
-                value_interfaces: Value::Array(vec![]),
-                template_interfaces: Value::Array(vec![]),
-            });
+        PurposeCase::Item => {
+            assert!(signature.is_none(), "item purpose has no input signature");
             (
-                if host {
-                    CheckedPurpose::HostActivationInput
-                } else {
-                    CheckedPurpose::Item
-                },
-                body,
+                CheckedPurpose::Item,
+                encode_item_authorization(ItemAuthorization {
+                    admission: [0xaa; 32],
+                    receipt: [0xaa; 32],
+                    index: 0,
+                    source: "codec item",
+                    kind: CheckedItemKind::Bind,
+                    binders: &[],
+                    templates: &[],
+                    injected: &[],
+                    signatures: &[],
+                    expression: None,
+                    generation: 1,
+                    runtime_prefix: [0xaa; 32],
+                    imports: &[],
+                    observation: None,
+                    planned: Value::Null,
+                    settled: vec![],
+                    value_interfaces: Value::Array(vec![]),
+                    template_interfaces: Value::Array(vec![]),
+                }),
             )
         }
         PurposeCase::Display => {

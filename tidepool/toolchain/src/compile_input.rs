@@ -24,6 +24,7 @@ use crate::CompileError;
 pub struct SealedCompileInputIdentity {
     identity: String,
     original_interfaces: Arc<crate::declaration_context::ExactDeclarationContext>,
+    original_execution: Arc<crate::declaration_context::ExactDeclarationContext>,
     target: Arc<PreparedProgram>,
     groups: Arc<[PendingCertifiedGroup]>,
     target_owners: Arc<[PendingImportOwner]>,
@@ -64,6 +65,27 @@ impl SealedCompileInputIdentity {
             ));
         }
         Ok(self.original_interfaces.clone())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn original_execution_context(
+        &self,
+        prepared: &PreparedProgram,
+        groups: &[PendingCertifiedGroup],
+        target_owners: &[PendingImportOwner],
+        package_interfaces: &CertifiedTargetPackageInterfaces,
+        table: &DataConTable,
+        yield_sites: &[YieldSite],
+    ) -> Result<Arc<crate::declaration_context::ExactDeclarationContext>, CompileError> {
+        self.original_interface_context(
+            prepared,
+            groups,
+            target_owners,
+            package_interfaces,
+            table,
+            yield_sites,
+        )?;
+        Ok(self.original_execution.clone())
     }
 
     pub fn matches_bundle(
@@ -632,6 +654,14 @@ pub(crate) fn seal(
                 crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(producer)
                     .sha256(),
                 artifacts,
+            )?,
+        ),
+        original_execution: Arc::new(
+            crate::declaration_context::ExactDeclarationContext::from_authenticated_execution(
+                crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(producer)
+                    .sha256(),
+                artifacts,
+                Vec::new(),
             )?,
         ),
         target: prepared.clone(),

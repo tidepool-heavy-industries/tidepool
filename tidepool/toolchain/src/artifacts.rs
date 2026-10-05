@@ -496,6 +496,7 @@ pub struct ModuleCandidateOffer {
 enum NativeCheckedOffer {
     Item(crate::checked_cell::CheckedItemOffer),
     Display(crate::checked_cell::CheckedDisplayOffer),
+    ActivationPreview(crate::activation_preview::ActivationPreviewOffer),
 }
 
 // Protected compilation manifests bind the actual worker search order as well
@@ -504,17 +505,14 @@ enum NativeCheckedOffer {
 pub(crate) enum CheckedPurpose {
     Inspection,
     Cell,
-    HostInputCell,
     Item,
-    HostActivationInput,
+    ActivationPreview,
     Display,
 }
 
-/// The original host witness travels only with its dedicated compiler purpose.
-/// Authored and planned cells cannot attach host input signature authority.
-pub enum CheckedCellPurpose<'a> {
+/// Authored whole-cell checking is independent of live-input binding and preview.
+pub enum CheckedCellPurpose {
     Authored,
-    HostActivationInput(&'a crate::checked_cell::CanonicalInputTypeWitness),
 }
 
 pub(crate) fn checked_search_authorization(
@@ -548,10 +546,9 @@ pub(crate) fn checked_search_authorization(
         match purpose {
             CheckedPurpose::Inspection => "inspection1",
             CheckedPurpose::Cell => "cell-check2",
-            CheckedPurpose::HostInputCell => "host-input-check1",
             CheckedPurpose::Item => "checked-item3",
-            CheckedPurpose::HostActivationInput => "host-activation-input2",
             CheckedPurpose::Display => "checked-display3",
+            CheckedPurpose::ActivationPreview => "host-activation-preview1",
         }
         .into(),
     );
@@ -560,28 +557,16 @@ pub(crate) fn checked_search_authorization(
 }
 
 fn checked_cell_authorization(
-    purpose: CheckedCellPurpose<'_>,
+    purpose: CheckedCellPurpose,
     specification: &crate::checked_cell::CheckedCellSpecification,
     values: &crate::checked_cell::CheckedValueInputs,
     include: &[PathBuf],
 ) -> Result<Value, CompileError> {
-    let (purpose, signature) = match purpose {
-        CheckedCellPurpose::Authored => (CheckedPurpose::Cell, None),
-        CheckedCellPurpose::HostActivationInput(witness) => {
-            if !specification.reserved_declaration_modules.is_empty()
-                || specification.cell_source
-                    != "sessionInput <- pure (undefined :: TidepoolActivationInput)"
-            {
-                return Err(CompileError::ExtractFailed(
-                    "host input witness requires its reserved binder-only compiler slot".into(),
-                ));
-            }
-            (CheckedPurpose::HostInputCell, Some(witness.signature()))
-        }
-    };
     checked_search_authorization(
-        purpose,
-        encode_cell_authorization(specification, values.baseline_authorization(), signature)?,
+        match purpose {
+            CheckedCellPurpose::Authored => CheckedPurpose::Cell,
+        },
+        encode_cell_authorization(specification, values.baseline_authorization())?,
         include,
     )
 }
@@ -589,16 +574,12 @@ fn checked_cell_authorization(
 pub(crate) fn encode_cell_authorization(
     specification: &crate::checked_cell::CheckedCellSpecification,
     baseline: Value,
-    signature: Option<&crate::checked_cell::ExactCheckedSignature>,
 ) -> Result<Value, CompileError> {
     let mut authorization = specification.manifest_value()?;
     let Value::Array(fields) = &mut authorization else {
         unreachable!("closed cell authorization")
     };
     fields.push(baseline);
-    if let Some(signature) = signature {
-        fields.push(crate::checked_cell::encode_signature(signature));
-    }
     Ok(authorization)
 }
 
@@ -958,7 +939,7 @@ impl ModuleCandidateOffer {
         scratch: &Path,
         context: Option<Arc<crate::declaration_context::ExactCompileContext>>,
         specification: crate::checked_cell::CheckedCellSpecification,
-        purpose: CheckedCellPurpose<'_>,
+        purpose: CheckedCellPurpose,
         checked_values: Vec<(tidepool_repr::SessionModule, Arc<[u8]>)>,
         retained_interfaces: &[Arc<crate::checked_cell::CheckedValueArtifact>],
         retained_projections: &[Arc<crate::declaration_join::AcceptedJoin>],
@@ -1134,76 +1115,6 @@ impl ModuleCandidateOffer {
             u64,
         )>,
     ) -> Result<Self, CompileError> {
-        Self::select_checked_item_for_purpose(
-            producer,
-            include,
-            scratch,
-            context,
-            item,
-            prefix,
-            runtime_prefix_digest,
-            generation,
-            observation_name,
-            templates,
-            settled_bindings,
-            crate::checked_cell::CheckedItemPurpose::Authored,
-        )
-    }
-
-    /// Compile the protected input interface and preview without issuing an
-    /// authored execution item. The runtime owns the affine input admission.
-    pub fn select_checked_activation_item(
-        producer: &[u8],
-        include: &[PathBuf],
-        scratch: &Path,
-        context: Option<Arc<crate::declaration_context::ExactCompileContext>>,
-        item: crate::checked_cell::ExactCheckedItem,
-        prefix: crate::checked_cell::ExactCompiledPrefix,
-        runtime_prefix_digest: [u8; 32],
-        generation: u64,
-        templates: &[(String, String)],
-        settled_bindings: Vec<(
-            String,
-            tidepool_repr::execution_schema::SymbolIdentity,
-            u64,
-            u64,
-        )>,
-    ) -> Result<Self, CompileError> {
-        Self::select_checked_item_for_purpose(
-            producer,
-            include,
-            scratch,
-            context,
-            item,
-            prefix,
-            runtime_prefix_digest,
-            generation,
-            None,
-            templates,
-            settled_bindings,
-            crate::checked_cell::CheckedItemPurpose::HostActivationInput,
-        )
-    }
-
-    fn select_checked_item_for_purpose(
-        producer: &[u8],
-        include: &[PathBuf],
-        scratch: &Path,
-        context: Option<Arc<crate::declaration_context::ExactCompileContext>>,
-        item: crate::checked_cell::ExactCheckedItem,
-        prefix: crate::checked_cell::ExactCompiledPrefix,
-        runtime_prefix_digest: [u8; 32],
-        generation: u64,
-        observation_name: Option<&str>,
-        templates: &[(String, String)],
-        settled_bindings: Vec<(
-            String,
-            tidepool_repr::execution_schema::SymbolIdentity,
-            u64,
-            u64,
-        )>,
-        purpose: crate::checked_cell::CheckedItemPurpose,
-    ) -> Result<Self, CompileError> {
         let compile_context = context;
         let context = prefix.with_value_context(checked_offer_context(
             compile_context
@@ -1212,7 +1123,6 @@ impl ModuleCandidateOffer {
         )?)?;
         let settled_values = prefix.select_settled_values(settled_bindings)?;
         let checked_item = crate::checked_cell::CheckedItemOffer {
-            purpose,
             item,
             prefix,
             runtime_prefix_digest,
@@ -1223,9 +1133,6 @@ impl ModuleCandidateOffer {
         };
         checked_item.validate_templates(templates)?;
         checked_item.validate_include(include)?;
-        if purpose == crate::checked_cell::CheckedItemPurpose::HostActivationInput {
-            checked_item.validate_activation_input()?;
-        }
         let mut selected = None;
         let exact = compile_context_with_declarations(compile_context, context.clone())
             .prepare_compilation_authorizing(
@@ -1233,14 +1140,7 @@ impl ModuleCandidateOffer {
                 producer,
                 |semantic_sha256| {
                     let authorization = checked_search_authorization(
-                        match purpose {
-                            crate::checked_cell::CheckedItemPurpose::Authored => {
-                                CheckedPurpose::Item
-                            }
-                            crate::checked_cell::CheckedItemPurpose::HostActivationInput => {
-                                CheckedPurpose::HostActivationInput
-                            }
-                        },
+                        CheckedPurpose::Item,
                         checked_item.authorization(producer, semantic_sha256)?,
                         include,
                     )?;
@@ -1305,6 +1205,111 @@ impl ModuleCandidateOffer {
             checked_projections: Vec::new(),
             checked: Some(NativeCheckedOffer::Item(checked_item)),
         })
+    }
+
+    /// Compile a pure preview after mounting the original live input. Neither
+    /// a whole-cell receipt nor a completed authored prefix is involved.
+    pub fn select_activation_preview(
+        endpoint: &crate::toolchain::AdmittedCompilerEndpoint,
+        include: &[PathBuf],
+        scratch: &Path,
+        context: Arc<crate::declaration_context::ExactCompileContext>,
+        input: Arc<crate::checked_cell::ExactHostBindingInterface>,
+        specification: crate::activation_preview::ActivationPreviewSpecification,
+    ) -> Result<crate::activation_preview::ActivationPreviewSelection, CompileError> {
+        use crate::activation_preview::{ActivationPreviewOffer, ActivationPreviewSelection};
+        let producer = endpoint.identity().producer_bytes();
+        if crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(producer)
+            .sha256()
+            != input.prototype().producer()
+        {
+            return Err(CompileError::ExtractFailed(
+                "activation preview worker differs from the original producer".into(),
+            ));
+        }
+        crate::activation_preview::validate_original_display_context(
+            &input,
+            context.declarations(),
+        )?;
+        let certificate = input.value_interface_certificate();
+        let values = crate::checked_cell::CheckedValueInputs::capture_checked(
+            vec![(certificate.owner(), certificate.bytes_owned().clone())],
+            std::slice::from_ref(&certificate),
+        )?;
+        let baseline = values.baseline_authorization();
+        let baseline = crate::checked_cell::row(&baseline, 1)?;
+        let copied = crate::checked_cell::row(&baseline[0], 4)?;
+        let packages = certificate
+            .certified_interface()
+            .interface()
+            .package_imports_bytes();
+        std::fs::write(
+            format!("{}.packages", crate::checked_cell::string(&copied[2])?),
+            packages,
+        )?;
+        let declarations = Arc::new(
+            (**context.declarations())
+                .clone()
+                .extend_interface_context(input.prototype().context())?
+                .extend_retained_value_artifacts(&values.certified_artifacts())?,
+        );
+        let offer = ActivationPreviewOffer {
+            specification,
+            input,
+            values: values.clone(),
+        };
+        let templates = [offer.specification.template_source.clone()];
+        let template_interfaces = Value::Array(
+            declarations
+                .template_interface_graph(&templates)?
+                .into_iter()
+                .map(|(owner, node)| {
+                    Value::Array(vec![
+                        Value::Text(owner.unit),
+                        Value::Text(owner.module),
+                        Value::Text(crate::checked_cell::hex(&node.interface_sha256)),
+                        Value::Array(
+                            node.imports
+                                .into_iter()
+                                .map(|owner| {
+                                    Value::Array(vec![
+                                        Value::Text(owner.unit),
+                                        Value::Text(owner.module),
+                                    ])
+                                })
+                                .collect(),
+                        ),
+                    ])
+                })
+                .collect(),
+        );
+        let authorization = checked_search_authorization(
+            CheckedPurpose::ActivationPreview,
+            offer.authorization(template_interfaces)?,
+            include,
+        )?;
+        let exact = (*context)
+            .clone()
+            .with_declarations(declarations)
+            .prepare_compilation_with_authorization(
+                &scratch.join("exact-scope"),
+                producer,
+                Some(authorization),
+            )?
+            .with_source_search_context(include)
+            .with_checked_value_imports(values.import_authority())
+            .with_generated_scaffold_imports(templates.iter().map(String::as_str));
+        Ok(ActivationPreviewSelection::Ready(Self {
+            selected: None,
+            producer: producer.to_vec(),
+            include: include.to_vec(),
+            exact: Some(exact),
+            checked_cell: None,
+            planned_cell: None,
+            checked_values: Some(values),
+            checked_projections: Vec::new(),
+            checked: Some(NativeCheckedOffer::ActivationPreview(offer)),
+        }))
     }
 
     pub fn select_checked_display(
@@ -1424,6 +1429,26 @@ impl ModuleCandidateOffer {
         })
     }
 
+    /// Read the compiler's distinct no-program result after a successful
+    /// preview request. Missing native display evidence cannot become Opaque.
+    pub fn activation_preview_unavailable(&self, root: &Path) -> Result<bool, CompileError> {
+        match &self.checked {
+            Some(NativeCheckedOffer::ActivationPreview(preview)) => {
+                let exact = self.exact.as_ref().expect("preview has exact offer");
+                exact.context.validate_artifacts(&exact.artifacts)?;
+                preview.unavailable(root, &exact.request_sha256)
+            }
+            _ => {
+                if root.join("activation-preview-unavailable.cbor").exists() {
+                    return Err(CompileError::ExtractFailed(
+                        "non-preview output advertised preview evidence".into(),
+                    ));
+                }
+                Ok(false)
+            }
+        }
+    }
+
     /// Retained checked-cell artifact root. Only the sealed request manifest
     /// authorizes inputs from this directory; new directory members do not.
     pub fn checked_value_root(&self) -> Option<&Path> {
@@ -1433,6 +1458,7 @@ impl ModuleCandidateOffer {
             .or_else(|| match self.checked.as_ref()? {
                 NativeCheckedOffer::Item(offer) => Some(offer.item.value_input_root()),
                 NativeCheckedOffer::Display(offer) => Some(offer.capture.item().value_input_root()),
+                NativeCheckedOffer::ActivationPreview(offer) => Some(offer.values.root()),
             })
     }
 
@@ -1472,6 +1498,9 @@ impl ModuleCandidateOffer {
                     .capture
                     .item()
                     .retain_input_diagnostics(&offer.prefix, destination),
+                Some(NativeCheckedOffer::ActivationPreview(offer)) => {
+                    offer.values.retain_diagnostics(None, destination)
+                }
                 None => Ok(()),
             }
         }
@@ -1781,7 +1810,6 @@ impl ModuleCandidateOffer {
                 }
             };
             let native = checked_cell::CheckedItemOffer {
-                purpose: checked_cell::CheckedItemPurpose::Authored,
                 item: item.clone(),
                 prefix: completed.clone(),
                 runtime_prefix_digest: cell.admission_digest(),
@@ -2242,8 +2270,8 @@ pub struct SealedTurnProducts {
 #[derive(Clone, Debug)]
 pub enum CheckedNativeProof {
     Execution(Arc<crate::checked_cell::ExactCompiledItem>),
-    ActivationInput(Arc<crate::checked_cell::ExactCompiledActivationInput>),
     Display(Arc<crate::checked_cell::ExactCompiledDisplay>),
+    ActivationPreview(Arc<crate::activation_preview::ExactCompiledActivationPreview>),
 }
 
 fn has_ready_home_module(evidence: &cache::DependencyEvidence) -> bool {
@@ -2558,6 +2586,21 @@ fn seal_turn_outputs_inner(
             source,
         )?;
         Some(match checked {
+            NativeCheckedOffer::ActivationPreview(preview) => {
+                CheckedNativeProof::ActivationPreview(
+                    preview.seal(
+                        output_dir,
+                        &offer
+                            .exact
+                            .as_ref()
+                            .expect("preview has exact scope")
+                            .request_sha256,
+                        source,
+                        prepared,
+                        &context,
+                    )?,
+                )
+            }
             NativeCheckedOffer::Display(display) => CheckedNativeProof::Display(
                 display.seal(
                     output_dir,
@@ -2578,28 +2621,14 @@ fn seal_turn_outputs_inner(
                     .as_ref()
                     .expect("checked offer has exact scope")
                     .request_sha256;
-                match item.purpose {
-                    crate::checked_cell::CheckedItemPurpose::Authored => {
-                        CheckedNativeProof::Execution(item.seal(
-                            output_dir,
-                            request_sha256,
-                            source,
-                            prepared,
-                            &context,
-                            &lexical,
-                        )?)
-                    }
-                    crate::checked_cell::CheckedItemPurpose::HostActivationInput => {
-                        CheckedNativeProof::ActivationInput(item.seal_activation_input(
-                            output_dir,
-                            request_sha256,
-                            source,
-                            prepared,
-                            &context,
-                            &lexical,
-                        )?)
-                    }
-                }
+                CheckedNativeProof::Execution(item.seal(
+                    output_dir,
+                    request_sha256,
+                    source,
+                    prepared,
+                    &context,
+                    &lexical,
+                )?)
             }
         })
     } else {
@@ -4366,113 +4395,6 @@ fn store_memo(
 #[cfg(test)]
 mod typed_site_tests {
     use super::*;
-
-    fn host_input_witness(payload: &[u8]) -> crate::checked_cell::CanonicalInputTypeWitness {
-        let text = |value: &str| Value::Text(value.into());
-        let mut structure = Vec::new();
-        ciborium::into_writer(
-            &Value::Array(vec![text("literal"), text("nat"), text("1")]),
-            &mut structure,
-        )
-        .unwrap();
-        let mut bytes = Vec::new();
-        // This codec fixture carries no executable GHC IfaceType.
-        ciborium::into_writer(
-            &Value::Array(vec![
-                text("TPCANONICALINPUTTYPE1"),
-                text("1"),
-                Value::Array(vec![
-                    text("TPCHECKEDSIGNATURE2"),
-                    text("activation-input"),
-                    text("presentation"),
-                    Value::Bytes(payload.to_vec()),
-                    Value::Array(vec![]),
-                ]),
-                Value::Bytes(structure),
-                Value::Array(vec![]),
-            ]),
-            &mut bytes,
-        )
-        .unwrap();
-        crate::checked_cell::CanonicalInputTypeWitness::from_bytes(&bytes).unwrap()
-    }
-
-    #[test]
-    fn host_input_authorization_preserves_native_payload_and_refuses_authored_or_planned_recipe() {
-        let witness = host_input_witness(&[1, 2, 3]);
-        let substituted = host_input_witness(&[3, 2, 1]);
-        assert_eq!(witness, substituted);
-        assert_eq!(witness.commitment(), substituted.commitment());
-        assert_ne!(witness.metadata_digest(), substituted.metadata_digest());
-        let specification = crate::checked_cell::CheckedCellSpecification {
-            admission_digest: [7; 32],
-            cell_source: "sessionInput <- pure (undefined :: TidepoolActivationInput)".into(),
-            template_source: "protected template".into(),
-            turn_templates: Vec::new(),
-            injected_modules: Vec::new(),
-            reserved_declaration_modules: Vec::new(),
-        };
-        let values = crate::checked_cell::CheckedValueInputs::capture_raw(Vec::new()).unwrap();
-        let include = [PathBuf::from("/source/original")];
-        let authorization = checked_cell_authorization(
-            CheckedCellPurpose::HostActivationInput(&witness),
-            &specification,
-            &values,
-            &include,
-        )
-        .unwrap();
-        let fields = authorization.as_array().unwrap();
-        assert_eq!(fields.len(), 10);
-        assert_eq!(fields[0], Value::Text("host-input-check1".into()));
-        assert_eq!(
-            fields[8],
-            crate::checked_cell::encode_signature(witness.signature())
-        );
-        assert_eq!(
-            fields[9],
-            Value::Array(vec![Value::Text("/source/original".into())])
-        );
-        let substituted = checked_cell_authorization(
-            CheckedCellPurpose::HostActivationInput(&substituted),
-            &specification,
-            &values,
-            &include,
-        )
-        .unwrap();
-        assert_ne!(authorization, substituted);
-        let authored = checked_cell_authorization(
-            CheckedCellPurpose::Authored,
-            &specification,
-            &values,
-            &include,
-        )
-        .unwrap();
-        assert_eq!(authored.as_array().unwrap().len(), 9);
-        assert_eq!(
-            authored.as_array().unwrap()[0],
-            Value::Text("cell-check2".into())
-        );
-        let mut authored_recipe = specification.clone();
-        authored_recipe.cell_source = "let authored = 1".into();
-        assert!(checked_cell_authorization(
-            CheckedCellPurpose::HostActivationInput(&witness),
-            &authored_recipe,
-            &values,
-            &include
-        )
-        .is_err());
-        let mut planned_recipe = specification;
-        planned_recipe
-            .reserved_declaration_modules
-            .push("Tidepool.Session.Lib.G1".into());
-        assert!(checked_cell_authorization(
-            CheckedCellPurpose::HostActivationInput(&witness),
-            &planned_recipe,
-            &values,
-            &include
-        )
-        .is_err());
-    }
 
     #[cfg(unix)]
     #[test]

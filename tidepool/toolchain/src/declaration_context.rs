@@ -2381,6 +2381,24 @@ impl ExactDeclarationContext {
         context.extend_interface_artifacts(artifacts)
     }
 
+    /// Retain already authenticated original code owners and their original
+    /// lexical graph. Only the original compiler output proof issues this.
+    pub(crate) fn from_authenticated_execution(
+        producer: [u8; 32],
+        artifacts: &ArtifactView,
+        lexical: Vec<ExactLexicalNode>,
+    ) -> Result<Self, CompileError> {
+        let mut context = Self::new(&[], &[], Vec::new())?;
+        context.admit_producer(producer)?;
+        for descriptor in artifacts.descriptors() {
+            context.admit_producer(descriptor.producer_sha256)?;
+        }
+        context.inventory = context.inventory.merge(artifacts)?;
+        context.lexical = lexical;
+        context.normalize()?;
+        Ok(context)
+    }
+
     /// Select interface custody without losing the original producer when the
     /// selected type closure contains only package Names.
     pub fn select_interface_roots(
@@ -2418,9 +2436,22 @@ impl ExactDeclarationContext {
             .iter()
             .filter(|node| {
                 let import = format!("import {}", node.owner.module);
-                templates
-                    .iter()
-                    .any(|template| template.lines().any(|line| line == import))
+                templates.iter().any(|template| {
+                    template.lines().any(|line| {
+                        line == import
+                            || line
+                                .strip_prefix(&format!(
+                                    "import qualified {} as ",
+                                    node.owner.module
+                                ))
+                                .is_some_and(|alias| {
+                                    !alias.is_empty()
+                                        && alias.chars().all(|c| {
+                                            c.is_ascii_alphanumeric() || c == '_' || c == '.'
+                                        })
+                                })
+                    })
+                })
             })
             .map(|node| node.owner.clone())
             .collect::<Vec<_>>();

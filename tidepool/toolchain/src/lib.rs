@@ -14,6 +14,7 @@ use std::path::PathBuf;
 use thiserror::Error;
 use tidepool_repr::serial::ReadError;
 
+pub mod activation_preview;
 pub mod artifact_inventory;
 pub mod artifacts;
 pub mod cache;
