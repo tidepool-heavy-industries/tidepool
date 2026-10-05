@@ -4254,6 +4254,14 @@ where
             .require_prepared()?
             .prepared_handle_of(raw)
             .ok_or_else(invalid)?;
+        if self
+            .state
+            .require_prepared()?
+            .hosting_program(handle)
+            .is_none()
+        {
+            return Err(invalid());
+        }
         let staged = self
             .state
             .stage_checked_value_interface(interface.value_interface_certificate())?;
