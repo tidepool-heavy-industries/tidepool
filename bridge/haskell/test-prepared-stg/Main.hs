@@ -50,7 +50,7 @@ import Tidepool.GhcPipeline
 import Tidepool.PreparedStg
   ( PreparedCoverage(..), pmModule, pmCoverage, pmBindings, pmYieldSites, pmPreparedSites, pmTypeGraph, pmSiteRejections
   , RecoveredModuleInput(..), prepareRecoveredModule, newPreparedBodyCache, newPreparedBodyPreparer
-  , preparedUsesSiteAuthority )
+  , preparedUsesSiteAuthority, filterPreparedBindings, preparedRejectsIntrinsic )
 import Tidepool.FinalizedModule (FinalizedModule(..))
 import Tidepool.FatIface
   ( OwnerInterfaceContext(..), newOwnerInterfaceCache, cacheOwnerInterface )
@@ -703,8 +703,12 @@ verifyRepeatedConstructorEvidence result = do
           , preparedPreparedSites = rooted
           , preparedSiteRejections = []
           }
-      otherModules = filter ((/= "StrictPlainMetadata")
-        . moduleNameString . moduleName . pmModule) (pprModules result)
+      -- This structural control emits independently rooted graphs directly.
+      -- Keep their typed siblings but omit unused unsited surface definitions.
+      otherModules = [filterPreparedBindings (\(binding, _) ->
+          not (any (preparedRejectsIntrinsic prepared) (Projection.topBinders binding))) prepared
+        | prepared <- pprModules result
+        , moduleNameString (moduleName (pmModule prepared)) /= "StrictPlainMetadata"]
       projectAcrossGraphs first second = Projection.projectPrepared context
         (otherModules
           ++ [ graphModule "noUnpack" first
@@ -737,6 +741,7 @@ verifyRepeatedConstructorEvidence result = do
         outcome -> ioError (userError
           ("conflicting constructor evidence in separate graphs was not rejected: "
             ++ either show (const "accepted") outcome))
+  _ <- either (ioError . userError . show) pure (projectAcrossGraphs original original)
   canonical <- either (ioError . userError . show) pure (project [original, original])
   repeated <- either (ioError . userError . show) pure
     (project [original, clone otherName fields runtimeFields])

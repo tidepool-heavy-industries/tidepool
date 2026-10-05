@@ -160,6 +160,7 @@ import Control.Monad (forM, forM_, when, unless, filterM, foldM)
 import Data.Data (Data, cast, gmapQ)
 import Data.Generics (everything, mkQ)
 import Data.Foldable (toList)
+import Data.Unique qualified as RequestUnique
 import Data.Word (Word64)
 import Tidepool.Binders (CheckedBinderPin(..), CellSourcePlan(..), SourcePrologue(..), LocatedImport(..), ImportIntent(..), CellGenericDeclaration(..), CellStructuralDisplayTarget(..), CellExpressionPlan(..), ExpressionLiftPlan(..), ExpressionPresentation(..), omitCellGenericDeclarations, omitCellStructuralDisplayDeclarations)
 import Tidepool.CheckedCell (CheckedSignature, captureCheckedSignature, rewriteCheckedAnnotations, rewriteHostInputType, rewriteRequestTypes
@@ -1686,6 +1687,9 @@ data GutsMemoEntry = GutsMemoEntry
     -- ^ Diagnostic only (TIDEPOOL_MEMO_TRACE): the compile-cycle id
     -- ('requestIdentity') that produced this entry. Never read by a
     -- validity check.
+  , gmePreparationCycle :: RequestUnique.Unique
+    -- ^ One native preparation invocation. Timing requests can contain several
+    -- compiler calls and therefore cannot identify admitted site authority.
   , gmeDirectWitnesses :: !(Map.Map HomeDependency HomeDependencyWitness)
     -- ^ Diagnostic only (TIDEPOOL_MEMO_TRACE): this module's direct
     -- dependency witnesses (selected path, content fingerprint) at the
@@ -1807,6 +1811,7 @@ runCompileCycle
   :: PipelineSelection result -> CycleState
   -> RetainedContext -> Maybe String -> Bool -> Word64 -> Double -> Maybe ResourceTimingStart -> PipelineVariant -> FilePath -> Ghc result
 runCompileCycle selection cycleState retained incarnation timing requestIdentity sessionT0 setupResources variant path = withCycleHooks $ withCompilerViewDirectory $ \compilerViewDirectory -> do
+    preparationCycle <- liftIO RequestUnique.newUnique
     forM_ (pvExactScope variant) $ \scope ->
       case compilerProducerFor variant of
         Nothing -> liftIO (throwIO CompilerProducerUnavailable)
@@ -2584,7 +2589,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           (GutsMemoEntry (MemoValidity (ms_hs_hash summary) (retainedFor summary)
               (homeDependencyWitnesses summary) incarnation)
             (ValidationOnly (loadedFacts loaded) (loadedOutput loaded) (loadedFinalized loaded))
-            requestIdentity (memoDiagnosticWitnesses summary)))
+            requestIdentity preparationCycle (memoDiagnosticWitnesses summary)))
     forM_ (Map.elems cachedOnly) $ \loaded -> do
       liftIO (publishLoadedFinalization loaded)
       installPreparedInterface (ms_mod_name (loadedSummary loaded))
@@ -2756,7 +2761,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
               -- does not seal; reuse it only within its original request.
               preparedReusable entry product' =
                 not (preparedUsesSiteAuthority (productPrepared product'))
-                  || gmeCycle entry == requestIdentity
+                  || gmePreparationCycle entry == preparationCycle
               rememberPreparedSiblings prepared = liftIO $
                 modifyIORef' preparedSiblingsRef (\known -> Map.union (pmSitedSiblings prepared) known)
           let interfaceUses = zipWith homeInterfaceUse summaries (homeInterfaceConsumers summaries)
@@ -2822,7 +2827,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                                 (homeDependencyWitnesses modSum)
                                 incarnation)
                               (ExecutableProduct moduleProduct)
-                              requestIdentity
+                              requestIdentity preparationCycle
                               (memoDiagnosticWitnesses modSum))))
                           Nothing  -> pure ()
                         pure (LoadedObservation loaded, Just r, prepared)
@@ -2891,7 +2896,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                               (homeDependencyWitnesses modSum)
                               incarnation)
                             (ExecutableProduct moduleProduct)
-                            requestIdentity
+                            requestIdentity preparationCycle
                             (memoDiagnosticWitnesses modSum))))
                       Nothing -> pure ()
                   compileReachable _interfaceUse observation moduleFacts = do
@@ -2922,7 +2927,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                               (homeDependencyWitnesses modSum)
                               incarnation)
                             (ValidationOnly moduleFacts (loadedOutput loaded) (loadedFinalized loaded))
-                            requestIdentity
+                            requestIdentity preparationCycle
                             (memoDiagnosticWitnesses modSum))))
                       Nothing -> pure ()
               rs <- fmap concat $ forM (zip3 observations' facts interfaceUses) $ \(observation, moduleFacts, interfaceUse) -> do
