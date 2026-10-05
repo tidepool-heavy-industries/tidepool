@@ -41,7 +41,7 @@ pub fn host_binding_interface_request_count() -> u64 {
     HOST_BINDING_INTERFACE_REQUESTS.load(std::sync::atomic::Ordering::SeqCst)
 }
 
-/// Issue one fresh type-only host interface from original compiler type evidence.
+/// Issue one fresh type-only binding interface from original compiler type evidence.
 /// This session-specific artifact is never cached or compiled as authored source.
 pub fn issue_host_binding_interface(
     prototype: Arc<crate::checked_cell::ExactHostBindingPrototype>,
@@ -2509,6 +2509,15 @@ fn seal_turn_outputs_inner(
         module_candidates::record_exact_context_publication_skip(fresh_products.products());
     }
     let certified_groups: Arc<[_]> = certified.groups.into();
+    let artifact_view = crate::declaration_context::certified_product_artifact_view(
+        crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(&offer.producer)
+            .sha256(),
+        &certified.recovery_products,
+        &certified.module_interfaces,
+        exact
+            .as_ref()
+            .map(|admission| admission.request.context.as_ref()),
+    )?;
     let compile_input_identity =
         if let Some((table, sites)) = identity_metadata.filter(|_| offer.exact.is_none()) {
             let input_packages = crate::compile_input::ValidatedInputPackages::read_supported(
@@ -2531,6 +2540,7 @@ fn seal_turn_outputs_inner(
                         &package_interfaces,
                         table.clone(),
                         sites.to_vec(),
+                        &artifact_view,
                     )
                 })
                 .transpose()?
@@ -2539,15 +2549,6 @@ fn seal_turn_outputs_inner(
         } else {
             None
         };
-    let artifact_view = crate::declaration_context::certified_product_artifact_view(
-        crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(&offer.producer)
-            .sha256(),
-        &certified.recovery_products,
-        &certified.module_interfaces,
-        exact
-            .as_ref()
-            .map(|admission| admission.request.context.as_ref()),
-    )?;
     let checked = if let Some(checked) = &offer.checked {
         let (context, lexical) = checked_output_context(
             offer,

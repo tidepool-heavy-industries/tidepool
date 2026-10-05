@@ -11,7 +11,7 @@ module Tidepool.DeclarationJoin
   , DeclarationInventory(..), DeclarationOperation(..), DeclarationInventoryOutcome(..)
   , readDeclarationOperation, encodeDeclarationInventory, inspectDeclarationArtifacts
   , renderDeclarationInventoryOutcome
-  , HostBindingInterfaceInput(..), encodeHostBindingInterface
+  , HostBindingInterfaceInput(..), BindingInterfacePurpose(..), encodeHostBindingInterface, encodeBindingInterfacePurpose
   , renderDeclarationSelection
   ) where
 
@@ -65,7 +65,7 @@ import System.FilePath (isAbsolute, takeDirectory)
 import System.IO (openBinaryTempFile, hClose)
 import System.Posix.Files (createLink)
 import Tidepool.ExactHydration
-import Tidepool.CheckedCell (CheckedSignature, decodeCheckedSignature, encodeCheckedSignature)
+import Tidepool.CheckedCell (CheckedSignature, decodeCheckedSignature, encodeCheckedSignature, validateCheckedTypeWitnessBytes)
 import Tidepool.Json (jsonString)
 import Tidepool.PackageWitness
   ( PackageImportRoot(..), PackageImportEvidence(..), emptyPackageImports, readPackageImports, sealPackageImports, validatePackageImportRoot )
@@ -631,20 +631,31 @@ data DeclarationInventory = DeclarationInventory
   { inventoryArtifact :: DeclarationArtifact, inventoryExports :: [DeclarationExport]
   , inventoryInstances :: InstanceInventory
   } deriving (Eq, Show)
+data BindingInterfacePurpose = HostBuilt | OriginalLiveInput BS.ByteString
+  deriving (Eq, Show)
+
+encodeBindingInterfacePurpose :: BindingInterfacePurpose -> Encoding
+encodeBindingInterfacePurpose HostBuilt = encodeListLen 1 <> wireText "host-built"
+encodeBindingInterfacePurpose (OriginalLiveInput witness) =
+  case validateCheckedTypeWitnessBytes witness of
+    Left diagnostic -> error diagnostic
+    Right () -> encodeListLen 2 <> wireText "original-live-input" <> encodeBytes witness
+
 data HostBindingInterfaceInput = HostBindingInterfaceInput
   { hostInterfaceProducer :: String, hostInterfaceAdmission :: String
   , hostInterfaceGeneration :: Word64, hostInterfaceBinder :: String
   , hostInterfaceSignature :: CheckedSignature, hostInterfaceScope :: FilePath
-  , hostInterfaceRoot :: FilePath
+  , hostInterfaceRoot :: FilePath, hostInterfacePurpose :: BindingInterfacePurpose
   } deriving (Eq, Show)
 
 encodeHostBindingInterface :: HostBindingInterfaceInput -> BS.ByteString
 encodeHostBindingInterface input = toStrictByteString $
-  encodeListLen 9 <> wireText "TPHOSTBINDINGINTERFACE" <> wireText "1"
+  encodeListLen 10 <> wireText "TPHOSTBINDINGINTERFACE" <> wireText "2"
   <> wireText (hostInterfaceProducer input) <> wireText (hostInterfaceAdmission input)
   <> encodeWord64 (hostInterfaceGeneration input) <> wireText (hostInterfaceBinder input)
   <> encodeCheckedSignature (hostInterfaceSignature input)
   <> wireText (hostInterfaceScope input) <> wireText (hostInterfaceRoot input)
+  <> encodeBindingInterfacePurpose (hostInterfacePurpose input)
 
 data DeclarationOperation = InspectInventory [DeclarationArtifact] | ValidateJoin DeclarationJoinInput
   | EmitHostBindingInterface HostBindingInterfaceInput
@@ -677,17 +688,27 @@ readDeclarationOperation path = do
     _ -> fail "unsupported declaration operation"
   where
     decodeHostInterface = do
-      array 9
+      array 10
       magic <- text
       version <- text
-      unless (magic == "TPHOSTBINDINGINTERFACE" && version == "1")
+      unless (magic == "TPHOSTBINDINGINTERFACE" && version == "2")
         (fail "unsupported host interface operation")
       producer <- digest
       admission <- digest
       generation <- decodeWord64
       unless (generation > 0) (fail "host interface generation must be nonzero")
       HostBindingInterfaceInput producer admission generation <$> nonempty
-        <*> decodeCheckedSignature <*> absolutePath <*> absolutePath
+        <*> decodeCheckedSignature <*> absolutePath <*> absolutePath <*> purpose
+    purpose = do
+      count <- decodeListLen
+      tag <- text
+      case (count, tag) of
+        (1, "host-built") -> pure HostBuilt
+        (2, "original-live-input") -> do
+          witness <- decodeBytes
+          either fail pure (validateCheckedTypeWitnessBytes witness)
+          pure (OriginalLiveInput witness)
+        _ -> fail "unsupported host interface purpose"
     decodeInventory = do
       array 3
       magic <- text

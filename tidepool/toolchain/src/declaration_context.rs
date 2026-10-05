@@ -2370,6 +2370,36 @@ impl ExactDeclarationContext {
         Ok(self)
     }
 
+    /// Retain the interface evidence admitted by an original compiler proof.
+    /// Only compiler-owned issuers may supply the producer identity.
+    pub(crate) fn from_authenticated_interfaces(
+        producer: [u8; 32],
+        artifacts: &ArtifactView,
+    ) -> Result<Self, CompileError> {
+        let mut context = Self::new(&[], &[], Vec::new())?;
+        context.admit_producer(producer)?;
+        context.extend_interface_artifacts(artifacts)
+    }
+
+    /// Select interface custody without losing the original producer when the
+    /// selected type closure contains only package Names.
+    pub fn select_interface_roots(
+        &self,
+        roots: Vec<crate::artifact_inventory::ArtifactId>,
+    ) -> Result<Self, CompileError> {
+        let selected = self.inventory.select_roots(roots)?;
+        Self::from_authenticated_interfaces(self.producer, &selected)
+    }
+
+    /// Merge original type-interface evidence without granting lexical imports.
+    /// Even an empty home closure must agree on its compiler producer.
+    pub fn extend_interface_context(mut self, context: &Self) -> Result<Self, CompileError> {
+        if context.producer != [0; 32] {
+            self.admit_producer(context.producer)?;
+        }
+        self.extend_interface_artifacts(context.artifact_view())
+    }
+
     /// Project only interfaces selected by the original checked template. The
     /// immutable context owns their seals; template text selects imports, never
     /// manufactures interface or native authority.

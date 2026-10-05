@@ -23,6 +23,7 @@ use crate::CompileError;
 #[derive(Debug, Clone)]
 pub struct SealedCompileInputIdentity {
     identity: String,
+    original_interfaces: Arc<crate::declaration_context::ExactDeclarationContext>,
     target: Arc<PreparedProgram>,
     groups: Arc<[PendingCertifiedGroup]>,
     target_owners: Arc<[PendingImportOwner]>,
@@ -36,6 +37,33 @@ impl SealedCompileInputIdentity {
     /// is not executable authority and cannot reconstruct the private proof.
     pub fn compile_input_identity(&self) -> &str {
         &self.identity
+    }
+
+    /// Original interface custody is available only for the complete output
+    /// bundle sealed by this compiler transaction.
+    #[allow(clippy::too_many_arguments)]
+    pub fn original_interface_context(
+        &self,
+        prepared: &PreparedProgram,
+        groups: &[PendingCertifiedGroup],
+        target_owners: &[PendingImportOwner],
+        package_interfaces: &CertifiedTargetPackageInterfaces,
+        table: &DataConTable,
+        yield_sites: &[YieldSite],
+    ) -> Result<Arc<crate::declaration_context::ExactDeclarationContext>, CompileError> {
+        if !self.matches_bundle(
+            prepared,
+            groups,
+            target_owners,
+            package_interfaces,
+            table,
+            yield_sites,
+        ) {
+            return Err(CompileError::ExtractFailed(
+                "original interface context belongs to another compiler output bundle".into(),
+            ));
+        }
+        Ok(self.original_interfaces.clone())
     }
 
     pub fn matches_bundle(
@@ -559,6 +587,7 @@ pub(crate) fn seal(
     package_interfaces: &CertifiedTargetPackageInterfaces,
     table: DataConTable,
     sites: Vec<YieldSite>,
+    artifacts: &crate::artifact_inventory::ArtifactView,
 ) -> Result<Option<SealedCompileInputIdentity>, CompileError> {
     // The initial contract covers ordinary startup compilation. Mutable
     // resident Val/Lib interfaces require a distinct context recipe.
@@ -598,6 +627,13 @@ pub(crate) fn seal(
         .collect::<Result<Vec<_>, _>>()?;
     Ok(Some(SealedCompileInputIdentity {
         identity: input_identity(producer, &include, evidence, packages, source, target)?,
+        original_interfaces: Arc::new(
+            crate::declaration_context::ExactDeclarationContext::from_authenticated_interfaces(
+                crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(producer)
+                    .sha256(),
+                artifacts,
+            )?,
+        ),
         target: prepared.clone(),
         groups: groups.clone(),
         target_owners: target_owners.to_vec().into(),
@@ -631,6 +667,176 @@ mod tests {
             source,
             target,
         )
+    }
+
+    fn package_context_proof(producer: &[u8]) -> SealedCompileInputIdentity {
+        use tidepool_repr::execution_schema::testing;
+        let source = "module Root where root = 42";
+        let evidence = DependencyEvidence {
+            version: 4,
+            cache_safe: true,
+            selection_complete: true,
+            sources: vec![SourceEvidence {
+                path: "@generated-source".into(),
+                sha256: format!("{:x}", Sha256::digest(source)),
+            }],
+            modules: vec![ModuleEvidence {
+                unit: "main".into(),
+                module: "Root".into(),
+                boot: false,
+                source: "@generated-source".into(),
+                product: ProductAvailability::Ready,
+                imports: vec![],
+            }],
+            resolutions: vec![],
+            packages: vec![],
+        };
+        let target = Arc::new(testing::prepare(testing::wire_program()).unwrap());
+        let package_interfaces =
+            crate::certified_products::certify_target_package_interfaces(&target, &BTreeMap::new())
+                .unwrap();
+        seal(
+            producer,
+            &[],
+            &evidence,
+            &ValidatedInputPackages::fixture(BTreeMap::new()),
+            source,
+            "root",
+            &target,
+            &Arc::from([]),
+            &[],
+            &package_interfaces,
+            DataConTable::new(),
+            vec![],
+            &crate::artifact_inventory::ArtifactInventory::default().empty_view(),
+        )
+        .unwrap()
+        .expect("ordinary compiler issuer admits complete fixture inputs")
+    }
+
+    fn original_context(
+        proof: &SealedCompileInputIdentity,
+    ) -> Arc<crate::declaration_context::ExactDeclarationContext> {
+        proof
+            .original_interface_context(
+                &proof.target,
+                &proof.groups,
+                &proof.target_owners,
+                &proof.package_interfaces,
+                &proof.table,
+                &proof.sites,
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn sealed_package_context_preserves_original_producer_after_empty_projection() {
+        let proof = package_context_proof(b"original compiler producer");
+        let original = original_context(&proof);
+        let selected = original.select_interface_roots(Vec::new()).unwrap();
+        assert!(selected.artifact_view().descriptors().is_empty());
+        assert_eq!(selected, *original);
+        let expected = crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
+            b"original compiler producer",
+        )
+        .sha256();
+        assert_eq!(selected.toolchain_identity_sha256(), expected);
+        let empty =
+            crate::declaration_context::ExactDeclarationContext::new(&[], &[], Vec::new()).unwrap();
+        let merged = empty.clone().extend_interface_context(&selected).unwrap();
+        assert_eq!(merged, selected);
+        assert_ne!(merged.semantic_sha256(), empty.semantic_sha256());
+        let directory = tempfile::tempdir().unwrap();
+        Arc::new(merged)
+            .prepare_compilation(directory.path(), b"original compiler producer")
+            .unwrap();
+    }
+
+    #[test]
+    fn sealed_package_context_refuses_different_producer_and_edited_output() {
+        let first_proof = package_context_proof(b"first compiler producer");
+        let second_proof = package_context_proof(b"second compiler producer");
+        let first = original_context(&first_proof)
+            .select_interface_roots(Vec::new())
+            .unwrap();
+        let second = original_context(&second_proof)
+            .select_interface_roots(Vec::new())
+            .unwrap();
+        assert_ne!(first, second);
+        assert_ne!(first.semantic_sha256(), second.semantic_sha256());
+        assert!(first.clone().extend_interface_context(&second).is_err());
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("refused");
+        assert!(Arc::new(first)
+            .prepare_compilation(&output, b"second compiler producer")
+            .is_err());
+        assert!(
+            !output.exists(),
+            "producer refusal precedes interface materialization"
+        );
+        let mut changed = tidepool_repr::execution_schema::testing::wire_program();
+        changed
+            .globals
+            .push(tidepool_repr::execution_schema::GlobalDecl {
+                identity: tidepool_repr::execution_schema::testing::identity("Other", "value"),
+                rep: tidepool_repr::execution_schema::RuntimeRep::LiftedRef,
+                entry_signature: None,
+                required_evaluated: false,
+                required_generation: None,
+            });
+        let changed = tidepool_repr::execution_schema::testing::prepare(changed).unwrap();
+        assert!(first_proof
+            .original_interface_context(
+                &changed,
+                &first_proof.groups,
+                &first_proof.target_owners,
+                &first_proof.package_interfaces,
+                &first_proof.table,
+                &first_proof.sites,
+            )
+            .is_err());
+        let mut edited_table = DataConTable::new();
+        edited_table.insert(tidepool_repr::DataCon {
+            id: tidepool_repr::DataConId(99),
+            name: "Edited".into(),
+            tag: 1,
+            rep_arity: 0,
+            field_bangs: vec![],
+            qualified_name: None,
+            type_name: "Edited".into(),
+        });
+        assert!(first_proof
+            .original_interface_context(
+                &first_proof.target,
+                &first_proof.groups,
+                &first_proof.target_owners,
+                &first_proof.package_interfaces,
+                &edited_table,
+                &first_proof.sites,
+            )
+            .is_err());
+        let sites = vec![YieldSite {
+            site: 1,
+            origin: "Root".into(),
+            ordinal: 0,
+            ty: "Int".into(),
+            modules: vec![],
+            heads: vec![],
+            inputs: vec![],
+            input_type_witnesses: vec![],
+            reply_declaration: None,
+            request_type_signatures: None,
+        }];
+        assert!(first_proof
+            .original_interface_context(
+                &first_proof.target,
+                &first_proof.groups,
+                &first_proof.target_owners,
+                &first_proof.package_interfaces,
+                &first_proof.table,
+                &sites,
+            )
+            .is_err());
     }
 
     fn evidence() -> DependencyEvidence {

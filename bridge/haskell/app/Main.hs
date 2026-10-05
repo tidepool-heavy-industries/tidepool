@@ -95,7 +95,7 @@ import Tidepool.ExecutionSource
   , executionIdentityKey, executionSourceProspectiveReferences )
 import Tidepool.DeclarationJoin
   ( DeclarationOperation(..), readDeclarationOperation, validateDeclarationJoin
-  , HostBindingInterfaceInput(..), encodeHostBindingInterface
+  , HostBindingInterfaceInput(..), encodeHostBindingInterface, encodeBindingInterfacePurpose
   , DeclarationExport(..), ExportIdentity(..), ExportNamespace(..)
   , renderDeclarationJoinOutcome, inspectDeclarationArtifacts
   , renderDeclarationInventoryOutcome )
@@ -338,16 +338,16 @@ runDeclarationOperation args manifest = do
         ValidateJoin input -> renderDeclarationJoinOutcome
           <$> validateDeclarationJoin env input >>= writeFile out
         EmitHostBindingInterface input -> do
-          binder <- emitHostBindingInterface env (hostInterfaceProducer input)
+          (binder, issuedPurpose) <- emitHostBindingInterface env (hostInterfaceProducer input)
             (hostInterfaceGeneration input) (hostInterfaceBinder input) (hostInterfaceSignature input)
-            (hostInterfaceScope input) (hostInterfaceRoot input)
+            (hostInterfaceScope input) (hostInterfaceRoot input) (hostInterfacePurpose input)
           let generation = hostInterfaceGeneration input
               owner = SessionModule ValMod (Generation generation)
           interface <- BS.readFile (sessionHiPath (hostInterfaceRoot input) owner)
           packages <- BS.readFile (sessionHiPath (hostInterfaceRoot input) owner ++ ".packages")
           requirements <- BS.readFile (sessionHiPath (hostInterfaceRoot input) owner ++ ".requirements")
           BS.writeFile out (toStrictByteString $
-            encodeListLen 11 <> encodeString "TPHOSTBINDINGINTERFACERECEIPT" <> encodeString "1"
+            encodeListLen 12 <> encodeString "TPHOSTBINDINGINTERFACERECEIPT" <> encodeString "2"
             <> encodeString (T.pack (shaHex (encodeHostBindingInterface input)))
             <> encodeString (T.pack (hostInterfaceProducer input))
             <> encodeString (T.pack (hostInterfaceAdmission input))
@@ -356,7 +356,8 @@ runDeclarationOperation args manifest = do
             <> encodeString (T.pack (shaHex (toStrictByteString
               (encodeCheckedSignature (hostInterfaceSignature input)))))
             <> encodeString (T.pack (shaHex packages))
-            <> encodeString (T.pack (shaHex requirements)))
+            <> encodeString (T.pack (shaHex requirements))
+            <> encodeBindingInterfacePurpose issuedPurpose)
   reportDiags result
 
 runInspectionMode :: Compiler -> WorkerRequest -> FilePath -> IO ExitCode

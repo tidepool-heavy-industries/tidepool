@@ -5492,6 +5492,22 @@ pub(crate) mod tests {
         };
         let groups: Arc<[_]> = vec![inherited_group(&owner, import.clone())].into();
         let table = tidepool_repr::DataConTable::default();
+        let producer = crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
+            b"admitted-producer",
+        )
+        .sha256();
+        let artifacts = crate::declaration_context::certified_product_artifact_view(
+            producer,
+            &[],
+            &[fixture_module_interface(
+                producer,
+                &owner.unit,
+                &owner.module,
+                BTreeMap::new(),
+            )],
+            None,
+        )
+        .unwrap();
         let proof = crate::compile_input::seal(
             b"admitted-producer",
             &[],
@@ -5505,6 +5521,7 @@ pub(crate) mod tests {
             &interfaces,
             table.clone(),
             vec![],
+            &artifacts,
         )
         .unwrap()
         .unwrap();

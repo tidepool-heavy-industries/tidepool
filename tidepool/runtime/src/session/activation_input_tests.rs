@@ -88,7 +88,10 @@ impl InputFixture {
         .expect("minimal real AgentSession surface");
         let root = tempfile::tempdir().unwrap();
         let mut include = effects.include_paths().to_vec();
-        include.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../bridge/haskell/actors"));
+        include.push(PathBuf::from(
+            std::env::var_os("TIDEPOOL_HASKELL_ACTORS_DIR")
+                .expect("TIDEPOOL_HASKELL_ACTORS_DIR must name the declared actor source resource"),
+        ));
         let mut preamble = effects.preamble().to_owned();
         for import in [
             "Tidepool.Agent.Reply (Replies)",
@@ -1091,9 +1094,89 @@ fn resident_parcel_preserves_original_authenticated_request_across_sessions() {
         "the original selected immutable interface view survives source retirement"
     );
     let realm = destination.parked_realm(&activation).unwrap();
+    let retained_context = &original.authenticated_inputs[&site];
+    assert!(
+        retained_context.artifact_view().descriptors().is_empty(),
+        "Int -> Int input and Unit reply have no home type interfaces"
+    );
+    let certification = fixture.producer.certification.as_ref().unwrap();
+    let compiler_context = certification
+        .compile_input_identity
+        .as_ref()
+        .unwrap()
+        .original_interface_context(
+            &fixture.producer.prepared,
+            &certification.groups,
+            &certification.target_owners,
+            &certification.package_interfaces,
+            &fixture.producer.table,
+            &fixture.producer.asks,
+        )
+        .unwrap();
+    let producer = compiler_context.toolchain_identity_sha256();
+    assert_ne!(producer, [0; 32]);
+    assert_eq!(retained_context.toolchain_identity_sha256(), producer);
+    let mut repeated_provenance = (*original).clone();
+    repeated_provenance.merge(&original).unwrap();
+    assert_eq!(repeated_provenance, *original);
+    assert!(
+        !compiler_context.artifact_view().descriptors().is_empty(),
+        "the compiler proof retains its original home closure before type projection"
+    );
+    let mut conflicting = (*original).clone();
+    conflicting
+        .authenticated_inputs
+        .insert(site, compiler_context.clone());
+    assert!(
+        repeated_provenance.merge(&conflicting).is_err(),
+        "same site metadata cannot replace its retained authenticated interface context"
+    );
+    assert_eq!(
+        repeated_provenance, *original,
+        "context collision is atomic"
+    );
     let input = destination
         .capture_activation_input(&activation, realm, site)
         .unwrap();
+    let observations = destination.request_site_type_evidence(site).unwrap();
+    assert_ne!(&observations, input.type_evidence().as_ref());
+    assert_ne!(
+        observations.commitment(),
+        input.type_evidence().commitment(),
+        "request authority commitment includes original compiler authentication"
+    );
+    let repeated_evidence = observations
+        .authenticate_request_types(
+            original.sites[&site]
+                .request_type_signatures
+                .clone()
+                .unwrap(),
+            retained_context,
+        )
+        .unwrap();
+    assert_eq!(&repeated_evidence, input.type_evidence().as_ref());
+    assert_eq!(
+        repeated_evidence.commitment(),
+        input.type_evidence().commitment()
+    );
+    let request_context = input.type_evidence().compile_context(None).unwrap();
+    assert_eq!(
+        request_context.declarations().toolchain_identity_sha256(),
+        producer
+    );
+    assert!(request_context
+        .declarations()
+        .artifact_view()
+        .descriptors()
+        .is_empty());
+    let compile_context = input
+        .type_evidence()
+        .compile_context(Some(&compiler_context))
+        .unwrap();
+    assert_eq!(
+        compile_context.declarations().toolchain_identity_sha256(),
+        producer
+    );
     assert_eq!(input.input_type(), original.sites[&site].inputs[0].ty);
     assert!(Arc::ptr_eq(&input.custody.provenance, &parked));
     assert!(destination.discard_custody(imported));
@@ -1457,16 +1540,42 @@ fn native_input_generation_retains_original_type_owner_after_source_readers_drop
         .artifact_view
         .inventory()
         .clone();
-    let original = fixture
+    let (original_unit, original_module, original_seal) = fixture
+        .producer
+        .asks
+        .iter()
+        .filter_map(|site| site.input_type_witnesses.first().and_then(Option::as_ref))
+        .flat_map(|witness| witness.interface_seals())
+        .find(|(_, module, _)| *module == "ActivationInputOriginal")
+        .map(|(unit, module, seal)| (unit.to_owned(), module.to_owned(), seal.to_owned()))
+        .expect("original input witness authenticates its private home type owner");
+    let producer_descriptors = fixture
         .producer
         .certification
         .as_ref()
         .unwrap()
         .artifact_view
-        .descriptors()
-        .into_iter()
-        .find(|descriptor| descriptor.owner.module == "ActivationInputOriginal")
-        .expect("compiler retained the actual original private home interface");
+        .descriptors();
+    let original = producer_descriptors
+        .iter()
+        .filter(|descriptor| {
+            descriptor.kind
+                == tidepool_toolchain::artifact_inventory::ArtifactKind::CanonicalModuleInterface
+        })
+        .find(|descriptor| {
+            descriptor.owner.unit == original_unit && descriptor.owner.module == original_module
+        })
+        .cloned()
+        .expect("compiler retained the actual original canonical home interface");
+    assert_eq!(
+        original
+            .interface_sha256
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>(),
+        original_seal,
+        "canonical interface seal matches the original authenticated input witness"
+    );
     let mut resident = fixture.fresh();
     let reservation = fixture.start(&mut resident);
     let (_submission, hole) = fixture.deliver(&mut resident, reservation, 1);
@@ -1498,11 +1607,28 @@ fn native_input_generation_retains_original_type_owner_after_source_readers_drop
     drop(producer);
     std::fs::remove_dir_all(root.path().join("home")).unwrap();
     let retained = evidence.compile_context(None).unwrap();
-    assert!(retained
-        .declarations()
-        .artifact_view()
-        .descriptors()
-        .contains(&original));
+    let retained_descriptors = retained.declarations().artifact_view().descriptors();
+    eprintln!(
+        "ACTIVATION_TYPE_CUSTODY {}",
+        serde_json::json!({
+            "selected": original,
+            "producer": producer_descriptors,
+            "retained": retained_descriptors,
+        })
+    );
+    assert!(
+        retained_descriptors.contains(&original),
+        "original canonical owner, producer and interface seals must survive: selected={original:?}, producer={producer_descriptors:?}, retained={retained_descriptors:?}"
+    );
+    assert_eq!(
+        retained.declarations().toolchain_identity_sha256(),
+        original.producer_sha256,
+        "type context retains the canonical interface's authenticated producer"
+    );
+    assert!(
+        retained.declarations().recovery_products().is_empty(),
+        "type custody grants no original native products"
+    );
     assert!(
         retained.declarations().lexical_graph().is_empty(),
         "type custody grants no source names"

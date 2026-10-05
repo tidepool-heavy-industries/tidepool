@@ -1096,16 +1096,10 @@ impl SiteTypeEvidence {
     pub(crate) fn authenticate_request_types(
         mut self,
         signatures: tidepool_toolchain::checked_cell::RequestTypeSignatures,
-        artifacts: &tidepool_toolchain::artifact_inventory::ArtifactView,
+        declarations: &Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>,
     ) -> Result<Self, crate::CompileError> {
-        let declarations = tidepool_toolchain::declaration_join::ExactDeclarationContext::new(
-            &[],
-            &[],
-            Vec::new(),
-        )?
-        .extend_interface_artifacts(artifacts)?;
         self.request_context = Some(Arc::new(
-            tidepool_toolchain::declaration_join::ExactCompileContext::new(Arc::new(declarations))
+            tidepool_toolchain::declaration_join::ExactCompileContext::new(declarations.clone())
                 .with_request_types(Arc::new(signatures)),
         ));
         Ok(self)
@@ -1129,8 +1123,7 @@ impl SiteTypeEvidence {
                 Vec::new(),
             )?,
         };
-        let declarations =
-            Arc::new(base.extend_interface_artifacts(request.declarations().artifact_view())?);
+        let declarations = Arc::new(base.extend_interface_context(request.declarations())?);
         Ok(Arc::new(
             tidepool_toolchain::declaration_join::ExactCompileContext::new(declarations)
                 .with_request_types(

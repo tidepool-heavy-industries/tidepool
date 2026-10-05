@@ -96,6 +96,7 @@ pub struct CanonicalInputTypeWitness {
     structure: Arc<[u8]>,
     interfaces: Vec<(String, String, String)>,
     metadata_digest: [u8; 32],
+    original_bytes: Arc<[u8]>,
 }
 
 impl PartialEq for CanonicalInputTypeWitness {
@@ -110,6 +111,10 @@ impl CanonicalInputTypeWitness {
     /// signature. Semantic equality alone does not authenticate that payload.
     pub fn metadata_digest(&self) -> [u8; 32] {
         self.metadata_digest
+    }
+    /// Complete original compiler payload, retained independently of semantic equality.
+    pub fn original_bytes(&self) -> &[u8] {
+        &self.original_bytes
     }
     pub fn commitment(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
@@ -137,6 +142,11 @@ impl CanonicalInputTypeWitness {
             return Err(failure("canonical input witness byte bound"));
         }
         let decoded = decode(bytes)?;
+        let mut canonical = Vec::new();
+        ciborium::ser::into_writer(&decoded, &mut canonical).expect("witness encodes to memory");
+        if canonical != bytes {
+            return Err(failure("canonical input witness uses noncanonical CBOR"));
+        }
         let fields = row(&decoded, 5)?;
         if string(&fields[0])? != "TPCANONICALINPUTTYPE1" || string(&fields[1])? != "1" {
             return Err(failure("canonical input witness version"));
@@ -148,9 +158,16 @@ impl CanonicalInputTypeWitness {
         let Value::Bytes(structure) = &fields[3] else {
             return Err(failure("canonical input witness structure"));
         };
+        let decoded_structure = decode(structure)?;
+        let mut canonical_structure = Vec::new();
+        ciborium::ser::into_writer(&decoded_structure, &mut canonical_structure)
+            .expect("input structure encodes to memory");
+        if canonical_structure != *structure {
+            return Err(failure("canonical input structure uses noncanonical CBOR"));
+        }
         let mut names = BTreeSet::new();
         let mut count = 0;
-        validate_input_type_shape(&decode(structure)?, 0, 0, &mut count, &mut names)?;
+        validate_input_type_shape(&decoded_structure, 0, 0, &mut count, &mut names)?;
         let interfaces = list(&fields[4], 65536)?
             .iter()
             .map(|value| {
@@ -186,6 +203,7 @@ impl CanonicalInputTypeWitness {
             structure: structure.clone().into(),
             interfaces,
             metadata_digest: Sha256::digest(bytes).into(),
+            original_bytes: bytes.into(),
         })
     }
 }
@@ -746,19 +764,40 @@ pub struct CheckedValueArtifact {
     artifact_view: crate::artifact_inventory::ArtifactView,
     source_lexical: Vec<crate::declaration_join::ExactLexicalNode>,
     directory: Arc<ValueInterfaceDirectory>,
+    original_interface_prototype: Option<Arc<ExactHostBindingPrototype>>,
 }
 
-/// Reusable native type authority extracted from one genuine checked host bind.
+/// Type-only issuance purpose. Neither purpose grants runtime value transfer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BindingInterfacePurpose {
+    HostBuilt,
+    OriginalLiveInput,
+}
+
+#[derive(Debug)]
+enum BindingInterfaceEvidence {
+    HostBuilt { original_binder: Value },
+    OriginalLiveInput { witness: CanonicalInputTypeWitness },
+}
+
+/// Reusable native type authority extracted from one original compiler proof.
 /// It retains only the type's original interface closure, never a new binder's
 /// runtime admission or an authored execution claim.
 #[derive(Debug)]
 pub struct ExactHostBindingPrototype {
     signature: ExactCheckedSignature,
-    original_binder: Value,
+    evidence: BindingInterfaceEvidence,
     context: Arc<crate::declaration_context::ExactDeclarationContext>,
     producer: [u8; 32],
     digest: [u8; 32],
 }
+
+impl PartialEq for ExactHostBindingPrototype {
+    fn eq(&self, other: &Self) -> bool {
+        self.digest == other.digest
+    }
+}
+impl Eq for ExactHostBindingPrototype {}
 
 impl ExactHostBindingPrototype {
     pub fn from_checked(execution: &ExactCompiledItem) -> Result<Arc<Self>, CompileError> {
@@ -814,17 +853,122 @@ impl ExactHostBindingPrototype {
         ciborium::ser::into_writer(&encode_signature(signature), &mut encoded)
             .expect("signature encodes to memory");
         let mut hash = Sha256::new();
-        hash.update(b"tidepool-host-binding-prototype-1");
+        hash.update(b"tidepool-host-binding-prototype-2");
         hash.update(producer);
         hash.update(context.semantic_sha256());
         hash.update(&encoded);
         Ok(Arc::new(Self {
             signature: signature.clone(),
-            original_binder: binder.clone(),
+            evidence: BindingInterfaceEvidence::HostBuilt {
+                original_binder: binder.clone(),
+            },
             context,
             producer,
             digest: hash.finalize().into(),
         }))
+    }
+
+    /// Derive type authority from an authenticated original site context. The
+    /// runtime pairs this proof with that site's separately owned live payload.
+    pub fn from_original_input(
+        witness: CanonicalInputTypeWitness,
+        original_context: Arc<crate::declaration_context::ExactDeclarationContext>,
+    ) -> Result<Arc<Self>, CompileError> {
+        let producer = original_context.toolchain_identity_sha256();
+        if producer == [0; 32] {
+            return Err(failure(
+                "original input context lacks its compiler producer",
+            ));
+        }
+        let descriptors = original_context.artifact_view().descriptors();
+        for (unit, module, seal) in witness.interface_seals() {
+            let originals = descriptors
+                .iter()
+                .filter(|descriptor| {
+                    descriptor.owner.unit == unit && descriptor.owner.module == module
+                })
+                .collect::<Vec<_>>();
+            if originals.is_empty() {
+                // Package seals are checked against the original producer's
+                // pinned package closure by the native compiler transaction.
+                if unit == "main" {
+                    return Err(failure("original input lacks its certified home interface"));
+                }
+            } else if originals.iter().any(|descriptor| {
+                descriptor.producer_sha256 != producer || hex(&descriptor.interface_sha256) != seal
+            }) {
+                return Err(failure(
+                    "original input differs from its certified interface seal",
+                ));
+            }
+        }
+        let owners = original_context
+            .interface_owners()
+            .into_iter()
+            .map(|owner| owner.owner)
+            .collect::<BTreeSet<_>>();
+        if witness.signature.names().iter().any(|name| {
+            name.unit == "main"
+                && !owners.contains(&crate::declaration_join::ExactModuleIdentity {
+                    unit: name.unit.clone(),
+                    module: name.module.clone(),
+                })
+        }) {
+            return Err(failure(
+                "original input native signature lacks its certified Name owner",
+            ));
+        }
+        // Preserve producer independently of the possibly empty package-only
+        // projection and strip any unrelated lexical or native authority.
+        let context = Arc::new(
+            crate::declaration_context::ExactDeclarationContext::from_authenticated_interfaces(
+                producer,
+                original_context.artifact_view(),
+            )?,
+        );
+        let mut encoded = Vec::new();
+        ciborium::ser::into_writer(&encode_signature(witness.signature()), &mut encoded)
+            .expect("signature encodes to memory");
+        let mut digest = Sha256::new();
+        digest.update(b"tidepool-original-live-input-prototype-2");
+        digest.update(producer);
+        digest.update(context.semantic_sha256());
+        digest.update(witness.metadata_digest());
+        digest.update(witness.commitment());
+        digest.update(&encoded);
+        Ok(Arc::new(Self {
+            signature: witness.signature().clone(),
+            evidence: BindingInterfaceEvidence::OriginalLiveInput { witness },
+            context,
+            producer,
+            digest: digest.finalize().into(),
+        }))
+    }
+
+    pub fn purpose(&self) -> BindingInterfacePurpose {
+        match self.evidence {
+            BindingInterfaceEvidence::HostBuilt { .. } => BindingInterfacePurpose::HostBuilt,
+            BindingInterfaceEvidence::OriginalLiveInput { .. } => {
+                BindingInterfacePurpose::OriginalLiveInput
+            }
+        }
+    }
+
+    pub fn original_input_type(&self) -> Option<&CanonicalInputTypeWitness> {
+        match &self.evidence {
+            BindingInterfaceEvidence::OriginalLiveInput { witness } => Some(witness),
+            BindingInterfaceEvidence::HostBuilt { .. } => None,
+        }
+    }
+
+    fn purpose_offer(&self) -> Value {
+        match &self.evidence {
+            BindingInterfaceEvidence::HostBuilt { .. } => array([text("host-built")]),
+            BindingInterfaceEvidence::OriginalLiveInput { witness } => array([
+                text("original-live-input"),
+                Value::Bytes(witness.original_bytes().to_vec()),
+            ]),
+        }
     }
 
     pub fn digest(&self) -> [u8; 32] {
@@ -859,7 +1003,7 @@ impl ExactHostBindingPrototype {
             .prepare_compilation(&directory.0.path().join("inputs"), producer)?;
         let value = array([
             text("TPHOSTBINDINGINTERFACE"),
-            text("1"),
+            text("2"),
             text(hex(&self.producer)),
             text(hex(&admission)),
             Value::Integer(generation.into()),
@@ -867,6 +1011,7 @@ impl ExactHostBindingPrototype {
             encode_signature(&self.signature),
             text(request.manifest.to_string_lossy()),
             text(directory.0.path().to_string_lossy()),
+            self.purpose_offer(),
         ]);
         let mut encoded = Vec::new();
         ciborium::ser::into_writer(&value, &mut encoded).expect("host offer encodes to memory");
@@ -904,9 +1049,16 @@ pub struct ExactHostBindingInterface {
     generation: u64,
     binder: Value,
     interface: Arc<CheckedValueArtifact>,
+    original_input_type: Option<CanonicalInputTypeWitness>,
 }
 
 impl ExactHostBindingInterface {
+    pub fn purpose(&self) -> BindingInterfacePurpose {
+        self.prototype.purpose()
+    }
+    pub fn original_input_type(&self) -> Option<&CanonicalInputTypeWitness> {
+        self.original_input_type.as_ref()
+    }
     pub fn prototype(&self) -> &Arc<ExactHostBindingPrototype> {
         &self.prototype
     }
@@ -932,13 +1084,21 @@ impl HostBindingInterfaceOffer {
         self.prototype
             .context
             .validate_artifacts(&self.request.artifacts)?;
+        if receipt.len() > 4 << 20 {
+            return Err(failure("binding interface receipt exceeds byte bound"));
+        }
         let decoded = decode(receipt)?;
-        let fields = row(&decoded, 11)?;
+        let mut canonical = Vec::new();
+        ciborium::ser::into_writer(&decoded, &mut canonical).expect("receipt encodes to memory");
+        if canonical != receipt {
+            return Err(failure("binding interface receipt uses noncanonical CBOR"));
+        }
+        let fields = row(&decoded, 12)?;
         let mut signature = Vec::new();
         ciborium::ser::into_writer(&encode_signature(&self.prototype.signature), &mut signature)
             .expect("signature encodes to memory");
         if string(&fields[0])? != "TPHOSTBINDINGINTERFACERECEIPT"
-            || string(&fields[1])? != "1"
+            || string(&fields[1])? != "2"
             || string(&fields[2])? != hash(&self.encoded)
             || string(&fields[3])? != hex(&self.prototype.producer)
             || string(&fields[4])? != hex(&self.admission)
@@ -950,18 +1110,45 @@ impl HostBindingInterfaceOffer {
             ));
         }
         let binder = row(&fields[6], 7)?;
-        let original = row(&self.prototype.original_binder, 7)?;
         let owner = tidepool_repr::SessionModule::val(tidepool_repr::Generation(self.generation));
-        if string(&binder[0])? != self.binding
-            || string(&binder[2])? != owner.module_name()
-            || [3, 5, 6]
-                .into_iter()
-                .any(|index| binder[index] != original[index])
-        {
-            return Err(failure(
-                "host interface has another binder or original nominal type",
-            ));
+        if string(&binder[0])? != self.binding || string(&binder[2])? != owner.module_name() {
+            return Err(failure("binding interface has another reserved binder"));
         }
+        let original_input_type = match &self.prototype.evidence {
+            BindingInterfaceEvidence::HostBuilt { original_binder } => {
+                let original = row(original_binder, 7)?;
+                if fields[11] != array([text("host-built")])
+                    || [3, 5, 6]
+                        .into_iter()
+                        .any(|index| binder[index] != original[index])
+                {
+                    return Err(failure(
+                        "host interface has another purpose or original nominal type",
+                    ));
+                }
+                None
+            }
+            BindingInterfaceEvidence::OriginalLiveInput { witness } => {
+                let purpose = row(&fields[11], 2)?;
+                let Value::Bytes(bytes) = &purpose[1] else {
+                    return Err(failure(
+                        "original input receipt lacks its canonical witness",
+                    ));
+                };
+                let issued = CanonicalInputTypeWitness::from_bytes(bytes)?;
+                if string(&purpose[0])? != "original-live-input"
+                    || &issued != witness
+                    || issued.signature.names() != witness.signature.names()
+                    || !matches!(string(&binder[3])?, "ForceData" | "RetainOpaque")
+                    || binder[6] != Value::Null
+                {
+                    return Err(failure(
+                        "original input receipt differs in type, purpose or host authority",
+                    ));
+                }
+                Some(issued)
+            }
+        };
         let path = self.directory.0.path().join(owner.relative_hi_path());
         let output = CapturedValueInterfaceOutput::capture(&path)?;
         let bytes: Arc<[u8]> = output.interface.clone().into();
@@ -994,6 +1181,7 @@ impl HostBindingInterfaceOffer {
             artifact_view,
             source_lexical: Vec::new(),
             directory: self.directory,
+            original_interface_prototype: Some(self.prototype.clone()),
         });
         Ok(Arc::new(ExactHostBindingInterface {
             prototype: self.prototype,
@@ -1001,6 +1189,7 @@ impl HostBindingInterfaceOffer {
             generation: self.generation,
             binder: fields[6].clone(),
             interface,
+            original_input_type,
         }))
     }
 }
@@ -1261,6 +1450,7 @@ impl CheckedValueInputs {
             artifact_view,
             source_lexical,
             directory: self.directory.clone(),
+            original_interface_prototype: None,
         }))
     }
 }
@@ -1683,6 +1873,7 @@ enum CheckedExecutionAdmission {
 /// product-sealing entry point. Compiling alone makes no execution claim.
 #[derive(Debug)]
 pub struct ExactCompiledItem {
+    original_interfaces: Arc<crate::declaration_context::ExactDeclarationContext>,
     item: ExactCheckedItem,
     target: Arc<tidepool_repr::execution_schema::PreparedProgram>,
     table: tidepool_repr::DataConTable,
@@ -1704,6 +1895,15 @@ pub struct ExactCompiledActivationInput {
 }
 
 impl ExactCompiledActivationInput {
+    pub fn original_interface_context(
+        &self,
+        target: &tidepool_repr::execution_schema::PreparedProgram,
+        table: &tidepool_repr::DataConTable,
+        sites: &[crate::YieldSite],
+    ) -> Result<Arc<crate::declaration_context::ExactDeclarationContext>, CompileError> {
+        self.compiled
+            .original_interface_context(target, table, sites)
+    }
     pub fn validate_yield_sites(&self, sites: &[crate::YieldSite]) -> Result<(), CompileError> {
         self.compiled.validate_yield_sites(sites)
     }
@@ -1765,6 +1965,7 @@ impl ExactCompiledActivationInput {
 
 #[derive(Debug)]
 pub struct ExactCompiledDisplay {
+    original_interfaces: Arc<crate::declaration_context::ExactDeclarationContext>,
     capture: Arc<ExactCompiledItem>,
     target: Arc<tidepool_repr::execution_schema::PreparedProgram>,
     table: tidepool_repr::DataConTable,
@@ -1778,6 +1979,23 @@ pub struct ExactCompiledDisplay {
 }
 
 impl ExactCompiledDisplay {
+    /// Admit original type-interface custody only after validating the target,
+    /// constructor table and complete compiler-authenticated site metadata.
+    pub fn original_interface_context(
+        &self,
+        target: &tidepool_repr::execution_schema::PreparedProgram,
+        table: &tidepool_repr::DataConTable,
+        sites: &[crate::YieldSite],
+    ) -> Result<Arc<crate::declaration_context::ExactDeclarationContext>, CompileError> {
+        if !self.matches_target(target) {
+            return Err(failure(
+                "original interface context belongs to another prepared target",
+            ));
+        }
+        self.validate_table(table)?;
+        self.validate_yield_sites(sites)?;
+        Ok(self.original_interfaces.clone())
+    }
     pub fn validate_yield_sites(&self, sites: &[crate::YieldSite]) -> Result<(), CompileError> {
         if crate::artifacts::yield_sites_metadata_digest(sites)? != self.yield_sites_digest {
             return Err(failure(
@@ -1989,6 +2207,12 @@ impl CheckedDisplayOffer {
             source_lexical,
         )?;
         Ok(Arc::new(ExactCompiledDisplay {
+            original_interfaces: Arc::new(
+                crate::declaration_context::ExactDeclarationContext::from_authenticated_interfaces(
+                    self.capture.item.cell.producer,
+                    artifact_context.artifact_view(),
+                )?,
+            ),
             capture: self.capture.clone(),
             target: target.clone(),
             table: read_table(root)?,
@@ -2004,6 +2228,23 @@ impl CheckedDisplayOffer {
 }
 
 impl ExactCompiledItem {
+    /// Admit original type-interface custody only after validating the target,
+    /// constructor table and complete compiler-authenticated site metadata.
+    pub fn original_interface_context(
+        &self,
+        target: &tidepool_repr::execution_schema::PreparedProgram,
+        table: &tidepool_repr::DataConTable,
+        sites: &[crate::YieldSite],
+    ) -> Result<Arc<crate::declaration_context::ExactDeclarationContext>, CompileError> {
+        if !self.matches_target(target) {
+            return Err(failure(
+                "original interface context belongs to another prepared target",
+            ));
+        }
+        self.validate_table(table)?;
+        self.validate_yield_sites(sites)?;
+        Ok(self.original_interfaces.clone())
+    }
     pub fn validate_yield_sites(&self, sites: &[crate::YieldSite]) -> Result<(), CompileError> {
         if crate::artifacts::yield_sites_metadata_digest(sites)? != self.yield_sites_digest {
             return Err(failure(
@@ -3070,6 +3311,11 @@ impl CheckedItemOffer {
         };
         Ok((
             Arc::new(ExactCompiledItem {
+                original_interfaces: Arc::new(
+                    crate::declaration_context::ExactDeclarationContext::from_authenticated_interfaces(
+                        self.item.cell.producer, artifact_context.artifact_view(),
+                    )?,
+                ),
                 item: self.item.clone(),
                 target: target.clone(),
                 table: read_table(root)?,
@@ -4264,6 +4510,92 @@ mod tests {
         let mut bytes = Vec::new();
         ciborium::into_writer(&wire, &mut bytes).unwrap();
         assert!(CanonicalInputTypeWitness::from_bytes(&bytes).is_err());
+    }
+
+    #[test]
+    fn original_input_witness_retains_payload_and_refuses_unowned_producer() {
+        use super::*;
+        // Codec-only bytes cannot mint native authority: the context must first
+        // belong to an authenticated original compiler output bundle.
+        let bytes = witness_bytes(
+            array([text("literal"), text("nat"), text("1")]),
+            &"a".repeat(64),
+        );
+        // The literal has no owner seal; remove the helper's nominal-only seal.
+        let mut value = decode(&bytes).unwrap();
+        let Value::Array(fields) = &mut value else {
+            unreachable!()
+        };
+        fields[4] = array([]);
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&value, &mut bytes).unwrap();
+        let witness = CanonicalInputTypeWitness::from_bytes(&bytes).unwrap();
+        assert_eq!(witness.original_bytes(), bytes);
+        assert_eq!(
+            witness.metadata_digest(),
+            <[u8; 32]>::from(Sha256::digest(&bytes))
+        );
+        let context = Arc::new(
+            crate::declaration_context::ExactDeclarationContext::new(&[], &[], Vec::new()).unwrap(),
+        );
+        assert!(ExactHostBindingPrototype::from_original_input(witness, context).is_err());
+        // Indefinite arrays decode to the same structure but are not the
+        // compiler's canonical serialized payload.
+        assert_eq!(bytes[0], 0x85);
+        let mut noncanonical = bytes.clone();
+        noncanonical[0] = 0x9f;
+        noncanonical.push(0xff);
+        assert!(CanonicalInputTypeWitness::from_bytes(&noncanonical).is_err());
+        let mut trailing = bytes;
+        trailing.push(0);
+        assert!(CanonicalInputTypeWitness::from_bytes(&trailing).is_err());
+    }
+
+    #[test]
+    fn canonical_input_witness_refuses_noncanonical_embedded_structure() {
+        use super::*;
+        // Structural codec control only; this fixture grants no native authority.
+        let mut wire = decode(&witness_bytes(
+            array([text("literal"), text("char"), Value::Integer(0.into())]),
+            &"a".repeat(64),
+        ))
+        .unwrap();
+        let Value::Array(fields) = &mut wire else {
+            unreachable!()
+        };
+        fields[4] = array([]);
+        let Value::Bytes(canonical) = &fields[3] else {
+            unreachable!()
+        };
+        let canonical = canonical.clone();
+        let canonical_value = decode(&canonical).unwrap();
+        let encode_witness = |structure: Vec<u8>| {
+            let mut wire = wire.clone();
+            let Value::Array(fields) = &mut wire else {
+                unreachable!()
+            };
+            fields[3] = Value::Bytes(structure);
+            let mut bytes = Vec::new();
+            ciborium::into_writer(&wire, &mut bytes).unwrap();
+            bytes
+        };
+        CanonicalInputTypeWitness::from_bytes(&encode_witness(canonical.clone())).unwrap();
+        assert_eq!(canonical[0], 0x83);
+        assert_eq!(canonical.last(), Some(&0x00));
+        let mut indefinite = canonical.clone();
+        indefinite[0] = 0x9f;
+        indefinite.push(0xff);
+        let mut nonminimal = canonical;
+        nonminimal.pop();
+        nonminimal.extend_from_slice(&[0x18, 0x00]);
+        for structure in [indefinite, nonminimal] {
+            assert_eq!(decode(&structure).unwrap(), canonical_value);
+            let error =
+                CanonicalInputTypeWitness::from_bytes(&encode_witness(structure)).unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("canonical input structure uses noncanonical CBOR"));
+        }
     }
 
     #[test]

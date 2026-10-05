@@ -9,17 +9,20 @@ module Tidepool.CheckedCell
   , encodeRequestTypeSignatures, decodeRequestTypeSignatures, renderRequestTypeSignatures
   , CheckedTypeWitness, captureCheckedTypeWitness, sealCheckedTypeWitness
   , encodeCheckedTypeWitness, renderCheckedTypeWitness
+  , validateOriginalInputTypeWitness, validateCheckedTypeWitnessBytes
   , NativeParsedModule(..), unannotatedModule, mapNativeModule, thenNativeModule, typecheckNativeModule
   , typecheckNativeModuleWithDiagnostics
   , rewriteCheckedAnnotations, rewriteHostInputType, rewriteRequestTypes
   ) where
 
-import Codec.CBOR.Encoding (Encoding, encodeListLen, encodeString, encodeBytes, encodeNull)
+import Codec.CBOR.Encoding (Encoding, encodeListLen, encodeString, encodeBytes, encodeNull, encodeInt)
 import qualified Codec.CBOR.Decoding as D
 import Codec.CBOR.Decoding
   ( Decoder, TokenType(TypeNull), decodeListLen, decodeString, decodeBytes
-  , decodeNull, peekTokenType, peekByteOffset )
+  , decodeNull, peekTokenType, peekByteOffset, decodeInt )
 import Codec.CBOR.Write (toStrictByteString)
+import Codec.CBOR.Read (deserialiseFromBytes)
+import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
 import Tidepool.ExactHydration (OriginalInterfaceArtifacts, originalInterfaceSha256
@@ -506,6 +509,135 @@ encodeCheckedTypeWitness witness = do
     text = encodeString . T.pack
     seal (owner, digest) = encodeListLen 3 <> text (unitString (moduleUnit owner))
       <> text (moduleNameString (moduleName owner)) <> text digest
+
+-- Retain the offered native payload verbatim; a recaptured GHC binary signature
+-- is not a canonical type fingerprint. Only semantic structure and exact seals
+-- are compared with the independent capture from the admitted environment.
+data OfferedTypeWitness = OfferedTypeWitness CheckedSignature BS.ByteString [(String, String, String)]
+
+decodeOfferedTypeWitness :: BS.ByteString -> Either String OfferedTypeWitness
+decodeOfferedTypeWitness bytes = do
+  unless (not (BS.null bytes) && BS.length bytes <= 4 * 1024 * 1024)
+    (Left "canonical input witness exceeds four MiB or is empty")
+  (remaining, witness@(OfferedTypeWitness signature structure seals)) <-
+    either (Left . show) Right (deserialiseFromBytes decoder (BL.fromStrict bytes))
+  let text = encodeString . T.pack
+      encoded = toStrictByteString (encodeListLen 5 <> text "TPCANONICALINPUTTYPE1" <> text "1"
+        <> encodeCheckedSignature signature <> encodeBytes structure
+        <> encodeListLen (fromIntegral (length seals))
+        <> foldMap (\(unit, owner, digest) -> encodeListLen 3 <> text unit <> text owner <> text digest) seals)
+  unless (BL.null remaining && encoded == bytes)
+    (Left "canonical input witness must use canonical CBOR with no trailing bytes")
+  (shapeRemaining, (shape, owners, _)) <- either (Left . show) Right
+    (deserialiseFromBytes (decodeInputStructure 0 0) (BL.fromStrict structure))
+  unless (BL.null shapeRemaining && toStrictByteString shape == structure)
+    (Left "canonical input structure must use canonical CBOR with no trailing bytes")
+  unless (Map.keys (Map.fromList [(owner, ()) | owner <- owners]) == [(unit, owner) | (unit, owner, _) <- seals])
+    (Left "canonical input interface inventory differs from structure")
+  pure witness
+ where
+  decoder = boundedTypeEvidence $ do
+    typeEvidenceRow 5
+    magic <- typeEvidenceText
+    version <- typeEvidenceText
+    unless (magic == "TPCANONICALINPUTTYPE1" && version == "1")
+      (fail "canonical input witness version")
+    signature <- decodeCheckedSignature
+    unless (signatureKey signature == "activation-input") (fail "canonical input signature purpose")
+    structure <- decodeBytes
+    unless (not (BS.null structure) && BS.length structure <= 4 * 1024 * 1024)
+      (fail "canonical input structure bound")
+    count <- decodeListLen
+    unless (count <= 65536) (fail "canonical input interface bound")
+    seals <- replicateM count $ do
+      typeEvidenceRow 3
+      unit <- typeEvidenceText
+      owner <- typeEvidenceText
+      digest <- typeEvidenceText
+      unless (length digest == 64 && all (`elem` (['0'..'9'] ++ ['a'..'f'])) digest)
+        (fail "canonical input interface digest")
+      pure (unit, owner, digest)
+    let owners = [(unit, owner) | (unit, owner, _) <- seals]
+    unless (and (zipWith (<) owners (drop 1 owners)))
+      (fail "canonical input interface seals are unsorted or duplicated")
+    pure (OfferedTypeWitness signature structure seals)
+
+-- Bound depth before descending, including malicious embedded expressions.
+-- Re-encoding the validated grammar rejects indefinite/noncanonical forms.
+decodeInputStructure :: Int -> Int -> Decoder s (Encoding, [(String, String)], Int)
+decodeInputStructure depth bound = do
+  unless (depth <= 128) (fail "canonical input structure depth bound")
+  count <- decodeListLen
+  tag <- typeEvidenceText
+  let text = encodeString . T.pack
+      prefix = encodeListLen (fromIntegral count) <> text tag
+      child = decodeInputStructure (depth + 1) bound
+      combine encoding children = do
+        let nodes = 1 + sum [size | (_, _, size) <- children]
+        unless (nodes <= 65536) (fail "canonical input structure node bound")
+        pure (encoding <> foldMap (\(value, _, _) -> value) children,
+          concat [owners | (_, owners, _) <- children], nodes)
+      flagged limit = do
+        flag <- decodeInt
+        unless (flag >= 0 && flag <= limit) (fail "canonical input structure flag")
+        pure flag
+  case (count, tag) of
+    (2, "bound") -> do
+      index <- decodeInt
+      unless (index >= 0 && index < bound) (fail "canonical input free variable")
+      pure (prefix <> encodeInt index, [], 1)
+    (3, "con") -> do
+      typeEvidenceRow 4
+      unit <- typeEvidenceText
+      owner <- typeEvidenceText
+      namespace <- typeEvidenceText
+      occurrence <- typeEvidenceText
+      unless (namespace `elem` ["type", "data"]) (fail "canonical input Name namespace")
+      arguments <- decodeListLen
+      unless (arguments <= 65536) (fail "canonical input argument bound")
+      children <- replicateM arguments child
+      (encoded, owners, nodes) <- combine (prefix <> encodeListLen 4 <> text unit <> text owner
+        <> text namespace <> text occurrence <> encodeListLen (fromIntegral arguments)) children
+      pure (encoded, (unit, owner) : owners, nodes)
+    (3, "app") -> replicateM 2 child >>= combine prefix
+    (5, "fun") -> do
+      flag <- flagged 3
+      replicateM 3 child >>= combine (prefix <> encodeInt flag)
+    (4, "forall") -> do
+      flag <- flagged 2
+      kind <- child
+      body <- decodeInputStructure (depth + 1) (bound + 1)
+      combine (prefix <> encodeInt flag) [kind, body]
+    (3, "literal") -> do
+      literal <- typeEvidenceText
+      value <- case literal of
+        "nat" -> do
+          number <- typeEvidenceText
+          unless (all (`elem` ['0'..'9']) number && (number == "0" || head number /= '0'))
+            (fail "canonical input natural literal")
+          pure (text number)
+        "symbol" -> encodeString <$> decodeString
+        "char" -> do
+          character <- decodeInt
+          unless (character >= 0 && character <= 0x10ffff && not (character >= 0xd800 && character <= 0xdfff))
+            (fail "canonical input character literal")
+          pure (encodeInt character)
+        _ -> fail "canonical input literal tag"
+      pure (prefix <> text literal <> value, [], 1)
+    _ -> fail "canonical input structure tag or arity"
+
+validateCheckedTypeWitnessBytes :: BS.ByteString -> Either String ()
+validateCheckedTypeWitnessBytes bytes = () <$ decodeOfferedTypeWitness bytes
+
+validateOriginalInputTypeWitness :: CheckedSignature -> BS.ByteString -> CheckedTypeWitness -> Either String ()
+validateOriginalInputTypeWitness signature offered captured = do
+  OfferedTypeWitness original structure seals <- decodeOfferedTypeWitness offered
+  unless (original == signature) (Left "original input witness native signature differs from offer")
+  interfaces <- maybe (Left "original input type witness is unsealed") Right (witnessInterfaces captured)
+  let actual = [(unitString (moduleUnit owner), moduleNameString (moduleName owner), digest)
+        | (owner, digest) <- interfaces]
+  unless (structure == witnessStructure captured && seals == actual)
+    (Left "original input type structure or original interface seals differ from offer")
 
 renderCheckedTypeWitness :: CheckedTypeWitness -> Maybe String
 renderCheckedTypeWitness witness = hexBytes . toStrictByteString <$> encodeCheckedTypeWitness witness
