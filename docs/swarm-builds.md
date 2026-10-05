@@ -168,6 +168,10 @@ Haskell test fixture trees are declared filegroups copied into private scratch
 before execution. Changing a fixture does not relink its test binary. Compiler,
 browser and process resources belong to the groups that use them, so a process
 framing test does not build Chromium or start GHC.
+Native Rust wrappers declare single-path inputs in `resource_env`, separately
+from flags, commands and path lists in `env`. The counted runner makes those
+resource paths absolute against its Buck launch directory before discovery or
+execution, preserving Buck symlink paths and refusing missing resources.
 
 ## Toolchain and output setup
 

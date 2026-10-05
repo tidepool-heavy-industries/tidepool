@@ -877,22 +877,22 @@ def runtime_test_cases(binary):
 
 def facade_test_cases(binary):
     """Share one linked test harness while declaring inputs per execution group."""
-    process_env = {
+    process_paths = {
         "TIDEPOOL_TEST_BASH": "$(exe toolchains//:bash)",
         "TIDEPOOL_TEST_SLEEP": "$(exe toolchains//:sleep)",
         "EXOMONAD_WORKSPACE_GITLINK": "$(location //build/rust:workspace_gitlink)",
     }
-    host_env = {
-        **process_env,
+    host_paths = {
+        **process_paths,
         "EXOMONAD_EMBEDDED_ASSET_ROOT": "$(location //web:dist)/web",
         "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_deployment)",
         "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
         "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
         "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
-        "TIDEPOOL_KEEP_TEST_LOGS": "1",
     }
-    browser_env = {
-        **host_env,
+    host_env = {"TIDEPOOL_KEEP_TEST_LOGS": "1"}
+    browser_paths = {
+        **host_paths,
         "TIDEPOOL_BROWSER_DRIVER": "$(location //build/testing/browser:driver_bundle)/driver.mjs",
         "TIDEPOOL_BROWSER_NODE": "$(exe toolchains//:browser_node)",
         "PLAYWRIGHT_BROWSERS_PATH": "$(location toolchains//:playwright_browsers)",
@@ -919,35 +919,35 @@ def facade_test_cases(binary):
             "cancelled_read_retains_partial_frame_for_next_select",
             "deadline_stops_descendant_and_drains_bounded_redacted_stderr",
             "successful_leader_exit_also_stops_pipe_holding_descendant",
-        )], process_env, process_resources, False, False, 30),
+        )], {}, process_paths, process_resources, False, False, 30),
         ("facade_host_tests", [prefix + name for name in (
             "production_host_retains_http_haskell_commands_and_reconnects_without_replay",
             "host_cancellation_stops_a_real_running_haskell_cell",
             "production_host_marks_embedded_root_ready_and_retires_invalid_auth_failure",
-        )], host_env, host_resources, True, False, 600),
+        )], host_env, host_paths, host_resources, True, False, 600),
         ("facade_idle_retirement_tests", ["actor_host::embedded_idle_retirement_tests::" + name for name in (
             "committed_input_before_wake_refuses_idle_retirement_and_runs_after_release",
             "idle_claim_before_input_refuses_store_mutation_and_confirms_cleanup",
-        )], host_env, host_resources, True, False, 600),
+        )], host_env, host_paths, host_resources, True, False, 600),
         ("facade_prepared_recipe_contract_test", [
             "actor_host::recipe_checks::prepared_contract_tests::prepared_recipe_receipts_and_assertions_execute_all_eight_cases",
-        ], prepared_recipe_env, prepared_recipe_resources, True, False, 600),
+        ], prepared_recipe_env, {}, prepared_recipe_resources, True, False, 600),
         ("facade_recipe_source_capture_test", [
             "exomonad::workspace::source_capture_tests::background_command_recipe_capture_records_seven_cells_without_validating_assertions",
-        ], capture_recipe_env, capture_recipe_resources, True, False, 600),
+        ], capture_recipe_env, {}, capture_recipe_resources, True, False, 600),
         ("facade_host_raw_test", [prefix +
             "production_host_retains_http_haskell_commands_and_reconnects_without_replay"],
-         host_env, host_resources, True, False, 600),
+         host_env, host_paths, host_resources, True, False, 600),
         ("facade_late_output_test", [prefix +
             "real_host_late_output_tests::real_host_retains_one_late_haskell_output_across_compaction"],
-         host_env, host_resources, True, False, 600),
+         host_env, host_paths, host_resources, True, False, 600),
         ("facade_browser_test", [prefix +
             "production_browser_executes_resident_haskell_retries_and_controls_root"],
-         browser_env, browser_resources, True, True, 900),
-        ("tidepool_unit_tests_all", [], browser_env, browser_resources, True, False, 600),
+         host_env, browser_paths, browser_resources, True, True, 900),
+        ("tidepool_unit_tests_all", [], host_env, browser_paths, browser_resources, True, False, 600),
     ]
     rules = []
-    for name, tests, env, resources, worker, ignored, timeout in groups:
+    for name, tests, env, resource_env, resources, worker, ignored, timeout in groups:
         lines = ["tidepool_rust_test_cases(", f"    name = {json.dumps(name)},",
                  f"    binary = {json.dumps(':' + binary)},"]
         if tests:
@@ -958,7 +958,12 @@ def facade_test_cases(binary):
                       f"    test_rule_timeout_ms = {(len(tests) * timeout + 60) * 1000 if tests else 7_200_000},",
                       "    env = {"])
         lines.extend(f"        {json.dumps(key)}: {json.dumps(value)}," for key, value in env.items())
-        lines.extend(["    },", "    resources = [", render_strings(resources, 8), "    ],",
+        lines.append("    },")
+        if resource_env:
+            lines.append("    resource_env = {")
+            lines.extend(f"        {json.dumps(key)}: {json.dumps(value)}," for key, value in resource_env.items())
+            lines.append("    },")
+        lines.extend(["    resources = [", render_strings(resources, 8), "    ],",
                       f"    haskell_worker = {worker},", '    visibility = ["PUBLIC"],', ")", ""])
         rules.append("\n".join(lines))
     return "\n".join(rules)

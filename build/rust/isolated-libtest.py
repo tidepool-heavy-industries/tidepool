@@ -240,9 +240,27 @@ def names(binary, *args):
     return found
 
 
+def resolve_resource_environment(names):
+    """Bind declared single-path resources to this Buck launch directory."""
+    selected = {}
+    for name in names:
+        value = os.environ.get(name)
+        if not value:
+            raise RuntimeError(f'declared resource environment is missing: {name}')
+        # Keep Buck's logical artifact/symlink path. Resource consumers retain
+        # their own authority checks; the runner only supplies an absolute path.
+        path = Path(value).absolute()
+        if not path.exists():
+            raise RuntimeError(f'declared resource does not exist: {name}={path}')
+        selected[name] = str(path)
+    os.environ.update(selected)
+
+
 def parse_args(argv):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('binary', type=lambda value: str(Path(value).resolve(strict=True)))
+    parser.add_argument('--resource-env', action='append', default=[], metavar='NAME',
+                        help='resolve this declared single-path environment input before any test process')
     parser.add_argument(
         '--exact', action='append', dest='exact_names', metavar='TEST_NAME',
         help='run this exact fully qualified test name; may be repeated',
@@ -274,6 +292,10 @@ def parse_args(argv):
     parser.add_argument('--output-dir', type=Path,
                         help='retain bounded stdout/stderr and outcome records for every test')
     options = parser.parse_args(argv)
+    if (len(options.resource_env) != len(set(options.resource_env))
+            or any(not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', name)
+                   for name in options.resource_env)):
+        parser.error('--resource-env names must be valid and unique')
     if options.service_slice is not None and not options.delegated_service:
         parser.error('--service-slice requires --delegated-service')
     if options.delegated_service:
@@ -451,6 +473,7 @@ def main(argv=None):
         old_handlers[signum] = signal.signal(signum, _signal_active_processes)
     try:
         try:
+            resolve_resource_environment(options.resource_env)
             all_names = names(options.binary)
             ignored_names = set(names(options.binary, '--ignored'))
             selected = select_tests(all_names, ignored_names, options)

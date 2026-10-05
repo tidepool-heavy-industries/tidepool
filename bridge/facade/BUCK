@@ -1726,6 +1726,8 @@ tidepool_rust_test_cases(
     timeout = 30,
     test_rule_timeout_ms = 240000,
     env = {
+    },
+    resource_env = {
         "TIDEPOOL_TEST_BASH": "$(exe toolchains//:bash)",
         "TIDEPOOL_TEST_SLEEP": "$(exe toolchains//:sleep)",
         "EXOMONAD_WORKSPACE_GITLINK": "$(location //build/rust:workspace_gitlink)",
@@ -1752,6 +1754,9 @@ tidepool_rust_test_cases(
     timeout = 600,
     test_rule_timeout_ms = 1860000,
     env = {
+        "TIDEPOOL_KEEP_TEST_LOGS": "1",
+    },
+    resource_env = {
         "TIDEPOOL_TEST_BASH": "$(exe toolchains//:bash)",
         "TIDEPOOL_TEST_SLEEP": "$(exe toolchains//:sleep)",
         "EXOMONAD_WORKSPACE_GITLINK": "$(location //build/rust:workspace_gitlink)",
@@ -1760,7 +1765,6 @@ tidepool_rust_test_cases(
         "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
         "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
         "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
-        "TIDEPOOL_KEEP_TEST_LOGS": "1",
     },
     resources = [
         "toolchains//:test_tools_closure",
@@ -1786,6 +1790,9 @@ tidepool_rust_test_cases(
     timeout = 600,
     test_rule_timeout_ms = 1260000,
     env = {
+        "TIDEPOOL_KEEP_TEST_LOGS": "1",
+    },
+    resource_env = {
         "TIDEPOOL_TEST_BASH": "$(exe toolchains//:bash)",
         "TIDEPOOL_TEST_SLEEP": "$(exe toolchains//:sleep)",
         "EXOMONAD_WORKSPACE_GITLINK": "$(location //build/rust:workspace_gitlink)",
@@ -1794,7 +1801,6 @@ tidepool_rust_test_cases(
         "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
         "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
         "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
-        "TIDEPOOL_KEEP_TEST_LOGS": "1",
     },
     resources = [
         "toolchains//:test_tools_closure",
@@ -1889,6 +1895,9 @@ tidepool_rust_test_cases(
     timeout = 600,
     test_rule_timeout_ms = 660000,
     env = {
+        "TIDEPOOL_KEEP_TEST_LOGS": "1",
+    },
+    resource_env = {
         "TIDEPOOL_TEST_BASH": "$(exe toolchains//:bash)",
         "TIDEPOOL_TEST_SLEEP": "$(exe toolchains//:sleep)",
         "EXOMONAD_WORKSPACE_GITLINK": "$(location //build/rust:workspace_gitlink)",
@@ -1897,7 +1906,6 @@ tidepool_rust_test_cases(
         "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
         "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
         "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
-        "TIDEPOOL_KEEP_TEST_LOGS": "1",
     },
     resources = [
         "toolchains//:test_tools_closure",
@@ -1922,6 +1930,9 @@ tidepool_rust_test_cases(
     timeout = 600,
     test_rule_timeout_ms = 660000,
     env = {
+        "TIDEPOOL_KEEP_TEST_LOGS": "1",
+    },
+    resource_env = {
         "TIDEPOOL_TEST_BASH": "$(exe toolchains//:bash)",
         "TIDEPOOL_TEST_SLEEP": "$(exe toolchains//:sleep)",
         "EXOMONAD_WORKSPACE_GITLINK": "$(location //build/rust:workspace_gitlink)",
@@ -1930,7 +1941,6 @@ tidepool_rust_test_cases(
         "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
         "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
         "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
-        "TIDEPOOL_KEEP_TEST_LOGS": "1",
     },
     resources = [
         "toolchains//:test_tools_closure",
@@ -1955,6 +1965,9 @@ tidepool_rust_test_cases(
     timeout = 900,
     test_rule_timeout_ms = 960000,
     env = {
+        "TIDEPOOL_KEEP_TEST_LOGS": "1",
+    },
+    resource_env = {
         "TIDEPOOL_TEST_BASH": "$(exe toolchains//:bash)",
         "TIDEPOOL_TEST_SLEEP": "$(exe toolchains//:sleep)",
         "EXOMONAD_WORKSPACE_GITLINK": "$(location //build/rust:workspace_gitlink)",
@@ -1963,7 +1976,6 @@ tidepool_rust_test_cases(
         "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
         "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
         "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
-        "TIDEPOOL_KEEP_TEST_LOGS": "1",
         "TIDEPOOL_BROWSER_DRIVER": "$(location //build/testing/browser:driver_bundle)/driver.mjs",
         "TIDEPOOL_BROWSER_NODE": "$(exe toolchains//:browser_node)",
         "PLAYWRIGHT_BROWSERS_PATH": "$(location toolchains//:playwright_browsers)",
@@ -1990,6 +2002,9 @@ tidepool_rust_test_cases(
     timeout = 600,
     test_rule_timeout_ms = 7200000,
     env = {
+        "TIDEPOOL_KEEP_TEST_LOGS": "1",
+    },
+    resource_env = {
         "TIDEPOOL_TEST_BASH": "$(exe toolchains//:bash)",
         "TIDEPOOL_TEST_SLEEP": "$(exe toolchains//:sleep)",
         "EXOMONAD_WORKSPACE_GITLINK": "$(location //build/rust:workspace_gitlink)",
@@ -1998,7 +2013,6 @@ tidepool_rust_test_cases(
         "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
         "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
         "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
-        "TIDEPOOL_KEEP_TEST_LOGS": "1",
         "TIDEPOOL_BROWSER_DRIVER": "$(location //build/testing/browser:driver_bundle)/driver.mjs",
         "TIDEPOOL_BROWSER_NODE": "$(exe toolchains//:browser_node)",
         "PLAYWRIGHT_BROWSERS_PATH": "$(location toolchains//:playwright_browsers)",
