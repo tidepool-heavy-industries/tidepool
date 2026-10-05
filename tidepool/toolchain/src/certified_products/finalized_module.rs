@@ -1171,8 +1171,8 @@ mod tests {
                 &exact,
                 &mut PackageInterfaceValidation::default(),
             ),
-            Err(CertificationError::Mismatch(
-                "finalization producer/profile"
+            Err(CertificationError::Receipt(
+                "finalization inventory bounds/profile"
             ))
         ));
         let mut old: Value = ciborium::de::from_reader(issued[0].certificate_bytes()).unwrap();
