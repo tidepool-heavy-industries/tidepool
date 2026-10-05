@@ -101,8 +101,9 @@ without introducing another compiler, fixture registry or test runner.
    complete original identities and local recipes, while authenticating every
    graph context and its dependencies independently. Fresh/retained placement
    and a graph locator are delivery facts, not different meanings of the same
-   original. Preserve changed-source, changed-native, missing-graph, cycle and
-   budget refusals. Candidate admission in `GhcPipeline` must retain the typed
+   original. Preserve refusals for conflicting original source/native evidence,
+   missing graphs, cycles and exhausted budgets. Candidate admission in
+   `GhcPipeline` must retain the typed
    cause of `CandidateExecutionProof`, rather than reduce it to a Boolean.
    Diagnose the remaining importer-reuse refusal from its actual original,
    candidate and scope inputs before changing admission policy.
