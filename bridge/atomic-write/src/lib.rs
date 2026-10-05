@@ -274,17 +274,19 @@ impl DirectoryAnchor {
         &self.path
     }
 
-    /// Create a relative hierarchy and sync every directory from its leaf back
-    /// through this anchor, deepest first, even when all directories exist.
-    ///
-    /// Absolute paths and parent components are rejected before mutation. An
-    /// empty path confirms this anchor. Failures can leave visible directories
-    /// whose durability is unconfirmed; retry with the same stable anchor and
-    /// relative path. Never promote a failed creation to a new anchor.
-    /// Directory open and sync errors, including unsupported operations, are
-    /// reported without rollback or suppression.
-    pub fn create_dir_all(&self, relative: impl AsRef<Path>) -> Result<PathBuf, WriteError> {
-        let relative = relative.as_ref();
+    /// Resolve an ordinary relative path within this directory without mutation.
+    /// This validates lexical containment, not symlink access authority.
+    pub fn resolve(&self, relative: impl AsRef<Path>) -> Result<PathBuf, WriteError> {
+        Ok(self.path.join(self.normalize_relative(relative.as_ref())?))
+    }
+
+    /// Establish a child hierarchy before opening it as a stable boundary.
+    /// A failed creation never produces an anchor for a merely visible child.
+    pub fn child(&self, relative: impl AsRef<Path>) -> Result<Self, WriteError> {
+        Self::open_existing(self.create_dir_all(relative)?)
+    }
+
+    fn normalize_relative(&self, relative: &Path) -> Result<PathBuf, WriteError> {
         let mut normalized = PathBuf::new();
         for component in relative.components() {
             match component {
@@ -295,12 +297,26 @@ impl DirectoryAnchor {
                         path: relative.to_path_buf(),
                         source: std::io::Error::new(
                             std::io::ErrorKind::InvalidInput,
-                            "directory creation requires a relative path without parent components",
+                            "directory anchor requires a relative path without parent components",
                         ),
                     });
                 }
             }
         }
+        Ok(normalized)
+    }
+
+    /// Create a relative hierarchy and sync every directory from its leaf back
+    /// through this anchor, deepest first, even when all directories exist.
+    ///
+    /// Absolute paths and parent components are rejected before mutation. An
+    /// empty path confirms this anchor. Failures can leave visible directories
+    /// whose durability is unconfirmed; retry with the same stable anchor and
+    /// relative path. Never promote a failed creation to a new anchor.
+    /// Directory open and sync errors, including unsupported operations, are
+    /// reported without rollback or suppression.
+    pub fn create_dir_all(&self, relative: impl AsRef<Path>) -> Result<PathBuf, WriteError> {
+        let normalized = self.normalize_relative(relative.as_ref())?;
         let path = self.path.join(&normalized);
         std::fs::create_dir_all(&path).map_err(|source| WriteError {
             path: path.clone(),
