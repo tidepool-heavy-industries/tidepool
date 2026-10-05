@@ -286,6 +286,8 @@ class NativeQualificationTests(unittest.TestCase):
             'TIDEPOOL_COMPILER_MODULES': '/nix/store/older-project/catalog.json',
             'TIDEPOOL_EXTRACT_NO_DAEMON': '1',
             'TIDEPOOL_EXTRACT': '/tmp/older-extract',
+            'TIDEPOOL_TEST_SYSTEMD_RUN': '/tmp/hostile-systemd-run',
+            'TIDEPOOL_TEST_SYSTEMCTL': '/tmp/hostile-systemctl',
             'EXOMONAD_WORKSPACE_GITLINK': '/tmp/older-workspace-gitlink.json',
             'EXOMONAD_NIX_BIN': '/tmp/hostile-nix',
             'EXOMONAD_NIX_OFFLINE': '1',
@@ -296,7 +298,7 @@ class NativeQualificationTests(unittest.TestCase):
             }})
         self.assertEqual(environment['TIDEPOOL_EXTRACT'], '/frozen/bin/tidepool-extract')
         self.assertEqual(environment['EXOMONAD_NIX_BIN'], '/frozen/runtime-tools/bin/nix')
-        for key in ('TIDEPOOL_EXTRACT_DAEMON_SOCKET', 'TIDEPOOL_COMPILER_MODULES', 'TIDEPOOL_EXTRACT_NO_DAEMON', 'EXOMONAD_WORKSPACE_GITLINK', 'EXOMONAD_NIX_OFFLINE'):
+        for key in ('TIDEPOOL_EXTRACT_DAEMON_SOCKET', 'TIDEPOOL_COMPILER_MODULES', 'TIDEPOOL_EXTRACT_NO_DAEMON', 'EXOMONAD_WORKSPACE_GITLINK', 'EXOMONAD_NIX_OFFLINE', 'TIDEPOOL_TEST_SYSTEMD_RUN', 'TIDEPOOL_TEST_SYSTEMCTL'):
             self.assertNotIn(key, environment)
 
     def test_frozen_bytes_may_not_change_and_descriptor_may_not_move(self):
