@@ -90,12 +90,50 @@ pub(super) struct HostedActorContext {
     pub(super) owners: InteractiveOwners,
 }
 
+#[derive(Debug)]
+pub(super) struct RootExitedBeforeBarrier {
+    pub(super) actor: ActorRef,
+    pub(super) terminal: exomonad_actor::ActorTerminal,
+    barrier: &'static str,
+}
+
+impl std::fmt::Display for RootExitedBeforeBarrier {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "production root {} exited before {} ({:?}): {}",
+            self.actor, self.barrier, self.terminal.kind, self.terminal.summary
+        )
+    }
+}
+
+impl std::error::Error for RootExitedBeforeBarrier {}
+
 impl HostedActorContext {
     pub(super) fn binding(
         &self,
         actor: ActorRef,
     ) -> Option<embedded_harness::EmbeddedActorBinding> {
         embedded_binding(&self.owners, actor)
+    }
+
+    /// Guard only barriers that require this exact root incarnation to remain
+    /// live. A failed cell or provider round is not an actor terminal, and
+    /// independently owned child barriers must observe their own lifecycle.
+    pub(super) async fn while_root_live<F: std::future::Future>(
+        &self,
+        barrier: &'static str,
+        future: F,
+    ) -> Result<F::Output, RootExitedBeforeBarrier> {
+        tokio::select! {
+            biased;
+            terminal = self.actor.terminal().wait() => Err(RootExitedBeforeBarrier {
+                actor: self.actor.identity(),
+                terminal,
+                barrier,
+            }),
+            result = future => Ok(result),
+        }
     }
 }
 
@@ -361,20 +399,23 @@ impl HostedTestRuntime {
                     return Err(format!("production host exited during startup: {result:?}"));
                 },
             };
-            loop {
-                tokio::select! {
-                    event = readiness.recv() => match event {
-                        Some(ActorHostReadiness::EmbeddedReady { root, address }) if root == context.actor.identity() => return Ok((context, address)),
-                        Some(ActorHostReadiness::CoordinationFailed { error, .. }) => return Err(error),
-                        Some(_) => {},
-                        None => return Err("production readiness owner closed".into()),
-                    },
-                    result = &mut outcome => {
-                        exited_during_startup = true;
-                        return Err(format!("production host exited before readiness: {result:?}"));
-                    },
+            let address = context.while_root_live("embedded readiness", async {
+                loop {
+                    tokio::select! {
+                        event = readiness.recv() => match event {
+                            Some(ActorHostReadiness::EmbeddedReady { root, address }) if root == context.actor.identity() => return Ok(address),
+                            Some(ActorHostReadiness::CoordinationFailed { error, .. }) => return Err(error),
+                            Some(_) => {},
+                            None => return Err("production readiness owner closed".into()),
+                        },
+                        result = &mut outcome => {
+                            exited_during_startup = true;
+                            return Err(format!("production host exited before readiness: {result:?}"));
+                        },
+                    }
                 }
-            }
+            }).await.map_err(|error| error.to_string())??;
+            Ok((context, address))
         }).await;
         let (context, address) = match started {
             Ok(Ok(started)) => started,

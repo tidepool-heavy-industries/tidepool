@@ -332,9 +332,12 @@ impl CapturedHostTransport {
                             .claims(&CallId(PENDING_CALL.into()))
                             .unwrap();
                         let failed = self.operation(&self.root_origin, PENDING_CALL);
-                        assert!(original.iter().any(|claim| claim.operation == failed
-                            && claim.request == failed.request && claim.state == harness::store::ClaimState::Settled),
-                            "failed original operation was not durably settled before capture reuse");
+                        assert!(
+                            original.iter().any(|claim| claim.operation == failed
+                                && claim.request == failed.request
+                                && claim.state == harness::store::ClaimState::Settled),
+                            "failed original operation was not durably settled before capture reuse"
+                        );
                     }
                     let input = serde_json::to_value(&request.input).unwrap();
                     let items = input.as_array().unwrap();
@@ -608,8 +611,13 @@ async fn finish_root(
     transport: &CapturedHostTransport,
     context: &super::hosted_test_context::HostedActorContext,
 ) {
-    transport.root_steps_tx.send(RootStep::Finish).unwrap();
-    successful_rounds(context, &[context.actor.identity()]).await;
+    context
+        .while_root_live("successful root provider round", async {
+            transport.root_steps_tx.send(RootStep::Finish).unwrap();
+            successful_rounds(context, &[context.actor.identity()]).await;
+        })
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
 }
 
 fn assert_absent_binding(response: &Value, binding: &str) {
@@ -705,71 +713,83 @@ async fn embedded_parked_captured_pipeline_cancellation_settles_invocation_owned
 }
 
 async fn root_browser_projection(
+    context: &super::hosted_test_context::HostedActorContext,
     address: std::net::SocketAddr,
     cookie: &str,
     target: &harness::embedding::HostIdentity,
     lifecycle: harness::server::HostActorLifecycle,
 ) -> harness::server::HostActorProjection {
-    tokio::time::timeout(Duration::from_secs(30), async {
-        loop {
-            let (mut socket, snapshot) =
-                super::m1_host_tests::browser_snapshot(address, cookie).await;
-            socket.close(None).await.unwrap();
-            for value in snapshot["snapshot"]["actors"]
-                .as_array()
-                .expect("browser actor projection")
-            {
-                let actor: harness::server::HostActorProjection =
-                    serde_json::from_value(value.clone()).unwrap();
-                if actor.identity == *target && actor.lifecycle == lifecycle {
-                    return actor;
+    context
+        .while_root_live(
+            "root browser lifecycle projection",
+            tokio::time::timeout(Duration::from_secs(30), async {
+                loop {
+                    let (mut socket, snapshot) =
+                        super::m1_host_tests::browser_snapshot(address, cookie).await;
+                    socket.close(None).await.unwrap();
+                    for value in snapshot["snapshot"]["actors"]
+                        .as_array()
+                        .expect("browser actor projection")
+                    {
+                        let actor: harness::server::HostActorProjection =
+                            serde_json::from_value(value.clone()).unwrap();
+                        if actor.identity == *target && actor.lifecycle == lifecycle {
+                            return actor;
+                        }
+                    }
+                    tokio::task::yield_now().await;
                 }
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("exact root browser lifecycle is projected")
+            }),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{error}"))
+        .expect("exact root browser lifecycle is projected")
 }
 
 // Offer another real provider tool call only after subscribing to its settlement.
 async fn root_tool_call(
+    context: &super::hosted_test_context::HostedActorContext,
     transport: &CapturedHostTransport,
     call_id: &str,
     source: &str,
 ) -> Result<Value, String> {
     let scheduler = transport.runtime.scheduler();
     let mut settlements = scheduler.operation_settlements();
-    transport
-        .root_steps_tx
-        .send(RootStep::Tool {
-            call_id: call_id.into(),
-            source: source.into(),
-            mode: CallMode::Blocking,
-        })
-        .unwrap();
-    tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, async {
-        loop {
-            let settled = settlements.recv().await.expect("root settlement observer");
-            if settled.origin == transport.root_origin && settled.call.0 == call_id {
-                let expected = transport.operation(&transport.root_origin, call_id);
-                assert_eq!(
-                    settled, expected,
-                    "settlement must match the exact provider call"
-                );
-                let result = embedded_operation(
-                    &transport.runtime,
-                    &expected,
-                    COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
-                )
-                .await;
-                received_output(transport, &expected).await;
-                return result;
-            }
-        }
-    })
-    .await
-    .expect("scripted root Haskell operation settles")
+    context
+        .while_root_live(
+            "root Haskell operation and provider output",
+            tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, async {
+                transport
+                    .root_steps_tx
+                    .send(RootStep::Tool {
+                        call_id: call_id.into(),
+                        source: source.into(),
+                        mode: CallMode::Blocking,
+                    })
+                    .unwrap();
+                loop {
+                    let settled = settlements.recv().await.expect("root settlement observer");
+                    if settled.origin == transport.root_origin && settled.call.0 == call_id {
+                        let expected = transport.operation(&transport.root_origin, call_id);
+                        assert_eq!(
+                            settled, expected,
+                            "settlement must match the exact provider call"
+                        );
+                        let result = embedded_operation(
+                            &transport.runtime,
+                            &expected,
+                            COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+                        )
+                        .await;
+                        received_output(transport, &expected).await;
+                        return result;
+                    }
+                }
+            }),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("root call {call_id}: {error}"))
+        .expect("scripted root Haskell operation settles")
 }
 
 async fn captured_host_scenario(scenario: CapturedScenario) {
@@ -859,40 +879,55 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
     );
     let scheduler = runtime.scheduler();
     let mut setup_settlements = transport.setup_settlements.lock().take().unwrap();
-    tokio::time::timeout(
-        Duration::from_secs(60),
-        transport.scope_setup_issued.notified(),
-    )
-    .await
-    .expect("root provider did not issue its original scope setup operation");
-    let setup_operation = transport.operation(&root_origin, "captured-scope-setup");
-    let setup = tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, async {
-        loop {
-            let settled = setup_settlements
-                .recv()
-                .await
-                .expect("scope setup settlement observation must remain available");
-            if settled == setup_operation {
-                break;
-            }
-        }
-        embedded_operation(
-            &runtime,
-            &setup_operation,
-            COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+    campaign
+        .while_root_live(
+            "scope setup provider call",
+            tokio::time::timeout(
+                Duration::from_secs(60),
+                transport.scope_setup_issued.notified(),
+            ),
         )
         .await
-        .unwrap()
-    })
-    .await
-    .expect("original scope setup operation did not settle within its cold budget");
+        .unwrap_or_else(|error| panic!("{error}"))
+        .expect("root provider did not issue its original scope setup operation");
+    let setup_operation = transport.operation(&root_origin, "captured-scope-setup");
+    let setup = campaign
+        .while_root_live(
+            "scope setup operation settlement",
+            tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, async {
+                loop {
+                    let settled = setup_settlements
+                        .recv()
+                        .await
+                        .expect("scope setup settlement observation must remain available");
+                    if settled == setup_operation {
+                        break;
+                    }
+                }
+                embedded_operation(
+                    &runtime,
+                    &setup_operation,
+                    COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+                )
+                .await
+                .unwrap()
+            }),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{error}"))
+        .expect("original scope setup operation did not settle within its cold budget");
     assert_committed_haskell_value(&setup, "True");
-    tokio::time::timeout(
-        Duration::from_secs(60),
-        transport.setup_requested.notified(),
-    )
-    .await
-    .expect("root Engine did not request a turn after scope setup settled");
+    campaign
+        .while_root_live(
+            "provider turn after scope setup",
+            tokio::time::timeout(
+                Duration::from_secs(60),
+                transport.setup_requested.notified(),
+            ),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{error}"))
+        .expect("root Engine did not request a turn after scope setup settled");
     // Subscribe before issuing the parent call: settlement may precede observation,
     // and Scheduler::wait refuses operations that are not admitted yet.
     let mut parent_settlements = scheduler.operation_settlements();
@@ -900,7 +935,7 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
     transport.setup_ready.notify_one();
     let mut sessions = std::collections::HashSet::new();
     for _ in 0..2 {
-        let request = tokio::time::timeout(Duration::from_secs(120), async {
+        let request = campaign.while_root_live("initial captured child provider requests", tokio::time::timeout(Duration::from_secs(120), async {
             tokio::select! {
                 biased;
                 settled = async {
@@ -919,8 +954,9 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
                 }
                 request = requests_rx.recv() => request,
             }
-        })
+        }))
         .await
+        .unwrap_or_else(|error| panic!("{error}"))
         .expect("captured children did not start while the parent call was pending")
         .unwrap();
         transport
@@ -971,19 +1007,24 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
             call_id: pending.call.0.clone(),
             namespace: None,
         };
-        tokio::time::timeout(Duration::from_secs(30), async {
-            while campaign.actor.hosted_workbench_waiting(&native).is_none() {
-                assert!(runtime
-                    .store()
-                    .claims_for_operation(&pending)
-                    .unwrap()
-                    .iter()
-                    .any(|claim| claim.state == harness::store::ClaimState::Pending));
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("the exact native cancellation owner is armed");
+        campaign
+            .while_root_live(
+                "native cancellation owner admission",
+                tokio::time::timeout(Duration::from_secs(30), async {
+                    while campaign.actor.hosted_workbench_waiting(&native).is_none() {
+                        assert!(runtime
+                            .store()
+                            .claims_for_operation(&pending)
+                            .unwrap()
+                            .iter()
+                            .any(|claim| claim.state == harness::store::ClaimState::Pending));
+                        tokio::task::yield_now().await;
+                    }
+                }),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{error}"))
+            .expect("the exact native cancellation owner is armed");
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
@@ -1004,6 +1045,7 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
             .unwrap()
             .to_owned();
         let running = root_browser_projection(
+            &campaign,
             address,
             &cookie,
             &target,
@@ -1092,6 +1134,7 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
             "interrupt must preserve the root actor"
         );
         let waiting = root_browser_projection(
+            &campaign,
             address,
             &cookie,
             &target,
@@ -1116,6 +1159,7 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
             .json(&input)
             .send();
         let resumed = root_tool_call(
+            &campaign,
             &transport,
             "captured-after-interrupt",
             "let resumedAfterInterrupt = x + getX\ndisplay (resumedAfterInterrupt == 83)",
@@ -1127,6 +1171,7 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
             "True",
         );
         let absent = root_tool_call(
+            &campaign,
             &transport,
             "captured-cancelled-prefix-absent",
             "display (capturedValue :: Int)",
@@ -1135,6 +1180,7 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
         .unwrap();
         assert_absent_binding(&absent, "capturedValue");
         let cleaned = root_tool_call(
+            &campaign,
             &transport,
             "captured-interrupted-group-cleanup",
             include_str!("embedded_captured_group_cleanup.hs"),
@@ -1155,6 +1201,7 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
     }
     if scenario == CapturedScenario::ConcurrentNominalJoin {
         let published_b = root_tool_call(
+            &campaign,
             &transport,
             "nominal-join-root-b",
             include_str!("embedded_nominal_join_b.hs"),
@@ -1218,6 +1265,7 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
             assert_committed_haskell_value(&result.unwrap(), "True");
             received_output(&transport, &transport.operation(&root_origin, PENDING_CALL)).await;
             let public = root_tool_call(
+                &campaign,
                 &transport,
                 "captured-public-prefix",
                 "display (capturedValue == 41 && capturedGetter == 42)",
@@ -1234,6 +1282,7 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
                 "{published_a}"
             );
             let joined = root_tool_call(
+                &campaign,
                 &transport,
                 "nominal-join-final-read",
                 include_str!("embedded_nominal_join_final.hs"),
@@ -1272,6 +1321,7 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
                 "[captured-engine] actual parent execution failed after both typed child replies"
             );
             let public_names = root_tool_call(
+                &campaign,
                 &transport,
                 "captured-parent-public-probe",
                 "display (show (x, getX))",
@@ -1289,6 +1339,7 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
                 ("capturedSuffix", "display (capturedSuffix :: Int)"),
             ] {
                 let absent = root_tool_call(
+                    &campaign,
                     &transport,
                     &format!("captured-parent-absent-{name}"),
                     source,
@@ -1298,6 +1349,7 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
                 assert_absent_binding(&absent, name);
             }
             let rebound = root_tool_call(
+                &campaign,
                 &transport, "captured-parent-rebind",
                 "capturedValue <- pure (99 :: Int)\nlet capturedGetter = capturedValue + 1\ndisplay (show (capturedValue, capturedGetter))",
             ).await.expect("public rebinding succeeds after the failed cell");
@@ -1324,6 +1376,7 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
             }
             assert_eq!(retained.len(), 2);
             let reused = root_tool_call(
+                &campaign,
                 &transport,
                 REUSE_CALL,
                 include_str!("embedded_captured_unfold_reuse_after_failure.hs"),
@@ -1381,6 +1434,7 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
             received_output(&transport, &operation).await;
         }
         let refusal = root_tool_call(
+            &campaign,
             &transport,
             "captured-active-cleanup-refusal",
             include_str!("embedded_captured_group_cleanup.hs"),
@@ -1419,6 +1473,7 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
         successful_rounds(&campaign, &actors).await;
     }
     let cleaned = root_tool_call(
+        &campaign,
         &transport,
         "captured-group-cleanup",
         include_str!("embedded_captured_group_cleanup.hs"),
@@ -1686,16 +1741,22 @@ async fn admitted_cell_late_type_error_has_no_effect_or_publication_on_retry() {
         .unwrap();
     let transport = slot.lock().take().unwrap();
     let actor = host.context.actor.identity();
-    let binding = tokio::time::timeout(Duration::from_secs(30), async {
-        loop {
-            if let Some(binding) = host.context.binding(actor) {
-                break binding;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("actual attached root binding");
+    let binding = host
+        .context
+        .while_root_live(
+            "preflight root binding",
+            tokio::time::timeout(Duration::from_secs(30), async {
+                loop {
+                    if let Some(binding) = host.context.binding(actor) {
+                        break binding;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            }),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{error}"))
+        .expect("actual attached root binding");
     assert_eq!(
         binding.inbox.watermark(),
         0,
@@ -1709,9 +1770,14 @@ async fn admitted_cell_late_type_error_has_no_effect_or_publication_on_retry() {
     let control_source = source
         .replace("neverPublished", "publishedControl")
         .replace("pure (True :: Int)", "display (42 :: Int)");
-    let (_, control) = transport
-        .cell("preflight-positive-control", &control_source)
-        .await;
+    let (_, control) = host
+        .context
+        .while_root_live(
+            "preflight positive control",
+            transport.cell("preflight-positive-control", &control_source),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
     assert_committed_haskell_value(&control, "42");
     assert_eq!(binding.inbox.watermark(), 1);
     assert!(
@@ -1727,7 +1793,14 @@ async fn admitted_cell_late_type_error_has_no_effect_or_publication_on_retry() {
     );
     assert!(host.runtime.store().unread("/root").unwrap().is_empty());
 
-    let (operation, rejected) = transport.cell("bad-final-call", &source).await;
+    let (operation, rejected) = host
+        .context
+        .while_root_live(
+            "preflight type rejection",
+            transport.cell("bad-final-call", &source),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
     assert_preflight_rejection(&rejected);
     assert_eq!(
         rejected["publication"]["status"], "notPublished",
@@ -1793,6 +1866,7 @@ async fn admitted_cell_late_type_error_has_no_effect_or_publication_on_retry() {
         incarnation: actor.incarnation.0.to_string(),
     };
     let waiting = root_browser_projection(
+        &host.context,
         host.address,
         &cookie,
         &target,
@@ -1822,16 +1896,22 @@ async fn admitted_cell_late_type_error_has_no_effect_or_publication_on_retry() {
         .await
         .unwrap();
     assert_eq!(wake.status(), reqwest::StatusCode::ACCEPTED);
-    let recovered = tokio::time::timeout(Duration::from_secs(30), async {
-        loop {
-            if let Some(request) = transport.requests.lock().get(requests_before).cloned() {
-                break request;
-            }
-            changed.changed().await.unwrap();
-        }
-    })
-    .await
-    .expect("real recovery provider request");
+    let recovered = host
+        .context
+        .while_root_live(
+            "preflight recovery provider request",
+            tokio::time::timeout(Duration::from_secs(30), async {
+                loop {
+                    if let Some(request) = transport.requests.lock().get(requests_before).cloned() {
+                        break request;
+                    }
+                    changed.changed().await.unwrap();
+                }
+            }),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{error}"))
+        .expect("real recovery provider request");
     assert!(recovered
         .input
         .iter()
@@ -1880,19 +1960,29 @@ async fn admitted_cell_late_type_error_has_no_effect_or_publication_on_retry() {
     );
     assert_eq!(binding.inbox.watermark(), 1);
 
-    let (_, absent) = transport
-        .cell(
-            "preflight-binding-absent",
-            "display (neverPublished :: Int)",
+    let (_, absent) = host
+        .context
+        .while_root_live(
+            "preflight absent binding",
+            transport.cell(
+                "preflight-binding-absent",
+                "display (neverPublished :: Int)",
+            ),
         )
-        .await;
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
     assert_absent_binding(&absent, "neverPublished");
-    let (_, valid) = transport
-        .cell(
-            "preflight-valid-after-retry",
-            &source.replace("pure (True :: Int)", "display (42 :: Int)"),
+    let (_, valid) = host
+        .context
+        .while_root_live(
+            "preflight valid cell after recovery",
+            transport.cell(
+                "preflight-valid-after-retry",
+                &source.replace("pure (True :: Int)", "display (42 :: Int)"),
+            ),
         )
-        .await;
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
     assert_committed_haskell_value(&valid, "42");
     assert!(
         valid["items"]
@@ -1911,7 +2001,13 @@ async fn admitted_cell_late_type_error_has_no_effect_or_publication_on_retry() {
     );
     assert!(host.context.actor.terminal().get().is_none());
     transport.sender.send(PreflightStep::Finish).unwrap();
-    successful_rounds(&host.context, &[actor]).await;
+    host.context
+        .while_root_live(
+            "successful preflight provider round",
+            successful_rounds(&host.context, &[actor]),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
     host.stop()
         .await
         .expect("production shutdown confirms preflight cleanup");
