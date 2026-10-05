@@ -569,6 +569,7 @@ def test_runtime_inputs(package_name, target_name, unit=False):
             and target_name in {"daemon_integration", "transaction_integration"})
         or (package_name == "tidepool" and target_name in {
             "facade_prepared_recipe_contract_test", "facade_recipe_source_capture_test",
+            "exomonad_action_surface",
         })
         or (package_name == "tidepool-mcp" and not unit and target_name == "mcp")
     ):
@@ -598,6 +599,8 @@ def test_runtime_inputs(package_name, target_name, unit=False):
     if package_name == "tidepool-toolchain" and target_name == "prepared_fixture":
         env["TIDEPOOL_PREPARED_FIXTURE_COMPILER"] = "$(exe //tidepool/toolchain:prepared-fixture)"
         resources.append("//tidepool/toolchain:prepared-fixture")
+    if package_name == "tidepool" and target_name == "exomonad_action_surface":
+        env["TIDEPOOL_HASKELL_ACTORS_DIR"] = "$(location //bridge/haskell:facade_embedded_sources)/actors"
     if package_name == "tidepool-mcp" and not unit and target_name == "mcp":
         worker = True
         env.update({
@@ -1173,7 +1176,8 @@ tidepool_buildscript_run(
         deps = dev_deps + ([":" + libraries[0]["name"]] if libraries else [])
         env, resources, worker = test_runtime_inputs(package_name, target["name"])
         resource_env = {}
-        if package_name == "tidepool-mcp" and target["name"] == "mcp":
+        if ((package_name == "tidepool-mcp" and target["name"] == "mcp")
+                or (package_name == "tidepool" and target["name"] == "exomonad_action_surface")):
             resource_env = env
             env = {"TIDEPOOL_KEEP_TEST_LOGS": resource_env.pop("TIDEPOOL_KEEP_TEST_LOGS")}
         extra = runtime_arguments(env, resources, worker, resource_env)

@@ -35,25 +35,30 @@ fn inferred_cells_compile_without_an_implicit_row_alias() {
 
 #[test]
 fn concurrent_selected_profiles_enforce_membership_with_stable_vocabulary() {
-    let installed = tidepool_mcp::ensure_effects_module(&[
+    let declarations = [
         tidepool_mcp::console_decl(),
         tidepool_mcp::context_read_write_decl(),
-    ])
-    .expect("installed effects");
+    ];
+    let installed = tidepool_mcp::ensure_effects_module(&declarations).expect("installed effects");
     let original = std::fs::read(installed.core.join("Tidepool/Effects.hs")).unwrap();
     let stdlib = PathBuf::from(
         std::env::var_os("TIDEPOOL_PRELUDE_DIR")
             .expect("TIDEPOOL_PRELUDE_DIR must name the declared Haskell library resource"),
     );
-    let preamble = include_str!("fixtures/selected-effects.hs");
+    let preamble = tidepool_runtime::session::insert_preamble_imports(
+        &tidepool_mcp::build_notebook_preamble(&declarations, false),
+        "qualified Tidepool.Effects.Core as Core",
+    );
     let compile = |row, expression| {
-        let source = tidepool_runtime::session::assemble_opaque_expression_module(
-            preamble,
+        let mut source = tidepool_runtime::session::assemble_opaque_expression_module(
+            &preamble,
             "result",
             row,
             expression,
             tidepool_runtime::session::ExpressionLift::Effectful,
         );
+        source.push('\n');
+        source.push_str(include_str!("fixtures/selected-effects.hs"));
         tidepool_runtime::compile_haskell(
             &source,
             "result",

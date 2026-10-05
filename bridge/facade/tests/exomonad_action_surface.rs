@@ -33,7 +33,10 @@ fn exomonad_include_paths() -> Vec<PathBuf> {
     let effects =
         tidepool_mcp::ensure_effects_module(&declarations).expect("materialize Exomonad effects");
     let mut include = effects.include_paths().to_vec();
-    include.push(eval_harness::repo_root().join("bridge/haskell/actors"));
+    include.push(PathBuf::from(
+        std::env::var_os("TIDEPOOL_HASKELL_ACTORS_DIR")
+            .expect("TIDEPOOL_HASKELL_ACTORS_DIR must name the declared actor source resource"),
+    ));
     include.push(eval_harness::prelude_path());
     include
 }
