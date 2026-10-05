@@ -3729,6 +3729,7 @@ dependencies = [
  "frunk",
  "log",
  "parking_lot",
+ "proptest",
  "rpds",
  "schemars 1.2.2",
  "serde",

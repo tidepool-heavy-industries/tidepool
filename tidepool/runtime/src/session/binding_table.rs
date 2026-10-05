@@ -506,4 +506,473 @@ mod tests {
         index.on_evict_record(&page);
         assert!(index.live_modules().is_empty());
     }
+    #[test]
+    fn evicting_one_of_same_identity_generation_keeps_pair_retained() {
+        let mut pointer = std::ptr::null_mut();
+        let root = fake_slot(&mut pointer);
+        let name = identity("shared_pair");
+        let first = record(7, 1, root, &name);
+        let second = record(7, 2, root, &name);
+        let mut index = BindingIndex::new();
+        index.on_bind_record(&first);
+        index.on_bind_record(&second);
+        let bytes: Arc<[u8]> = Arc::from([9]);
+        index.retain_fixture_interface(first.module, bytes.clone());
+
+        assert!(!index.on_evict_record(&first));
+        assert_eq!(index.prepared_retained(), vec![(name.clone(), 7)]);
+        assert_eq!(index.resolve_prepared(&name, Some(7)), Some(second.id));
+        assert_eq!(index.resolve_prepared(&name, None), Some(second.id));
+        assert_eq!(index.value_interface(second.module), Some(&bytes));
+        assert!(index.on_evict_record(&second));
+        assert!(index.prepared_retained().is_empty());
+        assert!(index.live_modules().is_empty());
+        assert!(index.value_interface(second.module).is_none());
+    }
+
+    mod properties {
+        use super::*;
+        use proptest::prelude::*;
+        use proptest::test_runner::{Config, FileFailurePersistence};
+        use std::sync::OnceLock;
+
+        const IDENTITIES: u8 = 4;
+        const ROOTS: usize = 3;
+
+        #[derive(Clone, Copy, Debug)]
+        struct Binding {
+            id: u64,
+            identity: u8,
+            generation: u64,
+            root: usize,
+        }
+
+        #[derive(Clone, Debug)]
+        enum Op {
+            Bind(Binding),
+            Evict(u64),
+            Read(u8, Option<u64>),
+            Legacy(u64),
+            Fixture(u64, u8),
+        }
+
+        #[derive(Clone, Debug)]
+        enum Choice {
+            Bind(u8, u64, usize),
+            Shadow(usize, usize),
+            Alias(usize, u8, u64),
+            Evict(usize),
+            Read(u8, Option<u64>),
+            Legacy(u64),
+            Fixture(usize, u8),
+        }
+
+        fn choice() -> impl Strategy<Value = Choice> {
+            prop_oneof![
+                4 => (0..IDENTITIES, 1u64..6, 0..ROOTS)
+                    .prop_map(|(identity, generation, root)| Choice::Bind(identity, generation, root)),
+                2 => (0usize..16, 0..ROOTS)
+                    .prop_map(|(selector, root)| Choice::Shadow(selector, root)),
+                2 => (0usize..16, 0..IDENTITIES, 1u64..6)
+                    .prop_map(|(selector, identity, generation)| Choice::Alias(selector, identity, generation)),
+                3 => (0usize..16).prop_map(Choice::Evict),
+                2 => (0..IDENTITIES, proptest::option::of(0u64..10))
+                    .prop_map(|(identity, generation)| Choice::Read(identity, generation)),
+                1 => (0u64..8).prop_map(Choice::Legacy),
+                1 => (0usize..16, any::<u8>())
+                    .prop_map(|(selector, byte)| Choice::Fixture(selector, byte)),
+            ]
+        }
+
+        /// Shrinking choices rebuilds a complete, valid AST. Every choice runs:
+        /// operations needing a live source explicitly insert one if empty.
+        /// Distinct ids may share an identity/generation pair. No operation
+        /// is filtered, rejected, or silently skipped after shrinking.
+        #[derive(Default)]
+        struct History {
+            ops: Vec<Op>,
+            live: Vec<Binding>,
+            next_id: u64,
+        }
+
+        impl History {
+            fn bind(&mut self, identity: u8, generation: u64, root: usize) -> Binding {
+                self.next_id += 1;
+                let binding = Binding {
+                    id: self.next_id,
+                    identity,
+                    generation,
+                    root,
+                };
+                self.live.push(binding);
+                self.ops.push(Op::Bind(binding));
+                binding
+            }
+
+            fn source(&mut self, selector: usize) -> Binding {
+                if self.live.is_empty() {
+                    self.bind(0, 1, 0);
+                }
+                self.live[selector % self.live.len()]
+            }
+
+            fn evict(&mut self, id: u64) {
+                let position = self.live.iter().position(|entry| entry.id == id).unwrap();
+                self.live.remove(position);
+                self.ops.push(Op::Evict(id));
+            }
+
+            fn choices(&mut self, choices: Vec<Choice>) {
+                for choice in choices {
+                    match choice {
+                        Choice::Bind(identity, generation, root) => {
+                            self.bind(identity, generation, root);
+                        }
+                        Choice::Shadow(selector, root) => {
+                            let source = self.source(selector);
+                            self.bind(source.identity, source.generation + 1, root);
+                        }
+                        Choice::Alias(selector, identity, generation) => {
+                            let source = self.source(selector);
+                            self.bind(identity, generation, source.root);
+                        }
+                        Choice::Evict(selector) => {
+                            let source = self.source(selector);
+                            self.evict(source.id);
+                        }
+                        Choice::Read(identity, generation) => {
+                            self.ops.push(Op::Read(identity, generation));
+                        }
+                        Choice::Legacy(generation) => self.ops.push(Op::Legacy(generation)),
+                        Choice::Fixture(selector, byte) => {
+                            let source = self.source(selector);
+                            self.ops.push(Op::Fixture(source.generation, byte));
+                        }
+                    }
+                }
+            }
+
+            fn guided(&mut self, cohort: u8) {
+                let generation = self
+                    .live
+                    .iter()
+                    .map(|entry| entry.generation)
+                    .max()
+                    .unwrap_or(0)
+                    + 1;
+                // The reserved root is untouched by arbitrary prefixes, so
+                // this cohort always reaches the shared root's final release.
+                let original = self.bind(0, generation, ROOTS);
+                self.ops.push(Op::Read(0, Some(generation)));
+                self.ops.push(Op::Fixture(generation, 11));
+                match cohort {
+                    0 => {
+                        self.bind(0, generation + 1, ROOTS);
+                        self.ops.push(Op::Read(0, None));
+                        self.evict(original.id);
+                        self.ops.push(Op::Read(0, Some(generation)));
+                    }
+                    1 => {
+                        let alias = self.bind(1, generation, ROOTS);
+                        self.ops.push(Op::Legacy(generation));
+                        self.ops.push(Op::Read(1, Some(generation)));
+                        self.evict(original.id);
+                        self.ops.push(Op::Read(1, None));
+                        self.evict(alias.id);
+                        self.ops.push(Op::Read(1, Some(generation)));
+                        self.bind(0, generation, ROOTS);
+                    }
+                    2 => {
+                        self.evict(original.id);
+                        self.ops.push(Op::Read(0, Some(generation)));
+                        self.bind(0, generation, ROOTS);
+                        self.ops.push(Op::Legacy(generation));
+                        self.ops.push(Op::Read(0, Some(generation)));
+                    }
+                    _ => unreachable!("bounded cohort selector"),
+                }
+            }
+
+            fn finish(mut self) -> Vec<Op> {
+                while let Some(entry) = self.live.last() {
+                    self.evict(entry.id);
+                }
+                self.ops.push(Op::Read(0, None));
+                self.ops
+            }
+        }
+
+        fn arbitrary_history() -> impl Strategy<Value = Vec<Op>> {
+            proptest::collection::vec(choice(), 0..49).prop_map(|choices| {
+                let mut history = History::default();
+                history.choices(choices);
+                history.finish()
+            })
+        }
+
+        fn guided_history() -> impl Strategy<Value = (u8, Vec<Op>)> {
+            (
+                proptest::collection::vec(choice(), 0..17),
+                0u8..3,
+                proptest::collection::vec(choice(), 0..17),
+            )
+                .prop_map(|(prefix, cohort, suffix)| {
+                    let mut history = History::default();
+                    history.choices(prefix);
+                    history.guided(cohort);
+                    history.choices(suffix);
+                    (cohort, history.finish())
+                })
+        }
+
+        #[derive(Debug, Default)]
+        struct Support {
+            binds: usize,
+            shadows: usize,
+            shared_modules: usize,
+            shared_roots: usize,
+            reinsertions: usize,
+            evictions: usize,
+            held_roots: usize,
+            released_roots: usize,
+            reads: usize,
+            fixtures: usize,
+            legacy: usize,
+        }
+
+        fn check_resolution(
+            index: &BindingIndex,
+            live: &[BindRecord],
+            name: &SymbolIdentity,
+            generation: Option<u64>,
+        ) {
+            // BindingTable::iter_live is a HashMap scan, so equal-generation
+            // ties have no ordering contract. The independent oracle accepts
+            // any matching live id at the maximal eligible generation.
+            let newest = live
+                .iter()
+                .filter(|entry| &entry.identity == name)
+                .filter(|entry| generation.is_none_or(|gen| gen == entry.module.gen().0))
+                .map(|entry| entry.module.gen().0)
+                .max();
+            let eligible: Vec<_> = live
+                .iter()
+                .filter(|entry| &entry.identity == name && Some(entry.module.gen().0) == newest)
+                .map(|entry| entry.id)
+                .collect();
+            let resolved = index.resolve_prepared(name, generation);
+            assert!(match resolved {
+                Some(id) => eligible.contains(&id),
+                None => eligible.is_empty(),
+            }, "resolution {resolved:?} must be one of {eligible:?} for {name:?} at {generation:?}");
+        }
+
+        fn check_observables(
+            index: &BindingIndex,
+            live: &[BindRecord],
+            interfaces: &[(u64, Option<Arc<[u8]>>)],
+            max_generation: u64,
+        ) {
+            let brute = BruteForce { live };
+            assert_eq!(index.live_modules(), brute.live_modules());
+            assert_eq!(index.prepared_retained(), brute.prepared_retained());
+            for generation in 0..=max_generation + 1 {
+                let module = SessionModule::val(Generation(generation));
+                let is_live = live.iter().any(|entry| entry.module == module);
+                assert_eq!(index.is_module_live(&module.module_name()), is_live);
+                let expected = interfaces.iter().find(|(gen, _)| *gen == generation);
+                assert_eq!(
+                    index.value_interface(module),
+                    expected.and_then(|(_, bytes)| bytes.as_ref())
+                );
+                assert!(index.checked_value_artifact(module).is_none());
+                for name in 0..IDENTITIES {
+                    let identity = identity(&format!("name_{name}"));
+                    check_resolution(index, live, &identity, Some(generation));
+                }
+            }
+            for name in 0..IDENTITIES {
+                let identity = identity(&format!("name_{name}"));
+                check_resolution(index, live, &identity, None);
+            }
+        }
+
+        /// Vec records and Vec interface markers are the independent model;
+        /// no production refcount or candidate map is copied into the oracle.
+        fn replay(ops: &[Op]) -> Support {
+            // The boxed slot array never moves. Slots are borrowed only while
+            // it lives, and the index compares addresses without dereferencing.
+            let mut pointers = Box::new([std::ptr::null_mut::<u8>(); ROOTS + 1]);
+            let slots: Vec<_> = pointers.iter_mut().map(fake_slot).collect();
+            let mut index = BindingIndex::new();
+            let mut live = Vec::<BindRecord>::new();
+            let mut interfaces = Vec::<(u64, Option<Arc<[u8]>>)>::new();
+            let mut seen = Vec::<(u8, u64)>::new();
+            let mut support = Support::default();
+            let mut max_generation = 0;
+            for (step, op) in ops.iter().enumerate() {
+                match *op {
+                    Op::Bind(binding) => {
+                        let name = identity(&format!("name_{}", binding.identity));
+                        assert!(live.iter().all(|entry| entry.id.raw() != binding.id));
+                        support.shadows +=
+                            usize::from(live.iter().any(|entry| entry.identity == name));
+                        support.shared_modules += usize::from(
+                            live.iter()
+                                .any(|entry| entry.module.gen().0 == binding.generation),
+                        );
+                        support.shared_roots += usize::from(
+                            live.iter()
+                                .any(|entry| entry.root.addr() == slots[binding.root].addr()),
+                        );
+                        support.reinsertions +=
+                            usize::from(seen.contains(&(binding.identity, binding.generation)));
+                        seen.push((binding.identity, binding.generation));
+                        let entry =
+                            record(binding.generation, binding.id, slots[binding.root], &name);
+                        index.on_bind_record(&entry);
+                        live.push(entry);
+                        max_generation = max_generation.max(binding.generation);
+                        support.binds += 1;
+                    }
+                    Op::Evict(id) => {
+                        let position = live.iter().position(|entry| entry.id.raw() == id).unwrap();
+                        // Preserve model order: candidate lookup's old scanning
+                        // oracle must not inherit the index's swap_remove order.
+                        let entry = live.remove(position);
+                        let final_reference = !live
+                            .iter()
+                            .any(|other| other.root.addr() == entry.root.addr());
+                        assert_eq!(
+                            index.on_evict_record(&entry),
+                            final_reference,
+                            "root release at step {step}: {op:?}"
+                        );
+                        if !live.iter().any(|other| other.module == entry.module) {
+                            interfaces
+                                .retain(|(generation, _)| *generation != entry.module.gen().0);
+                        }
+                        support.evictions += 1;
+                        support.released_roots += usize::from(final_reference);
+                        support.held_roots += usize::from(!final_reference);
+                    }
+                    Op::Read(name, generation) => {
+                        let name = identity(&format!("name_{name}"));
+                        check_resolution(&index, &live, &name, generation);
+                        support.reads += 1;
+                    }
+                    Op::Legacy(generation) => {
+                        let module = SessionModule::val(Generation(generation));
+                        index.mark_legacy_interface(module);
+                        if live.iter().any(|entry| entry.module == module)
+                            && !interfaces.iter().any(|(gen, _)| *gen == generation)
+                        {
+                            interfaces.push((generation, None));
+                        }
+                        max_generation = max_generation.max(generation);
+                        support.legacy += 1;
+                    }
+                    Op::Fixture(generation, byte) => {
+                        let bytes: Arc<[u8]> = Arc::from([byte]);
+                        index.retain_fixture_interface(
+                            SessionModule::val(Generation(generation)),
+                            bytes.clone(),
+                        );
+                        interfaces.retain(|(gen, _)| *gen != generation);
+                        interfaces.push((generation, Some(bytes)));
+                        support.fixtures += 1;
+                    }
+                }
+                check_observables(&index, &live, &interfaces, max_generation);
+            }
+            assert!(live.is_empty());
+            assert!(interfaces.is_empty());
+            assert_eq!(support.binds, support.evictions);
+            support
+        }
+
+        fn config() -> Config {
+            // Direct source-owned persistence avoids seeds landing in Buck's
+            // disposable copied source tree. Run from the repository root;
+            // set an absolute override to retain/replay seeds with evidence.
+            // PROPTEST_CASES and PROPTEST_RNG_SEED remain available for larger
+            // runs and exact seed replay through Config::default().
+            static REGRESSIONS: OnceLock<String> = OnceLock::new();
+            let path = REGRESSIONS.get_or_init(|| {
+                std::env::var("TIDEPOOL_BINDING_INDEX_REGRESSIONS").unwrap_or_else(|_| {
+                    concat!(
+                        env!("CARGO_MANIFEST_DIR"),
+                        "/proptest-regressions/binding_index.txt"
+                    )
+                    .to_owned()
+                })
+            });
+            Config {
+                max_shrink_iters: 4096,
+                failure_persistence: Some(Box::new(FileFailurePersistence::Direct(path))),
+                ..Config::default()
+            }
+        }
+
+        proptest! {
+            #![proptest_config(config())]
+
+            #[test]
+            fn arbitrary_histories_match_scanning_oracle(ops in arbitrary_history()) {
+                replay(&ops);
+            }
+
+            #[test]
+            fn guided_histories_match_scanning_oracle((cohort, ops) in guided_history()) {
+                let support = replay(&ops);
+                prop_assert!(support.binds >= 2, "{support:?}");
+                prop_assert!(support.reads >= 4, "{support:?}");
+                prop_assert!(support.fixtures >= 1, "{support:?}");
+                match cohort {
+                    0 => {
+                        prop_assert!(support.shadows >= 1, "{support:?}");
+                        prop_assert!(support.held_roots >= 1, "{support:?}");
+                    }
+                    1 => {
+                        prop_assert!(support.shared_modules >= 1, "{support:?}");
+                        prop_assert!(support.shared_roots >= 1, "{support:?}");
+                        prop_assert!(support.held_roots >= 1, "{support:?}");
+                        prop_assert!(support.reinsertions >= 1, "{support:?}");
+                    }
+                    2 => prop_assert!(support.reinsertions >= 1, "{support:?}"),
+                    _ => unreachable!("bounded cohort selector"),
+                }
+                prop_assert!(support.released_roots >= 1, "{support:?}");
+            }
+        }
+
+        #[test]
+        fn guided_cohorts_exercise_shadow_shared_root_and_reinsertion() {
+            for cohort in 0..3 {
+                let mut history = History::default();
+                history.guided(cohort);
+                let support = replay(&history.finish());
+                assert!(
+                    support.binds >= 2 && support.reads >= 4 && support.fixtures >= 1,
+                    "{support:?}"
+                );
+                match cohort {
+                    0 => assert!(support.shadows > 0 && support.held_roots > 0, "{support:?}"),
+                    1 => assert!(
+                        support.shared_modules > 0
+                            && support.shared_roots > 0
+                            && support.held_roots > 0
+                            && support.reinsertions > 0,
+                        "{support:?}"
+                    ),
+                    2 => assert!(
+                        support.reinsertions > 0 && support.legacy > 0,
+                        "{support:?}"
+                    ),
+                    _ => unreachable!("bounded cohort selector"),
+                }
+                assert!(support.released_roots > 0, "{support:?}");
+            }
+        }
+    }
 }

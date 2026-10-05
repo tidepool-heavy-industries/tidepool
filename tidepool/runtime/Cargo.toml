@@ -36,6 +36,7 @@ static_assertions.workspace = true
 rpds = "=1.2.1"
 
 [dev-dependencies]
+proptest.workspace = true
 tidepool-test-data.workspace = true
 sha2 = "0.10"
 tidepool-testing.workspace = true
