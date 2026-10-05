@@ -1,5 +1,6 @@
 //! Canonical module interfaces issued by one completed compiler finalization.
-//! Core is retained as compiler input, never projected as execution authority.
+//! Core is retained as compiler input. Native promotion independently certifies
+//! newly prepared products against the original canonical admission.
 
 use super::*;
 use std::path::Component;
@@ -265,6 +266,14 @@ impl FinalizationEnvelope {
                 return Err(CertificationError::Receipt("native finalization differs"));
             }
         }
+        if native.iter().any(|module| {
+            module.origin == ProductOrigin::RetainedCore
+                && self.modules.contains_key(&(module.unit.clone(), module.module.clone()))
+        }) {
+            return Err(CertificationError::Receipt(
+                "retained core owner has fresh finalization",
+            ));
+        }
         Ok(())
     }
 }
@@ -500,6 +509,51 @@ impl CertifiedModuleInterface {
     /// interface capability. Preparation requires a separate admission owner.
     pub(crate) fn core_bytes(&self) -> Option<&[u8]> {
         self.core.as_deref()
+    }
+
+    /// Only an independently admitted defining original can authorize a new
+    /// native child. The worker cannot replace its canonical payload or seals.
+    pub(super) fn validate_native_promotion(
+        &self,
+        accepted: &CertifiedModuleReceipt,
+        producer: [u8; 32],
+        inherited_seals: &BTreeMap<(String, String), [u8; 32]>,
+        interface: &[u8],
+        package_imports: &[u8],
+    ) -> CertResult<()> {
+        let (Some(core), Some(descriptor)) = (&self.core, &self.receipt.core) else {
+            return Err(CertificationError::Mismatch("retained original core absent"));
+        };
+        if !matches!(self.origin, CanonicalOrigin::SourceOriginal { .. })
+            || accepted.origin != ProductOrigin::RetainedCore
+            || accepted.module_version.is_some()
+            || self.producer_sha256 != producer
+            || self.receipt.unit != accepted.unit
+            || self.receipt.module != accepted.module
+            || self.receipt.source_sha256 != accepted.source_sha256
+            || self.receipt.interface.sha256 != accepted.skinny_iface_sha256
+            || self.receipt.interface_requirements != accepted.interface_requirements
+            || sha(&self.certificate) != accepted.dependency_witness_sha256
+            || self.interface.as_ref() != interface
+            || self.package_imports.as_ref() != package_imports
+            || core.len() as u64 != descriptor.bytes
+            || sha(core) != descriptor.sha256
+        {
+            return Err(CertificationError::Mismatch("retained original promotion identity"));
+        }
+        for (required, seal) in &self.receipt.interface_requirements {
+            if inherited_seals.get(required) != Some(seal) {
+                return Err(CertificationError::FinalizedInterfaceRequirement {
+                    unit: self.receipt.unit.clone(),
+                    module: self.receipt.module.clone(),
+                    required_unit: required.0.clone(),
+                    required_module: required.1.clone(),
+                    expected_sha256: hex(seal),
+                    selected_sha256: inherited_seals.get(required).map(|seal| hex(seal)),
+                });
+            }
+        }
+        Ok(())
     }
 }
 
@@ -955,6 +1009,105 @@ mod tests {
 
     fn interface(core: Option<Vec<u8>>) -> CertifiedModuleInterface {
         interface_for_owner("home-a", "Owner", core)
+    }
+
+    #[test]
+    fn retained_native_promotion_requires_original_payloads_and_exact_seals() {
+        let original = interface(Some(b"core".to_vec()));
+        let required = ("home-a".into(), "Dependency".into());
+        let requirements = BTreeMap::from([(required.clone(), [9; 32])]);
+        let original = fixture_interface(
+            original.producer_sha256(),
+            original.unit(),
+            original.module(),
+            original.source_sha256(),
+            original.interface_bytes().to_vec(),
+            original.package_imports_bytes().to_vec(),
+            requirements.clone(),
+            original.core_bytes().map(ToOwned::to_owned),
+        );
+        let accepted = CertifiedModuleReceipt {
+            origin: ProductOrigin::RetainedCore,
+            unit: original.unit().into(),
+            module: original.module().into(),
+            module_version: None,
+            source_sha256: original.source_sha256(),
+            skinny_iface_sha256: original.interface_sha256(),
+            product_sha256: [10; 32],
+            dependency_witness_sha256: sha(original.certificate_bytes()),
+            groups: vec![],
+            interface_requirements: requirements.clone(),
+        };
+        let validate = |original: &CertifiedModuleInterface,
+                        accepted: &CertifiedModuleReceipt,
+                        seals: &BTreeMap<_, _>,
+                        interface: &[u8],
+                        packages: &[u8]| {
+            original.validate_native_promotion(
+                accepted, [7; 32], seals, interface, packages,
+            )
+        };
+        assert!(validate(
+            &original, &accepted, &requirements,
+            original.interface_bytes(), original.package_imports_bytes(),
+        ).is_ok());
+        let receipt_mutations: [fn(&mut CertifiedModuleReceipt); 8] = [
+            |row: &mut CertifiedModuleReceipt| row.origin = ProductOrigin::Fresh,
+            |row: &mut CertifiedModuleReceipt| row.unit = "other-home".into(),
+            |row: &mut CertifiedModuleReceipt| row.module = "Other".into(),
+            |row: &mut CertifiedModuleReceipt| row.source_sha256 = [0; 32],
+            |row: &mut CertifiedModuleReceipt| row.skinny_iface_sha256 = [0; 32],
+            |row: &mut CertifiedModuleReceipt| row.dependency_witness_sha256 = [0; 32],
+            |row: &mut CertifiedModuleReceipt| row.interface_requirements.clear(),
+            |row: &mut CertifiedModuleReceipt| row.module_version = Some(ModuleVersion([11; 32])),
+        ];
+        for mutate in receipt_mutations {
+            let mut changed = accepted.clone();
+            mutate(&mut changed);
+            assert!(validate(
+                &original, &changed, &requirements,
+                original.interface_bytes(), original.package_imports_bytes(),
+            ).is_err());
+        }
+        for seals in [BTreeMap::new(), BTreeMap::from([(required, [0; 32])])] {
+            assert!(matches!(validate(
+                &original, &accepted, &seals,
+                original.interface_bytes(), original.package_imports_bytes(),
+            ), Err(CertificationError::FinalizedInterfaceRequirement { .. })));
+        }
+        assert!(validate(
+            &original, &accepted, &requirements,
+            b"changed interface", original.package_imports_bytes(),
+        ).is_err());
+        assert!(validate(
+            &original, &accepted, &requirements,
+            original.interface_bytes(), b"changed packages",
+        ).is_err());
+        let canonical_mutations: [fn(&mut CertifiedModuleInterface); 4] = [
+            |module: &mut CertifiedModuleInterface| module.core = None,
+            |module: &mut CertifiedModuleInterface| module.core = Some(b"changed Core".to_vec().into()),
+            |module: &mut CertifiedModuleInterface| module.producer_sha256 = [0; 32],
+            |module: &mut CertifiedModuleInterface| module.origin = CanonicalOrigin::NativeAuthoredDeclaration { generation: 1 },
+        ];
+        for mutate in canonical_mutations {
+            let mut changed = original.clone();
+            mutate(&mut changed);
+            assert!(validate(
+                &changed, &accepted, &requirements,
+                original.interface_bytes(), original.package_imports_bytes(),
+            ).is_err());
+        }
+        let envelope = FinalizationEnvelope {
+            profile: FINALIZATION_PROFILE.into(),
+            home_units: original.home_units().clone(),
+            modules: BTreeMap::from([(
+                (original.unit().into(), original.module().into()), original.receipt.clone(),
+            )]),
+        };
+        assert!(matches!(
+            envelope.validate_owners(&[accepted], &BTreeMap::new()),
+            Err(CertificationError::Receipt("retained core owner has fresh finalization")),
+        ));
     }
 
     #[test]
