@@ -864,11 +864,16 @@ tidepool_rust_isolated_test(
     named_deps = {
         "harness": "//third-party/rust:harness",
     },
+    env = {
+        "EXOMONAD_NIX_OFFLINE": "1",
+    },
     resources = [
         "//build/rust:workspace_git_bundle",
         "//build/rust:workspace_gitlink",
+        "toolchains//:exomonad_runtime_tools",
     ],
     resource_env = {
+        "EXOMONAD_NIX_BIN": "$(location toolchains//:exomonad_runtime_tools)/bin/nix",
         "EXOMONAD_WORKSPACE_GITLINK": "$(location //build/rust:workspace_gitlink)",
         "EXOMONAD_WORKSPACE_GIT_BUNDLE": "$(location //build/rust:workspace_git_bundle)",
     },
@@ -1016,11 +1021,16 @@ tidepool_rust_isolated_test(
     named_deps = {
         "harness": "//third-party/rust:harness",
     },
+    env = {
+        "EXOMONAD_NIX_OFFLINE": "1",
+    },
     resources = [
         "//build/rust:workspace_git_bundle",
         "//build/rust:workspace_gitlink",
+        "toolchains//:exomonad_runtime_tools",
     ],
     resource_env = {
+        "EXOMONAD_NIX_BIN": "$(location toolchains//:exomonad_runtime_tools)/bin/nix",
         "EXOMONAD_WORKSPACE_GITLINK": "$(location //build/rust:workspace_gitlink)",
         "EXOMONAD_WORKSPACE_GIT_BUNDLE": "$(location //build/rust:workspace_git_bundle)",
     },
@@ -1168,11 +1178,16 @@ tidepool_rust_isolated_test(
     named_deps = {
         "harness": "//third-party/rust:harness",
     },
+    env = {
+        "EXOMONAD_NIX_OFFLINE": "1",
+    },
     resources = [
         "//build/rust:workspace_git_bundle",
         "//build/rust:workspace_gitlink",
+        "toolchains//:exomonad_runtime_tools",
     ],
     resource_env = {
+        "EXOMONAD_NIX_BIN": "$(location toolchains//:exomonad_runtime_tools)/bin/nix",
         "EXOMONAD_WORKSPACE_GITLINK": "$(location //build/rust:workspace_gitlink)",
         "EXOMONAD_WORKSPACE_GIT_BUNDLE": "$(location //build/rust:workspace_git_bundle)",
     },
@@ -1320,11 +1335,16 @@ tidepool_rust_isolated_test(
     named_deps = {
         "harness": "//third-party/rust:harness",
     },
+    env = {
+        "EXOMONAD_NIX_OFFLINE": "1",
+    },
     resources = [
         "//build/rust:workspace_git_bundle",
         "//build/rust:workspace_gitlink",
+        "toolchains//:exomonad_runtime_tools",
     ],
     resource_env = {
+        "EXOMONAD_NIX_BIN": "$(location toolchains//:exomonad_runtime_tools)/bin/nix",
         "EXOMONAD_WORKSPACE_GITLINK": "$(location //build/rust:workspace_gitlink)",
         "EXOMONAD_WORKSPACE_GIT_BUNDLE": "$(location //build/rust:workspace_git_bundle)",
     },
@@ -1765,6 +1785,7 @@ tidepool_rust_test_cases(
     test_rule_timeout_ms = 1860000,
     env = {
         "TIDEPOOL_KEEP_TEST_LOGS": "1",
+        "EXOMONAD_NIX_OFFLINE": "1",
     },
     resource_env = {
         "TIDEPOOL_TEST_BASH": "$(exe toolchains//:bash)",
@@ -1776,11 +1797,13 @@ tidepool_rust_test_cases(
         "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
         "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
         "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
+        "EXOMONAD_NIX_BIN": "$(location toolchains//:exomonad_runtime_tools)/bin/nix",
     },
     resources = [
         "toolchains//:test_tools_closure",
         "//build/rust:workspace_gitlink",
         "//build/rust:workspace_git_bundle",
+        "toolchains//:exomonad_runtime_tools",
         "//web:dist",
         "//bridge/haskell:facade_embedded_sources",
         "//build/package:compiler_deployment",
@@ -1803,6 +1826,7 @@ tidepool_rust_test_cases(
     test_rule_timeout_ms = 1260000,
     env = {
         "TIDEPOOL_KEEP_TEST_LOGS": "1",
+        "EXOMONAD_NIX_OFFLINE": "1",
     },
     resource_env = {
         "TIDEPOOL_TEST_BASH": "$(exe toolchains//:bash)",
@@ -1814,11 +1838,13 @@ tidepool_rust_test_cases(
         "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
         "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
         "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
+        "EXOMONAD_NIX_BIN": "$(location toolchains//:exomonad_runtime_tools)/bin/nix",
     },
     resources = [
         "toolchains//:test_tools_closure",
         "//build/rust:workspace_gitlink",
         "//build/rust:workspace_git_bundle",
+        "toolchains//:exomonad_runtime_tools",
         "//web:dist",
         "//bridge/haskell:facade_embedded_sources",
         "//build/package:compiler_deployment",
@@ -1850,6 +1876,8 @@ tidepool_rust_test_cases(
         "TIDEPOOL_EFFECTS_SOURCE_ROOT": "$(location //bridge/mcp:effects_generated)",
         "EXOMONAD_WORKSPACE_GITLINK": "$(location //build/rust:workspace_gitlink)",
         "EXOMONAD_WORKSPACE_GIT_BUNDLE": "$(location //build/rust:workspace_git_bundle)",
+        "EXOMONAD_NIX_BIN": "$(location toolchains//:exomonad_runtime_tools)/bin/nix",
+        "EXOMONAD_NIX_OFFLINE": "1",
     },
     resources = [
         "//bridge/haskell:facade_embedded_sources",
@@ -1858,6 +1886,7 @@ tidepool_rust_test_cases(
         "//build/package:tidepool_extract_runtime_libraries",
         "//build/rust:workspace_git_bundle",
         "//build/rust:workspace_gitlink",
+        "toolchains//:exomonad_runtime_tools",
     ],
     haskell_worker = True,
     visibility = ["PUBLIC"],
@@ -1887,6 +1916,8 @@ tidepool_rust_test_cases(
         "TIDEPOOL_RECIPE_WORKSPACE": "$(location //exomonad/examples/workspace:facade_test_sources)/.exomonad",
         "EXOMONAD_WORKSPACE_GITLINK": "$(location //build/rust:workspace_gitlink)",
         "EXOMONAD_WORKSPACE_GIT_BUNDLE": "$(location //build/rust:workspace_git_bundle)",
+        "EXOMONAD_NIX_BIN": "$(location toolchains//:exomonad_runtime_tools)/bin/nix",
+        "EXOMONAD_NIX_OFFLINE": "1",
     },
     resources = [
         "//bridge/haskell:facade_embedded_sources",
@@ -1896,6 +1927,7 @@ tidepool_rust_test_cases(
         "//build/rust:workspace_git_bundle",
         "//build/rust:workspace_gitlink",
         "//exomonad/examples/workspace:facade_test_sources",
+        "toolchains//:exomonad_runtime_tools",
     ],
     haskell_worker = True,
     visibility = ["PUBLIC"],
@@ -1914,6 +1946,7 @@ tidepool_rust_test_cases(
     test_rule_timeout_ms = 660000,
     env = {
         "TIDEPOOL_KEEP_TEST_LOGS": "1",
+        "EXOMONAD_NIX_OFFLINE": "1",
     },
     resource_env = {
         "TIDEPOOL_TEST_BASH": "$(exe toolchains//:bash)",
@@ -1925,11 +1958,13 @@ tidepool_rust_test_cases(
         "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
         "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
         "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
+        "EXOMONAD_NIX_BIN": "$(location toolchains//:exomonad_runtime_tools)/bin/nix",
     },
     resources = [
         "toolchains//:test_tools_closure",
         "//build/rust:workspace_gitlink",
         "//build/rust:workspace_git_bundle",
+        "toolchains//:exomonad_runtime_tools",
         "//web:dist",
         "//bridge/haskell:facade_embedded_sources",
         "//build/package:compiler_deployment",
@@ -1951,6 +1986,7 @@ tidepool_rust_test_cases(
     test_rule_timeout_ms = 660000,
     env = {
         "TIDEPOOL_KEEP_TEST_LOGS": "1",
+        "EXOMONAD_NIX_OFFLINE": "1",
     },
     resource_env = {
         "TIDEPOOL_TEST_BASH": "$(exe toolchains//:bash)",
@@ -1962,11 +1998,13 @@ tidepool_rust_test_cases(
         "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
         "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
         "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
+        "EXOMONAD_NIX_BIN": "$(location toolchains//:exomonad_runtime_tools)/bin/nix",
     },
     resources = [
         "toolchains//:test_tools_closure",
         "//build/rust:workspace_gitlink",
         "//build/rust:workspace_git_bundle",
+        "toolchains//:exomonad_runtime_tools",
         "//web:dist",
         "//bridge/haskell:facade_embedded_sources",
         "//build/package:compiler_deployment",
@@ -1988,6 +2026,7 @@ tidepool_rust_test_cases(
     test_rule_timeout_ms = 960000,
     env = {
         "TIDEPOOL_KEEP_TEST_LOGS": "1",
+        "EXOMONAD_NIX_OFFLINE": "1",
     },
     resource_env = {
         "TIDEPOOL_TEST_BASH": "$(exe toolchains//:bash)",
@@ -1999,6 +2038,7 @@ tidepool_rust_test_cases(
         "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
         "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
         "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
+        "EXOMONAD_NIX_BIN": "$(location toolchains//:exomonad_runtime_tools)/bin/nix",
         "TIDEPOOL_BROWSER_DRIVER": "$(location //build/testing/browser:driver_bundle)/driver.mjs",
         "TIDEPOOL_BROWSER_NODE": "$(exe toolchains//:browser_node)",
         "PLAYWRIGHT_BROWSERS_PATH": "$(location toolchains//:playwright_browsers)",
@@ -2007,6 +2047,7 @@ tidepool_rust_test_cases(
         "toolchains//:test_tools_closure",
         "//build/rust:workspace_gitlink",
         "//build/rust:workspace_git_bundle",
+        "toolchains//:exomonad_runtime_tools",
         "//web:dist",
         "//bridge/haskell:facade_embedded_sources",
         "//build/package:compiler_deployment",
@@ -2027,6 +2068,7 @@ tidepool_rust_test_cases(
     test_rule_timeout_ms = 7200000,
     env = {
         "TIDEPOOL_KEEP_TEST_LOGS": "1",
+        "EXOMONAD_NIX_OFFLINE": "1",
     },
     resource_env = {
         "TIDEPOOL_TEST_BASH": "$(exe toolchains//:bash)",
@@ -2038,6 +2080,7 @@ tidepool_rust_test_cases(
         "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
         "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
         "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
+        "EXOMONAD_NIX_BIN": "$(location toolchains//:exomonad_runtime_tools)/bin/nix",
         "TIDEPOOL_BROWSER_DRIVER": "$(location //build/testing/browser:driver_bundle)/driver.mjs",
         "TIDEPOOL_BROWSER_NODE": "$(exe toolchains//:browser_node)",
         "PLAYWRIGHT_BROWSERS_PATH": "$(location toolchains//:playwright_browsers)",
@@ -2046,6 +2089,7 @@ tidepool_rust_test_cases(
         "toolchains//:test_tools_closure",
         "//build/rust:workspace_gitlink",
         "//build/rust:workspace_git_bundle",
+        "toolchains//:exomonad_runtime_tools",
         "//web:dist",
         "//bridge/haskell:facade_embedded_sources",
         "//build/package:compiler_deployment",
@@ -2124,11 +2168,16 @@ tidepool_rust_isolated_test(
     named_deps = {
         "harness": "//third-party/rust:harness",
     },
+    env = {
+        "EXOMONAD_NIX_OFFLINE": "1",
+    },
     resources = [
         "//build/rust:workspace_git_bundle",
         "//build/rust:workspace_gitlink",
+        "toolchains//:exomonad_runtime_tools",
     ],
     resource_env = {
+        "EXOMONAD_NIX_BIN": "$(location toolchains//:exomonad_runtime_tools)/bin/nix",
         "EXOMONAD_WORKSPACE_GITLINK": "$(location //build/rust:workspace_gitlink)",
         "EXOMONAD_WORKSPACE_GIT_BUNDLE": "$(location //build/rust:workspace_git_bundle)",
     },
@@ -2217,6 +2266,7 @@ tidepool_rust_isolated_test(
         "harness": "//third-party/rust:harness",
     },
     env = {
+        "EXOMONAD_NIX_OFFLINE": "1",
         "TIDEPOOL_KEEP_TEST_LOGS": "1",
     },
     resources = [
@@ -2225,8 +2275,10 @@ tidepool_rust_isolated_test(
         "//build/package:tidepool_extract_runtime_libraries",
         "//build/rust:workspace_git_bundle",
         "//build/rust:workspace_gitlink",
+        "toolchains//:exomonad_runtime_tools",
     ],
     resource_env = {
+        "EXOMONAD_NIX_BIN": "$(location toolchains//:exomonad_runtime_tools)/bin/nix",
         "EXOMONAD_WORKSPACE_GITLINK": "$(location //build/rust:workspace_gitlink)",
         "EXOMONAD_WORKSPACE_GIT_BUNDLE": "$(location //build/rust:workspace_git_bundle)",
         "LD_LIBRARY_PATH": "$(location //build/package:tidepool_extract_runtime_libraries)",
@@ -2307,11 +2359,16 @@ tidepool_rust_isolated_test(
     named_deps = {
         "harness": "//third-party/rust:harness",
     },
+    env = {
+        "EXOMONAD_NIX_OFFLINE": "1",
+    },
     resources = [
         "//build/rust:workspace_git_bundle",
         "//build/rust:workspace_gitlink",
+        "toolchains//:exomonad_runtime_tools",
     ],
     resource_env = {
+        "EXOMONAD_NIX_BIN": "$(location toolchains//:exomonad_runtime_tools)/bin/nix",
         "EXOMONAD_WORKSPACE_GITLINK": "$(location //build/rust:workspace_gitlink)",
         "EXOMONAD_WORKSPACE_GIT_BUNDLE": "$(location //build/rust:workspace_git_bundle)",
     },
@@ -2384,11 +2441,16 @@ tidepool_rust_isolated_test(
     named_deps = {
         "harness": "//third-party/rust:harness",
     },
+    env = {
+        "EXOMONAD_NIX_OFFLINE": "1",
+    },
     resources = [
         "//build/rust:workspace_git_bundle",
         "//build/rust:workspace_gitlink",
+        "toolchains//:exomonad_runtime_tools",
     ],
     resource_env = {
+        "EXOMONAD_NIX_BIN": "$(location toolchains//:exomonad_runtime_tools)/bin/nix",
         "EXOMONAD_WORKSPACE_GITLINK": "$(location //build/rust:workspace_gitlink)",
         "EXOMONAD_WORKSPACE_GIT_BUNDLE": "$(location //build/rust:workspace_git_bundle)",
     },

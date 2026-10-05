@@ -558,6 +558,19 @@ pub(super) fn nix_bin() -> PathBuf {
     std::env::var_os(super::ENV_NIX_BIN).map_or_else(|| PathBuf::from("nix"), PathBuf::from)
 }
 
+/// Locking and source capture share the declared executable and network policy.
+pub(super) fn nix_command() -> std::process::Command {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "one-shot Nix source admission; not a long-lived child"
+    )]
+    let mut command = std::process::Command::new(nix_bin());
+    if std::env::var_os(super::ENV_NIX_OFFLINE).is_some() {
+        command.arg("--offline");
+    }
+    command
+}
+
 /// Fetch the project's flake inputs and return the Haskell source directories
 /// `[haskell.flake_sources]` selects from them, ordered by input name.
 ///
@@ -654,11 +667,7 @@ fn archive_flake_sources(workspace: &Path, config: &HaskellConfig) -> Result<Vec
     }
     let base = workspace.join(".exomonad");
     let nix = nix_bin();
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "one-shot nix flake archive, like a git one-shot; not a long-lived child"
-    )]
-    let mut command = std::process::Command::new(&nix);
+    let mut command = nix_command();
     command
         .arg("--extra-experimental-features")
         .arg("nix-command flakes")
@@ -1522,6 +1531,34 @@ mod tests {
         let third = FrozenWorkspace::load(project.path(), third_run.path()).unwrap();
         assert!(tiny(&third).contains("123"), "{}", tiny(&third));
         assert_ne!(cache_key(&second.include), cache_key(&third.include));
+    }
+
+    #[test]
+    fn unavailable_flake_input_refuses_offline_source_admission() {
+        assert!(
+            std::env::var_os(super::super::ENV_NIX_OFFLINE).is_some(),
+            "native source admission must explicitly refuse network fetching"
+        );
+        assert!(
+            nix_bin().is_file(),
+            "source admission requires its declared Nix executable"
+        );
+        let project = tempfile::tempdir().unwrap();
+        let missing = project.path().join("unavailable-pinned-input");
+        pin_tiny_input(project.path(), &missing);
+        let config = HaskellConfig {
+            flake_sources: BTreeMap::from([("tiny".to_owned(), vec![PathBuf::from("src")])]),
+            ..HaskellConfig::default()
+        };
+        let error = resolve_source_roots(project.path(), &config)
+            .expect_err("missing pinned source must refuse")
+            .to_string();
+        assert!(
+            error.contains("cannot fetch the project's flake inputs"),
+            "{error}"
+        );
+        assert!(error.contains("unavailable-pinned-input"), "{error}");
+        assert!(!project.path().join("flake.lock").exists());
     }
 
     /// The pinned module is not merely captured. The resident machine compiles

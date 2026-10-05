@@ -618,15 +618,18 @@ def test_runtime_inputs(package_name, target_name, unit=False):
     if package_name == "tidepool":
         env["EXOMONAD_WORKSPACE_GITLINK"] = "$(location //build/rust:workspace_gitlink)"
         env["EXOMONAD_WORKSPACE_GIT_BUNDLE"] = "$(location //build/rust:workspace_git_bundle)"
+        env["EXOMONAD_NIX_BIN"] = "$(location toolchains//:exomonad_runtime_tools)/bin/nix"
+        env["EXOMONAD_NIX_OFFLINE"] = "1"
         resources.append("//build/rust:workspace_gitlink")
         resources.append("//build/rust:workspace_git_bundle")
+        resources.append("toolchains//:exomonad_runtime_tools")
     return env, sorted(set(resources)), worker
 
 
 def runtime_arguments(env, resources, worker, resource_env=None):
     env = dict(env)
     resource_env = dict(resource_env or {})
-    for key in ("EXOMONAD_WORKSPACE_GITLINK", "EXOMONAD_WORKSPACE_GIT_BUNDLE"):
+    for key in ("EXOMONAD_WORKSPACE_GITLINK", "EXOMONAD_WORKSPACE_GIT_BUNDLE", "EXOMONAD_NIX_BIN"):
         if key in env:
             resource_env[key] = env.pop(key)
     lines = []
@@ -905,8 +908,9 @@ def facade_test_cases(binary):
         "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
         "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
         "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
+        "EXOMONAD_NIX_BIN": "$(location toolchains//:exomonad_runtime_tools)/bin/nix",
     }
-    host_env = {"TIDEPOOL_KEEP_TEST_LOGS": "1"}
+    host_env = {"TIDEPOOL_KEEP_TEST_LOGS": "1", "EXOMONAD_NIX_OFFLINE": "1"}
     browser_paths = {
         **host_paths,
         "TIDEPOOL_BROWSER_DRIVER": "$(location //build/testing/browser:driver_bundle)/driver.mjs",
@@ -915,6 +919,7 @@ def facade_test_cases(binary):
     }
     process_resources = ["toolchains//:test_tools_closure", "//build/rust:workspace_gitlink", "//build/rust:workspace_git_bundle"]
     host_resources = process_resources + [
+        "toolchains//:exomonad_runtime_tools",
         "//web:dist",
         "//bridge/haskell:facade_embedded_sources",
         "//build/package:compiler_deployment",
@@ -1179,7 +1184,11 @@ tidepool_buildscript_run(
         if ((package_name == "tidepool-mcp" and target["name"] == "mcp")
                 or (package_name == "tidepool" and target["name"] == "exomonad_action_surface")):
             resource_env = env
-            env = {"TIDEPOOL_KEEP_TEST_LOGS": resource_env.pop("TIDEPOOL_KEEP_TEST_LOGS")}
+            env = {
+                key: resource_env.pop(key)
+                for key in ("TIDEPOOL_KEEP_TEST_LOGS", "EXOMONAD_NIX_OFFLINE")
+                if key in resource_env
+            }
         extra = runtime_arguments(env, resources, worker, resource_env)
         if package["name"] == "tidepool-atomic-write" and target["name"] == "strict_directory":
             extra = '    env = {"TIDEPOOL_DIRECTORY_FAULT_LIBRARY": "$(location :directory_fault_shared)"},'

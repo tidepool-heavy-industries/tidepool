@@ -36,7 +36,7 @@ UNSET_ENVIRONMENT = (
     "TIDEPOOL_EXTRACT_DAEMON_SOCKET", "TIDEPOOL_COMPILER_MODULES",
     "TIDEPOOL_COMPILER_DEPLOYMENT", "TIDEPOOL_EXTRACT_WORKER",
     "TIDEPOOL_EXTRACT", "TIDEPOOL_PRELUDE_DIR", "TIDEPOOL_GHC_LIBDIR",
-    "EXOMONAD_EMBEDDED_ASSET_ROOT", "EXOMONAD_WORKSPACE_GITLINK", "EXOMONAD_WORKSPACE_GIT_BUNDLE", "LD_LIBRARY_PATH", "TIDEPOOL_EXTRACT_NO_DAEMON",
+    "EXOMONAD_EMBEDDED_ASSET_ROOT", "EXOMONAD_WORKSPACE_GITLINK", "EXOMONAD_WORKSPACE_GIT_BUNDLE", "EXOMONAD_NIX_BIN", "EXOMONAD_NIX_OFFLINE", "LD_LIBRARY_PATH", "TIDEPOOL_EXTRACT_NO_DAEMON",
 )
 ARTIFACT_TARGETS = {
     "bin/exomonad-unwrapped": "//bridge/facade:exomonad",
@@ -240,6 +240,7 @@ def native_environment(root: Path) -> dict:
         "EXOMONAD_EMBEDDED_ASSET_ROOT": str(root / "share/exomonad/web"),
         "EXOMONAD_WORKSPACE_GITLINK": str(root / "share/exomonad/workspace-gitlink.json"),
         "EXOMONAD_WORKSPACE_GIT_BUNDLE": str(root / "share/exomonad/workspace.bundle"),
+        "EXOMONAD_NIX_BIN": str(root / "share/exomonad/runtime-tools/bin/nix"),
         "LD_LIBRARY_PATH": str(root / "lib/tidepool"),
         "PATH": str(tools / "bin") + ":" + str(root / "bin"),
         "TIDEPOOL_KEEP_TEST_LOGS": "1",
