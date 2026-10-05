@@ -85,8 +85,11 @@ The delivery execution owner owns integration, the admitted build lane and
 production host/M2 gates; root provides architectural review while discussing
 direction with the user. Component owners use separate
 source worktrees. Agree shared interfaces before crossing ownership boundaries.
-One admitted expensive build lane initially; other workers prepare changes and
-request root validation. No Buck in unprovisioned source worktrees. Builds use
+Independent acceptance cases run concurrently under the execution owner's
+measured resource admission; a serial cohort is not a host resource policy.
+Track aggregate memory, individual process peaks and actual CPU access before
+raising concurrency. Source workers prepare changes and request validation.
+No Buck in unprovisioned source worktrees. Builds use
 the provisioned main checkout after integration, pinned tools and local-only
 execution. Review focused failure paths and compile all affected targets.
 

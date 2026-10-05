@@ -191,8 +191,12 @@ Keep detailed design references out of always-loaded instructions.
 
 - Compile every changed or directly affected target and run the smallest tests
   that prove its behavior, including meaningful refusal and cleanup controls.
-  Coordinate one expensive build/test lane on the shared server. Preserve
-  source-only parcels until the execution owner admits their qualification.
+  Coordinate build/test capacity through the execution owner using actual
+  process peaks, enclosing cgroup limits and host headroom. Run independent
+  cases in parallel when that accounting supports it; CPU count alone is not
+  a safe heavy-test process count. Follow `docs/swarm-builds.md` for admitted
+  parallel execution. Preserve source-only parcels until their qualification
+  is scheduled.
 - `just test-lib PACKAGE --exact FULL_NAME --expected-count N` selects unit
   cases; `just test-target PACKAGE TARGET ...` selects an integration target.
   `just test-bin PACKAGE BINARY ...` selects binary tests. `just test-list`

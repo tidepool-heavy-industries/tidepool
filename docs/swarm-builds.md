@@ -32,6 +32,39 @@ test counts, exit status and log before reporting. Building a `rust_test` target
 only links its executable; use an accepted focused runner to execute tests.
 Do not claim remote qualification from local results.
 
+### Parallel frozen acceptance
+
+The existing system `build.slice` limits the Buck daemon and its descendants
+to 24 CPU equivalents and 40 GiB RAM. The existing user
+`tidepool-completion-build.slice` admits all 32 CPUs, with 96 GiB memory high,
+104 GiB maximum and 2 GiB maximum swap. These are separate enclosing budgets;
+their sum is not additional physical memory. Verify the loaded properties
+before using these host-specific values.
+
+Keep Buck clients and the owned Buck daemon in `build.slice`. Launch frozen
+acceptance through its canonical qualification owner with explicit `--jobs`,
+`--delegated-service` and
+`--service-slice tidepool-completion-build.slice`; see
+`build/package/README.md`. The client may start through `swarm-build`, while
+the existing isolated runner asks the user manager to admit each actual test
+and its descendants into a separate service in the larger slice. This
+preserves counted execution, per-case deadlines and complete process cleanup.
+Verify the test process cgroup rather than inferring it from its client.
+
+Start with three concurrent heavy hosted cases and schedule independent
+lighter native work alongside them. Observed hosted cases have reached about
+18 GiB per process tree; old live hosts also consume the user slice. Retain
+each service's peak before it is collected, monitor both enclosing slices,
+and keep roughly 20 GiB host memory available for transient growth, SSH and
+the OS. Increase concurrency only when the measured peaks fit. All CPUs may
+execute useful independent work; one serial compiler phase does not become
+parallel merely by assigning it more CPUs.
+
+Parallel semantic acceptance records shared-load wall times. Dedicated timing
+comparisons retain their own admission conditions. Do not rerun already
+qualified batteries solely to occupy idle CPUs, or change the bytes or
+deadlines of an in-flight frozen cohort.
+
 ## Historical remote-execution evidence
 
 The following is retained as evidence for the exact 2026-09-30 revisions and
