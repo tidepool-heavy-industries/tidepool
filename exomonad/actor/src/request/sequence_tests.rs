@@ -268,6 +268,8 @@ struct WatchModel {
 #[derive(Default, Debug)]
 struct Coverage {
     operations: BTreeMap<String, usize>,
+    changes_by_operation: BTreeMap<String, usize>,
+    refusals_by_operation: BTreeMap<String, usize>,
     changed: usize,
     unchanged: usize,
     refusals: usize,
@@ -315,10 +317,12 @@ fn run_history(operations: &[Operation], coverage: &mut Coverage) -> Result<(), 
         let before = (requests.clone(), watches.clone());
         coverage.stale_incarnation_attempts += usize::from(identity == Identity::Restarted);
         coverage.after_terminal += usize::from(requests[key].outcome.is_some());
+        let operation_name = format!("{action:?}");
         *coverage
             .operations
-            .entry(format!("{action:?}"))
+            .entry(operation_name.clone())
             .or_default() += 1;
+        let previous_refusals = coverage.refusals;
         let mut notices = Vec::new();
         let model = &mut requests[key];
         match action {
@@ -862,10 +866,18 @@ fn run_history(operations: &[Operation], coverage: &mut Coverage) -> Result<(), 
                 && !request.target_finished
                 && (request.admitted || request.cancellation.is_some())
         }));
+        *coverage
+            .refusals_by_operation
+            .entry(operation_name.clone())
+            .or_default() += coverage.refusals - previous_refusals;
         if before == (requests.clone(), watches.clone()) {
             coverage.unchanged += 1;
         } else {
             coverage.changed += 1;
+            *coverage
+                .changes_by_operation
+                .entry(operation_name)
+                .or_default() += 1;
         }
     }
     Ok(())
@@ -887,6 +899,11 @@ fn generated_request_lifecycle_matches_observable_model() {
     let mut runner = TestRunner::new(Config {
         cases: 96,
         max_shrink_iters: 4_096,
+        source_file: Some(file!()),
+        test_name: Some(concat!(
+            module_path!(),
+            "::generated_request_lifecycle_matches_observable_model"
+        )),
         ..Config::default()
     });
     let coverage = RefCell::new(Coverage::default());
