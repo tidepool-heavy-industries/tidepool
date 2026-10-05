@@ -122,6 +122,33 @@ class IsolatedLibtestTests(unittest.TestCase):
         self.assertIn('--setenv=DECLARED_FIXTURE=/declared/fixture', command)
         self.assertFalse(any('UNDECLARED_FIXTURE' in word for word in command))
 
+    def test_success_retains_physical_timing_and_outcome_before_scratch_deletion(self):
+        root = Path(self.tmp.name) / 'timing-artifacts'
+        def run(args, timeout, environment=None):
+            compiler = root / 'compiler'
+            compiler.mkdir()
+            (compiler / 'owned-compiler-outcome.json').write_text(json.dumps({'cleanup': {'status': 'confirmed'}}))
+            (compiler / 'lifecycle.json').write_text(json.dumps({'pid': 73, 'producer': 'matched'}))
+            rows = [
+                {'fields': {'execution_layer': 'transaction_wrapper', 'elapsed_ms': 10}},
+                {'fields': {'execution_layer': 'physical', 'physical_execution': '73:1', 'elapsed_ms': 9}},
+            ]
+            (compiler / 'compiler.jsonl').write_text(''.join(json.dumps(row) + '\n' for row in rows))
+            return completed_process(args, 0,
+                'test result: ok. 1 passed; 0 failed; 0 ignored;\n', '')
+        record = {}
+        with patch.object(runner, 'execute', side_effect=run):
+            passed, _, _ = runner.run_one(str(self.binary), 'suite::works', False,
+                10, record, artifact_root=root)
+        self.assertTrue(passed)
+        self.assertFalse(root.exists())
+        summary = record['diagnostic_summaries']
+        self.assertEqual(summary['owned_compiler_lifecycle']['pid'], 73)
+        timing = summary['physical_compiler_timing']
+        self.assertTrue(timing['complete'])
+        self.assertEqual(timing['physical_record_count'], 1)
+        self.assertEqual(timing['records'][0]['fields']['physical_execution'], '73:1')
+
     def test_regeneration_modes_refuse_before_discovery_or_execution(self):
         for name in ('TIDEPOOL_REGEN_BRIDGED', 'TIDEPOOL_REGEN_PROTOCOL_GOLDENS'):
             with self.subTest(name=name), patch.dict(os.environ, {name: '1'}), \

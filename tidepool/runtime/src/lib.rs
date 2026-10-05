@@ -410,6 +410,51 @@ mod tests {
     use super::*;
     use serial_test::serial;
 
+    struct DiagnosticTestScope {
+        _root: tempfile::TempDir,
+        previous: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+
+    impl DiagnosticTestScope {
+        fn when_not_owned_by_runner() -> Option<Self> {
+            if std::env::var("TIDEPOOL_TEST_DIAGNOSTIC_SCOPE").as_deref() == Ok("1") {
+                return None;
+            }
+            let root = tempfile::tempdir().unwrap();
+            let previous = [
+                "TIDEPOOL_TEST_DIAGNOSTIC_SCOPE",
+                "TIDEPOOL_TEST_ARTIFACT_ROOT",
+            ]
+            .into_iter()
+            .map(|key| (key, std::env::var_os(key)))
+            .collect();
+            // Native libtest cases run in separate processes. This control is
+            // also serial for direct libtest invocation and starts no compiler
+            // work until its two diagnostic-only coordinates are installed.
+            unsafe {
+                std::env::set_var("TIDEPOOL_TEST_DIAGNOSTIC_SCOPE", "1");
+                std::env::set_var("TIDEPOOL_TEST_ARTIFACT_ROOT", root.path());
+            }
+            Some(Self {
+                _root: root,
+                previous,
+            })
+        }
+    }
+
+    impl Drop for DiagnosticTestScope {
+        fn drop(&mut self) {
+            for (key, value) in &self.previous {
+                unsafe {
+                    match value {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     #[serial]
     fn test_compile_identity() {
@@ -430,11 +475,7 @@ mod tests {
         use tidepool_codegen::suspension::RealmId;
 
         tidepool_testing::eval_harness::require_extract();
-        assert_eq!(
-            std::env::var("TIDEPOOL_TEST_DIAGNOSTIC_SCOPE").as_deref(),
-            Ok("1"),
-            "run this evidence control with the isolated runner's --output-dir"
-        );
+        let _diagnostic_scope = DiagnosticTestScope::when_not_owned_by_runner();
         let root = PathBuf::from(std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT").unwrap());
         // A new authored module forces a real transaction even with a warm memo.
         let unique = tempfile::tempdir().unwrap();

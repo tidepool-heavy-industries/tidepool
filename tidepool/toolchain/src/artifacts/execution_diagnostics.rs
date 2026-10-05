@@ -222,7 +222,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn completed_transaction_diagnostics_survive_later_execution_failure() {
+    fn diagnostic_record_retains_original_paths_and_process_outcome() {
         let scratch = tempfile::tempdir().unwrap();
         let original = scratch.path().to_path_buf();
         let retained = scratch.keep();
@@ -239,8 +239,6 @@ mod tests {
             directory: Some(retained.clone()),
         };
         capture.completed(&original, &command, true, b"compiler succeeded");
-        let failure = std::panic::catch_unwind(|| panic!("injected later execution failure"));
-        assert!(failure.is_err());
         assert_eq!(
             std::fs::read(retained.join("result.prepared.cbor")).unwrap(),
             b"prepared diagnostic bytes"

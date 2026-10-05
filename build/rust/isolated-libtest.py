@@ -398,6 +398,75 @@ def record_actual_counts(record, stdout, delegated=False):
             record['process_execution_count'] = 1
 
 
+def diagnostic_summaries(artifact_root):
+    """Keep bounded compiler outcome/timing evidence after success scratch removal."""
+    def read_json(path):
+        with path.open('rb') as stream:
+            data = stream.read((1 << 20) + 1)
+        if len(data) > 1 << 20:
+            raise ValueError('diagnostic JSON exceeds one MiB summary bound')
+        return json.loads(data)
+
+    summaries = {'transactions': [], 'issues': []}
+    transactions = sorted(artifact_root.glob('compiler-transactions/*/transaction.json'))
+    summaries['transaction_count'] = len(transactions)
+    for path in transactions[:256]:
+        try:
+            report = read_json(path)
+            summary = {key: report.get(key) for key in (
+                'phase', 'compiler_process_success', 'original_directory',
+                'artifact_bytes', 'artifact_byte_limit', 'artifact_entry_limit')}
+            summary['path'] = str(path)
+            summary['file_count'] = len(report.get('files', []))
+            summary['issues'] = [str(issue)[:2048] for issue in report.get('issues', [])[:8]]
+            summaries['transactions'].append(summary)
+        except (OSError, ValueError, TypeError, AttributeError) as error:
+            summaries['issues'].append(f'{path}: {error}')
+    summaries['transactions_truncated'] = len(transactions) > 256
+    compiler = artifact_root / 'compiler'
+    for filename, key in (('owned-compiler-outcome.json', 'owned_compiler_outcome'),
+                          ('lifecycle.json', 'owned_compiler_lifecycle')):
+        path = compiler / filename
+        if path.exists():
+            try:
+                summaries[key] = read_json(path)
+            except (OSError, ValueError, TypeError, AttributeError) as error:
+                summaries['issues'].append(f'{path}: {error}')
+    trace = compiler / 'compiler.jsonl'
+    if trace.exists():
+        physical, retained_bytes, examined_bytes, malformed, total = [], 0, 0, 0, 0
+        try:
+            with trace.open('rb') as stream:
+                while True:
+                    line = stream.readline((1 << 20) + 1)
+                    if not line:
+                        break
+                    examined_bytes += len(line)
+                    if examined_bytes > 32 << 20 or len(line) > 1 << 20:
+                        malformed += 1
+                        break
+                    try:
+                        row = json.loads(line)
+                        fields = row.get('fields', row)
+                        if fields.get('execution_layer') == 'physical':
+                            total += 1
+                            if retained_bytes + len(line) <= 256 << 10 and len(physical) < 512:
+                                physical.append(row)
+                                retained_bytes += len(line)
+                    except (ValueError, AttributeError):
+                        malformed += 1
+        except OSError as error:
+            malformed += 1
+            summaries['issues'].append(f'{trace}: {error}')
+        summaries['physical_compiler_timing'] = {
+            'records': physical, 'physical_record_count': total,
+            'retained_record_count': len(physical), 'malformed_lines': malformed,
+            'complete': examined_bytes <= 32 << 20 and malformed == 0 and total == len(physical),
+            'trace_bytes': trace.stat().st_size,
+        }
+    return summaries
+
+
 def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
             artifact_root=None, compiler_mode='direct', declared_resources=()):
     args = [binary, '--exact', name, '--nocapture']
@@ -496,7 +565,15 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
                 stderr += f'\ncleanup remains {status}: {report}'
         if record is not None:
             record['cleanup_reports'] = cleanup_reports
-    if passed and artifact_root is not None:
+            try:
+                record['diagnostic_summaries'] = diagnostic_summaries(artifact_root)
+            except (OSError, ValueError, TypeError) as error:
+                record['diagnostic_summaries'] = {'issues': [str(error)]}
+    summaries = record.get('diagnostic_summaries', {}) if record is not None else {}
+    evidence_complete = (not summaries.get('issues')
+                         and not summaries.get('transactions_truncated')
+                         and summaries.get('physical_compiler_timing', {}).get('complete', True))
+    if passed and artifact_root is not None and evidence_complete:
         # Successful scenarios have completed their own acknowledged teardown.
         # The runner additionally confirms its enclosing process/service cleanup.
         shutil.rmtree(artifact_root)
