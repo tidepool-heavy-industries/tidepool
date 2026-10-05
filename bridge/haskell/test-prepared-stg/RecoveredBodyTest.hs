@@ -74,7 +74,8 @@ tests = testGroup "recovered-body"
   ]
 
 -- Both controls use genuine finalized Core and package interface declarations.
--- The qApp fat body loses entry metadata; a function-valued CAF must stay zero.
+-- Package decoding and optimization can change qApp's Core shape independently
+-- of its canonical callable entry; a function-valued CAF must stay zero.
 assertRecoveredEntryContracts :: IO ()
 assertRecoveredEntryContracts = do
   root <- getCurrentDirectory
@@ -111,18 +112,17 @@ assertRecoveredEntryContracts = do
       [identifier] -> pure identifier
       identifiers -> fail ("expected one genuine qApp reference, found " ++ show (length identifiers))
     cache <- liftIO newFatIfaceCache
-    result <- liftIO $ lookupFatIfaceExact env cache (varName requested)
-    (owner, body) <- case (nameModule_maybe (varName requested), result) of
-      (Just modul, FatIfaceFound group) -> pure (modul, group)
-      _ -> fail "genuine package qApp fat Core was unavailable"
+    result <- liftIO $ recoverExactBody env cache requested
+    (owner, body, origin) <- case result of
+      ExactBody modul group provenance -> pure (modul, group, provenance)
+      _ -> fail "genuine package qApp exact Core was unavailable"
     let rawSelected = [(identifier, rhs) | (identifier, rhs) <- bindPairs body,
           varName identifier == varName requested]
     liftIO $ case rawSelected of
-      [(identifier, rhs)] -> assert (idArity identifier == 0 && manifestArity rhs == 0)
-        ("qApp control did not exercise the genuine fat alias metadata loss: Id arity="
-          ++ show (idArity identifier) ++ ", manifest arity=" ++ show (manifestArity rhs)
-          ++ ", body=" ++ showSDocUnsafe (ppr rhs))
-      _ -> fail "qApp fat group did not retain exactly its selected binder"
+      [(identifier, rhs)] -> putStrLn ("genuine qApp body via " ++ show origin
+        ++ ": Id arity=" ++ show (idArity identifier)
+        ++ ", manifest arity=" ++ show (manifestArity rhs))
+      _ -> fail "qApp exact group did not retain exactly its selected binder"
     owners <- liftIO newOwnerInterfaceCache
     bodies <- liftIO newPreparedBodyCache
     recovered <- liftIO $ prepareRecoveredBodies env owners bodies owner [body]
@@ -139,6 +139,21 @@ assertRecoveredEntryContracts = do
       "the pinned defining qApp interface no longer has its two-argument entry"
     liftIO $ assert (entryArity "qApp" recovered == Just (Stg.ReEntrant, required))
       "recovered qApp changed its original callable entry contract"
+    qAppIdentities <- either (fail . show) pure (preparedTopIdentities [recovered])
+    qAppEntry <- case [identity | identity <- qAppIdentities,
+          symbolOccurrence identity == Text.pack "qApp"] of
+      [identity] -> pure identity
+      _ -> fail "recovered qApp did not retain its exact native identity"
+    native <- either (fail . ("genuine qApp native projection failed: " ++) . show) pure
+      (projectPreparedTarget (context { projectionEntry = qAppEntry }) [recovered])
+    liftIO $ case
+        [ signature | group <- programBindings native, top <- groupItems group
+        , TopBinding symbol (HeapBinding _ (Function (SignatureId index) _ _ _)) <- [top]
+        , symbol == qAppEntry
+        , signature : _ <- [drop (fromIntegral index) (programSignatures native)] ] of
+      [signature] -> assert (signatureArguments signature == replicate required LiftedRefRep)
+        "recovered qApp native function does not offer its canonical entry arguments"
+      _ -> fail "recovered qApp native projection did not emit its canonical function"
     let allPairs = concatMap bindPairs (cg_binds guts)
         caf = [(identifier, rhs) | (identifier, rhs) <- allPairs, occurrence identifier == "functionResult"]
     liftIO $ case caf of
@@ -166,6 +181,8 @@ assertRecoveredEntryContracts = do
       _ -> Nothing
     stgPairs (Stg.StgNonRec binder rhs) = [(binder, rhs)]
     stgPairs (Stg.StgRec pairs) = pairs
+    groupItems (NonRecursive top) = [top]
+    groupItems (Recursive tops) = tops
 
 assertAllRecoveredBodies :: IO ()
 assertAllRecoveredBodies = do
