@@ -176,27 +176,6 @@ nix_directory(
 )
 
 nix_directory(
-    name = "runtime_stdlib_sources",
-    cp = read_root_config("nix", "coreutils") + "/cp",
-    store_path = read_root_config("nix", "runtime_stdlib_sources", ""),
-    visibility = ["PUBLIC"],
-)
-
-nix_directory(
-    name = "runtime_stdlib_products",
-    cp = read_root_config("nix", "coreutils") + "/cp",
-    store_path = read_root_config("nix", "runtime_stdlib_products", ""),
-    visibility = ["PUBLIC"],
-)
-
-nix_directory(
-    name = "runtime_stdlib_extract",
-    cp = read_root_config("nix", "coreutils") + "/cp",
-    store_path = read_root_config("nix", "runtime_stdlib_extract", ""),
-    visibility = ["PUBLIC"],
-)
-
-nix_directory(
     name = "exomonad_runtime_tools",
     cp = read_root_config("nix", "coreutils") + "/cp",
     store_path = read_root_config("nix", "exomonad_runtime_tools", ""),

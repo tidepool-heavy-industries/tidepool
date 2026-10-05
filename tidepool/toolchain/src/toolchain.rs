@@ -235,7 +235,7 @@ pub enum ToolchainError {
     /// the bare name is not on `$PATH`.
     #[error(
         "tidepool-extract not found ({tried}). Set {ENV_EXTRACT} to a built \
-         tidepool-extract frontend, or install the harness with `nix profile install .#tidepool-extract`."
+         tidepool-extract frontend from the native runtime bundle."
     )]
     ExtractNotFound {
         /// What was searched for, as the locator crate reported it.
