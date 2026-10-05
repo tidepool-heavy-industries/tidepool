@@ -628,13 +628,13 @@ completedProgramSourceImports = withTiming $ withScratch $ \work -> do
         , "__result :: Int"
         , "__result = 7"
         ]
-  quoter <- T.pack <$> readFile (work </> "MetadataQuoter.hs")
+  quoter <- TE.decodeUtf8 <$> BS.readFile (work </> "MetadataQuoter.hs")
   writeFile (work </> "MetadataQuoter.hs") (T.unpack (T.replace
     "quoteExp = \\_ -> pure"
     (T.pack ("quoteExp = \\_ -> runIO (appendFile " ++ show marker ++ " \"executed\\n\") >> pure"))
     (T.replace "import MetadataQuoteSupport"
       "import Language.Haskell.TH.Syntax (runIO)\nimport MetadataQuoteSupport" quoter)))
-  quoted <- T.pack <$> readFile (work </> "MetadataQuotedTarget.hs")
+  quoted <- TE.decodeUtf8 <$> BS.readFile (work </> "MetadataQuotedTarget.hs")
   writeFile (work </> "MetadataHiddenQuoted.hs")
     (T.unpack (T.replace "module MetadataQuotedTarget" "module MetadataHiddenQuoted" quoted))
   scopePath <- writeGenuineEmptyMetadataScope work
@@ -740,7 +740,7 @@ completedProgramSourceImportPairing = withTiming $ withScratch $ \work -> do
       target = work </> "PairedOriginalConsumer.hs"
       includes = [work]
       root = ("main","MetadataQuotedTarget")
-  quoter <- T.pack <$> readFile (work </> "MetadataQuoter.hs")
+  quoter <- TE.decodeUtf8 <$> BS.readFile (work </> "MetadataQuoter.hs")
   writeFile (work </> "MetadataQuoter.hs") (T.unpack (T.replace
     "quoteExp = \\_ -> pure (LitE (IntegerL answerValue))"
     (T.pack ("quoteExp = \\_ -> do\n      value <- runIO (readFile " ++ show expansion
