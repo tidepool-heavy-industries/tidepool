@@ -3709,6 +3709,7 @@ name = "tidepool-repr"
 version = "0.1.0"
 dependencies = [
  "ciborium",
+ "petgraph",
  "proptest",
  "recursion",
  "serde_json",

@@ -13,6 +13,7 @@ readme = "../../README.md"
 [dependencies]
 recursion.workspace = true
 ciborium.workspace = true
+petgraph.workspace = true
 thiserror.workspace = true
 serde_json.workspace = true
 tidepool-atomic-write.workspace = true
