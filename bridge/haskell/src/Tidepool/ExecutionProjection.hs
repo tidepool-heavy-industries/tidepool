@@ -358,8 +358,8 @@ projectOriginalHomeModuleProducts env interfaces context externalBinders modules
 
 symbolOwner :: SymbolIdentity -> Module
 symbolOwner identity = mkModule
-  (stringToUnit (T.unpack (symbolUnit identity)))
-  (mkModuleName (T.unpack (symbolModule identity)))
+  (stringToUnit (Text.unpack (symbolUnit identity)))
+  (mkModuleName (Text.unpack (symbolModule identity)))
 
 preparedModuleProductOutcomes :: PreparedModuleProducts
   -> [(Module, Either ProjectionError [ProjectedGroup])]
