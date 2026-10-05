@@ -577,6 +577,44 @@ class IsolatedLibtestTests(unittest.TestCase):
             runner.execute(['fake-libtest'], 2, 'app.slice', {})
         kill.assert_not_called()
 
+    def test_successful_wait_fences_fast_collected_unit_without_invocation_poll(self):
+        for exit_code, query_exit, expected in ((0, 0, True), (1, 0, False), (0, 1, False)):
+            with self.subTest(exit_code=exit_code, query_exit=query_exit):
+                class Process:
+                    pid = 781237
+                    stdout = None
+                    stderr = None
+                    returncode = exit_code
+                    def communicate(self, timeout=None):
+                        return 'test result: ok. 1 passed; 0 failed; 0 ignored;\n', ''
+                def control(args, **kwargs):
+                    return completed_process(args, 5 if 'stop' in args else query_exit,
+                        'LoadState=not-found\nActiveState=inactive\n', '')
+                record = {'manager_wait_success': True, 'launcher_wait_exit_code': 0,
+                          'manager_admission': {'Id': 'previous-unit.service'}}
+                with patch.object(runner.subprocess, 'Popen', return_value=Process()), \
+                     patch.object(runner, 'observe_delegated_admission'), \
+                     patch.object(runner.subprocess, 'run', side_effect=control):
+                    result = runner.execute(['fake-libtest'], 2, 'app.slice', record)
+                self.assertNotIn('manager_admission', record)
+                self.assertEqual(record['manager_wait_success'], exit_code == 0)
+                self.assertEqual(record['launcher_wait_exit_code'], exit_code)
+                self.assertEqual(result.cleanup_confirmed, expected)
+        # Timeout/reap may race with a successful launcher exit, but incomplete
+        # wait communication is not evidence that the manager's job settled.
+        record = {}
+        process = Process()
+        process.returncode = 0
+        with patch.object(runner.subprocess, 'Popen', return_value=process), \
+             patch.object(process, 'communicate', side_effect=[
+                 subprocess.TimeoutExpired(['fake-libtest'], 2), ('', '')]), \
+             patch.object(runner, 'observe_delegated_admission'), \
+             patch.object(runner.subprocess, 'run', side_effect=control), \
+             self.assertRaises(subprocess.TimeoutExpired):
+            runner.execute(['fake-libtest'], 2, 'app.slice', record)
+        self.assertNotIn('manager_wait_success', record)
+        self.assertFalse(record['cleanup_confirmed'])
+
     def test_interrupted_launched_future_retains_unconfirmed_service_receipt(self):
         retained = Path(self.tmp.name) / 'interrupted'
         starts = []
