@@ -13579,6 +13579,126 @@ mod request_tests {
     }
 
     #[tokio::test]
+    async fn lookup_batches_qualified_export_facts_in_one_compiler_request() {
+        use crate::lookup::LookupOutcome;
+        use std::cell::Cell;
+
+        let (machines, context, source, _root) = actor_lookup_registry_fixture();
+        let modules = tempfile::tempdir().expect("lookup source fixtures");
+        std::fs::create_dir(modules.path().join("LookupPlanParent")).unwrap();
+        for (path, bytes) in [
+            (
+                "LookupPlanParent.hs",
+                include_str!("fixtures/LookupPlanParent.hs"),
+            ),
+            (
+                "LookupPlanParent/Choice.hs",
+                include_str!("fixtures/LookupPlanChoice.hs"),
+            ),
+            (
+                "LookupPlanParent/ModuleOnly.hs",
+                include_str!("fixtures/LookupPlanModuleOnly.hs"),
+            ),
+        ] {
+            std::fs::write(modules.path().join(path), bytes).unwrap();
+        }
+        // Aliases deliberately leave the original qualified constructor name
+        // outside reader scope. Its parent export browse must still resolve it.
+        let preamble = insert_preamble_imports(&source.preamble,
+            "qualified LookupPlanParent as Parent\nqualified LookupPlanParent.Choice as Child\nqualified LookupPlanParent.ModuleOnly as ModuleOnly");
+        let mut include = source.base_include.to_vec();
+        include.push(modules.path().to_owned());
+        let source = ActorWorkbenchSource::new(preamble, include);
+        let workbench = ResidentActorWorkbench::new(machines, source.clone(), None);
+        let (view, inputs, prepared) = workbench
+            .access
+            .with_machine(context.clone(), move |session, context, _| {
+                let view = actor_compile_view(session, context, &source)?;
+                let inputs = session
+                    .capture_inspection_inputs(view.session_view())
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                    })?;
+                let prepared = source.prepare_effectful(&view, &context.haskell_effects_alias)?;
+                Ok((view, inputs, prepared))
+            })
+            .await
+            .expect("lookup view captures");
+        let trace = lookup_trace_path();
+        let before = compiler_trace_started_ids(&trace);
+        let calls = Cell::new(0);
+        let answer = crate::lookup::execute(
+            real_lookup_request(vec![
+                "LookupPlanParent.ModuleOnly".into(),
+                "LookupPlanParent.Choice".into(),
+                "LookupPlanParent.ConstructorOnly".into(),
+                "doc workbench".into(),
+            ]),
+            "view".into(),
+            &prepared.imports,
+            &prepared.injected,
+            &[],
+            crate::UsagePointerTable::default(),
+            |queries| {
+                calls.set(calls.get() + 1);
+                inspect_lookup_queries(
+                    &view,
+                    Some(&inputs),
+                    &prepared.preamble,
+                    &prepared.imports,
+                    &prepared.include,
+                    &prepared.injected,
+                    &context.haskell_effects_alias,
+                    queries,
+                    None,
+                )
+            },
+        );
+        assert_eq!(
+            calls.get(),
+            1,
+            "one compiler submission supplies known facts"
+        );
+        let after = compiler_trace_started_ids(&trace);
+        assert_eq!(
+            after.difference(&before).count(),
+            1,
+            "successful module/name/doc batch must execute exactly one real worker request"
+        );
+        assert!(
+            matches!(&answer.results[0].outcome, LookupOutcome::Found(entries, false) if entries.len() == 1),
+            "module exports remain available"
+        );
+        assert!(
+            matches!(&answer.results[1].outcome, LookupOutcome::Ambiguous(entries, false) if entries.len() == 2),
+            "parent type/constructor ambiguity wins over a same-named module"
+        );
+        assert!(
+            matches!(&answer.results[2].outcome, LookupOutcome::Found(entries, false) if entries.len() == 1),
+            "qualified constructor resolves outside the imported alias"
+        );
+        assert!(
+            matches!(&answer.results[3].outcome, LookupOutcome::Found(entries, false) if entries.len() == 1),
+            "documentation resolves alongside compiler queries"
+        );
+        let before_docs = compiler_trace_started_ids(&trace);
+        let docs = crate::lookup::execute(
+            real_lookup_request(vec!["doc workbench".into()]),
+            "view".into(),
+            &prepared.imports,
+            &prepared.injected,
+            &[],
+            crate::UsagePointerTable::default(),
+            |_| panic!("documentation-only lookup must not submit to the compiler"),
+        );
+        assert!(matches!(
+            &docs.results[0].outcome,
+            LookupOutcome::Found(_, false)
+        ));
+        assert_eq!(compiler_trace_started_ids(&trace), before_docs);
+    }
+
+    #[tokio::test]
     async fn lookup_inspects_checked_bound_value_on_repeated_requests() {
         let (machines, context, source, _root) = actor_lookup_registry_fixture();
         let workbench = ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
