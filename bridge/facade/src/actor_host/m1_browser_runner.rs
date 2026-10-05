@@ -187,6 +187,7 @@ impl BrowserTransport {
                     harness::item::Item(json!({
                         "type":"custom_tool_call", "name":"haskell",
                         "call_id":"browser-cancellable-cell",
+                        "async":true,
                         "input":"do { sleep (seconds 30); _ <- display (99 :: Int); pure () }"
                     })),
                 )
@@ -225,9 +226,10 @@ impl BrowserTransport {
                 tool["type"] == kind
                     && tool["name"] == item.0["name"]
                     && (kind != "function" || tool["strict"] == true)
+                    && (item.0["async"] != true || tool["async"] == true)
             }) {
                 return Err(TransportError::Stream(format!(
-                    "browser scripted {phase} call requires installed {kind} tool {} in its issuing request",
+                    "browser scripted {phase} call requires installed {kind} tool {} with its selected execution mode in its issuing request",
                     item.0["name"],
                 )));
             }
