@@ -28,6 +28,8 @@ import GHC.Builtin.Types.Prim (wordPrimTy)
 import GHC.Core.FVs (exprSomeFreeVarsList)
 import GHC.Core.TyCo.Rep (Scaled(..), Type(TyConApp))
 import GHC.Types.Id (idName, idType)
+import GHC.Types.Var (varUnique)
+import GHC.Types.Unique.Set (elementOfUniqSet)
 import GHC.Types.Name (nameOccName, setNameUnique)
 import GHC.Types.Unique (mkUnique)
 import GHC.Types.Name.Occurrence (occNameString)
@@ -695,8 +697,10 @@ verifyRepeatedConstructorEvidence result = do
                 then site { psWireNode = noUnpackRoot }
                 else site
               | site <- selected ]
-            owners = map (idName . psOwner) selected
-            ownsSelected (binding, _) = any ((`elem` owners) . idName)
+            reach = Projection.admitReachFacts (map (varUnique . psOwner) selected)
+              [Projection.preparedModuleReachFacts context target] Projection.emptyPreparedReachability
+            ownsSelected (binding, _) = any
+              ((`elementOfUniqSet` Projection.reachedUniques reach) . varUnique)
               (Projection.topBinders binding)
         in (replaceNominal "NoUnpack" replacement target)
           { preparedBindings = filter ownsSelected (pmBindings target)
