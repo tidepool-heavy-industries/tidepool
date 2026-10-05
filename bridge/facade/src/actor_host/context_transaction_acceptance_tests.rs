@@ -404,10 +404,6 @@ async fn start_with_spec_and_model(
         std::fs::create_dir_all(&authored).unwrap();
         config.model = initial_model.into();
         if let Some(spec) = spec {
-            let package = Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../exomonad/examples/workspace")
-                .canonicalize()
-                .expect("the shipped workspace package");
             std::fs::write(authored.join("AgentSpec.hs"), spec).unwrap();
             std::fs::write(
                 authored.join("ContextWorkflow.hs"),
@@ -419,9 +415,22 @@ async fn start_with_spec_and_model(
             // receive, so the compiled acceptance fixture has real provenance.
             let operators = authored.join("Jev/Operators.hs");
             std::fs::create_dir_all(operators.parent().unwrap()).unwrap();
-            std::fs::copy(package.join(".exomonad/Jev/Operators.hs"), operators).unwrap();
-            for name in ["flake.nix", "flake.lock"] {
-                std::fs::copy(package.join(name), config.workspace.join(name)).unwrap();
+            std::fs::write(
+                operators,
+                include_str!("../../../../exomonad/examples/workspace/.exomonad/Jev/Operators.hs"),
+            )
+            .unwrap();
+            for (name, contents) in [
+                (
+                    "flake.nix",
+                    include_str!("../../../../exomonad/examples/workspace/flake.nix"),
+                ),
+                (
+                    "flake.lock",
+                    include_str!("../../../../exomonad/examples/workspace/flake.lock"),
+                ),
+            ] {
+                std::fs::write(config.workspace.join(name), contents).unwrap();
             }
         }
         crate::exomonad::write_fixture_project_config(&authored, initial_model, |project| {

@@ -39,7 +39,7 @@ export_file(
 # Compile-time inputs for the facade's published-example tests.
 filegroup(
     name = "facade_test_sources",
-    srcs = {source: source for source in glob([".exomonad/**/*.hs", ".exomonad/**/*.md", ".exomonad/**/*.json", ".exomonad/config.toml"])},
+    srcs = {source: source for source in glob(["flake.nix", "flake.lock", ".exomonad/**/*.hs", ".exomonad/**/*.md", ".exomonad/**/*.json", ".exomonad/config.toml"])},
     visibility = ["PUBLIC"],
 )
 

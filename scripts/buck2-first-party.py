@@ -502,7 +502,13 @@ def source_inputs(package, target, features=(), test_target=False):
             if not included.is_relative_to(ROOT):
                 raise SystemExit(f"compile-time input outside repository {included} from {source}")
             repo_relative = included.relative_to(ROOT).as_posix()
-            if test_target and repo_relative.startswith("exomonad/examples/workspace/.exomonad/"):
+            if test_target and (
+                repo_relative.startswith("exomonad/examples/workspace/.exomonad/")
+                or repo_relative in {
+                    "exomonad/examples/workspace/flake.nix",
+                    "exomonad/examples/workspace/flake.lock",
+                }
+            ):
                 external["//exomonad/examples/workspace:facade_test_sources"] = "exomonad/examples/workspace"
                 continue
             if repo_relative in LIBRARY_TEST_FIXTURES.get((package["name"], target["name"]), set()):
