@@ -84,7 +84,9 @@ class NativeQualificationTests(unittest.TestCase):
             descriptor_path = root / 'qualification.json'
             descriptor_path.write_text('sealed descriptor')
             descriptor = {'programs': {'runner': '/frozen/runner', 'libtest': '/frozen/libtest'},
-                          'cohorts': qualification.cohorts(), 'environment': {},
+                          'cohorts': qualification.cohorts(),
+                          'environment': {'PATH': '/frozen/runtime-tools/bin'},
+                          'external_inputs': {'runtime_tools': {'path': '/frozen/runtime-tools'}},
                           'source_oid': 'a' * 40, 'harness_revision': 'b' * 40,
                           'profile': 'fast-dev', 'stdlib_mode': 'source-backed'}
 
@@ -97,9 +99,13 @@ class NativeQualificationTests(unittest.TestCase):
                         'test': name, 'passed': True,
                         'execution': {'executed_test_count': 1, 'exit_code': 0}})
                 self.assertEqual(kwargs['env'], qualification.execution_environment(descriptor))
+                self.assertEqual(command[0], '/frozen/runtime-tools/bin/python3')
+                self.assertEqual(kwargs['env']['PATH'], '/frozen/runtime-tools/bin')
                 return subprocess.CompletedProcess(command, 0)
 
             with patch.object(qualification, 'verify', return_value=descriptor), \
+                 patch.object(qualification.sys, 'executable', '/ambient/unqualified-python'), \
+                 patch.dict(os.environ, {'PATH': '/ambient/unqualified-tools'}), \
                  patch.object(qualification.subprocess, 'run', side_effect=execute):
                 code = qualification.main(['run', str(descriptor_path), '--cohort', 'm2',
                     '--output', str(root / 'evidence'), '--jobs', '4', '--delegated-service',

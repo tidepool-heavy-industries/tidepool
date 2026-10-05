@@ -872,10 +872,11 @@ def run_cohort(args) -> int:
     if service_slice is not None and not re.fullmatch(r"[A-Za-z0-9_.@:-]+\.slice", service_slice):
         raise ValueError("--service-slice must name one systemd slice")
     descriptor = verify(args.descriptor.absolute())
+    tools = Path(descriptor["external_inputs"]["runtime_tools"]["path"])
     cohort = descriptor["cohorts"][args.cohort]
     output = args.output.absolute()
     output.mkdir(parents=True, exist_ok=False, mode=0o700)
-    command = [sys.executable, descriptor["programs"]["runner"], descriptor["programs"]["libtest"],
+    command = [str(tools / "bin/python3"), descriptor["programs"]["runner"], descriptor["programs"]["libtest"],
                "--expected-count", str(cohort["expected_count"]), "--jobs", str(args.jobs), "--timeout", str(cohort["timeout"]),
                "--output-dir", str(output / "tests"), "--compiler-mode", getattr(args, "compiler_mode", "direct")]
     for name, timeout in sorted(cohort.get("case_timeouts", {}).items()):
