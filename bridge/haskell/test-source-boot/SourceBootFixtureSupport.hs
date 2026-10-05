@@ -23,7 +23,7 @@ import GHC.Types.Literal (Literal(..), LitNumType(..))
 import GHC.Types.Name (getOccString)
 import GHC.Unit.Module (moduleName, moduleNameString, moduleUnit)
 import GHC.Unit.Types (unitString)
-import GenuineCandidateFixture
+import Tidepool.Test.GenuineCandidate
   ( CapturedCompilerFixture, FixtureCompilerInput(..), captureCompilerFixture, capturedPreparedNames
   , writeGenuineCandidateManifestFor, writeGenuineExecutionScope )
 import Numeric (showHex)

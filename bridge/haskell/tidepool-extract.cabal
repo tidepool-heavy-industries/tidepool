@@ -383,7 +383,7 @@ test-suite source-boot-product-reuse-test
   hs-source-dirs:   test-source-boot
   other-modules:    SourceBootCases
                     ExecutionSourceDecodeTest
-                    GenuineCandidateFixture
+                    Tidepool.Test.GenuineCandidate
                     ProgressBoundaryTest
                     FinalizedCoreTest
                     ExactScopeV9Test
@@ -420,6 +420,7 @@ test-suite prepared-stg-pipeline-test
     RetainedPluginTest
     TypeEvidenceChecks
     ModuleProductRoundtripTest
+    Tidepool.Test.GenuineCandidate
     Tidepool.Test.CandidateCodec
     Tidepool.Test.FixturePacket
   build-depends:
@@ -595,7 +596,7 @@ executable source-boot-child
   hs-source-dirs:   test-source-boot test-support
   other-modules:    SourceBootCases
                     ExecutionSourceDecodeTest
-                    GenuineCandidateFixture
+                    Tidepool.Test.GenuineCandidate
                     ProgressBoundaryTest
                     FinalizedCoreTest
                     ExactScopeV9Test

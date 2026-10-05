@@ -1,9 +1,9 @@
--- Genuine source-boot packets keep GHC capture and Rust issuance separate.
+-- Genuine compiler fixture packets keep GHC capture and Rust issuance separate.
 -- The configured Rust libtest adapter consumes the production owners; this
 -- module never writes durable certificates or candidate/scope descriptors.
-module GenuineCandidateFixture
+module Tidepool.Test.GenuineCandidate
   ( CapturedCompilerFixture, FixtureCompilerInput(..)
-  , captureCompilerFixture, capturedPreparedNames, issueCodecFixturePacket
+  , captureCompilerFixture, capturedPreparedNames
   , writeGenuineCandidateManifestFor, writeGenuineMetadataScope
   , writeGenuineEmptyMetadataScope, writeGenuineCandidateNativeScope
   , writeGenuineCandidateLexicalScope
@@ -24,7 +24,7 @@ import GHC.Unit.Module (moduleName, moduleNameString)
 import System.Environment (lookupEnv)
 import System.FilePath ((</>))
 import Tidepool.Test.FixturePacket
-  ( PacketProducer(..), newPacketDirectory, runPacketProducer, issueCodecFixturePacket )
+  ( PacketProducer(..), newPacketDirectory, runPacketProducer )
 import Tidepool.ExactHydration (newOriginalInterfaceArtifacts)
 import Tidepool.ExecutionProjection (projectOriginalHomeModuleProducts)
 import Tidepool.GhcPipeline (PreparedPipelineResult(..), PipelineResult(..))

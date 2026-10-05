@@ -21,7 +21,7 @@ import Tidepool.GhcPipeline
   , CompilePurpose(..), runPipelineSessionSelected )
 import Tidepool.ModuleCandidates
 import Tidepool.Session (emptySessionScope, SessionScope(..))
-import GenuineCandidateFixture (writeGenuineExecutionScope)
+import Tidepool.Test.GenuineCandidate (writeGenuineExecutionScope)
 import SourceBootFixtureSupport
   ( withTiming, withScratch, writeExecutionScope, writeManifestFor
   , manifest, preparedNames, hasIntResultLiteral, capturePreparedFixture, captureDiagnostics )

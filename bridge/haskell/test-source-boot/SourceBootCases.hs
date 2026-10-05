@@ -8,7 +8,7 @@ import SourceBootFixtureSupport
 
 import CandidateGraphDescriptorTest (candidateGraphDescriptorChecks)
 import CodecFixtureSupport
-import GenuineCandidateFixture
+import Tidepool.Test.GenuineCandidate
   ( writeGenuineCandidateManifestFor, writeGenuineMetadataScope, writeGenuineEmptyMetadataScope
   , writeGenuineCandidateNativeScope, writeGenuineCandidateLexicalScope, writeGenuineAuthoredDeclarationScope
   , writeGenuineExecutionScope )
