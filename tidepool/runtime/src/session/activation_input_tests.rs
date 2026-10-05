@@ -1142,7 +1142,7 @@ fn resident_parcel_preserves_original_authenticated_request_across_sessions() {
         input.type_evidence().commitment(),
         "request authority commitment includes original compiler authentication"
     );
-    let repeated = observations
+    let repeated_evidence = observations
         .authenticate_request_types(
             original.sites[&site]
                 .request_type_signatures
@@ -1151,8 +1151,11 @@ fn resident_parcel_preserves_original_authenticated_request_across_sessions() {
             retained_context,
         )
         .unwrap();
-    assert_eq!(&repeated, input.type_evidence().as_ref());
-    assert_eq!(repeated.commitment(), input.type_evidence().commitment());
+    assert_eq!(&repeated_evidence, input.type_evidence().as_ref());
+    assert_eq!(
+        repeated_evidence.commitment(),
+        input.type_evidence().commitment()
+    );
     let request_context = input.type_evidence().compile_context(None).unwrap();
     assert_eq!(
         request_context.declarations().toolchain_identity_sha256(),
