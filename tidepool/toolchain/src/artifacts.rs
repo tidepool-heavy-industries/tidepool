@@ -2770,7 +2770,14 @@ pub fn build_deployment_module_package(
     scratch: &Path,
     output_root: &Path,
 ) -> Result<crate::toolchain::DeploymentModulePackage, CompileError> {
-    let roots = [source_root.to_owned()];
+    let source_selection =
+        module_candidates::deployment::prepare_build_roots(source_root, output_root)?;
+    if source_path != source_selection.snapshot_root.join("TidepoolCatalog.hs") {
+        return Err(
+            crate::toolchain::ModulePackageError::Format("native catalog probe path").into(),
+        );
+    }
+    let roots = source_selection.include_roots();
     validate_build_action_request(source_path, targets, &roots, scratch, output_root)?;
     let configuration = crate::toolchain::CompilerDeploymentConfiguration::from_env()
         .map_err(|e| CompileError::ExtractFailed(e.to_string()))?;
@@ -2778,7 +2785,6 @@ pub fn build_deployment_module_package(
     else {
         return Err(crate::toolchain::ModulePackageError::UnknownCompiler.into());
     };
-    module_candidates::deployment::prepare_build_roots(source_root, output_root)?;
     compile_build_action(
         source_path,
         targets,
@@ -2786,7 +2792,7 @@ pub fn build_deployment_module_package(
         scratch,
         BuildActionExport::DeploymentPackage {
             output_root,
-            source_root,
+            source_selection: &source_selection,
         },
     )?;
     Ok(crate::toolchain::DeploymentModulePackage::load(
@@ -2822,7 +2828,7 @@ enum BuildActionExport<'a> {
     },
     DeploymentPackage {
         output_root: &'a Path,
-        source_root: &'a Path,
+        source_selection: &'a module_candidates::deployment::NativeCatalogSourceSelection,
     },
 }
 
@@ -3005,10 +3011,10 @@ fn compile_invocation_inner(
             export:
                 BuildActionExport::DeploymentPackage {
                     output_root,
-                    source_root,
+                    source_selection,
                 },
             ..
-        } => (None, None, Some((*output_root, *source_root)), None),
+        } => (None, None, Some((*output_root, *source_selection)), None),
     };
     let allow_candidates = matches!(&policy, CompilationPolicy::Runtime);
     let temp_dir = match &policy {
@@ -3461,7 +3467,7 @@ fn compile_invocation_inner(
             CompileError::ExtractFailed("bound compiler producer identity length".into())
         })?);
         module_candidates::record_deployment_acceptance(candidate_set.as_ref(), &receipt);
-        if let Some((output_root, source_root)) = deployment_export {
+        if let Some((output_root, source_selection)) = deployment_export {
             valid_evidence.ok_or_else(|| {
                 CompileError::ModulePackage(crate::toolchain::ModulePackageError::OpenCohort)
             })?;
@@ -3470,7 +3476,7 @@ fn compile_invocation_inner(
             })?;
             module_candidates::deployment::export(
                 output_root,
-                source_root,
+                source_selection,
                 &deployment,
                 publication,
             )?;
@@ -5278,7 +5284,8 @@ mod module_product_tests {
         let package = crate::toolchain::configured_module_package()
             .unwrap()
             .expect("requires the Nix-built runtime-stdlib-products catalog");
-        let source_root = package.source_root().to_owned();
+        let source_selection = package.source_selection().clone();
+        let roots = source_selection.include_roots();
         let catalog_path =
             PathBuf::from(std::env::var_os(crate::toolchain::ENV_COMPILER_MODULES).unwrap());
         let catalog: serde_json::Value =
@@ -5304,7 +5311,7 @@ mod module_product_tests {
             assert_eq!(std::fs::read_dir(directory).unwrap().count(), 0);
         }
         let source = include_str!("../tests/fixtures/deployment-module-package/Consumer.hs");
-        let original = compile_targets(source, &["result"], &[source_root.clone()], |_, _, _| {})
+        let original = compile_targets(source, &["result"], &roots, |_, _, _| {})
             .expect("fresh-process packaged cohort reuse");
         let cached: std::collections::BTreeSet<_> = original
             .certified_groups
@@ -5327,16 +5334,17 @@ mod module_product_tests {
             .collect();
         let shadow = tempfile::tempdir().unwrap();
         std::fs::create_dir(shadow.path().join("Tidepool")).unwrap();
-        let mut changed = std::fs::read(source_root.join("Tidepool/FilePath.hs")).unwrap();
-        changed.extend_from_slice(b"\n-- higher-priority source witness\n");
-        std::fs::write(shadow.path().join("Tidepool/FilePath.hs"), changed).unwrap();
-        let shadowed = compile_targets(
-            source,
-            &["result"],
-            &[shadow.path().to_owned(), source_root],
-            |_, _, _| {},
+        let mut changed = std::fs::read(
+            source_selection
+                .root(crate::toolchain::NativeSourceRole::Stdlib)
+                .join("Tidepool/FilePath.hs"),
         )
         .unwrap();
+        changed.extend_from_slice(b"\n-- higher-priority source witness\n");
+        std::fs::write(shadow.path().join("Tidepool/FilePath.hs"), changed).unwrap();
+        let mut shadow_roots = vec![shadow.path().to_owned()];
+        shadow_roots.extend(roots);
+        let shadowed = compile_targets(source, &["result"], &shadow_roots, |_, _, _| {}).unwrap();
         for module in ["Tidepool.FilePath", "Tidepool.Prelude"] {
             assert!(
                 shadowed

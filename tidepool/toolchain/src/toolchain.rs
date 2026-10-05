@@ -77,7 +77,9 @@ pub const ENV_EXTRACT_WORKER: &str = "TIDEPOOL_EXTRACT_WORKER";
 pub const ENV_COMPILER_DEPLOYMENT: &str = "TIDEPOOL_COMPILER_DEPLOYMENT";
 /// Optional immutable source/product catalog paired with configured compiler authority.
 pub const ENV_COMPILER_MODULES: &str = "TIDEPOOL_COMPILER_MODULES";
-pub use crate::module_candidates::deployment::{DeploymentModulePackage, ModulePackageError};
+pub use crate::module_candidates::deployment::{
+    DeploymentModulePackage, ModulePackageError, NativeCatalogSourceSelection, NativeSourceRole,
+};
 
 /// Load explicit source provenance; this never admits an observed endpoint.
 /// Present invalid configuration refuses when selecting package source roots or
@@ -94,6 +96,21 @@ pub fn configured_module_package() -> Result<Option<DeploymentModulePackage>, Mo
     };
     DeploymentModulePackage::load(&PathBuf::from(path), &authority).map(Some)
 }
+/// Validate configured source provenance without hydrating native products.
+/// Candidate selection still loads and authenticates the complete package.
+pub fn configured_module_source_selection(
+) -> Result<Option<NativeCatalogSourceSelection>, ModulePackageError> {
+    let Some(path) = std::env::var_os(ENV_COMPILER_MODULES) else {
+        return Ok(None);
+    };
+    let configuration = CompilerDeploymentConfiguration::from_env()
+        .map_err(|error| ModulePackageError::CompilerConfiguration(Box::new(error)))?;
+    let CompilerDeploymentConfiguration::Configured(authority) = configuration else {
+        return Err(ModulePackageError::UnknownCompiler);
+    };
+    DeploymentModulePackage::load_source_selection(&PathBuf::from(path), &authority).map(Some)
+}
+
 /// Env var naming the stdlib root (step 1 of the stdlib precedence).
 pub const ENV_PRELUDE_DIR: &str = "TIDEPOOL_PRELUDE_DIR";
 /// Env var overriding [`stamp_path`].

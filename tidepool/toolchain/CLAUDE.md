@@ -75,8 +75,8 @@ at the original compilation paths and are discarded with action scratch.
 
 `build_deployment_module_package` uses that same build-action compiler policy,
 with authenticated catalog export instead of portable fixture export. Its caller
-supplies a declared probe, ordered targets, source root, private current-directory
-scratch and absent output directory. Complete worker evidence and the canonical
+supplies the snapshot’s `TidepoolCatalog.hs` probe, ordered targets, retained
+snapshot root, private current-directory scratch and absent output directory. Complete worker evidence and the canonical
 module-product owner admit the closed source cohort before catalog export.
 Preparing those catalog records grants no runtime candidate publication.
 
@@ -84,13 +84,20 @@ Preparing those catalog records grants no runtime candidate publication.
 `--source-root` and `--output-root`. The build action supplies the configured
 frontend, worker, compiler deployment manifest and GHC libdir. The CLI removes
 inherited resident/cache selection and contains temporary files in its own
-scratch. Schema 4 keeps the original source root and all compiler-issued evidence
-unchanged. Product references are relative to the opened catalog's canonical
-parent, so the complete container can move without rewriting its bytes. Source
+scratch. Schema 4 records `source_selection` with the canonical retained snapshot,
+ordered `StableEffects`, `Stdlib`, `Actors`, and `Jev` roles, and the complete
+Haskell source manifest including the probe. These roles resolve to `effects`,
+`lib`, `actors`, and `jev/core`; each directory must exist, without source aliases.
+The worker include list must equal these roots in order, and every catalog source
+and home dependency must belong to their union. Source selection is checked again
+after compilation before exporting compiler-issued evidence unchanged. Product
+references are relative to the opened catalog's canonical parent, so the complete container can move without rewriting its bytes. Source
 paths cannot move or alias other paths. The source guard remains separate from
 qualification's actual Nix registration, NAR and GC-root checks. Earlier catalogs
 are rejected and must be regenerated through the matched producer.
 
-This container migration does not establish native catalog deployment. The
-native support source cohort, complete runtime source selection and final bundle
-qualification must still join before that mode is delivered.
+`configured_module_source_selection` shares catalog schema, compiler authority,
+source manifest and alias validation without hydrating native products. Candidate
+admission loads the full package and validates every proof and the complete cohort.
+Actual Nix registration, NAR, retention and final bundle qualification remain the
+qualification owner’s independent checks.

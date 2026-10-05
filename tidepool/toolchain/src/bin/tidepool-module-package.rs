@@ -19,7 +19,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut input = std::env::args_os().skip(1);
     if input.next().as_deref() != Some(std::ffi::OsStr::new("build")) {
         return Err(
-            "usage: tidepool-module-package build --source ABS --target NAME [--target NAME] --source-root ABS --output-root ABS".into(),
+            "usage: tidepool-module-package build --source ABS --target NAME [--target NAME] --source-root SNAPSHOT_ABS --output-root ABS".into(),
         );
     }
     let mut args = Arguments::default();
