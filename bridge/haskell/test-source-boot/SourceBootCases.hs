@@ -1128,11 +1128,18 @@ exactRetainedQuoter = withTiming $ withScratch $ \work -> do
           | (index,field) <- zip [0::Int ..] fields])
         _ -> fail "genuine retained interface inventory changed framing"
       _ -> fail "genuine retained scope changed framing"
-    let wrongOwnerPath = work </> "wrong-core-owner.cbor"
-    BS.writeFile wrongOwnerPath (toStrictByteString (encodeTerm wrongOwnerTerm))
-    wrongOwner <- readExactScope wrongOwnerPath
-    unless (case wrongOwner of Left _ -> True; _ -> False) $
-      fail "retained compiler proof accepted another genuine certificate under the wrong owner"
+    _ <- readExactScope scopePath >>= either fail pure
+    (do
+      BS.writeFile scopePath (toStrictByteString (encodeTerm wrongOwnerTerm))
+      wrongOwnerResult <- readExactScope scopePath
+      case wrongOwnerResult of
+        Left reason | "canonical module certificate differs from exact owner or payload" `isInfixOf` reason -> pure ()
+        Left reason -> fail ("wrong-owner certificate failed for another reason: " ++ reason)
+        Right _ -> fail "retained compiler proof accepted another genuine certificate under the wrong owner"
+      ) `finally` BS.writeFile scopePath originalBytes
+    _ <- readExactScope scopePath >>= either fail pure
+    restoredScopeBytes <- BS.readFile scopePath
+    unless (restoredScopeBytes == originalBytes) (fail "wrong-owner certificate control changed its genuine scope")
     runRequest (pure ()) $ \compile -> do
       copyFile "test-source-boot/fixtures/MetadataQuoteSupportChanged.hs" helperPath
       (captured,diagnostics) <- captureDiagnostics $
