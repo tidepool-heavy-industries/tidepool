@@ -122,7 +122,7 @@ encodingChecks = do
   assert (take 4 graphEdges ==
       [ TList [TInt 0, TInt 3, TList [TInt 1]]
       , TList [TInt 1, TInt 2, TList [TInt 10, TInt 1]]
-      , TList [TInt 2, TInt 3, TList [TInt 11, TInt 0, TList [TInt 0]]]
+      , TList [TInt 2, TInt 3, TList [TInt 11, TInt 0, TList [TInt 1]]]
       , TList [TInt 2, TInt 5, TList [TInt 11, TInt 1, TList [TInt 4, TInt 64]]] ])
     "type graph lost original recursive fields or paired source representations"
   assert (evidenceFields !! 14 == TList
