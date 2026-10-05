@@ -24,18 +24,19 @@ Orchestrate modules are excluded. `Tidepool.Effects` is a stable authored
 facade and belongs to the generated support selection. Production catalog admission still checks the actual compiler's
 complete closure; direct import selection alone is not passing evidence.
 
-The current metadata projects 67 direct imports. These are source selections;
-compiler-produced module counts require the native action and gate report.
+`NATIVE_CATALOG_COHORT` in the generated `bridge/haskell/components.bzl` owns
+the direct import roster. The snapshot's `catalog-sources.json` preserves that
+exact module-to-source selection; its `modules` entries determine direct import
+counts, including each source role. Compiler-produced counts require genuine
+certification and do not follow from this roster.
 
-| Evidence | Owner | Current count |
-| --- | --- | ---: |
-| Stable effect direct imports | Generated effect roster | 3 |
-| Stdlib direct imports | Pinned Cabal source ownership | 53 |
-| Actor direct imports | Pinned Cabal source ownership | 8 |
-| Jev direct imports | Pinned Jev source projection | 4 |
-| Full source file inventory | Retained snapshot record | Requires retention run |
-| Compiled module closure | Native catalog producer/admission | Requires native build |
-| Cold consumer execution | Frozen `catalog-gate` report | Requires gate run |
+| Evidence | Owner | Recorded by |
+| --- | --- | --- |
+| Direct imports and source roles | Pinned Cabal and stable-effect/Jev source projection | Snapshot `catalog-sources.json` |
+| Full source file inventory | Source retention and qualification | Retained snapshot record |
+| Canonical interfaces and optional Core | Actual compiler product certification | `inspect-catalog` inventory |
+| Native owners and groups | Actual compiler product certification | `inspect-catalog` inventory |
+| Cold consumer execution | Frozen native catalog bundle | `catalog-gate` report |
 
 Retain that exact snapshot before compiling original module products:
 
