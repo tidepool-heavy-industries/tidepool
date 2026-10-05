@@ -322,14 +322,15 @@ encodeCertifiedProductsWithOriginals retained emittedSeals env sourceRecipe inte
                   , encodeString (T.pack path), encodeString sha]
                 | ((unit, name), options) <- Map.toList packages
                 , (path, sha) <- Set.toList options ]
+              certificateBytes = toStrictByteString $ array
+                [encodeString "TPCERT", encodeWord 9
+                , list id encodedModules, list id encodedTargets
+                , list id encodedPackages, list (encodeWitness coordinateIndices) globalWitnesses
+                , encodeFinalizedModuleArtifacts finalized, encodeWorkerExecutionSource sourceRecipe
+                , list encodeCoordinate coordinates]
           pure $ do
             versions <- retainedNativeVersions emittedSeals exact cached packages products moduleRows
-            Right (toStrictByteString (array
-            [encodeString "TPCERT", encodeWord 9
-            , list id encodedModules, list id encodedTargets
-            , list id encodedPackages, list (encodeWitness coordinateIndices) globalWitnesses
-            , encodeFinalizedModuleArtifacts finalized, encodeWorkerExecutionSource sourceRecipe
-            , list encodeCoordinate coordinates]), versions)
+            Right (certificateBytes,versions)
   where
     internWitness :: Map.Map GlobalWitness Word -> GlobalWitness
       -> (Map.Map GlobalWitness Word, Word)
