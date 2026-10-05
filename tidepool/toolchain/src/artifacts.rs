@@ -5500,6 +5500,208 @@ mod module_product_tests {
     #[test]
     #[ignore = "requires matched Haskell worker and frontend"]
     #[serial_test::serial]
+    fn real_worker_retained_core_promotion_joins_across_unrelated_context_extension() {
+        use crate::artifact_inventory::{ArtifactKind, ArtifactView};
+        use crate::declaration_join::{
+            ExactDeclarationContext, ExactLexicalNode, ExactModuleIdentity,
+        };
+
+        let work = tempfile::tempdir().unwrap();
+        let include = [work.path().to_path_buf()];
+        let owner = ExactModuleIdentity {
+            unit: "main".into(),
+            module: "RetainedPromotionOwner".into(),
+        };
+        let support = ExactModuleIdentity {
+            unit: "main".into(),
+            module: "RetainedPromotionSupport".into(),
+        };
+        let unrelated = ExactModuleIdentity {
+            unit: "main".into(),
+            module: "RetainedPromotionUnrelated".into(),
+        };
+        let owner_source = work.path().join("RetainedPromotionOwner.hs");
+        let support_source = work.path().join("RetainedPromotionSupport.hs");
+        let unrelated_source = work.path().join("RetainedPromotionUnrelated.hs");
+        let owner_bytes =
+            include_str!("../tests/fixtures/retained-promotion/RetainedPromotionOwner.hs");
+        let support_bytes =
+            include_str!("../tests/fixtures/retained-promotion/RetainedPromotionSupport.hs");
+        let unrelated_bytes =
+            include_str!("../tests/fixtures/retained-promotion/RetainedPromotionUnrelated.hs");
+        let probe_bytes =
+            include_str!("../tests/fixtures/retained-promotion/RetainedPromotionProbe.hs");
+        let consumer_bytes =
+            include_str!("../tests/fixtures/retained-promotion/RetainedPromotionConsumer.hs");
+        let issue = |support_bytes: &str| {
+            std::fs::write(&owner_source, owner_bytes).unwrap();
+            std::fs::write(&support_source, support_bytes).unwrap();
+            std::fs::write(&unrelated_source, unrelated_bytes).unwrap();
+            let original = compile_invocation_inner(
+                &CompileInvocation {
+                    source: probe_bytes,
+                    targets: &["result"],
+                    include: &include,
+                    fallback_module_name: "RetainedPromotionProbe",
+                },
+                &mut |_, _, _| {},
+                CompilationPolicy::FreshRuntime,
+            )
+            .expect("genuine source-only original issuance");
+            let modules = original
+                .module_inventory
+                .as_ref()
+                .expect("actual original source graph");
+            let lexical = [&owner, &support, &unrelated]
+                .into_iter()
+                .map(|selected| {
+                    let module = modules
+                        .iter()
+                        .find(|module| {
+                            !module.boot
+                                && module.unit == selected.unit
+                                && module.module == selected.module
+                        })
+                        .expect("issued original owner");
+                    assert_eq!(module.product, cache::ProductAvailability::InterfaceOnly);
+                    let imports = module
+                        .imports
+                        .iter()
+                        .filter_map(|import| {
+                            let path = import.selected.as_ref()?;
+                            let imported = modules
+                                .iter()
+                                .find(|module| {
+                                    module.source == *path
+                                        && module.module == import.module
+                                        && module.boot == import.boot
+                                })
+                                .expect("original selected home import");
+                            Some(ExactModuleIdentity {
+                                unit: imported.unit.clone(),
+                                module: imported.module.clone(),
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    ExactLexicalNode {
+                        owner: selected.clone(),
+                        imports,
+                    }
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(lexical[0].imports, vec![support.clone()]);
+            assert!(lexical[1].imports.is_empty() && lexical[2].imports.is_empty());
+            assert!(original.certified_groups.iter().all(|group| {
+                ![&owner, &support, &unrelated].iter().any(|selected| {
+                    group.owner().unit == selected.unit && group.owner().module == selected.module
+                })
+            }));
+            let interfaces = original
+                .artifact_view
+                .interface_projection(&[owner.clone(), support.clone()])
+                .unwrap();
+            let context = ExactDeclarationContext::new(&[], &[], vec![])
+                .unwrap()
+                .extend_interface_artifacts(&interfaces)
+                .unwrap()
+                .extend(&[], &[], lexical[..2].to_vec())
+                .unwrap();
+            let extended = context
+                .clone()
+                .extend_interface_artifacts(
+                    &original
+                        .artifact_view
+                        .interface_projection(&[unrelated.clone()])
+                        .unwrap(),
+                )
+                .unwrap()
+                .extend(&[], &[], lexical)
+                .unwrap();
+            assert!(
+                context.recovery_products().is_empty() && extended.recovery_products().is_empty()
+            );
+            assert_eq!(context.lexical_graph().len(), 2);
+            assert_eq!(extended.lexical_graph().len(), 3);
+            for path in [&owner_source, &support_source, &unrelated_source] {
+                std::fs::remove_file(path).unwrap();
+            }
+            (context, extended)
+        };
+        let consume = |context: ExactDeclarationContext| {
+            compile_invocation_in_context(
+                &CompileInvocation {
+                    source: consumer_bytes,
+                    targets: &["result"],
+                    include: &include,
+                    fallback_module_name: "RetainedPromotionConsumer",
+                },
+                Arc::new(context),
+                |_, _, _| {},
+            )
+            .expect("production promotion after original sources are absent")
+        };
+        let native_root = |compiled: &CompiledArtifacts| -> ArtifactView {
+            let roots = compiled
+                .artifact_view
+                .descriptors()
+                .into_iter()
+                .filter(|descriptor| {
+                    descriptor.kind == ArtifactKind::OriginalModule && descriptor.owner == owner
+                })
+                .map(|descriptor| descriptor.id)
+                .collect::<Vec<_>>();
+            assert_eq!(roots.len(), 1);
+            compiled.artifact_view.select_roots(roots).unwrap()
+        };
+        let promoted_owner = |compiled: &CompiledArtifacts| {
+            let product = compiled
+                .recovery_products
+                .iter()
+                .find(|product| {
+                    product.owner().unit == owner.unit && product.owner().module == owner.module
+                })
+                .expect("promoted original root");
+            let groups = compiled
+                .certified_groups
+                .iter()
+                .filter(|group| group.owner() == product.owner())
+                .collect::<Vec<_>>();
+            assert!(!groups.is_empty());
+            assert!(groups
+                .iter()
+                .all(|group| group.origin() == ProductOrigin::RetainedCore));
+            product.owner().clone()
+        };
+        let (context, extended) = issue(support_bytes);
+        let first = consume(context);
+        let second = consume(extended);
+        assert_eq!(promoted_owner(&first), promoted_owner(&second));
+        let first_native = native_root(&first);
+        let second_native = native_root(&second);
+        assert_eq!(first_native.descriptors(), second_native.descriptors());
+        let joined = first_native
+            .merge(&second_native)
+            .expect("same original native owners join across unrelated context extension");
+        assert_eq!(joined.descriptors(), first_native.descriptors());
+
+        // Reissue unchanged owner source against a genuinely changed demanded
+        // dependency. The original canonical import seal may change too; this
+        // control does not claim to vary a dependency under one fixed seal.
+        let (changed_context, _) = issue(include_str!(
+            "../tests/fixtures/retained-promotion/RetainedPromotionSupportChanged.hs"
+        ));
+        let changed = consume(changed_context);
+        let changed_owner = promoted_owner(&changed);
+        assert_ne!(
+            promoted_owner(&first).module_version,
+            changed_owner.module_version
+        );
+        assert!(first_native.merge(&native_root(&changed)).is_err());
+    }
+
+    #[test]
+    #[ignore = "requires matched Haskell worker and frontend"]
+    #[serial_test::serial]
     fn real_worker_reuses_dependency_after_consumer_changes() {
         let cache = tempfile::tempdir().unwrap();
         let old_cache = std::env::var_os("TIDEPOOL_COMPILE_CACHE_DIR");
