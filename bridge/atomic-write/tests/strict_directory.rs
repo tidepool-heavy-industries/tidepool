@@ -45,7 +45,7 @@ fn fault_child() {
         "mkdir" | "mkdir-retry" => {
             let anchor = tidepool_atomic_write::DirectoryAnchor::open_existing(root).unwrap();
             if operation == "mkdir-retry" {
-                let error = anchor.create_dir_all("new/deep").unwrap_err();
+                let error = anchor.child("new/deep").unwrap_err();
                 assert_eq!(error.path, root);
                 assert!(root.join("new/deep").is_dir());
             }

@@ -207,9 +207,7 @@ pub fn sync_parent_directory(path: &Path) -> Result<(), WriteError> {
     sync_directory(parent_dir(path))
 }
 
-/// Sync one existing directory, reporting unsupported operations and I/O failures.
-/// This persists its entries, not file contents or links to this directory from
-/// its own parent. The caller owns concurrent mutation and publication ordering.
+/// Open one existing directory, rejecting ordinary files.
 fn open_directory(path: &Path) -> Result<std::fs::File, WriteError> {
     let directory = std::fs::File::open(path).map_err(|source| WriteError {
         path: path.to_path_buf(),
@@ -227,13 +225,15 @@ fn open_directory(path: &Path) -> Result<std::fs::File, WriteError> {
             path: path.to_path_buf(),
             source: std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                "directory sync requires a directory",
+                "directory operation requires a directory",
             ),
         });
     }
     Ok(directory)
 }
 
+/// Persist this directory's entries, not file contents or its own parent link.
+/// The caller owns concurrent mutation and publication ordering.
 fn sync_directory(path: &Path) -> Result<(), WriteError> {
     open_directory(path)?
         .sync_all()
@@ -402,13 +402,15 @@ mod tests {
             Path::new("../escaped"),
             root.path(),
         ] {
+            let error = anchor.resolve(relative).unwrap_err();
+            assert_eq!(error.source.kind(), std::io::ErrorKind::InvalidInput);
             let error = anchor.create_dir_all(relative).unwrap_err();
             assert_eq!(error.source.kind(), std::io::ErrorKind::InvalidInput);
         }
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
         assert_eq!(anchor.create_dir_all("").unwrap(), anchor.path());
         assert_eq!(
-            anchor.create_dir_all("./new/deep").unwrap(),
+            anchor.child("./new/deep").unwrap().path(),
             anchor.path().join("new/deep")
         );
     }
