@@ -127,7 +127,7 @@ impl CompilerDiagnosticCapture {
         let report = serde_json::json!({
             "schema": 1, "kind": "compiler-execution-diagnostics", "authority": false,
             "original_directory": source, "phase": if result.is_some() { "compiler_completed" } else { "compiler_started" },
-            "compiler_success": result.map(|(success, _)| success),
+            "compiler_process_success": result.map(|(success, _)| success),
             "artifact_byte_limit": BYTE_LIMIT, "artifact_entry_limit": ENTRY_LIMIT,
             "artifact_bytes": BYTE_LIMIT - snapshot.remaining, "files": snapshot.files,
             "issues": snapshot.issues,
@@ -248,7 +248,7 @@ mod tests {
         let report: serde_json::Value =
             serde_json::from_slice(&std::fs::read(retained.join("transaction.json")).unwrap())
                 .unwrap();
-        assert_eq!(report["compiler_success"], true);
+        assert_eq!(report["compiler_process_success"], true);
         assert_eq!(report["authority"], false);
         assert!(retained.join("compiler-request.bin").is_file());
         std::fs::remove_dir_all(retained).unwrap();

@@ -476,7 +476,7 @@ mod tests {
             &std::fs::read(transaction.path().join("transaction.json")).unwrap(),
         )
         .unwrap();
-        assert_eq!(report["compiler_success"], true);
+        assert_eq!(report["compiler_process_success"], true);
         assert_eq!(report["authority"], false);
         assert_eq!(
             report["original_directory"],

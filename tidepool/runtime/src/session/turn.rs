@@ -3196,7 +3196,8 @@ fn run_turn_with_admission(
         Admitted(tidepool_toolchain::artifacts::AdmittedTurnOutput),
         Direct(tidepool_extract_cmd::ExtractRun),
     }
-    let diagnostics = CompilerDiagnosticCapture::start(temp.path(), &cmd);
+    let diagnostics =
+        (!ordinary_admitted).then(|| CompilerDiagnosticCapture::start(temp.path(), &cmd));
     let run = if ordinary_admitted {
         TurnCompilerOutput::Admitted(offer.execute_admitted_turn(endpoint, &mut cmd)?)
     } else {
@@ -3210,7 +3211,9 @@ fn run_turn_with_admission(
         }
         TurnCompilerOutput::Direct(run) => (&run.output, run.elapsed, temp.path()),
     };
-    diagnostics.completed(output_dir, &cmd, output.status.success(), &output.stderr);
+    if let Some(diagnostics) = diagnostics {
+        diagnostics.completed(output_dir, &cmd, output.status.success(), &output.stderr);
+    }
     timing::record_stage(
         timing::NO_NODE,
         timing::NO_ROUND,
