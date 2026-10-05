@@ -433,7 +433,7 @@ enum NativeCheckedOffer {
 // Protected compilation manifests bind the actual worker search order as well
 // as the source and interface recipe. Unsupported path encodings refuse before
 // the invocation builder can perform its ordinary lossy CLI conversion.
-enum CheckedPurpose {
+pub(crate) enum CheckedPurpose {
     Inspection,
     Cell,
     HostInputCell,
@@ -449,7 +449,7 @@ pub enum CheckedCellPurpose<'a> {
     HostActivationInput(&'a crate::checked_cell::CanonicalInputTypeWitness),
 }
 
-fn checked_search_authorization(
+pub(crate) fn checked_search_authorization(
     purpose: CheckedPurpose,
     mut authorization: Value,
     include: &[PathBuf],
@@ -497,13 +497,8 @@ fn checked_cell_authorization(
     values: &crate::checked_cell::CheckedValueInputs,
     include: &[PathBuf],
 ) -> Result<Value, CompileError> {
-    let mut authorization = specification.manifest_value()?;
-    let Value::Array(fields) = &mut authorization else {
-        unreachable!("closed cell authorization")
-    };
-    fields.push(values.baseline_authorization());
-    let purpose = match purpose {
-        CheckedCellPurpose::Authored => CheckedPurpose::Cell,
+    let (purpose, signature) = match purpose {
+        CheckedCellPurpose::Authored => (CheckedPurpose::Cell, None),
         CheckedCellPurpose::HostActivationInput(witness) => {
             if !specification.reserved_declaration_modules.is_empty()
                 || specification.cell_source
@@ -513,11 +508,43 @@ fn checked_cell_authorization(
                     "host input witness requires its reserved binder-only compiler slot".into(),
                 ));
             }
-            fields.push(crate::checked_cell::encode_signature(witness.signature()));
-            CheckedPurpose::HostInputCell
+            (CheckedPurpose::HostInputCell, Some(witness.signature()))
         }
     };
-    checked_search_authorization(purpose, authorization, include)
+    checked_search_authorization(
+        purpose,
+        encode_cell_authorization(specification, values.baseline_authorization(), signature)?,
+        include,
+    )
+}
+
+pub(crate) fn encode_cell_authorization(
+    specification: &crate::checked_cell::CheckedCellSpecification,
+    baseline: Value,
+    signature: Option<&crate::checked_cell::ExactCheckedSignature>,
+) -> Result<Value, CompileError> {
+    let mut authorization = specification.manifest_value()?;
+    let Value::Array(fields) = &mut authorization else {
+        unreachable!("closed cell authorization")
+    };
+    fields.push(baseline);
+    if let Some(signature) = signature {
+        fields.push(crate::checked_cell::encode_signature(signature));
+    }
+    Ok(authorization)
+}
+
+fn encode_inspection_authorization(owners: &BTreeSet<String>, baseline: Value) -> Value {
+    Value::Array(vec![
+        Value::Text("inspection1".into()),
+        Value::Array(owners.iter().cloned().map(Value::Text).collect()),
+        baseline,
+    ])
+}
+
+#[cfg(test)]
+pub(crate) fn fixture_inspection_authorization() -> Value {
+    encode_inspection_authorization(&BTreeSet::new(), Value::Array(vec![]))
 }
 
 fn compile_context_with_declarations(
@@ -827,11 +854,7 @@ impl ModuleCandidateOffer {
         let context = checked_value_context(context, &inputs)?;
         let authorization = checked_search_authorization(
             CheckedPurpose::Inspection,
-            Value::Array(vec![
-                Value::Text("inspection1".into()),
-                Value::Array(owners.iter().cloned().map(Value::Text).collect()),
-                inputs.baseline_authorization(),
-            ]),
+            encode_inspection_authorization(&owners, inputs.baseline_authorization()),
             include,
         )?;
         Ok(Self {

@@ -520,7 +520,7 @@ fn capture(
     .map_err(CertificationError::CapturedModulePayload)
 }
 
-fn canonical_certificate(
+pub(super) fn canonical_certificate(
     producer: [u8; 32],
     envelope: &FinalizationEnvelope,
     module: &FinalizedModuleReceipt,

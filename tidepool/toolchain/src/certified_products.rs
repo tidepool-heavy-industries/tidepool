@@ -14,6 +14,8 @@ use tidepool_repr::execution_schema::{
 };
 
 mod finalized_module;
+#[cfg(test)]
+pub(crate) use finalized_module::FINALIZATION_PROFILE;
 pub(crate) use finalized_module::{
     CanonicalOrigin, CanonicalSourceImport, CertifiedModuleInterface,
 };
@@ -666,6 +668,69 @@ pub(crate) fn decode_receipt_in(
     bytes: &[u8],
     output_dir: Option<&Path>,
 ) -> CertResult<CertifiedReceipt> {
+    decode_receipt_packet_in(bytes, output_dir).map(|decoded| decoded.receipt)
+}
+
+struct DecodedReceiptPacket {
+    receipt: CertifiedReceipt,
+    #[cfg(test)]
+    globals: Vec<AcceptedGlobal>,
+}
+
+#[cfg(test)]
+pub(crate) fn fixture_decoded_receipt(
+    bytes: &[u8],
+    output_dir: Option<&Path>,
+) -> CertResult<(
+    CertifiedReceipt,
+    Vec<AcceptedGlobal>,
+    BTreeMap<String, Vec<usize>>,
+    Vec<[u8; 32]>,
+)> {
+    let decoded = decode_receipt_packet_in(bytes, output_dir)?;
+    let key = |global: &AcceptedGlobal| -> CertResult<Vec<u8>> {
+        let mut bytes = vec![];
+        ciborium::ser::into_writer(&value_global(global), &mut bytes)
+            .map_err(|_| CertificationError::Receipt("global dictionary encoding"))?;
+        Ok(bytes)
+    };
+    let keys = decoded
+        .globals
+        .iter()
+        .map(key)
+        .collect::<CertResult<Vec<_>>>()?;
+    let global_sha256 = keys.iter().map(|bytes| sha(bytes)).collect();
+    let indices = keys
+        .into_iter()
+        .enumerate()
+        .map(|(index, key)| (key, index))
+        .collect::<BTreeMap<_, _>>();
+    let references = decoded
+        .receipt
+        .targets
+        .iter()
+        .map(|(name, globals)| {
+            Ok((
+                name.clone(),
+                globals
+                    .iter()
+                    .map(|global| {
+                        indices
+                            .get(&key(global)?)
+                            .copied()
+                            .ok_or(CertificationError::Receipt("global dictionary index"))
+                    })
+                    .collect::<CertResult<Vec<_>>>()?,
+            ))
+        })
+        .collect::<CertResult<_>>()?;
+    Ok((decoded.receipt, decoded.globals, references, global_sha256))
+}
+
+fn decode_receipt_packet_in(
+    bytes: &[u8],
+    output_dir: Option<&Path>,
+) -> CertResult<DecodedReceiptPacket> {
     if bytes.len() > RECEIPT_LIMIT {
         return Err(CertificationError::SizeLimit {
             format: CertificationFormat::ProductReceipt,
@@ -685,7 +750,7 @@ pub(crate) fn decode_receipt_in(
 fn decode_receipt_value_in(
     value: &Value,
     output_dir: Option<&Path>,
-) -> CertResult<CertifiedReceipt> {
+) -> CertResult<DecodedReceiptPacket> {
     let header = array(value)?;
     if header.len() < 2 || string(&header[0])? != "TPCERT" {
         return Err(CertificationError::Receipt("receipt header"));
@@ -846,12 +911,20 @@ fn decode_receipt_value_in(
     };
     let finalization = finalized_module::decode_envelope(&header[6])?;
     finalization.validate_owners(&modules, &packages)?;
-    Ok(CertifiedReceipt {
-        modules,
-        targets,
-        packages,
-        finalization,
-        source_recipe,
+    Ok(DecodedReceiptPacket {
+        receipt: CertifiedReceipt {
+            modules,
+            targets,
+            packages,
+            finalization,
+            source_recipe,
+        },
+        #[cfg(test)]
+        globals: dictionary
+            .rows
+            .into_iter()
+            .map(|(global, _)| global)
+            .collect(),
     })
 }
 
@@ -9206,4 +9279,21 @@ pub(crate) mod tests {
             ));
         }
     }
+}
+
+/// Encode structural canonical certificate data without issuing an interface capability.
+#[cfg(test)]
+pub(crate) fn fixture_canonical_certificate(
+    producer: [u8; 32],
+    envelope: &FinalizationEnvelope,
+    module: &FinalizedModuleReceipt,
+) -> CertResult<Vec<u8>> {
+    finalized_module::canonical_certificate(
+        producer,
+        envelope,
+        module,
+        &CanonicalOrigin::SourceOriginal {
+            imports: Arc::from([]),
+        },
+    )
 }

@@ -391,7 +391,12 @@ impl DependencyEvidence {
     /// Replace the request-local path only after checking the bytes the worker
     /// says it consumed. Authored dependencies retain their path identity.
     pub(crate) fn from_worker(bytes: &[u8], input: &Path, source: &str) -> Option<Self> {
-        let mut evidence: Self = serde_json::from_slice(bytes).ok()?;
+        let evidence: Self = serde_json::from_slice(bytes).ok()?;
+        evidence.normalize_worker(input, source)
+    }
+
+    pub(crate) fn normalize_worker(mut self, input: &Path, source: &str) -> Option<Self> {
+        let evidence = &mut self;
         let input = fs::canonicalize(input).ok()?;
         for item in &mut evidence.sources {
             if fs::canonicalize(&item.path).ok().as_ref() == Some(&input) {
@@ -414,7 +419,7 @@ impl DependencyEvidence {
                 }
             }
         }
-        evidence.valid(source).then_some(evidence)
+        self.valid(source).then_some(self)
     }
 
     /// Validate contents and negative witnesses. IO errors are misses, including

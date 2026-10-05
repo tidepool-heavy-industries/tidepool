@@ -11,12 +11,64 @@ const LIST_LIMIT: usize = 65536;
 const SIGNATURE_LIMIT: usize = 256;
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-struct GlobalKey {
-    identity: SymbolIdentity,
-    rep: RuntimeRep,
-    signature: Option<Signature>,
-    evaluated: bool,
-    generation: Option<u64>,
+pub(in crate::module_candidates) struct GlobalKey {
+    pub(in crate::module_candidates) identity: SymbolIdentity,
+    pub(in crate::module_candidates) rep: RuntimeRep,
+    pub(in crate::module_candidates) signature: Option<Signature>,
+    pub(in crate::module_candidates) evaluated: bool,
+    pub(in crate::module_candidates) generation: Option<u64>,
+}
+
+/// Structural codec input; this contains no executable definitions or admission proof.
+#[cfg(test)]
+pub(in crate::module_candidates) struct StructuralGroup {
+    pub(in crate::module_candidates) ordinal: u32,
+    pub(in crate::module_candidates) binders: Vec<SymbolIdentity>,
+    pub(in crate::module_candidates) globals: Vec<GlobalKey>,
+}
+
+#[derive(Clone, Copy)]
+enum GroupView<'a> {
+    Projected(&'a ProjectedGroup),
+    #[cfg(test)]
+    Structural(&'a StructuralGroup),
+}
+impl<'a> GroupView<'a> {
+    fn ordinal(self) -> u32 {
+        match self {
+            Self::Projected(group) => group.original_ordinal(),
+            #[cfg(test)]
+            Self::Structural(group) => group.ordinal,
+        }
+    }
+    fn binders(self) -> &'a [SymbolIdentity] {
+        match self {
+            Self::Projected(group) => group.binders(),
+            #[cfg(test)]
+            Self::Structural(group) => &group.binders,
+        }
+    }
+    fn globals_len(self) -> usize {
+        match self {
+            Self::Projected(group) => group.globals().len(),
+            #[cfg(test)]
+            Self::Structural(group) => group.globals.len(),
+        }
+    }
+    fn keys(self) -> impl Iterator<Item = Option<GlobalKey>> + 'a {
+        (0..self.globals_len()).map(move |index| match self {
+            Self::Projected(group) => global_key(group, &group.globals()[index]),
+            #[cfg(test)]
+            Self::Structural(group) => {
+                let key = &group.globals[index];
+                validate_key(key)?;
+                Some(key.clone())
+            }
+        })
+    }
+    fn check(self) -> Option<()> {
+        (self.binders().len() <= LIST_LIMIT && self.globals_len() <= LIST_LIMIT).then_some(())
+    }
 }
 
 pub(super) struct InventoryTables {
@@ -29,6 +81,15 @@ pub(super) struct InventoryTables {
 
 impl InventoryTables {
     pub(super) fn new<'a>(groups: impl IntoIterator<Item = &'a ProjectedGroup>) -> Option<Self> {
+        Self::from_views(groups.into_iter().map(GroupView::Projected))
+    }
+
+    #[cfg(test)]
+    pub(in crate::module_candidates) fn structural(groups: &[StructuralGroup]) -> Option<Self> {
+        Self::from_views(groups.iter().map(GroupView::Structural))
+    }
+
+    fn from_views<'a>(groups: impl IntoIterator<Item = GroupView<'a>>) -> Option<Self> {
         let mut tables = Self {
             symbols: BTreeMap::new(),
             globals: BTreeMap::new(),
@@ -38,19 +99,19 @@ impl InventoryTables {
         };
         let mut expanded = 0usize;
         for group in groups {
-            check_group(group)?;
+            group.check()?;
             charge(
                 &mut expanded,
-                array_size(3).checked_add(uint_size(group.original_ordinal().into()))?,
+                array_size(3).checked_add(uint_size(group.ordinal().into()))?,
             )?;
             charge(&mut expanded, array_size(group.binders().len()))?;
-            charge(&mut expanded, array_size(group.globals().len()))?;
+            charge(&mut expanded, array_size(group.globals_len()))?;
             for binder in group.binders() {
                 let (_, bytes) = tables.intern_symbol(binder)?;
                 charge(&mut expanded, bytes)?;
             }
-            for global in group.globals() {
-                let key = global_key(group, global)?;
+            for key in group.keys() {
+                let key = key?;
                 let (_, bytes) = tables.intern_global(key)?;
                 charge(&mut expanded, bytes)?;
             }
@@ -60,24 +121,39 @@ impl InventoryTables {
 
     /// Each call consumes the offer-wide expanded budget, including its array header.
     pub(super) fn groups(&mut self, groups: &[ProjectedGroup]) -> Option<Value> {
+        self.encode_groups(groups.iter().map(GroupView::Projected))
+    }
+
+    #[cfg(test)]
+    pub(in crate::module_candidates) fn structural_groups(
+        &mut self,
+        groups: &[StructuralGroup],
+    ) -> Option<Value> {
+        self.encode_groups(groups.iter().map(GroupView::Structural))
+    }
+
+    fn encode_groups<'a>(
+        &mut self,
+        groups: impl Iterator<Item = GroupView<'a>> + Clone + ExactSizeIterator,
+    ) -> Option<Value> {
         if groups.len() > LIST_LIMIT {
             return None;
         }
         let mut bytes = array_size(groups.len());
         // Charge the complete normalized expansion before allocating index lists.
-        for group in groups {
-            check_group(group)?;
+        for group in groups.clone() {
+            group.check()?;
             charge(
                 &mut bytes,
-                array_size(3).checked_add(uint_size(group.original_ordinal().into()))?,
+                array_size(3).checked_add(uint_size(group.ordinal().into()))?,
             )?;
             charge(&mut bytes, array_size(group.binders().len()))?;
-            charge(&mut bytes, array_size(group.globals().len()))?;
+            charge(&mut bytes, array_size(group.globals_len()))?;
             for binder in group.binders() {
                 charge(&mut bytes, self.symbols.get(binder)?.1)?;
             }
-            for global in group.globals() {
-                charge(&mut bytes, self.globals.get(&global_key(group, global)?)?.1)?;
+            for key in group.keys() {
+                charge(&mut bytes, self.globals.get(&key?)?.1)?;
             }
         }
         let mut expanded = self.expanded_bytes;
@@ -90,16 +166,11 @@ impl InventoryTables {
                 .map(|binder| Some(Value::Integer((self.symbols.get(binder)?.0 as u64).into())))
                 .collect::<Option<Vec<_>>>()?;
             let globals = group
-                .globals()
-                .iter()
-                .map(|global| {
-                    Some(Value::Integer(
-                        (self.globals.get(&global_key(group, global)?)?.0 as u64).into(),
-                    ))
-                })
+                .keys()
+                .map(|key| Some(Value::Integer((self.globals.get(&key?)?.0 as u64).into())))
                 .collect::<Option<Vec<_>>>()?;
             rows.push(Value::Array(vec![
-                Value::Integer(group.original_ordinal().into()),
+                Value::Integer(group.ordinal().into()),
                 Value::Array(binders),
                 Value::Array(globals),
             ]));
@@ -186,8 +257,17 @@ fn global_key(
     })
 }
 
-fn check_group(group: &ProjectedGroup) -> Option<()> {
-    (group.binders().len() <= LIST_LIMIT && group.globals().len() <= LIST_LIMIT).then_some(())
+#[cfg(test)]
+fn validate_key(key: &GlobalKey) -> Option<()> {
+    identity_size(&key.identity)?;
+    if let Some(signature) = &key.signature {
+        if signature.arguments.len() > SIGNATURE_LIMIT
+            || matches!(&signature.results, super::ResultContract::Returns(results) if results.len() > SIGNATURE_LIMIT)
+        {
+            return None;
+        }
+    }
+    Some(())
 }
 fn charge(total: &mut usize, bytes: usize) -> Option<()> {
     *total = total.checked_add(bytes)?;

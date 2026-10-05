@@ -49,6 +49,19 @@ impl RequestHelperRecipe {
     }
 }
 
+pub(crate) fn encode_request_authorization(
+    signatures: &crate::checked_cell::RequestTypeSignatures,
+    recipe: RequestHelperRecipe,
+    purpose: Option<Value>,
+) -> Value {
+    Value::Array(vec![
+        text("request-types2"),
+        signatures.authorization_value(),
+        text(recipe.as_str()),
+        purpose.unwrap_or(Value::Null),
+    ])
+}
+
 /// Request-local signatures together with their trusted helper recipe.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RequestAnnotations {
@@ -147,12 +160,11 @@ impl ExactCompileContext {
 
     fn authorization(&self, purpose: Option<Value>) -> Option<Value> {
         match &self.request_annotations {
-            Some(annotations) => Some(Value::Array(vec![
-                text("request-types2"),
-                annotations.signatures.authorization_value(),
-                text(annotations.helper_recipe.as_str()),
-                purpose.unwrap_or(Value::Null),
-            ])),
+            Some(annotations) => Some(encode_request_authorization(
+                &annotations.signatures,
+                annotations.helper_recipe,
+                purpose,
+            )),
             None => purpose,
         }
     }
@@ -1616,47 +1628,22 @@ impl ExactCompilationRequest {
         planned: Option<&ExactModuleIdentity>,
         context: &ExactDeclarationContext,
     ) -> Result<ExactSourceAdmission, CompileError> {
-        use sha2::Digest;
-        let bytes = bounded_read(path, 4 * 1024 * 1024)?;
-        let mut cursor = std::io::Cursor::new(&bytes);
-        let value: Value = ciborium::de::from_reader(&mut cursor).map_err(failure)?;
-        if cursor.position() != bytes.len() as u64 {
-            return Err(failure("compile receipt has trailing bytes"));
-        }
-        let header = row(&value, 10)?;
-        if string(&header[0])? != "TPEXACTCOMPILE"
-            || string(&header[1])? != "3"
-            || string(&header[2])? != self.request_sha256
-            || string(&header[3])? != hex(&self.semantic_sha256)
-        {
-            return Err(failure(
-                "compile receipt belongs to another context or version",
-            ));
-        }
-        let source_path = PathBuf::from(string(&header[4])?);
-        let snapshot = PathBuf::from(string(&header[6])?);
-        if !source_path.is_absolute()
-            || !snapshot.is_absolute()
-            || snapshot
-                != path
-                    .parent()
-                    .ok_or_else(|| failure("compile receipt has no owner directory"))?
-                    .join("source.hs")
-        {
-            return Err(failure("compile source snapshot has another owner"));
-        }
-        let source_bytes = bounded_read(&snapshot, 32 * 1024 * 1024)?;
-        let source_sha256: [u8; 32] = sha2::Sha256::digest(&source_bytes).into();
-        if string(&header[5])? != hex(&source_sha256) {
-            return Err(failure("compile source snapshot changed"));
-        }
-        let source = std::str::from_utf8(&source_bytes).map_err(failure)?;
-        let evidence_bytes = string(&header[7])?.as_bytes().to_vec();
-        let evidence =
-            crate::cache::DependencyEvidence::from_worker(&evidence_bytes, &source_path, source)
-                .ok_or_else(|| {
-                    failure("fresh compilation lacks complete tracked source evidence")
-                })?;
+        let DecodedExactCompilationReceipt {
+            source_path,
+            source_sha256,
+            source,
+            evidence_bytes,
+            evidence,
+            edges,
+            claims,
+            selection_evidence,
+        } = decode_exact_compilation_receipt(
+            path,
+            Some((&self.request_sha256, self.semantic_sha256)),
+        )?;
+        let evidence = evidence
+            .normalize_worker(&source_path, &source)
+            .ok_or_else(|| failure("fresh compilation lacks complete tracked source evidence"))?;
         let interfaces = context.interface_owners();
         let mut exact_owners: BTreeSet<_> = interfaces
             .iter()
@@ -1711,56 +1698,27 @@ impl ExactCompilationRequest {
         if let Some(planned) = planned {
             selected.insert((planned.unit.as_str(), planned.module.as_str()));
         }
-        let edges = list(&header[8], 4096)?;
-        let mut source_selection_roots = Vec::new();
-        for module in edges {
-            let module = row(module, 4)?;
-            let source_owner = identity(string(&module[0])?, string(&module[1])?);
-            for edge in list(&module[3], 4096)? {
-                let edge = row(edge, 4)?;
-                if !boolean(&edge[2])? {
-                    let qualifier =
-                        crate::cache::ImportQualifier::try_from(string(&edge[0])?.to_owned())
-                            .map_err(failure)?;
-                    source_selection_roots.push((
-                        source_owner.clone(),
-                        qualifier,
-                        identity(string(&edge[3])?, string(&edge[1])?),
-                    ));
-                }
-            }
-        }
-        let source_selection = row(&header[9], 2)?;
-        let claims = list(&source_selection[0], 4096)?;
+        let source_selection_roots = edges
+            .iter()
+            .flat_map(|module| {
+                module.imports.iter().filter(|edge| !edge.boot).map(|edge| {
+                    (
+                        module.owner.clone(),
+                        edge.qualifier.clone(),
+                        identity(&edge.unit, &edge.module),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
         let selected_originals = if claims.is_empty() {
-            if source_selection[1] != Value::Null {
-                return Err(failure(
-                    "empty original selection has nonempty source evidence",
-                ));
-            }
             BTreeMap::new()
         } else {
             let include = self.source_search_include.as_deref().ok_or_else(|| {
                 failure("source-selected originals lack trusted current import roots")
             })?;
-            let claims = claims
-                .iter()
-                .map(|claim| {
-                    let claim = row(claim, 5)?;
-                    Ok(crate::execution_source::SourceSelectedOriginalClaim {
-                        owner: identity(string(&claim[0])?, string(&claim[1])?),
-                        certificate_sha256: crate::execution_source::parse_digest(string(
-                            &claim[2],
-                        )?)?,
-                        interface_sha256: crate::execution_source::parse_digest(string(
-                            &claim[3],
-                        )?)?,
-                        source_sha256: crate::execution_source::parse_digest(string(&claim[4])?)?,
-                    })
-                })
-                .collect::<Result<Vec<_>, CompileError>>()?;
-            let selection_evidence: crate::cache::DependencyEvidence =
-                serde_json::from_str(string(&source_selection[1])?).map_err(failure)?;
+            let selection_evidence = selection_evidence
+                .as_ref()
+                .ok_or_else(|| failure("selected originals lack source evidence"))?;
             // Earlier admitted program support carries the same original proof
             // as persisted context. This receipt cannot authorize itself.
             let source_view = match &self.program_support {
@@ -1795,7 +1753,7 @@ impl ExactCompilationRequest {
                 .collect();
             crate::execution_source::validate_source_selected_originals(
                 claims,
-                &selection_evidence,
+                selection_evidence,
                 crate::execution_source::SourceSelectionContext {
                     producer: self.producer_sha256,
                     interfaces: &canonical,
@@ -1810,12 +1768,11 @@ impl ExactCompilationRequest {
         let mut seen = BTreeSet::new();
         let mut exact_imports = BTreeMap::new();
         let mut exact_source_imports = BTreeMap::new();
-        for module in edges {
-            let module = row(module, 4)?;
+        for module in &edges {
             let owner = (
-                string(&module[0])?,
-                string(&module[1])?,
-                boolean(&module[2])?,
+                module.owner.unit.as_str(),
+                module.owner.module.as_str(),
+                module.boot,
             );
             if !source_owners.contains(&owner) || !seen.insert(owner) {
                 return Err(failure(
@@ -1825,12 +1782,11 @@ impl ExactCompilationRequest {
             let mut imported = BTreeSet::new();
             let mut resolved = BTreeSet::new();
             let mut source_imports = Vec::new();
-            for edge in list(&module[3], 4096)? {
-                let edge = row(edge, 4)?;
-                let qualifier = string(&edge[0])?;
-                let name = string(&edge[1])?;
-                let boot = boolean(&edge[2])?;
-                let unit = string(&edge[3])?;
+            for edge in &module.imports {
+                let qualifier = String::from(edge.qualifier.clone());
+                let name = edge.module.as_str();
+                let boot = edge.boot;
+                let unit = edge.unit.as_str();
                 let scaffold_import = self.generated_scaffold_imports.iter().any(|authority| {
                     evidence
                         .modules
@@ -1851,12 +1807,12 @@ impl ExactCompilationRequest {
                                 };
                             authority.permits(
                                 context,
-                                source,
+                                &source,
                                 &source_path,
                                 module_source,
                                 unit,
                                 name,
-                                qualifier,
+                                &qualifier,
                                 boot,
                             )
                         })
@@ -1866,7 +1822,7 @@ impl ExactCompilationRequest {
                         || scaffold_import
                         || selected_originals.contains_key(&identity(unit, name)))
                     || (qualifier != "none" && qualifier != format!("this:{unit}"))
-                    || !imported.insert((qualifier, name, boot, unit))
+                    || !imported.insert((qualifier.clone(), name.to_owned(), boot, unit.to_owned()))
                 {
                     return Err(failure(format!(
                         "exact import witness leaves selected lexical graph: source {}:{}, import {unit}:{name}, qualifier {qualifier}, boot {boot}, selected {}",
@@ -1877,8 +1833,7 @@ impl ExactCompilationRequest {
                 }
                 resolved.insert(identity(unit, name));
                 source_imports.push(crate::certified_products::CanonicalSourceImport {
-                    qualifier: crate::cache::ImportQualifier::try_from(qualifier.to_owned())
-                        .map_err(failure)?,
+                    qualifier: edge.qualifier.clone(),
                     module: name.to_owned(),
                     boot,
                     home_unit: Some(unit.to_owned()),
@@ -1902,6 +1857,152 @@ impl ExactCompilationRequest {
             selected_originals,
         })
     }
+}
+
+/// Decoded wire facts. Admission separately authenticates the request and selected owners.
+pub(crate) struct DecodedExactCompilationReceipt {
+    pub(crate) source_path: PathBuf,
+    source_sha256: [u8; 32],
+    source: String,
+    evidence_bytes: Vec<u8>,
+    pub(crate) evidence: crate::cache::DependencyEvidence,
+    edges: Vec<ExactReceiptModule>,
+    pub(crate) claims: Vec<crate::execution_source::SourceSelectedOriginalClaim>,
+    selection_evidence: Option<crate::cache::DependencyEvidence>,
+}
+struct ExactReceiptModule {
+    owner: ExactModuleIdentity,
+    boot: bool,
+    imports: Vec<ExactReceiptImport>,
+}
+struct ExactReceiptImport {
+    qualifier: crate::cache::ImportQualifier,
+    module: String,
+    boot: bool,
+    unit: String,
+}
+
+#[cfg(test)]
+pub(crate) fn read_exact_compilation_receipt(
+    path: &Path,
+) -> Result<DecodedExactCompilationReceipt, CompileError> {
+    decode_exact_compilation_receipt(path, None)
+}
+
+fn decode_exact_compilation_receipt(
+    path: &Path,
+    expected: Option<(&str, [u8; 32])>,
+) -> Result<DecodedExactCompilationReceipt, CompileError> {
+    use sha2::Digest;
+    let bytes = bounded_read(path, 4 * 1024 * 1024)?;
+    let mut cursor = std::io::Cursor::new(&bytes);
+    let value: Value = ciborium::de::from_reader(&mut cursor).map_err(failure)?;
+    if cursor.position() != bytes.len() as u64 {
+        return Err(failure("compile receipt has trailing bytes"));
+    }
+    let header = row(&value, 10)?;
+    if string(&header[0])? != "TPEXACTCOMPILE" || string(&header[1])? != "3" {
+        return Err(failure(
+            "compile receipt belongs to another context or version",
+        ));
+    }
+    let request_sha256 = string(&header[2])?.to_owned();
+    crate::execution_source::parse_digest(&request_sha256)?;
+    let semantic_sha256 = crate::execution_source::parse_digest(string(&header[3])?)?;
+    if expected
+        .is_some_and(|(request, semantic)| request_sha256 != request || semantic_sha256 != semantic)
+    {
+        return Err(failure(
+            "compile receipt belongs to another context or version",
+        ));
+    }
+    let source_path = PathBuf::from(string(&header[4])?);
+    let snapshot = PathBuf::from(string(&header[6])?);
+    if !source_path.is_absolute()
+        || !snapshot.is_absolute()
+        || snapshot
+            != path
+                .parent()
+                .ok_or_else(|| failure("compile receipt has no owner directory"))?
+                .join("source.hs")
+    {
+        return Err(failure("compile source snapshot has another owner"));
+    }
+    let source_bytes = bounded_read(&snapshot, 32 * 1024 * 1024)?;
+    let source_sha256: [u8; 32] = sha2::Sha256::digest(&source_bytes).into();
+    if string(&header[5])? != hex(&source_sha256) {
+        return Err(failure("compile source snapshot changed"));
+    }
+    let source = std::str::from_utf8(&source_bytes)
+        .map_err(failure)?
+        .to_owned();
+    let evidence_bytes = string(&header[7])?.as_bytes().to_vec();
+    let evidence: crate::cache::DependencyEvidence =
+        serde_json::from_slice(&evidence_bytes).map_err(failure)?;
+    if evidence.version != 4 {
+        return Err(failure("compile receipt dependency evidence version"));
+    }
+    let edges = list(&header[8], 4096)?
+        .iter()
+        .map(|module| {
+            let module = row(module, 4)?;
+            let owner = identity(string(&module[0])?, string(&module[1])?);
+            let boot = boolean(&module[2])?;
+            let imports = list(&module[3], 4096)?
+                .iter()
+                .map(|edge| {
+                    let edge = row(edge, 4)?;
+                    Ok(ExactReceiptImport {
+                        qualifier: crate::cache::ImportQualifier::try_from(
+                            string(&edge[0])?.to_owned(),
+                        )
+                        .map_err(failure)?,
+                        module: string(&edge[1])?.to_owned(),
+                        boot: boolean(&edge[2])?,
+                        unit: string(&edge[3])?.to_owned(),
+                    })
+                })
+                .collect::<Result<Vec<_>, CompileError>>()?;
+            Ok(ExactReceiptModule {
+                owner,
+                boot,
+                imports,
+            })
+        })
+        .collect::<Result<Vec<_>, CompileError>>()?;
+    let source_selection = row(&header[9], 2)?;
+    let claims = list(&source_selection[0], 4096)?
+        .iter()
+        .map(|claim| {
+            let claim = row(claim, 5)?;
+            Ok(crate::execution_source::SourceSelectedOriginalClaim {
+                owner: identity(string(&claim[0])?, string(&claim[1])?),
+                certificate_sha256: crate::execution_source::parse_digest(string(&claim[2])?)?,
+                interface_sha256: crate::execution_source::parse_digest(string(&claim[3])?)?,
+                source_sha256: crate::execution_source::parse_digest(string(&claim[4])?)?,
+            })
+        })
+        .collect::<Result<Vec<_>, CompileError>>()?;
+    let selection_evidence = if claims.is_empty() {
+        if source_selection[1] != Value::Null {
+            return Err(failure(
+                "empty original selection has nonempty source evidence",
+            ));
+        }
+        None
+    } else {
+        Some(serde_json::from_str(string(&source_selection[1])?).map_err(failure)?)
+    };
+    Ok(DecodedExactCompilationReceipt {
+        source_path,
+        source_sha256,
+        source,
+        evidence_bytes,
+        evidence,
+        edges,
+        claims,
+        selection_evidence,
+    })
 }
 
 fn bounded_read(path: &Path, limit: u64) -> Result<Vec<u8>, CompileError> {
@@ -4146,6 +4247,55 @@ mod tests {
 
     fn read_receipt(path: &Path) -> Value {
         ciborium::de::from_reader(std::fs::read(path).unwrap().as_slice()).unwrap()
+    }
+
+    #[test]
+    fn receipt_observations_do_not_admit_cache_unsafe_compilations() {
+        let directory = tempfile::tempdir().unwrap();
+        let context = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
+        let request = program_request(directory.path(), context.clone());
+        let receipt = import_receipt(directory.path(), &request, "Unadmitted");
+        assert!(
+            read_exact_compilation_receipt(&receipt)
+                .unwrap()
+                .evidence
+                .cache_safe
+        );
+        let mut value = read_receipt(&receipt);
+        let fields = value.as_array_mut().unwrap();
+        let mut evidence: crate::cache::DependencyEvidence =
+            serde_json::from_str(fields[7].as_text().unwrap()).unwrap();
+        evidence.cache_safe = false;
+        fields[7] = text(serde_json::to_string(&evidence).unwrap());
+        write_receipt(&receipt, &value);
+        let facts = read_exact_compilation_receipt(&receipt).unwrap();
+        assert!(!facts.evidence.cache_safe);
+        assert!(facts.claims.is_empty());
+        assert!(matches!(request.validate_receipt(&receipt, None, &context),
+            Err(CompileError::ExtractFailed(detail)) if detail.contains("complete tracked source evidence")));
+    }
+
+    #[test]
+    fn receipt_observations_reject_changed_snapshots_and_trailing_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let context = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
+        let request = program_request(directory.path(), context);
+        let receipt = import_receipt(directory.path(), &request, "Unadmitted");
+        let expected = std::fs::read(&receipt).unwrap();
+        assert!(read_exact_compilation_receipt(&receipt).is_ok());
+        let snapshot = receipt.parent().unwrap().join("source.hs");
+        let source = std::fs::read(&snapshot).unwrap();
+        std::fs::write(&snapshot, b"module Changed where\n").unwrap();
+        assert!(matches!(read_exact_compilation_receipt(&receipt),
+            Err(CompileError::ExtractFailed(detail)) if detail.contains("snapshot changed")));
+        std::fs::write(&snapshot, source).unwrap();
+        let mut trailing = expected.clone();
+        trailing.push(0);
+        std::fs::write(&receipt, trailing).unwrap();
+        assert!(matches!(read_exact_compilation_receipt(&receipt),
+            Err(CompileError::ExtractFailed(detail)) if detail.contains("trailing bytes")));
+        std::fs::write(&receipt, expected).unwrap();
+        assert!(read_exact_compilation_receipt(&receipt).is_ok());
     }
 
     fn source_selected_receipt(

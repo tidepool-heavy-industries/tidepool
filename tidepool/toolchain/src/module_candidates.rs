@@ -1846,32 +1846,6 @@ fn select_records_inner(
         )
         .ok()?;
         let core_reference = canonical_reference.core.as_ref()?;
-        let canonical_requirements = Value::Array(
-            canonical
-                .requirements()
-                .keys()
-                .map(|(unit, module)| {
-                    Value::Array(vec![Value::Text(unit.clone()), Value::Text(module.clone())])
-                })
-                .collect(),
-        );
-        let canonical_evidence = Value::Array(vec![
-            Value::Text("module".into()),
-            Value::Text(
-                scratch
-                    .join(&canonical_reference.certificate_path)
-                    .to_string_lossy()
-                    .into_owned(),
-            ),
-            Value::Text(hex(&canonical_reference.certificate_sha256)),
-            Value::Text(
-                scratch
-                    .join(&core_reference.path)
-                    .to_string_lossy()
-                    .into_owned(),
-            ),
-            Value::Text(hex(&core_reference.sha256)),
-        ]);
         let bundle = CandidateBundle {
             owner: owner.clone(),
             product,
@@ -1904,24 +1878,27 @@ fn select_records_inner(
         let product_path =
             scratch.join(format!("candidate-{}.tpmod", hex(&owner.module_version.0)));
         tidepool_atomic_write::write_best_effort(&product_path, &selected.product_bytes).ok()?;
-        manifest.push(Value::Array(vec![
-            Value::Text(owner.unit),
-            Value::Text(owner.module),
-            Value::Text(record.source.to_string_lossy().into_owned()),
-            Value::Text(std::mem::take(&mut record.data.source_sha256)),
-            Value::Text(iface_path.to_string_lossy().into_owned()),
-            Value::Text(sha(&record.interface)),
-            Value::Text(hex(&owner.module_version.0)),
-            Value::Text(hex(&product_sha)),
-            Value::Text(evidence_sha),
-            Value::Array(imports),
-            inventory.groups(&selected.product.groups)?,
-            Value::Text(package_imports_path.to_string_lossy().into_owned()),
-            Value::Text(sha(&selected.package_imports_bytes)),
-            Value::Text(product_path.to_string_lossy().into_owned()),
-            canonical_requirements,
-            canonical_evidence,
-        ]));
+        manifest.push(candidate_manifest_row(CandidateManifestRow {
+            unit: &owner.unit,
+            module: &owner.module,
+            source: &record.source,
+            source_sha256: &record.data.source_sha256,
+            interface: &iface_path,
+            interface_sha256: &sha(&record.interface),
+            module_version: &hex(&owner.module_version.0),
+            product_sha256: &hex(&product_sha),
+            evidence_sha256: &evidence_sha,
+            imports,
+            groups: inventory.groups(&selected.product.groups)?,
+            packages: &package_imports_path,
+            packages_sha256: &sha(&selected.package_imports_bytes),
+            product: &product_path,
+            canonical_requirements: canonical.requirements().keys().cloned().collect(),
+            certificate: &scratch.join(&canonical_reference.certificate_path),
+            certificate_sha256: &canonical_reference.certificate_sha256,
+            core: &scratch.join(&core_reference.path),
+            core_sha256: &core_reference.sha256,
+        }));
     }
     retain_closed_execution_capabilities(
         &mut by_owner,
@@ -1941,58 +1918,48 @@ fn select_records_inner(
         return None;
     }
     let (symbols, globals) = inventory.into_wire_tables();
-    let value = Value::Array(vec![
-        Value::Text("TPMCAN".into()),
-        Value::Text("10".into()),
+    let value = candidate_manifest_value(
         symbols,
         globals,
-        Value::Array(manifest),
-        Value::Array(vec![
-            Value::Array(
-                by_owner
-                    .values()
-                    .filter(|bundle| bundle.execution_admitted)
-                    .filter_map(|bundle| bundle.original_execution.as_ref())
-                    .map(|proof| (proof.graph.digest(), &proof.graph))
-                    .collect::<BTreeMap<_, _>>()
-                    .into_iter()
-                    .map(|(digest, graph)| {
-                        let path = graph.capture_descriptor(&scratch).ok()?;
-                        Some(Value::Array(vec![
-                            Value::Text(hex(&digest)),
-                            Value::Text(path.to_string_lossy().into_owned()),
-                        ]))
-                    })
-                    .collect::<Option<Vec<_>>>()?,
-            ),
-            Value::Array(
-                by_owner
-                    .values()
-                    .filter_map(|bundle| {
-                        if !bundle.execution_admitted {
-                            return None;
-                        }
-                        let proof = bundle.original_execution.as_ref()?;
-                        let owner = &bundle.owner;
-                        Some(Value::Array(vec![
-                            Value::Text(owner.unit.clone()),
-                            Value::Text(owner.module.clone()),
-                            Value::Text(hex(&owner.module_version.0)),
-                            Value::Text(hex(&owner.skinny_iface_sha256)),
-                            Value::Text(hex(&owner.product_sha256)),
-                            Value::Text(hex(&proof.graph.digest())),
-                        ]))
-                    })
-                    .collect(),
-            ),
-        ]),
-        Value::Text(
-            crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
-                endpoint_identity,
-            )
-            .hex(),
-        ),
-    ]);
+        manifest,
+        by_owner
+            .values()
+            .filter(|bundle| bundle.execution_admitted)
+            .filter_map(|bundle| bundle.original_execution.as_ref())
+            .map(|proof| (proof.graph.digest(), &proof.graph))
+            .collect::<BTreeMap<_, _>>()
+            .into_iter()
+            .map(|(digest, graph)| {
+                let path = graph.capture_descriptor(&scratch).ok()?;
+                Some(Value::Array(vec![
+                    Value::Text(hex(&digest)),
+                    Value::Text(path.to_string_lossy().into_owned()),
+                ]))
+            })
+            .collect::<Option<Vec<_>>>()?,
+        by_owner
+            .values()
+            .filter_map(|bundle| {
+                if !bundle.execution_admitted {
+                    return None;
+                }
+                let proof = bundle.original_execution.as_ref()?;
+                let owner = &bundle.owner;
+                Some(Value::Array(vec![
+                    Value::Text(owner.unit.clone()),
+                    Value::Text(owner.module.clone()),
+                    Value::Text(hex(&owner.module_version.0)),
+                    Value::Text(hex(&owner.skinny_iface_sha256)),
+                    Value::Text(hex(&owner.product_sha256)),
+                    Value::Text(hex(&proof.graph.digest())),
+                ]))
+            })
+            .collect(),
+        &crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
+            endpoint_identity,
+        )
+        .hex(),
+    );
     let mut encoded = Vec::new();
     ciborium::ser::into_writer(&value, &mut encoded).ok()?;
     if encoded.len() > MANIFEST_LIMIT {
@@ -2007,6 +1974,81 @@ fn select_records_inner(
         manifest_path,
         by_owner,
     })
+}
+
+/// Encoding data is separate from the retained executable candidate set.
+struct CandidateManifestRow<'a> {
+    unit: &'a str,
+    module: &'a str,
+    source: &'a Path,
+    source_sha256: &'a str,
+    interface: &'a Path,
+    interface_sha256: &'a str,
+    module_version: &'a str,
+    product_sha256: &'a str,
+    evidence_sha256: &'a str,
+    imports: Vec<Value>,
+    groups: Value,
+    packages: &'a Path,
+    packages_sha256: &'a str,
+    product: &'a Path,
+    canonical_requirements: Vec<(String, String)>,
+    certificate: &'a Path,
+    certificate_sha256: &'a [u8; 32],
+    core: &'a Path,
+    core_sha256: &'a [u8; 32],
+}
+
+fn candidate_manifest_row(row: CandidateManifestRow<'_>) -> Value {
+    let path = |path: &Path| Value::Text(path.to_string_lossy().into_owned());
+    Value::Array(vec![
+        Value::Text(row.unit.into()),
+        Value::Text(row.module.into()),
+        path(row.source),
+        Value::Text(row.source_sha256.into()),
+        path(row.interface),
+        Value::Text(row.interface_sha256.into()),
+        Value::Text(row.module_version.into()),
+        Value::Text(row.product_sha256.into()),
+        Value::Text(row.evidence_sha256.into()),
+        Value::Array(row.imports),
+        row.groups,
+        path(row.packages),
+        Value::Text(row.packages_sha256.into()),
+        path(row.product),
+        Value::Array(
+            row.canonical_requirements
+                .into_iter()
+                .map(|(unit, module)| Value::Array(vec![Value::Text(unit), Value::Text(module)]))
+                .collect(),
+        ),
+        Value::Array(vec![
+            Value::Text("module".into()),
+            path(row.certificate),
+            Value::Text(hex(row.certificate_sha256)),
+            path(row.core),
+            Value::Text(hex(row.core_sha256)),
+        ]),
+    ])
+}
+
+fn candidate_manifest_value(
+    symbols: Value,
+    globals: Value,
+    rows: Vec<Value>,
+    graphs: Vec<Value>,
+    owners: Vec<Value>,
+    producer: &str,
+) -> Value {
+    Value::Array(vec![
+        Value::Text("TPMCAN".into()),
+        Value::Text("10".into()),
+        symbols,
+        globals,
+        Value::Array(rows),
+        Value::Array(vec![Value::Array(graphs), Value::Array(owners)]),
+        Value::Text(producer.into()),
+    ])
 }
 
 #[derive(Clone, Debug, thiserror::Error)]

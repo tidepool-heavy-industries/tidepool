@@ -111,6 +111,19 @@ pub(crate) struct ValidatedInputPackages {
 }
 
 impl ValidatedInputPackages {
+    #[cfg(test)]
+    pub(crate) fn fixture_observations(
+        &self,
+    ) -> (
+        Vec<(String, String)>,
+        Vec<((String, String), Vec<(String, String)>)>,
+    ) {
+        (
+            self.interfaces.keys().cloned().collect(),
+            self.direct.clone(),
+        )
+    }
+
     pub(crate) fn read_supported(
         path: &Path,
         evidence_bytes: &[u8],

@@ -1599,45 +1599,27 @@ impl CheckedDisplayOffer {
             .item
             .expression_presentation()?
             .ok_or_else(|| failure("display has no checked presentation"))?;
-        Ok(array([
-            text("checked-display"),
-            text(hex(&self.capture.item.admission_digest())),
-            text(hex(&self.capture.item.cell.receipt_digest)),
-            Value::Integer((self.capture.item.index as u64).into()),
-            text(observation),
-            Value::Integer(self.capture.generation.into()),
-            Value::Integer(self.generation.into()),
-            text(hex(&self.admission_digest)),
-            Value::Integer(self.budget.into()),
-            Value::Array(self.presented.iter().map(text).collect()),
-            Value::Array(
-                self.capture
-                    .item
-                    .turn_templates()
-                    .iter()
-                    .map(|(kind, source)| array([text(kind), text(hash(source.as_bytes()))]))
-                    .collect(),
-            ),
-            Value::Array(self.prefix.injected_modules().iter().map(text).collect()),
-            Value::Array(
-                self.settled_values
-                    .imports
-                    .iter()
-                    .map(|(module, names)| {
-                        array([text(module), Value::Array(names.iter().map(text).collect())])
-                    })
-                    .collect(),
-            ),
-            text(match presentation {
-                CheckedExpressionPresentation::Rendered => "rendered",
-                CheckedExpressionPresentation::Opaque => "opaque",
-            }),
-            self.prefix.planned_authorization(),
-            Value::Array(self.settled_values.authorization.clone()),
-            self.prefix.value_interface_authorization()?,
-            self.capture.item.template_interface_authorization()?,
-        ]))
+        Ok(encode_display_authorization(DisplayAuthorization {
+            item_admission: self.capture.item.admission_digest(),
+            receipt: self.capture.item.cell.receipt_digest,
+            index: self.capture.item.index,
+            observation,
+            captured_generation: self.capture.generation,
+            generation: self.generation,
+            admission: self.admission_digest,
+            budget: self.budget,
+            presented: &self.presented,
+            templates: self.capture.item.turn_templates(),
+            injected: &self.prefix.injected_modules(),
+            imports: &self.settled_values.imports,
+            presentation,
+            planned: self.prefix.planned_authorization(),
+            settled: self.settled_values.authorization.clone(),
+            value_interfaces: self.prefix.value_interface_authorization()?,
+            template_interfaces: self.capture.item.template_interface_authorization()?,
+        }))
     }
+
     pub(crate) fn seal(
         &self,
         root: &Path,
@@ -2595,54 +2577,28 @@ impl CheckedItemOffer {
             ));
         }
         let expected = &self.item.cell.items[self.item.index];
-        Ok(array([
-            text("checked-item"),
-            text(hex(&self.item.admission_digest())),
-            text(hex(&self.item.cell.receipt_digest)),
-            Value::Integer((self.item.index as u64).into()),
-            text(hash(self.item.source().as_bytes())),
-            text(match self.item.kind() {
-                CheckedItemKind::Bind => "bind",
-                CheckedItemKind::Expression => "expr",
-                CheckedItemKind::Declaration => "decl",
-            }),
-            Value::Array(self.item.binders().iter().map(text).collect()),
-            Value::Array(
-                self.item
-                    .cell
-                    .specification
-                    .turn_templates
-                    .iter()
-                    .map(|(kind, source)| array([text(kind), text(hash(source.as_bytes()))]))
-                    .collect(),
-            ),
-            Value::Array(self.prefix.injected_modules().iter().map(text).collect()),
-            Value::Array(
-                self.item
-                    .signatures()
-                    .iter()
-                    .map(encode_signature)
-                    .collect(),
-            ),
-            expected.expression.clone().unwrap_or(Value::Null),
-            Value::Integer(self.generation.into()),
-            text(hex(&self.runtime_prefix_digest)),
-            Value::Array(
-                self.settled_values
-                    .imports
-                    .iter()
-                    .map(|(module, names)| {
-                        array([text(module), Value::Array(names.iter().map(text).collect())])
-                    })
-                    .collect(),
-            ),
-            self.observation_name.as_ref().map_or(Value::Null, text),
-            self.prefix.planned_authorization(),
-            Value::Array(self.settled_values.authorization.clone()),
-            self.prefix.value_interface_authorization()?,
-            self.item.template_interface_authorization()?,
-        ]))
+        Ok(encode_item_authorization(ItemAuthorization {
+            admission: self.item.admission_digest(),
+            receipt: self.item.cell.receipt_digest,
+            index: self.item.index,
+            source: self.item.source(),
+            kind: self.item.kind(),
+            binders: self.item.binders(),
+            templates: &self.item.cell.specification.turn_templates,
+            injected: &self.prefix.injected_modules(),
+            signatures: self.item.signatures(),
+            expression: expected.expression.as_ref(),
+            generation: self.generation,
+            runtime_prefix: self.runtime_prefix_digest,
+            imports: &self.settled_values.imports,
+            observation: self.observation_name.as_deref(),
+            planned: self.prefix.planned_authorization(),
+            settled: self.settled_values.authorization.clone(),
+            value_interfaces: self.prefix.value_interface_authorization()?,
+            template_interfaces: self.item.template_interface_authorization()?,
+        }))
     }
+
     pub(crate) fn validate_templates(
         &self,
         templates: &[(String, String)],
@@ -4245,4 +4201,132 @@ mod tests {
             "snapshot append copied historical proof links"
         );
     }
+}
+
+/// Serialization inputs have no completed-prefix or same-offer capability.
+pub(crate) struct ItemAuthorization<'a> {
+    pub(crate) admission: [u8; 32],
+    pub(crate) receipt: [u8; 32],
+    pub(crate) index: usize,
+    pub(crate) source: &'a str,
+    pub(crate) kind: CheckedItemKind,
+    pub(crate) binders: &'a [String],
+    pub(crate) templates: &'a [(String, String)],
+    pub(crate) injected: &'a [String],
+    pub(crate) signatures: &'a [ExactCheckedSignature],
+    pub(crate) expression: Option<&'a Value>,
+    pub(crate) generation: u64,
+    pub(crate) runtime_prefix: [u8; 32],
+    pub(crate) imports: &'a [(String, Vec<String>)],
+    pub(crate) observation: Option<&'a str>,
+    pub(crate) planned: Value,
+    pub(crate) settled: Vec<Value>,
+    pub(crate) value_interfaces: Value,
+    pub(crate) template_interfaces: Value,
+}
+pub(crate) fn encode_item_authorization(fields: ItemAuthorization<'_>) -> Value {
+    array([
+        text("checked-item"),
+        text(hex(&fields.admission)),
+        text(hex(&fields.receipt)),
+        Value::Integer((fields.index as u64).into()),
+        text(hash(fields.source.as_bytes())),
+        text(match fields.kind {
+            CheckedItemKind::Bind => "bind",
+            CheckedItemKind::Expression => "expr",
+            CheckedItemKind::Declaration => "decl",
+        }),
+        Value::Array(fields.binders.iter().map(text).collect()),
+        Value::Array(
+            fields
+                .templates
+                .iter()
+                .map(|(kind, source)| array([text(kind), text(hash(source.as_bytes()))]))
+                .collect(),
+        ),
+        Value::Array(fields.injected.iter().map(text).collect()),
+        Value::Array(fields.signatures.iter().map(encode_signature).collect()),
+        fields.expression.cloned().unwrap_or(Value::Null),
+        Value::Integer(fields.generation.into()),
+        text(hex(&fields.runtime_prefix)),
+        Value::Array(
+            fields
+                .imports
+                .iter()
+                .map(|(module, names)| {
+                    array([text(module), Value::Array(names.iter().map(text).collect())])
+                })
+                .collect(),
+        ),
+        fields.observation.map_or(Value::Null, text),
+        fields.planned,
+        Value::Array(fields.settled),
+        fields.value_interfaces,
+        fields.template_interfaces,
+    ])
+}
+pub(crate) struct DisplayAuthorization<'a> {
+    pub(crate) item_admission: [u8; 32],
+    pub(crate) receipt: [u8; 32],
+    pub(crate) index: usize,
+    pub(crate) observation: &'a str,
+    pub(crate) captured_generation: u64,
+    pub(crate) generation: u64,
+    pub(crate) admission: [u8; 32],
+    pub(crate) budget: u64,
+    pub(crate) presented: &'a [String],
+    pub(crate) templates: &'a [(String, String)],
+    pub(crate) injected: &'a [String],
+    pub(crate) imports: &'a [(String, Vec<String>)],
+    pub(crate) presentation: CheckedExpressionPresentation,
+    pub(crate) planned: Value,
+    pub(crate) settled: Vec<Value>,
+    pub(crate) value_interfaces: Value,
+    pub(crate) template_interfaces: Value,
+}
+pub(crate) fn encode_display_authorization(fields: DisplayAuthorization<'_>) -> Value {
+    array([
+        text("checked-display"),
+        text(hex(&fields.item_admission)),
+        text(hex(&fields.receipt)),
+        Value::Integer((fields.index as u64).into()),
+        text(fields.observation),
+        Value::Integer(fields.captured_generation.into()),
+        Value::Integer(fields.generation.into()),
+        text(hex(&fields.admission)),
+        Value::Integer(fields.budget.into()),
+        Value::Array(fields.presented.iter().map(text).collect()),
+        Value::Array(
+            fields
+                .templates
+                .iter()
+                .map(|(kind, source)| array([text(kind), text(hash(source.as_bytes()))]))
+                .collect(),
+        ),
+        Value::Array(fields.injected.iter().map(text).collect()),
+        Value::Array(
+            fields
+                .imports
+                .iter()
+                .map(|(module, names)| {
+                    array([text(module), Value::Array(names.iter().map(text).collect())])
+                })
+                .collect(),
+        ),
+        text(match fields.presentation {
+            CheckedExpressionPresentation::Rendered => "rendered",
+            CheckedExpressionPresentation::Opaque => "opaque",
+        }),
+        fields.planned,
+        Value::Array(fields.settled),
+        fields.value_interfaces,
+        fields.template_interfaces,
+    ])
+}
+
+#[cfg(test)]
+pub(crate) fn fixture_checked_signature(
+    bytes: &[u8],
+) -> Result<ExactCheckedSignature, CompileError> {
+    decode_signature(&decode(bytes)?)
 }
