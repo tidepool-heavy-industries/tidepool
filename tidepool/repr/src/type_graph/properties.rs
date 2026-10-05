@@ -430,7 +430,8 @@ proptest! {
         prop_assert_eq!(commitment(&first, true), commitment(&second, true));
         // The reported validation cost includes canonicalization. Its exact
         // boundary must admit the same input and refuse one work unit less.
-        prop_assert!(TypeGraph::validate(model.storage(), &model.inventory, GraphLimits { max_work: work, ..GraphLimits::default() }).is_ok());
+        let exact_limits = GraphLimits { max_work: work, ..GraphLimits::default() };
+        prop_assert!(TypeGraph::validate(model.storage(), &model.inventory, exact_limits).is_ok());
         prop_assert_eq!(TypeGraph::validate(model.storage(), &model.inventory, GraphLimits { max_work: work - 1, ..GraphLimits::default() }), Err(TypeGraphError::Limit("work")));
         if let TypeNode::Root { rendered, .. } = &mut reordered.nodes[model.root] { rendered.push_str(" changed"); }
         if let TypeNode::Declaration { form: DeclarationForm::Opaque { reason, .. }, .. } = &mut reordered.nodes[opaque] { reason.push_str(" changed"); }
