@@ -56,7 +56,7 @@ import qualified GHC.Linker.Loader as Linker
 import GHC.Iface.Make (mkIfaceTc, mkPartialIface, mkFullIface)
 import GHC.Iface.Recomp (MaybeValidated(..), checkOldIface)
 import GHC.Unit.Finder (initFinderCache)
-import GHC.Unit.Module.ModIface (set_mi_extra_decls, mi_iface_hash, mi_final_exts)
+import GHC.Unit.Module.ModIface (set_mi_extra_decls, mi_iface_hash)
 import GHC.Unit.Module.Deps (imp_mods)
 import GHC.Unit.Finder (FindResult(Found), findImportedModule)
 import GHC.Iface.Tidy (mkBootModDetailsTc)
@@ -4575,12 +4575,12 @@ validateCurrentCanonicalSources admitted interfaces sourceGraph roots = do
         | ModuleNode _ summary <- mgModSummaries' graph, ms_hsc_src summary == HsSrcFile]
       modules = Map.fromList [((dependencyModuleUnit node,dependencyModuleName node),node)
         | node <- dependencyModules current, not (dependencyModuleBoot node)]
-      selectedClosure selected =
-        let children = [key | owner <- Set.toList selected, Just node <- [Map.lookup owner modules]
+      selectedClosure selectedOwners =
+        let children = [key | owner <- Set.toList selectedOwners, Just node <- [Map.lookup owner modules]
               , edge <- dependencyModuleImports node, dependencyImportSelected edge /= Nothing
               , let key = (fst owner,dependencyImportName edge), Map.member key proofs]
-            grown = Set.union selected (Set.fromList children)
-         in if grown == selected then selected else selectedClosure grown
+            grown = Set.union selectedOwners (Set.fromList children)
+         in if grown == selectedOwners then selectedOwners else selectedClosure grown
       selected = selectedClosure (Set.fromList roots)
       fresh = Map.fromList [(ownerKey (ms_mod summary),summary)
         | ModuleNode _ summary <- mgModSummaries' sourceGraph, Map.notMember (ownerKey (ms_mod summary)) originals]
