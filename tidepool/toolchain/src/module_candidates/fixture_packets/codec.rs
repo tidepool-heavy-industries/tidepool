@@ -458,16 +458,19 @@ enum InputFacts {
     Checked {
         direct: Vec<DirectInputFact>,
         closure: Vec<OwnerFact>,
+        body_sha256: String,
     },
     UnsupportedBoot {
         unit: String,
         module: String,
+        body_sha256: String,
     },
     UnsupportedWired {
         unit: String,
         module: String,
         imported_unit: String,
         imported_module: String,
+        body_sha256: String,
     },
 }
 fn input_facts(root: &Path, arguments: &[Value]) {
@@ -476,14 +479,18 @@ fn input_facts(root: &Path, arguments: &[Value]) {
     let evidence_bytes = bounded_bytes(&argument_path(&arguments[1]), MANIFEST_LIMIT);
     let evidence: DependencyEvidence =
         serde_json::from_slice(&evidence_bytes).expect("typed dependency evidence");
-    let facts = match ValidatedInputPackages::read(
+    let (result, body_sha256) = ValidatedInputPackages::fixture_read_observed(
         &argument_path(&arguments[0]),
         &evidence_bytes,
         &evidence,
-    ) {
+    )
+    .expect("production compiler input packet decoder");
+    let body_sha256 = hex(&body_sha256);
+    let facts = match result {
         Ok(proof) => {
             let (closure, direct) = proof.fixture_observations();
             InputFacts::Checked {
+                body_sha256,
                 closure: closure.iter().map(OwnerFact::from_pair).collect(),
                 direct: direct
                     .iter()
@@ -494,9 +501,11 @@ fn input_facts(root: &Path, arguments: &[Value]) {
                     .collect(),
             }
         }
-        Err(CompileInputError::UnsupportedBoot { unit, module }) => {
-            InputFacts::UnsupportedBoot { unit, module }
-        }
+        Err(CompileInputError::UnsupportedBoot { unit, module }) => InputFacts::UnsupportedBoot {
+            unit,
+            module,
+            body_sha256,
+        },
         Err(CompileInputError::UnsupportedWiredInput {
             unit,
             module,
@@ -507,6 +516,7 @@ fn input_facts(root: &Path, arguments: &[Value]) {
             module,
             imported_unit,
             imported_module,
+            body_sha256,
         },
         Err(failure) => panic!("production compiler input decoder refused: {failure}"),
     };

@@ -158,6 +158,10 @@ impl ValidatedInputPackages {
         evidence_bytes: &[u8],
         evidence: &DependencyEvidence,
     ) -> Result<Self, CompileInputError> {
+        Self::decode(&Self::read_bytes(path)?, evidence_bytes, evidence)
+    }
+
+    fn read_bytes(path: &Path) -> Result<Vec<u8>, CompileInputError> {
         use std::io::Read;
         let file = std::fs::File::open(path)
             .map_err(|_| CompileInputError::Unavailable { path: path.into() })?;
@@ -165,13 +169,41 @@ impl ValidatedInputPackages {
         file.take((4 << 20) + 1)
             .read_to_end(&mut bytes)
             .map_err(|_| CompileInputError::Unavailable { path: path.into() })?;
-        Self::decode(&bytes, evidence_bytes, evidence)
+        Ok(bytes)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fixture_read_observed(
+        path: &Path,
+        evidence_bytes: &[u8],
+        evidence: &DependencyEvidence,
+    ) -> Result<(Result<Self, CompileInputError>, [u8; 32]), CompileInputError> {
+        let bytes = Self::read_bytes(path)?;
+        let mut body_sha256 = None;
+        let result = Self::decode_observed(&bytes, evidence_bytes, evidence, |body| {
+            let mut canonical = vec![];
+            ciborium::ser::into_writer(body, &mut canonical).expect("closed input body encoding");
+            body_sha256 = Some(Sha256::digest(&canonical).into());
+        });
+        match body_sha256 {
+            Some(digest) => Ok((result, digest)),
+            None => Err(result.err().unwrap_or(CompileInputError::Malformed)),
+        }
     }
 
     fn decode(
         bytes: &[u8],
         evidence_bytes: &[u8],
         evidence: &DependencyEvidence,
+    ) -> Result<Self, CompileInputError> {
+        Self::decode_observed(bytes, evidence_bytes, evidence, |_| {})
+    }
+
+    fn decode_observed(
+        bytes: &[u8],
+        evidence_bytes: &[u8],
+        evidence: &DependencyEvidence,
+        observe_body: impl FnOnce(&ciborium::value::Value),
     ) -> Result<Self, CompileInputError> {
         use ciborium::value::Value;
         if bytes.len() > 4 << 20 {
@@ -198,6 +230,7 @@ impl ValidatedInputPackages {
             return Err(CompileInputError::DependencyMismatch);
         }
         let body = header[3].as_array().ok_or(CompileInputError::Malformed)?;
+        observe_body(&header[3]);
         if body.first().and_then(Value::as_text) == Some("unsupported-wired") {
             let row = proof_row(&header[3], 4)?;
             let owner = proof_owner(&row[1])?;
