@@ -53,7 +53,8 @@ import Tidepool.ExecutionSource
   , executionSourceInheritedOwners )
 import Tidepool.ExtractUtil (shaHex)
 import Tidepool.FinalizedModuleArtifacts (FinalizedModuleArtifacts, captureFinalizedModuleArtifacts)
-import Tidepool.GhcPipeline (PreparedPipelineResult(..), PipelineResult(..))
+import Tidepool.GhcPipeline
+  ( PreparedPipelineResult(..), PipelineResult(..), preparedFreshDependencies, preparedExactCompilation )
 import Tidepool.ModuleCandidates (ModuleCandidate(..), candidateExecutionSources)
 import Tidepool.PackageWitness (PackageImportEvidence(..), PackageImportRoot(..), encodePackageImports)
 import Tidepool.PreparedFormatting (resolveFormattingAuthority)
@@ -70,7 +71,7 @@ prepareCompilerProjectionContext
 prepareCompilerProjectionContext prepared retainedGenerations owner target auxiliaryRoots hostJsonAuthority = do
   timing <- readTimingEnabled
   let environment = prHscEnv (pprPipelineResult prepared)
-      exactScope = compilationScope <$> pprExactCompilation prepared
+      exactScope = compilationScope <$> preparedExactCompilation prepared
       symbol occurrence = SymbolIdentity (T.pack (unitString (moduleUnit owner)))
         (T.pack (moduleNameString (moduleName owner))) "value" (T.pack occurrence) Nothing
   formattingAuthority <- timePhase timing "formatting_authority" $ resolveFormattingAuthority environment
@@ -110,9 +111,9 @@ data CertifiedOriginalProducts = CertifiedOriginalProducts
 -- execution recipes.
 retainedOriginalInterfaces :: PreparedPipelineResult -> [ExactIfaceArtifact]
 retainedOriginalInterfaces prepared =
-  [artifact | scope <- maybe [] pure (compilationScope <$> pprExactCompilation prepared)
+  [artifact | scope <- maybe [] pure (compilationScope <$> preparedExactCompilation prepared)
     , (artifact, _, _) <- scopeInterfaces scope]
-  ++ [artifact | scope <- maybe [] pure (compilationScope <$> pprExactCompilation prepared)
+  ++ [artifact | scope <- maybe [] pure (compilationScope <$> preparedExactCompilation prepared)
     , artifact <- scopeValueInterfaces scope]
   ++ [ExactIfaceArtifact (candidateUnit candidate) (candidateModule candidate)
         (candidateInterface candidate) (candidateInterfaceSha256 candidate)
@@ -128,7 +129,7 @@ writeCertifiedProductsKeeping includes originalInterfaces outDir prepared produc
     (availability, freshProducts) <- timeDetailPhase timing "module_products" "write_products" $
       writeModuleProducts originalInterfaces outDir productContext
         (pprProductInterfaces prepared) (pprPackageImports prepared)
-    let dependencies = pprDependencies prepared
+    let dependencies = preparedFreshDependencies prepared
         withCertified = foldr (\candidate -> Map.insert
           (candidateUnit candidate, candidateModule candidate) ProductReady)
           availability (pprAcceptedCandidates prepared)
@@ -140,13 +141,13 @@ writeCertifiedProductsKeeping includes originalInterfaces outDir prepared produc
           }
         freshDependencies = dependencies
           { dependencyModules = map withAvailability (dependencyModules dependencies) }
-        finalDependencies = case pprExactCompilation prepared of
+        finalDependencies = case preparedExactCompilation prepared of
           Nothing -> freshDependencies
           Just _ -> freshDependencies
             { dependencyCacheSafe = False, dependencySelectionComplete = False }
     timeDetailPhase timing "module_products" "dependency_evidence" $
       writeDependencyEvidence outDir finalDependencies
-    forM_ (pprExactCompilation prepared) $ \compilation -> do
+    forM_ (preparedExactCompilation prepared) $ \compilation -> do
       verified <- revalidateExactScope hscEnv (compilationScope compilation)
       either (ioError . userError) pure verified
       writeExactCompilation compilation freshDependencies
@@ -154,7 +155,7 @@ writeCertifiedProductsKeeping includes originalInterfaces outDir prepared produc
       productBytes <- BS.readFile (outDir </> "module-products.cbor")
       evidenceBytes <- BS.readFile (outDir </> "dependencies.json")
       pure (productBytes, evidenceBytes)
-    sourceRecipe <- case pprExactCompilation prepared of
+    sourceRecipe <- case preparedExactCompilation prepared of
       Nothing -> pure OrdinaryExecutionSource
       Just compilation -> issueFreshExecutionSource includes prepared freshDependencies freshProducts
         (compilationScope compilation)
@@ -166,7 +167,7 @@ writeCertifiedProductsKeeping includes originalInterfaces outDir prepared produc
       finalized <- captureFinalizedModuleArtifacts originalInterfaces hscEnv
         (pprFinalizedModules prepared) (pprPackageImports prepared) finalDependencies outDir
       certified <- encodeCertifiedProducts hscEnv sourceRecipe (pprProductInterfaces prepared) finalized (pprAcceptedCandidates prepared)
-        (compilationScope <$> pprExactCompilation prepared)
+        (compilationScope <$> preparedExactCompilation prepared)
         (map moduleProductInput freshProducts) targets
         finalDependencies productBytes evidenceBytes
       case certified of
@@ -176,7 +177,7 @@ writeCertifiedProductsKeeping includes originalInterfaces outDir prepared produc
           BS.writeFile (outDir </> "certified-products.cbor") BS.empty
           unless (null freshProducts) $ fail ("native product certification failed: " ++ reason)
       pure finalized
-    sourceOriginals <- case pprExactCompilation prepared of
+    sourceOriginals <- case preparedExactCompilation prepared of
       Nothing -> pure Map.empty
       Just compilation -> do
         let owner = tcg_mod (prTargetTcGblEnv (pprPipelineResult prepared))
@@ -268,8 +269,8 @@ issueFreshExecutionSource includes prepared evidence fullProducts scope
       pure (ExactExecutionSourceUnavailable IncompleteSourceEvidence)
   | otherwise = do
       compilation <- maybe (fail "fresh supporting original has no compiler transaction") pure
-        (pprExactCompilation prepared)
-      let exactRows = compilationImports compilation
+        (preparedExactCompilation prepared)
+      let exactRows = compilationExactImports compilation
       if any (\((_,_,boot),edges) -> boot || any (\(_,_,isBoot,_) -> isBoot) edges) exactRows
         then pure (ExactExecutionSourceUnavailable UnsupportedSourceRecipe)
         else do

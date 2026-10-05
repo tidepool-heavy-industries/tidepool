@@ -38,7 +38,8 @@ import System.IO
 import System.IO.Error (isUserError, ioeGetErrorString)
 import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 import Tidepool.DependencyEvidence (DependencyEvidence(..), DependencyModule(..))
-import Tidepool.GhcPipeline (PreparedPipelineResult(..), PipelineResult(..), CompilerTransactionFailure(..))
+import Tidepool.GhcPipeline
+  ( PreparedPipelineResult(..), PipelineResult(..), CompilerTransactionFailure(..), preparedFreshDependencies )
 import Tidepool.DiagJson (InputRejection(..))
 import Tidepool.ExecutionSource (ExecutionSourceFailure(..), ExecutionSourceValidationStage(..))
 import Tidepool.PreparedStg (PreparedModule(..))
@@ -136,7 +137,7 @@ originalCompilerInput prepared = do
       target = tcg_mod (prTargetTcGblEnv result)
       name = moduleNameString (moduleName target)
       unit = unitString (moduleUnit target)
-  source <- case [dependencyModuleSource node | node <- dependencyModules (pprDependencies prepared)
+  source <- case [dependencyModuleSource node | node <- dependencyModules (preparedFreshDependencies prepared)
       , dependencyModuleUnit node == unit, dependencyModuleName node == name
       , not (dependencyModuleBoot node)] of
     [path] -> pure path

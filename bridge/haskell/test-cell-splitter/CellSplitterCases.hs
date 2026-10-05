@@ -833,7 +833,7 @@ untrackedCompileTimeCompilation = bracket temporary removeDirectoryRecursive $ \
     , "result = value"
     ]
   direct <- runPipelineSelected PreparedStg target [root]
-  let evidence = pprDependencies direct
+  let evidence = preparedFreshDependencies direct
   when (dependencyCacheSafe evidence || dependencySelectionComplete evidence) $
     fail "TemplateHaskell source produced complete dependency evidence"
   noQuotes <- runPipelineSelected PreparedStg noQuoteUser [root]
@@ -964,11 +964,11 @@ untrackedCompileTimeCompilation = bracket temporary removeDirectoryRecursive $ \
     void (compile PreparedStg mempty GeneralCompile Nothing valueOracle [] Nothing)
   where
     assertComplete label result = do
-      let evidence = pprDependencies result
+      let evidence = preparedFreshDependencies result
       unless (dependencyCacheSafe evidence && dependencySelectionComplete evidence) $
         fail (label ++ " did not produce complete dependency evidence")
     assertIncomplete label result = do
-      let evidence = pprDependencies result
+      let evidence = preparedFreshDependencies result
       when (dependencyCacheSafe evidence || dependencySelectionComplete evidence) $
         fail (label ++ " produced complete dependency evidence")
     temporary = do
@@ -1013,7 +1013,7 @@ dependencyEvidenceCompilation = bracket temporary removeDirectoryRecursive $ \ro
     , "result = (Text.length (Text.pack \"x\"), value, Map.size Map.empty)"
     ]
   prepared <- runPipelineSelected PreparedStg target [root]
-  let evidence = pprDependencies prepared
+  let evidence = preparedFreshDependencies prepared
       resolutions = dependencyResolutions evidence
       selectedPaths = [path | resolution <- resolutions
                             , Just path <- [dependencyResolutionSelected resolution]]
@@ -1021,6 +1021,12 @@ dependencyEvidenceCompilation = bracket temporary removeDirectoryRecursive $ \ro
         , dependencyResolutionModule resolution == "Data.Text"]
       qualifiedWitnesses = [resolution | resolution <- resolutions
         , dependencyResolutionModule resolution == "Data.Map"]
+  unless (preparedExactCompilation prepared == Nothing) $
+    fail "ordinary source compile acquired exact-scope evidence"
+  forM_ [("WitnessTarget",[("main","WitnessA")]),("WitnessB",[("main","WitnessA")])] $ \(owner,expected) -> do
+    requirements <- either fail pure (preparedHomeRequirements prepared "main" owner)
+    assertEqual "complete source requirements preserve ordinary and SOURCE edges and exclude packages"
+      expected requirements
   unless (any (isSuffixOf "WitnessA.hs-boot") selectedPaths) $
     fail "SOURCE import did not retain its selected boot-interface witness"
   unless (any (isSuffixOf "WitnessA.hs") selectedPaths) $
@@ -1116,7 +1122,7 @@ pathInsensitiveWitnessCompilation = bracket temporary removeDirectoryRecursive $
       coldSharing <- compilerProductSharing cold
       warm <- compile PreparedStg mempty GeneralCompile Nothing importer [rootB, sharedRoot] Nothing
       warmSharing <- compilerProductSharing warm
-      let evidence = pprDependencies warm
+      let evidence = preparedFreshDependencies warm
           obsoletePaths = [path | resolution <- dependencyResolutions evidence
             , path <- dependencyResolutionCandidates resolution, rootA `isPrefixOf` path]
           selectedPaths = [path | resolution <- dependencyResolutions evidence

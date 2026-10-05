@@ -40,7 +40,7 @@ import Tidepool.ExecutionSchema
   ( Architecture(..), Endianness(..), SymbolIdentity(..), TargetDescriptor(..) )
 import Tidepool.FatIface (newFatIfaceCache, newOwnerInterfaceCache)
 import Tidepool.GhcPipeline
-  ( PipelineResult(..), PreparedPipelineResult(..) )
+  ( PipelineResult(..), PreparedPipelineResult(..), preparedFreshDependencies )
 import Tidepool.PreparedRecovery
   ( RecoveryFailure, RecoveredClosure(..), newPreparedRecovery )
 import Tidepool.PreparedStg (newPreparedBodyCache)
@@ -89,11 +89,11 @@ runProbe compile rawArguments = do
               (missingName moduleNameArg target) [] reason) targets
           )
     Right prepared -> do
-      unchanged <- revalidateDependencyEvidence (pprDependencies prepared)
+      unchanged <- revalidateDependencyEvidence (preparedFreshDependencies prepared)
       unless unchanged $
         ioError (userError "source changed while corpus artifacts were being published")
       writeFile (outputDir </> "dependencies.json")
-        (renderDependencyEvidence (pprDependencies prepared))
+        (renderDependencyEvidence (preparedFreshDependencies prepared))
       formattingAuthority <- resolveFormattingAuthority
         (prHscEnv (pprPipelineResult prepared))
       timeAuthority <- resolveTimeAuthority (prHscEnv (pprPipelineResult prepared))

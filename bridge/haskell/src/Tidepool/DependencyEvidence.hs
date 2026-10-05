@@ -16,7 +16,7 @@ module Tidepool.DependencyEvidence
   , revalidateDependencyEvidence
   , validateDependencyEvidence, writeDependencyEvidence
   , renderDependencyEvidence
-  , selectedHomeRequirements
+  , selectedFreshHomeRequirements
   ) where
 
 import qualified Crypto.Hash.SHA256 as SHA256
@@ -39,7 +39,7 @@ data DependencyEvidence = DependencyEvidence
   , dependencyModules :: [DependencyModule]
   }
 
--- | The direct graph that produced the paired module products. This is
+-- | The fresh-source direct graph that produced the paired module products. This is
 -- post-downsweep evidence; it does not by itself authorize a future compile
 -- to reuse a module without running its own downsweep and interface checks.
 data DependencyModule = DependencyModule
@@ -100,11 +100,11 @@ data DependencyResolution = DependencyResolution
   , dependencyResolutionCandidates :: [FilePath]
   } deriving (Eq)
 
--- Preserve home import edges when a fresh source module becomes an exact
--- interface. Package imports have no selected source; an owner is resolved
--- through the same downsweep source selection, including boot witnesses.
-selectedHomeRequirements :: DependencyEvidence -> String -> String -> Either String [(String, String)]
-selectedHomeRequirements evidence unit owner = do
+-- | Selected fresh-source home imports only. Package imports have no selected
+-- source; an owner is resolved through the same downsweep source selection,
+-- including boot witnesses. Retained exact imports belong to ExactCompilation.
+selectedFreshHomeRequirements :: DependencyEvidence -> String -> String -> Either String [(String, String)]
+selectedFreshHomeRequirements evidence unit owner = do
   node <- case [node | node <- dependencyModules evidence
     , dependencyModuleUnit node == unit, dependencyModuleName node == owner
     , not (dependencyModuleBoot node)] of

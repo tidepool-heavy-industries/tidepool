@@ -516,7 +516,8 @@ data ExactCompilation = ExactCompilation
   { compilationScope :: ExactScope
   , compilationTransaction :: Word64
   , compilationSource :: FilePath
-  , compilationImports :: [((String, String, Bool), [(DependencyQualifier, String, Bool, String)])]
+  -- | Direct imports to retained exact owners, excluded from fresh source lookup.
+  , compilationExactImports :: [((String, String, Bool), [(DependencyQualifier, String, Bool, String)])]
   , compilationSourceSelection :: Maybe SourceSelectedOriginals
   } deriving (Eq, Show)
 
@@ -667,7 +668,7 @@ captureFinalizedSourceOriginals compilation accepted target finalized evidence =
           _ -> fail "captured source import has no unique original home owner"
       pure (dependencyImportQualifier edge,dependencyImportName edge,dependencyImportBoot edge,home)
     let exact = [(qualifier,name,boot,Just unit)
-          | ((ownerUnit,ownerName,False),edges) <- compilationImports compilation
+          | ((ownerUnit,ownerName,False),edges) <- compilationExactImports compilation
           , (ownerUnit,ownerName) == key
           , (qualifier,name,boot,unit) <- edges]
         importKey (qualifier,name,boot,_) = (qualifier,name,boot)
@@ -931,7 +932,7 @@ writeExactCompilation compilation evidence = do
   let scope = compilationScope compilation
       transaction = compilationTransaction compilation
       source = compilationSource compilation
-      imports = compilationImports compilation
+      imports = compilationExactImports compilation
   path <- makeAbsolute source
   bytes <- BS.readFile path
   unless (any (\item -> dependencySourcePath item == path

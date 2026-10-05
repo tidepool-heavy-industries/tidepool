@@ -85,7 +85,7 @@ import System.Directory
   , getModificationTime, setModificationTime, withCurrentDirectory, getCurrentDirectory, canonicalizePath )
 import System.Environment (setEnv, lookupEnv, unsetEnv)
 import System.Exit (ExitCode(..))
-import System.FilePath ((</>), takeDirectory, normalise, replaceExtension, addTrailingPathSeparator)
+import System.FilePath ((</>), takeBaseName, takeDirectory, normalise, replaceExtension, addTrailingPathSeparator)
 import System.IO (hPutStrLn, hSetFileSize, withBinaryFile, IOMode(WriteMode), stderr)
 import System.IO.Error (isDoesNotExistError, ioeGetFileName)
 import System.Process (readProcessWithExitCode)
@@ -122,7 +122,7 @@ import Tidepool.DependencyEvidence
   ( DependencyEvidence(..), DependencyModule(..), DependencyImport(..)
   , DependencyResolution(..), ProductAvailability(..), DependencySource(..), sourceEvidence
   , DependencyQualifier(..), renderDependencyQualifier
-  , selectedHomeRequirements, renderDependencyEvidence )
+  , selectedFreshHomeRequirements, renderDependencyEvidence )
 import Tidepool.ExactHydration
   ( CheckedTemplateInterface(..), newOriginalInterfaceArtifacts, originalInterfaceBytes, ExactIfaceArtifact(..), freshExactState, noCheckedValueImports, installExactLexicalGraph
   , readCheckedValueImportAuthority, readExactIfaceArtifacts, hydrateExactScope
@@ -132,6 +132,7 @@ import Tidepool.ExtractUtil (getLibdir)
 import Tidepool.HomeProducts (hydrateCandidateHomeProducts, CandidateCoreFailure(..))
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedPipelineResult(..), PipelineResult(..), CheckedEnvironmentResult(..)
+  , preparedFreshDependencies, preparedExactCompilation, preparedHomeRequirements
   , finalizedTidyGuts, FinalizedExecutionFailure(..)
   , retainedCompilerArtifactClosure, retainedCompilerInterface
   , renderType, generatedScaffoldRecipe, activationPreviewInputType, withSourceImportIntents
@@ -205,8 +206,8 @@ sourceBootReuseAt work = do
       , "NativeScopeBase", "NativeScopeOwner", "SourceBootCapture"]
       && null (pprAcceptedCandidates cold)) $
     fail "cold SOURCE graph omitted original defining products"
-  unless (dependencyCacheSafe (pprDependencies cold)
-      && dependencySelectionComplete (pprDependencies cold)) $
+  unless (dependencyCacheSafe (preparedFreshDependencies cold)
+      && dependencySelectionComplete (preparedFreshDependencies cold)) $
     fail "cold SOURCE graph lacks final source/package evidence"
   coldFixture <- capturePreparedFixture work cold
   nativeScope <- writeGenuineCandidateNativeScope ["CacheEven", "CacheOdd"]
@@ -525,7 +526,7 @@ canonicalCurrentSource = withTiming $ withScratch $ \work -> do
     localProof <- maybe (fail "fresh support did not emit a complete source-original proof") pure
       (Map.lookup localOwner (certifiedSourceOriginals emitted))
     localCompilation <- maybe (fail "fresh support did not retain exact compilation custody") pure
-      (pprExactCompilation captured)
+      (preparedExactCompilation captured)
     inherited <- either fail pure (extendSourceSelectedOriginals
       (compilationSourceSelection localCompilation) admitted)
     -- Fresh rows are in the completed capture rather than its input scope.
@@ -549,7 +550,7 @@ canonicalCurrentSource = withTiming $ withScratch $ \work -> do
         recheckLocal = checkLocal selectedScope
     selectedLocal <- recheckLocal
     let selectedRows = maybe [] (maybe [] selectedOriginalRows . compilationSourceSelection)
-          (pprExactCompilation selectedLocal)
+          (preparedExactCompilation selectedLocal)
     unless (any (\(key,seal,_,_) -> key == localOwner
         && seal == canonicalCertificateSha256 localProof) selectedRows) $
       fail "later authored import did not select the captured canonical identity"
@@ -623,7 +624,7 @@ canonicalSourceObligations = withTiming $ withScratch $ \work -> do
       usageOwners = homeInterfaceUsageOwners environment (hm_iface (finalizedHomeModInfo finalized))
       required = dependencyKey `elem` usageOwners
       retained = "CanonicalUnusedSource" : ["CanonicalUnusedDependency" | required]
-      imported = [edge | node <- dependencyModules (pprDependencies original)
+      imported = [edge | node <- dependencyModules (preparedFreshDependencies original)
         , dependencyModuleName node == "CanonicalUnusedSource", edge <- dependencyModuleImports node
         , dependencyImportName edge == "CanonicalUnusedDependency"]
   unless (length imported == 1 && all ((== Just dependency) . dependencyImportSelected) imported) $
@@ -659,7 +660,7 @@ canonicalSourceObligations = withTiming $ withScratch $ \work -> do
     unless (Map.member (mkModuleName "CanonicalUnusedDependency") (pprFinalizedModules ordinary)
         && any (\source -> dependencySourcePath source == dependencySourcePath changedSource
           && dependencySourceSha256 source == dependencySourceSha256 changedSource)
-          (dependencySources (pprDependencies ordinary))) $
+          (dependencySources (preparedFreshDependencies ordinary))) $
       fail "ordinary fresh source refresh inherited an exact retained obligation"
     BS.writeFile dependency originalBytes
     void (check compile)
@@ -982,7 +983,7 @@ retainedExecutionPublication = withTiming $ withScratch $ \work -> do
     originals <- newOriginalInterfaceArtifacts environment (pprFinalizedModules prepared)
       [artifact | (artifact,_,_) <- scopeInterfaces exact] captured
     _ <- captureFinalizedModuleArtifacts originals environment (pprFinalizedModules prepared)
-      (pprPackageImports prepared) (pprDependencies prepared) captured
+      (pprPackageImports prepared) (preparedFreshDependencies prepared) captured
     after <- BS.readFile scopePath
     unless (after == originalBytes) $ fail "execution mutated its original immutable admission"
     copyFile "test-source-boot/fixtures/MetadataQuoteSupportChanged.hs" helperPath
@@ -1312,6 +1313,11 @@ exactExecutionSealedInstance getFixture = withExecutionInstanceFixture getFixtur
   withResidentPipelineSelected [work] $ \compile -> do
     forM_ ["ExecutionSealedTarget.hs","ExecutionQualifiedTarget.hs"] $ \target -> do
       sealed <- compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope) (work </> target) [work] Nothing
+      let owner = takeBaseName target
+      requireExactProviderImport owner "ExecutionSealedQuoter" sealed
+      requirements <- either fail pure (preparedHomeRequirements sealed "main" owner)
+      unless (requirements == [("main","ExecutionSealedQuoter")]) $
+        fail "sealed or qualified target acquired another home requirement"
       unless (fmap renderType (prResultType (pprPipelineResult sealed)) == Just "Int"
           && hasIntResultLiteral 42 (prBinds (pprPipelineResult sealed))) $
         fail "sealed or qualified original quoter lost its authenticated orphan dictionary"
@@ -1356,6 +1362,12 @@ exactExecutionUnrelatedInstance getFixture = withExecutionInstanceFixture getFix
     explicit <- compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope)
       (work </> "ExecutionExplicitOrphanTarget.hs") [work] Nothing
     requireInstanceQuoterResult "exact explicit orphan import" explicit
+    mixed <- either fail pure (preparedHomeRequirements explicit "main" "ExecutionExplicitOrphanTarget")
+    fresh <- either fail pure (selectedFreshHomeRequirements (preparedFreshDependencies explicit)
+      "main" "ExecutionExplicitOrphanTarget")
+    unless (fresh == [("main","ExecutionExplicitOrphanQuoter")]
+        && sort mixed == [("main","ExecutionExplicitOrphanQuoter"),("main","ExecutionSealedQuoter")]) $
+      fail "mixed source and exact imports lost their separate views or complete requirements"
     requireExactProviderImport "ExecutionExplicitOrphanQuoter" "ExecutionHiddenOrphan" explicit
     -- Use the same provider module in both observations. This makes the
     -- missing import the sole source difference and exercises warm isolation.
@@ -1434,11 +1446,14 @@ exactExecutionUnrelatedInstance getFixture = withExecutionInstanceFixture getFix
 requireExactProviderImport :: String -> String -> PreparedPipelineResult -> IO ()
 requireExactProviderImport provider imported prepared = do
   compilation <- maybe (fail "instance provider lost its exact compilation evidence") pure
-    (pprExactCompilation prepared)
+    (preparedExactCompilation prepared)
+  requirements <- either fail pure (preparedHomeRequirements prepared "main" provider)
+  unless (("main",imported) `elem` requirements) $
+    fail ("complete provider requirements omitted its authored exact import: " ++ provider ++ " -> " ++ imported)
   let expected = (DependencyUnqualified,imported,False,"main")
-      exactRows = [edges | (("main",owner,False),edges) <- compilationImports compilation
+      exactRows = [edges | (("main",owner,False),edges) <- compilationExactImports compilation
         , owner == provider]
-      freshRows = [node | node <- dependencyModules (pprDependencies prepared)
+      freshRows = [node | node <- dependencyModules (preparedFreshDependencies prepared)
         , dependencyModuleUnit node == "main", dependencyModuleName node == provider
         , not (dependencyModuleBoot node)]
   unless (case (exactRows,freshRows) of
@@ -1817,11 +1832,11 @@ originalPackageCohort coreRoot output = do
       ++ " executable_live_globals=" ++ show (length (filter (isJust . globalRequiredGeneration) (globals old))))
   let eligible = Set.fromList [(unitString (moduleUnit owner),moduleNameString (moduleName owner))
         | (owner,Right groups) <- products, all (isNothing . globalRequiredGeneration) (globals groups)]
-      evidence = pprDependencies original
+      evidence = preparedFreshDependencies original
   unless (dependencyCacheSafe evidence && dependencySelectionComplete evidence) $
     fail "actual original source cohort lacks complete tracked evidence"
   forM_ names $ \name -> do
-    required <- either fail pure (selectedHomeRequirements evidence "main" name)
+    required <- either fail pure (selectedFreshHomeRequirements evidence "main" name)
     unless (all (`Set.member` eligible) required) $
       fail ("actual original cohort is not closed: " ++ name ++ " requires " ++ show required)
   certified <- certifyProjectedProducts output "cohort" original products [] env >>= either fail pure
@@ -1855,10 +1870,10 @@ certifyProjectedProducts work label original outcomes targets env = do
     bytes <- BS.readFile path
     pure (T.pack (unitString (moduleUnit owner)),T.pack name,bytes,groups)
   let ready = Set.fromList [(T.unpack unit,T.unpack name) | (unit,name,_,_) <- fresh]
-      evidence = (pprDependencies original) {dependencyModules =
+      evidence = (preparedFreshDependencies original) {dependencyModules =
         [if (dependencyModuleUnit node,dependencyModuleName node) `Set.member` ready
             then node {dependencyModuleProduct=ProductReady} else node
-        | node <- dependencyModules (pprDependencies original)]}
+        | node <- dependencyModules (preparedFreshDependencies original)]}
       bytes = encodeModuleProducts fresh
   originals <- newOriginalInterfaceArtifacts env (pprFinalizedModules original) [] work
   finalized <- captureFinalizedModuleArtifacts originals env (pprFinalizedModules original)
@@ -2040,7 +2055,7 @@ candidateSitedSiblingsAt work = do
     Set.empty GeneralCompile (Just scope) target [work] Nothing
   unless (Set.fromList (map candidateModule (pprAcceptedCandidates reused)) == Set.fromList candidates
       && any ((== "Tidepool.Actors.Unfold") . dependencyModuleName)
-        (dependencyModules (pprDependencies reused))) $
+        (dependencyModules (preparedFreshDependencies reused))) $
     fail "typed sibling regression did not admit the requested originals"
   unless (Set.fromList (preparedNames reused) == Set.fromList ["Tidepool.Actors.Unfold","HydratedChildTarget"]
       && Set.fromList (map moduleNameString (Map.keys (pprFinalizedModules reused)))
@@ -2068,7 +2083,7 @@ candidateSitedSiblingsAt work = do
     Set.empty GeneralCompile (Just (scope {ssExactScope=Just capturedPath})) target [work] Nothing
   unless (null (pprAcceptedCandidates captured)
       && preparedNames captured == ["HydratedChildTarget"]
-      && all ((`notElem` owners) . dependencyModuleName) (dependencyModules (pprDependencies captured))) $
+      && all ((`notElem` owners) . dependencyModuleName) (dependencyModules (preparedFreshDependencies captured))) $
     fail "typed sibling regression did not exclude captured originals from downsweep"
   case pprModules captured of
     [prepared] | null (pmSiteRejections prepared), length (pmYieldSites prepared) == 1 -> pure ()
@@ -3128,7 +3143,7 @@ exactBashMetadata effects = withTiming $ withScratch $ \work -> do
       fail "exact bash metadata lost GHC load bytecode or signature parity"
     native <- compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope) target [] Nothing
     unless (fmap renderType (prResultType (pprPipelineResult native)) == Just "Command"
-        && dependencyCacheSafe (pprDependencies native)) $
+        && dependencyCacheSafe (preparedFreshDependencies native)) $
       fail "exact bash native compilation lost its quote or input evidence"
   putStrLn "exact bash: GHC metadata parity, retained bytecode and native compilation passed"
 
@@ -3172,7 +3187,7 @@ packageInputs = withScratch $ \work -> do
       fail "optional native availability changed checked compilation inputs"
     putStrLn ("package-input-products cold=" ++ show (preparedNames cold)
       ++ " candidate=" ++ show (preparedNames warm)
-      ++ " checked=" ++ show (length (dependencyModules (pprDependencies cold))))
+      ++ " checked=" ++ show (length (dependencyModules (preparedFreshDependencies cold))))
     -- Both offers share the complete fresh warmer capture. This fixture
     -- checks input identity; mixed fresh/retained reissuance has separate owners.
     writeGenuineCandidateManifestFor ["OptionalAnchor", "OptionalSupport"] work warmerFixture
@@ -3202,7 +3217,7 @@ packageInputs = withScratch $ \work -> do
         fail ("direct compiler-provided input lacked its typed unsupported category: body="
           ++ take 512 (show wiredBody) ++ " checked-imports="
           ++ show [(dependencyModuleName node, map dependencyImportName (dependencyModuleImports node))
-            | node <- dependencyModules (pprDependencies wired)]
+            | node <- dependencyModules (preparedFreshDependencies wired)]
           ++ " resolved-imports=" ++ show [(unitString (moduleUnit owner),
               moduleNameString (moduleName owner), owner == gHC_PRIM) | owner <- imported])
     wiredFixture <- capturePreparedFixture work wired
@@ -3229,13 +3244,13 @@ packageInputs = withScratch $ \work -> do
       _ -> fail "real primitive-extension interface did not retain a complete input proof"
   putStrLn "package inputs: cold/warm native divergence, identical checked closure, candidate roots, omission refusal and wired fresh/candidate refusal passed"
   where
-    normalized result = renderDependencyEvidence ((pprDependencies result)
+    normalized result = renderDependencyEvidence ((preparedFreshDependencies result)
       { dependencyModules = sortOn (\node -> (dependencyModuleUnit node, dependencyModuleName node))
           [node { dependencyModuleProduct = ProductInterfaceOnly }
-          | node <- dependencyModules (pprDependencies result)] })
+          | node <- dependencyModules (preparedFreshDependencies result)] })
     proof work label result = do
       let directory = work </> ("input-proof-" ++ label)
-          evidence = pprDependencies result
+          evidence = preparedFreshDependencies result
       createDirectory directory
       writeFile (directory </> "dependencies.json") (renderDependencyEvidence evidence)
       writeCompileInputProof directory (prHscEnv (pprPipelineResult result)) evidence
@@ -3447,20 +3462,23 @@ selectedHomeInstanceEdges = withScratch $ \work -> do
     copyFile ("test-source-boot/fixtures" </> name ++ ".hs") (work </> name ++ ".hs")
   cold <- runPipelineSelected (PreparedProducts Nothing)
     (work </> "InstanceConsumer.hs") [work]
-  let evidence = pprDependencies cold
+  let evidence = preparedFreshDependencies cold
       producer = prHscEnv (pprPipelineResult cold)
       consumers = [node | node@(ModuleNode _ summary) <- mgModSummaries' (hsc_mod_graph producer)
         , ms_mod_name summary == mkModuleName "InstanceConsumer"]
   verifyRetainedPackageWitness producer evidence
   lexical <- forM ["InstanceOwner", "InstanceRelay"] $ \name -> do
-    requirements <- either fail pure (selectedHomeRequirements evidence "main" name)
+    requirements <- either fail pure (preparedHomeRequirements cold "main" name)
+    unless (preparedExactCompilation cold == Nothing
+        && selectedFreshHomeRequirements evidence "main" name == Right requirements) $
+      fail "source-only prepared requirements differ from their fresh dependency view"
     pure (ExactIfaceArtifact "main" name (work </> name ++ ".hi") "" requirements, requirements)
   unless (map snd lexical == [[], [("main", "InstanceOwner")]]) $
     fail "selected home receipt omitted the transitive instance owner or admitted a package import"
   let altered = evidence { dependencyModules =
         [node { dependencyModuleSource = "missing-owner.hs" }
         | node <- dependencyModules evidence] }
-  case selectedHomeRequirements altered "main" "InstanceRelay" of
+  case selectedFreshHomeRequirements altered "main" "InstanceRelay" of
     Left _ -> pure ()
     Right _ -> fail "selected home receipt accepted an unmatched source owner"
   libdir <- getLibdir
@@ -3740,15 +3758,15 @@ resolutionPaths = do
               && dependencyResolutionCandidates home == [chosen]) $
             fail "selected source cutoff retained a lower root or another extension"
     cold <- runPipelineSelected (PreparedProducts Nothing) target roots
-    verify (pprDependencies cold)
+    verify (preparedFreshDependencies cold)
     coldFixture <- capturePreparedFixture work cold
     writeManifestFor ["InstanceOwner"] work coldFixture
     withResidentPipelineSelected roots $ \compile -> do
       let reuse = compile (PreparedProducts (Just (manifest work))) Set.empty GeneralCompile
             Nothing target [] Nothing
       warm <- reuse
-      verify (pprDependencies warm)
-      unless (resolutionBytes (pprDependencies warm) == resolutionBytes (pprDependencies cold)) $
+      verify (preparedFreshDependencies warm)
+      unless (resolutionBytes (preparedFreshDependencies warm) == resolutionBytes (preparedFreshDependencies cold)) $
         fail "warm reuse changed serialized ordered resolution evidence"
       unless (Set.fromList (map candidateModule (pprAcceptedCandidates warm))
           == Set.fromList ["InstanceOwner"]) $
@@ -3760,8 +3778,8 @@ resolutionPaths = do
           reuse >>= requireRefused "new home selection with root aliases")
         `finally` removeFile source
       restored <- reuse
-      verify (pprDependencies restored)
-      unless (resolutionBytes (pprDependencies restored) == resolutionBytes (pprDependencies cold)) $
+      verify (preparedFreshDependencies restored)
+      unless (resolutionBytes (preparedFreshDependencies restored) == resolutionBytes (preparedFreshDependencies cold)) $
         fail "restored selection changed serialized ordered resolution evidence"
       unless (length (pprAcceptedCandidates restored) == 1) $
         fail "restored negative root evidence did not recover unchanged owners"
@@ -3806,7 +3824,7 @@ mixedGraph required count = withScratch $ \work -> do
         Nothing (work </> "CacheEntry.hs") [] Nothing
       end <- getMonotonicTimeNSec
       requireMixed count result
-      let evidence = pprDependencies result
+      let evidence = preparedFreshDependencies result
           negative = length [resolution | resolution <- dependencyResolutions evidence
             , dependencyResolutionSelected resolution == Nothing
             , not (null (dependencyResolutionCandidates resolution))]
@@ -3839,8 +3857,8 @@ requireMixed count result = unless
   (Set.fromList (map candidateModule (pprAcceptedCandidates result)) == Set.fromList
       (["CacheEven", "CacheOdd"] ++ ["Independent" ++ show index | index <- [1 .. count]])
     && preparedNames result == ["CacheEntry"]
-    && dependencyCacheSafe (pprDependencies result)
-    && dependencySelectionComplete (pprDependencies result)) $
+    && dependencyCacheSafe (preparedFreshDependencies result)
+    && dependencySelectionComplete (preparedFreshDependencies result)) $
   fail ("mixed SOURCE reuse changed closure: accepted="
     ++ show (map candidateModule (pprAcceptedCandidates result))
     ++ " prepared=" ++ show (preparedNames result))
@@ -3869,8 +3887,8 @@ exerciseIndependentDrift work = do
       unless (Set.fromList (map candidateModule (pprAcceptedCandidates result))
           == Set.fromList ["CacheEven", "CacheOdd"]
         && Set.fromList (preparedNames result) == Set.fromList ["Independent1", "CacheEntry"]
-        && dependencyCacheSafe (pprDependencies result)
-        && dependencySelectionComplete (pprDependencies result)) $
+        && dependencyCacheSafe (preparedFreshDependencies result)
+        && dependencySelectionComplete (preparedFreshDependencies result)) $
         fail "unrelated source drift skipped a changed product or lost the SOURCE SCC")
     `finally` BS.writeFile source original
   reuseFresh work >>= requireMixed 1
@@ -3924,8 +3942,8 @@ requireReused label result = unless
       == Set.fromList ["CacheEven", "CacheOdd"]
     && all (`notElem` preparedNames result) ["CacheEven", "CacheOdd"]
     && "CacheEntry" `elem` preparedNames result
-    && dependencyCacheSafe (pprDependencies result)
-    && dependencySelectionComplete (pprDependencies result)) $
+    && dependencyCacheSafe (preparedFreshDependencies result)
+    && dependencySelectionComplete (preparedFreshDependencies result)) $
   fail (label ++ " did not reuse exact SOURCE SCC: accepted="
     ++ show (map candidateModule (pprAcceptedCandidates result))
     ++ " prepared=" ++ show (preparedNames result))

@@ -4,6 +4,7 @@
 
 module Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedPipelineResult(..), CheckedEnvironmentResult(..)
+  , PreparedDependencies, preparedFreshDependencies, preparedExactCompilation, preparedHomeRequirements
   , runPipelineSelected, runPipelineSessionSelected
   , runPipelineSelectedRetaining
   , CompilerProducerIdentity, captureCompilerProducerIdentity
@@ -201,7 +202,7 @@ import Tidepool.TurnSource (extractModuleName)
 import Tidepool.DependencyEvidence
   ( DependencyEvidence(..), DependencySource(..), DependencyResolution(..)
   , DependencyModule(..), DependencyImport(..), DependencyQualifier(..), ProductAvailability(..)
-  , sourceEvidenceWithFingerprint )
+  , sourceEvidenceWithFingerprint, selectedFreshHomeRequirements )
 import Tidepool.ExactHydration
   ( ExactIfaceArtifact(..), freshExactState, hydrateExactScope, exactInterfaceSummary, serializeOriginalInterface, exactHomeInstancesFor
   , readVerifiedExactIfaceClosureWithCheckedValues, selectVerifiedExactInterfaces, selectVerifiedValueInterfaces
@@ -276,13 +277,48 @@ homeInterfaceConsumers summaries = drop 1 (scanr addConsumer Map.empty summaries
 data PreparedPipelineResult = PreparedPipelineResult
   { pprPipelineResult :: PipelineResult
   , pprModules :: [PreparedModule]
-  , pprDependencies :: DependencyEvidence
+  , pprDependencies :: PreparedDependencies
   , pprProductInterfaces :: Map.Map ModuleName ModIface
   , pprFinalizedModules :: Map.Map ModuleName FinalizedModule
   , pprPackageImports :: Map.Map ModuleName PackageImportEvidence
   , pprAcceptedCandidates :: [ModuleCandidate]
-  , pprExactCompilation :: Maybe ExactCompilation
   }
+
+-- | One publication owns both source lookup and retained exact imports.
+-- Constructors stay private so consumers cannot pair unrelated compilations.
+data PreparedDependencies
+  = SourceOnly DependencyEvidence
+  | ExactScoped DependencyEvidence ExactCompilation
+
+preparedDependencies :: DependencyEvidence -> Maybe ExactCompilation -> PreparedDependencies
+preparedDependencies fresh Nothing = SourceOnly fresh
+preparedDependencies fresh (Just exact) = ExactScoped fresh exact
+
+-- | Fresh source lookup only; retained exact imports are deliberately absent.
+preparedFreshDependencies :: PreparedPipelineResult -> DependencyEvidence
+preparedFreshDependencies prepared = case pprDependencies prepared of
+  SourceOnly fresh -> fresh
+  ExactScoped fresh _ -> fresh
+
+-- | Exact-scope evidence only; fresh source imports remain in their own view.
+preparedExactCompilation :: PreparedPipelineResult -> Maybe ExactCompilation
+preparedExactCompilation prepared = case pprDependencies prepared of
+  SourceOnly _ -> Nothing
+  ExactScoped _ exact -> Just exact
+
+-- | Complete direct home imports of a fresh original, combining selected source
+-- owners with retained exact owners. Fresh SOURCE imports resolve through their
+-- boot witnesses; exact SOURCE imports are refused before pipeline publication.
+-- Package imports confer no home requirement.
+preparedHomeRequirements :: PreparedPipelineResult -> String -> String -> Either String [(String, String)]
+preparedHomeRequirements prepared unit owner = do
+  fresh <- selectedFreshHomeRequirements (preparedFreshDependencies prepared) unit owner
+  let exact = [(importedUnit,name)
+        | compilation <- maybe [] pure (preparedExactCompilation prepared)
+        , ((sourceUnit,sourceName,False), edges) <- compilationExactImports compilation
+        , sourceUnit == unit, sourceName == owner
+        , (_,name,_,importedUnit) <- edges]
+  pure (nub (fresh ++ exact))
 
 -- | Metadata has no executable projection. The environment
 -- retains dependency interfaces and the target's exact checked reader scope.
@@ -2899,12 +2935,11 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
         pure PreparedPipelineResult
           { pprPipelineResult = result
           , pprModules = modules
-          , pprDependencies = dependencies
+          , pprDependencies = preparedDependencies dependencies exactCompilation
           , pprProductInterfaces = productInterfaces
           , pprFinalizedModules = finalizedModules
           , pprPackageImports = packageRoots
           , pprAcceptedCandidates = []
-          , pprExactCompilation = exactCompilation
           }
       PreparedProducts _ -> do
         (result, modules, dependencies, productInterfaces, finalizedModules, packageRoots) <- compileExecutable
@@ -2914,12 +2949,11 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
         pure PreparedPipelineResult
           { pprPipelineResult = result
           , pprModules = modules
-          , pprDependencies = dependencies
+          , pprDependencies = preparedDependencies dependencies exactCompilation
           , pprProductInterfaces = productInterfaces
           , pprFinalizedModules = finalizedModules
           , pprPackageImports = packageRoots
           , pprAcceptedCandidates = map admittedCandidateOriginal (Map.elems acceptedCandidates)
-          , pprExactCompilation = exactCompilation
           }
       CheckedEnvironment -> compileChecked
       CheckedEnvironmentProducts _ -> compileChecked

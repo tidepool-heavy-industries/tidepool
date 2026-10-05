@@ -52,6 +52,7 @@ import Tidepool.Binders
   )
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedPipelineResult(..), CheckedEnvironmentResult(..)
+  , preparedFreshDependencies, preparedExactCompilation, preparedHomeRequirements
   , CompilePurpose(..), withSourceImportIntents, PipelineResult(..)
   , withResidentPipelineSelectedRequests, withExactInterfaceTransaction
   , captureCompilerProducerIdentity, runPipelineSessionSelectedWithProducer
@@ -145,7 +146,7 @@ import Tidepool.TurnSource
   , generatedScaffoldModuleName, renameScaffoldModuleHeader
   , captureCompilerDefaultRecipe, qualifyCompilerDefault, preambleImportMarker )
 import Tidepool.DependencyEvidence
-  ( validateDependencyEvidence, selectedHomeRequirements )
+  ( validateDependencyEvidence )
 
 renderAsksJson :: [Tidepool.EffectSchema.YieldSite] -> String
 renderAsksJson sites = "[" ++ intercalate "," (map renderAskJson sites) ++ "]"
@@ -440,7 +441,7 @@ prepareArtifacts originalInterfaces caches input prepared targets@(firstTarget :
       interfaces = pprProductInterfaces prepared
       modules = pprModules prepared
       candidates = pprAcceptedCandidates prepared
-      exactScope = compilationScope <$> pprExactCompilation prepared
+      exactScope = compilationScope <$> preparedExactCompilation prepared
   source <- readFile input
   let targetModule = fromMaybe (capitalize (takeBaseName input)) (extractModuleName source)
       matching = [prepared | prepared <- modules,
@@ -938,10 +939,10 @@ compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb binde
     when (not (requestCell args) && not (requestActivationPreview args)
         && null (requestInjectVals args) && not (isJust (requestSessionArtifacts args))
         && Map.null (requestRetainedGenerations args)) $
-      writeCompileInputProof outDir hscEnv (pprDependencies prepared) (pprPackageImports prepared)
+      writeCompileInputProof outDir hscEnv (preparedFreshDependencies prepared) (pprPackageImports prepared)
     -- Mutable turns never enter the artifact cache, but publication must
     -- still reject source changes observed during this compilation.
-    validateDependencyEvidence (pprDependencies prepared)
+    validateDependencyEvidence (preparedFreshDependencies prepared)
     let wrapped = T.pack spliced
     turn <- case selector of
       SBind -> do
@@ -1497,7 +1498,7 @@ retainProgramProducts
   -> CertifiedOriginalProducts -> String -> ExactScope -> IO ExactScope
 retainProgramProducts directory prepared certified target initial = do
   selected <- either fail pure (extendSourceSelectedOriginals
-    (pprExactCompilation prepared >>= compilationSourceSelection) initial)
+    (preparedExactCompilation prepared >>= compilationSourceSelection) initial)
   finalized <- foldM retainInterface selected (Map.toAscList localInterfaces)
   cached <- foldM retainCached finalized (zip [0::Int ..] (pprAcceptedCandidates prepared))
   promoted <- foldM retain cached (zip [0::Int ..] products)
@@ -1672,14 +1673,8 @@ programInterfaceRequirements prepared unit owner = do
   pure (nub (source ++ homeInterfaceUsageOwners (prHscEnv (pprPipelineResult prepared)) iface))
 
 programSourceRequirements :: PreparedPipelineResult -> String -> String -> IO [(String, String)]
-programSourceRequirements prepared unit owner = do
-  fresh <- either fail pure (selectedHomeRequirements (pprDependencies prepared) unit owner)
-  let exact = [(importedUnit,name)
-        | compilation <- maybe [] pure (pprExactCompilation prepared)
-        , ((sourceUnit,sourceName,False), edges) <- compilationImports compilation
-        , sourceUnit == unit, sourceName == owner
-        , (_,name,False,importedUnit) <- edges]
-  pure (nub (fresh ++ exact))
+programSourceRequirements prepared unit owner =
+  either fail pure (preparedHomeRequirements prepared unit owner)
 
 exactProgramProductVersion :: ExactScope -> String -> String -> String -> BS.ByteString -> BS.ByteString -> BS.ByteString -> String
 exactProgramProductVersion scope unit owner source =
