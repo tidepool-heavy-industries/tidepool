@@ -1,5 +1,5 @@
 module Tidepool.CellProgramState
-  ( ProgramCellState(programPrologue, programExact, programValues, programOriginal, programOriginals, programRetained)
+  ( ProgramCellState(programPrologue, programExact, programValues, programOriginal, programOriginals, programRetained, programSourceImports)
   , initialProgramCellState, programItemOffset
   , recordDeclarationSegment, recordCheckedSegment
   , programPlans, programPins, programExpressions, programCheckedSignatures
@@ -16,6 +16,7 @@ import Tidepool.CheckedCell (CheckedSignature(signatureKey))
 import Tidepool.CheckedPrefixImports (CompletedValueImport)
 import Tidepool.ExactScope (ExactScope)
 import Tidepool.ExecutionSchema (SymbolIdentity)
+import Tidepool.GhcPipeline (ProgramSourceImports)
 
 -- Active authority is updated by compilation; observations accumulate in order
 -- without rebuilding the already checked prefix on every segment.
@@ -26,6 +27,7 @@ data ProgramCellState = ProgramCellState
   , programOriginal :: Maybe ((String,String),String)
   , programOriginals :: [((String,String),String)]
   , programRetained :: Map.Map SymbolIdentity Word64
+  , programSourceImports :: Maybe ProgramSourceImports
   , programItemOffset :: !Int
   , planHistory :: Seq.Seq CellSourcePlan
   , pinChunks :: Seq.Seq [CheckedBinderPin]
@@ -37,7 +39,7 @@ data ProgramCellState = ProgramCellState
 
 initialProgramCellState :: SourcePrologue -> ExactScope -> Map.Map SymbolIdentity Word64 -> ProgramCellState
 initialProgramCellState prologue exact retained = ProgramCellState
-  prologue exact [] Nothing [] retained 0
+  prologue exact [] Nothing [] retained Nothing 0
   Seq.empty Seq.empty Seq.empty Seq.empty Seq.empty Seq.empty
 
 recordDeclarationSegment :: CellSourcePlan -> String -> String -> ProgramCellState -> ProgramCellState

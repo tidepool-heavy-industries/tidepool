@@ -54,6 +54,7 @@ import Tidepool.Binders
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedPipelineResult(..), CheckedEnvironmentResult(..)
   , preparedFreshDependencies, preparedExactCompilation, preparedHomeRequirements
+  , retainProgramSourceImports, withProgramSourceImports
   , CompilePurpose(..), withSourceImportIntents, PipelineResult(..)
   , withResidentPipelineSelectedRequests, withExactInterfaceTransaction
   , captureCompilerProducerIdentity, runPipelineSessionSelectedWithProducer
@@ -1089,10 +1090,10 @@ runLegacyCellMode compiler caches args cellPath = do
     let baseCheckPurpose = case checkedCellPurpose <$> (admittedScope >>= scopeCheckedCell) of
           Just (HostInputCellCheck signature) -> HostActivationCheck signature
           _ -> GeneralCompile
-        checkPurpose = maybe baseCheckPurpose (\(_,_,inventory,exact) -> PlannedDeclarationCheck inventory exact) preparedDeclaration
+        checkPurpose = maybe baseCheckPurpose (\(_,_,inventory,exact,_) -> PlannedDeclarationCheck inventory exact) preparedDeclaration
         checkedSelection = if isJust preparedDeclaration then CheckedEnvironment else
           maybe CheckedEnvironment CheckedEnvironmentProducts (requestModuleCandidates args)
-        checkPlan plan = maybe plan (\(_,planned,_,_) -> plannedCheckPlan planned) preparedDeclaration
+        checkPlan plan = maybe plan (\(_,planned,_,_,_) -> plannedCheckPlan planned) preparedDeclaration
     (analyzed, provisional) <- checkCellInstances (\plan -> do
       let effective = checkPlan plan
       rendered <- either fail pure (renderCellCheckSource checkingTemplate effective)
@@ -1104,7 +1105,7 @@ runLegacyCellMode compiler caches args cellPath = do
         (withSourceImportIntents (cellPlanPrologue effective)
           (GeneratedInstanceCheck (cellGeneratedInstanceRecipe effective) checkPurpose))
         scope modulePath (requestIncludes args) (requestBuildProductsDir args))
-        (maybe initialPlan (\(plan,_,_,_) -> plan) preparedDeclaration)
+        (maybe initialPlan (\(plan,_,_,_,_) -> plan) preparedDeclaration)
     checkedSource <- either fail pure (renderCellCheckSource checkingTemplate (checkPlan analyzed))
     let (finalPlan, finalSource, compiled) = (analyzed, checkedSource, provisional)
     -- Presentation observations remain separate from native signature authority.
@@ -1211,9 +1212,11 @@ runCellProgramMode compiler caches args cellPath exact planned = do
             _ -> fail "declaration has a native reservation"
           let owner = "Tidepool.Session.Lib.G" ++ show generation
               ownAdmission = admission { checkedReservedModules = [owner] }
-          (finalized,_,inventory,extended) <- timePhase timing "cell_program_declaration" $
+          (finalized,_,inventory,extended,(prepared,certified)) <- timePhase timing "cell_program_declaration" $
             prepareOriginalCellDeclaration scoped caches localArgs template directory
               (Just (scopeFromWorkerRequest localArgs)) scope ownAdmission withPrefix
+          retainedImports <- retainProgramSourceImports (programSourceImports state) prepared
+            (certifiedFinalizedArtifacts certified) extended
           receipt <- BS.readFile (directory </> "planned-declaration.cbor")
           let original = Just (("main",owner), extractPlannedFingerprint inventory)
           -- Keep the ordered item under its original ordinal; its original
@@ -1227,6 +1230,7 @@ runCellProgramMode compiler caches args cellPath exact planned = do
                 , not (null kept)]
           pure $ recordDeclarationSegment finalized (plannedSourceFromDirectory finalized) (shaHex receipt)
             $ state { programExact = extended, programOriginal = original
+              , programSourceImports = retainedImports
               , programValues = remainingValues
               , programOriginals = programOriginals state ++ maybe [] pure original }
         _ -> do
@@ -1291,8 +1295,10 @@ runCellProgramMode compiler caches args cellPath exact planned = do
         source verdict (intercalate ", " (sbBinders verdict)) (Just itemAdmission) Nothing lastAttempt (priorProgramImports state) (PlannedTurnParse parserFlags (programPrologue state))
       extended <- retainProgramProducts directory (compiledPipeline output)
         (compiledOriginalProducts output) (compiledModule output) scope
+      retainedImports <- retainProgramSourceImports (programSourceImports state) (compiledPipeline output)
+        (certifiedFinalizedArtifacts (compiledOriginalProducts output)) extended
       let turn = compiledTurn output
-          retainedState = state { programExact = extended }
+          retainedState = state { programExact = extended, programSourceImports = retainedImports }
       BS.writeFile (directory </> "turn.cbor") (encodeTurnOut turn)
       case turn of
         TBind _ _ binders _ wrapped -> do
@@ -1328,12 +1334,15 @@ runCellProgramMode compiler caches args cellPath exact planned = do
         "" verdict (intercalate ", " (sbBinders verdict)) Nothing (Just display) lastAttempt (priorProgramImports state) (StandaloneTurnParse parserFlags)
       extended <- retainProgramProducts directory (compiledPipeline output)
         (compiledOriginalProducts output) (compiledModule output) scope
+      retainedImports <- retainProgramSourceImports (programSourceImports state) (compiledPipeline output)
+        (certifiedFinalizedArtifacts (compiledOriginalProducts output)) extended
       let turn = compiledTurn output
       BS.writeFile (directory </> "turn.cbor") (encodeTurnOut turn)
       case turn of
         TBind _ _ binders _ wrapped -> do
           writeCheckedDisplayReceipt directory scope display (T.unpack wrapped)
-          next <- addProgramValue root generation binders (state { programExact = extended })
+          next <- addProgramValue root generation binders
+            (state { programExact = extended, programSourceImports = retainedImports })
           pure next { programValues = programValues state }
         _ -> fail "compiled cell display did not return bind metadata"
 
@@ -1342,13 +1351,15 @@ runCellProgramMode compiler caches args cellPath exact planned = do
     plannedSourceFromDirectory plan = concatMap cellAnalysisSource (cellPlanItems plan)
 
 programPurpose :: ProgramCellState -> CompilePurpose -> CompilePurpose
-programPurpose state purpose = case purpose of
-  ParsedImportSelection intents inner -> ParsedImportSelection intents (programPurpose state inner)
-  GeneratedScaffoldCompile recipe inner -> GeneratedScaffoldCompile recipe (programPurpose state inner)
-  GeneratedInstanceCheck recipe inner -> GeneratedInstanceCheck recipe (programPurpose state inner)
-  OriginalDeclarationCompile -> ProgramItemCompile True [] (programOriginals state) (selectedProgramValues (programValues state))
-  CheckedItemCompile annotations _ values -> ProgramItemCompile False annotations (programOriginals state) values
-  other -> other
+programPurpose state = withProgramSourceImports (programSourceImports state) . replacePurpose
+  where
+    replacePurpose purpose = case purpose of
+      ParsedImportSelection intents inner -> ParsedImportSelection intents (replacePurpose inner)
+      GeneratedScaffoldCompile recipe inner -> GeneratedScaffoldCompile recipe (replacePurpose inner)
+      GeneratedInstanceCheck recipe inner -> GeneratedInstanceCheck recipe (replacePurpose inner)
+      OriginalDeclarationCompile -> ProgramItemCompile True [] (programOriginals state) (selectedProgramValues (programValues state))
+      CheckedItemCompile annotations _ values -> ProgramItemCompile False annotations (programOriginals state) values
+      other -> other
 
 priorProgramImports :: ProgramCellState -> [String]
 priorProgramImports state = [owner | ((_,owner),_) <- programOriginals state
@@ -1434,7 +1445,8 @@ addProgramValue root generation binders@(firstBinder:_) state = do
 prepareOriginalCellDeclaration
   :: Compiler -> RecoveryCaches -> WorkerRequest -> String -> FilePath -> Maybe SessionScope
   -> ExactScope -> CheckedCellAdmission -> CellSourcePlan
-  -> IO (CellSourcePlan, PlannedDeclaration, PlannedDeclarationInventory, ExactScope)
+  -> IO (CellSourcePlan, PlannedDeclaration, PlannedDeclarationInventory, ExactScope,
+         (PreparedPipelineResult, CertifiedOriginalProducts))
 prepareOriginalCellDeclaration compiler caches args template outDir scope exact admission initial = do
   reserved <- case checkedReservedModules admission of
     [owner] -> pure owner
@@ -1512,7 +1524,7 @@ prepareOriginalCellDeclaration compiler caches args template outDir scope exact 
         <> text (shaHex interfaceBytes) <> text (renderPlannedDeclarationInventory inventory)
         <> text "planned-declaration"
   BS.writeFile (outDir </> "planned-declaration.cbor") (toStrictByteString receipt)
-  pure (finalized, original, inventory, extended)
+  pure (finalized, original, inventory, extended, (prepared,certified))
   where
     rejectPlan UnsupportedDeclarationOrder = throwIO (SourceRejection
       "local declarations currently require one initial group before bindings or expressions")

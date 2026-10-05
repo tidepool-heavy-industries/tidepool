@@ -8,7 +8,8 @@ module Tidepool.ExactScope
   , CanonicalInterfaceAdmission(..), scopeCanonicalInterfaces, scopeSourceOriginalInterfaces, scopeModuleInterfaceProofs
   , admittedInterfaceHomeUnits, admittedInterfaceSourceSha256, resolveShippedHomeModule
   , admittedInterfaceRequirements, admittedInterfaceCore
-  , captureFinalizedSourceOriginals, validateCanonicalInterfaceProof, validateCandidateCanonicalInterfaceProof
+  , captureFinalizedSourceOriginals, compilationOriginalSourceImports
+  , validateCanonicalInterfaceProof, validateCandidateCanonicalInterfaceProof
   , canonicalCertificatePath, canonicalCertificateSha256, canonicalCoreArtifact
   , canonicalCorePath, canonicalCoreSha256, canonicalHomeUnits, canonicalSourceSha256
   , canonicalRequirements, canonicalOrigin, canonicalSourceImports, isSourceOriginal
@@ -657,32 +658,13 @@ captureFinalizedSourceOriginals compilation accepted target finalized evidence =
         , dependencySourcePath source == dependencyModuleSource node]
         == [localFinalizedSourceSha256 admission])
       (fail "captured source original import receipt differs from its consumed source")
-    ordinary <- forM (dependencyModuleImports node) $ \edge -> do
-      home <- case dependencyImportSelected edge of
-        Nothing -> pure Nothing
-        Just path -> case [dependencyModuleUnit child | child <- dependencyModules evidence
-            , dependencyModuleName child == dependencyImportName edge
-            , dependencyModuleBoot child == dependencyImportBoot edge
-            , dependencyModuleSource child == path] of
-          [unit] -> pure (Just unit)
-          _ -> fail "captured source import has no unique original home owner"
-      pure (dependencyImportQualifier edge,dependencyImportName edge,dependencyImportBoot edge,home)
-    let exact = [(qualifier,name,boot,Just unit)
-          | ((ownerUnit,ownerName,False),edges) <- compilationExactImports compilation
-          , (ownerUnit,ownerName) == key
-          , (qualifier,name,boot,unit) <- edges]
-        importKey (qualifier,name,boot,_) = (qualifier,name,boot)
-    imports <- foldM (\selected row -> case Map.lookup (importKey row) selected of
-        Nothing -> pure (Map.insert (importKey row) row selected)
-        Just old | old == row -> pure selected
-        _ -> fail "captured source original has conflicting original import owners")
-      Map.empty (ordinary ++ exact)
+    imports <- either fail pure (compilationOriginalSourceImports compilation evidence key)
     let (iface,_,packageSha) = localFinalizedInterface admission
         core = localFinalizedCore admission
         certificate = CanonicalModuleCertificate
           (scopeProducerSha256 scope) (Set.toAscList (localFinalizedHomeUnits admission)) key
           (localFinalizedSourceSha256 admission) (exactSha256 iface) packageSha (snd <$> core)
-          (Map.toAscList (localFinalizedRequirements admission)) (SourceOriginal (Map.elems imports))
+          (Map.toAscList (localFinalizedRequirements admission)) (SourceOriginal imports)
         bytes = toStrictByteString (encodeCanonicalModuleCertificate certificate)
         seal = digest bytes
         path = takeDirectory (exactPath iface) </> seal ++ ".finalized.certificate.cbor"
@@ -690,6 +672,38 @@ captureFinalizedSourceOriginals compilation accepted target finalized evidence =
     pure (key,CanonicalInterfaceDescriptor path seal
       (uncurry CanonicalCoreArtifact <$> core) (ScopeInterface SourceOriginalRole))
   validateCanonicalInterfaces (scopeProducerSha256 scope) interfaces descriptors
+
+-- The completed source graph and exact-import graph jointly own original
+-- authored adjacency, for both canonical issuance and same-cell retention.
+compilationOriginalSourceImports
+  :: ExactCompilation -> DependencyEvidence -> (String,String)
+  -> Either String [CanonicalSourceImport]
+compilationOriginalSourceImports compilation evidence key = do
+  node <- case [node | node <- dependencyModules evidence
+      , (dependencyModuleUnit node,dependencyModuleName node) == key
+      , not (dependencyModuleBoot node)] of
+    [node] -> Right node
+    _ -> Left "captured source original lacks its original import receipt"
+  ordinary <- forM (dependencyModuleImports node) $ \edge -> do
+    home <- case dependencyImportSelected edge of
+      Nothing -> Right Nothing
+      Just path -> case [dependencyModuleUnit child | child <- dependencyModules evidence
+          , dependencyModuleName child == dependencyImportName edge
+          , dependencyModuleBoot child == dependencyImportBoot edge
+          , dependencyModuleSource child == path] of
+        [unit] -> Right (Just unit)
+        _ -> Left "captured source import has no unique original home owner"
+    pure (dependencyImportQualifier edge,dependencyImportName edge,dependencyImportBoot edge,home)
+  let exact = [(qualifier,name,boot,Just unit)
+        | ((ownerUnit,ownerName,False),edges) <- compilationExactImports compilation
+        , (ownerUnit,ownerName) == key
+        , (qualifier,name,boot,unit) <- edges]
+      importKey (qualifier,name,boot,_) = (qualifier,name,boot)
+  Map.elems <$> foldM (\selected row -> case Map.lookup (importKey row) selected of
+      Nothing -> Right (Map.insert (importKey row) row selected)
+      Just old | old == row -> Right selected
+      _ -> Left "captured source original has conflicting original import owners")
+    Map.empty (ordinary ++ exact)
 
 -- Candidate descriptors are optional cache suggestions until this same owner
 -- validates them against the complete selected interface closure.
