@@ -134,6 +134,7 @@ verifyModuleEvidenceProjection = do
     , preparedRequestSiteTyCon = Nothing
     , preparedAuthorityDependent = False
     , preparedIntrinsicNames = Set.empty
+    , preparedExpectedEntries = Map.empty
     }
   context = ProjectionContext
     { projectionProfile = "ghc-9.12-prepared-stg"

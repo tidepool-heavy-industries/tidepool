@@ -42,6 +42,7 @@ import GHC.Unit.Types (moduleName)
 import System.Directory
   ( createDirectory, createDirectoryIfMissing, getTemporaryDirectory, makeAbsolute, removeFile, removePathForcibly )
 import System.IO (openTempFile, hClose)
+import System.Environment (getEnv)
 import System.Mem.StableName (StableName, makeStableName)
 import System.FilePath ((</>), normalise)
 import GHC.Types.SourceError (SourceError)
@@ -484,7 +485,9 @@ verifyProjectionInterning dir = do
     ++ show (length (Schema.programSignatures program), length (Schema.programGlobals program),
       length (Schema.programConstructors program), length (Schema.programOperations program)))
   strictPlain <- writePlainConstructorEvidenceFixture dir
-  strictPlainResult <- runPipelineSelected PreparedStg strictPlain [dir, "test/prepared-stg", "lib"]
+  effects <- getEnv "TIDEPOOL_TEST_EFFECTS_DIR"
+  strictPlainResult <- runPipelineSelected PreparedStg strictPlain
+    [dir, "test/prepared-stg", "lib", effects]
   verifyRepeatedConstructorEvidence strictPlainResult
   putStrLn "projection interning: deterministic bytes and 16 constructor-conflict paths passed"
 
