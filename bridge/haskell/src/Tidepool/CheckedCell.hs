@@ -619,7 +619,8 @@ decodeInputStructure depth bound = do
         "symbol" -> encodeString <$> decodeString
         "char" -> do
           character <- decodeInt
-          unless (character >= 0 && character <= 0x10ffff) (fail "canonical input character literal")
+          unless (character >= 0 && character <= 0x10ffff && not (character >= 0xd800 && character <= 0xdfff))
+            (fail "canonical input character literal")
           pure (encodeInt character)
         _ -> fail "canonical input literal tag"
       pure (prefix <> text literal <> value, [], 1)

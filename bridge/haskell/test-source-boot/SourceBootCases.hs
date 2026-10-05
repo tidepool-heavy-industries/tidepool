@@ -2562,8 +2562,10 @@ originalThinInterfaceTest packageOnly = withScratch $ \work -> do
           unless (case validateCheckedTypeWitnessBytes missing of Left _ -> True; Right _ -> False)
             (fail "canonical witness admitted missing owner seals")
         _ -> fail "thin fixture has no original nominal owner seals"
+      let surrogate = TList (replace 4 (TList [])
+            (replace 3 (TBytes (encoded (TList [TString "literal", TString "char", TInt 0xd800]))) values))
       forM_ [offered <> BS.singleton 0, BS.pack [0x98, 5] <> BS.drop 1 offered
-            ,encoded (TList (replace 1 (TString "2") values))] $ \invalid ->
+            ,encoded (TList (replace 1 (TString "2") values)), encoded surrogate] $ \invalid ->
         unless (case validateCheckedTypeWitnessBytes invalid of Left _ -> True; Right _ -> False)
           (fail "canonical witness admitted a malformed envelope")
     _ -> fail "thin fixture witness is not a row"
