@@ -1,5 +1,6 @@
 module Main (main, tests) where
 
+import Tidepool.PreparedStg.Internal (PreparedModule(..))
 import Tidepool.Test.Runner (TestTree, runTests, testCase, testGroup)
 
 import Control.Exception (SomeException, bracket, evaluate, fromException, throwIO, try)
@@ -41,7 +42,7 @@ import Tidepool.DiagJson (Diag(..), DiagSeverity(..), diagsFromSourceError)
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedPipelineResult(..), CompilePurpose(..)
   , PipelineResult(..), runPipelineSelected, withResidentPipelineSelected )
-import Tidepool.PreparedStg (PreparedModule(..))
+import Tidepool.PreparedStg (pmModule, pmBindings, pmYieldSites, pmPreparedSites, pmTypeGraph, pmSiteRejections)
 import qualified Data.Map.Strict as Map
 import qualified Tidepool.ExecutionProjection as Projection
 import qualified Tidepool.ExecutionSchema as Schema
@@ -402,7 +403,7 @@ verifyNominalJsonConstructorDemand dir = do
           Just boxer -> DC.DCR (DC.dataConWrapId constructor) boxer
             (DC.dataConRepArgTys constructor) (DC.dataConRepStrictness constructor)
             (DC.dataConImplBangs constructor))
-      replace prepared = prepared { pmTypeGraph = (pmTypeGraph prepared)
+      replace prepared = prepared { preparedTypeGraph = (pmTypeGraph prepared)
         { Schema.typeGraphNodes = IntMap.map (\node -> case node of
             Schema.TypeDeclaration tc flags form restriction | tc == valueTyCon ->
               Schema.TypeDeclaration otherTyCon flags form restriction
@@ -635,10 +636,10 @@ verifyRepeatedConstructorEvidence result = do
       runtimeFields = DC.dataConRepArgTys original
       conflictingFields = [Scaled multiplicity wordPrimTy | Scaled multiplicity _ <- fields]
       replace pair prepared = prepared
-        { pmTypeGraph = Schema.TypeGraph
+        { preparedTypeGraph = Schema.TypeGraph
             (IntMap.unions [Schema.typeGraphNodes graph | graph <- copies])
             (IntMap.unions [Schema.typeGraphEdges graph | graph <- copies])
-        , pmPreparedSites = concat
+        , preparedPreparedSites = concat
             [ [site { psWireNode = shifted offset (psWireNode site)
                     , psInputNodes = map (shifted offset) (psInputNodes site)
                     , psSite = (psSite site)
@@ -665,7 +666,7 @@ verifyRepeatedConstructorEvidence result = do
         [prepared] -> prepared
         prepared -> error ("constructor collision fixture expected one target module, got "
           ++ show (map (moduleNameString . moduleName . pmModule) prepared))
-      replaceNominal occurrence replacement prepared = prepared { pmTypeGraph = (pmTypeGraph prepared)
+      replaceNominal occurrence replacement prepared = prepared { preparedTypeGraph = (pmTypeGraph prepared)
         { Schema.typeGraphNodes = IntMap.map (\node -> case node of
             Schema.TypeConstructorTemplate con
               | occNameString (nameOccName (dataConName con)) == occurrence ->
@@ -687,9 +688,9 @@ verifyRepeatedConstructorEvidence result = do
             ownsSelected (binding, _) = any ((`elem` owners) . idName)
               (Projection.topBinders binding)
         in (replaceNominal "NoUnpack" replacement target)
-          { pmBindings = filter ownsSelected (pmBindings target)
-          , pmPreparedSites = rooted
-          , pmSiteRejections = []
+          { preparedBindings = filter ownsSelected (pmBindings target)
+          , preparedPreparedSites = rooted
+          , preparedSiteRejections = []
           }
       otherModules = filter ((/= "StrictPlainMetadata")
         . moduleNameString . moduleName . pmModule) (pprModules result)

@@ -75,7 +75,7 @@ import Tidepool.HomeProducts
   ( CandidateCoreFailure(..), materializeCandidateCompilerView
   , admittedCompilerInterface, validateAdmittedInterfaceRequirements
   , validateCandidateInterfaceRequirements )
-import Tidepool.PreparedStg (PreparedModule(..), prepareModule, unelaboratedModule)
+import Tidepool.PreparedStg (pmBindings, prepareModule)
 import Tidepool.RetainedUnfoldings
   ( emptyRetainedContext, installRetainedUnfoldingsPlugin
   , scopeRetainedModuleGraph, scopeRetainedSummaryHscEnv )
@@ -228,7 +228,7 @@ finalizedCoreChecks = bracket scratch removeDirectoryRecursive $ \work -> do
               && eqType (idType original) (idType binder))
                 "cold Core rebound an original native Name or type"
             _ -> fail "cold Core binder has no admitted original declaration"
-      prepared <- prepareModule env summary (unelaboratedModule guts)
+      prepared <- prepareModule env (ms_location summary) mempty finalized
       assert (not (null (pmBindings prepared))) "cold canonical Core produced no STG"
       let owner = cg_module guts
           wrongHome = home { hm_iface = set_mi_module

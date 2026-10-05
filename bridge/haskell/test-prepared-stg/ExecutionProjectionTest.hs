@@ -7,6 +7,7 @@ module ExecutionProjectionTest
   , verifyHierarchicalTargetModule
   ) where
 
+import Tidepool.PreparedStg.Internal (PreparedModule(..))
 import Control.Monad (forM_, unless)
 import Data.ByteString qualified as BS
 import Data.List (nub)
@@ -33,7 +34,7 @@ import GHC.Unit.Types (stringToUnit)
 import GHC.Stg.Syntax
 import System.Directory (getCurrentDirectory)
 import System.FilePath ((</>))
-import Tidepool.PreparedStg (PreparedModule(..))
+import Tidepool.PreparedStg (pmModule, pmBindings)
 import Tidepool.PreparedFacts (PreparedFacts(..), extractPreparedFacts)
 import Tidepool.ExecutionProjection
 import Tidepool.ExecutionSchema
@@ -626,7 +627,7 @@ verifyMissingHomeTop context modules = case projectPrepared context stripped of
     "absent home top was projected as an import or otherwise accepted")
   where
     stripped =
-      [ prepared { pmBindings = filter (not . isMissingTop . fst) (pmBindings prepared) }
+      [ prepared { preparedBindings = filter (not . isMissingTop . fst) (pmBindings prepared) }
       | prepared <- modules
       ]
     isMissingTop binding = any

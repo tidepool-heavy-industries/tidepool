@@ -1,5 +1,6 @@
 module ModuleEvidenceProjectionTest (verifyModuleEvidenceProjection) where
 
+import Tidepool.PreparedStg.Internal (PreparedModule(..), PreparedCoverage(..))
 import Control.Monad (forM_, unless)
 import Control.Monad.State.Strict (runStateT)
 import Data.IntMap.Strict qualified as IntMap
@@ -23,7 +24,7 @@ import Tidepool.EffectSchema qualified as Effect
 import Tidepool.ExecutionProjection
 import Tidepool.ExecutionSchema
 import Tidepool.PreparedSites (PreparedSite(..), SiteRejection(..))
-import Tidepool.PreparedStg (PreparedModule(..), PreparedCoverage(..))
+import Tidepool.PreparedStg (pmModule, pmCoverage, pmBindings, pmTagSigs, pmSitedSiblings, pmYieldSites, pmPreparedSites, pmTypeGraph, pmSiteRejections, pmRequestSiteTyCon)
 import Tidepool.TypePolicy qualified as TypePolicy
 
 -- Pure projection checks use compiler-owned Ids and graphs, without compiling
@@ -57,36 +58,36 @@ verifyModuleEvidenceProjection = do
       prepared (Just (Set.singleton (projectedOriginalOrdinal group))))
     assert (selected == [group]) "selection changed group evidence identity"
   lazyEmpty <- project (prepared
-    { pmBindings = [last (pmBindings prepared)]
-    , pmTypeGraph = error "site-free projection forced the module type graph"
+    { preparedBindings = [last (pmBindings prepared)]
+    , preparedTypeGraph = error "site-free projection forced the module type graph"
     })
   assert (all (IntMap.null . typeGraphNodes . projectedTypes . projectedBody) lazyEmpty)
     "site-free projection produced type evidence"
   rejectShape "invalid reachable root"
     "finite type graph contains an out-of-range node" (prepared
-    { pmPreparedSites = [site alpha 21 "invalid-root" 0 999999 []] })
+    { preparedPreparedSites = [site alpha 21 "invalid-root" 0 999999 []] })
   rejectShape "invalid reachable edge"
     "finite type graph contains an out-of-range node" (prepared
-    { pmPreparedSites = [site alpha 22 "invalid-edge" 0 (raw firstRoot) []]
-    , pmTypeGraph = graph { typeGraphEdges = IntMap.insert (index firstRoot)
+    { preparedPreparedSites = [site alpha 22 "invalid-edge" 0 (raw firstRoot) []]
+    , preparedTypeGraph = graph { typeGraphEdges = IntMap.insert (index firstRoot)
         [(TypeBody, TypeNodeId 999999)] (typeGraphEdges graph) }
     })
   rejectShape "duplicate selected site id"
     "duplicate selected prepared site id 23" (prepared
-    { pmPreparedSites = [site alpha 23 "duplicate-one" 0 (raw firstRoot) [],
+    { preparedPreparedSites = [site alpha 23 "duplicate-one" 0 (raw firstRoot) [],
                          site alpha 23 "duplicate-two" 1 (raw thirdRoot) []] })
   case projectPreparedModuleGroups context (prepared
-    { pmPreparedSites = [site alpha 24 "reachable-defect" 0 (raw thirdRoot) []]
-    , pmTypeGraph = graph { typeGraphNodes = IntMap.map (\node -> case node of
+    { preparedPreparedSites = [site alpha 24 "reachable-defect" 0 (raw thirdRoot) []]
+    , preparedTypeGraph = graph { typeGraphNodes = IntMap.map (\node -> case node of
         TypeDeclaration tycon flags (OpaqueDeclaration _ "primitive") restriction ->
           TypeDeclaration tycon flags (ScalarDeclaration (BoxedRep Nothing)) restriction
         _ -> node) (typeGraphNodes graph) } }) of
     Left (InvalidPreparedRepresentation "runtime-polymorphic boxed representation") -> pure ()
     outcome -> fail ("reachable projection defect was skipped: " ++ show outcome)
   case projectPreparedModuleGroups context (prepared
-    { pmBindings = [last (pmBindings prepared)]
-    , pmPreparedSites = []
-    , pmSiteRejections = [SiteRejection alpha "unselected rejection",
+    { preparedBindings = [last (pmBindings prepared)]
+    , preparedPreparedSites = []
+    , preparedSiteRejections = [SiteRejection alpha "unselected rejection",
                           SiteRejection gamma "empty-root rejection",
                           SiteRejection gamma "later rejection"]
     }) of
@@ -118,19 +119,21 @@ verifyModuleEvidenceProjection = do
     Right result -> result
     Left failure -> error (show failure)
   prepared = PreparedModule
-    { pmModule = owner
-    , pmCoverage = CompleteSourceModule
-    , pmBindings = [(StgTopStringLit binder_ "fixture", emptyVarSet)
+    { preparedModule = owner
+    , preparedCoverage = CompleteSourceModule
+    , preparedBindings = [(StgTopStringLit binder_ "fixture", emptyVarSet)
                    | binder_ <- [alpha, beta, gamma]]
-    , pmTagSigs = emptyNameEnv
-    , pmSitedSiblings = Map.empty
-    , pmYieldSites = []
-    , pmPreparedSites = [site beta 11 "beta" 1 (raw thirdRoot) [],
+    , preparedTagSigs = emptyNameEnv
+    , preparedSitedSiblings = Map.empty
+    , preparedYieldSites = []
+    , preparedPreparedSites = [site beta 11 "beta" 1 (raw thirdRoot) [],
                          site alpha 12 "alpha-one" 2 (raw firstRoot) [raw thirdRoot],
                          site alpha 13 "alpha-two" 3 (raw thirdRoot) []]
-    , pmTypeGraph = graph
-    , pmSiteRejections = []
-    , pmRequestSiteTyCon = Nothing
+    , preparedTypeGraph = graph
+    , preparedSiteRejections = []
+    , preparedRequestSiteTyCon = Nothing
+    , preparedAuthorityDependent = False
+    , preparedIntrinsicNames = Set.empty
     }
   context = ProjectionContext
     { projectionProfile = "ghc-9.12-prepared-stg"

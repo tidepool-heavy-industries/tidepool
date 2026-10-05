@@ -9,6 +9,8 @@ module Tidepool.PreparedSites
   , lookupPreparedVerb
   , resolvePreparedSiblings
   , resolvePreparedInterfaceSiblings
+  , IntrinsicCensus, censusPreparedIntrinsics, intrinsicFree, intrinsicNames
+  , resolveRecoveredSiblings, requestSiteAuthority
   , requestReplyIndex
   ) where
 
@@ -24,6 +26,8 @@ import Data.Word (Word64)
 import GHC.Core
 import GHC.Core.Subst (cloneBndrs, mkEmptySubst, substExpr)
 import GHC.Core.FVs (exprFreeVars)
+import GHC.Core.TyCo.FVs (tyConsOfType)
+import GHC.Types.Unique.Set (nonDetEltsUniqSet)
 import GHC.Types.Var.Env (mkInScopeSet)
 import GHC.Core.Make (mkCoreConApps)
 import GHC.Builtin.Types (intDataCon, intTy, mkListTy, mkPromotedListTy, liftedTypeKind)
@@ -38,7 +42,7 @@ import GHC.Core.Type
   ( mkTyConApp, splitTyConApp_maybe
   , isLiftedTypeKind, typeKind )
 import GHC.Core.TyCo.Compare (eqType)
-import GHC.Core.TyCon (TyCon, isNewTyCon, newTyConCo, tyConArity, tyConDataCons, tyConRoles, tyConTyVars)
+import GHC.Core.TyCon (TyCon, isNewTyCon, newTyConCo, tyConArity, tyConDataCons, tyConRoles, tyConTyVars, tyConName, isDataTyCon)
 import GHC.Core.DataCon
   ( DataCon, dataConOrigResTy, dataConName, dataConWorkId, dataConWrapId_maybe
   , dataConInstOrigArgTys, dataConUnivTyVars, isVanillaDataCon )
@@ -47,10 +51,10 @@ import GHC.Types.TyThing.Ppr (pprTyThingInContext)
 import GHC.Types.TyThing (TyThing (..))
 import GHC.Iface.Type (ShowForAllFlag (..), ShowHowMuch (..), ShowSub (..))
 import GHC.Types.Literal (LitNumType (..), Literal (..))
-import GHC.Types.Name (isSystemName, nameModule_maybe, nameOccName, nameUnique)
+import GHC.Types.Name (Name, isSystemName, nameModule_maybe, nameOccName, nameUnique)
 import GHC.Types.Name.Occurrence (mkTcOcc, mkVarOcc, occNameString)
 import GHC.Types.Id (Id, idName, mkSysLocal)
-import GHC.Types.Var (varType)
+import GHC.Types.Var (isId, varType)
 import GHC.Utils.Fingerprint (Fingerprint (..), fingerprintString)
 import GHC.Utils.Outputable (SDocContext(sdocSuppressUniques), defaultSDocContext, ppr, renderWithContext)
 import GHC.Data.Maybe (MaybeErr(Succeeded, Failed))
@@ -76,6 +80,89 @@ import Tidepool.TypePolicy
   , nominalHeadsOfType
   )
 
+-- | The preparation owner inspects every typed Core occurrence. This census
+-- permits the stable cache only when neither elaboration nor reply carriers
+-- depend on the admitted interface environment. Constructors are private.
+data IntrinsicCensus = IntrinsicCensus Bool [Name] [Id]
+
+intrinsicFree :: IntrinsicCensus -> Bool
+intrinsicFree (IntrinsicCensus dependent _ _) = not dependent
+
+intrinsicNames :: IntrinsicCensus -> [Name]
+intrinsicNames (IntrinsicCensus _ names _) = names
+
+censusPreparedIntrinsics :: [TyCon] -> [CoreBind] -> IntrinsicCensus
+censusPreparedIntrinsics tycons bindings = IntrinsicCensus dependent names surfaces
+  where
+    identifiers = concatMap bindingIds bindings
+      ++ [dataConWorkId constructor | tycon <- tycons, isDataTyCon tycon
+          , constructor <- tyConDataCons tycon]
+    types = concatMap bindingTypes bindings ++ map varType identifiers
+    surfaces = filter (maybe False (const True) . lookupPreparedVerb) identifiers
+    names = nub (map idName surfaces)
+    dependent = not (null surfaces) || any protected identifiers
+      || any hasCarrier types
+    hasCarrier = any carrier . nonDetEltsUniqSet . tyConsOfType
+    carrier tycon = defining (tyConName tycon) "Tidepool.Internal.RequestSite" "RequestSite"
+    protected identifier = any (uncurry (defining (idName identifier)))
+      [("Tidepool.Agent.Reply.Internal", "PublishProgressWith"),
+       ("Tidepool.Agent.Reply.Internal", "ObserveProgressWith"),
+       ("Tidepool.Agent.Watch.Internal", "ObserveWatchProgressWith"),
+       ("Tidepool.Actor.Source", "installSource"),
+       ("Tidepool.Actor.Source", "attachSource")]
+    defining name owner occurrence =
+      occNameString (nameOccName name) == occurrence
+      && maybe False ((== owner) . moduleNameString . moduleName) (nameModule_maybe name)
+    bindingIds binding = concatMap (\(binder, body) -> binder : exprIds body) (pairs binding)
+    bindingTypes binding = concatMap (exprTypes . snd) (pairs binding)
+    pairs (NonRec binder rhs) = [(binder, rhs)]
+    pairs (Rec entries) = entries
+    exprIds expression = case expression of
+      Var identifier | isId identifier -> [identifier]
+      App function argument -> exprIds function ++ exprIds argument
+      Lam binder body -> [binder | isId binder] ++ exprIds body
+      Let binding body -> bindingIds binding ++ exprIds body
+      Case scrutinee binder _ alternatives -> binder : exprIds scrutinee
+        ++ concat [filter isId binders ++ exprIds body | Alt _ binders body <- alternatives]
+      Cast body _ -> exprIds body
+      Tick _ body -> exprIds body
+      _ -> []
+    exprTypes expression = case expression of
+      Type ty -> [ty]
+      App function argument -> exprTypes function ++ exprTypes argument
+      Lam _ body -> exprTypes body
+      Let binding body -> bindingTypes binding ++ exprTypes body
+      Case scrutinee _ result alternatives -> result : exprTypes scrutinee
+        ++ concat [exprTypes body | Alt _ _ body <- alternatives]
+      Cast body _ -> exprTypes body
+      Tick _ body -> exprTypes body
+      _ -> []
+
+-- | Resolve package or hydrated-home siblings under their actual defining
+-- unit. An unrelated same-spelled module cannot satisfy a surface call.
+resolveRecoveredSiblings :: HscEnv -> [CoreBind] -> IO (Map String Id)
+resolveRecoveredSiblings env bindings = do
+  let IntrinsicCensus _ _ surfaces = censusPreparedIntrinsics [] bindings
+  rows <- traverse resolve surfaces
+  pure (Map.fromList [row | Just row <- rows])
+  where
+    resolve surface = case (lookupPreparedVerb surface, nameModule_maybe (idName surface)) of
+      (Just spec, Just surfaceOwner) -> do
+        found <- findImportedModule env (mkModuleName (vsSitedModule spec)) NoPkgQual
+        case found of
+          Found _ owner | moduleUnit owner == moduleUnit surfaceOwner -> do
+            name <- initIfaceLoad env (lookupOrig owner (mkVarOcc (vsSitedName spec)))
+            existing <- lookupType env name
+            loaded <- case existing of
+              Just thing -> pure (Succeeded thing)
+              Nothing -> initIfaceLoad env (importDecl name)
+            pure $ case loaded of
+              Succeeded (AnId identifier) | nameModule_maybe (idName identifier) == Just owner ->
+                Just (vsName spec, identifier)
+              _ -> Nothing
+          _ -> pure Nothing
+      _ -> pure Nothing
+
 data SiteAuthority = SiteAuthority
   { requestSiteTyCon :: Maybe TyCon
   , responseResultTyCon :: Maybe TyCon
@@ -83,6 +170,9 @@ data SiteAuthority = SiteAuthority
   , protectedProgressIds :: Set.Set Word64
   , trustedProgressOwners :: Set.Set Word64
   }
+
+requestSiteAuthority :: SiteAuthority -> Maybe TyCon
+requestSiteAuthority = requestSiteTyCon
 
 -- | Resolve wrapper authority from each type's defining module. The real GHC
 -- TyCon crosses into evidence; rendered spelling never carries authority.

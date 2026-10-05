@@ -16,7 +16,7 @@ import Tidepool.ExecutionEncode (encodeWireProgram)
 import Tidepool.ExecutionProjection (ProjectionContext(..), projectPrepared)
 import Tidepool.ExecutionSchema (Architecture(..), Endianness(..), TargetDescriptor(..), SymbolIdentity(..))
 import Tidepool.GhcPipeline
-import Tidepool.PreparedStg (PreparedModule(..))
+import Tidepool.PreparedStg (pmModule)
 
 unreachableCompileTimeCompilation :: IO ()
 unreachableCompileTimeCompilation = bracket temporary removeDirectoryRecursive $ \root -> do

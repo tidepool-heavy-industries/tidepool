@@ -41,7 +41,7 @@ import Tidepool.PreparedFacts
   , extractPreparedFacts )
 import Tidepool.PreparedRecovery
   ( RecoveredClosure(..), RecoveryFailure )
-import Tidepool.PreparedStg (PreparedModule(..))
+import Tidepool.PreparedStg (PreparedModule, pmModule, pmBindings)
 
 data TargetInventory = TargetInventory
   { targetName :: String

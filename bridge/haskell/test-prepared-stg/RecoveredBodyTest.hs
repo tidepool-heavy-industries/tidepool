@@ -2,6 +2,7 @@
 
 module Main (main, tests) where
 
+import Tidepool.PreparedStg.Internal (PreparedModule(..))
 import Tidepool.Test.Runner (TestTree, runTests, testCase, testGroup)
 
 import Control.Monad (unless)
@@ -10,6 +11,9 @@ import Control.Exception (evaluate)
 import Data.List (intercalate)
 import Data.Text qualified as Text
 import GHC
+import GHC.Driver.Env (hsc_HPT)
+import GHC.Unit.Home.ModInfo (lookupHpt)
+import Tidepool.FinalizedModule (FinalizedModule(..))
 import GHC.Core (Bind(..), maybeUnfoldingTemplate)
 import GHC.Core.TyCo.Compare (eqType)
 import GHC.Core.Utils qualified as CoreUtils
@@ -42,8 +46,8 @@ import Tidepool.GhcPipeline
   , PipelineResult(prHscEnv), runPipelineSelected )
 import Tidepool.PreparedRecovery (RecoveredClosure(closureModules), recoverPreparedClosure)
 import Tidepool.PreparedStg
-  ( PreparedModule(..), RecoveredModuleFailure(..), newPreparedBodyCache, prepareModule
-  , prepareRecoveredBodies, unelaboratedModule )
+  ( pmModule, pmBindings, RecoveredModuleFailure(..), newPreparedBodyCache, prepareModule
+  , prepareRecoveredBodies )
 import Tidepool.Resolve
   ( BodyOrigin(..), ExactBodyLookup(..), recoverExactBody )
 
@@ -83,7 +87,10 @@ assertAllRecoveredBodies = do
     desugared <- desugarModule typed
     hsc <- getSession
     (callerGuts, _) <- liftIO $ hscTidy hsc (coreModule desugared)
-    caller <- liftIO $ prepareModule hsc summary (unelaboratedModule callerGuts)
+    home <- maybe (fail "loaded caller has no finalized home interface") pure
+      (lookupHpt (hsc_HPT hsc) (ms_mod_name summary))
+    caller <- liftIO $ prepareModule hsc (ms_location summary) mempty
+      (FinalizedModule home callerGuts)
     let entry = callerEntry caller
         context = ProjectionContext
           { projectionProfile = Text.pack "w5-b2-recovered-body"
@@ -213,7 +220,10 @@ assertSemigroupSubset root libdir = runGhc (Just libdir) $ do
   desugared <- desugarModule typed
   hsc <- getSession
   (guts, _) <- liftIO $ hscTidy hsc (coreModule desugared)
-  prepared <- liftIO $ prepareModule hsc summary (unelaboratedModule guts)
+  home <- maybe (fail "loaded module has no finalized home interface") pure
+    (lookupHpt (hsc_HPT hsc) (ms_mod_name summary))
+  prepared <- liftIO $ prepareModule hsc (ms_location summary) mempty
+      (FinalizedModule home guts)
   let context = ProjectionContext
         { projectionProfile = Text.pack "w5-b2-recovered-same-owner"
         , projectionToolchain = Text.pack "ghc-9.12.2"
@@ -596,7 +606,7 @@ assertBottomingApplications root = do
     -- closure. Restore the same worker application with one supplied argument
     -- so projection is tested at the unsaturated call boundary.
     preservePartialCall prepared = prepared
-      { pmBindings = bindings
+      { preparedBindings = bindings
       }
       where
         bindings = map restore (pmBindings prepared)

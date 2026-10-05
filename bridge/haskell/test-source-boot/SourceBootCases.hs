@@ -1,5 +1,6 @@
 module SourceBootCases where
 
+import Tidepool.PreparedStg.Internal (PreparedModule(..), PreparedCoverage(..))
 import CandidateExecutionSourcesTest (executionScopeDescriptorChecks)
 
 import ExactScopeV9Test (exactScopeV9Checks, nativeOriginChecks, candidateCanonicalChecks)
@@ -145,7 +146,7 @@ import Tidepool.ModuleCandidates (ModuleCandidate(..), CandidateGroup(..), Candi
   , readModuleCandidates, readModuleCandidatesWithGraphs, candidateExecutionSources, candidateOriginalIdentity
   , candidateCoreDescriptor, captureCandidateManifest, readCapturedModuleCandidatesWithGraphs)
 import Tidepool.PackageWitness (PackageImportEvidence(..), PackageImportRoot(..), encodePackageImports, emptyPackageImports, readPackageImports, revalidatePackageImports)
-import Tidepool.PreparedStg (PreparedModule(..), PreparedCoverage(..))
+import Tidepool.PreparedStg (pmModule, pmCoverage, pmBindings, pmYieldSites, pmSiteRejections)
 import Tidepool.FatIface (readExactInterface)
 import Tidepool.Session (SessionScope(..), emptySessionScope)
 import Tidepool.RetainedUnfoldings (scopeRetainedSummaryHscEnv)
@@ -1969,7 +1970,7 @@ originalPackageProjection = withScratch $ \work -> do
         (set_mi_module (mkModule (stringToUnit "wrong-home-unit") supportName) supportInterface) paired)
           == lookup supportOwner executable) $
     fail "missing or wrong-unit native interface granted original product purpose"
-  let incomplete = [prepared {pmCoverage=ExactBodySubset} | prepared <- modules]
+  let incomplete = [prepared {preparedCoverage=ExactBodySubset} | prepared <- modules]
       conservative = preparedModuleProductOutcomes (projectOriginalHomeModuleProducts env paired retained mempty incomplete)
   unless (any (isJust . globalRequiredGeneration) (globals conservative)) $
     fail "incomplete prepared coverage acquired generation-free original package requirements"
@@ -2312,7 +2313,7 @@ originalProjectionProducts = withScratch $ \work -> do
         (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) Map.empty
         (SymbolIdentity "main" "MetadataQuoteSupport" "value" "answerValue" Nothing)
         [] Nothing Nothing Nothing Nothing
-      rejected = prepared { pmSiteRejections = [SiteRejection binder "projection fixture refusal"] }
+      rejected = prepared { preparedSiteRejections = [SiteRejection binder "projection fixture refusal"] }
       originals = [prepared, rejected]
       products = projectPreparedModuleProducts context originals
       expected = [(pmModule value, projectPreparedModuleGroups context value) | value <- originals]

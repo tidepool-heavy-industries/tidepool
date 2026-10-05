@@ -20,7 +20,7 @@ import Tidepool.ExecutionProjection
 import Tidepool.ExecutionSchema
 import Tidepool.ExecutionEncode (encodeWireProgram, encodeProjectedGroup)
 import Tidepool.PreparedSites (SiteRejection(..))
-import Tidepool.PreparedStg (PreparedModule(..))
+import Tidepool.PreparedStg (pmModule, pmBindings, pmYieldSites, pmSiteRejections)
 
 progressBoundaryChecks :: FilePath -> IO ()
 progressBoundaryChecks effects = bracket scratch removeDirectoryRecursive $ \work -> do

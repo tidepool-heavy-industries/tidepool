@@ -195,10 +195,9 @@ import Tidepool.Timing
   , InterfaceStage(..), InterfaceReuse(..), measureModuleInterface
   , newTimingRequestIdentity
   , readMemoTraceEnabled, emitMemoCycleGraph, emitMemoMissTrace )
-import Tidepool.PreparedStg (PreparedElaboration(..), PreparedModule(..), prepareModule)
+import Tidepool.PreparedStg (PreparedModule, pmSitedSiblings, preparedUsesSiteAuthority, prepareModule)
 import Tidepool.PreparedSites
-  ( elaboratePreparedSites, resolvePreparedSiblings, resolvePreparedInterfaceSiblings, resolveSiteAuthority
-  )
+  ( resolvePreparedSiblings, resolvePreparedInterfaceSiblings )
 import Tidepool.ExecutionSchema (SymbolIdentity)
 import Tidepool.RetainedUnfoldings
   ( RetainedContext, retainedContext, emptyRetainedContext
@@ -2739,20 +2738,8 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                   siblings <- liftIO $ atomicModifyIORef' preparedSiblingsRef $ \known ->
                     let known' = Map.union ownedSiblings (Map.union known importedSiblings)
                     in (known', known')
-                  siteAuthority <- timePhase timing "prepared_site_authority" $ liftIO
-                    (resolveSiteAuthority env)
-                  (elaboratedBindings, yieldSites, preparedSites, typeGraph, rejections) <- timePhase timing "prepared_sites" $ liftIO $
-                    elaboratePreparedSites env siteAuthority siblings (cg_binds cgGuts)
-                  let elaboration = PreparedElaboration
-                        { peGuts = cgGuts
-                        , peBindings = elaboratedBindings
-                        , peSitedSiblings = ownedSiblings
-                        , peYieldSites = yieldSites
-                        , pePreparedSites = preparedSites
-                        , peTypeGraph = typeGraph
-                        , peSiteRejections = rejections
-                        }
-                  Just <$> timePhase timing "prepared_stg" (liftIO (prepareModule env summary elaboration))
+                  Just <$> liftIO (prepareModule env (ms_location summary) siblings
+                    (loadedFinalized loaded))
               finalizeCurrent interfaceUse summary = do
                 captured <- liftIO (Map.lookup (ms_mod summary) <$> readIORef loadedModulesRef)
                 case captured of
@@ -2764,6 +2751,12 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                     pure (LoadedModule (mfSummary front) facts output
                       finalized)
               rememberFinalized loaded = liftIO (publishLoadedFinalization loaded)
+              -- Finalized interfaces/Core remain reusable. Prepared site evidence
+              -- depends on additional admitted authority which the source memo
+              -- does not seal; reuse it only within its original request.
+              preparedReusable entry product' =
+                not (preparedUsesSiteAuthority (productPrepared product'))
+                  || gmeCycle entry == requestIdentity
               rememberPreparedSiblings prepared = liftIO $
                 modifyIORef' preparedSiblingsRef (\known -> Map.union (pmSitedSiblings prepared) known)
           let interfaceUses = zipWith homeInterfaceUse summaries (homeInterfaceConsumers summaries)
@@ -2789,6 +2782,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                       -- A memo hit reuses the prepared body and its exact interface.
                       Just entry
                         | Just moduleProduct <- payloadProduct (gmePayload entry)
+                        , preparedReusable entry moduleProduct
                         , interfaceReady interfaceUse modSum entry -> do
                         recordValidity modSum True
                         recordExecutableValidity modSum True
@@ -2804,6 +2798,8 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                           let reason
                                 | isNothing (payloadProduct (gmePayload entry)) =
                                     "executable-body-not-prepared"
+                                | Just product' <- payloadProduct (gmePayload entry)
+                                , not (preparedReusable entry product') = "site-authority-request-changed"
                                 | otherwise = "required-interface-not-retained"
                           memoMiss modSum reason
                           memoMissTrace modSum reason (Just entry)
@@ -2943,6 +2939,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                     CachedObservation _ entry
                       | depsExecutable
                       , Just moduleProduct <- payloadProduct (gmePayload entry)
+                      , preparedReusable entry moduleProduct
                       , interfaceReady interfaceUse modSum entry -> do
                         recordExecutableValidity modSum True
                         rememberPreparedSiblings (productPrepared moduleProduct)
@@ -2957,6 +2954,8 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                             | not depsExecutable = "dependency-executable-regenerated"
                             | isNothing (payloadProduct (gmePayload entry)) =
                                 "validation-only-promoted"
+                            | Just product' <- payloadProduct (gmePayload entry)
+                            , not (preparedReusable entry product') = "site-authority-request-changed"
                             | otherwise = "required-interface-not-retained"
                       memoMiss modSum reason
                       memoMissTrace modSum reason (Just entry)
@@ -2971,6 +2970,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                     CachedObservation _ entry
                       | depsExecutable
                       , Just moduleProduct <- payloadProduct (gmePayload entry)
+                      , preparedReusable entry moduleProduct
                       , interfaceReady interfaceUse modSum entry -> do
                         recordExecutableValidity modSum True
                         rememberPreparedSiblings (productPrepared moduleProduct)

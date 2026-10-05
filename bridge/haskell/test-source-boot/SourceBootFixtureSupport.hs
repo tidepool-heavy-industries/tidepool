@@ -42,7 +42,7 @@ import Tidepool.GhcPipeline
   ( PreparedPipelineResult(..), PipelineResult(..), CompilerTransactionFailure(..), preparedFreshDependencies )
 import Tidepool.DiagJson (InputRejection(..))
 import Tidepool.ExecutionSource (ExecutionSourceFailure(..), ExecutionSourceValidationStage(..))
-import Tidepool.PreparedStg (PreparedModule(..))
+import Tidepool.PreparedStg (pmModule)
 
 capturePreparedFixture :: FilePath -> PreparedPipelineResult -> IO CapturedCompilerFixture
 capturePreparedFixture work prepared = do

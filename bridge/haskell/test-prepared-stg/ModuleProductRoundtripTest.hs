@@ -4,6 +4,7 @@
 module ModuleProductRoundtripTest
   ( verifyModuleProductInterfaceRoundtrip, verifyOriginalProductCatalogue ) where
 
+import Tidepool.PreparedStg.Internal (PreparedModule(..))
 import Control.Monad (unless)
 import Control.Monad.IO.Class (liftIO)
 import Crypto.Hash.SHA256 qualified as SHA256
@@ -49,7 +50,7 @@ import Tidepool.ExactHydration
 import Tidepool.GhcPipeline
   ( PipelineResult(..), PipelineSelection(..), PreparedPipelineResult(..), runPipelineSelected )
 import Tidepool.PreparedSites (SiteRejection(..))
-import Tidepool.PreparedStg (PreparedModule(..))
+import Tidepool.PreparedStg (pmModule, pmBindings, pmSiteRejections)
 import Tidepool.RetainedUnfoldings (scopeRetainedSummaryHscEnv)
 import Tidepool.ModuleCandidates
   ( CandidateGroup(..), CandidateGlobal(..), ModuleCandidate(..), readModuleCandidates )
@@ -101,7 +102,7 @@ verifyModuleProductInterfaceRoundtrip work = do
   case [ binder | (binding, _) <- pmBindings moduleA
                 , binder <- topBinders binding ] of
     binder : _ -> case projectPreparedModuleGroups context (moduleA
-      { pmSiteRejections = SiteRejection binder "rejected group site"
+      { preparedSiteRejections = SiteRejection binder "rejected group site"
           : pmSiteRejections moduleA }) of
       Left (RejectedTypedSite "rejected group site") -> pure ()
       outcome -> ioError (userError ("group projection admitted rejected site: "

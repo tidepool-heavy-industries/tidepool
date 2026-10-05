@@ -4,16 +4,16 @@
 -- This module deliberately retains GHC's stage-specific types.  It is an
 -- internal compiler adapter, not the future serialized program model.
 module Tidepool.PreparedStg
-  ( PreparedModule(..)
-  , PreparedCoverage(..)
-  , PreparedElaboration(..)
-  , unelaboratedModule
+  ( PreparedModule, PreparedCoverage(..)
+  , pmModule, pmCoverage, pmBindings, pmTagSigs, pmSitedSiblings, pmYieldSites, pmPreparedSites, pmTypeGraph, pmSiteRejections, pmRequestSiteTyCon
+  , filterPreparedBindings, preparedRejectsIntrinsic, preparedUsesSiteAuthority
   , prepareModule
   , RecoveredModuleInput(..)
   , RecoveredModuleFailure(..)
   , prepareRecoveredModule
   , prepareRecoveredBodies
   , PreparedBodyCache, newPreparedBodyCache, evictPreparedBodyMatching
+  , newPreparedBodyPreparer
   ) where
 
 import Control.Exception
@@ -22,6 +22,7 @@ import Control.Exception
 import Control.Concurrent.MVar (MVar, modifyMVar_, newMVar, readMVar)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Data.Set qualified as Set
 import Data.Word (Word64)
 import GHC.Core.Lint (displayLintResults)
 import GHC.Core (CoreBind, Bind(..), bindersOfBinds)
@@ -53,86 +54,73 @@ import GHC.Unit.Module.Location (ModLocation)
 import GHC.Unit.Module.ModIface (ModIface)
 import GHC.Unit.Module.ModDetails (md_types)
 import GHC.Unit.Module.ModGuts (CgGuts(..))
-import GHC.Unit.Module.ModSummary (ModSummary(..))
 import GHC.Types.TypeEnv (typeEnvTyCons)
 import GHC.Utils.Outputable (ppr, showSDocUnsafe, text)
 import Tidepool.EffectSchema (YieldSite)
-import Tidepool.PreparedSites (PreparedSite, SiteRejection, resolveRequestSiteTyCon)
+import Tidepool.PreparedSites
+  ( PreparedSite, SiteRejection, IntrinsicCensus
+  , censusPreparedIntrinsics, intrinsicFree, intrinsicNames
+  , elaboratePreparedSites, resolvePreparedSiblings, resolvePreparedInterfaceSiblings
+  , resolveRecoveredSiblings, resolveSiteAuthority, requestSiteAuthority )
+import Tidepool.PreparedStg.Internal
+import Tidepool.FinalizedModule (FinalizedModule, finalizedTidyGuts)
+import Tidepool.Timing (readTimingEnabled, timePhase)
 import Tidepool.TypePolicy (TypeGraph, emptyTypeGraph)
 import Tidepool.FatIface
   ( ExactInterfaceFailure(..), readExactInterface
   , OwnerInterfaceContext(..), OwnerInterfaceCache, lookupOwnerInterface, cacheOwnerInterface )
 
--- | Typed, pre-CorePrep input to the prepared pipeline.
---
--- The elaboration owner must resolve exact generated sibling 'Id's from
--- tidied home-module 'CgGuts' or hydrated defining interfaces, and rewrite typed
--- Tidepool sites before handing the bindings to 'prepareModule'. Keeping this
--- as a GHC-typed internal record prevents the later wire schema from becoming
--- a second preparation API.
-data PreparedElaboration = PreparedElaboration
-  { peGuts :: CgGuts
-  , peBindings :: [CoreBind]
-  -- | Siblings defined by this module. Elaborating a module may read the
-  -- accumulated bindings from earlier modules, but its memo owns only these.
-  , peSitedSiblings :: Map String Id
-  , peYieldSites :: [YieldSite]
-  , pePreparedSites :: [PreparedSite]
-  , peTypeGraph :: TypeGraph
-  , peSiteRejections :: [SiteRejection]
-  }
+-- | Observe prepared output without replacing its compiler-owned evidence.
+pmModule :: PreparedModule -> Module
+pmModule = preparedModule
 
--- | The migration state used until the production elaborator is installed.
--- It deliberately records no site siblings or sidecar entries; prepared
--- evidence must not treat this value as proof that a module contains no sites.
-unelaboratedModule :: CgGuts -> PreparedElaboration
-unelaboratedModule guts = PreparedElaboration
-  { peGuts = guts
-  , peBindings = cg_binds guts
-  , peSitedSiblings = mempty
-  , peYieldSites = []
-  , pePreparedSites = []
-  , peTypeGraph = emptyTypeGraph
-  , peSiteRejections = []
-  }
+pmCoverage :: PreparedModule -> PreparedCoverage
+pmCoverage = preparedCoverage
 
--- | A missing top in a complete source module is a producer defect. A package
--- body subset can still reference unavailable package bodies; those remain
--- explicit globals with recovery diagnostics, not fabricated home definitions.
-data PreparedCoverage = CompleteSourceModule | ExactBodySubset
-  deriving (Eq, Show)
+pmBindings :: PreparedModule -> [(CgStgTopBinding, IdSet)]
+pmBindings = preparedBindings
 
--- | Prepared output and projection evidence for one defining module.
-data PreparedModule = PreparedModule
-  { pmModule :: Module
-  , pmCoverage :: PreparedCoverage
-  , pmBindings :: [(CgStgTopBinding, IdSet)]
-  , pmTagSigs :: StgCgInfos
-  -- | Defining-module sibling Ids only, replayed after memo validity checks.
-  , pmSitedSiblings :: Map String Id
-  , pmYieldSites :: [YieldSite]
-  , pmPreparedSites :: [PreparedSite]
-  , pmTypeGraph :: TypeGraph
-  -- | Typed sites that failed elaboration, raised only if projection
-  -- reaches their top binder. Empty for recovered package bodies.
-  , pmSiteRejections :: [SiteRejection]
-  , pmRequestSiteTyCon :: Maybe TyCon
-  }
+pmTagSigs :: PreparedModule -> StgCgInfos
+pmTagSigs = preparedTagSigs
 
--- | Run the same CorePrep/Core-to-STG/STG pipeline shape as GHC's native
--- object-code path, stopping before Cmm.  The caller must supply optimized,
--- typed module guts before any Tidepool type erasure or cross-module flattening.
-prepareModule :: HscEnv -> ModSummary -> PreparedElaboration -> IO PreparedModule
-prepareModule hscEnv summary elaboration = do
-  let guts = peGuts elaboration
-  prepared <- prepareBindings hscEnv (cg_module guts) (ms_location summary)
-    (cg_tycons guts) (peBindings elaboration)
-    (peSitedSiblings elaboration) (peYieldSites elaboration)
-  pure prepared
-    { pmPreparedSites = pePreparedSites elaboration
-    , pmTypeGraph = peTypeGraph elaboration
-    , pmSiteRejections = peSiteRejections elaboration
-    }
+pmSitedSiblings :: PreparedModule -> Map String Id
+pmSitedSiblings = preparedSitedSiblings
+
+pmYieldSites :: PreparedModule -> [YieldSite]
+pmYieldSites = preparedYieldSites
+
+pmPreparedSites :: PreparedModule -> [PreparedSite]
+pmPreparedSites = preparedPreparedSites
+
+pmTypeGraph :: PreparedModule -> TypeGraph
+pmTypeGraph = preparedTypeGraph
+
+pmSiteRejections :: PreparedModule -> [SiteRejection]
+pmSiteRejections = preparedSiteRejections
+
+pmRequestSiteTyCon :: PreparedModule -> Maybe TyCon
+pmRequestSiteTyCon = preparedRequestSiteTyCon
+
+-- | Projection can select existing groups; it cannot introduce bodies or sites.
+filterPreparedBindings :: ((CgStgTopBinding, IdSet) -> Bool) -> PreparedModule -> PreparedModule
+filterPreparedBindings keep prepared = prepared
+  { preparedBindings = filter keep (preparedBindings prepared) }
+
+-- | Intrinsics use original GHC Names, independently of their diagnostic text.
+preparedRejectsIntrinsic :: PreparedModule -> Id -> Bool
+preparedRejectsIntrinsic prepared identifier =
+  varName identifier `Set.member` preparedIntrinsicNames prepared
+
+-- | The typed census, not an empty site list, determines authority dependence.
+preparedUsesSiteAuthority :: PreparedModule -> Bool
+preparedUsesSiteAuthority = preparedAuthorityDependent
+
+-- | Complete fresh and admitted retained originals share this preparation owner.
+prepareModule :: HscEnv -> ModLocation -> Map String Id -> FinalizedModule -> IO PreparedModule
+prepareModule env location siblings finalized =
+  let guts = finalizedTidyGuts finalized
+  in prepareTypedBindings CompleteSourceModule env (cg_module guts) location
+       (cg_tycons guts) siblings (cg_binds guts)
 
 -- | Exact optimized bindings retain their defining module and interface
 -- context. No fabricated ModSummary or cross-module Core grouping is needed:
@@ -165,12 +153,33 @@ instance Show RecoveredModuleFailure where
       renderModule = showSDocUnsafe . ppr
 
 prepareRecoveredModule :: HscEnv -> RecoveredModuleInput -> IO PreparedModule
-prepareRecoveredModule hscEnv input = do
-  prepared <- prepareBindingsWithScope
-    (recoveredSubsetScope (recoveredModule input) (recoveredBindings input))
+prepareRecoveredModule hscEnv input =
+  prepareTypedBindings ExactBodySubset
     hscEnv (recoveredModule input) (recoveredLocation input)
-    (recoveredTyCons input) (recoveredBindings input) mempty []
-  pure prepared { pmCoverage = ExactBodySubset }
+    (recoveredTyCons input) Map.empty (recoveredBindings input)
+
+-- Both complete modules and recovered subsets elaborate before CorePrep erases types.
+prepareTypedBindings :: PreparedCoverage -> HscEnv -> Module -> ModLocation
+  -> [TyCon] -> Map String Id -> [CoreBind] -> IO PreparedModule
+prepareTypedBindings coverage env owner location tycons imported bindings = do
+  timing <- readTimingEnabled
+  let census = censusPreparedIntrinsics tycons bindings
+      ownedSiblings = resolvePreparedSiblings bindings
+  (rewritten, sites, preparedSites, graph, rejections, carrier) <-
+    if intrinsicFree census then pure (bindings, [], [], emptyTypeGraph, [], Nothing)
+    else do
+      recovered <- resolveRecoveredSiblings env bindings
+      let siblings = Map.unions
+            [ownedSiblings, imported, resolvePreparedInterfaceSiblings env, recovered]
+      authority <- timePhase timing "prepared_site_authority" (resolveSiteAuthority env)
+      (bodies, yields, issued, types, failures) <- timePhase timing "prepared_sites"
+        (elaboratePreparedSites env authority siblings bindings)
+      pure (bodies, yields, issued, types, failures, requestSiteAuthority authority)
+  let subset = case coverage of
+        CompleteSourceModule -> []
+        ExactBodySubset -> recoveredSubsetScope owner rewritten
+  timePhase timing "prepared_stg" $ prepareBindingsWithScope subset env owner location tycons
+    rewritten coverage ownedSiblings sites preparedSites graph rejections carrier census
 
 -- | An exact subset can reference other external tops in its defining module.
 -- Admit only those free Ids to GHC's preparation scope; they remain dependency
@@ -189,24 +198,8 @@ recoveredSubsetScope owner bindings =
     bodies (NonRec _ rhs) = [rhs]
     bodies (Rec pairs) = map snd pairs
 
--- | Daemon-lifetime cache of already prepared recovered bodies, keyed by the
--- owner and the exact binding groups asked for. Both halves of that key are
--- exact: a group is identified by its binders' 'Unique's, which are stable
--- for one process, and a binder's body comes from the owner's single cached
--- fat interface, so one key names one body set for as long as the cache
--- lives.
---
--- What the value does NOT depend on is what makes this sound to reuse across
--- requests: 'prepareBindingsWithScope' reads only CorePrep/STG configuration
--- from 'HscEnv', and a resident request changes nothing there — it changes
--- import paths, build-products flags, and the retained-generation set, which
--- steer GHC's own compile of the request's home module, not the preparation
--- of Core that was already read from an interface.
---
--- Evicted at the request boundary under the SAME predicate as the two caches
--- next to it (see 'Tidepool.FatIface.evictOwnerInterfaceMatching'): an owner
--- whose interface can change between requests must not keep prepared bodies
--- read from the old one.
+-- | Only an owner-issued census of intrinsic-free exact bodies permits
+-- daemon reuse. Authority-dependent preparation belongs to one admitted request.
 newtype PreparedBodyCache =
   PreparedBodyCache (MVar (Map (Module, [[Word64]]) PreparedModule))
 
@@ -231,18 +224,38 @@ preparedBodyKey owner bindings =
 prepareRecoveredBodies :: HscEnv -> OwnerInterfaceCache -> PreparedBodyCache
   -> Module -> [CoreBind] -> IO (Either RecoveredModuleFailure PreparedModule)
 prepareRecoveredBodies hscEnv ownerCache bodyCache owner bindings = do
-  let PreparedBodyCache bodyRef = bodyCache
+  prepare <- newPreparedBodyPreparer hscEnv ownerCache bodyCache
+  prepare owner bindings
+
+-- | The returned request preparer captures one admitted interface environment.
+-- Callers cannot substitute another environment while reusing its site cache.
+newPreparedBodyPreparer :: HscEnv -> OwnerInterfaceCache -> PreparedBodyCache
+  -> IO (Module -> [CoreBind] -> IO (Either RecoveredModuleFailure PreparedModule))
+newPreparedBodyPreparer env owners stable = do
+  scoped <- newMVar Map.empty
+  pure (prepareRecoveredBodiesWithSites env owners stable scoped)
+
+prepareRecoveredBodiesWithSites :: HscEnv -> OwnerInterfaceCache -> PreparedBodyCache
+  -> MVar (Map (Module, [[Word64]]) PreparedModule) -> Module -> [CoreBind]
+  -> IO (Either RecoveredModuleFailure PreparedModule)
+prepareRecoveredBodiesWithSites hscEnv ownerCache bodyCache scoped owner bindings = do
+  let PreparedBodyCache stable = bodyCache
       key = preparedBodyKey owner bindings
-  alreadyPrepared <- Map.lookup key <$> readMVar bodyRef
-  case alreadyPrepared of
+  stableHit <- Map.lookup key <$> readMVar stable
+  scopedHit <- Map.lookup key <$> readMVar scoped
+  case stableHit `orElse` scopedHit of
     Just hit -> pure (Right hit)
     Nothing -> do
       outcome <- prepareRecoveredBodiesUncached hscEnv ownerCache owner bindings
       case outcome of
-        Right prepared ->
-          modifyMVar_ bodyRef (pure . Map.insert key prepared)
+        Right prepared -> do
+          let cache = if preparedAuthorityDependent prepared then scoped else stable
+          modifyMVar_ cache (pure . Map.insert key prepared)
         Left _ -> pure ()
       pure outcome
+  where
+    orElse (Just hit) _ = Just hit
+    orElse Nothing other = other
 
 -- | Acquire the defining context for an exact recovered group and prepare it
 -- through the same owner as source modules.  In particular, this does not
@@ -301,13 +314,11 @@ prepareRecoveredBodiesUncached hscEnv ownerCache owner bindings = do
           Nothing -> pure (Left (displayException (exception :: SomeException)))
         Right value -> pure (Right value)
 
-prepareBindings :: HscEnv -> Module -> ModLocation -> [TyCon] -> [CoreBind]
-  -> Map String Id -> [YieldSite] -> IO PreparedModule
-prepareBindings = prepareBindingsWithScope []
-
 prepareBindingsWithScope :: [Id] -> HscEnv -> Module -> ModLocation -> [TyCon] -> [CoreBind]
-  -> Map String Id -> [YieldSite] -> IO PreparedModule
-prepareBindingsWithScope subsetScope hscEnv thisModule location tycons optimizedCore siblings yieldSites = do
+  -> PreparedCoverage -> Map String Id -> [YieldSite] -> [PreparedSite] -> TypeGraph
+  -> [SiteRejection] -> Maybe TyCon -> IntrinsicCensus -> IO PreparedModule
+prepareBindingsWithScope subsetScope hscEnv thisModule location tycons optimizedCore coverage
+    siblings yieldSites sites graph rejections carrierTyCon census = do
   let baseFlags = hsc_dflags hscEnv
       preparedFlags =
         gopt_set
@@ -334,18 +345,19 @@ prepareBindingsWithScope subsetScope hscEnv thisModule location tycons optimized
   -- CorePrep's configured end-pass performs the post-preparation Core lint.
   let (initialStg, _, _) =
         coreToStg (initCoreToStgOpts preparedFlags) thisModule location preppedCore
-  (preparedBindings, tagSigs) <-
+  (stgBindings, tagSigs) <-
     stg2stg logger interactiveVars stgOptions thisModule initialStg
-  carrierTyCon <- resolveRequestSiteTyCon hscEnv
   pure PreparedModule
-    { pmModule = thisModule
-    , pmCoverage = CompleteSourceModule
-    , pmBindings = preparedBindings
-    , pmTagSigs = tagSigs
-    , pmSitedSiblings = siblings
-    , pmYieldSites = yieldSites
-    , pmPreparedSites = []
-    , pmTypeGraph = emptyTypeGraph
-    , pmSiteRejections = []
-    , pmRequestSiteTyCon = carrierTyCon
+    { preparedModule = thisModule
+    , preparedCoverage = coverage
+    , preparedBindings = stgBindings
+    , preparedTagSigs = tagSigs
+    , preparedSitedSiblings = siblings
+    , preparedYieldSites = yieldSites
+    , preparedPreparedSites = sites
+    , preparedTypeGraph = graph
+    , preparedSiteRejections = rejections
+    , preparedRequestSiteTyCon = carrierTyCon
+    , preparedAuthorityDependent = not (intrinsicFree census)
+    , preparedIntrinsicNames = Set.fromList (intrinsicNames census)
     }

@@ -64,7 +64,7 @@ import Tidepool.DependencyEvidence
 import Tidepool.Session
   ( Generation(..), SessionModule(..), SessionModuleKind(..), SessionScope(..)
   , mkThinSessionIface, writeSessionIface, injectSessionIface, renderSessionModule )
-import Tidepool.PreparedStg (PreparedModule(..))
+import Tidepool.PreparedStg (pmModule, pmBindings)
 import Tidepool.Timing
   ( InterfaceStage(..), InterfaceReuse(..), measureModuleInterface )
 import System.Directory

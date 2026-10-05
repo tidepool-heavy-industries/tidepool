@@ -37,8 +37,8 @@ import Tidepool.ExecutionProjection
 import Tidepool.ExecutionSchema (SymbolIdentity)
 import Tidepool.FatIface (FatIfaceCache, FatIfaceMissing, OwnerInterfaceCache)
 import Tidepool.PreparedStg
-  ( PreparedBodyCache, PreparedModule(..), RecoveredModuleFailure(..)
-  , prepareRecoveredBodies )
+  ( PreparedBodyCache, PreparedModule, pmModule, pmBindings, RecoveredModuleFailure(..)
+  , newPreparedBodyPreparer )
 import Tidepool.Resolve (ExactBodyLookup(..), recoverExactBody)
 import Tidepool.PreparedBuiltins (deferredFunction, wiredInErrorKind)
 import Tidepool.Timing (emitDetailPhase, emitCount, readTimingEnabled, timeSection)
@@ -157,6 +157,7 @@ newPreparedRecoveryWithPackageRoots env cache ownerCache bodyCache certifiedHome
   -- while a later target that receives the same cached PreparedModule reuses
   -- them.  This memo deliberately lives outside the entry closure.
   factsMemo <- newIORef Map.empty
+  prepareBodies <- newPreparedBodyPreparer env ownerCache bodyCache
   pure $ \entry -> do
     let homeOwners = Set.fromList (map pmModule home)
         run roots carriedAttempts carriedGroups carriedModules carriedFailures carriedOwners carriedReach = do
@@ -288,7 +289,7 @@ newPreparedRecoveryWithPackageRoots env cache ownerCache bodyCache certifiedHome
                 -- A target can admit the same exact body set in different
                 -- root-growth rounds. Preparation order follows exact symbols,
                 -- preserving each authoritative recursive group intact.
-                result <- prepareRecoveredBodies env ownerCache bodyCache owner
+                result <- prepareBodies owner
                   (sortOn (map preparedRootIdentity . binders) (Map.findWithDefault [] owner groups))
                 case result of
                   Right modul -> do

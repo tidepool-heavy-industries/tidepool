@@ -3,6 +3,7 @@
 
 module Main (main, tests) where
 
+import Tidepool.PreparedStg.Internal (PreparedModule(..))
 import Tidepool.Test.Runner (TestTree, runTests, testCase, testGroup)
 
 import Control.Exception (bracket, evaluate, finally)
@@ -13,6 +14,9 @@ import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text qualified as Text
 import GHC
+import GHC.Driver.Env (hsc_HPT)
+import GHC.Unit.Home.ModInfo (lookupHpt)
+import Tidepool.FinalizedModule (FinalizedModule(..))
 import GHC.Driver.Main (hscTidy)
 import GHC.Driver.Session (updOptLevel)
 import GHC.Builtin.Types (intTy, boolTy)
@@ -52,8 +56,8 @@ import Tidepool.PreparedRecovery
 import Tidepool.OriginalProductRoots (requiredOriginalPackageGlobalsWithRetained)
 import Tidepool.CertifiedProducts (resolvePackageGlobal)
 import Tidepool.PreparedStg
-  ( PreparedCoverage(..), PreparedModule(..), RecoveredModuleFailure(..)
-  , newPreparedBodyCache, prepareModule, unelaboratedModule )
+  ( PreparedCoverage(..), pmModule, pmCoverage, pmBindings, pmSiteRejections, RecoveredModuleFailure(..)
+  , newPreparedBodyCache, prepareModule )
 import Tidepool.PreparedSites (SiteRejection(..))
 
 assert :: Bool -> String -> IO ()
@@ -181,7 +185,7 @@ scenario = do
         home : rest -> case [binder | binder <- topBindersOfModule home
             , varUnique binder `elementOfUniqSet` reachedUniques (closureReachability closure)] of
           selectedBinder : _ -> do
-            let rejected = home { pmSiteRejections =
+            let rejected = home { preparedSiteRejections =
                   SiteRejection selectedBinder "injected site" : pmSiteRejections home }
                 withRejection = rejected : rest
                 old = prepareProjection context withRejection
@@ -226,7 +230,7 @@ scenario = do
             , occNameString (nameOccName (varName binder)) == "homeValue"] of
           retainedBinder : _ -> do
             let markedHome = retainedHome
-                  { pmSiteRejections = SiteRejection retainedBinder "skipped site"
+                  { preparedSiteRejections = SiteRejection retainedBinder "skipped site"
                       : pmSiteRejections retainedHome }
                 markedModules = markedHome : rest
             assert (projectionResult
@@ -251,7 +255,10 @@ scenario = do
       typed <- typecheckModule parsed
       desugared <- desugarModule typed
       (guts, _) <- liftIO $ hscTidy hsc (coreModule desugared)
-      liftIO $ prepareModule hsc summary (unelaboratedModule guts)
+      home <- maybe (fail "loaded module has no finalized home interface") pure
+        (lookupHpt (hsc_HPT hsc) (ms_mod_name summary))
+      liftIO $ prepareModule hsc (ms_location summary) mempty
+        (FinalizedModule home guts)
 
     trim = reverse . dropWhile (== '\n') . reverse
 
@@ -327,8 +334,8 @@ scenario = do
         found -> fail ("expected one recovered Show module, got " ++ show (length found))
       let sourceRoot = identity home "homeValue"
           entry = identity home "homeOther"
-          subset = home { pmCoverage = ExactBodySubset
-            , pmBindings = filter (any ((== "homeOther") . occNameString . nameOccName . varName)
+          subset = home { preparedCoverage = ExactBodySubset
+            , preparedBindings = filter (any ((== "homeOther") . occNameString . nameOccName . varName)
                 . topBinders . fst) (pmBindings home) }
           fixtureContext = context { projectionEntry = entry }
           owner prepared = (unitString (moduleUnit (pmModule prepared)),
@@ -512,8 +519,8 @@ scenario = do
         [identity] -> pure identity
         found -> ioError (userError ("expected one homeOther entry, got " ++ show found))
       let subset = home
-            { pmCoverage = ExactBodySubset
-            , pmBindings = filter hasHomeOther (pmBindings home)
+            { preparedCoverage = ExactBodySubset
+            , preparedBindings = filter hasHomeOther (pmBindings home)
             }
           subsetContext = context { projectionEntry = homeOtherEntry }
       case projectPreparedTarget subsetContext [subset] of
@@ -523,7 +530,7 @@ scenario = do
           (any ((== Text.pack "homeValue") . symbolOccurrence . globalIdentity)
             (programGlobals program))
           "incomplete subset dropped its unresolved homeValue global"
-      let complete = subset { pmCoverage = CompleteSourceModule }
+      let complete = subset { preparedCoverage = CompleteSourceModule }
       case projectPreparedTarget subsetContext [complete] of
         Left (MissingPreparedTop _) -> pure ()
         Left failure -> ioError (userError

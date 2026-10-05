@@ -45,7 +45,7 @@ import GHC.Types.Var.Set (dVarSetElems)
 import GHC.Types.Var (Id, varName, varType, varUnique)
 import GHC.Unit.Module (Module, moduleName, moduleNameString, moduleUnit)
 import GHC.Unit.Types (unitString)
-import Tidepool.PreparedStg (PreparedModule(..))
+import Tidepool.PreparedStg (PreparedModule, pmModule, pmBindings, pmTagSigs)
 import Tidepool.PreparedFacts
   ( PreparedFacts(..), PreparedOperation(..), PreparedRepresentation(..)
   , PreparedSupport(..), extractPreparedFacts

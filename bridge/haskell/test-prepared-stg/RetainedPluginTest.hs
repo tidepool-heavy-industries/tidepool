@@ -28,7 +28,7 @@ import Tidepool.RetainedUnfoldings
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedPipelineResult(..), CompilePurpose(..)
   , PipelineResult(..), withResidentPipelineSelected )
-import Tidepool.PreparedStg (PreparedModule(..))
+import Tidepool.PreparedStg (pmModule, pmBindings)
 
 -- Count actual compiler passes per module, independently of Tidepool's
 -- separate Core memo, through the resident daemon's warm interface cache.

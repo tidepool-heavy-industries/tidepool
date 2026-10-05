@@ -31,7 +31,7 @@ import Tidepool.GhcPipeline
   ( PipelineSelection(PreparedStg), PreparedPipelineResult(..), PipelineResult(..)
   , finalizedHomeModInfo, runPipelineSelected )
 import Tidepool.PreparedSites (requestReplyIndex)
-import Tidepool.PreparedStg (PreparedModule(..))
+import Tidepool.PreparedStg (pmModule)
 import Tidepool.TypePolicy qualified as Policy
 
 -- Two genuine compiler results test alpha and same-layout field semantics. They remain different
