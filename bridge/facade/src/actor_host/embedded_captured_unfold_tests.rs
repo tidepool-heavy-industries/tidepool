@@ -1181,21 +1181,49 @@ async fn captured_host_scenario(scenario: HostedScenario) {
             .map(|installation| installation.actor)
             .collect::<Vec<_>>();
         assert_eq!(known_children.len(), 2);
+        let graph = campaign.forest.inspect_host_graph();
+        let mut child_requests = std::collections::HashSet::new();
         for child in &known_children {
             assert_eq!(
                 campaign.forest.actor_session(child.identity()),
                 campaign.forest.actor_session(actor),
                 "captured child uses the original shared machine"
             );
+            let node = graph
+                .iter()
+                .find(|node| node.actor == child.identity())
+                .expect("original captured child remains installed");
+            assert!(node.terminal.is_none());
+            assert_eq!(node.creator, Some(actor));
+            assert_eq!(node.workbench, exomonad_actor::ActorWorkbenchPosture::Idle);
+            assert_eq!(
+                node.active_requests.len(),
+                1,
+                "each child owns its original presented request: {node:?}"
+            );
+            assert!(node.queued_requests.is_empty(), "{node:?}");
+            assert!(node
+                .provider_turn
+                .as_ref()
+                .is_some_and(|turn| turn.state == exomonad_model::ProviderTurnState::Active));
+            assert!(child_requests.insert(node.active_requests[0]));
         }
         let baseline = parked_baseline.expect("cancellation retains its persistent baseline");
+        // A typed child request runs inside a mailbox handler. SuspendedCast
+        // retains the agentLoop receiver, while ResidentInteractiveAwait owns
+        // the separate handler continuation waiting for the model's reply.
+        let child_receivers = known_children.len();
+        let child_handlers = child_requests.len();
         assert_eq!(
             campaign
                 .forest
                 .measurement_snapshot()
                 .and_then(|snapshot| snapshot.parked),
-            Some(baseline + known_children.len() + 1),
-            "both child request continuations and the original parent await are parked"
+            Some(baseline + child_receivers + child_handlers + 1),
+            "child receivers, presented request handlers and the original parent await are parked"
+        );
+        eprintln!(
+            "[captured-engine] parked owners: persistent {baseline}, child receivers {child_receivers}, child requests {child_requests:?}, original parent await 1"
         );
         let requested = client
             .post(format!("{api}/commands"))
@@ -1256,6 +1284,15 @@ async fn captured_host_scenario(scenario: HostedScenario) {
             "interrupt consumes the invocation continuations and preserves persistent receive loops"
         );
         let graph = campaign.forest.inspect_host_graph();
+        for child in &known_children {
+            let node = graph
+                .iter()
+                .find(|node| node.actor == child.identity())
+                .expect("original child retains its terminal observation");
+            assert!(node.terminal.is_some());
+            assert!(node.active_requests.is_empty(), "{node:?}");
+            assert!(node.queued_requests.is_empty(), "{node:?}");
+        }
         for label in ["embedded-checkpoint-seeds", "embedded-checkpoint-groups"] {
             assert!(graph
                 .iter()
