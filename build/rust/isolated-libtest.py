@@ -107,8 +107,8 @@ def _kill_and_reap(process):
         return '', ''
 
 
-# Only declared runtime selections and user-service coordinates cross this
-# boundary. Provider credentials remain in the user's own authentication owner.
+# Only declared runtime selections, standard test campaign controls and
+# user-service coordinates cross this boundary. Provider credentials remain in the user's own authentication owner.
 DELEGATED_ENVIRONMENT = (
     'PATH', 'HOME', 'USER', 'LOGNAME', 'XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS',
     'LD_LIBRARY_PATH', 'TMPDIR', 'TMP', 'TEMP', 'TEMPDIR',
@@ -124,6 +124,13 @@ DELEGATED_ENVIRONMENT = (
     'EXOMONAD_NIX_BIN', 'EXOMONAD_NIX_OFFLINE',
     'PLAYWRIGHT_BROWSERS_PATH', 'TIDEPOOL_M3_FIXTURE_DIR',
     'TIDEPOOL_FREER_RESUME_FIXTURE_DIR', 'TIDEPOOL_FREER_RETENTION_FIXTURE_DIR',
+    # proptest 1.11 Config::contextualize_config owns these standard controls.
+    'PROPTEST_CASES', 'PROPTEST_RNG_SEED', 'PROPTEST_RNG_ALGORITHM',
+    'PROPTEST_MAX_LOCAL_REJECTS', 'PROPTEST_MAX_GLOBAL_REJECTS',
+    'PROPTEST_MAX_FLAT_MAP_REGENS', 'PROPTEST_MAX_SHRINK_TIME',
+    'PROPTEST_MAX_SHRINK_ITERS', 'PROPTEST_MAX_DEFAULT_SIZE_RANGE',
+    'PROPTEST_FORK', 'PROPTEST_TIMEOUT', 'PROPTEST_VERBOSE',
+    'PROPTEST_DISABLE_FAILURE_PERSISTENCE',
 )
 
 

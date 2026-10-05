@@ -151,6 +151,24 @@ class IsolatedLibtestTests(unittest.TestCase):
                 self.assertNotIn('artifacts_removed_after_success', record)
                 self.assertEqual(record['cleanup_reports'][0]['status'], outcome['cleanup']['status'])
 
+    def test_standard_property_campaign_controls_cross_delegation_explicitly(self):
+        campaign = {
+            'PROPTEST_CASES': '4000', 'PROPTEST_RNG_SEED': '781231',
+            'PROPTEST_RNG_ALGORITHM': 'cc', 'PROPTEST_MAX_SHRINK_ITERS': '32',
+            'PROPTEST_MAX_LOCAL_REJECTS': '64', 'PROPTEST_MAX_GLOBAL_REJECTS': '64',
+            'PROPTEST_MAX_FLAT_MAP_REGENS': '64', 'PROPTEST_MAX_SHRINK_TIME': '100',
+            'PROPTEST_MAX_DEFAULT_SIZE_RANGE': '64', 'PROPTEST_FORK': 'true',
+            'PROPTEST_TIMEOUT': '1000', 'PROPTEST_VERBOSE': '1',
+            'PROPTEST_DISABLE_FAILURE_PERSISTENCE': '1',
+        }
+        unrelated = {'PROPTEST_PRIVATE_TOKEN': 'private', 'OPENAI_API_KEY': 'private'}
+        command, _ = runner.delegated_command(['/libtest'], 10, 'app.slice', {},
+            environment={**campaign, **unrelated})
+        for name, value in campaign.items():
+            self.assertIn(f'--setenv={name}={value}', command)
+        for name in unrelated:
+            self.assertFalse(any(word.startswith(f'--setenv={name}=') for word in command))
+
     def test_declared_resource_paths_cross_delegation_without_exporting_ambient_state(self):
         with patch.dict(os.environ, {'TIDEPOOL_HASKELL_ACTORS_DIR': '/declared/actors',
                                      'DECLARED_FIXTURE': '/declared/fixture',
