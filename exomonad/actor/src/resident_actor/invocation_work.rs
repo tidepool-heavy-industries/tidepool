@@ -364,6 +364,7 @@ impl InvocationWork {
             }
         }
 
+        let mut request_cancellations = Vec::new();
         for request in environment
             .requests
             .invocation_requests(self.owner, &self.reservation)
@@ -388,13 +389,7 @@ impl InvocationWork {
                     }
                     outcome
                 });
-            cleanup.requests.push(InvocationRequestCleanup {
-                request,
-                cancellation,
-                target: environment
-                    .requests
-                    .request_cleanup_state(self.owner, request),
-            });
+            request_cancellations.push((request, cancellation));
         }
 
         let pending_cancellations = self.state.lock().pending_cancellations.clone();
@@ -590,11 +585,16 @@ impl InvocationWork {
         cleanup.workers = workers;
         // Delivery and owned-worker retirement may close request targets after
         // cancellation admission. Retain their state at the cleanup boundary.
-        for request in &mut cleanup.requests {
-            request.target = environment
-                .requests
-                .request_cleanup_state(self.owner, request.request);
-        }
+        cleanup.requests = request_cancellations
+            .into_iter()
+            .map(|(request, cancellation)| InvocationRequestCleanup {
+                request,
+                cancellation,
+                target: environment
+                    .requests
+                    .request_cleanup_state(self.owner, request),
+            })
+            .collect();
         self.state.lock().cleanup = Some(cleanup.clone());
         cleanup
     }
