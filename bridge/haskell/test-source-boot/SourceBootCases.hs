@@ -17,7 +17,7 @@ import Codec.CBOR.Write (toStrictByteString)
 import Codec.CBOR.Read (deserialiseFromBytes)
 import Codec.CBOR.Term (Term(..), decodeTerm, encodeTerm)
 import Data.ByteString.Lazy qualified as BSL
-import Control.Exception (SomeException, IOException, AsyncException(ThreadKilled), bracket, evaluate, finally, try, fromException)
+import Control.Exception (SomeException, IOException, AsyncException(ThreadKilled), bracket, evaluate, finally, try, fromException, onException, mask, catches, Handler(..), throwIO)
 import Control.Concurrent (MVar, forkIO, killThread, myThreadId, throwTo, threadDelay, newEmptyMVar, putMVar, takeMVar)
 import Control.Monad (foldM, forM, forM_, unless, void, when)
 import GHC.Clock (getMonotonicTimeNSec)
@@ -32,7 +32,7 @@ import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
-import GHC (runGhc, getSession, setSession, SafeHaskellMode(Sf_None), ms_mod_name, ms_hsc_src, ms_hspp_buf, ms_hspp_file, ms_hspp_opts, parseModule, typecheckModule, TypecheckedModule(..), ParsedModule(..), Target(..))
+import GHC (runGhc, getSession, setSession, SafeHaskellMode(Sf_None), ms_mod_name, ms_hsc_src, ms_hspp_buf, ms_hspp_file, ms_hspp_opts, parseModule, typecheckModule, TypecheckedModule(..), ParsedModule(..))
 import GHC.Core qualified as Core
 import GHC.Builtin.Types (boolTy, intTy, charTy, stringTy, intDataCon)
 import GHC.Core.Type (mkVisFunTyMany, mkTyVarTy, mkForAllTy)
@@ -65,6 +65,7 @@ import Control.Monad.IO.Class (liftIO)
 import GHC.Driver.Session (importPaths, targetProfile, wopt_set, xopt, WarningFlag(Opt_WarnMissingSignatures))
 import GHC.LanguageExtensions.Type qualified as LangExt
 import GHC.Types.Error (isEmptyMessages)
+import GHC.Types.SourceError (SourceError)
 import GHC.Types.Name.Set (nameSetElemsStable)
 import GHC.Driver.Hooks (hscCompileCoreExprHook, runMetaHook)
 import GHC.Iface.Make (mkIfaceTc)
@@ -79,15 +80,14 @@ import GHC.Unit.Module (Module, mkModule, mkModuleName, moduleName, moduleNameSt
 import GHC.Unit.Types (unitString, unitIdString, stringToUnit, GenWithIsBoot(..))
 import Numeric (showHex)
 import System.Directory
-  ( copyFile, createDirectory, createDirectoryIfMissing, getTemporaryDirectory, removeDirectoryRecursive
+  ( copyFile, createDirectory, createDirectoryIfMissing, removeDirectoryRecursive
   , removeFile, renameFile, listDirectory, doesFileExist, getPermissions, setPermissions, executable
   , getModificationTime, setModificationTime, withCurrentDirectory, getCurrentDirectory, canonicalizePath )
 import System.Environment (setEnv, lookupEnv, unsetEnv)
 import System.Exit (ExitCode(..))
 import System.FilePath ((</>), takeDirectory, normalise, replaceExtension, addTrailingPathSeparator)
-import System.IO (hClose, hFlush, hPutStrLn, hSeek, hSetFileSize, withBinaryFile, IOMode(WriteMode), SeekMode(AbsoluteSeek), openTempFile, stderr)
+import System.IO (hPutStrLn, hSetFileSize, withBinaryFile, IOMode(WriteMode), stderr)
 import System.IO.Error (isDoesNotExistError, ioeGetFileName)
-import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 import System.Process (readProcessWithExitCode)
 import System.Timeout (timeout)
 import Tidepool.CompilerProducts
@@ -116,7 +116,7 @@ import Tidepool.PreparedFacts (PreparedFacts(..), extractPreparedFacts)
 import GHC.Types.Name (nameModule_maybe)
 import GHC.Types.Var (varName)
 import Tidepool.CompileInput (writeCompileInputProof)
-import Tidepool.DiagJson (InputRejection(..))
+import Tidepool.DiagJson (InputRejection(..), DependencyLoadFailure(..), Diag(..), DiagSeverity(..), diagsFromSourceError)
 import Tidepool.ExecutionSchema
 import Tidepool.DependencyEvidence
   ( DependencyEvidence(..), DependencyModule(..), DependencyImport(..)
@@ -228,10 +228,9 @@ sourceBootReuseAt work = do
   unless (dependencyCacheSafe (pprDependencies cold)
       && dependencySelectionComplete (pprDependencies cold)) $
     fail "cold SOURCE graph lacks final source/package evidence"
-  let nativeScope = work </> "ordinary-native-scope.cbor"
-  writeGenuineCandidateNativeScope ["CacheEven", "CacheOdd"]
-    ["NativeScopeBase", "NativeScopeOwner"] work
-    (work </> "SourceBootCapture.hs") [work] nativeScope cold
+  coldFixture <- capturePreparedFixture work cold
+  nativeScope <- writeGenuineCandidateNativeScope ["CacheEven", "CacheOdd"]
+    ["NativeScopeBase", "NativeScopeOwner"] work coldFixture
   deliveredScope <- readExactScope nativeScope >>= either fail pure
   unless (Set.fromList (map originalModule (scopeProducts deliveredScope))
       == Set.fromList ["NativeScopeBase", "NativeScopeOwner"]
@@ -248,10 +247,9 @@ sourceBootReuseAt work = do
   exactScopeV9Checks nativeScope
   let nativeOwner = SessionModule LibMod (Generation 1)
       authoredSource = replaceExtension (sessionHiPath work nativeOwner) "hs"
-      authoredScope = work </> "authored-native-origin-scope.cbor"
   createDirectoryIfMissing True (takeDirectory authoredSource)
   copyFile "test-source-boot/fixtures/AuthoredScopeG1.hs" authoredSource
-  writeGenuineAuthoredDeclarationScope nativeOwner [work] authoredSource authoredScope
+  authoredScope <- writeGenuineAuthoredDeclarationScope nativeOwner [work] authoredSource work
   nativeOriginChecks authoredScope
   candidateCanonicalChecks nativeScope (manifest work)
   verifyHydration work cold
@@ -293,15 +291,13 @@ candidateGraphDescriptorsAt work = do
   forM_ ["NativeScopeBase.hs", "NativeScopeOwner.hs", "NativeScopeCapture.hs"] $ \file ->
     copyFile ("test-source-boot/fixtures" </> file) (work </> file)
   let source = work </> "NativeScopeCapture.hs"
-      scopeRoot = work </> "native-scope-request"
-      scopePath = scopeRoot </> "native-scope.cbor"
       owners = Set.fromList ["NativeScopeBase", "NativeScopeOwner"]
   BS.appendFile source (BSC.pack ("\n--" ++ replicate (4*1024*1024) ' ' ++ "\n"))
-  createDirectory scopeRoot
   original <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty GeneralCompile
     Nothing source [work] (Just (work </> "build-products"))
-  writeGenuineCandidateNativeScope (Set.toAscList owners) (Set.toAscList owners)
-    work source [work] scopePath original
+  originalFixture <- capturePreparedFixture work original
+  scopePath <- writeGenuineCandidateNativeScope (Set.toAscList owners) (Set.toAscList owners)
+    work originalFixture
   candidateGraphDescriptorChecks scopePath (manifest work)
   executionScopeDescriptorChecks scopePath
   candidateCanonicalChecks scopePath (manifest work)
@@ -364,8 +360,8 @@ checkedValueImports = withScratch $ \work -> do
   putStrLn "checked value imports: HPT parity, delayed injection and wrong-input refusal passed"
 
 writeGenuineEmptyScopeFields :: FilePath -> IO [Term]
-writeGenuineEmptyScopeFields path = do
-  writeGenuineEmptyMetadataScope path
+writeGenuineEmptyScopeFields work = do
+  path <- writeGenuineEmptyMetadataScope work
   _ <- readExactScope path >>= either fail pure
   bytes <- BS.readFile path
   either (fail . show) (pure . snd)
@@ -375,7 +371,7 @@ writeGenuineEmptyScopeFields path = do
 
 exactScopeBinders :: IO ()
 exactScopeBinders = withScratch $ \work -> do
-  fields <- writeGenuineEmptyScopeFields (work </> "issued-binder-scope.cbor")
+  fields <- writeGenuineEmptyScopeFields work
   let path = work </> "binder-scope.cbor"
       text = TString . T.pack
       sha = text (replicate 64 '0')
@@ -427,7 +423,6 @@ checkedValueTypeClosure :: FilePath -> IO ()
 checkedValueTypeClosure effects = withScratch $ \work -> do
   let producerPath = work </> "MetadataBashTarget.hs"
       consumerPath = work </> "CheckedCommandConsumer.hs"
-      scopePath = work </> "exact-scope.cbor"
   copyFile "test-source-boot/fixtures/MetadataBashTarget.hs" producerPath
   copyFile "test-source-boot/fixtures/CheckedCommandConsumer.hs" consumerPath
   prepared <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
@@ -448,41 +443,40 @@ checkedValueTypeClosure effects = withScratch $ \work -> do
   unless (("main","Tidepool.Command.Types") `elem` requirements) $
     fail "checked Command fixture lacks its real home type dependency"
   let ownerNames = map moduleNameString (Map.keys (pprProductInterfaces prepared))
-  writeGenuineCandidateLexicalScope [] ownerNames work producerPath [work,"lib",effects] scopePath prepared
+  preparedFixture <- capturePreparedFixture work prepared
+  scopePath <- writeGenuineCandidateLexicalScope [] ownerNames work preparedFixture
   base <- readExactScope scopePath >>= either fail pure
   let originals = scopeInterfaces base
       value = ExactIfaceArtifact "main" "Tidepool.Session.Val.G7" valuePath (digest valueBytes) requirements
-  valuePackages <- BS.readFile (valuePath ++ ".packages")
   let admitted = base
-        { scopeInterfaces = scopeInterfaces base ++ [(value,valuePath ++ ".packages",digest valuePackages)]
-        , scopeLexical = scopeLexical base ++ [(("main","Tidepool.Session.Val.G7"),requirements)]
-        , scopePurpose = ExactCellPurpose (CheckedCellAdmission (replicate 64 '0') (replicate 64 '0')
+        { scopePurpose = ExactCellPurpose (CheckedCellAdmission (replicate 64 '0') (replicate 64 '0')
             (replicate 64 '0') [] ["Tidepool.Session.Val.G7"] [] [value] Nothing AuthoredCellCheck) [work,"lib",effects] }
       scope = emptySessionScope { ssRoot = work, ssExactScope = Just scopePath, ssValIfaces = [valueOwner] }
   isolated <- readCheckedValueImportAuthority environment [value]
   unless (case isolated of Left "incomplete exact interface dependency closure" -> True; _ -> False) $
     fail "a checked value authorized its absent type owner"
-  verified <- readVerifiedExactIfaceClosure environment (value : [iface | (iface,_,_) <- originals])
-    >>= either fail pure
+  verified <- readVerifiedExactIfaceClosureWithCheckedValues environment
+    [iface | (iface,_,_) <- originals] [value] >>= either fail pure
   _ <- either fail pure (checkedValueImportAuthorityFromVerified verified [value])
+  _ <- either fail pure (selectVerifiedExactInterfaces verified [value])
   forM_ [value {exactRequirements=[]},value {exactSha256=replicate 64 '0'}] $ \changed ->
     unless (case selectVerifiedExactInterfaces verified [changed] of Left _ -> True; Right _ -> False) $
       fail "late checked value weakened or changed its captured type proof"
-  let missing = value : [iface | (iface,_,_) <- originals, exactModule iface /= "Tidepool.Command.Types"]
-  refused <- readVerifiedExactIfaceClosure environment missing
+  let missing = [iface | (iface,_,_) <- originals, exactModule iface /= "Tidepool.Command.Types"]
+  refused <- readVerifiedExactIfaceClosureWithCheckedValues environment missing [value]
   unless (case refused of Left _ -> True; Right _ -> False) $
     fail "a checked command accepted an absent captured type owner"
   let aliasPath = work </> "captured-command-copy.hi"
-      alias = value {exactPath=aliasPath,exactRequirements=[]}
+      alias = value {exactPath=aliasPath}
   copyFile valuePath aliasPath
   aliasClosure <- readVerifiedExactIfaceClosureWithCheckedValues environment
-    (value : [iface | (iface,_,_) <- originals]) [alias] >>= either fail pure
+    [iface | (iface,_,_) <- originals] [alias] >>= either fail pure
   selected <- either fail pure (selectVerifiedValueInterfaces aliasClosure [alias])
   unless (map (exactRequirements . fst) selected == [requirements]) $
     fail "captured value alias lost its complete original type requirements"
   forM_ [alias {exactSha256=replicate 64 '0'},alias {exactPath=aliasPath ++ ".missing"}] $ \wrong -> do
     rejected <- readVerifiedExactIfaceClosureWithCheckedValues environment
-      (value : [iface | (iface,_,_) <- originals]) [wrong]
+      [iface | (iface,_,_) <- originals] [wrong]
     unless (case rejected of Left _ -> True; Right _ -> False) $
       fail "captured command alias authorized changed or missing bytes"
   identifier <- case binders of
@@ -507,11 +501,11 @@ canonicalCurrentSource = withTiming $ withScratch $ \work -> do
     copyFile ("test-source-boot/fixtures" </> name) (work </> name)
   let owner = work </> "CanonicalSource.hs"
       consumer = work </> "CanonicalConsumer.hs"
-      scopePath = work </> "canonical-source-scope.cbor"
       includes = [work]
   original <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
     Nothing owner includes Nothing
-  writeGenuineMetadataScope scopePath work owner includes ["CanonicalSource","CanonicalDependency"] original
+  originalFixture <- capturePreparedFixture work original
+  scopePath <- writeGenuineMetadataScope work ["CanonicalSource","CanonicalDependency"] originalFixture
   base <- readExactScope scopePath >>= either fail pure
   unless (null (scopeProducts base) && null (scopeExecutionOwners base) && null (scopeExecutionGraphs base)) $
     fail "canonical current-source fixture unexpectedly retained native execution authority"
@@ -644,7 +638,6 @@ canonicalSourceObligations = withTiming $ withScratch $ \work -> do
   let owner = work </> "CanonicalUnusedSource.hs"
       dependency = work </> "CanonicalUnusedDependency.hs"
       consumer = work </> "CanonicalUnusedConsumer.hs"
-      scopePath = work </> "canonical-unused-scope.cbor"
       includes = [work]
       ownerName = mkModuleName "CanonicalUnusedSource"
       dependencyKey = ("main","CanonicalUnusedDependency")
@@ -661,7 +654,8 @@ canonicalSourceObligations = withTiming $ withScratch $ \work -> do
         , dependencyImportName edge == "CanonicalUnusedDependency"]
   unless (length imported == 1 && all ((== Just dependency) . dependencyImportSelected) imported) $
     fail "unused import fixture lacks its genuine parsed home edge"
-  writeGenuineMetadataScope scopePath work owner includes retained original
+  originalFixture <- capturePreparedFixture work original
+  scopePath <- writeGenuineMetadataScope work retained originalFixture
   base <- readExactScope scopePath >>= either fail pure
   ownerProof <- maybe (fail "unused import fixture lacks canonical custody") pure
     (Map.lookup ("main","CanonicalUnusedSource") (scopeModuleInterfaceProofs base))
@@ -705,8 +699,6 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
       supportPath = supportDirectory </> "Resume.hs"
       capturePath = work </> "GeneratedScaffoldCapture.hs"
       target = work </> "Expr.hs"
-      hiddenPath = work </> "hidden-scaffold.cbor"
-      hidden = emptySessionScope {ssRoot=work,ssExactScope=Just hiddenPath}
       includes = [work]
       originalOwners = filter (/= "GeneratedScaffoldCapture") . preparedNames
   createDirectoryIfMissing True supportDirectory
@@ -715,8 +707,9 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
   copyFile "test-source-boot/fixtures/GeneratedScaffoldExpr.hs" target
   original <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
     Nothing capturePath includes Nothing
-  writeGenuineCandidateNativeScope [] (originalOwners original)
-    work capturePath includes hiddenPath original
+  originalFixture <- capturePreparedFixture work original
+  hiddenPath <- writeGenuineCandidateNativeScope [] (originalOwners original) work originalFixture
+  let hidden = emptySessionScope {ssRoot=work,ssExactScope=Just hiddenPath}
   protected <- readFile target
   recipe <- generatedScaffoldRecipe [] protected protected target "Expr" >>= either fail pure
   let purpose = GeneratedScaffoldCompile recipe (CheckedItemCompile [] Nothing [])
@@ -827,9 +820,8 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
     writeFile supportPath incompleteExports
     missingExport <- compile (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
       Nothing capturePath [] Nothing
-    let missingExportPath = work </> "missing-export.cbor"
-    writeGenuineCandidateNativeScope [] (originalOwners missingExport)
-      work capturePath includes missingExportPath missingExport
+    missingExportFixture <- capturePreparedFixture work missingExport
+    missingExportPath <- writeGenuineCandidateNativeScope [] (originalOwners missingExport) work missingExportFixture
     requireRejected "missing actual resumeLifted export" $
       compile (PreparedProducts Nothing) Set.empty purpose
         (Just hidden {ssExactScope=Just missingExportPath}) target [] Nothing
@@ -840,9 +832,8 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
     writeFile supportPath withOrphan
     hiddenNeighbor <- compile (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
       Nothing capturePath [] Nothing
-    let neighborPath = work </> "hidden-neighbor.cbor"
-    writeGenuineCandidateNativeScope [] (originalOwners hiddenNeighbor)
-      work capturePath includes neighborPath hiddenNeighbor
+    neighborFixture <- capturePreparedFixture work hiddenNeighbor
+    neighborPath <- writeGenuineCandidateNativeScope [] (originalOwners hiddenNeighbor) work neighborFixture
     requireRejected "hidden orphan neighbor through scaffold support" $
       compile (PreparedProducts Nothing) Set.empty purpose
         (Just hidden {ssExactScope=Just neighborPath}) target [] Nothing
@@ -852,9 +843,8 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
     writeFile supportPath withFamily
     hiddenFamily <- compile (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
       Nothing capturePath [] Nothing
-    let familyPath = work </> "hidden-family.cbor"
-    writeGenuineCandidateNativeScope [] (originalOwners hiddenFamily)
-      work capturePath includes familyPath hiddenFamily
+    familyFixture <- capturePreparedFixture work hiddenFamily
+    familyPath <- writeGenuineCandidateNativeScope [] (originalOwners hiddenFamily) work familyFixture
     requireRejected "hidden family neighbor through scaffold support" $
       compile (PreparedProducts Nothing) Set.empty purpose
         (Just hidden {ssExactScope=Just familyPath}) target [] Nothing
@@ -873,12 +863,12 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
 -- Native and lexical roots share one immutable compiler capture. The witness
 -- is retained only as canonical interface/Core custody in the emitted scope.
 captureRetainedCompilerFixture
-  :: FilePath -> IO (PreparedPipelineResult, SessionScope, ExactScope)
+  :: FilePath -> IO (PreparedPipelineResult, SessionScope, ExactScope, CapturedCompilerFixture)
 captureRetainedCompilerFixture work =
   captureRetainedCompilerFixtureWith "MetadataRetainedWitness.hs" [work] work
 
 captureRetainedCompilerFixtureWith
-  :: FilePath -> [FilePath] -> FilePath -> IO (PreparedPipelineResult, SessionScope, ExactScope)
+  :: FilePath -> [FilePath] -> FilePath -> IO (PreparedPipelineResult, SessionScope, ExactScope, CapturedCompilerFixture)
 captureRetainedCompilerFixtureWith witnessFixture includes work = do
   forM_ ["MetadataQuoter.hs", "MetadataQuotedTarget.hs"
     , "MetadataCurrentSourceTarget.hs"] $ \name ->
@@ -887,13 +877,13 @@ captureRetainedCompilerFixtureWith witnessFixture includes work = do
   copyFile "test-source-boot/fixtures/MetadataQuoteSupportRetainedCore.hs"
     (work </> "MetadataQuoteSupport.hs")
   let source = work </> "MetadataQuoter.hs"
-      scopePath = work </> "original-execution.cbor"
-      session = emptySessionScope {ssRoot=work,ssExactScope=Just scopePath}
       helper = ("main", "MetadataQuoteSupport")
       witness = ("main", "MetadataRetainedWitness")
   original <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
     Nothing source includes Nothing
-  writeGenuineExecutionScope [snd helper] [snd helper] work source includes scopePath original
+  originalFixture <- capturePreparedFixture work original
+  scopePath <- writeGenuineExecutionScope [snd helper] [snd helper] work originalFixture
+  let session = emptySessionScope {ssRoot=work,ssExactScope=Just scopePath}
   exact <- readExactScope scopePath >>= either fail pure
   let proofs = scopeModuleInterfaceProofs exact
   unless (map originalModule (scopeProducts exact) == [snd helper]
@@ -901,12 +891,12 @@ captureRetainedCompilerFixtureWith witnessFixture includes work = do
       && isJust (Map.lookup witness proofs >>= canonicalCoreArtifact)
       && maybe False (Map.member witness . canonicalRequirements) (Map.lookup helper proofs)) $
     fail "retained fixture lost its interface/Core-only compiler dependency or acquired its native product"
-  pure (original, session, exact)
+  pure (original, session, exact, originalFixture)
 
 retainedExecutionThCounter :: IO ()
 retainedExecutionThCounter = withTiming $ withScratch $ \work -> do
   library <- canonicalizePath "lib"
-  ((_, session, exact), initialDiagnostics) <- captureDiagnostics $
+  ((_, session, exact, _), initialDiagnostics) <- captureDiagnostics $
     captureRetainedCompilerFixtureWith "MetadataRetainedAuditedWitness.hs" [work,library] work
   let target = work </> "MetadataQuotedTarget.hs"
       proofs = scopeModuleInterfaceProofs exact
@@ -969,11 +959,11 @@ requireRetainedCompilerResult prepared diagnostics = do
 
 retainedExecutionPublication :: IO ()
 retainedExecutionPublication = withTiming $ withScratch $ \work -> do
-  (original, session, exact) <- captureRetainedCompilerFixture work
+  (original, session, exact, _) <- captureRetainedCompilerFixture work
   let helper = mkModuleName "MetadataQuoteSupport"
       helperPath = work </> "MetadataQuoteSupport.hs"
       targetPath = work </> "MetadataQuotedTarget.hs"
-      scopePath = work </> "original-execution.cbor"
+  scopePath <- maybe (fail "retained fixture omitted issued scope") pure (ssExactScope session)
   let originalEnvironment = prHscEnv (pprPipelineResult original)
       helperFlags = [ms_hspp_opts summary | ModuleNode _ summary <-
         mgModSummaries' (hsc_mod_graph originalEnvironment), ms_mod_name summary == helper]
@@ -1070,13 +1060,10 @@ deferredOriginalModuleFlags work session = do
 
 exactRetainedQuoter :: IO ()
 exactRetainedQuoter = withTiming $ withScratch $ \work -> do
-  (original, scope, exact) <- captureRetainedCompilerFixture work
+  (original, scope, exact, originalFixture) <- captureRetainedCompilerFixture work
   let target = work </> "MetadataQuotedTarget.hs"
       helperPath = work </> "MetadataQuoteSupport.hs"
       quoterPath = work </> "MetadataQuoter.hs"
-      scopePath = work </> "original-execution.cbor"
-      hiddenPath = work </> "hidden-scope.cbor"
-      hiddenScope = scope {ssExactScope=Just hiddenPath}
       cancelMarker = work </> "cancel-marker"
       helperKey = ("main", "MetadataQuoteSupport")
       witnessKey = ("main", "MetadataRetainedWitness")
@@ -1089,8 +1076,10 @@ exactRetainedQuoter = withTiming $ withScratch $ \work -> do
   unless (scratchRoot `isPrefixOf` corePath) $
     fail "retained Core mutation must remain inside this fixture's scratch directory"
   coreBytes <- BS.readFile (canonicalCorePath core)
+  scopePath <- maybe (fail "retained fixture omitted issued scope") pure (ssExactScope scope)
   originalBytes <- BS.readFile scopePath
-  writeGenuineExecutionScope [snd helperKey] [] work quoterPath [work] hiddenPath original
+  hiddenPath <- writeGenuineExecutionScope [snd helperKey] [] work originalFixture
+  let hiddenScope = scope {ssExactScope=Just hiddenPath}
   removeRetainedCompilerSources work exact
   withResidentPipelineSelectedRequests [work] $ \runRequest -> do
     runRequest (pure ()) $ \compile -> do
@@ -1219,40 +1208,51 @@ exactRetainedQuoter = withTiming $ withScratch $ \work -> do
     fail "retained compiler refusal/recovery changed immutable admission bytes"
   putStrLn "exact retained quoter: cold source-less original42, Core-only compiler dependency, missing/corrupt/wrong-owner Core refusal, capture-only source drift, no preprocessing/frontend replay, explicit current/hidden authority refusal, cancellation/recovery"
 
--- The GHC fixture issues the original recipe alongside actual native group
 -- Execution custody comes from actual captured originals and the Rust issuer.
 exactReexportQuoter :: IO ()
 exactReexportQuoter = withTiming $ withScratch $ \work -> do
   forM_ ["MetadataQuoteSupport.hs","MetadataQuoter.hs","ExecutionReexportFacade.hs"
-    ,"ExecutionReexportTarget.hs"] $ \name ->
+    ,"ExecutionReexportTarget.hs","MetadataCurrentSourceTarget.hs"] $ \name ->
       copyFile ("test-source-boot/fixtures" </> name) (work </> name)
   original <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
     Nothing (work </> "ExecutionReexportFacade.hs") [work] Nothing
-  let scopePath = work </> "reexport-scope.cbor"
-      scope = emptySessionScope {ssRoot=work,ssExactScope=Just scopePath}
-  writeExecutionScope scopePath work original ["ExecutionReexportFacade"]
+  originalFixture <- capturePreparedFixture work original
+  scopePath <- writeExecutionScope work originalFixture ["ExecutionReexportFacade"]
+  let scope = emptySessionScope {ssRoot=work,ssExactScope=Just scopePath}
   withResidentPipelineSelected [work] $ \compile -> do
     (result,diagnostics) <- captureDiagnostics (compile (PreparedProducts Nothing) Set.empty GeneralCompile
       (Just scope) (work </> "ExecutionReexportTarget.hs") [work] Nothing)
-    mapM_ putStrLn [row | row <- lines diagnostics, "tidepool-exact-execution-load " `isPrefixOf` row]
     unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult result))) $
       fail "retained facade did not execute its original defining quoter"
     unless (counterValues "exact_execution_original_load_owners" diagnostics == [2]) $
       fail "reexport fixture did not select exactly the defining quoter and pure helper"
-    let loadRows = [row | row <- lines diagnostics, "tidepool-exact-execution-load " `isPrefixOf` row]
-    unless (length loadRows == 2 && all ("allow_object=False bytecode=True" `isInfixOf`) loadRows
-        && not (any ("ExecutionReexportFacade" `isInfixOf`) loadRows)) $
-      fail "reexport execution did not obtain real bytecode only for its selected original closure"
     let environment = prHscEnv (pprPipelineResult result)
-    unless (all (\target -> targetAllowObjCode target)
-        (hsc_targets environment)) $
-      fail "authenticated execution target policy escaped its load bracket"
+        retainedBytecode owner = case lookupHpt (hsc_HPT environment) (mkModuleName owner) of
+          Just hmi -> mi_module (hm_iface hmi) == mkModule (stringToUnit "main") (mkModuleName owner)
+            && isJust (homeMod_bytecode (hm_linkable hmi))
+            && isNothing (homeMod_object (hm_linkable hmi))
+          Nothing -> False
+        facadeLinkable = hm_linkable <$> lookupHpt (hsc_HPT environment)
+          (mkModuleName "ExecutionReexportFacade")
+    unless (all retainedBytecode ["MetadataQuoter","MetadataQuoteSupport"]
+        && maybe False (\linkable -> isNothing (homeMod_bytecode linkable)
+          && isNothing (homeMod_object linkable)) facadeLinkable
+        && isNothing (hscCompileCoreExprHook (hsc_hooks environment))) $
+      fail "reexport execution lost original bytecode, loaded the facade, or retained a linker hook"
     copyFile "test-source-boot/fixtures/MetadataQuoteSupportChanged.hs" (work </> "MetadataQuoteSupport.hs")
-    changed <- try (compile CheckedEnvironment Set.empty GeneralCompile (Just scope)
-      (work </> "ExecutionReexportTarget.hs") [work] Nothing)
-      :: IO (Either SomeException CheckedEnvironmentResult)
-    unless (case changed of Left reason -> "ExecutionSourceChanged" `isInfixOf` show reason; _ -> False) $
-      fail "reexport quoter executed a changed authenticated helper"
+    changed <- compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope)
+      (work </> "ExecutionReexportTarget.hs") [work] Nothing
+    unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult changed))) $
+      fail "captured reexport changed meaning with its former helper source"
+    parsed <- analyzeCellWithFlags (hsc_dflags environment) ""
+      "import MetadataQuoteSupport (answerValue)\nanswerValue" >>= either (fail . show) pure
+    let current = withSourceImportIntents (cellPlanPrologue parsed) GeneralCompile
+    currentRefusal <- try (void (compile CheckedEnvironment Set.empty current (Just scope)
+      (work </> "MetadataCurrentSourceTarget.hs") [work] Nothing)) :: IO (Either InputRejection ())
+    case currentRefusal of
+      Left (OriginalSourceSelectionRejected (ExecutionSourceUnavailable ("main","MetadataQuoteSupport"))) -> pure ()
+      Left reason -> fail ("current-source demand had another authority refusal: " ++ show reason)
+      Right () -> fail "captured reexport acquired unadmitted current-source authority"
     copyFile "test-source-boot/fixtures/MetadataQuoteSupport.hs" (work </> "MetadataQuoteSupport.hs")
     recovered <- compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope)
       (work </> "ExecutionReexportTarget.hs") [work] Nothing
@@ -1260,56 +1260,174 @@ exactReexportQuoter = withTiming $ withScratch $ \work -> do
       fail "failed reexport admission leaked its execution targets into the next cycle"
   putStrLn "execution reexport: thin facade selects only quoter and helper, executes, and restores load targets"
 
-exactExecutionHiddenInstance :: IO ()
-exactExecutionHiddenInstance = withTiming $ withScratch $ \work -> do
-  forM_ ["ExecutionClass.hs","ExecutionHiddenOrphan.hs","ExecutionSealedQuoter.hs"
-    ,"ExecutionFreshQuoter.hs","ExecutionSealedTarget.hs","ExecutionFreshTarget.hs"
-    ,"ExecutionQualifiedTarget.hs","ExecutionHiddenQuoteTarget.hs"
-    ,"ExecutionClassQuoter.hs","ExecutionClassQuoteTarget.hs","ExecutionClassQuoteHidden.hs"] $ \name ->
+data ExecutionInstanceFixture = ExecutionInstanceFixture
+  { instanceFixtureRoot :: FilePath
+  , instanceSealedCapture :: CapturedCompilerFixture
+  , instanceClassCapture :: CapturedCompilerFixture
+  }
+
+acquireExecutionInstanceFixture :: IO ExecutionInstanceFixture
+acquireExecutionInstanceFixture = mask $ \restore -> do
+  root <- acquireFixtureScratch
+  (restore $ withScratchFailureEvidence root $ do
+    forM_ ["ExecutionClass.hs","ExecutionHiddenOrphan.hs","ExecutionSealedQuoter.hs"
+      ,"ExecutionClassQuoter.hs"] $ \name ->
+      copyFile ("test-source-boot/fixtures" </> name) (root </> name)
+    sealed <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
+      Nothing (root </> "ExecutionSealedQuoter.hs") [root] Nothing
+    sealedCapture <- capturePreparedFixture root sealed
+    classOriginal <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
+      Nothing (root </> "ExecutionClassQuoter.hs") [root] Nothing
+    classCapture <- capturePreparedFixture root classOriginal
+    pure (ExecutionInstanceFixture root sealedCapture classCapture))
+    `onException` releaseFixtureScratchAfterFailure root
+
+releaseExecutionInstanceFixture :: ExecutionInstanceFixture -> IO ()
+releaseExecutionInstanceFixture = releaseFixtureScratch . instanceFixtureRoot
+
+withExecutionInstanceFixture
+  :: IO ExecutionInstanceFixture -> (FilePath -> SessionScope -> SessionScope -> IO a) -> IO a
+withExecutionInstanceFixture getFixture action = do
+  fixture <- getFixture
+  withScratchFailureEvidence (instanceFixtureRoot fixture) $ withTiming $ withScratch $ \work -> do
+    forM_ ["ExecutionFreshQuoter.hs","ExecutionSealedTarget.hs","ExecutionFreshTarget.hs"
+      ,"ExecutionQualifiedTarget.hs","ExecutionHiddenQuoteTarget.hs"
+      ,"ExecutionClassQuoteTarget.hs","ExecutionClassQuoteHidden.hs"
+      ,"ExecutionUnrelatedQuoter.hs"
+      ,"ExecutionExplicitOrphanQuoter.hs","ExecutionExplicitOrphanTarget.hs"] $ \name ->
       copyFile ("test-source-boot/fixtures" </> name) (work </> name)
-  original <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
-    Nothing (work </> "ExecutionSealedQuoter.hs") [work] Nothing
-  let scopePath = work </> "sealed-scope.cbor"
-      scope = emptySessionScope {ssRoot=work,ssExactScope=Just scopePath}
-  writeExecutionScope scopePath work original ["ExecutionSealedQuoter"]
-  classOriginal <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
-    Nothing (work </> "ExecutionClassQuoter.hs") [work] Nothing
-  let classScopePath = work </> "class-scope.cbor"
-      classScope = scope {ssExactScope=Just classScopePath}
-  writeExecutionScope classScopePath work classOriginal ["ExecutionClassQuoter"]
+    scopePath <- writeExecutionScope work (instanceSealedCapture fixture) ["ExecutionSealedQuoter"]
+    classScopePath <- writeExecutionScope work (instanceClassCapture fixture) ["ExecutionClassQuoter"]
+    let scope = emptySessionScope {ssRoot=work,ssExactScope=Just scopePath}
+        classScope = scope {ssExactScope=Just classScopePath}
+    admitted <- readExactScope scopePath >>= either fail pure
+    let imports owner = Map.findWithDefault [] ("main",owner) (Map.fromList (scopeLexical admitted))
+    unless (("main","ExecutionHiddenOrphan") `elem` imports "ExecutionSealedQuoter"
+        && null (imports "ExecutionClass")) $
+      fail "instance fixture lost its genuine transitive orphan edge or added an orphan below the class"
+    action work scope classScope
+
+exactExecutionSealedInstance :: IO ExecutionInstanceFixture -> IO ()
+exactExecutionSealedInstance getFixture = withExecutionInstanceFixture getFixture $ \work scope _ ->
   withResidentPipelineSelected [work] $ \compile -> do
-    sealed <- compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope)
+    forM_ ["ExecutionSealedTarget.hs","ExecutionQualifiedTarget.hs"] $ \target -> do
+      sealed <- compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope) (work </> target) [work] Nothing
+      unless (fmap renderType (prResultType (pprPipelineResult sealed)) == Just "Int"
+          && hasIntResultLiteral 42 (prBinds (pprPipelineResult sealed))) $
+        fail "sealed or qualified original quoter lost its authenticated orphan dictionary"
+    let target = work </> "ExecutionHiddenQuoteTarget.hs"
+    (hidden,diagnostics) <- captureDiagnostics (try (compile CheckedEnvironment Set.empty GeneralCompile
+      (Just scope) target [work] Nothing) :: IO (Either SourceError CheckedEnvironmentResult))
+    case hidden of
+      Left reason | any (sourceDiagnosticAt target "Not in scope") (diagsFromSourceError reason)
+        , counterValues "exact_execution_original_load_owners" diagnostics == [0] -> pure ()
+      Left reason -> fail ("hidden quoter failed for another reason: " ++ show reason)
+      Right _ -> fail "hidden qualified export acquired an execution recipe"
+
+exactExecutionTransitiveInstance :: IO ExecutionInstanceFixture -> IO ()
+exactExecutionTransitiveInstance getFixture = withExecutionInstanceFixture getFixture $ \work scope _ -> do
+  result <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope)
+    (work </> "ExecutionFreshTarget.hs") [work] Nothing
+  unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult result))
+      && any (\node -> dependencyModuleName node == "ExecutionFreshQuoter"
+        && any ((== "ExecutionSealedQuoter") . dependencyImportName) (dependencyModuleImports node))
+        (dependencyModules (pprDependencies result))) $
+    fail "fresh provider lost its real transitive import or GHC's orphan instance"
+
+exactExecutionUnrelatedInstance :: IO ExecutionInstanceFixture -> IO ()
+exactExecutionUnrelatedInstance getFixture = withExecutionInstanceFixture getFixture $ \work scope _ ->
+  withResidentPipelineSelected [work] $ \compile -> do
+    -- Ordinary GHC supplies the independent source-visibility oracle. Its
+    -- inputs live apart from retained artifacts and exact hydration.
+    withScratch $ \oracle -> do
+      forM_ ["ExecutionClass.hs","ExecutionHiddenOrphan.hs","ExecutionSealedQuoter.hs"
+        ,"ExecutionExplicitOrphanQuoter.hs","ExecutionExplicitOrphanTarget.hs"] $ \name ->
+        copyFile ("test-source-boot/fixtures" </> name) (oracle </> name)
+      let oracleTarget = oracle </> "ExecutionExplicitOrphanTarget.hs"
+          oracleProvider = oracle </> "ExecutionExplicitOrphanQuoter.hs"
+      ordinary <- runPipelineSelected (PreparedProducts Nothing) oracleTarget [oracle]
+      unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult ordinary))) $
+        fail "ordinary GHC explicit-import control changed its result"
+      writeUnrelatedProvider work oracleProvider
+      refused <- sourceFailureDiagnostics (runPipelineSelected (PreparedProducts Nothing) oracleTarget [oracle])
+      case refused of
+        Left diagnostics | any (sourceDiagnosticAt oracleProvider "No instance for") diagnostics -> pure ()
+        Left diagnostics -> fail ("ordinary GHC failed for another source reason: " ++ show diagnostics)
+        Right _ -> fail "ordinary GHC made a lexically unrelated orphan visible to the provider"
+    -- The explicit-import control has the same class and dictionary demand.
+    -- Removing only that provider's orphan edge must prevent resolution even
+    -- while the target demands bytecode from the sealed original quoter.
+    explicit <- compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope)
+      (work </> "ExecutionExplicitOrphanTarget.hs") [work] Nothing
+    unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult explicit))
+        && any (\node -> dependencyModuleName node == "ExecutionExplicitOrphanQuoter"
+          && any ((== "ExecutionHiddenOrphan") . dependencyImportName) (dependencyModuleImports node))
+          (dependencyModules (pprDependencies explicit))) $
+      fail "explicit orphan-import control lost its actual edge or dictionary"
+    -- Use the same provider module in both observations. This makes the
+    -- missing import the sole source difference and exercises warm isolation.
+    writeUnrelatedProvider work (work </> "ExecutionExplicitOrphanQuoter.hs")
+    let provider = work </> "ExecutionExplicitOrphanQuoter.hs"
+        target = work </> "ExecutionExplicitOrphanTarget.hs"
+    exact <- maybe (fail "instance fixture omitted its issued scope") readExactScope (ssExactScope scope)
+      >>= either fail pure
+    expectedOriginals <- either (fail . show) pure (executionSourceClosure
+      (scopeExecutionGraphs exact) (scopeExecutionOwners exact) (scopeExecutionNativeOwners exact)
+      [("main","ExecutionSealedQuoter")])
+    (rejected,diagnostics) <- captureDiagnostics (sourceFailureDiagnostics
+      (compile CheckedEnvironment Set.empty GeneralCompile (Just scope) target [work] Nothing))
+    case rejected of
+      Left errors | any (sourceDiagnosticAt provider "No instance for") errors
+        , counterValues "exact_execution_original_load_owners" diagnostics == [toInteger (length expectedOriginals)] -> pure ()
+      Left errors -> fail ("unrelated provider failed for another source reason: " ++ show errors ++ "\n" ++ diagnostics)
+      Right _ -> fail "unrelated provider borrowed an orphan from the execution linker graph"
+    restored <- compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope)
       (work </> "ExecutionSealedTarget.hs") [work] Nothing
-    unless (fmap renderType (prResultType (pprPipelineResult sealed)) == Just "Int"
-        && hasIntResultLiteral 42 (prBinds (pprPipelineResult sealed))) $
-      fail "sealed original quoter lost its authenticated private orphan dictionary"
-    qualified <- compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope)
-      (work </> "ExecutionQualifiedTarget.hs") [work] Nothing
-    unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult qualified))) $
-      fail "qualified quoter lost its full defining original owner"
-    (hiddenQuote,hiddenDiagnostics) <- captureDiagnostics (try (compile CheckedEnvironment Set.empty GeneralCompile (Just scope)
-      (work </> "ExecutionHiddenQuoteTarget.hs") [work] Nothing) :: IO (Either SomeException CheckedEnvironmentResult))
-    unless (case hiddenQuote of Left _ -> counterValues "exact_execution_original_load_owners" hiddenDiagnostics == [0]; _ -> False) $
-      fail "hidden qualified export acquired an execution recipe"
-    (fresh,diagnostics) <- captureDiagnostics (try (compile CheckedEnvironment Set.empty GeneralCompile (Just scope)
-      (work </> "ExecutionFreshTarget.hs") [work] Nothing) :: IO (Either SomeException CheckedEnvironmentResult))
-    unless (case fresh of Left reason -> "No instance for" `isInfixOf` (show reason ++ diagnostics); Right _ -> False) $
-      fail ("fresh provider borrowed a hidden execution-only instance: "
-        ++ either show (const "ACCEPTED") fresh ++ "\n" ++ diagnostics)
-    restored <- compile CheckedEnvironment Set.empty GeneralCompile (Just scope)
-      (work </> "ExecutionSealedTarget.hs") [work] Nothing
-    unless (fmap renderType (crResultType restored) == Just "Int") $
-      fail "fresh-provider refusal leaked its execution environment"
-    classQuote <- compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just classScope)
+    unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult restored))) $
+      fail "unrelated-provider refusal leaked its execution environment"
+    copyFile "test-source-boot/fixtures/ExecutionExplicitOrphanQuoter.hs" provider
+    recovered <- compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope) target [work] Nothing
+    unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult recovered))) $
+      fail "restored explicit orphan import did not recover after rejection"
+
+exactExecutionClassInstance :: IO ExecutionInstanceFixture -> IO ()
+exactExecutionClassInstance getFixture = withExecutionInstanceFixture getFixture $ \work _ scope ->
+  withResidentPipelineSelected [work] $ \compile -> do
+    result <- compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope)
       (work </> "ExecutionClassQuoteTarget.hs") [work] Nothing
-    unless (hasIntResultLiteral 43 (prBinds (pprPipelineResult classQuote))) $
+    unless (hasIntResultLiteral 43 (prBinds (pprPipelineResult result))) $
       fail "class parent wildcard import lost its exported quoter method"
-    (classHidden,classDiagnostics) <- captureDiagnostics (try (compile CheckedEnvironment Set.empty GeneralCompile
-      (Just classScope) (work </> "ExecutionClassQuoteHidden.hs") [work] Nothing)
-      :: IO (Either SomeException CheckedEnvironmentResult))
-    unless (case classHidden of Left _ -> counterValues "exact_execution_original_load_owners" classDiagnostics == [0]; _ -> False) $
-      fail "hiding a class parent acquired its child quoter execution capability"
-  putStrLn "execution instances: sealed quoter executes, fresh provider cannot borrow private orphan, failure recovers"
+    let target = work </> "ExecutionClassQuoteHidden.hs"
+    (hidden,diagnostics) <- captureDiagnostics (try (compile CheckedEnvironment Set.empty GeneralCompile
+      (Just scope) target [work] Nothing) :: IO (Either SourceError CheckedEnvironmentResult))
+    case hidden of
+      Left reason | any (sourceDiagnosticAt target "Not in scope") (diagsFromSourceError reason)
+        , counterValues "exact_execution_original_load_owners" diagnostics == [0] -> pure ()
+      Left reason -> fail ("hidden class child failed for another reason: " ++ show reason)
+      Right _ -> fail "hiding a class parent acquired its child quoter execution capability"
+
+writeUnrelatedProvider :: FilePath -> FilePath -> IO ()
+writeUnrelatedProvider work destination = do
+  unrelated <- readFile (work </> "ExecutionUnrelatedQuoter.hs")
+  writeFile destination (T.unpack (T.replace "ExecutionUnrelatedQuoter" "ExecutionExplicitOrphanQuoter" (T.pack unrelated)))
+
+-- GHC can report a dependency source error through its logger and return
+-- Failed, or throw SourceError directly. Worker and filesystem failures escape.
+sourceFailureDiagnostics :: IO a -> IO (Either [Diag] a)
+sourceFailureDiagnostics action = (Right <$> action) `catches`
+  [ Handler (pure . Left . diagsFromSourceError)
+  , Handler dependencyFailure
+  ]
+  where
+    dependencyFailure (DependencySourceFailure diagnostics) = pure (Left diagnostics)
+    dependencyFailure failure = throwIO failure
+
+sourceDiagnosticAt :: FilePath -> String -> Diag -> Bool
+sourceDiagnosticAt path fragment diagnostic = dSeverity diagnostic == DiagError
+  && fragment `isInfixOf` dMessage diagnostic
+  && case dFile diagnostic of
+    Just (actual,_,_,_,_) -> normalise actual == normalise path
+    Nothing -> False
 
 -- The returned environment includes this cycle's collector. Removing it must
 -- leave the empty boot stack; an older collector would make another pop succeed.
@@ -1328,7 +1446,9 @@ exactToOrdinary = withTiming $ withScratch $ \work -> do
       copyFile ("test-source-boot/fixtures" </> name) (work </> name)
   sealed <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
     Nothing (work </> "ExecutionSealedQuoter.hs") [work] Nothing
+  sealedFixture <- capturePreparedFixture work sealed
   helper <- runPipelineSelected (PreparedProducts Nothing) (work </> "MetadataQuoteSupport.hs") [work]
+  helperFixture <- capturePreparedFixture work helper
   let valueDirectory = work </> "Tidepool/Session/Val"
   createDirectoryIfMissing True valueDirectory
   copyFile "test-source-boot/fixtures/CheckedValueG2.hs" (valueDirectory </> "G2.hs")
@@ -1340,13 +1460,10 @@ exactToOrdinary = withTiming $ withScratch $ \work -> do
   writeBinIface (targetProfile (hsc_dflags (prHscEnv (pprPipelineResult valueProducer)))) QuietBinIFace NormalCompression
     (sessionHiPath work valueModule) valueIface
   renameFile (valueDirectory </> "G2.hs") (valueDirectory </> "G2.retained-source")
-  let scopePath = work </> "sealed-scope.cbor"
-      hiddenPath = work </> "hidden-scope.cbor"
-      helperPath = work </> "helper-scope.cbor"
-      scope = emptySessionScope {ssRoot=work,ssExactScope=Just scopePath}
-  writeExecutionScope scopePath work sealed ["ExecutionSealedQuoter"]
-  writeExecutionScope hiddenPath work sealed []
-  writeExecutionScope helperPath work helper ["MetadataQuoteSupport"]
+  scopePath <- writeExecutionScope work sealedFixture ["ExecutionSealedQuoter"]
+  hiddenPath <- writeExecutionScope work sealedFixture []
+  helperPath <- writeExecutionScope work helperFixture ["MetadataQuoteSupport"]
+  let scope = emptySessionScope {ssRoot=work,ssExactScope=Just scopePath}
   withResidentPipelineSelectedRequests [work] $ \runRequest -> do
     let ordinaryQuote compile = do
           result <- compile (PreparedProducts Nothing) Set.empty GeneralCompile Nothing
@@ -1439,13 +1556,12 @@ exactExecutionValues = withTiming $ withScratch $ \work -> do
     ]
   produced <- runPipelineSelected (PreparedProducts Nothing) (work </> "CheckedValueQuoterProducer.hs") [work]
   let result = pprPipelineResult produced
-      scopePath = work </> "value-scope.cbor"
   valueOwner <- maybe (fail "invalid checked value fixture owner") pure (parseValModule "Tidepool.Session.Val.G8")
   _ <- mkBoundBinders ["answer"] 8 work result
   let valuePath = sessionHiPath work valueOwner
   bytes <- BS.readFile valuePath
   let value = ExactIfaceArtifact "main" "Tidepool.Session.Val.G8" valuePath (digest bytes) []
-  writeGenuineEmptyMetadataScope scopePath
+  scopePath <- writeGenuineEmptyMetadataScope work
   base <- readExactScope scopePath >>= either fail pure
   let admitted = base {scopePurpose=ExactCellPurpose (CheckedCellAdmission (replicate 64 '0') (replicate 64 '0')
         (replicate 64 '0') [] ["Tidepool.Session.Val.G8"] [] [value] Nothing AuthoredCellCheck) [work]}
@@ -1873,9 +1989,6 @@ candidateSitedSiblingsAt work = do
       replyDir = work </> "Tidepool" </> "Agent" </> "Reply"
       owner = unfoldDir </> "Unfold.hs"
       target = work </> "HydratedChildTarget.hs"
-      scopePath = work </> "exact-scope.cbor"
-      capturedPath = work </> "captured-scope.cbor"
-      scope = emptySessionScope { ssRoot = work, ssExactScope = Just scopePath }
       candidates = ["Tidepool.Internal.RequestSite", "Tidepool.Agent.Reply.Internal"]
       owners = candidates ++ ["Tidepool.Actors.Unfold"]
   createDirectoryIfMissing True unfoldDir
@@ -1889,17 +2002,22 @@ candidateSitedSiblingsAt work = do
     Nothing owner [work] Nothing
   originals <- newOriginalInterfaceArtifacts (prHscEnv (pprPipelineResult original))
     (pprFinalizedModules original) [] work
-  writeGenuineCandidateLexicalScope candidates owners work owner [work] capturedPath original
-  writeGenuineEmptyMetadataScope scopePath
+  originalFixture <- capturePreparedFixture work original
+  capturedPath <- writeGenuineCandidateLexicalScope candidates owners work originalFixture
+  scopePath <- writeGenuineEmptyMetadataScope work
+  let scope = emptySessionScope { ssRoot = work, ssExactScope = Just scopePath }
   -- Native candidates retain their original certified interfaces; Unfold is
   -- compiled from source here and retained only in the canonical lexical scope.
   reused <- runPipelineSessionSelected (PreparedProducts (Just (manifest work)))
     Set.empty GeneralCompile (Just scope) target [work] Nothing
   unless (Set.fromList (map candidateModule (pprAcceptedCandidates reused)) == Set.fromList candidates
       && any ((== "Tidepool.Actors.Unfold") . dependencyModuleName)
-        (dependencyModules (pprDependencies reused))
-      && preparedNames reused == ["HydratedChildTarget"]) $
-    fail "typed sibling regression did not exercise the hydrated candidate path"
+        (dependencyModules (pprDependencies reused))) $
+    fail "typed sibling regression did not admit the requested originals"
+  unless (Set.fromList (preparedNames reused) == Set.fromList ["Tidepool.Actors.Unfold","HydratedChildTarget"]
+      && Set.fromList (map moduleNameString (Map.keys (pprFinalizedModules reused)))
+        == Set.fromList ["Tidepool.Actors.Unfold","HydratedChildTarget"]) $
+    fail "typed sibling regression did not compile its deliberately fresh Unfold and target"
   forM_ (pprAcceptedCandidates reused) $ \candidate -> do
     bytes <- BS.readFile (candidateInterface candidate)
     captured <- originalInterfaceBytes originals
@@ -1908,7 +2026,7 @@ candidateSitedSiblingsAt work = do
     unless (candidateUnit candidate == "main"
         && bytes == captured && candidateInterfaceSha256 candidate == digest captured) $
       fail "typed sibling candidate changed its exact original interface custody"
-  case pprModules reused of
+  case filter ((== "HydratedChildTarget") . moduleNameString . moduleName . pmModule) (pprModules reused) of
     [prepared] | null (pmSiteRejections prepared), length (pmYieldSites prepared) == 1 -> pure ()
     _ -> fail "hydrated child surface lost its exact typed sibling or site identity"
   retainedScope <- readExactScope capturedPath >>= either fail pure
@@ -1927,7 +2045,8 @@ candidateSitedSiblingsAt work = do
   case pprModules captured of
     [prepared] | null (pmSiteRejections prepared), length (pmYieldSites prepared) == 1 -> pure ()
     _ -> fail "source-free exact child surface lost its typed sibling or site identity"
-  unless (map pmYieldSites (pprModules captured) == map pmYieldSites (pprModules reused)) $
+  unless (map pmYieldSites (pprModules captured) == map pmYieldSites
+      (filter ((== "HydratedChildTarget") . moduleNameString . moduleName . pmModule) (pprModules reused))) $
     fail "source-free sibling hydration changed the original typed suspension site"
   putStrLn "candidate typed siblings: native candidates plus fresh Unfold and source-free canonical owners retain childSited and typed sites"
 
@@ -2032,14 +2151,13 @@ candidateGhcLoad = withTiming $ withScratch $ \work -> do
   forM_ ["MetadataQuoteSupport.hs", "MetadataQuoter.hs", "MetadataQuotedTarget.hs"] $ \name ->
     copyFile ("test-source-boot/fixtures" </> name) (work </> name)
   let helper = mkModuleName "MetadataQuoteSupport"
-      scopePath = work </> "exact-scope.cbor"
-      scope = emptySessionScope { ssRoot = work, ssExactScope = Just scopePath }
       restore = copyFile "test-source-boot/fixtures/MetadataQuoteSupport.hs" (work </> "MetadataQuoteSupport.hs")
       changed = copyFile "test-source-boot/fixtures/MetadataQuoteSupportChanged.hs" (work </> "MetadataQuoteSupport.hs")
-  writeGenuineEmptyMetadataScope scopePath
+  scopePath <- writeGenuineEmptyMetadataScope work
+  let scope = emptySessionScope { ssRoot = work, ssExactScope = Just scopePath }
   original <- runPipelineSelected (PreparedProducts Nothing) (work </> "MetadataQuoter.hs") [work]
-  writeGenuineCandidateManifestFor ["MetadataQuoteSupport"] work
-    (work </> "MetadataQuoter.hs") [work] original
+  originalFixture <- capturePreparedFixture work original
+  writeGenuineCandidateManifestFor ["MetadataQuoteSupport"] work originalFixture
   bracket (lookupEnv "TIDEPOOL_COMPILER_PRODUCER")
     (maybe (unsetEnv "TIDEPOOL_COMPILER_PRODUCER") (setEnv "TIDEPOOL_COMPILER_PRODUCER")) $ \configured -> do
       producer <- maybe (fail "genuine producer configuration disappeared") pure configured
@@ -2234,7 +2352,6 @@ hostActivationPurposeTest destination = withScratch $ \work -> do
         Left _ -> True; Right _ -> False) $
     fail "preview replacement rescanned input text or accepted duplicated protected markers"
   let sourcePath = work </> "HostActivationInput.hs"
-      issuedPath = work </> "issued-host-scope.cbor"
   inputTemplate <- readFile "test-source-boot/fixtures/HostActivationInput.hs"
   originalSource <- either fail pure (replaceTemplateMarker "{{CHECKED_TYPE}}" "Int" inputTemplate)
   writeFile sourcePath originalSource
@@ -2243,7 +2360,7 @@ hostActivationPurposeTest destination = withScratch $ \work -> do
   capturedSignature <- captureCheckedSignature (crHscEnv original) "__tidepool_cell_pin_0_sessionInput" inputType
   signature <- either (fail . show) (pure . snd)
     (deserialiseFromBytes decodeTerm (BSL.fromStrict (toStrictByteString (encodeCheckedSignature capturedSignature))))
-  issuedFields <- writeGenuineEmptyScopeFields issuedPath
+  issuedFields <- writeGenuineEmptyScopeFields work
   let sha = TString (T.replicate 64 "a")
       empty = TList []
       text = TString . T.pack
@@ -2691,9 +2808,6 @@ exactLoadedMetadata :: IO ()
 exactLoadedMetadata = withTiming $ withScratch $ \work -> do
   let fixture name = "test-source-boot/fixtures" </> name
       install name = copyFile (fixture name) (work </> name)
-      scopePath = work </> "exact-scope.cbor"
-      scope = emptySessionScope { ssRoot = work, ssExactScope = Just scopePath
-        , ssIncarnation = Just "loaded-metadata-test" }
       resultType = fmap renderType . crResultType
       loadedOwner = "tidepool-checked-loaded-source module=MetadataOwner"
       checkedOwner = "tidepool-checked module=MetadataOwner target=False"
@@ -2703,7 +2817,9 @@ exactLoadedMetadata = withTiming $ withScratch $ \work -> do
   forM_ ["MetadataOwner.hs", "MetadataTarget.hs", "MetadataExtensionOnlyTarget.hs", "MetadataLoadedFamily.hs"
     , "MetadataFamilyTarget.hs", "MetadataHiddenFamily.hs", "MetadataUntracked.hs"
     , "MetadataUntrackedTarget.hs", "MetadataQuoter.hs", "MetadataQuotedTarget.hs", "MetadataQuoteSupport.hs"] install
-  writeGenuineEmptyMetadataScope scopePath
+  scopePath <- writeGenuineEmptyMetadataScope work
+  let scope = emptySessionScope { ssRoot = work, ssExactScope = Just scopePath
+        , ssIncarnation = Just "loaded-metadata-test" }
   withResidentPipelineSelected [work] $ \compile -> do
     let checked name = compile CheckedEnvironment Set.empty GeneralCompile (Just scope)
           (work </> name) [work] Nothing
@@ -2752,8 +2868,8 @@ exactLoadedMetadata = withTiming $ withScratch $ \work -> do
       (work </> "MetadataQuoter.hs") [work] Nothing
     -- The helper has no TH extension or quotation itself. GHC's graph still
     -- requires its bytecode when the quoter executes in the target.
-    writeGenuineCandidateManifestFor ["MetadataQuoteSupport"] work
-      (work </> "MetadataQuoter.hs") [work] quoterProducer
+    quoterFixture <- capturePreparedFixture work quoterProducer
+    writeGenuineCandidateManifestFor ["MetadataQuoteSupport"] work quoterFixture
     (quotedCandidate, candidateQuoteDiagnostics) <- captureDiagnostics $
       compile (CheckedEnvironmentProducts (manifest work)) Set.empty GeneralCompile (Just scope)
         (work </> "MetadataQuotedTarget.hs") [work] Nothing
@@ -2769,13 +2885,14 @@ exactLoadedMetadata = withTiming $ withScratch $ \work -> do
       ++ " quoter_frontends=" ++ show (frontendCount "MetadataQuoter" candidateQuoteDiagnostics))
     hidden <- compile (PreparedProducts Nothing) Set.empty GeneralCompile Nothing
       (work </> "MetadataHiddenFamily.hs") [work] Nothing
-    writeGenuineMetadataScope scopePath work (work </> "MetadataHiddenFamily.hs") [work]
-      ["MetadataHiddenFamily"] hidden
+    hiddenFixture <- capturePreparedFixture work hidden
+    hiddenScopePath <- writeGenuineMetadataScope work ["MetadataHiddenFamily"] hiddenFixture
+    let hiddenScope = scope {ssExactScope=Just hiddenScopePath}
     ordinaryProducts <- compile (PreparedProducts Nothing) Set.empty GeneralCompile Nothing
       (work </> "MetadataTarget.hs") [work] Nothing
-    writeGenuineCandidateManifestFor ["MetadataOwner"] work
-      (work </> "MetadataTarget.hs") [work] ordinaryProducts
-    disjoint <- compile (PreparedProducts (Just (manifest work))) Set.empty GeneralCompile (Just scope)
+    ordinaryFixture <- capturePreparedFixture work ordinaryProducts
+    writeGenuineCandidateManifestFor ["MetadataOwner"] work ordinaryFixture
+    disjoint <- compile (PreparedProducts (Just (manifest work))) Set.empty GeneralCompile (Just hiddenScope)
       (work </> "MetadataTarget.hs") [work] Nothing
     unless (map candidateModule (pprAcceptedCandidates disjoint) == ["MetadataOwner"]
         && fmap renderType (prResultType (pprPipelineResult disjoint)) == Just "Int"
@@ -2794,7 +2911,7 @@ exactLoadedMetadata = withTiming $ withScratch $ \work -> do
     (do
       removeFile corePath
       (metadataOnly, metadataDiagnostics) <- captureDiagnostics $
-        compile (CheckedEnvironmentProducts (manifest work)) Set.empty GeneralCompile (Just scope)
+        compile (CheckedEnvironmentProducts (manifest work)) Set.empty GeneralCompile (Just hiddenScope)
           (work </> "MetadataTarget.hs") [work] Nothing
       restoredCore <- doesFileExist corePath
       unless (resultType metadataOnly == Just "Int" && not restoredCore
@@ -2806,11 +2923,11 @@ exactLoadedMetadata = withTiming $ withScratch $ \work -> do
         ++ " executable_demand=" ++ show (counterValues "candidate_executable_required" metadataDiagnostics)
         ++ " owner_frontends=" ++ show (frontendCount "MetadataOwner" metadataDiagnostics))
       ) `finally` BS.writeFile corePath originalCore
-    family <- try (checked "MetadataFamilyTarget.hs") :: IO (Either SomeException CheckedEnvironmentResult)
+    family <- try (compile CheckedEnvironment Set.empty GeneralCompile (Just hiddenScope)
+      (work </> "MetadataFamilyTarget.hs") [work] Nothing) :: IO (Either SomeException CheckedEnvironmentResult)
     case family of
       Left failure | "retained family consistency" `isInfixOf` show failure -> pure ()
       _ -> fail "loaded metadata lost the hidden original family conflict"
-    writeGenuineEmptyMetadataScope scopePath
     (_, untrackedDiagnostics) <- captureDiagnostics (checked "MetadataUntrackedTarget.hs")
     unless (frontendCount "MetadataUntracked" untrackedDiagnostics == 1
         && "tidepool-checked-loaded-source module=MetadataUntracked" `elem` lines untrackedDiagnostics) $
@@ -2841,8 +2958,6 @@ hydratedSiteSiblings = withScratch $ \work -> do
       target = work </> "HydratedSiteExpr.hs"
       unfoldPath = work </> "Tidepool/Actors/Unfold.hs"
       replyPath = work </> "Tidepool/Agent/Reply/Internal.hs"
-      scopePath = work </> "exact-scope.cbor"
-      scope = emptySessionScope {ssRoot=work,ssExactScope=Just scopePath}
       compile selection session = runPipelineSessionSelected selection Set.empty GeneralCompile
         session target [work] Nothing
       targetModule prepared = case [value | value <- pprModules prepared
@@ -2884,7 +2999,8 @@ hydratedSiteSiblings = withScratch $ \work -> do
   cold <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
     Nothing target [work] Nothing
   originalSite <- evidence cold
-  writeGenuineCandidateManifestFor names work target [work] cold
+  coldFixture <- capturePreparedFixture work cold
+  writeGenuineCandidateManifestFor names work coldFixture
   warm <- compile (PreparedProducts (Just (manifest work))) Nothing
   unless (sortOn id (map candidateModule (pprAcceptedCandidates warm)) == sortOn id names
       && all (`notElem` preparedNames warm) names) $
@@ -2892,7 +3008,8 @@ hydratedSiteSiblings = withScratch $ \work -> do
   warmSite <- evidence warm
   unless (warmSite == originalSite) (fail "native-candidate hydration changed exact child-site identity")
   let env = prHscEnv (pprPipelineResult cold)
-  writeGenuineCandidateLexicalScope names names work target [work] scopePath cold
+  scopePath <- writeGenuineCandidateLexicalScope names names work coldFixture
+  let scope = emptySessionScope {ssRoot=work,ssExactScope=Just scopePath}
   exact <- compile (PreparedProducts Nothing) (Just scope)
   unless (all (`notElem` preparedNames exact) names) $
     fail "hydrated sibling regression recompiled an exact defining owner"
@@ -2982,10 +3099,9 @@ hydratedSiteSiblings = withScratch $ \work -> do
 exactBashMetadata :: FilePath -> IO ()
 exactBashMetadata effects = withTiming $ withScratch $ \work -> do
   let target = work </> "MetadataBashTarget.hs"
-      scopePath = work </> "exact-scope.cbor"
-      scope = emptySessionScope { ssRoot = work, ssExactScope = Just scopePath }
   copyFile "test-source-boot/fixtures/MetadataBashTarget.hs" target
-  writeGenuineEmptyMetadataScope scopePath
+  scopePath <- writeGenuineEmptyMetadataScope work
+  let scope = emptySessionScope { ssRoot = work, ssExactScope = Just scopePath }
   withResidentPipelineSelected [work, "lib", effects] $ \compile -> do
     normal <- compile CheckedEnvironment Set.empty GeneralCompile Nothing target [] Nothing
     (checked, diagnostics) <- captureDiagnostics $
@@ -3020,8 +3136,8 @@ packageInputs = withScratch $ \work -> do
         && all (\name -> Map.member (mkModuleName name) (pprFinalizedModules warmer))
           ["OptionalAnchor", "OptionalSupport"]) $
       fail "warmer input fixture lacks both fresh finalized candidate owners"
-    writeGenuineCandidateManifestFor ["OptionalAnchor"] work
-      (work </> "OptionalWarmer.hs") [work] warmer
+    warmerFixture <- capturePreparedFixture work warmer
+    writeGenuineCandidateManifestFor ["OptionalAnchor"] work warmerFixture
     warm <- root (PreparedProducts (Just (manifest work)))
     unless (map candidateModule (pprAcceptedCandidates warm) == ["OptionalAnchor"]) $
       fail "warm input fixture did not admit its authenticated anchor candidate"
@@ -3045,8 +3161,7 @@ packageInputs = withScratch $ \work -> do
       ++ " checked=" ++ show (length (dependencyModules (pprDependencies cold))))
     -- Both offers share the complete fresh warmer capture. This fixture
     -- checks input identity; mixed fresh/retained reissuance has separate owners.
-    writeGenuineCandidateManifestFor ["OptionalAnchor", "OptionalSupport"] work
-      (work </> "OptionalWarmer.hs") [work] warmer
+    writeGenuineCandidateManifestFor ["OptionalAnchor", "OptionalSupport"] work warmerFixture
     reused <- root (PreparedProducts (Just (manifest work)))
     unless (map candidateModule (pprAcceptedCandidates reused) == ["OptionalAnchor", "OptionalSupport"]) $
       fail "input fixture did not exercise authenticated candidate hydration"
@@ -3078,8 +3193,8 @@ packageInputs = withScratch $ \work -> do
             | node <- dependencyModules (pprDependencies wired)]
           ++ " resolved-imports=" ++ show [(unitString (moduleUnit owner),
               moduleNameString (moduleName owner), owner == gHC_PRIM) | owner <- imported])
-    writeGenuineCandidateManifestFor ["OptionalWiredSupport"] work
-      (work </> "OptionalWiredRoot.hs") [work] wired
+    wiredFixture <- capturePreparedFixture work wired
+    writeGenuineCandidateManifestFor ["OptionalWiredSupport"] work wiredFixture
     wiredCandidates <- readModuleCandidates (manifest work) >>= either fail pure
     wiredCandidate <- case filter ((== "OptionalWiredSupport") . candidateModule) wiredCandidates of
       [candidate] -> pure candidate
@@ -3585,19 +3700,6 @@ verifyChangedPackageInterface producer identity evidence program global = withSc
     fail "restored standalone package lookup changed its canonical Name"
   putStrLn "package certification: changed interface refused and restored bytes recovered"
 
-captureDiagnostics :: IO a -> IO (a, String)
-captureDiagnostics action = do
-  temporary <- getTemporaryDirectory
-  bracket (openTempFile temporary "package-certification.log")
-    (\(path, output) -> hClose output >> removeFile path) $ \(_, output) -> do
-      hFlush stderr
-      result <- bracket (hDuplicate stderr) hClose $ \saved ->
-        (hDuplicateTo output stderr >> action)
-          `finally` (hFlush stderr >> hDuplicateTo saved stderr)
-      hSeek output AbsoluteSeek 0
-      diagnostics <- BSC.unpack <$> BS.hGetContents output
-      pure (result, diagnostics)
-
 resolutionPaths :: IO ()
 resolutionPaths = do
   original <- getCurrentDirectory
@@ -3635,7 +3737,8 @@ resolutionPaths = do
             fail "selected source cutoff retained a lower root or another extension"
     cold <- runPipelineSelected (PreparedProducts Nothing) target roots
     verify (pprDependencies cold)
-    writeManifestFor ["InstanceOwner"] work cold
+    coldFixture <- capturePreparedFixture work cold
+    writeManifestFor ["InstanceOwner"] work coldFixture
     withResidentPipelineSelected roots $ \compile -> do
       let reuse = compile (PreparedProducts (Just (manifest work))) Set.empty GeneralCompile
             Nothing target [] Nothing
@@ -3688,7 +3791,8 @@ mixedGraph required count = withScratch $ \work -> do
     (work </> "CacheEntry.hs") [work] (Just (work </> "build-products"))
   unless (Set.fromList (preparedNames cold) == Set.fromList ("CacheEntry" : expected)) $
     fail "mixed SOURCE producer omitted an original module"
-  writeGenuineCandidateManifestFor expected work (work </> "CacheEntry.hs") [work] cold
+  coldFixture <- capturePreparedFixture work cold
+  writeGenuineCandidateManifestFor expected work coldFixture
   withResidentPipelineSelected [work] $ \compile ->
     forM_ [1 .. 3 :: Int] $ \sample -> do
       hPutStrLn stderr ("mixed-source-start independent=" ++ show count

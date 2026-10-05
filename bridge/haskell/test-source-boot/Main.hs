@@ -1,6 +1,7 @@
 module Main (main, tests) where
 
 import Tidepool.Test.Runner (TestTree, runTests, testCase, testGroup, requiredInput)
+import Test.Tasty (withResource)
 import SourceBootCases
 import SourceBootFixtureSupport (withTiming, withScratch)
 import CandidateExecutionSourcesTest (candidateExecutionSourcesTest)
@@ -37,7 +38,13 @@ tests = testGroup "source-boot"
   , testCase "retained execution publication" $ retainedExecutionPublication
   , testCase "retained execution TH counter" $ retainedExecutionThCounter
   , testCase "exact reexport quoter" $ exactReexportQuoter
-  , testCase "exact hidden instance execution" $ exactExecutionHiddenInstance
+  , withResource acquireExecutionInstanceFixture releaseExecutionInstanceFixture $ \fixture ->
+      testGroup "exact instance execution"
+        [ testCase "sealed and qualified controls" $ exactExecutionSealedInstance fixture
+        , testCase "transitively imported orphan" $ exactExecutionTransitiveInstance fixture
+        , testCase "unrelated provider isolation and explicit import" $ exactExecutionUnrelatedInstance fixture
+        , testCase "class parent import and hiding" $ exactExecutionClassInstance fixture
+        ]
   , testCase "exact checked value execution" $ exactExecutionValues
   , testCase "exact to ordinary transition" $ exactToOrdinary
   , testCase "checked value imports" $ checkedValueImports

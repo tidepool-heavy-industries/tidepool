@@ -24,7 +24,7 @@ import Tidepool.Session (emptySessionScope, SessionScope(..))
 import GenuineCandidateFixture (writeGenuineExecutionScope)
 import SourceBootFixtureSupport
   ( withTiming, withScratch, writeExecutionScope, writeManifestFor
-  , manifest, preparedNames, hasIntResultLiteral )
+  , manifest, preparedNames, hasIntResultLiteral, capturePreparedFixture, captureDiagnostics )
 
 candidateExecutionSourcesTest :: IO ()
 candidateExecutionSourcesTest = withTiming $ withScratch $ \work -> do
@@ -32,24 +32,25 @@ candidateExecutionSourcesTest = withTiming $ withScratch $ \work -> do
     copyFile ("test-source-boot/fixtures" </> name) (work </> name)
   let source = work </> "ExecutionReexportFacade.hs"
       owners = ["MetadataQuoteSupport","MetadataQuoter"]
-      sourceScopePath = work </> "original-scope.cbor"
       candidatePath = manifest work
       helperName = "MetadataQuoteSupport"
       helperSource = work </> helperName ++ ".hs"
-      crossoverScopePath = work </> "candidate-original-scope.cbor"
-      crossoverScope = emptySessionScope {ssRoot=work,ssExactScope=Just crossoverScopePath}
-      crossover = runPipelineSessionSelected (PreparedProducts (Just candidatePath)) Set.empty
-        CertifyHomeProductsCompile (Just crossoverScope) source [work] Nothing
-      requireImporter result = unless
+      crossover scopePath = runPipelineSessionSelected (PreparedProducts (Just candidatePath)) Set.empty
+        CertifyHomeProductsCompile (Just emptySessionScope {ssRoot=work,ssExactScope=Just scopePath}) source [work] Nothing
+      requireImporter scopePath (result,diagnostics) = unless
         (map candidateModule (pprAcceptedCandidates result) == ["MetadataQuoter"]
           && helperName `notElem` preparedNames result) $
-        fail "exact dependency reuse rejected its importer or replaced the protected original"
+        fail ("exact dependency reuse rejected its importer or replaced the protected original"
+          ++ "\nretained offer=" ++ candidatePath ++ " scope=" ++ scopePath
+          ++ "\naccepted=" ++ show (map candidateOriginalIdentity (pprAcceptedCandidates result))
+          ++ " fresh=" ++ show (preparedNames result) ++ "\n" ++ diagnostics)
   original <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
     Nothing source [work] Nothing
-  writeExecutionScope sourceScopePath work original ["ExecutionReexportFacade"]
+  originalFixture <- capturePreparedFixture work original
+  sourceScopePath <- writeExecutionScope work originalFixture ["ExecutionReexportFacade"]
   originalScope <- readExactScope sourceScopePath >>= either fail pure
   executionScopeDescriptorChecks sourceScopePath
-  writeManifestFor owners work original
+  writeManifestFor owners work originalFixture
   offered <- readModuleCandidates candidatePath >>= either fail pure
   unless (Set.fromList (map candidateModule offered) == Set.fromList owners
       && all (maybe False (not . null . fst) . candidateExecutionSources) offered) $
@@ -62,10 +63,51 @@ candidateExecutionSourcesTest = withTiming $ withScratch $ \work -> do
     fail "real GHC admission did not accept the proven source-selected originals"
   -- The same production-issued compilation supplies interface closure, native
   -- owner selection and lexical adjacency; no checked-purpose grant is forged.
-  writeGenuineExecutionScope [helperName] [helperName] work source [work] crossoverScopePath original
-  crossover >>= requireImporter
+  crossoverScopePath <- writeGenuineExecutionScope [helperName] [helperName] work originalFixture
+  crossoverExact <- readExactScope crossoverScopePath >>= either fail pure
+  let helperKey = ("main",helperName)
+      helperCandidates = [candidate | candidate <- offered, candidateModule candidate == helperName]
+      helperNative = [identity | identity <- scopeExecutionNativeOwners crossoverExact
+        , executionIdentityKey identity == helperKey]
+  helperCandidate <- case helperCandidates of
+    [candidate] -> pure candidate
+    _ -> fail "original offer lacks exactly one helper identity"
+  let originalHelper = candidateOriginalIdentity helperCandidate
+  helperGraphNode <- case candidateExecutionSources helperCandidate of
+    Just (graphs,reference) -> either (fail . show) pure
+      (executionSourceOriginalNode graphs (executionRefIdentity reference) (executionRefGraph reference))
+    Nothing -> fail "original helper candidate lacks its authenticated graph binding"
+  importerCandidate <- case [candidate | candidate <- offered, candidateModule candidate == "MetadataQuoter"] of
+    [candidate] -> pure candidate
+    _ -> fail "original offer lacks exactly one importer"
+  importerGraphNode <- case candidateExecutionSources importerCandidate of
+    Just (graphs,reference) -> either (fail . show) pure
+      (executionSourceOriginalNode graphs (executionRefIdentity reference) (executionRefGraph reference))
+    Nothing -> fail "original importer candidate lacks its authenticated graph binding"
+  let importerGraph = executionNodeGraph importerGraphNode
+      importerHelperOwners = [owner | owner <- executionGraphOwners importerGraph
+        , executionIdentityKey (executionOwnerIdentity owner) == helperKey]
+      scopeHelperReferences = [reference | reference <- scopeExecutionOwners crossoverExact
+        , executionIdentityKey (executionRefIdentity reference) == helperKey]
+  unless (helperNative == [originalHelper]
+      && executionNodeIdentity helperGraphNode == originalHelper
+      && importerHelperOwners == [ExecutionSourceOwner originalHelper True Nothing]
+      && map executionRefIdentity scopeHelperReferences == [originalHelper]
+      && all (\reference -> executionRefGraph reference `elem`
+        map executionGraphSha256 (scopeExecutionGraphs crossoverExact)) scopeHelperReferences) $
+    fail ("shared original capture changed its helper native/interface tuple before crossover"
+      ++ "\noriginal=" ++ show originalHelper ++ " protected=" ++ show helperNative
+      ++ "\nhelper graph=" ++ show (executionGraphSha256 (executionNodeGraph helperGraphNode))
+      ++ " importer graph=" ++ show (executionGraphSha256 importerGraph)
+      ++ " importer helper owners=" ++ show importerHelperOwners
+      ++ " protected references=" ++ show scopeHelperReferences
+      ++ "\nretained offer=" ++ candidatePath ++ " scope=" ++ crossoverScopePath)
+  putStrLn ("candidate crossover original premise: helper=" ++ show originalHelper
+    ++ " importer_graph=" ++ executionGraphSha256 importerGraph
+    ++ " owners=" ++ show importerHelperOwners ++ " protected_refs=" ++ show scopeHelperReferences)
+  captureDiagnostics (crossover crossoverScopePath) >>= requireImporter crossoverScopePath
   bracket (BS.readFile helperSource <* removeFile helperSource) (BS.writeFile helperSource) $ \_ ->
-    crossover >>= requireImporter
+    captureDiagnostics (crossover crossoverScopePath) >>= requireImporter crossoverScopePath
   protectedRoot <- runPipelineSessionSelected (PreparedProducts (Just candidatePath)) Set.empty
     CertifyHomeProductsCompile Nothing (work </> "MetadataQuoter.hs") [work] Nothing
   unless ("MetadataQuoter" `notElem` map candidateModule (pprAcceptedCandidates protectedRoot)
@@ -74,8 +116,9 @@ candidateExecutionSourcesTest = withTiming $ withScratch $ \work -> do
   copyFile "test-source-boot/fixtures/MetadataQuoteSupportChanged.hs" helperSource
   differentOriginal <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
     Nothing helperSource [work] Nothing
-  writeExecutionScope crossoverScopePath work differentOriginal [helperName]
-  mismatched <- crossover
+  differentFixture <- capturePreparedFixture work differentOriginal
+  mismatchedScopePath <- writeExecutionScope work differentFixture [helperName]
+  mismatched <- crossover mismatchedScopePath
   unless (null (pprAcceptedCandidates mismatched) && "MetadataQuoter" `elem` preparedNames mismatched) $
     fail "cached importer admitted a different current exact dependency tuple"
   changed <- runPipelineSessionSelected (PreparedProducts (Just candidatePath)) Set.empty CertifyHomeProductsCompile
@@ -99,14 +142,13 @@ candidateExecutionSourcesTest = withTiming $ withScratch $ \work -> do
   unless (length shared == 2) (fail "two roots from one original cycle lost their shared helper")
   helperOriginal <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
     Nothing (work </> "MetadataQuoteSupport.hs") [work] Nothing
-  let helperScopePath = work </> "helper-only-original.cbor"
-  writeExecutionScope helperScopePath work helperOriginal ["MetadataQuoteSupport"]
+  helperFixture <- capturePreparedFixture work helperOriginal
+  helperScopePath <- writeExecutionScope work helperFixture ["MetadataQuoteSupport"]
   helperScope <- readExactScope helperScopePath >>= either fail pure
   -- The helper's independent receipt has a different graph digest but the
   -- same exact tuple; fresh parent edges retain their own graph provenance.
-  copyFile helperScopePath crossoverScopePath
-  independentlyAuthenticated <- crossover
-  requireImporter independentlyAuthenticated
+  independentlyAuthenticated <- captureDiagnostics (crossover helperScopePath)
+  requireImporter helperScopePath independentlyAuthenticated
   helperReference <- case scopeExecutionOwners helperScope of
     [value] -> pure value
     _ -> fail "helper-only source cycle has another native owner"
