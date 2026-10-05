@@ -151,6 +151,11 @@ without introducing another compiler, fixture registry or test runner.
    their own lifetime. An early compiler failure must retain its cause and
    cleanup result instead of waiting for the outer startup deadline. Qualify
    the focused two-child path before repeating all six expensive scenarios.
+   The next observed blocker is a native stack overflow after real child
+   admission. Compare the hosted-test thread/runtime contract with production
+   and capture a bounded native debugger backtrace from the exact frozen case.
+   Preserve stack limits during diagnosis. Repair the responsible recursion or
+   fixture divergence; a larger stack alone is not evidence of the cause.
 
 The delivery owner alone builds, freezes and runs the candidate. Fixture
 construction/ownership, semantic scenarios, and reply identity are separate
