@@ -22,7 +22,7 @@
 //! right alongside the underlying `BindingTable` call, so a turn's cost here
 //! is O(this turn's bindings), not O(session length).
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use tidepool_codegen::binding_table::{BindingEntry, BoundValue};
@@ -55,14 +55,6 @@ impl BindRecord {
     }
 }
 
-/// One live prepared-binding candidate for an import identity: its local
-/// binding generation and the id to fetch the full entry by.
-#[derive(Clone, Copy)]
-struct PreparedCandidate {
-    generation: u64,
-    id: SessionVarId,
-}
-
 /// Per-session indexes over the persistent binding store, maintained incrementally by
 /// [`super::persistent::PersistentSession`] alongside every bind and
 /// eviction. Never constructed or mutated anywhere else.
@@ -76,13 +68,12 @@ pub(crate) struct BindingIndex {
     /// Compiler-owned thin interfaces share the exact live binding lifetime.
     /// They carry type evidence only; native imports still resolve live roots.
     value_interfaces: BTreeMap<String, RetainedValueInterface>,
-    /// `(import identity, local generation)` pairs for every live prepared
-    /// binding with a recorded identity -- `PersistentSession::prepared_retained`.
-    prepared_retained: BTreeSet<(SymbolIdentity, u64)>,
-    /// Import identity -> live prepared candidates, for
-    /// `resolve_prepared_import`'s newest/exact-generation lookup. Order
-    /// within a `Vec` is not meaningful (only `max_by_key` over it is read).
-    prepared_by_identity: BTreeMap<SymbolIdentity, Vec<PreparedCandidate>>,
+    /// Import identity -> generation -> live binding ids. Generation membership
+    /// is the single owner of both retained-pair enumeration and exact/latest
+    /// resolution. Distinct live ids can share one identity/generation pair;
+    /// evicting one must preserve it until the last id leaves.
+    /// Order within an id vector has no semantic meaning.
+    prepared_by_identity: BTreeMap<SymbolIdentity, BTreeMap<u64, Vec<SessionVarId>>>,
     /// How many live entries currently resolve to each root-slot address --
     /// the aliasing refcount `release_binding_roots` used to recompute by
     /// scanning every live binding per evicted entry. Keyed by the address
@@ -226,15 +217,12 @@ impl BindingIndex {
             .entry(record.root.addr() as usize)
             .or_insert(0) += 1;
         let generation = record.module.gen().0;
-        self.prepared_retained
-            .insert((record.identity.clone(), generation));
         self.prepared_by_identity
             .entry(record.identity.clone())
             .or_default()
-            .push(PreparedCandidate {
-                generation,
-                id: record.id,
-            });
+            .entry(generation)
+            .or_default()
+            .push(record.id);
     }
 
     /// [`Self::on_evict`] for a pre-built [`BindRecord`] (see
@@ -248,13 +236,17 @@ impl BindingIndex {
                 self.value_interfaces.remove(&module);
             }
         }
-        self.prepared_retained
-            .remove(&(record.identity.clone(), record.module.gen().0));
-        if let Some(candidates) = self.prepared_by_identity.get_mut(&record.identity) {
-            if let Some(pos) = candidates.iter().position(|c| c.id == record.id) {
-                candidates.swap_remove(pos);
+        if let Some(generations) = self.prepared_by_identity.get_mut(&record.identity) {
+            let generation = record.module.gen().0;
+            if let Some(ids) = generations.get_mut(&generation) {
+                if let Some(pos) = ids.iter().position(|id| *id == record.id) {
+                    ids.swap_remove(pos);
+                }
+                if ids.is_empty() {
+                    generations.remove(&generation);
+                }
             }
-            if candidates.is_empty() {
+            if generations.is_empty() {
                 self.prepared_by_identity.remove(&record.identity);
             }
         }
@@ -291,25 +283,31 @@ impl BindingIndex {
     /// Sorted, deduplicated `(identity, generation)` pairs for every live
     /// prepared binding with a recorded identity.
     pub(super) fn prepared_retained(&self) -> Vec<(SymbolIdentity, u64)> {
-        self.prepared_retained.iter().cloned().collect()
+        self.prepared_by_identity
+            .iter()
+            .flat_map(|(identity, generations)| {
+                generations
+                    .keys()
+                    .map(move |generation| (identity.clone(), *generation))
+            })
+            .collect()
     }
 
-    /// The id of the newest live prepared binding whose recorded import
-    /// identity is `identity` (optionally pinned to an exact generation),
-    /// mirroring `iter_live().filter(..).max_by_key(|e| e.module.gen())`.
-    /// Generations are unique per live entry (minted monotonically per
-    /// bind), so no tie-break policy is observable.
+    /// One live prepared binding at the newest eligible generation for `identity`,
+    /// optionally pinned to an exact generation. Multiple immutable ids may
+    /// share an identity/generation pair; their lookup order is unspecified,
+    /// as it was in the underlying `BindingTable::iter_live` HashMap scan.
     pub(super) fn resolve_prepared(
         &self,
         identity: &SymbolIdentity,
         generation: Option<u64>,
     ) -> Option<SessionVarId> {
-        let candidates = self.prepared_by_identity.get(identity)?;
-        candidates
-            .iter()
-            .filter(|c| generation.is_none_or(|g| c.generation == g))
-            .max_by_key(|c| c.generation)
-            .map(|c| c.id)
+        let generations = self.prepared_by_identity.get(identity)?;
+        let ids = match generation {
+            Some(generation) => generations.get(&generation)?,
+            None => generations.last_key_value()?.1,
+        };
+        ids.last().copied()
     }
 }
 
@@ -604,9 +602,14 @@ mod tests {
                     generation,
                     root,
                 };
+                self.rebind(binding);
+                binding
+            }
+
+            fn rebind(&mut self, binding: Binding) {
+                assert!(self.live.iter().all(|entry| entry.id != binding.id));
                 self.live.push(binding);
                 self.ops.push(Op::Bind(binding));
-                binding
             }
 
             fn source(&mut self, selector: usize) -> Binding {
@@ -685,9 +688,20 @@ mod tests {
                     2 => {
                         self.evict(original.id);
                         self.ops.push(Op::Read(0, Some(generation)));
-                        self.bind(0, generation, ROOTS);
+                        // Reinstall the exact immutable id after eviction,
+                        // as well as new-id reinsertion in the shared cohort.
+                        self.rebind(original);
                         self.ops.push(Op::Legacy(generation));
                         self.ops.push(Op::Read(0, Some(generation)));
+                    }
+                    3 => {
+                        let duplicate = self.bind(0, generation, ROOTS);
+                        self.ops.push(Op::Read(0, Some(generation)));
+                        self.evict(original.id);
+                        self.ops.push(Op::Read(0, Some(generation)));
+                        self.evict(duplicate.id);
+                        self.ops.push(Op::Read(0, Some(generation)));
+                        self.rebind(original);
                     }
                     _ => unreachable!("bounded cohort selector"),
                 }
@@ -713,7 +727,7 @@ mod tests {
         fn guided_history() -> impl Strategy<Value = (u8, Vec<Op>)> {
             (
                 proptest::collection::vec(choice(), 0..17),
-                0u8..3,
+                0u8..4,
                 proptest::collection::vec(choice(), 0..17),
             )
                 .prop_map(|(prefix, cohort, suffix)| {
@@ -730,6 +744,7 @@ mod tests {
             binds: usize,
             shadows: usize,
             shared_modules: usize,
+            shared_pairs: usize,
             shared_roots: usize,
             reinsertions: usize,
             evictions: usize,
@@ -815,8 +830,13 @@ mod tests {
                     Op::Bind(binding) => {
                         let name = identity(&format!("name_{}", binding.identity));
                         assert!(live.iter().all(|entry| entry.id.raw() != binding.id));
-                        support.shadows +=
-                            usize::from(live.iter().any(|entry| entry.identity == name));
+                        support.shadows += usize::from(live.iter().any(|entry| {
+                            entry.identity == name && entry.module.gen().0 != binding.generation
+                        }));
+                        let pair_live = live.iter().any(|entry| {
+                            entry.identity == name && entry.module.gen().0 == binding.generation
+                        });
+                        support.shared_pairs += usize::from(pair_live);
                         support.shared_modules += usize::from(
                             live.iter()
                                 .any(|entry| entry.module.gen().0 == binding.generation),
@@ -825,8 +845,9 @@ mod tests {
                             live.iter()
                                 .any(|entry| entry.root.addr() == slots[binding.root].addr()),
                         );
-                        support.reinsertions +=
-                            usize::from(seen.contains(&(binding.identity, binding.generation)));
+                        support.reinsertions += usize::from(
+                            !pair_live && seen.contains(&(binding.identity, binding.generation)),
+                        );
                         seen.push((binding.identity, binding.generation));
                         let entry =
                             record(binding.generation, binding.id, slots[binding.root], &name);
@@ -940,6 +961,11 @@ mod tests {
                         prop_assert!(support.reinsertions >= 1, "{support:?}");
                     }
                     2 => prop_assert!(support.reinsertions >= 1, "{support:?}"),
+                    3 => {
+                        prop_assert!(support.shared_pairs >= 1, "{support:?}");
+                        prop_assert!(support.held_roots >= 1, "{support:?}");
+                        prop_assert!(support.reinsertions >= 1, "{support:?}");
+                    }
                     _ => unreachable!("bounded cohort selector"),
                 }
                 prop_assert!(support.released_roots >= 1, "{support:?}");
@@ -948,7 +974,7 @@ mod tests {
 
         #[test]
         fn guided_cohorts_exercise_shadow_shared_root_and_reinsertion() {
-            for cohort in 0..3 {
+            for cohort in 0..4 {
                 let mut history = History::default();
                 history.guided(cohort);
                 let support = replay(&history.finish());
@@ -969,9 +995,16 @@ mod tests {
                         support.reinsertions > 0 && support.legacy > 0,
                         "{support:?}"
                     ),
+                    3 => assert!(
+                        support.shared_pairs > 0
+                            && support.held_roots > 0
+                            && support.reinsertions > 0,
+                        "{support:?}"
+                    ),
                     _ => unreachable!("bounded cohort selector"),
                 }
                 assert!(support.released_roots > 0, "{support:?}");
+                eprintln!("BindingIndex cohort {cohort} support: {support:?}");
             }
         }
     }
