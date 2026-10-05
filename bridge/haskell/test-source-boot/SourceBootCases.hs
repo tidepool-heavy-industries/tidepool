@@ -1397,6 +1397,22 @@ exactExecutionUnrelatedInstance getFixture = withExecutionInstanceFixture getFix
         | owner == sealedOwner, dependency == orphanOwner -> pure ()
       Left reason -> fail ("missing canonical orphan refused for another reason: " ++ show reason)
       Right _ -> fail "canonical bytecode selection bypassed its exact orphan dependency seal"
+    sealedArtifact <- case [artifact | (artifact,_,_) <- scopeInterfaces exact
+        , (exactUnit artifact,exactModule artifact) == sealedOwner] of
+      [artifact] -> pure artifact
+      _ -> fail "sealed canonical execution owner is missing or duplicated"
+    let artifacts = [artifact | (artifact,_,_) <- scopeInterfaces exact]
+        wrongRootSeal artifact
+          | (exactUnit artifact,exactModule artifact) == sealedOwner = artifact {exactSha256=replicate 64 '0'}
+          | otherwise = artifact
+    case retainedCompilerArtifactClosure exact (map wrongRootSeal artifacts) [sealedOwner] of
+      Left (FinalizedExecutionInterfaceMismatch owner) | owner == sealedOwner -> pure ()
+      Left reason -> fail ("changed canonical root seal refused for another reason: " ++ show reason)
+      Right _ -> fail "canonical bytecode selection admitted another root interface seal"
+    case retainedCompilerArtifactClosure exact (sealedArtifact : artifacts) [sealedOwner] of
+      Left (FinalizedExecutionDuplicateOwner owner) | owner == sealedOwner -> pure ()
+      Left reason -> fail ("duplicate canonical owner refused for another reason: " ++ show reason)
+      Right _ -> fail "canonical bytecode selection silently selected a duplicate owner"
     (rejected,diagnostics) <- captureDiagnostics (sourceFailureDiagnostics
       (compile CheckedEnvironment Set.empty GeneralCompile (Just scope) target [work] Nothing))
     case rejected of

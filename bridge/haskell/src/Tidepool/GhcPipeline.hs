@@ -3904,6 +3904,8 @@ data RetainedCompilerModule = RetainedCompilerModule
 
 data FinalizedExecutionFailure
   = FinalizedExecutionOwnerMissing (String, String)
+  | FinalizedExecutionDuplicateOwner (String, String)
+  | FinalizedExecutionInterfaceMismatch (String, String)
   | FinalizedExecutionDependencyMismatch (String, String) (String, String)
   | FinalizedExecutionCycle (String, String)
   | FinalizedExecutionCoreMissing (String, String)
@@ -3931,10 +3933,17 @@ retainedCompilerArtifactClosure
   :: ExactScope -> [ExactIfaceArtifact] -> [(String, String)]
   -> Either FinalizedExecutionFailure [RetainedCompilerArtifact]
 retainedCompilerArtifactClosure scope interfaces roots = do
+  _ <- foldM uniqueOwner Set.empty interfaces
   (_, modules) <- foldM (visit Set.empty) (Set.empty, []) roots
   pure (reverse modules)
   where
     admissions = scopeSourceOriginalInterfaces scope
+    admittedArtifacts = Map.fromList [((exactUnit artifact, exactModule artifact), artifact)
+      | (artifact,_,_) <- scopeInterfaces scope]
+    uniqueOwner owners artifact =
+      let key = (exactUnit artifact,exactModule artifact)
+      in if key `Set.member` owners then Left (FinalizedExecutionDuplicateOwner key)
+         else Right (Set.insert key owners)
     artifacts = Map.fromList [((exactUnit artifact, exactModule artifact), artifact)
       | artifact <- interfaces]
     visit active state@(completed, _) key
@@ -3944,6 +3953,9 @@ retainedCompilerArtifactClosure scope interfaces roots = do
       | otherwise = do
           admission <- maybe (Left (FinalizedExecutionOwnerMissing key)) Right (Map.lookup key admissions)
           artifact <- maybe (Left (FinalizedExecutionOwnerMissing key)) Right (Map.lookup key artifacts)
+          admitted <- maybe (Left (FinalizedExecutionOwnerMissing key)) Right (Map.lookup key admittedArtifacts)
+          unless (exactSha256 artifact == exactSha256 admitted) $
+            Left (FinalizedExecutionInterfaceMismatch key)
           let requirements = Map.toAscList (admittedInterfaceRequirements admission)
           dependencyArtifacts <- forM requirements $ \(required, seal) -> case Map.lookup required artifacts of
             Just dependency | exactSha256 dependency == seal -> Right dependency
