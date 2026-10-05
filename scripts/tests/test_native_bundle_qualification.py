@@ -596,6 +596,97 @@ class CatalogSourceTests(unittest.TestCase):
         receipt = json.loads((output / qualification.NATIVE_CATALOG_BUILD).read_text())
         self.assertEqual(receipt['catalog_sha256'], qualification.sha256(output / 'catalog.json'))
 
+    def producer_args(self, original, tools, record, output):
+        paths = {}
+        for name in ('producer', 'frontend', 'worker', 'deployment'):
+            paths[name] = self.root / name
+            paths[name].write_text(name)
+        return SimpleNamespace(runtime_tools=tools, retention_record=record, snapshot=self.snapshot,
+            retention_record_origin=record, source_root=original, declared_source_root=original,
+            ghc_libdir=tools, libraries=tools, output=output, timeout=900, **paths)
+
+    def test_build_producer_refusal_still_rechecks_complete_retention(self):
+        original, tools, record, pin, nar = self.retained_fixture()
+        args = self.producer_args(original, tools, record, self.root / 'refused-products')
+        calls = []
+        def execute(command, **kwargs):
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0 if '--verify-path' in command else 7)
+        with self.nix_checks(nar, [pin]), patch.object(qualification.subprocess, 'run', side_effect=execute):
+            with self.assertRaises(subprocess.CalledProcessError) as failure:
+                qualification.build_native_catalog(args)
+        self.assertEqual(failure.exception.returncode, 7)
+        self.assertEqual(sum('--verify-path' in command for command in calls), 2)
+        self.assertFalse((args.output / qualification.NATIVE_CATALOG_BUILD).exists())
+        self.assertFalse(args.output.with_name(args.output.name + '.invocation').exists())
+
+    def test_inspection_preserves_refusal_and_secondary_retention_failure_distinctly(self):
+        original, tools, record, pin, nar = self.retained_fixture()
+        args = self.producer_args(original, tools, record, self.root / 'inspection')
+        def execute(command, **kwargs):
+            if '--verify-path' in command:
+                return subprocess.CompletedProcess(command, 0)
+            self.assertEqual(command[1], 'inspect')
+            self.assertEqual(kwargs['cwd'], args.output.with_name(args.output.name + '.invocation'))
+            self.assertFalse(args.output.exists())
+            kwargs['stderr'].write(b'unsafe cache_safe refusal\n')
+            (original / 'lib/Library.hs').write_text('source changed during failed inspection')
+            return subprocess.CompletedProcess(command, 9)
+        with self.nix_checks(nar, [pin]), patch.object(qualification.subprocess, 'run', side_effect=execute):
+            with self.assertRaisesRegex(ValueError, 'producer failed:.*retention recheck failed:'):
+                qualification.inspect_native_catalog(args)
+        evidence = args.output.with_name(args.output.name + '.invocation')
+        report = json.loads((evidence / 'outcome.json').read_text())
+        self.assertEqual(report['producer_exit_code'], 9)
+        self.assertIn('returned non-zero exit status 9', report['producer_error'])
+        self.assertFalse(report['retention_recheck']['passed'])
+        self.assertIn('declared action snapshot', report['retention_recheck']['error'])
+        self.assertFalse(report['catalog_qualified'])
+        self.assertFalse(report['completed'])
+        self.assertEqual((evidence / 'stderr.log').read_bytes(), b'unsafe cache_safe refusal\n')
+        self.assertFalse((args.output / 'catalog.json').exists())
+        self.assertFalse((args.output / qualification.NATIVE_CATALOG_BUILD).exists())
+
+    def test_inspection_timeout_keeps_durable_logs_and_rechecks_retention(self):
+        original, tools, record, pin, nar = self.retained_fixture()
+        args = self.producer_args(original, tools, record, self.root / 'timed-out-inspection')
+        calls = []
+        def execute(command, **kwargs):
+            calls.append(command)
+            if '--verify-path' in command:
+                return subprocess.CompletedProcess(command, 0)
+            self.assertEqual(kwargs['timeout'], 900)
+            self.assertEqual(kwargs['cwd'], args.output.with_name(args.output.name + '.invocation'))
+            kwargs['stdout'].write(b'compiler started\n')
+            kwargs['stderr'].write(b'partial compiler diagnostics\n')
+            raise subprocess.TimeoutExpired(command, kwargs['timeout'])
+        with self.nix_checks(nar, [pin]), patch.object(qualification.subprocess, 'run', side_effect=execute), \
+             patch.dict(os.environ, {'INSPECTION_AMBIENT_SECRET': 'private-ambient-credential'}):
+            with self.assertRaises(subprocess.TimeoutExpired):
+                qualification.inspect_native_catalog(args)
+        evidence = args.output.with_name(args.output.name + '.invocation')
+        report = json.loads((evidence / 'outcome.json').read_text())
+        self.assertNotIn('INSPECTION_AMBIENT_SECRET', (evidence / 'invocation.json').read_text())
+        self.assertNotIn('private-ambient-credential', (evidence / 'outcome.json').read_text())
+        self.assertTrue(report['timed_out'])
+        self.assertIsNone(report['producer_exit_code'])
+        self.assertTrue(report['retention_recheck']['passed'])
+        self.assertFalse(report['catalog_qualified'])
+        self.assertFalse(report['completed'])
+        self.assertEqual(sum('--verify-path' in command for command in calls), 2)
+        self.assertEqual((evidence / 'stdout.log').read_bytes(), b'compiler started\n')
+        self.assertEqual((evidence / 'stderr.log').read_bytes(), b'partial compiler diagnostics\n')
+        self.assertFalse((args.output / qualification.NATIVE_CATALOG_BUILD).exists())
+
+    def test_inspection_timeout_bounds_refuse_before_source_or_process_work(self):
+        for timeout in (-1, 0, 599, 1801):
+            with self.subTest(timeout=timeout), patch.object(qualification, 'nix_path') as selected, \
+                 patch.object(qualification.subprocess, 'run') as execute:
+                with self.assertRaisesRegex(ValueError, 'between 600 and 1800'):
+                    qualification.inspect_native_catalog(SimpleNamespace(timeout=timeout))
+            selected.assert_not_called()
+            execute.assert_not_called()
+
 
 if __name__ == '__main__':
     unittest.main()

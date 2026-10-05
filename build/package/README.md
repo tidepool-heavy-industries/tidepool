@@ -75,6 +75,41 @@ module/interface validation; qualification also binds the full original source
 inventory and NAR identity. Source tests do not establish a compiled native
 catalog, M1/M2 execution or live deployment acceptance.
 
+When catalog production refuses admission, inspect the same declared inputs
+through the existing owner. `inspect-catalog` invokes the producer's typed
+`inspect` operation with the same original probe, ordered source roots and
+explicit compiler deployment. It never creates a catalog build receipt or
+qualification acceptance. The producer reports inventory only after its real
+product-certification boundary; unsafe or incomplete source evidence remains
+a refusal with retained raw diagnostics.
+
+```sh
+swarm-build "$DECLARED_RUNTIME_TOOLS/bin/python3" build/package/qualification.py inspect-catalog \
+  --snapshot "$BUCK_CATALOG_SOURCES" \
+  --source-root "$CATALOG_SOURCES" --declared-source-root "$BUCK_DECLARED_SOURCE_ROOT" \
+  --retention-record "$BUCK_DECLARED_RETENTION_RECORD" --retention-record-origin "$CATALOG_RECORD" \
+  --runtime-tools "$DECLARED_RUNTIME_TOOLS" --producer "$BUCK_MODULE_PACKAGE" \
+  --frontend "$BUCK_FRONTEND" --worker "$BUCK_WORKER" \
+  --deployment "$BUCK_COMPILER_DEPLOYMENT" --ghc-libdir "$DECLARED_GHC_LIBDIR" \
+  --libraries "$BUCK_WORKER_RUNTIME_LIBRARIES" \
+  --output "$INSPECTION_OUTPUT" --timeout 900
+```
+
+All `BUCK_` paths above are the exact declared outputs used by the catalog action,
+not ambient compiler selections. `INSPECTION_OUTPUT` is a new canonical path in
+private evidence. The sibling `INSPECTION_OUTPUT.invocation` holds the exact
+argv and declared environment, stdout, stderr and final outcome, and is the producer's working
+directory so retained outer scratch stays with its evidence. The producer owns
+recursive compiler diagnostics under its output. Inspection requires an explicit
+producer wall limit of 600–1800 seconds. Python kills and waits for the producer
+on timeout; the extractor owns its child lifetime hooks. The startup protocol
+probe in `PreparedWorker::check_request_protocol` still requires its process
+ownership hook before full timeout cleanup can be accepted. Source tests do not
+establish descendant cleanup. Nix preflight and final retention checks have
+their existing separate limits. Complete inventories, NAR identity and actual
+GC registration are rechecked after success, refusal or timeout. A producer
+refusal and a later retention failure are recorded separately.
+
 Build the native bundle and
 `//build/testing/browser:driver_bundle` in one selected native profile. Retain the
 actual successful build log and its argv arrays as JSON. Source must have clean

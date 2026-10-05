@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from enum import Enum
 import hashlib
 import json
 import os
@@ -359,29 +360,102 @@ def transfer_catalog_retention(root: Path, contract: dict, gc_roots: list[dict],
     verify_native_catalog(root, tools)
 
 
-def build_native_catalog(args) -> None:
+class CatalogProducerOperation(Enum):
+    BUILD = "build"
+    INSPECT = "inspect"
+
+
+def invoke_retained_catalog_producer(args, operation: CatalogProducerOperation) -> Path:
+    """One source/retention/compiler boundary for production and inspection."""
+    if operation is CatalogProducerOperation.INSPECT and not 600 <= args.timeout <= 1800:
+        raise ValueError("inspection timeout must be between 600 and 1800 seconds")
     tools = nix_path(args.runtime_tools)
     original = verify_retained_catalog_sources(args.retention_record, args.snapshot, tools,
                                                 record_origin=args.retention_record_origin)
     if args.source_root != original or catalog_source_inventory(args.declared_source_root.resolve(strict=True)) != catalog_source_inventory(original):
         raise ValueError("configured catalog root differs from the complete declared source snapshot")
     output = args.output.absolute()
-    if output != output.resolve():
-        raise ValueError("native catalog requires a canonical action output")
-    environment = execution_environment({"environment": {
+    if output != output.resolve() or output.exists():
+        raise ValueError("native catalog requires an absent canonical action output")
+    declared_environment = {
         "TIDEPOOL_EXTRACT": str(args.frontend.resolve(strict=True)),
         "TIDEPOOL_EXTRACT_WORKER": str(args.worker.resolve(strict=True)),
         "TIDEPOOL_COMPILER_DEPLOYMENT": str(args.deployment.resolve(strict=True)),
         "TIDEPOOL_GHC_LIBDIR": str(nix_path(args.ghc_libdir)),
         "LD_LIBRARY_PATH": str(args.libraries.resolve(strict=True)),
         "PATH": str(tools / "bin"),
-    }})
-    command = [str(args.producer.resolve(strict=True)), "build", "--source", str(original / "TidepoolCatalog.hs"),
+    }
+    environment = execution_environment({"environment": declared_environment})
+    command = [str(args.producer.resolve(strict=True)), operation.value, "--source", str(original / "TidepoolCatalog.hs"),
                "--target", "catalogSentinel", "--source-root", str(original), "--output-root", str(output)]
-    subprocess.run(command, env=environment, check=True)
-    # Recheck the entire inventory after the producer has consumed it.
-    verify_retained_catalog_sources(args.retention_record, args.snapshot, tools,
-                                   record_origin=args.retention_record_origin)
+    invocation_root = output.with_name(output.name + ".invocation") if operation is CatalogProducerOperation.INSPECT else None
+    primary = None
+    secondary = None
+    return_code = None
+    started = time.monotonic_ns()
+    invocation = {
+        "schema": 1, "kind": "native-catalog-producer-inspection",
+        "command": command, "declared_environment": declared_environment,
+        "unset_environment": UNSET_ENVIRONMENT, "output_root": str(output),
+        "retention_record": str(args.retention_record),
+        "retention_record_origin": str(args.retention_record_origin),
+        "source_inventory_sha256": json.loads(args.retention_record.read_text())["inventory_sha256"],
+        "catalog_qualified": False,
+    }
+    if invocation_root is not None:
+        invocation_root.mkdir(parents=True, exist_ok=False)
+        invocation.update(timeout_seconds=args.timeout, cwd=str(invocation_root), stdout=str(invocation_root / "stdout.log"),
+                          stderr=str(invocation_root / "stderr.log"))
+        write_json(invocation_root / "invocation.json", invocation)
+    try:
+        if invocation_root is None:
+            result = subprocess.run(command, env=environment, check=False)
+        else:
+            # The extractor owns child lifetime hooks. subprocess.run kills
+            # and waits for its producer on timeout; do not duplicate that
+            # process-tree policy in this invocation owner.
+            with (invocation_root / "stdout.log").open("wb") as stdout, (invocation_root / "stderr.log").open("wb") as stderr:
+                result = subprocess.run(command, env=environment, check=False,
+                                        stdout=stdout, stderr=stderr, timeout=args.timeout, cwd=invocation_root)
+        return_code = result.returncode
+        if return_code != 0:
+            primary = subprocess.CalledProcessError(return_code, command)
+    except BaseException as error:
+        primary = error
+    finally:
+        # A refusal or timeout does not waive custody of the consumed originals.
+        try:
+            verify_retained_catalog_sources(args.retention_record, args.snapshot, tools,
+                                           record_origin=args.retention_record_origin)
+        except Exception as error:
+            secondary = error
+        if invocation_root is not None:
+            write_json(invocation_root / "outcome.json", {
+                **invocation, "producer_exit_code": return_code,
+                "timed_out": isinstance(primary, subprocess.TimeoutExpired),
+                "producer_error": str(primary) if primary is not None else None,
+                "retention_recheck": {"passed": secondary is None,
+                                      "error": str(secondary) if secondary is not None else None},
+                "completed": primary is None and secondary is None,
+                "elapsed_ns": time.monotonic_ns() - started,
+            })
+    if primary is not None:
+        if secondary is not None:
+            raise ValueError(f"producer failed: {primary}; retention recheck failed: {secondary}") from primary
+        raise primary
+    if secondary is not None:
+        raise secondary
+    return original
+
+
+def inspect_native_catalog(args) -> Path:
+    invoke_retained_catalog_producer(args, CatalogProducerOperation.INSPECT)
+    return args.output.absolute().with_name(args.output.name + ".invocation")
+
+
+def build_native_catalog(args) -> None:
+    original = invoke_retained_catalog_producer(args, CatalogProducerOperation.BUILD)
+    output = args.output.absolute()
     selection = native_catalog_selection(output / "catalog.json", original)
     retained = json.loads(args.retention_record.read_text())
     shutil.copy2(args.retention_record, output / "source-retention.json")
@@ -898,9 +972,14 @@ def main(argv=None) -> int:
     selected = commands.add_parser("select-sources")
     for key in ("record", "snapshot", "runtime-tools"):
         selected.add_argument("--" + key, required=True, type=Path)
-    catalog = commands.add_parser("build-catalog")
-    for key in ("snapshot", "source-root", "declared-source-root", "retention-record", "retention-record-origin", "runtime-tools", "producer", "frontend", "worker", "deployment", "ghc-libdir", "libraries", "output"):
-        catalog.add_argument("--" + key, required=True, type=Path)
+    producer_inputs = ("snapshot", "source-root", "declared-source-root", "retention-record", "retention-record-origin", "runtime-tools", "producer", "frontend", "worker", "deployment", "ghc-libdir", "libraries", "output")
+    for name in ("build-catalog", "inspect-catalog"):
+        catalog = commands.add_parser(name)
+        for key in producer_inputs:
+            catalog.add_argument("--" + key, required=True, type=Path)
+        if name == "inspect-catalog":
+            catalog.add_argument("--timeout", required=True, type=int,
+                                 help="producer wall limit in seconds (600–1800)")
     gate = commands.add_parser("catalog-gate")
     gate.add_argument("descriptor", type=Path)
     gate.add_argument("--output", type=Path, required=True)
@@ -942,6 +1021,8 @@ def main(argv=None) -> int:
             print(verify_retained_catalog_sources(args.record, args.snapshot, nix_path(args.runtime_tools)))
         elif args.command == "build-catalog":
             build_native_catalog(args)
+        elif args.command == "inspect-catalog":
+            print(inspect_native_catalog(args))
         elif args.command == "catalog-gate":
             return run_catalog_gate(args)
         elif args.command == "assemble":
