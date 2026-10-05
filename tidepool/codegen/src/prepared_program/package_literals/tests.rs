@@ -643,21 +643,39 @@ fn source_literal_original_group_executes_without_a_managed_address_handle() {
 fn source_literal_missing_or_wrong_version_evidence_stays_refused() {
     let registry = ImageRegistry::new();
     let producer = source_literal_producer(literal_owner(), 1, BYTES, &registry);
+    let registry_counts = (registry.hits(), registry.misses());
     for supplied in [BTreeMap::new(), producer.source_literals()] {
         let version = if supplied.is_empty() {
             ModuleVersion([4; 32])
         } else {
             ModuleVersion([9; 32])
         };
-        assert!(matches!(
-            DemandedImage::compile_with_literals(
-                source_literal_consumer(false, version),
-                &registry,
-                &BTreeMap::new(),
-                &supplied,
-            ),
-            Err(DemandError::Compile(CompileError::Unsupported(_)))
-        ));
+        let group = source_literal_consumer(false, version);
+        let owner = (group.owner().clone(), group.original_ordinal());
+        let declaration = group.definitions().globals()[0].clone();
+        let error = match DemandedImage::compile_with_literals(
+            group,
+            &registry,
+            &BTreeMap::new(),
+            &supplied,
+        ) {
+            Ok(_) => panic!("absent or wrong-version literal proof admitted"),
+            Err(error) => error,
+        };
+        let DemandError::Compile(CompileError::Unsupported(super::super::Unsupported::Global(
+            refusal,
+        ))) = error
+        else {
+            panic!("expected original global refusal, got {error:?}");
+        };
+        assert_eq!(refusal.id, GlobalId(0));
+        assert_eq!(
+            refusal.phase,
+            super::super::GlobalRefusalPhase::NonReferenceRepresentation
+        );
+        assert_eq!(refusal.declaration, Some(declaration));
+        assert_eq!(refusal.source_group, Some(owner));
+        assert_eq!((registry.hits(), registry.misses()), registry_counts);
     }
 }
 

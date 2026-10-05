@@ -674,7 +674,16 @@ impl DemandedImage {
         sources: &BTreeMap<SourceBinder, super::SourceLiteral>,
     ) -> Result<Self, DemandError> {
         let literals =
-            super::package_literals::GroupPackageLiterals::select(&group, packages, sources)?;
+            super::package_literals::GroupPackageLiterals::select(&group, packages, sources)
+                .map_err(|mut error| {
+                    if let CompileError::Unsupported(super::Unsupported::Global(refusal)) =
+                        &mut error
+                    {
+                        refusal.source_group =
+                            Some((group.owner().clone(), group.original_ordinal()));
+                    }
+                    error
+                })?;
         let image = registry.get_or_compile_literal_group(&group, &literals, || {
             CompiledProgram::compile_certified_group_with_literals(&group, &literals).map(Arc::new)
         })?;
