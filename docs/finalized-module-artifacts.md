@@ -6,10 +6,10 @@ interfaces are provisional and cannot issue this certificate.
 
 ## Worker receipt
 
-`TPCERT8` is exactly nine CBOR fields:
+`TPCERT9` is exactly nine CBOR fields:
 
 ```
-["TPCERT", 8, nativeModules, targets, packages, globalDictionary, envelope, sourceRecipe, ownerCoordinates]
+["TPCERT", 9, nativeModules, targets, packages, globalDictionary, envelope, sourceRecipe, ownerCoordinates]
 envelope = ["tidepool-ghc-finalized-module-v1", homeUnits, finalizedModules]
 ```
 

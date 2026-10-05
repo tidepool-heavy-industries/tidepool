@@ -105,7 +105,7 @@ import Tidepool.PreparedFacts (PreparedFacts(..), extractPreparedFacts)
 import Tidepool.Identity (varId)
 import Tidepool.PreparedStg
   ( PreparedModule, PreparedCoverage(..), pmModule, pmCoverage, pmBindings
-  , pmTypeGraph, pmPreparedSites, pmSiteRejections, pmRequestSiteTyCon, pmTagSigs
+  , pmTypeGraph, pmPreparedSites, pmSiteRejections, pmRequestSiteTyCon
   , filterPreparedBindings, preparedRejectsIntrinsic )
 import Tidepool.PreparedSites (SiteRejection(..))
 import Tidepool.PreparedSites (PreparedSite(..), requestReplyIndex)
@@ -317,7 +317,7 @@ projectOriginalHomeModuleProductDemand env interfaces context externalBinders mo
         , (_, _, Right projected) <- outcomes ]
       unavailableHomeReferences = Set.fromList
         [ globalIdentity global
-        | (prepared, outcomes) <- originalRows
+        | (_, outcomes) <- originalRows
         , (_, _, Right projected) <- outcomes
         , global <- projectedGlobals (projectedBody projected)
         , globalRequiredGeneration global == Nothing
@@ -332,7 +332,7 @@ projectOriginalHomeModuleProductDemand env interfaces context externalBinders mo
         , isJust (Map.lookup owner rowsByOwner) ]
       unavailableOwners = closeUnavailableOriginalModules dependencies groupOwners
         (Set.fromList [(owner, ordinal) | owner <- Set.toList initialUnavailableOwners
-          , (symbol, (owner', ordinal)) <- Map.toList groupOwners, owner' == owner])
+          , (_, (owner', ordinal)) <- Map.toList groupOwners, owner' == owner])
       finish prepared = case purpose prepared of
         ExecutableTarget -> (pmModule prepared,
           projectPreparedModuleGroupsFor ExecutableTarget context prepared Nothing, [])

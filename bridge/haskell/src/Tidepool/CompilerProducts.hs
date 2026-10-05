@@ -135,8 +135,7 @@ prepareOriginalProducts env exact interfaces context external initial = go initi
           definedOwners = Set.fromList (map pmModule modules)
           pending = Set.toAscList (Set.fromList
             [owner | identity <- Set.toAscList demands
-              , let owner = mkModule (stringToUnit (T.unpack (symbolUnit identity)))
-                    (mkModuleName (T.unpack (symbolModule identity)))
+              , let owner = mkModule (stringToUnit (T.unpack (symbolUnit identity))) (mkModuleName (T.unpack (symbolModule identity)))
               , owner `Set.notMember` definedOwners, owner `Set.notMember` attempted])
       recovered <- forM pending $ \owner -> case exact of
         Nothing -> pure Nothing
