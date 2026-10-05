@@ -55,7 +55,7 @@ import qualified GHC.Linker.Loader as Linker
 import GHC.Iface.Make (mkIfaceTc, mkPartialIface, mkFullIface)
 import GHC.Iface.Recomp (MaybeValidated(..), checkOldIface)
 import GHC.Unit.Finder (initFinderCache)
-import GHC.Unit.Module.ModIface (set_mi_extra_decls, mi_iface_hash)
+import GHC.Unit.Module.ModIface (set_mi_extra_decls, mi_iface_hash, mi_final_exts)
 import GHC.Unit.Module.Deps (imp_mods)
 import GHC.Unit.Finder (FindResult(Found), findImportedModule)
 import GHC.Iface.Tidy (mkBootModDetailsTc)
@@ -2065,9 +2065,9 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                   Nothing -> True
                   Just entry -> case Map.lookup owner summariesByOwner of
                     Nothing -> False
-                    Just summary -> mi_iface_hash (hm_iface hmi) == mi_iface_hash
-                      (hm_iface (finalizedHomeModInfo (loadedFinalized
-                        (payloadLoaded summary (gmePayload entry)))))]
+                    Just summary -> mi_iface_hash (mi_final_exts (hm_iface hmi)) == mi_iface_hash
+                      (mi_final_exts (hm_iface (finalizedHomeModInfo (loadedFinalized
+                        (payloadLoaded summary (gmePayload entry))))))]
         setSession (hscUpdateHPT (const (foldr
           (\hmi table -> addToHpt table (moduleName (mi_module (hm_iface hmi))) hmi)
           emptyHomePackageTable retainedHomes)) current)
