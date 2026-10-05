@@ -272,9 +272,10 @@ impl ProductAvailability {
     pub fn has_native_product(self) -> bool {
         match self {
             Self::Ready => true,
-            Self::Boot | Self::InterfaceOnly | Self::MissingInterface | Self::ProjectionRejected => {
-                false
-            }
+            Self::Boot
+            | Self::InterfaceOnly
+            | Self::MissingInterface
+            | Self::ProjectionRejected => false,
         }
     }
 }
@@ -805,7 +806,10 @@ mod tests {
         ] {
             assert!(availability.has_canonical_source_interface());
         }
-        for availability in [ProductAvailability::Boot, ProductAvailability::MissingInterface] {
+        for availability in [
+            ProductAvailability::Boot,
+            ProductAvailability::MissingInterface,
+        ] {
             assert!(!availability.has_canonical_source_interface());
         }
         assert!(ProductAvailability::Ready.has_native_product());

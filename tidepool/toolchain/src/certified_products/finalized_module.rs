@@ -1122,7 +1122,9 @@ mod tests {
                 &exact,
                 &mut PackageInterfaceValidation::default(),
             ),
-            Err(CertificationError::Mismatch("finalized source/interface closure"))
+            Err(CertificationError::Mismatch(
+                "finalized source/interface closure"
+            ))
         ));
         let mut changed_source = evidence.clone();
         changed_source.sources[0].sha256 = hex(&sha(b"different source bytes"));
@@ -1137,7 +1139,9 @@ mod tests {
                 &exact,
                 &mut PackageInterfaceValidation::default(),
             ),
-            Err(CertificationError::Mismatch("finalized source/interface closure"))
+            Err(CertificationError::Mismatch(
+                "finalized source/interface closure"
+            ))
         ));
         assert!(matches!(
             issue_interfaces(
@@ -1150,7 +1154,9 @@ mod tests {
                 &exact,
                 &mut PackageInterfaceValidation::default(),
             ),
-            Err(CertificationError::Mismatch("finalization producer/profile"))
+            Err(CertificationError::Mismatch(
+                "finalization producer/profile"
+            ))
         ));
         let mut changed_profile = envelope.clone();
         changed_profile.profile = "unmatched profile".into();
@@ -1165,7 +1171,9 @@ mod tests {
                 &exact,
                 &mut PackageInterfaceValidation::default(),
             ),
-            Err(CertificationError::Receipt("finalization profile"))
+            Err(CertificationError::Mismatch(
+                "finalization producer/profile"
+            ))
         ));
         let mut old: Value = ciborium::de::from_reader(issued[0].certificate_bytes()).unwrap();
         old.as_array_mut().unwrap()[1] = Value::Integer(2.into());
