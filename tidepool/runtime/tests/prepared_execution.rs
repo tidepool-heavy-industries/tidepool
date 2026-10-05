@@ -149,10 +149,9 @@ pub(super) fn assert_typed_receive_json(
                 && constructor.identity.occurrence == "ActorReceiveWith"
         })
         .expect("compiler retained the genuine receive constructor");
-    assert!(prepared.constructor_replies().contains(&(
-        ConstructorId(receiver as u32),
-        ConstructorReply::AtSite,
-    )));
+    assert!(prepared
+        .constructor_replies()
+        .contains(&(ConstructorId(receiver as u32), ConstructorReply::AtSite,)));
     assert!(prepared.json_layout().is_some());
     assert!(prepared.sites().iter().any(|site| {
         site.delivery == tidepool_repr::execution_schema::SiteDelivery::LiveReentry
@@ -169,9 +168,16 @@ pub(super) fn assert_typed_receive_json(
     )
     .expect("genuine compiler-produced typed payloads");
     let json_layout = |program: &PreparedProgram| {
-        program.json_layout().expect("compiler-issued Value layout")
-            .try_map(|id| program.constructors().get(id.0 as usize)
-                .map(|constructor| constructor.host_id).ok_or(()))
+        program
+            .json_layout()
+            .expect("compiler-issued Value layout")
+            .try_map(|id| {
+                program
+                    .constructors()
+                    .get(id.0 as usize)
+                    .map(|constructor| constructor.host_id)
+                    .ok_or(())
+            })
             .expect("declared canonical JSON constructors")
     };
     let layout = json_layout(&prepared);
@@ -186,8 +192,12 @@ pub(super) fn assert_typed_receive_json(
     else {
         panic!("pure payload producer must complete")
     };
-    producer.observe(payload_program, pair).expect("force the genuine typed payload pair");
-    let answers = producer.fields(pair, RealmId::ROOT, 2).expect("two typed payloads");
+    producer
+        .observe(payload_program, pair)
+        .expect("force the genuine typed payload pair");
+    let answers = producer
+        .fields(pair, RealmId::ROOT, 2)
+        .expect("two typed payloads");
     assert!(producer.release(pair));
     let (mut engine, program) = PreparedEngine::bootstrap_with_nursery_bytes(prepared, 4096)
         .expect("bootstrap compiler-produced typed receive");
@@ -233,13 +243,23 @@ pub(super) fn assert_typed_receive_json(
             })
         ));
         assert_eq!(engine.parked_count(), 2 - index);
-        let produced = producer.observe(payload_program, answer).expect("observe typed Haskell payload");
-        assert_eq!(tidepool_runtime::value_to_json(&produced, &table, 0), payload);
-        let parcel = producer.export_parcel(answer.raw()).expect("export genuine typed value");
-        let (arrived, imports) = engine.import_parcel(parcel, RealmId::ROOT)
+        let produced = producer
+            .observe(payload_program, answer)
+            .expect("observe typed Haskell payload");
+        assert_eq!(
+            tidepool_runtime::value_to_json(&produced, &table, 0),
+            payload
+        );
+        let parcel = producer
+            .export_parcel(answer.raw())
+            .expect("export genuine typed value");
+        let (arrived, imports) = engine
+            .import_parcel(parcel, RealmId::ROOT)
             .expect("import value and its native owner into the receiver realm");
         assert!(producer.release(answer));
-        engine.quiesce_and_collect_now().expect("collect imported live value and parked continuations");
+        engine
+            .quiesce_and_collect_now()
+            .expect("collect imported live value and parked continuations");
         let resumed = engine
             .resume_with_handle(parked.id, arrived)
             .expect("resume with the receiver-owned live typed value");
