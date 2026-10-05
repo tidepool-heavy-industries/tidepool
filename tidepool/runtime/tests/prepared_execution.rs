@@ -9,7 +9,7 @@ use tidepool_codegen::prepared_program::{
     PreparedOuter as PreparedOuterCodegen, PreparedResult, ProgramId, RunOptions, RunResult,
 };
 use tidepool_repr::execution_schema::{
-    link_program, parse_program, Architecture, DecodeLimits, Endianness, ImportedValue, LinkError,
+    link_program, parse_program, Architecture, DecodeLimits, Endianness, ImportedValue,
     MachineImports, PreparedProgram, ProgramRequirements, SymbolIdentity, TargetDescriptor,
     TopBinding, ValueId, EXECUTION_ABI_VERSION, SCHEMA_VERSION,
 };
@@ -757,6 +757,64 @@ fn strict_artifact() -> Vec<u8> {
 fn strict_program() -> PreparedProgram {
     parse_program(&strict_artifact(), &requirements(), DecodeLimits::default())
         .expect("strict_artifact() parses")
+}
+
+fn observed_int(value: &HaskellValue) -> i64 {
+    match value {
+        HaskellValue::Lit(tidepool_repr::Literal::LitInt(value)) => *value,
+        HaskellValue::Con(_, fields) if fields.len() == 1 => observed_int(&fields[0]),
+        other => panic!("expected an observed integer: {other:?}"),
+    }
+}
+
+// Link facts come from the producer's actual prepared binding and a live
+// machine handle. This helper does not create compiler or source admission.
+fn imported_value_for(
+    machine: &PreparedMachine<'static>,
+    producer: &PreparedProgram,
+    top: &TopBinding,
+    identity: SymbolIdentity,
+    handle: PreparedHandle,
+    generation: u64,
+) -> ImportedValue {
+    use tidepool_repr::execution_schema::HeapRhs;
+
+    assert_eq!(identity, top.identity);
+    let entry_signature = match top.binding.rhs {
+        HeapRhs::Function { signature, .. } | HeapRhs::Thunk { signature, .. } => {
+            Some(producer.signatures()[signature.0 as usize].clone())
+        }
+        _ => None,
+    };
+    ImportedValue {
+        identity,
+        rep: handle.rep(),
+        entry_signature,
+        evaluated: machine
+            .handle_is_evaluated(handle)
+            .expect("live producer handle"),
+        generation,
+    }
+}
+
+fn install_importing(
+    machine: &mut PreparedMachine<'static>,
+    prepared: PreparedProgram,
+    imports: &[(SymbolIdentity, PreparedHandle, ImportedValue)],
+) -> Result<ProgramId, PreparedRuntimeError> {
+    let mut values = MachineImports::default();
+    let mut bindings = ImportBindings::new();
+    for (identity, handle, imported) in imports {
+        values.values.insert(identity.clone(), imported.clone());
+        bindings.insert(identity.clone(), *handle);
+    }
+    let linked = link_program(prepared, &values)?;
+    let compiled = machine
+        .compile_for_install(&linked)
+        .map_err(PreparedRuntimeError::Compile)?;
+    machine
+        .install_program(compiled, bindings)
+        .map_err(PreparedRuntimeError::Install)
 }
 
 /// Call options using repository defaults, with collection timing chosen by
