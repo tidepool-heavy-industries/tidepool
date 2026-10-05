@@ -1115,7 +1115,6 @@ fn projection(result: &WatchResult, ids: &[RequestId]) -> WatchStateProjection {
 #[test]
 fn generated_request_lifecycle_matches_observable_model() {
     let mut config = Config {
-        max_shrink_iters: 4_096,
         source_file: Some(file!()),
         test_name: Some(concat!(
             module_path!(),
@@ -1125,6 +1124,9 @@ fn generated_request_lifecycle_matches_observable_model() {
     };
     if std::env::var_os("PROPTEST_CASES").is_none() {
         config.cases = 96;
+    }
+    if std::env::var_os("PROPTEST_MAX_SHRINK_ITERS").is_none() {
+        config.max_shrink_iters = 4_096;
     }
     if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
         config.failure_persistence = Some(Box::new(FileFailurePersistence::Direct(path)));
