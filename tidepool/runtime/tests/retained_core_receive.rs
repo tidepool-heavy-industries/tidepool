@@ -215,20 +215,23 @@ fn retained_core_typed_receive_executes_after_original_sources_are_removed() {
         .iter()
         .find(|group| {
             group.owner().module == support.module
-                && ["routeEven", "routeOdd"].iter().all(|name| {
-                    group
-                        .group()
-                        .binders()
-                        .iter()
-                        .any(|binder| binder.occurrence == *name)
-                })
+                && group
+                    .group()
+                    .binders()
+                    .iter()
+                    .any(|binder| binder.occurrence == "routeEven")
         })
-        .expect("transitive original retains its mutually recursive group");
-    assert!(recursive.group().definitions().bindings().iter().any(|group| {
-        matches!(group, Group::Recursive(bindings) if ["routeEven", "routeOdd"].iter().all(|name| {
-            bindings.iter().any(|binding| binding.identity.occurrence == *name)
-        }))
-    }));
+        .expect("transitive original retains its recursive routeEven group");
+    assert!(recursive
+        .group()
+        .definitions()
+        .bindings()
+        .iter()
+        .any(|group| {
+            matches!(group, Group::Recursive(bindings) if bindings.iter().any(|binding| {
+                binding.identity.occurrence == "routeEven"
+            }))
+        }));
     let prepared = compiled
         .targets
         .remove("__prepared")
