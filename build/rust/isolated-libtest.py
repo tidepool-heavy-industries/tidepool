@@ -118,6 +118,7 @@ DELEGATED_ENVIRONMENT = (
     'TIDEPOOL_EXTRACT_DAEMON_LOG', 'TIDEPOOL_KEEP_TEST_LOGS',
     'TIDEPOOL_TEST_ARTIFACT_ROOT', 'TIDEPOOL_TEST_DIAGNOSTIC_SCOPE',
     'TIDEPOOL_TEST_BASH', 'TIDEPOOL_TEST_SLEEP', 'TIDEPOOL_BROWSER_NODE',
+    'TIDEPOOL_TEST_SYSTEMD_RUN', 'TIDEPOOL_TEST_SYSTEMCTL',
     'TIDEPOOL_BROWSER_DRIVER', 'EXOMONAD_EMBEDDED_ASSET_ROOT',
     'EXOMONAD_WORKSPACE_GITLINK', 'EXOMONAD_WORKSPACE_GIT_BUNDLE',
     'EXOMONAD_NIX_BIN', 'EXOMONAD_NIX_OFFLINE',
@@ -126,12 +127,33 @@ DELEGATED_ENVIRONMENT = (
 )
 
 
+def delegated_tools(environment):
+    """Bind both manager tools once; declared tools never fall back to PATH."""
+    selections = {'systemd-run': 'TIDEPOOL_TEST_SYSTEMD_RUN',
+                  'systemctl': 'TIDEPOOL_TEST_SYSTEMCTL'}
+    declared = [key in environment for key in selections.values()]
+    if any(declared) and not all(declared):
+        raise OSError('delegated runner requires both declared systemd tools')
+    tools = {}
+    for executable, key in selections.items():
+        if not any(declared):
+            # Frozen qualification supplies its verified runtime-tools PATH.
+            tools[executable] = executable
+            continue
+        path = Path(environment[key])
+        if not path.is_absolute() or not path.is_file() or not os.access(path, os.X_OK):
+            raise OSError(f'declared delegated tool is not an absolute executable: {key}={path}')
+        tools[executable] = str(path.resolve(strict=True))
+    return tools
+
+
 def delegated_command(args, timeout, service_slice, record, environment=None, declared_resources=()):
     unit = 'tidepool-libtest-' + uuid.uuid4().hex + '.service'
     child_environment = os.environ if environment is None else environment
+    tools = delegated_tools(child_environment)
     environment_names = sorted(set(DELEGATED_ENVIRONMENT).union(declared_resources).intersection(child_environment))
     command = [
-        'systemd-run', '--user', '--pipe', '--wait', '--collect',
+        tools['systemd-run'], '--user', '--pipe', '--wait', '--collect',
         '--service-type=exec', '--property=Delegate=yes',
         '--property=KillMode=control-group', '--property=TimeoutStopSec=5s',
         f'--property=RuntimeMaxSec={timeout:g}s', '--slice=' + service_slice,
@@ -140,7 +162,8 @@ def delegated_command(args, timeout, service_slice, record, environment=None, de
     command.extend('--setenv=' + key + '=' + child_environment[key] for key in environment_names)
     command.extend(['--', *args])
     record.update(unit=unit, service_slice=service_slice,
-                  environment_names=environment_names, cleanup_confirmed=False)
+                  environment_names=environment_names, systemd_tools=tools,
+                  cleanup_confirmed=False)
     return command, unit
 
 
@@ -149,7 +172,8 @@ def observe_delegated_admission(unit, record, finished):
     while not finished.is_set():
         try:
             observed = subprocess.run([
-                'systemctl', '--user', 'show', '--property=Id',
+                record.get('systemd_tools', {}).get('systemctl', 'systemctl'),
+                '--user', 'show', '--property=Id',
                 '--property=LoadState', '--property=Transient',
                 '--property=InvocationID', unit,
             ], capture_output=True, text=True, timeout=1, check=False)
@@ -166,7 +190,7 @@ def observe_delegated_admission(unit, record, finished):
 
 def stop_delegated_service(unit, record):
     """Stop only this launch's service, including descendants outside client PGID."""
-    base = ['systemctl', '--user']
+    base = [record.get('systemd_tools', {}).get('systemctl', 'systemctl'), '--user']
     try:
         try:
             stopped = subprocess.run([*base, 'stop', unit], capture_output=True,

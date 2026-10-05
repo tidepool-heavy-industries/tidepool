@@ -235,6 +235,12 @@ class IsolatedLibtestTests(unittest.TestCase):
             resource_env={'EXOMONAD_EMBEDDED_ASSET_ROOT': relative},
         )
         rule = calls.pop()
+        self.assertIn('toolchains//:exomonad_runtime_tools', rule['resources'])
+        for key in ('TIDEPOOL_TEST_SYSTEMD_RUN', 'TIDEPOOL_TEST_SYSTEMCTL'):
+            self.assertIn(key, rule['args'])
+            # This rule-shape control models Buck's location expansion with an
+            # existing executable before exercising the resource binding owner.
+            rule['env'][key] = sys.executable
         observed = []
 
         def run(args, timeout, environment=None):
@@ -312,6 +318,50 @@ class IsolatedLibtestTests(unittest.TestCase):
         self.assertEqual(record['executed_test_count'], 1)
         self.assertEqual(record['process_execution_count'], 1)
         self.assertIn('service still active', errors)
+
+    def test_declared_manager_tools_launch_observe_and_cleanup_with_poisoned_path(self):
+        tools = Path(self.tmp.name) / 'declared-tools'
+        tools.mkdir()
+        calls = tools / 'calls.jsonl'
+        systemd_run, systemctl = tools / 'systemd-run', tools / 'systemctl'
+        systemd_run.write_text(f'#!{sys.executable}\n' +
+            'import json, os, sys\n' +
+            f'with open({str(calls)!r}, "a") as stream: stream.write(json.dumps(sys.argv) + "\\n")\n' +
+            'child = sys.argv[sys.argv.index("--") + 1:]\n' +
+            'os.execv(child[0], child)\n')
+        systemctl.write_text(f'#!{sys.executable}\n' +
+            'import json, sys\n' +
+            f'with open({str(calls)!r}, "a") as stream: stream.write(json.dumps(sys.argv) + "\\n")\n' +
+            'print("Id=" + sys.argv[-1])\n' +
+            'print("LoadState=loaded\\nActiveState=inactive\\nTransient=yes")\n' +
+            'print("InvocationID=" + "ab" * 16)\n')
+        self.binary.write_text(f'#!{sys.executable}\n' +
+            'import time\ntime.sleep(0.1)\n' +
+            'print("test result: ok. 1 passed; 0 failed; 0 ignored;")\n')
+        for executable in (systemd_run, systemctl, self.binary):
+            executable.chmod(0o700)
+        environment = {'PATH': '/nonexistent-poisoned-path',
+                       'TIDEPOOL_TEST_SYSTEMD_RUN': str(systemd_run),
+                       'TIDEPOOL_TEST_SYSTEMCTL': str(systemctl)}
+        record = {}
+        result = runner.execute([str(self.binary)], 3, 'app.slice', record,
+                                environment=environment)
+        self.assertEqual(result.returncode, 0)
+        self.assertTrue(result.cleanup_confirmed)
+        self.assertTrue(record['manager_admission'])
+        self.assertEqual(record['systemd_tools']['systemctl'], str(systemctl.resolve()))
+        commands = [json.loads(line) for line in calls.read_text().splitlines()]
+        self.assertEqual(sum(command[0] == str(systemd_run.resolve()) for command in commands), 1)
+        self.assertTrue(all(command[0] in (str(systemd_run.resolve()), str(systemctl.resolve()))
+                            for command in commands))
+        self.assertTrue(any('stop' in command for command in commands))
+        for bad in ({'TIDEPOOL_TEST_SYSTEMD_RUN': str(systemd_run)},
+                    {**environment, 'TIDEPOOL_TEST_SYSTEMCTL': 'relative-systemctl'},
+                    {**environment, 'TIDEPOOL_TEST_SYSTEMCTL': str(tools / 'missing')}):
+            with self.subTest(environment=bad), patch.object(runner.subprocess, 'Popen') as spawn:
+                with self.assertRaises(OSError):
+                    runner.execute([str(self.binary)], 3, 'app.slice', {}, environment=bad)
+                spawn.assert_not_called()
 
     def test_delegated_launch_failure_keeps_test_execution_unknown(self):
         def refused(args, timeout, service_slice, service_record):

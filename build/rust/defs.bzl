@@ -67,6 +67,19 @@ def tidepool_rust_test_cases(
         fail("jobs must be positive")
     args = ["$(location " + binary + ")", "--timeout", str(timeout)]
     runtime_env = dict(env)
+    resource_env = dict(resource_env)
+    # The counted runner owns delegated admission and cleanup. These tools are
+    # execution resources even when the shared libtest binary needs no host CLI.
+    for key, executable in {
+        "TIDEPOOL_TEST_SYSTEMD_RUN": "systemd-run",
+        "TIDEPOOL_TEST_SYSTEMCTL": "systemctl",
+    }.items():
+        if key in runtime_env or key in resource_env:
+            fail("delegated runner tools are owned by tidepool_rust_test_cases: " + key)
+        resource_env[key] = "$(location toolchains//:exomonad_runtime_tools)/bin/" + executable
+    resources = list(resources)
+    if "toolchains//:exomonad_runtime_tools" not in resources:
+        resources.append("toolchains//:exomonad_runtime_tools")
     for key, path in resource_env.items():
         if key in runtime_env:
             fail("resource_env must not duplicate ordinary env: " + key)
