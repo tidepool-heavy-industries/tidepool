@@ -69,8 +69,8 @@ import Tidepool.DiagJson (Diag(..), DiagSeverity(..), InputRejection(..), Depend
 import GHC.Data.FastString (unpackFS, mkFastString)
 import GHC.Fingerprint.Type (Fingerprint)
 import GHC.Unit.Module.Graph (mgModSummaries', ModuleGraphNode(..), NodeKey, mkNodeKey, nodeDependencies)
-import GHC.Unit.Home (homeUnitId, isHomeUnit)
-import GHC.Unit.Types (unitString)
+import GHC.Unit.Home (homeUnitAsUnit, homeUnitId, isHomeUnit)
+import GHC.Unit.Types (unitString, stringToUnit)
 import GHC.Data.Graph.Directed (flattenSCCs)
 import GHC.Driver.Session
   ( updOptLevel, gopt_set, gopt_unset, xopt
@@ -1774,7 +1774,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
         liftIO $ ioError $ userError "fresh source collides with an admitted exact owner"
     modGraphRaw <- elideUnusedQuasiQuoteCodegen timing modGraphDownsweep
     targetName <- liftIO (targetModuleNameFor path)
-    let targetOwner = mkModule (homeUnitId (hsc_home_unit previous)) targetName
+    let targetOwner = mkModule (homeUnitAsUnit (hsc_home_unit previous)) targetName
     -- Module names do not identify generated content across independent
     -- requests. A memo hit therefore requires the current source hash and
     -- the selected path/fingerprint closure of every home import. The
@@ -3858,7 +3858,7 @@ residentCompileOne producer selection cacheRef memoRef retainedRef retainedSymbo
   requestImportPaths <- liftIO (compileSearchPaths variant extraIncludes baseImportPaths)
   targetName <- liftIO (targetModuleNameFor path)
   initial <- getSession
-  let targetOwner = mkModule (homeUnitId (hsc_home_unit initial)) targetName
+  let targetOwner = mkModule (homeUnitAsUnit (hsc_home_unit initial)) targetName
   -- Target source can be transformed differently by each purpose, even when
   -- its bytes have not changed. A same-named foreign owner is not this target.
   liftIO (evictTargetMemo targetOwner memoRef)
