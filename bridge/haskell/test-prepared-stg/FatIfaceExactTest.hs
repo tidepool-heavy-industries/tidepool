@@ -6,7 +6,7 @@ import Control.Exception (finally)
 import Control.Monad (unless)
 import Control.Monad.IO.Class (liftIO)
 import GHC
-import GHC.Core (CoreBind, Bind(..), maybeUnfoldingTemplate)
+import GHC.Core (Bind(..), maybeUnfoldingTemplate)
 import GHC.Driver.Env (HscEnv)
 import GHC.Driver.Session (gopt_set, gopt_unset, updOptLevel)
 import GHC.Types.Id (Id, realIdUnfolding)
