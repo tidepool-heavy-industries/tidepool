@@ -637,14 +637,14 @@ prepareArtifactsWithProjection project originalInterfaces outDir caches prepared
             project (prepareProjectionWithReachability finalContext
               (closureModules recovered) (closureReachability recovered))
           candidate <- project (projectSelectedCandidateWithHostBindings hostBindings selected)
+          project (requireOriginalExecutableGlobals hscEnv admittedOriginalBinders
+            (candidateGlobals candidate))
           required <- either (ioError . userError) pure
             (originalPackageGlobals (candidateGlobals candidate))
           let nextRoots = Set.toAscList (Set.fromList (roots ++ required))
           if nextRoots == roots
             then do
               (program, constructors) <- project (finalizePreparedCandidate candidate)
-              project (requireOriginalExecutableGlobals hscEnv admittedOriginalBinders
-                (programGlobals program))
               pure (recovered, program, constructors, roots)
             else do
               packageRoots <- forM nextRoots $ \identity -> do
