@@ -7,11 +7,11 @@
 -- PIT (Package Interface Table) cache. The PIT replaces mi_extra_decls with
 -- a panic thunk to save memory, so loadSysInterface can't be used here.
 module Tidepool.FatIface
-  ( FatIfaceCache, newFatIfaceCache, copyFatIfaceCache, mergeFatIfaceCaches, evictFatIfaceMatching
+  ( FatIfaceCache, newFatIfaceCache, copyFatIfaceCache, mergeFatIfaceCaches, selectFatIfaceCaches, evictFatIfaceMatching
   , FatIfaceLookup(..), FatIfaceMissing(..), lookupFatIfaceExact, lookupFatIfaceBodies
   , ExactInterfaceFailure(..), readExactInterface
   , OwnerInterfaceContext(..), OwnerInterfaceCache, newOwnerInterfaceCache
-  , copyOwnerInterfaceCache, mergeOwnerInterfaceCaches, lookupOwnerInterface
+  , copyOwnerInterfaceCache, mergeOwnerInterfaceCaches, selectOwnerInterfaceCaches, lookupOwnerInterface
   , cacheOwnerInterface, evictOwnerInterfaceMatching
   ) where
 
@@ -123,6 +123,10 @@ copyFatIfaceCache (FatIfaceCache cache) = FatIfaceCache <$> Shared.copyLoadCache
 mergeFatIfaceCaches :: [(FatIfaceCache, Module -> Bool)] -> IO FatIfaceCache
 mergeFatIfaceCaches sources = FatIfaceCache <$> Shared.mergeLoadCaches
   [(cache, keep) | (FatIfaceCache cache, keep) <- sources]
+
+selectFatIfaceCaches :: [(FatIfaceCache, Set.Set Module)] -> IO FatIfaceCache
+selectFatIfaceCaches sources = FatIfaceCache <$> Shared.selectLoadCaches
+  [(cache, owners) | (FatIfaceCache cache, owners) <- sources]
 
 -- | Request-owned targets and changed private contexts can evict acceleration
 -- without replacing another in-flight generation's eventual publication.
@@ -281,6 +285,14 @@ mergeOwnerInterfaceCaches :: [(OwnerInterfaceCache, Module -> Bool)] -> IO Owner
 mergeOwnerInterfaceCaches sources = do
   selected <- mapM (\(OwnerInterfaceCache ref, keep) ->
     Map.filterWithKey (\owner _ -> keep owner) <$> readMVar ref) sources
+  OwnerInterfaceCache <$> newMVar (Map.unions selected)
+
+selectOwnerInterfaceCaches :: [(OwnerInterfaceCache, Set.Set Module)] -> IO OwnerInterfaceCache
+selectOwnerInterfaceCaches sources = do
+  selected <- mapM (\(OwnerInterfaceCache ref, owners) -> do
+    entries <- readMVar ref
+    pure (Map.fromAscList [(owner, value) | owner <- Set.toAscList owners
+      , Just value <- [Map.lookup owner entries]])) sources
   OwnerInterfaceCache <$> newMVar (Map.unions selected)
 
 lookupOwnerInterface :: OwnerInterfaceCache -> Module

@@ -1,12 +1,13 @@
 -- | Per-key loading shared by a defining interface's immutable outcomes.
 -- This module owns completion only; it cannot issue executable Core authority.
 module Tidepool.FatIface.Internal
-  ( LoadCache, newLoadCache, copyLoadCache, mergeLoadCaches, evictLoadCache, lookupLoadCache ) where
+  ( LoadCache, newLoadCache, copyLoadCache, mergeLoadCaches, selectLoadCaches, evictLoadCache, lookupLoadCache ) where
 
 import Control.Concurrent.MVar
   (MVar, modifyMVar, modifyMVar_, newEmptyMVar, newMVar, putMVar, readMVar)
 import Control.Exception (SomeException, mask, throwIO, try, uninterruptibleMask_)
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 
 data Entry value = Cached value | Loading (MVar (Maybe value))
 data Selection value = UseCached value | AwaitLoad (MVar (Maybe value)) | StartLoad (MVar (Maybe value))
@@ -27,6 +28,17 @@ copyLoadCache (LoadCache ref) = do
 mergeLoadCaches :: Ord key => [(LoadCache key value, key -> Bool)] -> IO (LoadCache key value)
 mergeLoadCaches sources = do
   selected <- mapM (\(LoadCache ref, keep) -> completedEntries keep <$> readMVar ref) sources
+  LoadCache <$> newMVar (Map.unions selected)
+
+-- | Resolve only the requested keys. Historical maps may contain many other
+-- owners; selection neither visits their entries nor transfers loading cells.
+selectLoadCaches :: Ord key => [(LoadCache key value, Set.Set key)] -> IO (LoadCache key value)
+selectLoadCaches sources = do
+  selected <- mapM (\(LoadCache ref, keys) -> do
+    entries <- readMVar ref
+    pure (Map.fromAscList
+      [(key, Cached value) | key <- Set.toAscList keys
+        , Just (Cached value) <- [Map.lookup key entries]])) sources
   LoadCache <$> newMVar (Map.unions selected)
 
 completedEntries :: (key -> Bool) -> Map.Map key (Entry value) -> Map.Map key (Entry value)

@@ -6,9 +6,10 @@ import Control.Concurrent (ThreadId, forkFinally, killThread, yield)
 import Control.Concurrent.MVar
   ( MVar, newEmptyMVar, putMVar, readMVar, takeMVar )
 import Control.Exception (SomeException, bracket, finally, throwIO)
-import Control.Monad (unless)
+import Control.Monad (forM, forM_, unless)
 import Control.Monad.IO.Class (liftIO)
 import Data.IORef (newIORef, readIORef, atomicModifyIORef')
+import qualified Data.Set as Set
 import GHC
 import GHC.Core (CoreBind, Bind(..), maybeUnfoldingTemplate)
 import GHC.Driver.Env (HscEnv)
@@ -36,10 +37,10 @@ import Tidepool.FatIface
   , lookupFatIfaceExact, lookupFatIfaceBodies
   , newFatIfaceCache
   , OwnerInterfaceContext(..), newOwnerInterfaceCache, copyOwnerInterfaceCache
-  , lookupOwnerInterface, evictOwnerInterfaceMatching
+  , lookupOwnerInterface, mergeOwnerInterfaceCaches, selectOwnerInterfaceCaches, evictOwnerInterfaceMatching
   )
 import Tidepool.FatIface.Internal
-  (newLoadCache, lookupLoadCache, copyLoadCache, evictLoadCache)
+  (newLoadCache, lookupLoadCache, copyLoadCache, mergeLoadCaches, selectLoadCaches, evictLoadCache)
 import GHC.Conc (ThreadStatus(..), BlockReason(..), threadStatus)
 import Tidepool.Resolve (ExactBodyLookup(..), recoverExactBody)
 import Tidepool.PreparedStg (newPreparedBodyCache, prepareRecoveredBodies, pmBindings)
@@ -53,7 +54,9 @@ main = runTests tests
 
 tests :: TestTree
 tests = testGroup "test-prepared-stg"
-  [testCase "exact interface cache lifecycle" scenario]
+  [ testCase "exact interface cache lifecycle" scenario
+  , testCase "selected completed cache merge" verifyCacheMerges
+  ]
 
 scenario :: IO ()
 scenario = do
@@ -126,6 +129,20 @@ scenario = do
       privateOwnerContext <- liftIO (lookupOwnerInterface privateOwnerClone privateOwner)
       liftIO (assert (maybe False (const True) privateOwnerContext)
         "owner cache copy omitted a completed interface context")
+      selectedOwners <- liftIO (mergeOwnerInterfaceCaches
+        [(privateOwners,const False),(privateOwnerClone,(== privateOwner))])
+      selectedOwnerContext <- liftIO (lookupOwnerInterface selectedOwners privateOwner)
+      liftIO (assert (maybe False (const True) selectedOwnerContext)
+        "owner selection excluded the earlier map but lost a later selected context")
+      excludedOwners <- liftIO (mergeOwnerInterfaceCaches [(privateOwnerClone,const False)])
+      excludedOwnerContext <- liftIO (lookupOwnerInterface excludedOwners privateOwner)
+      liftIO (assert (maybe True (const False) excludedOwnerContext)
+        "owner merge retained an excluded context")
+      indexedOwners <- liftIO (selectOwnerInterfaceCaches
+        [(privateOwners,Set.empty),(privateOwnerClone,Set.singleton privateOwner)])
+      indexedOwnerContext <- liftIO (lookupOwnerInterface indexedOwners privateOwner)
+      liftIO (assert (maybe False (const True) indexedOwnerContext)
+        "owner-indexed selection lost the requested later context")
       liftIO (evictOwnerInterfaceMatching privateOwners (== privateOwner))
       clonedOwnerContext <- liftIO (lookupOwnerInterface privateOwnerClone privateOwner)
       liftIO (assert (maybe False (const True) clonedOwnerContext)
@@ -306,6 +323,62 @@ verifyCacheConcurrency = guardTime $ do
         newResult <- awaitLoad new
         currentResult <- awaitLoad current
         assert (newResult == NoExtra && currentResult == NoExtra) "late completion replaced a newer generation"
+
+-- Independently enumerate each key's first selected completed source. This
+-- checks selection before union, priority and omission without using Map.union
+-- or constructing compiler interface/body authority in the test.
+verifyCacheMerges :: IO ()
+verifyCacheMerges = guardTime $ do
+  let keys = [0 :: Int, 1, 2]
+      subsets [] = [[]]
+      subsets (key : rest) = let tails = subsets rest in tails ++ map (key :) tails
+      sources = ["earlier", "later"]
+      outcome source key = LoadFailure (source ++ show key)
+  caches <- forM sources $ \source -> do
+    cache <- newLoadCache
+    forM_ keys $ \key -> do
+      _ <- lookupLoadCache cache key (pure (outcome source key))
+      pure ()
+    pure cache
+  forM_ (subsets keys) $ \firstSelection -> forM_ (subsets keys) $ \secondSelection -> do
+    let selections = [firstSelection,secondSelection]
+    merged <- mergeLoadCaches (zip caches (map (flip elem) selections))
+    indexed <- selectLoadCaches (zip caches (map Set.fromList selections))
+    forM_ keys $ \key -> do
+      let expected = case [outcome source key
+              | (source,selected) <- zip sources selections, key `elem` selected] of
+            found:_ -> found
+            [] -> NoExtra
+      found <- lookupLoadCache merged key (pure NoExtra)
+      indexedFound <- lookupLoadCache indexed key (pure NoExtra)
+      assert (found == expected) ("selected cache priority disagreed with first-match oracle: "
+        ++ show (key,selections,found,expected))
+      assert (indexedFound == expected) ("owner-indexed cache selection disagreed with first-match oracle: "
+        ++ show (key,selections,indexedFound,expected))
+  empty <- mergeLoadCaches []
+  absent <- lookupLoadCache empty (0 :: Int) (pure NoExtra)
+  assert (absent == NoExtra) "empty selection unexpectedly issued an entry"
+
+  pending <- newLoadCache
+  complete <- newLoadCache
+  entered <- newEmptyMVar
+  release <- newEmptyMVar
+  _ <- lookupLoadCache complete (0 :: Int) (pure (LoadFailure "later completed"))
+  withLoad (lookupLoadCache pending 0 (putMVar entered () >> readMVar release >> pure NoExtra)) $ \running -> do
+    takeMVar entered
+    snapshot <- mergeLoadCaches [(pending,const True),(complete,const True)]
+    indexedSnapshot <- selectLoadCaches
+      [(pending,Set.singleton 0),(complete,Set.singleton 0)]
+    found <- guardTime (lookupLoadCache snapshot 0 (fail "merge copied an in-flight cell"))
+    assert (found == LoadFailure "later completed") "in-flight earlier entry displaced completed later entry"
+    indexedFound <- guardTime (lookupLoadCache indexedSnapshot 0 (fail "indexed selection copied an in-flight cell"))
+    assert (indexedFound == LoadFailure "later completed") "indexed loading cell displaced a completed entry"
+    putMVar release ()
+    _ <- awaitLoad running
+    stable <- lookupLoadCache snapshot 0 (fail "late source completion replaced snapshot")
+    assert (stable == LoadFailure "later completed") "merged snapshot changed after source settlement"
+    indexedStable <- lookupLoadCache indexedSnapshot 0 (fail "late settlement replaced indexed snapshot")
+    assert (indexedStable == LoadFailure "later completed") "indexed snapshot changed after source settlement"
 
 -- Use the production defining-interface loader rather than a use-site Id
 -- whose optimization metadata the frontend may have omitted.

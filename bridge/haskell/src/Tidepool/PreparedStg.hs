@@ -12,7 +12,7 @@ module Tidepool.PreparedStg
   , RecoveredModuleFailure(..)
   , prepareRecoveredModule
   , prepareRecoveredBodies
-  , PreparedBodyCache, newPreparedBodyCache, copyPreparedBodyCache, mergePreparedBodyCaches, evictPreparedBodyMatching
+  , PreparedBodyCache, newPreparedBodyCache, copyPreparedBodyCache, mergePreparedBodyCaches, selectPreparedBodyCaches, evictPreparedBodyMatching
   , newPreparedOriginalModuleTaskPreparer
   , newPreparedBodyPreparer, newPreparedBodyTaskPreparer, PreparedBodyTask, runPreparedBodyTask
   ) where
@@ -272,8 +272,8 @@ recoveredSubsetScope owner bindings =
 -- | Only an owner-issued census of intrinsic-free exact bodies permits
 -- daemon reuse. Authority-dependent preparation belongs to one admitted request.
 data PreparedBodyCache = PreparedBodyCache
-  { cachedExactBodies :: MVar (Map (Module, [[Word64]]) PreparedModule)
-  , cachedOriginalModules :: MVar (Map OriginalVersion (AdmittedFinalizedOriginal,PreparedModule))
+  { cachedExactBodies :: MVar (Map Module (Map [[Word64]] PreparedModule))
+  , cachedOriginalModules :: MVar (Map Module (Map OriginalVersion (AdmittedFinalizedOriginal,PreparedModule)))
   }
 
 newPreparedBodyCache :: IO PreparedBodyCache
@@ -290,18 +290,39 @@ copyPreparedBodyCache cache = PreparedBodyCache
 mergePreparedBodyCaches :: [(PreparedBodyCache, Module -> Bool)] -> IO PreparedBodyCache
 mergePreparedBodyCaches sources = do
   selected <- mapM (\(cache, keep) -> do
-    exact <- Map.filterWithKey (\(owner, _) _ -> keep owner) <$> readMVar (cachedExactBodies cache)
-    originals <- Map.filterWithKey (\version _ -> keep (originalVersionOwner version))
+    exact <- Map.filterWithKey (\owner _ -> keep owner) <$> readMVar (cachedExactBodies cache)
+    originals <- Map.filterWithKey (\owner _ -> keep owner)
       <$> readMVar (cachedOriginalModules cache)
     pure (exact, originals)) sources
-  PreparedBodyCache <$> newMVar (Map.unions (map fst selected))
-    <*> newMVar (Map.unions (map snd selected))
+  PreparedBodyCache <$> newMVar (Map.unionsWith Map.union (map fst selected))
+    <*> newMVar (Map.unionsWith Map.union (map snd selected))
+
+-- | Home activation reads only validated owner buckets. Within an owner,
+-- exact subsets and canonical versions keep earlier-source key priority.
+selectPreparedBodyCaches :: [(PreparedBodyCache, Set.Set Module)] -> IO PreparedBodyCache
+selectPreparedBodyCaches sources = do
+  selected <- mapM (\(cache, owners) -> do
+    exact <- selectOwnerBuckets owners <$> readMVar (cachedExactBodies cache)
+    originals <- selectOwnerBuckets owners <$> readMVar (cachedOriginalModules cache)
+    pure (exact, originals)) sources
+  PreparedBodyCache <$> newMVar (Map.unionsWith Map.union (map fst selected))
+    <*> newMVar (Map.unionsWith Map.union (map snd selected))
+
+selectOwnerBuckets :: Set.Set Module -> Map Module value -> Map Module value
+selectOwnerBuckets owners entries = Map.fromAscList
+  [(owner, value) | owner <- Set.toAscList owners, Just value <- [Map.lookup owner entries]]
+
+lookupOwnerEntry :: Ord key => Module -> key -> Map Module (Map key value) -> Maybe value
+lookupOwnerEntry owner key entries = Map.lookup owner entries >>= Map.lookup key
+
+insertOwnerEntry :: Ord key => Module -> key -> value -> Map Module (Map key value) -> Map Module (Map key value)
+insertOwnerEntry owner key value = Map.insertWith Map.union owner (Map.singleton key value)
 
 evictPreparedBodyMatching :: PreparedBodyCache -> (Module -> Bool) -> IO ()
 evictPreparedBodyMatching cache stale = do
-  modifyMVar_ (cachedExactBodies cache) (pure . Map.filterWithKey (\(owner, _) _ -> not (stale owner)))
+  modifyMVar_ (cachedExactBodies cache) (pure . Map.filterWithKey (\owner _ -> not (stale owner)))
   modifyMVar_ (cachedOriginalModules cache)
-    (pure . Map.filterWithKey (\version _ -> not (stale (originalVersionOwner version))))
+    (pure . Map.filterWithKey (\owner _ -> not (stale owner)))
 
 -- Full original groups belong to the same retained body owner as recovered
 -- subsets. Only completed intrinsic-free preparation is shared across scopes;
@@ -314,8 +335,8 @@ newPreparedOriginalModuleTaskPreparer env cache scope = do
   scoped <- newMVar Map.empty
   pure $ \siblings owner -> do
     let key = originalVersionInScope scope owner
-    stableHit <- maybe (pure Nothing) (\version -> Map.lookup version <$> readMVar (cachedOriginalModules cache)) key
-    scopedHit <- maybe (pure Nothing) (\version -> Map.lookup version <$> readMVar scoped) key
+    stableHit <- maybe (pure Nothing) (\version -> lookupOwnerEntry owner version <$> readMVar (cachedOriginalModules cache)) key
+    scopedHit <- maybe (pure Nothing) (\version -> lookupOwnerEntry owner version <$> readMVar scoped) key
     let hit = case stableHit of Just found -> Just found; Nothing -> scopedHit
         previous = (,) <$> key <*> (fst <$> hit)
     original <- recoverAdmittedFinalizedOriginalWithPrevious admittedScope owner previous
@@ -329,12 +350,12 @@ newPreparedOriginalModuleTaskPreparer env cache scope = do
           pure (Just (admitted,False,PreparedModuleTask $ do
             prepared <- runPreparedModuleTask task
             let selected = if preparedAuthorityDependent prepared then scoped else cachedOriginalModules cache
-            modifyMVar_ selected (pure . Map.insert version (admitted,prepared))
+            modifyMVar_ selected (pure . insertOwnerEntry (originalVersionOwner version) version (admitted,prepared))
             pure prepared))
 
-preparedBodyKey :: Module -> [CoreBind] -> (Module, [[Word64]])
-preparedBodyKey owner bindings =
-  (owner, [map (getKey . varUnique) (bindersOf binding) | binding <- bindings])
+preparedBodyKey :: [CoreBind] -> [[Word64]]
+preparedBodyKey bindings =
+  [map (getKey . varUnique) (bindersOf binding) | binding <- bindings]
   where
     bindersOf (NonRec binder _) = [binder]
     bindersOf (Rec pairs) = map fst pairs
@@ -370,9 +391,9 @@ newPreparedBodyTaskPreparer env owners bodyCache = do
   scoped <- newMVar Map.empty
   pure $ \owner bindings -> do
     let stable = cachedExactBodies bodyCache
-        key = preparedBodyKey owner bindings
-    stableHit <- Map.lookup key <$> readMVar stable
-    scopedHit <- Map.lookup key <$> readMVar scoped
+        key = preparedBodyKey bindings
+    stableHit <- lookupOwnerEntry owner key <$> readMVar stable
+    scopedHit <- lookupOwnerEntry owner key <$> readMVar scoped
     case stableHit `orElse` scopedHit of
       Just hit -> pure (Right (PreparedBodyTask (pure (Right hit))))
       Nothing -> do
@@ -383,7 +404,7 @@ newPreparedBodyTaskPreparer env owners bodyCache = do
             Left reason -> pure (Left (RecoveredModulePreparationFailure owner reason))
             Right prepared -> do
               let cache = if preparedAuthorityDependent prepared then scoped else stable
-              modifyMVar_ cache (pure . Map.insert key prepared)
+              modifyMVar_ cache (pure . insertOwnerEntry owner key prepared)
               pure (Right prepared)) acquired
   where
     orElse (Just hit) _ = Just hit

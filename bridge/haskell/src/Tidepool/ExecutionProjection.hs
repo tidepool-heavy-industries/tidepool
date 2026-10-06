@@ -10,7 +10,7 @@ module Tidepool.ExecutionProjection
   , projectPreparedModuleProducts, projectOriginalHomeModuleProducts
   , projectOriginalHomeModuleProductDemand
   , RawModuleProducts, projectRawOriginalHomeModuleProducts, forceRawModuleProducts
-  , OriginalProjectionCache, newOriginalProjectionCache, copyOriginalProjectionCache, mergeOriginalProjectionCaches
+  , OriginalProjectionCache, newOriginalProjectionCache, copyOriginalProjectionCache, mergeOriginalProjectionCaches, selectOriginalProjectionCaches
   , evictOriginalProjectionMatching, projectCachedOriginalHomeModuleProducts
   , rawOriginalProductOwner, rawOriginalProductBinders, rawOriginalProductDemands
   , rawOriginalGroupEncodings
@@ -337,6 +337,14 @@ mergeOriginalProjectionCaches :: [(OriginalProjectionCache, Module -> Bool)] -> 
 mergeOriginalProjectionCaches sources = do
   selected <- mapM (\(OriginalProjectionCache ref, keep) ->
     Map.filterWithKey (\owner _ -> keep owner) <$> readMVar ref) sources
+  OriginalProjectionCache <$> newMVar (Map.unionsWith (++) selected)
+
+selectOriginalProjectionCaches :: [(OriginalProjectionCache, Set Module)] -> IO OriginalProjectionCache
+selectOriginalProjectionCaches sources = do
+  selected <- mapM (\(OriginalProjectionCache ref, owners) -> do
+    entries <- readMVar ref
+    pure (Map.fromAscList [(owner, alternatives) | owner <- Set.toAscList owners
+      , Just alternatives <- [Map.lookup owner entries]])) sources
   OriginalProjectionCache <$> newMVar (Map.unionsWith (++) selected)
 
 evictOriginalProjectionMatching :: OriginalProjectionCache -> (Module -> Bool) -> IO ()
