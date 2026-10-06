@@ -12,9 +12,7 @@ use super::{absolute, sha, version_hash, Record, CANDIDATE_LIMIT, RECORD_LIMIT};
 use crate::toolchain::CompilerDeploymentAuthority;
 
 mod source_selection;
-pub use source_selection::{
-    NativeCatalogSourceFile, NativeCatalogSourceSelection, NativeSourceRole,
-};
+pub use source_selection::{NativeCatalogSourceSelection, NativeSourceRole};
 
 const CATALOG_LIMIT: usize = 1 << 20;
 const TOTAL_LIMIT: usize = 128 << 20;

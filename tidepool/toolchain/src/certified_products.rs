@@ -15,8 +15,6 @@ use tidepool_repr::execution_schema::{
 
 mod finalized_module;
 mod retained_core;
-#[cfg(test)]
-pub(crate) use finalized_module::FINALIZATION_PROFILE;
 pub(crate) use finalized_module::{
     CanonicalOrigin, CanonicalSourceImport, CertifiedModuleInterface,
 };
