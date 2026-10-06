@@ -2006,7 +2006,7 @@ pub fn materialize_recovery_closure(
                 package_imports_bytes,
                 certification_bytes.bytes,
             )
-            .with_module_interface_with_validation(module_interface, validation)?,
+            .with_module_interface_with_validation(module_interface, &mut validation)?,
         );
     }
     materialize_certified_products_with_validation(
@@ -2290,7 +2290,7 @@ mod tests {
                 packages.clone(),
                 certification,
             )
-            .with_module_interface_with_validation(canonical.clone(), validation)
+            .with_module_interface(canonical.clone())
             .unwrap()
             .with_execution_source(graph)
             .unwrap()
