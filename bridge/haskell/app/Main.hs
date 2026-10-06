@@ -428,8 +428,7 @@ runActivationPreviewMode compiler caches args path = do
         writePreparedSidecars InlineYieldSites outDir binds (prTyCons compiled)
           (T.pack <$> prCapturedType compiled) (map T.pack (prWarnings compiled)) artifacts
         writePreparedArtifacts outDir artifacts
-        void $ writeCertifiedProductsKeepingWithOriginals (requestIncludes args) originalInterfaces outDir prepared productContext
-          [(paTarget artifact,paProgram artifact) | artifact <- artifacts]
+        void $ writeRequestProducts args originalInterfaces outDir prepared productContext artifacts
         outFile <- requireArg "--turn-out" (requestTurnOut args)
         BS.writeFile outFile (encodeTurnOut (TExpr 0 (concatMap paYieldSites artifacts) (T.pack source)))
         BS.writeFile (outDir </> "activation-preview.cbor") $ toStrictByteString
@@ -562,17 +561,26 @@ processFile compiler caches timing args path = do
       else timePhase timing "prepared_sidecars" $ writePreparedSidecars SeparateYieldSites outDir binds tycons mCapturedTy warnTexts preparedArtifacts
 
     timePhase timing "prepared_write" $ writePreparedArtifacts outDir preparedArtifacts
-    timePhase timing "module_products" $
-      writeCertifiedProducts (requestIncludes args) originalInterfaces outDir prepared productContext preparedArtifacts
+    void $ timePhase timing "module_products" $
+      writeRequestProducts args originalInterfaces outDir prepared productContext preparedArtifacts
 
   reportDiags res
 
-writeCertifiedProducts
-  :: [FilePath] -> OriginalInterfaceArtifacts -> FilePath -> PreparedPipelineResult -> Maybe PreparedProductContext
-  -> [PreparedArtifact] -> IO ()
-writeCertifiedProducts includes originalInterfaces outDir prepared productContext preparedArtifacts =
-  void (writeCertifiedProductsKeepingWithOriginals includes originalInterfaces outDir prepared productContext
-    [(paTarget artifact, paProgram artifact) | artifact <- preparedArtifacts])
+-- Every completed worker product carries its original input evidence. Exact
+-- and session requests use their separate retained authority instead.
+writeRequestProducts
+  :: WorkerRequest -> OriginalInterfaceArtifacts -> FilePath -> PreparedPipelineResult -> Maybe PreparedProductContext
+  -> [PreparedArtifact] -> IO CertifiedOriginalProducts
+writeRequestProducts args originalInterfaces outDir prepared productContext preparedArtifacts = do
+  products <- writeCertifiedProductsKeepingWithOriginals (requestIncludes args) originalInterfaces outDir prepared productContext
+    [(paTarget artifact, paProgram artifact) | artifact <- preparedArtifacts]
+  when (not (requestCell args) && not (requestActivationPreview args)
+      && null (requestInjectVals args) && not (isJust (requestSessionArtifacts args))
+      && Map.null (requestRetainedGenerations args)
+      && isNothing (preparedExactCompilation prepared)) $
+    writeCompileInputProof outDir (prHscEnv (pprPipelineResult prepared))
+      (preparedFreshDependencies prepared) (pprPackageImports prepared)
+  pure products
 
 data PreparedArtifact = PreparedArtifact
   { paTarget :: String
@@ -1071,12 +1079,7 @@ compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb binde
     timePhase timing "prepared_sidecars" $ writePreparedSidecars InlineYieldSites outDir binds (prTyCons result) mCapturedTy warnTexts preparedArtifacts
     timePhase timing "prepared_write" $ writePreparedArtifacts outDir preparedArtifacts
     originalProducts <- timePhase timing "module_products" $
-      writeCertifiedProductsKeepingWithOriginals (requestIncludes args) originalInterfaces outDir prepared productContext
-        [(paTarget artifact, paProgram artifact) | artifact <- preparedArtifacts]
-    when (not (requestCell args) && not (requestActivationPreview args)
-        && null (requestInjectVals args) && not (isJust (requestSessionArtifacts args))
-        && Map.null (requestRetainedGenerations args)) $
-      writeCompileInputProof outDir hscEnv (preparedFreshDependencies prepared) (pprPackageImports prepared)
+      writeRequestProducts args originalInterfaces outDir prepared productContext preparedArtifacts
     -- Mutable turns never enter the artifact cache, but publication must
     -- still reject source changes observed during this compilation.
     validateDependencyEvidence (preparedFreshDependencies prepared)
@@ -1541,8 +1544,7 @@ prepareOriginalCellDeclaration compiler caches args template outDir scope exact 
   writePreparedSidecars SeparateYieldSites directory binds (prTyCons result)
     Nothing (map T.pack (prWarnings result)) artifacts
   writePreparedArtifacts directory artifacts
-  certified <- writeCertifiedProductsKeepingWithOriginals (requestIncludes args) originalInterfaces directory prepared productContext
-    [(paTarget artifact, paProgram artifact) | artifact <- artifacts]
+  certified <- writeRequestProducts args originalInterfaces directory prepared productContext artifacts
   let products = certifiedOriginalProducts certified
   supportScope <- retainProgramProducts directory prepared certified reserved exact
   originalProductEncoding <- case
