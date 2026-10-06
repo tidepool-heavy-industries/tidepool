@@ -103,11 +103,14 @@ mod tests {
         for (relative, bytes) in [
             ("TidepoolCatalog.hs", "module TidepoolCatalog where\n"),
             ("effects/Effect.hs", "module Effect where\n"),
+            ("effects/Effect/Nested.hs", "module Effect.Nested where\n"),
             ("lib/Library.hs-boot", "module Library where\n"),
+            ("lib/Library/Nested.lhs", "> module Library.Nested where\n"),
             ("actors/Actor.lhs", "> module Actor where\n"),
             ("jev/core/Jev.lhs-boot", "> module Jev where\n"),
             ("lib/ignored.c", "/* not a Haskell source */\n"),
         ] {
+            fs::create_dir_all(root.join(relative).parent().unwrap()).unwrap();
             fs::write(root.join(relative), bytes).unwrap();
         }
         let selection = NativeCatalogSourceSelection::capture_under(&root, RootPolicy::Fixture)
@@ -116,10 +119,14 @@ mod tests {
         let mut legacy = serde_json::to_value(&selection).unwrap();
         legacy["source_files"] = serde_json::json!([["TidepoolCatalog.hs", "0".repeat(64)]]);
         assert!(serde_json::from_value::<NativeCatalogSourceSelection>(legacy).is_err());
-        let generic = crate::cache::source_root_manifest(&root).unwrap();
+        let generic = crate::cache::source_root_manifest(&root)
+            .unwrap()
+            .into_iter()
+            .collect::<std::collections::BTreeMap<_, _>>();
         assert_eq!(generic.len(), selection.source_files.len());
-        for ((path, blake3), file) in generic.iter().zip(&selection.source_files) {
-            assert_eq!(path, &file.path);
+        for file in &selection.source_files {
+            let path = &file.path;
+            let blake3 = generic.get(path).unwrap();
             assert_eq!(
                 blake3,
                 &blake3::hash(&fs::read(root.join(path)).unwrap())
@@ -155,7 +162,11 @@ spec.loader.exec_module(module)
 catalog, root = Path(sys.argv[2]), Path(sys.argv[3])
 original = json.loads(catalog.read_text())
 selection = module.native_catalog_selection(catalog, root)
-assert len(selection["source_files"]) == 5
+assert len(selection["source_files"]) == 7
+paths = [file["path"] for file in selection["source_files"]]
+assert paths == sorted(paths)
+assert paths.index("effects/Effect.hs") < paths.index("effects/Effect/Nested.hs")
+assert paths.index("lib/Library.hs-boot") < paths.index("lib/Library/Nested.lhs")
 assert {Path(file["path"]).suffix for file in selection["source_files"]} == {".hs", ".hs-boot", ".lhs", ".lhs-boot"}
 for legacy in (False, True):
     altered = json.loads(json.dumps(original))
@@ -171,6 +182,15 @@ for legacy in (False, True):
         pass
     else:
         raise AssertionError("corrupted or legacy source witness was accepted")
+altered = json.loads(json.dumps(original))
+altered["source_selection"]["source_files"].reverse()
+catalog.write_text(json.dumps(altered))
+try:
+    module.native_catalog_selection(catalog, root)
+except ValueError:
+    pass
+else:
+    raise AssertionError("noncanonical source witness order was accepted")
 catalog.write_text(json.dumps(original))
 (root / "jev/core/Jev.lhs-boot").write_text("changed original bytes")
 try:
@@ -200,10 +220,14 @@ impl NativeCatalogSourceSelection {
     pub fn source_manifest(
         snapshot_root: &Path,
     ) -> Result<Vec<NativeCatalogSourceFile>, crate::cache::SourceManifestError> {
-        Ok(crate::cache::catalog_source_sha256_manifest(snapshot_root)?
+        let mut files = crate::cache::catalog_source_sha256_manifest(snapshot_root)?
             .into_iter()
             .map(|(path, sha256)| NativeCatalogSourceFile { path, sha256 })
-            .collect())
+            .collect::<Vec<_>>();
+        // The catalog wire manifest orders complete path names. Path::Ord
+        // compares components, placing Foo/Bar.hs before Foo.hs instead.
+        files.sort_by(|left, right| left.path.as_os_str().cmp(right.path.as_os_str()));
+        Ok(files)
     }
 
     pub(crate) fn capture(snapshot_root: &Path) -> Result<Self, ModulePackageError> {
