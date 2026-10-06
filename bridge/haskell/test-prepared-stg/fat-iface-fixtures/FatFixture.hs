@@ -1,4 +1,4 @@
-module FatFixture where
+module FatFixture (fatIdentity, recA, recB, privateCaller) where
 
 fatIdentity :: Int -> Int
 fatIdentity value = value
@@ -11,3 +11,11 @@ recA value = recB value
 recB :: Int -> Int
 recB value = recA value
 {-# NOINLINE recB #-}
+
+privateHelper :: Int -> Int
+privateHelper value = value + 1
+{-# NOINLINE privateHelper #-}
+
+privateCaller :: Int -> Int
+privateCaller value = privateHelper value
+{-# NOINLINE privateCaller #-}

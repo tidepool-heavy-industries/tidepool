@@ -6,12 +6,12 @@ import Control.Exception (finally)
 import Control.Monad (unless)
 import Control.Monad.IO.Class (liftIO)
 import GHC
-import GHC.Core (Bind(..), maybeUnfoldingTemplate)
+import GHC.Core (CoreBind, Bind(..), maybeUnfoldingTemplate)
 import GHC.Driver.Env (HscEnv)
 import GHC.Driver.Session (gopt_set, gopt_unset, updOptLevel)
 import GHC.Types.Id (Id, realIdUnfolding)
 import GHC.Tc.Types (tcg_rdr_env)
-import GHC.Types.Name (mkExternalName, mkSystemName, nameModule_maybe, nameOccName)
+import GHC.Types.Name (mkExternalName, mkSystemName, nameModule_maybe, nameOccName, isExternalName)
 import GHC.Types.Name.Occurrence (mkVarOcc, occNameString)
 import GHC.Types.Name.Reader (globalRdrEnvElts, greName)
 import GHC.Types.Unique (mkUnique)
@@ -28,12 +28,13 @@ import System.Process (callProcess, readProcess)
 import Tidepool.FatIface
   ( FatIfaceLookup(..)
   , FatIfaceMissing(..)
-  , lookupFatIfaceExact
+  , lookupFatIfaceExact, lookupFatIfaceBodies
   , newFatIfaceCache
   , OwnerInterfaceContext(..), newOwnerInterfaceCache, lookupOwnerInterface
   )
 import Tidepool.Resolve (ExactBodyLookup(..), recoverExactBody)
-import Tidepool.PreparedStg (newPreparedBodyCache, prepareRecoveredBodies)
+import Tidepool.PreparedStg (newPreparedBodyCache, prepareRecoveredBodies, pmBindings)
+import Tidepool.ExecutionProjection (topBinders)
 
 assert :: Bool -> String -> IO ()
 assert ok message = unless ok (ioError (userError message))
@@ -81,6 +82,7 @@ scenario = do
       let (tcEnv, _) = tm_internals_ typed
           names = map greName (globalRdrEnvElts (tcg_rdr_env tcEnv))
           fatIdentityName = findName "FatFixture" "fatIdentity" names
+          privateCallerName = findName "FatFixture" "privateCaller" names
           recAName = findName "FatFixture" "recA" names
           recBName = findName "FatFixture" "recB" names
           thinIdentityName = findName "ThinFixture" "thinIdentity" names
@@ -99,6 +101,25 @@ scenario = do
         "name without a module was not reported as typed absence")
       fatIdentityResult <- liftIO (lookupFatIfaceExact hsc cache fatIdentityName)
       liftIO (assert (isFound fatIdentityResult) "fat identity was not recovered")
+      privateResult <- liftIO (lookupFatIfaceExact hsc cache privateCallerName)
+      liftIO $ assertPrivateScope privateCallerName privateResult
+      privateOwner <- maybe (fail "private scope fixture has no owner") pure
+        (nameModule_maybe privateCallerName)
+      privateGroups <- case privateResult of
+        FatIfaceFound groups -> pure groups
+        _ -> fail "private defining closure disappeared"
+      privateOwners <- liftIO newOwnerInterfaceCache
+      privateBodies <- liftIO newPreparedBodyCache
+      privatePrepared <- liftIO $ prepareRecoveredBodies hsc privateOwners privateBodies
+        privateOwner privateGroups >>= either (fail . show) pure
+      liftIO $ assert (any ((== "privateHelper") . occNameString . nameOccName . varName)
+        (concatMap (topBinders . fst) (pmBindings privatePrepared)))
+        "native preparation omitted the defining private helper"
+      forward <- liftIO (lookupFatIfaceBodies hsc cache privateOwner [privateCallerName, fatIdentityName])
+      reverseRoots <- liftIO (lookupFatIfaceBodies hsc cache privateOwner
+        [fatIdentityName, privateCallerName, privateCallerName])
+      liftIO $ assert (foundNames forward == foundNames reverseRoots)
+        "root permutation/duplication changed original group membership or defining order"
       recAResult <- liftIO (lookupFatIfaceExact hsc cache recAName)
       recBResult <- liftIO (lookupFatIfaceExact hsc cache recBName)
       liftIO (assertRecGroup ["recA", "recB"] recAResult)
@@ -207,11 +228,36 @@ isNameWithoutModule _ = False
 
 assertRecGroup :: [String] -> FatIfaceLookup -> IO ()
 assertRecGroup expected result = case result of
-  FatIfaceFound (Rec pairs) -> do
-    let actual = map (occNameString . nameOccName . varName . fst) pairs
-    assert (all (`elem` actual) expected)
+  FatIfaceFound groups -> do
+    let actual = [map (occNameString . nameOccName . varName . fst) pairs | Rec pairs <- groups]
+    assert (any (\members -> all (`elem` members) expected) actual)
       ("recursive group omitted a sibling: " ++ show actual)
   other -> ioError (userError ("expected recursive fat binding, got " ++ showLookup other))
+
+-- Private defining tops have internal Names and cannot be discovered by
+-- the external recovery worklist. Their exact original groups must travel
+-- with the selected body, without admitting unrelated definitions.
+assertPrivateScope :: Name -> FatIfaceLookup -> IO ()
+assertPrivateScope requested result = case result of
+  FatIfaceFound groups -> do
+    let identifiers = concatMap groupBinders groups
+        helpers = [identifier | identifier <- identifiers,
+          occNameString (nameOccName (varName identifier)) == "privateHelper"]
+    assert (any ((== requested) . varName) identifiers)
+      "private closure omitted its selected exported body"
+    assert (length helpers == 1 && all (not . isExternalName . varName) helpers)
+      "private closure did not retain exactly its genuine internal top helper"
+    assert (not (any ((== "fatIdentity") . occNameString . nameOccName . varName) identifiers))
+      "private closure admitted an unrelated exported group"
+  other -> fail ("private defining scope was unavailable: " ++ showLookup other)
+
+foundNames :: FatIfaceLookup -> [[Name]]
+foundNames (FatIfaceFound groups) = map (map varName . groupBinders) groups
+foundNames _ = []
+
+groupBinders :: CoreBind -> [Id]
+groupBinders (NonRec identifier _) = [identifier]
+groupBinders (Rec pairs) = map fst pairs
 
 assertLoadFailure :: String -> FatIfaceLookup -> IO ()
 assertLoadFailure wanted result = case result of
@@ -222,10 +268,7 @@ assertLoadFailure wanted result = case result of
   other -> ioError (userError ("expected typed load failure, got " ++ showLookup other))
 
 showLookup :: FatIfaceLookup -> String
-showLookup (FatIfaceFound (NonRec binder _)) =
-  "non-rec " ++ occNameString (nameOccName (varName binder))
-showLookup (FatIfaceFound (Rec pairs)) =
-  "recursive " ++ show (map (occNameString . nameOccName . varName . fst) pairs)
+showLookup found@FatIfaceFound{} = "original groups " ++ show (map (map (occNameString . nameOccName)) (foundNames found))
 showLookup (FatIfaceMissing missing) = show missing
 showLookup (FatIfaceLoadFailure modl reason) =
   moduleNameString (moduleName modl) ++ ": " ++ reason

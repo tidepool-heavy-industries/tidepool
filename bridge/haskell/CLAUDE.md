@@ -327,7 +327,9 @@ Recovered package executable bodies come from their defining interface's
 original fat Core. Optimizer unfoldings remain frontend metadata; reconstructing
 them can change exported allocation and entry contracts. Missing original Core,
 unreadable interfaces and incompatible body types retain distinct refusals.
-Exact recursive groups stay intact, and final selected emission still checks
+Exact recursive groups and defining group order stay intact. Selected groups
+include the transitive private top scope from that same decoded interface;
+external sibling dependencies retain the normal demand loop. Final selected emission still checks
 the canonical entry signature and evaluatedness.
 
 After changing translation or serialization, run `just fixtures-check`.

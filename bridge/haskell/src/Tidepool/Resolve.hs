@@ -25,7 +25,7 @@ import Tidepool.FatIface
 -- synthesizes a dictionary. Found groups belong to the returned module and
 -- must be prepared there, not appended to the caller's Core bindings.
 data ExactBodyLookup
-  = ExactBody Module CoreBind
+  = ExactBody Module [CoreBind]
   | MissingExactBody Name FatIfaceMissing
   | BodyInterfaceFailure Module String
   | BodyTypeMismatch
@@ -63,9 +63,9 @@ data CandidateMismatch = CandidateMismatch
   , mismatchDetail :: String
   }
 
-fatGroupMismatch :: Id -> CoreBind -> Maybe CandidateMismatch
-fatGroupMismatch requested group =
-  case find ((== varName requested) . varName . fst) (bindPairs group) of
+fatGroupMismatch :: Id -> [CoreBind] -> Maybe CandidateMismatch
+fatGroupMismatch requested groups =
+  case find ((== varName requested) . varName . fst) pairs of
     Nothing -> Just CandidateMismatch
       { candidateType = "<missing selected binder>"
       , mismatchDetail = "fat-interface group does not contain the requested binder"
@@ -78,8 +78,9 @@ fatGroupMismatch requested group =
             ++ " does not match requested binder type "
             ++ renderType (idType requested)
         }
-    _ -> firstMismatch (bindPairs group)
+    _ -> firstMismatch pairs
   where
+    pairs = concatMap bindPairs groups
     firstMismatch [] = Nothing
     firstMismatch ((binder, body) : rest)
       | eqType (idType binder) (exprType body) = firstMismatch rest

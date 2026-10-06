@@ -7,19 +7,21 @@
 -- PIT (Package Interface Table) cache. The PIT replaces mi_extra_decls with
 -- a panic thunk to save memory, so loadSysInterface can't be used here.
 module Tidepool.FatIface
-  ( FatIfaceCache, newFatIfaceCache, lookupFatIface, evictFatIfaceMatching
-  , FatIfaceLookup(..), FatIfaceMissing(..), lookupFatIfaceExact
+  ( FatIfaceCache, newFatIfaceCache, evictFatIfaceMatching
+  , FatIfaceLookup(..), FatIfaceMissing(..), lookupFatIfaceExact, lookupFatIfaceBodies
   , ExactInterfaceFailure(..), readExactInterface
   , OwnerInterfaceContext(..), OwnerInterfaceCache, newOwnerInterfaceCache, lookupOwnerInterface
   , cacheOwnerInterface, evictOwnerInterfaceMatching
   ) where
 
 import GHC.Core (CoreBind, Bind(..))
+import GHC.Core.FVs (exprSomeFreeVars)
 import GHC.Core.TyCon (TyCon)
 import GHC.Driver.Env (HscEnv, hsc_NC, hsc_dflags)
-import GHC.Types.Name (Name, nameModule_maybe)
-import GHC.Types.Var (Id)
+import GHC.Types.Name (Name, nameModule_maybe, isExternalName)
+import GHC.Types.Var (Id, isId)
 import GHC.Types.Var (varName)
+import GHC.Types.Unique.Set (nonDetEltsUniqSet)
 import GHC.Unit.Types (Module, moduleUnit, moduleName, mkModule, toUnitId)
 import GHC.Unit.Module.ModIface (ModIface, mi_extra_decls)
 import GHC.Utils.Outputable (showSDocUnsafe, ppr, text)
@@ -42,16 +44,18 @@ import Tidepool.ExtractUtil (trySynchronous)
 import Control.Monad.IO.Class (liftIO)
 import Data.IORef (newIORef)
 import qualified Data.Map.Strict as Map
+import qualified Data.IntMap.Strict as IntMap
+import qualified Data.Set as Set
 import System.IO (hPutStrLn, stderr)
 import System.Environment (lookupEnv)
 
 -- | Exact recovery keeps absence distinct from an unreadable interface.
--- The legacy Maybe view must not be used by prepared body recovery.
+-- Missing definitions never become optimizer-unfolding executable bodies.
 data FatIfaceMissing = NameWithoutModule | NoExtraDeclarations | BindingAbsent
   deriving (Eq, Show)
 
 data FatIfaceLookup
-  = FatIfaceFound CoreBind
+  = FatIfaceFound [CoreBind]
   | FatIfaceMissing FatIfaceMissing
   | FatIfaceLoadFailure Module String
 
@@ -60,7 +64,7 @@ data FatIfaceLookup
 -- become indistinguishable from a successfully loaded interface with no
 -- matching binding.
 data FatIfaceModule
-  = FatIfaceBindings (Map.Map Name CoreBind)
+  = FatIfaceBindings (IntMap.IntMap CoreBind) (Map.Map Name Int)
   | FatIfaceNoExtraDeclarations
   | FatIfaceLoadFailureOutcome String
 
@@ -72,20 +76,42 @@ data ExactInterfaceFailure
 lookupFatIfaceExact :: HscEnv -> FatIfaceCache -> Name -> IO FatIfaceLookup
 lookupFatIfaceExact hscEnv cache name = case nameModule_maybe name of
   Nothing -> pure (FatIfaceMissing NameWithoutModule)
-  Just modl -> do
-    outcome <- lookupModuleOutcome hscEnv cache modl
-    pure $ case outcome of
-      FatIfaceBindings nameMap -> case Map.lookup name nameMap of
-        Just bind -> FatIfaceFound bind
-        Nothing -> FatIfaceMissing BindingAbsent
-      FatIfaceNoExtraDeclarations -> FatIfaceMissing NoExtraDeclarations
-      FatIfaceLoadFailureOutcome reason -> FatIfaceLoadFailure modl reason
+  Just modl -> lookupFatIfaceBodies hscEnv cache modl [name]
+
+-- | Select original groups in defining order, including their private top
+-- scope. GHC's fat decoder gives unadvertised tops internal Names, so they
+-- cannot re-enter external-name recovery. External siblings remain ordinary
+-- demand edges; this operation never prepares the whole defining module.
+lookupFatIfaceBodies :: HscEnv -> FatIfaceCache -> Module -> [Name] -> IO FatIfaceLookup
+lookupFatIfaceBodies hscEnv cache owner requested = do
+  outcome <- lookupModuleOutcome hscEnv cache owner
+  pure $ case outcome of
+    FatIfaceBindings groups names -> case traverse (`Map.lookup` names) requested of
+      Nothing -> FatIfaceMissing BindingAbsent
+      Just roots ->
+        let selected = close Set.empty roots
+            close seen [] = seen
+            close seen (ordinal : pending)
+              | ordinal `Set.member` seen = close seen pending
+              | otherwise = close (Set.insert ordinal seen)
+                  (privateDependencies (groups IntMap.! ordinal) ++ pending)
+            -- Every pending ordinal comes from this immutable index, which
+            -- is constructed alongside the complete original group table.
+            privateDependencies binding =
+              [ dependency
+              | rhs <- case binding of NonRec _ body -> [body]; Rec pairs -> map snd pairs
+              , identifier <- nonDetEltsUniqSet (exprSomeFreeVars privateId rhs)
+              , Just dependency <- [Map.lookup (varName identifier) names] ]
+            privateId identifier = isId identifier && not (isExternalName (varName identifier))
+        in FatIfaceFound [binding | (ordinal, binding) <- IntMap.toAscList groups
+             , ordinal `Set.member` selected]
+    FatIfaceNoExtraDeclarations -> FatIfaceMissing NoExtraDeclarations
+    FatIfaceLoadFailureOutcome reason -> FatIfaceLoadFailure owner reason
 
 -- | Cache of deserialized fat interface Core, keyed by Module.
 -- Each module's extra-decls are deserialized at most once.
--- For each Name, we store the full CoreBind it belongs to — this preserves
--- Rec group structure so that looking up any member returns all siblings
--- (critical for join points that reference each other within a Rec group).
+-- Exact Names index original group ordinals. This preserves both Rec group
+-- identity and the defining order of private top scope.
 newtype FatIfaceCache = FatIfaceCache (MVar (Map.Map Module FatIfaceModule))
 
 -- | Create an empty cache.
@@ -101,28 +127,6 @@ evictFatIfaceMatching :: FatIfaceCache -> (Module -> Bool) -> IO ()
 evictFatIfaceMatching (FatIfaceCache cacheRef) stale =
   modifyMVar_ cacheRef (pure . Map.filterWithKey (\modl _ -> not (stale modl)))
 
--- | Look up a Name's CoreBind from the fat interface of its defining module.
--- For NonRec bindings, returns the single binding.
--- For Rec bindings, returns the FULL Rec group — this is critical because
--- Rec groups may contain join points that siblings reference. Without the
--- full group, join point definitions are lost and the JIT emits
--- "Jump to unknown label JoinId(...)".
---
--- Returns Nothing if:
---   - The Name has no module (local/anonymous)
---   - The module wasn't compiled with -fwrite-if-simplified-core
---   - The binding isn't found in mi_extra_decls
-lookupFatIface :: HscEnv -> FatIfaceCache -> Name -> IO (Maybe CoreBind)
-lookupFatIface hscEnv (FatIfaceCache cacheRef) name = do
-  case nameModule_maybe name of
-    Nothing -> return Nothing
-    Just modl -> do
-      outcome <- lookupModuleOutcome hscEnv (FatIfaceCache cacheRef) modl
-      case outcome of
-        FatIfaceBindings nameMap -> return (Map.lookup name nameMap)
-        FatIfaceNoExtraDeclarations -> return Nothing
-        FatIfaceLoadFailureOutcome _ -> return Nothing
-
 -- | Load one module once and retain whether it loaded, lacked extra
 -- declarations, or failed.  Holding the MVar across the miss path also keeps
 -- the "at most once" cache invariant true when resolution is concurrent.
@@ -135,7 +139,7 @@ lookupModuleOutcome hscEnv (FatIfaceCache cacheRef) modl =
       pure (Map.insert modl outcome cache, outcome)
 
 -- | Load and deserialize mi_extra_decls for a single module, retaining the
--- exact outcome for both exact and legacy callers.
+-- exact outcome for all selected-body callers.
 -- Uses findAndReadIface to bypass the PIT cache (which strips mi_extra_decls).
 loadModuleExtraDecls :: HscEnv -> Module -> IO FatIfaceModule
 loadModuleExtraDecls hscEnv modl = do
@@ -212,22 +216,19 @@ loadModuleExtraDeclsUnsafe hscEnv modl = do
             Just _ -> hPutStrLn stderr $
               "  [fat-iface] " ++ showSDocUnsafe (ppr modl) ++ ": loaded " ++ show (length coreBinds) ++ " bindings"
             Nothing -> pure ()
-          return (FatIfaceBindings (bindingsToMap coreBinds))
+          return (FatIfaceBindings (IntMap.fromList (zip [0..] coreBinds)) (bindingsToMap coreBinds))
 
 renderExactInterfaceFailure :: ExactInterfaceFailure -> String
 renderExactInterfaceFailure failure = case failure of
   ExactInterfaceFinderFailure reason -> reason
   ExactInterfaceReadFailure reason -> reason
 
--- | Index CoreBinds into a Name→CoreBind map.
--- For NonRec bindings, each name maps to its own NonRec.
--- For Rec bindings, EVERY member maps to the SAME full Rec group.
--- This preserves Rec group structure for join point resolution.
-bindingsToMap :: [CoreBind] -> Map.Map Name CoreBind
-bindingsToMap = foldl' addBind Map.empty
+-- | Every member of an authoritative Rec group has the same original ordinal.
+bindingsToMap :: [CoreBind] -> Map.Map Name Int
+bindingsToMap = foldl' addBind Map.empty . zip [0..]
   where
-    addBind m bind@(NonRec b _) = Map.insert (varName b) bind m
-    addBind m bind@(Rec pairs)  = foldl' (\m' (b, _) -> Map.insert (varName b) bind m') m pairs
+    addBind m (ordinal, NonRec binder _) = Map.insert (varName binder) ordinal m
+    addBind m (ordinal, Rec pairs) = foldl' (\m' (binder, _) -> Map.insert (varName binder) ordinal m') m pairs
 
 -- GHC exposes interface-read failures as a closed diagnostic type without an
 -- Outputable instance. Keep the reason typed at the lookup boundary while

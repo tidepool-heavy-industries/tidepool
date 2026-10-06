@@ -11,7 +11,6 @@ module Tidepool.PreparedRecovery
 import Control.Exception (evaluate, throwIO)
 import Control.Monad (foldM, unless, when)
 import Data.IORef (modifyIORef', newIORef, readIORef)
-import Data.List (sortOn)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Maybe (isJust)
@@ -35,7 +34,9 @@ import Tidepool.ExecutionProjection
   , preparedModuleReachFacts, preparedModuleReferenceFacts, preparedSeedUniques
   , preparedTargetReferences, preparedRootIdentity, topBinders )
 import Tidepool.ExecutionSchema (SymbolIdentity)
-import Tidepool.FatIface (FatIfaceCache, FatIfaceMissing, OwnerInterfaceCache)
+import Tidepool.FatIface
+  ( FatIfaceCache, FatIfaceMissing, FatIfaceLookup(..), OwnerInterfaceCache
+  , lookupFatIfaceBodies )
 import Tidepool.PreparedStg
   ( PreparedBodyCache, PreparedModule, pmModule, pmBindings, RecoveredModuleFailure(..)
   , newPreparedBodyPreparer )
@@ -270,8 +271,9 @@ newPreparedRecoveryWithPackageRoots env cache ownerCache bodyCache certifiedHome
                 | otherwise = do
                     found <- recoverExactBody env cache binder
                     pure $ case found of
-                      ExactBody owner group ->
-                        (Map.alter (Just . insertGroup group . maybe [] id) owner groups,
+                      ExactBody owner bodies ->
+                        (Map.alter (Just . (\previous -> foldl (flip insertGroup) previous bodies)
+                          . maybe [] id) owner groups,
                          Set.insert owner dirty, failures)
                       MissingExactBody name reason ->
                         (groups, dirty, failures ++ [MissingImplementation name reason])
@@ -285,11 +287,17 @@ newPreparedRecoveryWithPackageRoots env cache ownerCache bodyCache certifiedHome
                       UnsupportedBodyCapability name ->
                         (groups, dirty, failures ++ [UnsupportedExternalCapability name])
               prepareOne groups (prepared, failures) owner = do
-                -- A target can admit the same exact body set in different
-                -- root-growth rounds. Preparation order follows exact symbols,
-                -- preserving each authoritative recursive group intact.
-                result <- prepareBodies owner
-                  (sortOn (map preparedRootIdentity . binders) (Map.findWithDefault [] owner groups))
+                -- Reselect through the defining owner to preserve original
+                -- group order and private top scope across root-growth rounds.
+                selected <- lookupFatIfaceBodies env cache owner
+                  (concatMap (map varName . binders) (Map.findWithDefault [] owner groups))
+                result <- case selected of
+                  FatIfaceFound bodies -> prepareBodies owner bodies
+                  FatIfaceMissing reason -> pure (Left
+                    (RecoveredModulePreparationFailure owner
+                      ("original body set disappeared: " ++ show reason)))
+                  FatIfaceLoadFailure _ reason -> pure (Left
+                    (RecoveredModuleInterfaceFailure owner reason))
                 case result of
                   Right modul -> do
                     pure

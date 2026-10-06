@@ -242,7 +242,7 @@ assertRecoveredEntryContracts = do
     (owner, body) <- case result of
       ExactBody modul group -> pure (modul, group)
       _ -> fail "genuine package qApp exact Core was unavailable"
-    let rawSelected = [(identifier, rhs) | (identifier, rhs) <- bindPairs body,
+    let rawSelected = [(identifier, rhs) | (identifier, rhs) <- concatMap bindPairs body,
           varName identifier == varName requested]
     liftIO $ case rawSelected of
       [(identifier, rhs)] -> putStrLn ("genuine qApp defining body: Id arity=" ++ show (idArity identifier)
@@ -250,7 +250,7 @@ assertRecoveredEntryContracts = do
       _ -> fail "qApp exact group did not retain exactly its selected binder"
     owners <- liftIO newOwnerInterfaceCache
     bodies <- liftIO newPreparedBodyCache
-    recovered <- liftIO $ prepareRecoveredBodies env owners bodies owner [body]
+    recovered <- liftIO $ prepareRecoveredBodies env owners bodies owner body
       >>= either (fail . show) pure
     declaring <- liftIO $ lookupOwnerInterface owners owner
     original <- case [identifier | Just context <- [declaring], identifier <- ownerInterfaceEntries context,
@@ -359,7 +359,7 @@ assertAllRecoveredBodies = do
     recovered <- liftIO $ recoverFirst hsc cache fstIds
     case recovered of
       (fstId, ExactBody owner body) -> do
-        preparedResult <- liftIO $ prepareRecoveredBodies hsc ownerCache bodyCache owner (bindList body)
+        preparedResult <- liftIO $ prepareRecoveredBodies hsc ownerCache bodyCache owner body
         recoveredModule <- case preparedResult of
           Left failure -> liftIO $ ioError (userError
             ("defining-context preparation failed: " ++ show failure))
@@ -392,9 +392,6 @@ assertAllRecoveredBodies = do
       found -> error ("expected one caller entry, got " ++ show found)
 
     isFst identifier = occNameString (nameOccName (varName identifier)) == "fst"
-
-    bindList (NonRec binder body) = [NonRec binder body]
-    bindList (Rec pairs) = [Rec pairs]
 
     recoverFirst _ _ [] = error "recoverFirst called with no fst Id"
     recoverFirst hsc cache (identifier : rest) = do
@@ -496,7 +493,7 @@ assertSemigroupSubset root libdir = runGhc (Just libdir) $ do
     ExactBody owner group -> pure (owner, group)
     other -> liftIO $ ioError (userError
       ("semigroup reference was not recovered exactly: " ++ showLookup' other))
-  recovered <- liftIO $ prepareRecoveredBodies hsc ownerCache bodyCache owner (bindList body)
+  recovered <- liftIO $ prepareRecoveredBodies hsc ownerCache bodyCache owner body
   recoveredModule <- case recovered of
     Right value -> pure value
     Left failure -> liftIO $ ioError (userError
@@ -516,7 +513,7 @@ assertSemigroupSubset root libdir = runGhc (Just libdir) $ do
   liftIO $ assert (productOneOwner == owner)
     "$fMonoidProduct1 defining owner changed during recovery"
   productOnePrepared <- liftIO $ prepareRecoveredBodies hsc ownerCache bodyCache productOneOwner
-    (bindList productOneBody)
+    productOneBody
   productOneModule <- case productOnePrepared of
     Right value -> pure value
     Left failure -> liftIO $ ioError (userError
@@ -533,7 +530,7 @@ assertSemigroupSubset root libdir = runGhc (Just libdir) $ do
     Just _ -> ioError (userError "request-boundary eviction retained the owner context")
   freshBodyCache <- liftIO newPreparedBodyCache
   afterEviction <- liftIO $ prepareRecoveredBodies hsc ownerCache freshBodyCache owner
-    (bindList productOneBody)
+    productOneBody
   liftIO $ case afterEviction of
     Right value -> assert (pmModule value == owner)
       "reloaded owner context changed the recovered defining owner"
@@ -564,8 +561,6 @@ assertSemigroupSubset root libdir = runGhc (Just libdir) $ do
       == "$fMonoidProduct"
     isMonoidProductOne identifier = occNameString (nameOccName (varName identifier))
       == "$fMonoidProduct1"
-    bindList (NonRec binder body) = [NonRec binder body]
-    bindList (Rec pairs) = [Rec pairs]
     renderId identifier = showSDocUnsafe (ppr (idName identifier))
     showLookup' (ExactBody owner _) = "defining body in " ++ renderModule' owner
     showLookup' (MissingExactBody name reason) = "missing " ++ renderName' name ++ ": " ++ show reason
@@ -633,7 +628,7 @@ assertRecoveredKindRep root = do
     FatIfaceFound body -> pure body
     _ -> fail "genuine krep$* fat body was unavailable"
   partialCache <- newPreparedBodyCache
-  partial <- prepareRecoveredBodies (prHscEnv pipeline) ownerCache partialCache owner [group]
+  partial <- prepareRecoveredBodies (prHscEnv pipeline) ownerCache partialCache owner group
     >>= either (fail . show) pure
   partialBinder <- case
       [binder | (Stg.StgTopLifted binding, _) <- pmBindings partial
@@ -741,7 +736,7 @@ assertPatErrorBody root = do
     FatIfaceLoadFailure owner reason -> ioError (userError
       ("patError fat interface failed to load " ++ renderModule owner
         ++ ": " ++ reason))
-  let fatPairs = bindPairs fatGroup
+  let fatPairs = concatMap bindPairs fatGroup
       selected = [ (binder, body)
                  | (binder, body) <- fatPairs
                  , varName binder == varName patError ]
