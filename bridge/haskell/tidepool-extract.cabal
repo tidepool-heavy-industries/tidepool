@@ -292,7 +292,7 @@ executable tidepool-extract-bin
   -- flags from a caller. Without it, `Tidepool.Timing.readRtsStats` always
   -- reads `getRTSStatsEnabled == False` and every per-module timing record
   -- reports `rts=unavailable`.
-  ghc-options:      -Wall -with-rtsopts=-T
+  ghc-options:      -Wall -threaded -with-rtsopts=-T
 
 test-suite execution-inventory
   import:           tasty-tests
