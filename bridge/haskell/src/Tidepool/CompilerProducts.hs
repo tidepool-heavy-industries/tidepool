@@ -106,11 +106,12 @@ import Tidepool.Timing
 prepareCompilerProjectionContext
   :: PreparedPipelineResult -> Map.Map SymbolIdentity Word64 -> Module -> String -> [String]
   -> Maybe JsonAuthority -> IO ProjectionContext
-prepareCompilerProjectionContext prepared retainedGenerations owner target auxiliaryRoots hostJsonAuthority =
-  prepareCompilerProjectionContextForEnvironment
+prepareCompilerProjectionContext prepared retainedGenerations owner target auxiliaryRoots hostJsonAuthority = do
+  context <- prepareCompilerProjectionContextForEnvironment
     (prHscEnv (pprPipelineResult prepared))
     (compilationScope <$> preparedExactCompilation prepared)
     retainedGenerations owner target auxiliaryRoots hostJsonAuthority
+  pure context {projectionCurrentOriginals = pprAcceptedCandidateBindings prepared}
 
 prepareCompilerProjectionContextForEnvironment
   :: HscEnv -> Maybe ExactScope -> Map.Map SymbolIdentity Word64 -> Module -> String -> [String]
@@ -160,10 +161,11 @@ observeOriginalProjection :: OriginalProjectionCollector
   -> HscEnv -> Map.Map ModuleName ModIface -> Module -> Maybe ExactScope
   -> PreparedModuleCompletionInputs -> IO PreparedModuleObserver
 observeOriginalProjection completed retained auxiliaryRoots json
-    environment interfaces owner exact _inputs = do
-  context <- prepareCompilerProjectionContextForEnvironment environment exact retained owner
+    environment interfaces owner exact inputs = do
+  baseContext <- prepareCompilerProjectionContextForEnvironment environment exact retained owner
     "__original_projection" auxiliaryRoots json
-  let observe prepared = do
+  let context = baseContext {projectionCurrentOriginals = completionExternalOriginalBindings inputs}
+      observe prepared = do
         _ <- projectCachedOriginalHomeModuleProducts completed environment interfaces context prepared
         pure ()
   pure (PreparedModuleObserver observe (\_ -> pure ()))
@@ -195,10 +197,13 @@ data CurrentOriginalInventory = CurrentOriginalInventory
   , currentOriginalPackages :: Map.Map (String,String) BS.ByteString
   , currentOriginalFinalized :: FinalizedModuleArtifacts
   , currentOriginalNames :: Map.Map Name SymbolIdentity
+    -- Already admitted native originals are imports, never fresh emitted groups.
+  , currentOriginalExternalNames :: Map.Map Name SymbolIdentity
   }
 
 currentOriginalBinders :: CurrentOriginalInventory -> Set.Set SymbolIdentity
-currentOriginalBinders inventory = Set.fromList
+currentOriginalBinders inventory = Set.fromList (Map.elems (currentOriginalExternalNames inventory))
+  `Set.union` Set.fromList
   [binder | product' <- currentOriginalProducts inventory
     , let (_,_,_,groups) = moduleProductInput product'
     , group <- groups, binder <- projectedBinders group]
@@ -207,8 +212,8 @@ currentOriginalBinders inventory = Set.fromList
 -- Every remaining group crosses the executable boundary through its exact Name.
 currentOriginalBindingsExcept :: CurrentOriginalInventory -> Set.Set SymbolIdentity
   -> Map.Map Name SymbolIdentity
-currentOriginalBindingsExcept inventory roots = Map.filter (`Set.member` imported)
-  (currentOriginalNames inventory)
+currentOriginalBindingsExcept inventory roots = Map.union (currentOriginalExternalNames inventory)
+  (Map.filter (`Set.member` imported) (currentOriginalNames inventory))
   where
     imported = Set.fromList
       [binder | product' <- currentOriginalProducts inventory
@@ -245,8 +250,14 @@ admitCurrentOriginalProducts originalInterfaces outDir prepared productContext =
       (availability,products,packages) <- admitModuleProducts originalInterfaces admittedContext
         (finalizedLocalAdmissions finalized) (pprProductInterfaces prepared)
         (pprPackageImports prepared)
-      let inventory = CurrentOriginalInventory availability products packages finalized
-            (preparedTopIdentityBindings (preparedProductModules productContext))
+      let inventory = CurrentOriginalInventory
+            { currentOriginalAvailability = availability
+            , currentOriginalProducts = products
+            , currentOriginalPackages = packages
+            , currentOriginalFinalized = finalized
+            , currentOriginalNames = preparedTopIdentityBindings (preparedProductModules productContext)
+            , currentOriginalExternalNames = pprAcceptedCandidateBindings prepared
+            }
       pure admittedContext {preparedCurrentOriginalInventory = Just inventory}
 
 
@@ -318,8 +329,9 @@ observeOriginalProjectionWithRecovery :: OriginalProjectionCollector -> Prepared
   -> PreparedModuleCompletionInputs -> IO (PreparedModuleObserver,OriginalProductWorklist)
 observeOriginalProjectionWithRecovery collector cache executor retained auxiliaryRoots json
     env interfaces owner exact inputs = do
-  context <- prepareCompilerProjectionContextForEnvironment env exact retained owner
+  baseContext <- prepareCompilerProjectionContextForEnvironment env exact retained owner
     "__original_projection" auxiliaryRoots json
+  let context = baseContext {projectionCurrentOriginals = completionExternalOriginalBindings inputs}
   worklist <- newOriginalProductWorklist collector cache executor (Just (completionReuseContext inputs)) env exact interfaces context
     (completionExternalOriginals inputs) (completionSourceOwners inputs) (completionSiblings inputs)
   pure (PreparedModuleObserver (worklistObserve worklist) (worklistComplete worklist),worklist)

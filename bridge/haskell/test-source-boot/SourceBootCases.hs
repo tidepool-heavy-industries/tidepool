@@ -2592,7 +2592,7 @@ originalProjectionProducts = withScratch $ \work -> do
   withCompilerExecutor serialCompilerExecutionGrant $ \executor -> do
     let inputs = PreparedModuleCompletionInputs
           (Set.fromList (map pmModule (pprModules paired)))
-          (Map.unions (map pmSitedSiblings (pprModules paired))) Set.empty (ReuseContext 0 "fixture")
+          (Map.unions (map pmSitedSiblings (pprModules paired))) Set.empty Map.empty (ReuseContext 0 "fixture")
         completionOrder = [consumer,ownerModule,provider,independent]
     (observer,pendingWorklist) <- observeOriginalProjectionWithRecovery pendingRawCache
       pendingBodyCache executor Map.empty [] Nothing pairedEnv pairedInterfaces
@@ -2652,7 +2652,7 @@ originalProjectionProducts = withScratch $ \work -> do
       fail "raw original cache missed unrelated inventory growth or reused a changed demanded generation"
     let inputs = PreparedModuleCompletionInputs
           (Set.fromList (map pmModule (pprModules captured)))
-          (Map.unions (map pmSitedSiblings (pprModules captured))) Set.empty (ReuseContext 0 "fixture")
+          (Map.unions (map pmSitedSiblings (pprModules captured))) Set.empty Map.empty (ReuseContext 0 "fixture")
     (observer,earlyWorklist) <- observeOriginalProjectionWithRecovery rawCache bodyCache executor
       Map.empty [] Nothing capturedEnv (pprProductInterfaces captured) (pmModule consumer)
       (Just capturedScope) inputs
@@ -3012,7 +3012,39 @@ candidateGhcLoad = withTiming $ withScratch $ \work -> do
           ++ showSDocUnsafe (ppr (prBinds result)))
       case lookupHpt (hsc_HPT (prHscEnv result)) helper of
         Just hmi | let linkable = hm_linkable hmi
-                 , isJust (homeMod_bytecode linkable) || isJust (homeMod_object linkable) -> pure ()
+                 , isJust (homeMod_bytecode linkable) || isJust (homeMod_object linkable) -> do
+          let supported = Set.fromList
+                [binder | candidate <- pprAcceptedCandidates reused
+                  , group <- candidateGroups candidate, binder <- candidateGroupBinders group]
+              actual = Map.fromList
+                [(idName identifier, identity)
+                | identifier <- typeEnvIds (md_types (hm_details hmi))
+                , let identity = preparedRootIdentity identifier
+                , identity `Set.member` supported]
+          unless (pprAcceptedCandidateBindings reused == actual
+              && (expected /= 42 || not (Map.null actual))) $
+            fail "accepted native original inventory lost current HPT Names or admitted an unsupported binder"
+          context <- prepareCompilerProjectionContext reused Map.empty
+            (tcg_mod (prTargetTcGblEnv result)) "__result" [] Nothing
+          unless (projectionCurrentOriginals context == actual) $
+            fail "accepted native original Names disappeared at the projection boundary"
+          let output = work </> ("candidate-current-originals-" ++ show expected)
+              env = prHscEnv result
+          createDirectoryIfMissing True output
+          originals <- newOriginalInterfaceArtifacts env (pprFinalizedModules reused)
+            (retainedOriginalInterfaces reused) output
+          (_, products) <- prepareOriginalProducts env
+            (compilationScope <$> preparedExactCompilation reused) (pprProductInterfaces reused)
+            context supported (pprModules reused)
+          issuedProducts <- admitCurrentOriginalProducts originals output reused products
+          inventory <- maybe (fail "candidate original admission did not issue an inventory") pure
+            (preparedCurrentOriginalInventory issuedProducts)
+          let imported = currentOriginalBindingsExcept inventory
+                (Set.insert (projectionEntry context) supported)
+          unless (Map.isSubmapOf actual imported
+              && projectionEntry context `Set.notMember` Set.fromList (Map.elems imported)
+              && Set.fromList (Map.elems actual) `Set.isSubsetOf` currentOriginalBinders inventory) $
+            fail "current original issuer dropped native imports or imported the fresh entry group"
         _ -> fail "native candidate retention discarded its actual GHC executable"
       putStrLn ("candidate GHC load evidence: expected=" ++ show expected
         ++ " accepted=" ++ show accepted ++ " fresh=" ++ show fresh

@@ -217,7 +217,8 @@ import Tidepool.FatIface
   ( FatIfaceCache, newFatIfaceCache, mergeFatIfaceCaches, selectFatIfaceCaches, evictFatIfaceMatching
   , OwnerInterfaceCache, newOwnerInterfaceCache, mergeOwnerInterfaceCaches, selectOwnerInterfaceCaches, evictOwnerInterfaceMatching)
 import Tidepool.ExecutionProjection
-  ( OriginalProjectionCache, newOriginalProjectionCache, mergeOriginalProjectionCaches, selectOriginalProjectionCaches, evictOriginalProjectionMatching )
+  ( OriginalProjectionCache, newOriginalProjectionCache, mergeOriginalProjectionCaches, selectOriginalProjectionCaches, evictOriginalProjectionMatching
+  , preparedRootIdentity )
 import Tidepool.CompilerExecution
   ( CompilerExecutionGrant, serialCompilerExecutionGrant, compilerModuleJobs
   , CompilerExecutor, withCompilerExecutor, runCompilerTasks, dependencyClosedReuse )
@@ -291,6 +292,7 @@ data PreparedModuleCompletionInputs = PreparedModuleCompletionInputs
   { completionSourceOwners :: Set.Set Module
   , completionSiblings :: Map.Map String Id
   , completionExternalOriginals :: Set.Set SymbolIdentity
+  , completionExternalOriginalBindings :: Map.Map Name SymbolIdentity
   , completionReuseContext :: ReuseContext
   }
 
@@ -344,6 +346,7 @@ data PreparedPipelineResult = PreparedPipelineResult
   , pprFinalizedModules :: Map.Map ModuleName FinalizedModule
   , pprPackageImports :: Map.Map ModuleName PackageImportEvidence
   , pprAcceptedCandidates :: [ModuleCandidate]
+  , pprAcceptedCandidateBindings :: Map.Map Name SymbolIdentity
   }
 
 -- | One publication owns both source lookup and retained exact imports.
@@ -1362,6 +1365,7 @@ data CanonicalFrontendFailure
   | MissingLoadedFinalization
   | UnfinishedLoadedFrontend
   | CandidateInterfaceBytesMismatch ModuleName
+  | CandidateOriginalHomeMissing ModuleName
   | CandidateFrontendReplayRefused ModuleName
   | MissingFinalizedFacts ModuleName
   deriving (Show)
@@ -2632,6 +2636,28 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           forM_ (Map.keys acceptedCandidates) $ \name ->
             forM_ (lookupHpt (hsc_HPT env) name) $ \hmi ->
               validateCandidateInterface env name (hm_iface hmi)
+        -- Only already admitted executable groups can issue current original
+        -- imports. Use the selected HMI's actual Names, never reconstructed
+        -- names or the complete interface declaration inventory.
+        candidateOriginalBindings env = fmap Map.unions $
+          forM (Map.toAscList acceptedCandidates) $ \(name, admission) -> do
+            home <- maybe (throwIO (CandidateOriginalHomeMissing name)) pure
+              (lookupHpt (hsc_HPT env) name)
+            let candidate = admittedCandidateOriginal admission
+                owner = mkModule (stringToUnit (candidateUnit candidate))
+                  (mkModuleName (candidateModule candidate))
+                nativeBinders = Set.fromList
+                  [binder | group <- candidateGroups candidate
+                    , binder <- candidateGroupBinders group]
+            unless (mi_module (hm_iface home) == owner) $
+              throwIO (CandidateInterfaceBytesMismatch name)
+            validateCandidateInterface env name (hm_iface home)
+            pure (Map.fromList
+              [(idName identifier, identity)
+              | identifier <- typeEnvIds (md_types (hm_details home))
+              , nameModule_maybe (idName identifier) == Just owner
+              , let identity = preparedRootIdentity identifier
+              , identity `Set.member` nativeBinders])
         retainLoaded pending iface = do
           unless (mi_module iface == ms_mod (pendingSummary pending)) $
             throwIO LoadedFinalizationOwnerMismatch
@@ -3105,6 +3131,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                   env <- getSession
                   interfaces <- liftIO (readIORef productInterfacesRef)
                   siblings <- liftIO (readIORef preparedSiblingsRef)
+                  externalBindings <- liftIO (candidateOriginalBindings env)
                   let taskNames = Set.fromList (map fst tasks)
                       sourceOwners = Set.fromList
                         [ ms_mod summary | observation <- observations
@@ -3117,7 +3144,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                          ++ [binder | admitted <- Map.elems acceptedCandidates
                             , group <- candidateGroups (admittedCandidateOriginal admitted)
                             , binder <- candidateGroupBinders group])
-                      inputs = PreparedModuleCompletionInputs sourceOwners siblings externalOriginals reuseContext
+                      inputs = PreparedModuleCompletionInputs sourceOwners siblings externalOriginals externalBindings reuseContext
                   liftIO (factory (env {hsc_logger = loweringLogger}) interfaces
                     targetOwner (pvExactScope variant) inputs)
               lowerTasks preparedNormallyReusable observer tasks = liftIO $ timePhase timing "prepared_graph" $ do
@@ -3658,12 +3685,14 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
               , pprFinalizedModules = finalizedModules
               , pprPackageImports = packageRoots
               , pprAcceptedCandidates = []
+              , pprAcceptedCandidateBindings = Map.empty
               }
           PreparedProducts _ -> do
             (result, modules, dependencies, productInterfaces, finalizedModules, packageRoots) <- compileExecutable
             valid <- liftIO $ revalidateAcceptedCandidates (Map.elems acceptedCandidates)
             when (not valid) $ liftIO $ ioError $ userError
               "accepted module candidate changed before artifact publication"
+            acceptedBindings <- liftIO (candidateOriginalBindings (prHscEnv result))
             capturedDependencies <- liftIO (preparedDependencies (prHscEnv result)
               (pvSourceImportIntents variant) dependencies exactCompilation)
             pure PreparedPipelineResult
@@ -3674,6 +3703,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
               , pprFinalizedModules = finalizedModules
               , pprPackageImports = packageRoots
               , pprAcceptedCandidates = map admittedCandidateOriginal (Map.elems acceptedCandidates)
+              , pprAcceptedCandidateBindings = acceptedBindings
               }
           CheckedEnvironment -> compileChecked
           CheckedEnvironmentProducts _ -> compileChecked
