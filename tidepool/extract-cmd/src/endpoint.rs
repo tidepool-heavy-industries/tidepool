@@ -2433,7 +2433,6 @@ mod tests {
                     assert!(matches!(borrowed.transport, Transport::Scoped));
                     let body = borrowed.execute(&command).unwrap();
                     assert_eq!(body.output.stdout.as_slice(), expected);
-                    drop(borrowed);
                     assert!(retained.borrow().is_none());
                     TRANSACTION_SCOPE.with(|scope| {
                         let scope = scope.borrow();
