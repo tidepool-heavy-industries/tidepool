@@ -1199,7 +1199,7 @@ fn resident_parcel_executes_evaluated_receive_value_after_producer_retirement() 
                 .definition_facts()
                 .sites
                 .iter()
-                .any(|row| row == &site)
+                .any(|row| row.site == site.site && row.delivery == site.delivery)
         })
         .count();
     // This census observes the production exporter. An Eff continuation or
