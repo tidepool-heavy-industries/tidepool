@@ -29,6 +29,7 @@ module Tidepool.ExactHydration
 import Tidepool.Timing (readTimingEnabled, emitCount, timeDetailPhase)
 import Tidepool.Session (SessionModule(..), SessionModuleKind(..), parseSessionModule, sessionModuleString)
 import Control.Monad (forM, forM_, unless)
+import Control.Monad.IO.Class (liftIO)
 import Data.List (mapAccumL)
 import Control.Exception
   ( Exception, IOException, SomeException, SomeAsyncException, bracket, try, fromException, throwIO )
@@ -38,6 +39,10 @@ import qualified Data.ByteString as BS
 import qualified Crypto.Hash.SHA256 as SHA256
 import GHC.Driver.Env
   ( HscEnv(..), hscUpdateHPT_lazy, hptSomeThingsBelowUs, hsc_home_unit, hsc_HPT, hscEPS, discardIC, hsc_all_home_unit_ids )
+import GHC.Driver.Plugins
+  ( Plugin(..), PluginWithArgs(..), Plugins(..), StaticPlugin(..), PluginRecompile(..), defaultPlugin )
+import GHC.Tc.Types (TcGblEnv(..), ImportAvails(..))
+import GHC.Tc.Utils.Monad (getTopEnv)
 import qualified GHC.Linker.Loader as Linker
 import GHC.Unit.Env (UnitEnv(..), HomeUnitEnv(..))
 import GHC.Unit.External (initExternalUnitCache, ExternalPackageState(eps_PIT))
@@ -85,8 +90,8 @@ import GHC.Unit.Module.Deps (dep_orphs, dep_finsts)
 import GHC.Unit.Home (homeUnitAsUnit, homeUnitId, isHomeUnit)
 import GHC.Unit.Types (GenWithIsBoot(..))
 import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
-import GHC.Utils.Fingerprint (fingerprintByteString)
-import GHC.Unit.Module.ModIface (ModIface, mi_module, mi_extra_decls, mi_exports, mi_insts, mi_fam_insts, mi_deps, mi_iface_hash, mi_final_exts)
+import GHC.Utils.Fingerprint (fingerprintByteString, fingerprintString)
+import GHC.Unit.Module.ModIface (ModIface, mi_module, mi_extra_decls, mi_exports, mi_insts, mi_fam_insts, mi_deps, mi_iface_hash, mi_orphan, mi_final_exts)
 import GHC.Builtin.Names (gHC_PRIM)
 import Tidepool.FatIface (readExactInterface)
 import GHC.Unit.Types (unitString, stringToUnit, toUnitId)
@@ -217,7 +222,7 @@ data GeneratedScaffoldRecipe = GeneratedScaffoldRecipe FilePath String BS.ByteSt
   [(CheckedTemplateInterface,Int,Maybe String)] [CheckedTemplateInterface] GeneratedScaffoldInstanceScope
   deriving (Eq)
 
-data GeneratedScaffoldInstanceScope = ImportedTemplateInstances | OriginalPreviewInstances
+data GeneratedScaffoldInstanceScope = ImportedTemplateInstances | OriginalPreviewInstances CheckedTemplateInterface
   deriving (Eq)
 
 instance Show GeneratedScaffoldRecipe where
@@ -263,9 +268,9 @@ generatedScaffoldRecipe interfaces protectedTemplate rendered path name = do
 -- Only the activation admission supplies this complete original instance
 -- graph. Its synthetic edges affect GHC's instance traversal without exposing
 -- any original lexical name or permitting an authored source import.
-generatedActivationPreviewRecipe :: [CheckedTemplateInterface] -> String -> String -> FilePath -> String
+generatedActivationPreviewRecipe :: [CheckedTemplateInterface] -> (String,String) -> String -> String -> FilePath -> String
   -> IO (Either String GeneratedScaffoldRecipe)
-generatedActivationPreviewRecipe interfaces protectedTemplate rendered path name = do
+generatedActivationPreviewRecipe interfaces originalOwner protectedTemplate rendered path name = do
   recipe <- generatedScaffoldRecipe interfaces protectedTemplate rendered path name
   pure $ do
     original <- recipe
@@ -274,7 +279,11 @@ generatedActivationPreviewRecipe interfaces protectedTemplate rendered path name
           | interface <- interfaces]
     unless (all (all (`Set.member` owners) . templateInterfaceImports) interfaces)
       (Left "activation preview edge leaves its original instance graph")
-    pure (GeneratedScaffoldRecipe canonical target bytes line selected interfaces OriginalPreviewInstances)
+    originalTarget <- case [interface | interface <- interfaces
+        , (templateInterfaceUnit interface,templateInterfaceModule interface) == originalOwner] of
+      [interface] -> Right interface
+      _ -> Left "activation preview lacks its sealed original target"
+    pure (GeneratedScaffoldRecipe canonical target bytes line selected interfaces (OriginalPreviewInstances originalTarget))
 
 captureGeneratedScaffoldTarget :: GeneratedScaffoldRecipe -> FilePath -> IO (Either String BS.ByteString)
 captureGeneratedScaffoldTarget (GeneratedScaffoldRecipe path _ expected _ _ _ _) requested = do
@@ -292,14 +301,17 @@ data GeneratedScaffoldImportAuthority = GeneratedScaffoldImportAuthority
   [(Module,Fingerprint,GeneratedScaffoldOwner,SrcSpan,ExactIfaceArtifact)]
   [(ExactIfaceArtifact,[(String,String)])]
   [(Module,Fingerprint,[(String,String)])]
+  [OriginalPreviewOrphans]
+
+data OriginalPreviewOrphans = OriginalPreviewOrphans Module Fingerprint [Module]
 
 noGeneratedScaffoldImports :: GeneratedScaffoldImportAuthority
-noGeneratedScaffoldImports = GeneratedScaffoldImportAuthority [] [] []
+noGeneratedScaffoldImports = GeneratedScaffoldImportAuthority [] [] [] []
 
 permitsGeneratedScaffoldImport
   :: GeneratedScaffoldImportAuthority -> ModSummary -> (String,String)
   -> (PkgQual, Located ModuleName) -> Bool
-permitsGeneratedScaffoldImport (GeneratedScaffoldImportAuthority scaffold _ _) summary requested (qualifier,imported) =
+permitsGeneratedScaffoldImport (GeneratedScaffoldImportAuthority scaffold _ _ _) summary requested (qualifier,imported) =
   qualifier == NoPkgQual && any
     (\(target,fingerprint,owner,span',artifact) -> ms_mod summary == target && ms_hs_hash summary == fingerprint
       && requested == (case owner of
@@ -374,7 +386,7 @@ readGeneratedScaffoldImportAuthority (VerifiedExactIfaceClosure captured) native
             && ideclSource declaration == NotBoot && ideclImportList declaration == Nothing
             && case ideclPkgQual declaration of NoRawPkgQual -> True; _ -> False)
           (Left "generated scaffold parsed import differs from its protected shape")
-        pure (GeneratedScaffoldImportAuthority [(ms_mod summary,fingerprint,NativeScaffoldOwner native,getLoc imported,artifact)] [(artifact,[])] [])
+        pure (GeneratedScaffoldImportAuthority [(ms_mod summary,fingerprint,NativeScaffoldOwner native,getLoc imported,artifact)] [(artifact,[])] [] [])
     originals <- case planned of
       Nothing -> Right noGeneratedScaffoldImports
       Just (owner,expectedFingerprint) -> do
@@ -415,7 +427,7 @@ readGeneratedScaffoldImportAuthority (VerifiedExactIfaceClosure captured) native
           (Left "checked recipe original import has another shape")
         -- Original instances and families belong to this sealed declaration;
         -- only the protected recipe edge receives visibility.
-        pure (GeneratedScaffoldImportAuthority [(ms_mod summary,fingerprint,NativeScaffoldOwner native,getLoc imported,artifact)] [(artifact,[])] [])
+        pure (GeneratedScaffoldImportAuthority [(ms_mod summary,fingerprint,NativeScaffoldOwner native,getLoc imported,artifact)] [(artifact,[])] [] [])
     templateNodes <- forM templateGraph $ \selected -> do
       let owner = (templateInterfaceUnit selected,templateInterfaceModule selected)
       (artifact,_,_) <- maybe (Left "checked template graph interface is not retained") Right (Map.lookup owner captured)
@@ -450,14 +462,30 @@ readGeneratedScaffoldImportAuthority (VerifiedExactIfaceClosure captured) native
           && case ideclPkgQual declaration of NoRawPkgQual -> True; _ -> False)
         (Left "checked template interface import has another shape")
       pure (ms_mod summary,fingerprint,TemplateInterfaceOwner,getLoc imported,artifact)
-    let GeneratedScaffoldImportAuthority resumeEdges resumeNodes _ = resume
-        GeneratedScaffoldImportAuthority originalEdges originalNodes _ = originals
+    orphanScopes <- case instanceScope of
+      ImportedTemplateInstances -> pure []
+      OriginalPreviewInstances originalTarget -> do
+        let owner = (templateInterfaceUnit originalTarget,templateInterfaceModule originalTarget)
+        (artifact,iface,_) <- maybe (Left "activation preview original target interface is not retained") Right
+          (Map.lookup owner captured)
+        unless (exactSha256 artifact == templateInterfaceSha256 originalTarget
+            && (unitString (moduleUnit (mi_module iface)),moduleNameString (moduleName (mi_module iface))) == owner)
+          (Left "activation preview original target interface seal changed")
+        let orphans = Set.toAscList (Set.fromList
+              ([mi_module iface | mi_orphan (mi_final_exts iface)] ++ dep_orphs (mi_deps iface)))
+        forM_ (filter (isHomeUnit (hsc_home_unit env) . moduleUnit) orphans) $ \orphan ->
+          unless ((unitString (moduleUnit orphan),moduleNameString (moduleName orphan))
+              `Map.member` captured)
+            (Left "activation preview original orphan interface is not retained")
+        pure [OriginalPreviewOrphans (ms_mod summary) fingerprint orphans]
+    let GeneratedScaffoldImportAuthority resumeEdges resumeNodes _ _ = resume
+        GeneratedScaffoldImportAuthority originalEdges originalNodes _ _ = originals
         instanceEdges = case instanceScope of
           ImportedTemplateInstances -> []
-          OriginalPreviewInstances -> [(ms_mod summary,fingerprint,
+          OriginalPreviewInstances _ -> [(ms_mod summary,fingerprint,
             [(exactUnit artifact,exactModule artifact) | (artifact,_) <- templateNodes])]
     pure (GeneratedScaffoldImportAuthority (resumeEdges ++ originalEdges ++ templateEdges)
-      (resumeNodes ++ originalNodes ++ templateNodes) instanceEdges)
+      (resumeNodes ++ originalNodes ++ templateNodes) instanceEdges orphanScopes)
 
 readCheckedValueImportAuthority
   :: HscEnv -> [ExactIfaceArtifact] -> IO (Either String CheckedValueImportAuthority)
@@ -476,7 +504,7 @@ freshExactState env = do
     -- Extraction uses NoLink, so GHC's make driver does not unload splice
     -- executables. Reset those home symbols with the same loader protocol
     -- before another lexical scope can supply the same module identity.
-    let cleared = discardIC env
+    let cleared = discardIC (withoutPreviewOrphanPlugin env)
     forM_ (hsc_interp cleared) $ \interp -> Linker.unload interp cleared []
     eps <- initExternalUnitCache
     finder <- initFinderCache
@@ -735,8 +763,53 @@ exactHomeInstancesFor summary env = hscUpdateHPT_lazy install env
 withExactHomeInstances :: ModSummary -> Ghc a -> Ghc a
 withExactHomeInstances summary action = reifyGhc $ \session -> bracket
   (reflectGhc getSession session)
-  (\original -> reflectGhc (getSession >>= setSession . hscUpdateHPT_lazy (const (hsc_HPT original))) session)
+  (\original -> reflectGhc (do
+    current <- getSession
+    setSession ((hscUpdateHPT_lazy (const (hsc_HPT original)) current)
+      { hsc_plugins = hsc_plugins original })) session)
   (\original -> reflectGhc (setSession (exactHomeInstancesFor summary original) >> action) session)
+
+previewOrphanPluginMarker :: String
+previewOrphanPluginMarker = "tidepool-original-preview-orphans"
+
+-- The callback belongs to one verified target and is replaced on every graph
+-- installation. Resetting a transaction removes it, including after failure.
+withoutPreviewOrphanPlugin :: HscEnv -> HscEnv
+withoutPreviewOrphanPlugin env = env
+  { hsc_plugins = plugins { staticPlugins = filter retained (staticPlugins plugins) } }
+  where
+    plugins = hsc_plugins env
+    retained plugin = paArguments (spPlugin plugin) /= [previewOrphanPluginMarker]
+
+withOriginalPreviewOrphans :: [OriginalPreviewOrphans] -> HscEnv -> HscEnv
+withOriginalPreviewOrphans scopes original = env
+  { hsc_plugins = plugins { staticPlugins = map scopedPlugin scopes ++ staticPlugins plugins } }
+  where
+    env = withoutPreviewOrphanPlugin original
+    plugins = hsc_plugins env
+    scopedPlugin (OriginalPreviewOrphans target fingerprint orphans) = StaticPlugin
+      { spPlugin = PluginWithArgs
+          { paPlugin = defaultPlugin
+              { renamedResultAction = \_ environment declarations ->
+                  if tcg_mod environment /= target then pure (environment,declarations) else do
+                    current <- getTopEnv
+                    unless (any (\case ModuleNode _ summary ->
+                        ms_mod summary == target && ms_hs_hash summary == fingerprint
+                        _ -> False) (mgModSummaries' (hsc_mod_graph current)))
+                      (liftIO (fail "activation preview orphan callback target fingerprint changed"))
+                    let imports = tcg_imports environment
+                        restored = environment { tcg_imports = imports { imp_orphs = Set.toAscList
+                          (Set.fromList (orphans ++ imp_orphs imports)) } }
+                    pure (restored,declarations)
+              , pluginRecompile = \_ -> pure (MaybeRecompile
+                  (fingerprintString ("original-preview-orphans-v1:"
+                    ++ show (fingerprint,map moduleKey (target:orphans)))))
+              }
+          , paArguments = [previewOrphanPluginMarker]
+          }
+      , spInitialised = True
+      }
+    moduleKey owner = (unitString (moduleUnit owner),moduleNameString (moduleName owner))
 
 -- A lexical interface contributes its chosen instance/family environment to
 -- GHC's graph traversal. Implementation-only HMIs remain installed but never
@@ -754,7 +827,7 @@ installExactLexicalGraphWithScaffold
   -> CheckedValueImportAuthority -> GeneratedScaffoldImportAuthority -> HscEnv
   -> IO (Either String HscEnv)
 installExactLexicalGraphWithScaffold sourceGraph lexical (CheckedValueImportAuthority checkedValues)
-    authority@(GeneratedScaffoldImportAuthority _ scaffoldGraph instanceEdges) env
+    authority@(GeneratedScaffoldImportAuthority _ scaffoldGraph instanceEdges orphanScopes) env
   | not (null conflictingRows) = pure (Left "checked template graph conflicts with current exact lexical graph")
   | Set.size lexicalModuleNames /= length lexical = pure (Left "duplicate virtual lexical owner")
   | Set.size virtualModuleNames /= length virtualRows = pure (Left "duplicate virtual graph module name")
@@ -767,6 +840,9 @@ installExactLexicalGraphWithScaffold sourceGraph lexical (CheckedValueImportAuth
   | any (\(target,fingerprint,_) -> length [() | ModuleNode _ summary <- mgModSummaries' sourceGraph
       , ms_mod summary == target && ms_hs_hash summary == fingerprint] /= 1) instanceEdges =
       pure (Left "activation preview instance target differs from its protected recipe")
+  | any (\(OriginalPreviewOrphans target fingerprint _) ->
+      not (any (\(owner,seal,_) -> owner == target && seal == fingerprint) instanceEdges)) orphanScopes =
+      pure (Left "activation preview orphan scope differs from its protected instance target")
   | any (\node -> case node of
       ModuleNode _ summary -> keyOf summary `Set.member` Set.union virtualOwners checkedValues
       _ -> False) (mgModSummaries' sourceGraph) =
@@ -786,7 +862,8 @@ installExactLexicalGraphWithScaffold sourceGraph lexical (CheckedValueImportAuth
         addHomeModuleToFinder (hsc_FC env) (hsc_home_unit env)
           (GWIB (mkModuleName (exactModule artifact)) NotBoot)
           (ms_location (exactInterfaceSummary env artifact))
-      pure (Right env { hsc_mod_graph = mkModuleGraph (sourceNodes ++ virtualNodes) })
+      pure (Right (withOriginalPreviewOrphans orphanScopes env)
+        { hsc_mod_graph = mkModuleGraph (sourceNodes ++ virtualNodes) })
   where
     keyOfArtifact artifact = (exactUnit artifact,exactModule artifact)
     graphRows = lexical ++ scaffoldGraph

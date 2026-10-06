@@ -133,6 +133,7 @@ data ActivationPreviewAdmission = ActivationPreviewAdmission
   , previewInputWitness :: BS.ByteString
   , previewInputInterface :: ExactIfaceArtifact
   , previewOriginalInterfaces :: [CheckedTemplateInterface]
+  , previewOriginalTarget :: (String,String)
   , previewInputPackagesSha256 :: String
   } deriving (Eq, Show)
 
@@ -582,6 +583,7 @@ readExactScope path = do
           | otherwise -> fail "exact scope has trailing bytes"
       graphs <- readExecutionSourceGraphs path [] descriptors
       evidence <- validateInterfaceEvidence scope interfaceEvidence
+      validatePreviewOriginalTarget scope evidence
       validateExecutionSources scope graphs
       let sha = digest bytes
       when timing $ do
@@ -590,6 +592,21 @@ readExactScope path = do
       pure scope { scopeManifestPath = path, scopeRequestSha256 = sha
         , scopeExecutionGraphs = graphs, scopeInterfaceEvidence = evidence }) :: IO (Either IOException ExactScope)
     pure (either (Left . show) Right captured)
+
+validatePreviewOriginalTarget :: ExactScope -> Map.Map (String,String) ExactInterfaceEvidence -> IO ()
+validatePreviewOriginalTarget scope evidence = forM_ (scopeActivationPreview scope) $ \admission -> do
+  let target = previewOriginalTarget admission
+      selected = [interface | interface <- previewOriginalInterfaces admission
+        , (templateInterfaceUnit interface,templateInterfaceModule interface) == target]
+  seal <- case selected of
+    [interface] -> pure (templateInterfaceSha256 interface)
+    _ -> fail "activation preview lacks its exact original target graph owner"
+  unless (any (\(interface,_,_) -> (exactUnit interface,exactModule interface) == target
+      && exactSha256 interface == seal) (scopeInterfaces scope))
+    (fail "activation preview original target interface differs from its graph seal")
+  case Map.lookup target evidence of
+    Just ModuleInterfaceEvidence{} -> pure ()
+    _ -> fail "activation preview original target lacks canonical module authority"
 
 -- A bounded read also closes the stat/read growth race without allocating an
 -- unbounded input.
@@ -956,6 +973,7 @@ revalidateExactScope env scope = do
         | (key,value) <- Map.toAscList (scopeInterfaceEvidence scope)]
       unless (evidence == scopeInterfaceEvidence scope)
         (fail "exact interface evidence changed")
+      validatePreviewOriginalTarget scope evidence
       revalidatePackageImports env (scopeInterfaces scope) >>= either fail pure
       emitCount timing ("hash_bytes.scope_revalidation." ++ scopeRequestSha256 scope) (fromIntegral (BS.length bytes))
       mapM_ (checkProduct timing) (scopeProducts scope)
@@ -1156,8 +1174,8 @@ decodeScope = do
     checkedPurpose requestTypes Set.empty, descriptors, interfaceEvidence)
   where
     decodePurpose authCount purpose = case purpose of
-      "host-activation-preview2" -> do
-        unless (authCount == 12) (fail "invalid activation preview admission")
+      "host-activation-preview3" -> do
+        unless (authCount == 13) (fail "invalid activation preview admission")
         admissionDigest <- digestField
         generation <- decodeWord64
         budget <- decodeWord64
@@ -1187,9 +1205,14 @@ decodeScope = do
         originalInputs <- templateInterfaces
         unless (all ((== "main") . templateInterfaceUnit) originalInputs)
           (fail "activation preview original graph belongs to another home unit")
+        array 2
+        originalTarget <- (,) <$> nonempty <*> nonempty
+        unless (originalTarget `elem` [(templateInterfaceUnit input,templateInterfaceModule input)
+            | input <- originalInputs])
+          (fail "activation preview original target leaves its sealed graph")
         paths <- includePaths
         pure (ExactActivationPreviewPurpose (ActivationPreviewAdmission admissionDigest generation budget
-          templateSha inputGeneration binder native witness interface originalInputs packagesSha) paths)
+          templateSha inputGeneration binder native witness interface originalInputs originalTarget packagesSha) paths)
       "inspection1" -> do
         unless (authCount == 4) (fail "invalid inspection admission")
         injected <- bounded 4096 nonempty
