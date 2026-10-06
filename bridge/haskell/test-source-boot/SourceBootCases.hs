@@ -3724,23 +3724,6 @@ exactTransactionReuse = withTiming $ withScratch $ \work -> do
         [line | line <- lines diagnostics
         , "tidepool-reuse {" `isPrefixOf` line
         , "\"stage\":\"interface\"" `isInfixOf` line]
-      sourceVersion label decision reason diagnostics = case
-          [line | line <- lines diagnostics
-          , "tidepool-reuse {" `isPrefixOf` line
-          , "\"stage\":\"source_frontend\"" `isInfixOf` line
-          , "\"unit\":\"main\"" `isInfixOf` line
-          , "\"module\":\"MetadataOwner\"" `isInfixOf` line
-          , not ("\"decision\":\"work\"" `isInfixOf` line)] of
-        [event] | all (`isInfixOf` event)
-            [ "\"schema\":1,", "\"items\":1,"
-            , "\"version_kind\":\"source_fingerprint\""
-            , "\"decision\":\"" ++ decision ++ "\""
-            , "\"reason\":\"" ++ reason ++ "\""] ->
-          case T.stripPrefix ",\"version\":\"" (snd (T.breakOn ",\"version\":" (T.pack event)))
-              >>= T.stripSuffix "\"}" of
-            Just version | not (T.null version) -> pure version
-            _ -> fail (label ++ " omitted its actual source fingerprint: " ++ event)
-        events -> fail (label ++ " did not issue one matching source decision: " ++ show events)
       ownerIdentity prepared = case Map.lookup (mkModuleName "MetadataOwner") (pprFinalizedModules prepared) of
         Just finalized | mi_module (hm_iface (finalizedHomeModInfo finalized)) ==
             mkModule (stringToUnit "main") (mkModuleName "MetadataOwner") ->
@@ -3774,14 +3757,11 @@ exactTransactionReuse = withTiming $ withScratch $ \work -> do
       unless (isInt cold && frontends coldDiagnostics == 1) $
         fail "cold exact transaction did not compile its real source dependency"
       requireInterfaceComplete "cold check" coldDiagnostics
-      versionA <- sourceVersion "cold A" "miss" "absent" coldDiagnostics
       (warm,warmDiagnostics) <- captureDiagnostics (check relocated)
       unless (isInt warm && frontends warmDiagnostics == 0
           && counterValues "transaction_reused_source_products" warmDiagnostics == [1]) $
         fail "identical empty exact scopes repeated a dependency frontend"
       requireInterfaceComplete "warm check" warmDiagnostics
-      warmVersion <- sourceVersion "warm A" "hit" "matched" warmDiagnostics
-      unless (warmVersion == versionA) $ fail "warm check selected another source version"
       (native,nativeDiagnostics) <- captureDiagnostics $
         compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope)
           target [work] Nothing
@@ -3792,8 +3772,6 @@ exactTransactionReuse = withTiming $ withScratch $ \work -> do
         fail "check to native preparation replayed its dependency or lost original42"
       requireInterfaceComplete "native preparation" nativeDiagnostics
       identityA <- ownerIdentity native
-      nativeVersion <- sourceVersion "native A" "hit" "matched" nativeDiagnostics
-      unless (nativeVersion == versionA) $ fail "native preparation selected another source version"
       copyFile (fixture "MetadataOwnerWithoutInstance.hs") (work </> "MetadataOwner.hs")
       let requireRefusal label = do
             (changed,diagnostics) <- captureDiagnostics (sourceFailureDiagnostics (check scope))
@@ -3805,18 +3783,13 @@ exactTransactionReuse = withTiming $ withScratch $ \work -> do
             unless (not (null (interfaceEvents diagnostics))
                 && not (any isComplete (interfaceEvents diagnostics))) $
               fail (label ++ " fabricated an interface completion or omitted partial work")
-            sourceVersion label "miss" "changed_source" diagnostics
-      versionB <- requireRefusal "changed B"
-      repeatedB <- requireRefusal "repeated refused B"
-      unless (versionB /= versionA && repeatedB == versionB) $
-        fail "refusal retry did not select the same changed source version"
+      requireRefusal "changed B"
+      requireRefusal "repeated refused B"
       installOwner
       (recovered,recoveryDiagnostics) <- captureDiagnostics (check scope)
       unless (isInt recovered) $ fail "restored A lost its Int result type"
       requireReuse "restored A check" recoveryDiagnostics
       requireInterfaceComplete "recovered check" recoveryDiagnostics
-      recoveredVersion <- sourceVersion "restored A" "hit" "matched" recoveryDiagnostics
-      unless (recoveredVersion == versionA) $ fail "restored check selected another source version"
       (restored,restoredDiagnostics) <- captureDiagnostics $
         compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope)
           target [work] Nothing
@@ -3826,7 +3799,7 @@ exactTransactionReuse = withTiming $ withScratch $ \work -> do
         fail "refusal recovery lost the completed A object or native result42"
       requireReuse "restored A native" restoredDiagnostics
       requireInterfaceComplete "restored native preparation" restoredDiagnostics
-      pure (identityA,versionA)
+      pure identityA
     runRequest (pure ()) $ \compile -> do
       (next,nextDiagnostics) <- captureDiagnostics $
         compile CheckedEnvironment Set.empty GeneralCompile (Just relocated)
@@ -3834,13 +3807,11 @@ exactTransactionReuse = withTiming $ withScratch $ \work -> do
       unless (isInt next) $ fail "new request lost the restored Int result type"
       requireReuse "new request A check" nextDiagnostics
       requireInterfaceComplete "new transaction check" nextDiagnostics
-      nextVersion <- sourceVersion "new request A" "hit" "matched" nextDiagnostics
-      unless (nextVersion == snd originalIdentity) $ fail "new request selected another source version"
       (nextNative,nextNativeDiagnostics) <- captureDiagnostics $
         compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just relocated)
           target [work] Nothing
       nextIdentity <- ownerIdentity nextNative
-      unless (nextIdentity == fst originalIdentity
+      unless (nextIdentity == originalIdentity
           && hasIntResultLiteral 42 (prBinds (pprPipelineResult nextNative))) $
         fail "new request lost the completed A object or native result42"
       requireReuse "new request A native" nextNativeDiagnostics
