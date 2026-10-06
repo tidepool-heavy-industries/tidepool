@@ -387,6 +387,7 @@ projectionContext formattingAuthority timeAuthority textAuthority identity =
     , projectionToolchain = "ghc-9.12.2"
     , projectionTarget = targetDescriptor
     , projectionRetainedGenerations = mempty
+    , projectionCurrentOriginals = mempty
     , projectionEntry = identity
     , projectionAuxiliaryRoots = []
     , projectionFormattingAuthority = formattingAuthority
