@@ -288,13 +288,10 @@ executable tidepool-extract-bin
     text
   default-language: GHC2024
   default-extensions: OverloadedStrings
-  -- `-with-rtsopts=-T` bakes RTS statistics collection into this binary
-  -- without requiring `-rtsopts` at runtime: `-T` only enables
-  -- `getRTSStats`/`getRTSStatsEnabled`, never accepts arbitrary `+RTS`
-  -- flags from a caller. Without it, `Tidepool.Timing.readRtsStats` always
-  -- reads `getRTSStatsEnabled == False` and every per-module timing record
-  -- reports `rts=unavailable`.
-  ghc-options:      -Wall -Werror=missing-fields -threaded -with-rtsopts=-T
+  -- Collect RTS statistics by default. Trusted process owners may configure
+  -- RTS startup options; the daemon disables idle GC for its resident worker.
+  -- Typed compiler requests do not carry RTS command-line arguments.
+  ghc-options:      -Wall -Werror=missing-fields -threaded -rtsopts -with-rtsopts=-T
 
 test-suite execution-inventory
   import:           tasty-tests
