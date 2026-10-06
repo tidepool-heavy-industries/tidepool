@@ -1022,7 +1022,14 @@ const GROUP_NODES: usize = 4;
 
 type GroupState = (usize, u32);
 
-fn group_graph_fixture(extra_edges: &[u8], generations: &[u64]) -> (ArtifactView, Vec<ArtifactId>) {
+struct GroupGraphFixture {
+    view: ArtifactView,
+    reversed_view: ArtifactView,
+    binding_ids: Vec<ArtifactId>,
+    root_id: ArtifactId,
+}
+
+fn group_graph_fixture(extra_edges: &[u8], generations: &[u64]) -> GroupGraphFixture {
     use crate::certified_products::{tests::original_groups_fixture, PendingImportOwner};
     use tidepool_repr::execution_schema::SymbolIdentity;
 
@@ -1154,10 +1161,75 @@ fn group_graph_fixture(extra_edges: &[u8], generations: &[u64]) -> (ArtifactView
             id
         })
         .collect();
+    // Carry the exact native identity before admission adds a canonical module
+    // with the same owner. Demand must never select by module name alone.
+    assert_eq!(entries[0].descriptor.kind, ArtifactKind::OriginalModule);
+    assert_eq!(entries[0].descriptor.owner.module, "Node0");
+    let root_id = entries[0].descriptor.id;
     let inventory = ArtifactInventory::default();
-    let view = inventory.admit(&inventory.empty_view(), entries).unwrap();
-    let binding_ids = (0..GROUP_NODES).map(|node| value_ids[node]).collect();
-    (view, binding_ids)
+    let view = inventory
+        .admit(&inventory.empty_view(), entries.clone())
+        .unwrap();
+    entries.reverse();
+    let reversed_inventory = ArtifactInventory::default();
+    let reversed_view = reversed_inventory
+        .admit(&reversed_inventory.empty_view(), entries)
+        .unwrap();
+    GroupGraphFixture {
+        view,
+        reversed_view,
+        binding_ids: value_ids,
+        root_id,
+    }
+}
+
+#[test]
+fn native_group_fixture_distinguishes_original_and_canonical_owner_in_both_orders() {
+    let GroupGraphFixture {
+        view,
+        reversed_view,
+        root_id,
+        ..
+    } = group_graph_fixture(
+        &[0; GROUP_NODES * GROUP_ORDINALS.len()],
+        &[0; GROUP_NODES * GROUP_ORDINALS.len()],
+    );
+    for view in [&view, &reversed_view] {
+        let owner_artifacts: Vec<_> = view
+            .descriptors()
+            .into_iter()
+            .filter(|descriptor| {
+                descriptor.owner
+                    == ExactModuleIdentity {
+                        unit: "fixture".into(),
+                        module: "Node0".into(),
+                    }
+            })
+            .collect();
+        assert_eq!(owner_artifacts.len(), 2);
+        assert!(owner_artifacts
+            .iter()
+            .any(|descriptor| descriptor.id == root_id
+                && descriptor.kind == ArtifactKind::OriginalModule));
+        let canonical: Vec<_> = owner_artifacts
+            .iter()
+            .filter(|descriptor| descriptor.kind == ArtifactKind::CanonicalModuleInterface)
+            .collect();
+        assert_eq!(canonical.len(), 1);
+        let canonical_id = canonical[0].id;
+        assert_ne!(root_id, canonical_id);
+        let native = view
+            .native_requirements_from_roots(&[NativeRequirementRoot::Group {
+                artifact: root_id,
+                original_ordinal: 7,
+            }])
+            .unwrap();
+        assert_eq!(native.bindings.len(), 4);
+        assert!(
+            matches!(view.native_requirements_from_roots(&[NativeRequirementRoot::Group { artifact: canonical_id, original_ordinal: 7 }]),
+            Err(CompileError::ArtifactInventory(error)) if error.failure == ArtifactInventoryFailure::NativeGroupUnavailable { artifact: canonical_id, original_ordinal: 7 })
+        );
+    }
 }
 
 // Repeated set expansion is intentionally independent of the production
@@ -1244,13 +1316,7 @@ proptest! {
                 }
             }
         }
-        let (view, binding_ids) = group_graph_fixture(&extra_edges, &generations);
-        let root_id = view
-            .descriptors()
-            .into_iter()
-            .find(|descriptor| descriptor.owner.module == "Node0")
-            .unwrap()
-            .id;
+        let GroupGraphFixture { view, reversed_view, binding_ids, root_id } = group_graph_fixture(&extra_edges, &generations);
         let roots = [NativeRequirementRoot::Group {
             artifact: root_id,
             original_ordinal: 7,
@@ -1259,6 +1325,7 @@ proptest! {
         let expected_bindings =
             bindings_for_selected_groups(&expected_groups, &binding_ids, &generations);
         let actual = view.native_requirements_from_roots(&roots).unwrap();
+        prop_assert_eq!(&actual, &reversed_view.native_requirements_from_roots(&roots).unwrap());
         prop_assert_eq!(
             actual.bindings.iter().cloned().collect::<BTreeSet<_>>(),
             expected_bindings
@@ -1273,6 +1340,7 @@ proptest! {
             &BTreeSet::from([(0, 7), (0, 11)]),
         );
         let all_requirements = view.native_requirements_from_roots(&all_groups).unwrap();
+        prop_assert_eq!(&all_requirements, &reversed_view.native_requirements_from_roots(&all_groups).unwrap());
         prop_assert_eq!(
             all_requirements.bindings.iter().cloned().collect::<BTreeSet<_>>(),
             bindings_for_selected_groups(&expected_all, &binding_ids, &generations)
