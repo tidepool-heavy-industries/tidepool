@@ -155,8 +155,8 @@ lookupFatIfaceBodies hscEnv cache owner requested = do
     FatIfaceLoadFailureOutcome reason -> FatIfaceLoadFailure owner reason
 
 -- | Resolve requested roots and retain each root's full canonical private
--- dependency component. The directed demand closure count preserves the
--- previous lookup's preparation metric; it does not estimate bytes or work.
+-- dependency component. The demand count follows actual local Id references;
+-- the preparation count includes the full selected weak components.
 lookupFatIfaceComponents
   :: HscEnv -> FatIfaceCache -> Module -> [Name] -> IO FatIfaceComponentLookup
 lookupFatIfaceComponents hscEnv cache owner requested = do

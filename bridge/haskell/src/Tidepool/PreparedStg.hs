@@ -389,9 +389,6 @@ selectOwnerBuckets owners entries = Map.fromAscList
 lookupOwnerEntry :: Ord key => Module -> key -> Map Module (Map key value) -> Maybe value
 lookupOwnerEntry owner key entries = Map.lookup owner entries >>= Map.lookup key
 
-insertOwnerEntry :: Ord key => Module -> key -> value -> Map Module (Map key value) -> Map Module (Map key value)
-insertOwnerEntry owner key value = Map.insertWith Map.union owner (Map.singleton key value)
-
 mergePreparedVariants :: [PreparedModule] -> [PreparedModule] -> [PreparedModule]
 mergePreparedVariants earlier later = foldl insert earlier later
   where

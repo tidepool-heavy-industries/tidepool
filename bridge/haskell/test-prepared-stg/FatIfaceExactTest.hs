@@ -16,6 +16,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import GHC
 import GHC.Core (CoreBind, Bind(..), maybeUnfoldingTemplate)
+import GHC.Core.FVs (exprSomeFreeVars)
 import GHC.Driver.Env (HscEnv)
 import GHC.Driver.Session (gopt_set, gopt_unset, updOptLevel)
 import GHC.Types.Id (Id, realIdUnfolding)
@@ -24,7 +25,8 @@ import GHC.Types.Name (mkExternalName, mkSystemName, nameModule_maybe, nameOccNa
 import GHC.Types.Name.Occurrence (mkVarOcc, occNameString)
 import GHC.Types.Name.Reader (globalRdrEnvElts, greName)
 import GHC.Types.Unique (mkUnique)
-import GHC.Types.Var (varName)
+import GHC.Types.Var (varName, isLocalId)
+import GHC.Types.Unique.Set (nonDetEltsUniqSet)
 import System.Directory
   ( createDirectoryIfMissing
   , getTemporaryDirectory
@@ -195,10 +197,13 @@ scenario = do
               componentNames = map varName componentBinders
               selectedGroupCount = sum
                 (map (length . fatComponentOrdinals) components)
+              originalGroups = IntMap.toAscList (IntMap.unions
+                (map fatComponentBindings components))
           assert (fatOriginalOwner (fatSelectionVersion selection) == privateOwner)
             "component selection changed its full defining owner"
-          assert (fatSelectionDemandedGroupCount selection == length privateGroups)
-            "component selection changed the previous directed demand closure"
+          assert (fatSelectionDemandedGroupCount selection ==
+              demandedOriginalGroups privateCallerName originalGroups)
+            "component demand count disagreed with actual local Core references"
           assert (fatSelectionPreparedGroupCount selection == selectedGroupCount)
             "prepared group count disagreed with the canonical component roster"
           assert (privateCallerName `elem` censusNames && privateCallerName `elem` componentNames)
@@ -614,6 +619,25 @@ foundNames _ = []
 groupBinders :: CoreBind -> [Id]
 groupBinders (NonRec identifier _) = [identifier]
 groupBinders (Rec pairs) = map fst pairs
+
+-- Walk the original Core directly using a list of actual binder identities,
+-- independently of the production ordinal and weak-component indexes.
+demandedOriginalGroups :: Name -> [(Int, CoreBind)] -> Int
+demandedOriginalGroups requested groups = Set.size (walk Set.empty roots)
+  where
+    owners = [(varName binder, ordinal)
+      | (ordinal, binding) <- groups, binder <- groupBinders binding]
+    roots = [ordinal | (name, ordinal) <- owners, name == requested]
+    edges = [(ordinal, target)
+      | (ordinal, binding) <- groups
+      , rhs <- case binding of NonRec _ body -> [body]; Rec pairs -> map snd pairs
+      , free <- nonDetEltsUniqSet (exprSomeFreeVars isLocalId rhs)
+      , Just target <- [lookup (varName free) owners]]
+    walk seen [] = seen
+    walk seen (ordinal:pending)
+      | ordinal `Set.member` seen = walk seen pending
+      | otherwise = walk (Set.insert ordinal seen)
+          ([target | (source,target) <- edges, source == ordinal] ++ pending)
 
 assertLoadFailure :: String -> FatIfaceLookup -> IO ()
 assertLoadFailure wanted result = case result of
