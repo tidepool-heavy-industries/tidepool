@@ -146,11 +146,11 @@ pub use turn::{
     turn_user_code_line_range, turn_user_code_offset, with_resume_import, BoundBinder,
     CellAnalysisItem, CellAnalysisSourceItem, CellCheck, CellCheckFailure, CellCheckRequest,
     CellSourceSpan, CheckedBinderPin, CheckedExpressionPlan, CompileRejection, CompiledTurn,
-    DeclarationReceipt, DeclarationSource, ExpressionLift, ExpressionPresentation,
-    HostBindingAuthority, LocatedImport, LocatedPragma, PragmaKind, SourcePrologue,
-    TemplateSelector, TurnClassification, TurnCode, TurnFailure, TurnKind, TurnRequest, TurnResult,
-    TurnTemplate, ValueTier, AMBIGUOUS_TYPE_ADVICE, CELL_PURE_DISPATCH_ADVICE,
-    DECL_TEMPLATE_SOURCE, PREAMBLE_DEFAULT_DECL, PREAMBLE_IMPORT_MARKER, PREPARED_SCAFFOLD_TARGET,
+    DeclarationReceipt, DeclarationSource, ExpressionLift, HostBindingAuthority, LocatedImport,
+    LocatedPragma, PragmaKind, SourcePrologue, TemplateSelector, TurnClassification, TurnCode,
+    TurnFailure, TurnKind, TurnRequest, TurnResult, TurnTemplate, ValueTier, AMBIGUOUS_TYPE_ADVICE,
+    CELL_PURE_DISPATCH_ADVICE, DECL_TEMPLATE_SOURCE, PREAMBLE_DEFAULT_DECL, PREAMBLE_IMPORT_MARKER,
+    PREPARED_SCAFFOLD_TARGET,
 };
 
 /// Host-visible reentry state for one resident session.

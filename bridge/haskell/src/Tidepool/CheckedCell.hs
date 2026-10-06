@@ -2,7 +2,7 @@
 
 module Tidepool.CheckedCell
   ( CheckedSignature(..), CheckedSignatureName(..)
-  , CellExpressionPlan(..), ExpressionLiftPlan(..), ExpressionPresentation(..)
+  , CellExpressionPlan(..), ExpressionLiftPlan(..)
   , encodeCellExpressionPlan, decodeCellExpressionPlan
   , captureCheckedSignature, encodeCheckedSignature, decodeCheckedSignature, resolveCheckedSignature
   , RequestTypeSignatures(..), RequestHelperRecipe(..), captureRequestTypeSignatures
@@ -69,15 +69,11 @@ import qualified GHC.Utils.Outputable as Outputable
 data ExpressionLiftPlan = ExpressionEffectful | ExpressionPure
   deriving (Eq, Show)
 
-data ExpressionPresentation = ExpressionRendered | ExpressionOpaque
-  deriving (Eq, Show)
-
 -- | Compiler-owned execution decision for one expression item. The key is
 -- the reserved local binder whose zonked type supplied this evidence.
 data CellExpressionPlan = CellExpressionPlan
   { expressionPlanKey :: String
   , expressionPlanLift :: ExpressionLiftPlan
-  , expressionPlanPresentation :: ExpressionPresentation
   , expressionPlanType :: String
   , expressionPlanHeads :: [NominalHead]
   } deriving (Eq, Show)
@@ -86,18 +82,14 @@ encodeCellExpressionPlan :: CellExpressionPlan -> Encoding
 encodeCellExpressionPlan CellExpressionPlan
   { expressionPlanKey = key
   , expressionPlanLift = liftPlan
-  , expressionPlanPresentation = presentation
   , expressionPlanType = ty
   , expressionPlanHeads = heads
   } =
-  encodeListLen 5
+  encodeListLen 4
   <> encodeString (T.pack key)
   <> encodeString (case liftPlan of
        ExpressionEffectful -> "effectful"
        ExpressionPure -> "pure")
-  <> encodeString (case presentation of
-       ExpressionRendered -> "rendered"
-       ExpressionOpaque -> "opaque")
   <> encodeString (T.pack ty)
   <> encodeListLen (fromIntegral (length heads))
   <> foldMap (\(NominalHead unit modul name) ->
@@ -108,16 +100,12 @@ encodeCellExpressionPlan CellExpressionPlan
 decodeCellExpressionPlan :: D.Decoder s CellExpressionPlan
 decodeCellExpressionPlan = do
   fields <- D.decodeListLen
-  unless (fields == 5) (fail "invalid cell expression plan row")
+  unless (fields == 4) (fail "invalid cell expression plan row")
   key <- nonempty
   liftPlan <- D.decodeString >>= \value -> case value of
     "effectful" -> pure ExpressionEffectful
     "pure" -> pure ExpressionPure
     _ -> fail "invalid cell expression lift"
-  presentation <- D.decodeString >>= \value -> case value of
-    "rendered" -> pure ExpressionRendered
-    "opaque" -> pure ExpressionOpaque
-    _ -> fail "invalid cell expression presentation"
   ty <- T.unpack <$> D.decodeString
   count <- D.decodeListLen
   unless (count <= 65536) (fail "cell expression heads exceed bound")
@@ -125,7 +113,7 @@ decodeCellExpressionPlan = do
     headFields <- D.decodeListLen
     unless (headFields == 3) (fail "invalid cell expression head")
     NominalHead <$> nonemptyText <*> nonemptyText <*> nonemptyText
-  pure (CellExpressionPlan key liftPlan presentation ty heads)
+  pure (CellExpressionPlan key liftPlan ty heads)
   where
     nonemptyText = do
       value <- D.decodeString

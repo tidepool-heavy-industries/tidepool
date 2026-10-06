@@ -1,6 +1,5 @@
 module Tidepool.CheckedAdmission
   ( matchesInspectionAdmission, validateCheckedCellAdmission, validateCheckedItemAdmission
-  , checkedDisplayBinders, validateCheckedDisplayAdmission
   ) where
 
 import Control.Monad (forM, unless, when)
@@ -13,9 +12,8 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Tidepool.Binders (StmtBinders(..), TurnKind(..))
 import Tidepool.CheckedCell (CheckedSignature(..))
-import Tidepool.ExecutionSchema (SymbolIdentity(..))
 import Tidepool.ExactScope
-  ( CheckedCellAdmission(..), CheckedItemAdmission(..), CheckedDisplayAdmission(..) )
+  ( CheckedCellAdmission(..), CheckedItemAdmission(..) )
 import Tidepool.ExtractRequest (WorkerRequest(..))
 import Tidepool.ExtractUtil (shaHex)
 
@@ -67,23 +65,3 @@ validateCheckedItemAdmission args admission source verdict = do
     (fail "checked item body, verdict, generation, signatures or recipe differs from its protected offer")
   when ("__tidepool_checked_annotation_" `isInfixOf` source)
     (fail "authored checked item uses a compiler-reserved annotation name")
-
-checkedDisplayBinders :: CheckedDisplayAdmission -> [String]
-checkedDisplayBinders admission =
-  ["__tidepoolPage" ++ show (displayGeneration admission)
-  ,"__tidepoolMetadata" ++ show (displayGeneration admission),"cellDisplay"]
-
-validateCheckedDisplayAdmission :: WorkerRequest -> CheckedDisplayAdmission -> String -> StmtBinders -> IO ()
-validateCheckedDisplayAdmission args admission source verdict = do
-  templates <- readTurnTemplateDigests args
-  generation <- requireGeneration args
-  unless (null source && sbKind verdict == KBind && sbBinders verdict == checkedDisplayBinders admission
-      && generation == displayGeneration admission && templates == displayTurnTemplates admission
-      && requestInjectVals args == displayInjectedModules admission
-      && not (requestActivationPreview args))
-    (fail "display request differs from its completed observation admission")
-  let observation = SymbolIdentity "main"
-        (T.pack ("Tidepool.Session.Val.G" ++ show (displayCaptureGeneration admission)))
-        "value" (T.pack (displayObservationName admission)) Nothing
-  unless (Map.lookup observation (requestRetainedGenerations args) == Just (displayCaptureGeneration admission))
-    (fail "display lacks its exact retained observation generation")

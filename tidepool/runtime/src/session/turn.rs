@@ -159,7 +159,6 @@ pub struct CellAnalysisItem {
 pub struct CheckedExpressionPlan {
     pub key: String,
     pub lift: ExpressionLift,
-    pub presentation: ExpressionPresentation,
     /// GHC-rendered full sigma type of the submitted expression. For an
     /// effectful expression this includes its exact `Eff` row.
     pub type_display: String,
@@ -414,13 +413,6 @@ fn encode_checked_expression(plan: &CheckedExpressionPlan) -> CborValue {
             match plan.lift {
                 ExpressionLift::Effectful => "effectful",
                 ExpressionLift::Pure => "pure",
-            }
-            .into(),
-        ),
-        CborValue::Text(
-            match plan.presentation {
-                ExpressionPresentation::Rendered => "rendered",
-                ExpressionPresentation::Opaque => "opaque",
             }
             .into(),
         ),
@@ -1679,7 +1671,6 @@ pub(super) enum TurnPurpose {
         prefix: Arc<super::RuntimeCheckedPrefix>,
     },
     ActivationPreview(Arc<tidepool_toolchain::activation_preview::ExactCompiledActivationPreview>),
-    Display(Arc<tidepool_toolchain::checked_cell::ExactCompiledDisplay>),
     /// Immutable constructor code from an original checked host item. This
     /// carries no runtime prefix, authored execution or fresh binding authority.
     HostPrototype(Arc<ExactCompiledItem>),
@@ -1694,7 +1685,6 @@ impl TurnPurpose {
         let Some(admission) = admission else {
             return match proof {
                 None => Ok(Self::Ordinary),
-                Some(CheckedNativeProof::Display(display)) => Ok(Self::Display(display.clone())),
                 Some(CheckedNativeProof::Execution(_)) => Err(CompileError::ExtractFailed(
                     "checked execution lacks its runtime prefix owner".into(),
                 )),
@@ -1782,14 +1772,6 @@ impl TurnCertification {
     pub(super) fn purpose(&self) -> &TurnPurpose {
         &self.purpose
     }
-    pub fn checked_display(
-        &self,
-    ) -> Option<&Arc<tidepool_toolchain::checked_cell::ExactCompiledDisplay>> {
-        match &self.purpose {
-            TurnPurpose::Display(display) => Some(display),
-            _ => None,
-        }
-    }
     pub fn checked_item(&self) -> Option<&ExactCheckedItem> {
         match &self.purpose {
             TurnPurpose::Execution { execution, .. } => Some(execution.item()),
@@ -1824,7 +1806,6 @@ impl TurnCertification {
                 execution.validate_table(table)
             }
             TurnPurpose::ActivationPreview(proof) => proof.validate_table(table),
-            TurnPurpose::Display(display) => display.validate_table(table),
         }
     }
 
@@ -1839,11 +1820,6 @@ impl TurnCertification {
             TurnPurpose::ActivationPreview(_) | TurnPurpose::HostPrototype(_) => {
                 return Err(CompileError::ExtractFailed(
                     "protected host output requires its owning runtime consumer".into(),
-                ))
-            }
-            TurnPurpose::Display(_) => {
-                return Err(CompileError::ExtractFailed(
-                    "legacy checked display has no execution route".into(),
                 ))
             }
             TurnPurpose::Execution { execution, .. } => execution,
@@ -2086,12 +2062,6 @@ pub fn assemble_bind_module(
 pub enum ExpressionLift {
     Effectful,
     Pure,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ExpressionPresentation {
-    Rendered,
-    Opaque,
 }
 
 /// Assemble one expression-shaped session module while preserving the source
@@ -3862,7 +3832,7 @@ pub(super) fn decode_cell_out(
     })?;
     let envelope = cbor_expect_array_len(&value, 3, "cell observations envelope")?;
     if cbor_expect_text(&envelope[0], "cell observations magic")? != "TPCELLOBSERVATIONS"
-        || cbor_as_usize(&envelope[1], "cell observations version")? != 2
+        || cbor_as_usize(&envelope[1], "cell observations version")? != 3
     {
         return Err(CompileError::ExtractFailed(
             "unsupported cell observations version".into(),
@@ -3901,7 +3871,7 @@ pub(super) fn decode_cell_out(
 fn decode_checked_expression_plan(
     value: &CborValue,
 ) -> Result<CheckedExpressionPlan, CompileError> {
-    let fields = cbor_expect_array_len(value, 5, "checked expression plan")?;
+    let fields = cbor_expect_array_len(value, 4, "checked expression plan")?;
     let lift = match cbor_expect_text(&fields[1], "expression lift")? {
         "effectful" => ExpressionLift::Effectful,
         "pure" => ExpressionLift::Pure,
@@ -3911,21 +3881,11 @@ fn decode_checked_expression_plan(
             )))
         }
     };
-    let presentation = match cbor_expect_text(&fields[2], "expression presentation")? {
-        "rendered" => ExpressionPresentation::Rendered,
-        "opaque" => ExpressionPresentation::Opaque,
-        other => {
-            return Err(CompileError::ExtractFailed(format!(
-                "CellOut CBOR: unknown expression presentation {other:?}"
-            )))
-        }
-    };
     Ok(CheckedExpressionPlan {
         key: cbor_expect_text(&fields[0], "expression plan key")?.to_owned(),
         lift,
-        presentation,
-        type_display: cbor_expect_text(&fields[3], "full expression type")?.to_owned(),
-        heads: decode_nominal_heads(&fields[4], "expression result nominal heads")?,
+        type_display: cbor_expect_text(&fields[2], "full expression type")?.to_owned(),
+        heads: decode_nominal_heads(&fields[3], "expression result nominal heads")?,
     })
 }
 
@@ -4910,7 +4870,7 @@ mod tests {
             array(vec![array(vec![]), array(vec![])]),
             array(vec![]),
         ]);
-        let envelope = array(vec![text("TPCELLOBSERVATIONS"), 2.into(), payload.clone()]);
+        let envelope = array(vec![text("TPCELLOBSERVATIONS"), 3.into(), payload.clone()]);
         let decode = |value: &CborValue| {
             let mut bytes = Vec::new();
             ciborium::ser::into_writer(value, &mut bytes).unwrap();
@@ -4919,13 +4879,12 @@ mod tests {
         assert!(decode(&envelope).is_ok());
         assert!(decode(&payload).is_err());
         let mut old_version = envelope.clone();
-        old_version.as_array_mut().unwrap()[1] = 1.into();
+        old_version.as_array_mut().unwrap()[1] = 2.into();
         assert!(decode(&old_version).is_err());
         let pin = array(vec![text("bind0_owned"), text("Int"), array(vec![])]);
         let expression = array(vec![
             text("expr0"),
             text("pure"),
-            text("opaque"),
             text("Int"),
             array(vec![]),
         ]);
@@ -4941,7 +4900,7 @@ mod tests {
         old_expression
             .as_array_mut()
             .unwrap()
-            .push(array(vec![text("Invented.Import")]));
+            .insert(2, text("opaque"));
         assert!(decode_checked_expression_plan(&old_expression).is_err());
     }
 
@@ -5276,7 +5235,7 @@ mod tests {
                 cell.checked
                     .items
                     .iter()
-                    .filter(|item| item.verdict.kind == TurnKind::Bind)
+                    .filter(|item| matches!(item.verdict.kind, TurnKind::Bind | TurnKind::Expr))
                     .count()
             );
             artifacts
@@ -5307,6 +5266,82 @@ mod tests {
             self.execute(cell);
             self.assert_number("retainedObserved", 41);
         }
+    }
+
+    #[test]
+    fn checked_expression_history_retains_one_original_capture_per_item() {
+        use tidepool_toolchain::checked_cell::CheckedExpressionLift;
+        let mut fixture = CheckedHomeFixture::new();
+        let initial = fixture.resident.val_gen().0 + 1;
+        let cell = fixture
+            .check(
+                include_str!("fixtures/checked-expression-history.hs"),
+                &[],
+                None,
+            )
+            .unwrap();
+        assert_eq!(cell.checked.items.len(), 4);
+        assert_eq!(cell.program.items().len(), 4);
+        assert_eq!(fixture.resident.val_gen().0, initial + 3);
+        let reservation = cell.admission.plan_reservation().unwrap();
+        let observations = reservation
+            .items()
+            .iter()
+            .filter_map(|item| item.observation_name().map(str::to_owned))
+            .collect::<Vec<_>>();
+        assert_eq!(observations.len(), 2);
+        for (index, (reserved, compiled)) in reservation
+            .items()
+            .iter()
+            .zip(cell.program.items())
+            .enumerate()
+        {
+            let generation = initial + index as u64;
+            assert_eq!(reserved.value_generation().unwrap().0, generation);
+            let native = compiled
+                .native()
+                .expect("every history item has its original native target");
+            assert_eq!(native.generation(), generation);
+            assert_eq!(
+                native.value_interface_certificate().unwrap().owner(),
+                tidepool_repr::SessionModule::val(tidepool_repr::Generation(generation))
+            );
+            assert_eq!(native.observation_name(), reserved.observation_name());
+            let products = compiled.native_products().unwrap();
+            assert!(products
+                .certified_groups
+                .iter()
+                .all(|group| group.owner().module != "Tidepool.Inspection"));
+            assert!(products
+                .recovery_products
+                .iter()
+                .all(|product| product.owner().module != "Tidepool.Inspection"));
+        }
+        assert_eq!(
+            cell.program.items()[1]
+                .checked_item()
+                .expression_lift()
+                .unwrap(),
+            Some(CheckedExpressionLift::Pure)
+        );
+        assert_eq!(
+            cell.program.items()[2]
+                .checked_item()
+                .expression_lift()
+                .unwrap(),
+            Some(CheckedExpressionLift::Effectful)
+        );
+        fixture.execute(cell);
+        fixture.assert_number("historyEnd", 39);
+        let followup = fixture.check(&format!(
+            "let historyStart = (99 :: Int)\nlet originalPure = {} ()\nlet originalEffectful = {} ()\nlet originalEffectfulAgain = {} ()",
+            observations[0], observations[1], observations[1],
+        ), &[], None).unwrap();
+        fixture.execute(followup);
+        fixture.assert_number("historyStart", 99);
+        fixture.assert_number("originalPure", 37);
+        fixture.assert_number("originalEffectful", 38);
+        fixture.assert_number("originalEffectfulAgain", 38);
     }
 
     #[test]
@@ -6441,7 +6476,10 @@ mod tests {
             binding.signatures()
         );
         let expression = checked.checked_item(3).unwrap();
-        assert!(expression.expression_presentation().unwrap().is_some());
+        assert_eq!(
+            expression.expression_lift().unwrap(),
+            Some(tidepool_toolchain::checked_cell::CheckedExpressionLift::Pure)
+        );
         let prepared_declaration = admission.prepared_declaration(&declaration).unwrap();
         let receipt = prepared_declaration.projection.receipt().clone();
         let prefix = declaration.initial_prefix().unwrap();

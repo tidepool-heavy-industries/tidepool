@@ -45,7 +45,7 @@ import Tidepool.Binders
   , classifyWithFlags, classifyBlock, exportItemName, defaultParserDynFlags, templateParserFlags
   , analyzeCell, analyzeOrderedCell, analyzeOrderedCellWithFlags, cellInferenceSegments, renderCellCheckSource, CellSourceSpan(..)
   , CellSourcePlan(..), CellAnalysisItem(..), CellExpressionPlan(..), BoundBinder(..),
-    SourcePrologue(..), LocatedPragma(..), LocatedImport(..), ImportIntent(..), ExpressionLiftPlan(..), ExpressionPresentation(..)
+    SourcePrologue(..), LocatedPragma(..), LocatedImport(..), ImportIntent(..), ExpressionLiftPlan(..)
   , declarationSourceWithTemplateFlags, renderDeclarationForTemplate
   , TurnKind(..), parseTurnKind
   , TemplateSelector(..), templateSelectorForVerdict, templateSelectorWireName
@@ -106,11 +106,9 @@ import qualified Tidepool.WorkerServer as WorkerServer
 import Tidepool.DiagJson
   ( SourceRejection(..), InputRejection(..) )
 import Tidepool.CheckedAdmission
-  ( matchesInspectionAdmission, validateCheckedCellAdmission, validateCheckedItemAdmission
-  , checkedDisplayBinders, validateCheckedDisplayAdmission )
+  ( matchesInspectionAdmission, validateCheckedCellAdmission, validateCheckedItemAdmission )
 import Tidepool.CheckedRecipe
-  ( checkedDisplayRecipe, checkedProgramDisplayRecipe, writeCheckedDisplayReceipt
-  , checkedItemCompilePurpose, checkedRecipeSource, replaceRecipeMarker, writeCheckedItemReceipt )
+  ( checkedItemCompilePurpose, checkedRecipeSource, replaceRecipeMarker, writeCheckedItemReceipt )
 import Tidepool.ExtractUtil (shaHex, trySynchronous)
 import Tidepool.WorkerDiagnostics
   ( throwCellSplitError, sourceFailureDiagnostics, reportDiags, reportDiagsWithWarnings )
@@ -120,9 +118,9 @@ import Tidepool.InspectionRunner (isInspectionTypeQuery, runInspectionRequests)
 import Tidepool.ExactScope
   ( ExactCompilation(..), ExactScope(..), ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..)
   , ActivationPreviewAdmission(..), scopeActivationPreview
-  , scopeCheckedCell, scopeCheckedItem, scopeCheckedDisplay, scopeIncludePaths
+  , scopeCheckedCell, scopeCheckedItem, scopeIncludePaths
   , originalGroupFromProjected, originalGroupFromCandidate
-  , CheckedCellAdmission(..), CheckedItemAdmission(..), CheckedItemPurpose(..), CheckedDisplayAdmission(..), PlannedCellAdmission(..), PlannedCellSlot(..)
+  , CheckedCellAdmission(..), CheckedItemAdmission(..), CheckedItemPurpose(..), PlannedCellAdmission(..), PlannedCellSlot(..)
   , ExactInterfaceEvidence(..), validateCandidateCanonicalInterfaceProof, canonicalCertificateSha256, canonicalSourceSha256
   , readExactScope, revalidateExactScope, extendSourceSelectedOriginals, extendExactExecutionSources, extendExactExecutionSourcesWithinBudget )
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
@@ -287,7 +285,6 @@ dispatch compiler caches timing args = do
             && not (requestCertifyHomeProducts args) && previewPurpose
             && not (isJust (requestTarget args)))
             (throwIO CheckedPurposeMismatch)
-        ExactDisplayPurpose _ _ -> pure ()
         ExactActivationPreviewPurpose _ _ ->
           unless (requestActivationPreview args && requestTurn args
             && length (requestFiles args) == 1 && null (requestTurnTemplates args)
@@ -786,8 +783,6 @@ runTurnMode compiler caches args path = do
     exact <- traverse (\manifest -> readExactScope manifest >>= either fail pure) (requestSessionArtifacts args)
     let admittedItem = exact >>= scopeCheckedItem
     forM_ admittedItem $ \admission -> validateCheckedItemAdmission args admission turnSrc sb
-    let admittedDisplay = exact >>= scopeCheckedDisplay
-    forM_ admittedDisplay $ \admission -> validateCheckedDisplayAdmission args admission turnSrc sb
     let outDir     = fromMaybe (takeDirectory path </> takeBaseName path ++ "_cbor") (requestOutDir args)
         bindersStr = intercalate ", " (sbBinders sb)
     turnOut <- case sbKind sb of
@@ -806,7 +801,7 @@ runTurnMode compiler caches args path = do
                         else map T.pack (sbBinders sb)
         return (TDecl binders items declarationSource)
       _kind -> do
-        compileClassifiedTurn parserFlags compiler caches args timing outDir turnSrc sb bindersStr admittedItem admittedDisplay lastAttempt
+        compileClassifiedTurn parserFlags compiler caches args timing outDir turnSrc sb bindersStr admittedItem lastAttempt
     outFile <- requireArg "--turn-out" (requestTurnOut args)
     let cbor = encodeTurnOut turnOut
     BS.writeFile outFile cbor
@@ -815,10 +810,6 @@ runTurnMode compiler caches args path = do
         TBind _ _ _ _ wrapped -> writeCheckedItemReceipt outDir scope admission (T.unpack wrapped)
         TExpr _ _ wrapped -> writeCheckedItemReceipt outDir scope admission (T.unpack wrapped)
         TDecl {} -> fail "checked recipe cannot compile an unproved declaration"
-    forM_ (exact >>= \scope -> (,) scope <$> scopeCheckedDisplay scope) $ \(scope,admission) ->
-      case turnOut of
-        TBind _ _ _ _ wrapped -> writeCheckedDisplayReceipt outDir scope admission (T.unpack wrapped)
-        _ -> fail "checked display did not produce its capture bundle"
     hPutStrLn stderr $ "  Wrote: " ++ outFile ++ " (" ++ show (BS.length cbor) ++ " bytes)"
   case res of
     Left _ -> do
@@ -851,11 +842,11 @@ writeSplicedModule outDir lastAttempt spliced = do
 -- native recipe. Checked signatures remain compiler payloads, never type text.
 compileClassifiedTurn
   :: DynFlags -> Compiler -> RecoveryCaches -> WorkerRequest -> Bool -> FilePath
-  -> String -> StmtBinders -> String -> Maybe CheckedItemAdmission -> Maybe CheckedDisplayAdmission
+  -> String -> StmtBinders -> String -> Maybe CheckedItemAdmission
   -> IORef (Maybe (FilePath, String))
   -> IO TurnOut
-compileClassifiedTurn flags compiler caches args timing outDir turnSrc sb bindersStr admitted display lastAttempt =
-  compiledTurn <$> compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb bindersStr admitted display lastAttempt [] (StandaloneTurnParse flags)
+compileClassifiedTurn flags compiler caches args timing outDir turnSrc sb bindersStr admitted lastAttempt =
+  compiledTurn <$> compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb bindersStr admitted lastAttempt [] (StandaloneTurnParse flags)
 
 data CompiledTurnOutput = CompiledTurnOutput
   { compiledTurn :: TurnOut
@@ -870,9 +861,9 @@ data TurnParseContext
 
 compileClassifiedTurnKeeping
   :: Compiler -> RecoveryCaches -> WorkerRequest -> Bool -> FilePath
-  -> String -> StmtBinders -> String -> Maybe CheckedItemAdmission -> Maybe CheckedDisplayAdmission
+  -> String -> StmtBinders -> String -> Maybe CheckedItemAdmission
   -> IORef (Maybe (FilePath, String)) -> [String] -> TurnParseContext -> IO CompiledTurnOutput
-compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb bindersStr admitted display lastAttempt programImports parseContext = do
+compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb bindersStr admitted lastAttempt programImports parseContext = do
     let (parserFlags, prologue) = case parseContext of
           StandaloneTurnParse flags -> (flags, Nothing)
           PlannedTurnParse flags authored -> (flags, Just authored)
@@ -886,22 +877,14 @@ compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb binde
           ++ maybe ["session-incarnation-absent"] (\value -> ["session-incarnation", value]) (ssIncarnation scope)
           ++ concatMap (\value -> ["session-value-interface", sessionModuleString value]) (ssValIfaces scope))
     let templates = requestTurnTemplates args
-        protectedTemplates = case (display,admitted) of
-          (Just authority,Nothing) -> Just (displayTurnTemplates authority)
-          (Nothing,Just authority) -> Just (itemTurnTemplates authority)
-          _ -> Nothing
-        templateInterfaces = case (display,admitted) of
-          (Just authority,Nothing) -> displayTemplateInterfaces authority
-          (Nothing,Just authority) -> itemTemplateInterfaces authority
-          _ -> []
+        protectedTemplates = itemTurnTemplates <$> admitted
+        templateInterfaces = maybe [] itemTemplateInterfaces admitted
         verifyProtectedTemplate path captured = forM_ protectedTemplates $ \expected ->
           unless (any (\(kind,file) -> file == path
               && lookup kind expected == Just (shaHex (TE.encodeUtf8 (T.pack captured)))) templates)
             (fail "generated scaffold template differs from its protected offer")
-        basePurpose = maybe id withSourceImportIntents prologue $ case (display, admitted) of
-          (Just authority, Nothing) -> CheckedItemCompile [] (displayPlannedDeclaration authority) (displayCompletedValues authority)
-          (Nothing, Just authority) -> checkedItemCompilePurpose authority
-          _ -> GeneralCompile
+        basePurpose = maybe id withSourceImportIntents prologue $
+          maybe GeneralCompile checkedItemCompilePurpose admitted
         -- Splice @tmplFile@ against the turn text and write the generated
         -- module under the name in its compiler-owned header. Non-declaration
         -- turns derive a stable owner from their semantic compile inputs;
@@ -915,10 +898,7 @@ compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb binde
           verifyProtectedTemplate tmplFile originalTemplate
           selectedFlags <- templateParserFlags parserFlags originalTemplate >>= either throwCellSplitError pure
           defaults <- either fail pure (captureCompilerDefaultRecipe selectedFlags originalTemplate)
-          let original = case (display, admitted) of
-                (Just authority, Nothing) -> displayPlannedDeclaration authority
-                (Nothing, Just authority) -> itemPlannedDeclaration authority
-                _ -> Nothing
+          let original = admitted >>= itemPlannedDeclaration
           let prepareTemplate template = do
                 tmplSrc <- case prologue of
                   Nothing -> pure template
@@ -939,28 +919,21 @@ compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb binde
                 ++ maybe [] (\((_,owner),_) -> [mkModuleName owner]) original
                 ++ maybe [] (map (mkModuleName . fst) . itemValueImports) admitted
               renderRecipe withProgram = do
-                case (display, admitted) of
-                  (Just admission, Nothing) -> if requestCell args
-                    then checkedProgramDisplayRecipe defaults namespaces admission withProgram
-                    else checkedDisplayRecipe defaults namespaces admission withProgram
-                  (Nothing, Nothing) -> do
+                case admitted of
+                  Nothing -> do
                     prepared <- either fail pure (qualifyCompilerDefault defaults namespaces withProgram)
                     pure (spliceTemplate prepared turnSrc bindersStr)
-                  (Just _, Just _) -> fail "display and item authority cannot share one recipe"
-                  (Nothing, Just admission) -> do
+                  Just admission -> do
                     withPrefix <- if null (itemValueImports admission) then pure withProgram else
                       replaceRecipeMarker preambleImportMarker
                         (concatMap (\(moduleName',names) -> "import " ++ moduleName' ++ " (" ++ intercalate ", " (map renderImportBinder names) ++ ")\n")
                           (itemValueImports admission) ++ preambleImportMarker) withProgram
                     checkedRecipeSource defaults namespaces admission withPrefix turnSrc
-              authorityFields = case (display, admitted) of
-                (Just authority, Nothing) ->
-                  ["display", displayAdmissionDigest authority, displayCellReceiptDigest authority]
-                (Nothing, Just authority) ->
-                  ["item", itemAdmissionDigest authority, itemCellReceiptDigest authority]
-                _ -> ["unadmitted"]
-              includeFields = case (display, admitted) of
-                (Nothing, Nothing) -> ["source-search-includes"]
+              authorityFields = case admitted of
+                Just authority -> ["item", itemAdmissionDigest authority, itemCellReceiptDigest authority]
+                Nothing -> ["unadmitted"]
+              includeFields = case admitted of
+                Nothing -> ["source-search-includes"]
                   ++ concatMap (\include -> ["include-path", include]) (requestIncludes args)
                 _ -> ["checked-import-authority"]
               retainedFields = concat
@@ -1206,7 +1179,7 @@ runLegacyCellMode compiler caches args cellPath = do
       let text = encodeString . T.pack
           signatures = binderSignatures ++ map snd expressionEvidence
           receipt = encodeListLen 10
-            <> text "TPEXACTCHECK" <> text "2" <> text (scopeRequestSha256 receiptScope)
+            <> text "TPEXACTCHECK" <> text "3" <> text (scopeRequestSha256 receiptScope)
             <> text (checkedAdmissionDigest admission) <> text (checkedCellSha256 admission)
             <> text (checkedTemplateSha256 admission) <> text (shaHex outputBytes)
             <> text (shaHex (TE.encodeUtf8 (T.pack finalSource)))
@@ -1254,7 +1227,7 @@ runCellProgramMode compiler caches args cellPath exact planned = do
         checkedSource = concat (programSources settled)
         observations = encodeCellOut finalPlan (programPins settled) (programExpressions settled) checkedSource
         text = encodeString . T.pack
-        receipt = encodeListLen 11 <> text "TPEXACTPROGRAM" <> text "2"
+        receipt = encodeListLen 11 <> text "TPEXACTPROGRAM" <> text "3"
           <> text (scopeRequestSha256 exact) <> text (checkedAdmissionDigest admission)
           <> text (checkedCellSha256 admission) <> text (checkedTemplateSha256 admission)
           <> text (shaHex observations) <> text (shaHex (TE.encodeUtf8 (T.pack checkedSource)))
@@ -1344,7 +1317,7 @@ runCellProgramMode compiler caches args cellPath exact planned = do
           slot = plannedSlots planned !! index
           (generation,observation) = case slot of
             PlannedBind value -> (value,Nothing)
-            PlannedExpression capture _ name -> (capture,Just name)
+            PlannedExpression capture name -> (capture,Just name)
             _ -> error "native item has declaration reservation"
           source = cellAnalysisSource item
           verdict = cellAnalysisVerdict item
@@ -1361,7 +1334,6 @@ runCellProgramMode compiler caches args cellPath exact planned = do
             (if sbKind verdict == KBind then "bind" else "expr") (sbBinders verdict)
             (checkedTurnTemplates admission) (map exactModule (scopeValues scope)) signatures
             (fmap (\value -> case expressionPlanLift value of ExpressionPure -> "pure"; ExpressionEffectful -> "effectful") expression)
-            (fmap (\value -> case expressionPlanPresentation value of ExpressionRendered -> "rendered"; ExpressionOpaque -> "opaque") expression)
             generation (checkedAdmissionDigest admission) (map programValueImport prefix) observation (programOriginal state)
             prefix (scopeValues scope) []
           localArgs = args { requestBindGen = Just generation, requestSessionRoot = Just root
@@ -1375,7 +1347,7 @@ runCellProgramMode compiler caches args cellPath exact planned = do
       validateCheckedItemAdmission localArgs itemAdmission source verdict
       lastAttempt <- newIORef Nothing
       output <- timePhase timing "cell_program_native" $ compileClassifiedTurnKeeping scoped caches localArgs timing directory
-        source verdict (intercalate ", " (sbBinders verdict)) (Just itemAdmission) Nothing lastAttempt (priorProgramImports state) (PlannedTurnParse parserFlags (programPrologue state))
+        source verdict (intercalate ", " (sbBinders verdict)) (Just itemAdmission) lastAttempt (priorProgramImports state) (PlannedTurnParse parserFlags (programPrologue state))
       extended <- retainProgramProducts directory (compiledPipeline output)
         (compiledOriginalProducts output) (compiledModule output) scope
       retainedImports <- retainProgramSourceImports (programSourceImports state) (compiledPipeline output)
@@ -1386,48 +1358,8 @@ runCellProgramMode compiler caches args cellPath exact planned = do
       case turn of
         TBind _ _ binders _ wrapped -> do
           writeCheckedItemReceipt directory scope itemAdmission (T.unpack wrapped)
-          next <- addProgramValue root generation binders retainedState
-          case (slot,expression) of
-            (PlannedExpression _ display name,Just expressionPlan) ->
-              compileDisplay parserFlags timing admission root outDir index display name expressionPlan next
-            _ -> pure next
+          addProgramValue root generation binders retainedState
         _ -> fail "compiled cell native recipe did not return bind metadata"
-
-    compileDisplay parserFlags timing admission root outDir index generation observation expression state = do
-      let scope = programExact state
-          prefix = selectedProgramValues (programValues state)
-          capture = case plannedSlots planned !! index of
-            PlannedExpression value _ _ -> value
-            _ -> error "display has no capture slot"
-          display = CheckedDisplayAdmission (checkedAdmissionDigest admission) (checkedAdmissionDigest admission)
-            (fromIntegral index) observation capture generation (checkedAdmissionDigest admission)
-            0 [] (checkedTurnTemplates admission) (map exactModule (scopeValues scope)) (map programValueImport prefix)
-            (case expressionPlanPresentation expression of ExpressionRendered -> "rendered"; ExpressionOpaque -> "opaque")
-            (programOriginal state) prefix (scopeValues scope) []
-          localArgs = args { requestBindGen = Just generation, requestSessionRoot = Just root
-            , requestInjectVals = map exactModule (scopeValues scope), requestRetainedGenerations = programRetained state }
-          scoped :: Compiler
-          scoped selection retained purpose session path includes products =
-            compiler selection retained (CellProgramCompile (programPurpose state purpose) scope) session path includes products
-          directory = outDir </> "display-" ++ show index
-          verdict = StmtBinders KBind (checkedDisplayBinders display) []
-      createDirectoryIfMissing True directory
-      lastAttempt <- newIORef Nothing
-      output <- timePhase timing "cell_program_display" $ compileClassifiedTurnKeeping scoped caches localArgs timing directory
-        "" verdict (intercalate ", " (sbBinders verdict)) Nothing (Just display) lastAttempt (priorProgramImports state) (StandaloneTurnParse parserFlags)
-      extended <- retainProgramProducts directory (compiledPipeline output)
-        (compiledOriginalProducts output) (compiledModule output) scope
-      retainedImports <- retainProgramSourceImports (programSourceImports state) (compiledPipeline output)
-        (certifiedFinalizedArtifacts (compiledOriginalProducts output)) extended
-      let turn = compiledTurn output
-      BS.writeFile (directory </> "turn.cbor") (encodeTurnOut turn)
-      case turn of
-        TBind _ _ binders _ wrapped -> do
-          writeCheckedDisplayReceipt directory scope display (T.unpack wrapped)
-          next <- addProgramValue root generation binders
-            (state { programExact = extended, programSourceImports = retainedImports })
-          pure next { programValues = programValues state }
-        _ -> fail "compiled cell display did not return bind metadata"
 
     scopeValues = maybe [] checkedValueInterfaces . scopeCheckedCell
     extractPlannedFingerprint inventory = plannedInterfaceFingerprint inventory

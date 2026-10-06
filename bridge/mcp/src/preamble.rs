@@ -798,7 +798,7 @@ pub fn build_preamble_with_companions_hiding(
     )
 }
 
-/// The resident notebook renders through its admitted display recipes. Its
+/// Resident notebook presentation comes from authored display effects. Its
 /// declarations do not carry the expression evaluator's pagination alias.
 #[must_use]
 pub fn build_notebook_preamble(effects: &[EffectDecl], user_library: bool) -> String {

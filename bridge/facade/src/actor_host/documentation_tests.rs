@@ -302,37 +302,95 @@ async fn explicit_display_preserves_resource_guidance_and_specialized_renderers(
 
 #[tokio::test]
 async fn explicit_display_is_the_only_value_presentation() {
+    use super::command_test_support::{backend_request, TestCommands};
+
     let mut campaign = TestCampaign::start().await;
     let policy = campaign.root_installation.policy.clone();
-    let bare = committed(policy.as_ref(), "41 :: Int").await;
+    let store = super::display_output::open_run_store(campaign.session_root.path()).unwrap();
+    let executing_policy = policy.clone();
+    let mut running = tokio::spawn(async move {
+        committed(
+            executing_policy.as_ref(),
+            include_str!("notebook_retained_expression_history.hs"),
+        )
+        .await
+    });
+    let backend = TestCommands::completed("abc");
+    tokio::select! {
+        request = backend_request(&mut campaign) => request.supply(Ok(backend.clone())),
+        result = &mut running => panic!("expression history ended before its command effect: {result:?}"),
+    }
+    let bare = running.await.unwrap();
+    let items = bare["items"].as_array().unwrap();
+    assert_eq!(items.len(), 3, "{bare}");
+    let captures = items
+        .iter()
+        .map(|item| {
+            assert_eq!(item["kind"], "expression", "{bare}");
+            assert_eq!(item["status"], "committed", "{bare}");
+            let installed = item["installedBindings"].as_array().unwrap();
+            assert_eq!(installed.len(), 1, "one capture per expression: {bare}");
+            installed[0].as_str().unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        captures
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        3,
+        "each expression owns its retained capture: {bare}"
+    );
     assert!(
-        bare["items"].as_array().unwrap().iter().all(|item| {
+        items.iter().all(|item| {
             item["operations"]
                 .as_array()
                 .unwrap()
                 .iter()
                 .all(|operation| operation.get("display").is_none())
         }),
-        "bare expression must only retain its value: {bare}"
-    );
-    assert!(
-        !bare["items"][0]["installedBindings"]
-            .as_array()
-            .unwrap()
-            .is_empty(),
-        "{bare}"
+        "bare and effectful expressions retain values without display: {bare}"
     );
     campaign.assert_no_deployment("bare expression must not publish a display", |event| {
         matches!(event, LocalResidentDeployment::DisplayPublished(_))
     });
-    let store = super::display_output::open_run_store(campaign.session_root.path()).unwrap();
+    let origin = harness::store::actor_output::ActorOutputOrigin {
+        run: super::runtime_namespace(campaign.session_root.path()),
+        native_actor: campaign.actor.identity().id.0,
+        incarnation: campaign.actor.identity().incarnation.0,
+    };
+    assert!(store
+        .actor_output_page(&origin, 0, 10)
+        .unwrap()
+        .outputs
+        .is_empty());
+    assert_eq!(backend.executions(), 1);
+
+    let retained = committed(
+        policy.as_ref(),
+        &format!(
+            "retainedHistory <- pure ({} (), {} (), {} ())",
+            captures[0], captures[1], captures[2]
+        ),
+    )
+    .await;
+    assert_eq!(
+        retained["items"][0]["installedBindings"],
+        serde_json::json!(["retainedHistory"])
+    );
+    campaign.assert_no_deployment("reusing captures must not publish a display", |event| {
+        matches!(event, LocalResidentDeployment::DisplayPublished(_))
+    });
     let shown = campaign
         .drive_actor_output(
             &store,
-            committed(policy.as_ref(), "display (show (41 :: Int))"),
+            committed(
+                policy.as_ref(),
+                "display (let (a, b, text) = retainedHistory in if a == 41 && b == 42 && text == \"abc\" then a + b + T.length text else (-1 :: Int))",
+            ),
         )
         .await;
-    assert_eq!(explicit_display_output(&shown)["text"], "41", "{shown}");
+    assert_eq!(explicit_display_output(&shown)["text"], "86", "{shown}");
     for (source, expected) in [
         ("display (inspectFull True)", "True"),
         (
@@ -349,6 +407,19 @@ async fn explicit_display_is_the_only_value_presentation() {
             "{inspected}"
         );
     }
+    assert_eq!(
+        backend.executions(),
+        1,
+        "later capture use and explicit display must not replay the command"
+    );
+    assert_eq!(
+        store
+            .actor_output_page(&origin, 0, 10)
+            .unwrap()
+            .outputs
+            .len(),
+        3
+    );
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }

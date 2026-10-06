@@ -1,9 +1,13 @@
 module CellProgramStateTest (cellProgramStateChecks) where
 
 import Control.Monad (unless)
+import Codec.CBOR.Read (deserialiseFromBytes)
+import Codec.CBOR.Term (Term(..), decodeTerm)
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as BSL
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
+import qualified Data.Text as T
 import Tidepool.Binders
 import Tidepool.TurnSource (emptyCompilerDefaultRecipe)
 import Tidepool.CellProgramState
@@ -24,12 +28,12 @@ cellProgramStateChecks = do
       declaration = plan [item 3 KDecl,item 4 KDecl]
       lastPlan = plan [item 5 KExpr]
       pin key = CheckedBinderPin key "Int" []
-      expression key = CellExpressionPlan key ExpressionPure ExpressionRendered "Int" []
+      expression key = CellExpressionPlan key ExpressionPure "Int" []
       signature key ty = CheckedSignature key ty (BS.singleton 0) []
       signatures1 = [signature "pin-0" "Int",signature "expr-1" "Bool"]
       signatures2 = [signature "expr-4" "Char",signature "pin-0" "Duplicate"]
       expressions1 = [expression "expr-1"]
-      expressions2 = [expression "expr-4"]
+      expressions2 = [(expression "expr-4") { expressionPlanLift = ExpressionEffectful }]
       first = recordCheckedSegment firstPlan [pin "pin-0"] expressions1 signatures1 "checked-1" initial
       middle = recordDeclarationSegment declaration "declared" "receipt-2" first
       final = recordCheckedSegment lastPlan [pin "pin-4"] expressions2 signatures2 "checked-3" middle
@@ -47,11 +51,20 @@ cellProgramStateChecks = do
       && programCheckedSignatures final == signatures1 ++ signatures2
       && [signaturePresentation value | value <- programCheckedSignatures final, signatureKey value == "pin-0"]
         == ["Int","Duplicate"])
-  assert "observations preserve legacy list append bytes"
+  assert "observations preserve ordered segment accumulation"
     (encodeCellOut (plan (cellPlanItems firstPlan ++ cellPlanItems declaration ++ cellPlanItems lastPlan))
       ([pin "pin-0"] ++ [pin "pin-4"]) (expressions1 ++ expressions2) "checked-1declaredchecked-3"
       == encodeCellOut (plan (concatMap cellPlanItems (programPlans final)))
         (programPins final) (programExpressions final) (concat (programSources final)))
+  let bytes = encodeCellOut (plan (concatMap cellPlanItems (programPlans final)))
+        (programPins final) (programExpressions final) (concat (programSources final))
+  case deserialiseFromBytes decodeTerm (BSL.fromStrict bytes) of
+    Right (remaining, TList [TString magic, TInt 3, TList [_, _, _, _, TList rows]])
+      | BSL.null remaining && magic == T.pack "TPCELLOBSERVATIONS" -> case rows of
+          [TList [_, TString pureLift, _, _], TList [_, TString effectLift, _, _]]
+            | pureLift == T.pack "pure" && effectLift == T.pack "effectful" -> pure ()
+          _ -> fail "expression observations retained obsolete presentation fields"
+    _ -> fail "cell observations did not retain the matched version-three envelope"
   assert "native authority is unchanged by output accumulation"
     (programExact final == exact && programPrologue final == prologue
       && null (programValues final) && null (programOriginals final)
@@ -69,4 +82,4 @@ cellProgramStateChecks = do
       == expressions1 ++ expressions2 ++ [duplicateExpression]
       && expressionsFor ["expr-1"] ambiguous == expressions1 ++ [duplicateExpression]
       && null (expressionsFor [] ambiguous) && null (expressionsFor ["missing"] ambiguous))
-  putStrLn "cell accumulation: 8 checks passed"
+  putStrLn "cell accumulation: 9 checks passed"

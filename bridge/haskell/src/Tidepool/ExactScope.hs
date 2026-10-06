@@ -2,7 +2,7 @@
 
 module Tidepool.ExactScope
   ( ExactScope(..), ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..), ExactCompilation(..), SourceSelectedOriginals(..)
-  , CheckedCellAdmission(..), CheckedCellPurpose(..), CheckedItemAdmission(..), CheckedItemPurpose(..), CheckedDisplayAdmission(..)
+  , CheckedCellAdmission(..), CheckedCellPurpose(..), CheckedItemAdmission(..), CheckedItemPurpose(..)
   , ActivationPreviewAdmission(..), ActivationPreviewInputMetadata(..), scopeActivationPreview
   , PlannedCellAdmission(..), PlannedCellSlot(..)
   , ExactInterfaceEvidence(..), CanonicalOrigin(..), CanonicalInterfaceProof, CanonicalCoreArtifact
@@ -14,7 +14,7 @@ module Tidepool.ExactScope
   , canonicalCertificatePath, canonicalCertificateSha256, canonicalCoreArtifact
   , canonicalCorePath, canonicalCoreSha256, canonicalHomeUnits, canonicalSourceSha256
   , canonicalRequirements, canonicalOrigin, canonicalSourceImports, isSourceOriginal
-  , scopeCheckedCell, scopeCheckedItem, scopeCheckedDisplay, scopeIncludePaths
+  , scopeCheckedCell, scopeCheckedItem, scopeIncludePaths
   , readExactScope, revalidateExactScope, scopeValueInterfaces
   , writeExactCompilation, extendSourceSelectedOriginals
   , extendExactExecutionSources, extendExactExecutionSourcesWithinBudget
@@ -55,7 +55,7 @@ import Tidepool.Session (Generation(..), SessionModule(..), SessionModuleKind(..
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import Tidepool.CheckedCell
   ( CheckedSignature(..), RequestTypeSignatures, RequestHelperRecipe(..), decodeCheckedSignature, decodeRequestTypeSignatures
-  , CellExpressionPlan(..), ExpressionLiftPlan(..), ExpressionPresentation(..), decodeCellExpressionPlan
+  , CellExpressionPlan(..), ExpressionLiftPlan(..), decodeCellExpressionPlan
   , validateCheckedTypeWitnessBytes )
 import Tidepool.ExecutionSchema
   ( SymbolIdentity(..), ProjectedGroup(..), ProjectedGroupBody(..), GlobalDecl(..) )
@@ -105,7 +105,6 @@ data ExactScopePurpose
   = NoCheckedPurpose
   | ExactCellPurpose CheckedCellAdmission [FilePath]
   | ExactItemPurpose CheckedItemAdmission [FilePath]
-  | ExactDisplayPurpose CheckedDisplayAdmission [FilePath]
   | ExactInspectionPurpose [ExactIfaceArtifact] [FilePath]
   | ExactActivationPreviewPurpose ActivationPreviewAdmission [FilePath]
   deriving (Eq, Show)
@@ -152,17 +151,11 @@ scopeCheckedItem scope = case scopePurpose scope of
   ExactItemPurpose admission _ -> Just admission
   _ -> Nothing
 
-scopeCheckedDisplay :: ExactScope -> Maybe CheckedDisplayAdmission
-scopeCheckedDisplay scope = case scopePurpose scope of
-  ExactDisplayPurpose admission _ -> Just admission
-  _ -> Nothing
-
 scopeIncludePaths :: ExactScope -> Maybe [FilePath]
 scopeIncludePaths scope = case scopePurpose scope of
   NoCheckedPurpose -> Nothing
   ExactCellPurpose _ paths -> Just paths
   ExactItemPurpose _ paths -> Just paths
-  ExactDisplayPurpose _ paths -> Just paths
   ExactInspectionPurpose _ paths -> Just paths
   ExactActivationPreviewPurpose _ paths -> Just paths
 
@@ -308,26 +301,6 @@ data CanonicalModuleCertificate = CanonicalModuleCertificate
   , certificateOrigin :: CanonicalOrigin
   }
 
-data CheckedDisplayAdmission = CheckedDisplayAdmission
-  { displayAdmissionDigest :: String
-  , displayCellReceiptDigest :: String
-  , displayItemIndex :: Word64
-  , displayObservationName :: String
-  , displayCaptureGeneration :: Word64
-  , displayGeneration :: Word64
-  , displayPrefixDigest :: String
-  , displayBudget :: Word64
-  , displayPresented :: [String]
-  , displayTurnTemplates :: [(String,String)]
-  , displayInjectedModules :: [String]
-  , displayValueImports :: [(String,[String])]
-  , displayPresentation :: String
-  , displayPlannedDeclaration :: Maybe ((String,String),String)
-  , displayCompletedValues :: [CompletedValueImport]
-  , displayValueInterfaces :: [ExactIfaceArtifact]
-  , displayTemplateInterfaces :: [CheckedTemplateInterface]
-  } deriving (Eq, Show)
-
 data CheckedCellPurpose = AuthoredCellCheck
   deriving (Eq, Show)
 
@@ -344,7 +317,7 @@ data CheckedCellAdmission = CheckedCellAdmission
   } deriving (Eq, Show)
 
 data PlannedCellSlot = PlannedPrologue Word64 | PlannedDeclaration Word64
-  | PlannedBind Word64 | PlannedExpression Word64 Word64 String
+  | PlannedBind Word64 | PlannedExpression Word64 String
   deriving (Eq, Show)
 
 data PlannedCellAdmission = PlannedCellAdmission
@@ -370,7 +343,6 @@ data CheckedItemAdmission = CheckedItemAdmission
   , itemInjectedModules :: [String]
   , itemSignatures :: [CheckedSignature]
   , itemExpressionLift :: Maybe String
-  , itemExpressionPresentation :: Maybe String
   , itemGeneration :: Word64
   , itemPrefixDigest :: String
   , itemValueImports :: [(String,[String])]
@@ -563,7 +535,6 @@ scopeValueInterfaces scope = case scopePurpose scope of
   NoCheckedPurpose -> []
   ExactCellPurpose admission _ -> checkedValueInterfaces admission
   ExactItemPurpose admission _ -> itemValueInterfaces admission
-  ExactDisplayPurpose admission _ -> displayValueInterfaces admission
   ExactInspectionPurpose values _ -> values
   ExactActivationPreviewPurpose admission _ -> [previewInputInterface admission]
 
@@ -1221,7 +1192,7 @@ decodeScope = do
         validateInterfaces injected values
         paths <- includePaths
         pure (ExactInspectionPurpose values paths)
-      "cell-check2" -> do
+      "cell-check3" -> do
         unless (authCount == 9) (fail "invalid cell-check admission")
         admission <- CheckedCellAdmission <$> digestField <*> digestField <*> digestField
           <*> bounded 64 (array 2 >> (,) <$> nonempty <*> digestField)
@@ -1232,7 +1203,7 @@ decodeScope = do
         unique "checked reserved modules" (checkedReservedModules admission)
         paths <- includePaths
         pure (ExactCellPurpose admission paths)
-      "cell-program1" -> do
+      "cell-program2" -> do
         unless (authCount == 14) (fail "invalid compiled cell admission")
         admission <- CheckedCellAdmission <$> digestField <*> digestField <*> digestField
           <*> bounded 64 (array 2 >> (,) <$> nonempty <*> digestField)
@@ -1245,13 +1216,13 @@ decodeScope = do
                 ("prologue",2) -> PlannedPrologue <$> decodeWord64
                 ("decl",2) -> PlannedDeclaration <$> decodeWord64
                 ("bind",2) -> PlannedBind <$> decodeWord64
-                ("expr",4) -> PlannedExpression <$> decodeWord64 <*> decodeWord64 <*> nonempty
+                ("expr",3) -> PlannedExpression <$> decodeWord64 <*> nonempty
                 _ -> fail "invalid compiled cell reservation")))
           <*> pure AuthoredCellCheck
         validateInterfaces (checkedInjectedModules admission) (checkedValueInterfaces admission)
         paths <- includePaths
         pure (ExactCellPurpose admission paths)
-      "checked-item3" -> do
+      "checked-item4" -> do
         unless (authCount == 20) (fail "invalid checked-item admission")
         admissionDigest <- digestField
         receiptDigest <- digestField
@@ -1267,13 +1238,11 @@ decodeScope = do
         unique "checked item injected modules" injected
         unique "checked item signatures" (map signatureKey signatures)
         token <- peekTokenType
-        (liftPlan,presentation) <- if token == TypeNull then decodeNull >> pure (Nothing,Nothing) else do
+        liftPlan <- if token == TypeNull then decodeNull >> pure Nothing else do
           expression <- decodeCellExpressionPlan
           unless (kind == "expr") (fail "expression plan belongs to a non-expression item")
           pure (Just (case expressionPlanLift expression of
-              ExpressionPure -> "pure"; ExpressionEffectful -> "effectful")
-            ,Just (case expressionPlanPresentation expression of
-              ExpressionRendered -> "rendered"; ExpressionOpaque -> "opaque"))
+              ExpressionPure -> "pure"; ExpressionEffectful -> "effectful"))
         generation <- decodeWord64
         prefix <- digestField
         valueImports <- bounded 4096 (array 2 >> ((,) <$> nonempty <*> bounded 65536 nonempty))
@@ -1292,27 +1261,7 @@ decodeScope = do
         validateValues valueImports values
         paths <- includePaths
         pure (ExactItemPurpose (CheckedItemAdmission AuthoredCheckedItem admissionDigest receiptDigest index sourceDigest kind binders
-          templates injected signatures liftPlan presentation generation prefix valueImports observation planned values valueInputs templateInputs) paths)
-      "checked-display3" -> do
-        unless (authCount == 19) (fail "invalid checked-display admission")
-        admission <- CheckedDisplayAdmission <$> digestField <*> digestField <*> decodeWord64
-          <*> nonempty <*> decodeWord64 <*> decodeWord64 <*> digestField <*> decodeWord64
-          <*> bounded 65536 string <*> bounded 64 (array 2 >> (,) <$> nonempty <*> digestField)
-          <*> bounded 4096 nonempty
-          <*> bounded 4096 (array 2 >> ((,) <$> nonempty <*> bounded 65536 nonempty))
-          <*> nonempty
-          <*> plannedDeclaration
-          <*> completedValues <*> valueInterfaces <*> templateInterfaces
-        validateInterfaces (displayInjectedModules admission) (displayValueInterfaces admission)
-        validateValues (displayValueImports admission) (displayCompletedValues admission)
-        unique "display injected modules" (displayInjectedModules admission)
-        unique "display value import owners" (map fst (displayValueImports admission))
-        unique "display value import names" (concatMap snd (displayValueImports admission))
-        unless (displayPresentation admission `elem` ["rendered","opaque"]
-            && all ((`elem` displayInjectedModules admission) . fst) (displayValueImports admission))
-          (fail "invalid display presentation or imported owner")
-        paths <- includePaths
-        pure (ExactDisplayPurpose admission paths)
+          templates injected signatures liftPlan generation prefix valueImports observation planned values valueInputs templateInputs) paths)
       _ -> fail "unsupported exact compile purpose"
     nullable decoder = do
       token <- peekTokenType

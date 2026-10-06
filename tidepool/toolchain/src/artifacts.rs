@@ -505,7 +505,6 @@ pub struct ModuleCandidateOffer {
 
 enum NativeCheckedOffer {
     Item(crate::checked_cell::CheckedItemOffer),
-    Display(crate::checked_cell::CheckedDisplayOffer),
     ActivationPreview(crate::activation_preview::ActivationPreviewOffer),
 }
 
@@ -517,7 +516,6 @@ pub(crate) enum CheckedPurpose {
     Cell,
     Item,
     ActivationPreview,
-    Display,
     Program,
 }
 
@@ -526,11 +524,10 @@ impl CheckedPurpose {
     pub(crate) const fn wire_tag(self) -> &'static str {
         match self {
             Self::Inspection => "inspection1",
-            Self::Cell => "cell-check2",
-            Self::Item => "checked-item3",
-            Self::Display => "checked-display3",
+            Self::Cell => "cell-check3",
+            Self::Item => "checked-item4",
             Self::ActivationPreview => "host-activation-preview3",
-            Self::Program => "cell-program1",
+            Self::Program => "cell-program2",
         }
     }
 }
@@ -726,11 +723,8 @@ fn checked_candidate_reservations(
                 CheckedPlannedCellSlot::Bind { value } => {
                     reserved.insert(SessionModule::val(Generation(*value)).module_name());
                 }
-                CheckedPlannedCellSlot::Expression {
-                    capture, display, ..
-                } => {
+                CheckedPlannedCellSlot::Expression { capture, .. } => {
                     reserved.insert(SessionModule::val(Generation(*capture)).module_name());
-                    reserved.insert(SessionModule::val(Generation(*display)).module_name());
                 }
             }
         }
@@ -1335,122 +1329,6 @@ impl ModuleCandidateOffer {
         }))
     }
 
-    pub fn select_checked_display(
-        producer: &[u8],
-        include: &[PathBuf],
-        scratch: &Path,
-        context: Option<Arc<crate::declaration_context::ExactCompileContext>>,
-        capture: Arc<crate::checked_cell::ExactCompiledItem>,
-        prefix: crate::checked_cell::ExactCompiledPrefix,
-        generation: u64,
-        admission_digest: [u8; 32],
-        budget: u64,
-        presented: Vec<String>,
-        settled_bindings: Vec<(
-            String,
-            tidepool_repr::execution_schema::SymbolIdentity,
-            u64,
-            u64,
-        )>,
-    ) -> Result<Self, CompileError> {
-        let compile_context = context;
-        let context = prefix.with_value_context(checked_offer_context(
-            compile_context
-                .as_ref()
-                .map(|context| context.declarations().clone()),
-        )?)?;
-        if !crate::checked_cell::same_include_paths(include, capture.item().cell_include()) {
-            return Err(CompileError::ExtractFailed(
-                "checked display include search order changed".into(),
-            ));
-        }
-        let settled_values = prefix.select_settled_values(settled_bindings)?;
-        let display = crate::checked_cell::CheckedDisplayOffer {
-            capture,
-            prefix,
-            generation,
-            admission_digest,
-            budget,
-            presented,
-            settled_values,
-            is_program: false,
-        };
-        let mut selected = None;
-        let exact = compile_context_with_declarations(compile_context, context.clone())
-            .prepare_compilation_authorizing(
-                &scratch.join("exact-scope"),
-                producer,
-                |semantic_sha256| {
-                    let authorization = checked_search_authorization(
-                        display.authorization(producer, semantic_sha256)?,
-                        include,
-                    )?;
-                    let mut reserved = display
-                        .prefix
-                        .injected_modules()
-                        .into_iter()
-                        .collect::<BTreeSet<_>>();
-                    reserved.extend(
-                        display
-                            .capture
-                            .item()
-                            .reserved_declaration_modules()
-                            .iter()
-                            .cloned(),
-                    );
-                    reserved.insert(
-                        tidepool_repr::SessionModule::val(tidepool_repr::Generation(
-                            display.generation,
-                        ))
-                        .module_name(),
-                    );
-                    selected = immutable_candidates_in_context(
-                        &context, producer, include, scratch, reserved,
-                    )?;
-                    Ok(authorization)
-                },
-            )?;
-        Ok(Self {
-            selected,
-            producer: producer.to_vec(),
-            include: include.to_vec(),
-            exact: Some(
-                exact
-                    .with_source_search_context(include)
-                    .with_checked_value_imports(display.prefix.import_authority()?)
-                    .with_generated_scaffold_imports(
-                        display
-                            .capture
-                            .item()
-                            .turn_templates()
-                            .iter()
-                            .map(|(_, source)| source.as_str()),
-                    )
-                    .with_initial_template_interfaces(
-                        display.capture.item().template_context(),
-                        &display.capture.item().template_sources(),
-                    )?
-                    .with_generated_planned_imports(
-                        display
-                            .prefix
-                            .planned_declaration_proof()
-                            .map(|proof| &proof.certificate),
-                        display
-                            .capture
-                            .item()
-                            .turn_templates()
-                            .iter()
-                            .map(|(_, source)| source.as_str()),
-                    )?,
-            ),
-            checked_cell: None,
-            planned_cell: None,
-            checked_values: None,
-            checked_projections: Vec::new(),
-            checked: Some(NativeCheckedOffer::Display(display)),
-        })
-    }
-
     /// Read the compiler's distinct no-program result after a successful
     /// preview request. Missing native display evidence cannot become Opaque.
     pub fn activation_preview_unavailable(&self, root: &Path) -> Result<bool, CompileError> {
@@ -1479,7 +1357,6 @@ impl ModuleCandidateOffer {
             .map(|inputs| inputs.root())
             .or_else(|| match self.checked.as_ref()? {
                 NativeCheckedOffer::Item(offer) => Some(offer.item.value_input_root()),
-                NativeCheckedOffer::Display(offer) => Some(offer.capture.item().value_input_root()),
                 NativeCheckedOffer::ActivationPreview(offer) => Some(offer.values.root()),
             })
     }
@@ -1515,10 +1392,6 @@ impl ModuleCandidateOffer {
             match &self.checked {
                 Some(NativeCheckedOffer::Item(offer)) => offer
                     .item
-                    .retain_input_diagnostics(&offer.prefix, destination),
-                Some(NativeCheckedOffer::Display(offer)) => offer
-                    .capture
-                    .item()
                     .retain_input_diagnostics(&offer.prefix, destination),
                 Some(NativeCheckedOffer::ActivationPreview(offer)) => {
                     offer.values.retain_diagnostics(None, destination)
@@ -1592,7 +1465,6 @@ impl ModuleCandidateOffer {
         let mut declarations = BTreeMap::new();
         let mut admissions = Vec::new();
         let mut outputs = BTreeMap::new();
-        let mut display_outputs = BTreeMap::new();
         let mut segment = 0usize;
         let mut index = 0usize;
         while index < planned.parsed_plan.items().len() {
@@ -1747,34 +1619,6 @@ impl ModuleCandidateOffer {
                     context =
                         self.admit_program_value(context, values.root(), generation, &output.turn)?;
                     outputs.insert(index, output);
-                    if let CheckedPlannedCellSlot::Expression { display, .. } =
-                        &planned.slots[index]
-                    {
-                        program_request = program_request
-                            .in_program_context(&root.join("program-inputs"), context.clone())?;
-                        let effective = self.program_offer(program_request.clone());
-                        let directory = root.join(format!("display-{index}"));
-                        let output = effective.read_program_output(&directory)?;
-                        let source_admissions = effective
-                            .exact
-                            .as_ref()
-                            .expect("exact program offer")
-                            .validate_outputs(&directory)?;
-                        context = self.admit_program_support(
-                            &mut program_request,
-                            context,
-                            &output,
-                            &source_admissions,
-                        )?;
-                        admissions.extend(source_admissions);
-                        context = self.admit_program_value(
-                            context,
-                            values.root(),
-                            *display,
-                            &output.turn,
-                        )?;
-                        display_outputs.insert(index, output);
-                    }
                     index += 1;
                 }
             }
@@ -1809,9 +1653,7 @@ impl ModuleCandidateOffer {
                 items.push(CellProgramItem {
                     checked: item,
                     native: None,
-                    display: None,
                     native_observations: None,
-                    display_observations: None,
                 });
                 continue;
             }
@@ -1857,67 +1699,20 @@ impl ModuleCandidateOffer {
                         )
                     })?,
             )?;
-            let mut next = completed.append(native.clone())?;
-            let display =
-                if let CheckedPlannedCellSlot::Expression { display, .. } = planned.slots[index] {
-                    let output = display_outputs.get(&index).ok_or_else(|| {
-                        CompileError::ExtractFailed("program presentation target is missing".into())
-                    })?;
-                    let proof = checked_cell::CheckedDisplayOffer {
-                        capture: native.clone(),
-                        prefix: next.clone(),
-                        generation: display,
-                        admission_digest: cell.admission_digest(),
-                        budget: 0,
-                        presented: Vec::new(),
-                        settled_values: next.prepared_value_selection()?,
-                        is_program: true,
-                    }
-                    .seal(
-                        &output.directory,
-                        &initial.request_sha256,
-                        &output.source,
-                        &output.target,
-                        &context,
-                        program_request.program_source_lexical(),
-                        output
-                            .products
-                            .as_ref()
-                            .and_then(|products| products.original_execution.clone())
-                            .ok_or_else(|| {
-                                CompileError::ExtractFailed(
-                                    "program display lacks original execution evidence".into(),
-                                )
-                            })?,
-                    )?;
-                    next = next.append_display(proof.clone())?;
-                    Some(proof)
-                } else {
-                    None
-                };
+            let next = completed.append(native.clone())?;
             let observation = CellProgramObservations {
                 turn: output.turn,
                 metadata: output.metadata,
                 products: output.products.expect("program output was sealed"),
             };
-            let display_observations =
-                display_outputs
-                    .remove(&index)
-                    .map(|output| CellProgramObservations {
-                        turn: output.turn,
-                        metadata: output.metadata,
-                        products: output.products.expect("program output was sealed"),
-                    });
             items.push(CellProgramItem {
                 checked: item,
                 native: Some(native),
-                display,
                 native_observations: Some(observation),
-                display_observations,
             });
             prefix = Some(next);
         }
-        if !outputs.is_empty() || !display_outputs.is_empty() {
+        if !outputs.is_empty() {
             return Err(CompileError::ExtractFailed(
                 "program contains unowned prepared targets".into(),
             ));
@@ -2327,7 +2122,6 @@ pub struct SealedTurnProducts {
 #[derive(Clone, Debug)]
 pub enum CheckedNativeProof {
     Execution(Arc<crate::checked_cell::ExactCompiledItem>),
-    Display(Arc<crate::checked_cell::ExactCompiledDisplay>),
     ActivationPreview(Arc<crate::activation_preview::ExactCompiledActivationPreview>),
 }
 
@@ -2666,23 +2460,6 @@ fn seal_turn_outputs_inner(
                     )?,
                 )
             }
-            NativeCheckedOffer::Display(display) => CheckedNativeProof::Display(
-                display.seal(
-                    output_dir,
-                    &offer
-                        .exact
-                        .as_ref()
-                        .expect("checked display has exact scope")
-                        .request_sha256,
-                    source,
-                    prepared,
-                    &context,
-                    &lexical,
-                    original_execution
-                        .clone()
-                        .expect("checked output has full original execution evidence"),
-                )?,
-            ),
             NativeCheckedOffer::Item(item) => {
                 let request_sha256 = &offer
                     .exact
@@ -4030,7 +3807,7 @@ fn retain_program_compile_diagnostics(source: &Path, destination: &Path) -> std:
     for entry in entries(source)? {
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
-        let selected = ["segment-", "item-", "display-"]
+        let selected = ["segment-", "item-"]
             .iter()
             .filter_map(|prefix| name.strip_prefix(prefix))
             .any(|ordinal| {
@@ -4771,7 +4548,7 @@ mod typed_site_tests {
         let Value::Array(fields) = encoded else {
             panic!("authorization must be an array")
         };
-        assert_eq!(fields[0], Value::Text("cell-check2".into()));
+        assert_eq!(fields[0], Value::Text("cell-check3".into()));
         assert_eq!(
             fields[1],
             Value::Array(vec![
