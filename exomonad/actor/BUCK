@@ -410,11 +410,13 @@ tidepool_rust_test_cases(
         "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
         "TIDEPOOL_KEEP_TEST_LOGS": "1",
         "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
+        "TIDEPOOL_SHIPPED_SKILLS": "$(location //exomonad/examples/workspace:shipped_skills)/.exomonad/skills",
     },
     resources = [
         "//bridge/haskell:facade_embedded_sources",
         "//build/package:compiler_deployment",
         "//build/package:tidepool_extract_runtime_libraries",
+        "//exomonad/examples/workspace:shipped_skills",
     ],
     haskell_worker = True,
     visibility = ["PUBLIC"],

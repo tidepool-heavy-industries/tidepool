@@ -1,18 +1,9 @@
-Execution uses recursive scaffold → unfold a ready parallel batch → checked
-integration → repeat. Sol owns cross-component decisions; Luna component owners
-repeat the cycle through subcomponents to microtask leaves. Before substantial
-direct implementation, briefly justify a terminal leaf. Aim for at least three
-Luna implementation levels on average, with real overlap and useful integration
-at each owner. Reviewers and forwarding-only nodes do not count as depth.
+For Git project implementation and delivery, load `exomonad-project-work`.
+It owns scaffold/delegate/review/integrate, recursive Sol/Luna ownership and
+acceptance policy. `RECURSIVE-WORK.md` explains the supplied compositions.
+This topic covers worktree source selection, observations and role capabilities.
 
-Use the compiled `RECURSIVE-WORK.md` procedure and `unfoldWork` to admit a local
-frontier with one collector. Shared reasoning belongs in a captured checkpoint;
-implementation details stay with their owners. Cache reuse is observed, not
-guaranteed.
-
-Commit a useful interface, example, test, or partial implementation in your
-owned worktree. Name each obligation's scope, acceptance condition, and allowed
-holes. Use `currentCheckout` to select the executing actor's checkout: the root
+Use `currentCheckout` to select the executing actor's checkout: the root
 project checkout or a child's bound checkout. Use `projectHead` for the source
 project explicitly. Before a live-source fork,
 Exomonad checkpoints eligible edits on the source's current branch. The child starts
@@ -20,8 +11,6 @@ from that committed source. If the optional overlay capture is busy or unavailab
 the child starts from the checkpointed HEAD with an omission notice. If native
 source admission is busy, it instead uses existing committed HEAD and reports
 omitted working files. A Git checkpoint failure stops the fork.
-Commit authored units with meaningful
-messages for integration and recovery.
 
 Worktrees. A child's launch receipt names its own checkout, and that path is not
 yours to read while the child lives: the directory is mid-edit and may not be
@@ -41,18 +30,8 @@ resolve means the child has not checkpointed it yet, not that the work is gone.
 Load `exomonad-unfold` for the worked cells.
 
 `tryMerge` integrates a candidate; checks and publication are separate steps.
-If a check fails, retain the failed candidate, local edits and check evidence.
-The integration owner repairs or reconciles that state before publishing; a red
-check is not permission to reset or discard work. Before composing this flow,
-use targeted `doc` or `lookup` discovery to find an installed integration actor
-whose outcomes match the task. Keep its original receipt so the next action
-uses the exact checked source and evidence.
-
-One shared interface can support four branches: a pure test implementation,
-integration tests exercising the real implementation, the real implementation,
-and code using it. A testing branch may scaffold common fixtures and fork three
-responsibilities such as normal behavior, failures, and cleanup. Each parent
-owns its shared wiring and fulfills its own contract after folding its children.
+Keep the exact merged revision and its check evidence for the next action.
+A failed check leaves the candidate and local edits available for repair.
 
 Use `coding` for work that may implement and recurse. `scaffolding` has the same
 capabilities with a scaffold-focused prompt. `researching` is inspection-only
@@ -64,48 +43,7 @@ actor for a reviewer who must run tests. Explicitly narrowed rows
 and exhausted descendant budgets can still make an actor a leaf. Role names
 do not replace runtime authority; inspect the `status` tool.
 
-Compile-only fragments and tests that fail against an explicit stub can be
-valid intermediate submissions. Record exactly what passed, only compiled,
-failed, or remains unimplemented. Removing a TODO marker is not acceptance.
-Children may introduce internal obligations but cannot weaken the contract owed
-to their parent. Return a typed decision need when that contract must change.
+Use `doc unfold` for dispatch and submission observations, and `doc watch` for
+composing readiness. Load `exomonad-review` for exact-source review and repair.
 
-Use `lookup` with `doc unfold` for dispatch and `doc watch` for observation. Watch independent
-submissions separately when you can integrate them separately. A fold includes
-your judgment: inspect exact commits, validate claims, integrate through ordinary
-Git or the conservative merge, and run checks for the integrated revision.
-Retain discoveries that change the shared design, not every debugging exchange.
-
-A reviewer forked after implementation returns inherits your newer context.
-Supply the exact candidate, issued contract, and implementer reference. The
-reviewer can drive typed repairs directly while your watch waits for a verdict.
-Use `lookup` with `doc refinement`. Integration and contract changes remain your decisions.
-
-Keep specialists for focused follow-ups; send the new candidate and decision
-delta. Fork again when your newer context is the better starting point. A
-coordinator can keep its original request pending across watches and finally
-use its original `respond`. Acceptance does not require discarding useful actors.
-
-Improve the environment during useful work. Ordinary scripts, resident helpers,
-and parameterized acceptance functions can make the next cycle easier. Prefer
-existing tools and small project definitions; promote source when actual use
-justifies it. No generic campaign schema or mandatory experiment is needed.
-
-Research can deliver source-controlled knowledge. Use a coding actor when the
-owned deliverable is a recommendation document: assign each specialist a distinct
-path and the coordinator the synthesis. Ask for a recommendation, evidence,
-alternatives, uncertainties, and implementation consequences. Restricting that
-assignment to documents is a task constraint, not enforced read-only authority;
-choose inspection-only research when that authority boundary is needed. Its
-coordinator folds reported findings into shared notes, preserving qualifications.
-
-When an interface changes, its owner commits the revised contract and sends each
-affected retained actor the revision and decision delta. Track which contract
-revision each candidate satisfies; a reply against the old seed is not evidence
-for the new contract. Ordinary typed assignment and result values suffice.
-
-Distinguish findings, completed deliverables, and choices requiring the parent.
-For a decision request, state the exact choice and what work can continue. Keep
-minor friction in the folded notes rather than turning every observation into a
-user interruption. Verify subtree activity before reporting a pause: a returned
-request, retained actor, pending watch, and working descendant are distinct.
+skill: exomonad-project-work

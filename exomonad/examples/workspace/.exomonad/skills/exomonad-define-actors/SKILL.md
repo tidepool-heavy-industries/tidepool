@@ -1,7 +1,15 @@
 ---
 name: exomonad-define-actors
-description: Define typed Haskell actors in a resident Exomonad session for custom joins, stateful routing and automatic continuations. Load when Exomonad.Contrib.Routing's existing collectors do not express the required coordination.
+description: Author small languages and the stateful machines that interpret them. Define Haskell record actors with typed calls, event sources, retained state and Jev/agent continuations to automate orchestration in the notebook.
 ---
+
+Build a small machine for the task. Its public calls are a control language;
+its state records where the work has reached; its handlers interpret commands
+and events into state changes, replies and effects. Use local records and sums
+for the vocabulary, ordinary functions for the interpreter, and Jev where a
+transition needs semantic judgment. A handler can start agent work and a later
+reply can drive the next transition. The model can query or steer the machine
+through the same typed interface while it runs.
 
 One record describes private state, public calls and fixed source handlers. The
 same record supplies its definition and typed client. `R` is already imported as
@@ -12,14 +20,22 @@ service with actor lifetime, surviving its creating invocation. A handler withou
 a hosted invocation uses actor ownership for its commands and requests; it still
 processes one accepted call or event at a time.
 
-Model the actor as a typed state machine: state records what has been observed,
-event constructors distinguish arrivals, and handlers perform the transition and
-its chosen effects. Pure transition helpers make invariants inspectable; a record
-actor supplies serialized, persistent execution. Use functions or `waitFor` when
-the whole dependency is confined to one invocation, and existing Routing
-collectors when their join already fits. Use a custom actor for incremental joins,
-deduplication or custom event-driven policy. No model turn is
-needed for a transition the program already knows how to take.
+Choose the language around decisions the machine makes. A repair coordinator may
+accept candidates and findings, accumulate review results, and request a revision;
+a research coordinator may accept observations and competing hypotheses, select
+the next experiment, and accumulate conclusions. Both are stateful interpreters
+over a task-specific event language. Products retain jointly needed facts; sums
+distinguish inputs that trigger different behavior; endpoint values let machines
+call one another. Keep a straight dependency chain as a function or suspended
+`waitFor` computation; put ongoing interaction and evolving state in an actor.
+The Routing collectors are ready-made compositions you can use alongside your
+own actors. No model turn is needed for a transition the program can take itself.
+
+Give the language one `Call` taking a command sum when a single interpreter is
+convenient, or several differently typed `Call` fields when separate operations
+make a better client API. Local payload types at these actor endpoints need no
+JSON schema. The same domain value can travel from an agent reply into an event,
+through a Jev alternative's payload, and into the next handler.
 
 Compose sources with `fmap` to tag or project their values and `(<>)` to merge
 them; preserve request identity and source evidence in the event payload.
@@ -43,8 +59,8 @@ Availability of the names below:
 Confirm a name with `lookup` before depending on it. A skill's example is
 evidence of a pattern, not proof that the name is installed for you.
 
-This executable example joins two differently typed inputs. No mailbox GADT or
-manual result casting is needed:
+This executable example defines a tiny language with two input commands and one
+query. Its interpreter retains the inputs and answers from their combined state:
 
 ```haskell
 data Join mode = Join { joinState :: mode :- State (Maybe Text, Maybe Int), sourceReady :: mode :- Call Text NoReply, checksReady :: mode :- Call Int NoReply, joined :: mode :- Call () (R.Reply (Maybe (Text, Int))) }
@@ -66,7 +82,9 @@ display result
 fields use ordinary `get`, `gets`, `put`, `modify'`. Calls with `NoReply` use
 `R.send`; calls with `R.Reply output` use `R.call`. Endpoint values can be captured
 or passed to other actors. Passing one endpoint grants access only to that route.
-State and source-handler fields are private in clients. Handles display only exact
+Pass endpoints as values: a child or another machine can report a finding or
+request the next item through the route you give it. State and source-handler
+fields are private in clients. Handles display only exact
 identity; query a declared route for the state needed by your next decision.
 
 For fixed subscriptions, declare `mode :- Event input`, and supply
@@ -136,9 +154,10 @@ display (joinFinal, resultsFinal)
 
 `R.finish` drains accepted work and returns `ActorExit state`; retain that value
 for later inspection. It does not retire the workers whose results were observed.
-Use the parent's scoped cleanup separately. Actor-to-actor payloads should be
-typed values or compact actionable deltas, not narrated snapshots. Query only
-what the next engineering decision needs.
+Use the parent's scoped cleanup separately. Shape actor-to-actor payloads for
+the receiving transition: a compact delta, a structured report, a narrative
+explanation or another useful Haskell value. Query the state the next decision
+needs.
 
 ## Without the example workspace
 

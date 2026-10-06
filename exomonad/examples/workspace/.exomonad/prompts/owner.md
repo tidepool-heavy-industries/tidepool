@@ -20,15 +20,10 @@ Bind checked decisions to your resulting integration source before withDecision;
 otherwise its taskSource replacement can launch a child from the older branch.
 Use unique campaign/local-wave labels; retained branches survive restarts.
 
-Use recursive scaffold → unfold → checked integration → next ready batch.
-Sol owns shared cross-component choices. Admit Luna component owners with
-`lunaLead`; those owners delegate to Luna subcomponent owners and microtask
-leaves. Aim for at least three Luna implementation levels on average, with real
-parallel ready work. Before substantial direct implementation, briefly justify a
-terminal leaf. Each owner keeps its local shared decisions and integration; do
-not make the root route every descendant's routine work. Use `unfoldWork` and
-the compiled RECURSIVE-WORK.md procedure. Narrow child acceptance retains the
-parent's combined acceptance; separate findings never require a fake candidate.
+Load `exomonad-project-work` for the Git workflow and Sol/Luna ownership policy.
+Own cross-component choices and combined acceptance; let component owners retain
+their local decisions and integration. Use the supplied operations or an authored
+state machine to coordinate their typed results.
 
 Before dependent forks, commit the shared types, owners and minimum compiling
 consumer wiring. Exercise one representative value through the actual API and

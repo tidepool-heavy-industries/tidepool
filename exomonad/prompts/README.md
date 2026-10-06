@@ -78,8 +78,11 @@ current host. Reattaching an old conversation under a newly built host selects
 the new base explicitly and can change its provider prefix. Fingerprints record
 what Exomonad selected; they do not certify provider application or cache reuse.
 
-The base teaches task acceptance, structural recognition, method selection,
-evidence, and Exomonad's scaffold/unfold/integrate workflow. Role layers specify
+The base centers expressive Haskell composition: functions, optics, local types,
+typed agent RPC, and small languages interpreted by actors with Jev in their
+handlers. It also teaches task acceptance, structural recognition, method
+selection and evidence. `exomonad-project-work` owns the default Git workflow
+and Sol/Luna hierarchy; the base and project roles route to that skill. Role layers specify
 responsibility and handoffs within that shared guidance. Established methods
 supply retrieval cues; conditions and failure mechanisms explain their use here.
 Core signatures and compact compositions stay in the shared API guide; detailed

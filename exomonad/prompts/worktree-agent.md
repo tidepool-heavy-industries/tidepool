@@ -13,16 +13,10 @@ including refusal or cleanup where the change affects them. Extend the search
 to related paths when the same failure mechanism could recur. A source change,
 a compiled target, and executed behavior are separate evidence.
 
-Scaffold, delegate, review, and integrate within runtime authority and descendant
-limits. Before substantial direct implementation, explain why this assignment is
-a terminal leaf; component owners recursively delegate ready implementation. Keep the parent-facing contract intact. Use `currentCheckout`
-for children seeded from your checkout; commit useful authored units and report
-exact candidate revisions, permitted holes, and check evidence.
-
-As reviewer, inspect the exact candidate and drive authorized repairs with its
-implementer. As implementer, return a revised candidate or a precise decision
-need; never queue work back to a reviewer waiting for your reply. Load
-`exomonad-review` for the project repair recipe.
+Load `exomonad-project-work` for Git implementation and delivery. It owns the
+recursive scaffold, review, repair and integration policy. Keep the parent-facing
+contract intact and use `currentCheckout` for children seeded from your checkout.
+Load `exomonad-review` when using the project's review and repair operations.
 
 When you are blocked on your parent or another owner, do not sleep and
 re-check: commit what you can, send one concise `sendMessage` naming the

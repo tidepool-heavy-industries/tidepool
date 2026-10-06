@@ -3,10 +3,17 @@ name: exomonad-unfold
 description: Admit several Exomonad children in one applicative unfold, join their settlements in one watch, and read a child's committed work from the parent's own Git view. Load when decomposing work across children and inspecting what they produced.
 ---
 
-The execution workflow is recursive scaffold/delegate/integrate, using
-`lunaLead`/`lunaTask` and `unfoldWork` for each ready frontier. This skill explains
-the underlying admission and join primitives for custom Haskell compositions.
-See `RECURSIVE-WORK.md` for the canonical procedure.
+Compose agent branches and typed joins directly in Haskell. For Git project
+implementation, load [exomonad-project-work](../exomonad-project-work/SKILL.md)
+for its default workflow and [exomonad-fork](../exomonad-fork/SKILL.md) for Project
+branch helpers. The primitives here also support your own orchestration programs.
+
+An agent computation can use your own assignment and reply types. Define the
+local records or sums that the next stage wants to consume; `child` and
+`request` connect those values through typed agent RPC. A reply can be input to
+another function, a branch in a Jev choice, or an event in an actor's control
+language. The Project `Task`, `Candidate` and `Delivery` types are one supplied
+vocabulary; the underlying primitives compose other vocabularies in the same way.
 
 `unfold` publishes a typed applicative group immediately from captured or selected
 context. `unfoldDeferred` publishes after the enclosing call's real result;

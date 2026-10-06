@@ -79,7 +79,8 @@ executed `IntegrationCheck`. Reported delivery, review, integration and resource
 release are separate facts. Unknown output, zero test matches and source mismatch
 stop for the owner. ReviewFlow preserves those distinctions through bounded repair.
 
-Use [RECURSIVE-WORK.md](RECURSIVE-WORK.md) for scaffold, ready batches and checked
-integration. Load the boundary skill for commands, forks, routing, review or
+Load [exomonad-project-work](skills/exomonad-project-work/SKILL.md) for the Git
+workflow and [RECURSIVE-WORK.md](RECURSIVE-WORK.md) for its compiled compositions.
+Load the boundary skill for commands, forks, routing, review or
 cleanup; use targeted `lookup` for missing signatures. Registering an example
 proves neither that the current workspace compiled nor that live acceptance passed.

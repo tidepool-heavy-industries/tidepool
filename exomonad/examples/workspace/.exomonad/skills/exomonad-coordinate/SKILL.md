@@ -3,8 +3,9 @@ name: exomonad-coordinate
 description: Admit ready Exomonad task batches and retain typed progress, questions and results with Exomonad.Contrib.Routing. Use for coordination across model turns, heterogeneous result routing and decision-driven observation.
 ---
 
-Use the supplied collector when a batch needs retained progress and questions;
-write a custom record actor only when its transitions or join state differ.
+The supplied collector is a reusable machine for retained progress and questions.
+Compose it with your own record actors, or define a task-specific control
+language and interpreter directly; `exomonad-define-actors` covers that construction.
 Project heterogeneous worker results into an algebraic event sum so each
 constructor preserves the evidence needed by its handler. Keep exact checks and
 known transitions in Haskell. Jev can classify ambiguous evidence or choose a
@@ -91,7 +92,7 @@ display released
 Retain the cleanup receipt; a blocked step leaves that work with its current owner.
 Do not turn it into a stop/retry loop.
 
-For custom typed joins or automatic request continuations, load
+For custom typed joins, state machines or automatic request continuations, load
 `exomonad-define-actors`. Routine routing stays in Haskell; wake the local owner only
 for engineering decisions, actionable failures or integration work.
 `Project.RebaseRouter`'s `rebaseRouter` actor watches an integration worktree and
@@ -101,8 +102,9 @@ does not need a parent turn either.
 
 ## A ready frontier from one shared contract
 
-`unfoldWork` admits the children and attaches the collector in one cell. Each
-child still scaffolds/delegates or justifies a terminal leaf.
+`unfoldWork` admits the children and attaches the collector in one cell. The
+Git workflow and recursive ownership policy live in
+[exomonad-project-work](../exomonad-project-work/SKILL.md).
 
 Start from the accepted `Task` and a checked shared source. Bind the shared plan
 once. An ordinary local selector can make short, disjoint assignments without

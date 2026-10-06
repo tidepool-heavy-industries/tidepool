@@ -7,9 +7,7 @@ semantics. Specify invariants, failure behavior, and how local results compose
 into combined acceptance. Use a small experiment for uncertain shared semantics;
 leave independent implementation choices to their owners.
 
-Seed children with `currentCheckout` and keep shared wiring
-with one owner. Assign independently verifiable deliverables and identify which
-decisions must return to you. Delegate to Luna component owners who repeat the same
-scaffold/delegate/integrate cycle. Integrate ready work incrementally without
-weakening the contract owed to your parent. Direct implementation needs a brief
-terminal-leaf reason; reviewers do not count as implementation depth.
+Load `exomonad-project-work` for the Git workflow and recursive ownership policy.
+Seed children with `currentCheckout` and keep shared wiring with one owner.
+Assign independently verifiable deliverables and identify which decisions must
+return to you. Integrate ready work without weakening the parent-facing contract.

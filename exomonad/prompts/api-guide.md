@@ -13,12 +13,21 @@ and `expand handle key` displays one field independently. Use
 `display (show value)` when you want the textual `Show` form. Unsupported
 fields stay opaque.
 
-## Choose the workflow
+## Compose the program
 
-Use pure functions for deterministic transforms, Haskell `do` for effects and
-waits, Jev for judgment, record actors for ongoing sources or stateful joins,
-and model actors for investigation. Jev judges
-supplied evidence; it never grants resource authority.
+Compose effectful functions with `>=>` or `do`; use the notebook's `&&&`, `***`
+and `|||` for products and sums of Kleisli arrows. These operators sequence
+effects; `Tidepool.Async` supplies concurrency. `Control.Lens` is in scope for
+composable projections, updates and traversals through retained data.
+
+Define a small language for the task and a machine that interprets it. Local
+types name commands, observations and replies; a record actor holds state and
+interprets inputs through its handlers. Jev supplies semantic choices whose
+payloads can be values or continuations. Typed model-agent requests let those
+handlers commission investigation and use its results in later transitions.
+Use ordinary functions for a straight pipeline and actors for ongoing interaction;
+both can reuse the same data, functions and judgments. See `exomonad-workbench`,
+`exomonad-define-actors` and `exomonad-jev` for the composing vocabulary.
 
 Where the actor admits `ModelCall`, `Tidepool.Model` provides
 `invokeModel turn input` with `textTurn` or `typedTurn @Reply` and supplied
@@ -36,9 +45,9 @@ it does not render or replace the tool's text.
 
 ## Delegate and inspect
 
-Scaffold, admit ready parallel work and integrate checked results. Recursive
-owners use `Project.Work` policy and `Exomonad.Contrib.Routing`; see
-`RECURSIVE-WORK.md`.
+Typed requests and context unfolds compose agent work. For Git project
+implementation, load `exomonad-project-work` for the default recursive delivery
+workflow; `exomonad-fork` and `exomonad-coordinate` explain its Project helpers.
 
 ```haskell
 let task = "Remove the stale path and report the focused check." :: Text
@@ -110,9 +119,8 @@ their creating cell. See `doc workbench` and the compiled
 The activation supplies typed `sessionInput`, its reply declaration, and the
 roster of siblings admitted with you; use `display sessionInput` to inspect it.
 `respond`, `sessionReply` and `sessionInput` exist only while
-a request is pending; discovery shows them then. A root has none of them: use
-the project's task and review constructors instead of recipes written for a
-child. `request @Report (responseActor worker) (assignment [label|revision|] input)`
+a request is pending; discovery shows them then. A root has none of them.
+`request @Report (responseActor worker) (assignment [label|revision|] input)`
 assigns invocation-owned follow-up work. Await it before returning or explicitly
 `detachRequest` for a request spanning turns. `pollRequestUpdate` inspects updates.
 Requests notify their owner unless a watch/route takes over; record actor
@@ -124,12 +132,11 @@ publish, release, write stdin, or mutate its worktree.
 
 ## Review and integrate
 
-A reply identifies a candidate. Inspect its exact commit through
-`responseWorktree` and Git. Repair from that revision with the contract and
-owned paths; reviewers running checks need coding authority. Refuse
-out-of-ownership diffs. Merge with `tryMerge` or Git, then verify the resulting
-revision. Load `exomonad-review` for the compiled recipe and `exomonad-unfold`
-for submission evidence.
+For Git project delivery, `exomonad-project-work` owns review and integration
+policy. `responseWorktree` and Git expose the exact submission; `tryMerge`
+integrates managed worktrees. Load `exomonad-review` for review/repair operations
+and `exomonad-unfold` for submission observations. Reviewers running checks need
+coding authority.
 
 ## Core signatures
 

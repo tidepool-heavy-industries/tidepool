@@ -3,10 +3,11 @@ name: exomonad-command
 description: Use when composing commands as Haskell values, recovering retained output, controlling PTY/stdin, or routing command completion. Ordinary shell calls use the direct tool schemas without loading this skill.
 ---
 
-Use hosted `bash` for direct repository commands. Its structured `cmd` field
-contains literal Bash, including multiline scripts and heredocs; optional fields
-select workdir, environment, memory, PTY, and stdin. Haskell `Cmd` composes the same
-command owner when results feed a program.
+Compose a command as a stage in a Haskell program: construct its intent, run it,
+project the useful output, and feed a function, Jev question or actor event.
+Haskell `Cmd` and hosted `bash` use the same command owner. For a direct repository
+command, `bash`'s `cmd` field contains literal Bash, including multiline scripts
+and heredocs; optional fields select workdir, environment, memory, PTY and stdin.
 
 Treat command construction, execution and observation as separate stages.
 `Cmd.Command` and an `Eff` action are values that can be stored, transformed or

@@ -1,20 +1,10 @@
-# Recursive work: the execution workflow
+# Recursive work: Git project compositions
 
-Every execution owner uses the same cycle:
-
-**scaffold → admit a ready parallel batch → integrate checked results → repeat.**
-
-The Sol root owns cross-component choices. Luna component owners repeat the cycle
-through subcomponents to justified microtask leaves. Useful implementation depth
-requires shared boundaries and independent work; reviewers or forwarding nodes
-are not implementation levels. Explain a terminal leaf before substantial direct
-implementation.
-
-Scaffold only what the next children need: shared types, consumer wiring, exact
-source, owned paths, local gates and an integration owner. Commit that boundary,
-admit independent work together and continue local integration. The child owes
-its own gate; the parent still owes combined acceptance. A later batch uses its
-actual new source rather than a prewritten global graph.
+Load [exomonad-project-work](skills/exomonad-project-work/SKILL.md) for the default
+Git workflow, recursive ownership and delivery policy. This reference explains
+the supplied batch and review compositions and links their compiled examples.
+Use these parts directly or connect them through your own actor's control
+language and state transitions.
 
 ## Admit and collect a local batch
 
@@ -103,3 +93,17 @@ Record useful implementation depth and overlap, first useful fork, dependency
 waiting, source corrections, reviewer findings, relay rounds and time to checked
 delivery. Structural simplification is distinct from a measured speedup. Live
 model trials, adapter acceptance and publication remain their own gates.
+
+## Other Git deliverables and decompositions
+
+A shared interface can support a reference implementation, contract tests,
+production implementation and consumers as independent obligations. A testing
+owner can split ordinary behavior, failures and cleanup from shared fixtures.
+Choose these branches when they expose independent work from the same seam.
+
+Research can deliver source-controlled knowledge. Use coding actors for owned
+recommendation documents, with distinct paths for specialists and synthesis
+owned by the coordinator. Ask for recommendations, evidence, alternatives,
+uncertainties and implementation consequences. Use inspection-only researchers
+when no files need writing. Fold findings into shared notes with their scope
+and qualifications; preserve the original reply types through that composition.

@@ -17,14 +17,14 @@ pub fn agent_session() -> Effect {
         req_enum: "AgentSessionReq",
         decl_fn: "agent_session_decl",
         description: &[
-            "Present a typed request to an actor's attached application and resume the caller through its reply continuation. ",
-            "Activation binds `sessionInput` and `respond` to that request's assignment and result types; use ordinary Haskell values rather than a prose-only completion report. ",
+            "Agent RPC with authored assignment and reply types: present a request to an attached model actor and resume the caller through its reply continuation. ",
+            "Activation binds `sessionInput` and `respond` to those types. Define task-specific records or sums and compute with the returned value: map a report, match a decision, join independent answers or drive an actor transition. ",
             "The request remains an independent obligation: presentation, typed settlement and recipient incorporation are different evidence. ",
             "Use hosted lookup on `sessionInput` or `respond` when their exact current types are unknown. ",
             "The application uses its persistent workbench through the actor-local transport; the public request/reply facade owns authored operations.",
         ],
         prompt_card: Some(&[
-            "A request binds typed `sessionInput`, `sessionReply` and `respond`. Compute with the assignment and return the agreed result value; use lookup for its exact type. ",
+            "Typed agent RPC: a request binds `sessionInput`, `sessionReply` and `respond` to your assignment and result types. Use local records and sums so replies compose with functions, joins and actor transitions; lookup exposes the current type. ",
             "A typed reply settles this request, while acceptance and incorporation belong to its recipient.",
         ]),
         type_params: &[],

@@ -1,19 +1,23 @@
-A record actor keeps coordination in Haskell so routine events do not wake a
-model. One record describes private state, public calls, and fixed event
+Author a small control language and a stateful interpreter for it. A record
+actor's calls and events are the vocabulary; its state carries the evolving
+work; its handlers compose transitions, replies, agent RPC and Jev judgments.
+The owner can query and steer the machine through its typed endpoints while
+work proceeds. One record describes private state, public calls, and fixed event
 handlers; the same record supplies both the definition and the typed client.
 `R` is `Tidepool.Actor.Record`. `R.start` creates an explicit persistent service
 with actor lifetime. It survives the creating invocation; ordinary command,
 provider-worker and request defaults remain scoped to a hosted invocation.
 Handlers without such an invocation use actor ownership for their work.
 
-Find out whether this workspace already authors one that fits. `doc topics` ends
-by naming its compiled modules and `lookup` on one of those names browses their
-declarations, including the outcomes they can return. Some workspaces ship types
-and helpers and no actor at all; authoring your own is then the right move. What
-costs turns is rebuilding in shell what an installed actor already does.
+Use a command sum through one `Call` for a single interpreter, or separate typed
+calls for distinct operations. Project event sources into a shared sum with
+`fmap` and merge them with `<>`. The same structure can coordinate candidates and
+reviews, hypotheses and experiments, or any task with evolving state and
+meaningful arrivals. Workspace actors and collectors are parts you can compose;
+`doc topics` lists compiled modules and `lookup` browses their declarations.
 
-The minimal shape is a record with one `State`, one `Call`, and one `Event` over
-the settlements you want collected:
+This collector uses one `State`, one query `Call`, and one `Event` over the
+settlements it collects:
 
 ```haskell
 data Results mode = Results
@@ -55,9 +59,9 @@ At most one worktree per actor.
 that value. It does not retire the workers whose results were observed — their
 cleanup is a separate, explicit decision.
 
-Route results, including their cleanup evidence, rather than waking a model to
-poll. Actor-to-actor payloads are typed values or compact deltas, not narrated
-snapshots; query only what the next engineering decision needs.
+Route results, including their cleanup evidence, into the next transition.
+Choose a useful payload: a compact delta, a structured report, a narrative
+explanation or another Haskell value. Query the state the next decision needs.
 
 `coordinationActor` is the shared `Exomonad.Contrib.Actors` wrapper around
 `R.definition name (Actor.Selected knownEffects)`. `Outcome` and `Candidate`
@@ -69,11 +73,9 @@ A direct `R.definition` needs a pinned row, for example
 ambiguous. `Jev` and `Commands` are effect types from
 `Tidepool.Effects.Core` and need an import before a row can name them.
 
-For execution coordination, use the installed recursive-work procedure:
-`unfoldWork` admits a ready batch and retains its event collector; each owner
-integrates checked children and repeats locally. Load `exomonad-coordinate` for
-that procedure and `exomonad-review` for counted checks, exact-source review and
-bounded repair through `startReviewFlow`. Author a custom record only for a
-specific join or routing decision those compositions do not express.
+For Git delivery, load `exomonad-project-work` for the workflow. Its supplied
+compositions include `unfoldWork` batch collection and `startReviewFlow` review
+and repair. Use them as parts of your interpreter, or connect the primitives
+directly. `exomonad-coordinate` and `exomonad-review` explain those operations.
 
 skill: exomonad-define-actors

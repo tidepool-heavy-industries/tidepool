@@ -5,8 +5,15 @@ description: Define an Exomonad actor's typed tool record, effect profiles and r
 
 An agent spec selects one Haskell record of tools. Its fields and their types
 define the hosted tool names, schemas, and typed inputs and outputs. Nested tool
-records compose at the field where they are included. The installed spec is
+records compose at the field where they are included. A tool can expose a useful
+function or a command in an actor's control language: its handler can call an
+endpoint, ask Jev, or compose several effects and present the resulting value.
+Build and explore those functions and machines in the notebook first; the spec
+gives selected behavior a named model-facing entry point. The installed spec is
 compiled from the run's current source; saving a file does not install it.
+Agent-to-agent `request` and record-actor `Call` endpoints already carry Haskell
+values directly. They do not need a hosted tool or its JSON schema; use an
+`AgentSpec` when a model-facing tool is the interface you want.
 
 ## Find and check the spec
 

@@ -626,6 +626,9 @@ def test_runtime_inputs(package_name, target_name, unit=False):
     if package_name == "exomonad-node" and unit:
         env["EXOMONAD_INBOX_DIRECTORY_FAULT_LIBRARY"] = "$(location :inbox_directory_fault_shared)"
         resources.append(":inbox_directory_fault_shared")
+    if package_name == "exomonad-actor" and unit:
+        env["TIDEPOOL_SHIPPED_SKILLS"] = "$(location //exomonad/examples/workspace:shipped_skills)/.exomonad/skills"
+        resources.append("//exomonad/examples/workspace:shipped_skills")
     if package_name == "exomonad-worktree" and not unit and target_name == "worktree":
         for variable, name in (
             ("EXOMONAD_BINDING_DIRECTORY_FAULT_LIBRARY", "binding_directory_fault"),

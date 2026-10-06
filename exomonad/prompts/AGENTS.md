@@ -18,6 +18,13 @@ This file guides contributors; it is not part of the shipped model prompt.
   established method cues by relationship, including useful adjacent approaches;
   ground them where ambiguity would change a decision. Target lists and examples
   are starting points, not exhaustive prescriptions.
+- Center expressive composition: Kleisli arrows, optics, local algebraic data
+  types, typed agent RPC, and small control languages interpreted by stateful
+  actors with Jev in their handlers. Teach how parts connect and can be reshaped.
+  Types earn their place through useful computation and communication; notebook
+  code need not acquire a defensive framework or reusable library first. Give
+  lifecycle details where they explain how a composition runs. Preserve concrete
+  runtime contracts while keeping type-safety rhetoric out of the motivation.
 - Define acceptance through inspectable artifacts. Separate exploratory scope
   from the handoff, observations from inferences, and product failures from
   failures of the investigation. Explain what quiet results can establish and
@@ -34,11 +41,15 @@ This file guides contributors; it is not part of the shipped model prompt.
   information. Check against live/public types rather than inventing API shapes.
 - Keep role-specific instructions and runtime authority observations separate.
   Inherited bindings and descriptions do not transfer permissions or reply ownership.
-- Teach recursive scaffold, ready parallel unfold, independent review and checked
-  integration as the execution workflow. Sol owns cross-component choices; Luna
-  owners recursively delegate to justified terminal leaves. Reviewers do not
-  create another review tree.
-  Delivery of a baseline is not acknowledgment or verified incorporation.
+- Keep Git project workflow policy in `exomonad-project-work`: recursive
+  scaffold, ready batches, independent review, repair and checked integration.
+  Base and relevant roles carry a clear load cue; general notebook and actor
+  programming stays compositional. API skills own their mechanics. Delivery of
+  a baseline is not acknowledgment or verified incorporation.
+- Recheck cautionary guidance against current source and behavior. Remove obsolete
+  workarounds and incident-derived prohibitions; state live constraints through
+  the composition they affect and a working way to proceed. Do not preserve an
+  old restriction merely because it once prevented a failure.
 - Describe omitted fork effort through the native launch selector's inherited
   default; native Codex goals remain disabled on all Exomonad nodes. Verify policy
   against the production selector, not the fallback launch helper.

@@ -11,17 +11,19 @@ and continuation? Inspect actual starting packets and likely ambiguous choices.
 Prefer meaningful vocabulary, working examples and simpler ownership to longer
 lists of prohibitions. Look at fork timing, ready frontiers, shared-seam delivery
 and integration loops. Does a child receive compatible source and reasoning? Can
-its parent use the result without ingesting all its debugging? Preserve useful context reuse and targeted Astra cognition. The execution default
-is a broad recursive Luna implementation tree under Sol, aiming for at least
-three Luna levels on average. Evaluate real overlap and accepted-delivery time;
-reviewers and idle forwarding nodes do not count as implementation depth.
+its parent use the result without ingesting all its debugging? Preserve useful
+context reuse and targeted Astra cognition. Read `exomonad-project-work` for the
+Git workflow under evaluation; compare real overlap and accepted-delivery time
+while preserving the user's chosen model placement and ownership policy.
 Favor one
 bounded orchestration experiment per wave when it can answer a concrete
 coordination question; record its result and keep product delivery primary.
 
 Connect each change to an observed problem or accepted human preference. Remove
-stale orientation and duplicated instructions. Keep exceptional detail in referenced
-guidance. Check whether a change makes correct usage easier or just adds ceremony.
+stale orientation and duplicated instructions. Recheck cautionary prompts against
+current code and behavior: remove a workaround once its cause is fixed, and
+replace broad prohibitions with the actual constraint and a working composition.
+Keep exceptional detail in referenced guidance. Check whether a change makes correct usage easier or just adds ceremony.
 Treat expert answers as reviewable evidence. Product completion spans waves; a
 scaffold or model turn ending must not silently close that obligation.
 

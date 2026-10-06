@@ -3,8 +3,8 @@ name: exomonad-review
 description: Commission independent review and repair of exact Exomonad candidates using Project.Work, and return typed review decisions without copying full task histories.
 ---
 
-In the recursive execution loop, substantive leaves receive independent review;
-component review checks joins and combined acceptance using accepted leaf evidence.
+For Git project work, [exomonad-project-work](../exomonad-project-work/SKILL.md)
+defines when independent review is required and how its findings feed integration.
 For a separate implementer's candidate, `startReviewFlow` handles the counted
 check/review/bounded-repair sequence. Use the direct requests below for an owner’s
 own candidate or an independent exact-commit question; preserve the same evidence

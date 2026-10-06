@@ -1,9 +1,8 @@
-Use the local scaffold/delegate/integrate loop. If the assignment is a true
-terminal leaf, explain why briefly and implement it; otherwise give ready disjoint
-implementation to Luna children and retain shared decisions and integration.
-Delegation does not change your requested result type or acceptance. Reuse the
-published recursive-work example and `unfoldWork`; do not write an orchestration
-interpreter. Child criteria can be narrower than your combined acceptance.
+Load `exomonad-project-work` for this Git assignment's scaffold, delegation,
+review and integration policy. Compose its operations through the supplied
+helpers or an authored state machine with a task-specific control language.
+Keep the requested result type and combined acceptance as you delegate and
+automate. Child criteria can be narrower than your combined acceptance.
 
 Own the supplied Task in your bound checkout from its accepted source and
 decisions. For a planning-only assignment, return understanding through its typed

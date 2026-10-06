@@ -77,11 +77,12 @@ pub(crate) struct PromptArtifact {
 /// workspace modules existed.
 /// The skills an Exomonad workspace ships, named so an unknown topic can point at
 /// the one that answers it. These are the same names the `topics` body lists.
-const SHIPPED_SKILLS: [&str; 10] = [
+const SHIPPED_SKILLS: [&str; 11] = [
     "exomonad-jev",
     "exomonad-unfold",
     "exomonad-workbench",
     "exomonad-cleanup",
+    "exomonad-project-work",
     "exomonad-fork",
     "exomonad-coordinate",
     "exomonad-review",
@@ -139,7 +140,7 @@ pub(crate) fn workbench_doc(
         "help" | "topics" => {
             let mut body = String::from(
                 "Exomonad topics: tree (worktree), workbench, request, unfold, watch, deadline, refinement, lineage, cleanup, recovery, jev, actors, reflect. Use hosted `lookup` with `doc <topic>`.\n\
-                 Load the skill first where one exists; a topic is the fallback. Workspace skills: exomonad-jev (judgment-model packets and gates), exomonad-unfold (multi-child unfolds and reading a child's commit), exomonad-workbench (cells that typecheck the first time), exomonad-cleanup (retiring workers and groups), exomonad-agent-spec (declaring and reloading your typed tools), exomonad-fork (recursive scaffold and delegation), exomonad-coordinate (ready batches and retained event routing), exomonad-review (exact-source checks, review and bounded repair), exomonad-command, exomonad-define-actors.",
+                 Load the skill first where one exists; a topic is the fallback. Workspace skills: exomonad-workbench (Kleisli composition, optics and local languages), exomonad-define-actors (stateful interpreters for typed calls and events), exomonad-jev (semantic predicates, choices and continuations), exomonad-project-work (default Git workflow, recursive Sol/Luna ownership and delivery), exomonad-unfold (typed agent products and joins), exomonad-fork (Project delegation compositions), exomonad-coordinate (batch collectors and event routing), exomonad-agent-spec (model-facing tools and reloads), exomonad-command (commands as values and retained results), exomonad-review (exact-source review and repair), exomonad-cleanup (retiring workers and groups).",
             );
             if !workspace_modules.is_empty() {
                 body.push_str(
@@ -151,12 +152,7 @@ pub(crate) fn workbench_doc(
         }
         other => {
             let mut message = format!("unknown Exomonad documentation topic `{other}`");
-            // A topic that names a shipped skill is the most likely thing the
-            // asker actually wanted, and the seat's own rule is to load the
-            // skill before falling back to a topic. Saying so costs one line
-            // and saves a search; a live lead asked `doc command` while
-            // `exomonad-command` sat unmentioned, then spent four lookup rounds
-            // guessing names.
+            // Route skill names and their short aliases to the shipped entrypoint.
             if let Some(skill) = skill_for_topic(other) {
                 message.push_str(&format!(
                     "; the `{skill}` skill covers this — load it first, a topic is the fallback"
@@ -238,8 +234,10 @@ mod tests {
 
     #[test]
     fn discovery_names_only_existing_shipped_skills() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../examples/workspace/.exomonad/skills");
+        let root = std::path::PathBuf::from(
+            std::env::var_os("TIDEPOOL_SHIPPED_SKILLS")
+                .expect("native test runner supplies shipped skill resources"),
+        );
         for skill in SHIPPED_SKILLS {
             assert!(
                 root.join(skill).join("SKILL.md").is_file(),
@@ -250,9 +248,7 @@ mod tests {
 
     #[test]
     fn an_unknown_topic_naming_a_shipped_skill_says_so() {
-        // A live lead asked `doc command` while `exomonad-command` — whose whole
-        // subject is running commands — went unmentioned, then spent four
-        // lookup rounds guessing constructor names.
+        // A short skill alias resolves even when it has no built-in doc topic.
         let refusal = workbench_doc("command", &[]).unwrap_err();
         assert!(
             refusal.contains("`exomonad-command` skill covers this"),
@@ -262,7 +258,13 @@ mod tests {
 
         // The full name works too, and so does every other shipped skill that
         // is not already a topic in its own right.
-        for topic in ["exomonad-command", "review", "coordinate"] {
+        for topic in [
+            "exomonad-command",
+            "review",
+            "coordinate",
+            "project-work",
+            "exomonad-project-work",
+        ] {
             let refusal = workbench_doc(topic, &[]).unwrap_err();
             assert!(
                 refusal.contains("skill covers this"),

@@ -1,3 +1,17 @@
+Use notebook Haskell to build functions, small languages and the machines that
+interpret them. Bind working data, introduce local records or sums, and connect
+effectful functions with Kleisli composition (`>=>`) or `do`. The notebook's
+`&&&`, `***` and `|||` compose effectful functions over products and sums;
+they sequence effects, while `Tidepool.Async` overlaps independent waits.
+`Control.Lens` is in scope for reusable focuses, updates and traversals.
+
+Agent RPC carries your assignment and reply types. Record actors interpret
+typed calls and events against persistent state; Jev alternatives can carry
+values, closures or actions into their next transition. Keep one-off definitions
+in the notebook and adapt them as you learn. See `exomonad-workbench` for the
+composing vocabulary, `doc actors` for stateful machines and `doc jev` for semantic
+glue.
+
 Send one notebook cell of ordinary Haskell. A cell may contain
 declarations, bindings, and expressions. GHC splits declarations from statements
 and checks the entire cell before any effect runs. Declarations are mutually

@@ -1,12 +1,20 @@
 ---
 name: exomonad-jev
-description: "Compose Jev semantic judgments with Haskell dataflow: evidence packets, competing choices, independent per-item questions, ordered rubrics and typed continuations. Use for triage, relevance, routing or policy-gated action when meaning changes the next step; deterministic checks stay in code."
+description: "Compose semantic judgment with Haskell: packets, predicates, competing choices, rubrics and typed continuations. Use Jev as glue inside functions, agent RPC and state-machine actors when interpretation determines what runs next."
 ---
 
-Jev returns typed semantic judgments inside an effectful program. Batch independent
-questions over shared evidence; sequence calls when new evidence changes the
-question. Code owns authoritative facts and prepared actions. A judgment supplies
-evidence, not authority. Measure latency and usage for the actual workload.
+Jev makes semantic judgment composable inside an ordinary Haskell program.
+An alternative can carry a domain value, a partially applied function or an
+effectful action. Ask which condition fits, then pass its payload directly into
+the continuation. A small orchestration language can use Jev in its interpreter:
+classify an incoming report, choose the next question, or select a handler that
+updates actor state and requests more work. Keep the exact computations in code
+and put interpretation where the composition needs it.
+
+Batch independent questions over shared evidence; sequence calls when an answer
+determines what to observe next. Compose these stages as functions, reuse packets
+as values, and retain results for later projections. Measure latency and usage
+for the workload you are building.
 
 Everything named in this skill is **shipped**: `J.ask`, `J.ask1`, `J.askWith`,
 `J.choice`, `J.noul`, `J.score`, `J.each`, `J.optional`, `J.alt`, `J..|`,
@@ -25,7 +33,7 @@ unqualified.
 one round trip. Both return `Either J.JevError _`. Read the error and fall back
 to your own policy; never retry blindly.
 
-## Be dense
+## Compose the questions
 
 Choose the question's structure before its wording. A `choice` models competing
 explanations or actions; independent `noul` questions model predicates that can
@@ -107,8 +115,9 @@ answer cannot be built or matched, and what it decides is reached through
 with the bound `answer` shows every distribution — do that the first few times
 you write a packet, then project what the next decision needs.
 
-`.key` is for logs and journals, never for dispatch: a `case` on it is unchecked,
-and the compiler cannot tell you when the alternatives change. `.margin` is the
+Use `J.handle` or `J.settle` for dispatch: each handler receives the alternative's
+original typed payload, including its captured values or prepared action. `.key`
+names the choice in a display or journal. `.margin` is the
 winner's mass less the runner-up's, and equals the mass when nothing competes,
 so a margin near 1.0 usually means the alternatives were not really rivals.
 `J.contenders floor answer handlers` reads every alternative at or above a mass
@@ -117,28 +126,25 @@ outcome worth branching on. `J.handle answer handlers` eliminates a choice
 exhaustively with no policy at all, for when the program follows the winner
 whatever it is.
 
-A policy is three floors — mass, margin, confidence — named for how bad it is
-to be wrong: `J.lenient` for read-only choices (which file, which skill),
-`J.careful` for starting a worker or choosing an approach, `J.strict` for
-merging, stopping, anything that leaves a receipt. `J.settle policy answer
+A policy sets three floors: mass, margin and confidence. `J.lenient`,
+`J.careful` and `J.strict` provide increasing thresholds; choose them against
+actual decisions and outcomes. `J.handle` follows the winner directly;
+`J.settle` adds a doubt branch when the program benefits from another read,
+another question or a handback. `J.settle policy answer
 handlers` returns `Either J.Doubt (J.Settled p r)`: `Right (J.Settled result)`
 through the handler for the alternative that won, or `Left` a
 `J.Doubt { cause, why }` whose `cause` is `NearTie`, `Underweight` or
 `Unconfident` and whose `why` is the line a log reads. `J.takenUnder` is the
 same with no handler list when every alternative carries the same type of
 payload, `J.judge` and `J.holds` do it for a noul — a doubt is not a no, and
-both read as `False` under `J.holds`, which is why it is a separate verb — and
-the verdict carries the policy that reached it, so a function that must not be
-handed a lightly-settled answer can demand `J.Settled J.Strict Patch` in its
-own signature.
+both read as `False` under `J.holds`, which is why it is a separate verb.
+Choose the projection that preserves the distinctions your continuation uses.
 
-`Right` means the **winning alternative cleared the floors**, whatever that
-alternative is: a confident `insufficient_evidence` is a `Right`. Never treat
-`Right _` as approval; the handler that ran is what says what happens. A
-selected answer still depends on the supplied evidence. Choose review and
-escalation from the task's policy and consequences. A known-answer question can
-help diagnose a packet; passing it does not establish that every other answer is
-correct.
+`Right` means the winning alternative cleared the floors: a confident
+`insufficient_evidence` is also a `Right` and can select a read-more continuation.
+The payload and handler determine the behavior. Inspect a surprising decision's
+evidence, alternatives and outcome; increasing a confidence threshold cannot
+add a missing fact or an omitted alternative.
 
 ## Write questions against the evidence
 
@@ -194,31 +200,33 @@ display (case answer of
     Right (J.Settled verdict) -> a.key <> " -> " <> verdict <> "; " <> J.explain J.careful a)
 ```
 
-`J.careful` is the policy for a reviewed, test-passing diff. Use `J.strict` for
-a diff nobody reviewed, or for anything that leaves a receipt, and `J.lenient`
-for a read-only pick. `J.explain` states in one line why the answer settled or
-doubted, with the numbers behind it; put that in the notice you send, not the
-raw distribution. A `Left J.Doubt` already carries that line as `doubt.why`.
+The example uses `J.careful` to demonstrate settlement. Choose thresholds from
+the decisions and outcomes of your actual task; a stricter threshold cannot
+supply a missing review. `J.explain` summarizes why the answer settled or doubted,
+with the numbers behind it. A `Left J.Doubt` carries that line as `doubt.why`.
 
-`insufficient_evidence` is not a verdict on the candidate — it says the packet
-was wrong. Treat it like `Left J.Doubt`: name the exact missing field, get that
-field (another git command, another read, a request back to the child), and ask
-again. Never merge on it, never repair on it, never fall through to the next
-branch as though a decision had been made.
+`insufficient_evidence` means this packet cannot establish the described
+conclusion. Its continuation can name and fetch a missing field, ask the child
+for more context, or return an unresolved result. A domain policy may instead
+choose a remediation action; encode that choice in the alternative's payload
+and handler. Keep the distinction between that action and evidence that the
+candidate passed or failed.
 
 ## The payload is the continuation
 
 A prepared `Eff effects result` is a Haskell value: constructing `Cmd.run command`
 does not run the command. Let each alternative carry its own typed continuation,
-then sequence the selected action through the policy and handler. Running all
+then sequence the selected action through its handler, with a settlement policy
+when useful. Running all
 candidates before asking loses the benefit of selection. Keep pure extraction,
 exact checks and known transitions in functions; use Jev where semantic evidence
 selects the next effect. The same pattern works for choosing a source read, a
 specialist assignment, a repair approach or an event handler's next transition.
 
-Alternatives carry the thing that runs, not a key string you later interpret.
-Build the prepared continuations, let Jev select one, and run the selection.
-The wording is model-facing; the payload is yours. `J.many #label key wording
+The wording and rendered evidence go to Jev; the payload remains your original
+Haskell value, including captured data and actions. Put relevant text and
+structured evidence fields in `J.state` and keep the richer domain value in the
+payload. `J.many #label key wording
 rows` offers candidates computed at runtime — lines, tests, edges, table rows —
 and its handler receives the row itself, so there is nothing to dereference.
 
@@ -318,20 +326,21 @@ result when the available evidence or budget cannot settle it.
 
 ## Jev inside an actor
 
-The same `J.ask` works inside a record actor's handler — the loop does not have
-to come back to a model to make a semantic decision. Add the effect type to the
+The same `J.ask` works inside a record actor's handler. The actor interprets your
+control language, holds the current state and composes judgments with its next
+effects. An event can update accumulated findings, ask which hypothesis to pursue,
+and launch a typed agent request whose reply becomes another event. This makes
+adaptive orchestration an authored program. Add the effect type to the
 row (`import Tidepool.Effects.Core (Jev)`, then
 `LocalEffects MyActor '[Replies, Actor, Notifications, Jev]`) and call it from
 the handler exactly as in a cell. The row is checked against the launching
 actor's ceiling, so a handler cannot acquire judgment its creator does not have.
 
-Record every answer in the actor's own state as data — the key, the mass, the
-confidence, `J.resolvedModel`, and the action taken — and give the record one
-`Call` the owner reads the state through. A judgment nobody can inspect
-afterwards is the one failure mode that costs more than the turn it saved: the
-whole point of routing in Haskell is that the root can read what was decided
-without re-deriving it. `exomonad-review`'s owner-map and repair-policy
-example is that pattern written out.
+Give the actor a query endpoint for the state its callers need. Keep useful
+decision history there when it helps explain or revise the machine: selected
+payload, evidence, action, and distributions relevant to a surprising result.
+`exomonad-review`'s owner-map and repair-policy example is one composition to
+adapt; a research machine can use the same structure for hypotheses and next reads.
 
 Not executable on its own: it needs a live child to observe.
 

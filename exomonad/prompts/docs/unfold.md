@@ -1,7 +1,7 @@
-Execution owners use the recursive scaffold → ready batch → checked integration
-cycle in `RECURSIVE-WORK.md`, normally through `lunaLead`/`lunaTask` and
-`unfoldWork`. This page describes the underlying admission primitive used by
-that procedure and by custom typed joins.
+`unfold` composes child-agent branches as an applicative program. This page
+describes admission, typed joins and source observations. For Git implementation,
+load `exomonad-project-work` for the default workflow; `exomonad-fork` and
+`exomonad-coordinate` explain its Project compositions.
 
 An applicative unfold admits the ready frontier; it does not schedule data
 dependencies between its branches. Build a shared contract first, and place a
@@ -63,19 +63,14 @@ still applies to unfinished owned work.
 effort. Omission uses the launch selector's inherited default. Inspect provider
 observations when checking the effective selection or cache reuse. The consumer
 branch above inherits the same committed context while explicitly selecting
-Medium. Model placement is independent: the workspace execution policy uses a
-Sol root and recursive Luna owners; its branch constructors select those models.
-`withEffort` applies when constructing a context unfold; it is not an API for steering
-an already active Exomonad assignment. The Codex backend's configuration-update
-mechanism is a separate control layer, not a missing model capability.
+Medium. Model placement is independent; `withModel` chooses the branch's model
+and `exomonad-project-work` supplies the Git workflow's placement policy.
+`withEffort` selects initial effort when constructing a branch.
 
-Define your `Report` type and `domainPlan`/`consumerPlan` values first. Commit the
-shared interface before dispatch. `domainPlan` owns implementation; `consumerPlan`
-owns independent tests through that interface, including failure behavior. Each
-names owned paths, the contract revision, acceptance, and allowed holes. Return
-exact candidates, check evidence, discoveries, and unresolved decisions. Keep
-shared wiring with the coordinator. Review an implementation candidate after it
-exists; the parallel consumer branch tests the contract from the common scaffold.
+Define your reply type and `domainPlan`/`consumerPlan` values first. In the
+example, both branches start from the shared interface: one implements it and
+one tests it independently. For other compositions, choose the assignment and
+reply types your continuation will consume.
 Before live-source capture, Exomonad checkpoints eligible source changes on the
 source checkout's current branch. The child inherits that commit. Runtime
 `.exomonad/`, configured source exclusions and recognized caches stay out even when
@@ -85,11 +80,10 @@ fork fails with its source files preserved; it does not silently use an older
 still selects its specified revision. Build caches follow the creator; a
 completed warm build helps descendants without stopping active builds.
 
-`coding` owners repeat scaffold, ready parallel batch and checked integration
-within their inherited descendant budget. Before substantial direct implementation,
-briefly justify a terminal leaf. Use `currentCheckout` when their children should start from the
-child-owned scaffold. `scaffolding` selects a scaffold emphasis with the same
-capabilities. Use a coding reviewer when review includes running checks.
+`coding` allows implementation and delegation within runtime limits. Use
+`currentCheckout` when children should start from the executing actor's source.
+`scaffolding` selects a scaffold emphasis with the same capabilities. Use a
+coding reviewer when review includes running checks.
 
 `researching` admits inspection-only researchers with bounded delegation;
 `researchingLeaf` omits `Forks` and actor control. Research cannot escalate into

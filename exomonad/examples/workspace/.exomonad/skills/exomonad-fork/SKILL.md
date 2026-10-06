@@ -3,11 +3,12 @@ name: exomonad-fork
 description: Compose Exomonad implementation children in resident Haskell, choosing captured or fresh context and collecting typed progress/results. Use when decomposing work with the Project coordination package.
 ---
 
-Use the resident Haskell tool for scaffold/delegate/integrate; briefly
-justify terminal leaves. Give Luna component owners `lunaLead` (Delivery) and
-other children `lunaTask` with their real result type. Admit each ready frontier
-with `unfoldWork` and retain its original handles. See `RECURSIVE-WORK.md`
-for a compiled two-batch example and ready-frontier task construction. The shared package supplies Exomonad.Contrib.Types and Routing;
+Compose implementation branches and their typed results in the notebook. For
+Git project work, load [exomonad-project-work](../exomonad-project-work/SKILL.md)
+for the default workflow and Sol/Luna policy. `lunaLead` returns `Delivery`;
+`lunaTask` preserves the assignment's result type; `unfoldWork` adds event
+collection. See `RECURSIVE-WORK.md` for compiled batch compositions.
+The shared package supplies Exomonad.Contrib.Types and Routing;
 Project.Work and Project.Observe supply project policy. A captured context carries conversation, not skill
 contents. A child using `withContext (selected taskContext)` reads relevant skills
 itself or receives the needed facts in its assignment. Its request-local bindings
@@ -72,8 +73,7 @@ skill continues from this binding.
 
 ## Underlying admission operations
 
-For a custom join or mixed result types, compose the primitives directly. They
-implement the same scaffold/delegate/integrate cycle.
+For a custom join or mixed result types, compose the primitives directly.
 
 `task label objective ownedPaths acceptance source` builds a `Task` with the
 group, plan path and empty decisions defaulted; update any field with record
@@ -122,15 +122,6 @@ or changed facts it cannot recover. Do not reconstruct the full plan in every Ta
 
 ## Before replying
 
-Return the exact checked candidate and its actual base. Rebase when a required
-source correction is missing, overlapping code advanced, or integration conflicts;
-disjoint parent changes alone do not require another rebase. Managed worktrees
-share local refs, so fetch is needed only for a separate clone. After a rebase,
-report the new base and candidate, check cumulative owned paths against that base,
-and rerun affected checks. Do not reuse an old ownership verdict.
-
-The parent verifies the exact candidate and cumulative ownership, merges the
-child's branch rather than copying files, and checks the resulting integration.
-A candidate that no longer applies returns to its owner with the exact dependency
-commit and required correction. A delivered source update is not proof of its
-incorporation: the owner reports the resulting OID and consumer check.
+Follow [exomonad-project-work](../exomonad-project-work/SKILL.md) for exact
+candidates, rebasing, review and checked integration. Managed worktrees share
+local refs; a separate clone needs its own fetch.

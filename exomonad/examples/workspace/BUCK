@@ -36,6 +36,12 @@ export_file(
     visibility = ["PUBLIC"],
 )
 
+filegroup(
+    name = "shipped_skills",
+    srcs = {source: source for source in glob([".exomonad/skills/**/*"])},
+    visibility = ["PUBLIC"],
+)
+
 # Compile-time inputs for the facade's published-example tests.
 filegroup(
     name = "facade_test_sources",
