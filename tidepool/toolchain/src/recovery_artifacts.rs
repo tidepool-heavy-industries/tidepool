@@ -529,6 +529,7 @@ pub struct RecoveryArtifactWork {
     pub hash_bytes: u64,
     pub read_bytes: u64,
     pub written_bytes: u64,
+    /// Package witnesses and execution graphs submitted to tracked decoders.
     pub decoded_bytes: u64,
 }
 
@@ -836,6 +837,7 @@ fn read_certification(
             RecoveryArtifactError::Io(error)
         }
     })?;
+    validation.read_bytes += bytes.len() as u64;
     if bytes.len() as u64 > CERTIFICATION_LIMIT {
         return Err(RecoveryArtifactError::InvalidCertifiedOwners(
             path.to_path_buf(),
@@ -885,13 +887,13 @@ fn read_package_imports(
             RecoveryArtifactError::Io(error)
         }
     })?;
+    validation.read_bytes += bytes.len() as u64;
     if bytes.len() as u64 > PACKAGE_IMPORTS_LIMIT {
         return Err(RecoveryArtifactError::InvalidPackageImports(
             path.to_path_buf(),
         ));
     }
     if let Some(expected) = expected_sha256 {
-        validation.read_bytes += bytes.len() as u64;
         if &validation.digest(&bytes) != expected {
             return Err(RecoveryArtifactError::DigestMismatch(path.to_path_buf()));
         }
@@ -1170,6 +1172,7 @@ fn read_checked(
         }
         Err(error) => return Err(error.into()),
     };
+    validation.read_bytes += bytes.len() as u64;
     if &validation.digest(&bytes) != expected {
         return Err(RecoveryArtifactError::DigestMismatch(path.to_path_buf()));
     }
@@ -1275,7 +1278,9 @@ fn verify_existing_materialization(
         hasher.update(&buffer[..read]);
         remaining -= read as u64;
     }
-    if file.read(&mut buffer[..1])? != 0 || hasher.finalize().as_slice() != digest {
+    let trailing = file.read(&mut buffer[..1])?;
+    validation.read_bytes += trailing as u64;
+    if trailing != 0 || hasher.finalize().as_slice() != digest {
         return Err(RecoveryArtifactError::DigestMismatch(path.to_path_buf()));
     }
     let current = fs::symlink_metadata(path)?;
@@ -2777,6 +2782,34 @@ mod tests {
                 assert_eq!(fs::read(&path).unwrap(), b"owned");
             }
             assert_eq!(fs::read_dir(root.path()).unwrap().count(), 2);
+        }
+    }
+
+    #[test]
+    fn package_payload_read_work_does_not_depend_on_optional_expected_digest() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("Owner.hi.packages");
+        let bytes = package_witness("main", "Owner", &[7; 32], vec![]);
+        fs::write(&path, &bytes).unwrap();
+        let digest: [u8; 32] = Sha256::digest(&bytes).into();
+        for expected in [None, Some(&digest)] {
+            let mut work = RecoveryArtifactWork::default();
+            let actual = with_artifact_work(&mut work, |validation| {
+                read_package_imports(&path, expected, "main", "Owner", &[7; 32], validation)
+            })
+            .unwrap();
+            assert_eq!(actual, bytes);
+            assert_eq!(work.read_bytes, bytes.len() as u64);
+            assert_eq!(work.decoded_bytes, bytes.len() as u64);
+            assert_eq!(work.written_bytes, 0);
+            assert_eq!(
+                work.hash_bytes,
+                if expected.is_some() {
+                    bytes.len() as u64
+                } else {
+                    0
+                }
+            );
         }
     }
 
