@@ -19,6 +19,7 @@ import Codec.CBOR.Read (deserialiseFromBytes)
 import Codec.CBOR.Decoding (decodeListLen, decodeString)
 import Codec.CBOR.Term (Term(..), decodeTerm, encodeTerm)
 import Data.ByteString.Lazy qualified as BSL
+import Data.Bits (testBit)
 import Control.Exception (SomeException, IOException, AsyncException(ThreadKilled), bracket, evaluate, finally, try, fromException, onException, mask, catches, Handler(..), throwIO)
 import Control.Concurrent (MVar, forkIO, killThread, myThreadId, throwTo, threadDelay, newEmptyMVar, putMVar, takeMVar)
 import Data.IntMap.Strict qualified as IntMap
@@ -2347,8 +2348,56 @@ structuralCandidate work = do
     Left reason -> fail ("production structural candidate codec refused: " ++ reason)
     _ -> fail "structural producer-group candidate did not decode"
 
+-- Exhaust the three-group reference graphs and every failed-binder subset.
+-- The list-based oracle recomputes all facts until no owner changes; it shares
+-- neither the production reverse index nor its worklist traversal.
+originalGraphClosureProperties :: IO ()
+originalGraphClosureProperties = do
+  let binder name = SymbolIdentity "main" "GraphModel" "value" (T.pack name) Nothing
+      owned = [(binder "a",(0 :: Int,0 :: Int)),(binder "sibling",(0,1)),(binder "b",(1,0))]
+      missing = binder "missing"
+      groupKeys = map snd owned
+      symbols = map fst owned
+      recomputeGroups dependencies unavailable = close []
+        where
+          close blocked =
+            let unavailable' = unavailable ++ [symbol | (symbol,key) <- owned, key `elem` blocked]
+                expanded = [key | key <- groupKeys
+                  , key `elem` blocked
+                    || any (\(symbol,owner) -> owner == key && symbol `elem` unavailable') owned
+                    || any (`elem` unavailable') (maybe [] id (lookup key dependencies))]
+            in if expanded == blocked then blocked else close expanded
+      recomputeModules dependencies blocked = close [owner | (owner,_) <- blocked]
+        where
+          close modules =
+            let unavailable = [symbol | (symbol,(owner,_)) <- owned, owner `elem` modules]
+                expanded = Set.toAscList (Set.fromList (modules ++ [owner
+                  | ((owner,_),references) <- dependencies, any (`elem` unavailable) references]))
+            in if expanded == Set.toAscList (Set.fromList modules) then expanded else close expanded
+  forM_ [0 .. 511 :: Int] $ \edges ->
+    forM_ [0 .. 7 :: Int] $ \failures ->
+      forM_ [False,True] $ \externalMissing -> do
+        let dependencies = [(key,[symbol | (column,symbol) <- zip [0..] symbols
+                  , testBit edges (row * 3 + column)]
+                  ++ [missing | externalMissing && row == 0])
+              | (row,key) <- zip [0..] groupKeys]
+            unavailable = [symbol | (index,symbol) <- zip [0..] symbols, testBit failures index]
+              ++ [missing | externalMissing]
+            expectedGroups = Set.fromList (recomputeGroups dependencies unavailable)
+            expectedModules = Set.fromList (recomputeModules dependencies (Set.toList expectedGroups))
+            indexed = Map.fromList [(key,Set.fromList references) | (key,references) <- dependencies]
+            owners = Map.fromList owned
+            actualGroups = closeUnavailableOriginalGroups indexed owners (Set.fromList unavailable)
+            actualModules = closeUnavailableOriginalModules indexed owners actualGroups
+        unless (actualGroups == expectedGroups && actualModules == expectedModules) $
+          fail ("original graph closure differs from full recomputation: edges=" ++ show edges
+            ++ ", failures=" ++ show failures ++ ", external=" ++ show externalMissing
+            ++ ", expected=" ++ show (expectedGroups,expectedModules)
+            ++ ", actual=" ++ show (actualGroups,actualModules))
+
 originalProjectionProducts :: IO ()
 originalProjectionProducts = withScratch $ \work -> do
+  originalGraphClosureProperties
   let identity :: String -> String -> String -> SymbolIdentity
       identity unit moduleName' occurrence =
         SymbolIdentity (T.pack unit) (T.pack moduleName') (T.pack "value") (T.pack occurrence) Nothing
