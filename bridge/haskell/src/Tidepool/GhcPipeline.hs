@@ -2792,17 +2792,15 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
         observedCanonicalLoad :: TPhase a -> IO a
         observedCanonicalLoad phase@(T_Hsc _ summary)
           | ms_hsc_src summary == HsSrcFile = timeModuleDetailPhase timing
-              "ghc_load" "source_frontend_task_service" (ms_mod summary)
+              "compile" "source_frontend_task_service" (ms_mod summary)
               (canonicalLoadPhase phase)
         observedCanonicalLoad phase@(T_HscPostTc _ summary (FrontendTypecheck _) _ _)
           | ms_hsc_src summary == HsSrcFile = timeModuleDetailPhase timing
-              "ghc_load" "source_finalization_task_service" (ms_mod summary)
+              "compile" "source_finalization_task_service" (ms_mod summary)
               (canonicalLoadPhase phase)
         observedCanonicalLoad phase = canonicalLoadPhase phase
     when (isJust originalPhaseHook) (liftIO (throwIO CustomLoadPhaseHook))
     when (isJust (hscFrontendHook (hsc_hooks beforeLoad))) (liftIO (throwIO CustomLoadFrontendHook))
-    loadT0 <- monotonicTime
-    loadResources <- beginResourceTiming timing
     -- The outer extraction flags use NoLink, so GHC Make's LinkInMemory
     -- unload branch is inactive. This owner already selected the compatible
     -- executable epoch before planning; per-file TH backends do not change it.
@@ -2818,60 +2816,69 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           Nothing -> True
           Just original -> mi_iface_hash (mi_final_exts iface) == mi_iface_hash (mi_final_exts original)
         loadCache = fmap (filterModIfaceCache keepCurrent) mCache
-    liftIO markInterpreterMutation
-    loadFlag <- reifyGhc $ \session -> bracket
-      (reflectGhc (getSession >>= \env -> setSession env
-        { hsc_hooks = (hsc_hooks env)
-            { runPhaseHook = Just (PhaseHook captureCanonicalFailure) }
-        , hsc_dflags = (hsc_dflags env)
-            { parMakeCount = Just (ParMakeThisMany (compilerModuleJobs executionGrant)) } }) session)
-      (const (reflectGhc (getSession >>= \env -> setSession env
-        { hsc_hooks = hsc_hooks beforeLoad
-        , hsc_dflags = (hsc_dflags env)
-            { parMakeCount = parMakeCount (hsc_dflags beforeLoad) } }) session))
-      (const (reflectGhc (load' loadCache loadHowMuch
+    -- Fresh providers compile after exact hydration under the same canonical
+    -- frontend/finalization owner as GHC Make. Restore only this owner's
+    -- temporary fields; the plan's Core-expression link hook remains in force
+    -- until its existing cpFinalEnv boundary.
+    let withCanonicalLoadHooks :: Ghc a -> Ghc a
+        withCanonicalLoadHooks action = reifyGhc $ \session -> bracket
+          (reflectGhc (getSession >>= \env -> setSession env
+            { hsc_hooks = (hsc_hooks env)
+                { runPhaseHook = Just (PhaseHook captureCanonicalFailure) }
+            , hsc_dflags = (hsc_dflags env)
+                { parMakeCount = Just (ParMakeThisMany (compilerModuleJobs executionGrant)) } }) session)
+          (const (reflectGhc (getSession >>= \env -> setSession env
+            { hsc_hooks = (hsc_hooks env) { runPhaseHook = originalPhaseHook }
+            , hsc_dflags = (hsc_dflags env)
+                { parMakeCount = parMakeCount (hsc_dflags beforeLoad) } }) session))
+          (const (reflectGhc action session))
+    withCanonicalLoadHooks $ do
+      loadT0 <- monotonicTime
+      loadResources <- beginResourceTiming timing
+      liftIO markInterpreterMutation
+      loadFlag <- load' loadCache loadHowMuch
         dependencyDiagnostic (Just batchMsg)
-        (scopeRetainedModuleGraph (mapMG canonicalizeLoadSummary loadGraph))) session))
-    loadT1 <- monotonicTime
-    endResourceTiming loadResources "compile" "ghc_load"
-    -- 'ghc_load' phase (TIDEPOOL_TIMING): the 'load'' call alone, nothing
-    -- else. FLAT — see 'ghc_setup' above; the two rows partition the work,
-    -- they do not nest inside each other.
-    liftIO (emitPhase timing "ghc_load" (elapsedMs loadT0 loadT1))
-    when (timing && case preparation of CheckOnly -> True; _ -> False) $ do
-      loadedEnv <- getSession
-      forM_ (mgModSummaries' loadGraph) $ \node -> case node of
-          ModuleNode _ summary
-            | ms_hsc_src summary == HsSrcFile
-            , ms_mod_name summary /= targetName
-            , Just hmi <- lookupHpt (hsc_HPT loadedEnv) (ms_mod_name summary)
-            , let linkable = hm_linkable hmi
-            , isJust (homeMod_bytecode linkable) || isJust (homeMod_object linkable) ->
-                liftIO $ hPutStrLn stderr $
-                  "tidepool-checked-dependency-executable module="
-                    ++ moduleNameString (ms_mod_name summary)
-                    ++ " bytecode=" ++ show (isJust (homeMod_bytecode linkable))
-                    ++ " object=" ++ show (isJust (homeMod_object linkable))
-          _ -> pure ()
-    case loadFlag of
-      Succeeded -> do
-        getSession >>= liftIO . validateCandidateHomeInterfaces
-        cpAfterLoad plan
-        pending <- liftIO (readIORef pendingFinalizationsRef)
-        quotes <- liftIO (readIORef frontendQuasiQuotesRef)
-        unless (Map.null pending && Map.null quotes) $
-          liftIO $ throwIO UnfinishedLoadedFrontend
-      Failed -> do
-        canonicalFailure <- liftIO (readIORef canonicalFailureRef)
-        forM_ canonicalFailure (liftIO . throwIO)
-        instanceFailure <- liftIO (readIORef targetInstanceFailure)
-        forM_ instanceFailure (liftIO . throwIO)
-        targetFailure <- liftIO (readIORef targetLoadFailure)
-        forM_ targetFailure (liftIO . throwIO)
-        diagnostics <- liftIO (nub . reverse <$> readIORef errorRef)
-        liftIO $ throwIO $ if null diagnostics
-          then DependencyWorkerFailure
-          else DependencySourceFailure diagnostics
+        (scopeRetainedModuleGraph (mapMG canonicalizeLoadSummary loadGraph))
+      loadT1 <- monotonicTime
+      endResourceTiming loadResources "compile" "ghc_load"
+      -- 'ghc_load' phase (TIDEPOOL_TIMING): the 'load'' call alone, nothing
+      -- else. FLAT — see 'ghc_setup' above; the two rows partition the work,
+      -- they do not nest inside each other.
+      liftIO (emitPhase timing "ghc_load" (elapsedMs loadT0 loadT1))
+      when (timing && case preparation of CheckOnly -> True; _ -> False) $ do
+        loadedEnv <- getSession
+        forM_ (mgModSummaries' loadGraph) $ \node -> case node of
+            ModuleNode _ summary
+              | ms_hsc_src summary == HsSrcFile
+              , ms_mod_name summary /= targetName
+              , Just hmi <- lookupHpt (hsc_HPT loadedEnv) (ms_mod_name summary)
+              , let linkable = hm_linkable hmi
+              , isJust (homeMod_bytecode linkable) || isJust (homeMod_object linkable) ->
+                  liftIO $ hPutStrLn stderr $
+                    "tidepool-checked-dependency-executable module="
+                      ++ moduleNameString (ms_mod_name summary)
+                      ++ " bytecode=" ++ show (isJust (homeMod_bytecode linkable))
+                      ++ " object=" ++ show (isJust (homeMod_object linkable))
+            _ -> pure ()
+      case loadFlag of
+        Succeeded -> do
+          getSession >>= liftIO . validateCandidateHomeInterfaces
+          cpAfterLoad plan
+          pending <- liftIO (readIORef pendingFinalizationsRef)
+          quotes <- liftIO (readIORef frontendQuasiQuotesRef)
+          unless (Map.null pending && Map.null quotes) $
+            liftIO $ throwIO UnfinishedLoadedFrontend
+        Failed -> do
+          canonicalFailure <- liftIO (readIORef canonicalFailureRef)
+          forM_ canonicalFailure (liftIO . throwIO)
+          instanceFailure <- liftIO (readIORef targetInstanceFailure)
+          forM_ instanceFailure (liftIO . throwIO)
+          targetFailure <- liftIO (readIORef targetLoadFailure)
+          forM_ targetFailure (liftIO . throwIO)
+          diagnostics <- liftIO (nub . reverse <$> readIORef errorRef)
+          liftIO $ throwIO $ if null diagnostics
+            then DependencyWorkerFailure
+            else DependencySourceFailure diagnostics
     -- Exclude hs-boot summaries in one shared site for both variants:
     -- a boot node shares its ModuleName with the real module, so its
     -- near-empty desugared guts would CLOBBER the real module's entry in
