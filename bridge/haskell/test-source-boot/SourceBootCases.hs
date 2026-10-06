@@ -4511,13 +4511,13 @@ exactLoadedMetadata = withTiming $ withScratch $ \work -> do
       frontendCount name diagnostics = length (filter (==
           "tidepool-canonical-frontend module=" ++ name) (lines diagnostics))
         + length (filter (== "tidepool-checked module=" ++ name ++ " target=False") (lines diagnostics))
-      ownerInterface checked = do
-        let env = crHscEnv checked
-            owner = mkModule (stringToUnit "main") (mkModuleName "MetadataOwner")
+      moduleInterface name env = do
+        let owner = mkModule (stringToUnit "main") (mkModuleName name)
         case lookupHpt (hsc_HPT env) (moduleName owner) of
           Just home | mi_module (hm_iface home) == owner ->
             serializeOriginalInterface env work (hm_iface home)
-          _ -> fail "loaded metadata lost the original main:MetadataOwner interface"
+          _ -> fail ("loaded metadata lost the original main:" ++ name ++ " interface")
+      ownerInterface = moduleInterface "MetadataOwner" . crHscEnv
   forM_ ["MetadataOwner.hs", "MetadataTarget.hs", "MetadataExtensionOnlyTarget.hs", "MetadataLoadedFamily.hs"
     , "MetadataFamilyTarget.hs", "MetadataHiddenFamily.hs", "MetadataUntracked.hs"
     , "MetadataUntrackedTarget.hs", "MetadataQuoter.hs", "MetadataQuotedTarget.hs", "MetadataQuoteSupport.hs"] install
@@ -4598,25 +4598,76 @@ exactLoadedMetadata = withTiming $ withScratch $ \work -> do
         && "tidepool-checked-dependency-executable module=MetadataQuoter bytecode=True object=False" `elem` lines quoteDiagnostics
         && frontendCount "MetadataQuoter" quoteDiagnostics == 1) $
       fail "exact metadata discarded the loaded quoter's executable linkable"
+    originalQuoterInterface <- moduleInterface "MetadataQuoter" (crHscEnv quoted)
     quoterProducer <- compile (PreparedProducts Nothing) Set.empty GeneralCompile Nothing
       (work </> "MetadataQuoter.hs") [work] Nothing
     -- The helper has no TH extension or quotation itself. GHC's graph still
     -- requires its bytecode when the quoter executes in the target.
     quoterFixture <- capturePreparedFixture work quoterProducer
     writeGenuineCandidateManifestFor ["MetadataQuoteSupport"] work quoterFixture
+    offered <- readModuleCandidates (manifest work) >>= either fail pure
+    originalHelper <- case offered of
+      [candidate] | candidateUnit candidate == "main"
+        && candidateModule candidate == "MetadataQuoteSupport" -> pure candidate
+      _ -> fail "native quoter fixture did not issue its unique original helper"
+    originalHelperInterface <- BS.readFile (candidateInterface originalHelper)
     (quotedCandidate, candidateQuoteDiagnostics) <- captureDiagnostics $
       compile (CheckedEnvironmentProducts (manifest work)) Set.empty GeneralCompile (Just scope)
         (work </> "MetadataQuotedTarget.hs") [work] Nothing
-    unless (resultType quotedCandidate == Just "Int"
-        && frontendCount "MetadataQuoter" candidateQuoteDiagnostics == 1
-        && "tidepool-checked-dependency-executable module=MetadataQuoteSupport bytecode=True object=False" `elem` lines candidateQuoteDiagnostics
-        && counterValues "candidate_executable_required" candidateQuoteDiagnostics == [1]) $
-      fail "source candidate discarded a GHC-required quoter executable"
+    selectedQuoterInterface <- moduleInterface "MetadataQuoter" (crHscEnv quotedCandidate)
+    selectedHelperInterface <- moduleInterface "MetadataQuoteSupport" (crHscEnv quotedCandidate)
+    let candidateObservations =
+          [ ("result_int", resultType quotedCandidate == Just "Int")
+          , ("quoter_frontend_reused", frontendCount "MetadataQuoter" candidateQuoteDiagnostics == 0)
+          , ("quoter_reused_source_once", "tidepool-checked-reused-source module=MetadataQuoter" `elem` lines candidateQuoteDiagnostics
+              && counterValues "transaction_reused_source_products" candidateQuoteDiagnostics == [1])
+          , ("same_original_quoter_interface", selectedQuoterInterface == originalQuoterInterface)
+          , ("same_original_helper_interface", selectedHelperInterface == originalHelperInterface)
+          , ("helper_frontend_not_replayed", frontendCount "MetadataQuoteSupport" candidateQuoteDiagnostics == 0)
+          , ("helper_bytecode_available", "tidepool-checked-dependency-executable module=MetadataQuoteSupport bytecode=True object=False" `elem` lines candidateQuoteDiagnostics)
+          , ("helper_executable_demand", counterValues "candidate_executable_required" candidateQuoteDiagnostics == [1])
+          , ("original_helper_accepted", counterValues "candidate_admission.CandidateAccepted" candidateQuoteDiagnostics == [1])
+          , ("target_checked", "tidepool-checked module=MetadataQuotedTarget target=True" `elem` lines candidateQuoteDiagnostics)
+          ]
+    unless (all snd candidateObservations) $ do
+      hPutStrLn stderr ("candidate quoter observations=" ++ show candidateObservations
+        ++ "\n" ++ candidateQuoteDiagnostics)
+      fail "source candidate lost its original quoter or required helper executable"
     putStrLn ("candidate loaded metadata evidence: accepted_count="
       ++ show (counterValues "candidate_admission.CandidateAccepted" candidateQuoteDiagnostics)
       ++ " executable_demand=" ++ show (counterValues "candidate_executable_required" candidateQuoteDiagnostics)
       ++ " helper_frontends=" ++ show (frontendCount "MetadataQuoteSupport" candidateQuoteDiagnostics)
       ++ " quoter_frontends=" ++ show (frontendCount "MetadataQuoter" candidateQuoteDiagnostics))
+    let observedTarget = work </> "MetadataObservedQuotedTarget.hs"
+        quoterCounter = work </> "metadata-quoter-executions"
+        requireExecutions expected diagnostics = do
+          actual <- lines <$> readFile quoterCounter
+          unless (actual == replicate expected "42") $ do
+            hPutStrLn stderr ("native quoter executions=" ++ show actual ++ "\n" ++ diagnostics)
+            fail "candidate quoter did not execute its original native helper exactly once per target"
+    observedSource <- T.pack <$> readFile (fixture "MetadataObservedQuotedTarget.hs")
+    writeFile observedTarget (T.unpack (T.replace "{{QUOTER_COUNTER}}" (T.pack quoterCounter) observedSource))
+    (observed, observedDiagnostics) <- captureDiagnostics $
+      compile (CheckedEnvironmentProducts (manifest work)) Set.empty GeneralCompile (Just scope)
+        observedTarget [work] Nothing
+    requireExecutions 1 observedDiagnostics
+    unless (resultType observed == Just "Int"
+        && frontendCount "MetadataQuoteSupport" observedDiagnostics == 0
+        && frontendCount "MetadataQuoter" observedDiagnostics == 0
+        && counterValues "candidate_executable_required" observedDiagnostics == [1]) $ do
+      hPutStrLn stderr observedDiagnostics
+      fail "native quoter observation replayed a provider frontend or lost executable demand"
+    (observedNative, observedNativeDiagnostics) <- captureDiagnostics $
+      compile (PreparedProducts (Just (manifest work))) Set.empty GeneralCompile (Just scope)
+        observedTarget [work] Nothing
+    requireExecutions 2 observedNativeDiagnostics
+    unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult observedNative))
+        && map candidateOriginalIdentity (pprAcceptedCandidates observedNative)
+          == [candidateOriginalIdentity originalHelper]
+        && frontendCount "MetadataQuoteSupport" observedNativeDiagnostics == 0
+        && frontendCount "MetadataQuoter" observedNativeDiagnostics == 0) $ do
+      hPutStrLn stderr observedNativeDiagnostics
+      fail "candidate quoter lost native result42 or its complete original helper"
     hidden <- compile (PreparedProducts Nothing) Set.empty GeneralCompile Nothing
       (work </> "MetadataHiddenFamily.hs") [work] Nothing
     hiddenFixture <- capturePreparedFixture work hidden
