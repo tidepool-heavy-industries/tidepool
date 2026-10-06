@@ -1335,7 +1335,18 @@ fn verify_package_interface(
 ) -> CertResult<()> {
     validation
         .verify(&witness.selected_path, &witness.sha256)
-        .map_err(|_| CertificationError::StaleEvidence)
+        .map_err(package_validation_error)
+}
+
+fn package_validation_error(
+    error: crate::recovery_artifacts::RecoveryArtifactError,
+) -> CertificationError {
+    match error {
+        error @ crate::recovery_artifacts::RecoveryArtifactError::InventoryAccounting(_) => {
+            CertificationError::CapturedModulePayload(error)
+        }
+        _ => CertificationError::StaleEvidence,
+    }
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -4636,7 +4647,7 @@ pub(crate) fn certify_products_with_validation(
                     &bundle.package_imports_path,
                     validation,
                 )
-                .map_err(|_| CertificationError::StaleEvidence)?;
+                .map_err(package_validation_error)?;
                 if ready_source_sha(final_evidence, &key.0, &key.1)? != accepted.source_sha256 {
                     return Err(CertificationError::Mismatch("candidate current source"));
                 }
@@ -10112,6 +10123,39 @@ pub(crate) mod tests {
             generation: 8,
         };
         assert!(certify_target_owners(&prepared, &[stale], &[], &BTreeMap::new()).is_err());
+    }
+
+    #[test]
+    fn package_interface_accounting_refusal_is_not_stale_evidence() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("Package.hi");
+        let bytes = b"selected interface";
+        std::fs::write(&path, bytes).unwrap();
+        let witness = PackageInterfaceWitness {
+            selected_path: path.clone(),
+            sha256: sha(bytes),
+        };
+        verify_package_interface(&mut PackageInterfaceValidation::default(), &witness).unwrap();
+        let operation = std::sync::Arc::new(InventoryOperation::new(InventoryDecodeLimits {
+            max_work: 0,
+            ..InventoryDecodeLimits::default()
+        }));
+        let mut limited = PackageInterfaceValidation::with_inventory(operation);
+        assert!(matches!(
+            verify_package_interface(&mut limited, &witness),
+            Err(CertificationError::CapturedModulePayload(
+                crate::recovery_artifacts::RecoveryArtifactError::InventoryAccounting(
+                    crate::recovery_artifacts::RecoveryAdmissionFailure::Decode(
+                        tidepool_repr::execution_schema::ParseError::LimitExceeded(_)
+                    )
+                )
+            ))
+        ));
+        std::fs::write(path, b"changed interface").unwrap();
+        assert!(matches!(
+            verify_package_interface(&mut PackageInterfaceValidation::default(), &witness),
+            Err(CertificationError::StaleEvidence)
+        ));
     }
 
     #[test]

@@ -516,6 +516,12 @@ pub enum RecoveryAdmissionFailure {
         actual: usize,
         limit: usize,
     },
+    #[error("evidence {} size {actual} exceeds {limit} bytes", path.display())]
+    EvidenceSize {
+        path: PathBuf,
+        actual: u64,
+        limit: u64,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -605,7 +611,16 @@ fn recovery_validation_error(
         CertificationError::CapturedModulePayload(
             error @ RecoveryArtifactError::InventoryAccounting(_),
         ) => error,
-        CertificationError::CapturedModulePayload(_)
+        CertificationError::EvidenceRead {
+            path,
+            failure: crate::certified_products::EvidenceReadFailure::SizeLimit { actual, limit },
+        } => RecoveryArtifactError::InventoryAccounting(RecoveryAdmissionFailure::EvidenceSize {
+            path,
+            actual,
+            limit,
+        }),
+        CertificationError::EvidenceRead { .. }
+        | CertificationError::CapturedModulePayload(_)
         | CertificationError::UnsupportedVersion { .. }
         | CertificationError::Receipt(_)
         | CertificationError::Mismatch(_)
@@ -2380,6 +2395,35 @@ mod tests {
             Err(RecoveryArtifactError::InventoryAccounting(
                 RecoveryAdmissionFailure::Decode(ParseError::LimitExceeded(_))
             ))
+        ));
+    }
+
+    #[test]
+    fn evidence_read_size_refusal_preserves_path_and_bounds_without_artifact_loss() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("evidence.cbor");
+        fs::write(&path, b"evidence").unwrap();
+        let operation = tidepool_repr::execution_schema::InventoryOperation::new(
+            tidepool_repr::execution_schema::InventoryDecodeLimits::default(),
+        );
+        assert_eq!(
+            crate::certified_products::read_bounded_with_operation(&path, 8, &operation).unwrap(),
+            b"evidence"
+        );
+        let error = crate::certified_products::read_bounded_with_operation(&path, 7, &operation)
+            .unwrap_err();
+        assert!(matches!(
+            recovery_validation_error(error, RecoveryArtifactError::InvalidCertifiedOwners(path.clone())),
+            RecoveryArtifactError::InventoryAccounting(RecoveryAdmissionFailure::EvidenceSize {
+                path: actual_path, actual: 8, limit: 7
+            }) if actual_path == path
+        ));
+        fs::remove_file(&path).unwrap();
+        let error = crate::certified_products::read_bounded_with_operation(&path, 8, &operation)
+            .unwrap_err();
+        assert!(matches!(
+            recovery_validation_error(error, RecoveryArtifactError::InvalidCertifiedOwners(path.clone())),
+            RecoveryArtifactError::InvalidCertifiedOwners(actual) if actual == path
         ));
     }
 
