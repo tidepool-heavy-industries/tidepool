@@ -875,8 +875,8 @@ async fn captured_host_scenario(scenario: HostedScenario) {
     )
     .await
     .expect("production embedded host starts");
-    let shutdown_parked_check = Arc::new(AtomicBool::new(false));
-    let shutdown_parked_check_result = shutdown_parked_check.clone();
+    let check_shutdown_parked =
+        scenario == HostedScenario::Captured(CapturedScenario::CancelWhileParked);
     let forest_after_shutdown = Arc::clone(&host.context.forest);
     host.run_scenario(|host| {
         Box::pin(async move {
@@ -1371,7 +1371,6 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                 );
                 received_output(&transport, &pending).await;
                 finish_root(&transport, &campaign).await;
-                shutdown_parked_check.store(true, Ordering::SeqCst);
                 return;
             }
             if scenario == CapturedScenario::ConcurrentNominalJoin {
@@ -1679,7 +1678,7 @@ async fn captured_host_scenario(scenario: HostedScenario) {
         })
     })
     .await;
-    if shutdown_parked_check_result.load(Ordering::SeqCst) {
+    if check_shutdown_parked {
         assert_eq!(
             forest_after_shutdown
                 .measurement_snapshot()
