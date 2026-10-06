@@ -2,15 +2,17 @@
 //!
 //! This module owns identities and scope membership for parked continuations,
 //! live value handles, and scope-local cancellation flags. It deliberately
-//! does not register or deregister GC roots: those operations require the
-//! machine's [`crate::machine_state::MachineState`] and remain at the JIT
-//! boundary. Scope closure removes all matching entries here first and hands
-//! their rooted payloads back to that boundary for exact settlement.
+//! registers identities separately from GC roots. A detached managed-root
+//! receipt retains the issuing machine and settles its registration unless
+//! another ledger entry takes custody. Scope closure removes matching entries
+//! first and hands their rooted payloads back to the JIT boundary.
 
 use std::collections::HashMap;
+use std::rc::{Rc, Weak};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use crate::machine_state::MachineState;
 use crate::old_space::RootSlot;
 use crate::prepared_program::ProgramId;
 use crate::suspension::{ContinuationId, RealmId, ValueHandle};
@@ -57,11 +59,47 @@ impl PreparedReplyEvidence {
 
 pub(crate) type FrameEvidence = PreparedFrameEvidence;
 
+/// Exclusive custody of a detached persistent root and its exact representation.
+/// Only the issuing machine can park or remint it. Dropping an unclaimed
+/// receipt releases its registration; it never frees the physical root cell.
+pub struct OwnedManagedRoot {
+    slot: Option<RootSlot>,
+    rep: RuntimeRep,
+    machine: Weak<MachineState>,
+}
+
+impl OwnedManagedRoot {
+    pub(crate) fn addr(&self) -> *mut *mut u8 {
+        self.slot
+            .expect("an owned root has not been consumed")
+            .addr()
+    }
+
+    pub(crate) fn belongs_to(&self, machine: &Rc<MachineState>) -> bool {
+        self.machine.ptr_eq(&Rc::downgrade(machine))
+    }
+
+    pub(crate) fn into_parts(mut self) -> (RootSlot, RuntimeRep) {
+        (
+            self.slot.take().expect("an owned root is consumed once"),
+            self.rep,
+        )
+    }
+}
+
+impl Drop for OwnedManagedRoot {
+    fn drop(&mut self) {
+        if let (Some(slot), Some(machine)) = (self.slot.take(), self.machine.upgrade()) {
+            machine.deregister_persistent_root(slot.addr());
+        }
+    }
+}
+
 /// One parked continuation and all policy needed to resume it.
 pub(crate) struct ContinuationFrame {
     pub(crate) cell: FrameCell,
     pub(crate) realm: RealmId,
-    pub(crate) live_payload_root: Option<RootSlot>,
+    pub(crate) live_payload_root: Option<OwnedManagedRoot>,
     pub(crate) evidence: FrameEvidence,
 }
 
@@ -324,7 +362,10 @@ impl ResourceLedger {
             .values()
             .flat_map(|frame| {
                 let evidence = Some(&frame.evidence);
-                let payload = frame.live_payload_root.map(|root| (root.addr(), evidence));
+                let payload = frame
+                    .live_payload_root
+                    .as_ref()
+                    .map(|root| (root.addr(), evidence));
                 std::iter::once((frame.cell.addr(), evidence)).chain(payload)
             })
             .collect()
@@ -371,6 +412,21 @@ impl ResourceLedger {
 
     pub(crate) fn take_handle(&mut self, handle: ValueHandle) -> Option<HandleEntry> {
         self.handles.take(handle)
+    }
+
+    pub(crate) fn take_managed_root(
+        &mut self,
+        handle: ValueHandle,
+        rep: RuntimeRep,
+        machine: &Rc<MachineState>,
+    ) -> Option<OwnedManagedRoot> {
+        self.handle(handle).filter(|entry| entry.rep == rep)?;
+        let entry = self.take_handle(handle)?;
+        Some(OwnedManagedRoot {
+            slot: Some(entry.slot),
+            rep: entry.rep,
+            machine: Rc::downgrade(machine),
+        })
     }
 
     pub(crate) fn rehome_handle(&mut self, handle: ValueHandle, realm: RealmId) -> bool {

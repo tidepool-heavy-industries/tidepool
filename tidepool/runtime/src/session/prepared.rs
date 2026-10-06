@@ -5063,7 +5063,7 @@ impl PreparedEngine {
         realm: RealmId,
         policy: LivePayloadPolicy,
         request: &HaskellValue,
-    ) -> Result<Option<tidepool_codegen::old_space::RootSlot>, ExecutionError> {
+    ) -> Result<Option<tidepool_codegen::prepared_program::OwnedManagedRoot>, ExecutionError> {
         let field = match policy {
             LivePayloadPolicy::None => None,
             LivePayloadPolicy::ClosureField(field) => {
