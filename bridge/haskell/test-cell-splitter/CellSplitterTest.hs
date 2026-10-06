@@ -27,6 +27,8 @@ tests = testGroup "cell-splitter"
   , testCase "metadataCompilation" metadataCompilation
   , testCase "preparedSessionLeafCompilation" preparedSessionLeafCompilation
   , testCase "quasiQuoteOccurrenceChecks" quasiQuoteOccurrenceChecks
+  , testCase "quasiQuoteSourceReuseCompilation" quasiQuoteSourceReuseCompilation
+  , testCase "pinnedQuasiQuoteSourceCompilation" pinnedQuasiQuoteSourceCompilation
   , testCase "untrackedCompileTimeCompilation" untrackedCompileTimeCompilation
   , testCase "generatedScaffoldIdentityChecks" generatedScaffoldIdentityChecks
   , testCase "checkedAdmissionChecks" checkedAdmissionChecks

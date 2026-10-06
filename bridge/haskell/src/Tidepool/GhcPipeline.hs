@@ -48,7 +48,6 @@ import GHC.Unit.Module.Status (HscBackendAction(..))
 import GHC.Types.ForeignStubs (ForeignStubs(NoStubs))
 import GHC.Driver.Config.Diagnostic (initDiagOpts, initPrintConfig)
 import GHC.Driver.Errors (printOrThrowDiagnostics)
-import GHC.Types.Avail (availNames)
 import GHC.Iface.Load (loadInterface, WhereFrom(..))
 import GHC.Rename.Names (renameRawPkgQual)
 import GHC.Driver.Make (load', ModIfaceCache, newIfaceCache)
@@ -134,7 +133,7 @@ import GHC.Types.Name.Set (extendNameSetList)
 import GHC.Types.Name.Reader (GlobalRdrEnv, rdrNameOcc)
 import GHC.Types.Name.Ppr (mkNamePprCtx)
 import GHC.Types.Name (nameOccName, nameUnique, mkExternalName, mkInternalName, nameModule_maybe)
-import GHC.Types.Name.Occurrence (OccName, mkOccName, mkTyVarOcc, occNameSpace, occNameString, isTcOcc)
+import GHC.Types.Name.Occurrence (mkOccName, mkTyVarOcc, occNameSpace, occNameString, isTcOcc)
 import GHC.Types.Unique.Supply (UniqSupply, mkSplitUniqSupply, takeUniqFromSupply)
 import GHC.Types.Var (mkTyVar, mkTyVarBinder, setVarName)
 import GHC.Types.Var.Set (isEmptyVarSet)
@@ -158,7 +157,6 @@ import System.IO (hPutStrLn, stderr, readFile', IOMode(ReadMode), withBinaryFile
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad (forM, forM_, when, unless, filterM, foldM)
 import Data.Data (Data, cast, gmapQ)
-import Data.Generics (everything, mkQ)
 import Data.Foldable (toList)
 import Data.Unique qualified as RequestUnique
 import Data.Word (Word64)
@@ -1190,9 +1188,9 @@ data ModuleFront = ModuleFront
   , mfCheckedBinderPins :: [CheckedBinderPin]
   , mfResultType :: Maybe Type
   , mfReferencedModules :: Set.Set Module
-  , mfQuasiQuoteOrigins :: QuasiQuoteOrigins
+  , mfQuasiQuoteUse :: !QuasiQuoteUse
     -- ^ Classified once from the parsed source in 'compileFront'; see
-    -- 'classifyQuasiQuoteOrigins'.
+    -- 'classifyQuasiQuoteUse'.
   , mfHasDependentFiles :: Bool
     -- ^ Request-time inputs recorded by this module's typecheck.
   }
@@ -1461,93 +1459,26 @@ untrackedExtensionName flags
 -- External preprocessing, CPP, and TemplateHaskell splices can run arbitrary compile-time code with
 -- no static bound on what they read (files, environment, 'Name'-based
 -- 'reify' against other modules) or produce, so a module enabling either
--- always misses the memo -- unconditionally, regardless of any allowlist.
--- 'QuasiQuotes' is handled separately: see 'pureQuasiQuoters' below.
+-- always misses the memo. Actual quasiquote occurrences are handled separately
+-- by the parser fact below, including when the syntax extension is enabled by default.
 hasUnconditionallyUntrackedCompileTimeExecution :: DynFlags -> Bool
 hasUnconditionallyUntrackedCompileTimeExecution flags =
   not (null (pluginInputIssues flags))
     || gopt Opt_Pp flags || any (`xopt` flags) [LangExt.Cpp, LangExt.TemplateHaskell]
 
--- | Quasiquoters proven pure by inspection, named by their fully-qualified
--- defining module and identifier ("Module.Path.name"). THE PURITY
--- GUARANTEE THIS RELIES ON, for every entry: the quoter's spliced
--- expression is a pure, total function of the quote body's literal source
--- string alone -- no 'Language.Haskell.TH.addDependentFile', no
--- 'Name'/'reify' lookup, no 'runIO', no read of process environment or
--- anything not already covered by the module's own 'ms_hs_hash'. That is
--- exactly the guarantee 'moduleFactHasDependentFiles' verifies
--- operationally for 'addDependentFile' alone; here it is an unenforced
--- claim about each listed quoter's implementation, re-verified by hand at
--- 'bridge/haskell/lib/Tidepool/QQ/*.hs'.
---
--- THIS IS THE ONE PLACE a new quasiquoter must be audited before a module
--- that uses it can stay memoizable: read its 'QuasiQuoter' definition, and
--- add it here only if the guarantee above holds. An unaudited entry, or an
--- entry whose quoter implementation later grows a violation (e.g. gains an
--- 'addDependentFile' call or an environment read) without a corresponding
--- re-audit of this list, silently reuses stale Core for every module that
--- imports it and every transitive importer. A quoter not listed here keeps
--- every module that uses it conservatively uncached, exactly as before this
--- allowlist existed.
-pureQuasiQuoters :: Set.Set String
-pureQuasiQuoters = Set.fromList
-  [ "Tidepool.QQ.Bash.bash"
-  , "Tidepool.QQ.Fmt.fmt"
-  , "Tidepool.QQ.Json.j"
-  , "Tidepool.QQ.Label.label"
-  , "Tidepool.QQ.Patch.patch"
-  , "Tidepool.QQ.Validate.uri"
-  ]
-
--- | What a module's quasiquote occurrences (if any) resolved to, as of its
--- last fresh compile ('classifyQuasiQuoteOrigins', run once in
--- 'compileFront' from the parsed source). A later memo-hit decision trusts
--- this recorded fact instead of re-parsing: 'ms_hs_hash' equality already
--- guarantees identical source bytes, which guarantees the identical set of
--- quote occurrences this classification saw.
-data QuasiQuoteOrigins
-  = NoQuasiQuotes
-    -- ^ The module has no quasiquote occurrences at all (including when
-    -- 'QuasiQuotes' is off).
-  | AllPureQuasiQuotes (Set.Set String)
-    -- ^ Every occurrence resolved, via the module's own import list, to an
-    -- allowlisted ('pureQuasiQuoters') quoter. The set is diagnostic only
-    -- (TIDEPOOL_MEMO_TRACE "quoters=...").
-  | HasUntrackedQuasiQuote (Set.Set String)
-    -- ^ At least one occurrence did not resolve to an allowlisted quoter:
-    -- unlisted, locally defined in this module (so not brought in by any
-    -- import), or an import shape this resolver does not attempt (e.g. an
-    -- ambiguous unqualified import). The set is whatever names were
-    -- recoverable, diagnostic only; an unresolved occurrence renders as
-    -- "<unresolved>".
+-- | Parser evidence for whether fresh source executes a quasiquoter. Module
+-- names and exported occurrences do not authenticate an implementation or its
+-- compile-time inputs. Even a shipped quoter remains untracked here.
+-- An unchanged source hash lets memo lookup retain the no-occurrence proof.
+data QuasiQuoteUse = NoQuasiQuotes | HasQuasiQuotes
   deriving (Eq, Show)
 
--- | Walk a parsed module's quasiquote occurrences ('HsQuasiQuote' nodes,
--- present in the parser's own output before renaming ever expands them) and
--- resolve each occurrence's quoter identifier against the allowlist above.
--- Resolution consults 'HscEnv' (the current session's home package table)
--- to find each candidate import's *defining* module for the occurrence --
--- not just the module named in the import declaration -- so a quoter
--- re-exported through a convenience module (e.g. 'Tidepool.Actors.Exomonad'
--- re-exporting 'Tidepool.QQ.Label.label') still resolves to the allowlist
--- key of its true origin. Dependency modules are already compiled and
--- resident in the HPT by the time this runs (batch compile visits imports
--- before importers); a module not yet resident (impossible in practice
--- for this pipeline) simply fails to disambiguate, same as today.
-classifyQuasiQuoteOrigins :: HscEnv -> ParsedModule -> IO QuasiQuoteOrigins
-classifyQuasiQuoteOrigins hscEnv parsed
-  | null occurrences = pure NoQuasiQuotes
-  | otherwise = do
-      resolved <- mapM (resolveQuoterOrigin hscEnv imports) occurrences
-      pure $ if all isAllowlisted resolved
-        then AllPureQuasiQuotes (Set.fromList [origin | Just origin <- resolved])
-        else HasUntrackedQuasiQuote (Set.fromList (map (fromMaybe "<unresolved>") resolved))
+classifyQuasiQuoteUse :: ParsedModule -> QuasiQuoteUse
+classifyQuasiQuoteUse parsed
+  | null occurrences = NoQuasiQuotes
+  | otherwise = HasQuasiQuotes
   where
-    hsMod = unLoc (pm_parsed_source parsed)
-    imports = hsmodImports hsMod
     occurrences = quasiQuoteOccurrences (ms_hspp_opts (pm_mod_summary parsed)) (pm_parsed_source parsed)
-    isAllowlisted (Just origin) = Set.member origin pureQuasiQuoters
-    isAllowlisted Nothing = False
 
 -- GHC enables dependency codegen from the QuasiQuotes extension alone. The
 -- harness enables that syntax for every input, including inputs without a
@@ -1582,82 +1513,10 @@ elideUnusedQuasiQuoteCodegen timing graph
         || xopt LangExt.StaticPointers (ms_hspp_opts summary)
     occurrences parsed = quasiQuoteOccurrences (ms_hspp_opts (pm_mod_summary parsed)) (pm_parsed_source parsed)
 
--- | Diagnostic only (TIDEPOOL_MEMO_TRACE): honestly report which
--- quasiquoters, if any, a module's last fresh compile actually saw --
--- distinguishing "none", "every occurrence is an allowlisted pure quoter",
--- and "at least one is not", each naming the qualified quoter identities
--- observed (or "<unresolved>" for one this resolver could not place).
-renderQuasiQuoteOrigins :: QuasiQuoteOrigins -> String
-renderQuasiQuoteOrigins NoQuasiQuotes = "none"
-renderQuasiQuoteOrigins (AllPureQuasiQuotes origins) = "pure:" ++ intercalate "," (Set.toList origins)
-renderQuasiQuoteOrigins (HasUntrackedQuasiQuote origins) = "untracked:" ++ intercalate "," (Set.toList origins)
-
--- | Resolve one quasiquote occurrence's syntactic quoter identifier to a
--- "Module.Path.name" origin string naming its *defining* module -- not the
--- module named in the import that brought it into this file's scope. A
--- candidate import module's defining module for the occurrence comes from
--- 'definingModuleForOcc', which follows the already-loaded interface's
--- export list (so a quoter re-exported through a convenience module, e.g.
--- 'Tidepool.Actors.Exomonad' re-exporting 'Tidepool.QQ.Label.label',
--- resolves to "Tidepool.QQ.Label.label" either way). 'Nothing' whenever
--- that resolution is not unambiguous (including: the identifier is defined
--- locally in this module rather than imported, so no import provides it;
--- or more than one candidate import resolves the occurrence to a different
--- defining module). Callers must treat 'Nothing' as unlisted/unknown, never
--- as allowlisted: failing closed here is what keeps this resolver sound
--- without needing full renamer-grade name resolution.
-resolveQuoterOrigin :: HscEnv -> [LImportDecl GhcPs] -> RdrName -> IO (Maybe String)
-resolveQuoterOrigin hscEnv imports rdrName = case rdrName of
-  Qual qualifier occ -> resolveCandidates occ
-      [ unLoc (ideclName decl)
-      | L _ decl <- imports
-      , unLoc (ideclName decl) == qualifier || fmap unLoc (ideclAs decl) == Just qualifier
-      ]
-  Unqual occ -> resolveCandidates occ
-      [ unLoc (ideclName decl)
-      | L _ decl <- imports
-      , ideclQualified decl == NotQualified
-      , importBringsOccIntoScope decl occ
-      ]
-  _ -> pure Nothing
-  where
-    resolveCandidates occ candidateModNames = do
-      defining <- mapM (\mn -> definingModuleForOcc hscEnv mn occ) (nub candidateModNames)
-      pure $ case nub [ mn | Just mn <- defining ] of
-        [definingModName] -> Just (moduleNameString definingModName ++ "." ++ occNameString occ)
-        _ -> Nothing
-    importBringsOccIntoScope decl occ = case ideclImportList decl of
-      Nothing -> True
-      Just (Exactly, L _ ies) -> occ `elem` importListOccs ies
-      Just (EverythingBut, L _ ies) -> occ `notElem` importListOccs ies
-    importListOccs ies = everything (++) (mkQ [] ieRdrNameOcc) ies
-    ieRdrNameOcc :: RdrName -> [OccName]
-    ieRdrNameOcc (Unqual o) = [o]
-    ieRdrNameOcc (Qual _ o) = [o]
-    ieRdrNameOcc _ = []
-
--- | The module that actually defines the exported entity named 'occ', as
--- seen through the already-loaded interface of home-package module 'modName'
--- -- not necessarily 'modName' itself, since an export list can re-export a
--- name whose 'Name' still carries its original defining module. Consults
--- only the resident home package table ('lookupHpt'): by the time a module
--- is classified, this pipeline has already compiled its import dependencies
--- in topological order, so any module actually in scope here is HPT-resident.
--- A module not found there (not yet compiled, or a non-home package) yields
--- 'Nothing', which 'resolveQuoterOrigin' treats as "this candidate does not
--- resolve" -- failing closed, exactly like an unrecognized import shape.
-definingModuleForOcc :: HscEnv -> ModuleName -> OccName -> IO (Maybe ModuleName)
-definingModuleForOcc hscEnv modName occ = pure $ case lookupHpt (hsc_HPT hscEnv) modName of
-  Nothing -> Nothing
-  Just hmi -> case
-      [ definingModule
-      | avail <- mi_exports (hm_iface hmi)
-      , nm <- availNames avail
-      , nameOccName nm == occ
-      , Just definingModule <- [nameModule_maybe nm]
-      ] of
-    (m : _) -> Just (moduleName m)
-    [] -> Nothing
+-- Diagnostic only; the typed parser fact owns reuse eligibility.
+renderQuasiQuoteUse :: QuasiQuoteUse -> String
+renderQuasiQuoteUse NoQuasiQuotes = "none"
+renderQuasiQuoteUse HasQuasiQuotes = "untracked"
 
 -- Facts needed even when a module contributes no executable body. Keeping
 -- these separately lets an unchanged re-export or validation-only module
@@ -1669,8 +1528,8 @@ data ModuleFacts = ModuleFacts
     -- its relation. A package module with the same name is another owner.
   , moduleFactPackageImports :: PackageImportEvidence
   , moduleFactHasDependentFiles :: Bool
-  , moduleFactQuasiQuoteOrigins :: QuasiQuoteOrigins
-    -- ^ Diagnostic and gate input: see 'QuasiQuoteOrigins'. 'lookupValidMemo'
+  , moduleFactQuasiQuoteUse :: !QuasiQuoteUse
+    -- ^ Diagnostic and gate input: see 'QuasiQuoteUse'. 'lookupValidMemo'
     -- consults a *previous* entry's copy of this field (never today's fresh
     -- parse) to decide whether a 'QuasiQuotes'-only module can still be
     -- treated as memoizable.
@@ -1736,7 +1595,7 @@ observationFacts (HydratedObservation _ hmi roots) = pure ModuleFacts
   , moduleFactReferences = Set.empty
   , moduleFactPackageImports = roots
   , moduleFactHasDependentFiles = False
-  , moduleFactQuasiQuoteOrigins = NoQuasiQuotes
+  , moduleFactQuasiQuoteUse = NoQuasiQuotes
   }
 
 -- Original native groups can construct values from implementation interfaces
@@ -1808,7 +1667,7 @@ frontFacts front = pure ModuleFacts
     , moduleFactReferences = mfReferencedModules front
     , moduleFactPackageImports = mfPackageImports front
     , moduleFactHasDependentFiles = mfHasDependentFiles front
-    , moduleFactQuasiQuoteOrigins = mfQuasiQuoteOrigins front
+    , moduleFactQuasiQuoteUse = mfQuasiQuoteUse front
     }
 
 type GutsMemo = Map.Map ModuleName GutsMemoEntry
@@ -2080,10 +1939,8 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
         lookupMemo ref modSum = do
             depsOk <- depsValidSoFar modSum
             -- Cpp/TemplateHaskell gate here, before any entry lookup:
-            -- unconditional, no allowlist can rescue them. A
-            -- 'QuasiQuotes'-only module still might be memoizable —
-            -- that depends on a *previous* entry's recorded quoter
-            -- origins, so it is decided below, once 'entry' is in scope.
+            -- unconditional. A 'QuasiQuotes'-only module may be memoizable
+            -- when its previous parse proved that it contains no quotations.
             if not depsOk || hasUnconditionallyUntrackedCompileTimeExecution (ms_hspp_opts modSum)
               then do
                 -- Only the deps this cycle actually marked invalid —
@@ -2125,31 +1982,12 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                         sameIncarnation =
                           not (isJust (parseSessionModule (moduleNameString (ms_mod_name modSum))))
                             || (isJust incarnation && memoIncarnation validity == incarnation)
-                        -- Reached only once Cpp/TemplateHaskell are
-                        -- both ruled out above, so any remaining
-                        -- 'hasUntrackedCompileTimeExecution' is due to
-                        -- QuasiQuotes alone. That extension flag gates
-                        -- the whole module even when a quote
-                        -- occurrence never runs, so it stays
-                        -- conservative UNLESS the previous entry's
-                        -- recorded classification ('frontFacts',
-                        -- 'classifyQuasiQuoteOrigins') already proved
-                        -- every occurrence resolved to an allowlisted
-                        -- ('pureQuasiQuoters') quoter -- in which case
-                        -- 'sameHash' below (identical source bytes)
-                        -- guarantees today's occurrences are the exact
-                        -- same ones, with no need to re-parse here.
-                        quasiQuotesPureOnRecord = case moduleFactQuasiQuoteOrigins (payloadFacts (gmePayload entry)) of
-                          AllPureQuasiQuotes _ -> True
-                          NoQuasiQuotes -> True
-                          _ -> False
+                        -- Unconditional compile-time execution was excluded
+                        -- above. Only a recorded absence of quotations permits
+                        -- reuse; equal source bytes preserve that parser fact.
                         compileTimeExecutionTracked =
-                          not (hasUntrackedCompileTimeExecution (ms_hspp_opts modSum))
-                            || quasiQuotesPureOnRecord
-                    -- Source hashes do not cover CPP includes, splices,
-                    -- quasiquoters (unless allowlisted above), or
-                    -- addDependentFile inputs. These modules therefore
-                    -- remain conservatively uncached.
+                          moduleFactQuasiQuoteUse (payloadFacts (gmePayload entry)) == NoQuasiQuotes
+                    -- Source hashes do not cover compile-time external inputs.
                     if not (moduleFactHasDependentFiles (payloadFacts (gmePayload entry)))
                         && compileTimeExecutionTracked
                         && sameHash
@@ -2159,18 +1997,11 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                         && sameIncarnation
                       then pure (Just entry)
                       else if not compileTimeExecutionTracked
-                        -- A QuasiQuotes-only module whose recorded
-                        -- occurrences are not (all) allowlisted: same
-                        -- short reason Cpp/TemplateHaskell already use
-                        -- above, so this stays indistinguishable from
-                        -- the always-conservative case on the plain
-                        -- TIDEPOOL_TIMING line. TIDEPOOL_MEMO_TRACE
-                        -- still names exactly which quoters were seen.
                         then do
                           memoMiss modSum "untracked-compile-time-execution"
                           memoMissTrace modSum
                             ("no-reuse:untracked-compile-time-execution quasiquotes="
-                              ++ renderQuasiQuoteOrigins (moduleFactQuasiQuoteOrigins (payloadFacts (gmePayload entry))))
+                              ++ renderQuasiQuoteUse (moduleFactQuasiQuoteUse (payloadFacts (gmePayload entry))))
                             (Just entry)
                           pure Nothing
                         else do
@@ -2181,7 +2012,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                             , "same-retained=" ++ show sameRetained
                             , "same-home-dependencies=" ++ show sameHomeDependencies
                             , "same-incarnation=" ++ show sameIncarnation
-                            , "quasiquotes=" ++ renderQuasiQuoteOrigins (moduleFactQuasiQuoteOrigins (payloadFacts (gmePayload entry))) ]
+                            , "quasiquotes=" ++ renderQuasiQuoteUse (moduleFactQuasiQuoteUse (payloadFacts (gmePayload entry))) ]
                           memoMissTrace modSum (unwords
                             [ "dependent-files=" ++ show (moduleFactHasDependentFiles (payloadFacts (gmePayload entry)))
                             , "same-hash=" ++ show sameHash
@@ -2189,7 +2020,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                             , "same-retained=" ++ show sameRetained
                             , "same-home-dependencies=" ++ show sameHomeDependencies
                             , "same-incarnation=" ++ show sameIncarnation
-                            , "quasiquotes=" ++ renderQuasiQuoteOrigins (moduleFactQuasiQuoteOrigins (payloadFacts (gmePayload entry))) ]) (Just entry)
+                            , "quasiquotes=" ++ renderQuasiQuoteUse (moduleFactQuasiQuoteUse (payloadFacts (gmePayload entry))) ]) (Just entry)
                           pure Nothing
     validatedMemo <- case pvExactScope variant of
       Nothing -> pure Map.empty
@@ -2369,7 +2200,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     targetLoadFailure <- liftIO (newIORef Nothing)
     targetInstanceFailure <- liftIO (newIORef Nothing)
     canonicalFailureRef <- liftIO (newIORef Nothing)
-    frontendOriginsRef <- liftIO (newIORef Map.empty)
+    frontendQuasiQuotesRef <- liftIO (newIORef Map.empty)
     pendingFinalizationsRef <- liftIO (newIORef Map.empty)
     beforeLoad <- getSession
     let originalPhaseHook = runPhaseHook (hsc_hooks beforeLoad)
@@ -2434,14 +2265,14 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                 cpBeforeModule plan summaryC
                 current <- getSession
                 parsed <- parseModule summaryC
-                origins <- liftIO (classifyQuasiQuoteOrigins current parsed)
+                let quotes = classifyQuasiQuoteUse parsed
                 transformed <- liftIO (pvTransformParsed variant current summaryC parsed)
                 ((tcg, _), warnings) <- liftIO $ withNativeTypecheckRecovery variant targetName current summaryC parsed
                   (typecheckNativeModuleWithDiagnostics current transformed)
                 liftIO (validateCompilationFamilies current tcg)
                 liftIO $ do
-                  atomicModifyIORef' frontendOriginsRef (\known ->
-                    (Map.insert (ms_mod summaryC) (origins, current) known, ()))
+                  atomicModifyIORef' frontendQuasiQuotesRef (\known ->
+                    (Map.insert (ms_mod summaryC) (quotes, current) known, ()))
                   when (ms_mod_name summaryC == targetName) (writeIORef targetEnvironmentRef (Just tcg))
                   when timing $ hPutStrLn stderr $
                     "tidepool-canonical-frontend module=" ++ moduleNameString (ms_mod_name summaryC)
@@ -2454,7 +2285,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           runPhase (T_Hsc (exactHomeInstancesFor summary phaseEnv) summary)
         canonicalLoadPhase (T_HscPostTc phaseEnv summary (FrontendTypecheck tcg) tcWarnings oldHash)
           | ms_hsc_src summary == HsSrcFile = do
-              (origins, env) <- atomicModifyIORef' frontendOriginsRef (\known ->
+              (quotes, env) <- atomicModifyIORef' frontendQuasiQuotesRef (\known ->
                 (Map.delete (ms_mod summary) known, Map.lookup (ms_mod summary) known))
                 >>= maybe (throwIO MissingLoadedFrontend) pure
               let summaryC = canonicalSummary summary
@@ -2480,7 +2311,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                     (capturedBindingDisplay evalUserBinder tcg) (capturedCellBinderPins env tcg)
                     (foldr (<|>) Nothing [capturedBindingType name tcg | name <- cpResultBinders plan])
                   facts = ModuleFacts (mg_tcs desugared) (moduleRefs desugared) roots
-                    (not (null files)) origins
+                    (not (null files)) quotes
                   pending = PendingFinalization summaryC facts output tidy details env
                   action = HscRecomp tidy (ms_location summaryC) partial oldHash
               when timing $ hPutStrLn stderr $
@@ -2565,8 +2396,8 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
         getSession >>= liftIO . validateCandidateHomeInterfaces
         cpAfterLoad plan
         pending <- liftIO (readIORef pendingFinalizationsRef)
-        origins <- liftIO (readIORef frontendOriginsRef)
-        unless (Map.null pending && Map.null origins) $
+        quotes <- liftIO (readIORef frontendQuasiQuotesRef)
+        unless (Map.null pending && Map.null quotes) $
           liftIO $ throwIO UnfinishedLoadedFrontend
       Failed -> do
         canonicalFailure <- liftIO (readIORef canonicalFailureRef)
@@ -2649,24 +2480,20 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
               compileFront modSum0 = do
                 liftIO (modifyIORef' frontCountRef (+ 1))
                 let modSum = canonicalSummary modSum0
-                -- Classification needs the session's HPT as it stands right
-                -- before this module's own typecheck (to resolve import
-                -- origins -- see 'classifyQuasiQuoteOrigins'); dependency
-                -- modules are already resident by this point in the batch.
-                classifyEnv <- getSession
-                ((tcGblEnv, quasiQuoteOrigins), tcMs) <- timeSection $
+                typecheckEnv <- getSession
+                ((tcGblEnv, quasiQuoteUse), tcMs) <- timeSection $
                   timeDetailPhase timing "typecheck" (moduleNameString (ms_mod_name modSum)) $ do
                     parsed <- parseModule modSum
-                    origins <- liftIO (classifyQuasiQuoteOrigins classifyEnv parsed)
-                    transformed <- liftIO (pvTransformParsed variant classifyEnv modSum parsed)
-                    ((tcg, _), warnings) <- liftIO $ withNativeTypecheckRecovery variant targetName classifyEnv modSum parsed
-                      (typecheckNativeModuleWithDiagnostics classifyEnv transformed)
+                    let quotes = classifyQuasiQuoteUse parsed
+                    transformed <- liftIO (pvTransformParsed variant typecheckEnv modSum parsed)
+                    ((tcg, _), warnings) <- liftIO $ withNativeTypecheckRecovery variant targetName typecheckEnv modSum parsed
+                      (typecheckNativeModuleWithDiagnostics typecheckEnv transformed)
                     let flags = ms_hspp_opts modSum
-                    liftIO (printOrThrowDiagnostics (hsc_logger classifyEnv)
+                    liftIO (printOrThrowDiagnostics (hsc_logger typecheckEnv)
                       (initPrintConfig flags) (initDiagOpts flags) warnings)
                     familyEnvironment <- getSession
                     liftIO (validateCompilationFamilies familyEnvironment tcg)
-                    pure (tcg, origins)
+                    pure (tcg, quotes)
                 when (ms_mod_name modSum == targetName) $
                   liftIO (writeIORef targetEnvironmentRef (Just tcGblEnv))
                 liftIO (modifyIORef' tcMsRef (+ tcMs))
@@ -2717,7 +2544,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                                  , mfCheckedBinderPins = checkedBinderPins
                                  , mfResultType = mResTy
                                  , mfReferencedModules = moduleRefs desugared
-                                 , mfQuasiQuoteOrigins = quasiQuoteOrigins
+                                 , mfQuasiQuoteUse = quasiQuoteUse
                                  , mfHasDependentFiles = not (null dependentFiles) }
               -- The per-module back half: the optimized-Core pass, the
               -- shared interface registration, then stable name externalization.
@@ -3156,10 +2983,10 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                   liftIO $ hPutStrLn stderr $
                     "tidepool-checked module=" ++ moduleNameString (ms_mod_name summary)
                       ++ " target=" ++ show isTarget
-                  (tcg, origins) <- timeDetailPhase timing "checked_typecheck"
+                  (tcg, quotes) <- timeDetailPhase timing "checked_typecheck"
                     (moduleNameString (ms_mod_name summary)) $ do
                       parsed <- parseModule summary
-                      origins <- liftIO (classifyQuasiQuoteOrigins current parsed)
+                      let quotes = classifyQuasiQuoteUse parsed
                       transformed <- liftIO (pvTransformParsed variant current summary parsed)
                       ((checkedEnvironment, _), warnings) <- liftIO $ withNativeTypecheckRecovery variant targetName current summary parsed
                         (typecheckNativeModuleWithDiagnostics current transformed)
@@ -3168,7 +2995,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                         (initPrintConfig flags) (initDiagOpts flags) warnings)
                       familyEnvironment <- getSession
                       liftIO (validateCompilationFamilies familyEnvironment checkedEnvironment)
-                      pure (checkedEnvironment, origins)
+                      pure (checkedEnvironment, quotes)
                   let inspectionProbes = capturedInspectionProbes tcg
                       retainInterface reason = do
                         -- A later source module's normal home import resolves via
@@ -3197,7 +3024,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                     , moduleFactReferences = Set.empty
                     , moduleFactPackageImports = emptyPackageImports
                     , moduleFactHasDependentFiles = not (null dependentFiles)
-                    , moduleFactQuasiQuoteOrigins = origins }) :))
+                    , moduleFactQuasiQuoteUse = quotes }) :))
                   case homeInterfaceUse summary laterConsumers of
                     HomeInterfaceLeaf -> when timing $ liftIO $ hPutStrLn stderr $
                       "tidepool-checked-interface-elided module="
@@ -3832,10 +3659,7 @@ dependencyEvidenceFor env (sources, sourcesComplete) graph moduleFacts = do
               else case Map.lookup (ms_mod_name summary) factsByName of
                 Nothing -> True
                 Just facts -> moduleFactHasDependentFiles facts
-                  || (xopt LangExt.QuasiQuotes flags && case moduleFactQuasiQuoteOrigins facts of
-                        NoQuasiQuotes -> False
-                        AllPureQuasiQuotes _ -> False
-                        HasUntrackedQuasiQuote _ -> True)
+                  || moduleFactQuasiQuoteUse facts == HasQuasiQuotes
       hasUntrackedExecution = any untrackedExecution graphSummaries
       complete = sourcesComplete && not (any (moduleFactHasDependentFiles . snd) moduleFacts)
         && not hasUntrackedExecution

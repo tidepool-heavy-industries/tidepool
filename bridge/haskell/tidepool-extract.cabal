@@ -29,6 +29,7 @@ extra-source-files:
   test-cell-splitter/fixtures/declaration-join/*/*.hs
   test-cell-splitter/fixtures/session-fixities/*.hs
   test-cell-splitter/fixtures/quasiquote-occurrences/*.hs
+  test-cell-splitter/fixtures/quasiquote-reuse/*.hs
   test-cell-splitter/fixtures/unreachable-compile-time/*.hs
   test-source-boot/fixtures/*.hs
   test-source-boot/fixtures/*.hs-boot

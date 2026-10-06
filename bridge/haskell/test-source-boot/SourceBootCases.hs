@@ -95,7 +95,7 @@ import System.Process (readProcessWithExitCode)
 import System.Timeout (timeout)
 import Tidepool.CompilerProducts
   ( writeCertifiedProductsKeeping, retainedOriginalInterfaces, certifiedSourceOriginals, certifiedFinalizedArtifacts
-  , requireOriginalExecutableGlobals )
+  , requireOriginalExecutableGlobals, certifiedExecutionSource )
 import Tidepool.CertifiedProducts (encodeCertifiedProducts, resolvePackageGlobal)
 import Tidepool.FinalizedModuleArtifacts (captureFinalizedModuleArtifacts, emptyFinalizedModuleArtifacts, finalizedLocalAdmissions, localFinalizedInterface)
 import Tidepool.FinalizedModule (finalizedHomeModInfo, homeInterfaceUsageOwners)
@@ -172,7 +172,7 @@ import Tidepool.CheckedCell (CheckedSignature(..), RequestTypeSignatures(..), Re
 import Tidepool.TurnSource (replaceTemplateMarker, spliceTemplate)
 import Tidepool.Binders (BoundBinder(..), analyzeCellWithFlags, defaultParserDynFlags, CellSourcePlan(..))
 import Tidepool.ExecutionSource
-  ( WorkerExecutionSource(OrdinaryExecutionSource)
+  ( WorkerExecutionSource(..)
   , ExecutionSourceIdentity(..), ExecutionSourceOwner(..), ExecutionSourceRef(..), ExecutionSourceGraph(..), ExecutionSourceNode(..)
   , executionSourceClosure, executionSourceOriginalNode, executionSourceOriginalClosure, executionIdentityKey
   , ExecutionSourceFailure(..), ExecutionSourceRecipe(..), issueExecutionSourceRecipe, executionSourceProspectiveReferences
@@ -645,6 +645,11 @@ completedProgramSourceImportsWithCandidates reuseCandidate = withTiming $ withSc
     (T.replace "import MetadataQuoteSupport"
       "import Language.Haskell.TH.Syntax (runIO)\nimport MetadataQuoteSupport" quoter)))
   quoted <- TE.decodeUtf8 <$> BS.readFile (work </> "MetadataQuotedTarget.hs")
+  -- Preserve the defining quoter's real Name through an authored facade.
+  -- A later item imports this same completed original after source removal.
+  writeFile (work </> "MetadataQuotedTarget.hs") (T.unpack (T.replace
+    "module MetadataQuotedTarget where"
+    "module MetadataQuotedTarget (__result, answer) where" quoted))
   writeFile (work </> "MetadataHiddenQuoted.hs")
     (T.unpack (T.replace "module MetadataQuotedTarget" "module MetadataHiddenQuoted" quoted))
   scopePath <- writeGenuineEmptyMetadataScope work
@@ -671,6 +676,9 @@ completedProgramSourceImportsWithCandidates reuseCandidate = withTiming $ withSc
     originals <- newOriginalInterfaceArtifacts (prHscEnv (pprPipelineResult completed))
       (pprFinalizedModules completed) (retainedOriginalInterfaces completed) directory
     certified <- writeCertifiedProductsKeeping includes originals directory completed Nothing []
+    case certifiedExecutionSource certified of
+      ExactExecutionSourceUnavailable _ -> pure ()
+      _ -> fail "arbitrary runIO compilation unexpectedly issued an execution source recipe"
     let proofs = certifiedSourceOriginals certified
         admissions = finalizedLocalAdmissions (certifiedFinalizedArtifacts certified)
     rows <- forM (Map.keys proofs) $ \key -> do
@@ -718,6 +726,32 @@ completedProgramSourceImportsWithCandidates reuseCandidate = withTiming $ withSc
     unless (imports' == imports) (fail "later pass changed the completed import decision")
     laterRuns <- lines <$> readFile marker
     unless (laterRuns == initialRuns) (fail "later pass reran the retained arbitrary runIO quoter")
+    -- A new quotation executes the authenticated original quoter. It must
+    -- neither need its old source nor inherit ordinary source cache authority.
+    let removed = [work </> name | name <-
+          ["MetadataQuotedTarget.hs", "MetadataQuoter.hs", "MetadataQuoteSupport.hs"]]
+        quotedTarget = T.unpack (T.replace "__result = 7" "__result = [Captured.answer|later|]"
+          (T.replace "LANGUAGE PackageImports" "LANGUAGE PackageImports, QuasiQuotes"
+            (T.pack (targetSource "import qualified MetadataQuotedTarget as Captured"))))
+    originalsToRestore <- mapM BS.readFile removed
+    bracket (mapM_ removeFile removed)
+      (const (sequence_ (zipWith BS.writeFile removed originalsToRestore))) $ \_ -> do
+        writeFile target quotedTarget
+        (quotedAgain, diagnostics) <- captureDiagnostics $
+          compile (PreparedProducts Nothing) Set.empty
+            (CellProgramCompile (withProgramSourceImports imports aliased) retained)
+            (Just session) target includes Nothing
+        unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult quotedAgain))
+            && counterValues "exact_execution_original_load_owners" diagnostics == [2]
+            && Map.keys (pprFinalizedModules quotedAgain) == [mkModuleName "CompletedOriginalConsumer"]
+            && all (\owner -> ("tidepool-canonical-frontend module=" ++ owner)
+                `notElem` lines diagnostics) ["MetadataQuoter", "MetadataQuoteSupport"]
+            && null (scopeExecutionGraphs retained) && null (scopeExecutionOwners retained)) $
+          fail "later same-cell quotation lost source-less canonical Core execution"
+        runs <- lines <$> readFile marker
+        unless (runs == initialRuns ++ ["executed"]) $
+          fail "later same-cell quotation did not execute its original quoter exactly once"
+    writeFile target (targetSource "import qualified MetadataQuotedTarget as Captured")
     requireOriginalSourceRejection "new cell cannot reuse completed original imports"
       (ExecutionSourceUnsupported root)
       (compile CheckedEnvironment Set.empty (CellProgramCompile aliased retained)
@@ -771,7 +805,7 @@ completedProgramSourceImportsWithCandidates reuseCandidate = withTiming $ withSc
       (compile CheckedEnvironment Set.empty
         (CellProgramCompile (withProgramSourceImports imports helperPurpose) retained)
         (Just session) target includes Nothing)
-  putStrLn "completed program imports: fresh/cached providers, arbitrary runIO original retained once, alias reuse, unaccepted provider, new cell/qualifier/hidden/new-demand and source/dependency drift controls"
+  putStrLn "completed program imports: fresh/cached providers, arbitrary runIO original retained once, source-less later quoter, alias reuse, unaccepted provider, new cell/qualifier/hidden/new-demand and source/dependency drift controls"
   where
     firstOwner (owner,_,_,_) = owner
 

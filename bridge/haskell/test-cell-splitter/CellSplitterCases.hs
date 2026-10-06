@@ -3,7 +3,7 @@
 
 module CellSplitterCases where
 
-import Control.Monad (forM_, unless, void, when)
+import Control.Monad (forM, forM_, unless, void, when)
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (AsyncException(ThreadKilled), SomeException, bracket, evaluate, finally, fromException, throwIO, try)
 import qualified Data.Map.Strict as Map
@@ -12,24 +12,30 @@ import Data.IORef (newIORef, modifyIORef', readIORef, writeIORef)
 import Data.List (intercalate, isInfixOf, isPrefixOf, isSuffixOf, sort, tails)
 import Data.Char (isDigit)
 import Data.Data (Data, Typeable, cast, gmapQ)
+import Data.Dynamic (fromDynamic)
 import qualified Data.ByteString as BS
 import qualified Data.Text as Text
 import Codec.CBOR.Encoding (encodeListLen, encodeString)
 import Codec.CBOR.Write (toStrictByteString)
 import GHC hiding (Target)
-import GHC.Builtin.Types (intTy)
+import GHC.Builtin.Types (intTy, intDataCon)
+import GHC.Core qualified as Core
+import GHC.Core.DataCon (dataConWorkId)
 import GHC.Core.TyCo.Compare (eqType)
-import GHC.Unit.Module.ModGuts (CgGuts)
+import GHC.Unit.Module.ModGuts (CgGuts, cg_binds)
 import GHC.Stg.Syntax (CgStgTopBinding)
+import GHC.Stg.Syntax qualified as Stg
+import GHC.Types.Literal (Literal(..), LitNumType(..))
 import GHC.Types.Var.Set (IdSet)
 import System.Mem.StableName (StableName, makeStableName)
 import GHC.Types.Name.Occurrence (mkVarOcc, occNameString)
-import GHC.Types.Name (nameModule_maybe, nameOccName)
+import GHC.Types.Name (nameModule_maybe, nameOccName, getOccString)
 import GHC.Tc.Types (tcg_rn_decls, tcg_mod)
 import GHC.Types.SourceText (il_value)
 import GHC.Types.PkgQual (RawPkgQual(..))
 import GHC.Types.Fixity (Fixity(..))
-import GHC.Driver.Session (parseDynamicFilePragma)
+import GHC.Driver.Session (parseDynamicFilePragma, gopt_set, PackageDBFlag(..), PkgDbRef(..))
+import GHC.Driver.Backend (interpreterBackend)
 import GHC.Driver.Env (hsc_HPT)
 import GHC.Unit.Home.ModInfo (lookupHpt, hm_iface)
 import GHC.Unit.Module.ModIface (mi_iface_hash, mi_mod_hash, mi_usages)
@@ -69,7 +75,7 @@ import Tidepool.Timing
   ( InterfaceStage(..), InterfaceReuse(..), measureModuleInterface )
 import System.Directory
   ( getTemporaryDirectory, createDirectory, createDirectoryIfMissing
-  , removeFile, removeDirectoryRecursive
+  , removeFile, removeDirectoryRecursive, copyFile
   , getPermissions, setPermissions, setOwnerExecutable )
 import System.FilePath ((</>))
 import System.IO (openTempFile, hClose, hFlush, readFile', stderr)
@@ -658,6 +664,132 @@ multilineLetCompilation = bracket temporary removeDirectoryRecursive $ \root -> 
       createDirectory path
       pure path
 
+-- A source-name collision must not authorize stale Core or prepared STG.
+-- The GHC interpreter is an independent value oracle: it does not consume the
+-- Tidepool memo, dependency flags or prepared products being checked here.
+quasiQuoteSourceReuseCompilation :: IO ()
+quasiQuoteSourceReuseCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
+  let fixtures = "test-cell-splitter/fixtures/quasiquote-reuse"
+      quoterDirectory = root </> "Tidepool" </> "QQ"
+      input = root </> "quote-input"
+      target = root </> "ShadowUser.hs"
+      history = [37, 91, 37] :: [Integer]
+      inspect compiler expected = do
+        writeFile input (show expected)
+        prepared <- compiler PreparedStg mempty GeneralCompile Nothing target [] Nothing
+        actual <- boxedIntProducts "ShadowQuoted" "value" prepared
+        assertEqual "fresh source observes the current external input" (expected, expected) actual
+        pure actual
+  createDirectoryIfMissing True quoterDirectory
+  copyFile (fixtures </> "ShadowValidate.hs") (quoterDirectory </> "Validate.hs")
+  copyFile (fixtures </> "ShadowUser.hs") target
+  quoted <- Text.pack <$> readFile' (fixtures </> "ShadowQuoted.hs")
+  writeFile (root </> "ShadowQuoted.hs")
+    (Text.unpack (Text.replace "QUOTE_INPUT_PATH" (Text.pack input) quoted))
+  warm <- withResidentPipelineSelectedRequests [root] $ \runRequest -> do
+    within <- runRequest (pure ()) $ \compiler -> mapM (inspect compiler) history
+    -- Closing the transaction discards memo state. Reopening on the same
+    -- resident compiler must agree with both the warm history and cold GHC.
+    across <- forM history $ \expected -> runRequest (pure ()) $ \compiler -> inspect compiler expected
+    assertEqual "transaction restart agrees with warm quotation history" within across
+    pure within
+  cold <- forM history $ \expected -> do
+    writeFile input (show expected)
+    prepared <- runPipelineSelected PreparedStg target [root]
+    boxedIntProducts "ShadowQuoted" "value" prepared
+  assertEqual "fresh compiler sessions agree with warm quotation history" warm cold
+  oracle <- forM history $ \expected -> do
+    writeFile input (show expected)
+    coldQuasiQuoteValue [root] target "ShadowUser"
+  assertEqual "quoted Core agrees with independent cold GHC" oracle (map (fromInteger . fst) warm)
+  assertEqual "quoted prepared STG agrees with independent cold GHC" oracle (map (fromInteger . snd) warm)
+  where
+    temporary = do
+      parent <- getTemporaryDirectory
+      (path, handle) <- openTempFile parent "tidepool-quasiquote-reuse"
+      hClose handle
+      removeFile path
+      createDirectory path
+      pure path
+
+-- Use the deployed source resource itself. A local module with its spelling
+-- is a separate negative control above, never a stand-in for this provider.
+pinnedQuasiQuoteSourceCompilation :: IO ()
+pinnedQuasiQuoteSourceCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
+  let fixtures = "test-cell-splitter/fixtures/quasiquote-reuse"
+      target = root </> "PinnedUser.hs"
+      includes = [root, "lib"]
+  forM_ ["PinnedQuoted.hs", "PinnedUser.hs"] $ \name ->
+    copyFile (fixtures </> name) (root </> name)
+  withResidentPipelineSelected includes $ \compiler -> do
+    fresh <- compiler PreparedStg mempty GeneralCompile Nothing target [] Nothing
+    freshSharing <- compilerProductSharing fresh
+    repeated <- compiler PreparedStg mempty GeneralCompile Nothing target [] Nothing
+    repeatedSharing <- compilerProductSharing repeated
+    assertQuotedSourceUncached "pinned provider, fresh" fresh
+    assertQuotedSourceUncached "pinned provider, repeated" repeated
+    assertCoreSharing "actual pinned quotation is recompiled" False ["PinnedQuoted"] freshSharing repeatedSharing
+    assertStgSharing "actual pinned quotation is prepared afresh" False ["PinnedQuoted"] freshSharing repeatedSharing
+    assertSameInterfaceEvidenceAndPreparedShape "stable pinned quotation" fresh repeated
+  actual <- coldQuasiQuoteValue includes target "PinnedUser"
+  assertEqual "independent GHC executes the real pinned provider" 23 actual
+  where
+    temporary = do
+      parent <- getTemporaryDirectory
+      (path, handle) <- openTempFile parent "tidepool-pinned-quasiquote"
+      hClose handle
+      removeFile path
+      createDirectory path
+      pure path
+
+assertQuotedSourceUncached :: String -> PreparedPipelineResult -> IO ()
+assertQuotedSourceUncached label prepared = do
+  let evidence = preparedFreshDependencies prepared
+  when (dependencyCacheSafe evidence || dependencySelectionComplete evidence) $
+    fail (label ++ " authorized ordinary source reuse")
+
+-- This fixture's exported value must be exactly a boxed integer in both
+-- compiler products, not merely contain the expected literal somewhere.
+boxedIntProducts :: String -> String -> PreparedPipelineResult -> IO (Integer, Integer)
+boxedIntProducts owner occurrence prepared = do
+  finalized <- maybe (fail "quoted owner has no finalized Core") pure
+    (Map.lookup (mkModuleName owner) (pprFinalizedModules prepared))
+  core <- case [value | (binder, rhs) <- Core.flattenBinds (cg_binds (finalizedTidyGuts finalized))
+      , getOccString binder == occurrence
+      , Core.App (Core.Var constructor) (Core.Lit (LitNumber LitNumInt value)) <- [rhs]
+      , constructor == dataConWorkId intDataCon] of
+    [value] -> pure value
+    _ -> fail "quoted Core value is not one boxed Int literal"
+  stg <- case [value | modul <- pprModules prepared, moduleNameString (moduleName (pmModule modul)) == owner
+      , (Stg.StgTopLifted binding, _) <- pmBindings modul, (binder, rhs) <- pairs binding
+      , getOccString binder == occurrence
+      , Stg.StgRhsCon _ constructor _ _ [Stg.StgLitArg (LitNumber LitNumInt value)] _ <- [rhs]
+      , constructor == intDataCon] of
+    [value] -> pure value
+    _ -> fail "quoted prepared value is not one boxed Int literal"
+  pure (core, stg)
+  where
+    pairs (Stg.StgNonRec binder rhs) = [(binder, rhs)]
+    pairs (Stg.StgRec bindings) = bindings
+
+coldQuasiQuoteValue :: [FilePath] -> FilePath -> String -> IO Int
+coldQuasiQuoteValue includes target owner = do
+  libdir <- getLibdir
+  runGhc (Just libdir) $ do
+    flags <- getSessionDynFlags
+    _ <- setSessionDynFlags (gopt_set flags Opt_ForceRecomp)
+      { backend = interpreterBackend, ghcLink = LinkInMemory
+      , importPaths = includes, packageDBFlags = [PackageDB GlobalPkgDb, ClearPackageDBs] }
+    targetSpec <- guessTarget target Nothing Nothing
+    setTargets [targetSpec]
+    load LoadAllTargets >>= \case
+      Failed -> fail "independent GHC quotation compilation failed"
+      Succeeded -> pure ()
+    imported <- parseImportDecl ("import qualified " ++ owner)
+    setContext [IIDecl imported]
+    actual <- dynCompileExpr (owner ++ ".result")
+    maybe (fail "independent GHC quotation result is not Int") pure (fromDynamic actual)
+
 untrackedCompileTimeCompilation :: IO ()
 untrackedCompileTimeCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
   let dependency = root </> "QuasiQuoteDependency.hs"
@@ -670,22 +802,13 @@ untrackedCompileTimeCompilation = bracket temporary removeDirectoryRecursive $ \
       preprocessedUser = root </> "PreprocessedUser.hs"
       noQuoteUser = root </> "NoQuoteUser.hs"
       target = root </> "QuasiQuoteTarget.hs"
-      -- A fixture standing in for a real, allowlisted quoter module
-      -- ('bridge/haskell/lib/Tidepool/QQ/Label.hs'): 'pureQuasiQuoters'
-      -- matches purely on qualified name
-      -- ("Tidepool.QQ.Label.label"), so a small local module under that
-      -- same name exercises the same resolution path without depending on
-      -- the deployed stdlib tree.
+      -- A local provider may use the same spelling as a shipped provider.
+      -- Neither that spelling nor an import/reexport shape proves purity.
       qqDir = root </> "Tidepool" </> "QQ"
       qqLabel = qqDir </> "Label.hs"
       -- Compile through consumers so these modules own dependency products.
       labelDependency = root </> "LabelDependency.hs"
       labelUser = root </> "LabelUser.hs"
-      -- GHC's own stage restriction forbids using a quasiquoter in the
-      -- same module that defines it ("must be imported, not defined
-      -- locally"), so the unlisted quoter lives in its own module,
-      -- imported like any other -- exercising "imported, but not on the
-      -- allowlist" rather than "no import at all provides it".
       localQuoter = root </> "LocalQuoteQuoter.hs"
       localQuoteDependency = root </> "LocalQuoteDependency.hs"
       localQuoteUser = root </> "LocalQuoteUser.hs"
@@ -790,8 +913,7 @@ untrackedCompileTimeCompilation = bracket temporary removeDirectoryRecursive $ \
     , "import LocalQuoteDependency (value)"
     , "result = value"
     ]
-  -- Both open defining imports and reexports must resolve the exact audited
-  -- quoter owner; unrelated open imports do not make that owner ambiguous.
+  -- Open imports and reexports carry the same conservative quotation fact.
   let decoyModule = root </> "Decoy.hs"
       openImportDependency = root </> "OpenImportDependency.hs"
       openImportUser = root </> "OpenImportUser.hs"
@@ -863,27 +985,27 @@ untrackedCompileTimeCompilation = bracket temporary removeDirectoryRecursive $ \
     assertSameInterfaceEvidenceAndPreparedShape "untracked external input with unchanged output" preprocessedCold preprocessedWarm
     assertCoreSharing "untracked preprocessor input prevents native owner reuse" False
       ["PreprocessedDependency"] preprocessedColdSharing preprocessedWarmSharing
-    let pureQuote label owner user = do
+    let quotedSource label owner user = do
           fresh <- compile PreparedStg mempty GeneralCompile Nothing user [] Nothing
           freshSharing <- compilerProductSharing fresh
-          assertComplete (label ++ ", fresh") fresh
+          assertIncomplete (label ++ ", fresh") fresh
           repeated <- compile PreparedStg mempty GeneralCompile Nothing user [] Nothing
           repeatedSharing <- compilerProductSharing repeated
-          assertComplete (label ++ ", repeated") repeated
+          assertIncomplete (label ++ ", repeated") repeated
           assertSameInterfaceEvidenceAndPreparedShape (label ++ " preserves output") fresh repeated
-          assertCoreSharing (label ++ " retains canonical owner") True [owner] freshSharing repeatedSharing
-          assertStgSharing (label ++ " retains prepared body") True [owner] freshSharing repeatedSharing
-    pureQuote "allowlisted pure quasiquote" "LabelDependency" labelUser
-    pureQuote "allowlisted pure quasiquote via open import" "OpenImportDependency" openImportUser
-    pureQuote "allowlisted pure quasiquote via reexport" "ReexportDependency" reexportUser
+          assertCoreSharing (label ++ " recompiles canonical owner") False [owner] freshSharing repeatedSharing
+          assertStgSharing (label ++ " prepares a fresh body") False [owner] freshSharing repeatedSharing
+    quotedSource "local same-name pure quasiquote" "LabelDependency" labelUser
+    quotedSource "local same-name pure quasiquote via open import" "OpenImportDependency" openImportUser
+    quotedSource "local same-name pure quasiquote via reexport" "ReexportDependency" reexportUser
     localCold <- compile PreparedStg mempty GeneralCompile Nothing localQuoteUser [] Nothing
     localColdSharing <- compilerProductSharing localCold
-    assertIncomplete "unlisted quasiquote, fresh" localCold
+    assertIncomplete "local quasiquote, fresh" localCold
     localWarm <- compile PreparedStg mempty GeneralCompile Nothing localQuoteUser [] Nothing
     localWarmSharing <- compilerProductSharing localWarm
-    assertIncomplete "unlisted quasiquote, repeated" localWarm
-    assertSameInterfaceEvidenceAndPreparedShape "unlisted quasiquote preserves native output" localCold localWarm
-    assertCoreSharing "unlisted quasiquoter prevents owner reuse" False
+    assertIncomplete "local quasiquote, repeated" localWarm
+    assertSameInterfaceEvidenceAndPreparedShape "local quasiquote preserves native output" localCold localWarm
+    assertCoreSharing "local quasiquoter prevents owner reuse" False
       ["LocalQuoteDependency"] localColdSharing localWarmSharing
     let dependent = root </> "quote-input.txt"
     writeFile dependent "tracked input"
@@ -919,13 +1041,13 @@ untrackedCompileTimeCompilation = bracket temporary removeDirectoryRecursive $ \
       ]
     originalDependentBytes <- BS.readFile dependent
     withDependentFile <- compile PreparedStg mempty GeneralCompile Nothing dependentUser [] Nothing
-    assertIncomplete "allowlisted origin with a dependent file" withDependentFile
+    assertIncomplete "local same-name provider with a dependent file" withDependentFile
     dependentSharing <- compilerProductSharing withDependentFile
     writeFile dependent "changed tracked input"
     changedDependentBytes <- BS.readFile dependent
     dependentWarm <- compile PreparedStg mempty GeneralCompile Nothing dependentUser [] Nothing
     dependentWarmSharing <- compilerProductSharing dependentWarm
-    assertIncomplete "allowlisted origin with a changed dependent file" dependentWarm
+    assertIncomplete "local same-name provider with a changed dependent file" dependentWarm
     assertSamePreparedAbiAndShape "dependent-file recheck preserves ABI and typed output"
       withDependentFile dependentWarm
     let quoteInterface prepared = maybe (fail "dependent-file quoter lost its finalized interface")
@@ -947,7 +1069,7 @@ untrackedCompileTimeCompilation = bracket temporary removeDirectoryRecursive $ \
     when (originalFingerprint == changedFingerprint
         || mi_iface_hash (mi_final_exts originalInterface) == mi_iface_hash (mi_final_exts changedInterface)) $
       fail "changed dependent-file input retained stale usage or full interface evidence"
-    assertCoreSharing "addDependentFile defeats pure-origin reuse" False
+    assertCoreSharing "addDependentFile prevents reuse" False
       ["DependentQuote"] dependentSharing dependentWarmSharing
     -- Observe the value only after the ordinary consumer's measured cache
     -- checks. This splice cannot make those checks conservative on its own.
