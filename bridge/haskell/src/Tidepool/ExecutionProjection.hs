@@ -118,7 +118,7 @@ import Tidepool.PreparedFacts (PreparedFacts(..), extractPreparedFacts)
 import Tidepool.Identity (varId)
 import Tidepool.PreparedStg
   ( PreparedModule, PreparedCoverage(..), pmModule, pmCoverage, pmBindings
-  , pmTypeGraph, pmPreparedSites, pmSiteRejections, pmRequestSiteTyCon
+  , pmTypeGraph, pmPreparedSites, pmSiteRejections, pmRequestSiteTyCon, pmStableTopSpellings
   , preparedBindingGroups, filterPreparedBindings, preparedRejectsIntrinsic, preparedExpectedEntry )
 import Tidepool.PreparedSites (SiteRejection(..))
 import Tidepool.PreparedSites (PreparedSite(..), requestReplyIndex)
@@ -1259,7 +1259,9 @@ keepPreparedTop context binding =
 -- be an authored spelling), so reserve every original spelling first and claim
 -- either that spelling or the first unused suffix in emission order. The
 -- allocation is local to a symbol namespace; external names are retained
--- byte-for-byte while constraining generated suffixes around them.
+-- byte-for-byte while constraining generated suffixes around them. Canonical
+-- preparation also issues reserved internal spellings from its complete owner
+-- census; those remain fixed as independently prepared components accumulate.
 buildTopIdentityMap :: [PreparedModule] -> VarEnv SymbolIdentity
 buildTopIdentityMap modules = foldl insert emptyVarEnv (zip binders assigned)
   where
@@ -1269,10 +1271,17 @@ buildTopIdentityMap modules = foldl insert emptyVarEnv (zip binders assigned)
       , (binding, _) <- pmBindings prepared
       , binder <- topBinders binding
       ]
-    raw (fallback, binder) = idSymbolFor fallback (topIdentityNamespace binder) binder
+    stableSpellings = Map.unions (map pmStableTopSpellings modules)
+    fixed binder = isExternalName (varName binder)
+      || Map.member (varName binder) stableSpellings
+    raw (fallback, binder) =
+      let symbol = idSymbolFor fallback (topIdentityNamespace binder) binder
+      in if isExternalName (varName binder) then symbol else
+        maybe symbol (\spelling -> symbol {symbolOccurrence = spelling})
+          (Map.lookup (varName binder) stableSpellings)
     symbols = map raw binders
     assigned = assignTopIdentitySpellings
-      (zip symbols (map (isExternalName . varName . snd) binders))
+      (zip symbols (map (fixed . snd) binders))
     insert mappings ((_, binder), symbol) = extendVarEnv mappings binder symbol
 
 buildTopUniqueIdentityMap :: VarEnv SymbolIdentity -> [PreparedModule]
@@ -1286,8 +1295,8 @@ buildTopUniqueIdentityMap topIdentityMap modules = listToUFM
   ]
 
 -- | Deterministic identity allocation shared by projection and collision
--- regressions. The Bool marks an externally named top, whose spelling is
--- retained exactly; all original spellings reserve suffixes for internal tops.
+-- regressions. The Bool marks a fixed spelling (external or preparation-issued),
+-- retained exactly; all original spellings reserve suffixes for other internal tops.
 assignTopIdentitySpellings
   :: [(SymbolIdentity, Bool)] -> [SymbolIdentity]
 assignTopIdentitySpellings entries = reverse (snd (foldl' allocateOne
