@@ -122,7 +122,7 @@ import Tidepool.FinalizedModule (finalizedHomeModInfo, homeInterfaceUsageOwners)
 import Tidepool.ExecutionEncode (encodeModuleProducts, moduleProductInput)
 
 import Tidepool.ExecutionProjection
-  ( ProjectionContext(..), ProjectionError(..), projectPreparedModuleGroups
+  ( ProjectionContext(..), ProjectionError(..), projectPreparedModuleGroups, projectPreparedModuleGroupsSelected
   , projectPreparedModuleProducts, projectOriginalHomeModuleProducts, preparedModuleProductOutcomes, preparedModuleProductConstructors, preparedModuleProductYieldSites, settleOriginalHomeModuleProductsWithoutOwners, closeUnavailableOriginalGroups, closeUnavailableOriginalModules, preparedTopIdentities, topBinders
   , ReferenceFact(..), preparedModuleReferenceFacts, preparedRootIdentity, projectPrepared
   , projectRawOriginalHomeModuleProducts, rawOriginalProductBinders, rawOriginalProductDemands )
@@ -182,7 +182,7 @@ import Tidepool.ModuleCandidates (ModuleCandidate(..), CandidateGroup(..), Candi
   , readModuleCandidates, readModuleCandidatesWithGraphs, candidateExecutionSources, candidateOriginalIdentity
   , candidateCoreDescriptor, captureCandidateManifest, readCapturedModuleCandidatesWithGraphs)
 import Tidepool.PackageWitness (PackageImportEvidence(..), PackageImportRoot(..), encodePackageImports, emptyPackageImports, readPackageImports, revalidatePackageImports)
-import Tidepool.PreparedStg (pmModule, pmCoverage, pmBindings, pmYieldSites, pmSiteRejections)
+import Tidepool.PreparedStg (pmModule, pmCoverage, pmBindings, pmOriginalTopNames, pmYieldSites, pmSiteRejections)
 import Tidepool.FatIface (readExactInterface)
 import Tidepool.Session (SessionScope(..), emptySessionScope)
 import Tidepool.RetainedUnfoldings (scopeRetainedSummaryHscEnv)
@@ -2320,14 +2320,40 @@ originalConstructorMetadataClosure effects = withTiming $ withScratch $ \work ->
       && all (isJust . ysRequestTypeSignatures) expectedSites
       && all (not . null . ysInputs) expectedSites) $
     fail "effectful original lost its paired wire sites or native request metadata on cold/warm lowering"
-  let floatedGroups = [group
+  requestPrepared <- case filter ((== requestOwner) . pmModule) modules of
+    [value] -> pure value
+    _ -> fail "site closure control lacks its actual compiled original owner"
+  sibling <- maybe (fail "site closure control lacks the actual typed currentRequest sibling") pure
+    (Map.lookup "currentRequest" (pmSitedSiblings requestPrepared))
+  let actualFloatedOrdinals = [fromIntegral ordinal
+        | (ordinal,(binding,_)) <- zip [0 :: Int ..] (pmBindings requestPrepared)
+        , any ((`Set.notMember` pmOriginalTopNames requestPrepared) . varName) (topBinders binding)
+        , any ((== varName sibling) . varName)
+            (preparedImportedIds (extractPreparedFacts requestOwner [binding]))]
+      floatedGroups = [group
         | (owner,Right groups) <- preparedModuleProductOutcomes coldProducts
         , owner == requestOwner, group <- groups
-        , any ((== "local") . symbolNamespace) (projectedBinders group)
-        , any ((`Set.member` Set.fromList (map ysSite expectedSites)) . siteId)
-            (projectedSites (projectedBody group))]
-  unless (not (null floatedGroups)) $
+        , projectedOriginalOrdinal group `elem` actualFloatedOrdinals]
+  unless (not (null actualFloatedOrdinals)
+      && length floatedGroups == length actualFloatedOrdinals
+      && all (any ((`Set.member` Set.fromList (map ysSite expectedSites)) . siteId)
+            . projectedSites . projectedBody) floatedGroups) $
     fail "captured floated original closure lacks its source owner's issued site/type graph"
+  let independentOrdinals = Set.fromList [fromIntegral ordinal
+        | (ordinal,(binding,_)) <- zip [0 :: Int ..] (pmBindings requestPrepared)
+        , any ((`elem` ["continue","independent"]) . getOccString) (topBinders binding)]
+  unless (Set.size independentOrdinals == 2
+      && any ((== "invalid") . getOccString . srBinder) (pmSiteRejections requestPrepared)) $
+    fail "site rejection isolation lacks the genuine polymorphic rejection and independent source bindings"
+  independentGroups <- either (fail . show) pure
+    (projectPreparedModuleGroupsSelected context requestPrepared (Just independentOrdinals))
+  let helperGroups = [group | group <- independentGroups
+        , any ((== "continue") . symbolOccurrence) (projectedBinders group)]
+      callerGroups = [group | group <- independentGroups
+        , any ((== "independent") . symbolOccurrence) (projectedBinders group)]
+  unless (length helperGroups == 1 && all (null . projectedSites . projectedBody) helperGroups
+      && length callerGroups == 1 && all (not . null . projectedSites . projectedBody) callerGroups) $
+    fail "an invalid source site's rejection or another site's evidence contaminated an independent helper/caller"
   withdrawnSites <- either (fail . show) pure
     (preparedModuleProductYieldSites (settled warm (Set.singleton requestOwner)))
   unless (Set.null (Set.fromList (map ysSite withdrawnSites)

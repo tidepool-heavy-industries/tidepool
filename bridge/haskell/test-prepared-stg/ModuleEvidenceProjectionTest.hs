@@ -140,6 +140,7 @@ verifyModuleEvidenceProjection = do
     , preparedCoverage = CompleteSourceModule
     , preparedBindings = [(StgTopStringLit binder_ "fixture", emptyVarSet)
                    | binder_ <- [alpha, beta, gamma]]
+    , preparedOriginalTopNames = Set.fromList (map varName [alpha,beta,gamma])
     , preparedTagSigs = emptyNameEnv
     , preparedStableTopSpellings = Map.empty
     , preparedSitedSiblings = Map.empty

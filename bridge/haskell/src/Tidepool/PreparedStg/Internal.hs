@@ -27,6 +27,8 @@ data PreparedModule = PreparedModule
   { preparedModule :: Module
   , preparedCoverage :: PreparedCoverage
   , preparedBindings :: [(CgStgTopBinding, IdSet)]
+  -- | Exact top Names before CorePrep can introduce floated bindings.
+  , preparedOriginalTopNames :: Set Name
   -- | Canonical package-unit spellings issued before subset selection. Source
   -- modules retain their normal compiler identity allocation.
   , preparedStableTopSpellings :: Map Name Text

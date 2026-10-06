@@ -118,7 +118,7 @@ import Tidepool.PreparedFacts (PreparedFacts(..), extractPreparedFacts)
 import Tidepool.Identity (varId)
 import Tidepool.PreparedStg
   ( PreparedModule, PreparedCoverage(..), pmModule, pmCoverage, pmBindings
-  , pmTypeGraph, pmPreparedSites, pmSiteRejections, pmRequestSiteTyCon, pmStableTopSpellings
+  , pmTypeGraph, pmPreparedSites, pmSiteRejections, pmRequestSiteTyCon, pmStableTopSpellings, pmOriginalTopNames
   , preparedBindingGroups, filterPreparedBindings, preparedRejectsIntrinsic, preparedExpectedEntry )
 import Tidepool.PreparedSites (SiteRejection(..))
 import Tidepool.PreparedSites (PreparedSite(..), requestReplyIndex)
@@ -1470,27 +1470,28 @@ indexPreparedEvidence prepared = PreparedEvidenceIndex
       | (ordinal, site) <- zip [0 :: Int ..] (pmPreparedSites prepared)
       , owner <- Set.toList (ownedTops (psOwner site)) ]
   , evidenceRejectionsByOwner = Map.fromListWith (<>)
-      [ (owner, [(ordinal, rejection)])
-      | (ordinal, rejection) <- zip [0 :: Int ..] (pmSiteRejections prepared)
-      , owner <- Set.toList (ownedTops (srBinder rejection)) ]
+      [ (getKey (varUnique (srBinder rejection)), [(ordinal, rejection)])
+      | (ordinal, rejection) <- zip [0 :: Int ..] (pmSiteRejections prepared) ]
   }
  where
   -- CorePrep/STG can float a site's computation into a separate original
-  -- top. The exact source owner's top dependency closure owns its site
+  -- top. The exact source owner's introduced-top dependency closure owns its site
   -- evidence too: a captured floated closure must not depend on the source
   -- owner's native image remaining code-reachable. No scalar literal or
-  -- rendered binder spelling is used to recover this relationship.
+  -- rendered binder spelling is used to recover this relationship. Exact
+  -- pre-CorePrep top Names keep authored helpers independent even when they
+  -- have internal linkage; recursive peers remain indivisible.
   bindings = map fst (pmBindings prepared)
-  topUniverse = mkUniqSet [varUnique binder | binding <- bindings, binder <- topBinders binding]
+  introducedTops = mkUniqSet [varUnique binder | binding <- bindings, binder <- topBinders binding
+    , varName binder `Set.notMember` pmOriginalTopNames prepared]
   dependencies = Map.fromList
     [ (getKey (varUnique binder), Set.fromList (map getKey (nonDetEltsUniqSet
-        (topBindingReferences (pmModule prepared) topUniverse binding)))
+        (topBindingReferences (pmModule prepared) introducedTops binding)))
         `Set.union` Set.fromList (map (getKey . varUnique) (topBinders binding)))
     | binding <- bindings, binder <- topBinders binding ]
   ownedTops binder = Map.findWithDefault Set.empty (getKey (varUnique binder)) closures
   closures = Map.fromSet (\owner -> go [owner] Set.empty) (Set.fromList
-    (map (getKey . varUnique . psOwner) (pmPreparedSites prepared)
-      ++ map (getKey . varUnique . srBinder) (pmSiteRejections prepared)))
+    (map (getKey . varUnique . psOwner) (pmPreparedSites prepared)))
   go [] visited = visited
   go (owner:pending) visited
     | owner `Set.member` visited = go pending visited

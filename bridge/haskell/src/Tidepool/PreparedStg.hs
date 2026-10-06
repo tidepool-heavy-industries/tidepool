@@ -5,7 +5,7 @@
 -- internal compiler adapter, not the future serialized program model.
 module Tidepool.PreparedStg
   ( PreparedModule, PreparedCoverage(..)
-  , pmModule, pmCoverage, pmBindings, pmStableTopSpellings, pmTagSigs, pmSitedSiblings, pmYieldSites, pmPreparedSites, pmTypeGraph, pmSiteRejections, pmRequestSiteTyCon
+  , pmModule, pmCoverage, pmBindings, pmOriginalTopNames, pmStableTopSpellings, pmTagSigs, pmSitedSiblings, pmYieldSites, pmPreparedSites, pmTypeGraph, pmSiteRejections, pmRequestSiteTyCon
   , preparedBindingGroups, filterPreparedBindings, preparedRejectsIntrinsic, preparedUsesSiteAuthority, preparedExpectedEntry
   , prepareModule, PreparedModuleTask, acquirePreparedModule, runPreparedModuleTask
   , PreparedSiteEnvironment, resolvePreparedSiteEnvironment, preparedSiteDependenciesMatch, preparedSiteDependenciesEquivalent
@@ -22,7 +22,7 @@ module Tidepool.PreparedStg
 
 import Control.Exception
   ( SomeAsyncException, SomeException, displayException, fromException
-  , throwIO, try )
+  , throwIO, try, evaluate )
 import Control.Monad (unless, forM)
 import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newMVar, readMVar)
 import Data.List (foldl', partition, sortOn)
@@ -140,6 +140,9 @@ pmRequestSiteTyCon = preparedRequestSiteTyCon
 filterPreparedBindings :: ((CgStgTopBinding, IdSet) -> Bool) -> PreparedModule -> PreparedModule
 filterPreparedBindings keep prepared = prepared
   { preparedBindings = filter keep (preparedBindings prepared) }
+
+pmOriginalTopNames :: PreparedModule -> Set.Set Name
+pmOriginalTopNames = preparedOriginalTopNames
 
 -- | Original-order views of this owner's existing groups. Each view retains
 -- every module, tag, sibling and typed-site fact; no caller supplies a body.
@@ -672,6 +675,7 @@ assembleComponentSelection selection workers units = do
   let base = case siteUnits of site:_ -> site; [] -> head prepared
   pure base
     { preparedBindings = concatMap pmBindings prepared
+    , preparedOriginalTopNames = Set.unions (map pmOriginalTopNames prepared)
     , preparedTagSigs = foldl plusNameEnv emptyNameEnv (map pmTagSigs prepared)
     , preparedStableTopSpellings = Map.unions (map pmStableTopSpellings prepared)
     , preparedSitedSiblings = fromMaybe Map.empty siblings
@@ -834,7 +838,9 @@ acquireBindingsWithScope workers timing subsetScope entries hscEnv thisModule lo
       interactiveVars = subsetScope ++ interactiveInScope (hsc_IC hscEnv)
       coreLint = lintCoreBindings preparedFlags CorePrep [] optimizedCore
       stgOptions = initStgPipelineOpts preparedFlags False
+      originalTopNames = Set.fromList (map varName (bindersOfBinds optimizedCore))
 
+  _ <- evaluate (Set.size originalTopNames)
   corePrepConfig <- initCorePrepConfig (hscEnv { hsc_dflags = preparedFlags })
   let lower = do
         displayLintResults logger False (text "Tidepool prepared-STG pre-CorePrep")
@@ -857,6 +863,7 @@ acquireBindingsWithScope workers timing subsetScope entries hscEnv thisModule lo
           { preparedModule = thisModule
           , preparedCoverage = coverage
           , preparedBindings = stgBindings
+          , preparedOriginalTopNames = originalTopNames
           , preparedStableTopSpellings = Map.empty
           , preparedTagSigs = tagSigs
           , preparedSitedSiblings = siblings

@@ -1,5 +1,5 @@
-{-# LANGUAGE DataKinds, GADTs, OverloadedStrings, TypeApplications #-}
-module OriginalTextRequest where
+{-# LANGUAGE DataKinds, GADTs, OverloadedStrings, ScopedTypeVariables, TypeApplications #-}
+module OriginalTextRequest (request, siteRequest, independent, invalid) where
 
 import Data.Text (Text)
 import Control.Monad.Freer (Eff)
@@ -15,5 +15,13 @@ siteRequest :: Eff '[Replies] (RequestScope Text Int)
 siteRequest = continue (\() -> currentRequest @Text @Int)
 
 {-# OPAQUE continue #-}
-continue :: (() -> Eff '[Replies] (RequestScope Text Int)) -> Eff '[Replies] (RequestScope Text Int)
+continue :: (() -> Eff effects a) -> Eff effects a
 continue action = action ()
+
+{-# OPAQUE independent #-}
+independent :: Eff '[Replies] (RequestScope Text Int)
+independent = continue (\() -> currentRequest @Text @Int)
+
+{-# OPAQUE invalid #-}
+invalid :: forall input result. Eff '[Replies] (RequestScope input result)
+invalid = continue (\() -> currentRequest @input @result)
