@@ -134,7 +134,7 @@ import Data.Char (isDigit)
 import Data.List (isPrefixOf, stripPrefix, nub, sort)
 import Data.Word (Word64)
 import System.Directory (createDirectoryIfMissing, getTemporaryDirectory, removeFile, doesFileExist)
-import System.IO (openBinaryTempFile, hClose, hIsClosed)
+import System.IO (openBinaryTempFile, hClose, hIsClosed, withBinaryFile, IOMode(ReadMode))
 import System.FilePath (takeDirectory, (</>), (<.>))
 
 --------------------------------------------------------------------------------
@@ -355,7 +355,7 @@ injectSessionIfaceWithCapture root sm hsc0 = do
       path = sessionHiPath root sm
   timing <- readTimingEnabled
   emitCount timing ("session_iface_decode_reads." ++ sessionModuleString sm) 1
-  bytes <- BS.readFile path
+  bytes <- readSelected (32 * 1024 * 1024) path
   -- Decode a private copy so the snapshot and the installed interface cannot
   -- disagree if the mutable session file changes during or after injection.
   temporary <- getTemporaryDirectory
@@ -386,8 +386,8 @@ injectSessionIfaceWithCapture root sm hsc0 = do
       evidence <- if not packageExists && not requirementsExist then pure Nothing else do
         unless (packageExists && requirementsExist)
           (fail "selected session interface has incomplete value evidence")
-        packages <- BS.readFile (path ++ ".packages")
-        requirements <- BS.readFile (path ++ ".requirements")
+        packages <- readSelected (4 * 1024 * 1024) (path ++ ".packages")
+        requirements <- readSelected (4 * 1024 * 1024) (path ++ ".requirements")
         let home = homeUnitAsUnit homeU
             nominalOwners = sort . nub $
               [(unitString (moduleUnit owner),moduleNameString (moduleName owner))
@@ -395,12 +395,14 @@ injectSessionIfaceWithCapture root sm hsc0 = do
               , constructor <- nonDetEltsUniqSet (tyConsOfType (idType binder))
               , Just owner <- [nameModule_maybe (tyConName constructor)]
               , moduleUnit owner == home]
-        unless (BS.length packages <= 4 * 1024 * 1024
-            && BS.length requirements <= 4 * 1024 * 1024)
-          (fail "selected session value evidence exceeds bounds")
         pure (Just (packages,requirements,nominalOwners))
       pure (hsc1, CapturedSessionInterface theMod bytes evidence)
   where
+    readSelected limit path = withBinaryFile path ReadMode $ \handle -> do
+      bytes <- BS.hGet handle (limit + 1)
+      unless (not (BS.null bytes) && BS.length bytes <= limit)
+        (fail "selected session value payload exceeds bounds or is empty")
+      pure bytes
     injectDetails :: HscEnv -> ModuleName -> ModIface -> IO ModDetails
     injectDetails hsc _ iface =
       initIfaceCheck (text "tidepool session inject") hsc (typecheckIface iface)
