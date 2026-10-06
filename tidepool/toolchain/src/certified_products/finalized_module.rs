@@ -1767,10 +1767,10 @@ mod tests {
             value_array([]),
             value_array([]),
         ]);
-        let mut package_bytes = Vec::new();
-        ciborium::ser::into_writer(&packages, &mut package_bytes).unwrap();
+        let mut value_package_bytes = Vec::new();
+        ciborium::ser::into_writer(&packages, &mut value_package_bytes).unwrap();
         std::fs::write(root.path().join("value.hi"), &bytes).unwrap();
-        std::fs::write(root.path().join("value.packages"), &package_bytes).unwrap();
+        std::fs::write(root.path().join("value.packages"), &value_package_bytes).unwrap();
         let nominal = interface(None);
         let inherited = BTreeMap::from([(
             (nominal.unit().to_owned(), nominal.module().to_owned()),
@@ -1790,8 +1790,8 @@ mod tests {
                     },
                     package_imports: CapturedArtifactDescriptor {
                         relative_path: "value.packages".into(),
-                        sha256: sha(&package_bytes),
-                        bytes: package_bytes.len() as u64,
+                        sha256: sha(&value_package_bytes),
+                        bytes: value_package_bytes.len() as u64,
                     },
                     interface_requirements: inherited.clone(),
                 },
@@ -1889,7 +1889,33 @@ mod tests {
         assert!(decode_envelope(&duplicate).is_err());
         std::fs::write(root.path().join("value.packages"), b"altered sidecar").unwrap();
         assert!(issue(&decoded, &[selected], &inherited).is_err());
+        std::fs::write(root.path().join("value.packages"), &value_package_bytes).unwrap();
+        assert!(issue(&decoded, &[selected], &inherited).is_ok());
         std::fs::write(root.path().join("value.hi"), b"altered interface").unwrap();
         assert!(issue(&decoded, &[selected], &inherited).is_err());
+        std::fs::write(root.path().join("value.hi"), &bytes).unwrap();
+        assert!(issue(&decoded, &[selected], &inherited).is_ok());
+        // A fully hash-sealed sidecar naming another owner still cannot issue
+        // the selected interface's authority.
+        let mut wrong_owner = packages;
+        wrong_owner.as_array_mut().unwrap()[2]
+            .as_array_mut()
+            .unwrap()[1] = value_text(
+            tidepool_repr::SessionModule::val(tidepool_repr::Generation(2)).module_name(),
+        );
+        let mut wrong_package_bytes = Vec::new();
+        ciborium::ser::into_writer(&wrong_owner, &mut wrong_package_bytes).unwrap();
+        std::fs::write(root.path().join("value.packages"), &wrong_package_bytes).unwrap();
+        let mut wrong_package = decoded.clone();
+        let descriptor = &mut wrong_package
+            .value_interfaces
+            .get_mut(&key)
+            .unwrap()
+            .package_imports;
+        descriptor.sha256 = sha(&wrong_package_bytes);
+        descriptor.bytes = wrong_package_bytes.len() as u64;
+        assert!(issue(&wrong_package, &[selected], &inherited).is_err());
+        std::fs::write(root.path().join("value.packages"), &value_package_bytes).unwrap();
+        assert!(issue(&decoded, &[selected], &inherited).is_ok());
     }
 }
