@@ -980,8 +980,10 @@ writeExactCompilation compilation evidence =
 writeCheckedExactCompilation
   :: HscEnv -> ExactCompilation -> DependencyEvidence -> IO ()
 writeCheckedExactCompilation env compilation evidence = do
+  selected <- either fail pure (extendSourceSelectedOriginals
+    (compilationSourceSelection compilation) (compilationScope compilation))
   receipt <- captureExactCompilationReceipt compilation evidence
-  revalidateExactScope env (compilationScope compilation) >>= either fail pure
+  revalidateExactScope env selected >>= either fail pure
   publishExactCompilationReceipt receipt
 
 -- Kept private so a receipt cannot be constructed from unobserved inputs.

@@ -3980,19 +3980,20 @@ exactTransactionReuse = withTiming $ withScratch $ \work -> do
           admittedCheck session = compile CheckedEnvironment Set.empty
             (ExactScopeCompile (ExactScopeCompile GeneralCompile admitted) admitted)
             (Just session) target [work] Nothing
-          requireAdmissionRefusal label expected operation = do
+          requirePreEntryRefusal label expected operation = do
             (refused,diagnostics) <- captureDiagnostics
               (try operation :: IO (Either SomeException CheckedEnvironmentResult))
             case refused of
               Left reason | expected `isInfixOf` show reason
-                  , frontends diagnostics == 0 -> pure ()
+                  , not (any (\line -> "tidepool-checked module=" `isPrefixOf` line
+                    || "tidepool-canonical-frontend module=" `isPrefixOf` line) (lines diagnostics)) -> pure ()
               Left reason -> fail (label ++ " had another refusal: " ++ show reason)
               Right _ -> fail (label ++ " accepted a scope outside its original offer")
-      requireAdmissionRefusal "carried scope with another offer path"
+      requirePreEntryRefusal "carried scope with another offer path"
         "planned declaration leaves its original compiler offer" (admittedCheck relocated)
       (do
         BS.writeFile scopePath (BS.snoc originalScopeBytes 0)
-        requireAdmissionRefusal "manifest changed after metadata admission"
+        requirePreEntryRefusal "manifest changed after metadata admission"
           "exact scope request changed" (admittedCheck scope)
         ) `finally` BS.writeFile scopePath originalScopeBytes
       (cold,coldDiagnostics) <- captureDiagnostics (check scope)
@@ -4016,10 +4017,18 @@ exactTransactionReuse = withTiming $ withScratch $ \work -> do
         (T.pack (show scopePath)) mutatingTemplate))
       receiptsBefore <- sort <$> listDirectory (work </> ".exact-compilations")
       (do
-        requireAdmissionRefusal "manifest changed by actual target TH"
-          "exact scope request changed" $
-          compile CheckedEnvironment Set.empty (ExactScopeCompile GeneralCompile admitted)
-            (Just scope) mutatingTarget [work] Nothing
+        (refused,mutationDiagnostics) <- captureDiagnostics
+          (try (compile CheckedEnvironment Set.empty (ExactScopeCompile GeneralCompile admitted)
+            (Just scope) mutatingTarget [work] Nothing)
+            :: IO (Either SomeException CheckedEnvironmentResult))
+        case refused of
+          Left reason | "exact scope request changed" `isInfixOf` show reason
+              , "tidepool-checked module=MetadataMutatingScopeTarget target=True" `elem` lines mutationDiagnostics
+              , any (\line -> "tidepool-meta-execution " `isPrefixOf` line
+                  && "module=\"MetadataMutatingScopeTarget\"" `isInfixOf` line) (lines mutationDiagnostics)
+              , length (counterValues ("hash_bytes.scope_revalidation." ++ scopeRequestSha256 admitted) mutationDiagnostics) == 1 -> pure ()
+          Left reason -> fail ("post-TH manifest mutation had another refusal: " ++ show reason)
+          Right _ -> fail "terminal metadata proof accepted an actually mutated manifest"
         mutated <- BS.readFile scopePath
         receiptsAfter <- sort <$> listDirectory (work </> ".exact-compilations")
         unless (mutated == BS.snoc originalScopeBytes 0 && receiptsAfter == receiptsBefore) $
