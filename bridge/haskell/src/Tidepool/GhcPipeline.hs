@@ -4126,10 +4126,19 @@ certifyModuleCandidates requestIdentity forkContext compilerViewDirectory expect
                       ++ ";omitted=" ++ show (max 0 (length rows - 2))
                 in Just $ case (historical, currentImports) of
                   (Just expected, Just actual) ->
-                    let removed = Set.toAscList (Set.fromList expected `Set.difference` Set.fromList actual)
-                        added = Set.toAscList (Set.fromList actual `Set.difference` Set.fromList expected)
-                    in limited "normalized_removed" removed ++ ";" ++ limited "normalized_added" added
+                    let expectedCounts = Map.fromListWith (+) [(row, 1 :: Int) | row <- expected]
+                        actualCounts = Map.fromListWith (+) [(row, 1 :: Int) | row <- actual]
+                        changed = [(row, oldCount, newCount)
+                          | row <- Set.toAscList (Map.keysSet expectedCounts `Set.union` Map.keysSet actualCounts)
+                          , let oldCount = Map.findWithDefault 0 row expectedCounts
+                          , let newCount = Map.findWithDefault 0 row actualCounts
+                          , oldCount /= newCount]
+                        actualOriginals = Set.toAscList (Set.fromList
+                          [(candidateUnit candidate, name) | (qualifier, name, _, _) <- actual
+                            , isJust (exactImportKey candidate qualifier name)])
+                    in limited "normalized_changed_counts" changed
                       ++ ";" ++ limited "expected_originals" (Map.keys (provenOriginals candidate))
+                      ++ ";" ++ limited "actual_originals" actualOriginals
                   _ -> "normalization_failed;" ++ limited "historical_raw" (candidateImports candidate)
                     ++ ";" ++ limited "current_raw"
                       [(dependencyImportQualifier imported, dependencyImportName imported,
