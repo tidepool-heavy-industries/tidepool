@@ -4,6 +4,7 @@ module Tidepool.PreparedStg.Internal (PreparedModule(..), PreparedCoverage(..)) 
 
 import Data.Map.Strict (Map)
 import Data.Set (Set)
+import Data.Text (Text)
 import GHC.Core.TyCon (TyCon)
 import GHC.Stg.Pipeline (StgCgInfos)
 import GHC.Stg.Syntax (CgStgTopBinding)
@@ -26,6 +27,9 @@ data PreparedModule = PreparedModule
   { preparedModule :: Module
   , preparedCoverage :: PreparedCoverage
   , preparedBindings :: [(CgStgTopBinding, IdSet)]
+  -- | Canonical package-unit spellings issued before subset selection. Source
+  -- modules retain their normal compiler identity allocation.
+  , preparedStableTopSpellings :: Map Name Text
   , preparedTagSigs :: StgCgInfos
   -- | Defining-module sibling Ids only, replayed after memo validity checks.
   , preparedSitedSiblings :: Map String Id

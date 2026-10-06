@@ -5,7 +5,7 @@
 -- internal compiler adapter, not the future serialized program model.
 module Tidepool.PreparedStg
   ( PreparedModule, PreparedCoverage(..)
-  , pmModule, pmCoverage, pmBindings, pmTagSigs, pmSitedSiblings, pmYieldSites, pmPreparedSites, pmTypeGraph, pmSiteRejections, pmRequestSiteTyCon
+  , pmModule, pmCoverage, pmBindings, pmStableTopSpellings, pmTagSigs, pmSitedSiblings, pmYieldSites, pmPreparedSites, pmTypeGraph, pmSiteRejections, pmRequestSiteTyCon
   , preparedBindingGroups, filterPreparedBindings, preparedRejectsIntrinsic, preparedUsesSiteAuthority, preparedExpectedEntry
   , prepareModule, PreparedModuleTask, acquirePreparedModule, runPreparedModuleTask
   , PreparedSiteEnvironment, resolvePreparedSiteEnvironment, preparedSiteDependenciesMatch, preparedSiteDependenciesEquivalent
@@ -29,6 +29,7 @@ import Data.Maybe (fromMaybe, listToMaybe)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
+import Data.Text (Text)
 import Data.Word (Word32, Word64)
 import GHC.Core.Lint (displayLintResults)
 import GHC.Core (CoreBind, Bind(..), bindersOfBinds)
@@ -98,6 +99,9 @@ pmCoverage = preparedCoverage
 
 pmBindings :: PreparedModule -> [(CgStgTopBinding, IdSet)]
 pmBindings = preparedBindings
+
+pmStableTopSpellings :: PreparedModule -> Map Name Text
+pmStableTopSpellings = preparedStableTopSpellings
 
 pmTagSigs :: PreparedModule -> StgCgInfos
 pmTagSigs = preparedTagSigs
@@ -571,6 +575,7 @@ acquireBindingsWithScope timing subsetScope hscEnv thisModule location tycons op
           { preparedModule = thisModule
           , preparedCoverage = coverage
           , preparedBindings = stgBindings
+          , preparedStableTopSpellings = Map.empty
           , preparedTagSigs = tagSigs
           , preparedSitedSiblings = siblings
           , preparedYieldSites = yieldSites
