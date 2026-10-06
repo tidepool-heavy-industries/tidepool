@@ -1011,27 +1011,40 @@ impl<'code> PreparedMachine<'code> {
 
     /// The shareable image of an installed program, with the current value
     /// of each of its import slots (the identity it imported and the
-    /// encoded reference its block holds). `None` for a borrowed program.
+    /// encoded reference and admitted representation its block holds).
     pub(super) fn image_with_imports(
         &self,
         id: ProgramId,
-    ) -> Option<(
-        Arc<CompiledProgram>,
-        Arc<InstanceImage>,
-        super::evacuation::ParcelImports,
-    )> {
-        let installed = self.programs.get(&id)?;
-        let image = installed.program.shared()?;
+    ) -> Result<
+        (
+            Arc<CompiledProgram>,
+            Arc<InstanceImage>,
+            Vec<(SymbolIdentity, super::evacuation::ParcelRoot)>,
+        ),
+        ExecutionError,
+    > {
+        let installed = self
+            .programs
+            .get(&id)
+            .ok_or(ExecutionError::UnknownProgram(id))?;
+        let image = installed
+            .program
+            .shared()
+            .ok_or(ExecutionError::BorrowedParcelCode)?;
         let compiled = installed.program.get();
         let mut imports = Vec::with_capacity(compiled.import_slots.len());
         for slot in &compiled.import_slots {
             if slot.literal.is_some() {
                 continue;
             }
-            let word = installed.roots.read(slot.slot).ok()?;
-            imports.push((slot.identity.clone(), word as usize));
+            let word = installed
+                .roots
+                .read(slot.slot)
+                .map_err(|cause| runtime_error(&self.machine, cause))?;
+            let root = super::evacuation::ParcelRoot::new(word as usize, slot.rep)?;
+            imports.push((slot.identity.clone(), root));
         }
-        Some((image, Arc::clone(&installed.instance), imports))
+        Ok((image, Arc::clone(&installed.instance), imports))
     }
 
     fn install(
@@ -4924,6 +4937,199 @@ mod tests {
             format!("{before:?}")
         );
         assert!(right.release(arrived));
+    }
+
+    /// Native byte-array production, an exact UnliftedRef consumer, and a
+    /// dynamic caller for a transferred closure returning the byte array.
+    fn unlifted_parcel_program() -> CompiledProgram {
+        use tidepool_repr::execution_schema::{OperationDecl, OperationIdentity};
+        let mut wire = testing::wire_program();
+        wire.signatures = vec![
+            Signature {
+                arguments: vec![],
+                results: ResultContract::Returns(vec![RuntimeRep::UnliftedRef]),
+            },
+            Signature {
+                arguments: vec![RuntimeRep::Int(64), RuntimeRep::Void],
+                results: ResultContract::Returns(vec![RuntimeRep::UnliftedRef]),
+            },
+            Signature {
+                arguments: vec![RuntimeRep::UnliftedRef],
+                results: ResultContract::Returns(vec![RuntimeRep::Int(64)]),
+            },
+            Signature {
+                arguments: vec![RuntimeRep::LiftedRef],
+                results: ResultContract::Returns(vec![RuntimeRep::UnliftedRef]),
+            },
+        ];
+        wire.operations = vec![
+            OperationDecl {
+                identity: OperationIdentity::PrimOp("newByteArray#".into()),
+                signature: SignatureId(1),
+            },
+            OperationDecl {
+                identity: OperationIdentity::PrimOp("sizeofByteArray#".into()),
+                signature: SignatureId(2),
+            },
+        ];
+        wire.expressions.nodes = vec![
+            ExprFrame::Operation {
+                operation: tidepool_repr::execution_schema::OperationId(0),
+                arguments: vec![
+                    Atom::Scalar(ScalarLiteral::Int {
+                        bits: 64,
+                        bytes: 7_i64.to_be_bytes().to_vec(),
+                    }),
+                    Atom::Void,
+                ],
+            },
+            ExprFrame::Operation {
+                operation: tidepool_repr::execution_schema::OperationId(1),
+                arguments: vec![Atom::Ref(ValueRef::Local(ValueId(100)))],
+            },
+            ExprFrame::Call {
+                callee: Atom::Ref(ValueRef::Local(ValueId(101))),
+                signature: SignatureId(0),
+                arguments: vec![],
+            },
+        ];
+        wire.bindings = [
+            (0, 0, vec![]),
+            (1, 2, vec![ValueId(100)]),
+            (2, 3, vec![ValueId(101)]),
+        ]
+        .into_iter()
+        .map(|(id, signature, parameters)| {
+            Group::NonRecursive(TopBinding {
+                identity: testing::identity("UnliftedParcel", &format!("entry{id}")),
+                binding: HeapBinding {
+                    id: ValueId(id),
+                    rhs: HeapRhs::Function {
+                        signature: SignatureId(signature),
+                        parameters,
+                        captures: vec![],
+                        body: id as usize,
+                    },
+                },
+            })
+        })
+        .collect();
+        let prepared = testing::prepare(wire).expect("unlifted parcel program validates");
+        let linked = link_program(prepared, &MachineImports::default())
+            .expect("unlifted parcel program links");
+        CompiledProgram::compile(&linked).expect("unlifted parcel program compiles")
+    }
+
+    #[test]
+    fn transferred_unlifted_root_keeps_its_rep_and_runs_an_exact_consumer() {
+        let options = PreparedMachineOptions { nursery_bytes: 64 };
+        let code = Arc::new(unlifted_parcel_program());
+        let (mut source, producer) =
+            PreparedMachine::new_shared(Arc::clone(&code), options).expect("source");
+        let (mut destination, consumer) =
+            PreparedMachine::new_shared(code, options).expect("destination");
+        let call = PreparedCallOptions {
+            observation_budget: 100,
+            collect_before_observation: true,
+        };
+        let produced = source
+            .run_entry_retained(producer, ValueId(0), &[], call, RealmId::ROOT)
+            .expect("native byte-array production");
+        let [PreparedResult::Managed(original)] = produced.values.as_slice() else {
+            panic!("one unlifted byte-array result");
+        };
+        assert_eq!(original.rep(), RuntimeRep::UnliftedRef);
+        let parcel = source
+            .export_parcel(*original)
+            .expect("export unlifted root");
+        let arrived = destination
+            .import_parcel(parcel, RealmId::ROOT)
+            .expect("import unlifted root")
+            .value;
+        assert_eq!(arrived.rep(), RuntimeRep::UnliftedRef);
+        // Native consumption and collection continue after the source owners drop.
+        drop(source);
+        let consumed = destination
+            .run_entry_retained(
+                consumer,
+                ValueId(1),
+                &[PreparedInput::Managed(arrived)],
+                call,
+                RealmId::ROOT,
+            )
+            .expect("exact UnliftedRef consumer accepts the transferred value");
+        assert_eq!(consumed.values, vec![PreparedResult::Scalar(7)]);
+        assert!(destination.release(arrived));
+    }
+
+    #[test]
+    fn transferred_closure_keeps_its_unlifted_import_rep_and_runs() {
+        let options = PreparedMachineOptions { nursery_bytes: 64 };
+        let code = Arc::new(unlifted_parcel_program());
+        let (mut source, producer) =
+            PreparedMachine::new_shared(Arc::clone(&code), options).expect("source");
+        let (mut destination, consumer) =
+            PreparedMachine::new_shared(code, options).expect("destination");
+        let call = PreparedCallOptions {
+            observation_budget: 100,
+            collect_before_observation: true,
+        };
+        let produced = source
+            .run_entry_retained(producer, ValueId(0), &[], call, RealmId::ROOT)
+            .expect("native byte-array production");
+        let [PreparedResult::Managed(original)] = produced.values.as_slice() else {
+            panic!("one unlifted byte-array result");
+        };
+        let identity = testing::identity("UnliftedParcel", "importedArray");
+        let imports = [(identity.clone(), *original)].into_iter().collect();
+        let closure_program = install_linked(
+            &mut source,
+            &s3_import_consumer_program(identity.clone(), RuntimeRep::UnliftedRef, false),
+            imports,
+        )
+        .expect("closure imports the native unlifted value");
+        let closure = source
+            .retain_top(closure_program, ValueId(0))
+            .expect("retain closure");
+        let parcel = source
+            .export_parcel(closure)
+            .expect("export closure and import root");
+        let imported = destination
+            .import_parcel(parcel, RealmId::ROOT)
+            .expect("receiver installs the closure with its UnliftedRef import");
+        assert_eq!(imported.value.rep(), RuntimeRep::LiftedRef);
+        let [(imported_identity, imported_array)] = imported.imports.as_slice() else {
+            panic!("one imported byte-array binding");
+        };
+        assert_eq!(imported_identity, &identity);
+        assert_eq!(imported_array.rep(), RuntimeRep::UnliftedRef);
+        drop(source);
+        let returned = destination
+            .run_entry_retained(
+                consumer,
+                ValueId(2),
+                &[PreparedInput::Managed(imported.value)],
+                call,
+                RealmId::ROOT,
+            )
+            .expect("transferred closure returns its unlifted import");
+        let [PreparedResult::Managed(array)] = returned.values.as_slice() else {
+            panic!("closure returns one byte array");
+        };
+        assert_eq!(array.rep(), RuntimeRep::UnliftedRef);
+        let consumed = destination
+            .run_entry_retained(
+                consumer,
+                ValueId(1),
+                &[PreparedInput::Managed(*array)],
+                call,
+                RealmId::ROOT,
+            )
+            .expect("exact UnliftedRef consumer reads the closure's result");
+        assert_eq!(consumed.values, vec![PreparedResult::Scalar(7)]);
+        assert!(destination.release(*array));
+        assert!(destination.release(*imported_array));
+        assert!(destination.release(imported.value));
     }
 
     /// A value whose code lives in an image the receiver never installed:

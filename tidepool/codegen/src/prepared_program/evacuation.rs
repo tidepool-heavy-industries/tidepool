@@ -82,6 +82,45 @@ impl Drop for PendingStaticRegions {
 /// (into the parcel's roots) of the copied value the importer binds it to.
 pub type ParcelImports = Vec<(SymbolIdentity, usize)>;
 
+/// Logical evidence for a managed parcel root. Descriptor shape cannot tell
+/// lifted and unlifted references apart; addresses travel with literal owners.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ParcelRootRep {
+    Lifted,
+    Unlifted,
+}
+
+impl ParcelRootRep {
+    fn runtime_rep(self) -> RuntimeRep {
+        match self {
+            Self::Lifted => RuntimeRep::LiftedRef,
+            Self::Unlifted => RuntimeRep::UnliftedRef,
+        }
+    }
+}
+
+/// One exact machine root and its retained semantic representation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct ParcelRoot {
+    word: usize,
+    rep: ParcelRootRep,
+}
+
+impl ParcelRoot {
+    pub(super) fn new(word: usize, rep: RuntimeRep) -> Result<Self, ExecutionError> {
+        let rep = match rep {
+            RuntimeRep::LiftedRef => ParcelRootRep::Lifted,
+            RuntimeRep::UnliftedRef => ParcelRootRep::Unlifted,
+            _ => {
+                return Err(ExecutionError::Invariant(
+                    "export_parcel: a root has a non-managed representation",
+                ))
+            }
+        };
+        Ok(Self { word, rep })
+    }
+}
+
 /// One installation instance a parcel depends on, its shared code, and its
 /// import slots as [`ParcelImports`].
 pub struct ParcelImage {
@@ -105,6 +144,8 @@ pub struct ParcelConstructor {
 /// remaining roots are the import-slot values of the images in `images`.
 pub struct Parcel {
     heap: tidepool_heap::gc::evacuate::Parcel,
+    /// In heap-root order; the heap owner alone retains relocated words.
+    root_reps: Vec<ParcelRootRep>,
     images: Vec<ParcelImage>,
     constructors: Vec<ParcelConstructor>,
 }
@@ -160,11 +201,12 @@ impl PreparedMachine<'_> {
             let entry = self
                 .handles
                 .handle(handle.raw())
+                .filter(|entry| entry.rep == handle.rep())
                 .ok_or(ExecutionError::UnknownPreparedHandle)?;
             // SAFETY: the ledger keeps the slot registered while the handle
             // is live, and the machine is quiescent.
-            unsafe { entry.slot.current() }
-        } as usize;
+            ParcelRoot::new(unsafe { entry.slot.current() } as usize, entry.rep)?
+        };
         let static_metrics =
             tidepool_heap::static_region::StaticLookupMetrics::new("parcel-export");
         let mut roots = vec![value];
@@ -175,7 +217,8 @@ impl PreparedMachine<'_> {
             ParcelImports,
         )> = Vec::new();
         for _ in 0..MANIFEST_ROUNDS {
-            let heap = self.export_roots(&roots)?;
+            let words: Vec<_> = roots.iter().map(|root| root.word).collect();
+            let heap = self.export_roots(&words)?;
             // Owners of every copied object and every static reference.
             // An interned constructor or an external wrapper has no owner
             // (see `install_shared`): externals are process-wide and every
@@ -241,15 +284,13 @@ impl PreparedMachine<'_> {
                 if images.iter().any(|(known, _, _, _)| *known == id) {
                     continue;
                 }
-                let Some((image, instance, slots)) = self.image_with_imports(id) else {
-                    return Err(ExecutionError::BorrowedParcelCode);
-                };
+                let (image, instance, slots) = self.image_with_imports(id)?;
                 let mut imports = Vec::with_capacity(slots.len());
-                for (identity, word) in slots {
-                    let index = match roots.iter().position(|&root| root == word) {
+                for (identity, root) in slots {
+                    let index = match roots.iter().position(|known| *known == root) {
                         Some(index) => index,
                         None => {
-                            roots.push(word);
+                            roots.push(root);
                             grew = true;
                             roots.len() - 1
                         }
@@ -261,6 +302,7 @@ impl PreparedMachine<'_> {
             if !grew {
                 return Ok(Parcel {
                     heap,
+                    root_reps: roots.into_iter().map(|root| root.rep).collect(),
                     images: images
                         .into_iter()
                         .map(|(_, image, instance, imports)| ParcelImage {
@@ -377,6 +419,7 @@ impl PreparedMachine<'_> {
         let _quiescent = self.quiesce()?;
         let Parcel {
             heap: mut parcel,
+            root_reps,
             images,
             constructors,
         } = parcel;
@@ -622,15 +665,14 @@ impl PreparedMachine<'_> {
             // bound to. An index not named by any kept identity (a duplicate
             // root two images both import) is released with the rest below.
             // Every root is retained before installation can allocate or collect.
-            for &pointer in &relocated {
+            for (&pointer, rep) in relocated.iter().zip(&root_reps) {
+                let rep = rep.runtime_rep();
                 let slot = self
                     .old_space
                     .adopt_root(&self.machine, pointer as *mut u8)
                     .map_err(|cause| runtime_error(&self.machine, cause))?;
-                let raw = self
-                    .handles
-                    .insert_handle(slot, realm, RuntimeRep::LiftedRef);
-                handles.push(PreparedHandle::new(raw, RuntimeRep::LiftedRef));
+                let raw = self.handles.insert_handle(slot, realm, rep);
+                handles.push(PreparedHandle::new(raw, rep));
             }
             let mut imported: Vec<(SymbolIdentity, PreparedHandle)> = Vec::new();
             let mut kept_indices: std::collections::HashSet<usize> =
