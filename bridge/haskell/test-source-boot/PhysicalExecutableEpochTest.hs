@@ -5,7 +5,7 @@ import Control.Concurrent.MVar (newEmptyMVar, putMVar, readMVar, takeMVar)
 import Control.Exception (SomeException, bracket, displayException, throwIO, try)
 import Control.Monad (unless)
 import Data.List (isInfixOf)
-import Data.Maybe (isJust)
+import Data.Maybe (isJust, isNothing)
 import Data.Set qualified as Set
 import Data.Text qualified as T
 import GHC.Driver.Env (HscEnv(..), hsc_HPT)
@@ -42,7 +42,7 @@ physicalExecutableEpoch = withTiming $ withScratch $ \work -> do
         Nothing target [work] Nothing
       writeProvider :: Int -> IO ()
       writeProvider value = renderFixture (fixtures </> "NativeEpochProvider.hs") provider
-        [("EPOCH_VALUE", show value), (show "EPOCH_MARKER", show marker)]
+        [("EPOCH_VALUE", show value), ("\"EPOCH_MARKER\"", show marker)]
       requireValue :: Int -> CheckedEnvironmentResult -> IO ()
       requireValue expected checked = unless
         (fmap renderType (crResultType checked) == Just ("Proxy " ++ show expected)) $
@@ -50,7 +50,7 @@ physicalExecutableEpoch = withTiming $ withScratch $ \work -> do
   copyFile (fixtures </> "NativeEpochTarget.hs") target
   copyFile (fixtures </> "NativeEpochMissing.hs") (work </> "NativeEpochMissing.hs")
   writeProvider (41 :: Int)
-  withResidentCompilerScopes [work] $ \runScope ->
+  completed <- timeout 120000000 $ withResidentCompilerScopes [work] $ \runScope ->
     runScope (pure ()) $ \scope -> do
       first <- compile scope
       requireValue (41 :: Int) first
@@ -74,13 +74,16 @@ physicalExecutableEpoch = withTiming $ withScratch $ \work -> do
       -- foreign symbol and fails in GHC's BCO linker.
       writeProvider 43
       renderFixture (fixtures </> "NativeEpochFailingTarget.hs") target
-        [(show "EPOCH_REACHED", show reached), (show "EPOCH_RELEASE", show release)]
+        [("\"EPOCH_REACHED\"", show reached), ("\"EPOCH_RELEASE\"", show release)]
       observed <- newEmptyMVar
       let observe = do
-            process <- try (waitForFile reached >> runningProcess interp)
+            process <- try (do
+              waitForFile reached
+              process <- runningProcess interp
+              writeFile release "observed actual native process\n"
+              pure process)
               :: IO (Either SomeException (Integer, ProcessHandle))
             putMVar observed process
-            writeFile release "observed actual native process\n"
       (failed, diagnostics, failedProcess) <- bracket (forkIO observe) killThread $ \_ -> do
         (failed, diagnostics) <- captureDiagnostics
           (try (compile scope) :: IO (Either SomeException CheckedEnvironmentResult))
@@ -113,6 +116,8 @@ physicalExecutableEpoch = withTiming $ withScratch $ \work -> do
       requireNativeOwner interp (crHscEnv recovered)
       requireCall marker 41 recoveredProcess
       requireReplacement failedProcess recoveredProcess
+  unless (isJust completed) $
+    fail "physical native epoch lifetime (including resident cleanup) exceeded 120 seconds"
   putStrLn "physical native epoch: same owner 41/42, actual object call before BCO failure, retired processes and recovered 41"
 
 renderFixture :: FilePath -> FilePath -> [(String, String)] -> IO ()
@@ -127,6 +132,8 @@ runningProcess interp = case interpInstance interp of
     InterpRunning instance' -> do
       let process = interpHandle (instProcess instance')
       pid <- getPid process >>= maybe (fail "native interpreter has no live process") pure
+      exited <- getProcessExitCode process
+      unless (isNothing exited) (fail "native interpreter process has already exited")
       pure (fromIntegral pid, process)
     InterpPending -> fail "native interpreter is not running"
   _ -> fail "physical native epochs require the pinned external interpreter"
