@@ -304,6 +304,21 @@ pub fn run_compiled_target<U, H: DispatchEffect<U>>(
     user: &U,
     on_ready: impl FnOnce(CancelHandle),
 ) -> Result<HaskellValue, RuntimeError> {
+    let mut state = session::PersistentSession::new(None, nursery_size);
+    let program = install_compiled_target(&mut state, artifacts, target)?;
+    let engine = state.require_prepared()?;
+    let result = run_installed_program(engine, program, &artifacts.table, handlers, user, on_ready);
+    engine.unpin(program);
+    result
+}
+
+/// Install an ordinary compiler target with its complete certified closure in
+/// the selected session. Keep the target pinned until its caller finishes.
+fn install_compiled_target(
+    state: &mut session::PersistentSession,
+    artifacts: &CompiledArtifacts,
+    target: &str,
+) -> Result<tidepool_codegen::prepared_program::ProgramId, RuntimeError> {
     use session::prepared::CertifiedTargetImage;
     use tidepool_codegen::scope::ScopeId;
 
@@ -314,7 +329,6 @@ pub fn run_compiled_target<U, H: DispatchEffect<U>>(
         CompileError::ExtractFailed(format!("compiled artifact has no target {target:?}"))
     })?;
     let certification = session::turn::TurnCertification::from_artifacts(artifacts, target);
-    let mut state = session::PersistentSession::new(None, nursery_size);
     let resolved = state.resolve_certification_in(
         ScopeId::ROOT,
         target.prepared.prepared(),
@@ -334,10 +348,7 @@ pub fn run_compiled_target<U, H: DispatchEffect<U>>(
         demanded,
         &resolved.inherited_needed,
     )?;
-    let engine = state.require_prepared()?;
-    let result = run_installed_program(engine, program, &artifacts.table, handlers, user, on_ready);
-    engine.unpin(program);
-    result
+    Ok(program)
 }
 
 fn run_installed_program<U, H: DispatchEffect<U>>(

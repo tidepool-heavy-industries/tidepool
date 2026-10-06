@@ -5894,6 +5894,100 @@ pub(super) mod tests {
     use tidepool_repr::SessionModule;
     use tidepool_test_data::prepared as prepared_data;
 
+    #[test]
+    fn scientific_plain_and_quasiquoted_programs_share_one_representation() {
+        use tidepool_repr::freer_names::find_declared;
+        use tidepool_toolchain::artifacts::{compile_invocation, CompileInvocation};
+
+        fn observed_int(value: &HaskellValue) -> i64 {
+            match value {
+                HaskellValue::Lit(Literal::LitInt(value)) => *value,
+                HaskellValue::Con(_, fields) if fields.len() == 1 => observed_int(&fields[0]),
+                other => panic!("expected an observed integer: {other:?}"),
+            }
+        }
+
+        tidepool_testing::eval_harness::require_extract();
+        let include = [tidepool_testing::eval_harness::prelude_path()];
+        // Keep every compiler-issued group and import owner: at O0 the target
+        // still calls Scientific helpers from its certified source closure.
+        let artifacts = [
+            include_str!("../../tests/fixtures/ScientificPlain.hs"),
+            include_str!("../../tests/fixtures/ScientificQuoted.hs"),
+        ]
+        .map(|source| {
+            compile_invocation(
+                &CompileInvocation {
+                    source,
+                    targets: &["result"],
+                    include: &include,
+                    fallback_module_name: "Input",
+                },
+                |_, _, _| {},
+            )
+            .expect("compile Scientific fixture with its certified closure")
+        });
+        let programs = artifacts
+            .each_ref()
+            .map(|artifact| artifact.targets["result"].prepared.prepared());
+        let declarations = programs.map(|program| {
+            find_declared(
+                program.constructors(),
+                "Tidepool.Aeson.Scientific",
+                "Scientific",
+            )
+            .expect("Scientific declaration before execution")
+        });
+        assert_eq!(declarations[0], declarations[1]);
+        assert_eq!(
+            declarations[0].field_reps,
+            [RuntimeRep::LiftedRef, RuntimeRep::Int(64)]
+        );
+        let scientific_id = declarations[0].host_id;
+        for order in [[0, 1], [1, 0]] {
+            let mut state = super::super::PersistentSession::new(None, 4096);
+            let first = crate::install_compiled_target(&mut state, &artifacts[order[0]], "result")
+                .expect("install first Scientific certified closure");
+            let second = crate::install_compiled_target(&mut state, &artifacts[order[1]], "result")
+                .expect("second certified closure shares constructor interning");
+            let engine = state.require_prepared().expect("shared prepared machine");
+            for (index, program) in [(order[0], first), (order[1], second), (order[0], first)] {
+                let result = engine
+                    .machine
+                    .run_entry_with_raw_cancel(
+                        program,
+                        programs[index].entry(),
+                        &[],
+                        PreparedCallOptions {
+                            collect_before_observation: true,
+                            observation_budget: RunOptions::default().observation_budget,
+                        },
+                        Arc::new(AtomicBool::new(false)),
+                    )
+                    .expect("Scientific program executes after shared installation");
+                let value = &result.values[0];
+                let scientific = if index == 1 {
+                    let HaskellValue::Con(_, fields) = value else {
+                        panic!("expected Number: {value:?}")
+                    };
+                    assert_eq!(fields.len(), 1);
+                    &fields[0]
+                } else {
+                    value
+                };
+                let HaskellValue::Con(id, fields) = scientific else {
+                    panic!("expected Scientific: {scientific:?}")
+                };
+                assert_eq!(*id, scientific_id);
+                assert_eq!(fields.len(), 2);
+                assert_eq!(observed_int(&fields[0]), 42);
+                assert_eq!(observed_int(&fields[1]), 0);
+            }
+            assert!(engine.unpin(first));
+            assert!(engine.unpin(second));
+        }
+    }
+
     fn certified_source_group(
         name: &str,
         ordinal: u32,
